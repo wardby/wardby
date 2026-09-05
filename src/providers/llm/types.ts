@@ -5,8 +5,9 @@
  * and `priceUsd`: the core estimates cost pre-flight and can stop a run
  * *before* it incurs spend, not just report spend after the fact.
  *
- * Default adapter: OpenAiLlmProvider.
- * Native adapter:  BedrockLlmProvider.
+ * Default adapter: OpenAiLlmProvider. Anthropic adapter: AnthropicLlmProvider.
+ * Selected per-agent by RoutingLlmProvider (Agent.model -> provider).
+ * Bedrock-hosted Claude is a reserved future adapter (shared claude-messages.ts core).
  */
 
 export interface LlmMessage {

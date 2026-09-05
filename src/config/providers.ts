@@ -9,7 +9,7 @@
 
 export type JobLauncherKind = "local" | "ecs";
 export type EmailProviderKind = "smtp" | "ses";
-export type LlmProviderKind = "openai" | "bedrock";
+export type LlmProviderKind = "openai" | "anthropic" | "bedrock";
 export type SecretCipherKind = "app-key" | "kms";
 export type AuthProviderKind = "generic-oidc" | "fusionauth";
 export type BlobStoreKind = "local" | "s3";

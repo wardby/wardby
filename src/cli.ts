@@ -13,7 +13,16 @@ import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import type { RunStatus } from "@prisma/client";
 import { loadProviderConfig } from "./config/providers.js";
-import { OpenAiLlmProvider } from "./providers/llm/index.js";
+import {
+  OpenAiLlmProvider,
+  AnthropicLlmProvider,
+  RoutingLlmProvider,
+  openaiCredentialsPresent,
+  anthropicCredentialsPresent,
+  openaiSupportedModels,
+  anthropicSupportedModels,
+  type LlmRegistration,
+} from "./providers/llm/index.js";
 import { InProcessExecutor } from "./providers/executor/index.js";
 import { PostgresDatastore } from "./providers/datastore/index.js";
 import type { ProviderRegistry } from "./providers/index.js";
@@ -42,10 +51,20 @@ function fail(message: string): never {
 
 function buildLlmProvider(): ProviderRegistry["llm"] {
   const config = loadProviderConfig();
-  if (config.llm !== "openai") {
-    fail(`LLM_PROVIDER "${config.llm}" has no adapter yet (only "openai").`);
+  if (config.llm === "bedrock") {
+    fail(`LLM_PROVIDER "bedrock" is reserved but has no adapter yet — use "openai" and/or "anthropic".`);
   }
-  return new OpenAiLlmProvider();
+  const registrations: LlmRegistration[] = [];
+  if (openaiCredentialsPresent()) {
+    registrations.push({ provider: new OpenAiLlmProvider(), models: openaiSupportedModels() });
+  }
+  if (anthropicCredentialsPresent()) {
+    registrations.push({ provider: new AnthropicLlmProvider(), models: anthropicSupportedModels() });
+  }
+  if (registrations.length === 0) {
+    fail("No LLM credentials present. Set OPENAI_API_KEY and/or ANTHROPIC_API_KEY.");
+  }
+  return new RoutingLlmProvider(registrations);
 }
 
 function buildEngine(): ProviderRegistry["engine"] {
