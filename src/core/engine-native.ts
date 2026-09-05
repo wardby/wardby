@@ -18,7 +18,7 @@ interface Usage {
 }
 
 interface TurnResult {
-  usage: { inputTokens: number; outputTokens: number; costUsd: number };
+  usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number; costUsd: number };
   text: string;
   toolCalls: { id: string; name: string; argsJson: string }[];
   budgetExceededMidStream: boolean;
@@ -48,6 +48,7 @@ export class NativeEngine implements Engine {
     let cumulative = zeroUsage();
     let lastText = "";
     let turns = 0;
+    let lastCacheRatio = 0;
 
     while (true) {
       turns += 1;
@@ -68,6 +69,7 @@ export class NativeEngine implements Engine {
         messages,
         ctx.providers.llm,
         toolDefs,
+        lastCacheRatio,
       );
       const guardedEstimate = applyPreflightSafetyMargin(inputEstimateCost);
       const projected = cumulative.costUsd + guardedEstimate;
@@ -90,13 +92,14 @@ export class NativeEngine implements Engine {
         return this.windDown(ctx, messages, cumulative, turns, lastText);
       }
 
-      const turn = await this.runOneTurn(ctx, messages, inputTokens, cumulative.costUsd, toolDefs);
+      const turn = await this.runOneTurn(ctx, messages, inputTokens, cumulative.costUsd, toolDefs, lastCacheRatio);
 
       if (turn.error) {
         return this.finish("failed", lastText, turns, addUsage(cumulative, turn.usage), turn.error);
       }
 
       cumulative = addUsage(cumulative, turn.usage);
+      lastCacheRatio = turn.usage.inputTokens > 0 ? turn.usage.cachedInputTokens / turn.usage.inputTokens : 0;
 
       if (turn.budgetExceededMidStream) {
         return this.windDown(ctx, messages, cumulative, turns, turn.text || lastText);
@@ -157,7 +160,7 @@ export class NativeEngine implements Engine {
       );
     }
 
-    const turn = await this.runOneTurn(ctx, windDownMessages, inputTokens, cumulative.costUsd, []);
+    const turn = await this.runOneTurn(ctx, windDownMessages, inputTokens, cumulative.costUsd, [], 0);
     const finalUsage = addUsage(cumulative, turn.usage);
 
     if (turn.error) {
@@ -185,10 +188,12 @@ export class NativeEngine implements Engine {
     inputTokens: number,
     cumulativeCostSoFar: number,
     tools: LlmToolDef[],
+    cacheRatio = 0,
   ): Promise<TurnResult> {
     const assistantFrameTokens = await ctx.providers.llm.countTokens(ctx.agent.model, [
       { role: "assistant", content: "" },
     ]);
+    const estimatedCachedInput = Math.round(inputTokens * Math.min(Math.max(cacheRatio, 0), 1));
 
     const controller = new AbortController();
     let text = "";
@@ -212,7 +217,11 @@ export class NativeEngine implements Engine {
           outputTokensSoFar += Math.max(deltaTokens - assistantFrameTokens, 0);
           const projected =
             cumulativeCostSoFar +
-            ctx.providers.llm.priceUsd(ctx.agent.model, { inputTokens, outputTokens: outputTokensSoFar });
+            ctx.providers.llm.priceUsd(ctx.agent.model, {
+              inputTokens,
+              outputTokens: outputTokensSoFar,
+              cachedInputTokens: estimatedCachedInput,
+            });
           if (isOverBudget(projected, ctx.agent.budgetUsd)) {
             budgetExceededMidStream = true;
             controller.abort();
@@ -234,7 +243,7 @@ export class NativeEngine implements Engine {
       }
     } catch (err) {
       return {
-        usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+        usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, costUsd: 0 },
         text,
         toolCalls,
         budgetExceededMidStream: false,
@@ -243,13 +252,22 @@ export class NativeEngine implements Engine {
     }
 
     if (budgetExceededMidStream) {
-      const costUsd = ctx.providers.llm.priceUsd(ctx.agent.model, { inputTokens, outputTokens: outputTokensSoFar });
-      return { usage: { inputTokens, outputTokens: outputTokensSoFar, costUsd }, text, toolCalls, budgetExceededMidStream: true };
+      const costUsd = ctx.providers.llm.priceUsd(ctx.agent.model, {
+        inputTokens,
+        outputTokens: outputTokensSoFar,
+        cachedInputTokens: estimatedCachedInput,
+      });
+      return {
+        usage: { inputTokens, outputTokens: outputTokensSoFar, cachedInputTokens: estimatedCachedInput, costUsd },
+        text,
+        toolCalls,
+        budgetExceededMidStream: true,
+      };
     }
 
     if (!usage) {
       return {
-        usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+        usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, costUsd: 0 },
         text,
         toolCalls,
         budgetExceededMidStream: false,
@@ -272,7 +290,12 @@ export class NativeEngine implements Engine {
     }
 
     return {
-      usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, costUsd: usage.costUsd },
+      usage: {
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cachedInputTokens: usage.cachedInputTokens ?? 0,
+        costUsd: usage.costUsd,
+      },
       text,
       toolCalls,
       budgetExceededMidStream: false,

@@ -95,3 +95,30 @@ describe("checkTokenCalibration", () => {
     expect(calibration.deltaRatio).toBe(0);
   });
 });
+
+function llmStub(): LlmProvider {
+  return {
+    async *stream() {},
+    async countTokens() { return 1000; },
+    // fresh input $10/Mtok, cached $1/Mtok
+    priceUsd(_m, u) {
+      const cached = u.cachedInputTokens ?? 0;
+      return ((u.inputTokens - cached) / 1e6) * 10 + (cached / 1e6) * 1;
+    },
+  };
+}
+
+describe("estimateInputCost cache-aware", () => {
+  it("with no cacheRatio prices all input fresh", async () => {
+    const est = await estimateInputCost({ model: "m", budgetUsd: 1 }, [], llmStub());
+    expect(est.costUsd).toBeCloseTo((1000 / 1e6) * 10, 9);
+  });
+
+  it("with a cacheRatio prices the cached share at the cached rate (cheaper)", async () => {
+    const full = await estimateInputCost({ model: "m", budgetUsd: 1 }, [], llmStub());
+    const cached = await estimateInputCost({ model: "m", budgetUsd: 1 }, [], llmStub(), undefined, 0.9);
+    expect(cached.costUsd).toBeLessThan(full.costUsd);
+    // 100 fresh @ $10/M + 900 cached @ $1/M
+    expect(cached.costUsd).toBeCloseTo((100 / 1e6) * 10 + (900 / 1e6) * 1, 9);
+  });
+});

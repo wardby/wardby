@@ -24,17 +24,25 @@ export interface InputEstimate {
  * input tokens, so omitting them here when the real call includes them
  * under-counts (this was a real bug: a turn-1 refuse with tools attached
  * could admit a run whose real input cost already exceeded budget).
+ *
+ * `cacheRatio` is the fraction of input tokens expected to be served from
+ * a provider-side cache (e.g. observed from a prior turn's real usage),
+ * clamped to [0,1] and defaulting to 0 — today's full-rate behavior, where
+ * every input token is priced fresh.
  */
 export async function estimateInputCost(
   agent: BudgetAgent,
   messages: LlmMessage[],
   llm: LlmProvider,
   tools?: LlmToolDef[],
+  cacheRatio = 0,
 ): Promise<InputEstimate> {
   const tokens = await llm.countTokens(agent.model, messages, tools);
+  const cachedInputTokens = Math.round(tokens * Math.min(Math.max(cacheRatio, 0), 1));
   const costUsd = llm.priceUsd(agent.model, {
     inputTokens: tokens,
     outputTokens: 0,
+    cachedInputTokens,
   });
   return { tokens, costUsd };
 }
