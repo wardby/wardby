@@ -35,8 +35,13 @@ export interface LlmRequest {
 }
 
 export interface LlmUsage {
+  /** Total input tokens, including any served from cache. */
   inputTokens: number;
   outputTokens: number;
+  /** Subset of `inputTokens` served from a provider-side prompt cache, if reported. */
+  cachedInputTokens?: number;
+  /** Tokens billed for writing a new prompt-cache entry, if the provider charges for it. */
+  cacheWriteTokens?: number;
   costUsd: number;
 }
 
@@ -52,6 +57,11 @@ export interface LlmProvider {
   /** Deterministic price for a given token usage (no network call). */
   priceUsd(
     model: string,
-    usage: { inputTokens: number; outputTokens: number },
+    usage: {
+      inputTokens: number;
+      outputTokens: number;
+      cachedInputTokens?: number;
+      cacheWriteTokens?: number;
+    },
   ): number;
 }

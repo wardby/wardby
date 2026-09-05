@@ -1,0 +1,44 @@
+// Hand-written per CLEANROOM.md — never generated from another project's
+// schema. Targets PostgreSQL even for the laptop demo; "portable" means any
+// Postgres (see deploy/local/docker-compose.yml), not a cloud dependency.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Agent {
+  id           String   @id @default(cuid())
+  name         String   @unique
+  systemPrompt String
+  model        String
+  budgetUsd    Decimal  @db.Decimal(10, 4)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  runs         Run[]
+}
+
+enum RunStatus {
+  pending
+  running
+  succeeded
+  failed
+  refused
+}
+
+model Run {
+  id         String    @id @default(cuid())
+  agent      Agent     @relation(fields: [agentId], references: [id])
+  agentId    String
+  status     RunStatus @default(pending)
+  tokensIn   Int       @default(0)
+  tokensOut  Int       @default(0)
+  costUsd    Decimal   @default(0) @db.Decimal(10, 6)
+  error      String?
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+}

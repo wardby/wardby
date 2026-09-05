@@ -5,11 +5,29 @@
   "description": "Schedule and run budget-guarded LLM agents.",
   "license": "Apache-2.0",
   "type": "module",
+  "bin": {
+    "reevo": "./dist/cli.js"
+  },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "cli": "tsx src/cli.ts",
+    "test": "vitest run",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate deploy",
+    "db:up": "docker compose -f deploy/local/docker-compose.yml up -d",
+    "db:down": "docker compose -f deploy/local/docker-compose.yml down"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "gpt-tokenizer": "^2.5.0",
+    "openai": "^4.67.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "typescript": "^5.6.0"
+    "prisma": "^6.19.3",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
   }
 }
