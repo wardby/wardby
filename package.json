@@ -21,6 +21,7 @@
     "db:down": "docker compose -f deploy/local/docker-compose.yml down"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.124.0",
     "@prisma/client": "^6.19.3",
     "croner": "^10.0.1",
     "fast-xml-parser": "^5.11.1",
