@@ -182,4 +182,63 @@ describe("runInSandbox", () => {
       value: { hasJSON: true, hasFetch: true, uuid: true },
     });
   });
+
+  it("blocks a tool's fetch to cloud instance metadata, failing cleanly (no real request made)", async () => {
+    const result = await runInSandbox({
+      code: `
+        try {
+          await fetch("http://169.254.169.254/latest/meta-data/iam/security-credentials/");
+          return "no error thrown (unexpected)";
+        } catch (e) {
+          return "caught: " + e.message;
+        }
+      `,
+      params: {},
+      agentId: "a1",
+      datastore: fakeDatastore(),
+      toolName: "ssrf-probe",
+      limits: FAST_LIMITS,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toMatch(/caught:.*blocked/);
+    }
+  });
+
+  it("blocks a tool's fetch to loopback (the host's own services)", async () => {
+    const result = await runInSandbox({
+      code: `
+        try {
+          await fetch("http://127.0.0.1:5432/");
+          return "no error thrown (unexpected)";
+        } catch (e) {
+          return "caught: " + e.message;
+        }
+      `,
+      params: {},
+      agentId: "a1",
+      datastore: fakeDatastore(),
+      toolName: "ssrf-probe-2",
+      limits: FAST_LIMITS,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toMatch(/caught:.*blocked/);
+    }
+  });
+
+  it("URLSearchParams does not truncate a value containing '=' (e.g. a base64/JWT token)", async () => {
+    const result = await runInSandbox({
+      code: `
+        const p = new URLSearchParams("token=abc.def==&plain=1");
+        return { token: p.get("token"), plain: p.get("plain") };
+      `,
+      params: {},
+      agentId: "a1",
+      datastore: fakeDatastore(),
+      toolName: "urlsearchparams-probe",
+      limits: FAST_LIMITS,
+    });
+    expect(result).toEqual({ ok: true, value: { token: "abc.def==", plain: "1" } });
+  });
 });

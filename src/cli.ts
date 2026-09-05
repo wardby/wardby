@@ -150,14 +150,22 @@ async function toolCreate(args: string[]): Promise<void> {
     fail(`could not read --code file "${values.code}": ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  // Fails at registration, not at call time: a malformed schema never gets persisted.
+  // Fails at registration, not at call time: a malformed schema never gets
+  // persisted. The derived schema is cached on the row (no "update tool"
+  // path exists, so it can never go stale) rather than re-derived per run.
   const schemaResult = await deriveJsonSchema(paramsZod!);
   if (!schemaResult.ok) {
     fail(`invalid --params schema: ${schemaResult.errorMessage}`);
   }
 
   const tool = await prisma.tool.create({
-    data: { name: values.name!, description: values.description!, paramsZod: paramsZod!, code: code! },
+    data: {
+      name: values.name!,
+      description: values.description!,
+      paramsZod: paramsZod!,
+      jsonSchema: schemaResult.value as object,
+      code: code!,
+    },
   });
   console.log(tool.id);
 }

@@ -12,6 +12,7 @@ import type {
   LlmProvider,
   LlmRequest,
   LlmStreamEvent,
+  LlmToolDef,
   LlmUsage,
 } from "./types.js";
 import { getModelPricing, priceUsd as priceUsdFromTable } from "./pricing.js";
@@ -35,15 +36,24 @@ function encodeForModel(model: string, text: string): number[] {
   return encoding === "o200k_base" ? encodeO200kBase(text) : encodeCl100kBase(text);
 }
 
-// Known gap: this counts message tokens only. When a request carries
-// `tools`, OpenAI also tokenizes the tool JSON schemas into the prompt —
-// unaccounted for here, so the pre-flight estimate under-counts by however
-// large the attached tool schemas are. The 10% pre-flight safety margin
-// (budget.ts) covers some of this but isn't sized against it specifically;
-// a large tool roster could still slip past the margin. Calibration
-// logging (budget.ts's checkTokenCalibration) is what surfaces this in
-// practice — if it fires often once tools are in use, this is why.
-export function estimateTokens(model: string, messages: LlmMessage[]): number {
+/** Same shape sent to the API in `stream()` — kept as one function so the estimate can never drift from what's actually serialized. */
+function toOpenAiTools(tools: LlmToolDef[]) {
+  return tools.map((t) => ({
+    type: "function" as const,
+    function: { name: t.name, description: t.description, parameters: t.parameters },
+  }));
+}
+
+// Fixed: this used to count message tokens only. When a request carries
+// `tools`, OpenAI also tokenizes the serialized tool JSON schemas into the
+// prompt — measured live at a 44-52% under-count for a small tool roster,
+// which is what let a turn-1 pre-flight refuse (budget.ts, cumulative
+// spend still zero) admit a run whose real input cost already exceeded
+// budget. Counting `JSON.stringify` of the same payload `stream()` sends
+// is still an *approximation* (not OpenAI's undocumented exact tool-schema
+// tokenization), not a byte-for-byte match — calibration logging
+// (budget.ts's checkTokenCalibration) is what surfaces any remaining drift.
+export function estimateTokens(model: string, messages: LlmMessage[], tools?: LlmToolDef[]): number {
   let total = TOKENS_PRIMING_REPLY;
   for (const message of messages) {
     total += TOKENS_PER_MESSAGE;
@@ -52,6 +62,9 @@ export function estimateTokens(model: string, messages: LlmMessage[]): number {
     if (message.name) {
       total += encodeForModel(model, message.name).length + TOKENS_PER_NAME;
     }
+  }
+  if (tools && tools.length > 0) {
+    total += encodeForModel(model, JSON.stringify(toOpenAiTools(tools))).length;
   }
   return total;
 }
@@ -95,10 +108,7 @@ export class OpenAiLlmProvider implements LlmProvider {
               }
             : {}),
         })) as OpenAI.Chat.ChatCompletionMessageParam[],
-        tools: req.tools?.map((t) => ({
-          type: "function" as const,
-          function: { name: t.name, description: t.description, parameters: t.parameters },
-        })),
+        tools: req.tools ? toOpenAiTools(req.tools) : undefined,
         max_tokens: req.maxTokens,
         temperature: req.temperature,
         stop: req.stopSequences,
@@ -157,8 +167,8 @@ export class OpenAiLlmProvider implements LlmProvider {
     }
   }
 
-  async countTokens(model: string, messages: LlmMessage[]): Promise<number> {
-    return estimateTokens(model, messages);
+  async countTokens(model: string, messages: LlmMessage[], tools?: LlmToolDef[]): Promise<number> {
+    return estimateTokens(model, messages, tools);
   }
 
   priceUsd(

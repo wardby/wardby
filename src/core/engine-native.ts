@@ -58,10 +58,16 @@ export class NativeEngine implements Engine {
         return this.finish("succeeded", lastText, turns - 1, cumulative);
       }
 
+      // toolDefs is passed here because this turn's real call will include
+      // it (tools stay enabled until wind-down) — the estimate must count
+      // whatever the actual request sends, or the turn-1 refuse gate
+      // (cumulative is still zero, nothing else to catch an under-count)
+      // can admit a run whose real input cost already exceeds budget.
       const { costUsd: inputEstimateCost, tokens: inputTokens } = await estimateInputCost(
         { model: ctx.agent.model, budgetUsd: ctx.agent.budgetUsd },
         messages,
         ctx.providers.llm,
+        toolDefs,
       );
       const guardedEstimate = applyPreflightSafetyMargin(inputEstimateCost);
       const projected = cumulative.costUsd + guardedEstimate;
@@ -131,6 +137,9 @@ export class NativeEngine implements Engine {
       { role: "user", content: "You are out of budget; summarize what you have and stop." },
     ];
 
+    // No toolDefs here — the wind-down call itself passes `tools: []`
+    // below (disabled), so the real request won't carry tool schemas and
+    // the estimate must match what's actually sent.
     const { costUsd: inputEstimateCost, tokens: inputTokens } = await estimateInputCost(
       { model: ctx.agent.model, budgetUsd: ctx.agent.budgetUsd },
       windDownMessages,
@@ -210,6 +219,14 @@ export class NativeEngine implements Engine {
             break;
           }
         } else if (event.type === "tool_call") {
+          // Known gap: a turn that streams only tool-call deltas (no text)
+          // never runs the mid-stream budget check above, so it can only
+          // be caught once `usage` arrives on `done`. Bounded to one
+          // turn's tool-call cost and self-corrects at the next pre-turn
+          // gate (cumulative folds in the real `usage` below) — not fixed
+          // here since tool-call argument tokens are typically small
+          // relative to a text completion, but worth knowing if a tool
+          // call ever carries a very large argument payload.
           toolCalls.push({ id: event.id, name: event.name, argsJson: event.argsJson });
         } else if (event.type === "done") {
           usage = event.usage;

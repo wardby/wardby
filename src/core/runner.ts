@@ -20,7 +20,7 @@
 import type { PrismaClient, Run, RunTrigger } from "@prisma/client";
 import type { ProviderRegistry } from "../providers/index.js";
 import type { LoadedTool } from "../providers/engine/types.js";
-import { deriveJsonSchema, validateParams } from "../sandbox/zod-params.js";
+import { validateParams } from "../sandbox/zod-params.js";
 import { runInSandbox } from "../sandbox/run-in-sandbox.js";
 import { prisma as defaultDb } from "./db.js";
 
@@ -64,33 +64,22 @@ export async function executeRun(
       include: { tool: true },
     });
 
-    const tools: LoadedTool[] = [];
-    const toolsByName = new Map<string, { code: string; paramsZod: string }>();
-    for (const attachment of attached) {
-      // Re-derived per run rather than cached: cheap, deterministic, and a
-      // second line of defense if a schema was somehow edited into an
-      // invalid state after passing registration-time validation.
-      const schemaResult = await deriveJsonSchema(attachment.tool.paramsZod);
-      if (!schemaResult.ok) {
-        return db.run.update({
-          where: { id: runId },
-          data: {
-            status: "failed",
-            error: `Tool "${attachment.tool.name}" has an invalid params schema: ${schemaResult.errorMessage}`,
-            finishedAt: new Date(),
-          },
-        });
-      }
-      tools.push({
-        name: attachment.tool.name,
-        description: attachment.tool.description,
-        jsonSchema: schemaResult.value as Record<string, unknown>,
-      });
-      toolsByName.set(attachment.tool.name, {
-        code: attachment.tool.code,
-        paramsZod: attachment.tool.paramsZod,
-      });
-    }
+    // jsonSchema was derived and validated once at `reevo tool create` time
+    // (cli.ts) and cached on the row — there's no "update tool" path, so it
+    // can't go stale. Re-deriving it here on every run would spin a fresh
+    // QuickJS runtime and evaluate the whole vendored zod bundle per
+    // attached tool, before the first LLM call, on every single run.
+    const tools: LoadedTool[] = attached.map((attachment) => ({
+      name: attachment.tool.name,
+      description: attachment.tool.description,
+      jsonSchema: attachment.tool.jsonSchema as Record<string, unknown>,
+    }));
+    const toolsByName = new Map(
+      attached.map((attachment) => [
+        attachment.tool.name,
+        { code: attachment.tool.code, paramsZod: attachment.tool.paramsZod },
+      ]),
+    );
 
     const runSandboxTool = async (name: string, argsJson: string): Promise<string> => {
       const tool = toolsByName.get(name);

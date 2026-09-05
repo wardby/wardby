@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type OpenAI from "openai";
-import { OpenAiLlmProvider } from "./openai.js";
-import type { LlmStreamEvent } from "./types.js";
+import { OpenAiLlmProvider, estimateTokens } from "./openai.js";
+import type { LlmMessage, LlmStreamEvent, LlmToolDef } from "./types.js";
 
 function fakeOpenAiClient(chunks: unknown[]): OpenAI {
   return {
@@ -104,5 +104,61 @@ describe("OpenAiLlmProvider tool-call reassembly", () => {
       expect(done.usage.inputTokens).toBe(3);
       expect(done.usage.outputTokens).toBe(2);
     }
+  });
+});
+
+describe("estimateTokens with tools", () => {
+  const messages: LlmMessage[] = [
+    { role: "system", content: "You are a helpful assistant." },
+    { role: "user", content: "What is the weather in Boston?" },
+  ];
+  const tools: LlmToolDef[] = [
+    {
+      name: "getWeather",
+      description: "Gets the current weather for a named city, returning temperature and conditions.",
+      parameters: {
+        type: "object",
+        properties: {
+          city: { type: "string", description: "The city name, e.g. Boston" },
+          units: { type: "string", enum: ["fahrenheit", "celsius"] },
+        },
+        required: ["city"],
+      },
+    },
+  ];
+
+  it("counts tool schema tokens — the estimate with tools attached must exceed the messages-only estimate", () => {
+    // This is the regression test for the real bug: the pre-flight
+    // estimate used to ignore `tools` entirely, so an agent with a tool
+    // roster large enough to matter could pass the turn-1 refuse gate
+    // (cumulative spend still zero) even though the real request — which
+    // does include the serialized tool schemas — would cost meaningfully
+    // more than the messages alone.
+    const withoutTools = estimateTokens("gpt-4o-mini", messages);
+    const withTools = estimateTokens("gpt-4o-mini", messages, tools);
+
+    expect(withTools).toBeGreaterThan(withoutTools);
+  });
+
+  it("scales with the size of the tool roster", () => {
+    const oneTool = estimateTokens("gpt-4o-mini", messages, tools);
+    const twoTools = estimateTokens("gpt-4o-mini", messages, [
+      ...tools,
+      {
+        name: "getForecast",
+        description: "Gets a multi-day forecast for a named city.",
+        parameters: {
+          type: "object",
+          properties: { city: { type: "string" }, days: { type: "number" } },
+          required: ["city", "days"],
+        },
+      },
+    ]);
+
+    expect(twoTools).toBeGreaterThan(oneTool);
+  });
+
+  it("is a no-op for an empty tool array (matches the omitted-tools estimate)", () => {
+    expect(estimateTokens("gpt-4o-mini", messages, [])).toBe(estimateTokens("gpt-4o-mini", messages));
   });
 });

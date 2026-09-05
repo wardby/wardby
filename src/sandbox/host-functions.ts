@@ -12,7 +12,13 @@ import { XMLParser } from "fast-xml-parser";
 import type { QuickJSContext, QuickJSRuntime } from "quickjs-emscripten";
 import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
 import { registerJsonAsyncFunction } from "./bridge.js";
+import { assertFetchDestinationAllowed } from "./fetch-policy.js";
 import { FETCH_TIMEOUT_MS } from "./limits.js";
+
+const FETCH_ALLOWED_HOSTS = (process.env.REEVO_FETCH_ALLOWED_HOSTS ?? "")
+  .split(",")
+  .map((h) => h.trim())
+  .filter(Boolean);
 
 export interface HostFunctionOptions {
   agentId: string;
@@ -58,6 +64,7 @@ export function installHostFunctions(
     const [url, init] = args<[string, { method?: string; headers?: Record<string, string>; body?: string }]>(
       argsJson,
     );
+    await assertFetchDestinationAllowed(url, { allowedHosts: FETCH_ALLOWED_HOSTS });
     const response = await fetch(url, {
       method: init.method ?? "GET",
       headers: init.headers,

@@ -60,8 +60,13 @@ export type LlmStreamEvent =
 
 export interface LlmProvider {
   stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<LlmStreamEvent>;
-  /** Pre-flight token count for budget enforcement. */
-  countTokens(model: string, messages: LlmMessage[]): Promise<number>;
+  /**
+   * Pre-flight token count for budget enforcement. `tools`, when passed,
+   * must be counted too — a provider bills the serialized tool schemas as
+   * input tokens alongside the messages, so an estimate that ignores them
+   * under-counts by however large the attached tool roster is.
+   */
+  countTokens(model: string, messages: LlmMessage[], tools?: LlmToolDef[]): Promise<number>;
   /** Deterministic price for a given token usage (no network call). */
   priceUsd(
     model: string,

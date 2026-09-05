@@ -55,6 +55,12 @@ model Tool {
   /// Zod schema *source text*; compiled and evaluated inside the sandbox,
   /// never in the host process.
   paramsZod   String
+  /// JSON Schema derived from paramsZod at registration time (deriveJsonSchema)
+  /// and cached here — re-deriving it on every run would spin a fresh QuickJS
+  /// runtime and evaluate the whole vendored zod bundle per attached tool,
+  /// before the first LLM call, on every single run. Safe to cache because
+  /// there's no "update tool" path — paramsZod can't change without a new row.
+  jsonSchema  Json
   /// Tool body source; run inside the sandbox with the validated params.
   code        String
   createdAt   DateTime    @default(now())

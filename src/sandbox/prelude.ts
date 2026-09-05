@@ -166,7 +166,11 @@ class URLSearchParams {
       const s = init.startsWith("?") ? init.slice(1) : init;
       for (const pair of s.split("&")) {
         if (!pair) continue;
-        const [k, v = ""] = pair.split("=");
+        // Split on the *first* "=" only — a value containing "=" (e.g. a
+        // base64/JWT token) must not be truncated at a later "=".
+        const eqIndex = pair.indexOf("=");
+        const k = eqIndex === -1 ? pair : pair.slice(0, eqIndex);
+        const v = eqIndex === -1 ? "" : pair.slice(eqIndex + 1);
         this._entries.push([decodeURIComponent(k), decodeURIComponent(v)]);
       }
     } else if (init && typeof init === "object") {

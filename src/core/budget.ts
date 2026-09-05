@@ -5,7 +5,7 @@
  * mid-stream cutoff.
  */
 
-import type { LlmMessage, LlmProvider } from "../providers/index.js";
+import type { LlmMessage, LlmProvider, LlmToolDef } from "../providers/index.js";
 
 export interface BudgetAgent {
   model: string;
@@ -17,13 +17,21 @@ export interface InputEstimate {
   costUsd: number;
 }
 
-/** Input-only cost estimate: `countTokens` -> `priceUsd` with zero output tokens. */
+/**
+ * Input-only cost estimate: `countTokens` -> `priceUsd` with zero output
+ * tokens. `tools` must be passed whenever the turn being estimated will
+ * actually send them — a provider bills the serialized tool schemas as
+ * input tokens, so omitting them here when the real call includes them
+ * under-counts (this was a real bug: a turn-1 refuse with tools attached
+ * could admit a run whose real input cost already exceeded budget).
+ */
 export async function estimateInputCost(
   agent: BudgetAgent,
   messages: LlmMessage[],
   llm: LlmProvider,
+  tools?: LlmToolDef[],
 ): Promise<InputEstimate> {
-  const tokens = await llm.countTokens(agent.model, messages);
+  const tokens = await llm.countTokens(agent.model, messages, tools);
   const costUsd = llm.priceUsd(agent.model, {
     inputTokens: tokens,
     outputTokens: 0,

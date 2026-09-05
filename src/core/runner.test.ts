@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
 import type { Engine, EngineResult, EngineRunContext } from "../providers/engine/types.js";
 import type { LlmProvider } from "../providers/index.js";
@@ -23,6 +23,7 @@ interface FakeTool {
   name: string;
   description: string;
   paramsZod: string;
+  jsonSchema: Record<string, unknown>;
   code: string;
 }
 
@@ -157,12 +158,20 @@ describe("runAgent", () => {
     expect(captured?.tools).toEqual([]);
   });
 
-  it("loads attached tools and derives real JSON Schema for the engine", async () => {
+  it("loads attached tools' cached JSON Schema for the engine (not re-derived per run)", async () => {
+    // jsonSchema is derived once at `reevo tool create` time (cli.ts) and
+    // cached on the row — executeRun just reads it, it never re-derives.
+    const cachedJsonSchema = {
+      type: "object",
+      properties: { city: { type: "string" } },
+      required: ["city"],
+    };
     const tool: FakeTool = {
       id: "t1",
       name: "getWeather",
       description: "Get the weather for a city",
       paramsZod: "z.object({ city: z.string() })",
+      jsonSchema: cachedJsonSchema,
       code: "return { tempF: 72 };",
     };
     const db = fakeDb(
@@ -182,35 +191,7 @@ describe("runAgent", () => {
 
     expect(captured?.tools).toHaveLength(1);
     expect(captured?.tools[0].name).toBe("getWeather");
-    expect(captured?.tools[0].jsonSchema).toMatchObject({
-      type: "object",
-      properties: { city: { type: "string" } },
-      required: ["city"],
-    });
-  });
-
-  it("fails the run (without calling the engine) when an attached tool has an invalid schema", async () => {
-    const tool: FakeTool = {
-      id: "t1",
-      name: "broken",
-      description: "Has a malformed schema",
-      paramsZod: "this is not valid javascript {{{",
-      code: "return {};",
-    };
-    const db = fakeDb(
-      [{ id: "a1", name: "brokenbot", systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 10 }],
-      [tool],
-      [{ agentId: "a1", toolId: "t1" }],
-    );
-    const engineRun = vi.fn();
-    const engine: Engine = { run: engineRun };
-
-    const run = await runAgent("brokenbot", { llm: noopLlm, engine, datastore: fakeDatastore() }, db);
-
-    expect(run.status).toBe("failed");
-    expect(run.error).toMatch(/broken/);
-    expect(run.error).toMatch(/invalid params schema/);
-    expect(engineRun).not.toHaveBeenCalled();
+    expect(captured?.tools[0].jsonSchema).toEqual(cachedJsonSchema);
   });
 
   it("wires runSandboxTool to real Zod-in-sandbox validation and the real WASM sandbox", async () => {
@@ -219,6 +200,7 @@ describe("runAgent", () => {
       name: "double",
       description: "Doubles a number",
       paramsZod: "z.object({ n: z.number() })",
+      jsonSchema: { type: "object", properties: { n: { type: "number" } }, required: ["n"] },
       code: "return { doubled: params.n * 2 };",
     };
     const db = fakeDb(
