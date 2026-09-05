@@ -5,6 +5,11 @@
  */
 
 import OpenAI from "openai";
+
+/** Whether the OpenAI adapter has credentials to run (used by the router's enable-by-credential wiring). */
+export function openaiCredentialsPresent(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.OPENAI_API_KEY);
+}
 import { encode as encodeCl100kBase } from "gpt-tokenizer/encoding/cl100k_base";
 import { encode as encodeO200kBase } from "gpt-tokenizer/encoding/o200k_base";
 import type {

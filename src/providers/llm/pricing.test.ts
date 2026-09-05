@@ -69,3 +69,28 @@ describe("priceUsd", () => {
     );
   });
 });
+
+import { supportedModels } from "./pricing.js";
+import { computeCost } from "./pricing-core.js";
+import { openaiCredentialsPresent } from "./openai.js";
+
+describe("pricing routing helpers", () => {
+  it("supportedModels lists the OpenAI roster", () => {
+    const models = supportedModels();
+    expect(models).toContain("gpt-4o");
+    expect(models).toContain("gpt-5.6-luna");
+    expect(models.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("computeCost is importable from pricing-core and prices cached reads below fresh", () => {
+    const pricing = { encoding: "o200k_base", inputPerMTok: 10, cachedInputPerMTok: 1, outputPerMTok: 50 } as const;
+    const fresh = computeCost(pricing, { inputTokens: 1000, outputTokens: 0 });
+    const cached = computeCost(pricing, { inputTokens: 1000, outputTokens: 0, cachedInputTokens: 1000 });
+    expect(cached).toBeLessThan(fresh);
+  });
+
+  it("openaiCredentialsPresent reflects the env", () => {
+    expect(openaiCredentialsPresent({ OPENAI_API_KEY: "sk-x" } as NodeJS.ProcessEnv)).toBe(true);
+    expect(openaiCredentialsPresent({} as NodeJS.ProcessEnv)).toBe(false);
+  });
+});

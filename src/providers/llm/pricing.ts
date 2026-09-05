@@ -20,15 +20,9 @@
  * direction as the unknown-model error, never fail-toward-underestimate.
  */
 
-export type TokenizerEncoding = "cl100k_base" | "o200k_base";
-
-export interface ModelPricing {
-  encoding: TokenizerEncoding;
-  inputPerMTok: number;
-  outputPerMTok: number;
-  cachedInputPerMTok?: number;
-  cacheWritePerMTok?: number;
-}
+import { computeCost, type ModelPricing, type TokenizerEncoding, type UsageTokens } from "./pricing-core.js";
+export { computeCost } from "./pricing-core.js";
+export type { ModelPricing, TokenizerEncoding, UsageTokens } from "./pricing-core.js";
 
 const PRICING: Record<string, ModelPricing> = {
   "gpt-4o": { encoding: "o200k_base", inputPerMTok: 2.5, cachedInputPerMTok: 1.25, outputPerMTok: 10.0 },
@@ -78,35 +72,8 @@ export function getModelPricing(model: string): ModelPricing {
   return pricing;
 }
 
-interface UsageTokens {
-  inputTokens: number;
-  outputTokens: number;
-  cachedInputTokens?: number;
-  cacheWriteTokens?: number;
-}
-
-/**
- * Pure cost math for a resolved pricing entry. Exposed (separately from the
- * model lookup) so the cache-rate fallback stays testable even when every
- * shipped model in the table carries explicit cache rates.
- *
- * A model missing `cachedInputPerMTok` / `cacheWritePerMTok` falls back to the
- * full input rate — fail-toward-overestimate, never underestimate.
- */
-export function computeCost(pricing: ModelPricing, usage: UsageTokens): number {
-  const cachedInputTokens = usage.cachedInputTokens ?? 0;
-  const cacheWriteTokens = usage.cacheWriteTokens ?? 0;
-  const freshInputTokens = usage.inputTokens - cachedInputTokens;
-
-  const cachedRate = pricing.cachedInputPerMTok ?? pricing.inputPerMTok;
-  const cacheWriteRate = pricing.cacheWritePerMTok ?? pricing.inputPerMTok;
-
-  return (
-    (freshInputTokens / 1_000_000) * pricing.inputPerMTok +
-    (cachedInputTokens / 1_000_000) * cachedRate +
-    (cacheWriteTokens / 1_000_000) * cacheWriteRate +
-    (usage.outputTokens / 1_000_000) * pricing.outputPerMTok
-  );
+export function supportedModels(): string[] {
+  return Object.keys(PRICING);
 }
 
 export function priceUsd(model: string, usage: UsageTokens): number {
