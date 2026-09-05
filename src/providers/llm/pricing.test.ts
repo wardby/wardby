@@ -71,7 +71,6 @@ describe("priceUsd", () => {
 });
 
 import { supportedModels } from "./pricing.js";
-import { computeCost } from "./pricing-core.js";
 import { openaiCredentialsPresent } from "./openai.js";
 
 describe("pricing routing helpers", () => {
