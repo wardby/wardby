@@ -3,7 +3,7 @@
  * so a future Bedrock-Claude adapter reuses them unchanged — Bedrock and the
  * direct API differ only in client/auth, model IDs, and pricing.
  */
-import type { LlmMessage, LlmRequest, LlmToolDef } from "./types.js";
+import type { LlmMessage, LlmRequest, LlmToolDef, LlmStreamEvent, LlmUsage } from "./types.js";
 
 export interface CacheControl { type: "ephemeral"; }
 export interface ClaudeTextBlock { type: "text"; text: string; cache_control?: CacheControl; }
@@ -89,4 +89,72 @@ export function withCacheBreakpoints(req: ClaudeRequest): ClaudeRequest {
   });
 
   return { ...req, ...(system ? { system } : {}), messages };
+}
+
+interface ClaudeUsage { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number; output_tokens?: number; }
+export type ClaudeStreamEvent =
+  | { type: "message_start"; message: { usage: ClaudeUsage } }
+  | { type: "content_block_start"; index: number; content_block: { type: "text" | "tool_use"; id?: string; name?: string } }
+  | { type: "content_block_delta"; index: number; delta: { type: "text_delta"; text: string } | { type: "input_json_delta"; partial_json: string } }
+  | { type: "content_block_stop"; index: number }
+  | { type: "message_delta"; delta: { stop_reason?: string }; usage?: ClaudeUsage }
+  | { type: "message_stop" };
+
+export async function* mapClaudeStream(
+  events: AsyncIterable<ClaudeStreamEvent>,
+  priceUsd: (usage: LlmUsage) => number,
+): AsyncIterable<LlmStreamEvent> {
+  const toolBuffers = new Map<number, { id: string; name: string; argsJson: string }>();
+  let start: ClaudeUsage = {};
+  let outputTokens = 0;
+  let stopReason = "stop";
+
+  for await (const ev of events) {
+    switch (ev.type) {
+      case "message_start":
+        start = ev.message.usage ?? {};
+        outputTokens = ev.message.usage?.output_tokens ?? 0;
+        break;
+      case "content_block_start":
+        if (ev.content_block.type === "tool_use") {
+          toolBuffers.set(ev.index, { id: ev.content_block.id ?? "", name: ev.content_block.name ?? "", argsJson: "" });
+        }
+        break;
+      case "content_block_delta":
+        if (ev.delta.type === "text_delta") {
+          yield { type: "text", delta: ev.delta.text };
+        } else {
+          const buf = toolBuffers.get(ev.index);
+          if (buf) buf.argsJson += ev.delta.partial_json;
+        }
+        break;
+      case "content_block_stop": {
+        const buf = toolBuffers.get(ev.index);
+        if (buf) {
+          yield { type: "tool_call", id: buf.id, name: buf.name, argsJson: buf.argsJson };
+          toolBuffers.delete(ev.index);
+        }
+        break;
+      }
+      case "message_delta":
+        if (ev.delta.stop_reason) stopReason = ev.delta.stop_reason;
+        if (ev.usage?.output_tokens != null) outputTokens = ev.usage.output_tokens;
+        break;
+      case "message_stop": {
+        const cachedInputTokens = start.cache_read_input_tokens ?? 0;
+        const cacheWriteTokens = start.cache_creation_input_tokens ?? 0;
+        const inputTokens = (start.input_tokens ?? 0) + cachedInputTokens;
+        const usage: LlmUsage = {
+          inputTokens,
+          outputTokens,
+          cachedInputTokens,
+          cacheWriteTokens,
+          costUsd: 0,
+        };
+        usage.costUsd = priceUsd(usage);
+        yield { type: "done", stopReason, usage };
+        break;
+      }
+    }
+  }
 }
