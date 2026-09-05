@@ -39,6 +39,14 @@ Providers are selected purely by environment variable — e.g.
 `JOB_LAUNCHER=local`, `EMAIL_PROVIDER=smtp`, `SECRET_CIPHER=app-key`. Swapping to
 a native cloud deployment is configuration, not a code change.
 
+The `llm/` provider is the one exception: it's not a single-adapter switch but
+a per-agent **model router**. An OpenAI adapter and a direct Anthropic (Claude)
+adapter each register for the model names they own; whichever adapters have
+credentials present (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) are enabled, and an
+agent's `model` field picks which adapter handles its calls — so OpenAI and
+Claude agents can run side by side in one deployment. Bedrock-hosted Claude is
+a reserved `LLM_PROVIDER` kind with no adapter yet.
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
