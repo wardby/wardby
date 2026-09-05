@@ -1,0 +1,15 @@
+{
+  "name": "reevo-run",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Schedule and run budget-guarded LLM agents.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

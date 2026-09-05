@@ -1,0 +1,31 @@
+/**
+ * Provider seams — the interfaces the core depends on.
+ *
+ * The core imports only from here; it never references a concrete adapter or a
+ * cloud SDK. Adapters live alongside each interface (e.g. `jobs/local.ts`,
+ * `jobs/ecs-fargate.ts`) and are wired up from configuration.
+ */
+
+export * from "./jobs/types.js";
+export * from "./email/types.js";
+export * from "./llm/types.js";
+export * from "./secrets/types.js";
+export * from "./auth/types.js";
+export * from "./storage/types.js";
+
+import type { JobLauncher } from "./jobs/types.js";
+import type { EmailProvider } from "./email/types.js";
+import type { LlmProvider } from "./llm/types.js";
+import type { SecretCipher } from "./secrets/types.js";
+import type { AuthProvider } from "./auth/types.js";
+import type { BlobStore } from "./storage/types.js";
+
+/** The full set of providers the core is given at startup. */
+export interface ProviderRegistry {
+  jobs: JobLauncher;
+  email: EmailProvider;
+  llm: LlmProvider;
+  secrets: SecretCipher;
+  auth: AuthProvider;
+  storage: BlobStore;
+}
