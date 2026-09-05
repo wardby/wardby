@@ -36,6 +36,13 @@ function buildLlmProvider(): ProviderRegistry["llm"] {
   return new OpenAiLlmProvider();
 }
 
+function assertInProcessExecutor(): void {
+  const config = loadProviderConfig();
+  if (config.executor !== "in-process") {
+    fail(`EXECUTOR "${config.executor}" has no adapter yet (only "in-process").`);
+  }
+}
+
 async function agentCreate(args: string[]): Promise<void> {
   const { values } = parseArgs({
     args,
@@ -213,6 +220,7 @@ async function scheduler(args: string[]): Promise<void> {
   const { values } = parseArgs({ args, options: { scope: { type: "string" } } });
   const scope = values.scope ?? "default";
 
+  assertInProcessExecutor();
   const llm = buildLlmProvider();
   const executor = new InProcessExecutor({ llm }, prisma);
   const reconciler = startReconciler({ db: prisma });

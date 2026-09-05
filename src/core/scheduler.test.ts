@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
-import { findDueCandidates, claimDueRun, type SchedulerDb } from "./scheduler.js";
+import {
+  findDueCandidates,
+  claimDueRun,
+  markRunFailedFromExecutorError,
+  type SchedulerDb,
+} from "./scheduler.js";
 
 interface FakeAgent {
   id: string;
@@ -67,11 +72,68 @@ describe("findDueCandidates", () => {
   });
 });
 
+describe("markRunFailedFromExecutorError", () => {
+  interface FakeRun {
+    id: string;
+    status: string;
+    error: string | null;
+    finishedAt: Date | null;
+  }
+
+  function fakeRunDb(runs: FakeRun[]): Pick<SchedulerDb, "run"> {
+    const byId = new Map(runs.map((r) => [r.id, r]));
+    return {
+      run: {
+        updateMany: (async ({ where, data }: any) => {
+          let count = 0;
+          for (const run of byId.values()) {
+            if (run.id !== where.id) continue;
+            if (!where.status.in.includes(run.status)) continue;
+            Object.assign(run, data);
+            count += 1;
+          }
+          return { count };
+        }) as any,
+      },
+    } as unknown as Pick<SchedulerDb, "run">;
+  }
+
+  it("marks a pending run failed with the executor's error message", async () => {
+    const runs: FakeRun[] = [{ id: "r1", status: "pending", error: null, finishedAt: null }];
+    const db = fakeRunDb(runs);
+
+    await markRunFailedFromExecutorError(db, "r1", new Error("boom"));
+
+    expect(runs[0].status).toBe("failed");
+    expect(runs[0].error).toBe("boom");
+    expect(runs[0].finishedAt).not.toBeNull();
+  });
+
+  it("does not clobber a run that already reached a terminal state through another path", async () => {
+    const runs: FakeRun[] = [{ id: "r1", status: "succeeded", error: null, finishedAt: new Date() }];
+    const db = fakeRunDb(runs);
+
+    await markRunFailedFromExecutorError(db, "r1", new Error("too late"));
+
+    expect(runs[0].status).toBe("succeeded");
+    expect(runs[0].error).toBeNull();
+  });
+});
+
 // claimDueRun exercises FOR UPDATE SKIP LOCKED + a real transaction — that
 // concurrency behavior can't be faithfully faked, so this suite runs
 // against a real local Postgres and is skipped without DATABASE_URL (same
 // pattern as the OpenAI contract test).
 const databaseUrl = process.env.DATABASE_URL;
+
+if (!databaseUrl) {
+  console.warn(
+    "[reevo-run tests] DATABASE_URL not set — skipping the at-most-once claimDueRun " +
+      "concurrency test (FOR UPDATE SKIP LOCKED against two racing ticks). This is one " +
+      "of the highest-risk pieces of Phase 2; set DATABASE_URL before trusting a " +
+      "scheduler change based on a green run that skipped it.",
+  );
+}
 
 describe.skipIf(!databaseUrl)("claimDueRun (database)", () => {
   const db = new PrismaClient();

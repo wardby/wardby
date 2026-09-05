@@ -17,6 +17,27 @@ import { LEASE_RENEW_INTERVAL_MS, LEASE_TTL_MS, TICK_INTERVAL_MS } from "./timin
 
 export type SchedulerDb = Pick<PrismaClient, "agent" | "run" | "$transaction" | "$queryRaw">;
 
+/**
+ * Per spec: "Executor throws synchronously on start → the run is marked
+ * failed with the error." A guarded `updateMany` (only `pending`/`running`)
+ * rather than an unconditional `update`, so this can never clobber a run
+ * that already reached a terminal state through some other path.
+ */
+export async function markRunFailedFromExecutorError(
+  db: Pick<SchedulerDb, "run">,
+  runId: string,
+  err: unknown,
+): Promise<void> {
+  await db.run.updateMany({
+    where: { id: runId, status: { in: ["pending", "running"] } },
+    data: {
+      status: "failed",
+      error: err instanceof Error ? err.message : String(err),
+      finishedAt: new Date(),
+    },
+  });
+}
+
 /** Cheap, lock-free pass: which enabled+scheduled agents look due right now. */
 export async function findDueCandidates(db: Pick<SchedulerDb, "agent">, now: Date): Promise<Agent[]> {
   const candidates = await db.agent.findMany({
@@ -111,8 +132,13 @@ export function startScheduler(options: SchedulerOptions): SchedulerHandle {
         const runId = await claimDueRun(db, agent.id, now());
         if (runId) {
           log(`[scheduler] firing agent "${agent.name}" -> run ${runId}`);
-          options.executor.start(runId).catch((err) => {
+          options.executor.start(runId).catch(async (err) => {
             console.error(`[scheduler] run ${runId} for agent "${agent.name}" failed to start:`, err);
+            try {
+              await markRunFailedFromExecutorError(db, runId, err);
+            } catch (updateErr) {
+              console.error(`[scheduler] failed to mark run ${runId} as failed:`, updateErr);
+            }
           });
         }
       } catch (err) {

@@ -9,6 +9,15 @@ import { tryAcquireLease } from "./lease.js";
 // DATABASE_URL (same pattern as the OpenAI contract test).
 const databaseUrl = process.env.DATABASE_URL;
 
+if (!databaseUrl) {
+  console.warn(
+    "[reevo-run tests] DATABASE_URL not set — skipping the lease acquire/renew/refuse/" +
+      "expire tests (atomic INSERT ... ON CONFLICT ... WHERE). This is one of the " +
+      "highest-risk pieces of Phase 2 (leader election); set DATABASE_URL before " +
+      "trusting a scheduler change based on a green run that skipped it.",
+  );
+}
+
 describe.skipIf(!databaseUrl)("tryAcquireLease (database)", () => {
   const db = new PrismaClient();
   const usedScopes: string[] = [];
