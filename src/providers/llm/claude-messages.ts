@@ -65,3 +65,28 @@ export function toClaudeRequest(req: LlmRequest, defaultMaxTokens: number): Clau
     max_tokens: req.maxTokens ?? defaultMaxTokens,
   };
 }
+
+const EPHEMERAL: CacheControl = { type: "ephemeral" };
+
+/**
+ * Two-breakpoint canonical caching. Anthropic's cache order is
+ * tools -> system -> messages, so a breakpoint on the last system block
+ * caches tools+system (static across the run). A rolling breakpoint on the
+ * last message's final block grows the conversation cache each turn.
+ * Sub-minimum prefixes (1024/2048 tokens) are silently un-cached by Anthropic.
+ */
+export function withCacheBreakpoints(req: ClaudeRequest): ClaudeRequest {
+  const system = req.system?.map((b, i, arr) =>
+    i === arr.length - 1 ? { ...b, cache_control: EPHEMERAL } : b,
+  );
+
+  const messages = req.messages.map((m, mi, marr) => {
+    if (mi !== marr.length - 1) return m;
+    const content = m.content.map((b, bi, barr) =>
+      bi === barr.length - 1 ? { ...b, cache_control: EPHEMERAL } : b,
+    );
+    return { ...m, content };
+  });
+
+  return { ...req, ...(system ? { system } : {}), messages };
+}

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { toClaudeRequest } from "./claude-messages.js";
+import { toClaudeRequest, withCacheBreakpoints } from "./claude-messages.js";
 import type { LlmRequest } from "./types.js";
 
 const base: LlmRequest = {
@@ -39,5 +39,27 @@ describe("toClaudeRequest", () => {
     const r = toClaudeRequest({ ...base, maxTokens: undefined }, 2048);
     expect(r.tools?.[0]).toMatchObject({ name: "getTime", input_schema: { type: "object" } });
     expect(r.max_tokens).toBe(2048);
+  });
+});
+
+describe("withCacheBreakpoints", () => {
+  it("marks the last system block (caches tools+system) and the last message block (rolling)", () => {
+    const req = toClaudeRequest(base, 1024);
+    const marked = withCacheBreakpoints(req);
+    expect(marked.system?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+    const lastMsg = marked.messages.at(-1)!;
+    expect((lastMsg.content.at(-1) as any).cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("is a no-op-safe copy when there is no system and no messages", () => {
+    const marked = withCacheBreakpoints({ messages: [], max_tokens: 10 });
+    expect(marked.messages).toEqual([]);
+    expect(marked.system).toBeUndefined();
+  });
+
+  it("does not mutate its input", () => {
+    const req = toClaudeRequest(base, 1024);
+    withCacheBreakpoints(req);
+    expect(req.system?.at(-1)?.cache_control).toBeUndefined();
   });
 });
