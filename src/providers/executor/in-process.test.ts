@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { LlmProvider } from "../llm/types.js";
+import type { Datastore, DatastoreValue } from "../datastore/types.js";
 import type { RunnerDb } from "../../core/runner.js";
+import { NativeEngine } from "../../core/engine-native.js";
 import { InProcessExecutor } from "./in-process.js";
 
 interface FakeAgent {
@@ -9,6 +11,7 @@ interface FakeAgent {
   systemPrompt: string;
   model: string;
   budgetUsd: number;
+  maxTurns: number;
 }
 
 function fakeDb(agents: FakeAgent[], runs: Record<string, any>): RunnerDb {
@@ -32,7 +35,28 @@ function fakeDb(agents: FakeAgent[], runs: Record<string, any>): RunnerDb {
         throw new Error("not used in this test");
       }) as any,
     },
+    agentTool: {
+      findMany: (async () => []) as any,
+    },
   } as unknown as RunnerDb;
+}
+
+function fakeDatastore(): Datastore {
+  const store = new Map<string, DatastoreValue>();
+  return {
+    async get(agentId, key) {
+      return store.get(`${agentId}:${key}`);
+    },
+    async set(agentId, key, value) {
+      store.set(`${agentId}:${key}`, value);
+    },
+    async delete(agentId, key) {
+      store.delete(`${agentId}:${key}`);
+    },
+    async list() {
+      return [];
+    },
+  };
 }
 
 // Slow fake provider: yields deltas with a real delay so multiple heartbeat
@@ -69,6 +93,7 @@ describe("InProcessExecutor", () => {
       systemPrompt: "sys",
       model: "m",
       budgetUsd: 10,
+      maxTurns: 10,
     };
     const db = fakeDb(
       [agent],
@@ -76,7 +101,11 @@ describe("InProcessExecutor", () => {
     );
     const llm = slowLlm(["a", "b", "c"], 15);
 
-    const executor = new InProcessExecutor({ llm }, db, /* heartbeatIntervalMs */ 5);
+    const executor = new InProcessExecutor(
+      { llm, engine: new NativeEngine(), datastore: fakeDatastore() },
+      db,
+      /* heartbeatIntervalMs */ 5,
+    );
     await executor.start("run_1");
 
     const finalRun = await db.run.findUnique({ where: { id: "run_1" } });
@@ -92,6 +121,7 @@ describe("InProcessExecutor", () => {
       systemPrompt: "sys",
       model: "m",
       budgetUsd: 10,
+      maxTurns: 10,
     };
     const db = fakeDb(
       [agent],
@@ -110,7 +140,11 @@ describe("InProcessExecutor", () => {
       },
     };
 
-    const executor = new InProcessExecutor({ llm }, db, 5);
+    const executor = new InProcessExecutor(
+      { llm, engine: new NativeEngine(), datastore: fakeDatastore() },
+      db,
+      5,
+    );
     await executor.start("run_1");
 
     const finalRun = await db.run.findUnique({ where: { id: "run_1" } });

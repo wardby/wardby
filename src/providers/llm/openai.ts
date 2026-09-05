@@ -35,6 +35,14 @@ function encodeForModel(model: string, text: string): number[] {
   return encoding === "o200k_base" ? encodeO200kBase(text) : encodeCl100kBase(text);
 }
 
+// Known gap: this counts message tokens only. When a request carries
+// `tools`, OpenAI also tokenizes the tool JSON schemas into the prompt —
+// unaccounted for here, so the pre-flight estimate under-counts by however
+// large the attached tool schemas are. The 10% pre-flight safety margin
+// (budget.ts) covers some of this but isn't sized against it specifically;
+// a large tool roster could still slip past the margin. Calibration
+// logging (budget.ts's checkTokenCalibration) is what surfaces this in
+// practice — if it fires often once tools are in use, this is why.
 export function estimateTokens(model: string, messages: LlmMessage[]): number {
   let total = TOKENS_PRIMING_REPLY;
   for (const message of messages) {
@@ -51,7 +59,12 @@ export function estimateTokens(model: string, messages: LlmMessage[]): number {
 export class OpenAiLlmProvider implements LlmProvider {
   private readonly client: OpenAI;
 
-  constructor(apiKey: string = process.env.OPENAI_API_KEY ?? "") {
+  /** `client` is an injection point for tests — a real adapter never passes it. */
+  constructor(apiKey: string = process.env.OPENAI_API_KEY ?? "", client?: OpenAI) {
+    if (client) {
+      this.client = client;
+      return;
+    }
     if (!apiKey) {
       throw new Error(
         "OPENAI_API_KEY is not set — required by the OpenAI LlmProvider adapter.",
@@ -72,7 +85,20 @@ export class OpenAiLlmProvider implements LlmProvider {
           content: m.content,
           ...(m.name ? { name: m.name } : {}),
           ...(m.toolCallId ? { tool_call_id: m.toolCallId } : {}),
+          ...(m.toolCalls && m.toolCalls.length > 0
+            ? {
+                tool_calls: m.toolCalls.map((tc) => ({
+                  id: tc.id,
+                  type: "function" as const,
+                  function: { name: tc.name, arguments: tc.argsJson },
+                })),
+              }
+            : {}),
         })) as OpenAI.Chat.ChatCompletionMessageParam[],
+        tools: req.tools?.map((t) => ({
+          type: "function" as const,
+          function: { name: t.name, description: t.description, parameters: t.parameters },
+        })),
         max_tokens: req.maxTokens,
         temperature: req.temperature,
         stop: req.stopSequences,
@@ -83,13 +109,33 @@ export class OpenAiLlmProvider implements LlmProvider {
     );
 
     let stopReason = "stop";
+    // OpenAI streams tool-call arguments fragmented across chunks, keyed by
+    // index — buffer per index until the turn's finish_reason confirms the
+    // call is complete, then emit one `tool_call` event per call.
+    const toolCallBuffers = new Map<number, { id: string; name: string; argsJson: string }>();
+
     for await (const chunk of stream) {
       const choice = chunk.choices[0];
       if (choice?.delta?.content) {
         yield { type: "text", delta: choice.delta.content };
       }
+      if (choice?.delta?.tool_calls) {
+        for (const fragment of choice.delta.tool_calls) {
+          const buffered = toolCallBuffers.get(fragment.index) ?? { id: "", name: "", argsJson: "" };
+          if (fragment.id) buffered.id = fragment.id;
+          if (fragment.function?.name) buffered.name += fragment.function.name;
+          if (fragment.function?.arguments) buffered.argsJson += fragment.function.arguments;
+          toolCallBuffers.set(fragment.index, buffered);
+        }
+      }
       if (choice?.finish_reason) {
         stopReason = choice.finish_reason;
+        if (stopReason === "tool_calls") {
+          for (const toolCall of toolCallBuffers.values()) {
+            yield { type: "tool_call", id: toolCall.id, name: toolCall.name, argsJson: toolCall.argsJson };
+          }
+          toolCallBuffers.clear();
+        }
       }
       if (chunk.usage) {
         // OpenAI's prompt caching is automatic and read-only — no billed

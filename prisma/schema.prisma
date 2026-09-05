@@ -27,6 +27,10 @@ model Agent {
   scheduleEnabled Boolean   @default(true)
   /// Start of the most recent due window this agent was fired for.
   lastScheduledAt DateTime?
+
+  // Phase 3: tools + multi-turn loop.
+  tools    AgentTool[]
+  maxTurns Int         @default(10)
 }
 
 enum RunStatus {
@@ -37,6 +41,46 @@ enum RunStatus {
   refused
   /// Phase 2: orphaned by a dead executor, recovered by the reconciler.
   lost
+  /// Phase 3: budget ran out mid-loop; graceful wind-down (or hard-stop)
+  /// already applied. Distinct from `refused` (turn-1, zero spend) and
+  /// `failed` (an actual error).
+  budget_exhausted
+}
+
+/// Phase 3: a WASM-sandboxed, Zod-validated tool a model can call.
+model Tool {
+  id          String      @id @default(cuid())
+  name        String      @unique
+  description String
+  /// Zod schema *source text*; compiled and evaluated inside the sandbox,
+  /// never in the host process.
+  paramsZod   String
+  /// Tool body source; run inside the sandbox with the validated params.
+  code        String
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  agents      AgentTool[]
+}
+
+/// Phase 3: explicit many-to-many join between Agent and Tool.
+model AgentTool {
+  agentId String
+  toolId  String
+  agent   Agent @relation(fields: [agentId], references: [id])
+  tool    Tool  @relation(fields: [toolId], references: [id])
+
+  @@id([agentId, toolId])
+}
+
+/// Phase 3: the datastore seam's Postgres-backed default. Scoped by agentId
+/// so one agent's tools can't read another's state.
+model DatastoreEntry {
+  agentId   String
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@id([agentId, key])
 }
 
 /// Phase 2: how a Run was created.

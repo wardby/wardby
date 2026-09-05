@@ -6,6 +6,9 @@ dist/
 .next/
 out/
 
+# generated sandbox vendor bundles (npm run build:vendor / prepare)
+src/sandbox/generated/
+
 # env / secrets
 .env
 .env.*

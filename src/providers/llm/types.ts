@@ -16,13 +16,21 @@ export interface LlmMessage {
   toolCallId?: string;
   /** Optional tool/function name (for tool results or named messages). */
   name?: string;
+  /**
+   * Set on an `role: "assistant"` message that made tool calls. Providers
+   * require the assistant message preceding tool-result messages to
+   * replay the calls it made — omitting this on a follow-up turn breaks
+   * the conversation, since the provider can no longer correlate the
+   * `role: "tool"` results that follow it.
+   */
+  toolCalls?: { id: string; name: string; argsJson: string }[];
 }
 
 export interface LlmToolDef {
   name: string;
   description: string;
   /** JSON Schema for the tool's parameters. */
-  parameters: object;
+  parameters: Record<string, unknown>;
 }
 
 export interface LlmRequest {

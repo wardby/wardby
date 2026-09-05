@@ -10,9 +10,11 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.build.json",
+    "build:vendor": "node scripts/build-sandbox-vendor.mjs",
+    "build": "npm run build:vendor && tsc -p tsconfig.build.json",
+    "prepare": "npm run build:vendor",
     "cli": "tsx src/cli.ts",
-    "test": "vitest run",
+    "test": "npm run build:vendor && vitest run",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "db:up": "docker compose -f deploy/local/docker-compose.yml up -d",
@@ -21,11 +23,19 @@
   "dependencies": {
     "@prisma/client": "^6.19.3",
     "croner": "^10.0.1",
+    "fast-xml-parser": "^5.11.1",
     "gpt-tokenizer": "^2.5.0",
-    "openai": "^4.67.0"
+    "node-html-parser": "^9.0.3",
+    "openai": "^4.67.0",
+    "papaparse": "^5.7.0",
+    "quickjs-emscripten": "^0.32.0",
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/papaparse": "^5.5.2",
+    "esbuild": "^0.24.2",
     "prisma": "^6.19.3",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",

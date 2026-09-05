@@ -13,6 +13,8 @@ export * from "./secrets/types.js";
 export * from "./auth/types.js";
 export * from "./storage/types.js";
 export * from "./executor/types.js";
+export * from "./datastore/types.js";
+export * from "./engine/types.js";
 
 import type { JobLauncher } from "./jobs/types.js";
 import type { EmailProvider } from "./email/types.js";
@@ -21,6 +23,8 @@ import type { SecretCipher } from "./secrets/types.js";
 import type { AuthProvider } from "./auth/types.js";
 import type { BlobStore } from "./storage/types.js";
 import type { Executor } from "./executor/types.js";
+import type { Datastore } from "./datastore/types.js";
+import type { Engine } from "./engine/types.js";
 
 /** The full set of providers the core is given at startup. */
 export interface ProviderRegistry {
@@ -31,4 +35,6 @@ export interface ProviderRegistry {
   auth: AuthProvider;
   storage: BlobStore;
   executor: Executor;
+  datastore: Datastore;
+  engine: Engine;
 }

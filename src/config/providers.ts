@@ -14,6 +14,8 @@ export type SecretCipherKind = "app-key" | "kms";
 export type AuthProviderKind = "generic-oidc" | "fusionauth";
 export type BlobStoreKind = "local" | "s3";
 export type ExecutorKind = "in-process" | "dbos";
+export type DatastoreKind = "postgres";
+export type EngineKind = "native" | "langgraph";
 
 export interface ProviderConfig {
   jobs: JobLauncherKind;
@@ -23,6 +25,8 @@ export interface ProviderConfig {
   auth: AuthProviderKind;
   storage: BlobStoreKind;
   executor: ExecutorKind;
+  datastore: DatastoreKind;
+  engine: EngineKind;
 }
 
 /** Read provider selection from environment variables, defaulting to portable. */
@@ -37,5 +41,7 @@ export function loadProviderConfig(
     auth: (env.AUTH_PROVIDER as AuthProviderKind) ?? "generic-oidc",
     storage: (env.BLOB_STORE as BlobStoreKind) ?? "local",
     executor: (env.EXECUTOR as ExecutorKind) ?? "in-process",
+    datastore: (env.DATASTORE as DatastoreKind) ?? "postgres",
+    engine: (env.ENGINE as EngineKind) ?? "native",
   };
 }

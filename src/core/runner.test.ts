@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import type { LlmProvider, LlmStreamEvent } from "../providers/index.js";
+import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
+import type { Engine, EngineResult, EngineRunContext } from "../providers/engine/types.js";
+import type { LlmProvider } from "../providers/index.js";
 import { runAgent, type RunnerDb } from "./runner.js";
+
+// Phase 3: executeRun is a thin wrapper — budget/loop logic now lives in
+// the Engine (covered by engine-native.test.ts). These tests cover the
+// runner's own job: loading the agent + its attached tools, wiring
+// runSandboxTool, calling the engine, and persisting the result.
 
 interface FakeAgent {
   id: string;
@@ -8,11 +15,25 @@ interface FakeAgent {
   systemPrompt: string;
   model: string;
   budgetUsd: number;
+  maxTurns: number;
 }
 
-function fakeDb(agents: FakeAgent[]): RunnerDb {
+interface FakeTool {
+  id: string;
+  name: string;
+  description: string;
+  paramsZod: string;
+  code: string;
+}
+
+function fakeDb(
+  agents: FakeAgent[],
+  tools: FakeTool[] = [],
+  attachments: { agentId: string; toolId: string }[] = [],
+): RunnerDb {
   const byName = new Map(agents.map((a) => [a.name, a]));
   const byId = new Map(agents.map((a) => [a.id, a]));
+  const toolsById = new Map(tools.map((t) => [t.id, t]));
   const runs = new Map<string, any>();
   let counter = 0;
 
@@ -47,186 +68,202 @@ function fakeDb(agents: FakeAgent[]): RunnerDb {
         return record;
       }) as any,
     },
+    agentTool: {
+      findMany: (async ({ where }: any) =>
+        attachments
+          .filter((a) => a.agentId === where.agentId)
+          .map((a) => ({ ...a, tool: toolsById.get(a.toolId) }))) as any,
+    },
   } as unknown as RunnerDb;
 }
 
-// Cheap fake tokenizer: one token per character, so cost math is predictable.
-function charCountingLlm(opts: {
-  events: LlmStreamEvent[];
-  inputPerMTok: number;
-  outputPerMTok: number;
-  onStream?: (signal?: AbortSignal) => void;
-}): LlmProvider {
+function fakeDatastore(): Datastore {
+  const store = new Map<string, DatastoreValue>();
   return {
-    async *stream(_req, signal) {
-      opts.onStream?.(signal);
-      for (const event of opts.events) {
-        if (signal?.aborted) return;
-        yield event;
-      }
+    async get(agentId, key) {
+      return store.get(`${agentId}:${key}`);
     },
-    async countTokens(_model, messages) {
-      return messages.reduce((sum, m) => sum + m.content.length, 0);
+    async set(agentId, key, value) {
+      store.set(`${agentId}:${key}`, value);
     },
-    priceUsd(_model, usage) {
-      return (
-        (usage.inputTokens / 1_000_000) * opts.inputPerMTok +
-        (usage.outputTokens / 1_000_000) * opts.outputPerMTok
-      );
+    async delete(agentId, key) {
+      store.delete(`${agentId}:${key}`);
+    },
+    async list(agentId, prefix) {
+      const p = `${agentId}:${prefix ?? ""}`;
+      return [...store.keys()].filter((k) => k.startsWith(p)).sort();
+    },
+  };
+}
+
+const noopLlm = {} as LlmProvider;
+
+function fakeEngine(result: EngineResult, capture?: (ctx: EngineRunContext) => void): Engine {
+  return {
+    async run(ctx) {
+      capture?.(ctx);
+      return result;
     },
   };
 }
 
 describe("runAgent", () => {
-  it("succeeds and persists usage/cost from the done event", async () => {
-    const db = fakeDb([
-      { id: "a1", name: "greeter", systemPrompt: "be nice", model: "m", budgetUsd: 10 },
-    ]);
-    const llm = charCountingLlm({
-      events: [
-        { type: "text", delta: "hi" },
-        { type: "text", delta: " there" },
-        {
-          // inputTokens (13) matches the fake tokenizer's own pre-flight count
-          // for "be nice" + "Begin." so this test doesn't also trip a
-          // calibration warning — that's covered by its own test below.
-          type: "done",
-          stopReason: "stop",
-          usage: { inputTokens: 13, outputTokens: 8, costUsd: 0.0005 },
-        },
-      ],
-      inputPerMTok: 1,
-      outputPerMTok: 1,
+  it("persists the engine's result onto the run", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", systemPrompt: "be nice", model: "m", budgetUsd: 10, maxTurns: 10 }]);
+    const engine = fakeEngine({
+      status: "succeeded",
+      finalText: "hi there",
+      turns: 1,
+      usage: { tokensIn: 13, tokensOut: 8, costUsd: 0.0005 },
     });
 
-    let streamed = "";
-    const run = await runAgent("greeter", { llm }, db, (delta) => (streamed += delta));
+    const run = await runAgent("greeter", { llm: noopLlm, engine, datastore: fakeDatastore() }, db);
 
     expect(run.status).toBe("succeeded");
     expect(run.tokensIn).toBe(13);
     expect(run.tokensOut).toBe(8);
     expect(run.costUsd).toBe(0.0005);
-    expect(streamed).toBe("hi there");
   });
 
-  it("logs a non-blocking calibration warning when the estimate diverges from actual usage, without affecting the outcome", async () => {
-    const db = fakeDb([
-      { id: "a1", name: "driftER", systemPrompt: "be nice", model: "m", budgetUsd: 10 },
-    ]);
-    // Fake tokenizer estimates 13 input tokens ("be nice" + "Begin."); real
-    // usage reports 100 — a huge (dangerous, under-the-real-count) drift.
-    const llm = charCountingLlm({
-      events: [
-        { type: "text", delta: "hi" },
-        {
-          type: "done",
-          stopReason: "stop",
-          usage: { inputTokens: 100, outputTokens: 1, costUsd: 0.0001 },
-        },
-      ],
-      inputPerMTok: 1,
-      outputPerMTok: 1,
+  it("persists a refused/budget_exhausted/failed status and error message verbatim", async () => {
+    const db = fakeDb([{ id: "a1", name: "tight", systemPrompt: "sys", model: "m", budgetUsd: 0.01, maxTurns: 10 }]);
+    const engine = fakeEngine({
+      status: "refused",
+      finalText: "",
+      turns: 1,
+      usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+      error: "Estimated input cost exceeds budget before any LLM call.",
     });
 
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const run = await runAgent("driftER", { llm }, db);
-      expect(run.status).toBe("succeeded");
-      expect(run.tokensIn).toBe(100);
-      expect(warnSpy).toHaveBeenCalledTimes(1);
-      expect(warnSpy.mock.calls[0][0]).toMatch(/token calibration drift/);
-      expect(warnSpy.mock.calls[0][0]).toMatch(/UNDERestimated/);
-    } finally {
-      warnSpy.mockRestore();
-    }
-  });
-
-  it("refuses before any LLM call when the input estimate already meets budget", async () => {
-    const db = fakeDb([
-      {
-        id: "a1",
-        name: "expensive",
-        systemPrompt: "x".repeat(1000),
-        model: "m",
-        budgetUsd: 0.0001,
-      },
-    ]);
-    let streamCalled = false;
-    const llm = charCountingLlm({
-      events: [],
-      inputPerMTok: 10,
-      outputPerMTok: 10,
-      onStream: () => {
-        streamCalled = true;
-      },
-    });
-
-    const run = await runAgent("expensive", { llm }, db);
+    const run = await runAgent("tight", { llm: noopLlm, engine, datastore: fakeDatastore() }, db);
 
     expect(run.status).toBe("refused");
-    expect(run.error).toMatch(/before any LLM call/);
-    expect(streamCalled).toBe(false);
+    expect(run.error).toBe("Estimated input cost exceeds budget before any LLM call.");
   });
 
-  it("aborts mid-stream and marks the run failed when projected cost crosses budget", async () => {
-    const db = fakeDb([
-      { id: "a1", name: "chatty", systemPrompt: "sys", model: "m", budgetUsd: 0.000_015 },
-    ]);
-    let abortedSignal: AbortSignal | undefined;
-    const llm = charCountingLlm({
-      events: [
-        { type: "text", delta: "a".repeat(5) },
-        { type: "text", delta: "b".repeat(50) }, // pushes projected cost over budget
-        { type: "text", delta: "c".repeat(50) }, // must never be reached
-        {
-          type: "done",
-          stopReason: "stop",
-          usage: { inputTokens: 999, outputTokens: 999, costUsd: 999 },
-        },
-      ],
-      inputPerMTok: 1,
-      outputPerMTok: 1,
-      onStream: (signal) => {
-        abortedSignal = signal;
+  it("builds the EngineRunContext with the agent's fields and no tools when none are attached", async () => {
+    const db = fakeDb([{ id: "a1", name: "solo", systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 7 }]);
+    let captured: EngineRunContext | undefined;
+    const engine = fakeEngine(
+      { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.001 } },
+      (ctx) => {
+        captured = ctx;
       },
-    });
+    );
 
-    let streamed = "";
-    const run = await runAgent("chatty", { llm }, db, (delta) => (streamed += delta));
+    await runAgent("solo", { llm: noopLlm, engine, datastore: fakeDatastore() }, db);
+
+    expect(captured?.agent).toEqual({ systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 7 });
+    expect(captured?.tools).toEqual([]);
+  });
+
+  it("loads attached tools and derives real JSON Schema for the engine", async () => {
+    const tool: FakeTool = {
+      id: "t1",
+      name: "getWeather",
+      description: "Get the weather for a city",
+      paramsZod: "z.object({ city: z.string() })",
+      code: "return { tempF: 72 };",
+    };
+    const db = fakeDb(
+      [{ id: "a1", name: "weatherbot", systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 10 }],
+      [tool],
+      [{ agentId: "a1", toolId: "t1" }],
+    );
+    let captured: EngineRunContext | undefined;
+    const engine = fakeEngine(
+      { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.001 } },
+      (ctx) => {
+        captured = ctx;
+      },
+    );
+
+    await runAgent("weatherbot", { llm: noopLlm, engine, datastore: fakeDatastore() }, db);
+
+    expect(captured?.tools).toHaveLength(1);
+    expect(captured?.tools[0].name).toBe("getWeather");
+    expect(captured?.tools[0].jsonSchema).toMatchObject({
+      type: "object",
+      properties: { city: { type: "string" } },
+      required: ["city"],
+    });
+  });
+
+  it("fails the run (without calling the engine) when an attached tool has an invalid schema", async () => {
+    const tool: FakeTool = {
+      id: "t1",
+      name: "broken",
+      description: "Has a malformed schema",
+      paramsZod: "this is not valid javascript {{{",
+      code: "return {};",
+    };
+    const db = fakeDb(
+      [{ id: "a1", name: "brokenbot", systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 10 }],
+      [tool],
+      [{ agentId: "a1", toolId: "t1" }],
+    );
+    const engineRun = vi.fn();
+    const engine: Engine = { run: engineRun };
+
+    const run = await runAgent("brokenbot", { llm: noopLlm, engine, datastore: fakeDatastore() }, db);
 
     expect(run.status).toBe("failed");
-    expect(run.error).toMatch(/Budget exceeded mid-stream/);
-    expect(streamed).toBe("a".repeat(5) + "b".repeat(50));
-    expect(abortedSignal?.aborted).toBe(true);
+    expect(run.error).toMatch(/broken/);
+    expect(run.error).toMatch(/invalid params schema/);
+    expect(engineRun).not.toHaveBeenCalled();
   });
 
-  it("marks the run failed when the provider throws mid-stream", async () => {
-    const db = fakeDb([
-      { id: "a1", name: "flaky", systemPrompt: "sys", model: "m", budgetUsd: 10 },
-    ]);
-    const llm: LlmProvider = {
-      async *stream() {
-        yield { type: "text", delta: "partial" };
-        throw new Error("connection reset");
-      },
-      async countTokens(_model, messages) {
-        return messages.reduce((sum, m) => sum + m.content.length, 0);
-      },
-      priceUsd() {
-        return 0;
+  it("wires runSandboxTool to real Zod-in-sandbox validation and the real WASM sandbox", async () => {
+    const tool: FakeTool = {
+      id: "t1",
+      name: "double",
+      description: "Doubles a number",
+      paramsZod: "z.object({ n: z.number() })",
+      code: "return { doubled: params.n * 2 };",
+    };
+    const db = fakeDb(
+      [{ id: "a1", name: "doubler", systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 10 }],
+      [tool],
+      [{ agentId: "a1", toolId: "t1" }],
+    );
+
+    const results: string[] = [];
+    const engine: Engine = {
+      async run(ctx) {
+        results.push(await ctx.runSandboxTool("double", JSON.stringify({ n: 21 })));
+        results.push(await ctx.runSandboxTool("double", JSON.stringify({ n: "not a number" })));
+        results.push(await ctx.runSandboxTool("missingTool", "{}"));
+        return { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.001 } };
       },
     };
 
-    const run = await runAgent("flaky", { llm }, db);
+    await runAgent("doubler", { llm: noopLlm, engine, datastore: fakeDatastore() }, db);
+
+    expect(JSON.parse(results[0])).toEqual({ doubled: 42 });
+    expect(JSON.parse(results[1]).error).toBe("validation_failed");
+    expect(JSON.parse(results[2]).error).toBe("unknown_tool");
+  });
+
+  it("marks the run failed when the engine throws unexpectedly", async () => {
+    const db = fakeDb([{ id: "a1", name: "flaky", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 }]);
+    const engine: Engine = {
+      async run() {
+        throw new Error("engine bug");
+      },
+    };
+
+    const run = await runAgent("flaky", { llm: noopLlm, engine, datastore: fakeDatastore() }, db);
 
     expect(run.status).toBe("failed");
-    expect(run.error).toBe("connection reset");
+    expect(run.error).toBe("engine bug");
   });
 
   it("throws for an unknown agent without creating a Run", async () => {
     const db = fakeDb([]);
-    const llm = charCountingLlm({ events: [], inputPerMTok: 1, outputPerMTok: 1 });
+    const engine = fakeEngine({ status: "succeeded", finalText: "", turns: 0, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } });
 
-    await expect(runAgent("ghost", { llm }, db)).rejects.toThrow(/Unknown agent/);
+    await expect(runAgent("ghost", { llm: noopLlm, engine, datastore: fakeDatastore() }, db)).rejects.toThrow(
+      /Unknown agent/,
+    );
   });
 });

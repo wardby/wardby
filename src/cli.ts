@@ -9,19 +9,31 @@
  *   reevo scheduler [--scope default]
  */
 
+import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import type { RunStatus } from "@prisma/client";
 import { loadProviderConfig } from "./config/providers.js";
 import { OpenAiLlmProvider } from "./providers/llm/index.js";
 import { InProcessExecutor } from "./providers/executor/index.js";
+import { PostgresDatastore } from "./providers/datastore/index.js";
 import type { ProviderRegistry } from "./providers/index.js";
 import { prisma } from "./core/db.js";
 import { runAgent } from "./core/runner.js";
 import { validateCronExpression } from "./core/cron.js";
 import { startScheduler } from "./core/scheduler.js";
 import { startReconciler } from "./core/reconciler.js";
+import { NativeEngine } from "./core/engine-native.js";
+import { deriveJsonSchema } from "./sandbox/zod-params.js";
 
-const RUN_STATUSES: RunStatus[] = ["pending", "running", "succeeded", "failed", "refused", "lost"];
+const RUN_STATUSES: RunStatus[] = [
+  "pending",
+  "running",
+  "succeeded",
+  "failed",
+  "refused",
+  "lost",
+  "budget_exhausted",
+];
 
 function fail(message: string): never {
   console.error(`error: ${message}`);
@@ -34,6 +46,22 @@ function buildLlmProvider(): ProviderRegistry["llm"] {
     fail(`LLM_PROVIDER "${config.llm}" has no adapter yet (only "openai").`);
   }
   return new OpenAiLlmProvider();
+}
+
+function buildEngine(): ProviderRegistry["engine"] {
+  const config = loadProviderConfig();
+  if (config.engine !== "native") {
+    fail(`ENGINE "${config.engine}" has no adapter yet (only "native").`);
+  }
+  return new NativeEngine();
+}
+
+function buildDatastore(): ProviderRegistry["datastore"] {
+  const config = loadProviderConfig();
+  if (config.datastore !== "postgres") {
+    fail(`DATASTORE "${config.datastore}" has no adapter yet (only "postgres").`);
+  }
+  return new PostgresDatastore(prisma);
 }
 
 function assertInProcessExecutor(): void {
@@ -53,6 +81,7 @@ async function agentCreate(args: string[]): Promise<void> {
       budget: { type: "string" },
       schedule: { type: "string" },
       timezone: { type: "string" },
+      "max-turns": { type: "string" },
     },
   });
 
@@ -63,6 +92,11 @@ async function agentCreate(args: string[]): Promise<void> {
   const budgetUsd = Number(values.budget);
   if (!Number.isFinite(budgetUsd) || budgetUsd <= 0) {
     fail(`--budget must be a positive number, got "${values.budget}".`);
+  }
+
+  const maxTurns = values["max-turns"] ? Number(values["max-turns"]) : 10;
+  if (!Number.isInteger(maxTurns) || maxTurns <= 0) {
+    fail(`--max-turns must be a positive integer, got "${values["max-turns"]}".`);
   }
 
   const timezone = values.timezone ?? "UTC";
@@ -82,9 +116,97 @@ async function agentCreate(args: string[]): Promise<void> {
       budgetUsd,
       schedule: values.schedule ?? null,
       timezone,
+      maxTurns,
     },
   });
   console.log(agent.id);
+}
+
+async function toolCreate(args: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args,
+    options: {
+      name: { type: "string" },
+      description: { type: "string" },
+      params: { type: "string" },
+      code: { type: "string" },
+    },
+  });
+
+  if (!values.name || !values.description || !values.params || !values.code) {
+    fail("tool create requires --name, --description, --params <file>, and --code <file>.");
+  }
+
+  let paramsZod: string;
+  let code: string;
+  try {
+    paramsZod = readFileSync(values.params!, "utf8");
+  } catch (err) {
+    fail(`could not read --params file "${values.params}": ${err instanceof Error ? err.message : String(err)}`);
+  }
+  try {
+    code = readFileSync(values.code!, "utf8");
+  } catch (err) {
+    fail(`could not read --code file "${values.code}": ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Fails at registration, not at call time: a malformed schema never gets persisted.
+  const schemaResult = await deriveJsonSchema(paramsZod!);
+  if (!schemaResult.ok) {
+    fail(`invalid --params schema: ${schemaResult.errorMessage}`);
+  }
+
+  const tool = await prisma.tool.create({
+    data: { name: values.name!, description: values.description!, paramsZod: paramsZod!, code: code! },
+  });
+  console.log(tool.id);
+}
+
+async function toolAttach(args: string[], detach: boolean): Promise<void> {
+  const [toolName, agentName] = args;
+  if (!toolName || !agentName) {
+    fail(`tool ${detach ? "detach" : "attach"} requires <tool-name> <agent-name>.`);
+  }
+
+  const tool = await prisma.tool.findUnique({ where: { name: toolName! } });
+  if (!tool) fail(`unknown tool "${toolName}".`);
+  const agent = await prisma.agent.findUnique({ where: { name: agentName! } });
+  if (!agent) fail(`unknown agent "${agentName}".`);
+
+  if (detach) {
+    await prisma.agentTool.deleteMany({ where: { agentId: agent!.id, toolId: tool!.id } });
+    console.log(`detached "${toolName}" from "${agentName}".`);
+  } else {
+    await prisma.agentTool.upsert({
+      where: { agentId_toolId: { agentId: agent!.id, toolId: tool!.id } },
+      create: { agentId: agent!.id, toolId: tool!.id },
+      update: {},
+    });
+    console.log(`attached "${toolName}" to "${agentName}".`);
+  }
+}
+
+async function toolList(args: string[]): Promise<void> {
+  const { values } = parseArgs({ args, options: { agent: { type: "string" } } });
+
+  if (values.agent) {
+    const agent = await prisma.agent.findUnique({ where: { name: values.agent } });
+    if (!agent) fail(`unknown agent "${values.agent}".`);
+    const attached = await prisma.agentTool.findMany({ where: { agentId: agent!.id }, include: { tool: true } });
+    if (attached.length === 0) {
+      console.log(`no tools attached to "${values.agent}".`);
+      return;
+    }
+    for (const a of attached) console.log(`${a.tool.name}  ${a.tool.description}`);
+    return;
+  }
+
+  const tools = await prisma.tool.findMany({ orderBy: { name: "asc" } });
+  if (tools.length === 0) {
+    console.log("no tools registered.");
+    return;
+  }
+  for (const t of tools) console.log(`${t.name}  ${t.description}`);
 }
 
 async function agentSchedule(args: string[]): Promise<void> {
@@ -138,10 +260,12 @@ async function run(name: string | undefined): Promise<void> {
   }
 
   const llm = buildLlmProvider();
+  const engine = buildEngine();
+  const datastore = buildDatastore();
 
   let run;
   try {
-    run = await runAgent(name!, { llm }, prisma, (delta) => {
+    run = await runAgent(name!, { llm, engine, datastore }, prisma, (delta) => {
       process.stdout.write(delta);
     });
   } catch (err) {
@@ -152,11 +276,13 @@ async function run(name: string | undefined): Promise<void> {
   const agent = await prisma.agent.findUnique({ where: { id: run.agentId } });
   const budgetUsd = agent ? Number(agent.budgetUsd) : NaN;
 
-  if (run.status === "succeeded") {
+  if (run.status === "succeeded" || run.status === "budget_exhausted") {
+    const marker = run.status === "succeeded" ? "✓" : "◐";
     console.log(
-      `✓ run ${run.id} — ${run.tokensIn} in / ${run.tokensOut} out — ` +
+      `${marker} run ${run.id} (${run.status}) — ${run.tokensIn} in / ${run.tokensOut} out — ` +
         `$${Number(run.costUsd).toFixed(6)} (budget $${budgetUsd.toFixed(4)})`,
     );
+    if (run.status === "budget_exhausted") process.exitCode = 1;
   } else {
     console.error(`✗ run ${run.id} — ${run.status}: ${run.error ?? "unknown error"}`);
     process.exitCode = 1;
@@ -222,7 +348,9 @@ async function scheduler(args: string[]): Promise<void> {
 
   assertInProcessExecutor();
   const llm = buildLlmProvider();
-  const executor = new InProcessExecutor({ llm }, prisma);
+  const engine = buildEngine();
+  const datastore = buildDatastore();
+  const executor = new InProcessExecutor({ llm, engine, datastore }, prisma);
   const reconciler = startReconciler({ db: prisma });
   const sched = startScheduler({ executor, db: prisma, scope });
 
@@ -248,6 +376,14 @@ async function main(): Promise<void> {
       await agentCreate(rest.slice(1));
     } else if (command === "agent" && rest[0] === "schedule") {
       await agentSchedule(rest.slice(1));
+    } else if (command === "tool" && rest[0] === "create") {
+      await toolCreate(rest.slice(1));
+    } else if (command === "tool" && rest[0] === "attach") {
+      await toolAttach(rest.slice(1), false);
+    } else if (command === "tool" && rest[0] === "detach") {
+      await toolAttach(rest.slice(1), true);
+    } else if (command === "tool" && rest[0] === "list") {
+      await toolList(rest.slice(1));
     } else if (command === "run") {
       await run(rest[0]);
     } else if (command === "runs") {
@@ -257,8 +393,12 @@ async function main(): Promise<void> {
     } else {
       fail(
         "usage:\n" +
-          "  reevo agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule \"<cron>\"] [--timezone <tz>]\n" +
+          "  reevo agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule \"<cron>\"] [--timezone <tz>] [--max-turns <n>]\n" +
           '  reevo agent schedule <name> --cron "<expr>" [--timezone <tz>] [--disable]\n' +
+          "  reevo tool create --name <n> --description <d> --params <file> --code <file>\n" +
+          "  reevo tool attach <tool-name> <agent-name>\n" +
+          "  reevo tool detach <tool-name> <agent-name>\n" +
+          "  reevo tool list [--agent <name>]\n" +
           "  reevo run <name>\n" +
           "  reevo runs [--agent <name>] [--limit N] [--status <s>]\n" +
           "  reevo scheduler [--scope default]",
