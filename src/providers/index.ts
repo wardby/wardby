@@ -12,6 +12,7 @@ export * from "./llm/types.js";
 export * from "./secrets/types.js";
 export * from "./auth/types.js";
 export * from "./storage/types.js";
+export * from "./executor/types.js";
 
 import type { JobLauncher } from "./jobs/types.js";
 import type { EmailProvider } from "./email/types.js";
@@ -19,6 +20,7 @@ import type { LlmProvider } from "./llm/types.js";
 import type { SecretCipher } from "./secrets/types.js";
 import type { AuthProvider } from "./auth/types.js";
 import type { BlobStore } from "./storage/types.js";
+import type { Executor } from "./executor/types.js";
 
 /** The full set of providers the core is given at startup. */
 export interface ProviderRegistry {
@@ -28,4 +30,5 @@ export interface ProviderRegistry {
   secrets: SecretCipher;
   auth: AuthProvider;
   storage: BlobStore;
+  executor: Executor;
 }

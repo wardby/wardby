@@ -12,12 +12,14 @@ interface FakeAgent {
 
 function fakeDb(agents: FakeAgent[]): RunnerDb {
   const byName = new Map(agents.map((a) => [a.name, a]));
+  const byId = new Map(agents.map((a) => [a.id, a]));
   const runs = new Map<string, any>();
   let counter = 0;
 
   return {
     agent: {
-      findUnique: (async ({ where }: any) => byName.get(where.name) ?? null) as any,
+      findUnique: (async ({ where }: any) =>
+        (where.name ? byName.get(where.name) : byId.get(where.id)) ?? null) as any,
     },
     run: {
       create: (async ({ data }: any) => {
@@ -25,17 +27,20 @@ function fakeDb(agents: FakeAgent[]): RunnerDb {
         const record = {
           id,
           status: "pending",
+          trigger: "manual",
           tokensIn: 0,
           tokensOut: 0,
           costUsd: 0,
           error: null,
           startedAt: new Date(),
           finishedAt: null,
+          heartbeatAt: null,
           ...data,
         };
         runs.set(id, record);
         return record;
       }) as any,
+      findUnique: (async ({ where }: any) => runs.get(where.id) ?? null) as any,
       update: (async ({ where, data }: any) => {
         const record = { ...runs.get(where.id), ...data };
         runs.set(where.id, record);

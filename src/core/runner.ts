@@ -1,10 +1,19 @@
 /**
- * The single-turn Phase 1 runner. Uses only `ProviderRegistry.llm` — the
- * other seams (jobs, email, secrets, auth, storage) stay unimplemented until
- * a later phase actually needs them.
+ * The single-turn runner. Uses only `ProviderRegistry.llm` — the other
+ * seams (jobs, email, secrets, auth, storage) stay unimplemented until a
+ * later phase actually needs them.
+ *
+ * Split into `createRun` (persist a pending Run for an agent) and
+ * `executeRun` (drive an existing Run to a terminal state) so Phase 2's
+ * scheduler can create the Run itself (inside its claim transaction) and
+ * hand the id to an `Executor`, which is what actually calls `executeRun`.
+ * `runAgent` is the Phase 1 convenience that does both in one call, and is
+ * what the CLI's `reevo run` still uses directly (an attended, foreground
+ * command doesn't need the executor's heartbeat/reconciler durability —
+ * only unattended scheduled runs do).
  */
 
-import type { PrismaClient, Run } from "@prisma/client";
+import type { PrismaClient, Run, RunTrigger } from "@prisma/client";
 import type { LlmUsage, ProviderRegistry } from "../providers/index.js";
 import {
   applyPreflightSafetyMargin,
@@ -17,19 +26,36 @@ import { prisma as defaultDb } from "./db.js";
 /** The subset of the Prisma client the runner touches — mockable in tests. */
 export type RunnerDb = Pick<PrismaClient, "agent" | "run">;
 
-export async function runAgent(
+/** Persists a new pending Run for the named agent. Throws if the agent is unknown. */
+export async function createRun(
+  db: RunnerDb,
   agentName: string,
-  providers: Pick<ProviderRegistry, "llm">,
-  db: RunnerDb = defaultDb,
-  onText?: (delta: string) => void,
+  trigger: RunTrigger = "manual",
 ): Promise<Run> {
   const agent = await db.agent.findUnique({ where: { name: agentName } });
   if (!agent) {
     throw new Error(`Unknown agent "${agentName}".`);
   }
+  return db.run.create({ data: { agentId: agent.id, trigger } });
+}
 
-  const run = await db.run.create({ data: { agentId: agent.id } });
-  await db.run.update({ where: { id: run.id }, data: { status: "running" } });
+/** Drives an existing Run (created by `createRun` or the scheduler) to a terminal state. */
+export async function executeRun(
+  runId: string,
+  providers: Pick<ProviderRegistry, "llm">,
+  db: RunnerDb = defaultDb,
+  onText?: (delta: string) => void,
+): Promise<Run> {
+  const existingRun = await db.run.findUnique({ where: { id: runId } });
+  if (!existingRun) {
+    throw new Error(`Unknown run "${runId}".`);
+  }
+  const agent = await db.agent.findUnique({ where: { id: existingRun.agentId } });
+  if (!agent) {
+    throw new Error(`Run "${runId}" references missing agent "${existingRun.agentId}".`);
+  }
+
+  await db.run.update({ where: { id: runId }, data: { status: "running" } });
 
   const budgetUsd = Number(agent.budgetUsd);
   const messages = [
@@ -43,7 +69,7 @@ export async function runAgent(
 
   if (isOverBudget(guardedInputEstimateCost, budgetUsd)) {
     return db.run.update({
-      where: { id: run.id },
+      where: { id: runId },
       data: {
         status: "refused",
         error:
@@ -103,7 +129,7 @@ export async function runAgent(
     }
   } catch (err) {
     return db.run.update({
-      where: { id: run.id },
+      where: { id: runId },
       data: {
         status: "failed",
         error: err instanceof Error ? err.message : String(err),
@@ -114,7 +140,7 @@ export async function runAgent(
 
   if (budgetExceeded) {
     return db.run.update({
-      where: { id: run.id },
+      where: { id: runId },
       data: {
         status: "failed",
         tokensIn: inputTokens,
@@ -130,7 +156,7 @@ export async function runAgent(
 
   if (!usage) {
     return db.run.update({
-      where: { id: run.id },
+      where: { id: runId },
       data: {
         status: "failed",
         error: "LLM stream ended without a usage summary.",
@@ -154,7 +180,7 @@ export async function runAgent(
   }
 
   return db.run.update({
-    where: { id: run.id },
+    where: { id: runId },
     data: {
       status: "succeeded",
       tokensIn: usage.inputTokens,
@@ -163,4 +189,15 @@ export async function runAgent(
       finishedAt: new Date(),
     },
   });
+}
+
+/** Convenience: create + execute a manual run in one call (what the CLI's `reevo run` uses). */
+export async function runAgent(
+  agentName: string,
+  providers: Pick<ProviderRegistry, "llm">,
+  db: RunnerDb = defaultDb,
+  onText?: (delta: string) => void,
+): Promise<Run> {
+  const run = await createRun(db, agentName, "manual");
+  return executeRun(run.id, providers, db, onText);
 }

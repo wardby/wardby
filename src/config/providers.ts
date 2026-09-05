@@ -13,6 +13,7 @@ export type LlmProviderKind = "openai" | "bedrock";
 export type SecretCipherKind = "app-key" | "kms";
 export type AuthProviderKind = "generic-oidc" | "fusionauth";
 export type BlobStoreKind = "local" | "s3";
+export type ExecutorKind = "in-process" | "dbos";
 
 export interface ProviderConfig {
   jobs: JobLauncherKind;
@@ -21,6 +22,7 @@ export interface ProviderConfig {
   secrets: SecretCipherKind;
   auth: AuthProviderKind;
   storage: BlobStoreKind;
+  executor: ExecutorKind;
 }
 
 /** Read provider selection from environment variables, defaulting to portable. */
@@ -34,5 +36,6 @@ export function loadProviderConfig(
     secrets: (env.SECRET_CIPHER as SecretCipherKind) ?? "app-key",
     auth: (env.AUTH_PROVIDER as AuthProviderKind) ?? "generic-oidc",
     storage: (env.BLOB_STORE as BlobStoreKind) ?? "local",
+    executor: (env.EXECUTOR as ExecutorKind) ?? "in-process",
   };
 }

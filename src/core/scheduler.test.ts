@@ -1,0 +1,137 @@
+import { randomUUID } from "node:crypto";
+import { afterAll, describe, expect, it } from "vitest";
+import { PrismaClient } from "@prisma/client";
+import { findDueCandidates, claimDueRun, type SchedulerDb } from "./scheduler.js";
+
+interface FakeAgent {
+  id: string;
+  name: string;
+  scheduleEnabled: boolean;
+  schedule: string | null;
+  timezone: string;
+  lastScheduledAt: Date | null;
+}
+
+function fakeAgentDb(agents: FakeAgent[]): Pick<SchedulerDb, "agent"> {
+  return {
+    agent: {
+      findMany: (async ({ where }: any) =>
+        agents.filter(
+          (a) => a.scheduleEnabled === where.scheduleEnabled && a.schedule !== null,
+        )) as any,
+    },
+  } as unknown as Pick<SchedulerDb, "agent">;
+}
+
+describe("findDueCandidates", () => {
+  const now = new Date("2026-09-05T12:16:00.000Z");
+
+  it("returns only enabled, scheduled agents whose window has come due", async () => {
+    const due: FakeAgent = {
+      id: "a1",
+      name: "due-agent",
+      scheduleEnabled: true,
+      schedule: "*/15 * * * *",
+      timezone: "UTC",
+      lastScheduledAt: null,
+    };
+    const notYetDue: FakeAgent = {
+      id: "a2",
+      name: "not-due-agent",
+      scheduleEnabled: true,
+      schedule: "*/15 * * * *",
+      timezone: "UTC",
+      lastScheduledAt: new Date("2026-09-05T12:15:00.000Z"),
+    };
+    const disabled: FakeAgent = {
+      id: "a3",
+      name: "disabled-agent",
+      scheduleEnabled: false,
+      schedule: "*/15 * * * *",
+      timezone: "UTC",
+      lastScheduledAt: null,
+    };
+    const manualOnly: FakeAgent = {
+      id: "a4",
+      name: "manual-agent",
+      scheduleEnabled: true,
+      schedule: null,
+      timezone: "UTC",
+      lastScheduledAt: null,
+    };
+
+    const db = fakeAgentDb([due, notYetDue, disabled, manualOnly]);
+    const result = await findDueCandidates(db, now);
+
+    expect(result.map((a) => a.name)).toEqual(["due-agent"]);
+  });
+});
+
+// claimDueRun exercises FOR UPDATE SKIP LOCKED + a real transaction — that
+// concurrency behavior can't be faithfully faked, so this suite runs
+// against a real local Postgres and is skipped without DATABASE_URL (same
+// pattern as the OpenAI contract test).
+const databaseUrl = process.env.DATABASE_URL;
+
+describe.skipIf(!databaseUrl)("claimDueRun (database)", () => {
+  const db = new PrismaClient();
+  const createdAgentIds: string[] = [];
+
+  afterAll(async () => {
+    // A live scheduler polling this same dev database would otherwise pick
+    // up these leftover scheduleEnabled test agents and try to fire them.
+    await db.run.deleteMany({ where: { agentId: { in: createdAgentIds } } });
+    await db.agent.deleteMany({ where: { id: { in: createdAgentIds } } });
+    await db.$disconnect();
+  });
+
+  async function makeScheduledAgent(overrides: Partial<{ schedule: string; timezone: string }> = {}) {
+    const agent = await db.agent.create({
+      data: {
+        name: `sched-test-${randomUUID()}`,
+        systemPrompt: "sys",
+        model: "m",
+        budgetUsd: 10,
+        schedule: overrides.schedule ?? "*/15 * * * *",
+        timezone: overrides.timezone ?? "UTC",
+        scheduleEnabled: true,
+      },
+    });
+    createdAgentIds.push(agent.id);
+    return agent;
+  }
+
+  it("creates exactly one Run when two ticks race over the same due agent", async () => {
+    const agent = await makeScheduledAgent();
+    const now = new Date("2026-09-05T12:16:00.000Z");
+
+    const [first, second] = await Promise.all([
+      claimDueRun(db, agent.id, now),
+      claimDueRun(db, agent.id, now),
+    ]);
+
+    const runIds = [first, second].filter((id): id is string => id !== null);
+    expect(runIds.length).toBe(1);
+
+    const runs = await db.run.findMany({ where: { agentId: agent.id } });
+    expect(runs.length).toBe(1);
+    expect(runs[0].trigger).toBe("scheduled");
+
+    const updated = await db.agent.findUnique({ where: { id: agent.id } });
+    expect(updated?.lastScheduledAt).toEqual(new Date("2026-09-05T12:15:00.000Z"));
+  });
+
+  it("returns null and creates no Run when the agent isn't due", async () => {
+    const agent = await makeScheduledAgent();
+    await db.agent.update({
+      where: { id: agent.id },
+      data: { lastScheduledAt: new Date("2026-09-05T12:15:00.000Z") },
+    });
+
+    const runId = await claimDueRun(db, agent.id, new Date("2026-09-05T12:16:00.000Z"));
+
+    expect(runId).toBeNull();
+    const runs = await db.run.findMany({ where: { agentId: agent.id } });
+    expect(runs.length).toBe(0);
+  });
+});

@@ -20,6 +20,13 @@ model Agent {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
   runs         Run[]
+
+  // Phase 2: scheduling. `schedule` is a cron expression; null = manual-only.
+  schedule        String?
+  timezone        String    @default("UTC")
+  scheduleEnabled Boolean   @default(true)
+  /// Start of the most recent due window this agent was fired for.
+  lastScheduledAt DateTime?
 }
 
 enum RunStatus {
@@ -28,17 +35,38 @@ enum RunStatus {
   succeeded
   failed
   refused
+  /// Phase 2: orphaned by a dead executor, recovered by the reconciler.
+  lost
+}
+
+/// Phase 2: how a Run was created.
+enum RunTrigger {
+  manual
+  scheduled
 }
 
 model Run {
-  id         String    @id @default(cuid())
-  agent      Agent     @relation(fields: [agentId], references: [id])
+  id         String     @id @default(cuid())
+  agent      Agent      @relation(fields: [agentId], references: [id])
   agentId    String
-  status     RunStatus @default(pending)
-  tokensIn   Int       @default(0)
-  tokensOut  Int       @default(0)
-  costUsd    Decimal   @default(0) @db.Decimal(10, 6)
+  status     RunStatus  @default(pending)
+  trigger    RunTrigger @default(manual)
+  tokensIn   Int        @default(0)
+  tokensOut  Int        @default(0)
+  costUsd    Decimal    @default(0) @db.Decimal(10, 6)
   error      String?
-  startedAt  DateTime  @default(now())
+  startedAt  DateTime   @default(now())
   finishedAt DateTime?
+  /// Phase 2: beaten by the executor while running; a stale value past
+  /// HEARTBEAT_TIMEOUT is how the reconciler finds an orphaned run.
+  heartbeatAt DateTime?
+}
+
+/// Phase 2: single-row-per-scope lease so exactly one scheduler process
+/// ticks at a time. `holder` is a process instance id (crypto.randomUUID()).
+model SchedulerLease {
+  scope     String   @id
+  holder    String
+  expiresAt DateTime
+  updatedAt DateTime @updatedAt
 }
