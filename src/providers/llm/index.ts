@@ -5,3 +5,4 @@ export { AnthropicLlmProvider, anthropicCredentialsPresent, anthropicSupportedMo
 export { openaiCredentialsPresent } from "./openai.js";
 export { supportedModels as openaiSupportedModels } from "./pricing.js";
 export { RoutingLlmProvider, type LlmRegistration } from "./routing.js";
+export { resolveLlmRegistrations, type LlmRegistrationResult } from "./registration.js";
