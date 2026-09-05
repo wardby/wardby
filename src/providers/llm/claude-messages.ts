@@ -23,6 +23,23 @@ function parseArgs(argsJson: string): unknown {
   try { return JSON.parse(argsJson || "{}"); } catch { return {}; }
 }
 
+/**
+ * Same shape sent to the API in `toClaudeRequest` — kept as one function so
+ * a pre-flight token estimate (AnthropicLlmProvider.countTokens) can never
+ * drift from what's actually serialized into the request. Mirrors the
+ * OpenAI adapter's `toOpenAiTools`, which guards against the same failure
+ * class: a duplicated tool-schema mapping once desynced the pre-flight
+ * estimate from the real request and broke the budget guardrail's turn-1
+ * refuse guarantee (measured 44-52% under-count).
+ */
+export function toClaudeTools(tools: LlmToolDef[]): ClaudeTool[] {
+  return tools.map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.parameters as Record<string, unknown>,
+  }));
+}
+
 export function toClaudeRequest(req: LlmRequest, defaultMaxTokens: number): ClaudeRequest {
   const system: ClaudeTextBlock[] = [];
   const messages: ClaudeMessage[] = [];
@@ -52,11 +69,7 @@ export function toClaudeRequest(req: LlmRequest, defaultMaxTokens: number): Clau
     messages.push({ role: "user", content: [{ type: "text", text: m.content }] });
   }
 
-  const tools: ClaudeTool[] | undefined = req.tools?.map((t: LlmToolDef) => ({
-    name: t.name,
-    description: t.description,
-    input_schema: t.parameters as Record<string, unknown>,
-  }));
+  const tools: ClaudeTool[] | undefined = req.tools ? toClaudeTools(req.tools) : undefined;
 
   return {
     ...(system.length > 0 ? { system } : {}),

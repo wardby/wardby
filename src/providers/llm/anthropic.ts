@@ -9,7 +9,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { encode as encodeO200kBase } from "gpt-tokenizer/encoding/o200k_base";
 import type { LlmMessage, LlmProvider, LlmRequest, LlmStreamEvent, LlmToolDef } from "./types.js";
-import { toClaudeRequest, withCacheBreakpoints, mapClaudeStream, type ClaudeStreamEvent } from "./claude-messages.js";
+import { toClaudeRequest, withCacheBreakpoints, mapClaudeStream, toClaudeTools, type ClaudeStreamEvent } from "./claude-messages.js";
 import { anthropicPriceUsd, anthropicSupportedModels, getAnthropicPricing } from "./pricing-anthropic.js";
 
 export { anthropicSupportedModels } from "./pricing-anthropic.js";
@@ -49,7 +49,7 @@ export class AnthropicLlmProvider implements LlmProvider {
       raw += TOKENS_PER_MESSAGE + encodeO200kBase(m.content).length + encodeO200kBase(m.role).length;
     }
     if (tools && tools.length > 0) {
-      raw += encodeO200kBase(JSON.stringify(tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters })))).length;
+      raw += encodeO200kBase(JSON.stringify(toClaudeTools(tools))).length;
     }
     return Math.ceil(raw * CLAUDE_TOKEN_INFLATION);
   }
