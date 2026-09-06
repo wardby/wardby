@@ -6,9 +6,6 @@
  */
 
 import { randomUUID, randomBytes as nodeRandomBytes } from "node:crypto";
-import { parse as parseHtml } from "node-html-parser";
-import Papa from "papaparse";
-import { XMLParser } from "fast-xml-parser";
 import type { QuickJSContext, QuickJSRuntime } from "quickjs-emscripten";
 import type { Datastore, DatastoreSetOptions, DatastoreValue } from "../providers/datastore/types.js";
 import type { SecretsAccessor } from "../core/secrets.js";
@@ -17,14 +14,16 @@ import { parseAllowedHosts } from "./fetch-policy.js";
 import { safeFetch } from "./safe-fetch.js";
 import { FETCH_WILDCARD } from "./tool-capabilities.js";
 import { boundedJson, boundedString } from "./bounded-json.js";
-import { PARSER_INPUT_BYTES, HTML_LINKS_LIMIT, BRIDGE_RESULT_BYTES, RANDOM_BYTES_LIMIT, LOG_BYTES, WALL_TIME_LIMIT_MS } from "./limits.js";
+import { PARSER_INPUT_BYTES, RANDOM_BYTES_LIMIT, LOG_BYTES, WALL_TIME_LIMIT_MS } from "./limits.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import { logger as defaultLogger, type Logger } from "../core/logger.js";
+import { createParserWorkerPool, type ParserWorkerPool } from "./parser-worker/pool.js";
 
 /** Below this length a "secret" is too likely to coincidentally match ordinary log text — not worth the false-positive risk of redacting it. */
 const MIN_REDACTABLE_SECRET_LENGTH = 6;
 
 const FETCH_ALLOWED_HOSTS = parseAllowedHosts(process.env.REEVO_FETCH_ALLOWED_HOSTS);
+let sharedParserPool: ParserWorkerPool | undefined;
 
 export interface HostFunctionOptions {
   signal?: AbortSignal;
@@ -36,6 +35,8 @@ export interface HostFunctionOptions {
   secrets?: SecretsAccessor;
   /** Overrides the shared default logger — mainly for tests. */
   logger?: Logger;
+  /** Overrides the shared default parser-worker pool — mainly for tests. */
+  parserPool?: ParserWorkerPool;
   /** Hosts this specific tool attachment may fetch. Omitted/empty = no outbound fetch at all; a literal "*" element lifts the restriction (existing SSRF protection against private/link-local addresses still applies). */
   allowedFetchHosts?: string[];
 }
@@ -52,6 +53,7 @@ export function installHostFunctions(
   const { agentId, datastore, logTag, secrets, signal, allowedFetchHosts } = options;
   const register = (name: string, fn: (json: string) => Promise<unknown>) => registerJsonAsyncFunction(context, runtime, name, fn, signal);
   const sandboxLog = (options.logger ?? defaultLogger).child({ module: "sandbox-tool", agentId, tool: logTag.slice(0, 100) });
+  const parserPool = options.parserPool ?? (sharedParserPool ??= createParserWorkerPool());
 
   // Values fetched via secrets.get() during THIS invocation only — a tool
   // that logs a secret it never fetched has nothing to redact, and one that
@@ -139,34 +141,21 @@ export function installHostFunctions(
     return value ?? null;
   });
 
-  // Returns a focused, JSON-serializable extraction rather than the full DOM
-  // tree (which isn't cleanly JSON-serializable): title, visible text, and
-  // links. Good enough for the common "read this page" tool use case.
+  // The actual node-html-parser/papaparse/fast-xml-parser calls run in a
+  // disposable worker thread (see ./parser-worker/pool.ts) — this host
+  // process runs fully attacker-controlled (but size-capped) input through
+  // third-party parsers, and QuickJS's own CPU/memory/wall-time limits
+  // don't apply to that host-side work at all.
   register("__bridge_parseHTML", async (argsJson) => {
     const [html] = args<[string]>(argsJson);
     boundedString(html, PARSER_INPUT_BYTES);
-    const root = parseHtml(html);
-    const title = root.querySelector("title")?.text?.trim() ?? null;
-    const text = root.text.replace(/\s+/g, " ").trim();
-    const anchors = root.querySelectorAll("a[href]");
-    if (anchors.length > HTML_LINKS_LIMIT) throw new Error("html_link_limit");
-    const links: { href: string; text: string }[] = [];
-    let remaining = BRIDGE_RESULT_BYTES - Buffer.byteLength(boundedJson({ title, text, links }, BRIDGE_RESULT_BYTES));
-    // Nested anchors can repeat the same text; bound expansion during extraction.
-    for (const a of anchors) {
-      const link = { href: a.getAttribute("href") ?? "", text: a.text.trim() };
-      remaining -= Buffer.byteLength(boundedJson(link, remaining)) + 1;
-      if (remaining < 0) throw new Error("bridge_size_limit");
-      links.push(link);
-    }
-    return { title, text, links };
+    return parserPool.run("html", { html }, signal);
   });
 
   register("__bridge_parseCSV", async (argsJson) => {
     const [csv, csvOptions] = args<[string, { header?: boolean } | null]>(argsJson);
     boundedString(csv, PARSER_INPUT_BYTES);
-    const result = Papa.parse(csv, { header: csvOptions?.header ?? true, skipEmptyLines: true });
-    return { data: result.data, errors: result.errors, meta: result.meta };
+    return parserPool.run("csv", { csv, header: csvOptions?.header ?? true }, signal);
   });
 
   register("__bridge_parseXML", async (argsJson) => {
@@ -174,7 +163,6 @@ export function installHostFunctions(
     boundedString(xml, PARSER_INPUT_BYTES);
     if (/<!DOCTYPE|<!ENTITY/i.test(xml)) throw new Error("xml_entities_blocked");
     if (xmlOptions && Object.entries(xmlOptions).some(([key, value]) => !["ignoreAttributes", "trimValues", "parseTagValue"].includes(key) || typeof value !== "boolean")) throw new Error("xml_options_invalid");
-    const parser = new XMLParser({ ...xmlOptions, processEntities: false });
-    return parser.parse(xml);
+    return parserPool.run("xml", { xml, xmlOptions }, signal);
   });
 }

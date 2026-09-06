@@ -45,9 +45,17 @@ const defaultWorkerJsUrl = new URL("./worker.js", import.meta.url);
 // `new Worker()` loads by literal file URL — it gets none of the NodeNext
 // ".js"-import-resolves-to-".ts" remapping tsx/vitest give normal `import`
 // statements. Under tsx/vitest only worker.ts exists on disk; after
-// `tsc -p tsconfig.build.json` only the compiled worker.js does. Verified
-// both branches load and run correctly.
+// `tsc -p tsconfig.build.json` only the compiled worker.js does.
 const DEFAULT_WORKER_URL = existsSync(fileURLToPath(defaultWorkerJsUrl)) ? defaultWorkerJsUrl : new URL("./worker.ts", import.meta.url);
+// A worker spawned from a vitest-run process does NOT inherit a tsx loader
+// via process.execArgv (vitest's own parent process isn't started via
+// `tsx` — only a `tsx`-launched process, e.g. the `cli` script, has that
+// in its execArgv to inherit). worker.ts imports sibling files via
+// NodeNext ".js" specifiers that only resolve to their real ".ts" files
+// under a TS-aware loader, so a .ts worker needs one explicitly rather
+// than relying on inheritance. Verified: without this, spawning worker.ts
+// under vitest fails with "Cannot find module '.../bounded-json.js'".
+const TS_WORKER_EXEC_ARGV = ["--import", "tsx/esm"];
 
 export function createParserWorkerPool(options: ParserWorkerPoolOptions = {}): ParserWorkerPool {
   const maxConcurrency = options.maxConcurrency ?? PARSER_WORKER_MAX_CONCURRENCY;
@@ -83,7 +91,10 @@ export function createParserWorkerPool(options: ParserWorkerPoolOptions = {}): P
       throw new Error("parser_aborted");
     }
 
-    const worker = new Worker(workerUrl, { resourceLimits: { maxOldGenerationSizeMb } });
+    const worker = new Worker(workerUrl, {
+      resourceLimits: { maxOldGenerationSizeMb },
+      ...(workerUrl.pathname.endsWith(".ts") ? { execArgv: TS_WORKER_EXEC_ARGV } : {}),
+    });
     try {
       return await new Promise((resolve, reject) => {
         let settled = false;
