@@ -10,17 +10,18 @@
  * convention as every other tool in this codebase.
  */
 import type { Datastore } from "../../providers/index.js";
+import { Prisma, type PrismaClient } from "@prisma/client";
 import { deriveJsonSchema, validateParams } from "../../sandbox/zod-params.js";
 import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
-import { requireOwnedAgent, requireReadableAgent, visibleToPrincipal, canRead } from "../auth/ownership.js";
+import { assertCanMutate, requireOwnedAgent, requireReadableAgent, visibleToPrincipal, canRead } from "../auth/ownership.js";
 
 function textResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
 }
 
-async function requireOwnedTool(db: import("@prisma/client").PrismaClient, id: string, principalId: string) {
+async function requireOwnedTool(db: Pick<PrismaClient, "tool">, id: string, principalId: string) {
   const tool = await db.tool.findUnique({ where: { id } });
   if (!tool) throw new McpError(404, `Tool "${id}" not found.`);
   if (tool.ownerId !== principalId) throw new McpError(403, `Tool "${id}" is not owned by the caller.`);
@@ -102,9 +103,16 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
     scope: "tools:write",
     inputSchema: { type: "object", properties: { agentId: { type: "string" }, toolId: { type: "string" } }, required: ["agentId", "toolId"] },
     handler: async (args: { agentId: string; toolId: string }, ctx) => {
-      await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
-      await requireOwnedTool(ctx.db, args.toolId, ctx.principal.id);
-      await ctx.db.agentTool.create({ data: { agentId: args.agentId, toolId: args.toolId } });
+      await ctx.db.$transaction(async (tx) => {
+        const agent = await tx.agent.findUnique({ where: { id: args.agentId } });
+        if (!agent) throw new McpError(404, `Agent "${args.agentId}" not found.`);
+        assertCanMutate(agent.ownerId, ctx.principal.id, `Agent "${args.agentId}" is not owned by the caller.`);
+        if (agent.kind === "coding") {
+          throw new McpError(400, "Native sandbox tools cannot be attached to coding agents.");
+        }
+        await requireOwnedTool(tx, args.toolId, ctx.principal.id);
+        await tx.agentTool.create({ data: { agentId: args.agentId, toolId: args.toolId } });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
       return textResult({ attached: true });
     },
   });

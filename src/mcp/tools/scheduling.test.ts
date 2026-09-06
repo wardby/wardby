@@ -14,11 +14,13 @@ interface FakeAgentRow {
   schedule: string | null;
   timezone: string;
   scheduleEnabled: boolean;
+  kind?: "native" | "coding";
+  codingProfile?: { defaultTask: string | null } | null;
 }
 
 function fakeDb(agents: FakeAgentRow[]) {
   const rows = new Map(agents.map((a) => [a.id, a]));
-  return {
+  const transactionDb = {
     agent: {
       findUnique: async ({ where }: { where: { id: string } }) => rows.get(where.id) ?? null,
       update: async ({ where, data }: { where: { id: string }; data: Partial<FakeAgentRow> }) => {
@@ -29,6 +31,10 @@ function fakeDb(agents: FakeAgentRow[]) {
         return updated;
       },
     },
+  };
+  return {
+    ...transactionDb,
+    $transaction: async <T>(callback: (tx: typeof transactionDb) => Promise<T>) => callback(transactionDb),
   } as unknown as import("@prisma/client").PrismaClient;
 }
 
@@ -88,6 +94,30 @@ describe("scheduling tools", () => {
       arguments: { agentId: "a1", schedule: "not a cron", timezone: "UTC" },
     });
     expect(result.isError).toBe(true);
+    await client.close();
+  });
+
+  it("set_schedule requires a default task for coding agents", async () => {
+    const db = fakeDb([{
+      id: "a1",
+      ownerId: "p1",
+      schedule: null,
+      timezone: "UTC",
+      scheduleEnabled: false,
+      kind: "coding",
+      codingProfile: { defaultTask: null },
+    }]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerSchedulingTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "set_schedule",
+      arguments: { agentId: "a1", schedule: "0 * * * *", timezone: "UTC" },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).toMatch(/default task/i);
     await client.close();
   });
 

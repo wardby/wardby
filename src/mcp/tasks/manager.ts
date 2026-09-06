@@ -111,6 +111,8 @@ export async function getTask(taskId: string, db: PrismaClient): Promise<GetTask
     case "pending":
     case "running":
       return { ...base, status: "working", statusMessage: `cost so far: $${Number(run.costUsd).toFixed(6)}` };
+    case "cancelled":
+      return { ...base, status: "cancelled" };
     case "succeeded":
     case "budget_exhausted":
     case "refused":

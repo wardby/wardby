@@ -38,6 +38,9 @@ export async function createRun(
   if (!agent) {
     throw new Error(`Unknown agent "${agentName}".`);
   }
+  if (agent.kind === "coding") {
+    throw new Error("Coding agent execution requires the Phase 5 container executor.");
+  }
   return db.run.create({ data: { agentId: agent.id, trigger } });
 }
 
@@ -55,6 +58,16 @@ export async function executeRun(
   const agent = await db.agent.findUnique({ where: { id: existingRun.agentId } });
   if (!agent) {
     throw new Error(`Run "${runId}" references missing agent "${existingRun.agentId}".`);
+  }
+  if (agent.kind === "coding") {
+    return db.run.update({
+      where: { id: runId },
+      data: {
+        status: "failed",
+        error: "Coding agent execution requires the Phase 5 container executor.",
+        finishedAt: new Date(),
+      },
+    });
   }
 
   await db.run.update({ where: { id: runId }, data: { status: "running" } });

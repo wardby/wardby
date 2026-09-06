@@ -15,6 +15,7 @@ interface FakeAgent {
   schedule: string | null;
   timezone: string;
   lastScheduledAt: Date | null;
+  kind?: "native" | "coding";
 }
 
 function fakeAgentDb(agents: FakeAgent[]): Pick<SchedulerDb, "agent"> {
@@ -22,7 +23,8 @@ function fakeAgentDb(agents: FakeAgent[]): Pick<SchedulerDb, "agent"> {
     agent: {
       findMany: (async ({ where }: any) =>
         agents.filter(
-          (a) => a.scheduleEnabled === where.scheduleEnabled && a.schedule !== null,
+          (a) => a.scheduleEnabled === where.scheduleEnabled && a.schedule !== null
+            && (!where.kind || (a.kind ?? "native") === where.kind),
         )) as any,
     },
   } as unknown as Pick<SchedulerDb, "agent">;
@@ -64,8 +66,17 @@ describe("findDueCandidates", () => {
       timezone: "UTC",
       lastScheduledAt: null,
     };
+    const coding: FakeAgent = {
+      id: "a5",
+      name: "coding-agent",
+      scheduleEnabled: true,
+      schedule: "*/15 * * * *",
+      timezone: "UTC",
+      lastScheduledAt: null,
+      kind: "coding",
+    };
 
-    const db = fakeAgentDb([due, notYetDue, disabled, manualOnly]);
+    const db = fakeAgentDb([due, notYetDue, disabled, manualOnly, coding]);
     const result = await findDueCandidates(db, now);
 
     expect(result.map((a) => a.name)).toEqual(["due-agent"]);
@@ -195,5 +206,15 @@ describe.skipIf(!databaseUrl)("claimDueRun (database)", () => {
     expect(runId).toBeNull();
     const runs = await db.run.findMany({ where: { agentId: agent.id } });
     expect(runs.length).toBe(0);
+  });
+
+  it("does not claim coding agents before the routing executor is available", async () => {
+    const agent = await makeScheduledAgent();
+    await db.agent.update({ where: { id: agent.id }, data: { kind: "coding" } });
+
+    const runId = await claimDueRun(db, agent.id, new Date("2026-09-05T12:16:00.000Z"));
+
+    expect(runId).toBeNull();
+    expect(await db.run.count({ where: { agentId: agent.id } })).toBe(0);
   });
 });

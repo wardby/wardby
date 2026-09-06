@@ -12,14 +12,16 @@ datasource db {
 }
 
 model Agent {
-  id           String   @id @default(cuid())
-  name         String   @unique
-  systemPrompt String
-  model        String
-  budgetUsd    Decimal  @db.Decimal(10, 4)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  runs         Run[]
+  id            String              @id @default(cuid())
+  name          String              @unique
+  systemPrompt  String
+  model         String
+  budgetUsd     Decimal             @db.Decimal(10, 4)
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+  runs          Run[]
+  kind          AgentKind           @default(native)
+  codingProfile CodingAgentProfile?
 
   // Phase 2: scheduling. `schedule` is a cron expression; null = manual-only.
   schedule        String?
@@ -39,6 +41,15 @@ model Agent {
   webhooks Webhook[]
 }
 
+enum AgentKind {
+  native
+  coding
+}
+
+enum CodingProvider {
+  codex
+}
+
 enum RunStatus {
   pending
   running
@@ -51,6 +62,8 @@ enum RunStatus {
   /// already applied. Distinct from `refused` (turn-1, zero spend) and
   /// `failed` (an actual error).
   budget_exhausted
+  /// Phase 5: explicitly stopped by an authenticated caller.
+  cancelled
 }
 
 /// Phase 3: a WASM-sandboxed, Zod-validated tool a model can call.
@@ -106,29 +119,71 @@ enum RunTrigger {
 }
 
 model Run {
-  id          String     @id @default(cuid())
-  agent       Agent      @relation(fields: [agentId], references: [id])
-  agentId     String
-  status      RunStatus  @default(pending)
-  trigger     RunTrigger @default(manual)
-  tokensIn    Int        @default(0)
-  tokensOut   Int        @default(0)
-  costUsd     Decimal    @default(0) @db.Decimal(10, 6)
-  error       String?
-  startedAt   DateTime   @default(now())
-  finishedAt  DateTime?
+  id               String     @id @default(cuid())
+  agent            Agent      @relation(fields: [agentId], references: [id])
+  agentId          String
+  status           RunStatus  @default(pending)
+  trigger          RunTrigger @default(manual)
+  tokensIn         Int        @default(0)
+  tokensOut        Int        @default(0)
+  costUsd          Decimal    @default(0) @db.Decimal(10, 6)
+  error            String?
+  startedAt        DateTime   @default(now())
+  finishedAt       DateTime?
   /// Phase 2: beaten by the executor while running; a stale value past
   /// HEARTBEAT_TIMEOUT is how the reconciler finds an orphaned run.
-  heartbeatAt DateTime?
+  heartbeatAt      DateTime?
   /// Phase 4: EngineResult.finalText, persisted so a Task (MCP) or later
   /// inspection can read a completed run's answer. Previously only ever
   /// streamed live via onText and dropped — no durable place to read it
   /// from until this field existed.
-  finalText   String?
+  finalText        String?
   /// Phase 4: EngineResult.turns, persisted for the same reason as
   /// finalText — MCP's list_runs/get_run need it and it was previously
   /// dropped after the engine returned.
-  turns       Int        @default(0)
+  turns            Int        @default(0)
+  /// Detached executors are recovered by handle rather than inferred from trigger.
+  executionManaged Boolean    @default(false)
+  codingRun        CodingRun?
+}
+
+/// Phase 5: owner-configured coding behavior. Runtime credentials and opaque
+/// launcher handles never live on the reusable profile.
+model CodingAgentProfile {
+  agentId        String         @id
+  agent          Agent          @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  provider       CodingProvider @default(codex)
+  repository     String
+  baseRef        String         @default("main")
+  defaultTask    String?
+  timeoutSec     Int            @default(1800)
+  allowedEgress  Json
+  protectedPaths Json
+}
+
+/// Phase 5: immutable dispatch inputs plus opaque execution/result state for
+/// one coding run. Policy is copied from the profile before work starts.
+model CodingRun {
+  runId             String         @id
+  run               Run            @relation(fields: [runId], references: [id], onDelete: Cascade)
+  task              String
+  repository        String
+  baseRef           String
+  headRef           String
+  provider          CodingProvider
+  model             String
+  timeoutSec        Int
+  allowedEgress     Json
+  protectedPaths    Json
+  jobBackend        String?
+  jobHandle         String?
+  result            Json?
+  resultSchema      Int            @default(1)
+  budgetReservedUsd Decimal        @db.Decimal(10, 6)
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  @@index([jobBackend, jobHandle])
 }
 
 /// Phase 2: single-row-per-scope lease so exactly one scheduler process
@@ -240,85 +295,89 @@ model Webhook {
 /// used only under AUTH_PROVIDER=self-hosted; the delegating adapter never
 /// writes these tables even though the migration creates them unconditionally.
 model OAuthClient {
-  clientId     String   @id
-  metadata     Json
-  createdAt    DateTime @default(now())
-  requests     OAuthAuthorizationRequest[]
-  codes        OAuthAuthorizationCode[]
-  families     OAuthFamily[]
+  clientId  String                      @id
+  metadata  Json
+  createdAt DateTime                    @default(now())
+  requests  OAuthAuthorizationRequest[]
+  codes     OAuthAuthorizationCode[]
+  families  OAuthFamily[]
 }
 
 /// Phase 4 (self-hosted AS only): an issued authorization grant / refresh token.
 model OAuthGrant {
-  id               String   @id
+  id               String      @id
   familyId         String
   family           OAuthFamily @relation(fields: [familyId], references: [id], onDelete: Cascade)
-  refreshTokenHash  String
+  refreshTokenHash String
   expiresAt        DateTime
-  createdAt        DateTime @default(now())
+  createdAt        DateTime    @default(now())
   consumedAt       DateTime?
   revokedAt        DateTime?
   replacedById     String?
+
   @@index([familyId])
   @@index([expiresAt])
 }
 
 model AuthUser {
-  id           String @id @default(cuid())
-  principalId  String @unique
-  principal    Principal @relation(fields: [principalId], references: [id])
-  displayName  String?
-  status       String @default("enabled")
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  loginKeys    AuthLoginKey[]
-  sessions     AuthSession[]
-  codes        OAuthAuthorizationCode[]
-  families     OAuthFamily[]
+  id          String                   @id @default(cuid())
+  principalId String                   @unique
+  principal   Principal                @relation(fields: [principalId], references: [id])
+  displayName String?
+  status      String                   @default("enabled")
+  createdAt   DateTime                 @default(now())
+  updatedAt   DateTime                 @updatedAt
+  loginKeys   AuthLoginKey[]
+  sessions    AuthSession[]
+  codes       OAuthAuthorizationCode[]
+  families    OAuthFamily[]
 }
 
 model AuthLoginKey {
-  keyId       String @id
-  userId      String
-  user        AuthUser @relation(fields: [userId], references: [id], onDelete: Cascade)
-  secretHash  String
-  createdAt   DateTime @default(now())
-  lastUsedAt  DateTime?
-  expiresAt   DateTime
-  revokedAt   DateTime?
+  keyId      String    @id
+  userId     String
+  user       AuthUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  secretHash String
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+  expiresAt  DateTime
+  revokedAt  DateTime?
+
   @@index([userId])
   @@index([expiresAt])
 }
 
 model AuthSession {
-  sessionId   String @id
-  userId      String
-  user        AuthUser @relation(fields: [userId], references: [id], onDelete: Cascade)
-  secretHash  String
-  createdAt   DateTime @default(now())
-  lastSeenAt  DateTime @default(now())
-  expiresAt   DateTime
-  revokedAt   DateTime?
-  challenges  AuthFormChallenge[]
+  sessionId  String              @id
+  userId     String
+  user       AuthUser            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  secretHash String
+  createdAt  DateTime            @default(now())
+  lastSeenAt DateTime            @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  challenges AuthFormChallenge[]
+
   @@index([userId])
   @@index([expiresAt])
 }
 
 model AuthFormChallenge {
-  challengeId String @id
+  challengeId String       @id
   sessionId   String?
   session     AuthSession? @relation(fields: [sessionId], references: [sessionId], onDelete: Cascade)
   purpose     String
   binding     String
   secretHash  String
-  createdAt   DateTime @default(now())
+  createdAt   DateTime     @default(now())
   expiresAt   DateTime
   consumedAt  DateTime?
+
   @@index([expiresAt])
 }
 
 model OAuthAuthorizationRequest {
-  id             String @id @default(cuid())
+  id             String      @id @default(cuid())
   clientId       String
   client         OAuthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
   redirectUri    String
@@ -326,49 +385,53 @@ model OAuthAuthorizationRequest {
   requestedScope String
   codeChallenge  String
   state          String?
-  createdAt      DateTime @default(now())
+  createdAt      DateTime    @default(now())
   expiresAt      DateTime
   consumedAt     DateTime?
+
   @@index([expiresAt])
 }
 
 model OAuthAuthorizationCode {
-  codeId        String @id
+  codeId        String      @id
   secretHash    String
   clientId      String
   client        OAuthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
   userId        String
-  user          AuthUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user          AuthUser    @relation(fields: [userId], references: [id], onDelete: Cascade)
   redirectUri   String
   resource      String
   scope         String
   codeChallenge String
-  createdAt     DateTime @default(now())
+  createdAt     DateTime    @default(now())
   expiresAt     DateTime
   consumedAt    DateTime?
+
   @@index([expiresAt])
 }
 
 // The family row serializes refresh/revocation, including creation of replacements.
 model OAuthFamily {
-  id         String @id
-  clientId   String
-  client     OAuthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
-  userId     String
-  user       AuthUser @relation(fields: [userId], references: [id], onDelete: Cascade)
-  scope      String
-  resource   String
-  expiresAt  DateTime
-  revokedAt  DateTime?
-  createdAt  DateTime @default(now())
-  grants     OAuthGrant[]
+  id        String       @id
+  clientId  String
+  client    OAuthClient  @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+  userId    String
+  user      AuthUser     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scope     String
+  resource  String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime     @default(now())
+  grants    OAuthGrant[]
+
   @@index([userId])
   @@index([expiresAt])
 }
 
 model AuthRateLimit {
-  key       String @id
+  key       String   @id
   hits      Int
   expiresAt DateTime
+
   @@index([expiresAt])
 }

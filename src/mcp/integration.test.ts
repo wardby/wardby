@@ -31,6 +31,8 @@ interface FakeAgentRow {
   timezone: string;
   scheduleEnabled: boolean;
   tools: unknown[];
+  kind: "native" | "coding";
+  codingProfile: null;
 }
 interface FakeRunRow {
   id: string;
@@ -139,7 +141,17 @@ function buildFakeDb() {
   const db = {
     agent: {
       create: async ({ data }: { data: Partial<FakeAgentRow> & { name: string } }) => {
-        const row: FakeAgentRow = { id: `agent_${++n}`, ownerId: null, schedule: null, timezone: "UTC", scheduleEnabled: true, tools: [], ...data } as FakeAgentRow;
+        const row: FakeAgentRow = {
+          id: `agent_${++n}`,
+          ownerId: null,
+          schedule: null,
+          timezone: "UTC",
+          scheduleEnabled: true,
+          tools: [],
+          kind: "native",
+          codingProfile: null,
+          ...data,
+        } as FakeAgentRow;
         agents.set(row.id, row);
         return row;
       },
@@ -199,6 +211,8 @@ function buildFakeDb() {
       findMany: async () => [...tools.values()],
     },
     agentTool: {
+      count: async ({ where }: { where: { agentId: string } }) =>
+        agentTools.filter((attachment) => attachment.agentId === where.agentId).length,
       create: async ({ data }: { data: { agentId: string; toolId: string } }) => {
         agentTools.push(data);
         return data;
@@ -273,6 +287,9 @@ function buildFakeDb() {
       },
     },
   } as unknown as PrismaClient;
+
+  (db as unknown as { $transaction: (callback: (tx: PrismaClient) => Promise<unknown>) => Promise<unknown> }).$transaction =
+    async (callback) => callback(db);
 
   return { db, runs };
 }

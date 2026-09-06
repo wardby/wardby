@@ -44,7 +44,7 @@ export async function markRunFailedFromExecutorError(
 /** Cheap, lock-free pass: which enabled+scheduled agents look due right now. */
 export async function findDueCandidates(db: Pick<SchedulerDb, "agent">, now: Date): Promise<Agent[]> {
   const candidates = await db.agent.findMany({
-    where: { scheduleEnabled: true, schedule: { not: null } },
+    where: { kind: "native", scheduleEnabled: true, schedule: { not: null } },
   });
   return candidates.filter((agent) =>
     dueWindow({
@@ -72,7 +72,7 @@ export async function claimDueRun(db: SchedulerDb, agentId: string, now: Date): 
     }
 
     const agent = await tx.agent.findUnique({ where: { id: agentId } });
-    if (!agent || !agent.scheduleEnabled || !agent.schedule) {
+    if (!agent || agent.kind !== "native" || !agent.scheduleEnabled || !agent.schedule) {
       return null;
     }
 

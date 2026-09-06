@@ -73,7 +73,7 @@ describe.skipIf(!databaseUrl)("MCP task manager (database)", () => {
     expect(row?.status).toBe("working");
   });
 
-  describe.each<{ runStatus: RunStatus; expectTaskStatus: "working" | "completed" | "failed" }>([
+  describe.each<{ runStatus: RunStatus; expectTaskStatus: "working" | "completed" | "failed" | "cancelled" }>([
     { runStatus: "pending", expectTaskStatus: "working" },
     { runStatus: "running", expectTaskStatus: "working" },
     { runStatus: "succeeded", expectTaskStatus: "completed" },
@@ -81,6 +81,7 @@ describe.skipIf(!databaseUrl)("MCP task manager (database)", () => {
     { runStatus: "refused", expectTaskStatus: "completed" },
     { runStatus: "failed", expectTaskStatus: "failed" },
     { runStatus: "lost", expectTaskStatus: "failed" },
+    { runStatus: "cancelled", expectTaskStatus: "cancelled" },
   ])("getTask maps Run.status=$runStatus", ({ runStatus, expectTaskStatus }) => {
     it(`-> task status ${expectTaskStatus}`, async () => {
       const run = await newRun({

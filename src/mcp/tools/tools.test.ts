@@ -22,6 +22,7 @@ interface FakeToolRow {
 interface FakeAgentRow {
   id: string;
   ownerId: string | null;
+  kind?: "native" | "coding";
 }
 
 function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
@@ -30,7 +31,7 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
   const attachments: { agentId: string; toolId: string }[] = [];
   let counter = toolRows.size;
 
-  return {
+  const transactionDb = {
     tool: {
       create: async ({ data }: { data: Partial<FakeToolRow> & { name: string } }) => {
         const row: FakeToolRow = { id: `tool_${++counter}`, description: "", paramsZod: "", jsonSchema: {}, code: "", ownerId: null, ...data } as FakeToolRow;
@@ -62,6 +63,10 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
       findMany: async ({ where }: { where: { agentId: string } }) =>
         attachments.filter((a) => a.agentId === where.agentId).map((a) => ({ ...a, tool: toolRows.get(a.toolId) })),
     },
+  };
+  return {
+    ...transactionDb,
+    $transaction: async <T>(callback: (tx: typeof transactionDb) => Promise<T>) => callback(transactionDb),
   } as unknown as import("@prisma/client").PrismaClient;
 }
 
@@ -216,6 +221,22 @@ describe("tool authoring tools", () => {
 
     const result = await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "t1" } });
     expect(result.isError).toBe(true);
+    await client.close();
+  });
+
+  it("attach_tool rejects native sandbox tools for coding agents", async () => {
+    const db = fakeDb(
+      [{ id: "t1", name: "greet", description: "x", paramsZod: "z.object({})", jsonSchema: {}, code: "", ownerId: "p1" }],
+      [{ id: "a1", ownerId: "p1", kind: "coding" }],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "t1" } });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).toMatch(/coding|native/i);
     await client.close();
   });
 

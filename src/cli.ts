@@ -40,6 +40,7 @@ const RUN_STATUSES: RunStatus[] = [
   "refused",
   "lost",
   "budget_exhausted",
+  "cancelled",
 ];
 
 function fail(message: string): never {

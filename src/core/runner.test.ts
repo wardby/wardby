@@ -17,6 +17,7 @@ interface FakeAgent {
   model: string;
   budgetUsd: number;
   maxTurns: number;
+  kind?: "native" | "coding";
 }
 
 interface FakeTool {
@@ -113,6 +114,27 @@ function fakeEngine(result: EngineResult, capture?: (ctx: EngineRunContext) => v
 }
 
 describe("runAgent", () => {
+  it("fails closed instead of executing a coding agent in the native engine", async () => {
+    const db = fakeDb([{
+      id: "a1",
+      name: "coder",
+      systemPrompt: "code",
+      model: "gpt-5.6-luna",
+      budgetUsd: 1,
+      maxTurns: 10,
+      kind: "coding",
+    }]);
+    let engineCalled = false;
+    const engine = fakeEngine(
+      { status: "succeeded", finalText: "unsafe", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.1 } },
+      () => { engineCalled = true; },
+    );
+
+    await expect(runAgent("coder", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db))
+      .rejects.toThrow(/coding.*executor|executor.*coding/i);
+    expect(engineCalled).toBe(false);
+  });
+
   it("persists the engine's result onto the run", async () => {
     const db = fakeDb([{ id: "a1", name: "greeter", systemPrompt: "be nice", model: "m", budgetUsd: 10, maxTurns: 10 }]);
     const engine = fakeEngine({
