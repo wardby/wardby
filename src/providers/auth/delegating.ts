@@ -10,6 +10,7 @@
 import { createRemoteJWKSet, jwtVerify, errors as joseErrors, type JWTVerifyGetKey } from "jose";
 import type { AuthProfile, AuthProvider, AuthTokens, VerifiedToken } from "./types.js";
 import { AudienceError, NotSupportedError } from "./types.js";
+import { requireSubject } from "./subject.js";
 
 export interface DelegatingAuthConfig {
   issuer?: string;
@@ -29,6 +30,7 @@ export class DelegatingAuthProvider implements AuthProvider {
   private readonly jwks: JWTVerifyGetKey;
 
   constructor(config: DelegatingAuthConfig, jwks?: JWTVerifyGetKey) {
+    if (!config.issuer || !config.audience) throw new Error("AUTH_ISSUER and AUTH_AUDIENCE are required.");
     this.config = config;
     if (jwks) {
       this.jwks = jwks;
@@ -45,9 +47,10 @@ export class DelegatingAuthProvider implements AuthProvider {
       const { payload } = await jwtVerify(token, this.jwks, {
         issuer: this.config.issuer,
         audience: this.config.audience,
+        requiredClaims: ["sub", "exp", "iss", "aud"],
       });
       return {
-        subject: String(payload.sub ?? ""),
+        subject: requireSubject(payload.sub),
         email: typeof payload.email === "string" ? payload.email : undefined,
         roles: Array.isArray(payload.roles) ? payload.roles.map(String) : [],
         scopes: scopesFromClaim(payload.scope ?? payload.scp),

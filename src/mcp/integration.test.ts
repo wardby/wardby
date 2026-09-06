@@ -415,38 +415,13 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP integration: both AUTH_PROVIDER 
   const clientIds: string[] = [];
 
   afterAll(async () => {
-    await db.oAuthGrant.deleteMany({ where: { clientId: { in: clientIds } } });
+    await db.oAuthFamily.deleteMany({ where: { clientId: { in: clientIds } } });
     await db.oAuthClient.deleteMany({ where: { clientId: { in: clientIds } } });
     await db.$disconnect();
   });
 
-  it("self-hosted: buildAuthProvider issues a token via PKCE that its own verifyBearer accepts", async () => {
-    const provider = buildAuthProvider("self-hosted", { audience: CANONICAL_URI, signingKey: "s".repeat(32) }, db);
-    const selfHosted = provider as import("../providers/auth/self-hosted.js").SelfHostedAuthProvider;
-    const client = await selfHosted.registerClient({ redirectUris: ["https://client.example/callback"], tokenEndpointAuthMethod: "none" });
-    clientIds.push(client.clientId);
-
-    const codeVerifier = randomUUID() + randomUUID();
-    const codeChallenge = (await import("node:crypto")).createHash("sha256").update(codeVerifier).digest("base64url");
-    const authResult = await selfHosted.handleAuthorize({
-      clientId: client.clientId,
-      redirectUri: "https://client.example/callback",
-      codeChallenge,
-      codeChallengeMethod: "S256",
-      scope: "agents:read",
-      resource: CANONICAL_URI,
-      subject: "user-integration",
-    });
-    const tokenResult = await selfHosted.handleToken({
-      grantType: "authorization_code",
-      code: authResult.code,
-      codeVerifier,
-      redirectUri: "https://client.example/callback",
-      clientId: client.clientId,
-    });
-
-    const profile = await provider.verifyBearer(tokenResult.accessToken);
-    expect(profile.subject).toBe("user-integration");
+  it("self-hosted production factory remains quarantined until release review", () => {
+    expect(() => buildAuthProvider("self-hosted", { audience: CANONICAL_URI, signingKey: "a1".repeat(32), credentialHashKey: "b2".repeat(32) }, db)).toThrow(/quarantined/);
   });
 
   it("delegating: buildAuthProvider selects DelegatingAuthProvider, which verifies a JWKS-signed token", async () => {

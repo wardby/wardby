@@ -7,6 +7,6 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     setupFiles: ["./src/env.ts"],
-    include: ["**/*.contract.test.ts"],
+    include: ["src/**/*.contract.test.ts"],
   },
 });

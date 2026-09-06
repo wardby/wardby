@@ -14,7 +14,7 @@ import { deriveJsonSchema, validateParams } from "../../sandbox/zod-params.js";
 import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
-import { requireOwnedAgent, visibleToPrincipal } from "../auth/ownership.js";
+import { requireOwnedAgent, requireReadableAgent, visibleToPrincipal, canRead } from "../auth/ownership.js";
 
 function textResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
@@ -126,12 +126,14 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
     scope: "tools:write",
     inputSchema: { type: "object", properties: { agentId: { type: "string" } } },
     handler: async (args: { agentId?: string }, ctx) => {
+      const project = (tool: import("@prisma/client").Tool) => tool.ownerId === ctx.principal.id ? tool : { id: tool.id, name: tool.name, description: tool.description };
       if (args.agentId) {
+        await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
         const rows = await ctx.db.agentTool.findMany({ where: { agentId: args.agentId }, include: { tool: true } });
-        return textResult(rows.map((r) => r.tool));
+        return textResult(rows.map((r) => r.tool).filter((tool) => canRead(tool.ownerId, ctx.principal.id)).map(project));
       }
       const tools = await ctx.db.tool.findMany({ where: visibleToPrincipal(ctx.principal.id) });
-      return textResult(tools);
+      return textResult(tools.filter((tool) => canRead(tool.ownerId, ctx.principal.id)).map(project));
     },
   });
 }

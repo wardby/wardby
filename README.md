@@ -60,14 +60,20 @@ the CLI retained only as the bootstrap/ops floor (`migrate`, `scheduler`,
   authored this way.
 - **Streamable HTTP** (`MCP_TRANSPORT=http`) — remote, always an OAuth 2.1
   resource server. `AUTH_PROVIDER=delegating` (default) verifies tokens
-  issued by an external IdP; `AUTH_PROVIDER=self-hosted` has reevo also run
-  a minimal PKCE authorization server.
+  issued by an external IdP. `AUTH_PROVIDER=self-hosted` is quarantined while
+  the replacement provisioned-user/consent/PKCE implementation awaits its
+  independent security release review. There is no runtime bypass.
 
 Long-running operations (`trigger_agent`) return a durable Task (the MCP
 Tasks extension) when the client supports it, falling back to a plain
 `{runId}` polled via `get_run` otherwise — either way the same engine and
 budget guardrail run underneath. See `.env.example` for the full set of
 `MCP_*`/`AUTH_*`/`SECRET_*` configuration keys.
+
+Use Node.js 22.12 or newer. See [security deployment and recovery](docs/security-deployment.md)
+for HTTP boundaries, self-hosted provisioning after release approval, credential
+invalidation, runtime/migration images, test prerequisites, and the remaining
+Prisma tooling advisory. Every legacy self-hosted credential must be reissued.
 
 ## License
 

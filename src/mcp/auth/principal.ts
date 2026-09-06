@@ -6,8 +6,10 @@
  * HTTP+OAuth doesn't orphan locally-authored agents.
  */
 import type { PrismaClient, Principal } from "@prisma/client";
+import { requireSubject } from "../../providers/auth/subject.js";
 
 export async function resolvePrincipal(subject: string, db: PrismaClient): Promise<Principal> {
+  requireSubject(subject);
   return db.principal.upsert({
     where: { subject },
     create: { subject },

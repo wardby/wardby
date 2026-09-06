@@ -47,6 +47,7 @@ export function loadProviderConfig(
 }
 
 export interface McpConfig {
+  allowedOrigins?: string[];
   transport: "http" | "stdio";
   httpBind?: { host: string; port: number };
   canonicalUri?: string;
@@ -61,6 +62,7 @@ export function loadMcpConfig(env: NodeJS.ProcessEnv = process.env): McpConfig {
     transport,
     httpBind: bind ? { host: bind[0], port: Number(bind[1]) } : undefined,
     canonicalUri: env.MCP_CANONICAL_URI,
+    allowedOrigins: env.MCP_ALLOWED_ORIGINS ? env.MCP_ALLOWED_ORIGINS.split(",").map((s) => s.trim()) : undefined,
     localPrincipal: env.LOCAL_PRINCIPAL ?? "local",
   };
 }
@@ -72,8 +74,10 @@ export interface AuthConfig {
   jwksUri?: string;
   /** Both modes: the audience a token must carry to be accepted (reevo's canonical URI). */
   audience?: string;
-  /** Self-hosted mode: PEM-encoded signing key material for issuing tokens. */
+  /** Self-hosted mode: independent 32-byte hex keys. */
   signingKey?: string;
+  credentialHashKey?: string;
+  maxClients?: number;
 }
 
 /** Read auth-adapter config (issuer/JWKS/audience/signing key) from the environment. */
@@ -83,6 +87,8 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig
     jwksUri: env.AUTH_JWKS_URI,
     audience: env.AUTH_AUDIENCE,
     signingKey: env.AUTH_SIGNING_KEY,
+    credentialHashKey: env.AUTH_CREDENTIAL_HASH_KEY,
+    maxClients: env.AUTH_MAX_CLIENTS ? Number(env.AUTH_MAX_CLIENTS) : undefined,
   };
 }
 

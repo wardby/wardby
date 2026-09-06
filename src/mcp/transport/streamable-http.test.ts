@@ -1,11 +1,22 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
-import { startHttpServer, type HttpServerHandle } from "./streamable-http.js";
+import { startHttpServer as realStartHttpServer, type HttpServerHandle, type StartHttpServerOptions } from "./streamable-http.js";
+import { createServer } from "node:http";
 import type { AuthProvider, VerifiedToken } from "../../providers/auth/types.js";
 import { SelfHostedAuthProvider } from "../../providers/auth/self-hosted.js";
 
-const CANONICAL_URI = "https://host/mcp"; // logical resource identifier; the test server itself binds to 127.0.0.1
+const fetch: typeof globalThis.fetch = (input, init) => globalThis.fetch(input, { ...init, headers: { host: "host", ...init?.headers } });
+let CANONICAL_URI = "https://host/mcp";
+async function startHttpServer(opts: StartHttpServerOptions): Promise<HttpServerHandle> {
+  if (opts.config.authProviderKind === "self-hosted") return realStartHttpServer(opts);
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const port = (probe.address() as import("node:net").AddressInfo).port;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  CANONICAL_URI = `http://127.0.0.1:${port}/mcp`;
+  return realStartHttpServer({ ...opts, config: { ...opts.config, canonicalUri: CANONICAL_URI, httpBind: { host: "127.0.0.1", port } } });
+}
 
 function fakeAuthProvider(verifyBearer: AuthProvider["verifyBearer"]): AuthProvider {
   return {
@@ -84,7 +95,7 @@ describe("startHttpServer (delegating mode)", () => {
     });
     const client = new Client({ name: "test-client", version: "1.0.0" }, { versionNegotiation: { mode: "auto" } });
     const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${handle.port}/mcp`), {
-      requestInit: { headers: { authorization: "Bearer good-token" } },
+      requestInit: { headers: { host: "host", authorization: "Bearer good-token" } },
     });
     await client.connect(transport);
     const caps = client.getServerCapabilities();
@@ -117,7 +128,7 @@ describe("startHttpServer (delegating mode)", () => {
     );
     await tasksCapableClient.connect(
       new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${handle.port}/mcp`), {
-        requestInit: { headers: { authorization: "Bearer good-token" } },
+        requestInit: { headers: { host: "host", authorization: "Bearer good-token" } },
       }),
     );
     await tasksCapableClient.callTool({ name: "report_tasks_capability", arguments: {} });
@@ -127,7 +138,7 @@ describe("startHttpServer (delegating mode)", () => {
     const plainClient = new Client({ name: "plain-client", version: "1.0.0" }, { versionNegotiation: { mode: "auto" } });
     await plainClient.connect(
       new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${handle.port}/mcp`), {
-        requestInit: { headers: { authorization: "Bearer good-token" } },
+        requestInit: { headers: { host: "host", authorization: "Bearer good-token" } },
       }),
     );
     await plainClient.callTool({ name: "report_tasks_capability", arguments: {} });
@@ -287,20 +298,8 @@ describe("startHttpServer (webhook ingress)", () => {
   });
 });
 
-describe("startHttpServer (self-hosted mode)", () => {
-  it("self-hosted AS metadata is reachable without auth", async () => {
-    const db = fakeDb();
-    const selfHosted = new SelfHostedAuthProvider({ canonicalUri: CANONICAL_URI, signingKey: "s".repeat(32) }, db);
-    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    handle = await startHttpServer({
-      mcp,
-      config: { canonicalUri: CANONICAL_URI, httpBind: { host: "127.0.0.1", port: 0 }, authProviderKind: "self-hosted" },
-      auth: { authProvider: selfHosted, db, providers: fakeProviders },
-      selfHosted,
-    });
-    const res = await fetch(`http://127.0.0.1:${handle.port}/.well-known/oauth-authorization-server`);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { issuer: string };
-    expect(body.issuer).toBe(CANONICAL_URI);
+describe("startHttpServer (self-hosted quarantine)", () => {
+  it("rejects startup before issuing or listening", async () => {
+    await expect(startHttpServer({ config: { authProviderKind: "self-hosted" } } as Parameters<typeof startHttpServer>[0])).rejects.toThrow(/quarantined/);
   });
 });

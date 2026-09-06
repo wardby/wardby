@@ -2,6 +2,7 @@ import { defineConfig, configDefaults } from "vitest/config";
 
 export default defineConfig({
   test: {
+    include: ["src/**/*.test.ts"],
     // Same dotenv-flow cascade the CLI loads (src/env.ts) — so
     // DATABASE_URL/etc. reach tests without exporting them by hand before
     // every `npm test`.

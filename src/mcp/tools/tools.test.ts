@@ -89,6 +89,31 @@ function parseText(result: { content: { text: string }[] }): unknown {
 }
 
 describe("tool authoring tools", () => {
+  it("private-agent listings do not reveal attached tools to another owner", async () => {
+    const db = fakeDb([{ id: "t", name: "private", description: "x", paramsZod: "private schema", jsonSchema: {}, code: "private source", ownerId: "p2" }], [{ id: "a", ownerId: "p2" }]);
+    await db.agentTool.create({ data: { agentId: "a", toolId: "t" } });
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"])); registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+    const result = await client.callTool({ name: "list_tools", arguments: { agentId: "a" } });
+    expect(result.isError).toBe(true); expect(JSON.stringify(result)).toContain("not found"); expect(JSON.stringify(result)).not.toContain("private source");
+    await client.close();
+  });
+  it("public agents and catalog expose only public metadata and the caller's own source", async () => {
+    const tools = ["p1", "p2", null].map((ownerId, i) => ({ id: `t${i}`, name: `tool${i}`, description: "description", paramsZod: "schema", jsonSchema: {}, code: `source${i}`, ownerId }));
+    const db = fakeDb(tools, [{ id: "a", ownerId: null }]);
+    for (const tool of tools) await db.agentTool.create({ data: { agentId: "a", toolId: tool.id } });
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"])); registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+    for (const args of [{}, { agentId: "a" }]) {
+      const result = await client.callTool({ name: "list_tools", arguments: args });
+      const rows = parseText(result as never) as Record<string, unknown>[];
+      expect(rows).toHaveLength(2); expect(rows[0].code).toBe("source0");
+      expect(rows[1]).toEqual({ id: "t2", name: "tool2", description: "description" });
+    }
+    await client.close();
+  });
   it("create_tool persists a valid tool with cached jsonSchema", async () => {
     const db = fakeDb();
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });

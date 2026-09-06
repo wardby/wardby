@@ -5,6 +5,7 @@
   "description": "Schedule and run budget-guarded LLM agents.",
   "license": "Apache-2.0",
   "type": "module",
+  "engines": { "node": ">=22.12.0" },
   "bin": {
     "reevo": "./dist/cli.js"
   },
@@ -42,10 +43,11 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/papaparse": "^5.5.2",
-    "esbuild": "^0.24.2",
+    "esbuild": "^0.25.12",
+    "playwright": "^1.63.0",
     "prisma": "^6.19.3",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.0"
+    "vitest": "^3.2.6"
   }
 }

@@ -38,6 +38,12 @@ beforeAll(async () => {
 });
 
 describe("DelegatingAuthProvider.verifyBearer", () => {
+  it.each([undefined, null, 123, "", "  ", "a".repeat(513)])("rejects signed invalid subjects %j", async (sub) => {
+    const token = await new SignJWT({ sub: sub as string, scope: "agents:read" })
+      .setProtectedHeader({ alg: "RS256", kid: KID }).setIssuer(ISSUER).setAudience(AUDIENCE)
+      .setExpirationTime("1h").sign(privateKey);
+    await expect(new DelegatingAuthProvider({ issuer: ISSUER, audience: AUDIENCE }, jwks).verifyBearer(token)).rejects.toThrow();
+  });
   it("maps a valid signed token to a VerifiedToken", async () => {
     const provider = new DelegatingAuthProvider({ issuer: ISSUER, audience: AUDIENCE }, jwks);
     const token = await mintToken({ scope: "agents:read agents:write" });

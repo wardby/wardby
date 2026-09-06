@@ -32,6 +32,14 @@ describe.skipIf(!databaseUrl)("PostgresDatastore (database)", () => {
     const agentId = newAgentId();
     expect(await datastore.get(agentId, "missing")).toBeUndefined();
   });
+  it("rejects oversized new values and filters oversized legacy values inside PostgreSQL", async () => {
+    const agentId = newAgentId();
+    await expect(datastore.set(agentId, "big", "x".repeat(1024 * 1024 + 1))).rejects.toThrow(/limit/);
+    await prisma.datastoreEntry.create({ data: { agentId, key: "legacy", value: "x".repeat(1024 * 1024 + 1) } });
+    await expect(datastore.get(agentId, "legacy")).rejects.toThrow("datastore_value_limit");
+    await prisma.datastoreEntry.create({ data: { agentId, key: "k".repeat(1025), value: null as never } });
+    await expect(datastore.list(agentId)).rejects.toThrow("datastore_list_limit");
+  });
 
   it("round-trips get/set/delete", async () => {
     const agentId = newAgentId();

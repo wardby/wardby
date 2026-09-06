@@ -24,3 +24,14 @@ export const FETCH_TIMEOUT_MS = 8_000;
 
 /** QuickJS interpreter stack size cap (bytes). */
 export const MAX_STACK_SIZE_BYTES = 1024 * 1024; // 1 MiB
+
+export const FETCH_RESPONSE_BYTES = 8 * 1024 * 1024;
+export const MAX_REDIRECTS = 5;
+export const RANDOM_BYTES_LIMIT = 65_536;
+export const BRIDGE_INPUT_BYTES = 1024 * 1024;
+export const BRIDGE_RESULT_BYTES = 12 * 1024 * 1024;
+export const PARSER_INPUT_BYTES = 256 * 1024;
+export const HTML_LINKS_LIMIT = 1000;
+export const LOG_BYTES = 16 * 1024;
+export const MAX_HOST_CALLS = 256;
+export const MAX_PENDING_HOST_CALLS = 8;

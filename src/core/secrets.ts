@@ -8,6 +8,7 @@
  */
 import type { PrismaClient, Secret } from "@prisma/client";
 import type { SecretCipher } from "../providers/secrets/types.js";
+import { boundedString } from "../sandbox/bounded-json.js";
 
 export type SecretMetadata = Pick<Secret, "id" | "name" | "keyId" | "ownerId" | "createdAt" | "updatedAt">;
 
@@ -23,6 +24,8 @@ export async function createSecret(
   cipher: SecretCipher,
   db: PrismaClient,
 ): Promise<Secret> {
+  boundedString(name, 1024);
+  boundedString(value, 65_536);
   const ciphertext = await cipher.encrypt(value);
   return db.secret.create({ data: { name, ciphertext, keyId: cipher.keyId(), ownerId } });
 }
@@ -63,12 +66,24 @@ export async function deleteSecret(secretId: string, db: PrismaClient): Promise<
 export function buildSecretsAccessor(
   agentId: string,
   cipher: SecretCipher,
-  db: Pick<PrismaClient, "agentSecret">,
+  db: Pick<PrismaClient, "agentSecret"> & Partial<Pick<PrismaClient, "$queryRaw">>,
 ): SecretsAccessor {
   return {
     async get(name: string): Promise<string | undefined> {
+      boundedString(name, 1024);
+      if (db.$queryRaw) {
+        const rows = await db.$queryRaw<{ ciphertext: string | null }[]>`
+          SELECT CASE WHEN octet_length(s."ciphertext") <= 262144 THEN s."ciphertext" ELSE NULL END AS "ciphertext"
+          FROM "Secret" s JOIN "AgentSecret" a ON a."secretId" = s."id"
+          WHERE a."agentId" = ${agentId} AND s."name" = ${name} LIMIT 1`;
+        if (!rows.length) return undefined;
+        if (rows[0].ciphertext === null) throw new Error("secret_value_limit");
+        return cipher.decrypt(rows[0].ciphertext);
+      }
+      // Lightweight provider doubles use the same post-read bound; production Prisma filters in SQL.
       const attachment = await db.agentSecret.findFirst({ where: { agentId, secret: { name } }, include: { secret: true } });
       if (!attachment) return undefined;
+      boundedString(attachment.secret.ciphertext, 256 * 1024);
       return cipher.decrypt(attachment.secret.ciphertext);
     },
   };

@@ -6,9 +6,10 @@
  * compilation/validation is pure computation, no host I/O at all).
  */
 
-import type { QuickJSContext, QuickJSRuntime } from "quickjs-emscripten";
+import type { QuickJSContext, QuickJSRuntime, QuickJSHandle } from "quickjs-emscripten";
 import { getQuickJsModule } from "./quickjs-module.js";
 import { MAX_INTERRUPT_CHECKS, MAX_STACK_SIZE_BYTES, MEMORY_LIMIT_BYTES, WALL_TIME_LIMIT_MS } from "./limits.js";
+import { BRIDGE_RESULT_BYTES } from "./limits.js";
 
 export type SandboxErrorKind = "thrown" | "timeout" | "memory" | "cpu" | "non_serializable";
 
@@ -39,6 +40,20 @@ export const DEFAULT_SANDBOX_LIMITS: SandboxLimits = {
  */
 export const NON_SERIALIZABLE_MARKER = "__reevo_non_serializable__:";
 
+function boundedError(context: QuickJSContext, handle: QuickJSHandle) {
+  const result: { name?: string; message?: string } = {};
+  for (const key of ["name", "message"] as const) {
+    const value = context.getProp(handle, key);
+    if (context.typeof(value) === "string") {
+      const size = context.getProp(value, "length");
+      const length = context.getNumber(size); size.dispose();
+      result[key] = length <= 4096 ? context.getString(value) : "Sandbox error text exceeded limit.";
+    }
+    value.dispose();
+  }
+  return result;
+}
+
 export function classifyEvalError(dumped: { name?: string; message?: string }): SandboxResult {
   if (dumped.name === "InternalError" && dumped.message === "interrupted") {
     return { ok: false, errorKind: "cpu", errorMessage: "Exceeded the CPU/instruction budget." };
@@ -63,9 +78,12 @@ export function classifyEvalError(dumped: { name?: string; message?: string }): 
 export async function evalToJson(
   code: string,
   limitsOverride: Partial<SandboxLimits> | undefined,
-  installExtras: (context: QuickJSContext, runtime: QuickJSRuntime) => void,
+  installExtras: (context: QuickJSContext, runtime: QuickJSRuntime, signal: AbortSignal) => void,
 ): Promise<SandboxResult> {
   const limits: SandboxLimits = { ...DEFAULT_SANDBOX_LIMITS, ...limitsOverride };
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = Date.now() + limits.wallTimeLimitMs;
 
   const qjsModule = await getQuickJsModule();
   const runtime = qjsModule.newRuntime();
@@ -75,7 +93,7 @@ export async function evalToJson(
   let steps = 0;
   runtime.setInterruptHandler(() => {
     steps += 1;
-    return steps > limits.maxInterruptChecks;
+    return steps > limits.maxInterruptChecks || Date.now() >= deadline;
   });
 
   const context = runtime.newContext();
@@ -98,12 +116,12 @@ export async function evalToJson(
   };
 
   try {
-    installExtras(context, runtime);
+    installExtras(context, runtime, controller.signal);
 
     const runPromise: Promise<SandboxResult> = (async () => {
       const evalResult = context.evalCode(code);
       if (evalResult.error) {
-        const dumped = context.dump(evalResult.error);
+        const dumped = boundedError(context, evalResult.error);
         evalResult.error.dispose();
         return classifyEvalError(dumped);
       }
@@ -114,13 +132,18 @@ export async function evalToJson(
       const settled = await settledPromise;
 
       if (settled.error) {
-        const dumped = context.dump(settled.error);
+        const dumped = boundedError(context, settled.error);
         settled.error.dispose();
         return classifyEvalError(dumped);
       }
 
-      const raw = context.dump(settled.value);
+      if (context.typeof(settled.value) !== "string") { settled.value.dispose(); throw new Error("bridge_result_invalid"); }
+      const lengthHandle = context.getProp(settled.value, "length");
+      const length = context.getNumber(lengthHandle); lengthHandle.dispose();
+      if (length > BRIDGE_RESULT_BYTES) { settled.value.dispose(); throw new Error("bridge_result_limit"); }
+      const raw = context.getString(settled.value);
       settled.value.dispose();
+      if (Buffer.byteLength(raw) > BRIDGE_RESULT_BYTES) throw new Error("bridge_result_limit");
       try {
         return { ok: true, value: JSON.parse(raw) };
       } catch {
@@ -133,7 +156,7 @@ export async function evalToJson(
     })();
 
     const timeoutPromise = new Promise<SandboxResult>((resolve) => {
-      setTimeout(
+      timer = setTimeout(
         () =>
           resolve({
             ok: false,
@@ -152,6 +175,8 @@ export async function evalToJson(
       errorMessage: err instanceof Error ? err.message : String(err),
     };
   } finally {
+    clearTimeout(timer);
+    controller.abort();
     disposeAll();
   }
 }

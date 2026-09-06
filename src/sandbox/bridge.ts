@@ -13,40 +13,55 @@
  */
 
 import type { QuickJSContext, QuickJSRuntime } from "quickjs-emscripten";
+import { boundedJson } from "./bounded-json.js";
+import { BRIDGE_INPUT_BYTES, BRIDGE_RESULT_BYTES, MAX_HOST_CALLS, MAX_PENDING_HOST_CALLS } from "./limits.js";
+
+const budgets = new WeakMap<QuickJSRuntime, { calls: number; pending: number }>();
 
 export function registerJsonAsyncFunction(
   context: QuickJSContext,
   runtime: QuickJSRuntime,
   name: string,
   impl: (argsJson: string) => Promise<unknown>,
+  signal?: AbortSignal,
 ): void {
   const fnHandle = context.newFunction(name, (argHandle) => {
-    const argsJson = typeof argHandle === "undefined" ? "null" : context.dump(argHandle);
+    const budget = budgets.get(runtime) ?? { calls: 0, pending: 0 };
+    budgets.set(runtime, budget);
+    if (signal?.aborted || ++budget.calls > MAX_HOST_CALLS || budget.pending >= MAX_PENDING_HOST_CALLS) return { error: context.newError("bridge_call_limit") };
+    if (!argHandle || context.typeof(argHandle) !== "string") return { error: context.newError("bridge_input_invalid") };
+    const lengthHandle = context.getProp(argHandle, "length");
+    const length = context.getNumber(lengthHandle); lengthHandle.dispose();
+    if (length > BRIDGE_INPUT_BYTES) return { error: context.newError("bridge_input_limit") };
+    const argsJson = context.getString(argHandle);
+    if (Buffer.byteLength(argsJson) > BRIDGE_INPUT_BYTES) return { error: context.newError("bridge_input_limit") };
     const deferred = context.newPromise();
+    budget.pending++;
+    const abort = () => { if (deferred.alive) deferred.dispose(); };
+    signal?.addEventListener("abort", abort, { once: true });
 
-    impl(argsJson).then(
+    Promise.resolve().then(() => { signal?.throwIfAborted(); return impl(argsJson); }).then(
       (value) => {
         if (!deferred.alive) return;
-        const resultHandle = context.newString(JSON.stringify(value ?? null));
+        const resultHandle = context.newString(boundedJson(value, BRIDGE_RESULT_BYTES));
         deferred.resolve(resultHandle);
         resultHandle.dispose();
       },
-      (err: unknown) => {
+    ).catch((err: unknown) => {
         if (!deferred.alive) return;
-        const message = err instanceof Error ? err.message : String(err);
+        const message = err instanceof Error ? err.message.slice(0, 1024) : "Host function failed.";
         const errorHandle = context.newError(message);
         deferred.reject(errorHandle);
         errorHandle.dispose();
-      },
-    );
+      }).finally(() => { budget.pending--; signal?.removeEventListener("abort", abort); });
 
     deferred.settled
       .then(() => {
-        runtime.executePendingJobs();
+        if (runtime.alive && !signal?.aborted) runtime.executePendingJobs();
       })
       .finally(() => {
-        deferred.dispose();
-      });
+        if (deferred.alive) deferred.dispose();
+      }).catch(() => {});
 
     return deferred.handle;
   });

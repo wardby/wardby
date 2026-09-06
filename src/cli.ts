@@ -30,6 +30,7 @@ import { startReconciler } from "./core/reconciler.js";
 import { NativeEngine } from "./core/engine-native.js";
 import { deriveJsonSchema } from "./sandbox/zod-params.js";
 import { startMcp } from "./mcp/index.js";
+import { authCommand } from "./mcp/auth/self-hosted/cli.js";
 
 const RUN_STATUSES: RunStatus[] = [
   "pending",
@@ -422,7 +423,9 @@ async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
 
   try {
-    if (command === "agent" && rest[0] === "create") {
+    if (command === "auth") {
+      await authCommand(rest, prisma, process.env.AUTH_CREDENTIAL_HASH_KEY ?? "");
+    } else if (command === "agent" && rest[0] === "create") {
       await agentCreate(rest.slice(1));
     } else if (command === "agent" && rest[0] === "schedule") {
       await agentSchedule(rest.slice(1));

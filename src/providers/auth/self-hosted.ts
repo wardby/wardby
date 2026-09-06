@@ -1,310 +1,203 @@
-/**
- * Minimal OAuth 2.1 authorization server, hosted by reevo itself
- * (AUTH_PROVIDER=self-hosted). One process is both AS and resource server,
- * so a single symmetric (HS256) signing key is sufficient — no JWKS
- * publication needed, unlike delegating mode where a third-party client
- * verifies tokens issued elsewhere.
- *
- * The authorization code is itself a short-lived signed JWT (not a DB row):
- * it carries the PKCE challenge + requested scope/resource inline, so
- * `/token` verifies it statelessly instead of a second table + cleanup
- * job for a 60-second-lived value. `OAuthGrant` rows exist only for the
- * *issued* refresh token (Task 4's actual persistent state), not the code.
- *
- * HTTP framing (the /authorize, /token, /register routes) lives in Task 7;
- * this file is pure AS logic the HTTP layer calls into.
- */
-import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { SignJWT, jwtVerify, errors as joseErrors } from "jose";
-import type { PrismaClient } from "@prisma/client";
+import { createHash, randomUUID } from "node:crypto";
+import { SignJWT, jwtVerify } from "jose";
+import { z } from "zod";
+import type { OAuthFamily, PrismaClient } from "@prisma/client";
 import type { AuthProfile, AuthProvider, AuthTokens, VerifiedToken } from "./types.js";
-import { AudienceError, NotSupportedError } from "./types.js";
+import { NotSupportedError } from "./types.js";
+import { requireSubject } from "./subject.js";
+import { SCOPES_SUPPORTED } from "../../mcp/auth/resource-server.js";
+import { canonicalUrl } from "../../mcp/transport/http-limits.js";
+import { Credentials, DAY, decodeKey, lockUser, type AuthDb } from "../../mcp/auth/self-hosted/credentials.js";
+import { Sessions } from "../../mcp/auth/self-hosted/session.js";
+import type { AuthorizeParams, RegisterClientParams, SelfHostedAuthConfig, TokenParams, TokenResult } from "./authorization-server.js";
+export type { AuthorizeParams, RegisterClientParams, SelfHostedAuthConfig, TokenParams, TokenResult } from "./authorization-server.js";
 
-const CODE_TTL_SECONDS = 60;
-const ACCESS_TOKEN_TTL_SECONDS = 3600;
-const REFRESH_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30;
-const CODE_AUDIENCE = "reevo:self-hosted-as:code";
-
-export interface SelfHostedAuthConfig {
-  /** reevo's own canonical URI — used as both issuer and default audience. */
-  canonicalUri: string;
-  /** HMAC signing secret (>= 32 bytes recommended). */
-  signingKey: string;
+function validRedirect(value: string): boolean {
+  try {
+    const u = new URL(value);
+    return !value.includes("#") && !u.username && !u.password &&
+      (u.protocol === "https:" || (u.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname)));
+  } catch { return false; }
 }
-
-export interface AsMetadata {
-  issuer: string;
-  authorization_endpoint: string;
-  token_endpoint: string;
-  registration_endpoint: string;
-  response_types_supported: string[];
-  grant_types_supported: string[];
-  code_challenge_methods_supported: string[];
-  token_endpoint_auth_methods_supported: string[];
-  authorization_response_iss_parameter_supported: true;
-}
-
-export interface RegisterClientParams {
-  redirectUris: string[];
-  clientName?: string;
-  grantTypes?: string[];
-  tokenEndpointAuthMethod?: "none" | "client_secret_post";
-}
-
-export interface RegisteredClient {
-  clientId: string;
-  clientSecret?: string;
-}
-
-export interface AuthorizeParams {
-  clientId: string;
-  redirectUri: string;
-  codeChallenge: string;
-  codeChallengeMethod: "S256";
-  scope: string;
-  resource: string;
-  /**
-   * The principal approving this request. A real deployment gates
-   * `/authorize` behind its own login step and supplies the authenticated
-   * user's identity here — this minimal AS has no login UI of its own
-   * (out of scope for Phase 4; see design doc "minimal hand-rolled AS").
-   */
-  subject: string;
-  state?: string;
-}
-
-export interface AuthorizeResult {
-  code: string;
-  state?: string;
-  /** RFC 9207: echoed back so the client can bind the response to this issuer. */
-  iss: string;
-}
-
-export type TokenParams =
-  | { grantType: "authorization_code"; code: string; codeVerifier: string; redirectUri: string; clientId: string }
-  | { grantType: "refresh_token"; refreshToken: string; clientId: string };
-
-export interface TokenResult {
-  accessToken: string;
-  tokenType: "Bearer";
-  expiresIn: number;
-  refreshToken?: string;
-  scope: string;
-}
-
-interface CodePayload {
-  clientId: string;
-  subject: string;
-  scope: string;
-  resource: string;
-  redirectUri: string;
-  codeChallenge: string;
-  codeChallengeMethod: "S256";
-}
-
-function pkceMatches(codeVerifier: string, codeChallenge: string): boolean {
-  const computed = createHash("sha256").update(codeVerifier).digest("base64url");
-  return computed === codeChallenge;
-}
+const registration = z.object({
+  redirectUris: z.array(z.string().min(1).max(2048).refine(validRedirect)).min(1).max(10),
+  clientName: z.string().max(100).optional(),
+  grantTypes: z.array(z.enum(["authorization_code", "refresh_token"])).min(1).max(2).default(["authorization_code", "refresh_token"]),
+  tokenEndpointAuthMethod: z.literal("none").default("none"),
+}).strict();
+const authorization = z.object({
+  clientId: z.string().max(100), redirectUri: z.string().max(2048),
+  codeChallenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/), codeChallengeMethod: z.literal("S256"),
+  scope: z.string().max(512), resource: z.string().max(2048), state: z.string().max(1024).optional(),
+}).strict();
 
 export class SelfHostedAuthProvider implements AuthProvider {
-  private readonly config: SelfHostedAuthConfig;
-  private readonly db: PrismaClient;
-  private readonly key: Uint8Array;
-
-  constructor(config: SelfHostedAuthConfig, db: PrismaClient) {
-    if (config.signingKey.length < 32) {
-      throw new Error("AUTH_SIGNING_KEY must be at least 32 characters — required by the self-hosted AS adapter.");
-    }
-    this.config = config;
-    this.db = db;
-    this.key = new TextEncoder().encode(config.signingKey);
+  readonly credentials: Credentials;
+  readonly sessions: Sessions;
+  readonly config: SelfHostedAuthConfig;
+  private readonly key: Buffer;
+  constructor(config: SelfHostedAuthConfig, readonly db: PrismaClient) {
+    this.config = { ...config, canonicalUri: canonicalUrl(config.canonicalUri).href };
+    this.key = decodeKey(config.signingKey, "AUTH_SIGNING_KEY");
+    const credentialKey = decodeKey(config.credentialHashKey, "AUTH_CREDENTIAL_HASH_KEY");
+    if (this.key.equals(credentialKey)) throw new Error("Signing and credential hash keys must be distinct.");
+    if (!Number.isInteger(config.maxClients ?? 1000) || (config.maxClients ?? 1000) < 1) throw new Error("Invalid OAuth client limit.");
+    this.credentials = new Credentials(config.credentialHashKey);
+    this.sessions = new Sessions(db, this.credentials);
   }
-
-  asMetadata(): AsMetadata {
-    const base = this.config.canonicalUri.replace(/\/mcp$/, "");
+  asMetadata() {
+    const base = new URL(this.config.canonicalUri).origin;
     return {
-      issuer: this.config.canonicalUri,
-      authorization_endpoint: `${base}/authorize`,
-      token_endpoint: `${base}/token`,
-      registration_endpoint: `${base}/register`,
-      response_types_supported: ["code"],
-      grant_types_supported: ["authorization_code", "refresh_token"],
-      code_challenge_methods_supported: ["S256"],
-      token_endpoint_auth_methods_supported: ["none", "client_secret_post"],
+      issuer: this.config.canonicalUri, authorization_endpoint: base + "/authorize",
+      token_endpoint: base + "/token", registration_endpoint: base + "/register", revocation_endpoint: base + "/revoke",
+      response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"],
+      code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"],
+      revocation_endpoint_auth_methods_supported: ["none"], scopes_supported: SCOPES_SUPPORTED,
       authorization_response_iss_parameter_supported: true,
     };
   }
-
-  async registerClient(params: RegisterClientParams): Promise<RegisteredClient> {
-    const clientId = randomUUID();
-    const isPublic = params.tokenEndpointAuthMethod === "none";
-    const clientSecret = isPublic ? undefined : randomBytes(32).toString("base64url");
-    await this.db.oAuthClient.create({
-      data: {
-        clientId,
-        clientSecret,
-        metadata: {
-          redirect_uris: params.redirectUris,
-          grant_types: params.grantTypes ?? ["authorization_code", "refresh_token"],
-          client_name: params.clientName ?? null,
-          token_endpoint_auth_method: params.tokenEndpointAuthMethod ?? "none",
-        },
-      },
-    });
-    return { clientId, clientSecret };
-  }
-
-  async handleAuthorize(params: AuthorizeParams): Promise<AuthorizeResult> {
-    const client = await this.db.oAuthClient.findUnique({ where: { clientId: params.clientId } });
-    if (!client) {
-      throw new Error(`Unknown OAuth client "${params.clientId}".`);
-    }
-    const redirectUris = (client.metadata as { redirect_uris?: string[] }).redirect_uris ?? [];
-    if (!redirectUris.includes(params.redirectUri)) {
-      throw new Error(`redirect_uri "${params.redirectUri}" is not registered for client "${params.clientId}".`);
-    }
-    // This AS instance IS the one resource server (itself) — it never
-    // mediates access to a third-party RS, so the requested `resource`
-    // must equal our own canonical URI. Trusting a client-supplied
-    // `resource` blindly as the token audience would be an audience-
-    // confusion vector; RFC 8707 binding means validating it, not just
-    // echoing it.
-    if (params.resource !== this.config.canonicalUri) {
-      throw new Error(`resource "${params.resource}" is not this server ("${this.config.canonicalUri}").`);
-    }
-
-    const payload: CodePayload = {
-      clientId: params.clientId,
-      subject: params.subject,
-      scope: params.scope,
-      resource: params.resource,
-      redirectUri: params.redirectUri,
-      codeChallenge: params.codeChallenge,
-      codeChallengeMethod: params.codeChallengeMethod,
-    };
-    const code = await new SignJWT({ ...payload })
-      .setProtectedHeader({ alg: "HS256" })
-      .setIssuedAt()
-      .setIssuer(this.config.canonicalUri)
-      .setAudience(CODE_AUDIENCE)
-      .setExpirationTime(`${CODE_TTL_SECONDS}s`)
-      .sign(this.key);
-
-    return { code, state: params.state, iss: this.config.canonicalUri };
-  }
-
-  async handleToken(params: TokenParams): Promise<TokenResult> {
-    if (params.grantType === "authorization_code") {
-      return this.handleAuthorizationCodeGrant(params);
-    }
-    return this.handleRefreshTokenGrant(params);
-  }
-
-  private async handleAuthorizationCodeGrant(
-    params: Extract<TokenParams, { grantType: "authorization_code" }>,
-  ): Promise<TokenResult> {
-    const { payload } = await jwtVerify(params.code, this.key, {
-      issuer: this.config.canonicalUri,
-      audience: CODE_AUDIENCE,
-    });
-    const code = payload as unknown as CodePayload;
-
-    if (code.clientId !== params.clientId) {
-      throw new Error("Authorization code was not issued to this client.");
-    }
-    if (code.redirectUri !== params.redirectUri) {
-      throw new Error("redirect_uri does not match the one used at the authorization step.");
-    }
-    if (!pkceMatches(params.codeVerifier, code.codeChallenge)) {
-      throw new Error("PKCE verification failed: code_verifier does not match code_challenge.");
-    }
-
-    return this.issueTokens({ clientId: code.clientId, subject: code.subject, scope: code.scope, resource: code.resource });
-  }
-
-  private async handleRefreshTokenGrant(
-    params: Extract<TokenParams, { grantType: "refresh_token" }>,
-  ): Promise<TokenResult> {
-    const grant = await this.db.oAuthGrant.findUnique({ where: { refreshToken: params.refreshToken } });
-    if (!grant || grant.clientId !== params.clientId) {
-      throw new Error("Unknown or mismatched refresh token.");
-    }
-    if (grant.expiresAt.getTime() <= Date.now()) {
-      throw new Error("Refresh token grant has expired.");
-    }
-    return this.issueTokens({
-      clientId: grant.clientId,
-      subject: grant.principalId,
-      scope: grant.scope,
-      resource: this.config.canonicalUri,
+  async registerClient(params: RegisterClientParams) {
+    const p = registration.parse(params);
+    return this.db.$transaction(async (tx) => {
+      await tx.$queryRawUnsafe("SELECT 1 AS locked FROM pg_advisory_xact_lock(7412901)");
+      if (await tx.oAuthClient.count() >= (this.config.maxClients ?? 1000)) throw new Error("Client capacity reached.");
+      const clientId = randomUUID();
+      await tx.oAuthClient.create({ data: { clientId, metadata: {
+        redirect_uris: p.redirectUris, grant_types: p.grantTypes, client_name: p.clientName ?? "Unnamed client", token_endpoint_auth_method: "none",
+      } } });
+      return { clientId };
     });
   }
-
-  private async issueTokens(params: { clientId: string; subject: string; scope: string; resource: string }): Promise<TokenResult> {
-    const accessToken = await new SignJWT({ scope: params.scope })
-      .setProtectedHeader({ alg: "HS256" })
-      .setSubject(params.subject)
-      .setIssuedAt()
-      .setIssuer(this.config.canonicalUri)
-      .setAudience(params.resource)
-      .setExpirationTime(`${ACCESS_TOKEN_TTL_SECONDS}s`)
-      .sign(this.key);
-
-    const refreshToken = randomBytes(32).toString("base64url");
-    await this.db.oAuthGrant.create({
-      data: {
-        clientId: params.clientId,
-        principalId: params.subject,
-        scope: params.scope,
-        refreshToken,
-        expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_SECONDS * 1000),
-      },
-    });
-
-    return {
-      accessToken,
-      tokenType: "Bearer",
-      expiresIn: ACCESS_TOKEN_TTL_SECONDS,
-      refreshToken,
-      scope: params.scope,
-    };
+  async handleAuthorize(input: AuthorizeParams) {
+    const p = authorization.parse(input);
+    if (p.resource !== this.config.canonicalUri) throw new Error("Invalid resource.");
+    const client = await this.db.oAuthClient.findUnique({ where: { clientId: p.clientId } });
+    const metadata = client?.metadata as { redirect_uris?: string[]; grant_types?: string[] } | undefined;
+    if (!metadata?.redirect_uris?.includes(p.redirectUri) || !metadata.grant_types?.includes("authorization_code")) throw new Error("Invalid client or redirect.");
+    const scope = [...new Set(p.scope.split(/\s+/).filter((s) => SCOPES_SUPPORTED.includes(s)))].join(" ");
+    const request = await this.db.oAuthAuthorizationRequest.create({ data: {
+      clientId: p.clientId, redirectUri: p.redirectUri, resource: p.resource, requestedScope: scope,
+      codeChallenge: p.codeChallenge, state: p.state, expiresAt: new Date(Date.now() + 600_000),
+    } });
+    return { interactionId: request.id };
   }
-
-  async verifyBearer(token: string): Promise<VerifiedToken> {
-    try {
-      const { payload } = await jwtVerify(token, this.key, {
-        issuer: this.config.canonicalUri,
-        audience: this.config.canonicalUri,
-      });
-      const scopeClaim = payload.scope;
-      return {
-        subject: String(payload.sub ?? ""),
-        roles: [],
-        scopes: typeof scopeClaim === "string" ? scopeClaim.split(/\s+/).filter(Boolean) : [],
-      };
-    } catch (err) {
-      if (err instanceof joseErrors.JWTClaimValidationFailed && err.claim === "aud") {
-        throw new AudienceError(`Token audience does not match this resource server ("${this.config.canonicalUri}").`);
+  async consentPage(sessionToken: string, interactionId: string) {
+    const session = await this.sessions.get(sessionToken);
+    const interaction = await this.db.oAuthAuthorizationRequest.findUnique({ where: { id: interactionId }, include: { client: true } });
+    if (!interaction || interaction.consumedAt || interaction.expiresAt.getTime() <= Date.now()) throw new Error("Invalid interaction.");
+    const challenge = await this.sessions.challenge("consent", session.sessionId, interactionId);
+    return { interaction, challenge };
+  }
+  async consent(sessionToken: string, interactionId: string, challenge: string, approve: boolean) {
+    const first = await this.sessions.get(sessionToken);
+    return this.db.$transaction(async (tx) => {
+      await lockUser(tx, first.userId);
+      const session = await this.sessions.get(sessionToken, tx);
+      await this.sessions.consumeChallenge(tx, challenge, "consent", session.sessionId, interactionId);
+      const interaction = await tx.oAuthAuthorizationRequest.findUnique({ where: { id: interactionId } });
+      if (!interaction) throw new Error("Invalid interaction.");
+      const used = await tx.oAuthAuthorizationRequest.updateMany({ where: { id: interactionId, consumedAt: null, expiresAt: { gt: new Date() } }, data: { consumedAt: new Date() } });
+      if (used.count !== 1) throw new Error("Invalid interaction.");
+      const redirect = new URL(interaction.redirectUri);
+      redirect.searchParams.set("iss", this.config.canonicalUri);
+      if (interaction.state !== null) redirect.searchParams.set("state", interaction.state);
+      if (!approve) redirect.searchParams.set("error", "access_denied");
+      else {
+        const code = this.credentials.create("rva");
+        await tx.oAuthAuthorizationCode.create({ data: {
+          codeId: code.id, secretHash: code.hash, clientId: interaction.clientId, userId: session.userId,
+          redirectUri: interaction.redirectUri, resource: interaction.resource, scope: interaction.requestedScope,
+          codeChallenge: interaction.codeChallenge, expiresAt: new Date(Date.now() + 60_000),
+        } });
+        redirect.searchParams.set("code", code.token);
       }
-      throw err;
-    }
+      return redirect.href;
+    });
   }
-
-  async profile(idToken: string): Promise<AuthProfile> {
-    const verified = await this.verifyBearer(idToken);
-    return { subject: verified.subject, email: verified.email, roles: verified.roles ?? [] };
+  async handleToken(params: TokenParams): Promise<TokenResult> {
+    if (params.resource !== undefined && params.resource !== this.config.canonicalUri) throw new Error("Invalid grant.");
+    if (params.grantType === "authorization_code") return this.exchange(params);
+    if (params.grantType === "refresh_token") return this.rotate(params);
+    throw new Error("Unsupported grant.");
   }
-
-  authorizeUrl(_state: string, _redirectUri: string): string {
-    throw new NotSupportedError("Use asMetadata().authorization_endpoint and handleAuthorize() directly; this adapter is the AS itself, not a redirect-based client helper.");
+  private async exchange(p: Extract<TokenParams, { grantType: "authorization_code" }>): Promise<TokenResult> {
+    const id = this.credentials.id(p.code, "rva");
+    const code = id ? await this.db.oAuthAuthorizationCode.findUnique({ where: { codeId: id } }) : null;
+    if (!code || !this.credentials.matches(p.code, code.secretHash) || code.clientId !== p.clientId || code.redirectUri !== p.redirectUri ||
+      code.resource !== this.config.canonicalUri || !/^[A-Za-z0-9._~-]{43,128}$/.test(p.codeVerifier) ||
+      createHash("sha256").update(p.codeVerifier).digest("base64url") !== code.codeChallenge) throw new Error("Invalid grant.");
+    return this.db.$transaction(async (tx) => {
+      const user = await lockUser(tx, code.userId);
+      const consumed = await tx.oAuthAuthorizationCode.updateMany({ where: { codeId: code.codeId, consumedAt: null, expiresAt: { gt: new Date() } }, data: { consumedAt: new Date() } });
+      if (consumed.count !== 1) throw new Error("Invalid grant.");
+      const family = await tx.oAuthFamily.create({ data: { id: randomUUID(), clientId: code.clientId, userId: code.userId, scope: code.scope, resource: code.resource, expiresAt: new Date(Date.now() + 30 * DAY) } });
+      return this.issue(tx, family, user.principal.subject);
+    });
   }
-
-  async exchangeCode(_code: string, _redirectUri: string): Promise<AuthTokens> {
-    throw new NotSupportedError("Use handleToken() directly; this adapter is the AS itself.");
+  private async rotate(p: Extract<TokenParams, { grantType: "refresh_token" }>): Promise<TokenResult> {
+    const id = this.credentials.id(p.refreshToken, "rvr");
+    const initial = id ? await this.db.oAuthGrant.findUnique({ where: { id }, include: { family: true } }) : null;
+    if (!initial || !this.credentials.matches(p.refreshToken, initial.refreshTokenHash) || initial.family.clientId !== p.clientId) throw new Error("Invalid grant.");
+    const result = await this.db.$transaction(async (tx) => {
+      const user = await lockUser(tx, initial.family.userId);
+      await tx.$queryRawUnsafe('SELECT "id" FROM "OAuthFamily" WHERE "id" = $1 FOR UPDATE', initial.familyId);
+      const grant = await tx.oAuthGrant.findUnique({ where: { id: initial.id }, include: { family: { include: { client: true } } } });
+      if (!grant || grant.revokedAt || grant.family.revokedAt || grant.family.expiresAt.getTime() <= Date.now() || grant.expiresAt.getTime() <= Date.now()) return null;
+      if (!(grant.family.client.metadata as { grant_types?: string[] }).grant_types?.includes("refresh_token")) return null;
+      if (grant.consumedAt) {
+        // Return instead of throwing: the transaction must COMMIT reuse revocation.
+        await this.revokeFamily(tx, grant.familyId);
+        return null;
+      }
+      const result = await this.issue(tx, grant.family, user.principal.subject);
+      await tx.oAuthGrant.update({ where: { id: grant.id }, data: { consumedAt: new Date(), replacedById: this.credentials.id(result.refreshToken, "rvr")! } });
+      return result;
+    });
+    if (!result) throw new Error("Invalid grant.");
+    return result;
   }
-
-  async refresh(_refreshToken: string): Promise<AuthTokens> {
-    throw new NotSupportedError("Use handleToken({grantType:'refresh_token', ...}) directly; this adapter is the AS itself.");
+  private async issue(tx: AuthDb, family: OAuthFamily, subject: string): Promise<TokenResult> {
+    const refresh = this.credentials.create("rvr");
+    await tx.oAuthGrant.create({ data: { id: refresh.id, familyId: family.id, refreshTokenHash: refresh.hash, expiresAt: family.expiresAt } });
+    const accessToken = await new SignJWT({ scope: family.scope, client_id: family.clientId, fid: family.id, uid: family.userId, ver: 2 })
+      .setProtectedHeader({ alg: "HS256", typ: "at+jwt" }).setIssuer(this.config.canonicalUri).setAudience(family.resource)
+      .setSubject(requireSubject(subject)).setIssuedAt().setExpirationTime("10m").setJti(randomUUID()).sign(this.key);
+    return { accessToken, tokenType: "Bearer", expiresIn: 600, refreshToken: refresh.token, scope: family.scope };
   }
+  private async revokeFamily(tx: AuthDb, id: string) {
+    await tx.oAuthFamily.update({ where: { id }, data: { revokedAt: new Date() } });
+    await tx.oAuthGrant.updateMany({ where: { familyId: id }, data: { revokedAt: new Date() } });
+  }
+  async revoke(token: string, clientId: string) {
+    const id = this.credentials.id(token, "rvr");
+    const grant = id ? await this.db.oAuthGrant.findUnique({ where: { id }, include: { family: true } }) : null;
+    if (!grant || !this.credentials.matches(token, grant.refreshTokenHash) || grant.family.clientId !== clientId) return;
+    await this.db.$transaction(async (tx) => {
+      await tx.$queryRawUnsafe('SELECT "id" FROM "AuthUser" WHERE "id" = $1 FOR UPDATE', grant.family.userId);
+      await this.revokeFamily(tx, grant.familyId);
+    });
+  }
+  async verifyBearer(token: string): Promise<VerifiedToken> {
+    const { payload } = await jwtVerify(token, this.key, { algorithms: ["HS256"], typ: "at+jwt", issuer: this.config.canonicalUri, audience: this.config.canonicalUri, requiredClaims: ["sub", "iss", "aud", "iat", "exp", "jti", "client_id", "fid", "uid", "ver"] });
+    const subject = requireSubject(payload.sub);
+    if (payload.ver !== 2 || typeof payload.fid !== "string" || typeof payload.uid !== "string" || typeof payload.client_id !== "string") throw new Error("Invalid token.");
+    const family = await this.db.oAuthFamily.findUnique({ where: { id: payload.fid }, include: { user: { include: { principal: true } } } });
+    if (!family || family.revokedAt || family.expiresAt.getTime() <= Date.now() || family.user.status !== "enabled" || family.userId !== payload.uid ||
+      family.user.principal.subject !== subject || family.clientId !== payload.client_id || payload.scope !== family.scope) throw new Error("Invalid token.");
+    return { subject, scopes: family.scope.split(/\s+/).filter(Boolean), roles: [] };
+  }
+  async cleanup() {
+    const now = new Date();
+    // Retain consumed grants until absolute family expiry for reuse detection.
+    await this.db.oAuthFamily.deleteMany({ where: { expiresAt: { lt: now } } });
+    await this.db.oAuthAuthorizationCode.deleteMany({ where: { expiresAt: { lt: now } } });
+    await this.db.oAuthAuthorizationRequest.deleteMany({ where: { expiresAt: { lt: now } } });
+    await this.db.authFormChallenge.deleteMany({ where: { expiresAt: { lt: now } } });
+    await this.db.authSession.deleteMany({ where: { expiresAt: { lt: now } } });
+    await this.db.authRateLimit.deleteMany({ where: { expiresAt: { lt: now } } });
+  }
+  async profile(token: string): Promise<AuthProfile> { const v = await this.verifyBearer(token); return { subject: v.subject, roles: [] }; }
+  authorizeUrl(): string { throw new NotSupportedError("Use browser authorization."); }
+  async exchangeCode(): Promise<AuthTokens> { throw new NotSupportedError("Use the token endpoint."); }
+  async refresh(): Promise<AuthTokens> { throw new NotSupportedError("Use the token endpoint."); }
 }

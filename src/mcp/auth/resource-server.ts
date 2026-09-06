@@ -78,8 +78,7 @@ export async function authenticate(headers: AuthenticateHeaders, deps: Authentic
   try {
     verified = await deps.authProvider.verifyBearer(token);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw unauthorized(`Invalid token: ${message}`, resourceMetadataUrl);
+    throw unauthorized("Invalid token.", resourceMetadataUrl);
   }
 
   const principal = await resolvePrincipal(verified.subject, deps.db);

@@ -28,6 +28,8 @@ import { runStdioServer } from "./transport/stdio.js";
 import { startHttpServer } from "./transport/streamable-http.js";
 import { resolvePrincipal } from "./auth/principal.js";
 import { SCOPES_SUPPORTED } from "./auth/resource-server.js";
+import { canonicalUrl } from "./transport/http-limits.js";
+import { assertSelfHostedReleased } from "../providers/auth/release-gate.js";
 import { registerAgentTools } from "./tools/agents.js";
 import { registerTriggerTool } from "./tools/trigger.js";
 import { registerToolAuthoringTools } from "./tools/tools.js";
@@ -80,6 +82,7 @@ export function buildMcpProviders(): McpProviderComposition {
 /** The real CLI entry point: `reevo mcp`. Reads config from the environment, starts stdio or HTTP per MCP_TRANSPORT. */
 export async function startMcp(): Promise<void> {
   const mcpConfig = loadMcpConfig();
+  if (mcpConfig.transport === "http" && loadProviderConfig().auth === "self-hosted") assertSelfHostedReleased();
   const { providers } = buildMcpProviders();
 
   if (mcpConfig.transport === "stdio") {
@@ -110,6 +113,9 @@ export async function startMcp(): Promise<void> {
 
   const providerConfig = loadProviderConfig();
   const authConfig = loadAuthConfig();
+  if (!authConfig.audience || canonicalUrl(mcpConfig.canonicalUri).href !== canonicalUrl(authConfig.audience).href) {
+    throw new Error("MCP_CANONICAL_URI and AUTH_AUDIENCE must be identical normalized URLs.");
+  }
   const authProviderKind = providerConfig.auth === "self-hosted" ? "self-hosted" : "delegating";
   const authProvider = buildAuthProvider(providerConfig.auth, authConfig, prisma);
   const selfHosted = authProviderKind === "self-hosted" ? (authProvider as SelfHostedAuthProvider) : undefined;
@@ -119,7 +125,7 @@ export async function startMcp(): Promise<void> {
 
   await startHttpServer({
     mcp,
-    config: { canonicalUri: mcpConfig.canonicalUri, httpBind: mcpConfig.httpBind, authProviderKind },
+    config: { canonicalUri: canonicalUrl(mcpConfig.canonicalUri).href, httpBind: mcpConfig.httpBind, authProviderKind, authorizationServer: authConfig.issuer, allowedOrigins: mcpConfig.allowedOrigins },
     auth: { authProvider, db: prisma, providers },
     selfHosted,
   });
