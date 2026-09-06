@@ -402,10 +402,14 @@ async function mcp(): Promise<void> {
   // when it stops — block here the same way `scheduler` does, so main()'s
   // `finally { prisma.$disconnect() }` doesn't tear the connection down
   // out from under a server that's still supposed to be running.
-  console.log("reevo mcp started. Press Ctrl+C to stop.");
+  //
+  // stderr, not stdout: in stdio mode stdout IS the JSON-RPC protocol
+  // stream (unlike `scheduler`, which owns no such stream), so a stray
+  // console.log here would corrupt every stdio-connected client.
+  console.error("reevo mcp started. Press Ctrl+C to stop.");
   await new Promise<void>((resolve) => {
     const shutdown = () => {
-      console.log("\nreevo mcp shutting down...");
+      console.error("\nreevo mcp shutting down...");
       resolve();
     };
     process.once("SIGINT", shutdown);
