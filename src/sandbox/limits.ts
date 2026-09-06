@@ -35,3 +35,12 @@ export const HTML_LINKS_LIMIT = 1000;
 export const LOG_BYTES = 16 * 1024;
 export const MAX_HOST_CALLS = 256;
 export const MAX_PENDING_HOST_CALLS = 8;
+
+/** Max concurrent parser worker threads across the whole process (html/csv/xml bridge calls share this budget). */
+export const PARSER_WORKER_MAX_CONCURRENCY = 4;
+/** Max callers waiting for a free worker slot before a new call is rejected immediately instead of queueing. */
+export const PARSER_WORKER_QUEUE_LIMIT = 32;
+/** Hard wall-clock budget for one parse call; the worker is forcibly terminated if it runs longer. */
+export const PARSER_WORKER_TIMEOUT_MS = 5_000;
+/** Per-worker V8 old-generation heap cap (resourceLimits) — see plan D2 for its known Buffer-allocation blind spot. */
+export const PARSER_WORKER_MAX_OLD_GEN_MB = 64;
