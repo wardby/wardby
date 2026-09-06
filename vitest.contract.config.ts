@@ -6,7 +6,7 @@ import { defineConfig } from "vitest/config";
 // excluding it from the default `npm test` run.
 export default defineConfig({
   test: {
-    setupFiles: ["./src/env.ts"],
+    setupFiles: ["./vitest.setup.ts"],
     include: ["src/**/*.contract.test.ts"],
   },
 });
