@@ -17,7 +17,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { SignJWT, jwtVerify, errors as joseErrors } from "jose";
 import type { PrismaClient } from "@prisma/client";
-import type { AuthProfile, AuthProvider, AuthTokens } from "./types.js";
+import type { AuthProfile, AuthProvider, AuthTokens, VerifiedToken } from "./types.js";
 import { AudienceError, NotSupportedError } from "./types.js";
 
 const CODE_TTL_SECONDS = 60;
@@ -271,7 +271,7 @@ export class SelfHostedAuthProvider implements AuthProvider {
     };
   }
 
-  async verifyBearer(token: string): Promise<AuthProfile> {
+  async verifyBearer(token: string): Promise<VerifiedToken> {
     try {
       const { payload } = await jwtVerify(token, this.key, {
         issuer: this.config.canonicalUri,
@@ -292,7 +292,8 @@ export class SelfHostedAuthProvider implements AuthProvider {
   }
 
   async profile(idToken: string): Promise<AuthProfile> {
-    return this.verifyBearer(idToken);
+    const verified = await this.verifyBearer(idToken);
+    return { subject: verified.subject, email: verified.email, roles: verified.roles ?? [] };
   }
 
   authorizeUrl(_state: string, _redirectUri: string): string {

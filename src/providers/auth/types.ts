@@ -7,14 +7,33 @@
  * signed tokens).
  */
 
+/**
+ * The interactive-login identity shape (returned by `profile(idToken)`).
+ * Identity only — no scopes here. Scopes are a per-token authorization
+ * grant, not a property of who someone is: the same subject can present
+ * two different tokens carrying two different scope sets, so a scope
+ * field on an identity type would conflate a grant with an identity the
+ * moment more than one token exists for the same subject.
+ */
 export interface AuthProfile {
   subject: string;
   email?: string;
   name?: string;
   /** Application roles resolved from the provider's token claims. */
   roles: string[];
-  /** OAuth scopes granted to this token. */
+}
+
+/**
+ * The result of validating a bearer access token (returned by
+ * `verifyBearer`). Distinct from `AuthProfile` precisely because it DOES
+ * carry scopes — this is per-token, not per-identity.
+ */
+export interface VerifiedToken {
+  subject: string;
+  /** OAuth scopes granted to this specific token. */
   scopes: string[];
+  email?: string;
+  roles?: string[];
 }
 
 export interface AuthTokens {
@@ -31,11 +50,12 @@ export interface AuthProvider {
   profile(idToken: string): Promise<AuthProfile>;
   /**
    * Validate a bearer access token (signature, audience, expiry, issuer)
-   * and map its claims to a profile. This is what the MCP resource-server
-   * middleware calls on every authenticated request — both adapters
-   * implement it so the middleware never needs to know which is active.
+   * and map its claims to a verified-token result. This is what the MCP
+   * resource-server middleware calls on every authenticated request — both
+   * adapters implement it so the middleware never needs to know which is
+   * active.
    */
-  verifyBearer(token: string): Promise<AuthProfile>;
+  verifyBearer(token: string): Promise<VerifiedToken>;
 }
 
 /** Thrown by verifyBearer when a token's audience doesn't match the configured canonical URI. */

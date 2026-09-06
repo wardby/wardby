@@ -2,13 +2,13 @@
  * Resource-server-only AuthProvider: reevo never issues tokens itself, an
  * external OIDC/OAuth IdP is the authorization server. verifyBearer is the
  * whole job — validate a caller-supplied access token (signature via JWKS,
- * audience, expiry, issuer) and map its claims to an AuthProfile. The
- * auth-code flow methods (authorizeUrl/exchangeCode/refresh) belong to the
- * external IdP, not to reevo, so they throw rather than half-implement a
- * flow this adapter doesn't own.
+ * audience, expiry, issuer) and map its claims to a VerifiedToken (subject
+ * + per-token scopes). The auth-code flow methods (authorizeUrl/
+ * exchangeCode/refresh) belong to the external IdP, not to reevo, so they
+ * throw rather than half-implement a flow this adapter doesn't own.
  */
 import { createRemoteJWKSet, jwtVerify, errors as joseErrors, type JWTVerifyGetKey } from "jose";
-import type { AuthProfile, AuthProvider, AuthTokens } from "./types.js";
+import type { AuthProfile, AuthProvider, AuthTokens, VerifiedToken } from "./types.js";
 import { AudienceError, NotSupportedError } from "./types.js";
 
 export interface DelegatingAuthConfig {
@@ -40,7 +40,7 @@ export class DelegatingAuthProvider implements AuthProvider {
     }
   }
 
-  async verifyBearer(token: string): Promise<AuthProfile> {
+  async verifyBearer(token: string): Promise<VerifiedToken> {
     try {
       const { payload } = await jwtVerify(token, this.jwks, {
         issuer: this.config.issuer,
@@ -49,7 +49,6 @@ export class DelegatingAuthProvider implements AuthProvider {
       return {
         subject: String(payload.sub ?? ""),
         email: typeof payload.email === "string" ? payload.email : undefined,
-        name: typeof payload.name === "string" ? payload.name : undefined,
         roles: Array.isArray(payload.roles) ? payload.roles.map(String) : [],
         scopes: scopesFromClaim(payload.scope ?? payload.scp),
       };
@@ -62,7 +61,8 @@ export class DelegatingAuthProvider implements AuthProvider {
   }
 
   async profile(idToken: string): Promise<AuthProfile> {
-    return this.verifyBearer(idToken);
+    const verified = await this.verifyBearer(idToken);
+    return { subject: verified.subject, email: verified.email, roles: verified.roles ?? [] };
   }
 
   authorizeUrl(_state: string, _redirectUri: string): string {

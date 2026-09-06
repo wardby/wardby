@@ -74,18 +74,18 @@ export async function authenticate(headers: AuthenticateHeaders, deps: Authentic
     throw unauthorized("Missing or malformed Authorization header (expected: Bearer <token>).", resourceMetadataUrl);
   }
 
-  let profile;
+  let verified;
   try {
-    profile = await deps.authProvider.verifyBearer(token);
+    verified = await deps.authProvider.verifyBearer(token);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw unauthorized(`Invalid token: ${message}`, resourceMetadataUrl);
   }
 
-  const principal = await resolvePrincipal(profile.subject, deps.db);
+  const principal = await resolvePrincipal(verified.subject, deps.db);
   return {
     principal,
-    scopes: new Set(profile.scopes),
+    scopes: new Set(verified.scopes),
     providers: deps.providers,
     db: deps.db,
     // authenticate() only sees the HTTP Authorization header, before the

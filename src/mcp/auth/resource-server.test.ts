@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import type { AuthProfile, AuthProvider } from "../../providers/auth/types.js";
+import type { AuthProvider, VerifiedToken } from "../../providers/auth/types.js";
 import { AudienceError } from "../../providers/auth/types.js";
 import { protectedResourceMetadata, authenticate, requireScope } from "./resource-server.js";
 import { McpError } from "../errors.js";
@@ -11,7 +11,7 @@ function fakeAuthProvider(verifyBearer: AuthProvider["verifyBearer"]): AuthProvi
     authorizeUrl: () => "",
     exchangeCode: async () => ({ idToken: "", accessToken: "" }),
     refresh: async () => ({ idToken: "", accessToken: "" }),
-    profile: async () => ({ subject: "", roles: [], scopes: [] }),
+    profile: async () => ({ subject: "", roles: [] }),
     verifyBearer,
   };
 }
@@ -42,8 +42,8 @@ describe("protectedResourceMetadata", () => {
 
 describe("authenticate", () => {
   it("valid token resolves a context with principal + scopes", async () => {
-    const profile: AuthProfile = { subject: "user-1", roles: [], scopes: ["agents:read", "agents:write"] };
-    const authProvider = fakeAuthProvider(async () => profile);
+    const verified: VerifiedToken = { subject: "user-1", roles: [], scopes: ["agents:read", "agents:write"] };
+    const authProvider = fakeAuthProvider(async () => verified);
     const db = fakeDb();
     const ctx = await authenticate(
       { authorization: "Bearer good-token" },

@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import { startHttpServer, type HttpServerHandle } from "./streamable-http.js";
-import type { AuthProfile, AuthProvider } from "../../providers/auth/types.js";
+import type { AuthProvider, VerifiedToken } from "../../providers/auth/types.js";
 import { SelfHostedAuthProvider } from "../../providers/auth/self-hosted.js";
 
 const CANONICAL_URI = "https://host/mcp"; // logical resource identifier; the test server itself binds to 127.0.0.1
@@ -12,7 +12,7 @@ function fakeAuthProvider(verifyBearer: AuthProvider["verifyBearer"]): AuthProvi
     authorizeUrl: () => "",
     exchangeCode: async () => ({ idToken: "", accessToken: "" }),
     refresh: async () => ({ idToken: "", accessToken: "" }),
-    profile: async () => ({ subject: "", roles: [], scopes: [] }),
+    profile: async () => ({ subject: "", roles: [] }),
     verifyBearer,
   };
 }
@@ -39,11 +39,11 @@ afterEach(async () => {
 });
 
 describe("startHttpServer (delegating mode)", () => {
-  async function start(profile: AuthProfile | Error) {
+  async function start(verified: VerifiedToken | Error) {
     const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb(), config: { canonicalUri: CANONICAL_URI } });
     const authProvider = fakeAuthProvider(async () => {
-      if (profile instanceof Error) throw profile;
-      return profile;
+      if (verified instanceof Error) throw verified;
+      return verified;
     });
     handle = await startHttpServer({
       mcp,

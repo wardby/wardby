@@ -38,7 +38,7 @@ beforeAll(async () => {
 });
 
 describe("DelegatingAuthProvider.verifyBearer", () => {
-  it("maps a valid signed token to an AuthProfile", async () => {
+  it("maps a valid signed token to a VerifiedToken", async () => {
     const provider = new DelegatingAuthProvider({ issuer: ISSUER, audience: AUDIENCE }, jwks);
     const token = await mintToken({ scope: "agents:read agents:write" });
     const profile = await provider.verifyBearer(token);
