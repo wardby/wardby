@@ -22,6 +22,8 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "@prisma/client": "^6.19.3",
     "croner": "^10.0.1",
     "fast-xml-parser": "^5.11.1",
