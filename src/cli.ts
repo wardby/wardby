@@ -29,6 +29,7 @@ import { startScheduler } from "./core/scheduler.js";
 import { startReconciler } from "./core/reconciler.js";
 import { NativeEngine } from "./core/engine-native.js";
 import { deriveJsonSchema } from "./sandbox/zod-params.js";
+import { ToolCapabilitiesPatchSchema } from "./sandbox/tool-capabilities.js";
 import { startMcp } from "./mcp/index.js";
 import { authCommand } from "./mcp/auth/self-hosted/cli.js";
 
@@ -192,7 +193,16 @@ async function toolCreate(args: string[]): Promise<void> {
 }
 
 async function toolAttach(args: string[], detach: boolean): Promise<void> {
-  const [toolName, agentName] = args;
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: {
+      "allow-secret": { type: "string", multiple: true },
+      "allow-datastore-prefix": { type: "string", multiple: true },
+      "allow-host": { type: "string", multiple: true },
+    },
+  });
+  const [toolName, agentName] = positionals;
   if (!toolName || !agentName) {
     fail(`tool ${detach ? "detach" : "attach"} requires <tool-name> <agent-name>.`);
   }
@@ -205,14 +215,34 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
   if (detach) {
     await prisma.agentTool.deleteMany({ where: { agentId: agent!.id, toolId: tool!.id } });
     console.log(`detached "${toolName}" from "${agentName}".`);
-  } else {
-    await prisma.agentTool.upsert({
-      where: { agentId_toolId: { agentId: agent!.id, toolId: tool!.id } },
-      create: { agentId: agent!.id, toolId: tool!.id },
-      update: {},
-    });
-    console.log(`attached "${toolName}" to "${agentName}".`);
+    return;
   }
+
+  const patch = ToolCapabilitiesPatchSchema.safeParse({
+    allowedSecrets: values["allow-secret"],
+    allowedDatastorePrefixes: values["allow-datastore-prefix"],
+    allowedHosts: values["allow-host"],
+  });
+  if (!patch.success) {
+    fail(`invalid tool capabilities: ${patch.error.issues.map((i) => i.message).join("; ")}`);
+  }
+
+  await prisma.agentTool.upsert({
+    where: { agentId_toolId: { agentId: agent!.id, toolId: tool!.id } },
+    create: {
+      agentId: agent!.id,
+      toolId: tool!.id,
+      allowedSecrets: patch.data!.allowedSecrets ?? [],
+      allowedDatastorePrefixes: patch.data!.allowedDatastorePrefixes ?? [],
+      allowedHosts: patch.data!.allowedHosts ?? [],
+    },
+    update: {
+      ...(patch.data!.allowedSecrets !== undefined ? { allowedSecrets: patch.data!.allowedSecrets } : {}),
+      ...(patch.data!.allowedDatastorePrefixes !== undefined ? { allowedDatastorePrefixes: patch.data!.allowedDatastorePrefixes } : {}),
+      ...(patch.data!.allowedHosts !== undefined ? { allowedHosts: patch.data!.allowedHosts } : {}),
+    },
+  });
+  console.log(`attached "${toolName}" to "${agentName}".`);
 }
 
 async function toolList(args: string[]): Promise<void> {
