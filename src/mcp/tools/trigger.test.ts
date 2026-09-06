@@ -71,6 +71,7 @@ function fakeDb(agents: FakeAgentRow[]) {
         tasks.set(row.id, row);
         return row;
       },
+      findUnique: async ({ where }: { where: { id: string } }) => tasks.get(where.id) ?? null,
       findUniqueOrThrow: async ({ where }: { where: { id: string } }) => {
         const row = tasks.get(where.id);
         if (!row) throw new Error("not found");
@@ -170,7 +171,7 @@ describe("trigger_agent", () => {
   it("cancel_run invokes the executor's cooperative stop path", async () => {
     const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "p1" }]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["runs:trigger"], true));
+    mcp.setFixedContext(fakeCtx(db, "p1", ["runs:trigger", "agents:read"], true));
     registerTriggerTool(mcp);
     const client = await connectClient(mcp);
 
@@ -191,6 +192,73 @@ describe("trigger_agent", () => {
     )) as { status: string };
     expect(getResult.status).toBe("cancelled");
 
+    await client.close();
+  });
+
+  it("tasks/get on another owner's task is rejected (not found, not leaked)", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "owner-1" }]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    registerTriggerTool(mcp);
+
+    // owner-1 triggers and gets a real task.
+    mcp.setFixedContext(fakeCtx(db, "owner-1", ["runs:trigger"], true));
+    const ownerClient = await connectClient(mcp);
+    const triggerResult = await ownerClient.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+    const { taskId } = parseText(triggerResult as never) as { taskId: string };
+    await ownerClient.close();
+
+    // A different principal, even with agents:read, cannot read it.
+    mcp.setFixedContext(fakeCtx(db, "not-the-owner", ["agents:read"], true));
+    const intruderClient = await connectClient(mcp);
+    await expect(
+      intruderClient.request(
+        { method: "tasks/get", params: { taskId } },
+        fromJsonSchema<Record<string, unknown>>({ type: "object", additionalProperties: true }),
+      ),
+    ).rejects.toThrow();
+    await intruderClient.close();
+  });
+
+  it("tasks/cancel on another owner's task is rejected", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "owner-1" }]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    registerTriggerTool(mcp);
+
+    mcp.setFixedContext(fakeCtx(db, "owner-1", ["runs:trigger"], true));
+    const ownerClient = await connectClient(mcp);
+    const triggerResult = await ownerClient.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+    const { taskId } = parseText(triggerResult as never) as { taskId: string };
+    await ownerClient.close();
+
+    mcp.setFixedContext(fakeCtx(db, "not-the-owner", ["runs:trigger"], true));
+    const intruderClient = await connectClient(mcp);
+    await expect(
+      intruderClient.request(
+        { method: "tasks/cancel", params: { taskId } },
+        fromJsonSchema<Record<string, unknown>>({ type: "object", additionalProperties: true }),
+      ),
+    ).rejects.toThrow();
+    await intruderClient.close();
+  });
+
+  it("tasks/get without agents:read scope is rejected", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "p1" }]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    registerTriggerTool(mcp);
+
+    mcp.setFixedContext(fakeCtx(db, "p1", ["runs:trigger"], true));
+    const client = await connectClient(mcp);
+    const triggerResult = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+    const { taskId } = parseText(triggerResult as never) as { taskId: string };
+
+    // Same principal, but this connection's context lacks agents:read.
+    mcp.setFixedContext(fakeCtx(db, "p1", [], true));
+    await expect(
+      client.request(
+        { method: "tasks/get", params: { taskId } },
+        fromJsonSchema<Record<string, unknown>>({ type: "object", additionalProperties: true }),
+      ),
+    ).rejects.toThrow(/scope/i);
     await client.close();
   });
 });

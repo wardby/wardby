@@ -177,6 +177,7 @@ function buildFakeDb() {
         tasks.set(row.id, row);
         return row;
       },
+      findUnique: async ({ where }: { where: { id: string } }) => tasks.get(where.id) ?? null,
       findUniqueOrThrow: async ({ where }: { where: { id: string } }) => {
         const row = tasks.get(where.id);
         if (!row) throw new Error("not found");

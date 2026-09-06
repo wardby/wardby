@@ -15,7 +15,16 @@
  * run — building real interruption is a new Executor/Engine capability out
  * of scope for this plan (no task in it adds one). Flagged in the ledger,
  * not silently glossed over.
+ *
+ * Ownership: a Task carries no owner of its own — it inherits the owning
+ * Run's Agent's owner, resolved via requireOwnedTask below. tasks/get and
+ * tasks/cancel both call it before touching the task manager, the same
+ * shape every other cross-principal-sensitive read/mutate in this codebase
+ * uses (requireOwnedAgent in agents.ts/runs.ts/etc.) — a caller who guesses
+ * or is handed someone else's taskId gets 404, not another principal's
+ * final text/cost.
  */
+import type { PrismaClient } from "@prisma/client";
 import { createRun } from "../../core/runner.js";
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
@@ -25,6 +34,17 @@ const DEFAULT_TASK_TTL_MS = 24 * 60 * 60 * 1000;
 
 function textResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
+}
+
+async function requireOwnedTask(db: PrismaClient, taskId: string, principalId: string): Promise<void> {
+  const task = await db.task.findUnique({ where: { id: taskId } });
+  if (!task || !task.runId) throw new McpError(404, `Task "${taskId}" not found.`);
+  const run = await db.run.findUnique({ where: { id: task.runId } });
+  if (!run) throw new McpError(404, `Task "${taskId}" not found.`);
+  const agent = await db.agent.findUnique({ where: { id: run.agentId } });
+  // 404, not 403: confirming a taskId exists at all to a non-owner is
+  // itself a (small) information leak — same reasoning as get_agent.
+  if (!agent || agent.ownerId !== principalId) throw new McpError(404, `Task "${taskId}" not found.`);
 }
 
 export function registerTriggerTool(mcp: ReevoMcpServer): void {
@@ -63,13 +83,15 @@ export function registerTriggerTool(mcp: ReevoMcpServer): void {
   // handler-returned `resultType` field never survives the round trip
   // through this SDK's own Client, while any other field does. A real
   // wire capture would show it; `client.request()`'s return value won't.
-  mcp.registerRequestHandler("tasks/get", async (params, ctx) => {
+  mcp.registerRequestHandler("tasks/get", "agents:read", async (params, ctx) => {
     const { taskId } = params as { taskId: string };
+    await requireOwnedTask(ctx.db, taskId, ctx.principal.id);
     return getTask(taskId, ctx.db) as unknown as Record<string, unknown>;
   });
 
-  mcp.registerRequestHandler("tasks/cancel", async (params, ctx) => {
+  mcp.registerRequestHandler("tasks/cancel", "runs:trigger", async (params, ctx) => {
     const { taskId } = params as { taskId: string };
+    await requireOwnedTask(ctx.db, taskId, ctx.principal.id);
     await cancelTask(taskId, ctx.db, async (runId) => {
       // See module-level caveat: no real interrupt hook exists yet.
       void runId;

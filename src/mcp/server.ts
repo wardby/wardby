@@ -78,10 +78,15 @@ export interface ReevoMcpServer {
    * tasks/get, tasks/cancel, tasks/update — there is no npm runtime package
    * for the extension, see Task 6's ledger note, so these are hand-wired
    * the same way this SDK itself expects any custom method to be added:
-   * `Server.setRequestHandler`). The handler receives the resolved
-   * McpRequestContext exactly like a tool handler does.
+   * `Server.setRequestHandler`). Scope is enforced BEFORE the handler runs,
+   * exactly like registerTool — a custom method is not exempt from the
+   * scope gate just because it isn't a tool.
    */
-  registerRequestHandler(method: string, handler: (params: unknown, ctx: McpRequestContext) => Promise<unknown>): void;
+  registerRequestHandler(
+    method: string,
+    scope: string | string[],
+    handler: (params: unknown, ctx: McpRequestContext) => Promise<unknown>,
+  ): void;
   /** Passed directly to createMcpHandler (Task 7) / serveStdio (below). */
   factory: McpServerFactory;
   /** Local capability introspection without a protocol round-trip. */
@@ -96,7 +101,11 @@ interface AuthInfoExtra {
 
 export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
   const specs: ToolSpec<never>[] = [];
-  const requestHandlers: { method: string; handler: (params: unknown, ctx: McpRequestContext) => Promise<unknown> }[] = [];
+  const requestHandlers: {
+    method: string;
+    scope: string[];
+    handler: (params: unknown, ctx: McpRequestContext) => Promise<unknown>;
+  }[] = [];
   let fixedContext: McpRequestContext | undefined;
 
   function resolveCtx(sdkCtx: ServerContext): McpRequestContext {
@@ -123,8 +132,12 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
     specs.push(spec as ToolSpec<never>);
   }
 
-  function registerRequestHandler(method: string, handler: (params: unknown, ctx: McpRequestContext) => Promise<unknown>): void {
-    requestHandlers.push({ method, handler });
+  function registerRequestHandler(
+    method: string,
+    scope: string | string[],
+    handler: (params: unknown, ctx: McpRequestContext) => Promise<unknown>,
+  ): void {
+    requestHandlers.push({ method, scope: Array.isArray(scope) ? scope : [scope], handler });
   }
 
   const factory: McpServerFactory = () => {
@@ -153,12 +166,13 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
     // passthrough JSON Schema on both sides keeps this generic: real
     // validation of taskId/etc. happens inside each handler, not here.
     const PERMISSIVE_SCHEMA = fromJsonSchema<Record<string, unknown>>({ type: "object", additionalProperties: true });
-    for (const { method, handler } of requestHandlers) {
+    for (const { method, scope, handler } of requestHandlers) {
       mcpServer.server.setRequestHandler(
         method,
         { params: PERMISSIVE_SCHEMA },
         async (params: unknown, sdkCtx: ServerContext) => {
           const ctx = resolveCtx(sdkCtx);
+          requireScope(ctx, opts.config.canonicalUri, ...scope);
           return (await handler(params, ctx)) as Record<string, unknown>;
         },
       );
