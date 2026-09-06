@@ -32,14 +32,15 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
   mcp.registerTool({
     name: "datastore_set",
     scope: "datastore:write",
+    description: 'Sets a datastore value. Pass "pii": true to encrypt the value at rest (AES-256-GCM) — opt in only for values that actually carry PII, never inferred automatically.',
     inputSchema: {
       type: "object",
-      properties: { agentId: { type: "string" }, key: { type: "string" }, value: {} },
+      properties: { agentId: { type: "string" }, key: { type: "string" }, value: {}, pii: { type: "boolean" } },
       required: ["agentId", "key", "value"],
     },
-    handler: async (args: { agentId: string; key: string; value: DatastoreValue }, ctx) => {
+    handler: async (args: { agentId: string; key: string; value: DatastoreValue; pii?: boolean }, ctx) => {
       await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
-      await ctx.providers.datastore.set(args.agentId, args.key, args.value);
+      await ctx.providers.datastore.set(args.agentId, args.key, args.value, { pii: args.pii });
       return textResult({ ok: true });
     },
   });

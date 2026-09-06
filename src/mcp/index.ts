@@ -78,8 +78,8 @@ export function buildMcpProviders(): McpProviderComposition {
   }
   const llm = new RoutingLlmProvider(llmResult.registrations);
   const engine = new NativeEngine();
-  const datastore = new PostgresDatastore(prisma);
   const secrets = buildSecretCipher(providerConfig);
+  const datastore = new PostgresDatastore(prisma, secrets);
   const executor = new InProcessExecutor({ llm, engine, datastore, secrets }, prisma);
 
   return { providers: { llm, engine, datastore, secrets, executor } };

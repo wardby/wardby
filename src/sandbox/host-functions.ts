@@ -10,7 +10,7 @@ import { parse as parseHtml } from "node-html-parser";
 import Papa from "papaparse";
 import { XMLParser } from "fast-xml-parser";
 import type { QuickJSContext, QuickJSRuntime } from "quickjs-emscripten";
-import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
+import type { Datastore, DatastoreSetOptions, DatastoreValue } from "../providers/datastore/types.js";
 import type { SecretsAccessor } from "../core/secrets.js";
 import { registerJsonAsyncFunction } from "./bridge.js";
 import { parseAllowedHosts } from "./fetch-policy.js";
@@ -112,9 +112,9 @@ export function installHostFunctions(
   });
 
   register("__bridge_datastoreSet", async (argsJson) => {
-    const [key, value] = args<[string, DatastoreValue]>(argsJson);
+    const [key, value, opts] = args<[string, DatastoreValue, DatastoreSetOptions | undefined]>(argsJson);
     boundedString(key, 1024);
-    await datastore.set(agentId, key, value);
+    await datastore.set(agentId, key, value, opts);
     return null;
   });
 

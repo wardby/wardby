@@ -15,10 +15,13 @@ interface FakeAgentRow {
 
 function fakeDatastore() {
   const store = new Map<string, DatastoreValue>();
+  const setOpts = new Map<string, { pii?: boolean }>();
   return {
+    setOpts,
     get: async (agentId: string, key: string) => store.get(`${agentId}:${key}`),
-    set: async (agentId: string, key: string, value: DatastoreValue) => {
+    set: async (agentId: string, key: string, value: DatastoreValue, opts?: { pii?: boolean }) => {
       store.set(`${agentId}:${key}`, value);
+      if (opts) setOpts.set(`${agentId}:${key}`, opts);
     },
     delete: async (agentId: string, key: string) => {
       store.delete(`${agentId}:${key}`);
@@ -83,6 +86,19 @@ describe("datastore tools", () => {
     const getResult = await client.callTool({ name: "datastore_get", arguments: { agentId: "a1", key: "k1" } });
     expect(getResult.isError).toBeFalsy();
     expect(parseText(getResult as never)).toEqual({ value: "v1" });
+    await client.close();
+  });
+
+  it("datastore_set passes a pii:true flag through to the underlying store", async () => {
+    const db = fakeDb([{ id: "a1", ownerId: "p1" }]);
+    const datastore = fakeDatastore();
+    const mcp = buildMcpServer({ providers: { datastore } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, datastore, "p1", ["agents:read", "datastore:write"]));
+    registerDatastoreTools(mcp);
+    const client = await connectClient(mcp);
+
+    await client.callTool({ name: "datastore_set", arguments: { agentId: "a1", key: "k1", value: "v1", pii: true } });
+    expect(datastore.setOpts.get("a1:k1")).toEqual({ pii: true });
     await client.close();
   });
 

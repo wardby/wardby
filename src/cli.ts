@@ -69,12 +69,12 @@ function buildEngine(): ProviderRegistry["engine"] {
   return new NativeEngine();
 }
 
-function buildDatastore(): ProviderRegistry["datastore"] {
+function buildDatastore(cipher: ProviderRegistry["secrets"]): ProviderRegistry["datastore"] {
   const config = loadProviderConfig();
   if (config.datastore !== "postgres") {
     fail(`DATASTORE "${config.datastore}" has no adapter yet (only "postgres").`);
   }
-  return new PostgresDatastore(prisma);
+  return new PostgresDatastore(prisma, cipher);
 }
 
 function buildSecrets(): ProviderRegistry["secrets"] {
@@ -320,8 +320,8 @@ async function run(name: string | undefined): Promise<void> {
 
   const llm = buildLlmProvider();
   const engine = buildEngine();
-  const datastore = buildDatastore();
   const secrets = buildSecrets();
+  const datastore = buildDatastore(secrets);
 
   let run;
   try {
@@ -409,8 +409,8 @@ async function scheduler(args: string[]): Promise<void> {
   assertInProcessExecutor();
   const llm = buildLlmProvider();
   const engine = buildEngine();
-  const datastore = buildDatastore();
   const secrets = buildSecrets();
+  const datastore = buildDatastore(secrets);
   const executor = new InProcessExecutor({ llm, engine, datastore, secrets }, prisma);
   const reconciler = startReconciler({ db: prisma });
   const sched = startScheduler({ executor, db: prisma, scope });

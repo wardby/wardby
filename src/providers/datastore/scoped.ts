@@ -6,7 +6,7 @@
  * prefix throws loudly instead — a tool author needs to know their write
  * was rejected, not silently believe it landed.
  */
-import type { Datastore, DatastoreValue } from "./types.js";
+import type { Datastore, DatastoreSetOptions, DatastoreValue } from "./types.js";
 
 function isAllowed(key: string, allowedPrefixes: readonly string[]): boolean {
   return allowedPrefixes.some((prefix) => key.startsWith(prefix));
@@ -18,9 +18,9 @@ export function scopeDatastore(datastore: Datastore, allowedPrefixes: readonly s
       if (!isAllowed(key, allowedPrefixes)) return undefined;
       return datastore.get(agentId, key);
     },
-    async set(agentId: string, key: string, value: DatastoreValue): Promise<void> {
+    async set(agentId: string, key: string, value: DatastoreValue, opts?: DatastoreSetOptions): Promise<void> {
       if (!isAllowed(key, allowedPrefixes)) throw new Error("datastore_prefix_not_allowed");
-      await datastore.set(agentId, key, value);
+      await datastore.set(agentId, key, value, opts);
     },
     async delete(agentId: string, key: string): Promise<void> {
       if (!isAllowed(key, allowedPrefixes)) return;

@@ -363,7 +363,7 @@ globalThis.fetch = async (url, init) => {
 
 globalThis.datastore = {
   get: async (key) => JSON.parse(await __bridge_datastoreGet(JSON.stringify([key]))),
-  set: async (key, value) => { await __bridge_datastoreSet(JSON.stringify([key, value])); },
+  set: async (key, value, opts) => { await __bridge_datastoreSet(JSON.stringify([key, value, opts])); },
   delete: async (key) => { await __bridge_datastoreDelete(JSON.stringify([key])); },
   list: async (prefix) => JSON.parse(await __bridge_datastoreList(JSON.stringify([prefix === undefined ? null : prefix]))),
 };

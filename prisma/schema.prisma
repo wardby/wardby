@@ -114,10 +114,18 @@ model AgentTool {
 
 /// Phase 3: the datastore seam's Postgres-backed default. Scoped by agentId
 /// so one agent's tools can't read another's state.
+/// Phase 6: optional per-entry PII encryption. `pii` is opt-in per `set()`
+/// call (never inferred) — when true, `value` holds a SecretCipher blob
+/// (same "iv:tag:ciphertext" envelope as Secret.ciphertext) instead of the
+/// plain JSON value, and `keyId` records which cipher key encrypted it, for
+/// rotation. A `pii: false` row (the default) is stored exactly as before —
+/// unencrypted, and `keyId` is null.
 model DatastoreEntry {
   agentId   String
   key       String
   value     Json
+  pii       Boolean  @default(false)
+  keyId     String?
   updatedAt DateTime @updatedAt
 
   @@id([agentId, key])

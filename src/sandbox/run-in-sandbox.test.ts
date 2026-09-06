@@ -161,6 +161,26 @@ describe("runInSandbox", () => {
     expect(getFromB).toEqual({ ok: true, value: null });
   });
 
+  it("passes a pii option from sandboxed code through to the host datastore.set", async () => {
+    const setCalls: unknown[] = [];
+    const datastore: Datastore = {
+      ...fakeDatastore(),
+      async set(agentId, key, value, opts) {
+        setCalls.push(opts);
+      },
+    };
+    const result = await runInSandbox({
+      code: "await datastore.set('ssn', '123-45-6789', { pii: true }); return 'ok';",
+      params: {},
+      agentId: "agent-a",
+      datastore,
+      toolName: "pii-setter",
+      limits: FAST_LIMITS,
+    });
+    expect(result).toEqual({ ok: true, value: "ok" });
+    expect(setCalls).toEqual([{ pii: true }]);
+  });
+
   it("supports fetch, JSON, and console without crossing into host state", async () => {
     const result = await runInSandbox({
       code: `

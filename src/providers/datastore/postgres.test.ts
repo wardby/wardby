@@ -2,8 +2,10 @@ import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { PostgresDatastore } from "./postgres.js";
+import { AppKeySecretCipher } from "../secrets/app-key.js";
 
 const databaseUrl = process.env.DATABASE_URL;
+const cipherKey = "0".repeat(64); // 32 bytes hex
 
 if (!databaseUrl) {
   console.warn(
@@ -73,5 +75,40 @@ describe.skipIf(!databaseUrl)("PostgresDatastore (database)", () => {
     expect(await datastore.get(agentB, "secret")).toBeUndefined();
     expect(await datastore.list(agentB)).toEqual([]);
     expect(await datastore.get(agentA, "secret")).toBe("a-only");
+  });
+
+  describe("pii: true", () => {
+    const cipher = new AppKeySecretCipher(cipherKey);
+    const encrypted = new PostgresDatastore(prisma, cipher);
+
+    it("stores the value encrypted at rest and decrypts it back on get", async () => {
+      const agentId = newAgentId();
+      await encrypted.set(agentId, "ssn", { value: "123-45-6789" }, { pii: true });
+
+      const raw = await prisma.datastoreEntry.findUniqueOrThrow({ where: { agentId_key: { agentId, key: "ssn" } } });
+      expect(raw.pii).toBe(true);
+      expect(raw.keyId).toBe(cipher.keyId());
+      expect(JSON.stringify(raw.value)).not.toContain("123-45-6789");
+
+      expect(await encrypted.get(agentId, "ssn")).toEqual({ value: "123-45-6789" });
+    });
+
+    it("a pii:false (default) entry is stored and readable as plain JSON, unaffected by an available cipher", async () => {
+      const agentId = newAgentId();
+      await encrypted.set(agentId, "plain", { value: "not sensitive" });
+
+      const raw = await prisma.datastoreEntry.findUniqueOrThrow({ where: { agentId_key: { agentId, key: "plain" } } });
+      expect(raw.pii).toBe(false);
+      expect(raw.keyId).toBeNull();
+      expect(await encrypted.get(agentId, "plain")).toEqual({ value: "not sensitive" });
+    });
+
+    it("throws rather than silently storing/reading plaintext when no cipher is configured", async () => {
+      const agentId = newAgentId();
+      await expect(datastore.set(agentId, "ssn", "123-45-6789", { pii: true })).rejects.toThrow("datastore_pii_cipher_unavailable");
+
+      await prisma.datastoreEntry.create({ data: { agentId, key: "orphaned-pii", value: "some-ciphertext", pii: true, keyId: "appkey:whatever" } });
+      await expect(datastore.get(agentId, "orphaned-pii")).rejects.toThrow("datastore_pii_cipher_unavailable");
+    });
   });
 });

@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { Datastore, DatastoreValue } from "./types.js";
+import type { Datastore, DatastoreSetOptions, DatastoreValue } from "./types.js";
 import { scopeDatastore } from "./scoped.js";
 
-function fakeDatastore(): Datastore {
+function fakeDatastore(): Datastore & { setCalls: [string, string, DatastoreValue, DatastoreSetOptions | undefined][] } {
   const store = new Map<string, DatastoreValue>();
+  const setCalls: [string, string, DatastoreValue, DatastoreSetOptions | undefined][] = [];
   return {
+    setCalls,
     async get(agentId, key) { return store.get(`${agentId}:${key}`); },
-    async set(agentId, key, value) { store.set(`${agentId}:${key}`, value); },
+    async set(agentId, key, value, opts) { setCalls.push([agentId, key, value, opts]); store.set(`${agentId}:${key}`, value); },
     async delete(agentId, key) { store.delete(`${agentId}:${key}`); },
     async list(agentId, prefix) {
       const p = `${agentId}:${prefix ?? ""}`;
@@ -60,6 +62,13 @@ describe("scopeDatastore", () => {
     const scoped = scopeDatastore(inner, [""]);
     await scoped.set("a1", "anything", "v");
     await expect(scoped.get("a1", "anything")).resolves.toBe("v");
+  });
+
+  it("passes the pii option through to the underlying store's set", async () => {
+    const inner = fakeDatastore();
+    const scoped = scopeDatastore(inner, ["allowed:"]);
+    await scoped.set("a1", "allowed:1", "v", { pii: true });
+    expect(inner.setCalls).toEqual([["a1", "allowed:1", "v", { pii: true }]]);
   });
 
   it("an empty allowlist denies every read, write, and delete", async () => {
