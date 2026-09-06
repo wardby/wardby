@@ -231,6 +231,8 @@ model Webhook {
   owner       Principal?    @relation(fields: [ownerId], references: [id])
   createdAt   DateTime      @default(now())
   lastFiredAt DateTime?
+
+  @@index([agentId])
 }
 
 /// Phase 4 (self-hosted AS only): a registered OAuth client. Created and
