@@ -26,6 +26,7 @@
     "croner": "^10.0.1",
     "fast-xml-parser": "^5.11.1",
     "gpt-tokenizer": "^2.5.0",
+    "jose": "^6.2.12",
     "node-html-parser": "^9.0.3",
     "openai": "^4.67.0",
     "papaparse": "^5.7.0",
