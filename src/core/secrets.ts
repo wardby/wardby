@@ -98,3 +98,20 @@ export function buildSecretsAccessor(
     },
   };
 }
+
+/**
+ * Wraps a `SecretsAccessor` so `get()` only ever resolves a name the caller
+ * has declared this specific tool attachment may read — every other name
+ * behaves exactly like one that was never attached (`undefined`), never a
+ * throw, matching the existing "unattached name" convention. The underlying
+ * accessor is never even called for a disallowed name.
+ */
+export function scopeSecretsAccessor(accessor: SecretsAccessor, allowedNames: readonly string[]): SecretsAccessor {
+  const allowed = new Set(allowedNames);
+  return {
+    async get(name: string): Promise<string | undefined> {
+      if (!allowed.has(name)) return undefined;
+      return accessor.get(name);
+    },
+  };
+}

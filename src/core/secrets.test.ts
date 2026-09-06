@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createSecret, listSecrets, attachSecret, detachSecret, deleteSecret, buildSecretsAccessor } from "./secrets.js";
+import { createSecret, listSecrets, attachSecret, detachSecret, deleteSecret, buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
 
 function fakeCipher(): SecretCipher {
@@ -174,5 +174,34 @@ describe("core/secrets", () => {
     await deleteSecret(secret.id, db);
     const list = await listSecrets("p1", db);
     expect(list.length).toBe(0);
+  });
+});
+
+describe("scopeSecretsAccessor", () => {
+  function fakeAccessor(values: Record<string, string>) {
+    return { async get(name: string) { return values[name]; } };
+  }
+
+  it("resolves a name that is in the allowlist", async () => {
+    const scoped = scopeSecretsAccessor(fakeAccessor({ ALLOWED: "v1", BLOCKED: "v2" }), ["ALLOWED"]);
+    await expect(scoped.get("ALLOWED")).resolves.toBe("v1");
+  });
+
+  it("resolves undefined for a name that exists on the underlying accessor but is not in the allowlist", async () => {
+    const scoped = scopeSecretsAccessor(fakeAccessor({ ALLOWED: "v1", BLOCKED: "v2" }), ["ALLOWED"]);
+    await expect(scoped.get("BLOCKED")).resolves.toBeUndefined();
+  });
+
+  it("never calls the underlying accessor for a disallowed name", async () => {
+    let calls = 0;
+    const accessor = { async get(name: string) { calls++; return "x"; } };
+    const scoped = scopeSecretsAccessor(accessor, []);
+    await scoped.get("ANYTHING");
+    expect(calls).toBe(0);
+  });
+
+  it("resolves undefined for every name when the allowlist is empty", async () => {
+    const scoped = scopeSecretsAccessor(fakeAccessor({ A: "1" }), []);
+    await expect(scoped.get("A")).resolves.toBeUndefined();
   });
 });
