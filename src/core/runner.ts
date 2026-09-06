@@ -22,7 +22,9 @@ import type { ProviderRegistry } from "../providers/index.js";
 import type { LoadedTool } from "../providers/engine/types.js";
 import { validateParams } from "../sandbox/zod-params.js";
 import { runInSandbox } from "../sandbox/run-in-sandbox.js";
-import { buildSecretsAccessor } from "./secrets.js";
+import { asStringArray } from "../sandbox/tool-capabilities.js";
+import { scopeDatastore } from "../providers/datastore/scoped.js";
+import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
 import { prisma as defaultDb } from "./db.js";
 
 /** The subset of the Prisma client the runner touches — mockable in tests. */
@@ -91,7 +93,13 @@ export async function executeRun(
     const toolsByName = new Map(
       attached.map((attachment) => [
         attachment.tool.name,
-        { code: attachment.tool.code, paramsZod: attachment.tool.paramsZod },
+        {
+          code: attachment.tool.code,
+          paramsZod: attachment.tool.paramsZod,
+          allowedSecrets: asStringArray(attachment.allowedSecrets),
+          allowedDatastorePrefixes: asStringArray(attachment.allowedDatastorePrefixes),
+          allowedHosts: asStringArray(attachment.allowedHosts),
+        },
       ]),
     );
     const secretsAccessor = buildSecretsAccessor(agent.id, providers.secrets, db);
@@ -126,8 +134,9 @@ export async function executeRun(
         code: tool.code,
         params: validation.value,
         agentId: agent.id,
-        datastore: providers.datastore,
-        secrets: secretsAccessor,
+        datastore: scopeDatastore(providers.datastore, tool.allowedDatastorePrefixes),
+        secrets: scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets),
+        allowedFetchHosts: tool.allowedHosts,
         toolName: name,
       });
       if (!result.ok) {

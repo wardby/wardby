@@ -29,10 +29,19 @@ interface FakeTool {
   code: string;
 }
 
+interface FakeAttachment {
+  agentId: string;
+  toolId: string;
+  allowedSecrets?: string[];
+  allowedDatastorePrefixes?: string[];
+  allowedHosts?: string[];
+}
+
 function fakeDb(
   agents: FakeAgent[],
   tools: FakeTool[] = [],
-  attachments: { agentId: string; toolId: string }[] = [],
+  attachments: FakeAttachment[] = [],
+  secretsData: { agentId: string; name: string; value: string }[] = [],
 ): RunnerDb {
   const byName = new Map(agents.map((a) => [a.name, a]));
   const byId = new Map(agents.map((a) => [a.id, a]));
@@ -77,7 +86,21 @@ function fakeDb(
           .filter((a) => a.agentId === where.agentId)
           .map((a) => ({ ...a, tool: toolsById.get(a.toolId) }))) as any,
     },
+    agentSecret: {
+      findFirst: (async ({ where }: any) => {
+        const row = secretsData.find((s) => s.agentId === where.agentId && s.name === where.secret.name);
+        return row ? { secret: { ciphertext: row.value } } : null;
+      }) as any,
+    },
   } as unknown as RunnerDb;
+}
+
+function fakeCipher(): SecretCipher {
+  return {
+    keyId: () => "k1",
+    encrypt: async (v: string) => v,
+    decrypt: async (v: string) => v,
+  } as unknown as SecretCipher;
 }
 
 function fakeDatastore(): Datastore {
@@ -303,5 +326,65 @@ describe("runAgent", () => {
     await expect(runAgent("ghost", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db)).rejects.toThrow(
       /Unknown agent/,
     );
+  });
+
+  it("scopes a sandboxed tool's datastore access to its declared allowedDatastorePrefixes", async () => {
+    const db = fakeDb(
+      [{ id: "a1", name: "scoped-ds", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 }],
+      [{
+        id: "t1",
+        name: "write_key",
+        description: "x",
+        paramsZod: "z.object({ key: z.string() })",
+        jsonSchema: {},
+        code: "await datastore.set(params.key, 'v'); return 'ok';",
+      }],
+      [{ agentId: "a1", toolId: "t1", allowedDatastorePrefixes: ["allowed:"] }],
+    );
+    let captured: EngineRunContext | undefined;
+    const engine = fakeEngine(
+      { status: "succeeded", finalText: "", turns: 1, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } },
+      (ctx) => { captured = ctx; },
+    );
+
+    await runAgent("scoped-ds", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
+
+    const allowed = JSON.parse(await captured!.runSandboxTool("write_key", JSON.stringify({ key: "allowed:1" })));
+    expect(allowed).toBe("ok");
+
+    const blocked = JSON.parse(await captured!.runSandboxTool("write_key", JSON.stringify({ key: "blocked:1" })));
+    expect(blocked).toMatchObject({ error: "thrown", message: expect.stringContaining("datastore_prefix_not_allowed") });
+  });
+
+  it("scopes a sandboxed tool's secrets access to its declared allowedSecrets", async () => {
+    const db = fakeDb(
+      [{ id: "a1", name: "scoped-secrets", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 }],
+      [{
+        id: "t1",
+        name: "read_secret",
+        description: "x",
+        paramsZod: "z.object({ name: z.string() })",
+        jsonSchema: {},
+        code: "const v = await secrets.get(params.name); return v === undefined ? null : v;",
+      }],
+      [{ agentId: "a1", toolId: "t1", allowedSecrets: ["ALLOWED"] }],
+      [
+        { agentId: "a1", name: "ALLOWED", value: "secret-a" },
+        { agentId: "a1", name: "BLOCKED", value: "secret-b" },
+      ],
+    );
+    let captured: EngineRunContext | undefined;
+    const engine = fakeEngine(
+      { status: "succeeded", finalText: "", turns: 1, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } },
+      (ctx) => { captured = ctx; },
+    );
+
+    await runAgent("scoped-secrets", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: fakeCipher() }, db);
+
+    const allowed = JSON.parse(await captured!.runSandboxTool("read_secret", JSON.stringify({ name: "ALLOWED" })));
+    expect(allowed).toBe("secret-a");
+
+    const blocked = JSON.parse(await captured!.runSandboxTool("read_secret", JSON.stringify({ name: "BLOCKED" })));
+    expect(blocked).toBeNull();
   });
 });
