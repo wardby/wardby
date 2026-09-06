@@ -11,6 +11,7 @@ import Papa from "papaparse";
 import { XMLParser } from "fast-xml-parser";
 import type { QuickJSContext, QuickJSRuntime } from "quickjs-emscripten";
 import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
+import type { SecretsAccessor } from "../core/secrets.js";
 import { registerJsonAsyncFunction } from "./bridge.js";
 import { assertFetchDestinationAllowed } from "./fetch-policy.js";
 import { FETCH_TIMEOUT_MS } from "./limits.js";
@@ -25,6 +26,8 @@ export interface HostFunctionOptions {
   datastore: Datastore;
   /** Tag prefixed onto forwarded console output — typically the tool name. */
   logTag: string;
+  /** Omitted (e.g. dry_run_tool, no real agent) — secrets.get always resolves undefined. */
+  secrets?: SecretsAccessor;
 }
 
 function args<T extends unknown[]>(argsJson: string): T {
@@ -36,7 +39,7 @@ export function installHostFunctions(
   runtime: QuickJSRuntime,
   options: HostFunctionOptions,
 ): void {
-  const { agentId, datastore, logTag } = options;
+  const { agentId, datastore, logTag, secrets } = options;
 
   registerJsonAsyncFunction(context, runtime, "__bridge_console", async (argsJson) => {
     const [level, logArgs] = args<[string, unknown[]]>(argsJson);
@@ -107,6 +110,12 @@ export function installHostFunctions(
   registerJsonAsyncFunction(context, runtime, "__bridge_datastoreList", async (argsJson) => {
     const [prefix] = args<[string | null]>(argsJson);
     return datastore.list(agentId, prefix ?? undefined);
+  });
+
+  registerJsonAsyncFunction(context, runtime, "__bridge_secretsGet", async (argsJson) => {
+    const [name] = args<[string]>(argsJson);
+    const value = secrets ? await secrets.get(name) : undefined;
+    return value ?? null;
   });
 
   // Returns a focused, JSON-serializable extraction rather than the full DOM

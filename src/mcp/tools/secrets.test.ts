@@ -1,0 +1,190 @@
+import { describe, it, expect } from "vitest";
+import { InMemoryTransport } from "@modelcontextprotocol/server";
+import { Client } from "@modelcontextprotocol/client";
+import { buildMcpServer } from "../server.js";
+import { registerSecretsTools } from "./secrets.js";
+import type { McpRequestContext } from "../context.js";
+import type { SecretCipher } from "../../providers/secrets/types.js";
+
+const CANONICAL_URI = "https://host/mcp";
+
+function fakeCipher(): SecretCipher {
+  const store = new Map<string, string>();
+  let counter = 0;
+  return {
+    keyId: () => "appkey:fake",
+    encrypt: async (plaintext) => {
+      const id = `ct_${++counter}`;
+      store.set(id, plaintext);
+      return id;
+    },
+    decrypt: async (ciphertext) => store.get(ciphertext) ?? "",
+  };
+}
+
+interface FakeSecretRow {
+  id: string;
+  name: string;
+  ciphertext: string;
+  keyId: string;
+  ownerId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+interface FakeAgentRow {
+  id: string;
+  ownerId: string | null;
+}
+
+function fakeDb(agents: FakeAgentRow[] = []) {
+  const secrets = new Map<string, FakeSecretRow>();
+  const agentRows = new Map(agents.map((a) => [a.id, a]));
+  const agentSecrets: { agentId: string; secretId: string }[] = [];
+  let counter = 0;
+
+  return {
+    secret: {
+      create: async ({ data }: { data: Partial<FakeSecretRow> & { name: string } }) => {
+        const now = new Date();
+        const row: FakeSecretRow = { id: `secret_${++counter}`, createdAt: now, updatedAt: now, ownerId: null, ...data } as FakeSecretRow;
+        secrets.set(row.id, row);
+        return row;
+      },
+      findMany: async ({ where }: { where: { ownerId: string } }) => [...secrets.values()].filter((s) => s.ownerId === where.ownerId),
+      findUnique: async ({ where }: { where: { ownerId_name: { ownerId: string; name: string } } }) =>
+        [...secrets.values()].find((s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name) ?? null,
+      delete: async ({ where }: { where: { id: string } }) => {
+        const row = secrets.get(where.id);
+        secrets.delete(where.id);
+        return row;
+      },
+    },
+    agent: {
+      findUnique: async ({ where }: { where: { id: string } }) => agentRows.get(where.id) ?? null,
+    },
+    agentSecret: {
+      create: async ({ data }: { data: { agentId: string; secretId: string } }) => {
+        agentSecrets.push(data);
+        return data;
+      },
+      deleteMany: async ({ where }: { where: { agentId: string; secretId: string } }) => {
+        const before = agentSecrets.length;
+        const kept = agentSecrets.filter((a) => !(a.agentId === where.agentId && a.secretId === where.secretId));
+        agentSecrets.length = 0;
+        agentSecrets.push(...kept);
+        return { count: before - kept.length };
+      },
+      findFirst: async ({ where }: { where: { agentId: string; secret: { name: string } } }) => {
+        const match = agentSecrets.find((a) => a.agentId === where.agentId && secrets.get(a.secretId)?.name === where.secret.name);
+        return match ? { ...match, secret: secrets.get(match.secretId) } : null;
+      },
+    },
+  } as unknown as import("@prisma/client").PrismaClient;
+}
+
+function fakeCtx(db: ReturnType<typeof fakeDb>, cipher: SecretCipher, principalId: string, scopes: string[]): McpRequestContext {
+  return {
+    principal: { id: principalId, subject: principalId, createdAt: new Date() } as never,
+    scopes: new Set(scopes),
+    providers: { secrets: cipher } as never,
+    db,
+    clientSupportsTasks: false,
+  };
+}
+
+async function connectClient(mcp: ReturnType<typeof buildMcpServer>) {
+  const server = mcp.factory({ era: "modern" }) as import("@modelcontextprotocol/server").McpServer;
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test-client", version: "1.0.0" }, { versionNegotiation: { mode: "auto" } });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  return client;
+}
+
+function parseText(result: { content: { text: string }[] }): unknown {
+  return JSON.parse(result.content[0].text);
+}
+
+describe("secrets tools", () => {
+  it("create_secret requires secrets:write and never returns the value", async () => {
+    const db = fakeDb();
+    const cipher = fakeCipher();
+    const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
+    registerSecretsTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-live-abc123" } });
+    expect(result.isError).toBeFalsy();
+    const body = parseText(result as never) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("value");
+    expect(body).not.toHaveProperty("ciphertext");
+    expect(JSON.stringify(body)).not.toContain("sk-live-abc123");
+    await client.close();
+  });
+
+  it("create_secret without secrets:write is rejected", async () => {
+    const db = fakeDb();
+    const cipher = fakeCipher();
+    const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["agents:read"]));
+    registerSecretsTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "x" } });
+    expect(result.isError).toBe(true);
+    await client.close();
+  });
+
+  it("list_secrets never returns the value", async () => {
+    const db = fakeDb();
+    const cipher = fakeCipher();
+    const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
+    registerSecretsTools(mcp);
+    const client = await connectClient(mcp);
+
+    await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-live-abc123" } });
+    const listed = await client.callTool({ name: "list_secrets", arguments: {} });
+    const list = parseText(listed as never) as Record<string, unknown>[];
+    expect(list.length).toBe(1);
+    expect(JSON.stringify(list)).not.toContain("sk-live-abc123");
+    await client.close();
+  });
+
+  it("attach_secret by a non-owner of the agent is forbidden", async () => {
+    const db = fakeDb([{ id: "a1", ownerId: "someone-else" }]);
+    const cipher = fakeCipher();
+    const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
+    registerSecretsTools(mcp);
+    const client = await connectClient(mcp);
+
+    await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-live-abc123" } });
+    const result = await client.callTool({ name: "attach_secret", arguments: { agentId: "a1", name: "API_KEY" } });
+    expect(result.isError).toBe(true);
+    await client.close();
+  });
+
+  it("attach_secret + delete_secret round-trip for the owner", async () => {
+    const db = fakeDb([{ id: "a1", ownerId: "p1" }]);
+    const cipher = fakeCipher();
+    const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
+    registerSecretsTools(mcp);
+    const client = await connectClient(mcp);
+
+    const created = await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-live-abc123" } });
+    const { id } = parseText(created as never) as { id: string };
+
+    const attached = await client.callTool({ name: "attach_secret", arguments: { agentId: "a1", name: "API_KEY" } });
+    expect(attached.isError).toBeFalsy();
+
+    const deleted = await client.callTool({ name: "delete_secret", arguments: { id } });
+    expect(deleted.isError).toBeFalsy();
+
+    const listed = await client.callTool({ name: "list_secrets", arguments: {} });
+    expect(parseText(listed as never)).toEqual([]);
+    await client.close();
+  });
+});

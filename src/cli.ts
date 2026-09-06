@@ -16,6 +16,7 @@ import { loadProviderConfig } from "./config/providers.js";
 import { RoutingLlmProvider, resolveLlmRegistrations } from "./providers/llm/index.js";
 import { InProcessExecutor } from "./providers/executor/index.js";
 import { PostgresDatastore } from "./providers/datastore/index.js";
+import { buildSecretCipher } from "./providers/secrets/index.js";
 import type { ProviderRegistry } from "./providers/index.js";
 import { prisma } from "./core/db.js";
 import { runAgent } from "./core/runner.js";
@@ -66,6 +67,15 @@ function buildDatastore(): ProviderRegistry["datastore"] {
     fail(`DATASTORE "${config.datastore}" has no adapter yet (only "postgres").`);
   }
   return new PostgresDatastore(prisma);
+}
+
+function buildSecrets(): ProviderRegistry["secrets"] {
+  const config = loadProviderConfig();
+  try {
+    return buildSecretCipher(config);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
 }
 
 function assertInProcessExecutor(): void {
@@ -274,10 +284,11 @@ async function run(name: string | undefined): Promise<void> {
   const llm = buildLlmProvider();
   const engine = buildEngine();
   const datastore = buildDatastore();
+  const secrets = buildSecrets();
 
   let run;
   try {
-    run = await runAgent(name!, { llm, engine, datastore }, prisma, (delta) => {
+    run = await runAgent(name!, { llm, engine, datastore, secrets }, prisma, (delta) => {
       process.stdout.write(delta);
     });
   } catch (err) {
@@ -362,7 +373,8 @@ async function scheduler(args: string[]): Promise<void> {
   const llm = buildLlmProvider();
   const engine = buildEngine();
   const datastore = buildDatastore();
-  const executor = new InProcessExecutor({ llm, engine, datastore }, prisma);
+  const secrets = buildSecrets();
+  const executor = new InProcessExecutor({ llm, engine, datastore, secrets }, prisma);
   const reconciler = startReconciler({ db: prisma });
   const sched = startScheduler({ executor, db: prisma, scope });
 

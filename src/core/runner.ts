@@ -22,10 +22,11 @@ import type { ProviderRegistry } from "../providers/index.js";
 import type { LoadedTool } from "../providers/engine/types.js";
 import { validateParams } from "../sandbox/zod-params.js";
 import { runInSandbox } from "../sandbox/run-in-sandbox.js";
+import { buildSecretsAccessor } from "./secrets.js";
 import { prisma as defaultDb } from "./db.js";
 
 /** The subset of the Prisma client the runner touches — mockable in tests. */
-export type RunnerDb = Pick<PrismaClient, "agent" | "run" | "agentTool">;
+export type RunnerDb = Pick<PrismaClient, "agent" | "run" | "agentTool" | "agentSecret">;
 
 /** Persists a new pending Run for the named agent. Throws if the agent is unknown. */
 export async function createRun(
@@ -43,7 +44,7 @@ export async function createRun(
 /** Drives an existing Run (created by `createRun` or the scheduler) to a terminal state. */
 export async function executeRun(
   runId: string,
-  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore">,
+  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets">,
   db: RunnerDb = defaultDb,
   onText?: (delta: string) => void,
 ): Promise<Run> {
@@ -80,6 +81,7 @@ export async function executeRun(
         { code: attachment.tool.code, paramsZod: attachment.tool.paramsZod },
       ]),
     );
+    const secretsAccessor = buildSecretsAccessor(agent.id, providers.secrets, db);
 
     const runSandboxTool = async (name: string, argsJson: string): Promise<string> => {
       const tool = toolsByName.get(name);
@@ -110,6 +112,7 @@ export async function executeRun(
         params: validation.value,
         agentId: agent.id,
         datastore: providers.datastore,
+        secrets: secretsAccessor,
         toolName: name,
       });
       if (!result.ok) {
@@ -163,7 +166,7 @@ export async function executeRun(
 /** Convenience: create + execute a manual run in one call (what the CLI's `reevo run` uses). */
 export async function runAgent(
   agentName: string,
-  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore">,
+  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets">,
   db: RunnerDb = defaultDb,
   onText?: (delta: string) => void,
 ): Promise<Run> {

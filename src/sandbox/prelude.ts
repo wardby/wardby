@@ -368,6 +368,15 @@ globalThis.datastore = {
   list: async (prefix) => JSON.parse(await __bridge_datastoreList(JSON.stringify([prefix === undefined ? null : prefix]))),
 };
 
+// ---- secrets (bridged; decrypt-on-demand, scoped per agent by the host) ----
+
+globalThis.secrets = {
+  get: async (name) => {
+    const raw = JSON.parse(await __bridge_secretsGet(JSON.stringify([name])));
+    return raw === null ? undefined : raw;
+  },
+};
+
 // ---- parsers (bridged; real parser libraries run host-side) ----
 
 globalThis.parseHTML = async (html) => JSON.parse(await __bridge_parseHTML(JSON.stringify([String(html)])));

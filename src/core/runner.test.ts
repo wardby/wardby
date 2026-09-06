@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
 import type { Engine, EngineResult, EngineRunContext } from "../providers/engine/types.js";
 import type { LlmProvider } from "../providers/index.js";
+import type { SecretCipher } from "../providers/secrets/types.js";
 import { runAgent, type RunnerDb } from "./runner.js";
 
 // Phase 3: executeRun is a thin wrapper — budget/loop logic now lives in
@@ -98,6 +99,9 @@ function fakeDatastore(): Datastore {
 }
 
 const noopLlm = {} as LlmProvider;
+// None of these tests' sandboxed tool bodies call secrets.get, so this
+// cipher is constructed into a SecretsAccessor closure but never invoked.
+const noopSecretCipher = {} as SecretCipher;
 
 function fakeEngine(result: EngineResult, capture?: (ctx: EngineRunContext) => void): Engine {
   return {
@@ -118,7 +122,7 @@ describe("runAgent", () => {
       usage: { tokensIn: 13, tokensOut: 8, costUsd: 0.0005 },
     });
 
-    const run = await runAgent("greeter", { llm: noopLlm, engine, datastore: fakeDatastore() }, db);
+    const run = await runAgent("greeter", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
 
     expect(run.status).toBe("succeeded");
     expect(run.tokensIn).toBe(13);
@@ -138,7 +142,7 @@ describe("runAgent", () => {
       error: "Estimated input cost exceeds budget before any LLM call.",
     });
 
-    const run = await runAgent("tight", { llm: noopLlm, engine, datastore: fakeDatastore() }, db);
+    const run = await runAgent("tight", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
 
     expect(run.status).toBe("refused");
     expect(run.error).toBe("Estimated input cost exceeds budget before any LLM call.");
@@ -154,7 +158,7 @@ describe("runAgent", () => {
       },
     );
 
-    await runAgent("solo", { llm: noopLlm, engine, datastore: fakeDatastore() }, db);
+    await runAgent("solo", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
 
     expect(captured?.agent).toEqual({ systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 7 });
     expect(captured?.tools).toEqual([]);
@@ -189,7 +193,7 @@ describe("runAgent", () => {
       },
     );
 
-    await runAgent("weatherbot", { llm: noopLlm, engine, datastore: fakeDatastore() }, db);
+    await runAgent("weatherbot", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
 
     expect(captured?.tools).toHaveLength(1);
     expect(captured?.tools[0].name).toBe("getWeather");
@@ -221,7 +225,7 @@ describe("runAgent", () => {
       },
     };
 
-    await runAgent("doubler", { llm: noopLlm, engine, datastore: fakeDatastore() }, db);
+    await runAgent("doubler", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
 
     expect(JSON.parse(results[0])).toEqual({ doubled: 42 });
     expect(JSON.parse(results[1]).error).toBe("validation_failed");
@@ -236,7 +240,7 @@ describe("runAgent", () => {
       },
     };
 
-    const run = await runAgent("flaky", { llm: noopLlm, engine, datastore: fakeDatastore() }, db);
+    const run = await runAgent("flaky", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
 
     expect(run.status).toBe("failed");
     expect(run.error).toBe("engine bug");
@@ -246,7 +250,7 @@ describe("runAgent", () => {
     const db = fakeDb([]);
     const engine = fakeEngine({ status: "succeeded", finalText: "", turns: 0, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } });
 
-    await expect(runAgent("ghost", { llm: noopLlm, engine, datastore: fakeDatastore() }, db)).rejects.toThrow(
+    await expect(runAgent("ghost", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db)).rejects.toThrow(
       /Unknown agent/,
     );
   });

@@ -12,6 +12,7 @@ import { installHostFunctions } from "./host-functions.js";
 import { SANDBOX_PRELUDE } from "./prelude.js";
 import { evalToJson, NON_SERIALIZABLE_MARKER, type SandboxLimits, type SandboxResult } from "./eval-core.js";
 import type { Datastore } from "../providers/datastore/types.js";
+import type { SecretsAccessor } from "../core/secrets.js";
 
 export type { SandboxErrorKind, SandboxLimits, SandboxResult } from "./eval-core.js";
 
@@ -25,6 +26,8 @@ export interface SandboxInvocation {
   toolName: string;
   /** Overrides the default limits (limits.ts) — mainly for fast, deterministic tests. */
   limits?: Partial<SandboxLimits>;
+  /** Omitted for a dry run (no real agent) — secrets.get always resolves undefined. */
+  secrets?: SecretsAccessor;
 }
 
 export async function runInSandbox(invocation: SandboxInvocation): Promise<SandboxResult> {
@@ -51,6 +54,7 @@ export async function runInSandbox(invocation: SandboxInvocation): Promise<Sandb
       agentId: invocation.agentId,
       datastore: invocation.datastore,
       logTag: invocation.toolName,
+      secrets: invocation.secrets,
     });
   });
 }
