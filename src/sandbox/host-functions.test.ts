@@ -51,6 +51,18 @@ describe("secrets.get sandbox host function", () => {
     const result = await runInSandbox({ code: "return await parseHTML('<a href=\"/\">text</a>'.repeat(1001));", params: {}, agentId: "a", datastore: fakeDatastore(), toolName: "limits" });
     expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("html_link_limit") });
   });
+  it("parses valid CSV end-to-end through the worker pool", async () => {
+    const result = await runInSandbox({ code: "return await parseCSV('a,b\\n1,2');", params: {}, agentId: "a", datastore: fakeDatastore(), toolName: "csv-smoke" });
+    expect(result).toMatchObject({ ok: true, value: { data: [{ a: "1", b: "2" }] } });
+  });
+  it("parses valid XML end-to-end through the worker pool", async () => {
+    const result = await runInSandbox({ code: "return await parseXML('<x>hi</x>');", params: {}, agentId: "a", datastore: fakeDatastore(), toolName: "xml-smoke" });
+    expect(result).toMatchObject({ ok: true, value: { x: "hi" } });
+  });
+  it("parses valid HTML end-to-end through the worker pool", async () => {
+    const result = await runInSandbox({ code: "return await parseHTML('<title>T</title><a href=\"/x\">L</a>');", params: {}, agentId: "a", datastore: fakeDatastore(), toolName: "html-smoke" });
+    expect(result).toMatchObject({ ok: true, value: { title: "T", links: [{ href: "/x", text: "L" }] } });
+  });
   it("returns the plaintext for an attached secret", async () => {
     const result = await runInSandbox({
       code: "return await secrets.get('API_KEY');",
