@@ -94,7 +94,9 @@ export async function executeRun(
 
       let parsedArgs: unknown;
       try {
-        parsedArgs = JSON.parse(argsJson);
+        // Some providers stream no JSON delta at all for a zero-parameter
+        // tool call, yielding an empty argsJson rather than "{}".
+        parsedArgs = JSON.parse(argsJson || "{}");
       } catch (err) {
         return JSON.stringify({
           error: "invalid_arguments_json",

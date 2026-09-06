@@ -232,6 +232,34 @@ describe("runAgent", () => {
     expect(JSON.parse(results[2]).error).toBe("unknown_tool");
   });
 
+  it("runSandboxTool treats an empty argsJson as {} for a zero-parameter tool (some providers stream no delta at all for empty args)", async () => {
+    const tool: FakeTool = {
+      id: "t1",
+      name: "ping",
+      description: "Takes no arguments",
+      paramsZod: "z.object({})",
+      jsonSchema: { type: "object", properties: {} },
+      code: "return { pong: true };",
+    };
+    const db = fakeDb(
+      [{ id: "a1", name: "pinger", systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 10 }],
+      [tool],
+      [{ agentId: "a1", toolId: "t1" }],
+    );
+
+    let result = "";
+    const engine: Engine = {
+      async run(ctx) {
+        result = await ctx.runSandboxTool("ping", "");
+        return { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.001 } };
+      },
+    };
+
+    await runAgent("pinger", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
+
+    expect(JSON.parse(result)).toEqual({ pong: true });
+  });
+
   it("marks the run failed when the engine throws unexpectedly", async () => {
     const db = fakeDb([{ id: "a1", name: "flaky", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 }]);
     const engine: Engine = {
