@@ -22,6 +22,7 @@ import type { ProviderRegistry } from "../../providers/index.js";
 import type { ReevoMcpServer } from "../server.js";
 import { authenticate, protectedResourceMetadata, protectedResourceMetadataUrl } from "../auth/resource-server.js";
 import { McpError } from "../errors.js";
+import { handleWebhookIngress } from "../webhooks/ingress.js";
 
 export interface HttpServerConfig {
   canonicalUri: string;
@@ -151,6 +152,27 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
         }
         return;
       }
+    }
+
+    // Webhook ingress: authenticated by the per-webhook secret only, never
+    // OAuth — a narrow, single-route exception to auth being required on
+    // every non-discovery endpoint, matching the design's own carve-out.
+    const webhookMatch = /^\/webhooks\/([^/]+)$/.exec(url.pathname);
+    if (webhookMatch && req.method === "POST") {
+      let body: Record<string, unknown> = {};
+      try {
+        const raw = await readBody(req);
+        if (raw) body = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        // Malformed body is fine — the secret may have arrived via header instead.
+      }
+      const headers: Record<string, string | undefined> = {};
+      for (const [key, value] of Object.entries(req.headers)) {
+        headers[key] = Array.isArray(value) ? value[0] : value;
+      }
+      const result = await handleWebhookIngress(webhookMatch[1], { headers, body }, opts.auth.db);
+      sendJson(res, result.status, result.body);
+      return;
     }
 
     if (url.pathname === "/mcp") {

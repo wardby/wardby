@@ -195,6 +195,98 @@ describe("startHttpServer (forced SSE)", () => {
   });
 });
 
+describe("startHttpServer (webhook ingress)", () => {
+  it("POST /webhooks/:id with a valid secret enqueues a run without any OAuth token", async () => {
+    const { createWebhook } = await import("../../core/webhooks.js");
+
+    interface FakeWebhookRow {
+      id: string;
+      agentId: string;
+      secretHash: string;
+      status: "enabled" | "disabled";
+      ownerId: string | null;
+      createdAt: Date;
+      lastFiredAt: Date | null;
+    }
+    const webhooks = new Map<string, FakeWebhookRow>();
+    let webhookCounter = 0;
+    let runCounter = 0;
+    const webhookDb = {
+      webhook: {
+        create: async ({ data }: { data: Partial<FakeWebhookRow> & { agentId: string; secretHash: string } }) => {
+          const row: FakeWebhookRow = { id: `webhook_${++webhookCounter}`, status: "enabled", ownerId: null, createdAt: new Date(), lastFiredAt: null, ...data } as FakeWebhookRow;
+          webhooks.set(row.id, row);
+          return row;
+        },
+        findUnique: async ({ where }: { where: { id: string } }) => webhooks.get(where.id) ?? null,
+        update: async ({ where, data }: { where: { id: string }; data: Partial<FakeWebhookRow> }) => {
+          const row = webhooks.get(where.id)!;
+          const updated = { ...row, ...data };
+          webhooks.set(where.id, updated);
+          return updated;
+        },
+      },
+      agent: {
+        findUnique: async ({ where }: { where: { id?: string; name?: string } }) =>
+          where.id === "a1" || where.name === "greeter" ? { id: "a1", name: "greeter" } : null,
+      },
+      run: {
+        create: async ({ data }: { data: { agentId: string; trigger: string } }) => ({ id: `run_${++runCounter}`, ...data }),
+      },
+    } as unknown as import("@prisma/client").PrismaClient;
+
+    const { id, secret } = await createWebhook("a1", "p1", webhookDb);
+
+    const mcp = buildMcpServer({ providers: fakeProviders, db: webhookDb, config: { canonicalUri: CANONICAL_URI } });
+    handle = await startHttpServer({
+      mcp,
+      config: { canonicalUri: CANONICAL_URI, httpBind: { host: "127.0.0.1", port: 0 }, authProviderKind: "delegating" },
+      auth: { authProvider: fakeAuthProvider(async () => ({ subject: "x", roles: [], scopes: [] })), db: webhookDb, providers: fakeProviders },
+    });
+
+    const res = await fetch(`http://127.0.0.1:${handle.port}/webhooks/${id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-webhook-secret": secret },
+      body: "{}",
+    });
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as { runId: string };
+    expect(body.runId).toBeTruthy();
+  });
+
+  it("POST /webhooks/:id with a wrong secret -> 401", async () => {
+    const { createWebhook } = await import("../../core/webhooks.js");
+    const webhooks = new Map<string, { id: string; secretHash: string; status: string }>();
+    let counter = 0;
+    const webhookDb = {
+      webhook: {
+        create: async ({ data }: { data: { agentId: string; secretHash: string } }) => {
+          const row = { id: `webhook_${++counter}`, status: "enabled", ...data };
+          webhooks.set(row.id, row);
+          return row;
+        },
+        findUnique: async ({ where }: { where: { id: string } }) => webhooks.get(where.id) ?? null,
+      },
+      agent: { findUnique: async () => null },
+    } as unknown as import("@prisma/client").PrismaClient;
+    const { id } = await createWebhook("a1", "p1", webhookDb);
+
+    const mcp = buildMcpServer({ providers: fakeProviders, db: webhookDb, config: { canonicalUri: CANONICAL_URI } });
+    handle = await startHttpServer({
+      mcp,
+      config: { canonicalUri: CANONICAL_URI, httpBind: { host: "127.0.0.1", port: 0 }, authProviderKind: "delegating" },
+      auth: { authProvider: fakeAuthProvider(async () => ({ subject: "x", roles: [], scopes: [] })), db: webhookDb, providers: fakeProviders },
+    });
+
+    const res = await fetch(`http://127.0.0.1:${handle.port}/webhooks/${id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-webhook-secret": "wrong" },
+      body: "{}",
+    });
+    expect(res.status).toBe(401);
+  });
+});
+
 describe("startHttpServer (self-hosted mode)", () => {
   it("self-hosted AS metadata is reachable without auth", async () => {
     const db = fakeDb();
