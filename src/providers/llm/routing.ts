@@ -22,6 +22,10 @@ export class RoutingLlmProvider implements LlmProvider {
     }
   }
 
+  listModels(): string[] {
+    return [...this.byModel.keys()];
+  }
+
   private resolve(model: string): LlmProvider {
     const provider = this.byModel.get(model);
     if (!provider) {

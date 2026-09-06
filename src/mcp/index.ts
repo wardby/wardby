@@ -30,6 +30,7 @@ import { resolvePrincipal } from "./auth/principal.js";
 import { SCOPES_SUPPORTED } from "./auth/resource-server.js";
 import { canonicalUrl } from "./transport/http-limits.js";
 import { registerAgentTools } from "./tools/agents.js";
+import { registerModelTools } from "./tools/models.js";
 import { registerTriggerTool } from "./tools/trigger.js";
 import { registerToolAuthoringTools } from "./tools/tools.js";
 import { registerSchedulingTools } from "./tools/scheduling.js";
@@ -44,6 +45,7 @@ const STDIO_PLACEHOLDER_URI = "urn:reevo:local-stdio";
 /** Registers the full Phase 4 tool surface — every module, in one place. */
 export function registerAllTools(mcp: ReevoMcpServer): void {
   registerAgentTools(mcp);
+  registerModelTools(mcp);
   registerTriggerTool(mcp);
   registerToolAuthoringTools(mcp);
   registerSchedulingTools(mcp);

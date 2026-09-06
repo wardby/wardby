@@ -29,4 +29,12 @@ describe("RoutingLlmProvider", () => {
       { provider: fake("b"), models: ["gpt-4o"] },
     ])).toThrow(/gpt-4o/);
   });
+
+  it("listModels returns every registered model across all providers", () => {
+    const r = new RoutingLlmProvider([
+      { provider: fake("a"), models: ["gpt-4o", "gpt-4o-mini"] },
+      { provider: fake("b"), models: ["claude-opus-5"] },
+    ]);
+    expect(r.listModels().sort()).toEqual(["claude-opus-5", "gpt-4o", "gpt-4o-mini"]);
+  });
 });
