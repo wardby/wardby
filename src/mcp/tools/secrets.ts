@@ -49,7 +49,7 @@ export function registerSecretsTools(mcp: ReevoMcpServer, opts: SecretsToolsOpti
         }
       }
 
-      const existingOutcome = getSecretElicitationOutcome(ctx.principal.id, args.name);
+      const existingOutcome = await getSecretElicitationOutcome(ctx.principal.id, args.name, ctx.db);
       if (existingOutcome) {
         if (!existingOutcome.ok) throw new McpError(400, existingOutcome.error);
         return textResult(existingOutcome.secret);

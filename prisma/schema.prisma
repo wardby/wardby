@@ -288,6 +288,21 @@ model AgentSecret {
   @@id([agentId, secretId])
 }
 
+/// Cross-instance persistence for the out-of-band secret-entry flow
+/// (mcp/tools/secret-elicitation.ts) — was an in-process Map, which stranded
+/// a browser-form submission on the wrong instance under a multi-instance
+/// HTTP deployment. `outcome` holds the SecretElicitationOutcome JSON;
+/// `expiresAt` mirrors the old TTL sweep, now a `DELETE WHERE expiresAt <=
+/// now()` instead of a Map scan.
+model SecretElicitationOutcome {
+  ownerId    String
+  secretName String
+  outcome    Json
+  expiresAt  DateTime
+
+  @@id([ownerId, secretName])
+}
+
 enum WebhookStatus {
   enabled
   disabled

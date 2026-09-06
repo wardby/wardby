@@ -40,6 +40,7 @@ function fakeDb(agents: FakeAgentRow[] = []) {
   const secrets = new Map<string, FakeSecretRow>();
   const agentRows = new Map(agents.map((a) => [a.id, a]));
   const agentSecrets: { agentId: string; secretId: string }[] = [];
+  const elicitationOutcomes = new Map<string, { ownerId: string; secretName: string; outcome: unknown; expiresAt: Date }>();
   let counter = 0;
 
   return {
@@ -99,6 +100,35 @@ function fakeDb(agents: FakeAgentRow[] = []) {
       findFirst: async ({ where }: { where: { agentId: string; secret: { name: string } } }) => {
         const match = agentSecrets.find((a) => a.agentId === where.agentId && secrets.get(a.secretId)?.name === where.secret.name);
         return match ? { ...match, secret: secrets.get(match.secretId) } : null;
+      },
+    },
+    secretElicitationOutcome: {
+      findUnique: async ({ where: { ownerId_secretName } }: { where: { ownerId_secretName: { ownerId: string; secretName: string } } }) =>
+        elicitationOutcomes.get(`${ownerId_secretName.ownerId}\0${ownerId_secretName.secretName}`) ?? null,
+      upsert: async ({
+        where: { ownerId_secretName },
+        create,
+        update,
+      }: {
+        where: { ownerId_secretName: { ownerId: string; secretName: string } };
+        create: { ownerId: string; secretName: string; outcome: unknown; expiresAt: Date };
+        update: { outcome: unknown; expiresAt: Date };
+      }) => {
+        const key = `${ownerId_secretName.ownerId}\0${ownerId_secretName.secretName}`;
+        const existing = elicitationOutcomes.get(key);
+        const row = existing ? { ...existing, ...update } : create;
+        elicitationOutcomes.set(key, row);
+        return row;
+      },
+      deleteMany: async ({ where: { expiresAt } }: { where: { expiresAt: { lte: Date } } }) => {
+        let count = 0;
+        for (const [key, row] of elicitationOutcomes) {
+          if (row.expiresAt <= expiresAt.lte) {
+            elicitationOutcomes.delete(key);
+            count++;
+          }
+        }
+        return { count };
       },
     },
   } as unknown as import("@prisma/client").PrismaClient;

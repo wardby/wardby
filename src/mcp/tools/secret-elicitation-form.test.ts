@@ -20,6 +20,7 @@ function fakeCipher(): SecretCipher {
 
 function fakeDb() {
   const secrets = new Map<string, { id: string; name: string; ciphertext: string; keyId: string; ownerId: string | null; createdAt: Date; updatedAt: Date }>();
+  const outcomes = new Map<string, { ownerId: string; secretName: string; outcome: unknown; expiresAt: Date }>();
   let counter = 0;
   return {
     secret: {
@@ -42,6 +43,35 @@ function fakeDb() {
         const row = { id: `secret_${++counter}`, createdAt: now, updatedAt: now, ...create };
         secrets.set(row.id, row);
         return row;
+      },
+    },
+    secretElicitationOutcome: {
+      findUnique: async ({ where: { ownerId_secretName } }: { where: { ownerId_secretName: { ownerId: string; secretName: string } } }) =>
+        outcomes.get(`${ownerId_secretName.ownerId}\0${ownerId_secretName.secretName}`) ?? null,
+      upsert: async ({
+        where: { ownerId_secretName },
+        create,
+        update,
+      }: {
+        where: { ownerId_secretName: { ownerId: string; secretName: string } };
+        create: { ownerId: string; secretName: string; outcome: unknown; expiresAt: Date };
+        update: { outcome: unknown; expiresAt: Date };
+      }) => {
+        const key = `${ownerId_secretName.ownerId}\0${ownerId_secretName.secretName}`;
+        const existing = outcomes.get(key);
+        const row = existing ? { ...existing, ...update } : create;
+        outcomes.set(key, row);
+        return row;
+      },
+      deleteMany: async ({ where: { expiresAt } }: { where: { expiresAt: { lte: Date } } }) => {
+        let count = 0;
+        for (const [key, row] of outcomes) {
+          if (row.expiresAt <= expiresAt.lte) {
+            outcomes.delete(key);
+            count++;
+          }
+        }
+        return { count };
       },
     },
   } as unknown as import("@prisma/client").PrismaClient;
@@ -96,12 +126,13 @@ describe("handleSecretElicitationForm", () => {
     expect(await res.text()).toMatch(/saved/i);
 
     const { getSecretElicitationOutcome } = await import("./secret-elicitation.js");
-    const outcome = getSecretElicitationOutcome("p1", "FORM_TEST_CREATE");
+    const outcome = await getSecretElicitationOutcome("p1", "FORM_TEST_CREATE", db);
     expect(outcome).toEqual({ ok: true, secret: expect.objectContaining({ name: "FORM_TEST_CREATE", ownerId: "p1" }) });
   });
 
   it("POST with no value is rejected without writing a secret", async () => {
-    const base = await startTestServer({ verify: async () => ({ ownerId: "p1", secretName: "FORM_TEST_EMPTY" }), secrets: fakeCipher(), db: fakeDb() });
+    const db = fakeDb();
+    const base = await startTestServer({ verify: async () => ({ ownerId: "p1", secretName: "FORM_TEST_EMPTY" }), secrets: fakeCipher(), db });
     const res = await fetch(`${base}/secret?t=whatever`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -109,7 +140,7 @@ describe("handleSecretElicitationForm", () => {
     });
     expect(res.status).toBe(400);
     const { getSecretElicitationOutcome } = await import("./secret-elicitation.js");
-    expect(getSecretElicitationOutcome("p1", "FORM_TEST_EMPTY")).toBeUndefined();
+    expect(await getSecretElicitationOutcome("p1", "FORM_TEST_EMPTY", db)).toBeUndefined();
   });
 
   it("resubmitting the same elicitation is idempotent (no second write attempt)", async () => {

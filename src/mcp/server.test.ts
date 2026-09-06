@@ -137,4 +137,23 @@ describe("buildMcpServer", () => {
     const token = await mcp.mintRequestState({ ok: true });
     await expect(mcp.verifyRequestState(token.slice(0, -2) + "xx")).rejects.toThrow();
   });
+
+  it("REQUEST_STATE_KEY unset: two instances mint independent keys, so one instance's token fails on the other", async () => {
+    const a = buildMcpServer({ providers: fakeProviders, db: fakeDb, config: { canonicalUri: "https://host/mcp" }, env: {} });
+    const b = buildMcpServer({ providers: fakeProviders, db: fakeDb, config: { canonicalUri: "https://host/mcp" }, env: {} });
+    const token = await a.mintRequestState({ ok: true });
+    await expect(b.verifyRequestState(token)).rejects.toThrow();
+  });
+
+  it("REQUEST_STATE_KEY set: a token minted on one instance verifies on another sharing the same key", async () => {
+    const env = { REQUEST_STATE_KEY: "aa".repeat(32) };
+    const a = buildMcpServer({ providers: fakeProviders, db: fakeDb, config: { canonicalUri: "https://host/mcp" }, env });
+    const b = buildMcpServer({ providers: fakeProviders, db: fakeDb, config: { canonicalUri: "https://host/mcp" }, env });
+    const token = await a.mintRequestState({ ok: true, step: "cross-instance" });
+    await expect(b.verifyRequestState(token)).resolves.toEqual({ ok: true, step: "cross-instance" });
+  });
+
+  it("a malformed REQUEST_STATE_KEY (wrong byte length) throws at construction", () => {
+    expect(() => buildMcpServer({ providers: fakeProviders, db: fakeDb, config: { canonicalUri: "https://host/mcp" }, env: { REQUEST_STATE_KEY: "aabb" } })).toThrow(/32 bytes/);
+  });
 });

@@ -68,6 +68,8 @@ export interface BuildMcpServerOptions {
   providers: McpProviders;
   db: PrismaClient;
   config: McpServerConfig;
+  /** Testability hook for REQUEST_STATE_KEY — defaults to process.env, matching buildSecretCipher's convention. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface DiscoverResultLike {
@@ -122,6 +124,24 @@ interface AuthInfoExtra {
   principal?: Principal;
 }
 
+const REQUEST_STATE_KEY_BYTES = 32;
+
+/**
+ * REQUEST_STATE_KEY (hex, 32 bytes) shares the requestState HMAC key across
+ * instances — see the requestStateCodec construction below. Unset falls back
+ * to a fresh random key, which is correct for stdio and single-instance HTTP
+ * and is NOT an error: only a multi-instance HTTP deployment needs this set.
+ */
+function loadRequestStateKey(env: NodeJS.ProcessEnv): Uint8Array {
+  const hex = env.REQUEST_STATE_KEY;
+  if (!hex) return randomBytes(REQUEST_STATE_KEY_BYTES);
+  const key = Buffer.from(hex, "hex");
+  if (key.length !== REQUEST_STATE_KEY_BYTES) {
+    throw new Error(`REQUEST_STATE_KEY must be ${REQUEST_STATE_KEY_BYTES} bytes of hex (${REQUEST_STATE_KEY_BYTES * 2} hex chars); got ${key.length} bytes.`);
+  }
+  return key;
+}
+
 export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
   const specs: ToolSpec<never>[] = [];
   const requestHandlers: {
@@ -134,9 +154,16 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
   // No `bind` callback, so `ctx` is never read by mint()/verify() (confirmed
   // against the codec's implementation) — safe to call verifyRequestState()
   // from outside a real MCP request (the secret-elicitation browser form).
-  // A fresh random key per process is fine: nothing outside this same
-  // running server ever needs to verify a token this process minted.
-  const requestStateCodec = createRequestStateCodec<unknown>({ key: randomBytes(32), ttlSeconds: 600 });
+  //
+  // REQUEST_STATE_KEY, when set, lets a token minted by one process verify
+  // on another — required for the secret-elicitation round trip (mint,
+  // browser-form POST, polling retry) to work under a multi-instance HTTP
+  // deployment, where those three legs can land on three different
+  // processes (see secret-elicitation.ts's matching Postgres-backed outcome
+  // store). stdio and single-instance HTTP need no configuration: with the
+  // env var unset, a fresh random key per process is fine, since nothing
+  // outside this same running server ever needs to verify a token it minted.
+  const requestStateCodec = createRequestStateCodec<unknown>({ key: loadRequestStateKey(opts.env ?? process.env), ttlSeconds: 600 });
 
   function mcpReqOf(sdkCtx: ServerContext): McpRequestContext["mcpReq"] {
     return { inputResponses: sdkCtx.mcpReq?.inputResponses, requestState: sdkCtx.mcpReq?.requestState ?? (() => undefined) };

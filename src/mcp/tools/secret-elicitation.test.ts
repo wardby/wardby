@@ -18,6 +18,7 @@ function fakeCipher(): SecretCipher {
 
 function fakeDb() {
   const secrets = new Map<string, { id: string; name: string; ciphertext: string; keyId: string; ownerId: string | null; createdAt: Date; updatedAt: Date }>();
+  const outcomes = new Map<string, { ownerId: string; secretName: string; outcome: unknown; expiresAt: Date }>();
   let counter = 0;
   return {
     secret: {
@@ -34,6 +35,35 @@ function fakeDb() {
         return row;
       },
     },
+    secretElicitationOutcome: {
+      findUnique: async ({ where: { ownerId_secretName } }: { where: { ownerId_secretName: { ownerId: string; secretName: string } } }) =>
+        outcomes.get(`${ownerId_secretName.ownerId}\0${ownerId_secretName.secretName}`) ?? null,
+      upsert: async ({
+        where: { ownerId_secretName },
+        create,
+        update,
+      }: {
+        where: { ownerId_secretName: { ownerId: string; secretName: string } };
+        create: { ownerId: string; secretName: string; outcome: unknown; expiresAt: Date };
+        update: { outcome: unknown; expiresAt: Date };
+      }) => {
+        const key = `${ownerId_secretName.ownerId}\0${ownerId_secretName.secretName}`;
+        const existing = outcomes.get(key);
+        const row = existing ? { ...existing, ...update } : create;
+        outcomes.set(key, row);
+        return row;
+      },
+      deleteMany: async ({ where: { expiresAt } }: { where: { expiresAt: { lte: Date } } }) => {
+        let count = 0;
+        for (const [key, row] of outcomes) {
+          if (row.expiresAt <= expiresAt.lte) {
+            outcomes.delete(key);
+            count++;
+          }
+        }
+        return { count };
+      },
+    },
   } as unknown as import("@prisma/client").PrismaClient;
 }
 
@@ -44,12 +74,13 @@ afterEach(() => {
 describe("secret elicitation outcome TTL", () => {
   it("evicts an outcome once its TTL has elapsed", async () => {
     vi.useFakeTimers();
+    const db = fakeDb();
     const payload: SecretElicitationPayload = { ownerId: "p1", secretName: "TTL_TEST" };
-    await fulfillSecretElicitation(payload, "value", fakeCipher(), fakeDb());
-    expect(getSecretElicitationOutcome("p1", "TTL_TEST")).toEqual({ ok: true, secret: expect.objectContaining({ name: "TTL_TEST" }) });
+    await fulfillSecretElicitation(payload, "value", fakeCipher(), db);
+    expect(await getSecretElicitationOutcome("p1", "TTL_TEST", db)).toEqual({ ok: true, secret: expect.objectContaining({ name: "TTL_TEST" }) });
 
     vi.advanceTimersByTime(600_001);
-    expect(getSecretElicitationOutcome("p1", "TTL_TEST")).toBeUndefined();
+    expect(await getSecretElicitationOutcome("p1", "TTL_TEST", db)).toBeUndefined();
   });
 
   it("a later unrelated lookup prunes an earlier expired entry even without ever re-reading it", async () => {
@@ -62,8 +93,8 @@ describe("secret elicitation outcome TTL", () => {
     // Never re-read STALE directly — only a fresh, unrelated elicitation triggers the sweep.
     await fulfillSecretElicitation({ ownerId: "p1", secretName: "FRESH" }, "value2", cipher, db);
 
-    expect(getSecretElicitationOutcome("p1", "STALE")).toBeUndefined();
-    expect(getSecretElicitationOutcome("p1", "FRESH")).toEqual({ ok: true, secret: expect.objectContaining({ name: "FRESH" }) });
+    expect(await getSecretElicitationOutcome("p1", "STALE", db)).toBeUndefined();
+    expect(await getSecretElicitationOutcome("p1", "FRESH", db)).toEqual({ ok: true, secret: expect.objectContaining({ name: "FRESH" }) });
   });
 
   it("still returns the recorded outcome, and skips a second write, within the TTL window", async () => {
