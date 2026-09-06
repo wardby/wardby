@@ -297,9 +297,3 @@ describe("startHttpServer (webhook ingress)", () => {
     expect(res.status).toBe(401);
   });
 });
-
-describe("startHttpServer (self-hosted quarantine)", () => {
-  it("rejects startup before issuing or listening", async () => {
-    await expect(startHttpServer({ config: { authProviderKind: "self-hosted" } } as Parameters<typeof startHttpServer>[0])).rejects.toThrow(/quarantined/);
-  });
-});

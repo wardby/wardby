@@ -1,10 +1,9 @@
 # Security deployment and recovery
 
-Status: implementation candidate. Self-hosted HTTP startup remains quarantined
-in `src/providers/auth/release-gate.ts`. There is no environment override.
-The database, HTTP, browser, migration, and independent-review release gates in
-the remediation plan must pass before a reviewed change removes that assertion.
-Do not restore the previous self-hosted provider to work around this gate.
+Status: the secured self-hosted HTTP implementation was enabled on 2026-09-06
+after its database, HTTP, browser, migration, and review gates passed. SR-009 is
+accepted only for trusted build/migration tooling through 2026-10-06; deployment
+controls in this guide still apply.
 
 ## Supported runtime and delegated operation
 
@@ -28,7 +27,7 @@ consent, and logout POSTs always require the canonical Origin, even when an
 additional MCP browser origin is allowed. Tokens must have a nonblank subject
 of at most 512 UTF-8 bytes. External subject spelling and case are preserved.
 
-## Self-hosted provisioning after release approval
+## Self-hosted provisioning
 
 Generate three independent random 32-byte keys, each encoded as 64 hex
 characters. `openssl rand -hex 32` generates one key; run it independently
@@ -108,7 +107,7 @@ shared throttling. Foreign keys and indexes are declared in both SQL and Prisma.
 
 Restoring a full pre-fix backup would resurrect usable compromised credentials.
 The secure recovery alternative restores unrelated tables only, with issuance
-quarantined. For a schema rollback, recreate empty legacy OAuth placeholders
+stopped. For a schema rollback, recreate empty legacy OAuth placeholders
 before reapplying the security migration; never restore their contents. The
 rehearsal script exercises migration, unrelated-data restoration, and
 re-migration against synthetic data in an isolated container:
@@ -178,20 +177,22 @@ dependencies and omits optional peers before installation. Merely running
 Audit the shipped subset with `npm audit --omit=peer`. A plain audit may still
 report intentionally omitted optional peers from the lockfile.
 
-SR-009 remains open in the trusted build/migration toolchain. On 2026-09-06,
+SR-009 remains present in the trusted build/migration toolchain. On 2026-09-06,
 6.19.3 was the newest published Prisma 6 release and still included vulnerable
 deepmerge-ts 7.1.5. The advisory fixes deepmerge-ts at 8.0.0; no compatible
 Prisma 6 release was available. Neither npm's suggested 6.12 downgrade nor an
 unreviewed dependency-major override was applied. See the
 [advisory](https://github.com/advisories/GHSA-ggr8-5vv4-36mx).
 
-Proposed exception: trusted build/migration jobs only, expiring **2026-10-06**,
-pending deployment-owner acceptance. Do not load untrusted Prisma config or
+Accepted exception: the owner accepted this risk on **2026-09-06** for trusted
+build/migration jobs only, expiring **2026-10-06**. Do not load untrusted Prisma config or
 run migration tooling in a request handler. Recheck upstream by that date;
 otherwise plan a separately reviewed Prisma-major migration. CI deliberately
-keeps both full and production audit failures visible; this document does not
-silently waive them. Vitest and esbuild's additional development advisories
-were remediated by supported tooling updates.
+allows only the exact `@prisma/config`, `deepmerge-ts`, and `prisma` chain for
+GHSA-ggr8-5vv4-36mx and fails for any other advisory or after expiration. Raw
+`npm audit` remains nonzero, so the policy wrapper must stay in the security job.
+Vitest and esbuild's additional development advisories were remediated by
+supported tooling updates.
 
 ## Verification and rollout
 
@@ -200,7 +201,7 @@ machine `SECURITY_BROWSER_CHANNEL=chrome` uses installed Chrome in an isolated
 headless profile. Database-backed and browser tests are not release evidence
 when skipped. Use a disposable `DATABASE_URL`, then run typecheck, full tests,
 contract tests, build, Prisma validation, migration replay/drift/recovery, and
-both audits. The new CI job runs database tests and archives a dependency tree.
+`node scripts/security-audit.mjs`. The CI job runs database tests and archives a dependency tree.
 After building, `node --expose-gc scripts/security-allocation-check.mjs` checks
 stream abortion, read-ahead, and process-memory growth for an endless response.
 

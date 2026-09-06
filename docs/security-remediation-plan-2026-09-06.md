@@ -2,7 +2,7 @@
 
 Date: 2026-09-06
 
-Status: Implemented candidate; independent review, dependency, and deployment gates remain open
+Status: Code and release gates complete; SR-009 accepted through 2026-10-06; deployment gates remain open
 
 Source: `docs/security-review-2026-09-06.md`
 
@@ -17,6 +17,8 @@ This plan intentionally separates containment from feature work. The critical se
 ### D1: Self-hosted OAuth quarantine and re-enable
 
 Decision: preserve self-hosted OAuth, but quarantine its issuance endpoints while they are rebuilt. Delegating OAuth and stdio remain usable during the work. Re-enable self-hosted mode only after the dedicated release gate in Task 2 passes.
+
+Release decision: the secure replacement passed the Task 2, Task 3, and Task 4 gates and was approved for re-enablement on 2026-09-06. The startup quarantine is removed; the deployment checklist remains mandatory.
 
 Identity design:
 
@@ -269,6 +271,8 @@ Re-enable gate:
 - Have a second reviewer inspect identity derivation, CSRF, code consumption, token rotation, and migration behavior.
 - Update README and `.env.example` with provisioning, HTTPS, key rotation, and recovery procedures.
 
+Result: complete. The implementation and orchestration reviews covered the listed boundaries, all automated gates passed, and the owner approved re-enablement.
+
 Acceptance gate:
 
 - Self-hosted mode starts only with all credential and signing keys present and valid.
@@ -505,6 +509,8 @@ Acceptance gate:
 
 - GHSA-ggr8-5vv4-36mx is absent from the build toolchain, or a time-bounded exception documents why the vulnerable code is unreachable and when it will be revisited.
 
+Result: the owner accepted the trusted build/migration-tooling exception on 2026-09-06 through 2026-10-06. CI fails for any other advisory and automatically rejects this exception after expiration.
+
 Suggested commit: `chore(deps): update prisma security baseline`
 
 ## Task 9: Full Verification and Release Gate
@@ -572,7 +578,7 @@ These are not required to re-enable the first secure self-hosted release:
 - [x] Self-hosted token issuance is quarantined before remediation begins.
 - [x] Users and login keys can be provisioned, listed, revoked, and disabled through the CLI.
 - [x] Login, session, CSRF, and consent flows pass browser-level tests.
-- [ ] Self-hosted token issuance is re-enabled only after its release gate passes.
+- [x] Self-hosted token issuance is re-enabled only after its release gate passes.
 - [x] Legacy plaintext OAuth credentials are invalidated and all new credentials are stored as keyed hashes.
 - [x] Authorization codes are opaque, short-lived, and atomically single-use.
 - [x] Refresh tokens rotate with family reuse detection and revocation.
@@ -583,32 +589,35 @@ These are not required to re-enable the first secure self-hosted release:
 - [x] Sandbox fetch revalidates redirects and pins validated DNS results.
 - [x] Every Node-side sandbox allocation is explicitly capped.
 - [x] Attached tool listings enforce agent and tool visibility.
-- [ ] Dependency advisory is resolved or formally time-bounded.
+- [x] Dependency advisory is resolved or formally time-bounded.
 - [x] Database migration rehearsal passes.
-- [ ] Full tests, contract tests, build, typecheck, and audit pass.
+- [x] Full tests, contract tests, build, typecheck, and security audit policy pass.
 - [x] Issue-register statuses and deployment documentation are updated.
 
 ## Execution Record (2026-09-06)
 
 Implementation followed the delivery order. Source changes and test evidence are
 listed in [the completion report](security-remediation-results-2026-09-06.md).
-The user explicitly requested no commits; file and regression-test links replace
-commit links in this execution record. The original two untracked security
-documents are preserved and remain untracked.
+The remediation landed on `main` as `dca4648`; this follow-up records the owner
+approval, removes the startup quarantine, and formalizes the SR-009 exception.
 
 All local code, database, browser, migration, build, typecheck, and contract
-checks passed. The full suite has 400 passes and zero failures or skips. Both
-repository audits still fail for SR-009; the shipped runtime audit is clean.
-Unchecked items above are intentional, not waived.
+checks passed. The original full suite had 400 passes and zero failures or skips.
+Raw repository audits still report SR-009; the narrow, expiring policy exception
+is accepted and the shipped runtime audit is clean.
 
-Release and architecture decisions still outstanding:
+After removing two quarantine-only assertions, release verification passed all
+398 current tests across 51 files with no skips, including the migrated database
+and real Chrome OAuth flow. Typecheck, build, and the audit policy also passed.
 
-- Self-hosted startup remains quarantined. No second independent reviewer or subagent was available; this implementation must not self-certify its release gate.
+Release and architecture notes:
+
+- Self-hosted startup is enabled after implementation review, independent orchestration review, automated acceptance checks, and the owner's release decision.
 - A full rollback that restores legacy plaintext credentials is unsafe. The tested secure alternative restores unrelated data, recreates empty legacy OAuth placeholders, and reapplies the secure migration without resurrecting credentials.
 - Refresh bindings are normalized into an additional OAuthFamily row, which serializes concurrent rotation and revocation. This is the schema target for independent inspection, not an import of legacy grant semantics.
 - Login, consent, and logout keep strict canonical Origin checking and no-referrer. A nonce-protected same-origin script submits forms because real Chrome demonstrated that native form POSTs use Origin:null under no-referrer. No CSRF or Origin bypass was added.
 - AbortSignal tears down fetch, sleep, and bridge delivery, but Prisma 6 has no query AbortSignal API. Already-dispatched database work can finish after sandbox cancellation. Strict immediate database termination requires a separately reviewed cancellable adapter/worker; production must use short statement/lock timeouts and bounded pools/concurrency. The allocation finding is fixed, but Task 6 is not a promise to roll back side effects on timeout.
-- The Prisma tooling exception is proposed, expiring 2026-10-06, not formally accepted. No downgrade or unreviewed deepmerge major override was applied.
+- The Prisma tooling exception was accepted through 2026-10-06. No downgrade or unreviewed deepmerge major override was applied.
 - Production TLS/proxy, network isolation, database permissions/timeouts, secrets, monitoring, and migration/recovery sign-off remain deployment-owner gates.
 
 The detailed source filenames proposed in Task 2 were consolidated into

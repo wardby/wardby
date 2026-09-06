@@ -29,7 +29,6 @@ import { startHttpServer } from "./transport/streamable-http.js";
 import { resolvePrincipal } from "./auth/principal.js";
 import { SCOPES_SUPPORTED } from "./auth/resource-server.js";
 import { canonicalUrl } from "./transport/http-limits.js";
-import { assertSelfHostedReleased } from "../providers/auth/release-gate.js";
 import { registerAgentTools } from "./tools/agents.js";
 import { registerTriggerTool } from "./tools/trigger.js";
 import { registerToolAuthoringTools } from "./tools/tools.js";
@@ -82,7 +81,6 @@ export function buildMcpProviders(): McpProviderComposition {
 /** The real CLI entry point: `reevo mcp`. Reads config from the environment, starts stdio or HTTP per MCP_TRANSPORT. */
 export async function startMcp(): Promise<void> {
   const mcpConfig = loadMcpConfig();
-  if (mcpConfig.transport === "http" && loadProviderConfig().auth === "self-hosted") assertSelfHostedReleased();
   const { providers } = buildMcpProviders();
 
   if (mcpConfig.transport === "stdio") {

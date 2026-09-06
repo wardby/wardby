@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { SelfHostedAuthProvider } from "../../../providers/auth/self-hosted.js";
@@ -10,8 +10,6 @@ import { buildMcpServer } from "../../server.js";
 import type { McpProviders } from "../../context.js";
 import { chromium } from "playwright";
 
-// Test-only module replacement exercises the candidate implementation. No runtime flag can bypass quarantine.
-vi.mock("../../../providers/auth/release-gate.js", () => ({ assertSelfHostedReleased: () => {} }));
 describe.skipIf(!process.env.DATABASE_URL)("browser HTTP OAuth flow (database)", () => {
   const db = new PrismaClient(); const subjects: string[] = []; const clients: string[] = [];
   let server: HttpServerHandle | undefined;

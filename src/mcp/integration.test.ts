@@ -7,7 +7,7 @@ import { buildMcpServer, type ReevoMcpServer } from "./server.js";
 import { registerAllTools } from "./index.js";
 import { handleWebhookIngress } from "./webhooks/ingress.js";
 import { buildSecretsAccessor } from "../core/secrets.js";
-import { buildAuthProvider } from "../providers/auth/index.js";
+import { buildAuthProvider, SelfHostedAuthProvider } from "../providers/auth/index.js";
 import type { McpRequestContext } from "./context.js";
 import type { Executor } from "../providers/executor/types.js";
 import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
@@ -420,8 +420,8 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP integration: both AUTH_PROVIDER 
     await db.$disconnect();
   });
 
-  it("self-hosted production factory remains quarantined until release review", () => {
-    expect(() => buildAuthProvider("self-hosted", { audience: CANONICAL_URI, signingKey: "a1".repeat(32), credentialHashKey: "b2".repeat(32) }, db)).toThrow(/quarantined/);
+  it("self-hosted production factory builds the secured provider", () => {
+    expect(buildAuthProvider("self-hosted", { audience: CANONICAL_URI, signingKey: "a1".repeat(32), credentialHashKey: "b2".repeat(32) }, db)).toBeInstanceOf(SelfHostedAuthProvider);
   });
 
   it("delegating: buildAuthProvider selects DelegatingAuthProvider, which verifies a JWKS-signed token", async () => {

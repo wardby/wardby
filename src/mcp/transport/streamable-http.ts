@@ -5,7 +5,6 @@ import { toNodeHandler, hostHeaderValidation } from "@modelcontextprotocol/node"
 import type { PrismaClient } from "@prisma/client";
 import type { AuthProvider } from "../../providers/auth/types.js";
 import type { SelfHostedAuthProvider } from "../../providers/auth/self-hosted.js";
-import { assertSelfHostedReleased } from "../../providers/auth/release-gate.js";
 import type { ReevoMcpServer } from "../server.js";
 import type { McpProviders } from "../context.js";
 import { authenticate, protectedResourceMetadata } from "../auth/resource-server.js";
@@ -35,7 +34,6 @@ export function sendJson(res: ServerResponse, status: number, body: unknown, hea
 }
 
 export async function startHttpServer(opts: StartHttpServerOptions): Promise<HttpServerHandle> {
-  if (opts.config.authProviderKind === "self-hosted") assertSelfHostedReleased();
   const canonical = canonicalUrl(opts.config.canonicalUri);
   if (opts.config.authProviderKind === "self-hosted" && !opts.selfHosted) throw new Error("Missing self-hosted provider.");
   const oauth = opts.config.authProviderKind === "self-hosted" ? browserHandler(opts.selfHosted!) : undefined;

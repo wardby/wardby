@@ -12,11 +12,16 @@ describe("buildAuthProvider", () => {
     expect(provider).toBeInstanceOf(DelegatingAuthProvider);
   });
 
-  it("quarantines self-hosted even with keys configured", () => {
-    expect(() => buildAuthProvider("self-hosted", { audience: "https://host/mcp", signingKey: "s".repeat(32) }, fakeDb)).toThrow(/quarantined/);
+  it("builds a SelfHostedAuthProvider when all keys are configured", () => {
+    const provider = buildAuthProvider("self-hosted", {
+      audience: "https://host/mcp",
+      signingKey: "a1".repeat(32),
+      credentialHashKey: "b2".repeat(32),
+    }, fakeDb);
+    expect(provider).toBeInstanceOf(SelfHostedAuthProvider);
   });
 
-  it("throws for self-hosted with missing audience/signingKey", () => {
-    expect(() => buildAuthProvider("self-hosted", {}, fakeDb)).toThrow(/quarantined/);
+  it("throws for self-hosted with missing audience or keys", () => {
+    expect(() => buildAuthProvider("self-hosted", {}, fakeDb)).toThrow(/AUTH_AUDIENCE/);
   });
 });

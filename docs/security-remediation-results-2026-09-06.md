@@ -2,9 +2,25 @@
 
 Date: 2026-09-06
 Repository: `/Users/chfields/Personal/reevo-run`
-Status: implementation candidate verified locally; NOT approved for self-hosted release.
+Status: secured self-hosted implementation approved and enabled on 2026-09-06.
 
-## Outcome
+## Release Update
+
+The original candidate below was committed as `dca4648`. After independent
+orchestration review and repeat verification, the owner approved removal of the
+startup quarantine. SR-001, SR-002, SR-003, and SR-008 are closed at their code
+and release gates. Production migration and deployment controls remain separate.
+
+The owner accepted SR-009 on 2026-09-06 through 2026-10-06 for trusted build and
+migration tooling only. `scripts/security-audit.mjs` permits only the exact
+GHSA-ggr8-5vv4-36mx dependency chain and fails for new advisories or expiration;
+the runtime artifact remains free of the affected packages.
+
+Release verification passed all 398 current tests across 51 files with no skips,
+including the migrated PostgreSQL tests and real Chrome OAuth flow. Typecheck,
+build, and the time-bounded audit policy also passed.
+
+## Original Candidate Outcome
 
 The unsafe self-hosted issuance path is quarantined without an environment bypass.
 Its replacement is implemented: operator-provisioned high-entropy login keys,
@@ -212,7 +228,7 @@ Docker/test artifacts are not source changes and are not included below.
 - Added: [src/mcp/transport/http-limits.test.ts](/Users/chfields/Personal/reevo-run/src/mcp/transport/http-limits.test.ts)
 - Added: [src/mcp/transport/http-limits.ts](/Users/chfields/Personal/reevo-run/src/mcp/transport/http-limits.ts)
 - Added: [src/mcp/transport/http-security.test.ts](/Users/chfields/Personal/reevo-run/src/mcp/transport/http-security.test.ts)
-- Added: [src/mcp/transport/quarantine.test.ts](/Users/chfields/Personal/reevo-run/src/mcp/transport/quarantine.test.ts)
+- Added for containment, then removed at release: `src/mcp/transport/quarantine.test.ts`
 - Edited: [src/mcp/transport/streamable-http.test.ts](/Users/chfields/Personal/reevo-run/src/mcp/transport/streamable-http.test.ts)
 - Edited: [src/mcp/transport/streamable-http.ts](/Users/chfields/Personal/reevo-run/src/mcp/transport/streamable-http.ts)
 - Added: [src/providers/auth/authorization-server.ts](/Users/chfields/Personal/reevo-run/src/providers/auth/authorization-server.ts)
@@ -220,7 +236,7 @@ Docker/test artifacts are not source changes and are not included below.
 - Edited: [src/providers/auth/delegating.ts](/Users/chfields/Personal/reevo-run/src/providers/auth/delegating.ts)
 - Edited: [src/providers/auth/index.test.ts](/Users/chfields/Personal/reevo-run/src/providers/auth/index.test.ts)
 - Edited: [src/providers/auth/index.ts](/Users/chfields/Personal/reevo-run/src/providers/auth/index.ts)
-- Added: [src/providers/auth/release-gate.ts](/Users/chfields/Personal/reevo-run/src/providers/auth/release-gate.ts)
+- Added for containment, then removed at release: `src/providers/auth/release-gate.ts`
 - Edited: [src/providers/auth/self-hosted.test.ts](/Users/chfields/Personal/reevo-run/src/providers/auth/self-hosted.test.ts)
 - Edited: [src/providers/auth/self-hosted.ts](/Users/chfields/Personal/reevo-run/src/providers/auth/self-hosted.ts)
 - Added: [src/providers/auth/subject.test.ts](/Users/chfields/Personal/reevo-run/src/providers/auth/subject.test.ts)

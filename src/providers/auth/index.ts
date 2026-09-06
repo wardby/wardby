@@ -8,14 +8,12 @@ import type { AuthProviderKind, AuthConfig } from "../../config/providers.js";
 import type { AuthProvider } from "./types.js";
 import { DelegatingAuthProvider } from "./delegating.js";
 import { SelfHostedAuthProvider } from "./self-hosted.js";
-import { assertSelfHostedReleased } from "./release-gate.js";
 
 export { DelegatingAuthProvider } from "./delegating.js";
 export { SelfHostedAuthProvider } from "./self-hosted.js";
 
 export function buildAuthProvider(kind: AuthProviderKind, config: AuthConfig, db: PrismaClient): AuthProvider {
   if (kind === "self-hosted") {
-    assertSelfHostedReleased();
     if (!config.audience || !config.signingKey || !config.credentialHashKey) {
       throw new Error("AUTH_AUDIENCE, AUTH_SIGNING_KEY, and AUTH_CREDENTIAL_HASH_KEY are required.");
     }
