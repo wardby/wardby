@@ -140,6 +140,7 @@ export async function executeRun(
         costUsd: engineResult.usage.costUsd,
         error: engineResult.error ?? null,
         finalText: engineResult.finalText || null,
+        turns: engineResult.turns,
         finishedAt: new Date(),
       },
     });

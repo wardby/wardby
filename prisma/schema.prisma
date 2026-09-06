@@ -125,6 +125,10 @@ model Run {
   /// streamed live via onText and dropped — no durable place to read it
   /// from until this field existed.
   finalText   String?
+  /// Phase 4: EngineResult.turns, persisted for the same reason as
+  /// finalText — MCP's list_runs/get_run need it and it was previously
+  /// dropped after the engine returned.
+  turns       Int        @default(0)
 }
 
 /// Phase 2: single-row-per-scope lease so exactly one scheduler process
