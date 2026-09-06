@@ -33,6 +33,8 @@ export interface SandboxInvocation {
   secrets?: SecretsAccessor;
   /** Overrides the default shared logger — mainly for tests that need to capture forwarded console output. */
   logger?: Logger;
+  /** Forwarded to installHostFunctions — which hosts this tool attachment may fetch. Omitted/empty = no outbound fetch at all; a literal "*" element lifts the restriction. */
+  allowedFetchHosts?: string[];
 }
 
 export async function runInSandbox(invocation: SandboxInvocation): Promise<SandboxResult> {
@@ -64,6 +66,7 @@ export async function runInSandbox(invocation: SandboxInvocation): Promise<Sandb
       logTag: invocation.toolName,
       secrets: invocation.secrets,
       logger: invocation.logger,
+      allowedFetchHosts: invocation.allowedFetchHosts,
       signal,
     });
   });

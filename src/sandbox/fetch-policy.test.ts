@@ -32,6 +32,26 @@ describe("assertFetchDestinationAllowed (allowlist)", () => {
   });
 });
 
+describe("assertFetchDestinationAllowed (restrictToAllowedHosts)", () => {
+  it("blocks a public host that is not on the allowlist when restricted", async () => {
+    await expect(
+      assertFetchDestinationAllowed("http://8.8.8.8/", { restrictToAllowedHosts: true }),
+    ).rejects.toThrow(/blocked/);
+  });
+
+  it("allows a public host that is on the allowlist when restricted", async () => {
+    await expect(
+      assertFetchDestinationAllowed("http://8.8.8.8/", { allowedHosts: ["8.8.8.8"], restrictToAllowedHosts: true }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("still blocks a private address even when it is on the allowlist and unrestricted (no accidental widening)", async () => {
+    await expect(
+      assertFetchDestinationAllowed("http://8.8.8.8/", { allowedHosts: [], restrictToAllowedHosts: false }),
+    ).resolves.toBeUndefined();
+  });
+});
+
 describe("assertFetchDestinationAllowed (hostname resolution)", () => {
   beforeEach(() => {
     vi.doMock("node:dns/promises", () => ({

@@ -15,6 +15,7 @@ import type { SecretsAccessor } from "../core/secrets.js";
 import { registerJsonAsyncFunction } from "./bridge.js";
 import { parseAllowedHosts } from "./fetch-policy.js";
 import { safeFetch } from "./safe-fetch.js";
+import { FETCH_WILDCARD } from "./tool-capabilities.js";
 import { boundedJson, boundedString } from "./bounded-json.js";
 import { PARSER_INPUT_BYTES, HTML_LINKS_LIMIT, BRIDGE_RESULT_BYTES, RANDOM_BYTES_LIMIT, LOG_BYTES, WALL_TIME_LIMIT_MS } from "./limits.js";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -35,6 +36,8 @@ export interface HostFunctionOptions {
   secrets?: SecretsAccessor;
   /** Overrides the shared default logger — mainly for tests. */
   logger?: Logger;
+  /** Hosts this specific tool attachment may fetch. Omitted/empty = no outbound fetch at all; a literal "*" element lifts the restriction (existing SSRF protection against private/link-local addresses still applies). */
+  allowedFetchHosts?: string[];
 }
 
 function args<T extends unknown[]>(argsJson: string): T {
@@ -46,7 +49,7 @@ export function installHostFunctions(
   runtime: QuickJSRuntime,
   options: HostFunctionOptions,
 ): void {
-  const { agentId, datastore, logTag, secrets, signal } = options;
+  const { agentId, datastore, logTag, secrets, signal, allowedFetchHosts } = options;
   const register = (name: string, fn: (json: string) => Promise<unknown>) => registerJsonAsyncFunction(context, runtime, name, fn, signal);
   const sandboxLog = (options.logger ?? defaultLogger).child({ module: "sandbox-tool", agentId, tool: logTag.slice(0, 100) });
 
@@ -94,7 +97,11 @@ export function installHostFunctions(
     const [url, init] = args<[string, { method?: string; headers?: Record<string, string>; body?: string }]>(
       argsJson,
     );
-    return safeFetch(url, init, { allowedHosts: FETCH_ALLOWED_HOSTS, signal });
+    const hosts = allowedFetchHosts ?? [];
+    if (hosts.includes(FETCH_WILDCARD)) {
+      return safeFetch(url, init, { allowedHosts: FETCH_ALLOWED_HOSTS, signal });
+    }
+    return safeFetch(url, init, { allowedHosts: hosts, restrictToAllowedHosts: true, signal });
   });
 
   register("__bridge_datastoreGet", async (argsJson) => {

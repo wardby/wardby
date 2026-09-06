@@ -2,7 +2,7 @@ import { isIP } from "node:net";
 import { lookup } from "node:dns/promises";
 export type ResolvedAddress = { address: string; family: number };
 export type Resolver = (hostname: string) => Promise<ResolvedAddress[]>;
-export interface FetchPolicyOptions { allowedHosts?: string[]; resolve?: Resolver; }
+export interface FetchPolicyOptions { allowedHosts?: string[]; resolve?: Resolver; restrictToAllowedHosts?: boolean; }
 export class FetchPolicyError extends Error { constructor() { super("fetch_destination_blocked"); } }
 const blockedV4: [string, number][] = [
   ["0.0.0.0",8], ["10.0.0.0",8], ["100.64.0.0",10], ["127.0.0.0",8], ["169.254.0.0",16],
@@ -42,6 +42,7 @@ export async function resolveDestination(urlString: string, options: FetchPolicy
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || urlString.length > 8192) throw new FetchPolicyError();
   const hostname = normalizeHost(url.hostname);
   const allowed = (options.allowedHosts ?? []).map(normalizeHost).includes(hostname);
+  if (options.restrictToAllowedHosts && !allowed) throw new FetchPolicyError();
   const version = isIP(hostname);
   const addresses = version ? [{ address: hostname, family: version }] : await (options.resolve ?? ((host) => lookup(host, { all: true })))(hostname);
   if (!addresses.length || addresses.some((a) => !isIP(a.address) || isIP(a.address) !== a.family || (!allowed && !isGlobalAddress(a.address)))) throw new FetchPolicyError();

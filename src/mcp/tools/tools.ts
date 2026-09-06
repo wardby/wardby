@@ -13,6 +13,7 @@ import type { Datastore } from "../../providers/index.js";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { deriveJsonSchema, validateParams } from "../../sandbox/zod-params.js";
 import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
+import { FETCH_WILDCARD } from "../../sandbox/tool-capabilities.js";
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { assertCanMutate, requireOwnedAgent, requireReadableAgent, visibleToPrincipal, canRead } from "../auth/ownership.js";
@@ -93,6 +94,7 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
         agentId: ctx.principal.id,
         datastore: ctx.providers.datastore as Datastore,
         toolName: "dry_run_tool",
+        allowedFetchHosts: [FETCH_WILDCARD],
       });
       return textResult({ jsonSchema, result: sandboxResult });
     },

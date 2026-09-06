@@ -129,3 +129,40 @@ describe("secrets.get sandbox host function", () => {
     expect(serialized).toContain("REDACTED");
   });
 });
+
+describe("__bridge_fetch host scoping", () => {
+  it("blocks all outbound fetch when the tool has no declared allowedFetchHosts (deny by default)", async () => {
+    const result = await runInSandbox({
+      code: "return await fetch('http://8.8.8.8/');",
+      params: {},
+      agentId: "a1",
+      datastore: fakeDatastore(),
+      toolName: "fetcher",
+    });
+    expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("fetch_destination_blocked") });
+  });
+
+  it("still enforces SSRF protection against private addresses even with the wildcard host declared", async () => {
+    const result = await runInSandbox({
+      code: "return await fetch('http://169.254.169.254/');",
+      params: {},
+      agentId: "a1",
+      datastore: fakeDatastore(),
+      toolName: "fetcher",
+      allowedFetchHosts: ["*"],
+    });
+    expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("fetch_destination_blocked") });
+  });
+
+  it("restricts fetch to exactly the tool's declared host allowlist", async () => {
+    const result = await runInSandbox({
+      code: "return await fetch('http://8.8.8.8/');",
+      params: {},
+      agentId: "a1",
+      datastore: fakeDatastore(),
+      toolName: "fetcher",
+      allowedFetchHosts: ["example.com"],
+    });
+    expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("fetch_destination_blocked") });
+  });
+});
