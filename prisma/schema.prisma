@@ -92,11 +92,22 @@ model Tool {
 }
 
 /// Phase 3: explicit many-to-many join between Agent and Tool.
+/// Phase 6: per-attachment capability scoping (OWASP LLM08 fix — Excessive
+/// Agency). Empty array = no access to that resource class; a tool must be
+/// explicitly granted secrets/datastore-prefixes/hosts at attach time. A
+/// literal "*" element in allowedHosts lifts the fetch allowlist entirely
+/// (existing SSRF protection against private/link-local addresses still
+/// applies) — the back-compat escape hatch for pre-existing attachments and
+/// deliberate full-web-access tools. See src/sandbox/tool-capabilities.ts.
 model AgentTool {
   agentId String
   toolId  String
   agent   Agent  @relation(fields: [agentId], references: [id])
   tool    Tool   @relation(fields: [toolId], references: [id])
+
+  allowedSecrets           Json @default("[]")
+  allowedDatastorePrefixes Json @default("[]")
+  allowedHosts             Json @default("[]")
 
   @@id([agentId, toolId])
 }
