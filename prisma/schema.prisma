@@ -120,6 +120,11 @@ model Run {
   /// Phase 2: beaten by the executor while running; a stale value past
   /// HEARTBEAT_TIMEOUT is how the reconciler finds an orphaned run.
   heartbeatAt DateTime?
+  /// Phase 4: EngineResult.finalText, persisted so a Task (MCP) or later
+  /// inspection can read a completed run's answer. Previously only ever
+  /// streamed live via onText and dropped — no durable place to read it
+  /// from until this field existed.
+  finalText   String?
 }
 
 /// Phase 2: single-row-per-scope lease so exactly one scheduler process

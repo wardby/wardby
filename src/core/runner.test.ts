@@ -124,6 +124,7 @@ describe("runAgent", () => {
     expect(run.tokensIn).toBe(13);
     expect(run.tokensOut).toBe(8);
     expect(run.costUsd).toBe(0.0005);
+    expect(run.finalText).toBe("hi there");
   });
 
   it("persists a refused/budget_exhausted/failed status and error message verbatim", async () => {

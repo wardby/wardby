@@ -139,6 +139,7 @@ export async function executeRun(
         tokensOut: engineResult.usage.tokensOut,
         costUsd: engineResult.usage.costUsd,
         error: engineResult.error ?? null,
+        finalText: engineResult.finalText || null,
         finishedAt: new Date(),
       },
     });
