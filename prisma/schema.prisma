@@ -31,6 +31,12 @@ model Agent {
   // Phase 3: tools + multi-turn loop.
   tools    AgentTool[]
   maxTurns Int         @default(10)
+
+  // Phase 4: ownership. Null = public/unowned (pre-Phase-4 agents migrate this way).
+  ownerId  String?
+  owner    Principal?    @relation(fields: [ownerId], references: [id])
+  secrets  AgentSecret[]
+  webhooks Webhook[]
 }
 
 enum RunStatus {
@@ -66,14 +72,18 @@ model Tool {
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
   agents      AgentTool[]
+
+  // Phase 4: ownership. Null = public/unowned.
+  ownerId String?
+  owner   Principal? @relation(fields: [ownerId], references: [id])
 }
 
 /// Phase 3: explicit many-to-many join between Agent and Tool.
 model AgentTool {
   agentId String
   toolId  String
-  agent   Agent @relation(fields: [agentId], references: [id])
-  tool    Tool  @relation(fields: [toolId], references: [id])
+  agent   Agent  @relation(fields: [agentId], references: [id])
+  tool    Tool   @relation(fields: [toolId], references: [id])
 
   @@id([agentId, toolId])
 }
@@ -96,17 +106,17 @@ enum RunTrigger {
 }
 
 model Run {
-  id         String     @id @default(cuid())
-  agent      Agent      @relation(fields: [agentId], references: [id])
-  agentId    String
-  status     RunStatus  @default(pending)
-  trigger    RunTrigger @default(manual)
-  tokensIn   Int        @default(0)
-  tokensOut  Int        @default(0)
-  costUsd    Decimal    @default(0) @db.Decimal(10, 6)
-  error      String?
-  startedAt  DateTime   @default(now())
-  finishedAt DateTime?
+  id          String     @id @default(cuid())
+  agent       Agent      @relation(fields: [agentId], references: [id])
+  agentId     String
+  status      RunStatus  @default(pending)
+  trigger     RunTrigger @default(manual)
+  tokensIn    Int        @default(0)
+  tokensOut   Int        @default(0)
+  costUsd     Decimal    @default(0) @db.Decimal(10, 6)
+  error       String?
+  startedAt   DateTime   @default(now())
+  finishedAt  DateTime?
   /// Phase 2: beaten by the executor while running; a stale value past
   /// HEARTBEAT_TIMEOUT is how the reconciler finds an orphaned run.
   heartbeatAt DateTime?
@@ -119,4 +129,117 @@ model SchedulerLease {
   holder    String
   expiresAt DateTime
   updatedAt DateTime @updatedAt
+}
+
+/// Phase 4: an authenticated caller. `subject` is the IdP subject claim
+/// (delegating mode) or the configured LOCAL_PRINCIPAL (stdio, no token).
+/// Created on first sight (find-or-create by subject).
+model Principal {
+  id        String    @id @default(cuid())
+  subject   String    @unique
+  createdAt DateTime  @default(now())
+  agents    Agent[]
+  tools     Tool[]
+  secrets   Secret[]
+  webhooks  Webhook[]
+}
+
+/// Phase 4: durable handle backing both a triggered run and (reserved,
+/// unused this phase) guided tool authoring. Persisted before the
+/// tools/call response is returned, so a client's first tasks/get always
+/// finds it.
+enum TaskKind {
+  run
+  tool_authoring
+}
+
+enum TaskStatus {
+  working
+  input_required
+  completed
+  failed
+  cancelled
+}
+
+model Task {
+  id             String     @id @default(cuid())
+  kind           TaskKind
+  runId          String?
+  status         TaskStatus @default(working)
+  inputRequests  Json?
+  inputResponses Json?
+  result         Json?
+  error          Json?
+  ttlAt          DateTime
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+}
+
+/// Phase 4: a secret value, encrypted at rest via the SecretCipher seam.
+/// `ciphertext` is opaque to Prisma; only the cipher's decrypt() ever
+/// produces plaintext, and only at point-of-use inside the sandbox.
+model Secret {
+  id         String        @id @default(cuid())
+  name       String
+  ciphertext String
+  keyId      String
+  ownerId    String?
+  owner      Principal?    @relation(fields: [ownerId], references: [id])
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+  agents     AgentSecret[]
+
+  @@unique([ownerId, name])
+}
+
+/// Phase 4: attaches a secret to an agent, addressed by name at sandbox
+/// point-of-use (secrets.get(name)).
+model AgentSecret {
+  agentId  String
+  secretId String
+  agent    Agent  @relation(fields: [agentId], references: [id])
+  secret   Secret @relation(fields: [secretId], references: [id])
+
+  @@id([agentId, secretId])
+}
+
+enum WebhookStatus {
+  enabled
+  disabled
+}
+
+/// Phase 4: inbound trigger for an agent. `secretHash` is an HMAC/hash of
+/// the validation secret shown to the caller once at creation; the raw
+/// secret itself is never stored.
+model Webhook {
+  id          String        @id @default(cuid())
+  agentId     String
+  agent       Agent         @relation(fields: [agentId], references: [id])
+  secretHash  String
+  status      WebhookStatus @default(enabled)
+  ownerId     String?
+  owner       Principal?    @relation(fields: [ownerId], references: [id])
+  createdAt   DateTime      @default(now())
+  lastFiredAt DateTime?
+}
+
+/// Phase 4 (self-hosted AS only): a registered OAuth client. Created and
+/// used only under AUTH_PROVIDER=self-hosted; the delegating adapter never
+/// writes these tables even though the migration creates them unconditionally.
+model OAuthClient {
+  clientId     String   @id
+  metadata     Json
+  clientSecret String?
+  createdAt    DateTime @default(now())
+}
+
+/// Phase 4 (self-hosted AS only): an issued authorization grant / refresh token.
+model OAuthGrant {
+  id           String   @id @default(cuid())
+  clientId     String
+  principalId  String
+  scope        String
+  refreshToken String?  @unique
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
 }

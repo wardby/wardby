@@ -21,3 +21,6 @@ src/sandbox/generated/
 .DS_Store
 *.log
 coverage/
+
+# local SDD/plan-execution ledger scratch (never published)
+/.superpowers/

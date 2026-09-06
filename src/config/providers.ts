@@ -11,7 +11,7 @@ export type JobLauncherKind = "local" | "ecs";
 export type EmailProviderKind = "smtp" | "ses";
 export type LlmProviderKind = "openai" | "anthropic" | "bedrock";
 export type SecretCipherKind = "app-key" | "kms";
-export type AuthProviderKind = "generic-oidc" | "fusionauth";
+export type AuthProviderKind = "delegating" | "self-hosted";
 export type BlobStoreKind = "local" | "s3";
 export type ExecutorKind = "in-process" | "dbos";
 export type DatastoreKind = "postgres";
@@ -38,10 +38,62 @@ export function loadProviderConfig(
     email: (env.EMAIL_PROVIDER as EmailProviderKind) ?? "smtp",
     llm: (env.LLM_PROVIDER as LlmProviderKind) ?? "openai",
     secrets: (env.SECRET_CIPHER as SecretCipherKind) ?? "app-key",
-    auth: (env.AUTH_PROVIDER as AuthProviderKind) ?? "generic-oidc",
+    auth: (env.AUTH_PROVIDER as AuthProviderKind) ?? "delegating",
     storage: (env.BLOB_STORE as BlobStoreKind) ?? "local",
     executor: (env.EXECUTOR as ExecutorKind) ?? "in-process",
     datastore: (env.DATASTORE as DatastoreKind) ?? "postgres",
     engine: (env.ENGINE as EngineKind) ?? "native",
+  };
+}
+
+export interface McpConfig {
+  transport: "http" | "stdio";
+  httpBind?: { host: string; port: number };
+  canonicalUri?: string;
+  localPrincipal: string;
+}
+
+/** Read MCP server transport/binding config from the environment. */
+export function loadMcpConfig(env: NodeJS.ProcessEnv = process.env): McpConfig {
+  const transport = (env.MCP_TRANSPORT as "http" | "stdio") ?? "stdio";
+  const bind = env.MCP_HTTP_BIND?.split(":");
+  return {
+    transport,
+    httpBind: bind ? { host: bind[0], port: Number(bind[1]) } : undefined,
+    canonicalUri: env.MCP_CANONICAL_URI,
+    localPrincipal: env.LOCAL_PRINCIPAL ?? "local",
+  };
+}
+
+export interface AuthConfig {
+  /** Delegating mode: the external IdP's issuer URL. */
+  issuer?: string;
+  /** Delegating mode: JWKS endpoint for signature verification. */
+  jwksUri?: string;
+  /** Both modes: the audience a token must carry to be accepted (reevo's canonical URI). */
+  audience?: string;
+  /** Self-hosted mode: PEM-encoded signing key material for issuing tokens. */
+  signingKey?: string;
+}
+
+/** Read auth-adapter config (issuer/JWKS/audience/signing key) from the environment. */
+export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig {
+  return {
+    issuer: env.AUTH_ISSUER,
+    jwksUri: env.AUTH_JWKS_URI,
+    audience: env.AUTH_AUDIENCE,
+    signingKey: env.AUTH_SIGNING_KEY,
+  };
+}
+
+export interface SecretConfig {
+  /** app-key mode: 32-byte hex-encoded AES-256-GCM master key. */
+  appKey?: string;
+}
+
+/** Read secret-cipher config (the app-key master key) from the environment. */
+export function loadSecretConfig(env: NodeJS.ProcessEnv = process.env): SecretConfig {
+  return {
+    appKey: env.SECRET_APP_KEY,
   };
 }
