@@ -27,6 +27,7 @@
     "@modelcontextprotocol/server": "^2.0.0",
     "@prisma/client": "^6.19.3",
     "croner": "^10.0.1",
+    "dotenv-flow": "^4.1.0",
     "fast-xml-parser": "^5.11.1",
     "gpt-tokenizer": "^2.5.0",
     "jose": "^6.2.12",

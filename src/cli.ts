@@ -12,6 +12,7 @@
  *                before/without an MCP client)
  */
 
+import "./env.js";
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import type { RunStatus } from "@prisma/client";
