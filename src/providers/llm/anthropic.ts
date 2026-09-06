@@ -14,7 +14,13 @@ import { anthropicPriceUsd, anthropicSupportedModels, getAnthropicPricing } from
 
 export { anthropicSupportedModels } from "./pricing-anthropic.js";
 
-const DEFAULT_MAX_TOKENS = 4096;
+// Anthropic's own guidance: don't lowball max_tokens — hitting the cap
+// truncates output mid-thought with no error, silently handing engine-native.ts
+// (which never sets LlmRequest.maxTokens, and never checks stopReason) a
+// clipped "final" answer it treats as complete. This adapter streams, so a
+// generous ceiling costs nothing in latency; the budget guardrail is driven
+// by actual token counts (core/budget.ts), not by this cap.
+const DEFAULT_MAX_TOKENS = 16000;
 // Claude has no offline tokenizer; o200k_base is a proxy. Bias high so the
 // pre-flight refuse never admits an over-budget run on an under-count.
 const CLAUDE_TOKEN_INFLATION = 1.2;
