@@ -18,8 +18,8 @@ import { toNodeHandler, localhostOriginValidation } from "@modelcontextprotocol/
 import type { PrismaClient } from "@prisma/client";
 import type { AuthProvider } from "../../providers/auth/types.js";
 import type { SelfHostedAuthProvider } from "../../providers/auth/self-hosted.js";
-import type { ProviderRegistry } from "../../providers/index.js";
 import type { ReevoMcpServer } from "../server.js";
+import type { McpProviders } from "../context.js";
 import { authenticate, protectedResourceMetadata, protectedResourceMetadataUrl } from "../auth/resource-server.js";
 import { McpError } from "../errors.js";
 import { handleWebhookIngress } from "../webhooks/ingress.js";
@@ -34,7 +34,7 @@ export interface HttpServerConfig {
 export interface StartHttpServerOptions {
   mcp: ReevoMcpServer;
   config: HttpServerConfig;
-  auth: { authProvider: AuthProvider; db: PrismaClient; providers: ProviderRegistry };
+  auth: { authProvider: AuthProvider; db: PrismaClient; providers: McpProviders };
   /** Required when config.authProviderKind === "self-hosted" — the same instance as auth.authProvider, narrowed. */
   selfHosted?: SelfHostedAuthProvider;
 }

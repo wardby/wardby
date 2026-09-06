@@ -30,8 +30,7 @@ import {
   type ServerContext,
 } from "@modelcontextprotocol/server";
 import type { PrismaClient, Principal } from "@prisma/client";
-import type { ProviderRegistry } from "../providers/index.js";
-import type { McpRequestContext } from "./context.js";
+import type { McpRequestContext, McpProviders } from "./context.js";
 import { requireScope } from "./auth/resource-server.js";
 import { McpError } from "./errors.js";
 import { TASKS_EXTENSION_ID, clientSupportsTasks } from "./capabilities.js";
@@ -63,7 +62,7 @@ export interface McpServerConfig {
 }
 
 export interface BuildMcpServerOptions {
-  providers: ProviderRegistry;
+  providers: McpProviders;
   db: PrismaClient;
   config: McpServerConfig;
 }

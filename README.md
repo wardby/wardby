@@ -20,15 +20,16 @@ interface with a default (portable) adapter and optional native adapters.
 ```
 src/
   core/            cloud-agnostic domain: agents, tools, runner, scheduler,
-                   triggers, sandbox (built out in later steps)
+                   triggers, sandbox, secrets, webhooks
   config/          provider selection from environment
   providers/
     jobs/          JobLauncher     — dispatch long-running work
     email/         EmailProvider   — outbound + inbound mail
     llm/           LlmProvider     — streaming chat + usage/budget
     secrets/       SecretCipher    — encrypt-at-rest
-    auth/          AuthProvider    — OIDC identity + roles
+    auth/          AuthProvider    — OAuth 2.1 resource-server identity
     storage/       BlobStore       — object storage
+  mcp/             MCP server front door (Phase 4) — peer to the CLI
 deploy/
   local/           docker-compose (default target)
   aws/             terraform (native cloud target)
@@ -46,6 +47,27 @@ credentials present (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) are enabled, and an
 agent's `model` field picks which adapter handles its calls — so OpenAI and
 Claude agents can run side by side in one deployment. Bedrock-hosted Claude is
 a reserved `LLM_PROVIDER` kind with no adapter yet.
+
+## MCP server (Phase 4)
+
+`reevo mcp` exposes agents, tools, scheduling, runs, datastore, secrets, and
+webhooks as MCP tools — the primary way to author and operate agents, with
+the CLI retained only as the bootstrap/ops floor (`migrate`, `scheduler`,
+`run`, `runs`). Two transports:
+
+- **stdio** (`MCP_TRANSPORT=stdio`, default) — local, no OAuth; the operator
+  is trusted, and `LOCAL_PRINCIPAL` names the owner identity for anything
+  authored this way.
+- **Streamable HTTP** (`MCP_TRANSPORT=http`) — remote, always an OAuth 2.1
+  resource server. `AUTH_PROVIDER=delegating` (default) verifies tokens
+  issued by an external IdP; `AUTH_PROVIDER=self-hosted` has reevo also run
+  a minimal PKCE authorization server.
+
+Long-running operations (`trigger_agent`) return a durable Task (the MCP
+Tasks extension) when the client supports it, falling back to a plain
+`{runId}` polled via `get_run` otherwise — either way the same engine and
+budget guardrail run underneath. See `.env.example` for the full set of
+`MCP_*`/`AUTH_*`/`SECRET_*` configuration keys.
 
 ## License
 

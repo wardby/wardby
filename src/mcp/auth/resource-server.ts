@@ -6,10 +6,9 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import type { AuthProvider } from "../../providers/auth/types.js";
-import type { ProviderRegistry } from "../../providers/index.js";
 import { resolvePrincipal } from "./principal.js";
 import { McpError, unauthorized, insufficientScope } from "../errors.js";
-import type { McpRequestContext } from "../context.js";
+import type { McpRequestContext, McpProviders } from "../context.js";
 
 /** The initial capability tiers (§Scopes → capability tiers in the design doc). */
 export const SCOPES_SUPPORTED = [
@@ -55,7 +54,7 @@ export interface AuthenticateHeaders {
 export interface AuthenticateDeps {
   authProvider: AuthProvider;
   db: PrismaClient;
-  providers: ProviderRegistry;
+  providers: McpProviders;
   canonicalUri: string;
 }
 

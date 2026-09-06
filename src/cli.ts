@@ -7,6 +7,9 @@
  *   reevo run <name>
  *   reevo runs [--agent <name>] [--limit N] [--status <s>]
  *   reevo scheduler [--scope default]
+ *   reevo mcp   (MCP_TRANSPORT=stdio|http selects the transport; authoring/
+ *                control is MCP-first from here — this floor keeps working
+ *                before/without an MCP client)
  */
 
 import { readFileSync } from "node:fs";
@@ -25,6 +28,7 @@ import { startScheduler } from "./core/scheduler.js";
 import { startReconciler } from "./core/reconciler.js";
 import { NativeEngine } from "./core/engine-native.js";
 import { deriveJsonSchema } from "./sandbox/zod-params.js";
+import { startMcp } from "./mcp/index.js";
 
 const RUN_STATUSES: RunStatus[] = [
   "pending",
@@ -392,6 +396,23 @@ async function scheduler(args: string[]): Promise<void> {
   });
 }
 
+async function mcp(): Promise<void> {
+  await startMcp();
+  // startMcp() resolves once the transport is up (bound/listening), not
+  // when it stops — block here the same way `scheduler` does, so main()'s
+  // `finally { prisma.$disconnect() }` doesn't tear the connection down
+  // out from under a server that's still supposed to be running.
+  console.log("reevo mcp started. Press Ctrl+C to stop.");
+  await new Promise<void>((resolve) => {
+    const shutdown = () => {
+      console.log("\nreevo mcp shutting down...");
+      resolve();
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+  });
+}
+
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
 
@@ -414,6 +435,8 @@ async function main(): Promise<void> {
       await listRuns(rest);
     } else if (command === "scheduler") {
       await scheduler(rest);
+    } else if (command === "mcp") {
+      await mcp();
     } else {
       fail(
         "usage:\n" +
@@ -425,7 +448,8 @@ async function main(): Promise<void> {
           "  reevo tool list [--agent <name>]\n" +
           "  reevo run <name>\n" +
           "  reevo runs [--agent <name>] [--limit N] [--status <s>]\n" +
-          "  reevo scheduler [--scope default]",
+          "  reevo scheduler [--scope default]\n" +
+          "  reevo mcp   (MCP_TRANSPORT=stdio|http selects the transport)",
       );
     }
   } finally {
