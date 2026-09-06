@@ -22,6 +22,7 @@ interface FakeTaskRow {
   id: string;
   kind: string;
   runId: string | null;
+  principalId: string | null;
   status: string;
   createdAt: Date;
   updatedAt: Date;
@@ -57,12 +58,13 @@ function fakeDb(agents: FakeAgentRow[]) {
       },
     },
     task: {
-      create: async ({ data }: { data: { kind: string; runId: string; status: string } }) => {
+      create: async ({ data }: { data: { kind: string; runId: string; principalId: string | null; status: string } }) => {
         const now = new Date();
         const row: FakeTaskRow = {
           id: `task_${++taskCounter}`,
           kind: data.kind,
           runId: data.runId,
+          principalId: data.principalId,
           status: data.status,
           createdAt: now,
           updatedAt: now,

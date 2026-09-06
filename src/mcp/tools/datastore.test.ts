@@ -115,6 +115,28 @@ describe("datastore tools", () => {
     await client.close();
   });
 
+  it("a public (ownerId: null) agent's datastore is readable by any principal, but not writable", async () => {
+    const db = fakeDb([{ id: "a1", ownerId: null }]);
+    const datastore = fakeDatastore();
+    const mcp = buildMcpServer({ providers: { datastore } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, datastore, "anyone", ["agents:read", "datastore:write"]));
+    registerDatastoreTools(mcp);
+    const client = await connectClient(mcp);
+
+    const getResult = await client.callTool({ name: "datastore_get", arguments: { agentId: "a1", key: "k1" } });
+    expect(getResult.isError).toBeFalsy();
+
+    const listResult = await client.callTool({ name: "datastore_list", arguments: { agentId: "a1" } });
+    expect(listResult.isError).toBeFalsy();
+
+    const setResult = await client.callTool({ name: "datastore_set", arguments: { agentId: "a1", key: "k1", value: "v1" } });
+    expect(setResult.isError).toBe(true);
+
+    const deleteResult = await client.callTool({ name: "datastore_delete", arguments: { agentId: "a1", key: "k1" } });
+    expect(deleteResult.isError).toBe(true);
+    await client.close();
+  });
+
   it("datastore_delete removes a key, and datastore_list reflects it", async () => {
     const db = fakeDb([{ id: "a1", ownerId: "p1" }]);
     const datastore = fakeDatastore();

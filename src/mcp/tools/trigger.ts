@@ -25,35 +25,25 @@
  * of scope for this plan (no task in it adds one). Flagged in the ledger,
  * not silently glossed over.
  *
- * Ownership: a Task carries no owner of its own — it inherits the owning
- * Run's Agent's owner, resolved via requireOwnedTask below. tasks/get and
- * tasks/cancel both call it before touching the task manager, the same
- * shape every other cross-principal-sensitive read/mutate in this codebase
- * uses (requireOwnedAgent in agents.ts/runs.ts/etc.) — a caller who guesses
- * or is handed someone else's taskId gets 404, not another principal's
- * final text/cost.
+ * Ownership: a Task is stamped with the triggering principal's id at
+ * creation (Task.principalId) — a direct column, not resolved transitively
+ * through Run -> Agent -> ownerId, so it works uniformly even for a future
+ * tool_authoring task with no Run/Agent chain. requireOwnedTask (in
+ * ../auth/ownership.js, the one seam every ownership check in this codebase
+ * routes through) checks it before tasks/get and tasks/cancel touch the
+ * task manager — a caller who guesses or is handed someone else's taskId
+ * gets 404, not another principal's final text/cost.
  */
-import type { PrismaClient } from "@prisma/client";
 import { createRun } from "../../core/runner.js";
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { createRunTask, getTask, cancelTask } from "../tasks/manager.js";
+import { requireOwnedAgent, requireOwnedTask } from "../auth/ownership.js";
 
 const DEFAULT_TASK_TTL_MS = 24 * 60 * 60 * 1000;
 
 function textResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
-}
-
-async function requireOwnedTask(db: PrismaClient, taskId: string, principalId: string): Promise<void> {
-  const task = await db.task.findUnique({ where: { id: taskId } });
-  if (!task || !task.runId) throw new McpError(404, `Task "${taskId}" not found.`);
-  const run = await db.run.findUnique({ where: { id: task.runId } });
-  if (!run) throw new McpError(404, `Task "${taskId}" not found.`);
-  const agent = await db.agent.findUnique({ where: { id: run.agentId } });
-  // 404, not 403: confirming a taskId exists at all to a non-owner is
-  // itself a (small) information leak — same reasoning as get_agent.
-  if (!agent || agent.ownerId !== principalId) throw new McpError(404, `Task "${taskId}" not found.`);
 }
 
 export function registerTriggerTool(mcp: ReevoMcpServer): void {
@@ -62,9 +52,7 @@ export function registerTriggerTool(mcp: ReevoMcpServer): void {
     scope: "runs:trigger",
     inputSchema: { type: "object", properties: { agentId: { type: "string" } }, required: ["agentId"] },
     handler: async (args: { agentId: string }, ctx) => {
-      const agent = await ctx.db.agent.findUnique({ where: { id: args.agentId } });
-      if (!agent) throw new McpError(404, `Agent "${args.agentId}" not found.`);
-      if (agent.ownerId !== ctx.principal.id) throw new McpError(403, `Agent "${args.agentId}" is not owned by the caller.`);
+      const agent = await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
 
       const run = await createRun(ctx.db, agent.name, "manual");
 
@@ -78,7 +66,7 @@ export function registerTriggerTool(mcp: ReevoMcpServer): void {
       });
 
       if (ctx.clientSupportsTasks) {
-        const task = await createRunTask(run.id, ctx.db, DEFAULT_TASK_TTL_MS);
+        const task = await createRunTask(run.id, ctx.principal.id, ctx.db, DEFAULT_TASK_TTL_MS);
         return textResult(task);
       }
       return textResult({ runId: run.id });

@@ -1,16 +1,9 @@
 import type { ReevoMcpServer } from "../server.js";
-import { McpError } from "../errors.js";
 import type { DatastoreValue } from "../../providers/index.js";
+import { requireOwnedAgent, requireReadableAgent } from "../auth/ownership.js";
 
 function textResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
-}
-
-async function requireOwnedAgent(db: import("@prisma/client").PrismaClient, id: string, principalId: string) {
-  const agent = await db.agent.findUnique({ where: { id } });
-  if (!agent) throw new McpError(404, `Agent "${id}" not found.`);
-  if (agent.ownerId !== principalId) throw new McpError(403, `Agent "${id}" is not owned by the caller.`);
-  return agent;
 }
 
 export function registerDatastoreTools(mcp: ReevoMcpServer): void {
@@ -19,7 +12,7 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
     scope: "agents:read",
     inputSchema: { type: "object", properties: { agentId: { type: "string" }, key: { type: "string" } }, required: ["agentId", "key"] },
     handler: async (args: { agentId: string; key: string }, ctx) => {
-      await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+      await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
       const value = await ctx.providers.datastore.get(args.agentId, args.key);
       return textResult({ value: value ?? null });
     },
@@ -30,7 +23,7 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
     scope: "agents:read",
     inputSchema: { type: "object", properties: { agentId: { type: "string" }, prefix: { type: "string" } }, required: ["agentId"] },
     handler: async (args: { agentId: string; prefix?: string }, ctx) => {
-      await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+      await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
       const keys = await ctx.providers.datastore.list(args.agentId, args.prefix);
       return textResult(keys);
     },

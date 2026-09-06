@@ -14,6 +14,7 @@ import { deriveJsonSchema, validateParams } from "../../sandbox/zod-params.js";
 import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
+import { requireOwnedAgent, visibleToPrincipal } from "../auth/ownership.js";
 
 function textResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
@@ -24,13 +25,6 @@ async function requireOwnedTool(db: import("@prisma/client").PrismaClient, id: s
   if (!tool) throw new McpError(404, `Tool "${id}" not found.`);
   if (tool.ownerId !== principalId) throw new McpError(403, `Tool "${id}" is not owned by the caller.`);
   return tool;
-}
-
-async function requireOwnedAgent(db: import("@prisma/client").PrismaClient, id: string, principalId: string) {
-  const agent = await db.agent.findUnique({ where: { id } });
-  if (!agent) throw new McpError(404, `Agent "${id}" not found.`);
-  if (agent.ownerId !== principalId) throw new McpError(403, `Agent "${id}" is not owned by the caller.`);
-  return agent;
 }
 
 export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
@@ -136,7 +130,7 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
         const rows = await ctx.db.agentTool.findMany({ where: { agentId: args.agentId }, include: { tool: true } });
         return textResult(rows.map((r) => r.tool));
       }
-      const tools = await ctx.db.tool.findMany({ where: { OR: [{ ownerId: ctx.principal.id }, { ownerId: null }] } });
+      const tools = await ctx.db.tool.findMany({ where: visibleToPrincipal(ctx.principal.id) });
       return textResult(tools);
     },
   });

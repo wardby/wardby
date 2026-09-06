@@ -6,16 +6,10 @@
 import { createSecret, listSecrets, attachSecret, detachSecret, deleteSecret } from "../../core/secrets.js";
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
+import { requireOwnedAgent } from "../auth/ownership.js";
 
 function textResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
-}
-
-async function requireOwnedAgent(db: import("@prisma/client").PrismaClient, id: string, principalId: string) {
-  const agent = await db.agent.findUnique({ where: { id } });
-  if (!agent) throw new McpError(404, `Agent "${id}" not found.`);
-  if (agent.ownerId !== principalId) throw new McpError(403, `Agent "${id}" is not owned by the caller.`);
-  return agent;
 }
 
 export function registerSecretsTools(mcp: ReevoMcpServer): void {

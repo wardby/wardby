@@ -16,6 +16,8 @@ if (!databaseUrl) {
   );
 }
 
+const TEST_PRINCIPAL_ID = "task-mgr-test-principal";
+
 describe.skipIf(!databaseUrl)("MCP task manager (database)", () => {
   const db = new PrismaClient();
   const agentIds: string[] = [];
@@ -58,7 +60,7 @@ describe.skipIf(!databaseUrl)("MCP task manager (database)", () => {
 
   it("createRunTask persists a Task row before returning", async () => {
     const run = await newRun({ status: "pending" });
-    const created = await createRunTask(run.id, db, 60_000);
+    const created = await createRunTask(run.id, TEST_PRINCIPAL_ID, db, 60_000);
     taskIds.push(created.taskId);
 
     expect(created.resultType).toBe("task");
@@ -89,7 +91,7 @@ describe.skipIf(!databaseUrl)("MCP task manager (database)", () => {
         error: runStatus === "failed" || runStatus === "lost" || runStatus === "refused" ? "something went wrong" : null,
         finalText: runStatus === "succeeded" || runStatus === "budget_exhausted" ? "the answer" : null,
       });
-      const created = await createRunTask(run.id, db, 60_000);
+      const created = await createRunTask(run.id, TEST_PRINCIPAL_ID, db, 60_000);
       taskIds.push(created.taskId);
 
       const result = await getTask(created.taskId, db);
@@ -107,7 +109,7 @@ describe.skipIf(!databaseUrl)("MCP task manager (database)", () => {
 
   it("budget_exhausted is a successful terminal (completed), not an error", async () => {
     const run = await newRun({ status: "budget_exhausted", finalText: "partial summary", costUsd: 0.05 });
-    const created = await createRunTask(run.id, db, 60_000);
+    const created = await createRunTask(run.id, TEST_PRINCIPAL_ID, db, 60_000);
     taskIds.push(created.taskId);
     const result = await getTask(created.taskId, db);
     expect(result.status).toBe("completed");
@@ -116,7 +118,7 @@ describe.skipIf(!databaseUrl)("MCP task manager (database)", () => {
 
   it("cancelTask invokes the stop hook for a still-running task", async () => {
     const run = await newRun({ status: "running" });
-    const created = await createRunTask(run.id, db, 60_000);
+    const created = await createRunTask(run.id, TEST_PRINCIPAL_ID, db, 60_000);
     taskIds.push(created.taskId);
 
     let stoppedRunId: string | undefined;
@@ -131,7 +133,7 @@ describe.skipIf(!databaseUrl)("MCP task manager (database)", () => {
 
   it("cancelTask tolerates a run already terminal (no-op, does not invoke the stop hook)", async () => {
     const run = await newRun({ status: "succeeded", finalText: "done" });
-    const created = await createRunTask(run.id, db, 60_000);
+    const created = await createRunTask(run.id, TEST_PRINCIPAL_ID, db, 60_000);
     taskIds.push(created.taskId);
 
     let stopHookCalled = false;

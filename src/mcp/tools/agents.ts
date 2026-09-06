@@ -8,16 +8,10 @@
  */
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
+import { canRead, requireOwnedAgent, visibleToPrincipal } from "../auth/ownership.js";
 
 function textResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
-}
-
-async function requireOwnedAgent(db: import("@prisma/client").PrismaClient, id: string, principalId: string) {
-  const agent = await db.agent.findUnique({ where: { id } });
-  if (!agent) throw new McpError(404, `Agent "${id}" not found.`);
-  if (agent.ownerId !== principalId) throw new McpError(403, `Agent "${id}" is not owned by the caller.`);
-  return agent;
 }
 
 export function registerAgentTools(mcp: ReevoMcpServer): void {
@@ -89,7 +83,7 @@ export function registerAgentTools(mcp: ReevoMcpServer): void {
     inputSchema: { type: "object", properties: {} },
     handler: async (_args: Record<string, never>, ctx) => {
       const agents = await ctx.db.agent.findMany({
-        where: { OR: [{ ownerId: ctx.principal.id }, { ownerId: null }] },
+        where: visibleToPrincipal(ctx.principal.id),
       });
       return textResult(agents);
     },
@@ -104,7 +98,7 @@ export function registerAgentTools(mcp: ReevoMcpServer): void {
         where: { id: args.id },
         include: { tools: { include: { tool: true } } },
       });
-      if (!agent || (agent.ownerId !== null && agent.ownerId !== ctx.principal.id)) {
+      if (!agent || !canRead(agent.ownerId, ctx.principal.id)) {
         throw new McpError(404, `Agent "${args.id}" not found.`);
       }
       return textResult(agent);

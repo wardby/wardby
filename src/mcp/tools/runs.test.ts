@@ -164,4 +164,23 @@ describe("run observability tools", () => {
     expect(result.isError).toBe(true);
     await client.close();
   });
+
+  it("get_run and list_runs on a public (ownerId: null) agent are readable by any principal", async () => {
+    const now = new Date();
+    const db = fakeDb(
+      [{ id: "a1", ownerId: null }],
+      [{ id: "r1", agentId: "a1", status: "succeeded", trigger: "manual", turns: 1, tokensIn: 1, tokensOut: 1, costUsd: 0, finalText: "x", error: null, startedAt: now, finishedAt: now }],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "anyone", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+
+    const getResult = await client.callTool({ name: "get_run", arguments: { runId: "r1" } });
+    expect(getResult.isError).toBeFalsy();
+
+    const listResult = await client.callTool({ name: "list_runs", arguments: { agentId: "a1" } });
+    expect(listResult.isError).toBeFalsy();
+    await client.close();
+  });
 });

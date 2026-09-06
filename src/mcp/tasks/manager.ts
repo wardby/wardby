@@ -43,11 +43,12 @@ export type GetTaskResult =
 const DEFAULT_POLL_INTERVAL_MS = 1000;
 
 /** Starts a run-backed task: persists the Task row BEFORE returning, so a client's first tasks/get always finds it. */
-export async function createRunTask(runId: string, db: PrismaClient, ttlMs: number): Promise<CreateTaskResult> {
+export async function createRunTask(runId: string, principalId: string, db: PrismaClient, ttlMs: number): Promise<CreateTaskResult> {
   const row = await db.task.create({
     data: {
       kind: "run",
       runId,
+      principalId,
       status: "working",
       ttlAt: new Date(Date.now() + ttlMs),
     },
