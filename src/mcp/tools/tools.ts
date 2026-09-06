@@ -13,7 +13,7 @@ import type { Datastore } from "../../providers/index.js";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { deriveJsonSchema, validateParams } from "../../sandbox/zod-params.js";
 import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
-import { FETCH_WILDCARD } from "../../sandbox/tool-capabilities.js";
+import { FETCH_WILDCARD, ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { assertCanMutate, requireOwnedAgent, requireReadableAgent, visibleToPrincipal, canRead } from "../auth/ownership.js";
@@ -103,8 +103,35 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
   mcp.registerTool({
     name: "attach_tool",
     scope: "tools:write",
-    inputSchema: { type: "object", properties: { agentId: { type: "string" }, toolId: { type: "string" } }, required: ["agentId", "toolId"] },
-    handler: async (args: { agentId: string; toolId: string }, ctx) => {
+    inputSchema: {
+      type: "object",
+      properties: {
+        agentId: { type: "string" },
+        toolId: { type: "string" },
+        allowedSecrets: { type: "array", items: { type: "string" } },
+        allowedDatastorePrefixes: { type: "array", items: { type: "string" } },
+        allowedHosts: { type: "array", items: { type: "string" } },
+      },
+      required: ["agentId", "toolId"],
+    },
+    handler: async (
+      args: {
+        agentId: string;
+        toolId: string;
+        allowedSecrets?: string[];
+        allowedDatastorePrefixes?: string[];
+        allowedHosts?: string[];
+      },
+      ctx,
+    ) => {
+      const patch = ToolCapabilitiesPatchSchema.safeParse({
+        allowedSecrets: args.allowedSecrets,
+        allowedDatastorePrefixes: args.allowedDatastorePrefixes,
+        allowedHosts: args.allowedHosts,
+      });
+      if (!patch.success) {
+        throw new McpError(400, `Invalid tool capabilities: ${patch.error.issues.map((i) => i.message).join("; ")}`);
+      }
       await ctx.db.$transaction(async (tx) => {
         const agent = await tx.agent.findUnique({ where: { id: args.agentId } });
         if (!agent) throw new McpError(404, `Agent "${args.agentId}" not found.`);
@@ -113,7 +140,21 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
           throw new McpError(400, "Native sandbox tools cannot be attached to coding agents.");
         }
         await requireOwnedTool(tx, args.toolId, ctx.principal.id);
-        await tx.agentTool.create({ data: { agentId: args.agentId, toolId: args.toolId } });
+        await tx.agentTool.upsert({
+          where: { agentId_toolId: { agentId: args.agentId, toolId: args.toolId } },
+          create: {
+            agentId: args.agentId,
+            toolId: args.toolId,
+            allowedSecrets: patch.data.allowedSecrets ?? [],
+            allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes ?? [],
+            allowedHosts: patch.data.allowedHosts ?? [],
+          },
+          update: {
+            ...(patch.data.allowedSecrets !== undefined ? { allowedSecrets: patch.data.allowedSecrets } : {}),
+            ...(patch.data.allowedDatastorePrefixes !== undefined ? { allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes } : {}),
+            ...(patch.data.allowedHosts !== undefined ? { allowedHosts: patch.data.allowedHosts } : {}),
+          },
+        });
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
       return textResult({ attached: true });
     },

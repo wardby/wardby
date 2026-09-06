@@ -28,7 +28,13 @@ interface FakeAgentRow {
 function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
   const toolRows = new Map(tools.map((t) => [t.id, t]));
   const agentRows = new Map(agents.map((a) => [a.id, a]));
-  const attachments: { agentId: string; toolId: string }[] = [];
+  const attachments: {
+    agentId: string;
+    toolId: string;
+    allowedSecrets?: string[];
+    allowedDatastorePrefixes?: string[];
+    allowedHosts?: string[];
+  }[] = [];
   let counter = toolRows.size;
 
   const transactionDb = {
@@ -52,6 +58,16 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
       create: async ({ data }: { data: { agentId: string; toolId: string } }) => {
         attachments.push(data);
         return data;
+      },
+      upsert: async ({ where, create, update }: { where: { agentId_toolId: { agentId: string; toolId: string } }; create: Record<string, unknown>; update: Record<string, unknown> }) => {
+        const idx = attachments.findIndex((a) => a.agentId === where.agentId_toolId.agentId && a.toolId === where.agentId_toolId.toolId);
+        if (idx === -1) {
+          const row = { agentId: where.agentId_toolId.agentId, toolId: where.agentId_toolId.toolId, allowedSecrets: [], allowedDatastorePrefixes: [], allowedHosts: [], ...create };
+          attachments.push(row as never);
+          return row;
+        }
+        attachments[idx] = { ...attachments[idx], ...update } as never;
+        return attachments[idx];
       },
       deleteMany: async ({ where }: { where: { agentId: string; toolId: string } }) => {
         const before = attachments.length;
@@ -262,6 +278,67 @@ describe("tool authoring tools", () => {
 
     const listedAfter = await client.callTool({ name: "list_tools", arguments: { agentId: "a1" } });
     expect(parseText(listedAfter as never)).toEqual([]);
+    await client.close();
+  });
+
+  it("attach_tool persists declared capabilities and rejects an invalid host", async () => {
+    const db = fakeDb(
+      [{ id: "t1", name: "greet", description: "x", paramsZod: "z.object({})", jsonSchema: {}, code: "", ownerId: "p1" }],
+      [{ id: "a1", ownerId: "p1" }],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    const bad = await client.callTool({
+      name: "attach_tool",
+      arguments: { agentId: "a1", toolId: "t1", allowedHosts: ["not a host!"] },
+    });
+    expect(bad.isError).toBe(true);
+
+    const attach = await client.callTool({
+      name: "attach_tool",
+      arguments: { agentId: "a1", toolId: "t1", allowedSecrets: ["API_KEY"], allowedHosts: ["api.example.com"] },
+    });
+    expect(attach.isError).toBeFalsy();
+
+    const rows = await db.agentTool.findMany({ where: { agentId: "a1" } });
+    expect(rows[0]).toMatchObject({ allowedSecrets: ["API_KEY"], allowedHosts: ["api.example.com"], allowedDatastorePrefixes: [] });
+    await client.close();
+  });
+
+  it("attach_tool defaults to deny-all capabilities when none are declared", async () => {
+    const db = fakeDb(
+      [{ id: "t1", name: "greet", description: "x", paramsZod: "z.object({})", jsonSchema: {}, code: "", ownerId: "p1" }],
+      [{ id: "a1", ownerId: "p1" }],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "t1" } });
+    const rows = await db.agentTool.findMany({ where: { agentId: "a1" } });
+    expect(rows[0]).toMatchObject({ allowedSecrets: [], allowedDatastorePrefixes: [], allowedHosts: [] });
+    await client.close();
+  });
+
+  it("re-attaching declares only the fields passed, leaving the rest untouched", async () => {
+    const db = fakeDb(
+      [{ id: "t1", name: "greet", description: "x", paramsZod: "z.object({})", jsonSchema: {}, code: "", ownerId: "p1" }],
+      [{ id: "a1", ownerId: "p1" }],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "t1", allowedSecrets: ["API_KEY"] } });
+    await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "t1", allowedHosts: ["api.example.com"] } });
+
+    const rows = await db.agentTool.findMany({ where: { agentId: "a1" } });
+    expect(rows[0]).toMatchObject({ allowedSecrets: ["API_KEY"], allowedHosts: ["api.example.com"] });
     await client.close();
   });
 });

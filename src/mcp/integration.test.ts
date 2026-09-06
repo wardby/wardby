@@ -217,6 +217,16 @@ function buildFakeDb() {
         agentTools.push(data);
         return data;
       },
+      upsert: async ({ where, create, update }: { where: { agentId_toolId: { agentId: string; toolId: string } }; create: Record<string, unknown>; update: Record<string, unknown> }) => {
+        const idx = agentTools.findIndex((a) => a.agentId === where.agentId_toolId.agentId && a.toolId === where.agentId_toolId.toolId);
+        if (idx === -1) {
+          const row = { agentId: where.agentId_toolId.agentId, toolId: where.agentId_toolId.toolId, allowedSecrets: [], allowedDatastorePrefixes: [], allowedHosts: [], ...create };
+          agentTools.push(row as never);
+          return row;
+        }
+        agentTools[idx] = { ...agentTools[idx], ...update } as never;
+        return agentTools[idx];
+      },
       deleteMany: async ({ where }: { where: { agentId: string; toolId: string } }) => {
         const kept = agentTools.filter((a) => !(a.agentId === where.agentId && a.toolId === where.toolId));
         const removed = agentTools.length - kept.length;
