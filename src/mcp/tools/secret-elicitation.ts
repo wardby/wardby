@@ -7,6 +7,12 @@
  * write has happened yet. In-memory and per-process only: nothing outside
  * this same running server ever needs to read it, matching
  * mintRequestState's own per-process key.
+ *
+ * Entries expire after ELICITATION_TTL_MS (matches server.ts's
+ * mintRequestState ttlSeconds: an elicitation nobody completes or polls
+ * within that window is abandoned, and the map must not grow unbounded
+ * over the life of the process). Expiry is swept lazily on every read and
+ * write rather than via a timer, so an idle process holds no interval.
  */
 import type { PrismaClient } from "@prisma/client";
 import { createSecret, type SecretMetadata } from "../../core/secrets.js";
@@ -19,15 +25,31 @@ export interface SecretElicitationPayload {
 
 export type SecretElicitationOutcome = { ok: true; secret: SecretMetadata } | { ok: false; error: string };
 
-const outcomes = new Map<string, SecretElicitationOutcome>();
+const ELICITATION_TTL_MS = 600_000;
+
+interface OutcomeEntry {
+  outcome: SecretElicitationOutcome;
+  expiresAt: number;
+}
+
+const outcomes = new Map<string, OutcomeEntry>();
 
 /** Deterministic on (ownerId, secretName) — every call for the same pending secret, protocol-mode or polling-mode, looks up the same entry. */
 function outcomeKey(ownerId: string, secretName: string): string {
   return `${ownerId}\0${secretName}`;
 }
 
+/** Sweeps every expired entry, not just the one being looked up, so a set-and-never-polled-again entry doesn't linger forever. */
+function pruneExpired(now: number): void {
+  for (const [key, entry] of outcomes) {
+    if (entry.expiresAt <= now) outcomes.delete(key);
+  }
+}
+
 export function getSecretElicitationOutcome(ownerId: string, secretName: string): SecretElicitationOutcome | undefined {
-  return outcomes.get(outcomeKey(ownerId, secretName));
+  const now = Date.now();
+  pruneExpired(now);
+  return outcomes.get(outcomeKey(ownerId, secretName))?.outcome;
 }
 
 /**
@@ -41,20 +63,22 @@ export async function fulfillSecretElicitation(
   cipher: SecretCipher,
   db: PrismaClient,
 ): Promise<SecretElicitationOutcome> {
+  const now = Date.now();
+  pruneExpired(now);
   const key = outcomeKey(payload.ownerId, payload.secretName);
   const existing = outcomes.get(key);
-  if (existing) return existing;
+  if (existing) return existing.outcome;
   try {
     const secret = await createSecret(payload.secretName, value, payload.ownerId, cipher, db);
     const outcome: SecretElicitationOutcome = {
       ok: true,
       secret: { id: secret.id, name: secret.name, keyId: secret.keyId, ownerId: secret.ownerId, createdAt: secret.createdAt, updatedAt: secret.updatedAt },
     };
-    outcomes.set(key, outcome);
+    outcomes.set(key, { outcome, expiresAt: now + ELICITATION_TTL_MS });
     return outcome;
   } catch (err) {
     const outcome: SecretElicitationOutcome = { ok: false, error: err instanceof Error ? err.message : String(err) };
-    outcomes.set(key, outcome);
+    outcomes.set(key, { outcome, expiresAt: now + ELICITATION_TTL_MS });
     return outcome;
   }
 }
