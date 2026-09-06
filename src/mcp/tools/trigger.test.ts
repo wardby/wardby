@@ -261,4 +261,45 @@ describe("trigger_agent", () => {
     ).rejects.toThrow(/scope/i);
     await client.close();
   });
+
+  it("tasks/update is registered but rejects — a run-backed task never enters input_required", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "p1" }]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["runs:trigger"], true));
+    registerTriggerTool(mcp);
+    const client = await connectClient(mcp);
+
+    const triggerResult = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+    const { taskId } = parseText(triggerResult as never) as { taskId: string };
+
+    await expect(
+      client.request(
+        { method: "tasks/update", params: { taskId, inputResponses: {} } },
+        fromJsonSchema<Record<string, unknown>>({ type: "object", additionalProperties: true }),
+      ),
+    ).rejects.toThrow(/not awaiting input/i);
+    await client.close();
+  });
+
+  it("tasks/update on another owner's task is rejected (ownership checked before the not-awaiting-input error)", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "owner-1" }]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    registerTriggerTool(mcp);
+
+    mcp.setFixedContext(fakeCtx(db, "owner-1", ["runs:trigger"], true));
+    const ownerClient = await connectClient(mcp);
+    const triggerResult = await ownerClient.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+    const { taskId } = parseText(triggerResult as never) as { taskId: string };
+    await ownerClient.close();
+
+    mcp.setFixedContext(fakeCtx(db, "not-the-owner", ["runs:trigger"], true));
+    const intruderClient = await connectClient(mcp);
+    await expect(
+      intruderClient.request(
+        { method: "tasks/update", params: { taskId, inputResponses: {} } },
+        fromJsonSchema<Record<string, unknown>>({ type: "object", additionalProperties: true }),
+      ),
+    ).rejects.toThrow();
+    await intruderClient.close();
+  });
 });

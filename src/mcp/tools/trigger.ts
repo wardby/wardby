@@ -1,10 +1,19 @@
 /**
- * trigger_agent + the Tasks extension's tasks/get and tasks/cancel methods.
- * A separate module from agents.ts (Task 9's pure CRUD) — this is the one
- * place in Phase 4 that actually produces Tasks (kind:"run"; tool_authoring
- * is reserved/unused this phase), so registering tasks/get and tasks/cancel
- * here — rather than splitting them into yet another file with nothing
- * else to register — keeps the one task-producing concern together.
+ * trigger_agent + the Tasks extension's tasks/get, tasks/cancel, and
+ * tasks/update methods. A separate module from agents.ts (Task 9's pure
+ * CRUD) — this is the one place in Phase 4 that actually produces Tasks
+ * (kind:"run"; tool_authoring is reserved/unused this phase), so
+ * registering all three here — rather than splitting them into yet
+ * another file with nothing else to register — keeps the one
+ * task-producing concern together.
+ *
+ * tasks/update is registered but always rejects: a run-backed task never
+ * enters "input_required" (runs need no mid-flight input, and guided tool
+ * authoring — the one flow that would — is deferred per Amendment A), so
+ * there is never legitimately pending input to submit. Registering it
+ * anyway (rather than leaving it unregistered, -32601) gives a client that
+ * calls it a clear, on-protocol "this task isn't awaiting input" instead
+ * of a generic method-not-found.
  *
  * Cancellation caveat: `Executor.start(runId)`/the engine expose no
  * interrupt hook at all today — `cancelTask`'s "cooperative stop" (per the
@@ -97,5 +106,12 @@ export function registerTriggerTool(mcp: ReevoMcpServer): void {
       void runId;
     });
     return {};
+  });
+
+  mcp.registerRequestHandler("tasks/update", "runs:trigger", async (params, ctx) => {
+    const { taskId } = params as { taskId: string };
+    await requireOwnedTask(ctx.db, taskId, ctx.principal.id);
+    const result = await getTask(taskId, ctx.db);
+    throw new McpError(400, `Task "${taskId}" is not awaiting input (status: ${result.status}).`);
   });
 }
