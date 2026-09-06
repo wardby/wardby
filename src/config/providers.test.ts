@@ -34,4 +34,9 @@ describe("loadMcpConfig", () => {
     expect(c.httpBind).toEqual({ host: "127.0.0.1", port: 8080 });
     expect(c.canonicalUri).toBe("https://host/mcp");
   });
+
+  it("defaults secretElicitationProtocol to off, and reads it on when explicitly set", () => {
+    expect(loadMcpConfig({} as NodeJS.ProcessEnv).secretElicitationProtocol).toBe(false);
+    expect(loadMcpConfig({ MCP_SECRET_ELICITATION_PROTOCOL: "true" } as NodeJS.ProcessEnv).secretElicitationProtocol).toBe(true);
+  });
 });

@@ -8,6 +8,7 @@
  * needs and this plan never builds real adapters for.
  */
 import type { Principal, PrismaClient } from "@prisma/client";
+import type { RequestStateAccessor } from "@modelcontextprotocol/server";
 import type { ProviderRegistry } from "../providers/index.js";
 
 export type McpProviders = Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "executor">;
@@ -17,6 +18,15 @@ export interface McpRequestContext {
   scopes: Set<string>;
   providers: McpProviders;
   db: PrismaClient;
+  /**
+   * The current call's multi-round-trip data (protocol revision 2026-07-28)
+   * — present on every call so a tool can tell an initial call from a
+   * retried one. `inputResponses` is only populated on a retry;
+   * `requestState()` returns the verified payload minted by
+   * `ReevoMcpServer.mintRequestState` on a prior round, or `undefined` on
+   * an initial call. See src/mcp/tools/secrets.ts for the one current user.
+   */
+  mcpReq: { inputResponses?: Record<string, unknown>; requestState: RequestStateAccessor };
   /**
    * Whether THIS call's client declared the Tasks extension
    * (io.modelcontextprotocol/tasks) — read from the modern-era per-request

@@ -25,10 +25,13 @@
 import {
   McpServer,
   fromJsonSchema,
+  createRequestStateCodec,
   CLIENT_CAPABILITIES_META_KEY,
   type McpServerFactory,
   type ServerContext,
+  type InputRequiredResult,
 } from "@modelcontextprotocol/server";
+import { randomBytes } from "node:crypto";
 import type { PrismaClient, Principal } from "@prisma/client";
 import type { McpRequestContext, McpProviders } from "./context.js";
 import { requireScope } from "./auth/resource-server.js";
@@ -54,7 +57,7 @@ export interface ToolSpec<Args = Record<string, unknown>> {
   handler: (
     args: Args,
     ctx: McpRequestContext,
-  ) => Promise<{ content: { type: "text"; text: string }[]; structuredContent?: unknown }>;
+  ) => Promise<{ content: { type: "text"; text: string }[]; structuredContent?: unknown } | InputRequiredResult>;
 }
 
 export interface McpServerConfig {
@@ -93,6 +96,26 @@ export interface ReevoMcpServer {
   discover(): DiscoverResultLike;
   /** stdio only: the one fixed identity every call in this connection resolves to. */
   setFixedContext(ctx: McpRequestContext | undefined): void;
+  /**
+   * Seals `payload` into the opaque `requestState` string a multi-round-trip
+   * tool hands back via `inputRequired({ requestState })`. Backed by one
+   * HMAC codec created for the life of this `ReevoMcpServer` (stable across
+   * every `factory()` call, so state minted on one call verifies on a
+   * later one) — see the module doc for why the key never needs to be
+   * shared beyond this process.
+   */
+  mintRequestState<T>(payload: T): Promise<string>;
+  /**
+   * Verifies a `requestState`-shaped token OUTSIDE the normal MCP request
+   * path — used by the secret-elicitation browser form (stdio's ephemeral
+   * local server, or the HTTP transport's mounted route), which receives
+   * the token via a URL query param rather than the protocol's own
+   * `requestState` field. Throws on a malformed, tampered, or expired
+   * token. Uses the same codec as `mintRequestState`/the SDK's own
+   * `ServerOptions.requestState.verify` hook, so a token is valid on
+   * either path interchangeably.
+   */
+  verifyRequestState<T>(token: string): Promise<T>;
 }
 
 interface AuthInfoExtra {
@@ -108,6 +131,17 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
   }[] = [];
   let fixedContext: McpRequestContext | undefined;
 
+  // No `bind` callback, so `ctx` is never read by mint()/verify() (confirmed
+  // against the codec's implementation) — safe to call verifyRequestState()
+  // from outside a real MCP request (the secret-elicitation browser form).
+  // A fresh random key per process is fine: nothing outside this same
+  // running server ever needs to verify a token this process minted.
+  const requestStateCodec = createRequestStateCodec<unknown>({ key: randomBytes(32), ttlSeconds: 600 });
+
+  function mcpReqOf(sdkCtx: ServerContext): McpRequestContext["mcpReq"] {
+    return { inputResponses: sdkCtx.mcpReq?.inputResponses, requestState: sdkCtx.mcpReq?.requestState ?? (() => undefined) };
+  }
+
   function resolveCtx(sdkCtx: ServerContext): McpRequestContext {
     const authInfo = sdkCtx.http?.authInfo;
     const extra = authInfo?.extra as AuthInfoExtra | undefined;
@@ -117,6 +151,7 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
         scopes: new Set(authInfo!.scopes),
         providers: opts.providers,
         db: opts.db,
+        mcpReq: mcpReqOf(sdkCtx),
         clientSupportsTasks: clientSupportsTasks(
           (sdkCtx.mcpReq?.envelope as Record<string, unknown> | undefined)?.[CLIENT_CAPABILITIES_META_KEY] as
             | { extensions?: Record<string, unknown> }
@@ -124,7 +159,7 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
         ),
       };
     }
-    if (fixedContext) return fixedContext;
+    if (fixedContext) return { ...fixedContext, mcpReq: mcpReqOf(sdkCtx) };
     throw new McpError(401, "No authenticated context available for this call.");
   }
 
@@ -141,7 +176,10 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
   }
 
   const factory: McpServerFactory = () => {
-    const mcpServer = new McpServer({ name: "reevo-run", version: "0.0.0" });
+    const mcpServer = new McpServer(
+      { name: "reevo-run", version: "0.0.0" },
+      { requestState: { verify: (state, ctx) => requestStateCodec.verify(state, ctx) } },
+    );
     mcpServer.server.registerCapabilities({ extensions: { [TASKS_EXTENSION_ID]: {} } });
 
     for (const spec of specs) {
@@ -190,5 +228,16 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
     fixedContext = ctx;
   }
 
-  return { registerTool, registerRequestHandler, factory, discover, setFixedContext };
+  function mintRequestState<T>(payload: T): Promise<string> {
+    return requestStateCodec.mint(payload);
+  }
+
+  function verifyRequestState<T>(token: string): Promise<T> {
+    // `ctx` is unused by verify() when no `bind` is configured (see the
+    // codec construction above) — this cast stands in for the real
+    // ServerContext an MCP request would supply.
+    return requestStateCodec.verify(token, {} as ServerContext) as Promise<T>;
+  }
+
+  return { registerTool, registerRequestHandler, factory, discover, setFixedContext, mintRequestState, verifyRequestState };
 }

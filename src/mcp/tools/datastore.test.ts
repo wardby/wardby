@@ -51,6 +51,7 @@ function fakeCtx(
     providers: { datastore } as unknown as import("../../providers/index.js").ProviderRegistry,
     db,
     clientSupportsTasks: false,
+    mcpReq: { requestState: () => undefined },
   };
 }
 

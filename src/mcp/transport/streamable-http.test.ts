@@ -169,6 +169,13 @@ describe("startHttpServer (delegating mode)", () => {
     const res = await fetch(`${base}/authorize?client_id=x`, { redirect: "manual" });
     expect(res.status).toBe(404);
   });
+
+  it("/elicit/secret is reachable unauthenticated and rejects an invalid token", async () => {
+    const base = await start({ subject: "user-1", roles: [], scopes: [] });
+    const res = await fetch(`${base}/elicit/secret?t=not-a-real-token`);
+    expect(res.status).toBe(400);
+    expect(await res.text()).toMatch(/expired|invalid/i);
+  });
 });
 
 describe("startHttpServer (forced SSE)", () => {

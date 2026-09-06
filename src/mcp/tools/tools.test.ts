@@ -72,6 +72,7 @@ function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: str
     providers: fakeProviders,
     db,
     clientSupportsTasks: false,
+    mcpReq: { requestState: () => undefined },
   };
 }
 

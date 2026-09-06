@@ -50,6 +50,26 @@ function fakeDb() {
       findMany: async ({ where }: { where: { ownerId: string } }) => [...secrets.values()].filter((s) => s.ownerId === where.ownerId),
       findUnique: async ({ where }: { where: { ownerId_name: { ownerId: string; name: string } } }) =>
         [...secrets.values()].find((s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name) ?? null,
+      upsert: async ({
+        where,
+        create,
+        update,
+      }: {
+        where: { ownerId_name: { ownerId: string; name: string } };
+        create: Partial<FakeSecretRow> & { name: string };
+        update: Partial<FakeSecretRow>;
+      }) => {
+        const existing = [...secrets.values()].find((s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name);
+        if (existing) {
+          const row = { ...existing, ...update, updatedAt: new Date() };
+          secrets.set(row.id, row);
+          return row;
+        }
+        const now = new Date();
+        const row: FakeSecretRow = { id: `secret_${++counter}`, createdAt: now, updatedAt: now, ownerId: null, ...create } as FakeSecretRow;
+        secrets.set(row.id, row);
+        return row;
+      },
       delete: async ({ where }: { where: { id: string } }) => {
         const row = secrets.get(where.id);
         secrets.delete(where.id);
@@ -88,6 +108,21 @@ describe("core/secrets", () => {
     const secret = await createSecret("API_KEY", "sk-live-abc123", "p1", cipher, db);
     expect(secret.ciphertext).not.toBe("sk-live-abc123");
     expect(secret.name).toBe("API_KEY");
+  });
+
+  it("createSecret upserts: calling it again for the same owner+name rotates the value instead of throwing", async () => {
+    const db = fakeDb();
+    const cipher = fakeCipher();
+    const first = await createSecret("API_KEY", "sk-live-old", "p1", cipher, db);
+    const second = await createSecret("API_KEY", "sk-live-new", "p1", cipher, db);
+
+    expect(second.id).toBe(first.id);
+    const list = await listSecrets("p1", db);
+    expect(list.length).toBe(1);
+
+    await attachSecret("agent-1", "API_KEY", "p1", db);
+    const accessor = buildSecretsAccessor("agent-1", cipher, db);
+    expect(await accessor.get("API_KEY")).toBe("sk-live-new");
   });
 
   it("listSecrets never includes value or ciphertext", async () => {

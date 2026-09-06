@@ -12,6 +12,7 @@ import { McpError } from "../errors.js";
 import { handleWebhookIngress } from "../webhooks/ingress.js";
 import { canonicalUrl, HTTP_LIMITS, HttpBoundaryError, parseBody, readBody } from "./http-limits.js";
 import { browserHandler } from "../auth/self-hosted/browser.js";
+import { handleSecretElicitationForm, SECRET_ELICITATION_PATH } from "../tools/secret-elicitation-form.js";
 
 export interface HttpServerConfig {
   canonicalUri: string;
@@ -90,6 +91,16 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
     if (req.method === "GET" && (url.pathname === "/.well-known/oauth-protected-resource" || url.pathname === "/.well-known/oauth-protected-resource" + (canonical.pathname === "/" ? "" : canonical.pathname))) {
       const authorizationServers = opts.config.authProviderKind === "self-hosted" ? [canonical.href] : [opts.config.authorizationServer].filter((s): s is string => !!s);
       sendJson(res, 200, protectedResourceMetadata({ canonicalUri: canonical.href, authorizationServers })); return;
+    }
+    if (url.pathname === SECRET_ELICITATION_PATH && (req.method === "GET" || req.method === "POST")) {
+      await handleSecretElicitationForm(
+        req.method,
+        url.searchParams.get("t"),
+        () => Promise.resolve(body instanceof URLSearchParams ? body : new URLSearchParams()),
+        res,
+        { verify: (token) => opts.mcp.verifyRequestState(token), secrets: opts.auth.providers.secrets, db: opts.auth.db },
+      );
+      return;
     }
     if (oauth && await oauth(req, res, url, body)) return;
     const webhook = /^\/webhooks\/([^/]+)$/.exec(url.pathname);

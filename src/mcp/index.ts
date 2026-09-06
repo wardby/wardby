@@ -36,14 +36,19 @@ import { registerToolAuthoringTools } from "./tools/tools.js";
 import { registerSchedulingTools } from "./tools/scheduling.js";
 import { registerRunTools } from "./tools/runs.js";
 import { registerDatastoreTools } from "./tools/datastore.js";
-import { registerSecretsTools } from "./tools/secrets.js";
+import { registerSecretsTools, type SecretElicitationUrlBuilder } from "./tools/secrets.js";
 import { registerWebhookTools } from "./tools/webhooks.js";
+import { createStdioSecretElicitationHost } from "./tools/secret-elicitation-server.js";
+import { SECRET_ELICITATION_PATH } from "./tools/secret-elicitation-form.js";
 
 /** Placeholder identifier for stdio, which has no HTTP endpoint to name. Never surfaced: stdio's fixed context always holds every scope, so no scope challenge is ever built against it. */
 const STDIO_PLACEHOLDER_URI = "urn:reevo:local-stdio";
 
 /** Registers the full Phase 4 tool surface — every module, in one place. */
-export function registerAllTools(mcp: ReevoMcpServer): void {
+export function registerAllTools(
+  mcp: ReevoMcpServer,
+  opts: { secretElicitationUrl: SecretElicitationUrlBuilder; secretElicitationProtocol: boolean },
+): void {
   registerAgentTools(mcp);
   registerModelTools(mcp);
   registerTriggerTool(mcp);
@@ -51,7 +56,7 @@ export function registerAllTools(mcp: ReevoMcpServer): void {
   registerSchedulingTools(mcp);
   registerRunTools(mcp);
   registerDatastoreTools(mcp);
-  registerSecretsTools(mcp);
+  registerSecretsTools(mcp, { buildElicitationUrl: opts.secretElicitationUrl, protocolElicitation: opts.secretElicitationProtocol });
   registerWebhookTools(mcp);
 }
 
@@ -87,7 +92,15 @@ export async function startMcp(): Promise<void> {
 
   if (mcpConfig.transport === "stdio") {
     const mcp = buildMcpServer({ providers, db: prisma, config: { canonicalUri: STDIO_PLACEHOLDER_URI } });
-    registerAllTools(mcp);
+    const secretElicitationHost = createStdioSecretElicitationHost({
+      verify: (token) => mcp.verifyRequestState(token),
+      secrets: providers.secrets,
+      db: prisma,
+    });
+    registerAllTools(mcp, {
+      secretElicitationUrl: (token) => secretElicitationHost.urlFor(token),
+      secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
+    });
 
     // stdio never carries per-call AuthInfo — one fixed, fully-trusted
     // local identity for the whole connection, per the design's own
@@ -99,6 +112,9 @@ export async function startMcp(): Promise<void> {
       providers,
       db: prisma,
       clientSupportsTasks: false,
+      // Placeholder — server.ts's resolveCtx overwrites this with the
+      // current call's real mcpReq on every dispatch.
+      mcpReq: { requestState: () => undefined },
     });
     runStdioServer(mcp);
     return;
@@ -121,7 +137,11 @@ export async function startMcp(): Promise<void> {
   const selfHosted = authProviderKind === "self-hosted" ? (authProvider as SelfHostedAuthProvider) : undefined;
 
   const mcp = buildMcpServer({ providers, db: prisma, config: { canonicalUri: mcpConfig.canonicalUri } });
-  registerAllTools(mcp);
+  const httpOrigin = canonicalUrl(mcpConfig.canonicalUri).origin;
+  registerAllTools(mcp, {
+    secretElicitationUrl: (token) => Promise.resolve(`${httpOrigin}${SECRET_ELICITATION_PATH}?t=${encodeURIComponent(token)}`),
+    secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
+  });
 
   await startHttpServer({
     mcp,

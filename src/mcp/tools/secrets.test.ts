@@ -53,6 +53,26 @@ function fakeDb(agents: FakeAgentRow[] = []) {
       findMany: async ({ where }: { where: { ownerId: string } }) => [...secrets.values()].filter((s) => s.ownerId === where.ownerId),
       findUnique: async ({ where }: { where: { ownerId_name: { ownerId: string; name: string } } }) =>
         [...secrets.values()].find((s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name) ?? null,
+      upsert: async ({
+        where,
+        create,
+        update,
+      }: {
+        where: { ownerId_name: { ownerId: string; name: string } };
+        create: Partial<FakeSecretRow> & { name: string };
+        update: Partial<FakeSecretRow>;
+      }) => {
+        const existing = [...secrets.values()].find((s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name);
+        if (existing) {
+          const row = { ...existing, ...update, updatedAt: new Date() };
+          secrets.set(row.id, row);
+          return row;
+        }
+        const now = new Date();
+        const row: FakeSecretRow = { id: `secret_${++counter}`, createdAt: now, updatedAt: now, ownerId: null, ...create } as FakeSecretRow;
+        secrets.set(row.id, row);
+        return row;
+      },
       delete: async ({ where }: { where: { id: string } }) => {
         const row = secrets.get(where.id);
         secrets.delete(where.id);
@@ -89,13 +109,14 @@ function fakeCtx(db: ReturnType<typeof fakeDb>, cipher: SecretCipher, principalI
     providers: { secrets: cipher } as never,
     db,
     clientSupportsTasks: false,
+    mcpReq: { requestState: () => undefined },
   };
 }
 
-async function connectClient(mcp: ReturnType<typeof buildMcpServer>) {
+async function connectClient(mcp: ReturnType<typeof buildMcpServer>, capabilities?: import("@modelcontextprotocol/client").ClientCapabilities) {
   const server = mcp.factory({ era: "modern" }) as import("@modelcontextprotocol/server").McpServer;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "test-client", version: "1.0.0" }, { versionNegotiation: { mode: "auto" } });
+  const client = new Client({ name: "test-client", version: "1.0.0" }, { versionNegotiation: { mode: "auto" }, capabilities });
   await server.connect(serverTransport);
   await client.connect(clientTransport);
   return client;
@@ -111,7 +132,7 @@ describe("secrets tools", () => {
     const cipher = fakeCipher();
     const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
-    registerSecretsTools(mcp);
+    registerSecretsTools(mcp, { buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`, protocolElicitation: false });
     const client = await connectClient(mcp);
 
     const result = await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-live-abc123" } });
@@ -128,7 +149,7 @@ describe("secrets tools", () => {
     const cipher = fakeCipher();
     const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["agents:read"]));
-    registerSecretsTools(mcp);
+    registerSecretsTools(mcp, { buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`, protocolElicitation: false });
     const client = await connectClient(mcp);
 
     const result = await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "x" } });
@@ -141,7 +162,7 @@ describe("secrets tools", () => {
     const cipher = fakeCipher();
     const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
-    registerSecretsTools(mcp);
+    registerSecretsTools(mcp, { buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`, protocolElicitation: false });
     const client = await connectClient(mcp);
 
     await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-live-abc123" } });
@@ -157,7 +178,7 @@ describe("secrets tools", () => {
     const cipher = fakeCipher();
     const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
-    registerSecretsTools(mcp);
+    registerSecretsTools(mcp, { buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`, protocolElicitation: false });
     const client = await connectClient(mcp);
 
     await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-live-abc123" } });
@@ -171,7 +192,7 @@ describe("secrets tools", () => {
     const cipher = fakeCipher();
     const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
-    registerSecretsTools(mcp);
+    registerSecretsTools(mcp, { buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`, protocolElicitation: false });
     const client = await connectClient(mcp);
 
     const created = await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-live-abc123" } });
@@ -185,6 +206,89 @@ describe("secrets tools", () => {
 
     const listed = await client.callTool({ name: "list_secrets", arguments: {} });
     expect(parseText(listed as never)).toEqual([]);
+    await client.close();
+  });
+
+  it("[protocolElicitation: true] create_secret without a value elicits it via a one-time browser URL, then succeeds once submitted", async () => {
+    const db = fakeDb();
+    const cipher = fakeCipher();
+    const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
+    registerSecretsTools(mcp, { buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`, protocolElicitation: true });
+    const client = await connectClient(mcp, { elicitation: { url: {} } });
+
+    let visitedUrl: string | undefined;
+    client.setRequestHandler("elicitation/create", async (request) => {
+      const params = request.params as { mode?: string; url?: string };
+      if (params.mode === "url" && params.url) {
+        visitedUrl = params.url;
+        // Simulates the user's browser POSTing the form directly against the
+        // server's secret store — the point under test is create_secret's
+        // handler branches, not the HTTP form itself (covered separately).
+        const token = new URL(params.url).searchParams.get("t")!;
+        const payload = await mcp.verifyRequestState<{ ownerId: string; secretName: string }>(token);
+        const { fulfillSecretElicitation } = await import("./secret-elicitation.js");
+        await fulfillSecretElicitation(payload, "sk-live-abc123", cipher, db);
+      }
+      return { action: "accept" };
+    });
+
+    const result = await client.callTool({ name: "create_secret", arguments: { name: "API_KEY" } });
+    expect(result.isError).toBeFalsy();
+    expect(visitedUrl).toContain("https://test.invalid/elicit/secret?t=");
+    const body = parseText(result as never) as { name: string };
+    expect(body.name).toBe("API_KEY");
+    expect(JSON.stringify(body)).not.toContain("sk-live-abc123");
+
+    const listed = await client.callTool({ name: "list_secrets", arguments: {} });
+    expect((parseText(listed as never) as unknown[]).length).toBe(1);
+    await client.close();
+  });
+
+  it("[protocolElicitation: true] create_secret without a value surfaces a clear error if the user declines", async () => {
+    const db = fakeDb();
+    const cipher = fakeCipher();
+    const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
+    registerSecretsTools(mcp, { buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`, protocolElicitation: true });
+    const client = await connectClient(mcp, { elicitation: { url: {} } });
+    client.setRequestHandler("elicitation/create", async () => ({ action: "decline" }));
+
+    const result = await client.callTool({ name: "create_secret", arguments: { name: "DECLINED_KEY" } });
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0].text).toMatch(/declined/i);
+    await client.close();
+  });
+
+  it("[default: polling] create_secret without a value returns a plain link, then a plain 'still pending' link, then succeeds once submitted", async () => {
+    const db = fakeDb();
+    const cipher = fakeCipher();
+    const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
+    registerSecretsTools(mcp, { buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`, protocolElicitation: false });
+    const client = await connectClient(mcp);
+
+    const first = await client.callTool({ name: "create_secret", arguments: { name: "POLL_KEY" } });
+    expect(first.isError).toBeFalsy();
+    const firstBody = parseText(first as never) as { status: string; url: string };
+    expect(firstBody.status).toBe("pending");
+    expect(firstBody.url).toContain("https://test.invalid/elicit/secret?t=");
+
+    // No plain-text/manual protocol feature is needed here — a second call
+    // before the "browser" ever submits just reports pending again.
+    const second = await client.callTool({ name: "create_secret", arguments: { name: "POLL_KEY" } });
+    expect((parseText(second as never) as { status: string }).status).toBe("pending");
+
+    const token = new URL(firstBody.url).searchParams.get("t")!;
+    const payload = await mcp.verifyRequestState<{ ownerId: string; secretName: string }>(token);
+    const { fulfillSecretElicitation } = await import("./secret-elicitation.js");
+    await fulfillSecretElicitation(payload, "sk-live-abc123", cipher, db);
+
+    const third = await client.callTool({ name: "create_secret", arguments: { name: "POLL_KEY" } });
+    expect(third.isError).toBeFalsy();
+    const thirdBody = parseText(third as never) as { name: string };
+    expect(thirdBody.name).toBe("POLL_KEY");
+    expect(JSON.stringify(thirdBody)).not.toContain("sk-live-abc123");
     await client.close();
   });
 });

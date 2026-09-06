@@ -16,7 +16,12 @@ export interface SecretsAccessor {
   get(name: string): Promise<string | undefined>;
 }
 
-/** Encrypts and stores a secret value. The plaintext is never logged or returned. */
+/**
+ * Encrypts and stores a secret value. Upserts on (ownerId, name) — calling
+ * this again for a name the owner already has rotates its value in place
+ * (same id) rather than failing on the unique constraint. The plaintext is
+ * never logged or returned.
+ */
 export async function createSecret(
   name: string,
   value: string,
@@ -27,7 +32,12 @@ export async function createSecret(
   boundedString(name, 1024);
   boundedString(value, 65_536);
   const ciphertext = await cipher.encrypt(value);
-  return db.secret.create({ data: { name, ciphertext, keyId: cipher.keyId(), ownerId } });
+  const keyId = cipher.keyId();
+  return db.secret.upsert({
+    where: { ownerId_name: { ownerId, name } },
+    create: { name, ciphertext, keyId, ownerId },
+    update: { ciphertext, keyId },
+  });
 }
 
 /** Names/metadata only — never a value or ciphertext. */

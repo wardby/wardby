@@ -52,6 +52,17 @@ export interface McpConfig {
   httpBind?: { host: string; port: number };
   canonicalUri?: string;
   localPrincipal: string;
+  /**
+   * Use the MCP spec's own multi-round-trip URL-mode elicitation
+   * (`InputRequiredResult`) for interactive secret entry, instead of the
+   * plain-text "here's a link, call me again" fallback. Off by default:
+   * as of Claude Code 2.1.263, this stdio client doesn't declare the
+   * elicitation capability for local project servers, so the protocol
+   * path fails outright ("did not declare the required capability").
+   * Flip this on once that's fixed client-side — no server code changes
+   * needed, both paths share the same signed-token/browser-form core.
+   */
+  secretElicitationProtocol: boolean;
 }
 
 /** Read MCP server transport/binding config from the environment. */
@@ -64,6 +75,7 @@ export function loadMcpConfig(env: NodeJS.ProcessEnv = process.env): McpConfig {
     canonicalUri: env.MCP_CANONICAL_URI,
     allowedOrigins: env.MCP_ALLOWED_ORIGINS ? env.MCP_ALLOWED_ORIGINS.split(",").map((s) => s.trim()) : undefined,
     localPrincipal: env.LOCAL_PRINCIPAL ?? "local",
+    secretElicitationProtocol: env.MCP_SECRET_ELICITATION_PROTOCOL === "true",
   };
 }
 

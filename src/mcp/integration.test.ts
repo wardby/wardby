@@ -223,6 +223,26 @@ function buildFakeDb() {
       findMany: async ({ where }: { where: { ownerId: string } }) => [...secrets.values()].filter((s) => s.ownerId === where.ownerId),
       findUnique: async ({ where }: { where: { ownerId_name: { ownerId: string; name: string } } }) =>
         [...secrets.values()].find((s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name) ?? null,
+      upsert: async ({
+        where,
+        create,
+        update,
+      }: {
+        where: { ownerId_name: { ownerId: string; name: string } };
+        create: Partial<FakeSecretRow> & { name: string };
+        update: Partial<FakeSecretRow>;
+      }) => {
+        const existing = [...secrets.values()].find((s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name);
+        if (existing) {
+          const row = { ...existing, ...update, updatedAt: new Date() };
+          secrets.set(row.id, row);
+          return row;
+        }
+        const now = new Date();
+        const row: FakeSecretRow = { id: `secret_${++n}`, createdAt: now, updatedAt: now, ownerId: null, ...create } as FakeSecretRow;
+        secrets.set(row.id, row);
+        return row;
+      },
       delete: async ({ where }: { where: { id: string } }) => {
         secrets.delete(where.id);
       },
@@ -264,6 +284,7 @@ function fakeCtx(db: PrismaClient, providers: McpRequestContext["providers"], pr
     providers,
     db,
     clientSupportsTasks: true,
+    mcpReq: { requestState: () => undefined },
   };
 }
 
@@ -292,7 +313,7 @@ describe("MCP integration (all tool modules, in-memory)", () => {
 
     const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, providers, "p1", ALL_SCOPES));
-    registerAllTools(mcp);
+    registerAllTools(mcp, { secretElicitationUrl: async (token) => `https://test.invalid/elicit/secret?t=${token}`, secretElicitationProtocol: false });
     const client = await connectClient(mcp);
 
     const agentResult = await client.callTool({
@@ -357,7 +378,7 @@ describe("MCP integration (all tool modules, in-memory)", () => {
 
     const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, providers, "p1", ALL_SCOPES));
-    registerAllTools(mcp);
+    registerAllTools(mcp, { secretElicitationUrl: async (token) => `https://test.invalid/elicit/secret?t=${token}`, secretElicitationProtocol: false });
     const client = await connectClient(mcp);
 
     const agentResult = await client.callTool({ name: "create_agent", arguments: { name: "secret-user", systemPrompt: "x", model: "m", budgetUsd: 1 } });
@@ -378,7 +399,7 @@ describe("MCP integration (all tool modules, in-memory)", () => {
     const providers = { llm: {} as never, engine: {} as never, datastore: fakeDatastore(), secrets: fakeCipher(), executor: {} as Executor };
     const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, providers, "p1", ALL_SCOPES));
-    registerAllTools(mcp);
+    registerAllTools(mcp, { secretElicitationUrl: async (token) => `https://test.invalid/elicit/secret?t=${token}`, secretElicitationProtocol: false });
     const client = await connectClient(mcp);
 
     const agentResult = await client.callTool({ name: "create_agent", arguments: { name: "hooked", systemPrompt: "x", model: "m", budgetUsd: 1 } });
@@ -399,7 +420,7 @@ describe("MCP integration (all tool modules, in-memory)", () => {
     const providers = { llm: {} as never, engine: {} as never, datastore: fakeDatastore(), secrets: fakeCipher(), executor: {} as Executor };
     const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, providers, "p1", ["agents:read"])); // no agents:write
-    registerAllTools(mcp);
+    registerAllTools(mcp, { secretElicitationUrl: async (token) => `https://test.invalid/elicit/secret?t=${token}`, secretElicitationProtocol: false });
     const client = await connectClient(mcp);
 
     const scopeDenied = await client.callTool({ name: "create_agent", arguments: { name: "x", systemPrompt: "x", model: "x", budgetUsd: 1 } });

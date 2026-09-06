@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { InMemoryTransport } from "@modelcontextprotocol/server";
+import { InMemoryTransport, inputRequired } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "./server.js";
 import { TASKS_EXTENSION_ID } from "./capabilities.js";
@@ -15,14 +15,15 @@ function fakeCtx(scopes: string[] = []): McpRequestContext {
     providers: fakeProviders,
     db: fakeDb,
     clientSupportsTasks: false,
+    mcpReq: { requestState: () => undefined },
   };
 }
 
 /** Connects a real Client to a factory-built McpServer over an in-memory transport pair. */
-async function connectClient(mcp: ReturnType<typeof import("./server.js").buildMcpServer>) {
+async function connectClient(mcp: ReturnType<typeof import("./server.js").buildMcpServer>, capabilities?: import("@modelcontextprotocol/client").ClientCapabilities) {
   const server = mcp.factory({ era: "modern" }) as import("@modelcontextprotocol/server").McpServer;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "test-client", version: "1.0.0" }, { versionNegotiation: { mode: "auto" } });
+  const client = new Client({ name: "test-client", version: "1.0.0" }, { versionNegotiation: { mode: "auto" }, capabilities });
   await server.connect(serverTransport);
   await client.connect(clientTransport);
   return { client, server };
@@ -93,5 +94,47 @@ describe("buildMcpServer", () => {
     const { client } = await connectClient(mcp);
     await expect(client.callTool({ name: "not-a-real-tool", arguments: {} })).rejects.toThrow();
     await client.close();
+  });
+
+  it("mintRequestState/verifyRequestState round-trip through a real multi-round-trip tool call", async () => {
+    const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb, config: { canonicalUri: "https://host/mcp" } });
+    mcp.setFixedContext(fakeCtx(["agents:read"]));
+    let urlVisited: string | undefined;
+    mcp.registerTool({
+      name: "needs-approval",
+      scope: "agents:read",
+      inputSchema: {},
+      handler: async (_args, ctx) => {
+        const state = ctx.mcpReq.requestState<{ step: string }>();
+        if (!state) {
+          const token = await mcp.mintRequestState({ step: "approve" });
+          return inputRequired({
+            requestState: token,
+            inputRequests: { approval: inputRequired.elicitUrl({ url: "https://example.com/approve", message: "Approve?" }) },
+          });
+        }
+        expect(state.step).toBe("approve");
+        return { content: [{ type: "text" as const, text: "approved" }] };
+      },
+    });
+
+    const { client } = await connectClient(mcp, { elicitation: { url: {} } });
+    client.setRequestHandler("elicitation/create", async (request) => {
+      const params = request.params as { mode?: string; url?: string };
+      if (params.mode === "url" && params.url) urlVisited = params.url;
+      return { action: "accept" };
+    });
+
+    const result = await client.callTool({ name: "needs-approval", arguments: {} });
+    expect(result.isError).toBeFalsy();
+    expect((result.content as { text: string }[])[0].text).toBe("approved");
+    expect(urlVisited).toBe("https://example.com/approve");
+    await client.close();
+  });
+
+  it("verifyRequestState rejects a tampered token", async () => {
+    const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb, config: { canonicalUri: "https://host/mcp" } });
+    const token = await mcp.mintRequestState({ ok: true });
+    await expect(mcp.verifyRequestState(token.slice(0, -2) + "xx")).rejects.toThrow();
   });
 });

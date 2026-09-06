@@ -24,6 +24,7 @@ function fakeCtx(llm: LlmProvider): McpRequestContext {
     providers: { llm } as unknown as McpRequestContext["providers"],
     db: {} as never,
     clientSupportsTasks: false,
+    mcpReq: { requestState: () => undefined },
   };
 }
 
