@@ -1,0 +1,196 @@
+import { describe, it, expect, vi } from "vitest";
+import { InMemoryTransport } from "@modelcontextprotocol/server";
+import { Client, fromJsonSchema } from "@modelcontextprotocol/client";
+import { buildMcpServer } from "../server.js";
+import { registerTriggerTool } from "./trigger.js";
+import type { McpRequestContext } from "../context.js";
+
+const CANONICAL_URI = "https://host/mcp";
+const fakeProviders = { executor: { start: vi.fn(async () => {}) } } as unknown as import("../../providers/index.js").ProviderRegistry;
+
+interface FakeAgentRow {
+  id: string;
+  name: string;
+  ownerId: string | null;
+}
+interface FakeRunRow {
+  id: string;
+  agentId: string;
+  status: string;
+}
+interface FakeTaskRow {
+  id: string;
+  kind: string;
+  runId: string | null;
+  status: string;
+  createdAt: Date;
+  updatedAt: Date;
+  ttlAt: Date;
+}
+
+function fakeDb(agents: FakeAgentRow[]) {
+  const agentsById = new Map(agents.map((a) => [a.id, a]));
+  const runs = new Map<string, FakeRunRow>();
+  const tasks = new Map<string, FakeTaskRow>();
+  let runCounter = 0;
+  let taskCounter = 0;
+
+  return {
+    agent: {
+      findUnique: async ({ where }: { where: { id?: string; name?: string } }) => {
+        if (where.id) return agentsById.get(where.id) ?? null;
+        if (where.name) return agents.find((a) => a.name === where.name) ?? null;
+        return null;
+      },
+    },
+    run: {
+      create: async ({ data }: { data: { agentId: string; trigger: string } }) => {
+        const row: FakeRunRow = { id: `run_${++runCounter}`, agentId: data.agentId, status: "pending" };
+        runs.set(row.id, row);
+        return row;
+      },
+      findUnique: async ({ where }: { where: { id: string } }) => runs.get(where.id) ?? null,
+      findUniqueOrThrow: async ({ where }: { where: { id: string } }) => {
+        const row = runs.get(where.id);
+        if (!row) throw new Error("not found");
+        return row;
+      },
+    },
+    task: {
+      create: async ({ data }: { data: { kind: string; runId: string; status: string } }) => {
+        const now = new Date();
+        const row: FakeTaskRow = {
+          id: `task_${++taskCounter}`,
+          kind: data.kind,
+          runId: data.runId,
+          status: data.status,
+          createdAt: now,
+          updatedAt: now,
+          ttlAt: new Date(now.getTime() + 60_000),
+        };
+        tasks.set(row.id, row);
+        return row;
+      },
+      findUniqueOrThrow: async ({ where }: { where: { id: string } }) => {
+        const row = tasks.get(where.id);
+        if (!row) throw new Error("not found");
+        return row;
+      },
+      update: async ({ where, data }: { where: { id: string }; data: Partial<FakeTaskRow> }) => {
+        const row = tasks.get(where.id);
+        if (!row) throw new Error("not found");
+        const updated = { ...row, ...data };
+        tasks.set(where.id, updated);
+        return updated;
+      },
+    },
+  } as unknown as import("@prisma/client").PrismaClient;
+}
+
+function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[], clientSupportsTasks: boolean): McpRequestContext {
+  return {
+    principal: { id: principalId, subject: principalId, createdAt: new Date() } as never,
+    scopes: new Set(scopes),
+    providers: fakeProviders,
+    db,
+    clientSupportsTasks,
+  };
+}
+
+async function connectClient(mcp: ReturnType<typeof buildMcpServer>) {
+  const server = mcp.factory({ era: "modern" }) as import("@modelcontextprotocol/server").McpServer;
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test-client", version: "1.0.0" }, { versionNegotiation: { mode: "auto" } });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  return client;
+}
+
+function parseText(result: { content: { text: string }[] }): unknown {
+  return JSON.parse(result.content[0].text);
+}
+
+describe("trigger_agent", () => {
+  it("with a Tasks-capable client: creates a run, starts the executor, returns a CreateTaskResult", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "p1" }]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["runs:trigger"], true));
+    registerTriggerTool(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+    expect(result.isError).toBeFalsy();
+    const body = parseText(result as never) as { resultType: string; taskId: string; status: string };
+    expect(body.resultType).toBe("task");
+    expect(body.status).toBe("working");
+    expect(body.taskId).toBeTruthy();
+    await client.close();
+  });
+
+  it("without a Tasks-capable client: returns { runId } for get_run polling", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "p1" }]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["runs:trigger"], false));
+    registerTriggerTool(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+    expect(result.isError).toBeFalsy();
+    const body = parseText(result as never) as { runId: string };
+    expect(body.runId).toBeTruthy();
+    expect("resultType" in (body as object)).toBe(false);
+    await client.close();
+  });
+
+  it("a non-owner cannot trigger the agent", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "owner-1" }]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "not-the-owner", ["runs:trigger"], false));
+    registerTriggerTool(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+    expect(result.isError).toBe(true);
+    await client.close();
+  });
+
+  it("missing runs:trigger scope is rejected", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "p1" }]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"], false));
+    registerTriggerTool(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0].text).toMatch(/scope/i);
+    await client.close();
+  });
+
+  it("cancel_run invokes the executor's cooperative stop path", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "p1" }]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["runs:trigger"], true));
+    registerTriggerTool(mcp);
+    const client = await connectClient(mcp);
+
+    const triggerResult = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+    const { taskId } = parseText(triggerResult as never) as { taskId: string };
+
+    // `resultType` is wire-only protocol machinery the SDK strips before
+    // application code (including client.request()'s return value) ever
+    // sees it — verify the cancel functionally instead, via a follow-up
+    // tasks/get, the same way Task 8's own manager tests do.
+    await client.request(
+      { method: "tasks/cancel", params: { taskId } },
+      fromJsonSchema<Record<string, unknown>>({ type: "object", additionalProperties: true }),
+    );
+    const getResult = (await client.request(
+      { method: "tasks/get", params: { taskId } },
+      fromJsonSchema<{ status: string }>({ type: "object", additionalProperties: true }),
+    )) as { status: string };
+    expect(getResult.status).toBe("cancelled");
+
+    await client.close();
+  });
+});

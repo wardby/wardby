@@ -70,6 +70,7 @@ function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: str
     scopes: new Set(scopes),
     providers: fakeProviders,
     db,
+    clientSupportsTasks: false,
   };
 }
 

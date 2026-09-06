@@ -92,6 +92,49 @@ describe("startHttpServer (delegating mode)", () => {
     await client.close();
   });
 
+  it("a tool handler's ctx.clientSupportsTasks reflects the connecting client's declared capabilities", async () => {
+    const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb(), config: { canonicalUri: CANONICAL_URI } });
+    const authProvider = fakeAuthProvider(async () => ({ subject: "user-1", roles: [], scopes: ["agents:read"] }));
+    let seenClientSupportsTasks: boolean | undefined;
+    mcp.registerTool({
+      name: "report_tasks_capability",
+      scope: "agents:read",
+      inputSchema: { type: "object", properties: {} },
+      handler: async (_args, ctx) => {
+        seenClientSupportsTasks = ctx.clientSupportsTasks;
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+    });
+    handle = await startHttpServer({
+      mcp,
+      config: { canonicalUri: CANONICAL_URI, httpBind: { host: "127.0.0.1", port: 0 }, authProviderKind: "delegating" },
+      auth: { authProvider, db: fakeDb(), providers: fakeProviders },
+    });
+
+    const tasksCapableClient = new Client(
+      { name: "tasks-capable-client", version: "1.0.0" },
+      { versionNegotiation: { mode: "auto" }, capabilities: { extensions: { "io.modelcontextprotocol/tasks": {} } } },
+    );
+    await tasksCapableClient.connect(
+      new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${handle.port}/mcp`), {
+        requestInit: { headers: { authorization: "Bearer good-token" } },
+      }),
+    );
+    await tasksCapableClient.callTool({ name: "report_tasks_capability", arguments: {} });
+    expect(seenClientSupportsTasks).toBe(true);
+    await tasksCapableClient.close();
+
+    const plainClient = new Client({ name: "plain-client", version: "1.0.0" }, { versionNegotiation: { mode: "auto" } });
+    await plainClient.connect(
+      new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${handle.port}/mcp`), {
+        requestInit: { headers: { authorization: "Bearer good-token" } },
+      }),
+    );
+    await plainClient.callTool({ name: "report_tasks_capability", arguments: {} });
+    expect(seenClientSupportsTasks).toBe(false);
+    await plainClient.close();
+  });
+
   it("bad Origin is rejected with 403", async () => {
     const base = await start({ subject: "user-1", roles: [], scopes: [] });
     const res = await fetch(`${base}/mcp`, {

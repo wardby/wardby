@@ -89,6 +89,12 @@ export async function authenticate(headers: AuthenticateHeaders, deps: Authentic
     scopes: new Set(profile.scopes),
     providers: deps.providers,
     db: deps.db,
+    // authenticate() only sees the HTTP Authorization header, before the
+    // JSON-RPC body (and its _meta envelope) is even parsed — the real
+    // per-call value is computed later, in server.ts's resolveCtx, once the
+    // envelope is available. Callers using ONLY this function's return
+    // value (streamable-http.ts's auth gate) never read this field.
+    clientSupportsTasks: false,
   };
 }
 

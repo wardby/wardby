@@ -14,6 +14,7 @@ function fakeCtx(scopes: string[] = []): McpRequestContext {
     scopes: new Set(scopes),
     providers: fakeProviders,
     db: fakeDb,
+    clientSupportsTasks: false,
   };
 }
 

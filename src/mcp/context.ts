@@ -12,4 +12,12 @@ export interface McpRequestContext {
   scopes: Set<string>;
   providers: ProviderRegistry;
   db: PrismaClient;
+  /**
+   * Whether THIS call's client declared the Tasks extension
+   * (io.modelcontextprotocol/tasks) — read from the modern-era per-request
+   * `_meta` envelope (`ctx.mcpReq.envelope.clientCapabilities`). A legacy
+   * (2025-era) client carries no envelope at all and is therefore always
+   * `false` here — Tasks is a 2026-07-28-only concept.
+   */
+  clientSupportsTasks: boolean;
 }

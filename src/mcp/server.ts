@@ -22,13 +22,19 @@
  * `setFixedContext` supplies one fixed LOCAL_PRINCIPAL identity for the
  * whole connection.
  */
-import { McpServer, fromJsonSchema, type McpServerFactory, type ServerContext } from "@modelcontextprotocol/server";
+import {
+  McpServer,
+  fromJsonSchema,
+  CLIENT_CAPABILITIES_META_KEY,
+  type McpServerFactory,
+  type ServerContext,
+} from "@modelcontextprotocol/server";
 import type { PrismaClient, Principal } from "@prisma/client";
 import type { ProviderRegistry } from "../providers/index.js";
 import type { McpRequestContext } from "./context.js";
 import { requireScope } from "./auth/resource-server.js";
 import { McpError } from "./errors.js";
-import { TASKS_EXTENSION_ID } from "./capabilities.js";
+import { TASKS_EXTENSION_ID, clientSupportsTasks } from "./capabilities.js";
 
 export interface ToolSpec<Args = Record<string, unknown>> {
   name: string;
@@ -68,6 +74,15 @@ export interface DiscoverResultLike {
 
 export interface ReevoMcpServer {
   registerTool<Args = Record<string, unknown>>(spec: ToolSpec<Args>): void;
+  /**
+   * Registers a custom JSON-RPC method (e.g. the Tasks extension's
+   * tasks/get, tasks/cancel, tasks/update — there is no npm runtime package
+   * for the extension, see Task 6's ledger note, so these are hand-wired
+   * the same way this SDK itself expects any custom method to be added:
+   * `Server.setRequestHandler`). The handler receives the resolved
+   * McpRequestContext exactly like a tool handler does.
+   */
+  registerRequestHandler(method: string, handler: (params: unknown, ctx: McpRequestContext) => Promise<unknown>): void;
   /** Passed directly to createMcpHandler (Task 7) / serveStdio (below). */
   factory: McpServerFactory;
   /** Local capability introspection without a protocol round-trip. */
@@ -82,13 +97,24 @@ interface AuthInfoExtra {
 
 export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
   const specs: ToolSpec<never>[] = [];
+  const requestHandlers: { method: string; handler: (params: unknown, ctx: McpRequestContext) => Promise<unknown> }[] = [];
   let fixedContext: McpRequestContext | undefined;
 
   function resolveCtx(sdkCtx: ServerContext): McpRequestContext {
     const authInfo = sdkCtx.http?.authInfo;
     const extra = authInfo?.extra as AuthInfoExtra | undefined;
     if (extra?.principal) {
-      return { principal: extra.principal, scopes: new Set(authInfo!.scopes), providers: opts.providers, db: opts.db };
+      return {
+        principal: extra.principal,
+        scopes: new Set(authInfo!.scopes),
+        providers: opts.providers,
+        db: opts.db,
+        clientSupportsTasks: clientSupportsTasks(
+          (sdkCtx.mcpReq?.envelope as Record<string, unknown> | undefined)?.[CLIENT_CAPABILITIES_META_KEY] as
+            | { extensions?: Record<string, unknown> }
+            | undefined,
+        ),
+      };
     }
     if (fixedContext) return fixedContext;
     throw new McpError(401, "No authenticated context available for this call.");
@@ -96,6 +122,10 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
 
   function registerTool<Args = Record<string, unknown>>(spec: ToolSpec<Args>): void {
     specs.push(spec as ToolSpec<never>);
+  }
+
+  function registerRequestHandler(method: string, handler: (params: unknown, ctx: McpRequestContext) => Promise<unknown>): void {
+    requestHandlers.push({ method, handler });
   }
 
   const factory: McpServerFactory = () => {
@@ -118,6 +148,23 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
       );
     }
 
+    // Non-spec (extension) methods need a { params, result } schema bundle
+    // — setRequestHandler only resolves schemas from the method name for
+    // spec methods (see docs/advanced/custom-methods.md). A permissive
+    // passthrough JSON Schema on both sides keeps this generic: real
+    // validation of taskId/etc. happens inside each handler, not here.
+    const PERMISSIVE_SCHEMA = fromJsonSchema<Record<string, unknown>>({ type: "object", additionalProperties: true });
+    for (const { method, handler } of requestHandlers) {
+      mcpServer.server.setRequestHandler(
+        method,
+        { params: PERMISSIVE_SCHEMA },
+        async (params: unknown, sdkCtx: ServerContext) => {
+          const ctx = resolveCtx(sdkCtx);
+          return (await handler(params, ctx)) as Record<string, unknown>;
+        },
+      );
+    }
+
     return mcpServer;
   };
 
@@ -130,5 +177,5 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
     fixedContext = ctx;
   }
 
-  return { registerTool, factory, discover, setFixedContext };
+  return { registerTool, registerRequestHandler, factory, discover, setFixedContext };
 }

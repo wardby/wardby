@@ -105,12 +105,12 @@ describe("authenticate", () => {
 
 describe("requireScope", () => {
   it("passes when the context holds the required scope", () => {
-    const ctx = { principal: {} as never, scopes: new Set(["agents:write"]), providers: fakeProviders, db: fakeDb() };
+    const ctx = { principal: {} as never, scopes: new Set(["agents:write"]), providers: fakeProviders, db: fakeDb(), clientSupportsTasks: false };
     expect(() => requireScope(ctx, CANONICAL_URI, "agents:write")).not.toThrow();
   });
 
   it("throws 403 with a WWW-Authenticate challenge listing all required scopes", () => {
-    const ctx = { principal: {} as never, scopes: new Set(["agents:read"]), providers: fakeProviders, db: fakeDb() };
+    const ctx = { principal: {} as never, scopes: new Set(["agents:read"]), providers: fakeProviders, db: fakeDb(), clientSupportsTasks: false };
     try {
       requireScope(ctx, CANONICAL_URI, "agents:write", "tools:write");
       expect.unreachable("requireScope should have thrown");
