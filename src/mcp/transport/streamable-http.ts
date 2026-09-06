@@ -13,6 +13,9 @@ import { handleWebhookIngress } from "../webhooks/ingress.js";
 import { canonicalUrl, HTTP_LIMITS, HttpBoundaryError, parseBody, readBody } from "./http-limits.js";
 import { browserHandler } from "../auth/self-hosted/browser.js";
 import { handleSecretElicitationForm, SECRET_ELICITATION_PATH } from "../tools/secret-elicitation-form.js";
+import { logger } from "../../core/logger.js";
+
+const httpLog = logger.child({ module: "streamable-http" });
 
 export interface HttpServerConfig {
   canonicalUri: string;
@@ -60,7 +63,7 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
         sendJson(res, err.status, { error: err.message }, { connection: "close" });
       } else {
         const id = randomUUID();
-        console.error("HTTP request failed: " + id);
+        httpLog.error({ err, requestId: id }, "HTTP request failed");
         sendJson(res, 500, { error: "internal_error", id });
       }
     });
@@ -123,7 +126,7 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
   server.keepAliveTimeout = 5_000;
   server.maxRequestsPerSocket = 100;
   const cleanupTimer = opts.config.authProviderKind === "self-hosted" ? setInterval(() => {
-    void opts.selfHosted!.cleanup().catch(() => console.error("OAuth cleanup failed."));
+    void opts.selfHosted!.cleanup().catch((err) => httpLog.error({ err }, "OAuth cleanup failed"));
   }, 15 * 60_000) : undefined;
   cleanupTimer?.unref();
   server.once("close", () => clearInterval(cleanupTimer));

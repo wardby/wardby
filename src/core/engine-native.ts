@@ -10,6 +10,9 @@
 import type { Engine, EngineResult, EngineRunContext, EngineStatus } from "../providers/engine/types.js";
 import type { LlmMessage, LlmToolDef, LlmUsage } from "../providers/index.js";
 import { applyPreflightSafetyMargin, checkTokenCalibration, estimateInputCost, isOverBudget } from "./budget.js";
+import { logger } from "./logger.js";
+
+const engineLog = logger.child({ module: "engine-native" });
 
 interface Usage {
   tokensIn: number;
@@ -281,11 +284,15 @@ export class NativeEngine implements Engine {
         calibration.deltaRatio < 0
           ? "UNDERestimated (dangerous — the pre-flight refuse/gate could admit an over-budget run)"
           : "overestimated (safe direction)";
-      console.warn(
-        `[reevo-run] token calibration drift for model "${ctx.agent.model}": local pre-turn ` +
-          `estimate was ${calibration.estimatedTokens} tokens vs. actual ${calibration.actualTokens} ` +
-          `(${(calibration.deltaRatio * 100).toFixed(1)}%, ${direction}). Check the tokenizer ` +
-          `encoding and per-message overhead constants for this model in src/providers/llm/openai.ts.`,
+      engineLog.warn(
+        {
+          model: ctx.agent.model,
+          estimatedTokens: calibration.estimatedTokens,
+          actualTokens: calibration.actualTokens,
+          deltaRatio: calibration.deltaRatio,
+          direction,
+        },
+        "token calibration drift — check the tokenizer encoding and per-message overhead constants for this model in src/providers/llm/openai.ts",
       );
     }
 

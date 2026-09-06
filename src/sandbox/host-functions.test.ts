@@ -105,4 +105,27 @@ describe("secrets.get sandbox host function", () => {
     const serialized = JSON.stringify(logs);
     expect(serialized).not.toContain("sk-live-abc123");
   });
+
+  function fakeLogger() {
+    const calls: { level: string; args: unknown[] }[] = [];
+    const record = (level: string) => (...args: unknown[]) => { calls.push({ level, args }); };
+    const instance = { info: record("info"), warn: record("warn"), error: record("error"), child: () => instance };
+    return { logger: instance as never, calls };
+  }
+
+  it("redacts a secret's actual value out of tool console output that logs it directly", async () => {
+    const { logger, calls } = fakeLogger();
+    await runInSandbox({
+      code: "const v = await secrets.get('API_KEY'); console.log('the key is', v); return 'ok';",
+      params: {},
+      agentId: "a1",
+      datastore: fakeDatastore(),
+      secrets: fakeSecrets({ API_KEY: "sk-live-abc123" }),
+      toolName: "read-secret",
+      logger,
+    });
+    const serialized = JSON.stringify(calls);
+    expect(serialized).not.toContain("sk-live-abc123");
+    expect(serialized).toContain("REDACTED");
+  });
 });

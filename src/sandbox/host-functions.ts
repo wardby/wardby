@@ -18,6 +18,10 @@ import { safeFetch } from "./safe-fetch.js";
 import { boundedJson, boundedString } from "./bounded-json.js";
 import { PARSER_INPUT_BYTES, HTML_LINKS_LIMIT, BRIDGE_RESULT_BYTES, RANDOM_BYTES_LIMIT, LOG_BYTES, WALL_TIME_LIMIT_MS } from "./limits.js";
 import { setTimeout as sleep } from "node:timers/promises";
+import { logger as defaultLogger, type Logger } from "../core/logger.js";
+
+/** Below this length a "secret" is too likely to coincidentally match ordinary log text — not worth the false-positive risk of redacting it. */
+const MIN_REDACTABLE_SECRET_LENGTH = 6;
 
 const FETCH_ALLOWED_HOSTS = parseAllowedHosts(process.env.REEVO_FETCH_ALLOWED_HOSTS);
 
@@ -29,6 +33,8 @@ export interface HostFunctionOptions {
   logTag: string;
   /** Omitted (e.g. dry_run_tool, no real agent) — secrets.get always resolves undefined. */
   secrets?: SecretsAccessor;
+  /** Overrides the shared default logger — mainly for tests. */
+  logger?: Logger;
 }
 
 function args<T extends unknown[]>(argsJson: string): T {
@@ -42,11 +48,28 @@ export function installHostFunctions(
 ): void {
   const { agentId, datastore, logTag, secrets, signal } = options;
   const register = (name: string, fn: (json: string) => Promise<unknown>) => registerJsonAsyncFunction(context, runtime, name, fn, signal);
+  const sandboxLog = (options.logger ?? defaultLogger).child({ module: "sandbox-tool", agentId, tool: logTag.slice(0, 100) });
+
+  // Values fetched via secrets.get() during THIS invocation only — a tool
+  // that logs a secret it never fetched has nothing to redact, and one that
+  // fetches but doesn't log it costs nothing extra. Fresh per invocation
+  // (installHostFunctions runs once per sandbox context, one per tool call).
+  const fetchedSecretValues = new Set<string>();
+  function redactSecrets(text: string): string {
+    let out = text;
+    for (const value of fetchedSecretValues) {
+      if (value.length < MIN_REDACTABLE_SECRET_LENGTH) continue;
+      out = out.split(value).join("[REDACTED]");
+    }
+    return out;
+  }
 
   register("__bridge_console", async (argsJson) => {
     const [level, logArgs] = args<[string, unknown[]]>(argsJson);
-    const method = level === "warn" ? console.warn : level === "error" ? console.error : console.log;
-    method(`[tool:${logTag.slice(0, 100)}]`, boundedJson(logArgs, LOG_BYTES));
+    const message = redactSecrets(boundedJson(logArgs, LOG_BYTES));
+    if (level === "warn") sandboxLog.warn(message);
+    else if (level === "error") sandboxLog.error(message);
+    else sandboxLog.info(message);
     return null;
   });
 
@@ -105,6 +128,7 @@ export function installHostFunctions(
     const [name] = args<[string]>(argsJson);
     boundedString(name, 1024);
     const value = secrets ? await secrets.get(name) : undefined;
+    if (value) fetchedSecretValues.add(value);
     return value ?? null;
   });
 

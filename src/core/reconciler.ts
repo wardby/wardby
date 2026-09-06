@@ -33,6 +33,9 @@
 import type { PrismaClient } from "@prisma/client";
 import { HEARTBEAT_TIMEOUT_MS, RECONCILE_INTERVAL_MS } from "./timing.js";
 import { prisma as defaultDb } from "./db.js";
+import { logger } from "./logger.js";
+
+const reconcilerLog = logger.child({ module: "reconciler" });
 
 export type ReconcilerDb = Pick<PrismaClient, "run">;
 
@@ -80,7 +83,7 @@ export function startReconciler(options: ReconcilerOptions = {}): ReconcilerHand
 
   const timer = setInterval(() => {
     reconcileOnce(db, new Date(), heartbeatTimeoutMs).catch((err) => {
-      console.error("[reconciler] error:", err);
+      reconcilerLog.error({ err }, "reconcile pass failed");
     });
   }, intervalMs);
 

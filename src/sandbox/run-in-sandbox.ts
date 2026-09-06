@@ -15,6 +15,7 @@ import type { Datastore } from "../providers/datastore/types.js";
 import type { SecretsAccessor } from "../core/secrets.js";
 import { boundedJson, boundedString } from "./bounded-json.js";
 import { BRIDGE_INPUT_BYTES } from "./limits.js";
+import type { Logger } from "../core/logger.js";
 
 export type { SandboxErrorKind, SandboxLimits, SandboxResult } from "./eval-core.js";
 
@@ -30,6 +31,8 @@ export interface SandboxInvocation {
   limits?: Partial<SandboxLimits>;
   /** Omitted for a dry run (no real agent) — secrets.get always resolves undefined. */
   secrets?: SecretsAccessor;
+  /** Overrides the default shared logger — mainly for tests that need to capture forwarded console output. */
+  logger?: Logger;
 }
 
 export async function runInSandbox(invocation: SandboxInvocation): Promise<SandboxResult> {
@@ -60,6 +63,7 @@ export async function runInSandbox(invocation: SandboxInvocation): Promise<Sandb
       datastore: invocation.datastore,
       logTag: invocation.toolName,
       secrets: invocation.secrets,
+      logger: invocation.logger,
       signal,
     });
   });

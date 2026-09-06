@@ -14,6 +14,9 @@ import { dueWindow } from "./cron.js";
 import { tryAcquireLease } from "./lease.js";
 import { prisma as defaultDb } from "./db.js";
 import { LEASE_RENEW_INTERVAL_MS, LEASE_TTL_MS, TICK_INTERVAL_MS } from "./timing.js";
+import { logger } from "./logger.js";
+
+const schedulerLog = logger.child({ module: "scheduler" });
 
 export type SchedulerDb = Pick<PrismaClient, "agent" | "run" | "$transaction" | "$queryRaw">;
 
@@ -108,16 +111,16 @@ export function startScheduler(options: SchedulerOptions): SchedulerHandle {
   const scope = options.scope ?? "default";
   const instanceId = options.instanceId ?? randomUUID();
   const now = options.now ?? (() => new Date());
-  const log = options.onLog ?? ((message: string) => console.log(message));
+  const log = options.onLog ?? ((message: string) => schedulerLog.info(message));
 
   let leader = false;
 
   async function leaseTick(): Promise<void> {
     const acquired = await tryAcquireLease(db, scope, instanceId, LEASE_TTL_MS);
     if (acquired && !leader) {
-      log(`[scheduler] acquired leadership for scope "${scope}" as ${instanceId}`);
+      log(`acquired leadership for scope "${scope}" as ${instanceId}`);
     } else if (!acquired && leader) {
-      log(`[scheduler] lost leadership for scope "${scope}"`);
+      log(`lost leadership for scope "${scope}"`);
     }
     leader = acquired;
   }
@@ -131,31 +134,31 @@ export function startScheduler(options: SchedulerOptions): SchedulerHandle {
       try {
         const runId = await claimDueRun(db, agent.id, now());
         if (runId) {
-          log(`[scheduler] firing agent "${agent.name}" -> run ${runId}`);
+          log(`firing agent "${agent.name}" -> run ${runId}`);
           options.executor.start(runId).catch(async (err) => {
-            console.error(`[scheduler] run ${runId} for agent "${agent.name}" failed to start:`, err);
+            schedulerLog.error({ err, runId, agentName: agent.name }, "run failed to start");
             try {
               await markRunFailedFromExecutorError(db, runId, err);
             } catch (updateErr) {
-              console.error(`[scheduler] failed to mark run ${runId} as failed:`, updateErr);
+              schedulerLog.error({ err: updateErr, runId }, "failed to mark run as failed");
             }
           });
         }
       } catch (err) {
-        console.error(`[scheduler] error claiming a due run for agent "${agent.name}":`, err);
+        schedulerLog.error({ err, agentName: agent.name }, "error claiming a due run");
       }
     }
   }
 
   const leaseTimer = setInterval(() => {
-    leaseTick().catch((err) => console.error("[scheduler] lease error:", err));
+    leaseTick().catch((err) => schedulerLog.error({ err }, "lease error"));
   }, LEASE_RENEW_INTERVAL_MS);
   const tickTimer = setInterval(() => {
-    tick().catch((err) => console.error("[scheduler] tick error:", err));
+    tick().catch((err) => schedulerLog.error({ err }, "tick error"));
   }, TICK_INTERVAL_MS);
 
   // Acquire immediately rather than waiting a full renew interval to start.
-  leaseTick().catch((err) => console.error("[scheduler] lease error:", err));
+  leaseTick().catch((err) => schedulerLog.error({ err }, "lease error"));
 
   return {
     stop() {
