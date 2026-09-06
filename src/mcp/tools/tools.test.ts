@@ -207,6 +207,61 @@ describe("tool authoring tools", () => {
     await client.close();
   });
 
+  it("dry_run_tool denies fetch by default, same as a freshly attached tool", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "dry_run_tool",
+      arguments: { paramsZod: "z.object({})", code: "return await fetch('http://8.8.8.8/');", sampleArgs: {} },
+    });
+    const body = parseText(result as never) as { result: { ok: boolean; errorMessage?: string } };
+    expect(body.result.ok).toBe(false);
+    expect(body.result.errorMessage).toContain("fetch_destination_blocked");
+    await client.close();
+  });
+
+  it("dry_run_tool scopes fetch to only the declared allowedHosts, not a blanket allow", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "dry_run_tool",
+      arguments: {
+        paramsZod: "z.object({})",
+        code: "return await fetch('http://1.1.1.1/');",
+        sampleArgs: {},
+        allowedHosts: ["8.8.8.8"],
+      },
+    });
+    const body = parseText(result as never) as { result: { ok: boolean; errorMessage?: string } };
+    expect(body.result.ok).toBe(false);
+    expect(body.result.errorMessage).toContain("fetch_destination_blocked");
+    await client.close();
+  });
+
+  it("dry_run_tool rejects a malformed allowedHosts entry", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "dry_run_tool",
+      arguments: { paramsZod: "z.object({})", code: "return 1;", sampleArgs: {}, allowedHosts: ["not a host!"] },
+    });
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0].text).toMatch(/Invalid allowedHosts/i);
+    await client.close();
+  });
+
   it("dry_run_tool surfaces a runtime error in the body as a structured result", async () => {
     const db = fakeDb();
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });

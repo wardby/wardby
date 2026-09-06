@@ -13,7 +13,7 @@ import type { Datastore } from "../../providers/index.js";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { deriveJsonSchema, validateParams } from "../../sandbox/zod-params.js";
 import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
-import { FETCH_WILDCARD, ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
+import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { assertCanMutate, requireOwnedAgent, requireReadableAgent, visibleToPrincipal, canRead } from "../auth/ownership.js";
@@ -62,12 +62,23 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
   mcp.registerTool({
     name: "dry_run_tool",
     scope: "tools:write",
+    description: "Test-runs tool code against sample args without persisting it. Fetch is denied by default, same as a freshly attached tool — pass allowedHosts to test code that calls fetch().",
     inputSchema: {
       type: "object",
-      properties: { paramsZod: { type: "string" }, code: { type: "string" }, sampleArgs: { type: "object" } },
+      properties: {
+        paramsZod: { type: "string" },
+        code: { type: "string" },
+        sampleArgs: { type: "object" },
+        allowedHosts: { type: "array", items: { type: "string" } },
+      },
       required: ["paramsZod", "code", "sampleArgs"],
     },
-    handler: async (args: { paramsZod: string; code: string; sampleArgs: unknown }, ctx) => {
+    handler: async (args: { paramsZod: string; code: string; sampleArgs: unknown; allowedHosts?: string[] }, ctx) => {
+      const hosts = ToolCapabilitiesPatchSchema.pick({ allowedHosts: true }).safeParse({ allowedHosts: args.allowedHosts });
+      if (!hosts.success) {
+        throw new McpError(400, `Invalid allowedHosts: ${hosts.error.issues.map((i) => i.message).join("; ")}`);
+      }
+
       const schemaResult = await deriveJsonSchema(args.paramsZod);
       if (!schemaResult.ok) {
         return textResult({ ok: false, errorKind: schemaResult.errorKind, errorMessage: schemaResult.errorMessage });
@@ -84,14 +95,18 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
 
       // No real agent exists for a dry run — the caller's own principal
       // scopes the sandbox's datastore access, keeping dry-run reads/writes
-      // isolated per-caller rather than colliding across authors.
+      // isolated per-caller rather than colliding across authors. Fetch is
+      // deny-by-default here too — same posture as a freshly attached tool
+      // (OWASP LLM08) — rather than the unconditional wildcard this used to
+      // pass; a caller testing fetch-dependent code must declare the hosts
+      // it needs, same as at attach_tool time.
       const sandboxResult = await runInSandbox({
         code: args.code,
         params: validated.value,
         agentId: ctx.principal.id,
         datastore: ctx.providers.datastore as Datastore,
         toolName: "dry_run_tool",
-        allowedFetchHosts: [FETCH_WILDCARD],
+        allowedFetchHosts: hosts.data.allowedHosts ?? [],
       });
       return textResult({ jsonSchema, result: sandboxResult });
     },
