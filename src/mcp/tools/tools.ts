@@ -17,10 +17,7 @@ import { FETCH_WILDCARD, ToolCapabilitiesPatchSchema } from "../../sandbox/tool-
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { assertCanMutate, requireOwnedAgent, requireReadableAgent, visibleToPrincipal, canRead } from "../auth/ownership.js";
-
-function textResult(value: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
-}
+import { textResult } from "./text-result.js";
 
 async function requireOwnedTool(db: Pick<PrismaClient, "tool">, id: string, principalId: string) {
   const tool = await db.tool.findUnique({ where: { id } });

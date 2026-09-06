@@ -41,6 +41,20 @@ export async function requireReadableAgent(db: PrismaClient, id: string, princip
   return agent;
 }
 
+export async function requireOwnedSecret(db: PrismaClient, id: string, principalId: string): Promise<void> {
+  const secret = await db.secret.findUnique({ where: { id } });
+  if (!secret || !isOwner(secret.ownerId, principalId)) {
+    throw new McpError(403, `Secret "${id}" is not owned by the caller.`);
+  }
+}
+
+export async function requireOwnedWebhook(db: PrismaClient, id: string, principalId: string): Promise<void> {
+  const webhook = await db.webhook.findUnique({ where: { id } });
+  if (!webhook || !isOwner(webhook.ownerId, principalId)) {
+    throw new McpError(403, `Webhook "${id}" is not owned by the caller.`);
+  }
+}
+
 /**
  * A Task's principalId is the caller who triggered it, not the underlying
  * agent's owner — a public agent's runs are still private to whoever

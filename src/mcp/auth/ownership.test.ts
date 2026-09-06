@@ -1,5 +1,15 @@
 import { describe, it, expect } from "vitest";
-import { canRead, isOwner, assertCanMutate, visibleToPrincipal, requireOwnedAgent, requireReadableAgent, requireOwnedTask } from "./ownership.js";
+import {
+  canRead,
+  isOwner,
+  assertCanMutate,
+  visibleToPrincipal,
+  requireOwnedAgent,
+  requireReadableAgent,
+  requireOwnedTask,
+  requireOwnedSecret,
+  requireOwnedWebhook,
+} from "./ownership.js";
 import { McpError } from "../errors.js";
 
 describe("canRead", () => {
@@ -48,10 +58,17 @@ describe("visibleToPrincipal", () => {
   });
 });
 
-function fakeDb(agents: Record<string, { id: string; ownerId: string | null }>, tasks: Record<string, { id: string; principalId: string | null }> = {}) {
+function fakeDb(
+  agents: Record<string, { id: string; ownerId: string | null }>,
+  tasks: Record<string, { id: string; principalId: string | null }> = {},
+  secrets: Record<string, { id: string; ownerId: string | null }> = {},
+  webhooks: Record<string, { id: string; ownerId: string | null }> = {},
+) {
   return {
     agent: { findUnique: async ({ where }: { where: { id: string } }) => agents[where.id] ?? null },
     task: { findUnique: async ({ where }: { where: { id: string } }) => tasks[where.id] ?? null },
+    secret: { findUnique: async ({ where }: { where: { id: string } }) => secrets[where.id] ?? null },
+    webhook: { findUnique: async ({ where }: { where: { id: string } }) => webhooks[where.id] ?? null },
   } as unknown as import("@prisma/client").PrismaClient;
 }
 
@@ -101,5 +118,35 @@ describe("requireOwnedTask", () => {
   it("404s (not 403) for another principal's task", async () => {
     const db = fakeDb({}, { t1: { id: "t1", principalId: "owner-1" } });
     await expect(requireOwnedTask(db, "t1", "p1")).rejects.toMatchObject({ httpStatus: 404 });
+  });
+});
+
+describe("requireOwnedSecret", () => {
+  it("resolves for the owner", async () => {
+    const db = fakeDb({}, {}, { s1: { id: "s1", ownerId: "p1" } });
+    await expect(requireOwnedSecret(db, "s1", "p1")).resolves.toBeUndefined();
+  });
+  it("403s for a missing secret", async () => {
+    const db = fakeDb({}, {}, {});
+    await expect(requireOwnedSecret(db, "missing", "p1")).rejects.toMatchObject({ httpStatus: 403 });
+  });
+  it("403s for a different owner", async () => {
+    const db = fakeDb({}, {}, { s1: { id: "s1", ownerId: "owner-1" } });
+    await expect(requireOwnedSecret(db, "s1", "p1")).rejects.toMatchObject({ httpStatus: 403 });
+  });
+});
+
+describe("requireOwnedWebhook", () => {
+  it("resolves for the owner", async () => {
+    const db = fakeDb({}, {}, {}, { w1: { id: "w1", ownerId: "p1" } });
+    await expect(requireOwnedWebhook(db, "w1", "p1")).resolves.toBeUndefined();
+  });
+  it("403s for a missing webhook", async () => {
+    const db = fakeDb({}, {}, {}, {});
+    await expect(requireOwnedWebhook(db, "missing", "p1")).rejects.toMatchObject({ httpStatus: 403 });
+  });
+  it("403s for a different owner", async () => {
+    const db = fakeDb({}, {}, {}, { w1: { id: "w1", ownerId: "owner-1" } });
+    await expect(requireOwnedWebhook(db, "w1", "p1")).rejects.toMatchObject({ httpStatus: 403 });
   });
 });

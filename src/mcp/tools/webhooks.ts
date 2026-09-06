@@ -1,11 +1,7 @@
 import { createWebhook, listWebhooks, deleteWebhook } from "../../core/webhooks.js";
 import type { ReevoMcpServer } from "../server.js";
-import { McpError } from "../errors.js";
-import { requireOwnedAgent } from "../auth/ownership.js";
-
-function textResult(value: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
-}
+import { requireOwnedAgent, requireOwnedWebhook } from "../auth/ownership.js";
+import { textResult } from "./text-result.js";
 
 export function registerWebhookTools(mcp: ReevoMcpServer): void {
   mcp.registerTool({
@@ -34,8 +30,7 @@ export function registerWebhookTools(mcp: ReevoMcpServer): void {
     scope: "webhooks:write",
     inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
     handler: async (args: { id: string }, ctx) => {
-      const owned = await listWebhooks(ctx.principal.id, ctx.db);
-      if (!owned.some((w) => w.id === args.id)) throw new McpError(403, `Webhook "${args.id}" is not owned by the caller.`);
+      await requireOwnedWebhook(ctx.db, args.id, ctx.principal.id);
       await deleteWebhook(args.id, ctx.db);
       return textResult({ deleted: args.id });
     },

@@ -10,6 +10,7 @@ import { validateCronExpression } from "../../core/cron.js";
 import { assertCanMutate, canRead, requireOwnedAgent, visibleToPrincipal } from "../auth/ownership.js";
 import { McpError } from "../errors.js";
 import type { ReevoMcpServer } from "../server.js";
+import { textResult } from "./text-result.js";
 
 const MAX_AGENT_NAME_CHARS = 200;
 const MAX_SYSTEM_PROMPT_CHARS = 64 * 1024;
@@ -82,10 +83,6 @@ const profileJsonSchema = {
     protectedPaths: { type: "array", minItems: 1, maxItems: 128, items: { type: "string" } },
   },
 };
-
-function textResult(value: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
-}
 
 function invalidArguments(label: string, error: z.ZodError): McpError {
   const details = error.issues.map((issue) => `${issue.path.join(".") || "input"}: ${issue.message}`).join("; ");

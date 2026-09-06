@@ -1,10 +1,7 @@
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { requireReadableAgent } from "../auth/ownership.js";
-
-function textResult(value: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
-}
+import { textResult } from "./text-result.js";
 
 export function registerRunTools(mcp: ReevoMcpServer): void {
   mcp.registerTool({

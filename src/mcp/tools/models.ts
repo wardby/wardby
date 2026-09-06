@@ -6,10 +6,7 @@
  */
 import type { ReevoMcpServer } from "../server.js";
 import type { RoutingLlmProvider } from "../../providers/llm/index.js";
-
-function textResult(value: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
-}
+import { textResult } from "./text-result.js";
 
 export function registerModelTools(mcp: ReevoMcpServer): void {
   mcp.registerTool({

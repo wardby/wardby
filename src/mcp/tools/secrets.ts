@@ -7,12 +7,9 @@ import { inputRequired, inputResponse } from "@modelcontextprotocol/server";
 import { createSecret, listSecrets, attachSecret, detachSecret, deleteSecret } from "../../core/secrets.js";
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
-import { requireOwnedAgent } from "../auth/ownership.js";
+import { requireOwnedAgent, requireOwnedSecret } from "../auth/ownership.js";
 import { getSecretElicitationOutcome, type SecretElicitationPayload } from "./secret-elicitation.js";
-
-function textResult(value: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
-}
+import { textResult } from "./text-result.js";
 
 /** Builds the browser-form URL for a minted token — stdio's ephemeral loopback server or the HTTP transport's mounted route (see mcp/index.ts and streamable-http.ts). */
 export type SecretElicitationUrlBuilder = (token: string) => Promise<string>;
@@ -122,8 +119,7 @@ export function registerSecretsTools(mcp: ReevoMcpServer, opts: SecretsToolsOpti
     scope: "secrets:write",
     inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
     handler: async (args: { id: string }, ctx) => {
-      const owned = await listSecrets(ctx.principal.id, ctx.db);
-      if (!owned.some((s) => s.id === args.id)) throw new McpError(403, `Secret "${args.id}" is not owned by the caller.`);
+      await requireOwnedSecret(ctx.db, args.id, ctx.principal.id);
       await deleteSecret(args.id, ctx.db);
       return textResult({ deleted: args.id });
     },

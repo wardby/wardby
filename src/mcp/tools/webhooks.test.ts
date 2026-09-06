@@ -35,6 +35,7 @@ function fakeDb(agents: FakeAgentRow[]) {
         return row;
       },
       findMany: async ({ where }: { where: { ownerId: string } }) => [...webhooks.values()].filter((w) => w.ownerId === where.ownerId),
+      findUnique: async ({ where }: { where: { id: string } }) => webhooks.get(where.id) ?? null,
       delete: async ({ where }: { where: { id: string } }) => {
         const row = webhooks.get(where.id);
         webhooks.delete(where.id);
