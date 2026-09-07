@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { loadProviderConfig, loadMcpConfig, loadGitHubVcsConfig } from "./providers.js";
+import { loadContainerExecutorConfig, loadProviderConfig, loadMcpConfig, loadGitHubVcsConfig } from "./providers.js";
 
 describe("provider config", () => {
   it("accepts anthropic and bedrock as llm kinds", () => {
@@ -45,6 +45,29 @@ describe("loadGitHubVcsConfig", () => {
     expect(() => loadGitHubVcsConfig({ VCS_MAX_DIFF_BYTES: value })).toThrow(
       "VCS_MAX_DIFF_BYTES must be a positive integer",
     );
+  });
+});
+
+describe("loadContainerExecutorConfig", () => {
+  it("loads immutable-worker and resource configuration with safe defaults", () => {
+    expect(
+      loadContainerExecutorConfig({
+        CODING_WORKER_IMAGE: `worker@sha256:${"a".repeat(64)}`,
+        CODING_PROXY_CONTAINER: "reevo-proxy",
+        CODING_CPUS: "1.5",
+      }),
+    ).toMatchObject({
+      proxyContainer: "reevo-proxy",
+      cpus: 1.5,
+      memoryMb: 2048,
+      pids: 128,
+      diskMb: 2048,
+      credentialRef: "env:OPENAI_API_KEY",
+    });
+  });
+
+  it.each(["0", "-1", "nope"])("rejects invalid container CPU limits (%s)", (value) => {
+    expect(() => loadContainerExecutorConfig({ CODING_CPUS: value })).toThrow("CODING_CPUS must be a positive");
   });
 });
 

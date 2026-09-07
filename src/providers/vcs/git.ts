@@ -335,6 +335,43 @@ export class GitVcsProvider implements VcsProvider {
     }
   }
 
+  async recoverWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace | null> {
+    const normalized = this.validateInput(input);
+    const expected = this.expectedPaths(normalized.runId);
+    try {
+      const metadata = await lstat(expected.runRoot);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error("vcs_workspace_path_invalid");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+
+    const baseCommit = await this.revParseRaw(
+      expected.gitMetadataPath,
+      expected.workspacePath,
+      `refs/remotes/origin/${normalized.baseRef}^{commit}`,
+    );
+    const recovered: PreparedWorkspace = {
+      id: `vcs-${normalized.runId}`,
+      ...normalized,
+      baseCommit,
+      workspacePath: expected.workspacePath,
+      gitMetadataPath: expected.gitMetadataPath,
+    };
+    const prepared = await this.validatePrepared(recovered);
+    await this.inspectWorkspace(prepared.workspacePath);
+    await this.assertRemote(prepared);
+    await this.assertSafeLocalConfig(prepared.gitMetadataPath);
+    const symbolicHead = (await this.gitFor(prepared, ["symbolic-ref", "--short", "HEAD"])).stdout.trim();
+    if (symbolicHead !== prepared.headRef) throw new Error("vcs_head_ref_mismatch");
+    const currentHead = await this.revParse(prepared, "HEAD");
+    if (currentHead !== prepared.baseCommit) {
+      const parent = await this.revParse(prepared, "HEAD^");
+      if (parent !== prepared.baseCommit) throw new Error("vcs_commit_history_invalid");
+    }
+    return prepared;
+  }
+
   async finalizeChanges(workspace: PreparedWorkspace): Promise<FinalizeChangesResult> {
     const prepared = await this.validatePrepared(workspace);
     await this.inspectWorkspace(prepared.workspacePath);

@@ -1,7 +1,20 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { lstat, mkdir, open, readdir, readFile, realpath, rename, unlink } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  opendir,
+  readdir,
+  readFile,
+  readlink,
+  realpath,
+  rename,
+  rm,
+  unlink,
+} from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { parseCodingAgentOutputJson, MAX_CODING_ARTIFACT_BYTES } from "../../coding/protocol.js";
 import {
   assertDockerHostSupportsIsolation,
@@ -14,11 +27,12 @@ import {
   type DockerContainerInspection,
   type DockerHostInfo,
 } from "./docker-isolation.js";
-import type { JobHandle, JobLauncher, JobResult, JobSpec, JobStatus } from "./types.js";
+import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
 
 const BACKEND = "docker";
 const STATE_SCHEMA_VERSION = 1;
 const MAX_DOCKER_OUTPUT_BYTES = 1024 * 1024;
+const MAX_WORKSPACE_ENTRIES = 100_000;
 const TERMINAL_PHASES = new Set<DockerJobRecord["phase"]>(["succeeded", "failed", "stopped", "lost", "removed"]);
 const RESULT_READ_SCRIPT = [
   "const fs=require('node:fs');",
@@ -133,6 +147,7 @@ export class NodeDockerCommandRunner implements DockerCommandRunner {
 export interface DockerArtifactTransfer {
   seedDirectory(sourceDirectory: string, container: string, destination: string): Promise<void>;
   seedInput(sourceFile: string, container: string): Promise<void>;
+  materializeDirectory(container: string, source: string, destination: string, maxBytes: number): Promise<void>;
 }
 
 /** Streams tar archives into the unprivileged keeper; no host bind mounts are used. */
@@ -204,6 +219,75 @@ export class NodeDockerArtifactTransfer implements DockerArtifactTransfer {
       `${container}:/run/reevo/storage/input/input.json`,
     ]);
   }
+
+  async materializeDirectory(container: string, source: string, destination: string, maxBytes: number): Promise<void> {
+    const target = resolve(destination);
+    const parent = dirname(target);
+    const [parentReal, targetReal, targetStat] = await Promise.all([realpath(parent), realpath(target), lstat(target)]);
+    if (
+      !targetStat.isDirectory() ||
+      targetStat.isSymbolicLink() ||
+      targetReal !== resolve(parentReal, target.slice(parent.length + 1))
+    ) {
+      throw new Error("docker_workspace_destination_invalid");
+    }
+
+    const staging = await mkdtemp(join(parentReal, ".reevo-workspace-stage-"));
+    const backup = await mkdtemp(join(parentReal, ".reevo-workspace-backup-"));
+    await rm(backup, { recursive: true });
+    let targetMoved = false;
+    try {
+      await new NodeDockerCommandRunner({ dockerBinary: this.dockerBinary, homeDir: "/tmp", path: this.path }).run([
+        "container",
+        "cp",
+        `${container}:${source}/.`,
+        staging,
+      ]);
+      await validateMaterializedWorkspace(staging, maxBytes);
+      await rename(targetReal, backup);
+      targetMoved = true;
+      await rename(staging, targetReal);
+      targetMoved = false;
+      await rm(backup, { recursive: true, force: true });
+    } catch (error) {
+      if (targetMoved) await rename(backup, targetReal).catch(() => undefined);
+      throw error;
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+      await rm(backup, { recursive: true, force: true });
+    }
+  }
+}
+
+export async function validateMaterializedWorkspace(root: string, maxBytes: number): Promise<void> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error("docker_workspace_limit_invalid");
+  let entries = 0;
+  let bytes = 0;
+  const visit = async (directory: string): Promise<void> => {
+    const handle = await opendir(directory);
+    for await (const entry of handle) {
+      entries += 1;
+      if (entries > MAX_WORKSPACE_ENTRIES) throw new Error("docker_workspace_entry_limit");
+      if (entry.name.toLowerCase() === ".git") throw new Error("docker_workspace_nested_repository");
+      const fullPath = resolve(directory, entry.name);
+      const metadata = await lstat(fullPath);
+      if (metadata.isSymbolicLink()) {
+        const target = await readlink(fullPath);
+        const resolvedTarget = resolve(directory, target);
+        if (isAbsolute(target) || (resolvedTarget !== root && !resolvedTarget.startsWith(`${root}${sep}`))) {
+          throw new Error("docker_workspace_symlink_escape");
+        }
+      } else if (metadata.isDirectory()) {
+        await visit(fullPath);
+      } else if (metadata.isFile()) {
+        bytes += metadata.size;
+        if (bytes > maxBytes) throw new Error("docker_workspace_size_limit");
+      } else {
+        throw new Error("docker_workspace_special_file");
+      }
+    }
+  };
+  await visit(root);
 }
 
 export interface DockerJobLauncherOptions {
@@ -355,7 +439,7 @@ function terminalResult(
   return undefined;
 }
 
-export class DockerJobLauncher implements JobLauncher {
+export class DockerJobLauncher implements WorkspaceJobLauncher {
   private readonly stateRoot: string;
   private readonly workspaceRoot: string;
   private readonly docker: DockerCommandRunner;
@@ -410,6 +494,27 @@ export class DockerJobLauncher implements JobLauncher {
         await this.writeRecord(current);
       }
       return clone(current.result);
+    });
+  }
+
+  async materializeWorkspace(handle: JobHandle, destination: string): Promise<void> {
+    await this.ready;
+    const record = await this.findRecord(handle);
+    if (!record) throw new Error("job_not_found");
+    await this.withRun(record.runId, async () => {
+      const current = await this.requireRecord(record.runId);
+      await this.refresh(current);
+      if (current.phase !== "succeeded") throw new Error("job_not_succeeded");
+      const expected = resolve(this.workspaceRoot, current.runId, "workspace");
+      if (resolve(destination) !== expected || !expected.startsWith(`${this.workspaceRoot}${sep}`)) {
+        throw new Error("docker_workspace_destination_invalid");
+      }
+      await this.transfer.materializeDirectory(
+        this.keeperName(current),
+        "/run/reevo/storage/workspace",
+        expected,
+        current.spec.limits.diskMb * 1024 * 1024,
+      );
     });
   }
 

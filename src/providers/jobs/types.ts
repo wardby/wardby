@@ -59,3 +59,8 @@ export interface JobLauncher {
   stop: (handle: JobHandle, reason?: string) => Promise<void>;
   remove: (handle: JobHandle) => Promise<void>;
 }
+
+/** A launcher that can safely copy a terminal worker workspace back to trusted storage. */
+export interface WorkspaceJobLauncher extends JobLauncher {
+  materializeWorkspace: (handle: JobHandle, destination: string) => Promise<void>;
+}

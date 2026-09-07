@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,6 +7,7 @@ import { jobLauncherContract } from "./contract-suite.js";
 import {
   DockerCommandError,
   DockerJobLauncher,
+  validateMaterializedWorkspace,
   type DockerArtifactTransfer,
   type DockerCommandOptions,
   type DockerCommandResult,
@@ -42,8 +43,12 @@ function labels(args: readonly string[]): Record<string, string> {
 }
 
 class NoopTransfer implements DockerArtifactTransfer {
+  materializations = 0;
   async seedDirectory(): Promise<void> {}
   async seedInput(): Promise<void> {}
+  async materializeDirectory(): Promise<void> {
+    this.materializations += 1;
+  }
 }
 
 class FakeDocker implements DockerCommandRunner {
@@ -85,6 +90,7 @@ class FakeDocker implements DockerCommandRunner {
     if (action === "create") {
       const nameIndex = args.indexOf("--name");
       const name = nameIndex >= 0 ? args[nameIndex + 1] : args.at(-1);
+      if (!name) throw new Error("fake_docker_name_missing");
       this.resourceLabels.set(name, labels(args));
       return this.ok();
     }
@@ -304,6 +310,7 @@ async function harness(runId = "docker-run-1") {
   job.inputArtifact = join(root, "input.json");
   await writeFile(job.inputArtifact, "{}", { mode: 0o600 });
   const docker = new FakeDocker(job);
+  const transfer = new NoopTransfer();
   const launcher = new DockerJobLauncher({
     stateRoot: join(root, "state"),
     workspaceRoot: join(root, "workspaces"),
@@ -311,9 +318,9 @@ async function harness(runId = "docker-run-1") {
     resolveCapability: async () => capability,
     isRunActive: async () => false,
     docker,
-    transfer: new NoopTransfer(),
+    transfer,
   });
-  return { launcher, docker, spec: job };
+  return { launcher, docker, spec: job, transfer, runRoot };
 }
 
 afterEach(async () => {
@@ -330,6 +337,20 @@ jobLauncherContract("Docker", async () => {
 });
 
 describe("DockerJobLauncher", () => {
+  it("materializes only a succeeded job into its exact trusted workspace", async () => {
+    const created = await harness("docker-materialize");
+    const handle = await created.launcher.launch(created.spec);
+    await expect(created.launcher.materializeWorkspace(handle, join(created.runRoot, "other"))).rejects.toThrow(
+      "job_not_succeeded",
+    );
+    created.docker.finish();
+    await expect(created.launcher.materializeWorkspace(handle, join(created.runRoot, "other"))).rejects.toThrow(
+      "docker_workspace_destination_invalid",
+    );
+    await created.launcher.materializeWorkspace(handle, join(created.runRoot, "workspace"));
+    expect(created.transfer.materializations).toBe(1);
+  });
+
   it("adds trusted resource labels without forwarding caller labels or artifacts", async () => {
     const { launcher, docker, spec: job } = await harness("docker-labels");
     await launcher.launch(job);
@@ -360,5 +381,20 @@ describe("DockerJobLauncher", () => {
     now += created.spec.timeoutSec * 1_000;
     expect(await launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
     expect(await launcher.collect(handle)).toEqual({ exitCode: 124, reason: "timed_out" });
+  });
+});
+
+describe("Docker workspace validation", () => {
+  it("rejects nested Git control paths, escaping symlinks, and oversized output", async () => {
+    const root = await mkdtemp(join(tmpdir(), "reevo-docker-output-"));
+    temporaryRoots.push(root);
+    await mkdir(join(root, ".git"));
+    await expect(validateMaterializedWorkspace(root, 1024)).rejects.toThrow("docker_workspace_nested_repository");
+    await rm(join(root, ".git"), { recursive: true });
+    await symlink("/etc/passwd", join(root, "escape"));
+    await expect(validateMaterializedWorkspace(root, 1024)).rejects.toThrow("docker_workspace_symlink_escape");
+    await rm(join(root, "escape"));
+    await writeFile(join(root, "large.txt"), "123456");
+    await expect(validateMaterializedWorkspace(root, 5)).rejects.toThrow("docker_workspace_size_limit");
   });
 });

@@ -2,8 +2,8 @@
 
 Date: 2026-09-07
 
-Status: Tasks 8-9 complete; the Docker JobLauncher executes and attests this
-policy without weakening it.
+Status: Tasks 8-10 complete; the routed container executor, Docker JobLauncher,
+and trusted VCS finalizer execute and attest this policy without weakening it.
 
 ## Security Boundary
 
@@ -85,13 +85,42 @@ allocations at the host scheduler as well as per run.
    environment; inspect every effective control before start.
 7. Start the worker and enforce `deadlineMs`. Send SIGTERM at expiry, then
    SIGKILL after `stopGraceSeconds` if it remains alive.
-8. Collect and validate bounded output, remove the worker, disconnect the proxy,
-   stop/remove the keeper, remove the network, and remove the volume.
+8. Cancel the proxy session, collect and validate bounded output, and re-read
+   authoritative usage before any repository publication.
+9. For `changes_ready` only, copy the worker workspace into a new host staging
+   directory, reject special files, nested `.git`, escaping symlinks, and size
+   or entry-limit violations, then atomically replace the trusted checkout.
+10. Revalidate protected paths, Git configuration, branch ancestry, remotes,
+    and budget; create one controlled commit, push one deterministic branch,
+    and create or find one draft pull request.
+11. Persist the typed coding result and terminal run status in one transaction,
+    then remove the worker, keeper, network, volume, input artifact, and VCS
+    workspace. `no_changes` and `budget_exhausted` never push.
+
+`ContainerExecutor` treats a durable proxy session without a durable job handle
+as ambiguous provisioning and never relaunches it. A persisted handle is the
+only recovery path. Duplicate starts, terminal collection, Git finalization,
+and cleanup converge on the same handle, branch, commit, pull request, usage,
+and status.
 
 Any missing host feature, unsupported network option, failed inspection,
 unexpected mount/network/environment, or cleanup ambiguity is the fixed
 `docker_isolation_unsupported` failure. Production must not fall back to a
 weaker profile.
+
+## Control Plane Configuration
+
+Set `JOB_LAUNCHER=docker`, `CODING_WORKER_IMAGE` to an immutable repository
+digest, and `CODING_PROXY_CONTAINER` to the dedicated proxy container name.
+`VCS_WORK_ROOT`, `CODING_JOB_STATE_ROOT`, and `CODING_ARTIFACT_ROOT` must be
+trusted host-only directories. Resource limits are controlled by
+`CODING_CPUS`, `CODING_MEMORY_MB`, `CODING_PIDS`, and `CODING_DISK_MB`.
+
+The GitHub adapter requires `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`; the
+App installation is checked while preparing the workspace, before the
+billable proxy session is created. The upstream key remains behind
+`CODING_OPENAI_CREDENTIAL_REF` and is never written to the database, input
+artifact, Docker arguments, or Git workspace.
 
 ## Verification
 
