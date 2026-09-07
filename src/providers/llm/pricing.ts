@@ -24,6 +24,9 @@ import { computeCost, type ModelPricing, type UsageTokens } from "./pricing-core
 export { computeCost } from "./pricing-core.js";
 export type { ModelPricing, TokenizerEncoding, UsageTokens } from "./pricing-core.js";
 
+/** Bump whenever a rate changes so durable reservations retain their original terms. */
+export const PRICING_VERSION = "2026-09-06";
+
 const PRICING: Record<string, ModelPricing> = {
   "gpt-4o": { encoding: "o200k_base", inputPerMTok: 2.5, cachedInputPerMTok: 1.25, outputPerMTok: 10.0 },
   "gpt-4o-mini": { encoding: "o200k_base", inputPerMTok: 0.15, cachedInputPerMTok: 0.075, outputPerMTok: 0.6 },

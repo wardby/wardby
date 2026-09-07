@@ -183,8 +183,8 @@ model CodingAgentProfile {
 /// Phase 5: immutable dispatch inputs plus opaque execution/result state for
 /// one coding run. Policy is copied from the profile before work starts.
 model CodingRun {
-  runId             String         @id
-  run               Run            @relation(fields: [runId], references: [id], onDelete: Cascade)
+  runId             String              @id
+  run               Run                 @relation(fields: [runId], references: [id], onDelete: Cascade)
   task              String
   repository        String
   baseRef           String
@@ -197,12 +197,72 @@ model CodingRun {
   jobBackend        String?
   jobHandle         String?
   result            Json?
-  resultSchema      Int            @default(1)
-  budgetReservedUsd Decimal        @db.Decimal(10, 6)
-  createdAt         DateTime       @default(now())
-  updatedAt         DateTime       @updatedAt
+  resultSchema      Int                 @default(1)
+  budgetReservedUsd Decimal             @db.Decimal(10, 6)
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  proxySession      CodingProxySession?
 
   @@index([jobBackend, jobHandle])
+}
+
+enum CodingProxySessionStatus {
+  active
+  cancelled
+}
+
+enum CodingProxyRequestStatus {
+  reserved
+  completed
+  released
+  uncertain
+}
+
+/// Trusted-boundary state for one coding run. Only a capability digest and an
+/// upstream credential reference are persisted; neither secret value enters the DB.
+model CodingProxySession {
+  id             String                   @id @default(cuid())
+  runId          String                   @unique
+  run            CodingRun                @relation(fields: [runId], references: [runId], onDelete: Cascade)
+  capabilityHash String                   @unique
+  credentialRef  String
+  allowedModels  Json
+  deadlineAt     DateTime
+  budgetUsd      Decimal                  @db.Decimal(18, 10)
+  status         CodingProxySessionStatus @default(active)
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+  requests       CodingProxyRequest[]
+
+  @@index([deadlineAt])
+}
+
+/// Monotonic per-upstream-call ledger. Uncertain reservations remain held so a
+/// crash or truncated provider stream can never create new spendable budget.
+model CodingProxyRequest {
+  id                 String                   @id @default(cuid())
+  sessionId          String
+  session            CodingProxySession       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  requestKey         String
+  requestFingerprint String
+  model              String
+  status             CodingProxyRequestStatus @default(reserved)
+  reservationUsd     Decimal                  @db.Decimal(18, 10)
+  actualCostUsd      Decimal?                 @db.Decimal(18, 10)
+  pricingVersion     String
+  pricingSnapshot    Json
+  inputTokens        Int?
+  outputTokens       Int?
+  cachedInputTokens  Int?
+  cacheWriteTokens   Int?
+  reasoningTokens    Int?
+  upstreamStatus     Int?
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
+  completedAt        DateTime?
+
+  @@unique([sessionId, requestKey])
+  @@index([sessionId, status])
 }
 
 /// Phase 2: single-row-per-scope lease so exactly one scheduler process
