@@ -1,7 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LlmProvider, LlmRequest, LlmStreamEvent } from "../providers/index.js";
-import type { EngineRunContext } from "../providers/engine/types.js";
+import type { EngineRunContext, StepRunner } from "../providers/engine/types.js";
 import { NativeEngine } from "./engine-native.js";
+
+/** Records each step's JSON result; on a later run replays it without calling fn. */
+function recordingStepRunner(record: Map<string, unknown>, calls: string[]): StepRunner {
+  return async (name, fn) => {
+    calls.push(name);
+    if (record.has(name)) return record.get(name) as never;
+    const value = await fn();
+    record.set(name, JSON.parse(JSON.stringify(value)));
+    return value;
+  };
+}
 
 /** Pops one scripted event sequence per `stream()` call, in order. Records every request. */
 function scriptedLlm(
@@ -275,5 +286,90 @@ describe("NativeEngine", () => {
 
     expect(result.status).toBe("failed");
     expect(result.error).toBe("connection reset");
+  });
+
+  it("routes every LLM turn, estimate, and tool call through ctx.step with deterministic names", async () => {
+    const llm = scriptedLlm(
+      [
+        [
+          { type: "tool_call", id: "c1", name: "getWeather", argsJson: '{"city":"Boston"}' },
+          { type: "done", stopReason: "tool_calls", usage: { inputTokens: 9, outputTokens: 2, costUsd: 11 } },
+        ],
+        [
+          { type: "text", delta: "72F" },
+          { type: "done", stopReason: "stop", usage: { inputTokens: 20, outputTokens: 6, costUsd: 26 } },
+        ],
+      ],
+      (usage) => usage.inputTokens + usage.outputTokens,
+      (messages) => messages.reduce((sum, m) => sum + m.content.length, 0),
+    );
+    const calls: string[] = [];
+    const ctx = makeContext({ llm, step: recordingStepRunner(new Map(), calls) });
+
+    const result = await new NativeEngine().run(ctx);
+
+    expect(result.status).toBe("succeeded");
+    expect(calls).toEqual(["turn:1:estimate", "turn:1:llm", "turn:1:tool:0", "turn:2:estimate", "turn:2:llm"]);
+  });
+
+  it("replays a recorded run to the same result with zero LLM or tool calls (crash-resume safety)", async () => {
+    const scripts: LlmStreamEvent[][] = [
+      [
+        { type: "tool_call", id: "c1", name: "getWeather", argsJson: '{"city":"Boston"}' },
+        { type: "done", stopReason: "tool_calls", usage: { inputTokens: 9, outputTokens: 2, costUsd: 11 } },
+      ],
+      [
+        { type: "text", delta: "72F" },
+        { type: "done", stopReason: "stop", usage: { inputTokens: 20, outputTokens: 6, costUsd: 26 } },
+      ],
+    ];
+    const price = (usage: { inputTokens: number; outputTokens: number }) => usage.inputTokens + usage.outputTokens;
+    const count = (messages: { content: string }[]) => messages.reduce((sum, m) => sum + m.content.length, 0);
+    const record = new Map<string, unknown>();
+
+    const firstLlm = scriptedLlm(scripts, price, count);
+    const firstTool = vi.fn(async () => '{"tempF":72}');
+    const first = await new NativeEngine().run(
+      makeContext({ llm: firstLlm, runSandboxTool: firstTool, step: recordingStepRunner(record, []) }),
+    );
+
+    const replayLlm = scriptedLlm(scripts, price, count);
+    const replayTool = vi.fn(async () => '{"tempF":72}');
+    const replayed = await new NativeEngine().run(
+      makeContext({ llm: replayLlm, runSandboxTool: replayTool, step: recordingStepRunner(record, []) }),
+    );
+
+    expect(replayed).toEqual(first);
+    expect(replayLlm.calls).toHaveLength(0);
+    expect(replayTool).not.toHaveBeenCalled();
+  });
+
+  it("names wind-down steps distinctly so a replay after budget exhaustion lines up", async () => {
+    const llm = scriptedLlm(
+      [
+        [
+          { type: "tool_call", id: "c1", name: "t", argsJson: "{}" },
+          { type: "done", stopReason: "tool_calls", usage: { inputTokens: 1, outputTokens: 1, costUsd: 0.5 } },
+        ],
+        [
+          { type: "text", delta: "summary" },
+          { type: "done", stopReason: "stop", usage: { inputTokens: 1, outputTokens: 1, costUsd: 0.1 } },
+        ],
+      ],
+      () => 0.1,
+      () => 1000, // turn 2's estimate blows the remaining budget → wind-down
+    );
+    const calls: string[] = [];
+    const ctx = makeContext({
+      llm,
+      agent: { systemPrompt: "sys", model: "m", budgetUsd: 0.6, maxTurns: 10 },
+      step: recordingStepRunner(new Map(), calls),
+    });
+
+    const result = await new NativeEngine().run(ctx);
+
+    expect(result.status).toBe("budget_exhausted");
+    expect(calls.slice(0, 3)).toEqual(["turn:1:estimate", "turn:1:llm", "turn:1:tool:0"]);
+    expect(calls).toContain("winddown:estimate");
   });
 });

@@ -30,6 +30,22 @@ export interface LoadedTool {
   jsonSchema: Record<string, unknown>;
 }
 
+/**
+ * Durable step boundary. A checkpointing executor (DbosExecutor) supplies
+ * one that records each step's result, so a run resumed after a crash
+ * replays completed steps from the record instead of re-executing them
+ * (and re-spending). When absent, `fn` runs directly.
+ *
+ * Contract for engines: `fn`'s return value must be plain JSON data, and
+ * `name` must be deterministic for a given position in the run — the
+ * replay matches steps by order, so control flow between steps must depend
+ * only on earlier step results and on `agent` fields fixed at run start.
+ */
+export type StepRunner = <T>(name: string, fn: () => Promise<T>) => Promise<T>;
+
+/** The no-checkpoint default: run the step body directly. */
+export const runStepInline: StepRunner = (_name, fn) => fn();
+
 export interface EngineRunContext {
   agent: EngineAgent;
   tools: LoadedTool[];
@@ -37,6 +53,8 @@ export interface EngineRunContext {
   /** Host bridge: validates params (Zod-in-sandbox) then runs the tool body in the WASM sandbox. Never throws — a tool/validation failure is a JSON error result string, fed back to the model as the tool's result. */
   runSandboxTool(name: string, argsJson: string): Promise<string>;
   onText?: (delta: string) => void;
+  /** See StepRunner. Optional; the in-process executor leaves it unset. */
+  step?: StepRunner;
 }
 
 export type EngineStatus = "succeeded" | "budget_exhausted" | "refused" | "failed";
