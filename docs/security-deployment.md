@@ -122,6 +122,18 @@ temporary schemas are removed after verification. It is not a production
 backup or rollback command. Have a second reviewer inspect production backup,
 recovery, auth identity derivation, CSRF, transactions, and SSRF before rollout.
 
+## Durable executor
+
+`EXECUTOR=dbos` tables live outside Prisma's migration chain: DBOS creates and
+migrates its own `dbos` schema at `launch()`, so the database role used by the
+server needs `CREATE` on that schema (not just the application schema Prisma
+manages). `DBOS_EXECUTOR_ID` must be unique per running instance — two
+instances sharing an id can each believe they own the other's in-flight runs.
+Rolling back to `EXECUTOR=in-process` is safe at any time: any DBOS run still
+in flight is reconciled to `lost` once its heartbeat times out, because no
+executor is left to recover it, and nothing else in the deployment depends on
+the `dbos` schema.
+
 ## Resource and networking limits
 
 | Surface                        | Limit                                             |

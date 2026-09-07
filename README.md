@@ -81,6 +81,23 @@ for HTTP boundaries, self-hosted provisioning, credential
 invalidation, runtime/migration images, test prerequisites, and the remaining
 Prisma tooling advisory. Every legacy self-hosted credential must be reissued.
 
+## Durable executor (Phase 6)
+
+`EXECUTOR=in-process` (default) provides durability with a heartbeat and a
+reconciler: a run whose process dies is reconciled to `lost`.
+
+`EXECUTOR=dbos` runs each native agent run as a [DBOS](https://docs.dbos.dev)
+durable workflow. Every LLM turn and tool call is a checkpointed step, so a
+run interrupted by a crash or redeploy resumes from its last completed step
+with no repeated spend for finished turns, and cancelling a run
+(`tasks/cancel`, `stop`) takes effect at the next step. DBOS keeps its tables
+in the `dbos` schema of `DATABASE_URL` (override with
+`DBOS_SYSTEM_DATABASE_URL`); set `DBOS_EXECUTOR_ID` to a stable value per
+long-lived instance so it re-drives its own interrupted runs at startup. A
+stale run owned by an instance that never returns is adopted by whichever
+reconciler sees it first. The at-least-once window is one step: a turn that
+was mid-stream when the process died runs again on resume.
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).

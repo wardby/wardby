@@ -79,9 +79,13 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
   });
 
   function build(llm: LlmProvider) {
+    return buildWith(llm, executorId);
+  }
+
+  function buildWith(llm: LlmProvider, id: string) {
     return new DbosExecutor(
       { llm, engine: new NativeEngine(), datastore: fakeDatastore(), secrets: fakeCipher },
-      { systemDatabaseUrl: process.env.DATABASE_URL, schemaName: "dbos_test", executorId },
+      { systemDatabaseUrl: process.env.DATABASE_URL, schemaName: "dbos_test", executorId: id },
       db,
       /* heartbeatIntervalMs */ 50,
     );
@@ -189,4 +193,65 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     expect(after.status).toBe("failed");
     expect(after.error).toContain("without persisting a terminal run state");
   });
+
+  it("resumes an interrupted run from its last completed step without re-running earlier turns", async () => {
+    let release!: () => void;
+    const open = new Promise<void>((resolve) => (release = resolve));
+    const llm = scriptedLlm([toolCall("t"), finalAnswer("resumed")], { turn: 2, open });
+    executor = build(llm);
+    await executor.launch();
+    const run = await db.run.create({ data: { agentId, executionManaged: true } });
+
+    const firstAttempt = executor.start(run.id).catch(() => undefined);
+    await new Promise<void>((resolve) => {
+      const poll = setInterval(() => {
+        if (llm.calls.length === 2) {
+          clearInterval(poll);
+          resolve();
+        }
+      }, 20);
+    });
+    // "Crash": tear DBOS down while turn 2 is in flight. Turn 1 and its tool
+    // call are already recorded as completed steps.
+    await executor.close();
+
+    // "Restart": a fresh executor with a DIFFERENT executor id re-drives the
+    // orphaned PENDING workflow via recover()'s resume branch (adoption),
+    // not launch()'s same-id re-drive. Turn 2's script is now unblocked.
+    release();
+    await firstAttempt;
+    // The resumed workflow replays turn 1 (and its tool call) from the
+    // durable record without calling this LLM at all: its own call index
+    // starts fresh, and its first (only) call answers the engine's turn 2,
+    // so its script has one entry, not a replay of turn 1's script too.
+    const resumedLlm = scriptedLlm([finalAnswer("resumed")]);
+    executor = buildWith(resumedLlm, `${executorId}-restart`);
+    await executor.launch();
+    const resumed = await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id });
+    expect(["active", "terminal"]).toContain(resumed.state);
+    // recover()'s resume branch fires the adopted workflow without awaiting
+    // it, and the dead first attempt's own backstop write (an unconditional
+    // `db.run.update`, absorbed by `firstAttempt`'s `.catch`) may have
+    // already landed a transient "failed" row before the real resumed
+    // workflow's write lands. Poll for `finalText`, which only the
+    // successfully-resumed run ever sets, rather than the first non-active
+    // status.
+    await new Promise<void>((resolve) => {
+      const poll = setInterval(() => {
+        void db.run.findUnique({ where: { id: run.id } }).then((row) => {
+          if (row?.finalText != null) {
+            clearInterval(poll);
+            resolve();
+          }
+        });
+      }, 50);
+    });
+
+    const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.status).toBe("succeeded");
+    expect(after.finalText).toBe("resumed");
+    // Turn 1 replayed from the record: the resumed LLM only ever served turn 2.
+    expect(resumedLlm.calls).toHaveLength(1);
+    expect(resumedLlm.calls[0].messages.some((m) => m.role === "tool")).toBe(true);
+  }, 30_000);
 });
