@@ -127,12 +127,48 @@ recovery, auth identity derivation, CSRF, transactions, and SSRF before rollout.
 `EXECUTOR=dbos` tables live outside Prisma's migration chain: DBOS creates and
 migrates its own `dbos` schema at `launch()`, so the database role used by the
 server needs `CREATE` on that schema (not just the application schema Prisma
-manages). `DBOS_EXECUTOR_ID` must be unique per running instance — two
-instances sharing an id can each believe they own the other's in-flight runs.
-Rolling back to `EXECUTOR=in-process` is safe at any time: any DBOS run still
-in flight is reconciled to `lost` once its heartbeat times out, because no
-executor is left to recover it, and nothing else in the deployment depends on
-the `dbos` schema.
+manages). `DBOS_EXECUTOR_ID` is required and must be unique per running
+_process_ — two processes sharing an id each believe they own the other's
+in-flight runs and re-drive them at launch, so the scheduler and the MCP
+server must be given different values. There is deliberately no default:
+`EXECUTOR=dbos` refuses to start without one.
+
+**New data at rest.** Durable execution checkpoints every step's result into
+`dbos.operation_outputs`: each turn's assistant text, every tool call's
+arguments, every tool result in full, and the `load` step's pinned agent
+fields plus each attached tool's source and `paramsZod`. That is the same
+class of data as the `Run`/`Tool` tables — prompt content, tool output, and
+anything a tool returned from a secret-bearing call — and it accumulates for
+the life of every workflow record, with no retention limit of its own. Give
+the `dbos` schema the same encryption-at-rest, access control, backup, and
+backup-retention handling as the application schema, and prune completed
+workflows periodically: `DBOS.deleteWorkflow(workflowID, deleteChildren?)`
+removes one workflow and its step records (irreversible), or delete rows
+directly from the schema's tables for a bulk retention job. Prune only
+workflows in a finished status — deleting a PENDING record makes its run
+unrecoverable, and the reconciler will reap it as `lost`.
+
+**Version pinning across upgrades.** DBOS gates both recovery and dequeue on
+`application_version`, which it computes from the registered code unless
+`DBOS__APPVERSION` is set. After an SDK bump or any change to the workflow
+wrapper, workflows recorded under the old version are never dequeued by the
+new process: pin `DBOS__APPVERSION` per deploy, or drain in-flight runs before
+upgrading. The executor no longer loops on those runs — `recover()` reports
+the run `lost` as soon as it sees a version mismatch, and otherwise gives up
+after three adoption attempts. That attempt counter is in memory and per
+process, so it resets on restart.
+
+**Rolling back, and rolling forward again.** Rolling back to
+`EXECUTOR=in-process` is safe at any time: any DBOS run still in flight is
+reconciled to `lost` once its heartbeat times out, because no executor is left
+to recover it, and nothing else in the deployment depends on the `dbos`
+schema. The return trip is the part to know about: those workflows are still
+PENDING in the `dbos` schema, and re-enabling `EXECUTOR=dbos` with the same
+executor id re-drives them at launch. They no longer re-spend — `executeRun`
+short-circuits on any run whose row is already terminal, so a re-driven
+workflow whose run was reaped as `lost` does no work and leaves the row
+`lost` — but the workflows do wake up and run to completion in DBOS's own
+records. Delete them (see pruning above) if you want the rollback to be final.
 
 ## Resource and networking limits
 
