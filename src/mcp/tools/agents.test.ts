@@ -38,7 +38,12 @@ interface FakeCodingProfile {
 type FakeAgentSeed = Omit<FakeAgentRow, "kind" | "codingProfile" | "scheduleEnabled" | "budgetGroupId"> &
   Partial<Pick<FakeAgentRow, "kind" | "codingProfile" | "scheduleEnabled" | "budgetGroupId">>;
 
-function fakeDb(seed: FakeAgentSeed[] = [], budgetGroups: { id: string; ownerId: string | null }[] = []) {
+function fakeDb(
+  seed: FakeAgentSeed[] = [],
+  budgetGroups: { id: string; ownerId: string | null }[] = [],
+  principals: string[] = [],
+) {
+  const principalIds = new Set(principals);
   const rows = new Map(
     seed.map((r) => [
       r.id,
@@ -119,6 +124,10 @@ function fakeDb(seed: FakeAgentSeed[] = [], budgetGroups: { id: string; ownerId:
     },
     budgetGroup: {
       findUnique: async ({ where }: { where: { id: string } }) => groupsById.get(where.id) ?? null,
+    },
+    principal: {
+      findUnique: async ({ where }: { where: { id: string } }) =>
+        principalIds.has(where.id) ? { id: where.id, subject: where.id, createdAt: new Date() } : null,
     },
   };
   const db = {
@@ -419,6 +428,166 @@ describe("agent CRUD tools", () => {
     const client = await connectClient(mcp);
 
     const result = await client.callTool({ name: "delete_agent", arguments: { id: "a1" } });
+    expect(result.isError).toBe(true);
+    await client.close();
+  });
+
+  it("make_owner reassigns an already-owned agent to a different principal, with agents:admin", async () => {
+    const db = fakeDb(
+      [
+        {
+          id: "a1",
+          name: "shared",
+          systemPrompt: "x",
+          model: "m",
+          budgetUsd: 1,
+          maxTurns: 10,
+          schedule: null,
+          timezone: "UTC",
+          ownerId: "owner-1",
+          tools: [],
+        },
+      ],
+      [],
+      ["new-owner"],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "make_owner", arguments: { agentId: "a1", ownerId: "new-owner" } });
+    expect(result.isError).toBeFalsy();
+    const body = JSON.parse((result.content as { text: string }[])[0].text) as { ownerId: string };
+    expect(body.ownerId).toBe("new-owner");
+    await client.close();
+  });
+
+  it("make_owner assigns an owner to a public (null-owner) agent", async () => {
+    const db = fakeDb(
+      [
+        {
+          id: "a1",
+          name: "public",
+          systemPrompt: "x",
+          model: "m",
+          budgetUsd: 1,
+          maxTurns: 10,
+          schedule: null,
+          timezone: "UTC",
+          ownerId: null,
+          tools: [],
+        },
+      ],
+      [],
+      ["new-owner"],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "make_owner", arguments: { agentId: "a1", ownerId: "new-owner" } });
+    expect(result.isError).toBeFalsy();
+    await client.close();
+  });
+
+  it("make_owner with ownerId: null releases an owned agent back to public", async () => {
+    const db = fakeDb([
+      {
+        id: "a1",
+        name: "shared",
+        systemPrompt: "x",
+        model: "m",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId: "owner-1",
+        tools: [],
+      },
+    ]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "make_owner", arguments: { agentId: "a1", ownerId: null } });
+    expect(result.isError).toBeFalsy();
+    const body = JSON.parse((result.content as { text: string }[])[0].text) as { ownerId: string | null };
+    expect(body.ownerId).toBeNull();
+    await client.close();
+  });
+
+  it("make_owner without agents:admin scope is rejected, even for the agent's own owner", async () => {
+    const db = fakeDb(
+      [
+        {
+          id: "a1",
+          name: "mine",
+          systemPrompt: "x",
+          model: "m",
+          budgetUsd: 1,
+          maxTurns: 10,
+          schedule: null,
+          timezone: "UTC",
+          ownerId: "p1",
+          tools: [],
+        },
+      ],
+      [],
+      ["p1"],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "make_owner", arguments: { agentId: "a1", ownerId: "p1" } });
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0].text).toMatch(/scope/i);
+    await client.close();
+  });
+
+  it("make_owner 404s for a missing agent", async () => {
+    const db = fakeDb([], [], ["new-owner"]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "make_owner",
+      arguments: { agentId: "missing", ownerId: "new-owner" },
+    });
+    expect(result.isError).toBe(true);
+    await client.close();
+  });
+
+  it("make_owner rejects a target principal that doesn't exist", async () => {
+    const db = fakeDb([
+      {
+        id: "a1",
+        name: "shared",
+        systemPrompt: "x",
+        model: "m",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId: "owner-1",
+        tools: [],
+      },
+    ]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "make_owner",
+      arguments: { agentId: "a1", ownerId: "no-such-principal" },
+    });
     expect(result.isError).toBe(true);
     await client.close();
   });

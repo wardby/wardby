@@ -312,4 +312,32 @@ export function registerAgentTools(mcp: ReevoMcpServer): void {
       return textResult({ deleted: args.id });
     },
   });
+
+  // Deliberately bypasses ownership entirely (no assertCanMutate/
+  // requireOwnedAgent call) — that's the point of this tool vs. the
+  // self-service null-owner-is-public-mutable rule everything else here
+  // follows. Gated on agents:admin, a step up from agents:write, so an
+  // ordinary caller can never reach it regardless of what they own.
+  // ownerId: null releases the agent back to public, same as any agent
+  // that was never assigned an owner.
+  mcp.registerTool({
+    name: "make_owner",
+    scope: "agents:admin",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { agentId: { type: "string" }, ownerId: { type: ["string", "null"] } },
+      required: ["agentId", "ownerId"],
+    },
+    handler: async (args: { agentId: string; ownerId: string | null }, ctx) => {
+      const agent = await ctx.db.agent.findUnique({ where: { id: args.agentId } });
+      if (!agent) throw new McpError(404, `Agent "${args.agentId}" not found.`);
+      if (args.ownerId !== null) {
+        const principal = await ctx.db.principal.findUnique({ where: { id: args.ownerId } });
+        if (!principal) throw new McpError(400, `Principal "${args.ownerId}" not found.`);
+      }
+      const updated = await ctx.db.agent.update({ where: { id: args.agentId }, data: { ownerId: args.ownerId } });
+      return textResult(updated);
+    },
+  });
 }

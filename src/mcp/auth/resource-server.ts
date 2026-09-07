@@ -20,6 +20,10 @@ export const SCOPES_SUPPORTED = [
   "secrets:write",
   "webhooks:write",
   "budget_groups:write",
+  // Reassigns an agent's owner regardless of who currently owns it (or
+  // whether it's public) — a step above agents:write, which only ever lets
+  // a caller act on agents they already own or that are unowned.
+  "agents:admin",
 ];
 
 export interface ProtectedResourceMetadata {
