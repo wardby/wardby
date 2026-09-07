@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add optional daily/weekly/monthly spend caps across a *group* of agents, layered on top of the existing per-run `Agent.budgetUsd` cap (which stays required and unchanged), so a set of agents can share a recurring budget instead of only ever being bounded run-by-run.
+**Goal:** Add optional daily/weekly/monthly spend caps across a _group_ of agents, layered on top of the existing per-run `Agent.budgetUsd` cap (which stays required and unchanged), so a set of agents can share a recurring budget instead of only ever being bounded run-by-run.
 
-**Architecture:** A new `BudgetGroup` model with a nullable `Agent.budgetGroupId` (an agent belongs to at most one group). A new pure-ish module, `src/core/budget-groups.ts`, computes calendar-aligned-UTC period windows and a group's live spend within them by summing `Run.costUsd`. The key design decision: enforcement is **not** a separate refuse-at-creation gate. Instead, `runner.ts`'s `executeRun` computes an *effective* per-run budget — the agent's own `budgetUsd`, tightened to whatever's left of its group's daily/weekly/monthly caps — and hands that to the engine in place of the raw `budgetUsd`. The engine's existing turn-by-turn machinery (pre-flight refuse, mid-stream cutoff, graceful wind-down in `src/core/engine-native.ts`) then enforces it with **zero changes of its own**: a group whose period budget is already exhausted simply produces an effective budget of `0`, which the engine's existing turn-1 refuse path already handles (`isOverBudget(0, 0)` is `true`, same as any other exhausted-budget agent). This also closes the "in-flight run invisible to the period check" gap that a create-time-only check would have: the tightened budget applies to the run *itself*, live, via the same mechanism that already protects any single run.
+**Architecture:** A new `BudgetGroup` model with a nullable `Agent.budgetGroupId` (an agent belongs to at most one group). A new pure-ish module, `src/core/budget-groups.ts`, computes calendar-aligned-UTC period windows and a group's live spend within them by summing `Run.costUsd`. The key design decision: enforcement is **not** a separate refuse-at-creation gate. Instead, `runner.ts`'s `executeRun` computes an _effective_ per-run budget — the agent's own `budgetUsd`, tightened to whatever's left of its group's daily/weekly/monthly caps — and hands that to the engine in place of the raw `budgetUsd`. The engine's existing turn-by-turn machinery (pre-flight refuse, mid-stream cutoff, graceful wind-down in `src/core/engine-native.ts`) then enforces it with **zero changes of its own**: a group whose period budget is already exhausted simply produces an effective budget of `0`, which the engine's existing turn-1 refuse path already handles (`isOverBudget(0, 0)` is `true`, same as any other exhausted-budget agent). This also closes the "in-flight run invisible to the period check" gap that a create-time-only check would have: the tightened budget applies to the run _itself_, live, via the same mechanism that already protects any single run.
 
 **Tech Stack:** TypeScript, Prisma 6 + PostgreSQL, Zod, Vitest.
 
@@ -23,10 +23,12 @@
 ## Task 1: `BudgetGroup` schema + migration
 
 **Files:**
+
 - Modify: `prisma/schema.prisma`
 - Create: `prisma/migrations/20260907020000_budget_groups/migration.sql`
 
 **Interfaces:**
+
 - Produces: Prisma Client types `BudgetGroup`, and `Agent.budgetGroupId: string | null`, `Agent.budgetGroup?: BudgetGroup | null`. Every later task depends on these existing on the generated client.
 
 - [ ] **Step 1: Add the `BudgetGroup` model to `prisma/schema.prisma`, right after the `Agent` model's closing brace (before `enum AgentKind`)**
@@ -146,10 +148,12 @@ EOF
 ## Task 2: `src/core/budget-groups.ts` — period math + live spend
 
 **Files:**
+
 - Create: `src/core/budget-groups.ts`
 - Create: `src/core/budget-groups.test.ts`
 
 **Interfaces:**
+
 - Consumes: Prisma Client types `Agent`, `BudgetGroup`, `PrismaClient` from `@prisma/client`; `logger` from `./logger.js` (existing, `logger.child({module})` convention — see `src/core/scheduler.ts`'s `schedulerLog`).
 - Produces (used by Task 3's `runner.ts` and Task 5's `get_budget_group` tool):
   - `export type Period = "day" | "week" | "month"`
@@ -282,9 +286,7 @@ export async function computeGroupSpend(
 
   return configured.map(({ period, capUsd }) => {
     const start = periodStart(period, now);
-    const spentUsd = runs
-      .filter((r) => r.startedAt >= start)
-      .reduce((sum, r) => sum + Number(r.costUsd), 0);
+    const spentUsd = runs.filter((r) => r.startedAt >= start).reduce((sum, r) => sum + Number(r.costUsd), 0);
     return { period, capUsd, spentUsd, remainingUsd: Math.max(0, capUsd - spentUsd) };
   });
 }
@@ -391,20 +393,38 @@ const TODAY_START = new Date("2026-09-09T00:00:00.000Z");
 describe("computeGroupSpend", () => {
   it("returns nothing when the group has no caps configured", async () => {
     const db = fakeDb(
-      [{ id: "g1", name: "g", dailyBudgetUsd: null, weeklyBudgetUsd: null, monthlyBudgetUsd: null, warnThresholdRatio: 0.8, agentIds: ["a1"] }],
+      [
+        {
+          id: "g1",
+          name: "g",
+          dailyBudgetUsd: null,
+          weeklyBudgetUsd: null,
+          monthlyBudgetUsd: null,
+          warnThresholdRatio: 0.8,
+          agentIds: ["a1"],
+        },
+      ],
       [],
     );
-    const spend = await computeGroupSpend(db, { dailyBudgetUsd: null, weeklyBudgetUsd: null, monthlyBudgetUsd: null } as never, ["a1"], NOW);
+    const spend = await computeGroupSpend(
+      db,
+      { dailyBudgetUsd: null, weeklyBudgetUsd: null, monthlyBudgetUsd: null } as never,
+      ["a1"],
+      NOW,
+    );
     expect(spend).toEqual([]);
   });
 
   it("sums only runs within each configured period's window, per agent in the group", async () => {
-    const db = fakeDb([], [
-      { agentId: "a1", costUsd: 1, startedAt: TODAY_START }, // in today
-      { agentId: "a2", costUsd: 2, startedAt: TODAY_START }, // in today, other member
-      { agentId: "a1", costUsd: 5, startedAt: new Date("2026-09-01T00:00:00.000Z") }, // this month, not today
-      { agentId: "a1", costUsd: 100, startedAt: new Date("2026-08-01T00:00:00.000Z") }, // outside the month entirely
-    ]);
+    const db = fakeDb(
+      [],
+      [
+        { agentId: "a1", costUsd: 1, startedAt: TODAY_START }, // in today
+        { agentId: "a2", costUsd: 2, startedAt: TODAY_START }, // in today, other member
+        { agentId: "a1", costUsd: 5, startedAt: new Date("2026-09-01T00:00:00.000Z") }, // this month, not today
+        { agentId: "a1", costUsd: 100, startedAt: new Date("2026-08-01T00:00:00.000Z") }, // outside the month entirely
+      ],
+    );
     const spend = await computeGroupSpend(
       db,
       { dailyBudgetUsd: 10, weeklyBudgetUsd: null, monthlyBudgetUsd: 20 } as never,
@@ -419,7 +439,12 @@ describe("computeGroupSpend", () => {
 
   it("clamps remainingUsd at 0 when spend has already exceeded the cap", async () => {
     const db = fakeDb([], [{ agentId: "a1", costUsd: 15, startedAt: TODAY_START }]);
-    const spend = await computeGroupSpend(db, { dailyBudgetUsd: 10, weeklyBudgetUsd: null, monthlyBudgetUsd: null } as never, ["a1"], NOW);
+    const spend = await computeGroupSpend(
+      db,
+      { dailyBudgetUsd: 10, weeklyBudgetUsd: null, monthlyBudgetUsd: null } as never,
+      ["a1"],
+      NOW,
+    );
     expect(spend[0]).toEqual({ period: "day", capUsd: 10, spentUsd: 15, remainingUsd: 0 });
   });
 });
@@ -433,7 +458,17 @@ describe("effectiveBudgetForRun", () => {
 
   it("returns the agent's own budgetUsd unchanged when its group has no caps set", async () => {
     const db = fakeDb(
-      [{ id: "g1", name: "g", dailyBudgetUsd: null, weeklyBudgetUsd: null, monthlyBudgetUsd: null, warnThresholdRatio: 0.8, agentIds: ["a1"] }],
+      [
+        {
+          id: "g1",
+          name: "g",
+          dailyBudgetUsd: null,
+          weeklyBudgetUsd: null,
+          monthlyBudgetUsd: null,
+          warnThresholdRatio: 0.8,
+          agentIds: ["a1"],
+        },
+      ],
       [],
     );
     const result = await effectiveBudgetForRun(db, { id: "a1", budgetGroupId: "g1", budgetUsd: 5 } as never, NOW);
@@ -442,7 +477,17 @@ describe("effectiveBudgetForRun", () => {
 
   it("tightens the effective budget to the group's remaining daily cap when that's smaller than budgetUsd", async () => {
     const db = fakeDb(
-      [{ id: "g1", name: "g", dailyBudgetUsd: 10, weeklyBudgetUsd: null, monthlyBudgetUsd: null, warnThresholdRatio: 0.8, agentIds: ["a1"] }],
+      [
+        {
+          id: "g1",
+          name: "g",
+          dailyBudgetUsd: 10,
+          weeklyBudgetUsd: null,
+          monthlyBudgetUsd: null,
+          warnThresholdRatio: 0.8,
+          agentIds: ["a1"],
+        },
+      ],
       [{ agentId: "a1", costUsd: 8, startedAt: TODAY_START }],
     );
     const result = await effectiveBudgetForRun(db, { id: "a1", budgetGroupId: "g1", budgetUsd: 5 } as never, NOW);
@@ -451,7 +496,17 @@ describe("effectiveBudgetForRun", () => {
 
   it("returns an effective budget of 0 once the group's period cap is fully spent — the engine's existing zero-budget refuse then applies", async () => {
     const db = fakeDb(
-      [{ id: "g1", name: "g", dailyBudgetUsd: 10, weeklyBudgetUsd: null, monthlyBudgetUsd: null, warnThresholdRatio: 0.8, agentIds: ["a1"] }],
+      [
+        {
+          id: "g1",
+          name: "g",
+          dailyBudgetUsd: 10,
+          weeklyBudgetUsd: null,
+          monthlyBudgetUsd: null,
+          warnThresholdRatio: 0.8,
+          agentIds: ["a1"],
+        },
+      ],
       [{ agentId: "a1", costUsd: 10, startedAt: TODAY_START }],
     );
     const result = await effectiveBudgetForRun(db, { id: "a1", budgetGroupId: "g1", budgetUsd: 5 } as never, NOW);
@@ -460,7 +515,17 @@ describe("effectiveBudgetForRun", () => {
 
   it("uses the tightest of multiple configured periods, not just the first one checked", async () => {
     const db = fakeDb(
-      [{ id: "g1", name: "g", dailyBudgetUsd: 10, weeklyBudgetUsd: 12, monthlyBudgetUsd: 100, warnThresholdRatio: 0.8, agentIds: ["a1"] }],
+      [
+        {
+          id: "g1",
+          name: "g",
+          dailyBudgetUsd: 10,
+          weeklyBudgetUsd: 12,
+          monthlyBudgetUsd: 100,
+          warnThresholdRatio: 0.8,
+          agentIds: ["a1"],
+        },
+      ],
       [
         { agentId: "a1", costUsd: 2, startedAt: TODAY_START }, // daily remaining: 8
         { agentId: "a1", costUsd: 9, startedAt: new Date("2026-09-07T00:00:00.000Z") }, // this ISO week (Mon 09-07) too -> weekly spend 11, remaining 1
@@ -502,10 +567,12 @@ EOF
 ## Task 3: Wire `effectiveBudgetForRun` into `runner.ts`
 
 **Files:**
+
 - Modify: `src/core/runner.ts`
 - Modify: `src/core/runner.test.ts`
 
 **Interfaces:**
+
 - Consumes: `effectiveBudgetForRun` from `./budget-groups.js` (Task 2).
 - Produces: `RunnerDb` gains `"budgetGroup"` to its `Pick<PrismaClient, ...>` — Task 5's MCP tools and any future caller of `executeRun`/`runAgent` must pass a `db` whose type includes it (already true for the real `PrismaClient`; only test fakes need updating, done in this task).
 
@@ -614,73 +681,73 @@ function fakeDb(
 - [ ] **Step 2: Add the new test cases, in the `describe("runAgent", ...)` block, after the existing three tests**
 
 ```ts
-  it("passes the agent's own budgetUsd unchanged to the engine when it has no budget group", async () => {
-    const db = fakeDb([{ id: "a1", name: "solo", systemPrompt: "s", model: "m", budgetUsd: 5, maxTurns: 10 }]);
-    let capturedBudget: number | undefined;
-    const engine = fakeEngine(
-      { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.01 } },
-      (ctx) => {
-        capturedBudget = ctx.agent.budgetUsd;
-      },
-    );
-    await runAgent("solo", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
-    expect(capturedBudget).toBe(5);
-  });
+it("passes the agent's own budgetUsd unchanged to the engine when it has no budget group", async () => {
+  const db = fakeDb([{ id: "a1", name: "solo", systemPrompt: "s", model: "m", budgetUsd: 5, maxTurns: 10 }]);
+  let capturedBudget: number | undefined;
+  const engine = fakeEngine(
+    { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.01 } },
+    (ctx) => {
+      capturedBudget = ctx.agent.budgetUsd;
+    },
+  );
+  await runAgent("solo", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
+  expect(capturedBudget).toBe(5);
+});
 
-  it("tightens the budget handed to the engine when the agent's group has a smaller remaining daily cap", async () => {
-    const db = fakeDb(
-      [{ id: "a1", name: "grouped", systemPrompt: "s", model: "m", budgetUsd: 5, maxTurns: 10, budgetGroupId: "g1" }],
-      [],
-      [],
-      [],
-      [{ id: "g1", name: "team", dailyBudgetUsd: 10 }],
-      [{ agentId: "a1", costUsd: 8, startedAt: new Date() }],
-    );
-    let capturedBudget: number | undefined;
-    const engine = fakeEngine(
-      { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.01 } },
-      (ctx) => {
-        capturedBudget = ctx.agent.budgetUsd;
-      },
-    );
-    await runAgent("grouped", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
-    expect(capturedBudget).toBe(2); // 10 cap - 8 already spent = 2 remaining, tighter than the agent's own 5
-  });
+it("tightens the budget handed to the engine when the agent's group has a smaller remaining daily cap", async () => {
+  const db = fakeDb(
+    [{ id: "a1", name: "grouped", systemPrompt: "s", model: "m", budgetUsd: 5, maxTurns: 10, budgetGroupId: "g1" }],
+    [],
+    [],
+    [],
+    [{ id: "g1", name: "team", dailyBudgetUsd: 10 }],
+    [{ agentId: "a1", costUsd: 8, startedAt: new Date() }],
+  );
+  let capturedBudget: number | undefined;
+  const engine = fakeEngine(
+    { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.01 } },
+    (ctx) => {
+      capturedBudget = ctx.agent.budgetUsd;
+    },
+  );
+  await runAgent("grouped", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
+  expect(capturedBudget).toBe(2); // 10 cap - 8 already spent = 2 remaining, tighter than the agent's own 5
+});
 
-  it("hands the engine a 0 budget once the group's daily cap is fully spent, regardless of the agent's own budgetUsd", async () => {
-    const db = fakeDb(
-      [{ id: "a1", name: "exhausted", systemPrompt: "s", model: "m", budgetUsd: 5, maxTurns: 10, budgetGroupId: "g1" }],
-      [],
-      [],
-      [],
-      [{ id: "g1", name: "team", dailyBudgetUsd: 10 }],
-      [{ agentId: "a1", costUsd: 10, startedAt: new Date() }],
-    );
-    let capturedBudget: number | undefined;
-    const engine = fakeEngine(
-      {
-        status: "refused",
-        finalText: "",
-        turns: 1,
-        usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
-        error: "budget exhausted before any LLM call",
-      },
-      (ctx) => {
-        capturedBudget = ctx.agent.budgetUsd;
-      },
-    );
-    const run = await runAgent(
-      "exhausted",
-      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher },
-      db,
-    );
-    expect(capturedBudget).toBe(0);
-    // The engine result is a fake here (its own zero-budget refuse behavior
-    // is engine-native.test.ts's job, not this file's) -- this test's job
-    // is only to prove runner.ts computed and passed a 0, then persisted
-    // whatever status the engine returned for it.
-    expect(run.status).toBe("refused");
-  });
+it("hands the engine a 0 budget once the group's daily cap is fully spent, regardless of the agent's own budgetUsd", async () => {
+  const db = fakeDb(
+    [{ id: "a1", name: "exhausted", systemPrompt: "s", model: "m", budgetUsd: 5, maxTurns: 10, budgetGroupId: "g1" }],
+    [],
+    [],
+    [],
+    [{ id: "g1", name: "team", dailyBudgetUsd: 10 }],
+    [{ agentId: "a1", costUsd: 10, startedAt: new Date() }],
+  );
+  let capturedBudget: number | undefined;
+  const engine = fakeEngine(
+    {
+      status: "refused",
+      finalText: "",
+      turns: 1,
+      usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+      error: "budget exhausted before any LLM call",
+    },
+    (ctx) => {
+      capturedBudget = ctx.agent.budgetUsd;
+    },
+  );
+  const run = await runAgent(
+    "exhausted",
+    { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher },
+    db,
+  );
+  expect(capturedBudget).toBe(0);
+  // The engine result is a fake here (its own zero-budget refuse behavior
+  // is engine-native.test.ts's job, not this file's) -- this test's job
+  // is only to prove runner.ts computed and passed a 0, then persisted
+  // whatever status the engine returned for it.
+  expect(run.status).toBe("refused");
+});
 ```
 
 - [ ] **Step 3: Run to confirm these fail (runner.ts doesn't call `effectiveBudgetForRun` yet, so the tightened-budget tests fail; the unchanged-budget test still passes)**
@@ -757,11 +824,13 @@ EOF
 ## Task 4: Ownership helpers + scope
 
 **Files:**
+
 - Modify: `src/mcp/auth/ownership.ts`
 - Modify: `src/mcp/auth/ownership.test.ts`
 - Modify: `src/mcp/auth/resource-server.ts`
 
 **Interfaces:**
+
 - Produces (used by Task 5's `budget-groups.ts` MCP tools and Task 6's `agents.ts` changes): `requireOwnedBudgetGroup(db: PrismaClient, id: string, principalId: string): Promise<BudgetGroup>`, `requireReadableBudgetGroup(db: PrismaClient, id: string, principalId: string): Promise<BudgetGroup>`.
 - Produces: `"budget_groups:write"` added to `SCOPES_SUPPORTED`.
 
@@ -905,11 +974,13 @@ EOF
 ## Task 5: MCP tools — `create_budget_group`, `update_budget_group`, `list_budget_groups`, `get_budget_group`, `delete_budget_group`
 
 **Files:**
+
 - Create: `src/mcp/tools/budget-groups.ts`
 - Create: `src/mcp/tools/budget-groups.test.ts`
 - Modify: `src/mcp/index.ts`
 
 **Interfaces:**
+
 - Consumes: `requireOwnedBudgetGroup`/`requireReadableBudgetGroup` (Task 4), `computeGroupSpend` (Task 2), `visibleToPrincipal`/`canRead` (existing, `src/mcp/auth/ownership.ts`), `textResult` (existing, `src/mcp/tools/text-result.ts`), `McpError` (existing, `src/mcp/errors.ts`).
 - Produces: `export function registerBudgetGroupTools(mcp: ReevoMcpServer): void`, called from `registerAllTools` in `mcp/index.ts`.
 
@@ -939,7 +1010,11 @@ const CreateBudgetGroupSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
-    if (value.dailyBudgetUsd === undefined && value.weeklyBudgetUsd === undefined && value.monthlyBudgetUsd === undefined) {
+    if (
+      value.dailyBudgetUsd === undefined &&
+      value.weeklyBudgetUsd === undefined &&
+      value.monthlyBudgetUsd === undefined
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["dailyBudgetUsd"],
@@ -1076,8 +1151,8 @@ import { registerBudgetGroupTools } from "./tools/budget-groups.js";
 In `registerAllTools`, add the call (anywhere in the list, e.g. right after `registerAgentTools(mcp);`):
 
 ```ts
-  registerAgentTools(mcp);
-  registerBudgetGroupTools(mcp);
+registerAgentTools(mcp);
+registerBudgetGroupTools(mcp);
 ```
 
 - [ ] **Step 3: Write `src/mcp/tools/budget-groups.test.ts`**
@@ -1286,11 +1361,13 @@ EOF
 ## Task 6: `budgetGroupId` on `create_agent`/`update_agent`
 
 **Files:**
+
 - Modify: `src/mcp/tools/agents.ts`
 - Modify: `src/mcp/tools/agents.test.ts`
 
 **Interfaces:**
-- Consumes: `requireReadableBudgetGroup` from `../auth/ownership.js` (Task 4) — attaching an agent to a group requires the group be *readable* (owned, or public), matching how a public `Tool` can be attached to any agent without owning the `Tool` itself.
+
+- Consumes: `requireReadableBudgetGroup` from `../auth/ownership.js` (Task 4) — attaching an agent to a group requires the group be _readable_ (owned, or public), matching how a public `Tool` can be attached to any agent without owning the `Tool` itself.
 
 - [ ] **Step 1: Write the failing tests.** Add to `src/mcp/tools/agents.test.ts`:
 
@@ -1414,40 +1491,41 @@ function fakeDb(seed: FakeAgentSeed[] = [], budgetGroups: { id: string; ownerId:
 Then add the new test cases in the `describe` block, after the existing tests:
 
 ```ts
-  it("create_agent accepts a budgetGroupId for a group the caller can read (public)", async () => {
-    const db = fakeDb([], [{ id: "g1", ownerId: null }]);
-    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
-    registerAgentTools(mcp);
-    const client = await connectClient(mcp);
+it("create_agent accepts a budgetGroupId for a group the caller can read (public)", async () => {
+  const db = fakeDb([], [{ id: "g1", ownerId: null }]);
+  const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+  mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+  registerAgentTools(mcp);
+  const client = await connectClient(mcp);
 
-    const result = await client.callTool({
-      name: "create_agent",
-      arguments: { name: "grouped", systemPrompt: "s", model: "m", budgetUsd: 1, budgetGroupId: "g1" },
-    });
-    expect(result.isError).toBeFalsy();
-    const body = parseText(result as never) as { budgetGroupId: string };
-    expect(body.budgetGroupId).toBe("g1");
-    await client.close();
+  const result = await client.callTool({
+    name: "create_agent",
+    arguments: { name: "grouped", systemPrompt: "s", model: "m", budgetUsd: 1, budgetGroupId: "g1" },
   });
+  expect(result.isError).toBeFalsy();
+  const body = parseText(result as never) as { budgetGroupId: string };
+  expect(body.budgetGroupId).toBe("g1");
+  await client.close();
+});
 
-  it("create_agent rejects a budgetGroupId for a group owned by someone else", async () => {
-    const db = fakeDb([], [{ id: "g1", ownerId: "someone-else" }]);
-    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
-    registerAgentTools(mcp);
-    const client = await connectClient(mcp);
+it("create_agent rejects a budgetGroupId for a group owned by someone else", async () => {
+  const db = fakeDb([], [{ id: "g1", ownerId: "someone-else" }]);
+  const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+  mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+  registerAgentTools(mcp);
+  const client = await connectClient(mcp);
 
-    const result = await client.callTool({
-      name: "create_agent",
-      arguments: { name: "grouped", systemPrompt: "s", model: "m", budgetUsd: 1, budgetGroupId: "g1" },
-    });
-    expect(result.isError).toBe(true);
-    await client.close();
+  const result = await client.callTool({
+    name: "create_agent",
+    arguments: { name: "grouped", systemPrompt: "s", model: "m", budgetUsd: 1, budgetGroupId: "g1" },
   });
+  expect(result.isError).toBe(true);
+  await client.close();
+});
 
-  it("update_agent can clear an agent's budgetGroupId back to null", async () => {
-    const db = fakeDb([
+it("update_agent can clear an agent's budgetGroupId back to null", async () => {
+  const db = fakeDb(
+    [
       {
         id: "a1",
         name: "grouped",
@@ -1461,19 +1539,21 @@ Then add the new test cases in the `describe` block, after the existing tests:
         tools: [],
         budgetGroupId: "g1",
       },
-    ], [{ id: "g1", ownerId: null }]);
-    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
-    registerAgentTools(mcp);
-    const client = await connectClient(mcp);
+    ],
+    [{ id: "g1", ownerId: null }],
+  );
+  const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+  mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+  registerAgentTools(mcp);
+  const client = await connectClient(mcp);
 
-    const result = await client.callTool({
-      name: "update_agent",
-      arguments: { id: "a1", budgetGroupId: null },
-    });
-    expect((parseText(result as never) as { budgetGroupId: string | null }).budgetGroupId).toBeNull();
-    await client.close();
+  const result = await client.callTool({
+    name: "update_agent",
+    arguments: { id: "a1", budgetGroupId: null },
   });
+  expect((parseText(result as never) as { budgetGroupId: string | null }).budgetGroupId).toBeNull();
+  await client.close();
+});
 ```
 
 - [ ] **Step 2: Run to confirm failure**
@@ -1486,7 +1566,13 @@ Expected: FAIL (schemas don't accept `budgetGroupId` yet — 400 invalid-argumen
 Add the import:
 
 ```ts
-import { assertCanMutate, canRead, requireOwnedAgent, requireReadableBudgetGroup, visibleToPrincipal } from "../auth/ownership.js";
+import {
+  assertCanMutate,
+  canRead,
+  requireOwnedAgent,
+  requireReadableBudgetGroup,
+  visibleToPrincipal,
+} from "../auth/ownership.js";
 ```
 
 Add a field to `agentFields` (after `kind`):
@@ -1522,17 +1608,17 @@ and `update_agent`'s (after its own `budgetUsd: { type: "number" },`):
 In `create_agent`'s handler, validate the group before creating (right after `validateSchedule(args.schedule, args.timezone ?? "UTC");`):
 
 ```ts
-      if (args.budgetGroupId) {
-        await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id);
-      }
+if (args.budgetGroupId) {
+  await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id);
+}
 ```
 
 In `update_agent`'s handler, inside the `$transaction` callback, right after the existing `assertCanMutate(existing.ownerId, ctx.principal.id, ...)` line — a plain read via `ctx.db` (not `tx`) is fine here since it's validation-only, before any write in the transaction:
 
 ```ts
-          if (args.budgetGroupId) {
-            await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id);
-          }
+if (args.budgetGroupId) {
+  await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id);
+}
 ```
 
 - [ ] **Step 4: Run to confirm the new tests pass, and the whole file still passes**
