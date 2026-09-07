@@ -1,0 +1,35 @@
+FROM node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94 AS build
+WORKDIR /build
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY tsconfig.json tsconfig.build.json ./
+COPY prisma ./prisma
+COPY scripts ./scripts
+COPY src ./src
+RUN npm run prisma:generate && npm run build
+
+FROM node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94 AS worker-dependencies
+WORKDIR /worker
+COPY src/coding-worker/package.json src/coding-worker/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+
+FROM node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94 AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin reevo
+WORKDIR /opt/reevo
+COPY --from=worker-dependencies /worker/node_modules ./node_modules
+COPY --from=build /build/dist/coding-worker ./coding-worker
+COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
+RUN test ! -e /usr/bin/docker \
+    && test ! -e /usr/bin/ssh \
+    && test ! -e /usr/bin/curl \
+    && test ! -e /usr/bin/wget \
+    && test ! -e /usr/bin/sudo \
+    && test ! -e /usr/bin/gcc \
+    && test ! -e /usr/bin/make
+USER 10001:10001
+ENV NODE_ENV=production HOME=/home/reevo
+WORKDIR /workspace
+ENTRYPOINT ["node", "/opt/reevo/coding-worker/main.js"]

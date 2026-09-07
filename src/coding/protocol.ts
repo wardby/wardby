@@ -251,6 +251,7 @@ const TOKEN_PATTERNS = [
   /gh[pousr]_[A-Za-z0-9]{20,}/g,
   /AKIA[0-9A-Z]{16}/g,
   /(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/gi,
+  /rrp_[A-Za-z0-9_-]{32,}/g,
   /rv[a-z]_[0-9a-f-]{36}\.[A-Za-z0-9_-]{20,}/gi,
 ];
 

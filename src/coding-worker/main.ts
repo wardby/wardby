@@ -1,0 +1,36 @@
+#!/usr/bin/env node
+import { readCodingInput, writeCodingOutputAtomic } from "./artifact.js";
+import { runCodingWorker } from "./driver.js";
+import { safeWorkerErrorCode } from "./errors.js";
+import { createCodexSdkClient } from "./sdk.js";
+
+const INPUT_PATH = "/run/reevo/input/input.json";
+const OUTPUT_PATH = "/run/reevo/output/result.json";
+const WORKSPACE_PATH = "/workspace";
+
+function required(name: "REEVO_PROXY_URL" | "REEVO_RUN_CAPABILITY"): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`${name.toLowerCase()}_missing`);
+  return value;
+}
+
+const controller = new AbortController();
+for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => controller.abort());
+
+try {
+  const input = await readCodingInput(INPUT_PATH);
+  const output = await runCodingWorker({
+    input,
+    workspace: WORKSPACE_PATH,
+    proxyBaseUrl: required("REEVO_PROXY_URL"),
+    capability: required("REEVO_RUN_CAPABILITY"),
+    signal: controller.signal,
+    createClient: createCodexSdkClient,
+    onProgress: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),
+  });
+  await writeCodingOutputAtomic(OUTPUT_PATH, output);
+} catch (error) {
+  const code = controller.signal.aborted ? "worker_cancelled" : safeWorkerErrorCode(error);
+  process.stderr.write(`${JSON.stringify({ error: code })}\n`);
+  process.exitCode = controller.signal.aborted ? 143 : 1;
+}
