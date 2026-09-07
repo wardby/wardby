@@ -41,6 +41,21 @@ export async function requireReadableAgent(db: PrismaClient, id: string, princip
   return agent;
 }
 
+export async function requireOwnedBudgetGroup(db: PrismaClient, id: string, principalId: string) {
+  const group = await db.budgetGroup.findUnique({ where: { id } });
+  if (!group) throw new McpError(404, `Budget group "${id}" not found.`);
+  assertCanMutate(group.ownerId, principalId, `Budget group "${id}" is not owned by the caller.`);
+  return group;
+}
+
+export async function requireReadableBudgetGroup(db: PrismaClient, id: string, principalId: string) {
+  const group = await db.budgetGroup.findUnique({ where: { id } });
+  if (!group || !canRead(group.ownerId, principalId)) {
+    throw new McpError(404, `Budget group "${id}" not found.`);
+  }
+  return group;
+}
+
 export async function requireOwnedSecret(db: PrismaClient, id: string, principalId: string): Promise<void> {
   const secret = await db.secret.findUnique({ where: { id } });
   if (!secret || !isOwner(secret.ownerId, principalId)) {
