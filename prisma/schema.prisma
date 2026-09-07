@@ -192,6 +192,11 @@ model Run {
   turns            Int        @default(0)
   /// Detached executors are recovered by handle rather than inferred from trigger.
   executionManaged Boolean    @default(false)
+  /// Phase 6: which durable executor backend holds this run, if any
+  /// ("dbos" = a DBOS workflow whose id equals this run's id). Null for
+  /// in-process runs. The reconciler consults the backend before declaring a
+  /// stale run lost, and can adopt one orphaned by a dead instance.
+  executionBackend String?
   codingRun        CodingRun?
 }
 
