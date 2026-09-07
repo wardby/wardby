@@ -14,11 +14,14 @@
 
 import "./env.js";
 import { readFileSync } from "node:fs";
+import { execFile as execFileCallback } from "node:child_process";
 import { parseArgs } from "node:util";
+import { promisify } from "node:util";
 import type { RunStatus } from "@prisma/client";
-import { loadProviderConfig } from "./config/providers.js";
+import { loadContainerExecutorConfig, loadProviderConfig } from "./config/providers.js";
 import { RoutingLlmProvider, resolveLlmRegistrations } from "./providers/llm/index.js";
 import { buildConfiguredExecutor, InProcessExecutor } from "./providers/executor/index.js";
+import type { Executor } from "./providers/executor/types.js";
 import { PostgresDatastore } from "./providers/datastore/index.js";
 import { buildSecretCipher } from "./providers/secrets/index.js";
 import type { ProviderRegistry } from "./providers/index.js";
@@ -43,6 +46,7 @@ const RUN_STATUSES: RunStatus[] = [
   "budget_exhausted",
   "cancelled",
 ];
+const execFile = promisify(execFileCallback);
 
 function fail(message: string): never {
   console.error(`error: ${message}`);
@@ -320,6 +324,12 @@ async function run(name: string | undefined): Promise<void> {
     fail("run requires an agent name: reevo run <name>");
   }
 
+  const agent = await prisma.agent.findUnique({ where: { name } });
+  if (!agent) fail(`unknown agent "${name}".`);
+  if (agent.kind === "coding") {
+    fail("Coding agents are MCP-first: use trigger_agent so task input and ownership are recorded safely.");
+  }
+
   const llm = buildLlmProvider();
   const engine = buildEngine();
   const secrets = buildSecrets();
@@ -335,8 +345,8 @@ async function run(name: string | undefined): Promise<void> {
   }
   process.stdout.write("\n");
 
-  const agent = await prisma.agent.findUnique({ where: { id: run.agentId } });
-  const budgetUsd = agent ? Number(agent.budgetUsd) : NaN;
+  const completedAgent = await prisma.agent.findUnique({ where: { id: run.agentId } });
+  const budgetUsd = completedAgent ? Number(completedAgent.budgetUsd) : NaN;
 
   if (run.status === "succeeded" || run.status === "budget_exhausted") {
     const marker = run.status === "succeeded" ? "✓" : "◐";
@@ -349,6 +359,44 @@ async function run(name: string | undefined): Promise<void> {
     console.error(`✗ run ${run.id} — ${run.status}: ${run.error ?? "unknown error"}`);
     process.exitCode = 1;
   }
+}
+
+function noopExecutor(): Executor {
+  return { async start() {}, async stop() {} };
+}
+
+async function codingOps(args: string[]): Promise<void> {
+  const [operation, ...rest] = args;
+  const config = loadProviderConfig();
+  if (config.jobs !== "docker") fail("coding operations require JOB_LAUNCHER=docker.");
+  const container = loadContainerExecutorConfig();
+  if (!container.workerImage || !container.proxyContainer) {
+    fail("CODING_WORKER_IMAGE and CODING_PROXY_CONTAINER are required when JOB_LAUNCHER=docker.");
+  }
+
+  if (operation === "preflight") {
+    if (!/.+@sha256:[a-f0-9]{64}$/i.test(container.workerImage)) {
+      fail("CODING_WORKER_IMAGE must use an immutable sha256 digest.");
+    }
+    try {
+      await execFile("docker", ["image", "inspect", container.workerImage], { maxBuffer: 1024 * 1024 });
+    } catch {
+      fail(`Docker cannot inspect coding worker image "${container.workerImage}".`);
+    }
+    console.log(`coding preflight passed for ${container.workerImage}`);
+    return;
+  }
+
+  if (operation === "cleanup") {
+    const { values } = parseArgs({ args: rest, options: { "run-id": { type: "string" } } });
+    if (!values["run-id"]) fail("coding cleanup requires --run-id <id>.");
+    const executor = buildConfiguredExecutor({ native: noopExecutor(), db: prisma });
+    await executor.stop(values["run-id"], "operator cleanup");
+    console.log(`coding cleanup requested for run ${values["run-id"]}`);
+    return;
+  }
+
+  fail("coding requires preflight or cleanup --run-id <id>.");
 }
 
 async function listRuns(args: string[]): Promise<void> {
@@ -475,6 +523,8 @@ async function main(): Promise<void> {
       await run(rest[0]);
     } else if (command === "runs") {
       await listRuns(rest);
+    } else if (command === "coding") {
+      await codingOps(rest);
     } else if (command === "scheduler") {
       await scheduler(rest);
     } else if (command === "mcp") {
@@ -490,6 +540,8 @@ async function main(): Promise<void> {
           "  reevo tool list [--agent <name>]\n" +
           "  reevo run <name>\n" +
           "  reevo runs [--agent <name>] [--limit N] [--status <s>]\n" +
+          "  reevo coding preflight\n" +
+          "  reevo coding cleanup --run-id <id>\n" +
           "  reevo scheduler [--scope default]\n" +
           "  reevo mcp   (MCP_TRANSPORT=stdio|http selects the transport)",
       );

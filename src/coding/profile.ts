@@ -94,6 +94,7 @@ const codingProfileFields = {
   repository: repositorySchema,
   baseRef: baseRefSchema,
   defaultTask: defaultTaskSchema,
+  allowWebhookTaskOverride: z.boolean(),
   timeoutSec: z.number().int().min(MIN_CODING_TIMEOUT_SEC).max(MAX_CODING_TIMEOUT_SEC),
   allowedEgress: z
     .array(egressHostSchema)
@@ -112,6 +113,7 @@ export const CodingProfileSchema = z
     repository: codingProfileFields.repository,
     baseRef: codingProfileFields.baseRef.default("main"),
     defaultTask: codingProfileFields.defaultTask.default(null),
+    allowWebhookTaskOverride: codingProfileFields.allowWebhookTaskOverride.default(false),
     timeoutSec: codingProfileFields.timeoutSec.default(1800),
     allowedEgress: codingProfileFields.allowedEgress.default([]),
     protectedPaths: codingProfileFields.protectedPaths.default([...DEFAULT_PROTECTED_PATHS]),
@@ -124,6 +126,7 @@ export const CodingProfilePatchSchema = z
     repository: codingProfileFields.repository.optional(),
     baseRef: codingProfileFields.baseRef.optional(),
     defaultTask: codingProfileFields.defaultTask.optional(),
+    allowWebhookTaskOverride: codingProfileFields.allowWebhookTaskOverride.optional(),
     timeoutSec: codingProfileFields.timeoutSec.optional(),
     allowedEgress: codingProfileFields.allowedEgress.optional(),
     protectedPaths: codingProfileFields.protectedPaths.optional(),

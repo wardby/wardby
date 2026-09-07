@@ -16,6 +16,8 @@ interface FakeWebhookRow {
 interface FakeAgentRow {
   id: string;
   name: string;
+  kind?: "native" | "coding";
+  codingProfile?: Record<string, unknown> | null;
 }
 
 function fakeDb(agents: FakeAgentRow[] = []) {
@@ -131,6 +133,35 @@ describe("core/webhooks", () => {
     const result = await resolveWebhookRun(id, secret, db, executor);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("disabled");
+  });
+
+  it("accepts webhook task input only for an opted-in coding profile", async () => {
+    const codingProfile = {
+      provider: "codex",
+      repository: "openai/reevo",
+      baseRef: "main",
+      defaultTask: "Default task",
+      allowWebhookTaskOverride: true,
+      timeoutSec: 900,
+      allowedEgress: [],
+      protectedPaths: ["CODEOWNERS"],
+    };
+    const db = fakeDb([{ id: "a1", name: "coder", kind: "coding", codingProfile }]);
+    const { id, secret } = await createWebhook("a1", "p1", db);
+    await expect(resolveWebhookRun(id, secret, db, executor, "Fix the failing test")).resolves.toMatchObject({
+      ok: true,
+    });
+
+    const blockedDb = fakeDb([
+      { id: "a1", name: "coder", kind: "coding", codingProfile: { ...codingProfile, allowWebhookTaskOverride: false } },
+    ]);
+    const blocked = await createWebhook("a1", "p1", blockedDb);
+    await expect(
+      resolveWebhookRun(blocked.id, blocked.secret, blockedDb, executor, "Fix the failing test"),
+    ).resolves.toEqual({
+      ok: false,
+      reason: "disabled",
+    });
   });
 
   it("deleteWebhook removes it from listWebhooks", async () => {

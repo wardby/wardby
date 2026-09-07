@@ -131,6 +131,36 @@ describe("dispatchRun", () => {
     ]);
   });
 
+  it("snapshots bounded manual coding task and base-ref overrides", async () => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      codingProfile: {
+        provider: "codex",
+        repository: "openai/reevo",
+        baseRef: "main",
+        defaultTask: "Default task",
+        timeoutSec: 900,
+        allowedEgress: [],
+        protectedPaths: ["CODEOWNERS"],
+      },
+    };
+    const state = fakeDb(agent);
+    const result = await dispatchRun({
+      db: state.db,
+      executor: { async start() {}, async stop() {} },
+      agentId: agent.id,
+      codingTask: "Fix the auth regression",
+      codingBaseRef: "refs/heads/release/2026.09",
+    });
+
+    expect(state.codingRuns[0]).toMatchObject({
+      runId: result?.run.id,
+      task: "Fix the auth regression",
+      baseRef: "release/2026.09",
+    });
+  });
+
   it("does not persist or launch when a transactional claim is no longer valid", async () => {
     const state = fakeDb(nativeAgent());
     const start = vi.fn(async () => {});

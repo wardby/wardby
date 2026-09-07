@@ -25,21 +25,30 @@ interface FakeRunRow {
   error: string | null;
   startedAt: Date;
   finishedAt: Date | null;
+  codingRun?: { result: unknown; jobHandle?: string; protectedPaths?: string[] } | null;
 }
 
 function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[]) {
   const agentRows = new Map(agents.map((a) => [a.id, a]));
   const runRows = new Map(runs.map((r) => [r.id, r]));
+  const publicRun = (run: FakeRunRow | undefined) => {
+    if (!run) return null;
+    const { codingRun: _codingRun, ...row } = run;
+    return row;
+  };
   return {
     agent: {
       findUnique: async ({ where }: { where: { id: string } }) => agentRows.get(where.id) ?? null,
     },
     run: {
-      findUnique: async ({ where }: { where: { id: string } }) => runRows.get(where.id) ?? null,
+      findUnique: async ({ where }: { where: { id: string } }) => publicRun(runRows.get(where.id)),
       findMany: async ({ where }: { where: { agentId: string; status?: string } }) =>
-        [...runRows.values()].filter(
-          (r) => r.agentId === where.agentId && (!where.status || r.status === where.status),
-        ),
+        [...runRows.values()]
+          .filter((r) => r.agentId === where.agentId && (!where.status || r.status === where.status))
+          .map((r) => publicRun(r)),
+    },
+    codingRun: {
+      findUnique: async ({ where }: { where: { runId: string } }) => runRows.get(where.runId)?.codingRun ?? null,
     },
   } as unknown as import("@prisma/client").PrismaClient;
 }
@@ -132,6 +141,54 @@ describe("run observability tools", () => {
 
     const result = await client.callTool({ name: "get_run", arguments: { runId: "r1" } });
     expect(result.isError).toBe(true);
+    await client.close();
+  });
+
+  it("get_run projects only the validated coding result", async () => {
+    const now = new Date();
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [
+        {
+          id: "r1",
+          agentId: "a1",
+          status: "succeeded",
+          trigger: "manual",
+          turns: 0,
+          tokensIn: 1,
+          tokensOut: 2,
+          costUsd: 0.01,
+          finalText: null,
+          error: null,
+          startedAt: now,
+          finishedAt: now,
+          codingRun: {
+            jobHandle: "container-secret",
+            protectedPaths: [".github/workflows/**"],
+            result: {
+              schemaVersion: 1,
+              outcome: "no_changes",
+              repository: "openai/reevo",
+              baseRef: "main",
+              summary: "No changes; sk-abcdefghijklmnopqrstuvwxyz0123456789",
+              tests: [{ command: "npm test", outcome: "passed" }],
+              usage: { tokensIn: 1, tokensOut: 2, costUsd: 0.01 },
+            },
+          },
+        },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "get_run", arguments: { runId: "r1" } });
+    const body = parseText(result as never) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("codingRun");
+    expect(body).not.toHaveProperty("jobHandle");
+    expect(body).not.toHaveProperty("protectedPaths");
+    expect(body).toMatchObject({ codingResult: { outcome: "no_changes", summary: "No changes; [REDACTED]" } });
     await client.close();
   });
 

@@ -7,6 +7,7 @@
 import type { PrismaClient } from "@prisma/client";
 import type { Executor } from "../../providers/executor/types.js";
 import { resolveWebhookRun } from "../../core/webhooks.js";
+import { CodingTaskOverrideSchema } from "../../coding/protocol.js";
 
 export interface WebhookIngressRequest {
   headers: Record<string, string | undefined>;
@@ -22,6 +23,12 @@ function extractSecret(req: WebhookIngressRequest): string | undefined {
   return req.headers["x-webhook-secret"] ?? (typeof req.body.secret === "string" ? req.body.secret : undefined);
 }
 
+function extractCodingTask(req: WebhookIngressRequest): string | undefined {
+  if (req.body.task === undefined) return undefined;
+  const parsed = CodingTaskOverrideSchema.safeParse(req.body.task);
+  return parsed.success ? parsed.data : undefined;
+}
+
 export async function handleWebhookIngress(
   webhookId: string,
   req: WebhookIngressRequest,
@@ -33,7 +40,12 @@ export async function handleWebhookIngress(
     return { status: 401, body: { error: "invalid_secret", error_description: "No webhook secret presented." } };
   }
 
-  const result = await resolveWebhookRun(webhookId, secret, db, executor);
+  const codingTask = extractCodingTask(req);
+  if (req.body.task !== undefined && codingTask === undefined) {
+    return { status: 400, body: { error: "invalid_task" } };
+  }
+
+  const result = await resolveWebhookRun(webhookId, secret, db, executor, codingTask);
   if (result.ok) {
     return { status: 202, body: { runId: result.runId } };
   }

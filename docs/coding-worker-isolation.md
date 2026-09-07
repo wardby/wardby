@@ -122,6 +122,25 @@ billable proxy session is created. The upstream key remains behind
 `CODING_OPENAI_CREDENTIAL_REF` and is never written to the database, input
 artifact, Docker arguments, or Git workspace.
 
+Coding-agent authoring and execution are MCP-first. `trigger_agent` accepts
+an optional bounded `task` and `baseRef` only for a coding agent owned by the
+caller; the chosen values are copied into the immutable run record. Webhooks
+use the profile default task unless `allowWebhookTaskOverride` is explicitly
+enabled on that coding profile. Coding results returned through `get_run` and
+`tasks/get` are validated, redacted summaries/tests only; job handles and
+execution policy stay internal.
+
+Operator-only checks and cleanup remain available through the CLI:
+
+```sh
+reevo coding preflight
+reevo coding cleanup --run-id <id>
+```
+
+The preflight command requires Docker mode, validates the pinned worker-image
+digest, and confirms the image is available to Docker. Cleanup delegates to
+the configured executor so it resolves and stops the persisted container job.
+
 ## Verification
 
 Build the image and run the destructive, self-cleaning acceptance suite:

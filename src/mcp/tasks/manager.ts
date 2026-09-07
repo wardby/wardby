@@ -12,6 +12,7 @@
  */
 import type { PrismaClient, RunStatus, Task } from "@prisma/client";
 import { INTERNAL_ERROR } from "@modelcontextprotocol/server";
+import { publicCodingRunResult } from "../../coding/protocol.js";
 
 export type TaskStatus = "working" | "input_required" | "completed" | "failed" | "cancelled";
 
@@ -81,9 +82,12 @@ function mapTerminalRunStatus(
     costUsd: unknown;
     error: string | null;
     finalText: string | null;
+    codingRun?: { result: unknown } | null;
   },
 ): { status: "completed"; result: Record<string, unknown> } | { status: "failed"; error: JsonRpcErrorObject } {
   const usage = { tokensIn: run.tokensIn, tokensOut: run.tokensOut, costUsd: Number(run.costUsd) };
+  const codingResult = publicCodingRunResult(run.codingRun?.result);
+  if (codingResult) return { status: "completed", result: codingResult };
   switch (status) {
     case "succeeded":
       return { status: "completed", result: { finalText: run.finalText ?? "", usage } };
@@ -120,7 +124,10 @@ export async function getTask(taskId: string, db: PrismaClient): Promise<GetTask
   if (!task.runId) {
     throw new Error(`Task "${taskId}" has kind "${task.kind}" with no runId — only kind:"run" tasks are supported.`);
   }
-  const run = await db.run.findUniqueOrThrow({ where: { id: task.runId } });
+  const run = await db.run.findUniqueOrThrow({
+    where: { id: task.runId },
+    include: { codingRun: { select: { result: true } } },
+  });
 
   switch (run.status) {
     case "pending":

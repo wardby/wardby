@@ -198,15 +198,16 @@ model Run {
 /// Phase 5: owner-configured coding behavior. Runtime credentials and opaque
 /// launcher handles never live on the reusable profile.
 model CodingAgentProfile {
-  agentId        String         @id
-  agent          Agent          @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  provider       CodingProvider @default(codex)
-  repository     String
-  baseRef        String         @default("main")
-  defaultTask    String?
-  timeoutSec     Int            @default(1800)
-  allowedEgress  Json
-  protectedPaths Json
+  agentId                  String         @id
+  agent                    Agent          @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  provider                 CodingProvider @default(codex)
+  repository               String
+  baseRef                  String         @default("main")
+  defaultTask              String?
+  allowWebhookTaskOverride Boolean        @default(false)
+  timeoutSec               Int            @default(1800)
+  allowedEgress            Json
+  protectedPaths           Json
 }
 
 /// Phase 5: immutable dispatch inputs plus opaque execution/result state for
