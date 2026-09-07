@@ -43,6 +43,10 @@ jobs:
 
       - run: npm run typecheck
 
+      - run: npm run lint
+
+      - run: npm run format:check
+
       - run: npm run build
 
       # DATABASE_URL is set above so the concurrency-critical DB-gated
