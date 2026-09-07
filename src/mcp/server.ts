@@ -32,11 +32,13 @@ import {
   type InputRequiredResult,
 } from "@modelcontextprotocol/server";
 import { randomBytes } from "node:crypto";
-import type { PrismaClient, Principal } from "@prisma/client";
+import type { Agent, PrismaClient, Principal } from "@prisma/client";
 import type { McpRequestContext, McpProviders } from "./context.js";
 import { requireScope } from "./auth/resource-server.js";
 import { McpError } from "./errors.js";
 import { TASKS_EXTENSION_ID, clientSupportsTasks } from "./capabilities.js";
+import { visibleToPrincipal } from "./auth/ownership.js";
+import { logger } from "../core/logger.js";
 
 export interface ToolSpec<Args = Record<string, unknown>> {
   name: string;
@@ -95,7 +97,7 @@ export interface ReevoMcpServer {
   /** Passed directly to createMcpHandler (Task 7) / serveStdio (below). */
   factory: McpServerFactory;
   /** Local capability introspection without a protocol round-trip. */
-  discover(): DiscoverResultLike;
+  discover(): Promise<DiscoverResultLike>;
   /** stdio only: the one fixed identity every call in this connection resolves to. */
   setFixedContext(ctx: McpRequestContext | undefined): void;
   /**
@@ -142,6 +144,27 @@ function loadRequestStateKey(env: NodeJS.ProcessEnv): Uint8Array {
     );
   }
   return key;
+}
+
+/**
+ * Shown to every connecting client at session start (Claude Code and other
+ * compliant clients surface this directly to the calling assistant) — the
+ * main discovery channel for "you can run a reevo-run agent's prompt
+ * yourself, right now, instead of only via its schedule/trigger." Paired
+ * with the per-agent MCP prompts registered below, which are the concrete,
+ * one-call way to actually do it.
+ */
+const SERVER_INSTRUCTIONS =
+  'reevo-run hosts reusable LLM agents (a system prompt, model, budget, and attached tools) that normally run on a schedule or webhook trigger. Every agent\'s full system prompt is available via list_agents/get_agent ("systemPrompt" field), and agents you can see are also registered as MCP prompts by name — you can adopt an agent\'s instructions and run them yourself, in this session, right now. This is a good way to shift work like code review left: e.g., before committing, run the "systemPrompt" of a code-review agent against your own working tree using your own tools, rather than waiting for a separately triggered run. Where a pulled prompt names a reevo-run-specific sandboxed tool, use your own equivalent tool for the same purpose instead.';
+
+/** The MCP prompt body for one Agent — the message a client injects when a user invokes it (e.g. as a slash command). */
+function agentPromptText(agent: Pick<Agent, "name" | "model" | "systemPrompt">): string {
+  return [
+    `You are adopting the instructions of reevo-run agent "${agent.name}" (model "${agent.model}") to run directly in this session, instead of waiting for its schedule/trigger.`,
+    "Follow the instructions below as this conversation's operating instructions. Where they name a specific reevo-run tool that isn't available here, use your own equivalent tool for the same purpose instead.",
+    "---",
+    agent.systemPrompt,
+  ].join("\n\n");
 }
 
 export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
@@ -210,10 +233,13 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
     requestHandlers.push({ method, scope: Array.isArray(scope) ? scope : [scope], handler });
   }
 
-  const factory: McpServerFactory = () => {
+  const factory: McpServerFactory = async () => {
     const mcpServer = new McpServer(
       { name: "reevo-run", version: "0.0.0" },
-      { requestState: { verify: (state, ctx) => requestStateCodec.verify(state, ctx) } },
+      {
+        requestState: { verify: (state, ctx) => requestStateCodec.verify(state, ctx) },
+        instructions: SERVER_INSTRUCTIONS,
+      },
     );
     mcpServer.server.registerCapabilities({ extensions: { [TASKS_EXTENSION_ID]: {} } });
 
@@ -251,11 +277,42 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
       );
     }
 
+    // One MCP prompt per Agent this connection can see, so a client that
+    // supports the prompts UI (e.g. a slash-command picker) can run a
+    // reevo-run agent directly — the concrete half of the "shift left"
+    // discovery story SERVER_INSTRUCTIONS introduces. Identity isn't
+    // reliably known yet for an HTTP connection at this point (resolveCtx
+    // resolves it per-dispatch from the SDK's own per-call ServerContext,
+    // not at factory time) — stdio's fixedContext IS set by now
+    // (mcp/index.ts calls setFixedContext before serveStdio ever invokes
+    // this factory), so stdio sees every agent it owns plus public ones;
+    // HTTP conservatively falls back to public-only until this factory can
+    // see request-scoped identity. A DB hiccup here must not break tool
+    // registration — this is a discoverability nicety, not core function.
+    try {
+      const where = fixedContext ? visibleToPrincipal(fixedContext.principal.id) : { ownerId: null };
+      const agents = await opts.db.agent.findMany({ where });
+      for (const agent of agents) {
+        mcpServer.registerPrompt(
+          agent.name,
+          {
+            title: agent.name,
+            description: `Run reevo-run agent "${agent.name}" (model ${agent.model}) directly in this session, instead of via its schedule/trigger.`,
+          },
+          () => ({
+            messages: [{ role: "user" as const, content: { type: "text" as const, text: agentPromptText(agent) } }],
+          }),
+        );
+      }
+    } catch (err) {
+      logger.warn({ err }, "failed to register agent prompts — continuing without them");
+    }
+
     return mcpServer;
   };
 
-  function discover(): DiscoverResultLike {
-    const probe = factory({ era: "modern" }) as McpServer;
+  async function discover(): Promise<DiscoverResultLike> {
+    const probe = (await factory({ era: "modern" })) as McpServer;
     return { capabilities: probe.server.getCapabilities() };
   }
 

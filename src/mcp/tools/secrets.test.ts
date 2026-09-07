@@ -181,7 +181,7 @@ async function connectClient(
   mcp: ReturnType<typeof buildMcpServer>,
   capabilities?: import("@modelcontextprotocol/client").ClientCapabilities,
 ) {
-  const server = mcp.factory({ era: "modern" }) as import("@modelcontextprotocol/server").McpServer;
+  const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client(
     { name: "test-client", version: "1.0.0" },

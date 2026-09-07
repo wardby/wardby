@@ -56,7 +56,7 @@ function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: str
 }
 
 async function connectClient(mcp: ReturnType<typeof buildMcpServer>) {
-  const server = mcp.factory({ era: "modern" }) as import("@modelcontextprotocol/server").McpServer;
+  const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test-client", version: "1.0.0" }, { versionNegotiation: { mode: "auto" } });
   await server.connect(serverTransport);

@@ -19,12 +19,34 @@ function fakeCtx(scopes: string[] = []): McpRequestContext {
   };
 }
 
+interface FakeAgentRow {
+  id: string;
+  name: string;
+  model: string;
+  systemPrompt: string;
+  ownerId: string | null;
+}
+
+function fakeDbWithAgents(agents: FakeAgentRow[]) {
+  return {
+    agent: {
+      findMany: async ({ where }: { where: { ownerId: string | null } | { OR: { ownerId: string | null }[] } }) => {
+        if ("OR" in where) {
+          const allowed = new Set(where.OR.map((c) => c.ownerId));
+          return agents.filter((a) => allowed.has(a.ownerId));
+        }
+        return agents.filter((a) => a.ownerId === where.ownerId);
+      },
+    },
+  } as unknown as import("@prisma/client").PrismaClient;
+}
+
 /** Connects a real Client to a factory-built McpServer over an in-memory transport pair. */
 async function connectClient(
   mcp: ReturnType<typeof import("./server.js").buildMcpServer>,
   capabilities?: import("@modelcontextprotocol/client").ClientCapabilities,
 ) {
-  const server = mcp.factory({ era: "modern" }) as import("@modelcontextprotocol/server").McpServer;
+  const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client(
     { name: "test-client", version: "1.0.0" },
@@ -36,9 +58,9 @@ async function connectClient(
 }
 
 describe("buildMcpServer", () => {
-  it("discover() advertises the Tasks extension", () => {
+  it("discover() advertises the Tasks extension", async () => {
     const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb, config: { canonicalUri: "https://host/mcp" } });
-    const result = mcp.discover();
+    const result = await mcp.discover();
     expect(result.capabilities.extensions?.[TASKS_EXTENSION_ID]).toBeDefined();
   });
 
@@ -190,5 +212,71 @@ describe("buildMcpServer", () => {
         env: { REQUEST_STATE_KEY: "aabb" },
       }),
     ).toThrow(/32 bytes/);
+  });
+
+  it("connecting clients see the shift-left instructions", async () => {
+    const mcp = buildMcpServer({
+      providers: fakeProviders,
+      db: fakeDbWithAgents([]),
+      config: { canonicalUri: "https://host/mcp" },
+    });
+    const { client } = await connectClient(mcp);
+    expect(client.getInstructions()).toMatch(/shift.+left/i);
+    await client.close();
+  });
+
+  it("a public agent is registered as an MCP prompt carrying its system prompt", async () => {
+    const mcp = buildMcpServer({
+      providers: fakeProviders,
+      db: fakeDbWithAgents([
+        {
+          id: "a1",
+          name: "public-review-agent",
+          model: "claude-sonnet-5",
+          systemPrompt: "Review the diff for bugs.",
+          ownerId: null,
+        },
+      ]),
+      config: { canonicalUri: "https://host/mcp" },
+    });
+    const { client } = await connectClient(mcp);
+    const { prompts } = await client.listPrompts();
+    expect(prompts.map((p) => p.name)).toContain("public-review-agent");
+
+    const result = await client.getPrompt({ name: "public-review-agent" });
+    const text = (result.messages[0].content as { type: "text"; text: string }).text;
+    expect(text).toContain("Review the diff for bugs.");
+    expect(text).toContain("public-review-agent");
+    await client.close();
+  });
+
+  it("an owned agent is invisible as a prompt without a resolvable identity (HTTP-shaped connection)", async () => {
+    const mcp = buildMcpServer({
+      providers: fakeProviders,
+      db: fakeDbWithAgents([
+        { id: "a1", name: "private-agent", model: "m", systemPrompt: "secret process", ownerId: "owner-1" },
+      ]),
+      config: { canonicalUri: "https://host/mcp" },
+    });
+    // No setFixedContext call — mirrors the HTTP path, where factory() runs before any per-request identity is known.
+    const { client } = await connectClient(mcp);
+    const { prompts } = await client.listPrompts();
+    expect(prompts.map((p) => p.name)).not.toContain("private-agent");
+    await client.close();
+  });
+
+  it("an owned agent IS visible as a prompt once its owner is the fixed context (stdio-shaped connection)", async () => {
+    const mcp = buildMcpServer({
+      providers: fakeProviders,
+      db: fakeDbWithAgents([
+        { id: "a1", name: "private-agent", model: "m", systemPrompt: "secret process", ownerId: "owner-1" },
+      ]),
+      config: { canonicalUri: "https://host/mcp" },
+    });
+    mcp.setFixedContext({ ...fakeCtx(), principal: { id: "owner-1", subject: "owner-1", createdAt: new Date() } });
+    const { client } = await connectClient(mcp);
+    const { prompts } = await client.listPrompts();
+    expect(prompts.map((p) => p.name)).toContain("private-agent");
+    await client.close();
   });
 });
