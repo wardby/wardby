@@ -22,7 +22,8 @@ function byteLength(value: string): number {
 
 function boundedText(maxBytes: number, singleLine = false) {
   const invalidControl = singleLine ? INVALID_SINGLE_LINE_CONTROL : INVALID_MULTILINE_CONTROL;
-  return z.string()
+  return z
+    .string()
     .refine((value) => byteLength(value) <= maxBytes, `must be at most ${maxBytes} UTF-8 bytes`)
     .refine((value) => !invalidControl.test(value), "must not contain control characters")
     .refine((value) => value.trim().length > 0, "must not be blank");
@@ -36,8 +37,15 @@ function repositoryParts(value: string): [owner: string, repository: string] {
   let candidate = value.trim();
   if (candidate.startsWith("https://")) {
     const url = new URL(candidate);
-    if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "github.com"
-      || url.port || url.username || url.password || url.search || url.hash) {
+    if (
+      url.protocol !== "https:" ||
+      url.hostname.toLowerCase() !== "github.com" ||
+      url.port ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    ) {
       throw new Error("repository must be an uncredentialed github.com URL");
     }
     candidate = url.pathname.replace(/^\/+|\/+$/g, "");
@@ -51,8 +59,7 @@ function repositoryParts(value: string): [owner: string, repository: string] {
   const [owner, repository] = parts;
   const ownerPattern = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
   const repositoryPattern = /^[A-Za-z0-9._-]{1,100}$/;
-  if (!ownerPattern.test(owner) || !repositoryPattern.test(repository)
-    || repository === "." || repository === "..") {
+  if (!ownerPattern.test(owner) || !repositoryPattern.test(repository) || repository === "." || repository === "..") {
     throw new Error("invalid GitHub owner or repository name");
   }
   return [owner.toLowerCase(), repository.toLowerCase()];
@@ -77,9 +84,15 @@ export function normalizeGitRef(value: string): string {
   if (!ref || byteLength(ref) > MAX_REF_BYTES || ref === "@" || ref.startsWith("-")) {
     throw new Error("invalid Git ref");
   }
-  if (/[\u0000-\u0020\u007F~^:?*\\[]/.test(ref)
-    || ref.startsWith("/") || ref.endsWith("/") || ref.endsWith(".")
-    || ref.includes("//") || ref.includes("..") || ref.includes("@{")) {
+  if (
+    /[\u0000-\u0020\u007F~^:?*\\[]/.test(ref) ||
+    ref.startsWith("/") ||
+    ref.endsWith("/") ||
+    ref.endsWith(".") ||
+    ref.includes("//") ||
+    ref.includes("..") ||
+    ref.includes("@{")
+  ) {
     throw new Error("invalid Git ref");
   }
   const components = ref.split("/");
@@ -98,100 +111,135 @@ function isGitRef(value: string): boolean {
   }
 }
 
-const repositorySchema = z.string()
+const repositorySchema = z
+  .string()
   .refine(isGitHubRepository, "must be a canonical name or uncredentialed github.com repository")
   .transform(normalizeGitHubRepository);
 
-const refSchema = z.string()
-  .refine(isGitRef, "must be a safe branch ref")
-  .transform(normalizeGitRef);
+const refSchema = z.string().refine(isGitRef, "must be a safe branch ref").transform(normalizeGitRef);
 
-const runIdSchema = boundedText(MAX_RUN_ID_BYTES, true)
-  .refine((value) => /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value), "must be an opaque identifier");
+const runIdSchema = boundedText(MAX_RUN_ID_BYTES, true).refine(
+  (value) => /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value),
+  "must be an opaque identifier",
+);
 
-const modelSchema = boundedText(MAX_MODEL_BYTES, true)
-  .refine((value) => /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value), "must be a model identifier");
+const modelSchema = boundedText(MAX_MODEL_BYTES, true).refine(
+  (value) => /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value),
+  "must be a model identifier",
+);
 
-const usageSchema = z.object({
-  tokensIn: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  tokensOut: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  costUsd: z.number().finite().nonnegative().max(MAX_COST_USD),
-}).strict();
+const usageSchema = z
+  .object({
+    tokensIn: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    tokensOut: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    costUsd: z.number().finite().nonnegative().max(MAX_COST_USD),
+  })
+  .strict();
 
-const testResultSchema = z.object({
-  command: boundedText(MAX_CODING_TEST_COMMAND_BYTES, true),
-  outcome: z.enum(["passed", "failed", "skipped"]),
-}).strict();
+const testResultSchema = z
+  .object({
+    command: boundedText(MAX_CODING_TEST_COMMAND_BYTES, true),
+    outcome: z.enum(["passed", "failed", "skipped"]),
+  })
+  .strict();
 
-export const CodingTaskInputSchema = z.object({
-  schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
-  runId: runIdSchema,
-  repository: repositorySchema,
-  baseRef: refSchema,
-  headRef: refSchema,
-  task: boundedText(MAX_CODING_TASK_BYTES),
-  model: modelSchema,
-  budgetUsd: z.number().finite().positive().max(MAX_COST_USD),
-  deadlineAt: z.string().datetime({ offset: true }),
-}).strict().superRefine((value, ctx) => {
-  if (value.headRef !== `reevo/run-${value.runId}`) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["headRef"], message: "must match reevo/run-<runId>" });
-  }
-});
-
-export const CodingAgentOutputSchema = z.object({
-  schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
-  runId: runIdSchema,
-  outcome: z.enum(["changes_ready", "no_changes", "budget_exhausted"]),
-  summary: boundedText(MAX_CODING_SUMMARY_BYTES),
-  tests: z.array(testResultSchema).max(MAX_CODING_TESTS),
-}).strict().transform((value) => ({
-  ...value,
-  summary: redactTokenShapedValues(value.summary),
-  tests: value.tests.map((test) => ({ ...test, command: redactTokenShapedValues(test.command) })),
-}));
-
-const pullRequestUrlSchema = z.string().url().refine((value) => {
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" && url.hostname.toLowerCase() === "github.com"
-      && !url.port && !url.username && !url.password && !url.search && !url.hash;
-  } catch {
-    return false;
-  }
-}, "must be an uncredentialed github.com URL");
-
-export const CodingRunResultSchema = z.object({
-  schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
-  outcome: z.enum(["pull_request_opened", "no_changes", "budget_exhausted"]),
-  repository: repositorySchema,
-  baseRef: refSchema,
-  headRef: refSchema.optional(),
-  commitSha: z.string().regex(/^[0-9a-fA-F]{40}$/).transform((value) => value.toLowerCase()).optional(),
-  pullRequestUrl: pullRequestUrlSchema.optional(),
-  pullRequestNumber: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
-  summary: boundedText(MAX_CODING_SUMMARY_BYTES),
-  tests: z.array(testResultSchema).max(MAX_CODING_TESTS),
-  usage: usageSchema,
-}).strict().superRefine((value, ctx) => {
-  const prFields = [value.headRef, value.commitSha, value.pullRequestUrl, value.pullRequestNumber];
-  if (value.outcome === "pull_request_opened" && prFields.some((field) => field === undefined)) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "pull_request_opened requires all PR fields" });
-  }
-  if (value.outcome !== "pull_request_opened" && prFields.some((field) => field !== undefined)) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "non-PR outcomes must not include PR fields" });
-  }
-  if (value.pullRequestUrl && value.pullRequestNumber) {
-    const expected = `https://github.com/${value.repository}/pull/${value.pullRequestNumber}`;
-    if (value.pullRequestUrl !== expected) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["pullRequestUrl"], message: "must match repository and PR number" });
+export const CodingTaskInputSchema = z
+  .object({
+    schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
+    runId: runIdSchema,
+    repository: repositorySchema,
+    baseRef: refSchema,
+    headRef: refSchema,
+    task: boundedText(MAX_CODING_TASK_BYTES),
+    model: modelSchema,
+    budgetUsd: z.number().finite().positive().max(MAX_COST_USD),
+    deadlineAt: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.headRef !== `reevo/run-${value.runId}`) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["headRef"], message: "must match reevo/run-<runId>" });
     }
-  }
-}).transform((value) => ({
-  ...value,
-  summary: redactTokenShapedValues(value.summary),
-  tests: value.tests.map((test) => ({ ...test, command: redactTokenShapedValues(test.command) })),
-}));
+  });
+
+export const CodingAgentOutputSchema = z
+  .object({
+    schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
+    runId: runIdSchema,
+    outcome: z.enum(["changes_ready", "no_changes", "budget_exhausted"]),
+    summary: boundedText(MAX_CODING_SUMMARY_BYTES),
+    tests: z.array(testResultSchema).max(MAX_CODING_TESTS),
+  })
+  .strict()
+  .transform((value) => ({
+    ...value,
+    summary: redactTokenShapedValues(value.summary),
+    tests: value.tests.map((test) => ({ ...test, command: redactTokenShapedValues(test.command) })),
+  }));
+
+const pullRequestUrlSchema = z
+  .string()
+  .url()
+  .refine((value) => {
+    try {
+      const url = new URL(value);
+      return (
+        url.protocol === "https:" &&
+        url.hostname.toLowerCase() === "github.com" &&
+        !url.port &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash
+      );
+    } catch {
+      return false;
+    }
+  }, "must be an uncredentialed github.com URL");
+
+export const CodingRunResultSchema = z
+  .object({
+    schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
+    outcome: z.enum(["pull_request_opened", "no_changes", "budget_exhausted"]),
+    repository: repositorySchema,
+    baseRef: refSchema,
+    headRef: refSchema.optional(),
+    commitSha: z
+      .string()
+      .regex(/^[0-9a-fA-F]{40}$/)
+      .transform((value) => value.toLowerCase())
+      .optional(),
+    pullRequestUrl: pullRequestUrlSchema.optional(),
+    pullRequestNumber: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    summary: boundedText(MAX_CODING_SUMMARY_BYTES),
+    tests: z.array(testResultSchema).max(MAX_CODING_TESTS),
+    usage: usageSchema,
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const prFields = [value.headRef, value.commitSha, value.pullRequestUrl, value.pullRequestNumber];
+    if (value.outcome === "pull_request_opened" && prFields.some((field) => field === undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "pull_request_opened requires all PR fields" });
+    }
+    if (value.outcome !== "pull_request_opened" && prFields.some((field) => field !== undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "non-PR outcomes must not include PR fields" });
+    }
+    if (value.pullRequestUrl && value.pullRequestNumber) {
+      const expected = `https://github.com/${value.repository}/pull/${value.pullRequestNumber}`;
+      if (value.pullRequestUrl !== expected) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["pullRequestUrl"],
+          message: "must match repository and PR number",
+        });
+      }
+    }
+  })
+  .transform((value) => ({
+    ...value,
+    summary: redactTokenShapedValues(value.summary),
+    tests: value.tests.map((test) => ({ ...test, command: redactTokenShapedValues(test.command) })),
+  }));
 
 export type CodingTaskInput = z.infer<typeof CodingTaskInputSchema>;
 export type CodingAgentOutput = z.infer<typeof CodingAgentOutputSchema>;
@@ -219,10 +267,10 @@ function parseJsonWithoutDuplicateKeys(text: string): unknown {
   };
   const string = (): string => {
     const start = offset;
-    if (text[offset++] !== "\"") throw new Error("coding_artifact_invalid_json");
+    if (text[offset++] !== '"') throw new Error("coding_artifact_invalid_json");
     while (offset < text.length) {
       const character = text[offset++];
-      if (character === "\"") {
+      if (character === '"') {
         try {
           return JSON.parse(text.slice(start, offset)) as string;
         } catch {
@@ -241,7 +289,10 @@ function parseJsonWithoutDuplicateKeys(text: string): unknown {
       offset += 1;
       whitespace();
       const keys = new Set<string>();
-      if (text[offset] === "}") { offset += 1; return; }
+      if (text[offset] === "}") {
+        offset += 1;
+        return;
+      }
       for (;;) {
         whitespace();
         const key = string();
@@ -259,7 +310,10 @@ function parseJsonWithoutDuplicateKeys(text: string): unknown {
     if (text[offset] === "[") {
       offset += 1;
       whitespace();
-      if (text[offset] === "]") { offset += 1; return; }
+      if (text[offset] === "]") {
+        offset += 1;
+        return;
+      }
       for (;;) {
         value(depth + 1);
         whitespace();
@@ -268,7 +322,10 @@ function parseJsonWithoutDuplicateKeys(text: string): unknown {
         if (separator !== ",") throw new Error("coding_artifact_invalid_json");
       }
     }
-    if (text[offset] === "\"") { string(); return; }
+    if (text[offset] === '"') {
+      string();
+      return;
+    }
     const token = /^(?:-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/.exec(text.slice(offset));
     if (!token) throw new Error("coding_artifact_invalid_json");
     offset += token[0].length;

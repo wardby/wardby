@@ -106,7 +106,15 @@ function fakeExecutor(runs: Map<string, FakeRunRow>): Executor {
       // Simulates a completed engine turn — the point of this test is the
       // wiring (trigger -> Task -> terminal), not the engine itself
       // (covered exhaustively by engine-native.test.ts).
-      runs.set(runId, { ...run, status: "succeeded", turns: 1, tokensIn: 10, tokensOut: 5, costUsd: 0.001, finalText: "done" });
+      runs.set(runId, {
+        ...run,
+        status: "succeeded",
+        turns: 1,
+        tokensIn: 10,
+        tokensOut: 5,
+        costUsd: 0.001,
+        finalText: "done",
+      });
     },
     async stop() {},
   };
@@ -123,7 +131,9 @@ function fakeDatastore(): Datastore {
       store.delete(`${agentId}:${key}`);
     },
     list: async (agentId, prefix) =>
-      [...store.keys()].filter((k) => k.startsWith(`${agentId}:${prefix ?? ""}`)).map((k) => k.slice(`${agentId}:`.length)),
+      [...store.keys()]
+        .filter((k) => k.startsWith(`${agentId}:${prefix ?? ""}`))
+        .map((k) => k.slice(`${agentId}:`.length)),
   };
 }
 
@@ -169,7 +179,19 @@ function buildFakeDb() {
     },
     run: {
       create: async ({ data }: { data: { agentId: string; trigger: string } }) => {
-        const row: FakeRunRow = { id: `run_${++n}`, status: "pending", turns: 0, tokensIn: 0, tokensOut: 0, costUsd: 0, finalText: null, error: null, startedAt: new Date(), finishedAt: null, ...data };
+        const row: FakeRunRow = {
+          id: `run_${++n}`,
+          status: "pending",
+          turns: 0,
+          tokensIn: 0,
+          tokensOut: 0,
+          costUsd: 0,
+          finalText: null,
+          error: null,
+          startedAt: new Date(),
+          finishedAt: null,
+          ...data,
+        };
         runs.set(row.id, row);
         return row;
       },
@@ -186,7 +208,13 @@ function buildFakeDb() {
     task: {
       create: async ({ data }: { data: { kind: string; runId: string; status: string } }) => {
         const now = new Date();
-        const row: FakeTaskRow = { id: `task_${++n}`, createdAt: now, updatedAt: now, ttlAt: new Date(now.getTime() + 60_000), ...data };
+        const row: FakeTaskRow = {
+          id: `task_${++n}`,
+          createdAt: now,
+          updatedAt: now,
+          ttlAt: new Date(now.getTime() + 60_000),
+          ...data,
+        };
         tasks.set(row.id, row);
         return row;
       },
@@ -204,7 +232,15 @@ function buildFakeDb() {
     },
     tool: {
       create: async ({ data }: { data: Partial<FakeToolRow> & { name: string } }) => {
-        const row: FakeToolRow = { id: `tool_${++n}`, description: "", paramsZod: "", jsonSchema: {}, code: "", ownerId: null, ...data };
+        const row: FakeToolRow = {
+          id: `tool_${++n}`,
+          description: "",
+          paramsZod: "",
+          jsonSchema: {},
+          code: "",
+          ownerId: null,
+          ...data,
+        };
         tools.set(row.id, row);
         return row;
       },
@@ -218,10 +254,27 @@ function buildFakeDb() {
         agentTools.push(data);
         return data;
       },
-      upsert: async ({ where, create, update }: { where: { agentId_toolId: { agentId: string; toolId: string } }; create: Record<string, unknown>; update: Record<string, unknown> }) => {
-        const idx = agentTools.findIndex((a) => a.agentId === where.agentId_toolId.agentId && a.toolId === where.agentId_toolId.toolId);
+      upsert: async ({
+        where,
+        create,
+        update,
+      }: {
+        where: { agentId_toolId: { agentId: string; toolId: string } };
+        create: Record<string, unknown>;
+        update: Record<string, unknown>;
+      }) => {
+        const idx = agentTools.findIndex(
+          (a) => a.agentId === where.agentId_toolId.agentId && a.toolId === where.agentId_toolId.toolId,
+        );
         if (idx === -1) {
-          const row = { agentId: where.agentId_toolId.agentId, toolId: where.agentId_toolId.toolId, allowedSecrets: [], allowedDatastorePrefixes: [], allowedHosts: [], ...create };
+          const row = {
+            agentId: where.agentId_toolId.agentId,
+            toolId: where.agentId_toolId.toolId,
+            allowedSecrets: [],
+            allowedDatastorePrefixes: [],
+            allowedHosts: [],
+            ...create,
+          };
           agentTools.push(row);
           return row;
         }
@@ -241,13 +294,22 @@ function buildFakeDb() {
     secret: {
       create: async ({ data }: { data: Partial<FakeSecretRow> & { name: string } }) => {
         const now = new Date();
-        const row: FakeSecretRow = { id: `secret_${++n}`, createdAt: now, updatedAt: now, ownerId: null, ...data } as FakeSecretRow;
+        const row: FakeSecretRow = {
+          id: `secret_${++n}`,
+          createdAt: now,
+          updatedAt: now,
+          ownerId: null,
+          ...data,
+        } as FakeSecretRow;
         secrets.set(row.id, row);
         return row;
       },
-      findMany: async ({ where }: { where: { ownerId: string } }) => [...secrets.values()].filter((s) => s.ownerId === where.ownerId),
+      findMany: async ({ where }: { where: { ownerId: string } }) =>
+        [...secrets.values()].filter((s) => s.ownerId === where.ownerId),
       findUnique: async ({ where }: { where: { ownerId_name: { ownerId: string; name: string } } }) =>
-        [...secrets.values()].find((s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name) ?? null,
+        [...secrets.values()].find(
+          (s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name,
+        ) ?? null,
       upsert: async ({
         where,
         create,
@@ -257,14 +319,22 @@ function buildFakeDb() {
         create: Partial<FakeSecretRow> & { name: string };
         update: Partial<FakeSecretRow>;
       }) => {
-        const existing = [...secrets.values()].find((s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name);
+        const existing = [...secrets.values()].find(
+          (s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name,
+        );
         if (existing) {
           const row = { ...existing, ...update, updatedAt: new Date() };
           secrets.set(row.id, row);
           return row;
         }
         const now = new Date();
-        const row: FakeSecretRow = { id: `secret_${++n}`, createdAt: now, updatedAt: now, ownerId: null, ...create } as FakeSecretRow;
+        const row: FakeSecretRow = {
+          id: `secret_${++n}`,
+          createdAt: now,
+          updatedAt: now,
+          ownerId: null,
+          ...create,
+        } as FakeSecretRow;
         secrets.set(row.id, row);
         return row;
       },
@@ -279,18 +349,28 @@ function buildFakeDb() {
       },
       deleteMany: async () => ({ count: 0 }),
       findFirst: async ({ where }: { where: { agentId: string; secret: { name: string } } }) => {
-        const match = agentSecrets.find((a) => a.agentId === where.agentId && secrets.get(a.secretId)?.name === where.secret.name);
+        const match = agentSecrets.find(
+          (a) => a.agentId === where.agentId && secrets.get(a.secretId)?.name === where.secret.name,
+        );
         return match ? { ...match, secret: secrets.get(match.secretId) } : null;
       },
     },
     webhook: {
       create: async ({ data }: { data: Partial<FakeWebhookRow> & { agentId: string; secretHash: string } }) => {
-        const row: FakeWebhookRow = { id: `webhook_${++n}`, status: "enabled", ownerId: null, createdAt: new Date(), lastFiredAt: null, ...data };
+        const row: FakeWebhookRow = {
+          id: `webhook_${++n}`,
+          status: "enabled",
+          ownerId: null,
+          createdAt: new Date(),
+          lastFiredAt: null,
+          ...data,
+        };
         webhooks.set(row.id, row);
         return row;
       },
       findUnique: async ({ where }: { where: { id: string } }) => webhooks.get(where.id) ?? null,
-      findMany: async ({ where }: { where: { ownerId: string } }) => [...webhooks.values()].filter((w) => w.ownerId === where.ownerId),
+      findMany: async ({ where }: { where: { ownerId: string } }) =>
+        [...webhooks.values()].filter((w) => w.ownerId === where.ownerId),
       update: async ({ where, data }: { where: { id: string }; data: Partial<FakeWebhookRow> }) => {
         const row = { ...webhooks.get(where.id)!, ...data };
         webhooks.set(where.id, row);
@@ -300,13 +380,19 @@ function buildFakeDb() {
     codingRun: { create: async ({ data }: { data: unknown }) => data },
   } as unknown as PrismaClient;
 
-  (db as unknown as { $transaction: (callback: (tx: PrismaClient) => Promise<unknown>) => Promise<unknown> }).$transaction =
-    async (callback) => callback(db);
+  (
+    db as unknown as { $transaction: (callback: (tx: PrismaClient) => Promise<unknown>) => Promise<unknown> }
+  ).$transaction = async (callback) => callback(db);
 
   return { db, runs };
 }
 
-function fakeCtx(db: PrismaClient, providers: McpRequestContext["providers"], principalId: string, scopes: string[]): McpRequestContext {
+function fakeCtx(
+  db: PrismaClient,
+  providers: McpRequestContext["providers"],
+  principalId: string,
+  scopes: string[],
+): McpRequestContext {
   return {
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
@@ -320,7 +406,10 @@ function fakeCtx(db: PrismaClient, providers: McpRequestContext["providers"], pr
 async function connectClient(mcp: ReevoMcpServer) {
   const server = mcp.factory({ era: "modern" }) as import("@modelcontextprotocol/server").McpServer;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "integration-test-client", version: "1.0.0" }, { versionNegotiation: { mode: "auto" } });
+  const client = new Client(
+    { name: "integration-test-client", version: "1.0.0" },
+    { versionNegotiation: { mode: "auto" } },
+  );
   await server.connect(serverTransport);
   await client.connect(clientTransport);
   return client;
@@ -330,7 +419,15 @@ function parseText(result: { content: { text: string }[] }): unknown {
   return JSON.parse(result.content[0].text);
 }
 
-const ALL_SCOPES = ["agents:read", "agents:write", "tools:write", "runs:trigger", "datastore:write", "secrets:write", "webhooks:write"];
+const ALL_SCOPES = [
+  "agents:read",
+  "agents:write",
+  "tools:write",
+  "runs:trigger",
+  "datastore:write",
+  "secrets:write",
+  "webhooks:write",
+];
 
 describe("MCP integration (all tool modules, in-memory)", () => {
   it("create_agent -> create_tool -> dry_run_tool -> attach_tool -> set_schedule -> trigger_agent -> tasks/get reaches a terminal status", async () => {
@@ -342,7 +439,10 @@ describe("MCP integration (all tool modules, in-memory)", () => {
 
     const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, providers, "p1", ALL_SCOPES));
-    registerAllTools(mcp, { secretElicitationUrl: async (token) => `https://test.invalid/elicit/secret?t=${token}`, secretElicitationProtocol: false });
+    registerAllTools(mcp, {
+      secretElicitationUrl: async (token) => `https://test.invalid/elicit/secret?t=${token}`,
+      secretElicitationProtocol: false,
+    });
     const client = await connectClient(mcp);
 
     const agentResult = await client.callTool({
@@ -353,13 +453,22 @@ describe("MCP integration (all tool modules, in-memory)", () => {
 
     const toolResult = await client.callTool({
       name: "create_tool",
-      arguments: { name: "greet", description: "says hi", paramsZod: "z.object({ name: z.string() })", code: "return `hi ${params.name}`;" },
+      arguments: {
+        name: "greet",
+        description: "says hi",
+        paramsZod: "z.object({ name: z.string() })",
+        code: "return `hi ${params.name}`;",
+      },
     });
     const tool = parseText(toolResult as never) as { id: string };
 
     const dryRun = await client.callTool({
       name: "dry_run_tool",
-      arguments: { paramsZod: "z.object({ name: z.string() })", code: "return `hi ${params.name}`;", sampleArgs: { name: "world" } },
+      arguments: {
+        paramsZod: "z.object({ name: z.string() })",
+        code: "return `hi ${params.name}`;",
+        sampleArgs: { name: "world" },
+      },
     });
     expect((parseText(dryRun as never) as { result: { ok: boolean } }).result.ok).toBe(true);
 
@@ -385,10 +494,12 @@ describe("MCP integration (all tool modules, in-memory)", () => {
 
     const getResult = await client.request(
       { method: "tasks/get", params: { taskId: task.taskId } },
-      (await import("@modelcontextprotocol/client")).fromJsonSchema<{ status: string; result?: { finalText: string } }>({
-        type: "object",
-        additionalProperties: true,
-      }),
+      (await import("@modelcontextprotocol/client")).fromJsonSchema<{ status: string; result?: { finalText: string } }>(
+        {
+          type: "object",
+          additionalProperties: true,
+        },
+      ),
     );
     expect(getResult.status).toBe("completed");
     expect(getResult.result?.finalText).toBe("done");
@@ -403,18 +514,33 @@ describe("MCP integration (all tool modules, in-memory)", () => {
     // (Task 13); this confirms attach->accessor without that extra weight.
     const { db } = buildFakeDb();
     const cipher = fakeCipher();
-    const providers = { llm: {} as never, engine: {} as never, datastore: fakeDatastore(), secrets: cipher, executor: {} as Executor };
+    const providers = {
+      llm: {} as never,
+      engine: {} as never,
+      datastore: fakeDatastore(),
+      secrets: cipher,
+      executor: {} as Executor,
+    };
 
     const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, providers, "p1", ALL_SCOPES));
-    registerAllTools(mcp, { secretElicitationUrl: async (token) => `https://test.invalid/elicit/secret?t=${token}`, secretElicitationProtocol: false });
+    registerAllTools(mcp, {
+      secretElicitationUrl: async (token) => `https://test.invalid/elicit/secret?t=${token}`,
+      secretElicitationProtocol: false,
+    });
     const client = await connectClient(mcp);
 
-    const agentResult = await client.callTool({ name: "create_agent", arguments: { name: "secret-user", systemPrompt: "x", model: "m", budgetUsd: 1 } });
+    const agentResult = await client.callTool({
+      name: "create_agent",
+      arguments: { name: "secret-user", systemPrompt: "x", model: "m", budgetUsd: 1 },
+    });
     const agent = parseText(agentResult as never) as { id: string };
 
     await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-live-abc123" } });
-    const attachResult = await client.callTool({ name: "attach_secret", arguments: { agentId: agent.id, name: "API_KEY" } });
+    const attachResult = await client.callTool({
+      name: "attach_secret",
+      arguments: { agentId: agent.id, name: "API_KEY" },
+    });
     expect(attachResult.isError).toBeFalsy();
 
     const accessor = buildSecretsAccessor(agent.id, cipher, db);
@@ -425,13 +551,25 @@ describe("MCP integration (all tool modules, in-memory)", () => {
 
   it("create_webhook + a simulated POST /webhooks/:id enqueues a manual run", async () => {
     const { db, runs } = buildFakeDb();
-    const providers = { llm: {} as never, engine: {} as never, datastore: fakeDatastore(), secrets: fakeCipher(), executor: {} as Executor };
+    const providers = {
+      llm: {} as never,
+      engine: {} as never,
+      datastore: fakeDatastore(),
+      secrets: fakeCipher(),
+      executor: {} as Executor,
+    };
     const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, providers, "p1", ALL_SCOPES));
-    registerAllTools(mcp, { secretElicitationUrl: async (token) => `https://test.invalid/elicit/secret?t=${token}`, secretElicitationProtocol: false });
+    registerAllTools(mcp, {
+      secretElicitationUrl: async (token) => `https://test.invalid/elicit/secret?t=${token}`,
+      secretElicitationProtocol: false,
+    });
     const client = await connectClient(mcp);
 
-    const agentResult = await client.callTool({ name: "create_agent", arguments: { name: "hooked", systemPrompt: "x", model: "m", budgetUsd: 1 } });
+    const agentResult = await client.callTool({
+      name: "create_agent",
+      arguments: { name: "hooked", systemPrompt: "x", model: "m", budgetUsd: 1 },
+    });
     const agent = parseText(agentResult as never) as { id: string };
 
     const webhookResult = await client.callTool({ name: "create_webhook", arguments: { agentId: agent.id } });
@@ -451,13 +589,25 @@ describe("MCP integration (all tool modules, in-memory)", () => {
 
   it("scope and ownership denials surface as isError tool results (mapped to 401/403 at the HTTP layer by earlier tasks)", async () => {
     const { db } = buildFakeDb();
-    const providers = { llm: {} as never, engine: {} as never, datastore: fakeDatastore(), secrets: fakeCipher(), executor: {} as Executor };
+    const providers = {
+      llm: {} as never,
+      engine: {} as never,
+      datastore: fakeDatastore(),
+      secrets: fakeCipher(),
+      executor: {} as Executor,
+    };
     const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, providers, "p1", ["agents:read"])); // no agents:write
-    registerAllTools(mcp, { secretElicitationUrl: async (token) => `https://test.invalid/elicit/secret?t=${token}`, secretElicitationProtocol: false });
+    registerAllTools(mcp, {
+      secretElicitationUrl: async (token) => `https://test.invalid/elicit/secret?t=${token}`,
+      secretElicitationProtocol: false,
+    });
     const client = await connectClient(mcp);
 
-    const scopeDenied = await client.callTool({ name: "create_agent", arguments: { name: "x", systemPrompt: "x", model: "x", budgetUsd: 1 } });
+    const scopeDenied = await client.callTool({
+      name: "create_agent",
+      arguments: { name: "x", systemPrompt: "x", model: "x", budgetUsd: 1 },
+    });
     expect(scopeDenied.isError).toBe(true);
     expect((scopeDenied.content as { text: string }[])[0].text).toMatch(/scope/i);
 
@@ -476,7 +626,13 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP integration: both AUTH_PROVIDER 
   });
 
   it("self-hosted production factory builds the secured provider", () => {
-    expect(buildAuthProvider("self-hosted", { audience: CANONICAL_URI, signingKey: "a1".repeat(32), credentialHashKey: "b2".repeat(32) }, db)).toBeInstanceOf(SelfHostedAuthProvider);
+    expect(
+      buildAuthProvider(
+        "self-hosted",
+        { audience: CANONICAL_URI, signingKey: "a1".repeat(32), credentialHashKey: "b2".repeat(32) },
+        db,
+      ),
+    ).toBeInstanceOf(SelfHostedAuthProvider);
   });
 
   it("delegating: buildAuthProvider selects DelegatingAuthProvider, which verifies a JWKS-signed token", async () => {
@@ -501,7 +657,10 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP integration: both AUTH_PROVIDER 
     );
     expect(provider).toBeInstanceOf(DelegatingAuthProvider);
 
-    const directProvider = new DelegatingAuthProvider({ issuer: "https://idp.example.com", audience: CANONICAL_URI }, jwks);
+    const directProvider = new DelegatingAuthProvider(
+      { issuer: "https://idp.example.com", audience: CANONICAL_URI },
+      jwks,
+    );
     const token = await new SignJWT({ scope: "agents:read" })
       .setProtectedHeader({ alg: "RS256", kid: "integration-test-key" })
       .setIssuedAt()

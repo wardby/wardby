@@ -39,7 +39,10 @@ const secretNameSchema = z
 
 const datastorePrefixSchema = z
   .string()
-  .refine((v) => byteLength(v) <= MAX_DATASTORE_PREFIX_BYTES, `must be at most ${MAX_DATASTORE_PREFIX_BYTES} UTF-8 bytes`);
+  .refine(
+    (v) => byteLength(v) <= MAX_DATASTORE_PREFIX_BYTES,
+    `must be at most ${MAX_DATASTORE_PREFIX_BYTES} UTF-8 bytes`,
+  );
 
 const fetchHostSchema = z
   .string()
@@ -47,9 +50,18 @@ const fetchHostSchema = z
   .transform((v) => (v === FETCH_WILDCARD ? FETCH_WILDCARD : normalizeHost(v)));
 
 const toolCapabilityFields = {
-  allowedSecrets: z.array(secretNameSchema).max(MAX_ALLOWED_SECRETS).transform((v) => [...new Set(v)]),
-  allowedDatastorePrefixes: z.array(datastorePrefixSchema).max(MAX_ALLOWED_DATASTORE_PREFIXES).transform((v) => [...new Set(v)]),
-  allowedHosts: z.array(fetchHostSchema).max(MAX_ALLOWED_HOSTS).transform((v) => [...new Set(v)]),
+  allowedSecrets: z
+    .array(secretNameSchema)
+    .max(MAX_ALLOWED_SECRETS)
+    .transform((v) => [...new Set(v)]),
+  allowedDatastorePrefixes: z
+    .array(datastorePrefixSchema)
+    .max(MAX_ALLOWED_DATASTORE_PREFIXES)
+    .transform((v) => [...new Set(v)]),
+  allowedHosts: z
+    .array(fetchHostSchema)
+    .max(MAX_ALLOWED_HOSTS)
+    .transform((v) => [...new Set(v)]),
 };
 
 /** Full capability set — used when creating a brand-new attachment (unset fields default to deny-all). */

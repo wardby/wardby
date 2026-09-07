@@ -31,11 +31,7 @@ import { prisma as defaultDb } from "./db.js";
 export type RunnerDb = Pick<PrismaClient, "agent" | "run" | "agentTool" | "agentSecret">;
 
 /** Persists a new pending Run for the named agent. Throws if the agent is unknown. */
-export async function createRun(
-  db: RunnerDb,
-  agentName: string,
-  trigger: RunTrigger = "manual",
-): Promise<Run> {
+export async function createRun(db: RunnerDb, agentName: string, trigger: RunTrigger = "manual"): Promise<Run> {
   const agent = await db.agent.findUnique({ where: { name: agentName } });
   if (!agent) {
     throw new Error(`Unknown agent "${agentName}".`);

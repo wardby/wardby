@@ -11,9 +11,15 @@ const CANONICAL_URI = "https://host/mcp";
 
 function fakeLlm(name: string): LlmProvider {
   return {
-    async *stream() { yield { type: "done", stopReason: "stop", usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 } }; },
-    async countTokens() { return name.length; },
-    priceUsd() { return 0; },
+    async *stream() {
+      yield { type: "done", stopReason: "stop", usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 } };
+    },
+    async countTokens() {
+      return name.length;
+    },
+    priceUsd() {
+      return 0;
+    },
   };
 }
 
@@ -43,7 +49,11 @@ describe("list_models", () => {
       { provider: fakeLlm("a"), models: ["gpt-4o", "gpt-4o-mini"] },
       { provider: fakeLlm("b"), models: ["claude-opus-5"] },
     ]);
-    const mcp = buildMcpServer({ providers: { llm } as unknown as McpRequestContext["providers"], db: {} as never, config: { canonicalUri: CANONICAL_URI } });
+    const mcp = buildMcpServer({
+      providers: { llm } as unknown as McpRequestContext["providers"],
+      db: {} as never,
+      config: { canonicalUri: CANONICAL_URI },
+    });
     mcp.setFixedContext(fakeCtx(llm));
     registerModelTools(mcp);
     const client = await connectClient(mcp);

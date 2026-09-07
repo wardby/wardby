@@ -137,7 +137,9 @@ function loadRequestStateKey(env: NodeJS.ProcessEnv): Uint8Array {
   if (!hex) return randomBytes(REQUEST_STATE_KEY_BYTES);
   const key = Buffer.from(hex, "hex");
   if (key.length !== REQUEST_STATE_KEY_BYTES) {
-    throw new Error(`REQUEST_STATE_KEY must be ${REQUEST_STATE_KEY_BYTES} bytes of hex (${REQUEST_STATE_KEY_BYTES * 2} hex chars); got ${key.length} bytes.`);
+    throw new Error(
+      `REQUEST_STATE_KEY must be ${REQUEST_STATE_KEY_BYTES} bytes of hex (${REQUEST_STATE_KEY_BYTES * 2} hex chars); got ${key.length} bytes.`,
+    );
   }
   return key;
 }
@@ -163,10 +165,16 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
   // store). stdio and single-instance HTTP need no configuration: with the
   // env var unset, a fresh random key per process is fine, since nothing
   // outside this same running server ever needs to verify a token it minted.
-  const requestStateCodec = createRequestStateCodec<unknown>({ key: loadRequestStateKey(opts.env ?? process.env), ttlSeconds: 600 });
+  const requestStateCodec = createRequestStateCodec<unknown>({
+    key: loadRequestStateKey(opts.env ?? process.env),
+    ttlSeconds: 600,
+  });
 
   function mcpReqOf(sdkCtx: ServerContext): McpRequestContext["mcpReq"] {
-    return { inputResponses: sdkCtx.mcpReq?.inputResponses, requestState: sdkCtx.mcpReq?.requestState ?? (() => undefined) };
+    return {
+      inputResponses: sdkCtx.mcpReq?.inputResponses,
+      requestState: sdkCtx.mcpReq?.requestState ?? (() => undefined),
+    };
   }
 
   function resolveCtx(sdkCtx: ServerContext): McpRequestContext {
@@ -182,8 +190,7 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
         clientSupportsTasks: clientSupportsTasks(
           // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- ESLint's type-checked view of `envelope` disagrees with the real tsc build; the cast is load-bearing there.
           (sdkCtx.mcpReq?.envelope as Record<string, unknown> | undefined)?.[CLIENT_CAPABILITIES_META_KEY] as
-            | { extensions?: Record<string, unknown> }
-            | undefined,
+            { extensions?: Record<string, unknown> } | undefined,
         ),
       };
     }
@@ -267,5 +274,13 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
     return requestStateCodec.verify(token, {} as ServerContext) as Promise<T>;
   }
 
-  return { registerTool, registerRequestHandler, factory, discover, setFixedContext, mintRequestState, verifyRequestState };
+  return {
+    registerTool,
+    registerRequestHandler,
+    factory,
+    discover,
+    setFixedContext,
+    mintRequestState,
+    verifyRequestState,
+  };
 }

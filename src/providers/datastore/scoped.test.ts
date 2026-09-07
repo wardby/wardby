@@ -2,14 +2,23 @@ import { describe, expect, it } from "vitest";
 import type { Datastore, DatastoreSetOptions, DatastoreValue } from "./types.js";
 import { scopeDatastore } from "./scoped.js";
 
-function fakeDatastore(): Datastore & { setCalls: [string, string, DatastoreValue, DatastoreSetOptions | undefined][] } {
+function fakeDatastore(): Datastore & {
+  setCalls: [string, string, DatastoreValue, DatastoreSetOptions | undefined][];
+} {
   const store = new Map<string, DatastoreValue>();
   const setCalls: [string, string, DatastoreValue, DatastoreSetOptions | undefined][] = [];
   return {
     setCalls,
-    async get(agentId, key) { return store.get(`${agentId}:${key}`); },
-    async set(agentId, key, value, opts) { setCalls.push([agentId, key, value, opts]); store.set(`${agentId}:${key}`, value); },
-    async delete(agentId, key) { store.delete(`${agentId}:${key}`); },
+    async get(agentId, key) {
+      return store.get(`${agentId}:${key}`);
+    },
+    async set(agentId, key, value, opts) {
+      setCalls.push([agentId, key, value, opts]);
+      store.set(`${agentId}:${key}`, value);
+    },
+    async delete(agentId, key) {
+      store.delete(`${agentId}:${key}`);
+    },
     async list(agentId, prefix) {
       const p = `${agentId}:${prefix ?? ""}`;
       return [...store.keys()].filter((k) => k.startsWith(p)).map((k) => k.slice(agentId.length + 1));

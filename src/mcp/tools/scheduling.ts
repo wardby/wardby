@@ -20,18 +20,21 @@ export function registerSchedulingTools(mcp: ReevoMcpServer): void {
       } catch (err) {
         throw new McpError(400, `Invalid schedule/timezone: ${err instanceof Error ? err.message : String(err)}`);
       }
-      const agent = await ctx.db.$transaction(async (tx) => {
-        const existing = await tx.agent.findUnique({ where: { id: args.agentId }, include: { codingProfile: true } });
-        if (!existing) throw new McpError(404, `Agent "${args.agentId}" not found.`);
-        assertCanMutate(existing.ownerId, ctx.principal.id, `Agent "${args.agentId}" is not owned by the caller.`);
-        if (existing.kind === "coding" && !existing.codingProfile?.defaultTask) {
-          throw new McpError(400, "A default task is required before enabling a coding-agent schedule.");
-        }
-        return tx.agent.update({
-          where: { id: args.agentId },
-          data: { schedule: args.schedule, timezone: args.timezone, scheduleEnabled: true },
-        });
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      const agent = await ctx.db.$transaction(
+        async (tx) => {
+          const existing = await tx.agent.findUnique({ where: { id: args.agentId }, include: { codingProfile: true } });
+          if (!existing) throw new McpError(404, `Agent "${args.agentId}" not found.`);
+          assertCanMutate(existing.ownerId, ctx.principal.id, `Agent "${args.agentId}" is not owned by the caller.`);
+          if (existing.kind === "coding" && !existing.codingProfile?.defaultTask) {
+            throw new McpError(400, "A default task is required before enabling a coding-agent schedule.");
+          }
+          return tx.agent.update({
+            where: { id: args.agentId },
+            data: { schedule: args.schedule, timezone: args.timezone, scheduleEnabled: true },
+          });
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
       return textResult(agent);
     },
   });

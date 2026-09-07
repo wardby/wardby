@@ -2,12 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import type { Executor } from "../providers/executor/types.js";
-import {
-  findDueCandidates,
-  claimDueRun,
-  markRunFailedFromExecutorError,
-  type SchedulerDb,
-} from "./scheduler.js";
+import { findDueCandidates, claimDueRun, markRunFailedFromExecutorError, type SchedulerDb } from "./scheduler.js";
 
 const executor: Executor = {
   async start() {},
@@ -29,8 +24,10 @@ function fakeAgentDb(agents: FakeAgent[]): Pick<SchedulerDb, "agent"> {
     agent: {
       findMany: (async ({ where }: any) =>
         agents.filter(
-          (a) => a.scheduleEnabled === where.scheduleEnabled && a.schedule !== null
-            && (!where.kind || (a.kind ?? "native") === where.kind),
+          (a) =>
+            a.scheduleEnabled === where.scheduleEnabled &&
+            a.schedule !== null &&
+            (!where.kind || (a.kind ?? "native") === where.kind),
         )) as any,
     },
   } as unknown as Pick<SchedulerDb, "agent">;

@@ -51,8 +51,7 @@ function fakeDb(
 
   return {
     agent: {
-      findUnique: (async ({ where }: any) =>
-        (where.name ? byName.get(where.name) : byId.get(where.id)) ?? null) as any,
+      findUnique: (async ({ where }: any) => (where.name ? byName.get(where.name) : byId.get(where.id)) ?? null) as any,
     },
     run: {
       create: (async ({ data }: any) => {
@@ -138,28 +137,35 @@ function fakeEngine(result: EngineResult, capture?: (ctx: EngineRunContext) => v
 
 describe("runAgent", () => {
   it("fails closed instead of executing a coding agent in the native engine", async () => {
-    const db = fakeDb([{
-      id: "a1",
-      name: "coder",
-      systemPrompt: "code",
-      model: "gpt-5.6-luna",
-      budgetUsd: 1,
-      maxTurns: 10,
-      kind: "coding",
-    }]);
+    const db = fakeDb([
+      {
+        id: "a1",
+        name: "coder",
+        systemPrompt: "code",
+        model: "gpt-5.6-luna",
+        budgetUsd: 1,
+        maxTurns: 10,
+        kind: "coding",
+      },
+    ]);
     let engineCalled = false;
     const engine = fakeEngine(
       { status: "succeeded", finalText: "unsafe", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.1 } },
-      () => { engineCalled = true; },
+      () => {
+        engineCalled = true;
+      },
     );
 
-    await expect(runAgent("coder", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db))
-      .rejects.toThrow(/coding.*executor|executor.*coding/i);
+    await expect(
+      runAgent("coder", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db),
+    ).rejects.toThrow(/coding.*executor|executor.*coding/i);
     expect(engineCalled).toBe(false);
   });
 
   it("persists the engine's result onto the run", async () => {
-    const db = fakeDb([{ id: "a1", name: "greeter", systemPrompt: "be nice", model: "m", budgetUsd: 10, maxTurns: 10 }]);
+    const db = fakeDb([
+      { id: "a1", name: "greeter", systemPrompt: "be nice", model: "m", budgetUsd: 10, maxTurns: 10 },
+    ]);
     const engine = fakeEngine({
       status: "succeeded",
       finalText: "hi there",
@@ -167,7 +173,11 @@ describe("runAgent", () => {
       usage: { tokensIn: 13, tokensOut: 8, costUsd: 0.0005 },
     });
 
-    const run = await runAgent("greeter", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
+    const run = await runAgent(
+      "greeter",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher },
+      db,
+    );
 
     expect(run.status).toBe("succeeded");
     expect(run.tokensIn).toBe(13);
@@ -187,7 +197,11 @@ describe("runAgent", () => {
       error: "Estimated input cost exceeds budget before any LLM call.",
     });
 
-    const run = await runAgent("tight", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
+    const run = await runAgent(
+      "tight",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher },
+      db,
+    );
 
     expect(run.status).toBe("refused");
     expect(run.error).toBe("Estimated input cost exceeds budget before any LLM call.");
@@ -313,7 +327,11 @@ describe("runAgent", () => {
       },
     };
 
-    const run = await runAgent("flaky", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
+    const run = await runAgent(
+      "flaky",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher },
+      db,
+    );
 
     expect(run.status).toBe("failed");
     expect(run.error).toBe("engine bug");
@@ -321,30 +339,39 @@ describe("runAgent", () => {
 
   it("throws for an unknown agent without creating a Run", async () => {
     const db = fakeDb([]);
-    const engine = fakeEngine({ status: "succeeded", finalText: "", turns: 0, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } });
+    const engine = fakeEngine({
+      status: "succeeded",
+      finalText: "",
+      turns: 0,
+      usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+    });
 
-    await expect(runAgent("ghost", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db)).rejects.toThrow(
-      /Unknown agent/,
-    );
+    await expect(
+      runAgent("ghost", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db),
+    ).rejects.toThrow(/Unknown agent/);
   });
 
   it("scopes a sandboxed tool's datastore access to its declared allowedDatastorePrefixes", async () => {
     const db = fakeDb(
       [{ id: "a1", name: "scoped-ds", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 }],
-      [{
-        id: "t1",
-        name: "write_key",
-        description: "x",
-        paramsZod: "z.object({ key: z.string() })",
-        jsonSchema: {},
-        code: "await datastore.set(params.key, 'v'); return 'ok';",
-      }],
+      [
+        {
+          id: "t1",
+          name: "write_key",
+          description: "x",
+          paramsZod: "z.object({ key: z.string() })",
+          jsonSchema: {},
+          code: "await datastore.set(params.key, 'v'); return 'ok';",
+        },
+      ],
       [{ agentId: "a1", toolId: "t1", allowedDatastorePrefixes: ["allowed:"] }],
     );
     let captured: EngineRunContext | undefined;
     const engine = fakeEngine(
       { status: "succeeded", finalText: "", turns: 1, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } },
-      (ctx) => { captured = ctx; },
+      (ctx) => {
+        captured = ctx;
+      },
     );
 
     await runAgent("scoped-ds", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
@@ -353,20 +380,25 @@ describe("runAgent", () => {
     expect(allowed).toBe("ok");
 
     const blocked = JSON.parse(await captured!.runSandboxTool("write_key", JSON.stringify({ key: "blocked:1" })));
-    expect(blocked).toMatchObject({ error: "thrown", message: expect.stringContaining("datastore_prefix_not_allowed") });
+    expect(blocked).toMatchObject({
+      error: "thrown",
+      message: expect.stringContaining("datastore_prefix_not_allowed"),
+    });
   });
 
   it("scopes a sandboxed tool's secrets access to its declared allowedSecrets", async () => {
     const db = fakeDb(
       [{ id: "a1", name: "scoped-secrets", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 }],
-      [{
-        id: "t1",
-        name: "read_secret",
-        description: "x",
-        paramsZod: "z.object({ name: z.string() })",
-        jsonSchema: {},
-        code: "const v = await secrets.get(params.name); return v === undefined ? null : v;",
-      }],
+      [
+        {
+          id: "t1",
+          name: "read_secret",
+          description: "x",
+          paramsZod: "z.object({ name: z.string() })",
+          jsonSchema: {},
+          code: "const v = await secrets.get(params.name); return v === undefined ? null : v;",
+        },
+      ],
       [{ agentId: "a1", toolId: "t1", allowedSecrets: ["ALLOWED"] }],
       [
         { agentId: "a1", name: "ALLOWED", value: "secret-a" },
@@ -376,7 +408,9 @@ describe("runAgent", () => {
     let captured: EngineRunContext | undefined;
     const engine = fakeEngine(
       { status: "succeeded", finalText: "", turns: 1, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } },
-      (ctx) => { captured = ctx; },
+      (ctx) => {
+        captured = ctx;
+      },
     );
 
     await runAgent("scoped-secrets", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: fakeCipher() }, db);

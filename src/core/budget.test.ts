@@ -1,17 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { LlmProvider } from "../providers/index.js";
-import {
-  applyPreflightSafetyMargin,
-  checkTokenCalibration,
-  estimateInputCost,
-  isOverBudget,
-} from "./budget.js";
+import { applyPreflightSafetyMargin, checkTokenCalibration, estimateInputCost, isOverBudget } from "./budget.js";
 
-function fakeLlm(opts: {
-  tokens: number;
-  inputPerMTok: number;
-  outputPerMTok: number;
-}): LlmProvider {
+function fakeLlm(opts: { tokens: number; inputPerMTok: number; outputPerMTok: number }): LlmProvider {
   return {
     async *stream() {},
     async countTokens() {
@@ -19,8 +10,7 @@ function fakeLlm(opts: {
     },
     priceUsd(_model, usage) {
       return (
-        (usage.inputTokens / 1_000_000) * opts.inputPerMTok +
-        (usage.outputTokens / 1_000_000) * opts.outputPerMTok
+        (usage.inputTokens / 1_000_000) * opts.inputPerMTok + (usage.outputTokens / 1_000_000) * opts.outputPerMTok
       );
     },
   };
@@ -99,7 +89,9 @@ describe("checkTokenCalibration", () => {
 function llmStub(): LlmProvider {
   return {
     async *stream() {},
-    async countTokens() { return 1000; },
+    async countTokens() {
+      return 1000;
+    },
     // fresh input $10/Mtok, cached $1/Mtok
     priceUsd(_m, u) {
       const cached = u.cachedInputTokens ?? 0;

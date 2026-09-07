@@ -54,7 +54,11 @@ function zeroUsage(): Usage {
 }
 
 function addUsage(a: Usage, b: { inputTokens: number; outputTokens: number; costUsd: number }): Usage {
-  return { tokensIn: a.tokensIn + b.inputTokens, tokensOut: a.tokensOut + b.outputTokens, costUsd: a.costUsd + b.costUsd };
+  return {
+    tokensIn: a.tokensIn + b.inputTokens,
+    tokensOut: a.tokensOut + b.outputTokens,
+    costUsd: a.costUsd + b.costUsd,
+  };
 }
 
 export class NativeEngine implements Engine {

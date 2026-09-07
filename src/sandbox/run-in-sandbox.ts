@@ -39,8 +39,12 @@ export interface SandboxInvocation {
 
 export async function runInSandbox(invocation: SandboxInvocation): Promise<SandboxResult> {
   let params: string;
-  try { boundedString(invocation.code, BRIDGE_INPUT_BYTES); params = boundedJson(invocation.params, BRIDGE_INPUT_BYTES); }
-  catch { return { ok: false, errorKind: "memory", errorMessage: "Sandbox invocation input limit exceeded." }; }
+  try {
+    boundedString(invocation.code, BRIDGE_INPUT_BYTES);
+    params = boundedJson(invocation.params, BRIDGE_INPUT_BYTES);
+  } catch {
+    return { ok: false, errorKind: "memory", errorMessage: "Sandbox invocation input limit exceeded." };
+  }
   // The final JSON.stringify is wrapped separately so a serialization
   // failure (e.g. a circular reference) is tagged distinctly from the tool
   // body itself throwing — both "fail cleanly", but the caller should be

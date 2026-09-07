@@ -27,7 +27,11 @@ function secretMatches(presented: string, storedHash: string): boolean {
 }
 
 /** Creates a webhook and returns the raw secret ONCE — only its hash is ever stored. */
-export async function createWebhook(agentId: string, ownerId: string, db: PrismaClient): Promise<{ id: string; secret: string }> {
+export async function createWebhook(
+  agentId: string,
+  ownerId: string,
+  db: PrismaClient,
+): Promise<{ id: string; secret: string }> {
   const secret = randomBytes(32).toString("base64url");
   const webhook = await db.webhook.create({ data: { agentId, ownerId, secretHash: hashSecret(secret) } });
   return { id: webhook.id, secret };
@@ -50,8 +54,7 @@ export async function deleteWebhook(id: string, db: PrismaClient): Promise<void>
 }
 
 export type ResolveWebhookRunResult =
-  | { ok: true; runId: string }
-  | { ok: false; reason: "not_found" | "invalid_secret" | "disabled" };
+  { ok: true; runId: string } | { ok: false; reason: "not_found" | "invalid_secret" | "disabled" };
 
 /**
  * Validates the presented secret and, if valid + enabled, enqueues a
@@ -81,9 +84,18 @@ export async function resolveWebhookRun(
     trigger: "manual",
     beforePersist: async (tx) => {
       const current = await tx.webhook.findUnique({ where: { id } });
-      if (!current) { rejected = "not_found"; return false; }
-      if (!secretMatches(presentedSecret, current.secretHash)) { rejected = "invalid_secret"; return false; }
-      if (current.status !== "enabled") { rejected = "disabled"; return false; }
+      if (!current) {
+        rejected = "not_found";
+        return false;
+      }
+      if (!secretMatches(presentedSecret, current.secretHash)) {
+        rejected = "invalid_secret";
+        return false;
+      }
+      if (current.status !== "enabled") {
+        rejected = "disabled";
+        return false;
+      }
       await tx.webhook.update({ where: { id }, data: { lastFiredAt: new Date() } });
       return true;
     },

@@ -39,7 +39,8 @@ function fakeDb(agents: FakeAgentRow[] = []) {
         return row;
       },
       findUnique: async ({ where }: { where: { id: string } }) => webhooks.get(where.id) ?? null,
-      findMany: async ({ where }: { where: { ownerId: string } }) => [...webhooks.values()].filter((w) => w.ownerId === where.ownerId),
+      findMany: async ({ where }: { where: { ownerId: string } }) =>
+        [...webhooks.values()].filter((w) => w.ownerId === where.ownerId),
       delete: async ({ where }: { where: { id: string } }) => {
         const row = webhooks.get(where.id);
         webhooks.delete(where.id);
@@ -70,7 +71,9 @@ function fakeDb(agents: FakeAgentRow[] = []) {
       updateMany: async () => ({ count: 1 }),
     },
     codingRun: { create: async ({ data }: any) => data },
-    task: { create: async ({ data }: any) => ({ id: "task_1", createdAt: new Date(), updatedAt: new Date(), ...data }) },
+    task: {
+      create: async ({ data }: any) => ({ id: "task_1", createdAt: new Date(), updatedAt: new Date(), ...data }),
+    },
     $queryRaw: async () => [],
   };
   db.$transaction = async (fn: (tx: any) => unknown) => fn(db);

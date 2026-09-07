@@ -28,7 +28,14 @@ function fakeDb(agents: FakeAgentRow[]) {
   const db: any = {
     webhook: {
       create: async ({ data }: { data: Partial<FakeWebhookRow> & { agentId: string; secretHash: string } }) => {
-        const row: FakeWebhookRow = { id: `webhook_${++counter}`, status: "enabled", ownerId: null, createdAt: new Date(), lastFiredAt: null, ...data };
+        const row: FakeWebhookRow = {
+          id: `webhook_${++counter}`,
+          status: "enabled",
+          ownerId: null,
+          createdAt: new Date(),
+          lastFiredAt: null,
+          ...data,
+        };
         webhooks.set(row.id, row);
         return row;
       },
@@ -49,11 +56,18 @@ function fakeDb(agents: FakeAgentRow[]) {
       },
     },
     run: {
-      create: async ({ data }: { data: { agentId: string; trigger: string } }) => ({ id: `run_${++runCounter}`, status: "pending", startedAt: new Date(), ...data }),
+      create: async ({ data }: { data: { agentId: string; trigger: string } }) => ({
+        id: `run_${++runCounter}`,
+        status: "pending",
+        startedAt: new Date(),
+        ...data,
+      }),
       updateMany: async () => ({ count: 1 }),
     },
     codingRun: { create: async ({ data }: any) => data },
-    task: { create: async ({ data }: any) => ({ id: "task_1", createdAt: new Date(), updatedAt: new Date(), ...data }) },
+    task: {
+      create: async ({ data }: any) => ({ id: "task_1", createdAt: new Date(), updatedAt: new Date(), ...data }),
+    },
     $queryRaw: async () => [],
   };
   db.$transaction = async (fn: (tx: any) => unknown) => fn(db);
@@ -85,7 +99,12 @@ describe("webhook ingress", () => {
 
   it("unknown webhook id -> 404", async () => {
     const db = fakeDb([{ id: "a1", name: "greeter" }]);
-    const result = await handleWebhookIngress("no-such-id", { headers: { "x-webhook-secret": "x" }, body: {} }, db, executor);
+    const result = await handleWebhookIngress(
+      "no-such-id",
+      { headers: { "x-webhook-secret": "x" }, body: {} },
+      db,
+      executor,
+    );
     expect(result.status).toBe(404);
   });
 

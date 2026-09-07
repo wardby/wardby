@@ -117,12 +117,18 @@ describe("CodingTaskInputSchema", () => {
 
 describe("CodingAgentOutputSchema", () => {
   it("bounds summary, test count, and command bytes", () => {
-    expect(() => CodingAgentOutputSchema.parse({ ...output, summary: "x".repeat(MAX_CODING_SUMMARY_BYTES + 1) })).toThrow();
-    expect(() => CodingAgentOutputSchema.parse({ ...output, tests: Array(MAX_CODING_TESTS + 1).fill(output.tests[0]) })).toThrow();
-    expect(() => CodingAgentOutputSchema.parse({
-      ...output,
-      tests: [{ command: "x".repeat(MAX_CODING_TEST_COMMAND_BYTES + 1), outcome: "failed" }],
-    })).toThrow();
+    expect(() =>
+      CodingAgentOutputSchema.parse({ ...output, summary: "x".repeat(MAX_CODING_SUMMARY_BYTES + 1) }),
+    ).toThrow();
+    expect(() =>
+      CodingAgentOutputSchema.parse({ ...output, tests: Array(MAX_CODING_TESTS + 1).fill(output.tests[0]) }),
+    ).toThrow();
+    expect(() =>
+      CodingAgentOutputSchema.parse({
+        ...output,
+        tests: [{ command: "x".repeat(MAX_CODING_TEST_COMMAND_BYTES + 1), outcome: "failed" }],
+      }),
+    ).toThrow();
   });
 
   it("redacts token-shaped values before returning untrusted output", () => {
@@ -139,34 +145,42 @@ describe("CodingAgentOutputSchema", () => {
 
   it("rejects unknown output and nested test keys", () => {
     expect(() => CodingAgentOutputSchema.parse({ ...output, rawLog: "unsafe" })).toThrow();
-    expect(() => CodingAgentOutputSchema.parse({
-      ...output,
-      tests: [{ ...output.tests[0], environment: "secret" }],
-    })).toThrow();
+    expect(() =>
+      CodingAgentOutputSchema.parse({
+        ...output,
+        tests: [{ ...output.tests[0], environment: "secret" }],
+      }),
+    ).toThrow();
   });
 });
 
 describe("CodingRunResultSchema", () => {
   it("binds PR URL, repository, number, and fields to the PR outcome", () => {
     expect(CodingRunResultSchema.parse(result)).toMatchObject({ commitSha: "a".repeat(40) });
-    expect(() => CodingRunResultSchema.parse({ ...result, pullRequestUrl: "https://github.com/other/repo/pull/42" })).toThrow();
+    expect(() =>
+      CodingRunResultSchema.parse({ ...result, pullRequestUrl: "https://github.com/other/repo/pull/42" }),
+    ).toThrow();
     expect(() => CodingRunResultSchema.parse({ ...result, outcome: "no_changes" })).toThrow();
-    expect(CodingRunResultSchema.parse({
-      ...result,
-      outcome: "no_changes",
-      headRef: undefined,
-      commitSha: undefined,
-      pullRequestUrl: undefined,
-      pullRequestNumber: undefined,
-    })).toMatchObject({ outcome: "no_changes" });
+    expect(
+      CodingRunResultSchema.parse({
+        ...result,
+        outcome: "no_changes",
+        headRef: undefined,
+        commitSha: undefined,
+        pullRequestUrl: undefined,
+        pullRequestNumber: undefined,
+      }),
+    ).toMatchObject({ outcome: "no_changes" });
   });
 
   it("rejects unknown and credential-bearing result fields", () => {
     expect(() => CodingRunResultSchema.parse({ ...result, rawLog: "unsafe" })).toThrow();
-    expect(() => CodingRunResultSchema.parse({
-      ...result,
-      pullRequestUrl: "https://token@github.com/openai/example/pull/42",
-    })).toThrow();
+    expect(() =>
+      CodingRunResultSchema.parse({
+        ...result,
+        pullRequestUrl: "https://token@github.com/openai/example/pull/42",
+      }),
+    ).toThrow();
   });
 });
 
@@ -179,12 +193,12 @@ describe("bounded duplicate-safe JSON parsing", () => {
   });
 
   it("rejects an oversized artifact before parsing", () => {
-    expect(() => parseCodingTaskInputJson(`{"padding":"${"x".repeat(MAX_CODING_ARTIFACT_BYTES)}"}`))
-      .toThrow(/size_limit/);
+    expect(() => parseCodingTaskInputJson(`{"padding":"${"x".repeat(MAX_CODING_ARTIFACT_BYTES)}"}`)).toThrow(
+      /size_limit/,
+    );
   });
 
   it("rejects excessive JSON nesting before schema validation", () => {
-    expect(() => parseCodingAgentOutputJson(`${"[".repeat(65)}null${"]".repeat(65)}`))
-      .toThrow(/nesting_limit/);
+    expect(() => parseCodingAgentOutputJson(`${"[".repeat(65)}null${"]".repeat(65)}`)).toThrow(/nesting_limit/);
   });
 });

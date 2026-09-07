@@ -15,7 +15,13 @@ import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
-import { assertCanMutate, requireOwnedAgent, requireReadableAgent, visibleToPrincipal, canRead } from "../auth/ownership.js";
+import {
+  assertCanMutate,
+  requireOwnedAgent,
+  requireReadableAgent,
+  visibleToPrincipal,
+  canRead,
+} from "../auth/ownership.js";
 import { textResult } from "./text-result.js";
 
 async function requireOwnedTool(db: Pick<PrismaClient, "tool">, id: string, principalId: string) {
@@ -61,7 +67,8 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
   mcp.registerTool({
     name: "dry_run_tool",
     scope: "tools:write",
-    description: "Test-runs tool code against sample args without persisting it. Fetch is denied by default, same as a freshly attached tool — pass allowedHosts to test code that calls fetch().",
+    description:
+      "Test-runs tool code against sample args without persisting it. Fetch is denied by default, same as a freshly attached tool — pass allowedHosts to test code that calls fetch().",
     inputSchema: {
       type: "object",
       properties: {
@@ -73,7 +80,9 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
       required: ["paramsZod", "code", "sampleArgs"],
     },
     handler: async (args: { paramsZod: string; code: string; sampleArgs: unknown; allowedHosts?: string[] }, ctx) => {
-      const hosts = ToolCapabilitiesPatchSchema.pick({ allowedHosts: true }).safeParse({ allowedHosts: args.allowedHosts });
+      const hosts = ToolCapabilitiesPatchSchema.pick({ allowedHosts: true }).safeParse({
+        allowedHosts: args.allowedHosts,
+      });
       if (!hosts.success) {
         throw new McpError(400, `Invalid allowedHosts: ${hosts.error.issues.map((i) => i.message).join("; ")}`);
       }
@@ -143,30 +152,35 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
       if (!patch.success) {
         throw new McpError(400, `Invalid tool capabilities: ${patch.error.issues.map((i) => i.message).join("; ")}`);
       }
-      await ctx.db.$transaction(async (tx) => {
-        const agent = await tx.agent.findUnique({ where: { id: args.agentId } });
-        if (!agent) throw new McpError(404, `Agent "${args.agentId}" not found.`);
-        assertCanMutate(agent.ownerId, ctx.principal.id, `Agent "${args.agentId}" is not owned by the caller.`);
-        if (agent.kind === "coding") {
-          throw new McpError(400, "Native sandbox tools cannot be attached to coding agents.");
-        }
-        await requireOwnedTool(tx, args.toolId, ctx.principal.id);
-        await tx.agentTool.upsert({
-          where: { agentId_toolId: { agentId: args.agentId, toolId: args.toolId } },
-          create: {
-            agentId: args.agentId,
-            toolId: args.toolId,
-            allowedSecrets: patch.data.allowedSecrets ?? [],
-            allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes ?? [],
-            allowedHosts: patch.data.allowedHosts ?? [],
-          },
-          update: {
-            ...(patch.data.allowedSecrets !== undefined ? { allowedSecrets: patch.data.allowedSecrets } : {}),
-            ...(patch.data.allowedDatastorePrefixes !== undefined ? { allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes } : {}),
-            ...(patch.data.allowedHosts !== undefined ? { allowedHosts: patch.data.allowedHosts } : {}),
-          },
-        });
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      await ctx.db.$transaction(
+        async (tx) => {
+          const agent = await tx.agent.findUnique({ where: { id: args.agentId } });
+          if (!agent) throw new McpError(404, `Agent "${args.agentId}" not found.`);
+          assertCanMutate(agent.ownerId, ctx.principal.id, `Agent "${args.agentId}" is not owned by the caller.`);
+          if (agent.kind === "coding") {
+            throw new McpError(400, "Native sandbox tools cannot be attached to coding agents.");
+          }
+          await requireOwnedTool(tx, args.toolId, ctx.principal.id);
+          await tx.agentTool.upsert({
+            where: { agentId_toolId: { agentId: args.agentId, toolId: args.toolId } },
+            create: {
+              agentId: args.agentId,
+              toolId: args.toolId,
+              allowedSecrets: patch.data.allowedSecrets ?? [],
+              allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes ?? [],
+              allowedHosts: patch.data.allowedHosts ?? [],
+            },
+            update: {
+              ...(patch.data.allowedSecrets !== undefined ? { allowedSecrets: patch.data.allowedSecrets } : {}),
+              ...(patch.data.allowedDatastorePrefixes !== undefined
+                ? { allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes }
+                : {}),
+              ...(patch.data.allowedHosts !== undefined ? { allowedHosts: patch.data.allowedHosts } : {}),
+            },
+          });
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
       return textResult({ attached: true });
     },
   });
@@ -174,7 +188,11 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
   mcp.registerTool({
     name: "detach_tool",
     scope: "tools:write",
-    inputSchema: { type: "object", properties: { agentId: { type: "string" }, toolId: { type: "string" } }, required: ["agentId", "toolId"] },
+    inputSchema: {
+      type: "object",
+      properties: { agentId: { type: "string" }, toolId: { type: "string" } },
+      required: ["agentId", "toolId"],
+    },
     handler: async (args: { agentId: string; toolId: string }, ctx) => {
       await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
       await requireOwnedTool(ctx.db, args.toolId, ctx.principal.id);
@@ -188,11 +206,17 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
     scope: "tools:write",
     inputSchema: { type: "object", properties: { agentId: { type: "string" } } },
     handler: async (args: { agentId?: string }, ctx) => {
-      const project = (tool: Tool) => tool.ownerId === ctx.principal.id ? tool : { id: tool.id, name: tool.name, description: tool.description };
+      const project = (tool: Tool) =>
+        tool.ownerId === ctx.principal.id ? tool : { id: tool.id, name: tool.name, description: tool.description };
       if (args.agentId) {
         await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
         const rows = await ctx.db.agentTool.findMany({ where: { agentId: args.agentId }, include: { tool: true } });
-        return textResult(rows.map((r) => r.tool).filter((tool) => canRead(tool.ownerId, ctx.principal.id)).map(project));
+        return textResult(
+          rows
+            .map((r) => r.tool)
+            .filter((tool) => canRead(tool.ownerId, ctx.principal.id))
+            .map(project),
+        );
       }
       const tools = await ctx.db.tool.findMany({ where: visibleToPrincipal(ctx.principal.id) });
       return textResult(tools.filter((tool) => canRead(tool.ownerId, ctx.principal.id)).map(project));

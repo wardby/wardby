@@ -41,8 +41,5 @@ export interface InboundEmail {
 export interface EmailProvider {
   send(msg: OutboundEmail): Promise<{ messageId: string }>;
   /** Fetch messages routed to a mailbox/address key. */
-  fetchInbound(
-    mailbox: string,
-    opts?: { since?: Date; limit?: number },
-  ): Promise<InboundEmail[]>;
+  fetchInbound(mailbox: string, opts?: { since?: Date; limit?: number }): Promise<InboundEmail[]>;
 }

@@ -58,7 +58,9 @@ export async function fulfillSecretElicitation(
   const now = new Date();
   await pruneExpired(db, now);
   const { ownerId, secretName } = payload;
-  const existing = await db.secretElicitationOutcome.findUnique({ where: { ownerId_secretName: { ownerId, secretName } } });
+  const existing = await db.secretElicitationOutcome.findUnique({
+    where: { ownerId_secretName: { ownerId, secretName } },
+  });
   if (existing) return existing.outcome as SecretElicitationOutcome;
 
   let outcome: SecretElicitationOutcome;
@@ -66,7 +68,14 @@ export async function fulfillSecretElicitation(
     const secret = await createSecret(secretName, value, ownerId, cipher, db);
     outcome = {
       ok: true,
-      secret: { id: secret.id, name: secret.name, keyId: secret.keyId, ownerId: secret.ownerId, createdAt: secret.createdAt, updatedAt: secret.updatedAt },
+      secret: {
+        id: secret.id,
+        name: secret.name,
+        keyId: secret.keyId,
+        ownerId: secret.ownerId,
+        createdAt: secret.createdAt,
+        updatedAt: secret.updatedAt,
+      },
     };
   } catch (err) {
     outcome = { ok: false, error: err instanceof Error ? err.message : String(err) };

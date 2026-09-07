@@ -38,16 +38,25 @@ type FakeAgentSeed = Omit<FakeAgentRow, "kind" | "codingProfile" | "scheduleEnab
   Partial<Pick<FakeAgentRow, "kind" | "codingProfile" | "scheduleEnabled">>;
 
 function fakeDb(seed: FakeAgentSeed[] = []) {
-  const rows = new Map(seed.map((r) => [r.id, {
-    kind: "native" as const,
-    codingProfile: null,
-    scheduleEnabled: true,
-    ...r,
-  }]));
+  const rows = new Map(
+    seed.map((r) => [
+      r.id,
+      {
+        kind: "native" as const,
+        codingProfile: null,
+        scheduleEnabled: true,
+        ...r,
+      },
+    ]),
+  );
   let counter = rows.size;
   const transactionDb = {
     agent: {
-      create: async ({ data }: { data: Partial<FakeAgentRow> & { name: string; codingProfile?: { create: FakeCodingProfile } } }) => {
+      create: async ({
+        data,
+      }: {
+        data: Partial<FakeAgentRow> & { name: string; codingProfile?: { create: FakeCodingProfile } };
+      }) => {
         const { codingProfile, ...agentData } = data;
         const row: FakeAgentRow = {
           id: `agent_${++counter}`,
@@ -73,9 +82,14 @@ function fakeDb(seed: FakeAgentSeed[] = []) {
         if (!where?.OR) return all;
         return all.filter((r) => where.OR!.some((cond) => r.ownerId === cond.ownerId));
       },
-      update: async ({ where, data }: {
+      update: async ({
+        where,
+        data,
+      }: {
         where: { id: string };
-        data: Partial<FakeAgentRow> & { codingProfile?: { create?: FakeCodingProfile; update?: FakeCodingProfile; delete?: boolean } };
+        data: Partial<FakeAgentRow> & {
+          codingProfile?: { create?: FakeCodingProfile; update?: FakeCodingProfile; delete?: boolean };
+        };
       }) => {
         const row = rows.get(where.id);
         if (!row) throw new Error("not found");
@@ -85,7 +99,7 @@ function fakeDb(seed: FakeAgentSeed[] = []) {
           ...agentData,
           codingProfile: codingProfile?.delete
             ? null
-            : codingProfile?.create ?? codingProfile?.update ?? row.codingProfile,
+            : (codingProfile?.create ?? codingProfile?.update ?? row.codingProfile),
         };
         rows.set(where.id, updated);
         return updated;
@@ -218,7 +232,18 @@ describe("agent CRUD tools", () => {
 
   it("update_agent transitions native to coding and coding back to native atomically", async () => {
     const db = fakeDb([
-      { id: "a1", name: "agent", systemPrompt: "x", model: "m", budgetUsd: 1, maxTurns: 10, schedule: null, timezone: "UTC", ownerId: "p1", tools: [] },
+      {
+        id: "a1",
+        name: "agent",
+        systemPrompt: "x",
+        model: "m",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId: "p1",
+        tools: [],
+      },
     ]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
@@ -237,13 +262,27 @@ describe("agent CRUD tools", () => {
 
     const toNative = await client.callTool({ name: "update_agent", arguments: { id: "a1", kind: "native" } });
     expect(toNative.isError).toBeFalsy();
-    expect(JSON.parse((toNative.content as { text: string }[])[0].text)).toMatchObject({ kind: "native", codingProfile: null });
+    expect(JSON.parse((toNative.content as { text: string }[])[0].text)).toMatchObject({
+      kind: "native",
+      codingProfile: null,
+    });
     await client.close();
   });
 
   it("update_agent rejects a coding transition while native tools remain attached", async () => {
     const db = fakeDb([
-      { id: "a1", name: "agent", systemPrompt: "x", model: "m", budgetUsd: 1, maxTurns: 10, schedule: null, timezone: "UTC", ownerId: "p1", tools: [{}] },
+      {
+        id: "a1",
+        name: "agent",
+        systemPrompt: "x",
+        model: "m",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId: "p1",
+        tools: [{}],
+      },
     ]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
@@ -268,21 +307,23 @@ describe("agent CRUD tools", () => {
       allowedEgress: [],
       protectedPaths: ["CODEOWNERS"],
     };
-    const db = fakeDb([{
-      id: "a1",
-      name: "agent",
-      systemPrompt: "x",
-      model: "m",
-      budgetUsd: 1,
-      maxTurns: 10,
-      schedule: "0 * * * *",
-      timezone: "UTC",
-      scheduleEnabled: true,
-      ownerId: "p1",
-      tools: [],
-      kind: "coding",
-      codingProfile: profile,
-    }]);
+    const db = fakeDb([
+      {
+        id: "a1",
+        name: "agent",
+        systemPrompt: "x",
+        model: "m",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: "0 * * * *",
+        timezone: "UTC",
+        scheduleEnabled: true,
+        ownerId: "p1",
+        tools: [],
+        kind: "coding",
+        codingProfile: profile,
+      },
+    ]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
     registerAgentTools(mcp);
@@ -326,7 +367,18 @@ describe("agent CRUD tools", () => {
 
   it("update_agent by a non-owner is forbidden", async () => {
     const db = fakeDb([
-      { id: "a1", name: "shared", systemPrompt: "x", model: "m", budgetUsd: 1, maxTurns: 10, schedule: null, timezone: "UTC", ownerId: "owner-1", tools: [] },
+      {
+        id: "a1",
+        name: "shared",
+        systemPrompt: "x",
+        model: "m",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId: "owner-1",
+        tools: [],
+      },
     ]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, "not-the-owner", ["agents:write"]));
@@ -341,7 +393,18 @@ describe("agent CRUD tools", () => {
 
   it("delete_agent by a non-owner is forbidden", async () => {
     const db = fakeDb([
-      { id: "a1", name: "shared", systemPrompt: "x", model: "m", budgetUsd: 1, maxTurns: 10, schedule: null, timezone: "UTC", ownerId: "owner-1", tools: [] },
+      {
+        id: "a1",
+        name: "shared",
+        systemPrompt: "x",
+        model: "m",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId: "owner-1",
+        tools: [],
+      },
     ]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, "not-the-owner", ["agents:write"]));
@@ -355,9 +418,42 @@ describe("agent CRUD tools", () => {
 
   it("list_agents returns caller's own agents plus public (null-owner) ones, not other owners'", async () => {
     const db = fakeDb([
-      { id: "a1", name: "mine", systemPrompt: "x", model: "m", budgetUsd: 1, maxTurns: 10, schedule: null, timezone: "UTC", ownerId: "p1", tools: [] },
-      { id: "a2", name: "public", systemPrompt: "x", model: "m", budgetUsd: 1, maxTurns: 10, schedule: null, timezone: "UTC", ownerId: null, tools: [] },
-      { id: "a3", name: "someone-elses", systemPrompt: "x", model: "m", budgetUsd: 1, maxTurns: 10, schedule: null, timezone: "UTC", ownerId: "p2", tools: [] },
+      {
+        id: "a1",
+        name: "mine",
+        systemPrompt: "x",
+        model: "m",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId: "p1",
+        tools: [],
+      },
+      {
+        id: "a2",
+        name: "public",
+        systemPrompt: "x",
+        model: "m",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId: null,
+        tools: [],
+      },
+      {
+        id: "a3",
+        name: "someone-elses",
+        systemPrompt: "x",
+        model: "m",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId: "p2",
+        tools: [],
+      },
     ]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));

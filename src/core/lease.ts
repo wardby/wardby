@@ -13,12 +13,7 @@ import type { PrismaClient } from "@prisma/client";
 export type LeaseDb = Pick<PrismaClient, "$queryRaw">;
 
 /** Attempts to acquire (or renew) the lease for `scope`. Returns whether `holder` now holds it. */
-export async function tryAcquireLease(
-  db: LeaseDb,
-  scope: string,
-  holder: string,
-  ttlMs: number,
-): Promise<boolean> {
+export async function tryAcquireLease(db: LeaseDb, scope: string, holder: string, ttlMs: number): Promise<boolean> {
   const expiresAt = new Date(Date.now() + ttlMs);
   const rows = await db.$queryRaw<{ holder: string }[]>`
     INSERT INTO "SchedulerLease" ("scope", "holder", "expiresAt", "updatedAt")

@@ -22,7 +22,10 @@ const PRICING: Record<string, ModelPricing> = {
 
 export function getAnthropicPricing(model: string): ModelPricing {
   const p = PRICING[model];
-  if (!p) throw new Error(`No pricing entry for model "${model}" — refusing to price at zero. Add it to src/providers/llm/pricing-anthropic.ts.`);
+  if (!p)
+    throw new Error(
+      `No pricing entry for model "${model}" — refusing to price at zero. Add it to src/providers/llm/pricing-anthropic.ts.`,
+    );
   return p;
 }
 

@@ -80,7 +80,10 @@ describe("datastore tools", () => {
     registerDatastoreTools(mcp);
     const client = await connectClient(mcp);
 
-    const setResult = await client.callTool({ name: "datastore_set", arguments: { agentId: "a1", key: "k1", value: "v1" } });
+    const setResult = await client.callTool({
+      name: "datastore_set",
+      arguments: { agentId: "a1", key: "k1", value: "v1" },
+    });
     expect(setResult.isError).toBeFalsy();
 
     const getResult = await client.callTool({ name: "datastore_get", arguments: { agentId: "a1", key: "k1" } });
@@ -110,7 +113,10 @@ describe("datastore tools", () => {
     registerDatastoreTools(mcp);
     const client = await connectClient(mcp);
 
-    const result = await client.callTool({ name: "datastore_set", arguments: { agentId: "a1", key: "k1", value: "v1" } });
+    const result = await client.callTool({
+      name: "datastore_set",
+      arguments: { agentId: "a1", key: "k1", value: "v1" },
+    });
     expect(result.isError).toBe(true);
     expect((result.content as { text: string }[])[0].text).toMatch(/scope/i);
     await client.close();
@@ -127,7 +133,10 @@ describe("datastore tools", () => {
     const getResult = await client.callTool({ name: "datastore_get", arguments: { agentId: "a1", key: "k1" } });
     expect(getResult.isError).toBe(true);
 
-    const setResult = await client.callTool({ name: "datastore_set", arguments: { agentId: "a1", key: "k1", value: "v1" } });
+    const setResult = await client.callTool({
+      name: "datastore_set",
+      arguments: { agentId: "a1", key: "k1", value: "v1" },
+    });
     expect(setResult.isError).toBe(true);
     await client.close();
   });
@@ -146,7 +155,10 @@ describe("datastore tools", () => {
     const listResult = await client.callTool({ name: "datastore_list", arguments: { agentId: "a1" } });
     expect(listResult.isError).toBeFalsy();
 
-    const setResult = await client.callTool({ name: "datastore_set", arguments: { agentId: "a1", key: "k1", value: "v1" } });
+    const setResult = await client.callTool({
+      name: "datastore_set",
+      arguments: { agentId: "a1", key: "k1", value: "v1" },
+    });
     expect(setResult.isError).toBe(true);
 
     const deleteResult = await client.callTool({ name: "datastore_delete", arguments: { agentId: "a1", key: "k1" } });

@@ -98,15 +98,17 @@ describe("scheduling tools", () => {
   });
 
   it("set_schedule requires a default task for coding agents", async () => {
-    const db = fakeDb([{
-      id: "a1",
-      ownerId: "p1",
-      schedule: null,
-      timezone: "UTC",
-      scheduleEnabled: false,
-      kind: "coding",
-      codingProfile: { defaultTask: null },
-    }]);
+    const db = fakeDb([
+      {
+        id: "a1",
+        ownerId: "p1",
+        schedule: null,
+        timezone: "UTC",
+        scheduleEnabled: false,
+        kind: "coding",
+        codingProfile: { defaultTask: null },
+      },
+    ]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
     registerSchedulingTools(mcp);

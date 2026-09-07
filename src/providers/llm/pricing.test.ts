@@ -3,9 +3,7 @@ import { computeCost, priceUsd, type ModelPricing } from "./pricing.js";
 
 describe("priceUsd", () => {
   it("throws for an unknown model rather than pricing at zero", () => {
-    expect(() => priceUsd("not-a-real-model", { inputTokens: 1, outputTokens: 1 })).toThrow(
-      /No pricing entry/,
-    );
+    expect(() => priceUsd("not-a-real-model", { inputTokens: 1, outputTokens: 1 })).toThrow(/No pricing entry/);
   });
 
   it("prices plain input/output at the base rates when no cache tokens are reported", () => {
@@ -31,7 +29,7 @@ describe("priceUsd", () => {
       outputTokens: 0,
     });
     // 600k fresh @ $0.2/1M + 400k cached @ $0.02/1M
-    expect(cost).toBeCloseTo(600_000 / 1_000_000 * 0.2 + 400_000 / 1_000_000 * 0.02, 6);
+    expect(cost).toBeCloseTo((600_000 / 1_000_000) * 0.2 + (400_000 / 1_000_000) * 0.02, 6);
   });
 
   it("prices cache-write tokens at the cache-write rate", () => {
@@ -62,9 +60,7 @@ describe("priceUsd", () => {
     // cachedInputTokens splits out of inputTokens (500k fresh + 500k cached);
     // cacheWriteTokens (200k) bills on top. So (500k + 500k + 200k) @ $0.15/1M.
     expect(withoutCacheRates).toBeCloseTo(
-      (500_000 / 1_000_000) * 0.15 +
-        (500_000 / 1_000_000) * 0.15 +
-        (200_000 / 1_000_000) * 0.15,
+      (500_000 / 1_000_000) * 0.15 + (500_000 / 1_000_000) * 0.15 + (200_000 / 1_000_000) * 0.15,
       6,
     );
   });

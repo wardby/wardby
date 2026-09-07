@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { getSecretElicitationOutcome, fulfillSecretElicitation, type SecretElicitationPayload } from "./secret-elicitation.js";
+import {
+  getSecretElicitationOutcome,
+  fulfillSecretElicitation,
+  type SecretElicitationPayload,
+} from "./secret-elicitation.js";
 import type { SecretCipher } from "../../providers/secrets/types.js";
 
 function fakeCipher(): SecretCipher {
@@ -17,13 +21,34 @@ function fakeCipher(): SecretCipher {
 }
 
 function fakeDb() {
-  const secrets = new Map<string, { id: string; name: string; ciphertext: string; keyId: string; ownerId: string | null; createdAt: Date; updatedAt: Date }>();
+  const secrets = new Map<
+    string,
+    {
+      id: string;
+      name: string;
+      ciphertext: string;
+      keyId: string;
+      ownerId: string | null;
+      createdAt: Date;
+      updatedAt: Date;
+    }
+  >();
   const outcomes = new Map<string, { ownerId: string; secretName: string; outcome: unknown; expiresAt: Date }>();
   let counter = 0;
   return {
     secret: {
-      upsert: async ({ where, create, update }: { where: { ownerId_name: { ownerId: string; name: string } }; create: { name: string; ciphertext: string; keyId: string; ownerId: string }; update: { ciphertext: string; keyId: string } }) => {
-        const existing = [...secrets.values()].find((s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name);
+      upsert: async ({
+        where,
+        create,
+        update,
+      }: {
+        where: { ownerId_name: { ownerId: string; name: string } };
+        create: { name: string; ciphertext: string; keyId: string; ownerId: string };
+        update: { ciphertext: string; keyId: string };
+      }) => {
+        const existing = [...secrets.values()].find(
+          (s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name,
+        );
         if (existing) {
           const row = { ...existing, ...update, updatedAt: new Date() };
           secrets.set(row.id, row);
@@ -36,8 +61,11 @@ function fakeDb() {
       },
     },
     secretElicitationOutcome: {
-      findUnique: async ({ where: { ownerId_secretName } }: { where: { ownerId_secretName: { ownerId: string; secretName: string } } }) =>
-        outcomes.get(`${ownerId_secretName.ownerId}\0${ownerId_secretName.secretName}`) ?? null,
+      findUnique: async ({
+        where: { ownerId_secretName },
+      }: {
+        where: { ownerId_secretName: { ownerId: string; secretName: string } };
+      }) => outcomes.get(`${ownerId_secretName.ownerId}\0${ownerId_secretName.secretName}`) ?? null,
       upsert: async ({
         where: { ownerId_secretName },
         create,
@@ -77,7 +105,10 @@ describe("secret elicitation outcome TTL", () => {
     const db = fakeDb();
     const payload: SecretElicitationPayload = { ownerId: "p1", secretName: "TTL_TEST" };
     await fulfillSecretElicitation(payload, "value", fakeCipher(), db);
-    expect(await getSecretElicitationOutcome("p1", "TTL_TEST", db)).toEqual({ ok: true, secret: expect.objectContaining({ name: "TTL_TEST" }) });
+    expect(await getSecretElicitationOutcome("p1", "TTL_TEST", db)).toEqual({
+      ok: true,
+      secret: expect.objectContaining({ name: "TTL_TEST" }),
+    });
 
     vi.advanceTimersByTime(600_001);
     expect(await getSecretElicitationOutcome("p1", "TTL_TEST", db)).toBeUndefined();
@@ -94,7 +125,10 @@ describe("secret elicitation outcome TTL", () => {
     await fulfillSecretElicitation({ ownerId: "p1", secretName: "FRESH" }, "value2", cipher, db);
 
     expect(await getSecretElicitationOutcome("p1", "STALE", db)).toBeUndefined();
-    expect(await getSecretElicitationOutcome("p1", "FRESH", db)).toEqual({ ok: true, secret: expect.objectContaining({ name: "FRESH" }) });
+    expect(await getSecretElicitationOutcome("p1", "FRESH", db)).toEqual({
+      ok: true,
+      secret: expect.objectContaining({ name: "FRESH" }),
+    });
   });
 
   it("still returns the recorded outcome, and skips a second write, within the TTL window", async () => {
@@ -104,7 +138,12 @@ describe("secret elicitation outcome TTL", () => {
     const first = await fulfillSecretElicitation({ ownerId: "p1", secretName: "IDEMPOTENT_TTL" }, "first", cipher, db);
 
     vi.advanceTimersByTime(500_000);
-    const second = await fulfillSecretElicitation({ ownerId: "p1", secretName: "IDEMPOTENT_TTL" }, "second", cipher, db);
+    const second = await fulfillSecretElicitation(
+      { ownerId: "p1", secretName: "IDEMPOTENT_TTL" },
+      "second",
+      cipher,
+      db,
+    );
 
     expect(second).toEqual(first);
   });

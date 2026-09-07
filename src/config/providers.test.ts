@@ -22,14 +22,16 @@ describe("provider config", () => {
 
 describe("loadGitHubVcsConfig", () => {
   it("loads credentials, workspace, API, and positive limits", () => {
-    expect(loadGitHubVcsConfig({
-      GITHUB_APP_ID: "123",
-      GITHUB_APP_PRIVATE_KEY: "private-key",
-      VCS_WORK_ROOT: "/var/lib/reevo-vcs",
-      GITHUB_API_VERSION: "2026-03-10",
-      VCS_MAX_CHANGED_FILES: "50",
-      VCS_MAX_DIFF_BYTES: "4096",
-    })).toEqual({
+    expect(
+      loadGitHubVcsConfig({
+        GITHUB_APP_ID: "123",
+        GITHUB_APP_PRIVATE_KEY: "private-key",
+        VCS_WORK_ROOT: "/var/lib/reevo-vcs",
+        GITHUB_API_VERSION: "2026-03-10",
+        VCS_MAX_CHANGED_FILES: "50",
+        VCS_MAX_DIFF_BYTES: "4096",
+      }),
+    ).toEqual({
       appId: "123",
       privateKey: "private-key",
       workRoot: "/var/lib/reevo-vcs",

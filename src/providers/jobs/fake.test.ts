@@ -30,7 +30,7 @@ describe("FakeJobLauncher controls", () => {
     const launcher = new FakeJobLauncher();
     launcher.queuePlan({
       statusScript: [{ state: "pending" }, { state: "running" }, { state: "succeeded" }],
-      result: { exitCode: 0, reason: "completed", resultArtifact: "{\"schemaVersion\":1}" },
+      result: { exitCode: 0, reason: "completed", resultArtifact: '{"schemaVersion":1}' },
     });
     const handle = await launcher.launch(spec());
 
@@ -41,7 +41,7 @@ describe("FakeJobLauncher controls", () => {
     expect(await launcher.collect(handle)).toEqual({
       exitCode: 0,
       reason: "completed",
-      resultArtifact: "{\"schemaVersion\":1}",
+      resultArtifact: '{"schemaVersion":1}',
     });
   });
 
@@ -55,18 +55,12 @@ describe("FakeJobLauncher controls", () => {
   it("makes stop-versus-completion races converge on the first terminal state", async () => {
     const stopFirst = new FakeJobLauncher();
     const stopped = await stopFirst.launch(spec("run-stop-first"));
-    await Promise.all([
-      stopFirst.stop(stopped, "cancelled"),
-      stopFirst.finish(stopped),
-    ]);
+    await Promise.all([stopFirst.stop(stopped, "cancelled"), stopFirst.finish(stopped)]);
     expect(await stopFirst.status(stopped)).toEqual({ state: "stopped" });
 
     const finishFirst = new FakeJobLauncher();
     const finished = await finishFirst.launch(spec("run-finish-first"));
-    await Promise.all([
-      finishFirst.finish(finished),
-      finishFirst.stop(finished, "cancelled"),
-    ]);
+    await Promise.all([finishFirst.finish(finished), finishFirst.stop(finished, "cancelled")]);
     expect(await finishFirst.status(finished)).toEqual({ state: "succeeded" });
   });
 

@@ -37,7 +37,9 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[]) {
     run: {
       findUnique: async ({ where }: { where: { id: string } }) => runRows.get(where.id) ?? null,
       findMany: async ({ where }: { where: { agentId: string; status?: string } }) =>
-        [...runRows.values()].filter((r) => r.agentId === where.agentId && (!where.status || r.status === where.status)),
+        [...runRows.values()].filter(
+          (r) => r.agentId === where.agentId && (!where.status || r.status === where.status),
+        ),
     },
   } as unknown as import("@prisma/client").PrismaClient;
 }
@@ -138,8 +140,34 @@ describe("run observability tools", () => {
     const db = fakeDb(
       [{ id: "a1", ownerId: "p1" }],
       [
-        { id: "r1", agentId: "a1", status: "succeeded", trigger: "manual", turns: 1, tokensIn: 1, tokensOut: 1, costUsd: 0, finalText: "x", error: null, startedAt: now, finishedAt: now },
-        { id: "r2", agentId: "a1", status: "failed", trigger: "manual", turns: 1, tokensIn: 1, tokensOut: 1, costUsd: 0, finalText: null, error: "boom", startedAt: now, finishedAt: now },
+        {
+          id: "r1",
+          agentId: "a1",
+          status: "succeeded",
+          trigger: "manual",
+          turns: 1,
+          tokensIn: 1,
+          tokensOut: 1,
+          costUsd: 0,
+          finalText: "x",
+          error: null,
+          startedAt: now,
+          finishedAt: now,
+        },
+        {
+          id: "r2",
+          agentId: "a1",
+          status: "failed",
+          trigger: "manual",
+          turns: 1,
+          tokensIn: 1,
+          tokensOut: 1,
+          costUsd: 0,
+          finalText: null,
+          error: "boom",
+          startedAt: now,
+          finishedAt: now,
+        },
       ],
     );
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
@@ -170,7 +198,22 @@ describe("run observability tools", () => {
     const now = new Date();
     const db = fakeDb(
       [{ id: "a1", ownerId: null }],
-      [{ id: "r1", agentId: "a1", status: "succeeded", trigger: "manual", turns: 1, tokensIn: 1, tokensOut: 1, costUsd: 0, finalText: "x", error: null, startedAt: now, finishedAt: now }],
+      [
+        {
+          id: "r1",
+          agentId: "a1",
+          status: "succeeded",
+          trigger: "manual",
+          turns: 1,
+          tokensIn: 1,
+          tokensOut: 1,
+          costUsd: 0,
+          finalText: "x",
+          error: null,
+          startedAt: now,
+          finishedAt: now,
+        },
+      ],
     );
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, "anyone", ["agents:read"]));

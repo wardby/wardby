@@ -23,8 +23,7 @@ export function jobLauncherContract(
     it("rejects a conflicting duplicate launch", async () => {
       const { launcher, spec } = await createHarness();
       await launcher.launch(spec);
-      await expect(launcher.launch({ ...spec, timeoutSec: spec.timeoutSec + 1 }))
-        .rejects.toThrow("job_spec_conflict");
+      await expect(launcher.launch({ ...spec, timeoutSec: spec.timeoutSec + 1 })).rejects.toThrow("job_spec_conflict");
     });
 
     it("reports legal active-to-terminal transitions without terminal regression", async () => {

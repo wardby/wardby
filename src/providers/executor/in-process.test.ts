@@ -22,8 +22,7 @@ function fakeDb(agents: FakeAgent[], runs: Record<string, any>): RunnerDb {
 
   return {
     agent: {
-      findUnique: (async ({ where }: any) =>
-        (where.name ? byName.get(where.name) : byId.get(where.id)) ?? null) as any,
+      findUnique: (async ({ where }: any) => (where.name ? byName.get(where.name) : byId.get(where.id)) ?? null) as any,
     },
     run: {
       findUnique: (async ({ where }: any) => store.get(where.id) ?? null) as any,
@@ -96,10 +95,7 @@ describe("InProcessExecutor", () => {
       budgetUsd: 10,
       maxTurns: 10,
     };
-    const db = fakeDb(
-      [agent],
-      { run_1: { id: "run_1", agentId: "a1", status: "pending", heartbeatAt: null } },
-    );
+    const db = fakeDb([agent], { run_1: { id: "run_1", agentId: "a1", status: "pending", heartbeatAt: null } });
     const llm = slowLlm(["a", "b", "c"], 15);
 
     const executor = new InProcessExecutor(
@@ -124,10 +120,7 @@ describe("InProcessExecutor", () => {
       budgetUsd: 10,
       maxTurns: 10,
     };
-    const db = fakeDb(
-      [agent],
-      { run_1: { id: "run_1", agentId: "a1", status: "pending", heartbeatAt: null } },
-    );
+    const db = fakeDb([agent], { run_1: { id: "run_1", agentId: "a1", status: "pending", heartbeatAt: null } });
     const llm: LlmProvider = {
       async *stream() {
         yield { type: "text", delta: "x" };

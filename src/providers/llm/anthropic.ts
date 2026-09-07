@@ -9,7 +9,13 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { encode as encodeO200kBase } from "gpt-tokenizer/encoding/o200k_base";
 import type { LlmMessage, LlmProvider, LlmRequest, LlmStreamEvent, LlmToolDef } from "./types.js";
-import { toClaudeRequest, withCacheBreakpoints, mapClaudeStream, toClaudeTools, type ClaudeStreamEvent } from "./claude-messages.js";
+import {
+  toClaudeRequest,
+  withCacheBreakpoints,
+  mapClaudeStream,
+  toClaudeTools,
+  type ClaudeStreamEvent,
+} from "./claude-messages.js";
 import { anthropicPriceUsd, getAnthropicPricing } from "./pricing-anthropic.js";
 
 export { anthropicSupportedModels } from "./pricing-anthropic.js";
@@ -34,17 +40,19 @@ export class AnthropicLlmProvider implements LlmProvider {
   private readonly client: Anthropic;
 
   constructor(apiKey: string = process.env.ANTHROPIC_API_KEY ?? "", client?: Anthropic) {
-    if (client) { this.client = client; return; }
+    if (client) {
+      this.client = client;
+      return;
+    }
     if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not set — required by the Anthropic LlmProvider adapter.");
     this.client = new Anthropic({ apiKey });
   }
 
   async *stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<LlmStreamEvent> {
     const claudeReq = withCacheBreakpoints(toClaudeRequest(req, DEFAULT_MAX_TOKENS));
-    const raw = this.client.messages.stream(
-      { model: req.model, ...claudeReq } as Anthropic.MessageStreamParams,
-      { signal },
-    ) as AsyncIterable<ClaudeStreamEvent>;
+    const raw = this.client.messages.stream({ model: req.model, ...claudeReq } as Anthropic.MessageStreamParams, {
+      signal,
+    }) as AsyncIterable<ClaudeStreamEvent>;
     yield* mapClaudeStream(raw, (usage) => this.priceUsd(req.model, usage));
   }
 
@@ -60,7 +68,10 @@ export class AnthropicLlmProvider implements LlmProvider {
     return Math.ceil(raw * CLAUDE_TOKEN_INFLATION);
   }
 
-  priceUsd(model: string, usage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number; cacheWriteTokens?: number }): number {
+  priceUsd(
+    model: string,
+    usage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number; cacheWriteTokens?: number },
+  ): number {
     return anthropicPriceUsd(model, usage);
   }
 }

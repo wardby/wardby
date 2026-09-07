@@ -43,7 +43,14 @@ export async function createSecret(
 /** Names/metadata only — never a value or ciphertext. */
 export async function listSecrets(ownerId: string, db: PrismaClient): Promise<SecretMetadata[]> {
   const secrets = await db.secret.findMany({ where: { ownerId } });
-  return secrets.map(({ id, name, keyId, ownerId: owner, createdAt, updatedAt }) => ({ id, name, keyId, ownerId: owner, createdAt, updatedAt }));
+  return secrets.map(({ id, name, keyId, ownerId: owner, createdAt, updatedAt }) => ({
+    id,
+    name,
+    keyId,
+    ownerId: owner,
+    createdAt,
+    updatedAt,
+  }));
 }
 
 async function findOwnedSecretByName(db: PrismaClient, ownerId: string, name: string): Promise<Secret | null> {
@@ -91,7 +98,10 @@ export function buildSecretsAccessor(
         return cipher.decrypt(rows[0].ciphertext);
       }
       // Lightweight provider doubles use the same post-read bound; production Prisma filters in SQL.
-      const attachment = await db.agentSecret.findFirst({ where: { agentId, secret: { name } }, include: { secret: true } });
+      const attachment = await db.agentSecret.findFirst({
+        where: { agentId, secret: { name } },
+        include: { secret: true },
+      });
       if (!attachment) return undefined;
       boundedString(attachment.secret.ciphertext, 256 * 1024);
       return cipher.decrypt(attachment.secret.ciphertext);

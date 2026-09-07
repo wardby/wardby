@@ -10,7 +10,14 @@ import globals from "globals";
 
 export default tseslint.config(
   {
-    ignores: ["**/dist/**", "**/node_modules/**", "src/sandbox/generated/**", "**/coverage/**", "spikes/**", ".claude/**"],
+    ignores: [
+      "**/dist/**",
+      "**/node_modules/**",
+      "src/sandbox/generated/**",
+      "**/coverage/**",
+      "spikes/**",
+      ".claude/**",
+    ],
   },
   {
     files: ["src/**/*.ts"],

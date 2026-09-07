@@ -93,10 +93,7 @@ describe("OpenAiLlmProvider tool-call reassembly", () => {
       events.push(event);
     }
 
-    expect(events.filter((e) => e.type === "text").map((e) => (e as { delta: string }).delta)).toEqual([
-      "hel",
-      "lo",
-    ]);
+    expect(events.filter((e) => e.type === "text").map((e) => (e as { delta: string }).delta)).toEqual(["hel", "lo"]);
     expect(events.filter((e) => e.type === "tool_call")).toHaveLength(0);
     const done = events.find((e) => e.type === "done");
     expect(done).toBeDefined();

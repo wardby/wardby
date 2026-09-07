@@ -54,25 +54,40 @@ class ScriptedGitRunner implements GitCommandRunner {
   async run(args: readonly string[], options?: GitCommandOptions): Promise<GitCommandResult> {
     const copied = [...args];
     this.calls.push({ args: copied, options: options ? { ...options } : undefined });
-    const command = copied.find((value) => [
-      "clone", "config", "branch", "symbolic-ref", "read-tree", "remote", "add",
-      "diff", "commit", "rev-parse", "ls-remote", "push",
-    ].includes(value));
+    const command = copied.find((value) =>
+      [
+        "clone",
+        "config",
+        "branch",
+        "symbolic-ref",
+        "read-tree",
+        "remote",
+        "add",
+        "diff",
+        "commit",
+        "rev-parse",
+        "ls-remote",
+        "push",
+      ].includes(value),
+    );
     if (command === "clone") {
       const metadataPath = copied[copied.indexOf("--separate-git-dir") + 1];
       const workspacePath = copied.at(-1)!;
       await mkdir(metadataPath, { recursive: true });
       await mkdir(workspacePath, { recursive: true });
       await writeFile(resolve(workspacePath, ".git"), `gitdir: ${metadataPath}\n`);
-      await writeFile(resolve(metadataPath, "config"), [
-        "[core]",
-        "\trepositoryformatversion = 0",
-        "\tbare = false",
-        `\tworktree = ${workspacePath}`,
-        "[remote \"origin\"]",
-        `\turl = ${this.remoteUrl}`,
-        "\tfetch = +refs/heads/main:refs/remotes/origin/main",
-      ].join("\n"));
+      await writeFile(
+        resolve(metadataPath, "config"),
+        [
+          "[core]",
+          "\trepositoryformatversion = 0",
+          "\tbare = false",
+          `\tworktree = ${workspacePath}`,
+          '[remote "origin"]',
+          `\turl = ${this.remoteUrl}`,
+          "\tfetch = +refs/heads/main:refs/remotes/origin/main",
+        ].join("\n"),
+      );
     }
     if (command === "remote") {
       if (copied.includes("get-url")) return { stdout: `${this.remoteUrl}\n`, stderr: "" };
@@ -145,9 +160,9 @@ describe("GitVcsProvider", () => {
     expect(prepared.gitMetadataPath).not.toContain(`${prepared.workspacePath}/`);
     await expect(readFile(resolve(prepared.workspacePath, ".git"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     const clone = git.calls.find((call) => call.args.includes("clone"))!;
-    expect(clone.args).toEqual(expect.arrayContaining([
-      "--no-checkout", "--single-branch", "--no-tags", "--separate-git-dir",
-    ]));
+    expect(clone.args).toEqual(
+      expect.arrayContaining(["--no-checkout", "--single-branch", "--no-tags", "--separate-git-dir"]),
+    );
     expect(clone.args.join(" ")).not.toContain(TOKEN);
     expect(clone.options?.authToken).toBe(TOKEN);
     expect(github.tokenCalls).toBe(1);
@@ -169,26 +184,32 @@ describe("GitVcsProvider", () => {
       pullRequestUrl: "https://github.com/openai/example/pull/42",
     });
     const commit = git.calls.find((call) => call.args.includes("commit"))!;
-    expect(commit.args).toEqual(expect.arrayContaining([
-      "core.hooksPath=/dev/null", "commit.gpgSign=false", "commit", "--no-verify", "--no-gpg-sign",
-    ]));
+    expect(commit.args).toEqual(
+      expect.arrayContaining([
+        "core.hooksPath=/dev/null",
+        "commit.gpgSign=false",
+        "commit",
+        "--no-verify",
+        "--no-gpg-sign",
+      ]),
+    );
     const push = git.calls.find((call) => call.args.includes("push"))!;
     expect(push.args.join(" ")).not.toContain(TOKEN);
     expect(push.args).toContain(`${COMMIT_SHA}:refs/heads/reevo/run-run-1`);
     expect(github.pullRequestCalls).toHaveLength(1);
   });
 
-  it.each([
-    ".github/workflows/release.yml",
-    "CODEOWNERS",
-  ])("rejects protected path changes before commit or push (%s)", async (path) => {
-    const { provider, git, input } = await harness();
-    const prepared = await provider.prepareWorkspace(input);
-    git.changedPaths = [path];
-    await expect(provider.finalizeChanges(prepared)).rejects.toThrow(`vcs_protected_path:${path}`);
-    expect(git.calls.some((call) => call.args.includes("commit"))).toBe(false);
-    expect(git.calls.some((call) => call.args.includes("push"))).toBe(false);
-  });
+  it.each([".github/workflows/release.yml", "CODEOWNERS"])(
+    "rejects protected path changes before commit or push (%s)",
+    async (path) => {
+      const { provider, git, input } = await harness();
+      const prepared = await provider.prepareWorkspace(input);
+      git.changedPaths = [path];
+      await expect(provider.finalizeChanges(prepared)).rejects.toThrow(`vcs_protected_path:${path}`);
+      expect(git.calls.some((call) => call.args.includes("commit"))).toBe(false);
+      expect(git.calls.some((call) => call.args.includes("push"))).toBe(false);
+    },
+  );
 
   it("rejects symlinks escaping the workspace before staging", async () => {
     const { provider, git, input } = await harness();
@@ -266,8 +287,9 @@ describe("GitVcsProvider", () => {
     const prepared = await provider.prepareWorkspace(input);
     await provider.cleanup(prepared);
     await provider.cleanup(prepared);
-    await expect(provider.cleanup({ ...prepared, workspacePath: rootDir }))
-      .rejects.toThrow("vcs_workspace_handle_invalid");
+    await expect(provider.cleanup({ ...prepared, workspacePath: rootDir })).rejects.toThrow(
+      "vcs_workspace_handle_invalid",
+    );
   });
 });
 
@@ -280,24 +302,26 @@ describe("Git process boundary", () => {
 
   it("rejects malformed authentication tokens before spawning Git", async () => {
     const runner = new NodeGitCommandRunner({ homeDir: "/private/tmp" });
-    await expect(runner.run(["status"], { authToken: "token\nsecond-line" }))
-      .rejects.toThrow("git_auth_token_invalid");
+    await expect(runner.run(["status"], { authToken: "token\nsecond-line" })).rejects.toThrow("git_auth_token_invalid");
   });
 
   it("uses argv arrays, strips inherited secrets, and keeps the token outside argv", async () => {
     const root = await mkdtemp("/private/tmp/reevo-git-runner-");
     roots.push(root);
     const executable = resolve(root, "fake-git.mjs");
-    await writeFile(executable, [
-      `#!${process.execPath}`,
-      "import { readFileSync } from 'node:fs';",
-      "console.log(JSON.stringify({",
-      "  argv: process.argv.slice(2),",
-      "  inherited: process.env.OPENAI_API_KEY ?? null,",
-      "  authEnvironmentPresent: Object.keys(process.env).some((key) => key.includes('AUTH_HEADER') || key.includes('TOKEN')) ,",
-      "  tokenBytesFromFd: readFileSync(3, 'utf8').trim().length,",
-      "}));",
-    ].join("\n"));
+    await writeFile(
+      executable,
+      [
+        `#!${process.execPath}`,
+        "import { readFileSync } from 'node:fs';",
+        "console.log(JSON.stringify({",
+        "  argv: process.argv.slice(2),",
+        "  inherited: process.env.OPENAI_API_KEY ?? null,",
+        "  authEnvironmentPresent: Object.keys(process.env).some((key) => key.includes('AUTH_HEADER') || key.includes('TOKEN')) ,",
+        "  tokenBytesFromFd: readFileSync(3, 'utf8').trim().length,",
+        "}));",
+      ].join("\n"),
+    );
     await chmod(executable, 0o700);
     process.env.OPENAI_API_KEY = "sk-test-abcdefghijklmnopqrstuvwxyz";
     try {
@@ -320,12 +344,15 @@ describe("Git process boundary", () => {
     const root = await mkdtemp("/private/tmp/reevo-git-runner-");
     roots.push(root);
     const executable = resolve(root, "failing-git.mjs");
-    await writeFile(executable, [
-      `#!${process.execPath}`,
-      "import { readFileSync } from 'node:fs';",
-      "console.error(readFileSync(3, 'utf8'));",
-      "process.exit(2);",
-    ].join("\n"));
+    await writeFile(
+      executable,
+      [
+        `#!${process.execPath}`,
+        "import { readFileSync } from 'node:fs';",
+        "console.error(readFileSync(3, 'utf8'));",
+        "process.exit(2);",
+      ].join("\n"),
+    );
     await chmod(executable, 0o700);
     const runner = new NodeGitCommandRunner({ gitBinary: executable, homeDir: root });
     const caught: unknown = await runner.run(["push"], { authToken: TOKEN }).catch((error) => error);
@@ -354,17 +381,26 @@ describe("Git process boundary", () => {
       const root = await mkdtemp("/private/tmp/reevo-git-runner-");
       roots.push(root);
       const runner = new NodeGitCommandRunner({ homeDir: root });
-      const caught: unknown = await runner.run([
-        "-c", "protocol.allow=never",
-        "-c", "protocol.http.allow=always",
-        "ls-remote", `http://127.0.0.1:${address.port}/owner/repository.git`,
-      ], { authToken: TOKEN }).catch((error) => error);
+      const caught: unknown = await runner
+        .run(
+          [
+            "-c",
+            "protocol.allow=never",
+            "-c",
+            "protocol.http.allow=always",
+            "ls-remote",
+            `http://127.0.0.1:${address.port}/owner/repository.git`,
+          ],
+          { authToken: TOKEN },
+        )
+        .catch((error) => error);
       expect(caught).toBeInstanceOf(GitCommandError);
       expect(authorization).toBe(`Basic ${Buffer.from(`x-access-token:${TOKEN}`).toString("base64")}`);
       expect((caught as Error).message).not.toContain(TOKEN);
     } finally {
-      await new Promise<void>((resolvePromise, rejectPromise) => server.close((error) =>
-        error ? rejectPromise(error) : resolvePromise()));
+      await new Promise<void>((resolvePromise, rejectPromise) =>
+        server.close((error) => (error ? rejectPromise(error) : resolvePromise())),
+      );
     }
   });
 });

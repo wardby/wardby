@@ -124,20 +124,20 @@ recovery, auth identity derivation, CSRF, transactions, and SSRF before rollout.
 
 ## Resource and networking limits
 
-| Surface | Limit |
-| --- | --- |
-| MCP/webhook bodies | 1 MiB raw bytes |
-| Auth bodies | 64 KiB raw bytes |
-| Request completion / headers | 15 seconds / 10 seconds |
-| Sandbox fetch | 8 MiB encoded and decoded, 5 redirects, 8 seconds |
-| Bridge input / output | 1 MiB / 12 MiB |
-| Parser input / console payload | 256 KiB / 16 KiB |
-| HTML links extracted | 1000, with incremental result-byte accounting |
-| Random bytes | 65,536 bytes |
-| Host calls | 256 per invocation, at most 8 pending |
-| Datastore value / keys listed | 1 MiB / 1000 |
-| Datastore key / secret name | 1024 bytes |
-| New secret plaintext | 64 KiB |
+| Surface                        | Limit                                             |
+| ------------------------------ | ------------------------------------------------- |
+| MCP/webhook bodies             | 1 MiB raw bytes                                   |
+| Auth bodies                    | 64 KiB raw bytes                                  |
+| Request completion / headers   | 15 seconds / 10 seconds                           |
+| Sandbox fetch                  | 8 MiB encoded and decoded, 5 redirects, 8 seconds |
+| Bridge input / output          | 1 MiB / 12 MiB                                    |
+| Parser input / console payload | 256 KiB / 16 KiB                                  |
+| HTML links extracted           | 1000, with incremental result-byte accounting     |
+| Random bytes                   | 65,536 bytes                                      |
+| Host calls                     | 256 per invocation, at most 8 pending             |
+| Datastore value / keys listed  | 1 MiB / 1000                                      |
+| Datastore key / secret name    | 1024 bytes                                        |
+| New secret plaintext           | 64 KiB                                            |
 
 Oversized or malformed input fails explicitly. Existing oversized datastore
 values/keys and secret ciphertext fail instead of entering Node allocations.

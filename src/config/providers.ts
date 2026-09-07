@@ -32,9 +32,7 @@ export interface ProviderConfig {
 }
 
 /** Read provider selection from environment variables, defaulting to portable. */
-export function loadProviderConfig(
-  env: NodeJS.ProcessEnv = process.env,
-): ProviderConfig {
+export function loadProviderConfig(env: NodeJS.ProcessEnv = process.env): ProviderConfig {
   return {
     jobs: (env.JOB_LAUNCHER as JobLauncherKind) ?? "local",
     email: (env.EMAIL_PROVIDER as EmailProviderKind) ?? "smtp",

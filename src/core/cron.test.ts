@@ -61,9 +61,7 @@ describe("dueWindow", () => {
 describe("isDue", () => {
   it("mirrors dueWindow as a boolean", () => {
     const now = new Date("2026-09-05T12:16:00.000Z");
-    expect(
-      isDue({ schedule: "*/15 * * * *", timezone: "UTC", lastScheduledAt: null, now }),
-    ).toBe(true);
+    expect(isDue({ schedule: "*/15 * * * *", timezone: "UTC", lastScheduledAt: null, now })).toBe(true);
     expect(
       isDue({
         schedule: "*/15 * * * *",

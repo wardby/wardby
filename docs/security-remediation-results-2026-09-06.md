@@ -34,11 +34,11 @@ request/header timeouts, sanitized errors, per-hop SSRF checks, pinned DNS,
 bounded host allocations, and owner-aware attached-tool projections are in place.
 A final regression also bounds HTML link expansion before building its result.
 
-| Findings | Current status |
-| --- | --- |
-| SR-004, SR-005, SR-006, SR-007, SR-010 | Closed at their local code/acceptance gates; independent release review and deployment verification are not implied. |
-| SR-001, SR-002, SR-003, SR-008 | Exploits mitigated by quarantine; secure replacement tests pass; remain pending independent auth/migration release review and production migration. |
-| SR-009 | Open in build/migration tooling. Runtime artifact excludes the affected packages. No compatible fixed Prisma 6 release was available; no downgrade or dependency-major override was applied. |
+| Findings                               | Current status                                                                                                                                                                               |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| SR-004, SR-005, SR-006, SR-007, SR-010 | Closed at their local code/acceptance gates; independent release review and deployment verification are not implied.                                                                         |
+| SR-001, SR-002, SR-003, SR-008         | Exploits mitigated by quarantine; secure replacement tests pass; remain pending independent auth/migration release review and production migration.                                          |
+| SR-009                                 | Open in build/migration tooling. Runtime artifact excludes the affected packages. No compatible fixed Prisma 6 release was available; no downgrade or dependency-major override was applied. |
 
 The original issue evidence and plan have been preserved and annotated in
 [the register](security-review-2026-09-06.md) and
@@ -58,20 +58,20 @@ After verification, the disposable container was stopped, not deleted. Restart
 it with `docker start reevo-security-20260906` to repeat database checks. The
 two reviewed local images remain available; neither was deployed.
 
-| Final check | Pass | Fail | Skip | Result |
-| --- | ---: | ---: | ---: | --- |
-| Full suite, 52 files | 400 | 0 | 0 | Includes DB auth/concurrency, browser, delegated HTTP, stdio, sandbox, ownership, and body/timeout checks. |
-| Focused security suite, 7 files | 115 | 0 | 0 | Overlaps the full suite; do not add these counts together. |
-| Live OpenAI contract tests | 2 | 0 | 0 | Real streaming completion and tool-call reconstruction. |
-| Typecheck | 1 | 0 | 0 | TypeScript passes. |
-| Application build | 1 | 0 | 0 | Vendor bundle and production TypeScript build pass. |
-| Prisma generate, validate, status, drift | 4 | 0 | 0 | Client 6.19.3; nine migrations applied; exact output: `-- This is an empty migration.` |
-| Migration/recovery rehearsal assertions | 7 | 0 | 0 | Eleven unrelated tables preserved, old OAuth data removed, safe backup restored and re-migrated. |
-| Allocation-check assertions | 4 | 0 | 0 | Endless stream stops after 8,519,680 bytes; observed peak RSS increase 9,928,704 bytes (9.47 MiB). |
-| Runtime image build/smoke/audit | 3 | 0 | 0 | uid 1000, database reachable, affected tooling absent, zero shipped-subset npm vulnerabilities. |
-| Migration image build/deploy smoke | 2 | 0 | 0 | Trusted separate tooling image works against the disposable database; no pending migrations. |
-| Repository dependency audits | 0 | 2 | 0 | Each reports 3 high-severity affected packages from one advisory, GHSA-ggr8-5vv4-36mx. |
-| Dependency inventory | 1 | 0 | 0 | `npm ls --all --json` archived alongside this report. |
+| Final check                              | Pass | Fail | Skip | Result                                                                                                     |
+| ---------------------------------------- | ---: | ---: | ---: | ---------------------------------------------------------------------------------------------------------- |
+| Full suite, 52 files                     |  400 |    0 |    0 | Includes DB auth/concurrency, browser, delegated HTTP, stdio, sandbox, ownership, and body/timeout checks. |
+| Focused security suite, 7 files          |  115 |    0 |    0 | Overlaps the full suite; do not add these counts together.                                                 |
+| Live OpenAI contract tests               |    2 |    0 |    0 | Real streaming completion and tool-call reconstruction.                                                    |
+| Typecheck                                |    1 |    0 |    0 | TypeScript passes.                                                                                         |
+| Application build                        |    1 |    0 |    0 | Vendor bundle and production TypeScript build pass.                                                        |
+| Prisma generate, validate, status, drift |    4 |    0 |    0 | Client 6.19.3; nine migrations applied; exact output: `-- This is an empty migration.`                     |
+| Migration/recovery rehearsal assertions  |    7 |    0 |    0 | Eleven unrelated tables preserved, old OAuth data removed, safe backup restored and re-migrated.           |
+| Allocation-check assertions              |    4 |    0 |    0 | Endless stream stops after 8,519,680 bytes; observed peak RSS increase 9,928,704 bytes (9.47 MiB).         |
+| Runtime image build/smoke/audit          |    3 |    0 |    0 | uid 1000, database reachable, affected tooling absent, zero shipped-subset npm vulnerabilities.            |
+| Migration image build/deploy smoke       |    2 |    0 |    0 | Trusted separate tooling image works against the disposable database; no pending migrations.               |
+| Repository dependency audits             |    0 |    2 |    0 | Each reports 3 high-severity affected packages from one advisory, GHSA-ggr8-5vv4-36mx.                     |
+| Dependency inventory                     |    1 |    0 |    0 | `npm ls --all --json` archived alongside this report.                                                      |
 
 ### Commands
 

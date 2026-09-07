@@ -19,7 +19,18 @@ function fakeCipher(): SecretCipher {
 }
 
 function fakeDb() {
-  const secrets = new Map<string, { id: string; name: string; ciphertext: string; keyId: string; ownerId: string | null; createdAt: Date; updatedAt: Date }>();
+  const secrets = new Map<
+    string,
+    {
+      id: string;
+      name: string;
+      ciphertext: string;
+      keyId: string;
+      ownerId: string | null;
+      createdAt: Date;
+      updatedAt: Date;
+    }
+  >();
   const outcomes = new Map<string, { ownerId: string; secretName: string; outcome: unknown; expiresAt: Date }>();
   let counter = 0;
   return {
@@ -33,7 +44,9 @@ function fakeDb() {
         create: { name: string; ciphertext: string; keyId: string; ownerId: string };
         update: { ciphertext: string; keyId: string };
       }) => {
-        const existing = [...secrets.values()].find((s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name);
+        const existing = [...secrets.values()].find(
+          (s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name,
+        );
         if (existing) {
           const row = { ...existing, ...update, updatedAt: new Date() };
           secrets.set(row.id, row);
@@ -46,8 +59,11 @@ function fakeDb() {
       },
     },
     secretElicitationOutcome: {
-      findUnique: async ({ where: { ownerId_secretName } }: { where: { ownerId_secretName: { ownerId: string; secretName: string } } }) =>
-        outcomes.get(`${ownerId_secretName.ownerId}\0${ownerId_secretName.secretName}`) ?? null,
+      findUnique: async ({
+        where: { ownerId_secretName },
+      }: {
+        where: { ownerId_secretName: { ownerId: string; secretName: string } };
+      }) => outcomes.get(`${ownerId_secretName.ownerId}\0${ownerId_secretName.secretName}`) ?? null,
       upsert: async ({
         where: { ownerId_secretName },
         create,
@@ -84,7 +100,11 @@ afterEach(async () => {
   server = undefined;
 });
 
-async function startTestServer(deps: { verify: (token: string) => Promise<SecretElicitationPayload>; secrets: SecretCipher; db: import("@prisma/client").PrismaClient }) {
+async function startTestServer(deps: {
+  verify: (token: string) => Promise<SecretElicitationPayload>;
+  secrets: SecretCipher;
+  db: import("@prisma/client").PrismaClient;
+}) {
   server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     void handleSecretElicitationForm(req.method, url.searchParams.get("t"), () => readFormBody(req), res, deps);
@@ -97,7 +117,11 @@ async function startTestServer(deps: { verify: (token: string) => Promise<Secret
 
 describe("handleSecretElicitationForm", () => {
   it("GET with a valid token renders a form naming the secret", async () => {
-    const base = await startTestServer({ verify: async () => ({ ownerId: "p1", secretName: "API_KEY" }), secrets: fakeCipher(), db: fakeDb() });
+    const base = await startTestServer({
+      verify: async () => ({ ownerId: "p1", secretName: "API_KEY" }),
+      secrets: fakeCipher(),
+      db: fakeDb(),
+    });
     const res = await fetch(`${base}/secret?t=whatever`);
     expect(res.status).toBe(200);
     const body = await res.text();
@@ -107,7 +131,13 @@ describe("handleSecretElicitationForm", () => {
   });
 
   it("GET with an invalid/expired token shows an error instead of the form", async () => {
-    const base = await startTestServer({ verify: async () => { throw new Error("expired"); }, secrets: fakeCipher(), db: fakeDb() });
+    const base = await startTestServer({
+      verify: async () => {
+        throw new Error("expired");
+      },
+      secrets: fakeCipher(),
+      db: fakeDb(),
+    });
     const res = await fetch(`${base}/secret?t=bad`);
     expect(res.status).toBe(400);
     expect(await res.text()).toMatch(/expired|invalid/i);
@@ -116,7 +146,11 @@ describe("handleSecretElicitationForm", () => {
   it("POST with a value creates the secret and returns a success page", async () => {
     const cipher = fakeCipher();
     const db = fakeDb();
-    const base = await startTestServer({ verify: async () => ({ ownerId: "p1", secretName: "FORM_TEST_CREATE" }), secrets: cipher, db });
+    const base = await startTestServer({
+      verify: async () => ({ ownerId: "p1", secretName: "FORM_TEST_CREATE" }),
+      secrets: cipher,
+      db,
+    });
     const res = await fetch(`${base}/secret?t=whatever`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -132,7 +166,11 @@ describe("handleSecretElicitationForm", () => {
 
   it("POST with no value is rejected without writing a secret", async () => {
     const db = fakeDb();
-    const base = await startTestServer({ verify: async () => ({ ownerId: "p1", secretName: "FORM_TEST_EMPTY" }), secrets: fakeCipher(), db });
+    const base = await startTestServer({
+      verify: async () => ({ ownerId: "p1", secretName: "FORM_TEST_EMPTY" }),
+      secrets: fakeCipher(),
+      db,
+    });
     const res = await fetch(`${base}/secret?t=whatever`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -146,8 +184,17 @@ describe("handleSecretElicitationForm", () => {
   it("resubmitting the same elicitation is idempotent (no second write attempt)", async () => {
     const cipher = fakeCipher();
     const db = fakeDb();
-    const base = await startTestServer({ verify: async () => ({ ownerId: "p1", secretName: "FORM_TEST_IDEMPOTENT" }), secrets: cipher, db });
-    const submit = () => fetch(`${base}/secret?t=whatever`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ value: "first" }) });
+    const base = await startTestServer({
+      verify: async () => ({ ownerId: "p1", secretName: "FORM_TEST_IDEMPOTENT" }),
+      secrets: cipher,
+      db,
+    });
+    const submit = () =>
+      fetch(`${base}/secret?t=whatever`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ value: "first" }),
+      });
     const first = await submit();
     const second = await submit();
     expect(first.status).toBe(200);

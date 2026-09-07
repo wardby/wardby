@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  CodingProfilePatchSchema,
-  CodingProfileSchema,
-  DEFAULT_PROTECTED_PATHS,
-} from "./profile.js";
+import { CodingProfilePatchSchema, CodingProfileSchema, DEFAULT_PROTECTED_PATHS } from "./profile.js";
 
 describe("CodingProfileSchema", () => {
   it("normalizes identifiers and applies fail-safe defaults", () => {

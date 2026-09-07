@@ -52,8 +52,13 @@ export function installHostFunctions(
   options: HostFunctionOptions,
 ): void {
   const { agentId, datastore, logTag, secrets, signal, allowedFetchHosts } = options;
-  const register = (name: string, fn: (json: string) => Promise<unknown>) => registerJsonAsyncFunction(context, runtime, name, fn, signal);
-  const sandboxLog = (options.logger ?? defaultLogger).child({ module: "sandbox-tool", agentId, tool: logTag.slice(0, 100) });
+  const register = (name: string, fn: (json: string) => Promise<unknown>) =>
+    registerJsonAsyncFunction(context, runtime, name, fn, signal);
+  const sandboxLog = (options.logger ?? defaultLogger).child({
+    module: "sandbox-tool",
+    agentId,
+    tool: logTag.slice(0, 100),
+  });
   const parserPool = options.parserPool ?? (sharedParserPool ??= createParserWorkerPool());
 
   // Values fetched via secrets.get() during THIS invocation only — a tool
@@ -97,9 +102,7 @@ export function installHostFunctions(
   });
 
   register("__bridge_fetch", async (argsJson) => {
-    const [url, init] = args<[string, { method?: string; headers?: Record<string, string>; body?: string }]>(
-      argsJson,
-    );
+    const [url, init] = args<[string, { method?: string; headers?: Record<string, string>; body?: string }]>(argsJson);
     const hosts = allowedFetchHosts ?? [];
     if (hosts.includes(FETCH_WILDCARD)) {
       return safeFetch(url, init, { allowedHosts: FETCH_ALLOWED_HOSTS, signal });
@@ -163,7 +166,14 @@ export function installHostFunctions(
     const [xml, xmlOptions] = args<[string, Record<string, unknown> | null]>(argsJson);
     boundedString(xml, PARSER_INPUT_BYTES);
     if (/<!DOCTYPE|<!ENTITY/i.test(xml)) throw new Error("xml_entities_blocked");
-    if (xmlOptions && Object.entries(xmlOptions).some(([key, value]) => !["ignoreAttributes", "trimValues", "parseTagValue"].includes(key) || typeof value !== "boolean")) throw new Error("xml_options_invalid");
+    if (
+      xmlOptions &&
+      Object.entries(xmlOptions).some(
+        ([key, value]) =>
+          !["ignoreAttributes", "trimValues", "parseTagValue"].includes(key) || typeof value !== "boolean",
+      )
+    )
+      throw new Error("xml_options_invalid");
     return parserPool.run("xml", { xml, xmlOptions }, signal);
   });
 }

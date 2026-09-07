@@ -1,11 +1,16 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
-import { startHttpServer as realStartHttpServer, type HttpServerHandle, type StartHttpServerOptions } from "./streamable-http.js";
+import {
+  startHttpServer as realStartHttpServer,
+  type HttpServerHandle,
+  type StartHttpServerOptions,
+} from "./streamable-http.js";
 import { createServer } from "node:http";
 import type { AuthProvider, VerifiedToken } from "../../providers/auth/types.js";
 
-const fetch: typeof globalThis.fetch = (input, init) => globalThis.fetch(input, { ...init, headers: { host: "host", ...init?.headers } });
+const fetch: typeof globalThis.fetch = (input, init) =>
+  globalThis.fetch(input, { ...init, headers: { host: "host", ...init?.headers } });
 let CANONICAL_URI = "https://host/mcp";
 async function startHttpServer(opts: StartHttpServerOptions): Promise<HttpServerHandle> {
   if (opts.config.authProviderKind === "self-hosted") return realStartHttpServer(opts);
@@ -14,7 +19,10 @@ async function startHttpServer(opts: StartHttpServerOptions): Promise<HttpServer
   const port = (probe.address() as import("node:net").AddressInfo).port;
   await new Promise<void>((resolve) => probe.close(() => resolve()));
   CANONICAL_URI = `http://127.0.0.1:${port}/mcp`;
-  return realStartHttpServer({ ...opts, config: { ...opts.config, canonicalUri: CANONICAL_URI, httpBind: { host: "127.0.0.1", port } } });
+  return realStartHttpServer({
+    ...opts,
+    config: { ...opts.config, canonicalUri: CANONICAL_URI, httpBind: { host: "127.0.0.1", port } },
+  });
 }
 
 function fakeAuthProvider(verifyBearer: AuthProvider["verifyBearer"]): AuthProvider {
@@ -136,7 +144,10 @@ describe("startHttpServer (delegating mode)", () => {
     expect(seenClientSupportsTasks).toBe(true);
     await tasksCapableClient.close();
 
-    const plainClient = new Client({ name: "plain-client", version: "1.0.0" }, { versionNegotiation: { mode: "auto" } });
+    const plainClient = new Client(
+      { name: "plain-client", version: "1.0.0" },
+      { versionNegotiation: { mode: "auto" } },
+    );
     await plainClient.connect(
       new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${handle.port}/mcp`), {
         requestInit: { headers: { host: "host", authorization: "Bearer good-token" } },
@@ -233,7 +244,14 @@ describe("startHttpServer (webhook ingress)", () => {
     const webhookDb: any = {
       webhook: {
         create: async ({ data }: { data: Partial<FakeWebhookRow> & { agentId: string; secretHash: string } }) => {
-          const row: FakeWebhookRow = { id: `webhook_${++webhookCounter}`, status: "enabled", ownerId: null, createdAt: new Date(), lastFiredAt: null, ...data };
+          const row: FakeWebhookRow = {
+            id: `webhook_${++webhookCounter}`,
+            status: "enabled",
+            ownerId: null,
+            createdAt: new Date(),
+            lastFiredAt: null,
+            ...data,
+          };
           webhooks.set(row.id, row);
           return row;
         },
@@ -252,7 +270,12 @@ describe("startHttpServer (webhook ingress)", () => {
             : null,
       },
       run: {
-        create: async ({ data }: { data: { agentId: string; trigger: string } }) => ({ id: `run_${++runCounter}`, status: "pending", startedAt: new Date(), ...data }),
+        create: async ({ data }: { data: { agentId: string; trigger: string } }) => ({
+          id: `run_${++runCounter}`,
+          status: "pending",
+          startedAt: new Date(),
+          ...data,
+        }),
         updateMany: async () => ({ count: 1 }),
       },
       codingRun: { create: async ({ data }: { data: unknown }) => data },
@@ -266,7 +289,11 @@ describe("startHttpServer (webhook ingress)", () => {
     handle = await startHttpServer({
       mcp,
       config: { canonicalUri: CANONICAL_URI, httpBind: { host: "127.0.0.1", port: 0 }, authProviderKind: "delegating" },
-      auth: { authProvider: fakeAuthProvider(async () => ({ subject: "x", roles: [], scopes: [] })), db: webhookDb, providers: fakeProviders },
+      auth: {
+        authProvider: fakeAuthProvider(async () => ({ subject: "x", roles: [], scopes: [] })),
+        db: webhookDb,
+        providers: fakeProviders,
+      },
     });
 
     const res = await fetch(`http://127.0.0.1:${handle.port}/webhooks/${id}`, {
@@ -300,7 +327,11 @@ describe("startHttpServer (webhook ingress)", () => {
     handle = await startHttpServer({
       mcp,
       config: { canonicalUri: CANONICAL_URI, httpBind: { host: "127.0.0.1", port: 0 }, authProviderKind: "delegating" },
-      auth: { authProvider: fakeAuthProvider(async () => ({ subject: "x", roles: [], scopes: [] })), db: webhookDb, providers: fakeProviders },
+      auth: {
+        authProvider: fakeAuthProvider(async () => ({ subject: "x", roles: [], scopes: [] })),
+        db: webhookDb,
+        providers: fakeProviders,
+      },
     });
 
     const res = await fetch(`http://127.0.0.1:${handle.port}/webhooks/${id}`, {

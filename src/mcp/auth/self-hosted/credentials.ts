@@ -10,8 +10,12 @@ export function decodeKey(value: string, name: string): Buffer {
 }
 export class Credentials {
   private readonly key: Buffer;
-  constructor(value: string) { this.key = decodeKey(value, "AUTH_CREDENTIAL_HASH_KEY"); }
-  hash(value: string): string { return createHmac("sha256", this.key).update(value).digest("hex"); }
+  constructor(value: string) {
+    this.key = decodeKey(value, "AUTH_CREDENTIAL_HASH_KEY");
+  }
+  hash(value: string): string {
+    return createHmac("sha256", this.key).update(value).digest("hex");
+  }
   create(prefix: string) {
     const id = randomUUID();
     const token = `${prefix}_${id}.${randomBytes(32).toString("base64url")}`;
@@ -35,14 +39,21 @@ export async function lockUser(tx: AuthDb, id: string) {
 }
 export class IdentityService {
   readonly credentials: Credentials;
-  constructor(readonly db: PrismaClient, hashKey: string) { this.credentials = new Credentials(hashKey); }
+  constructor(
+    readonly db: PrismaClient,
+    hashKey: string,
+  ) {
+    this.credentials = new Credentials(hashKey);
+  }
   async createUser(subject: string) {
     requireSubject(subject);
     return this.db.$transaction(async (tx) => {
       const principal = await tx.principal.upsert({ where: { subject }, create: { subject }, update: {} });
       const user = await tx.authUser.create({ data: { principalId: principal.id } });
       const key = this.credentials.create("rvk");
-      await tx.authLoginKey.create({ data: { keyId: key.id, userId: user.id, secretHash: key.hash, expiresAt: new Date(Date.now() + 365 * DAY) } });
+      await tx.authLoginKey.create({
+        data: { keyId: key.id, userId: user.id, secretHash: key.hash, expiresAt: new Date(Date.now() + 365 * DAY) },
+      });
       return { userId: user.id, subject, loginKey: key.token };
     });
   }
@@ -52,7 +63,9 @@ export class IdentityService {
     return this.db.$transaction(async (tx) => {
       await lockUser(tx, user.id);
       const key = this.credentials.create("rvk");
-      await tx.authLoginKey.create({ data: { keyId: key.id, userId: user.id, secretHash: key.hash, expiresAt: new Date(Date.now() + 365 * DAY) } });
+      await tx.authLoginKey.create({
+        data: { keyId: key.id, userId: user.id, secretHash: key.hash, expiresAt: new Date(Date.now() + 365 * DAY) },
+      });
       return key.token;
     });
   }
@@ -78,6 +91,15 @@ export class IdentityService {
       await tx.oAuthFamily.updateMany({ where: { userId: key.userId }, data: { revokedAt: new Date() } });
     });
   }
-  listUsers() { return this.db.authUser.findMany({ select: { id: true, status: true, displayName: true, principal: { select: { subject: true } } } }); }
-  listKeys(subject: string) { return this.db.authLoginKey.findMany({ where: { user: { principal: { subject: requireSubject(subject) } } }, select: { keyId: true, createdAt: true, expiresAt: true, lastUsedAt: true, revokedAt: true } }); }
+  listUsers() {
+    return this.db.authUser.findMany({
+      select: { id: true, status: true, displayName: true, principal: { select: { subject: true } } },
+    });
+  }
+  listKeys(subject: string) {
+    return this.db.authLoginKey.findMany({
+      where: { user: { principal: { subject: requireSubject(subject) } } },
+      select: { keyId: true, createdAt: true, expiresAt: true, lastUsedAt: true, revokedAt: true },
+    });
+  }
 }

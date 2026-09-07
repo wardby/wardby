@@ -10,7 +10,7 @@ function fakeDb(agent: Record<string, any>) {
   const tasks: Record<string, any>[] = [];
   const db: any = {
     agent: {
-      findUnique: async ({ where }: any) => where.id === agent.id ? agent : null,
+      findUnique: async ({ where }: any) => (where.id === agent.id ? agent : null),
       update: async () => agent,
     },
     run: {
@@ -30,7 +30,10 @@ function fakeDb(agent: Record<string, any>) {
       },
     },
     codingRun: {
-      create: async ({ data }: any) => { codingRuns.push(data); return data; },
+      create: async ({ data }: any) => {
+        codingRuns.push(data);
+        return data;
+      },
     },
     task: {
       create: async ({ data }: any) => {
@@ -45,7 +48,11 @@ function fakeDb(agent: Record<string, any>) {
   };
   db.$transaction = async (callback: (tx: any) => Promise<unknown>) => {
     transactionActive = true;
-    try { return await callback(db); } finally { transactionActive = false; }
+    try {
+      return await callback(db);
+    } finally {
+      transactionActive = false;
+    }
   };
   return {
     db: db as DispatchDb,
@@ -143,7 +150,12 @@ describe("dispatchRun", () => {
     const state = fakeDb(nativeAgent());
     const result = await dispatchRun({
       db: state.db,
-      executor: { async start() { throw new Error("launcher unavailable"); }, async stop() {} },
+      executor: {
+        async start() {
+          throw new Error("launcher unavailable");
+        },
+        async stop() {},
+      },
       agentId: "agent_1",
     });
     await vi.waitFor(() => expect(state.runs[0].status).toBe("failed"));

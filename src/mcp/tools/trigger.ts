@@ -50,9 +50,7 @@ export function registerTriggerTool(mcp: ReevoMcpServer): void {
         executor: ctx.providers.executor,
         agentId: agent.id,
         trigger: "manual",
-        task: ctx.clientSupportsTasks
-          ? { principalId: ctx.principal.id, ttlMs: DEFAULT_TASK_TTL_MS }
-          : undefined,
+        task: ctx.clientSupportsTasks ? { principalId: ctx.principal.id, ttlMs: DEFAULT_TASK_TTL_MS } : undefined,
         beforePersist: async (_tx, current) => {
           if (current.ownerId !== ctx.principal.id) {
             throw new McpError(403, `Agent "${agent.id}" is not owned by the caller.`);

@@ -47,16 +47,16 @@ Do not re-enable self-hosted mode with a caller-controlled `subject`, a trusted-
 
 Use fixed conservative defaults first; configuration can be added later if real workloads demonstrate a need.
 
-| Surface | Initial limit |
-| --- | ---: |
-| MCP JSON request | 1 MiB |
-| Webhook JSON request | 1 MiB |
-| OAuth login/registration/token request | 64 KiB |
-| Sandbox fetch response | 8 MiB decoded bytes |
-| Sandbox `randomBytes` request | 64 KiB |
-| Redirect hops | 5 |
-| Request completion | 15 seconds |
-| Request headers | 10 seconds |
+| Surface                                |       Initial limit |
+| -------------------------------------- | ------------------: |
+| MCP JSON request                       |               1 MiB |
+| Webhook JSON request                   |               1 MiB |
+| OAuth login/registration/token request |              64 KiB |
+| Sandbox fetch response                 | 8 MiB decoded bytes |
+| Sandbox `randomBytes` request          |              64 KiB |
+| Redirect hops                          |                   5 |
+| Request completion                     |          15 seconds |
+| Request headers                        |          10 seconds |
 
 Limit failures must be explicit and must not include request bodies, bearer tokens, webhook secrets, or fetched response content in logs.
 

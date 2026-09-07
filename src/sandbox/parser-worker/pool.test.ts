@@ -29,7 +29,12 @@ describe("createParserWorkerPool", () => {
   });
 
   it("rejects fast once maxConcurrency + queueLimit is exceeded", async () => {
-    const pool = createParserWorkerPool({ workerUrl: fixture("spin-forever"), timeoutMs: 300, maxConcurrency: 1, queueLimit: 1 });
+    const pool = createParserWorkerPool({
+      workerUrl: fixture("spin-forever"),
+      timeoutMs: 300,
+      maxConcurrency: 1,
+      queueLimit: 1,
+    });
     const first = pool.run("html", {}); // occupies the one worker slot
     const second = pool.run("html", {}); // fills the one queue slot
     const third = pool.run("html", {}); // must be rejected immediately, no slot or queue room left

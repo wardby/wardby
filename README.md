@@ -1,7 +1,7 @@
 # reevo-run
 
 Schedule and run **budget-guarded LLM agents** — autonomous agents that run on a
-schedule or in response to events, with hard spend limits that stop *before*
+schedule or in response to events, with hard spend limits that stop _before_
 cost, and a sandboxed tool executor.
 
 > Reevo runs your agents on a schedule, within a budget.

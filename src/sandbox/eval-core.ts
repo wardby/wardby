@@ -14,8 +14,7 @@ import { BRIDGE_RESULT_BYTES } from "./limits.js";
 export type SandboxErrorKind = "thrown" | "timeout" | "memory" | "cpu" | "non_serializable";
 
 export type SandboxResult =
-  | { ok: true; value: unknown }
-  | { ok: false; errorKind: SandboxErrorKind; errorMessage: string };
+  { ok: true; value: unknown } | { ok: false; errorKind: SandboxErrorKind; errorMessage: string };
 
 export interface SandboxLimits {
   memoryLimitBytes: number;
@@ -46,7 +45,8 @@ function boundedError(context: QuickJSContext, handle: QuickJSHandle) {
     const value = context.getProp(handle, key);
     if (context.typeof(value) === "string") {
       const size = context.getProp(value, "length");
-      const length = context.getNumber(size); size.dispose();
+      const length = context.getNumber(size);
+      size.dispose();
       result[key] = length <= 4096 ? context.getString(value) : "Sandbox error text exceeded limit.";
     }
     value.dispose();
@@ -137,10 +137,17 @@ export async function evalToJson(
         return classifyEvalError(dumped);
       }
 
-      if (context.typeof(settled.value) !== "string") { settled.value.dispose(); throw new Error("bridge_result_invalid"); }
+      if (context.typeof(settled.value) !== "string") {
+        settled.value.dispose();
+        throw new Error("bridge_result_invalid");
+      }
       const lengthHandle = context.getProp(settled.value, "length");
-      const length = context.getNumber(lengthHandle); lengthHandle.dispose();
-      if (length > BRIDGE_RESULT_BYTES) { settled.value.dispose(); throw new Error("bridge_result_limit"); }
+      const length = context.getNumber(lengthHandle);
+      lengthHandle.dispose();
+      if (length > BRIDGE_RESULT_BYTES) {
+        settled.value.dispose();
+        throw new Error("bridge_result_limit");
+      }
       const raw = context.getString(settled.value);
       settled.value.dispose();
       if (Buffer.byteLength(raw) > BRIDGE_RESULT_BYTES) throw new Error("bridge_result_limit");

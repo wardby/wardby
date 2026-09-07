@@ -31,7 +31,10 @@ export function resolveLlmRegistrations(
     registrations.push({ provider: new OpenAiLlmProvider(env.OPENAI_API_KEY), models: openaiSupportedModels() });
   }
   if (anthropicCredentialsPresent(env)) {
-    registrations.push({ provider: new AnthropicLlmProvider(env.ANTHROPIC_API_KEY), models: anthropicSupportedModels() });
+    registrations.push({
+      provider: new AnthropicLlmProvider(env.ANTHROPIC_API_KEY),
+      models: anthropicSupportedModels(),
+    });
   }
   if (registrations.length === 0) {
     return { kind: "no-credentials" };

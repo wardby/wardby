@@ -14,7 +14,10 @@ import { fulfillSecretElicitation, type SecretElicitationPayload } from "./secre
 export const SECRET_ELICITATION_PATH = "/elicit/secret";
 
 function escape(value: string): string {
-  return value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+  return value.replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!,
+  );
 }
 
 const STYLE = `
@@ -51,10 +54,12 @@ function html(res: ServerResponse, status: number, body: string): void {
   res.setHeader("cache-control", "no-store");
   res.setHeader("x-content-type-options", "nosniff");
   res.setHeader("referrer-policy", "no-referrer");
-  res.writeHead(status, { "content-type": "text/html; charset=utf-8" }).end(
-    `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">` +
-      `<title>reevo secret entry</title><style>${STYLE}</style><body><div class="card">${body}</div></body></html>`,
-  );
+  res
+    .writeHead(status, { "content-type": "text/html; charset=utf-8" })
+    .end(
+      `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">` +
+        `<title>reevo secret entry</title><style>${STYLE}</style><body><div class="card">${body}</div></body></html>`,
+    );
 }
 
 export interface SecretFormDeps {
@@ -76,7 +81,11 @@ export async function handleSecretElicitationForm(
     if (!token) throw new Error("missing token");
     payload = await deps.verify(token);
   } catch {
-    html(res, 400, "<h1>Link expired</h1><p>This link is invalid or has expired. Return to your MCP client and try again.</p>");
+    html(
+      res,
+      400,
+      "<h1>Link expired</h1><p>This link is invalid or has expired. Return to your MCP client and try again.</p>",
+    );
     return;
   }
 

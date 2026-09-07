@@ -105,9 +105,13 @@ describe.skipIf(!databaseUrl)("PostgresDatastore (database)", () => {
 
     it("throws rather than silently storing/reading plaintext when no cipher is configured", async () => {
       const agentId = newAgentId();
-      await expect(datastore.set(agentId, "ssn", "123-45-6789", { pii: true })).rejects.toThrow("datastore_pii_cipher_unavailable");
+      await expect(datastore.set(agentId, "ssn", "123-45-6789", { pii: true })).rejects.toThrow(
+        "datastore_pii_cipher_unavailable",
+      );
 
-      await prisma.datastoreEntry.create({ data: { agentId, key: "orphaned-pii", value: "some-ciphertext", pii: true, keyId: "appkey:whatever" } });
+      await prisma.datastoreEntry.create({
+        data: { agentId, key: "orphaned-pii", value: "some-ciphertext", pii: true, keyId: "appkey:whatever" },
+      });
       await expect(datastore.get(agentId, "orphaned-pii")).rejects.toThrow("datastore_pii_cipher_unavailable");
     });
   });

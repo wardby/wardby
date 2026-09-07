@@ -56,7 +56,10 @@ export function registerAllTools(
   registerSchedulingTools(mcp);
   registerRunTools(mcp);
   registerDatastoreTools(mcp);
-  registerSecretsTools(mcp, { buildElicitationUrl: opts.secretElicitationUrl, protocolElicitation: opts.secretElicitationProtocol });
+  registerSecretsTools(mcp, {
+    buildElicitationUrl: opts.secretElicitationUrl,
+    protocolElicitation: opts.secretElicitationProtocol,
+  });
   registerWebhookTools(mcp);
 }
 
@@ -139,13 +142,20 @@ export async function startMcp(): Promise<void> {
   const mcp = buildMcpServer({ providers, db: prisma, config: { canonicalUri: mcpConfig.canonicalUri } });
   const httpOrigin = canonicalUrl(mcpConfig.canonicalUri).origin;
   registerAllTools(mcp, {
-    secretElicitationUrl: (token) => Promise.resolve(`${httpOrigin}${SECRET_ELICITATION_PATH}?t=${encodeURIComponent(token)}`),
+    secretElicitationUrl: (token) =>
+      Promise.resolve(`${httpOrigin}${SECRET_ELICITATION_PATH}?t=${encodeURIComponent(token)}`),
     secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
   });
 
   await startHttpServer({
     mcp,
-    config: { canonicalUri: canonicalUrl(mcpConfig.canonicalUri).href, httpBind: mcpConfig.httpBind, authProviderKind, authorizationServer: authConfig.issuer, allowedOrigins: mcpConfig.allowedOrigins },
+    config: {
+      canonicalUri: canonicalUrl(mcpConfig.canonicalUri).href,
+      httpBind: mcpConfig.httpBind,
+      authProviderKind,
+      authorizationServer: authConfig.issuer,
+      allowedOrigins: mcpConfig.allowedOrigins,
+    },
     auth: { authProvider, db: prisma, providers },
     selfHosted,
   });

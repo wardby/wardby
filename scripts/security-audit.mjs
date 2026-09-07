@@ -15,26 +15,37 @@ function auditPassesPolicy(output, status) {
     return false;
   }
 
-  if (report.auditReportVersion !== 2 || typeof report.vulnerabilities !== "object" || typeof report.metadata?.vulnerabilities !== "object") return false;
+  if (
+    report.auditReportVersion !== 2 ||
+    typeof report.vulnerabilities !== "object" ||
+    typeof report.metadata?.vulnerabilities !== "object"
+  )
+    return false;
   const vulnerabilities = report.vulnerabilities ?? {};
   const packages = Object.keys(vulnerabilities);
   if (packages.length === 0) return status === 0;
-  if (Date.now() >= acceptedException.expires || packages.some((name) => !acceptedException.packages.has(name))) return false;
+  if (Date.now() >= acceptedException.expires || packages.some((name) => !acceptedException.packages.has(name)))
+    return false;
 
   const advisoryUrls = Object.values(vulnerabilities).flatMap((entry) =>
-    (entry.via ?? []).flatMap((via) => typeof via === "object" && typeof via.url === "string" ? [via.url] : []),
+    (entry.via ?? []).flatMap((via) => (typeof via === "object" && typeof via.url === "string" ? [via.url] : [])),
   );
   return advisoryUrls.length > 0 && advisoryUrls.every((url) => url.endsWith("/" + acceptedException.advisory));
 }
 
 const results = [];
-for (const args of [["audit", "--omit=dev", "--json"], ["audit", "--json"]]) {
+for (const args of [
+  ["audit", "--omit=dev", "--json"],
+  ["audit", "--json"],
+]) {
   const result = spawnSync("npm", args, { encoding: "utf8" });
   console.log(result.stdout);
   if (result.stderr) console.error(result.stderr);
   const passed = auditPassesPolicy(result.stdout, result.status ?? 1);
   if (result.status !== 0 && passed) {
-    console.warn(`${args.join(" ")}: accepted ${acceptedException.advisory} through 2026-10-06 (${acceptedException.accepted} owner approval).`);
+    console.warn(
+      `${args.join(" ")}: accepted ${acceptedException.advisory} through 2026-10-06 (${acceptedException.accepted} owner approval).`,
+    );
   }
   results.push(passed ? 0 : (result.status ?? 1));
 }

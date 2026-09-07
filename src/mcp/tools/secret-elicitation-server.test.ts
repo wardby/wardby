@@ -34,7 +34,11 @@ function fakeDb() {
 describe("createStdioSecretElicitationHost", () => {
   it("lazily starts a loopback server and serves the form at the returned URL", async () => {
     const payload: SecretElicitationPayload = { ownerId: "p1", secretName: "API_KEY" };
-    const host = createStdioSecretElicitationHost({ verify: async (token) => (token === "good" ? payload : Promise.reject(new Error("bad"))), secrets: fakeCipher(), db: fakeDb() });
+    const host = createStdioSecretElicitationHost({
+      verify: async (token) => (token === "good" ? payload : Promise.reject(new Error("bad"))),
+      secrets: fakeCipher(),
+      db: fakeDb(),
+    });
 
     const url = await host.urlFor("good");
     expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/secret\?t=good$/);
@@ -45,14 +49,22 @@ describe("createStdioSecretElicitationHost", () => {
   });
 
   it("reuses the same server/port across multiple tokens", async () => {
-    const host = createStdioSecretElicitationHost({ verify: async () => ({ ownerId: "p1", secretName: "X" }), secrets: fakeCipher(), db: fakeDb() });
+    const host = createStdioSecretElicitationHost({
+      verify: async () => ({ ownerId: "p1", secretName: "X" }),
+      secrets: fakeCipher(),
+      db: fakeDb(),
+    });
     const first = await host.urlFor("t1");
     const second = await host.urlFor("t2");
     expect(new URL(first).port).toBe(new URL(second).port);
   });
 
   it("404s any path other than /secret", async () => {
-    const host = createStdioSecretElicitationHost({ verify: async () => ({ ownerId: "p1", secretName: "X" }), secrets: fakeCipher(), db: fakeDb() });
+    const host = createStdioSecretElicitationHost({
+      verify: async () => ({ ownerId: "p1", secretName: "X" }),
+      secrets: fakeCipher(),
+      db: fakeDb(),
+    });
     const url = await host.urlFor("good");
     const other = new URL(url);
     other.pathname = "/other";

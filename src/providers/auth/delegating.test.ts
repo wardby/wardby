@@ -10,14 +10,16 @@ const KID = "test-key";
 let jwks: JWTVerifyGetKey;
 let privateKey: CryptoKey;
 
-async function mintToken(overrides: {
-  audience?: string;
-  issuer?: string;
-  subject?: string;
-  scope?: string;
-  expiresIn?: string;
-  key?: CryptoKey;
-} = {}): Promise<string> {
+async function mintToken(
+  overrides: {
+    audience?: string;
+    issuer?: string;
+    subject?: string;
+    scope?: string;
+    expiresIn?: string;
+    key?: CryptoKey;
+  } = {},
+): Promise<string> {
   return new SignJWT({ scope: overrides.scope ?? "agents:read agents:write" })
     .setProtectedHeader({ alg: "RS256", kid: KID })
     .setIssuedAt()
@@ -40,9 +42,14 @@ beforeAll(async () => {
 describe("DelegatingAuthProvider.verifyBearer", () => {
   it.each([undefined, null, 123, "", "  ", "a".repeat(513)])("rejects signed invalid subjects %j", async (sub) => {
     const token = await new SignJWT({ sub: sub as string, scope: "agents:read" })
-      .setProtectedHeader({ alg: "RS256", kid: KID }).setIssuer(ISSUER).setAudience(AUDIENCE)
-      .setExpirationTime("1h").sign(privateKey);
-    await expect(new DelegatingAuthProvider({ issuer: ISSUER, audience: AUDIENCE }, jwks).verifyBearer(token)).rejects.toThrow();
+      .setProtectedHeader({ alg: "RS256", kid: KID })
+      .setIssuer(ISSUER)
+      .setAudience(AUDIENCE)
+      .setExpirationTime("1h")
+      .sign(privateKey);
+    await expect(
+      new DelegatingAuthProvider({ issuer: ISSUER, audience: AUDIENCE }, jwks).verifyBearer(token),
+    ).rejects.toThrow();
   });
   it("maps a valid signed token to a VerifiedToken", async () => {
     const provider = new DelegatingAuthProvider({ issuer: ISSUER, audience: AUDIENCE }, jwks);

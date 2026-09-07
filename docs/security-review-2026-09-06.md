@@ -10,18 +10,18 @@ The original self-hosted OAuth path was removed and replaced. The secured implem
 
 Statuses below were updated only after the corresponding acceptance checks passed. Closed means the code-level finding and applicable release review are addressed, not that production deployment controls have been signed off. See [implementation results](security-remediation-results-2026-09-06.md) and [deployment requirements](security-deployment.md).
 
-| ID | Severity | Status | Area | Issue |
-| --- | --- | --- | --- | --- |
-| SR-001 | Critical | Closed (release gate) | Self-hosted OAuth | Unauthenticated caller controls the token subject |
-| SR-002 | High | Closed (release gate) | Self-hosted OAuth | Authorization codes can be redeemed repeatedly |
-| SR-003 | High | Closed (release gate) | Self-hosted OAuth | Confidential clients are not authenticated at the token endpoint |
-| SR-004 | High | Closed (local code gate) | Sandbox networking | Redirects and DNS rebinding can bypass the SSRF destination check |
-| SR-005 | High | Closed (local code gate) | Availability | HTTP and sandbox bridge payloads can exhaust host memory |
-| SR-006 | Medium | Closed (local code gate) | MCP authorization | `list_tools(agentId)` exposes another tenant's attached tool source |
-| SR-007 | Medium | Closed (local code gate) | Identity | Tokens without a non-empty `sub` collapse into one principal |
-| SR-008 | Medium | Closed (release gate) | OAuth token storage | Client and refresh credentials are stored in plaintext and refresh tokens are reusable |
-| SR-009 | Low | Accepted risk through 2026-10-06 | Dependencies | Prisma CLI tree contains a high-severity development-time advisory |
-| SR-010 | Medium | Closed (local code gate) | HTTP transport | Requests do not validate the `Host` header |
+| ID     | Severity | Status                           | Area                | Issue                                                                                  |
+| ------ | -------- | -------------------------------- | ------------------- | -------------------------------------------------------------------------------------- |
+| SR-001 | Critical | Closed (release gate)            | Self-hosted OAuth   | Unauthenticated caller controls the token subject                                      |
+| SR-002 | High     | Closed (release gate)            | Self-hosted OAuth   | Authorization codes can be redeemed repeatedly                                         |
+| SR-003 | High     | Closed (release gate)            | Self-hosted OAuth   | Confidential clients are not authenticated at the token endpoint                       |
+| SR-004 | High     | Closed (local code gate)         | Sandbox networking  | Redirects and DNS rebinding can bypass the SSRF destination check                      |
+| SR-005 | High     | Closed (local code gate)         | Availability        | HTTP and sandbox bridge payloads can exhaust host memory                               |
+| SR-006 | Medium   | Closed (local code gate)         | MCP authorization   | `list_tools(agentId)` exposes another tenant's attached tool source                    |
+| SR-007 | Medium   | Closed (local code gate)         | Identity            | Tokens without a non-empty `sub` collapse into one principal                           |
+| SR-008 | Medium   | Closed (release gate)            | OAuth token storage | Client and refresh credentials are stored in plaintext and refresh tokens are reusable |
+| SR-009 | Low      | Accepted risk through 2026-10-06 | Dependencies        | Prisma CLI tree contains a high-severity development-time advisory                     |
+| SR-010 | Medium   | Closed (local code gate)         | HTTP transport      | Requests do not validate the `Host` header                                             |
 
 ## Findings
 
@@ -163,18 +163,18 @@ This was a source review, not a penetration test. It did not assess reverse-prox
 
 ## Implementation Evidence (2026-09-06)
 
-| Finding | Evidence and remaining gate |
-| --- | --- |
-| SR-001 | [Secure provider](../src/providers/auth/self-hosted.ts), [sessions](../src/mcp/auth/self-hosted/session.ts), [browser flow](../src/mcp/auth/self-hosted/browser.test.ts), and [database regressions](../src/providers/auth/self-hosted.test.ts): provisioned identity, single-use CSRF, consent, and rejected subject substitution. Release review passed. |
-| SR-002 | Opaque hashed codes, expiry and binding checks, atomic consumption; eight concurrent exchanges produce one success in the database tests. Release review passed. |
-| SR-003 | Only public clients and S256 PKCE are supported; confidential registration is rejected and no client secret is generated. Release review passed. |
-| SR-004 | [Safe fetch](../src/sandbox/safe-fetch.ts) and [41 regressions](../src/sandbox/safe-fetch.test.ts): special address classes, redirects, mixed DNS answers, pinned lookup, stripped credentials, cancellation, and response limits. |
-| SR-005 | [HTTP limits](../src/mcp/transport/http-security.test.ts), [host bridge regressions](../src/sandbox/host-functions.test.ts), database value guards, and [allocation check](../scripts/security-allocation-check.mjs) pass. Endless response stops after 8.125 MiB with 9.47 MiB observed peak RSS growth. Database cancellation and whole-process concurrency remain explicit deployment/architecture caveats, not guarantees of the allocation fix. |
-| SR-006 | [Ownership regressions](../src/mcp/tools/tools.test.ts) prove private-agent anti-enumeration and metadata-only public/non-owner projections. |
-| SR-007 | [Subject regressions](../src/providers/auth/subject.test.ts) and signed delegated-token tests reject missing, malformed, blank, and oversized subjects before principal creation. |
-| SR-008 | HMAC credential storage, rotating refresh families, reuse revocation, key/user revocation, and [migration recovery rehearsal](../scripts/security-migration-rehearsal.mjs) pass. Release review passed; production migration is still required before deployment. |
-| SR-009 | Raw repository audits report three affected tooling packages for one advisory. The owner accepted the isolated build/migration-tooling risk through 2026-10-06. The runtime image excludes the affected tooling and its shipped-subset audit reports zero vulnerabilities. |
-| SR-010 | Exact canonical Host plus explicit Origin checks, malformed/missing/duplicate Host rejection, and delegated metadata tests pass. |
+| Finding | Evidence and remaining gate                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| SR-001  | [Secure provider](../src/providers/auth/self-hosted.ts), [sessions](../src/mcp/auth/self-hosted/session.ts), [browser flow](../src/mcp/auth/self-hosted/browser.test.ts), and [database regressions](../src/providers/auth/self-hosted.test.ts): provisioned identity, single-use CSRF, consent, and rejected subject substitution. Release review passed.                                                                                           |
+| SR-002  | Opaque hashed codes, expiry and binding checks, atomic consumption; eight concurrent exchanges produce one success in the database tests. Release review passed.                                                                                                                                                                                                                                                                                     |
+| SR-003  | Only public clients and S256 PKCE are supported; confidential registration is rejected and no client secret is generated. Release review passed.                                                                                                                                                                                                                                                                                                     |
+| SR-004  | [Safe fetch](../src/sandbox/safe-fetch.ts) and [41 regressions](../src/sandbox/safe-fetch.test.ts): special address classes, redirects, mixed DNS answers, pinned lookup, stripped credentials, cancellation, and response limits.                                                                                                                                                                                                                   |
+| SR-005  | [HTTP limits](../src/mcp/transport/http-security.test.ts), [host bridge regressions](../src/sandbox/host-functions.test.ts), database value guards, and [allocation check](../scripts/security-allocation-check.mjs) pass. Endless response stops after 8.125 MiB with 9.47 MiB observed peak RSS growth. Database cancellation and whole-process concurrency remain explicit deployment/architecture caveats, not guarantees of the allocation fix. |
+| SR-006  | [Ownership regressions](../src/mcp/tools/tools.test.ts) prove private-agent anti-enumeration and metadata-only public/non-owner projections.                                                                                                                                                                                                                                                                                                         |
+| SR-007  | [Subject regressions](../src/providers/auth/subject.test.ts) and signed delegated-token tests reject missing, malformed, blank, and oversized subjects before principal creation.                                                                                                                                                                                                                                                                    |
+| SR-008  | HMAC credential storage, rotating refresh families, reuse revocation, key/user revocation, and [migration recovery rehearsal](../scripts/security-migration-rehearsal.mjs) pass. Release review passed; production migration is still required before deployment.                                                                                                                                                                                    |
+| SR-009  | Raw repository audits report three affected tooling packages for one advisory. The owner accepted the isolated build/migration-tooling risk through 2026-10-06. The runtime image excludes the affected tooling and its shipped-subset audit reports zero vulnerabilities.                                                                                                                                                                           |
+| SR-010  | Exact canonical Host plus explicit Origin checks, malformed/missing/duplicate Host rejection, and delegated metadata tests pass.                                                                                                                                                                                                                                                                                                                     |
 
 Candidate verification: 400/400 full tests, 115/115 focused tests, 2/2 live
 contract tests, typecheck, build, Prisma validation, all nine migrations, empty

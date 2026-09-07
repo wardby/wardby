@@ -31,28 +31,50 @@ export interface StartHttpServerOptions {
   auth: { authProvider: AuthProvider; db: PrismaClient; providers: McpProviders };
   selfHosted?: SelfHostedAuthProvider;
 }
-export interface HttpServerHandle { port: number; close(): Promise<void>; }
+export interface HttpServerHandle {
+  port: number;
+  close(): Promise<void>;
+}
 
-export function sendJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
-  res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...headers }).end(JSON.stringify(body));
+export function sendJson(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+): void {
+  res
+    .writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...headers })
+    .end(JSON.stringify(body));
 }
 
 export async function startHttpServer(opts: StartHttpServerOptions): Promise<HttpServerHandle> {
   const canonical = canonicalUrl(opts.config.canonicalUri);
-  if (opts.config.authProviderKind === "self-hosted" && !opts.selfHosted) throw new Error("Missing self-hosted provider.");
+  if (opts.config.authProviderKind === "self-hosted" && !opts.selfHosted)
+    throw new Error("Missing self-hosted provider.");
   const oauth = opts.config.authProviderKind === "self-hosted" ? browserHandler(opts.selfHosted!) : undefined;
-  const origins = new Set([canonical.origin, ...(opts.config.allowedOrigins ?? []).map((value) => {
-    const url = canonicalUrl(value);
-    if (url.origin !== value) throw new Error("Allowed origins must be exact origins without paths.");
-    return value;
-  })]);
+  const origins = new Set([
+    canonical.origin,
+    ...(opts.config.allowedOrigins ?? []).map((value) => {
+      const url = canonicalUrl(value);
+      if (url.origin !== value) throw new Error("Allowed origins must be exact origins without paths.");
+      return value;
+    }),
+  ]);
   const validateHost = hostHeaderValidation([canonical.hostname]);
   const nodeHandler = toNodeHandler(createMcpHandler(opts.mcp.factory, { responseMode: opts.config.responseMode }));
   const server = createServer({ maxHeaderSize: 16 * 1024, requireHostHeader: false }, (req, res) => {
     void route(req, res).catch((err: unknown) => {
-      if (res.headersSent) { res.destroy(); return; }
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
       if (err instanceof McpError) {
-        sendJson(res, err.httpStatus, { error: "invalid_token" }, err.wwwAuthenticate ? { "www-authenticate": err.wwwAuthenticate } : {});
+        sendJson(
+          res,
+          err.httpStatus,
+          { error: "invalid_token" },
+          err.wwwAuthenticate ? { "www-authenticate": err.wwwAuthenticate } : {},
+        );
       } else if (err instanceof HttpBoundaryError) {
         res.shouldKeepAlive = false;
         // Drain without buffering while the error response flushes, then bound socket cleanup.
@@ -75,7 +97,8 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
       return;
     }
     if (req.headers.origin && !origins.has(req.headers.origin)) {
-      sendJson(res, 403, { error: "invalid_origin" }, { connection: "close" }); return;
+      sendJson(res, 403, { error: "invalid_origin" }, { connection: "close" });
+      return;
     }
     if (!req.url?.startsWith("/") || req.url.startsWith("//")) throw new HttpBoundaryError(400, "invalid_target");
     const url = new URL(req.url, canonical.origin);
@@ -83,17 +106,34 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
     const timer = setTimeout(() => controller.abort(), HTTP_LIMITS.requestMs);
     let body: unknown;
     try {
-      const hasBody = req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.headers["content-length"] || req.headers["transfer-encoding"];
+      const hasBody =
+        req.method === "POST" ||
+        req.method === "PUT" ||
+        req.method === "PATCH" ||
+        req.headers["content-length"] ||
+        req.headers["transfer-encoding"];
       if (hasBody) {
-        const limit = url.pathname === "/mcp" || url.pathname.startsWith("/webhooks/") ? HTTP_LIMITS.json : HTTP_LIMITS.auth;
+        const limit =
+          url.pathname === "/mcp" || url.pathname.startsWith("/webhooks/") ? HTTP_LIMITS.json : HTTP_LIMITS.auth;
         const raw = await readBody(req, limit, controller.signal);
         body = parseBody(raw, req.headers["content-type"]);
       }
-    } finally { clearTimeout(timer); }
+    } finally {
+      clearTimeout(timer);
+    }
 
-    if (req.method === "GET" && (url.pathname === "/.well-known/oauth-protected-resource" || url.pathname === "/.well-known/oauth-protected-resource" + (canonical.pathname === "/" ? "" : canonical.pathname))) {
-      const authorizationServers = opts.config.authProviderKind === "self-hosted" ? [canonical.href] : [opts.config.authorizationServer].filter((s): s is string => !!s);
-      sendJson(res, 200, protectedResourceMetadata({ canonicalUri: canonical.href, authorizationServers })); return;
+    if (
+      req.method === "GET" &&
+      (url.pathname === "/.well-known/oauth-protected-resource" ||
+        url.pathname ===
+          "/.well-known/oauth-protected-resource" + (canonical.pathname === "/" ? "" : canonical.pathname))
+    ) {
+      const authorizationServers =
+        opts.config.authProviderKind === "self-hosted"
+          ? [canonical.href]
+          : [opts.config.authorizationServer].filter((s): s is string => !!s);
+      sendJson(res, 200, protectedResourceMetadata({ canonicalUri: canonical.href, authorizationServers }));
+      return;
     }
     if (url.pathname === SECRET_ELICITATION_PATH && (req.method === "GET" || req.method === "POST")) {
       await handleSecretElicitationForm(
@@ -101,14 +141,19 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
         url.searchParams.get("t"),
         () => Promise.resolve(body instanceof URLSearchParams ? body : new URLSearchParams()),
         res,
-        { verify: (token) => opts.mcp.verifyRequestState(token), secrets: opts.auth.providers.secrets, db: opts.auth.db },
+        {
+          verify: (token) => opts.mcp.verifyRequestState(token),
+          secrets: opts.auth.providers.secrets,
+          db: opts.auth.db,
+        },
       );
       return;
     }
-    if (oauth && await oauth(req, res, url, body)) return;
+    if (oauth && (await oauth(req, res, url, body))) return;
     const webhook = /^\/webhooks\/([^/]+)$/.exec(url.pathname);
     if (webhook && req.method === "POST") {
-      if (!body || Array.isArray(body) || body instanceof URLSearchParams) throw new HttpBoundaryError(415, "expected_json_object");
+      if (!body || Array.isArray(body) || body instanceof URLSearchParams)
+        throw new HttpBoundaryError(415, "expected_json_object");
       const headers = Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v[0] : v]));
       const result = await handleWebhookIngress(
         webhook[1],
@@ -116,13 +161,24 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
         opts.auth.db,
         opts.auth.providers.executor,
       );
-      sendJson(res, result.status, result.body); return;
+      sendJson(res, result.status, result.body);
+      return;
     }
     if (url.pathname === "/mcp") {
-      if (req.method === "POST" && (!body || body instanceof URLSearchParams)) throw new HttpBoundaryError(415, "expected_json");
-      const ctx = await authenticate({ authorization: req.headers.authorization }, { ...opts.auth, canonicalUri: canonical.href });
-      (req as IncomingMessage & { auth?: unknown }).auth = { token: "", clientId: ctx.principal.subject, scopes: [...ctx.scopes], extra: { principal: ctx.principal } };
-      await nodeHandler(req, res, body); return;
+      if (req.method === "POST" && (!body || body instanceof URLSearchParams))
+        throw new HttpBoundaryError(415, "expected_json");
+      const ctx = await authenticate(
+        { authorization: req.headers.authorization },
+        { ...opts.auth, canonicalUri: canonical.href },
+      );
+      (req as IncomingMessage & { auth?: unknown }).auth = {
+        token: "",
+        clientId: ctx.principal.subject,
+        scopes: [...ctx.scopes],
+        extra: { principal: ctx.principal },
+      };
+      await nodeHandler(req, res, body);
+      return;
     }
     sendJson(res, 404, { error: "not_found" });
   }
@@ -130,12 +186,25 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
   server.headersTimeout = HTTP_LIMITS.headersMs;
   server.keepAliveTimeout = 5_000;
   server.maxRequestsPerSocket = 100;
-  const cleanupTimer = opts.config.authProviderKind === "self-hosted" ? setInterval(() => {
-    void opts.selfHosted!.cleanup().catch((err) => httpLog.error({ err }, "OAuth cleanup failed"));
-  }, 15 * 60_000) : undefined;
+  const cleanupTimer =
+    opts.config.authProviderKind === "self-hosted"
+      ? setInterval(() => {
+          void opts.selfHosted!.cleanup().catch((err) => httpLog.error({ err }, "OAuth cleanup failed"));
+        }, 15 * 60_000)
+      : undefined;
   cleanupTimer?.unref();
   server.once("close", () => clearInterval(cleanupTimer));
-  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(opts.config.httpBind.port, opts.config.httpBind.host, resolve); });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(opts.config.httpBind.port, opts.config.httpBind.host, resolve);
+  });
   const address = server.address();
-  return { port: typeof address === "object" && address ? address.port : opts.config.httpBind.port, close: () => new Promise((resolve, reject) => { server.close((err) => err ? reject(err) : resolve()); server.closeIdleConnections(); }) };
+  return {
+    port: typeof address === "object" && address ? address.port : opts.config.httpBind.port,
+    close: () =>
+      new Promise((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+        server.closeIdleConnections();
+      }),
+  };
 }

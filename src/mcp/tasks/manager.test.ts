@@ -31,14 +31,16 @@ describe.skipIf(!databaseUrl)("MCP task manager (database)", () => {
     await db.$disconnect();
   });
 
-  async function newRun(overrides: Partial<{
-    status: RunStatus;
-    tokensIn: number;
-    tokensOut: number;
-    costUsd: number;
-    error: string | null;
-    finalText: string | null;
-  }> = {}) {
+  async function newRun(
+    overrides: Partial<{
+      status: RunStatus;
+      tokensIn: number;
+      tokensOut: number;
+      costUsd: number;
+      error: string | null;
+      finalText: string | null;
+    }> = {},
+  ) {
     const agent = await db.agent.create({
       data: { name: `task-mgr-test-${randomUUID()}`, systemPrompt: "x", model: "m", budgetUsd: 10 },
     });
@@ -89,7 +91,8 @@ describe.skipIf(!databaseUrl)("MCP task manager (database)", () => {
         tokensIn: 10,
         tokensOut: 5,
         costUsd: 0.01,
-        error: runStatus === "failed" || runStatus === "lost" || runStatus === "refused" ? "something went wrong" : null,
+        error:
+          runStatus === "failed" || runStatus === "lost" || runStatus === "refused" ? "something went wrong" : null,
         finalText: runStatus === "succeeded" || runStatus === "budget_exhausted" ? "the answer" : null,
       });
       const created = await createRunTask(run.id, TEST_PRINCIPAL_ID, db, 60_000);

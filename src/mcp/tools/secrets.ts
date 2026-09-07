@@ -28,8 +28,13 @@ export function registerSecretsTools(mcp: ReevoMcpServer, opts: SecretsToolsOpti
   mcp.registerTool({
     name: "create_secret",
     scope: "secrets:write",
-    description: 'Creates a secret. Omit "value" to enter it securely via a one-time browser link instead of passing it as a plaintext argument.',
-    inputSchema: { type: "object", properties: { name: { type: "string" }, value: { type: "string" } }, required: ["name"] },
+    description:
+      'Creates a secret. Omit "value" to enter it securely via a one-time browser link instead of passing it as a plaintext argument.',
+    inputSchema: {
+      type: "object",
+      properties: { name: { type: "string" }, value: { type: "string" } },
+      required: ["name"],
+    },
     handler: async (args: { name: string; value?: string }, ctx) => {
       if (args.value !== undefined) {
         const secret = await createSecret(args.name, args.value, ctx.principal.id, ctx.providers.secrets, ctx.db);
@@ -63,7 +68,10 @@ export function registerSecretsTools(mcp: ReevoMcpServer, opts: SecretsToolsOpti
         return inputRequired({
           requestState: token,
           inputRequests: {
-            secretValue: inputRequired.elicitUrl({ url, message: `Enter the value for secret "${args.name}" in your browser.` }),
+            secretValue: inputRequired.elicitUrl({
+              url,
+              message: `Enter the value for secret "${args.name}" in your browser.`,
+            }),
           },
         });
       }
@@ -91,7 +99,11 @@ export function registerSecretsTools(mcp: ReevoMcpServer, opts: SecretsToolsOpti
   mcp.registerTool({
     name: "attach_secret",
     scope: "secrets:write",
-    inputSchema: { type: "object", properties: { agentId: { type: "string" }, name: { type: "string" } }, required: ["agentId", "name"] },
+    inputSchema: {
+      type: "object",
+      properties: { agentId: { type: "string" }, name: { type: "string" } },
+      required: ["agentId", "name"],
+    },
     handler: async (args: { agentId: string; name: string }, ctx) => {
       await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
       try {
@@ -106,7 +118,11 @@ export function registerSecretsTools(mcp: ReevoMcpServer, opts: SecretsToolsOpti
   mcp.registerTool({
     name: "detach_secret",
     scope: "secrets:write",
-    inputSchema: { type: "object", properties: { agentId: { type: "string" }, name: { type: "string" } }, required: ["agentId", "name"] },
+    inputSchema: {
+      type: "object",
+      properties: { agentId: { type: "string" }, name: { type: "string" } },
+      required: ["agentId", "name"],
+    },
     handler: async (args: { agentId: string; name: string }, ctx) => {
       await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
       await detachSecret(args.agentId, args.name, ctx.principal.id, ctx.db);

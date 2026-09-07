@@ -13,10 +13,7 @@ export interface PersistedExecutionHandle {
   id: string;
 }
 
-export type ExecutionRecoveryResult =
-  | { state: "active" }
-  | { state: "terminal" }
-  | { state: "lost"; reason?: string };
+export type ExecutionRecoveryResult = { state: "active" } | { state: "terminal" } | { state: "lost"; reason?: string };
 
 export interface Executor {
   start: (runId: string) => Promise<void>;

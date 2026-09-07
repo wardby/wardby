@@ -21,7 +21,12 @@ describe("anthropic pricing", () => {
 
   it("does not double-count cache-write tokens", () => {
     // inputTokens excludes cache-write by contract; fresh = input - cachedRead.
-    const cost = anthropicPriceUsd("claude-sonnet-5", { inputTokens: 1000, cachedInputTokens: 1000, cacheWriteTokens: 500, outputTokens: 0 });
+    const cost = anthropicPriceUsd("claude-sonnet-5", {
+      inputTokens: 1000,
+      cachedInputTokens: 1000,
+      cacheWriteTokens: 500,
+      outputTokens: 0,
+    });
     const p = getAnthropicPricing("claude-sonnet-5");
     const expected = (1000 / 1e6) * p.cachedInputPerMTok! + (500 / 1e6) * p.cacheWritePerMTok!;
     expect(cost).toBeCloseTo(expected, 9);

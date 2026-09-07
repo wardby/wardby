@@ -27,21 +27,31 @@ function clone<T>(value: T): T {
 
 function resultFor(status: JobStatus): JobResult {
   switch (status.state) {
-    case "succeeded": return { exitCode: 0, reason: "completed" };
-    case "failed": return { exitCode: 1, reason: "failed" };
-    case "stopped": return { exitCode: 143, reason: "stopped" };
-    case "lost": return { exitCode: 1, reason: "lost" };
-    default: throw new Error("job_not_terminal");
+    case "succeeded":
+      return { exitCode: 0, reason: "completed" };
+    case "failed":
+      return { exitCode: 1, reason: "failed" };
+    case "stopped":
+      return { exitCode: 143, reason: "stopped" };
+    case "lost":
+      return { exitCode: 1, reason: "lost" };
+    default:
+      throw new Error("job_not_terminal");
   }
 }
 
 function statusFor(result: JobResult): JobStatus {
   switch (result.reason) {
-    case "completed": return { state: "succeeded" };
-    case "stopped": return { state: "stopped" };
-    case "lost": return { state: "lost" };
-    case "failed": return { state: "failed" };
-    case "timed_out": return { state: "failed", reason: "timed_out" };
+    case "completed":
+      return { state: "succeeded" };
+    case "stopped":
+      return { state: "stopped" };
+    case "lost":
+      return { state: "lost" };
+    case "failed":
+      return { state: "failed" };
+    case "timed_out":
+      return { state: "failed", reason: "timed_out" };
   }
 }
 

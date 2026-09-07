@@ -14,7 +14,11 @@ import { XMLParser } from "fast-xml-parser";
 import { boundedJson } from "../bounded-json.js";
 import { BRIDGE_RESULT_BYTES, HTML_LINKS_LIMIT } from "../limits.js";
 
-export function parseHtmlPayload(html: string): { title: string | null; text: string; links: { href: string; text: string }[] } {
+export function parseHtmlPayload(html: string): {
+  title: string | null;
+  text: string;
+  links: { href: string; text: string }[];
+} {
   const root = parseHtmlDom(html);
   const title = root.querySelector("title")?.text?.trim() ?? null;
   const text = root.text.replace(/\s+/g, " ").trim();
@@ -44,7 +48,8 @@ export function parseXmlPayload(xml: string, xmlOptions: Record<string, unknown>
 
 interface ParseRequest {
   kind: "html" | "csv" | "xml";
-  payload: { html: string } | { csv: string; header: boolean } | { xml: string; xmlOptions: Record<string, unknown> | null };
+  payload:
+    { html: string } | { csv: string; header: boolean } | { xml: string; xmlOptions: Record<string, unknown> | null };
 }
 
 function handle(request: ParseRequest): unknown {

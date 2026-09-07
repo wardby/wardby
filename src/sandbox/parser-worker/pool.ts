@@ -46,7 +46,9 @@ const defaultWorkerJsUrl = new URL("./worker.js", import.meta.url);
 // ".js"-import-resolves-to-".ts" remapping tsx/vitest give normal `import`
 // statements. Under tsx/vitest only worker.ts exists on disk; after
 // `tsc -p tsconfig.build.json` only the compiled worker.js does.
-const DEFAULT_WORKER_URL = existsSync(fileURLToPath(defaultWorkerJsUrl)) ? defaultWorkerJsUrl : new URL("./worker.ts", import.meta.url);
+const DEFAULT_WORKER_URL = existsSync(fileURLToPath(defaultWorkerJsUrl))
+  ? defaultWorkerJsUrl
+  : new URL("./worker.ts", import.meta.url);
 // A worker spawned from a vitest-run process does NOT inherit a tsx loader
 // via process.execArgv (vitest's own parent process isn't started via
 // `tsx` — only a `tsx`-launched process, e.g. the `cli` script, has that

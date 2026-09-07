@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Close the Excessive Agency (OWASP LLM08) finding from the 2026-09-06 reevo-run code review — any tool attached to an agent currently has unscoped access to *every* secret and datastore key the agent has, plus unrestricted outbound `fetch`. This plan adds per-tool capability declarations (which secrets, which datastore key prefixes, which fetch hosts) at `attach_tool` time, persisted on `AgentTool`, and enforced at the sandbox bridge layer.
+**Goal:** Close the Excessive Agency (OWASP LLM08) finding from the 2026-09-06 reevo-run code review — any tool attached to an agent currently has unscoped access to _every_ secret and datastore key the agent has, plus unrestricted outbound `fetch`. This plan adds per-tool capability declarations (which secrets, which datastore key prefixes, which fetch hosts) at `attach_tool` time, persisted on `AgentTool`, and enforced at the sandbox bridge layer.
 
 **Architecture:** A new validation module (`src/sandbox/tool-capabilities.ts`) defines the zod schema and bounded-array conventions for the three capability lists, mirroring the existing `src/coding/profile.ts` pattern (bounded `Json` columns, not native Postgres arrays — this repo's established convention for this kind of config). Two small wrapper functions — `scopeSecretsAccessor` (in `core/secrets.ts`) and `scopeDatastore` (new `providers/datastore/scoped.ts`) — decorate the existing `SecretsAccessor`/`Datastore` interfaces with an allowlist check, so `host-functions.ts`'s bridge functions need no changes for secrets/datastore. Fetch scoping is threaded as a new `allowedFetchHosts` option through `runInSandbox` → `installHostFunctions`, reusing `fetch-policy.ts`'s existing SSRF machinery via one new `restrictToAllowedHosts` flag. `runner.ts` builds these three scoped values per attached tool, from the `AgentTool` row's declared capabilities, immediately before each sandbox invocation.
 
 **Tech Stack:** TypeScript, Prisma 6 + PostgreSQL, Zod, Vitest.
 
-**Spec:** No standalone spec doc — this plan implements the fix direction from the 2026-09-06 codebase-review-agent run (runId `cmtq7dixx0002sqn0thy7d4wc`), memorialized in the user's `reevo-run-code-review-findings` memory: *"Needs per-tool capability scoping (which secrets/datastore prefixes/hosts a tool may touch, declared at attach time) enforced at the bridge layer."*
+**Spec:** No standalone spec doc — this plan implements the fix direction from the 2026-09-06 codebase-review-agent run (runId `cmtq7dixx0002sqn0thy7d4wc`), memorialized in the user's `reevo-run-code-review-findings` memory: _"Needs per-tool capability scoping (which secrets/datastore prefixes/hosts a tool may touch, declared at attach time) enforced at the bridge layer."_
 
 ## Global Constraints
 
@@ -22,12 +22,14 @@
 ## Task 1: Capability schema module + `AgentTool` migration
 
 **Files:**
+
 - Create: `src/sandbox/tool-capabilities.ts`
 - Create: `src/sandbox/tool-capabilities.test.ts`
 - Modify: `prisma/schema.prisma` (`AgentTool` model, ~line 95-102)
 - Create: `prisma/migrations/20260906060000_tool_capability_scoping/migration.sql`
 
 **Interfaces:**
+
 - Produces: `ToolCapabilitiesSchema` (full, all fields defaulted to `[]`), `ToolCapabilitiesPatchSchema` (all fields optional, for partial re-declaration on re-attach), `FETCH_WILDCARD = "*"`, `asStringArray(value: unknown): string[]`, and the constants `MAX_ALLOWED_SECRETS`, `MAX_ALLOWED_DATASTORE_PREFIXES`, `MAX_ALLOWED_HOSTS` (each `64`). Later tasks (5, 6, 7) import all of these.
 - Consumes: `normalizeHost` from `./fetch-policy.js` (already exists, unchanged).
 
@@ -75,7 +77,10 @@ const secretNameSchema = z
 
 const datastorePrefixSchema = z
   .string()
-  .refine((v) => byteLength(v) <= MAX_DATASTORE_PREFIX_BYTES, `must be at most ${MAX_DATASTORE_PREFIX_BYTES} UTF-8 bytes`);
+  .refine(
+    (v) => byteLength(v) <= MAX_DATASTORE_PREFIX_BYTES,
+    `must be at most ${MAX_DATASTORE_PREFIX_BYTES} UTF-8 bytes`,
+  );
 
 const fetchHostSchema = z
   .string()
@@ -83,9 +88,18 @@ const fetchHostSchema = z
   .transform((v) => (v === FETCH_WILDCARD ? FETCH_WILDCARD : normalizeHost(v)));
 
 const toolCapabilityFields = {
-  allowedSecrets: z.array(secretNameSchema).max(MAX_ALLOWED_SECRETS).transform((v) => [...new Set(v)]),
-  allowedDatastorePrefixes: z.array(datastorePrefixSchema).max(MAX_ALLOWED_DATASTORE_PREFIXES).transform((v) => [...new Set(v)]),
-  allowedHosts: z.array(fetchHostSchema).max(MAX_ALLOWED_HOSTS).transform((v) => [...new Set(v)]),
+  allowedSecrets: z
+    .array(secretNameSchema)
+    .max(MAX_ALLOWED_SECRETS)
+    .transform((v) => [...new Set(v)]),
+  allowedDatastorePrefixes: z
+    .array(datastorePrefixSchema)
+    .max(MAX_ALLOWED_DATASTORE_PREFIXES)
+    .transform((v) => [...new Set(v)]),
+  allowedHosts: z
+    .array(fetchHostSchema)
+    .max(MAX_ALLOWED_HOSTS)
+    .transform((v) => [...new Set(v)]),
 };
 
 /** Full capability set — used when creating a brand-new attachment (unset fields default to deny-all). */
@@ -276,16 +290,19 @@ COMMIT;
 - [ ] **Step 7: Apply locally and regenerate the client**
 
 Run:
+
 ```bash
 npm run db:up
 npx prisma migrate resolve --applied 20260906060000_tool_capability_scoping
 npm run prisma:generate
 ```
+
 (If the local DB doesn't yet have every prior migration applied, run `npm run prisma:migrate` first — it's `prisma migrate deploy`, safe to run repeatedly.)
 
 - [ ] **Step 8: Run the required drift check (CLAUDE.md)**
 
 Run:
+
 ```bash
 docker exec local-postgres-1 psql -U reevo -d reevo \
   -c "DROP DATABASE IF EXISTS reevo_shadow;" -c "CREATE DATABASE reevo_shadow;"
@@ -297,6 +314,7 @@ npx prisma migrate diff \
 docker exec local-postgres-1 psql -U reevo -d reevo -c "DROP DATABASE IF EXISTS reevo_shadow;"
 npx prisma validate
 ```
+
 Expected: the diff script prints exactly `-- This is an empty migration.` If it prints any `ALTER`/`CREATE`, the `@default("[]")` syntax in schema.prisma doesn't match the migration's `DEFAULT '[]'` — adjust schema.prisma's default expression (not the migration) until this is clean.
 
 - [ ] **Step 9: Commit**
@@ -311,10 +329,12 @@ git commit -m "feat(sandbox): add per-tool capability schema + AgentTool migrati
 ## Task 2: Secrets scoping wrapper
 
 **Files:**
+
 - Modify: `src/core/secrets.ts`
 - Modify: `src/core/secrets.test.ts`
 
 **Interfaces:**
+
 - Consumes: `SecretsAccessor` (already defined in `secrets.ts`).
 - Produces: `scopeSecretsAccessor(accessor: SecretsAccessor, allowedNames: readonly string[]): SecretsAccessor` — Task 5 (runner.ts) calls this per tool invocation.
 
@@ -325,7 +345,11 @@ Add to `src/core/secrets.test.ts` (check the file's existing imports first — a
 ```ts
 describe("scopeSecretsAccessor", () => {
   function fakeAccessor(values: Record<string, string>) {
-    return { async get(name: string) { return values[name]; } };
+    return {
+      async get(name: string) {
+        return values[name];
+      },
+    };
   }
 
   it("resolves a name that is in the allowlist", async () => {
@@ -340,7 +364,12 @@ describe("scopeSecretsAccessor", () => {
 
   it("never calls the underlying accessor for a disallowed name", async () => {
     let calls = 0;
-    const accessor = { async get(name: string) { calls++; return "x"; } };
+    const accessor = {
+      async get(name: string) {
+        calls++;
+        return "x";
+      },
+    };
     const scoped = scopeSecretsAccessor(accessor, []);
     await scoped.get("ANYTHING");
     expect(calls).toBe(0);
@@ -398,10 +427,12 @@ git commit -m "feat(core): add scopeSecretsAccessor for per-tool secret scoping"
 ## Task 3: Datastore scoping wrapper
 
 **Files:**
+
 - Create: `src/providers/datastore/scoped.ts`
 - Create: `src/providers/datastore/scoped.test.ts`
 
 **Interfaces:**
+
 - Consumes: `Datastore`, `DatastoreValue` from `./types.js`.
 - Produces: `scopeDatastore(datastore: Datastore, allowedPrefixes: readonly string[]): Datastore` — Task 5 (runner.ts) calls this per tool invocation.
 
@@ -416,9 +447,15 @@ import { scopeDatastore } from "./scoped.js";
 function fakeDatastore(): Datastore {
   const store = new Map<string, DatastoreValue>();
   return {
-    async get(agentId, key) { return store.get(`${agentId}:${key}`); },
-    async set(agentId, key, value) { store.set(`${agentId}:${key}`, value); },
-    async delete(agentId, key) { store.delete(`${agentId}:${key}`); },
+    async get(agentId, key) {
+      return store.get(`${agentId}:${key}`);
+    },
+    async set(agentId, key, value) {
+      store.set(`${agentId}:${key}`, value);
+    },
+    async delete(agentId, key) {
+      store.delete(`${agentId}:${key}`);
+    },
     async list(agentId, prefix) {
       const p = `${agentId}:${prefix ?? ""}`;
       return [...store.keys()].filter((k) => k.startsWith(p)).map((k) => k.slice(agentId.length + 1));
@@ -545,6 +582,7 @@ git commit -m "feat(datastore): add scopeDatastore for per-tool key-prefix scopi
 ## Task 4: Fetch host scoping
 
 **Files:**
+
 - Modify: `src/sandbox/fetch-policy.ts`
 - Modify: `src/sandbox/fetch-policy.test.ts`
 - Modify: `src/sandbox/host-functions.ts`
@@ -554,6 +592,7 @@ git commit -m "feat(datastore): add scopeDatastore for per-tool key-prefix scopi
 - Modify: `.env.example`
 
 **Interfaces:**
+
 - Consumes: `FETCH_WILDCARD` from `./tool-capabilities.js` (Task 1).
 - Produces: `FetchPolicyOptions.restrictToAllowedHosts`, `HostFunctionOptions.allowedFetchHosts`, `SandboxInvocation.allowedFetchHosts` — Task 5 (runner.ts) sets the last one per tool invocation.
 
@@ -564,9 +603,9 @@ Add to `src/sandbox/fetch-policy.test.ts`:
 ```ts
 describe("assertFetchDestinationAllowed (restrictToAllowedHosts)", () => {
   it("blocks a public host that is not on the allowlist when restricted", async () => {
-    await expect(
-      assertFetchDestinationAllowed("http://8.8.8.8/", { restrictToAllowedHosts: true }),
-    ).rejects.toThrow(/blocked/);
+    await expect(assertFetchDestinationAllowed("http://8.8.8.8/", { restrictToAllowedHosts: true })).rejects.toThrow(
+      /blocked/,
+    );
   });
 
   it("allows a public host that is on the allowlist when restricted", async () => {
@@ -591,15 +630,26 @@ Expected: the two `restrictToAllowedHosts` tests FAIL (option is silently ignore
 - [ ] **Step 3: Add `restrictToAllowedHosts` to `fetch-policy.ts`**
 
 Change:
+
 ```ts
-export interface FetchPolicyOptions { allowedHosts?: string[]; resolve?: Resolver; }
+export interface FetchPolicyOptions {
+  allowedHosts?: string[];
+  resolve?: Resolver;
+}
 ```
+
 to:
+
 ```ts
-export interface FetchPolicyOptions { allowedHosts?: string[]; resolve?: Resolver; restrictToAllowedHosts?: boolean; }
+export interface FetchPolicyOptions {
+  allowedHosts?: string[];
+  resolve?: Resolver;
+  restrictToAllowedHosts?: boolean;
+}
 ```
 
 Change:
+
 ```ts
 export async function resolveDestination(urlString: string, options: FetchPolicyOptions = {}) {
   let url: URL;
@@ -609,7 +659,9 @@ export async function resolveDestination(urlString: string, options: FetchPolicy
   const allowed = (options.allowedHosts ?? []).map(normalizeHost).includes(hostname);
   const version = isIP(hostname);
 ```
+
 to:
+
 ```ts
 export async function resolveDestination(urlString: string, options: FetchPolicyOptions = {}) {
   let url: URL;
@@ -679,6 +731,7 @@ Expected: FAIL — `runInSandbox` doesn't accept `allowedFetchHosts` yet, and to
 - [ ] **Step 7: Wire `allowedFetchHosts` through `run-in-sandbox.ts`**
 
 In `src/sandbox/run-in-sandbox.ts`, change the `SandboxInvocation` interface:
+
 ```ts
 export interface SandboxInvocation {
   code: string;
@@ -691,7 +744,9 @@ export interface SandboxInvocation {
   logger?: Logger;
 }
 ```
+
 to:
+
 ```ts
 export interface SandboxInvocation {
   code: string;
@@ -708,41 +763,46 @@ export interface SandboxInvocation {
 ```
 
 And change the `installHostFunctions` call:
+
 ```ts
-  return evalToJson(code, invocation.limits, (context, runtime, signal) => {
-    installHostFunctions(context, runtime, {
-      agentId: invocation.agentId,
-      datastore: invocation.datastore,
-      logTag: invocation.toolName,
-      secrets: invocation.secrets,
-      logger: invocation.logger,
-      signal,
-    });
+return evalToJson(code, invocation.limits, (context, runtime, signal) => {
+  installHostFunctions(context, runtime, {
+    agentId: invocation.agentId,
+    datastore: invocation.datastore,
+    logTag: invocation.toolName,
+    secrets: invocation.secrets,
+    logger: invocation.logger,
+    signal,
   });
+});
 ```
+
 to:
+
 ```ts
-  return evalToJson(code, invocation.limits, (context, runtime, signal) => {
-    installHostFunctions(context, runtime, {
-      agentId: invocation.agentId,
-      datastore: invocation.datastore,
-      logTag: invocation.toolName,
-      secrets: invocation.secrets,
-      logger: invocation.logger,
-      allowedFetchHosts: invocation.allowedFetchHosts,
-      signal,
-    });
+return evalToJson(code, invocation.limits, (context, runtime, signal) => {
+  installHostFunctions(context, runtime, {
+    agentId: invocation.agentId,
+    datastore: invocation.datastore,
+    logTag: invocation.toolName,
+    secrets: invocation.secrets,
+    logger: invocation.logger,
+    allowedFetchHosts: invocation.allowedFetchHosts,
+    signal,
   });
+});
 ```
 
 - [ ] **Step 8: Enforce it in `host-functions.ts`**
 
 Add the import:
+
 ```ts
 import { FETCH_WILDCARD } from "./tool-capabilities.js";
 ```
 
 Change `HostFunctionOptions`:
+
 ```ts
 export interface HostFunctionOptions {
   signal?: AbortSignal;
@@ -756,7 +816,9 @@ export interface HostFunctionOptions {
   logger?: Logger;
 }
 ```
+
 to:
+
 ```ts
 export interface HostFunctionOptions {
   signal?: AbortSignal;
@@ -774,35 +836,37 @@ export interface HostFunctionOptions {
 ```
 
 Change the destructure:
+
 ```ts
-  const { agentId, datastore, logTag, secrets, signal } = options;
+const { agentId, datastore, logTag, secrets, signal } = options;
 ```
+
 to:
+
 ```ts
-  const { agentId, datastore, logTag, secrets, signal, allowedFetchHosts } = options;
+const { agentId, datastore, logTag, secrets, signal, allowedFetchHosts } = options;
 ```
 
 Change `__bridge_fetch`:
+
 ```ts
-  register("__bridge_fetch", async (argsJson) => {
-    const [url, init] = args<[string, { method?: string; headers?: Record<string, string>; body?: string }]>(
-      argsJson,
-    );
-    return safeFetch(url, init, { allowedHosts: FETCH_ALLOWED_HOSTS, signal });
-  });
+register("__bridge_fetch", async (argsJson) => {
+  const [url, init] = args<[string, { method?: string; headers?: Record<string, string>; body?: string }]>(argsJson);
+  return safeFetch(url, init, { allowedHosts: FETCH_ALLOWED_HOSTS, signal });
+});
 ```
+
 to:
+
 ```ts
-  register("__bridge_fetch", async (argsJson) => {
-    const [url, init] = args<[string, { method?: string; headers?: Record<string, string>; body?: string }]>(
-      argsJson,
-    );
-    const hosts = allowedFetchHosts ?? [];
-    if (hosts.includes(FETCH_WILDCARD)) {
-      return safeFetch(url, init, { allowedHosts: FETCH_ALLOWED_HOSTS, signal });
-    }
-    return safeFetch(url, init, { allowedHosts: hosts, restrictToAllowedHosts: true, signal });
-  });
+register("__bridge_fetch", async (argsJson) => {
+  const [url, init] = args<[string, { method?: string; headers?: Record<string, string>; body?: string }]>(argsJson);
+  const hosts = allowedFetchHosts ?? [];
+  if (hosts.includes(FETCH_WILDCARD)) {
+    return safeFetch(url, init, { allowedHosts: FETCH_ALLOWED_HOSTS, signal });
+  }
+  return safeFetch(url, init, { allowedHosts: hosts, restrictToAllowedHosts: true, signal });
+});
 ```
 
 - [ ] **Step 9: Run tests to verify they pass**
@@ -815,40 +879,47 @@ Expected: PASS.
 `dry_run_tool` (in `src/mcp/tools/tools.ts`) has no `AgentTool` row — it's the tool author's own pre-attach test sandbox, not a production agent run, so it should keep today's exact fetch behavior rather than silently becoming fetch-blocked.
 
 Add the import in `src/mcp/tools/tools.ts`:
+
 ```ts
 import { FETCH_WILDCARD } from "../../sandbox/tool-capabilities.js";
 ```
 
 Change:
+
 ```ts
-      const sandboxResult = await runInSandbox({
-        code: args.code,
-        params: validated.value,
-        agentId: ctx.principal.id,
-        datastore: ctx.providers.datastore as Datastore,
-        toolName: "dry_run_tool",
-      });
+const sandboxResult = await runInSandbox({
+  code: args.code,
+  params: validated.value,
+  agentId: ctx.principal.id,
+  datastore: ctx.providers.datastore as Datastore,
+  toolName: "dry_run_tool",
+});
 ```
+
 to:
+
 ```ts
-      const sandboxResult = await runInSandbox({
-        code: args.code,
-        params: validated.value,
-        agentId: ctx.principal.id,
-        datastore: ctx.providers.datastore as Datastore,
-        toolName: "dry_run_tool",
-        allowedFetchHosts: [FETCH_WILDCARD],
-      });
+const sandboxResult = await runInSandbox({
+  code: args.code,
+  params: validated.value,
+  agentId: ctx.principal.id,
+  datastore: ctx.providers.datastore as Datastore,
+  toolName: "dry_run_tool",
+  allowedFetchHosts: [FETCH_WILDCARD],
+});
 ```
 
 - [ ] **Step 11: Clarify `.env.example`**
 
 Change:
+
 ```
 # Exact normalized hosts only. Allowlisting private hosts bypasses network isolation.
 REEVO_FETCH_ALLOWED_HOSTS=
 ```
+
 to:
+
 ```
 # Exact normalized hosts only. Allowlisting private hosts bypasses network isolation.
 # Only takes effect for a tool attachment whose allowedHosts includes the "*"
@@ -874,10 +945,12 @@ git commit -m "feat(sandbox): scope outbound fetch to a tool's declared host all
 ## Task 5: Wire capability scoping into `runner.ts`
 
 **Files:**
+
 - Modify: `src/core/runner.ts`
 - Modify: `src/core/runner.test.ts`
 
 **Interfaces:**
+
 - Consumes: `scopeSecretsAccessor` (Task 2), `scopeDatastore` (Task 3), `asStringArray` (Task 1). `db.agentTool.findMany` now returns rows carrying `allowedSecrets`/`allowedDatastorePrefixes`/`allowedHosts` as `Prisma.JsonValue` (Task 1's migration + `prisma generate`).
 - Produces: nothing new for other tasks — this is the integration point.
 
@@ -899,8 +972,7 @@ function fakeDb(
 
   return {
     agent: {
-      findUnique: (async ({ where }: any) =>
-        (where.name ? byName.get(where.name) : byId.get(where.id)) ?? null) as any,
+      findUnique: (async ({ where }: any) => (where.name ? byName.get(where.name) : byId.get(where.id)) ?? null) as any,
     },
     run: {
       create: (async ({ data }: any) => {
@@ -963,8 +1035,7 @@ function fakeDb(
 
   return {
     agent: {
-      findUnique: (async ({ where }: any) =>
-        (where.name ? byName.get(where.name) : byId.get(where.id)) ?? null) as any,
+      findUnique: (async ({ where }: any) => (where.name ? byName.get(where.name) : byId.get(where.id)) ?? null) as any,
     },
     run: {
       create: (async ({ data }: any) => {
@@ -1019,65 +1090,73 @@ function fakeCipher(): SecretCipher {
 Then add two new tests to the `describe("runAgent", ...)` block:
 
 ```ts
-  it("scopes a sandboxed tool's datastore access to its declared allowedDatastorePrefixes", async () => {
-    const db = fakeDb(
-      [{ id: "a1", name: "scoped-ds", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 }],
-      [{
+it("scopes a sandboxed tool's datastore access to its declared allowedDatastorePrefixes", async () => {
+  const db = fakeDb(
+    [{ id: "a1", name: "scoped-ds", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 }],
+    [
+      {
         id: "t1",
         name: "write_key",
         description: "x",
         paramsZod: "z.object({ key: z.string() })",
         jsonSchema: {},
         code: "await datastore.set(params.key, 'v'); return 'ok';",
-      }],
-      [{ agentId: "a1", toolId: "t1", allowedDatastorePrefixes: ["allowed:"] }],
-    );
-    let captured: EngineRunContext | undefined;
-    const engine = fakeEngine(
-      { status: "succeeded", finalText: "", turns: 1, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } },
-      (ctx) => { captured = ctx; },
-    );
+      },
+    ],
+    [{ agentId: "a1", toolId: "t1", allowedDatastorePrefixes: ["allowed:"] }],
+  );
+  let captured: EngineRunContext | undefined;
+  const engine = fakeEngine(
+    { status: "succeeded", finalText: "", turns: 1, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } },
+    (ctx) => {
+      captured = ctx;
+    },
+  );
 
-    await runAgent("scoped-ds", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
+  await runAgent("scoped-ds", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
 
-    const allowed = JSON.parse(await captured!.runSandboxTool("write_key", JSON.stringify({ key: "allowed:1" })));
-    expect(allowed).toBe("ok");
+  const allowed = JSON.parse(await captured!.runSandboxTool("write_key", JSON.stringify({ key: "allowed:1" })));
+  expect(allowed).toBe("ok");
 
-    const blocked = JSON.parse(await captured!.runSandboxTool("write_key", JSON.stringify({ key: "blocked:1" })));
-    expect(blocked).toMatchObject({ error: "thrown", message: expect.stringContaining("datastore_prefix_not_allowed") });
-  });
+  const blocked = JSON.parse(await captured!.runSandboxTool("write_key", JSON.stringify({ key: "blocked:1" })));
+  expect(blocked).toMatchObject({ error: "thrown", message: expect.stringContaining("datastore_prefix_not_allowed") });
+});
 
-  it("scopes a sandboxed tool's secrets access to its declared allowedSecrets", async () => {
-    const db = fakeDb(
-      [{ id: "a1", name: "scoped-secrets", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 }],
-      [{
+it("scopes a sandboxed tool's secrets access to its declared allowedSecrets", async () => {
+  const db = fakeDb(
+    [{ id: "a1", name: "scoped-secrets", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 }],
+    [
+      {
         id: "t1",
         name: "read_secret",
         description: "x",
         paramsZod: "z.object({ name: z.string() })",
         jsonSchema: {},
         code: "const v = await secrets.get(params.name); return v === undefined ? null : v;",
-      }],
-      [{ agentId: "a1", toolId: "t1", allowedSecrets: ["ALLOWED"] }],
-      [
-        { agentId: "a1", name: "ALLOWED", value: "secret-a" },
-        { agentId: "a1", name: "BLOCKED", value: "secret-b" },
-      ],
-    );
-    let captured: EngineRunContext | undefined;
-    const engine = fakeEngine(
-      { status: "succeeded", finalText: "", turns: 1, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } },
-      (ctx) => { captured = ctx; },
-    );
+      },
+    ],
+    [{ agentId: "a1", toolId: "t1", allowedSecrets: ["ALLOWED"] }],
+    [
+      { agentId: "a1", name: "ALLOWED", value: "secret-a" },
+      { agentId: "a1", name: "BLOCKED", value: "secret-b" },
+    ],
+  );
+  let captured: EngineRunContext | undefined;
+  const engine = fakeEngine(
+    { status: "succeeded", finalText: "", turns: 1, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } },
+    (ctx) => {
+      captured = ctx;
+    },
+  );
 
-    await runAgent("scoped-secrets", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: fakeCipher() }, db);
+  await runAgent("scoped-secrets", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: fakeCipher() }, db);
 
-    const allowed = JSON.parse(await captured!.runSandboxTool("read_secret", JSON.stringify({ name: "ALLOWED" })));
-    expect(allowed).toBe("secret-a");
+  const allowed = JSON.parse(await captured!.runSandboxTool("read_secret", JSON.stringify({ name: "ALLOWED" })));
+  expect(allowed).toBe("secret-a");
 
-    const blocked = JSON.parse(await captured!.runSandboxTool("read_secret", JSON.stringify({ name: "BLOCKED" })));
-    expect(blocked).toBeNull();
-  });
+  const blocked = JSON.parse(await captured!.runSandboxTool("read_secret", JSON.stringify({ name: "BLOCKED" })));
+  expect(blocked).toBeNull();
+});
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -1088,60 +1167,68 @@ Expected: FAIL — the datastore test's "blocked" write currently succeeds (no s
 - [ ] **Step 3: Wire scoping into `runner.ts`**
 
 Add imports:
+
 ```ts
 import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
 import { scopeDatastore } from "../providers/datastore/scoped.js";
 import { asStringArray } from "../sandbox/tool-capabilities.js";
 ```
+
 (replacing the existing `import { buildSecretsAccessor } from "./secrets.js";` line.)
 
 Change:
+
 ```ts
-    const toolsByName = new Map(
-      attached.map((attachment) => [
-        attachment.tool.name,
-        { code: attachment.tool.code, paramsZod: attachment.tool.paramsZod },
-      ]),
-    );
+const toolsByName = new Map(
+  attached.map((attachment) => [
+    attachment.tool.name,
+    { code: attachment.tool.code, paramsZod: attachment.tool.paramsZod },
+  ]),
+);
 ```
+
 to:
+
 ```ts
-    const toolsByName = new Map(
-      attached.map((attachment) => [
-        attachment.tool.name,
-        {
-          code: attachment.tool.code,
-          paramsZod: attachment.tool.paramsZod,
-          allowedSecrets: asStringArray(attachment.allowedSecrets),
-          allowedDatastorePrefixes: asStringArray(attachment.allowedDatastorePrefixes),
-          allowedHosts: asStringArray(attachment.allowedHosts),
-        },
-      ]),
-    );
+const toolsByName = new Map(
+  attached.map((attachment) => [
+    attachment.tool.name,
+    {
+      code: attachment.tool.code,
+      paramsZod: attachment.tool.paramsZod,
+      allowedSecrets: asStringArray(attachment.allowedSecrets),
+      allowedDatastorePrefixes: asStringArray(attachment.allowedDatastorePrefixes),
+      allowedHosts: asStringArray(attachment.allowedHosts),
+    },
+  ]),
+);
 ```
 
 Change:
+
 ```ts
-      const result = await runInSandbox({
-        code: tool.code,
-        params: validation.value,
-        agentId: agent.id,
-        datastore: providers.datastore,
-        secrets: secretsAccessor,
-        toolName: name,
-      });
+const result = await runInSandbox({
+  code: tool.code,
+  params: validation.value,
+  agentId: agent.id,
+  datastore: providers.datastore,
+  secrets: secretsAccessor,
+  toolName: name,
+});
 ```
+
 to:
+
 ```ts
-      const result = await runInSandbox({
-        code: tool.code,
-        params: validation.value,
-        agentId: agent.id,
-        datastore: scopeDatastore(providers.datastore, tool.allowedDatastorePrefixes),
-        secrets: scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets),
-        allowedFetchHosts: tool.allowedHosts,
-        toolName: name,
-      });
+const result = await runInSandbox({
+  code: tool.code,
+  params: validation.value,
+  agentId: agent.id,
+  datastore: scopeDatastore(providers.datastore, tool.allowedDatastorePrefixes),
+  secrets: scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets),
+  allowedFetchHosts: tool.allowedHosts,
+  toolName: name,
+});
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -1161,11 +1248,13 @@ git commit -m "feat(core): enforce per-tool capability scoping in the runner"
 ## Task 6: `attach_tool` accepts and persists capabilities
 
 **Files:**
+
 - Modify: `src/mcp/tools/tools.ts`
 - Modify: `src/mcp/tools/tools.test.ts`
 - Modify: `src/mcp/integration.test.ts`
 
 **Interfaces:**
+
 - Consumes: `ToolCapabilitiesPatchSchema` (Task 1).
 - Produces: nothing new for other tasks — this is the authoring-time entry point that Task 7 (CLI) mirrors independently.
 
@@ -1222,77 +1311,90 @@ with:
 ```
 
 Also widen the local `attachments` type declaration from:
+
 ```ts
-  const attachments: { agentId: string; toolId: string }[] = [];
+const attachments: { agentId: string; toolId: string }[] = [];
 ```
+
 to:
+
 ```ts
-  const attachments: Record<string, unknown>[] = [];
+const attachments: Record<string, unknown>[] = [];
 ```
 
 Then add new test cases in the `describe("tool authoring tools", ...)` block:
 
 ```ts
-  it("attach_tool persists declared capabilities and rejects an invalid host", async () => {
-    const db = fakeDb(
-      [{ id: "t1", name: "greet", description: "x", paramsZod: "z.object({})", jsonSchema: {}, code: "", ownerId: "p1" }],
-      [{ id: "a1", ownerId: "p1" }],
-    );
-    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
-    registerToolAuthoringTools(mcp);
-    const client = await connectClient(mcp);
+it("attach_tool persists declared capabilities and rejects an invalid host", async () => {
+  const db = fakeDb(
+    [{ id: "t1", name: "greet", description: "x", paramsZod: "z.object({})", jsonSchema: {}, code: "", ownerId: "p1" }],
+    [{ id: "a1", ownerId: "p1" }],
+  );
+  const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+  mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+  registerToolAuthoringTools(mcp);
+  const client = await connectClient(mcp);
 
-    const bad = await client.callTool({
-      name: "attach_tool",
-      arguments: { agentId: "a1", toolId: "t1", allowedHosts: ["not a host!"] },
-    });
-    expect(bad.isError).toBe(true);
+  const bad = await client.callTool({
+    name: "attach_tool",
+    arguments: { agentId: "a1", toolId: "t1", allowedHosts: ["not a host!"] },
+  });
+  expect(bad.isError).toBe(true);
 
-    const attach = await client.callTool({
-      name: "attach_tool",
-      arguments: { agentId: "a1", toolId: "t1", allowedSecrets: ["API_KEY"], allowedHosts: ["api.example.com"] },
-    });
-    expect(attach.isError).toBeFalsy();
+  const attach = await client.callTool({
+    name: "attach_tool",
+    arguments: { agentId: "a1", toolId: "t1", allowedSecrets: ["API_KEY"], allowedHosts: ["api.example.com"] },
+  });
+  expect(attach.isError).toBeFalsy();
 
-    const rows = await db.agentTool.findMany({ where: { agentId: "a1" } });
-    expect(rows[0]).toMatchObject({ allowedSecrets: ["API_KEY"], allowedHosts: ["api.example.com"], allowedDatastorePrefixes: [] });
-    await client.close();
+  const rows = await db.agentTool.findMany({ where: { agentId: "a1" } });
+  expect(rows[0]).toMatchObject({
+    allowedSecrets: ["API_KEY"],
+    allowedHosts: ["api.example.com"],
+    allowedDatastorePrefixes: [],
+  });
+  await client.close();
+});
+
+it("attach_tool defaults to deny-all capabilities when none are declared", async () => {
+  const db = fakeDb(
+    [{ id: "t1", name: "greet", description: "x", paramsZod: "z.object({})", jsonSchema: {}, code: "", ownerId: "p1" }],
+    [{ id: "a1", ownerId: "p1" }],
+  );
+  const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+  mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+  registerToolAuthoringTools(mcp);
+  const client = await connectClient(mcp);
+
+  await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "t1" } });
+  const rows = await db.agentTool.findMany({ where: { agentId: "a1" } });
+  expect(rows[0]).toMatchObject({ allowedSecrets: [], allowedDatastorePrefixes: [], allowedHosts: [] });
+  await client.close();
+});
+
+it("re-attaching declares only the fields passed, leaving the rest untouched", async () => {
+  const db = fakeDb(
+    [{ id: "t1", name: "greet", description: "x", paramsZod: "z.object({})", jsonSchema: {}, code: "", ownerId: "p1" }],
+    [{ id: "a1", ownerId: "p1" }],
+  );
+  const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+  mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+  registerToolAuthoringTools(mcp);
+  const client = await connectClient(mcp);
+
+  await client.callTool({
+    name: "attach_tool",
+    arguments: { agentId: "a1", toolId: "t1", allowedSecrets: ["API_KEY"] },
+  });
+  await client.callTool({
+    name: "attach_tool",
+    arguments: { agentId: "a1", toolId: "t1", allowedHosts: ["api.example.com"] },
   });
 
-  it("attach_tool defaults to deny-all capabilities when none are declared", async () => {
-    const db = fakeDb(
-      [{ id: "t1", name: "greet", description: "x", paramsZod: "z.object({})", jsonSchema: {}, code: "", ownerId: "p1" }],
-      [{ id: "a1", ownerId: "p1" }],
-    );
-    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
-    registerToolAuthoringTools(mcp);
-    const client = await connectClient(mcp);
-
-    await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "t1" } });
-    const rows = await db.agentTool.findMany({ where: { agentId: "a1" } });
-    expect(rows[0]).toMatchObject({ allowedSecrets: [], allowedDatastorePrefixes: [], allowedHosts: [] });
-    await client.close();
-  });
-
-  it("re-attaching declares only the fields passed, leaving the rest untouched", async () => {
-    const db = fakeDb(
-      [{ id: "t1", name: "greet", description: "x", paramsZod: "z.object({})", jsonSchema: {}, code: "", ownerId: "p1" }],
-      [{ id: "a1", ownerId: "p1" }],
-    );
-    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
-    registerToolAuthoringTools(mcp);
-    const client = await connectClient(mcp);
-
-    await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "t1", allowedSecrets: ["API_KEY"] } });
-    await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "t1", allowedHosts: ["api.example.com"] } });
-
-    const rows = await db.agentTool.findMany({ where: { agentId: "a1" } });
-    expect(rows[0]).toMatchObject({ allowedSecrets: ["API_KEY"], allowedHosts: ["api.example.com"] });
-    await client.close();
-  });
+  const rows = await db.agentTool.findMany({ where: { agentId: "a1" } });
+  expect(rows[0]).toMatchObject({ allowedSecrets: ["API_KEY"], allowedHosts: ["api.example.com"] });
+  await client.close();
+});
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -1303,18 +1405,25 @@ Expected: FAIL — `attach_tool`'s input schema doesn't accept the new fields ye
 - [ ] **Step 3: Update `attach_tool` in `src/mcp/tools/tools.ts`**
 
 Add the import:
+
 ```ts
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
 ```
 
 Change:
+
 ```ts
-  mcp.registerTool({
-    name: "attach_tool",
-    scope: "tools:write",
-    inputSchema: { type: "object", properties: { agentId: { type: "string" }, toolId: { type: "string" } }, required: ["agentId", "toolId"] },
-    handler: async (args: { agentId: string; toolId: string }, ctx) => {
-      await ctx.db.$transaction(async (tx) => {
+mcp.registerTool({
+  name: "attach_tool",
+  scope: "tools:write",
+  inputSchema: {
+    type: "object",
+    properties: { agentId: { type: "string" }, toolId: { type: "string" } },
+    required: ["agentId", "toolId"],
+  },
+  handler: async (args: { agentId: string; toolId: string }, ctx) => {
+    await ctx.db.$transaction(
+      async (tx) => {
         const agent = await tx.agent.findUnique({ where: { id: args.agentId } });
         if (!agent) throw new McpError(404, `Agent "${args.agentId}" not found.`);
         assertCanMutate(agent.ownerId, ctx.principal.id, `Agent "${args.agentId}" is not owned by the caller.`);
@@ -1323,46 +1432,51 @@ Change:
         }
         await requireOwnedTool(tx, args.toolId, ctx.principal.id);
         await tx.agentTool.create({ data: { agentId: args.agentId, toolId: args.toolId } });
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-      return textResult({ attached: true });
-    },
-  });
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+    return textResult({ attached: true });
+  },
+});
 ```
+
 to:
+
 ```ts
-  mcp.registerTool({
-    name: "attach_tool",
-    scope: "tools:write",
-    inputSchema: {
-      type: "object",
-      properties: {
-        agentId: { type: "string" },
-        toolId: { type: "string" },
-        allowedSecrets: { type: "array", items: { type: "string" } },
-        allowedDatastorePrefixes: { type: "array", items: { type: "string" } },
-        allowedHosts: { type: "array", items: { type: "string" } },
-      },
-      required: ["agentId", "toolId"],
+mcp.registerTool({
+  name: "attach_tool",
+  scope: "tools:write",
+  inputSchema: {
+    type: "object",
+    properties: {
+      agentId: { type: "string" },
+      toolId: { type: "string" },
+      allowedSecrets: { type: "array", items: { type: "string" } },
+      allowedDatastorePrefixes: { type: "array", items: { type: "string" } },
+      allowedHosts: { type: "array", items: { type: "string" } },
     },
-    handler: async (
-      args: {
-        agentId: string;
-        toolId: string;
-        allowedSecrets?: string[];
-        allowedDatastorePrefixes?: string[];
-        allowedHosts?: string[];
-      },
-      ctx,
-    ) => {
-      const patch = ToolCapabilitiesPatchSchema.safeParse({
-        allowedSecrets: args.allowedSecrets,
-        allowedDatastorePrefixes: args.allowedDatastorePrefixes,
-        allowedHosts: args.allowedHosts,
-      });
-      if (!patch.success) {
-        throw new McpError(400, `Invalid tool capabilities: ${patch.error.issues.map((i) => i.message).join("; ")}`);
-      }
-      await ctx.db.$transaction(async (tx) => {
+    required: ["agentId", "toolId"],
+  },
+  handler: async (
+    args: {
+      agentId: string;
+      toolId: string;
+      allowedSecrets?: string[];
+      allowedDatastorePrefixes?: string[];
+      allowedHosts?: string[];
+    },
+    ctx,
+  ) => {
+    const patch = ToolCapabilitiesPatchSchema.safeParse({
+      allowedSecrets: args.allowedSecrets,
+      allowedDatastorePrefixes: args.allowedDatastorePrefixes,
+      allowedHosts: args.allowedHosts,
+    });
+    if (!patch.success) {
+      throw new McpError(400, `Invalid tool capabilities: ${patch.error.issues.map((i) => i.message).join("; ")}`);
+    }
+    await ctx.db.$transaction(
+      async (tx) => {
         const agent = await tx.agent.findUnique({ where: { id: args.agentId } });
         if (!agent) throw new McpError(404, `Agent "${args.agentId}" not found.`);
         assertCanMutate(agent.ownerId, ctx.principal.id, `Agent "${args.agentId}" is not owned by the caller.`);
@@ -1381,14 +1495,18 @@ to:
           },
           update: {
             ...(patch.data.allowedSecrets !== undefined ? { allowedSecrets: patch.data.allowedSecrets } : {}),
-            ...(patch.data.allowedDatastorePrefixes !== undefined ? { allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes } : {}),
+            ...(patch.data.allowedDatastorePrefixes !== undefined
+              ? { allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes }
+              : {}),
             ...(patch.data.allowedHosts !== undefined ? { allowedHosts: patch.data.allowedHosts } : {}),
           },
         });
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-      return textResult({ attached: true });
-    },
-  });
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+    return textResult({ attached: true });
+  },
+});
 ```
 
 - [ ] **Step 4: Run to verify they pass**
@@ -1399,6 +1517,7 @@ Expected: PASS (all existing tests plus the 3 new ones).
 - [ ] **Step 5: Update `integration.test.ts`'s fake db the same way**
 
 `src/mcp/integration.test.ts`'s `agentTool` mock (around line 201) needs the same `upsert` addition as Step 1 above (its `create`/`deleteMany`/`findMany` are identical in shape). Add:
+
 ```ts
       upsert: async ({ where, create, update }: { where: { agentId_toolId: { agentId: string; toolId: string } }; create: Record<string, unknown>; update: Record<string, unknown> }) => {
         const idx = agentTools.findIndex((a) => a.agentId === where.agentId_toolId.agentId && a.toolId === where.agentId_toolId.toolId);
@@ -1411,6 +1530,7 @@ Expected: PASS (all existing tests plus the 3 new ones).
         return agentTools[idx];
       },
 ```
+
 right after the `count` entry and before `create` (or anywhere inside the `agentTool: {...}` object — order doesn't matter).
 
 - [ ] **Step 6: Run the full integration test**
@@ -1430,16 +1550,19 @@ git commit -m "feat(mcp): accept and persist per-tool capabilities on attach_too
 ## Task 7: CLI `tool attach` capability flags
 
 **Files:**
+
 - Modify: `src/cli.ts`
 
 No test file exists for `cli.ts` today (verified: no `cli*.test.ts` anywhere in `src/`), so this task is verified by a manual smoke check against the local dev DB rather than an automated test — don't invent a new CLI test harness for one function; that's out of scope for this fix.
 
 **Interfaces:**
+
 - Consumes: `ToolCapabilitiesPatchSchema` (Task 1).
 
 - [ ] **Step 1: Add the import**
 
 In `src/cli.ts`, add alongside the other local imports (near the top, e.g. after `import { validateCronExpression } from "./core/cron.js";`):
+
 ```ts
 import { ToolCapabilitiesPatchSchema } from "./sandbox/tool-capabilities.js";
 ```
@@ -1447,6 +1570,7 @@ import { ToolCapabilitiesPatchSchema } from "./sandbox/tool-capabilities.js";
 - [ ] **Step 2: Update `toolAttach`**
 
 Change:
+
 ```ts
 async function toolAttach(args: string[], detach: boolean): Promise<void> {
   const [toolName, agentName] = args;
@@ -1472,7 +1596,9 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
   }
 }
 ```
+
 to:
+
 ```ts
 async function toolAttach(args: string[], detach: boolean): Promise<void> {
   const { values, positionals } = parseArgs({
@@ -1520,7 +1646,9 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
     },
     update: {
       ...(patch.data!.allowedSecrets !== undefined ? { allowedSecrets: patch.data!.allowedSecrets } : {}),
-      ...(patch.data!.allowedDatastorePrefixes !== undefined ? { allowedDatastorePrefixes: patch.data!.allowedDatastorePrefixes } : {}),
+      ...(patch.data!.allowedDatastorePrefixes !== undefined
+        ? { allowedDatastorePrefixes: patch.data!.allowedDatastorePrefixes }
+        : {}),
       ...(patch.data!.allowedHosts !== undefined ? { allowedHosts: patch.data!.allowedHosts } : {}),
     },
   });
@@ -1531,6 +1659,7 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
 - [ ] **Step 3: Build and smoke-test manually against the local dev DB**
 
 Run:
+
 ```bash
 npm run build
 npm run db:up
@@ -1539,12 +1668,16 @@ node dist/cli.js tool create --name smoke_tool --description "smoke test" \
 node dist/cli.js agent create --name smoke_agent --model gpt-4o-mini --prompt "test" --budget 1
 node dist/cli.js tool attach smoke_tool smoke_agent --allow-secret FOO --allow-host api.example.com
 ```
+
 Expected: prints `attached "smoke_tool" to "smoke_agent".` with no thrown error. Then verify the row:
+
 ```bash
 docker exec local-postgres-1 psql -U reevo -d reevo -c \
   'SELECT "allowedSecrets", "allowedHosts" FROM "AgentTool" LIMIT 1;'
 ```
+
 Expected: `["FOO"]` and `["api.example.com"]`. Clean up the smoke-test rows afterward:
+
 ```bash
 docker exec local-postgres-1 psql -U reevo -d reevo -c \
   'DELETE FROM "AgentTool"; DELETE FROM "Tool" WHERE name = '"'"'smoke_tool'"'"'; DELETE FROM "Agent" WHERE name = '"'"'smoke_agent'"'"';'
@@ -1586,4 +1719,5 @@ This isn't a code change, but close the loop: update the `reevo-run-code-review-
 ```bash
 git status
 ```
+
 If clean, nothing to do — every task above already committed its own changes.

@@ -14,12 +14,18 @@ const MAX_WORKSPACE_ENTRIES = 100_000;
 const SAFE_COMMIT_SHA = /^[0-9a-f]{40}$/;
 const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const HARDENED_GIT_CONFIG = [
-  "-c", "core.hooksPath=/dev/null",
-  "-c", "commit.gpgSign=false",
-  "-c", "tag.gpgSign=false",
-  "-c", "credential.helper=",
-  "-c", "protocol.allow=never",
-  "-c", "protocol.https.allow=always",
+  "-c",
+  "core.hooksPath=/dev/null",
+  "-c",
+  "commit.gpgSign=false",
+  "-c",
+  "tag.gpgSign=false",
+  "-c",
+  "credential.helper=",
+  "-c",
+  "protocol.allow=never",
+  "-c",
+  "protocol.https.allow=always",
 ] as const;
 
 export interface GitCommandOptions {
@@ -38,7 +44,10 @@ export interface GitCommandRunner {
 }
 
 export class GitCommandError extends Error {
-  constructor(public readonly exitCode: number | null, detail: string) {
+  constructor(
+    public readonly exitCode: number | null,
+    detail: string,
+  ) {
     super(`git_command_failed:${exitCode ?? "spawn"}${detail ? `:${detail}` : ""}`);
   }
 }
@@ -67,13 +76,15 @@ export class NodeGitCommandRunner implements GitCommandRunner {
   constructor(private readonly options: NodeGitCommandRunnerOptions) {
     this.gitBinary = options.gitBinary ?? "git";
     this.path = options.path ?? "/usr/bin:/bin";
-    this.askPassPath = options.askPassPath
-      ?? fileURLToPath(new URL("../../../scripts/git-askpass.sh", import.meta.url));
+    this.askPassPath =
+      options.askPassPath ?? fileURLToPath(new URL("../../../scripts/git-askpass.sh", import.meta.url));
   }
 
   async run(args: readonly string[], options: GitCommandOptions = {}): Promise<GitCommandResult> {
-    if (options.authToken !== undefined
-      && (!/^[A-Za-z0-9_]+$/.test(options.authToken) || Buffer.byteLength(options.authToken, "utf8") > 512)) {
+    if (
+      options.authToken !== undefined &&
+      (!/^[A-Za-z0-9_]+$/.test(options.authToken) || Buffer.byteLength(options.authToken, "utf8") > 512)
+    ) {
       throw new Error("git_auth_token_invalid");
     }
     const env: NodeJS.ProcessEnv = {
@@ -168,9 +179,14 @@ export interface GitVcsProviderOptions {
 
 function validateProtectedPath(value: string): string {
   const path = value.trim();
-  if (!path || Buffer.byteLength(path, "utf8") > 512 || path.startsWith("/")
-    || path.startsWith("./") || path.includes("\\")
-    || path.split("/").some((part) => !part || part === "." || part === "..")) {
+  if (
+    !path ||
+    Buffer.byteLength(path, "utf8") > 512 ||
+    path.startsWith("/") ||
+    path.startsWith("./") ||
+    path.includes("\\") ||
+    path.split("/").some((part) => !part || part === "." || part === "..")
+  ) {
     throw new Error("vcs_protected_path_invalid");
   }
   return path;
@@ -197,8 +213,12 @@ function globRegex(pattern: string): RegExp {
 }
 
 function validateChangedPath(path: string): string {
-  if (!path || isAbsolute(path) || path.includes("\\")
-    || path.split("/").some((part) => !part || part === "." || part === "..")) {
+  if (
+    !path ||
+    isAbsolute(path) ||
+    path.includes("\\") ||
+    path.split("/").some((part) => !part || part === "." || part === "..")
+  ) {
     throw new Error("vcs_changed_path_invalid");
   }
   return path;
@@ -227,12 +247,16 @@ export class GitVcsProvider implements VcsProvider {
     this.git = options.git ?? new NodeGitCommandRunner({ homeDir: resolve(this.rootDir, ".home") });
     this.maxChangedFiles = options.maxChangedFiles ?? DEFAULT_MAX_CHANGED_FILES;
     this.maxDiffBytes = options.maxDiffBytes ?? DEFAULT_MAX_DIFF_BYTES;
-    if (!Number.isSafeInteger(this.maxChangedFiles) || this.maxChangedFiles <= 0
-      || !Number.isSafeInteger(this.maxDiffBytes) || this.maxDiffBytes <= 0) {
+    if (
+      !Number.isSafeInteger(this.maxChangedFiles) ||
+      this.maxChangedFiles <= 0 ||
+      !Number.isSafeInteger(this.maxDiffBytes) ||
+      this.maxDiffBytes <= 0
+    ) {
       throw new Error("vcs_limits_invalid");
     }
-    this.cloneUrlForRepository = options.cloneUrlForRepository
-      ?? ((repository) => `https://github.com/${repository}.git`);
+    this.cloneUrlForRepository =
+      options.cloneUrlForRepository ?? ((repository) => `https://github.com/${repository}.git`);
   }
 
   async prepareWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace> {
@@ -256,13 +280,22 @@ export class GitVcsProvider implements VcsProvider {
 
     try {
       await this.options.github.withRepositoryToken(normalized.repository, async (token) => {
-        await this.git.run([
-          ...HARDENED_GIT_CONFIG,
-          "clone", "--no-checkout", "--single-branch", "--no-tags",
-          "--branch", normalized.baseRef,
-          "--separate-git-dir", gitMetadataPath,
-          cloneUrl, workspacePath,
-        ], { cwd: runRoot, authToken: token });
+        await this.git.run(
+          [
+            ...HARDENED_GIT_CONFIG,
+            "clone",
+            "--no-checkout",
+            "--single-branch",
+            "--no-tags",
+            "--branch",
+            normalized.baseRef,
+            "--separate-git-dir",
+            gitMetadataPath,
+            cloneUrl,
+            workspacePath,
+          ],
+          { cwd: runRoot, authToken: token },
+        );
       });
       await rm(resolve(workspacePath, ".git"), { force: true });
       const baseCommit = await this.revParseRaw(
@@ -274,9 +307,18 @@ export class GitVcsProvider implements VcsProvider {
       await this.gitForPaths(gitMetadataPath, workspacePath, ["config", "--local", "commit.gpgSign", "false"]);
       await this.gitForPaths(gitMetadataPath, workspacePath, ["config", "--local", "tag.gpgSign", "false"]);
       await this.gitForPaths(gitMetadataPath, workspacePath, ["config", "--local", "user.name", "Reevo"]);
-      await this.gitForPaths(gitMetadataPath, workspacePath, ["config", "--local", "user.email", "reevo-run@users.noreply.github.com"]);
+      await this.gitForPaths(gitMetadataPath, workspacePath, [
+        "config",
+        "--local",
+        "user.email",
+        "reevo-run@users.noreply.github.com",
+      ]);
       await this.gitForPaths(gitMetadataPath, workspacePath, ["branch", "--force", normalized.headRef, baseCommit]);
-      await this.gitForPaths(gitMetadataPath, workspacePath, ["symbolic-ref", "HEAD", `refs/heads/${normalized.headRef}`]);
+      await this.gitForPaths(gitMetadataPath, workspacePath, [
+        "symbolic-ref",
+        "HEAD",
+        `refs/heads/${normalized.headRef}`,
+      ]);
       await this.gitForPaths(gitMetadataPath, workspacePath, ["read-tree", "--reset", "-u", baseCommit]);
       await this.inspectWorkspace(workspacePath);
 
@@ -299,9 +341,19 @@ export class GitVcsProvider implements VcsProvider {
     await this.assertRemote(prepared);
     await this.assertSafeLocalConfig(prepared.gitMetadataPath);
     await this.gitFor(prepared, ["add", "--all", "--", ":/"]);
-    const changed = nullSeparated((await this.gitFor(prepared, [
-      "diff", "--cached", "--name-only", "-z", "--no-renames", prepared.baseCommit, "--",
-    ])).stdout);
+    const changed = nullSeparated(
+      (
+        await this.gitFor(prepared, [
+          "diff",
+          "--cached",
+          "--name-only",
+          "-z",
+          "--no-renames",
+          prepared.baseCommit,
+          "--",
+        ])
+      ).stdout,
+    );
     if (changed.length > this.maxChangedFiles) throw new Error("vcs_changed_file_limit");
     const protectedMatchers = prepared.protectedPaths.map((path) => ({ path, matcher: globRegex(path) }));
     const protectedChange = changed.find((path) => protectedMatchers.some(({ matcher }) => matcher.test(path)));
@@ -309,9 +361,13 @@ export class GitVcsProvider implements VcsProvider {
 
     let diff: string;
     try {
-      diff = (await this.gitFor(prepared, [
-        "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", prepared.baseCommit, "--",
-      ], { maxOutputBytes: this.maxDiffBytes })).stdout;
+      diff = (
+        await this.gitFor(
+          prepared,
+          ["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", prepared.baseCommit, "--"],
+          { maxOutputBytes: this.maxDiffBytes },
+        )
+      ).stdout;
     } catch (error) {
       if (error instanceof GitCommandError && error.message.includes("git_output_limit")) {
         throw new Error("vcs_diff_size_limit", { cause: error });
@@ -333,16 +389,14 @@ export class GitVcsProvider implements VcsProvider {
     if (symbolicHead !== prepared.headRef) throw new Error("vcs_head_ref_mismatch");
     let commitSha: string;
     if (currentHead === prepared.baseCommit) {
-      await this.gitFor(prepared, [
-        "commit", "--no-verify", "--no-gpg-sign", "-m", `Reevo run ${prepared.runId}`,
-      ]);
+      await this.gitFor(prepared, ["commit", "--no-verify", "--no-gpg-sign", "-m", `Reevo run ${prepared.runId}`]);
       commitSha = await this.revParse(prepared, "HEAD");
     } else {
       const parent = await this.revParse(prepared, "HEAD^");
       if (parent !== prepared.baseCommit) throw new Error("vcs_commit_history_invalid");
-      const afterCommitChanges = nullSeparated((await this.gitFor(prepared, [
-        "diff", "--cached", "--name-only", "-z", "HEAD", "--",
-      ])).stdout);
+      const afterCommitChanges = nullSeparated(
+        (await this.gitFor(prepared, ["diff", "--cached", "--name-only", "-z", "HEAD", "--"])).stdout,
+      );
       if (afterCommitChanges.length > 0) throw new Error("vcs_finalized_workspace_changed");
       commitSha = currentHead;
     }
@@ -368,15 +422,19 @@ export class GitVcsProvider implements VcsProvider {
 
   async cleanup(workspace: PreparedWorkspace): Promise<void> {
     const expected = this.expectedPaths(workspace.runId);
-    if (workspace.id !== `vcs-${workspace.runId}`
-      || workspace.workspacePath !== expected.workspacePath
-      || workspace.gitMetadataPath !== expected.gitMetadataPath) {
+    if (
+      workspace.id !== `vcs-${workspace.runId}` ||
+      workspace.workspacePath !== expected.workspacePath ||
+      workspace.gitMetadataPath !== expected.gitMetadataPath
+    ) {
       throw new Error("vcs_workspace_handle_invalid");
     }
     await rm(expected.runRoot, { recursive: true, force: true });
   }
 
-  private validateInput(input: VcsPrepareInput): Omit<PreparedWorkspace, "id" | "baseCommit" | "workspacePath" | "gitMetadataPath"> {
+  private validateInput(
+    input: VcsPrepareInput,
+  ): Omit<PreparedWorkspace, "id" | "baseCommit" | "workspacePath" | "gitMetadataPath"> {
     if (!SAFE_RUN_ID.test(input.runId)) throw new Error("vcs_run_id_invalid");
     const repository = normalizeGitHubRepository(input.repository);
     const baseRef = normalizeGitRef(input.baseRef);
@@ -401,13 +459,17 @@ export class GitVcsProvider implements VcsProvider {
   private async validatePrepared(workspace: PreparedWorkspace): Promise<PreparedWorkspace> {
     const normalized = this.validateInput(workspace);
     const expected = this.expectedPaths(normalized.runId);
-    if (workspace.id !== `vcs-${normalized.runId}` || !SAFE_COMMIT_SHA.test(workspace.baseCommit)
-      || workspace.repository !== normalized.repository || workspace.baseRef !== normalized.baseRef
-      || workspace.headRef !== normalized.headRef
-      || workspace.workspacePath !== expected.workspacePath
-      || workspace.gitMetadataPath !== expected.gitMetadataPath
-      || workspace.protectedPaths.length !== normalized.protectedPaths.length
-      || workspace.protectedPaths.some((path, index) => path !== normalized.protectedPaths[index])) {
+    if (
+      workspace.id !== `vcs-${normalized.runId}` ||
+      !SAFE_COMMIT_SHA.test(workspace.baseCommit) ||
+      workspace.repository !== normalized.repository ||
+      workspace.baseRef !== normalized.baseRef ||
+      workspace.headRef !== normalized.headRef ||
+      workspace.workspacePath !== expected.workspacePath ||
+      workspace.gitMetadataPath !== expected.gitMetadataPath ||
+      workspace.protectedPaths.length !== normalized.protectedPaths.length ||
+      workspace.protectedPaths.some((path, index) => path !== normalized.protectedPaths[index])
+    ) {
       throw new Error("vcs_workspace_handle_invalid");
     }
     const [rootReal, runRootReal, workspaceReal, metadataReal] = await Promise.all([
@@ -416,9 +478,11 @@ export class GitVcsProvider implements VcsProvider {
       realpath(expected.workspacePath),
       realpath(expected.gitMetadataPath),
     ]);
-    if (runRootReal !== resolve(rootReal, workspace.runId)
-      || workspaceReal !== resolve(runRootReal, "workspace")
-      || metadataReal !== resolve(runRootReal, "git")) {
+    if (
+      runRootReal !== resolve(rootReal, workspace.runId) ||
+      workspaceReal !== resolve(runRootReal, "workspace") ||
+      metadataReal !== resolve(runRootReal, "git")
+    ) {
       throw new Error("vcs_workspace_path_invalid");
     }
     return { ...workspace, ...normalized };
@@ -439,7 +503,10 @@ export class GitVcsProvider implements VcsProvider {
         if (stat.isSymbolicLink()) {
           const target = await readlink(fullPath);
           const resolvedTarget = resolve(directory, target);
-          if (isAbsolute(target) || (resolvedTarget !== workspacePath && !resolvedTarget.startsWith(`${workspacePath}${sep}`))) {
+          if (
+            isAbsolute(target) ||
+            (resolvedTarget !== workspacePath && !resolvedTarget.startsWith(`${workspacePath}${sep}`))
+          ) {
             throw new Error("vcs_symlink_escape");
           }
         } else if (stat.isDirectory()) {
@@ -455,21 +522,34 @@ export class GitVcsProvider implements VcsProvider {
   private async assertRemote(workspace: PreparedWorkspace): Promise<void> {
     const expectedUrl = this.cloneUrlForRepository(workspace.repository);
     const remotes = (await this.gitFor(workspace, ["remote"])).stdout.trim().split("\n").filter(Boolean);
-    const fetchUrls = (await this.gitFor(workspace, ["remote", "get-url", "--all", "origin"])).stdout.trim().split("\n").filter(Boolean);
-    const pushUrls = (await this.gitFor(workspace, ["remote", "get-url", "--push", "--all", "origin"])).stdout.trim().split("\n").filter(Boolean);
-    if (remotes.length !== 1 || remotes[0] !== "origin"
-      || fetchUrls.length !== 1 || fetchUrls[0] !== expectedUrl
-      || pushUrls.length !== 1 || pushUrls[0] !== expectedUrl) {
+    const fetchUrls = (await this.gitFor(workspace, ["remote", "get-url", "--all", "origin"])).stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean);
+    const pushUrls = (await this.gitFor(workspace, ["remote", "get-url", "--push", "--all", "origin"])).stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean);
+    if (
+      remotes.length !== 1 ||
+      remotes[0] !== "origin" ||
+      fetchUrls.length !== 1 ||
+      fetchUrls[0] !== expectedUrl ||
+      pushUrls.length !== 1 ||
+      pushUrls[0] !== expectedUrl
+    ) {
       throw new Error("vcs_remote_invalid");
     }
   }
 
   private async assertSafeLocalConfig(gitMetadataPath: string): Promise<void> {
     const config = await readFile(resolve(gitMetadataPath, "config"), "utf8");
-    if (Buffer.byteLength(config, "utf8") > 64 * 1024
-      || /^\s*\[(?:credential|filter\b|http\b|url\b)/im.test(config)
-      || /^\s*(?:extraheader|helper|insteadof|sshcommand|textconv|clean|smudge)\s*=/im.test(config)
-      || redactTokenShapedValues(config) !== config) {
+    if (
+      Buffer.byteLength(config, "utf8") > 64 * 1024 ||
+      /^\s*\[(?:credential|filter\b|http\b|url\b)/im.test(config) ||
+      /^\s*(?:extraheader|helper|insteadof|sshcommand|textconv|clean|smudge)\s*=/im.test(config) ||
+      redactTokenShapedValues(config) !== config
+    ) {
       throw new Error("vcs_git_config_unsafe");
     }
   }
@@ -480,25 +560,24 @@ export class GitVcsProvider implements VcsProvider {
       if (remote === commitSha) return;
       if (remote) throw new Error("vcs_head_ref_conflict");
       try {
-        await this.gitFor(workspace, [
-          "push", "origin", `${commitSha}:refs/heads/${workspace.headRef}`,
-        ], { authToken: token });
+        await this.gitFor(workspace, ["push", "origin", `${commitSha}:refs/heads/${workspace.headRef}`], {
+          authToken: token,
+        });
       } catch (error) {
-        if (await this.remoteHead(workspace, token) === commitSha) return;
+        if ((await this.remoteHead(workspace, token)) === commitSha) return;
         throw error;
       }
     });
   }
 
   private async remoteHead(workspace: PreparedWorkspace, token: string): Promise<string | null> {
-    const result = await this.gitFor(workspace, [
-      "ls-remote", "--heads", "origin", `refs/heads/${workspace.headRef}`,
-    ], { authToken: token });
+    const result = await this.gitFor(workspace, ["ls-remote", "--heads", "origin", `refs/heads/${workspace.headRef}`], {
+      authToken: token,
+    });
     const line = result.stdout.trim();
     if (!line) return null;
     const [sha, ref, ...rest] = line.split(/\s+/);
-    if (rest.length > 0 || !SAFE_COMMIT_SHA.test(sha)
-      || ref !== `refs/heads/${workspace.headRef}`) {
+    if (rest.length > 0 || !SAFE_COMMIT_SHA.test(sha) || ref !== `refs/heads/${workspace.headRef}`) {
       throw new Error("vcs_remote_response_invalid");
     }
     return sha;
@@ -509,7 +588,9 @@ export class GitVcsProvider implements VcsProvider {
   }
 
   private async revParseRaw(gitMetadataPath: string, workspacePath: string, revision: string): Promise<string> {
-    const sha = (await this.gitForPaths(gitMetadataPath, workspacePath, ["rev-parse", "--verify", revision])).stdout.trim();
+    const sha = (
+      await this.gitForPaths(gitMetadataPath, workspacePath, ["rev-parse", "--verify", revision])
+    ).stdout.trim();
     if (!SAFE_COMMIT_SHA.test(sha)) throw new Error("vcs_commit_sha_invalid");
     return sha;
   }
@@ -528,11 +609,9 @@ export class GitVcsProvider implements VcsProvider {
     args: readonly string[],
     options: Omit<GitCommandOptions, "cwd"> = {},
   ): Promise<GitCommandResult> {
-    return this.git.run([
-      `--git-dir=${gitMetadataPath}`,
-      `--work-tree=${workspacePath}`,
-      ...HARDENED_GIT_CONFIG,
-      ...args,
-    ], { ...options, cwd: workspacePath });
+    return this.git.run(
+      [`--git-dir=${gitMetadataPath}`, `--work-tree=${workspacePath}`, ...HARDENED_GIT_CONFIG, ...args],
+      { ...options, cwd: workspacePath },
+    );
   }
 }

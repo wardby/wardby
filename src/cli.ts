@@ -238,7 +238,9 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
     },
     update: {
       ...(patch.data.allowedSecrets !== undefined ? { allowedSecrets: patch.data.allowedSecrets } : {}),
-      ...(patch.data.allowedDatastorePrefixes !== undefined ? { allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes } : {}),
+      ...(patch.data.allowedDatastorePrefixes !== undefined
+        ? { allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes }
+        : {}),
       ...(patch.data.allowedHosts !== undefined ? { allowedHosts: patch.data.allowedHosts } : {}),
     },
   });
@@ -479,7 +481,7 @@ async function main(): Promise<void> {
     } else {
       fail(
         "usage:\n" +
-          "  reevo agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule \"<cron>\"] [--timezone <tz>] [--max-turns <n>]\n" +
+          '  reevo agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule "<cron>"] [--timezone <tz>] [--max-turns <n>]\n' +
           '  reevo agent schedule <name> --cron "<expr>" [--timezone <tz>] [--disable]\n' +
           "  reevo tool create --name <n> --description <d> --params <file> --code <file>\n" +
           "  reevo tool attach <tool-name> <agent-name>\n" +

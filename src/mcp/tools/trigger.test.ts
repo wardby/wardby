@@ -61,7 +61,11 @@ function fakeDb(agents: FakeAgentRow[]) {
       updateMany: async () => ({ count: 1 }),
     },
     task: {
-      create: async ({ data }: { data: { kind: string; runId: string; principalId: string | null; status: string } }) => {
+      create: async ({
+        data,
+      }: {
+        data: { kind: string; runId: string; principalId: string | null; status: string };
+      }) => {
         const now = new Date();
         const row: FakeTaskRow = {
           id: `task_${++taskCounter}`,
@@ -98,7 +102,12 @@ function fakeDb(agents: FakeAgentRow[]) {
   return db as import("@prisma/client").PrismaClient;
 }
 
-function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[], clientSupportsTasks: boolean): McpRequestContext {
+function fakeCtx(
+  db: ReturnType<typeof fakeDb>,
+  principalId: string,
+  scopes: string[],
+  clientSupportsTasks: boolean,
+): McpRequestContext {
   return {
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
@@ -198,10 +207,10 @@ describe("trigger_agent", () => {
       { method: "tasks/cancel", params: { taskId } },
       fromJsonSchema<Record<string, unknown>>({ type: "object", additionalProperties: true }),
     );
-    const getResult = (await client.request(
+    const getResult = await client.request(
       { method: "tasks/get", params: { taskId } },
       fromJsonSchema<{ status: string }>({ type: "object", additionalProperties: true }),
-    ));
+    );
     expect(getResult.status).toBe("cancelled");
     expect(fakeProviders.executor.stop).toHaveBeenCalledWith(expect.any(String), "cancelled by caller");
 

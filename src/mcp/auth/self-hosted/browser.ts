@@ -3,8 +3,22 @@ import { randomUUID, randomBytes } from "node:crypto";
 import type { SelfHostedAuthProvider } from "../../../providers/auth/self-hosted.js";
 import { PostgresRateLimiter, RateLimitError } from "./rate-limit.js";
 
-const paths = new Set(["/login", "/consent", "/logout", "/authorize", "/register", "/token", "/revoke", "/.well-known/oauth-authorization-server"]);
-function escape(value: string) { return value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!); }
+const paths = new Set([
+  "/login",
+  "/consent",
+  "/logout",
+  "/authorize",
+  "/register",
+  "/token",
+  "/revoke",
+  "/.well-known/oauth-authorization-server",
+]);
+function escape(value: string) {
+  return value.replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!,
+  );
+}
 // CORS-mode same-origin fetch retains Origin under no-referrer, unlike native form POSTs.
 const FORM_SCRIPT = `document.addEventListener('submit', async (event) => {
   const form = event.target;
@@ -19,15 +33,35 @@ const FORM_SCRIPT = `document.addEventListener('submit', async (event) => {
 });`;
 function html(res: ServerResponse, content: string) {
   const nonce = randomBytes(18).toString("base64");
-  res.setHeader("content-security-policy", `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`);
-  res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end('<!doctype html><html lang="en"><meta charset="utf-8"><title>reevo authorization</title><body>' + content + '<p id="auth-error" role="alert"></p><noscript>JavaScript is required for secure form submission.</noscript><script nonce="' + nonce + '">' + FORM_SCRIPT + '</script></body></html>');
+  res.setHeader(
+    "content-security-policy",
+    `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
+  );
+  res
+    .writeHead(200, { "content-type": "text/html; charset=utf-8" })
+    .end(
+      '<!doctype html><html lang="en"><meta charset="utf-8"><title>reevo authorization</title><body>' +
+        content +
+        '<p id="auth-error" role="alert"></p><noscript>JavaScript is required for secure form submission.</noscript><script nonce="' +
+        nonce +
+        '">' +
+        FORM_SCRIPT +
+        "</script></body></html>",
+    );
 }
-function json(res: ServerResponse, status: number, body: unknown) { res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body)); }
+function json(res: ServerResponse, status: number, body: unknown) {
+  res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+}
 function redirect(res: ServerResponse, location: string, req?: IncomingMessage) {
-  if (req?.method === "POST" && req.headers.accept === "application/json") { json(res, 200, { redirect: location }); return; }
+  if (req?.method === "POST" && req.headers.accept === "application/json") {
+    json(res, 200, { redirect: location });
+    return;
+  }
   res.writeHead(303, { location }).end();
 }
-function hidden(name: string, value: string) { return `<input type="hidden" name="${name}" value="${escape(value)}">`; }
+function hidden(name: string, value: string) {
+  return `<input type="hidden" name="${name}" value="${escape(value)}">`;
+}
 
 export function browserHandler(provider: SelfHostedAuthProvider) {
   const canonical = new URL(provider.config.canonicalUri);
@@ -35,11 +69,15 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
   const sessionName = secure ? "__Host-reevo-session" : "reevo-dev-session";
   const loginName = secure ? "__Host-reevo-login" : "reevo-dev-login";
   const limiter = new PostgresRateLimiter(provider.db, provider.credentials);
-  const cookie = (name: string, value: string, sameSite: string, age: number) => `${name}=${value}; Path=/; HttpOnly; SameSite=${sameSite}; Max-Age=${age}${secure ? "; Secure" : ""}`;
+  const cookie = (name: string, value: string, sameSite: string, age: number) =>
+    `${name}=${value}; Path=/; HttpOnly; SameSite=${sameSite}; Max-Age=${age}${secure ? "; Secure" : ""}`;
   return async (req: IncomingMessage, res: ServerResponse, url: URL, body: unknown): Promise<boolean> => {
     if (!paths.has(url.pathname)) return false;
     res.setHeader("cache-control", "no-store");
-    res.setHeader("content-security-policy", "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
+    res.setHeader(
+      "content-security-policy",
+      "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    );
     res.setHeader("x-content-type-options", "nosniff");
     res.setHeader("referrer-policy", "no-referrer");
     try {
@@ -52,32 +90,82 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
       for (const key of url.searchParams.keys()) if (url.searchParams.getAll(key).length !== 1) throw new Error();
       const ip = req.socket.remoteAddress ?? "unknown";
       await limiter.check("auth-ip", ip, 120);
-      if (req.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") { json(res, 200, provider.asMetadata()); return true; }
+      if (req.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") {
+        json(res, 200, provider.asMetadata());
+        return true;
+      }
       if (req.method === "POST" && url.pathname === "/register") {
         await limiter.check("registration", ip, 10);
-        if (!body || typeof body !== "object" || body instanceof URLSearchParams || Array.isArray(body)) throw new Error();
+        if (!body || typeof body !== "object" || body instanceof URLSearchParams || Array.isArray(body))
+          throw new Error();
         const p = body as Record<string, unknown>;
-        if (Object.keys(p).some((k) => !["redirect_uris", "client_name", "grant_types", "token_endpoint_auth_method", "response_types"].includes(k))) throw new Error();
+        if (
+          Object.keys(p).some(
+            (k) =>
+              !["redirect_uris", "client_name", "grant_types", "token_endpoint_auth_method", "response_types"].includes(
+                k,
+              ),
+          )
+        )
+          throw new Error();
         if (p.response_types && JSON.stringify(p.response_types) !== '["code"]') throw new Error();
-        const registered = await provider.registerClient({ redirectUris: p.redirect_uris as string[], clientName: p.client_name as string | undefined, grantTypes: p.grant_types as string[] | undefined, tokenEndpointAuthMethod: p.token_endpoint_auth_method as string | undefined });
-        json(res, 201, { client_id: registered.clientId, token_endpoint_auth_method: "none", redirect_uris: p.redirect_uris }); return true;
+        const registered = await provider.registerClient({
+          redirectUris: p.redirect_uris as string[],
+          clientName: p.client_name as string | undefined,
+          grantTypes: p.grant_types as string[] | undefined,
+          tokenEndpointAuthMethod: p.token_endpoint_auth_method as string | undefined,
+        });
+        json(res, 201, {
+          client_id: registered.clientId,
+          token_endpoint_auth_method: "none",
+          redirect_uris: p.redirect_uris,
+        });
+        return true;
       }
       if (req.method === "GET" && url.pathname === "/authorize") {
         const p = url.searchParams;
         if (p.has("subject") || p.get("response_type") !== "code") throw new Error();
-        const result = await provider.handleAuthorize({ clientId: p.get("client_id") ?? "", redirectUri: p.get("redirect_uri") ?? "", codeChallenge: p.get("code_challenge") ?? "", codeChallengeMethod: p.get("code_challenge_method") ?? "", resource: p.get("resource") ?? provider.config.canonicalUri, scope: p.get("scope") ?? "", state: p.get("state") ?? undefined });
+        const result = await provider.handleAuthorize({
+          clientId: p.get("client_id") ?? "",
+          redirectUri: p.get("redirect_uri") ?? "",
+          codeChallenge: p.get("code_challenge") ?? "",
+          codeChallengeMethod: p.get("code_challenge_method") ?? "",
+          resource: p.get("resource") ?? provider.config.canonicalUri,
+          scope: p.get("scope") ?? "",
+          state: p.get("state") ?? undefined,
+        });
         let target = "/login";
-        try { await provider.sessions.get(cookies.get(sessionName) ?? ""); target = "/consent"; } catch { /* No valid browser session. */ }
-        redirect(res, target + "?interaction=" + encodeURIComponent(result.interactionId)); return true;
+        try {
+          await provider.sessions.get(cookies.get(sessionName) ?? "");
+          target = "/consent";
+        } catch {
+          /* No valid browser session. */
+        }
+        redirect(res, target + "?interaction=" + encodeURIComponent(result.interactionId));
+        return true;
       }
       if (req.method === "GET" && url.pathname === "/login") {
         const interaction = url.searchParams.get("interaction") ?? "";
         const nonce = provider.credentials.create("rvb").token;
         const challenge = await provider.sessions.challenge("login", null, nonce + ":" + interaction);
         res.setHeader("set-cookie", cookie(loginName, nonce, "Strict", 600));
-        html(res, '<h1>Sign in to reevo</h1><form method="post" action="/login">' + hidden("interaction", interaction) + hidden("csrf", challenge) + '<label>Login key <input type="password" name="login_key" required autocomplete="off"></label><button>Sign in</button></form>'); return true;
+        html(
+          res,
+          '<h1>Sign in to reevo</h1><form method="post" action="/login">' +
+            hidden("interaction", interaction) +
+            hidden("csrf", challenge) +
+            '<label>Login key <input type="password" name="login_key" required autocomplete="off"></label><button>Sign in</button></form>',
+        );
+        return true;
       }
-      if (req.method === "POST" && ["/login", "/consent", "/logout"].includes(url.pathname) && req.headers.origin !== canonical.origin) { json(res, 403, { error: "invalid_origin" }); return true; }
+      if (
+        req.method === "POST" &&
+        ["/login", "/consent", "/logout"].includes(url.pathname) &&
+        req.headers.origin !== canonical.origin
+      ) {
+        json(res, 403, { error: "invalid_origin" });
+        return true;
+      }
       if (req.method === "POST" && !(body instanceof URLSearchParams)) throw new Error();
       const p = body instanceof URLSearchParams ? body : new URLSearchParams();
       if (req.method === "POST" && url.pathname === "/login") {
@@ -88,43 +176,106 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
         const interaction = p.get("interaction") ?? "";
         const nonce = cookies.get(loginName);
         if (!nonce) throw new Error();
-        const session = await provider.sessions.login(key, p.get("csrf") ?? "", nonce + ":" + interaction, cookies.get(sessionName));
-        res.setHeader("set-cookie", [cookie(sessionName, session, "Lax", 30 * 86400), cookie(loginName, "", "Strict", 0)]);
-        redirect(res, interaction ? "/consent?interaction=" + encodeURIComponent(interaction) : "/logout", req); return true;
+        const session = await provider.sessions.login(
+          key,
+          p.get("csrf") ?? "",
+          nonce + ":" + interaction,
+          cookies.get(sessionName),
+        );
+        res.setHeader("set-cookie", [
+          cookie(sessionName, session, "Lax", 30 * 86400),
+          cookie(loginName, "", "Strict", 0),
+        ]);
+        redirect(res, interaction ? "/consent?interaction=" + encodeURIComponent(interaction) : "/logout", req);
+        return true;
       }
       if (req.method === "GET" && url.pathname === "/consent") {
         const id = url.searchParams.get("interaction") ?? "";
         const { interaction, challenge } = await provider.consentPage(cookies.get(sessionName) ?? "", id);
         const name = (interaction.client.metadata as { client_name: string }).client_name;
-        html(res, '<h1>Authorize ' + escape(name) + '</h1><p>Resource: ' + escape(interaction.resource) + '</p><p>Scopes: ' + escape(interaction.requestedScope) + '</p><form action="/consent" method="post">' + hidden("interaction", id) + hidden("csrf", challenge) + '<button name="decision" value="approve">Approve</button><button name="decision" value="deny">Deny</button></form>'); return true;
+        html(
+          res,
+          "<h1>Authorize " +
+            escape(name) +
+            "</h1><p>Resource: " +
+            escape(interaction.resource) +
+            "</p><p>Scopes: " +
+            escape(interaction.requestedScope) +
+            '</p><form action="/consent" method="post">' +
+            hidden("interaction", id) +
+            hidden("csrf", challenge) +
+            '<button name="decision" value="approve">Approve</button><button name="decision" value="deny">Deny</button></form>',
+        );
+        return true;
       }
       if (req.method === "POST" && url.pathname === "/consent") {
         if (!["approve", "deny"].includes(p.get("decision") ?? "")) throw new Error();
-        redirect(res, await provider.consent(cookies.get(sessionName) ?? "", p.get("interaction") ?? "", p.get("csrf") ?? "", p.get("decision") === "approve"), req); return true;
+        redirect(
+          res,
+          await provider.consent(
+            cookies.get(sessionName) ?? "",
+            p.get("interaction") ?? "",
+            p.get("csrf") ?? "",
+            p.get("decision") === "approve",
+          ),
+          req,
+        );
+        return true;
       }
       if (req.method === "GET" && url.pathname === "/logout") {
         const session = await provider.sessions.get(cookies.get(sessionName) ?? "");
         const challenge = await provider.sessions.challenge("logout", session.sessionId, "logout");
-        html(res, '<form action="/logout" method="post">' + hidden("csrf", challenge) + '<button>Sign out</button></form>'); return true;
+        html(
+          res,
+          '<form action="/logout" method="post">' + hidden("csrf", challenge) + "<button>Sign out</button></form>",
+        );
+        return true;
       }
       if (req.method === "POST" && url.pathname === "/logout") {
         await provider.sessions.logout(cookies.get(sessionName) ?? "", p.get("csrf") ?? "");
-        res.setHeader("set-cookie", cookie(sessionName, "", "Lax", 0)); redirect(res, "/login", req); return true;
+        res.setHeader("set-cookie", cookie(sessionName, "", "Lax", 0));
+        redirect(res, "/login", req);
+        return true;
       }
       if (req.method === "POST" && ["/token", "/revoke"].includes(url.pathname)) {
         if (req.headers.authorization || p.has("client_secret") || p.has("client_assertion")) throw new Error();
         const clientId = p.get("client_id") ?? "";
-        if (url.pathname === "/revoke") { await provider.revoke(p.get("token") ?? "", clientId); json(res, 200, {}); return true; }
+        if (url.pathname === "/revoke") {
+          await provider.revoke(p.get("token") ?? "", clientId);
+          json(res, 200, {});
+          return true;
+        }
         const grantType = p.get("grant_type");
         if (grantType !== "authorization_code" && grantType !== "refresh_token") throw new Error();
         const common = { clientId, resource: p.get("resource") ?? undefined };
-        const token = await provider.handleToken(grantType === "refresh_token" ? { ...common, grantType, refreshToken: p.get("refresh_token") ?? "" } : { ...common, grantType, code: p.get("code") ?? "", codeVerifier: p.get("code_verifier") ?? "", redirectUri: p.get("redirect_uri") ?? "" });
-        json(res, 200, { access_token: token.accessToken, token_type: token.tokenType, expires_in: token.expiresIn, refresh_token: token.refreshToken, scope: token.scope }); return true;
+        const token = await provider.handleToken(
+          grantType === "refresh_token"
+            ? { ...common, grantType, refreshToken: p.get("refresh_token") ?? "" }
+            : {
+                ...common,
+                grantType,
+                code: p.get("code") ?? "",
+                codeVerifier: p.get("code_verifier") ?? "",
+                redirectUri: p.get("redirect_uri") ?? "",
+              },
+        );
+        json(res, 200, {
+          access_token: token.accessToken,
+          token_type: token.tokenType,
+          expires_in: token.expiresIn,
+          refresh_token: token.refreshToken,
+          scope: token.scope,
+        });
+        return true;
       }
       json(res, 405, { error: "method_not_allowed" });
     } catch (err) {
-      if (err instanceof RateLimitError) { res.setHeader("retry-after", "60"); json(res, 429, { error: "rate_limited" }); }
-      else { json(res, 400, { error: url.pathname === "/token" ? "invalid_grant" : "invalid_request", id: randomUUID() }); }
+      if (err instanceof RateLimitError) {
+        res.setHeader("retry-after", "60");
+        json(res, 429, { error: "rate_limited" });
+      } else {
+        json(res, 400, { error: url.pathname === "/token" ? "invalid_grant" : "invalid_request", id: randomUUID() });
+      }
     }
     return true;
   };

@@ -8,7 +8,7 @@ const base: LlmRequest = {
     { role: "system", content: "You are helpful." },
     { role: "user", content: "Hi" },
     { role: "assistant", content: "calling", toolCalls: [{ id: "t1", name: "getTime", argsJson: "{}" }] },
-    { role: "tool", toolCallId: "t1", name: "getTime", content: "\"noon\"" },
+    { role: "tool", toolCallId: "t1", name: "getTime", content: '"noon"' },
   ],
   tools: [{ name: "getTime", description: "current time", parameters: { type: "object", properties: {} } }],
 };
@@ -67,32 +67,53 @@ describe("withCacheBreakpoints", () => {
 import { mapClaudeStream, type ClaudeStreamEvent } from "./claude-messages.js";
 import type { LlmStreamEvent } from "./types.js";
 
-async function* gen(events: ClaudeStreamEvent[]) { for (const e of events) yield e; }
-async function collect(it: AsyncIterable<LlmStreamEvent>) { const out: LlmStreamEvent[] = []; for await (const e of it) out.push(e); return out; }
+async function* gen(events: ClaudeStreamEvent[]) {
+  for (const e of events) yield e;
+}
+async function collect(it: AsyncIterable<LlmStreamEvent>) {
+  const out: LlmStreamEvent[] = [];
+  for await (const e of it) out.push(e);
+  return out;
+}
 
 describe("mapClaudeStream", () => {
   it("maps text deltas, a tool call, and a done event with mapped usage", async () => {
     const events: ClaudeStreamEvent[] = [
-      { type: "message_start", message: { usage: { input_tokens: 100, cache_read_input_tokens: 900, cache_creation_input_tokens: 50, output_tokens: 0 } } },
+      {
+        type: "message_start",
+        message: {
+          usage: { input_tokens: 100, cache_read_input_tokens: 900, cache_creation_input_tokens: 50, output_tokens: 0 },
+        },
+      },
       { type: "content_block_start", index: 0, content_block: { type: "text" } },
       { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hel" } },
       { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "lo" } },
       { type: "content_block_stop", index: 0 },
       { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "u1", name: "getTime" } },
-      { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{\"tz\":" } },
-      { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "\"utc\"}" } },
+      { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"tz":' } },
+      { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '"utc"}' } },
       { type: "content_block_stop", index: 1 },
       { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 12 } },
       { type: "message_stop" },
     ];
     const out = await collect(mapClaudeStream(gen(events), (u) => u.inputTokens + u.outputTokens));
 
-    expect(out.filter((e) => e.type === "text").map((e: any) => e.delta).join("")).toBe("Hello");
+    expect(
+      out
+        .filter((e) => e.type === "text")
+        .map((e: any) => e.delta)
+        .join(""),
+    ).toBe("Hello");
     const call = out.find((e) => e.type === "tool_call") as any;
-    expect(call).toMatchObject({ id: "u1", name: "getTime", argsJson: "{\"tz\":\"utc\"}" });
+    expect(call).toMatchObject({ id: "u1", name: "getTime", argsJson: '{"tz":"utc"}' });
     const done = out.find((e) => e.type === "done") as any;
     // inputTokens = input_tokens + cache_read; cachedInputTokens = cache_read; cacheWriteTokens = cache_creation
-    expect(done.usage).toMatchObject({ inputTokens: 1000, cachedInputTokens: 900, cacheWriteTokens: 50, outputTokens: 12 });
+    expect(done.usage).toMatchObject({
+      inputTokens: 1000,
+      cachedInputTokens: 900,
+      cacheWriteTokens: 50,
+      outputTokens: 12,
+    });
     expect(done.stopReason).toBe("tool_use");
   });
 });

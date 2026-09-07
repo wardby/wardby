@@ -39,7 +39,9 @@ class RpcClient {
     this.events = [];
     this.stderr = "";
     child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk) => { this.stderr = `${this.stderr}${chunk}`.slice(-4_000); });
+    child.stderr.on("data", (chunk) => {
+      this.stderr = `${this.stderr}${chunk}`.slice(-4_000);
+    });
     child.once("exit", (code, signal) => {
       const error = new Error(`app server exited (${code ?? signal ?? "unknown"}): ${this.stderr}`);
       for (const pending of this.pending.values()) pending.reject(error);
@@ -56,7 +58,11 @@ class RpcClient {
         buffer = buffer.slice(newline + 1);
         if (!line) continue;
         let message;
-        try { message = JSON.parse(line); } catch { continue; }
+        try {
+          message = JSON.parse(line);
+        } catch {
+          continue;
+        }
         if (message.id && this.pending.has(message.id)) {
           const pending = this.pending.get(message.id);
           this.pending.delete(message.id);
@@ -74,8 +80,14 @@ class RpcClient {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`timed out waiting for ${method}`)), timeoutMs);
       this.pending.set(id, {
-        resolve: (value) => { clearTimeout(timer); resolve(value); },
-        reject: (error) => { clearTimeout(timer); reject(error); },
+        resolve: (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
       });
       this.child.stdin.write(`${JSON.stringify({ method, id, params })}\n`);
     });
@@ -86,24 +98,33 @@ class RpcClient {
   }
 
   event(method, predicate) {
-    return eventually(
-      () => this.events.find((event) => event.method === method && predicate(event.params)),
-      method,
-    );
+    return eventually(() => this.events.find((event) => event.method === method && predicate(event.params)), method);
   }
 }
 
 function startServer() {
-  const child = spawn("codex", [
-    "-c", "model_provider=\"reevo_proxy\"",
-    "-c", "model_providers.reevo_proxy.name=\"Reevo Task 0B Proxy\"",
-    "-c", `model_providers.reevo_proxy.base_url=\"${proxyBaseUrl}/v1\"`,
-    "-c", "model_providers.reevo_proxy.wire_api=\"responses\"",
-    "-c", "model_providers.reevo_proxy.auth.command=\"/usr/local/bin/reevo-token\"",
-    "-c", "model_providers.reevo_proxy.request_max_retries=0",
-    "-c", "model_providers.reevo_proxy.stream_max_retries=0",
-    "app-server", "--stdio",
-  ], { stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(
+    "codex",
+    [
+      "-c",
+      'model_provider="reevo_proxy"',
+      "-c",
+      'model_providers.reevo_proxy.name="Reevo Task 0B Proxy"',
+      "-c",
+      `model_providers.reevo_proxy.base_url=\"${proxyBaseUrl}/v1\"`,
+      "-c",
+      'model_providers.reevo_proxy.wire_api="responses"',
+      "-c",
+      'model_providers.reevo_proxy.auth.command="/usr/local/bin/reevo-token"',
+      "-c",
+      "model_providers.reevo_proxy.request_max_retries=0",
+      "-c",
+      "model_providers.reevo_proxy.stream_max_retries=0",
+      "app-server",
+      "--stdio",
+    ],
+    { stdio: ["pipe", "pipe", "pipe"] },
+  );
   return { child, rpc: new RpcClient(child) };
 }
 

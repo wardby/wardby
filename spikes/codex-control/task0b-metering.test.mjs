@@ -1,10 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
-  actualCostUsd,
-  completedUsageFromSseFrame,
-  estimateReservationUsd,
-} from "./task0b-metering.mjs";
+import { actualCostUsd, completedUsageFromSseFrame, estimateReservationUsd } from "./task0b-metering.mjs";
 
 test("reservation treats each UTF-8 byte as both fresh input and a possible cache write", () => {
   const body = { input: "hello", max_output_tokens: 128 };
@@ -13,11 +9,14 @@ test("reservation treats each UTF-8 byte as both fresh input and a possible cach
 });
 
 test("actual cost separates cached input", () => {
-  assert.equal(actualCostUsd({
-    input_tokens: 1_000,
-    input_tokens_details: { cached_tokens: 400, cache_write_tokens: 500 },
-    output_tokens: 100,
-  }), 0.000373);
+  assert.equal(
+    actualCostUsd({
+      input_tokens: 1_000,
+      input_tokens_details: { cached_tokens: 400, cache_write_tokens: 500 },
+      output_tokens: 100,
+    }),
+    0.000373,
+  );
 });
 
 test("completed SSE frame exposes authoritative usage", () => {

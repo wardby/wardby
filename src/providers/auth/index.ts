@@ -17,8 +17,17 @@ export function buildAuthProvider(kind: AuthProviderKind, config: AuthConfig, db
     if (!config.audience || !config.signingKey || !config.credentialHashKey) {
       throw new Error("AUTH_AUDIENCE, AUTH_SIGNING_KEY, and AUTH_CREDENTIAL_HASH_KEY are required.");
     }
-    if (config.credentialHashKey.toLowerCase() === process.env.SECRET_APP_KEY?.toLowerCase()) throw new Error("Credential and encryption keys must be distinct.");
-    return new SelfHostedAuthProvider({ canonicalUri: config.audience, signingKey: config.signingKey, credentialHashKey: config.credentialHashKey, maxClients: config.maxClients }, db);
+    if (config.credentialHashKey.toLowerCase() === process.env.SECRET_APP_KEY?.toLowerCase())
+      throw new Error("Credential and encryption keys must be distinct.");
+    return new SelfHostedAuthProvider(
+      {
+        canonicalUri: config.audience,
+        signingKey: config.signingKey,
+        credentialHashKey: config.credentialHashKey,
+        maxClients: config.maxClients,
+      },
+      db,
+    );
   }
   return new DelegatingAuthProvider(config);
 }

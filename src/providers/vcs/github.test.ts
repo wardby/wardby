@@ -7,10 +7,12 @@ const TOKEN = "ghs_abcdefghijklmnopqrstuvwxyz1234567890";
 const NOW = new Date("2026-09-06T12:00:00.000Z");
 
 function privateKeyPem(): string {
-  return generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({
-    type: "pkcs1",
-    format: "pem",
-  }).toString();
+  return generateKeyPairSync("rsa", { modulusLength: 2048 })
+    .privateKey.export({
+      type: "pkcs1",
+      format: "pem",
+    })
+    .toString();
 }
 
 function json(value: unknown, status = 200, headers?: Record<string, string>): Response {
@@ -26,13 +28,16 @@ function bodyText(body: RequestInit["body"]): string {
 }
 
 function tokenResponse(overrides: Record<string, unknown> = {}): Response {
-  return json({
-    token: TOKEN,
-    expires_at: "2026-09-06T13:00:00Z",
-    permissions: { contents: "write", pull_requests: "write" },
-    repositories: [{ full_name: "openai/example" }],
-    ...overrides,
-  }, 201);
+  return json(
+    {
+      token: TOKEN,
+      expires_at: "2026-09-06T13:00:00Z",
+      permissions: { contents: "write", pull_requests: "write" },
+      repositories: [{ full_name: "openai/example" }],
+      ...overrides,
+    },
+    201,
+  );
 }
 
 describe("GitHubAppClient", () => {
@@ -46,16 +51,14 @@ describe("GitHubAppClient", () => {
       if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
       throw new Error(`unexpected request ${url}`);
     }) as typeof fetch;
-    const client = new GitHubAppClient(
-      { appId: "123", privateKey: privateKeyPem() },
-      fetchMock,
-      () => NOW,
-    );
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
 
-    await expect(client.withRepositoryToken("OpenAI/Example.git", async (token) => {
-      expect(token).toBe(TOKEN);
-      return "ok";
-    })).resolves.toBe("ok");
+    await expect(
+      client.withRepositoryToken("OpenAI/Example.git", async (token) => {
+        expect(token).toBe(TOKEN);
+        return "ok";
+      }),
+    ).resolves.toBe("ok");
 
     const installationAuth = new Headers(calls[0].init?.headers).get("authorization")!;
     const jwt = installationAuth.replace(/^Bearer /, "");
@@ -78,8 +81,9 @@ describe("GitHubAppClient", () => {
       });
     }) as typeof fetch;
     const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
-    await expect(client.withRepositoryToken("openai/example", async () => undefined))
-      .rejects.toThrow("github_installation_token_scope_invalid");
+    await expect(client.withRepositoryToken("openai/example", async () => undefined)).rejects.toThrow(
+      "github_installation_token_scope_invalid",
+    );
   });
 
   it("returns an existing marked pull request without creating a duplicate", async () => {
@@ -91,24 +95,28 @@ describe("GitHubAppClient", () => {
       if (url.endsWith("/access_tokens")) return tokenResponse();
       if (url.includes("/pulls?")) {
         expect(new URL(url).searchParams.get("head")).toBe("openai:reevo/run-run-1");
-        return json([{
-          number: 7,
-          html_url: "https://github.com/openai/example/pull/7",
-          body: "<!-- reevo-run:run-1 -->",
-          draft: true,
-        }]);
+        return json([
+          {
+            number: 7,
+            html_url: "https://github.com/openai/example/pull/7",
+            body: "<!-- reevo-run:run-1 -->",
+            draft: true,
+          },
+        ]);
       }
       if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
       throw new Error(`unexpected request ${url}`);
     }) as typeof fetch;
     const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
 
-    await expect(client.createOrFindDraftPullRequest({
-      runId: "run-1",
-      repository: "openai/example",
-      baseRef: "main",
-      headRef: "reevo/run-run-1",
-    })).resolves.toEqual({ number: 7, url: "https://github.com/openai/example/pull/7" });
+    await expect(
+      client.createOrFindDraftPullRequest({
+        runId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "reevo/run-run-1",
+      }),
+    ).resolves.toEqual({ number: 7, url: "https://github.com/openai/example/pull/7" });
     expect(methods.filter((method) => method === "POST /repos/openai/example/pulls")).toHaveLength(0);
   });
 
@@ -121,12 +129,16 @@ describe("GitHubAppClient", () => {
       if (url.endsWith("/access_tokens")) return tokenResponse();
       if (url.includes("/pulls?") && (init?.method ?? "GET") === "GET") {
         lookups += 1;
-        return lookups === 1 ? json([]) : json([{
-          number: 8,
-          html_url: "https://github.com/openai/example/pull/8",
-          body: "<!-- reevo-run:run-1 -->",
-          draft: true,
-        }]);
+        return lookups === 1
+          ? json([])
+          : json([
+              {
+                number: 8,
+                html_url: "https://github.com/openai/example/pull/8",
+                body: "<!-- reevo-run:run-1 -->",
+                draft: true,
+              },
+            ]);
       }
       if (url.endsWith("/pulls") && init?.method === "POST") {
         createBody = JSON.parse(bodyText(init.body));
@@ -137,12 +149,14 @@ describe("GitHubAppClient", () => {
     }) as typeof fetch;
     const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
 
-    await expect(client.createOrFindDraftPullRequest({
-      runId: "run-1",
-      repository: "openai/example",
-      baseRef: "main",
-      headRef: "reevo/run-run-1",
-    })).resolves.toEqual({ number: 8, url: "https://github.com/openai/example/pull/8" });
+    await expect(
+      client.createOrFindDraftPullRequest({
+        runId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "reevo/run-run-1",
+      }),
+    ).resolves.toEqual({ number: 8, url: "https://github.com/openai/example/pull/8" });
     expect(createBody).toEqual({
       title: "Reevo run run-1",
       head: "reevo/run-run-1",
@@ -158,30 +172,34 @@ describe("GitHubAppClient", () => {
       if (url.endsWith("/installation")) return json({ id: 42 });
       if (url.endsWith("/access_tokens")) return tokenResponse();
       if (url.includes("/pulls?")) return json([]);
-      if (url.endsWith("/pulls") && init?.method === "POST") return json({
-        number: 9,
-        html_url: "https://github.com/OpenAI/Example/pull/9",
-        draft: true,
-      }, 201);
+      if (url.endsWith("/pulls") && init?.method === "POST")
+        return json(
+          {
+            number: 9,
+            html_url: "https://github.com/OpenAI/Example/pull/9",
+            draft: true,
+          },
+          201,
+        );
       if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
       throw new Error(`unexpected request ${url}`);
     }) as typeof fetch;
     const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
 
-    await expect(client.createOrFindDraftPullRequest({
-      runId: "run-1",
-      repository: "openai/example",
-      baseRef: "main",
-      headRef: "reevo/run-run-1",
-    })).resolves.toEqual({ number: 9, url: "https://github.com/openai/example/pull/9" });
+    await expect(
+      client.createOrFindDraftPullRequest({
+        runId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "reevo/run-run-1",
+      }),
+    ).resolves.toEqual({ number: 9, url: "https://github.com/openai/example/pull/9" });
   });
 
   it("returns bounded API categories rather than credential-bearing response bodies", async () => {
-    const fetchMock = vi.fn(async () => json(
-      { message: `server exposed ${TOKEN}` },
-      500,
-      { "x-github-request-id": "safe-request-id" },
-    )) as typeof fetch;
+    const fetchMock = vi.fn(async () =>
+      json({ message: `server exposed ${TOKEN}` }, 500, { "x-github-request-id": "safe-request-id" }),
+    ) as typeof fetch;
     const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
 
     const error = await client.withRepositoryToken("openai/example", async () => undefined).catch((caught) => caught);
@@ -194,39 +212,53 @@ describe("GitHubAppClient", () => {
       const url = String(input);
       if (url.endsWith("/installation")) return json({ id: 42 });
       if (url.endsWith("/access_tokens")) return tokenResponse();
-      if (url.includes("/pulls?")) return json([{
-        number: 7,
-        html_url: "https://github.com/OpenAI/Example/pull/7",
-        body: "<!-- reevo-run:run-1 -->",
-        draft: false,
-      }]);
+      if (url.includes("/pulls?"))
+        return json([
+          {
+            number: 7,
+            html_url: "https://github.com/OpenAI/Example/pull/7",
+            body: "<!-- reevo-run:run-1 -->",
+            draft: false,
+          },
+        ]);
       if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
       throw new Error(`unexpected request ${url}`);
     }) as typeof fetch;
     const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
-    await expect(client.createOrFindDraftPullRequest({
-      runId: "run-1",
-      repository: "openai/example",
-      baseRef: "main",
-      headRef: "reevo/run-run-1",
-    })).rejects.toThrow("github_pull_request_not_draft");
+    await expect(
+      client.createOrFindDraftPullRequest({
+        runId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "reevo/run-run-1",
+      }),
+    ).rejects.toThrow("github_pull_request_not_draft");
   });
 
   it("rejects non-HTTPS or credentialed API base URLs", () => {
-    expect(() => new GitHubAppClient({
-      appId: "123",
-      privateKey: privateKeyPem(),
-      apiBaseUrl: "http://api.github.com",
-    })).toThrow("github_api_base_url_invalid");
-    expect(() => new GitHubAppClient({
-      appId: "123",
-      privateKey: privateKeyPem(),
-      apiBaseUrl: "https://token@api.github.com",
-    })).toThrow("github_api_base_url_invalid");
-    expect(() => new GitHubAppClient({
-      appId: "123",
-      privateKey: privateKeyPem(),
-      apiVersion: "latest\r\nx-injected: true",
-    })).toThrow("github_api_version_invalid");
+    expect(
+      () =>
+        new GitHubAppClient({
+          appId: "123",
+          privateKey: privateKeyPem(),
+          apiBaseUrl: "http://api.github.com",
+        }),
+    ).toThrow("github_api_base_url_invalid");
+    expect(
+      () =>
+        new GitHubAppClient({
+          appId: "123",
+          privateKey: privateKeyPem(),
+          apiBaseUrl: "https://token@api.github.com",
+        }),
+    ).toThrow("github_api_base_url_invalid");
+    expect(
+      () =>
+        new GitHubAppClient({
+          appId: "123",
+          privateKey: privateKeyPem(),
+          apiVersion: "latest\r\nx-injected: true",
+        }),
+    ).toThrow("github_api_version_invalid");
   });
 });

@@ -34,9 +34,9 @@ describe("assertFetchDestinationAllowed (allowlist)", () => {
 
 describe("assertFetchDestinationAllowed (restrictToAllowedHosts)", () => {
   it("blocks a public host that is not on the allowlist when restricted", async () => {
-    await expect(
-      assertFetchDestinationAllowed("http://8.8.8.8/", { restrictToAllowedHosts: true }),
-    ).rejects.toThrow(/blocked/);
+    await expect(assertFetchDestinationAllowed("http://8.8.8.8/", { restrictToAllowedHosts: true })).rejects.toThrow(
+      /blocked/,
+    );
   });
 
   it("allows a public host that is on the allowlist when restricted", async () => {

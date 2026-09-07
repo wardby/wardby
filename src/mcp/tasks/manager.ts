@@ -55,7 +55,12 @@ export function createTaskResult(row: Task, ttlMs: number): CreateTaskResult {
 }
 
 /** Starts a run-backed task: persists the Task row BEFORE returning, so a client's first tasks/get always finds it. */
-export async function createRunTask(runId: string, principalId: string, db: PrismaClient, ttlMs: number): Promise<CreateTaskResult> {
+export async function createRunTask(
+  runId: string,
+  principalId: string,
+  db: PrismaClient,
+  ttlMs: number,
+): Promise<CreateTaskResult> {
   const row = await db.task.create({
     data: {
       kind: "run",
@@ -68,13 +73,16 @@ export async function createRunTask(runId: string, principalId: string, db: Pris
   return createTaskResult(row, ttlMs);
 }
 
-function mapTerminalRunStatus(status: Extract<RunStatus, "succeeded" | "budget_exhausted" | "refused" | "failed" | "lost">, run: {
-  tokensIn: number;
-  tokensOut: number;
-  costUsd: unknown;
-  error: string | null;
-  finalText: string | null;
-}): { status: "completed"; result: Record<string, unknown> } | { status: "failed"; error: JsonRpcErrorObject } {
+function mapTerminalRunStatus(
+  status: Extract<RunStatus, "succeeded" | "budget_exhausted" | "refused" | "failed" | "lost">,
+  run: {
+    tokensIn: number;
+    tokensOut: number;
+    costUsd: unknown;
+    error: string | null;
+    finalText: string | null;
+  },
+): { status: "completed"; result: Record<string, unknown> } | { status: "failed"; error: JsonRpcErrorObject } {
   const usage = { tokensIn: run.tokensIn, tokensOut: run.tokensOut, costUsd: Number(run.costUsd) };
   switch (status) {
     case "succeeded":
@@ -83,7 +91,10 @@ function mapTerminalRunStatus(status: Extract<RunStatus, "succeeded" | "budget_e
       // A successful terminal, not an error — the run did what the budget allowed.
       return { status: "completed", result: { summary: run.finalText ?? "", usage, budgetExhausted: true } };
     case "refused":
-      return { status: "completed", result: { refusalReason: run.error ?? "", usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } } };
+      return {
+        status: "completed",
+        result: { refusalReason: run.error ?? "", usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } },
+      };
     case "failed":
     case "lost":
       return { status: "failed", error: { code: INTERNAL_ERROR, message: run.error ?? `Run ${status}.` } };
@@ -134,7 +145,11 @@ export async function getTask(taskId: string, db: PrismaClient): Promise<GetTask
  * terminal status on its own; the stop hook is never called for a run
  * that's already finished.
  */
-export async function cancelTask(taskId: string, db: PrismaClient, stopRun: (runId: string) => Promise<void>): Promise<void> {
+export async function cancelTask(
+  taskId: string,
+  db: PrismaClient,
+  stopRun: (runId: string) => Promise<void>,
+): Promise<void> {
   const task = await db.task.findUniqueOrThrow({ where: { id: taskId } });
   if (task.status === "cancelled" || !task.runId) return;
 

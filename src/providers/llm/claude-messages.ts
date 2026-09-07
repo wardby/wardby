@@ -5,13 +5,38 @@
  */
 import type { LlmRequest, LlmToolDef, LlmStreamEvent, LlmUsage } from "./types.js";
 
-export interface CacheControl { type: "ephemeral"; }
-export interface ClaudeTextBlock { type: "text"; text: string; cache_control?: CacheControl; }
-export interface ClaudeToolUseBlock { type: "tool_use"; id: string; name: string; input: unknown; cache_control?: CacheControl; }
-export interface ClaudeToolResultBlock { type: "tool_result"; tool_use_id: string; content: string; cache_control?: CacheControl; }
+export interface CacheControl {
+  type: "ephemeral";
+}
+export interface ClaudeTextBlock {
+  type: "text";
+  text: string;
+  cache_control?: CacheControl;
+}
+export interface ClaudeToolUseBlock {
+  type: "tool_use";
+  id: string;
+  name: string;
+  input: unknown;
+  cache_control?: CacheControl;
+}
+export interface ClaudeToolResultBlock {
+  type: "tool_result";
+  tool_use_id: string;
+  content: string;
+  cache_control?: CacheControl;
+}
 export type ClaudeContentBlock = ClaudeTextBlock | ClaudeToolUseBlock | ClaudeToolResultBlock;
-export interface ClaudeMessage { role: "user" | "assistant"; content: ClaudeContentBlock[]; }
-export interface ClaudeTool { name: string; description: string; input_schema: Record<string, unknown>; cache_control?: CacheControl; }
+export interface ClaudeMessage {
+  role: "user" | "assistant";
+  content: ClaudeContentBlock[];
+}
+export interface ClaudeTool {
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+  cache_control?: CacheControl;
+}
 export interface ClaudeRequest {
   system?: ClaudeTextBlock[];
   messages: ClaudeMessage[];
@@ -20,7 +45,11 @@ export interface ClaudeRequest {
 }
 
 function parseArgs(argsJson: string): unknown {
-  try { return JSON.parse(argsJson || "{}"); } catch { return {}; }
+  try {
+    return JSON.parse(argsJson || "{}");
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -89,26 +118,35 @@ const EPHEMERAL: CacheControl = { type: "ephemeral" };
  * Sub-minimum prefixes (1024/2048 tokens) are silently un-cached by Anthropic.
  */
 export function withCacheBreakpoints(req: ClaudeRequest): ClaudeRequest {
-  const system = req.system?.map((b, i, arr) =>
-    i === arr.length - 1 ? { ...b, cache_control: EPHEMERAL } : b,
-  );
+  const system = req.system?.map((b, i, arr) => (i === arr.length - 1 ? { ...b, cache_control: EPHEMERAL } : b));
 
   const messages = req.messages.map((m, mi, marr) => {
     if (mi !== marr.length - 1) return m;
-    const content = m.content.map((b, bi, barr) =>
-      bi === barr.length - 1 ? { ...b, cache_control: EPHEMERAL } : b,
-    );
+    const content = m.content.map((b, bi, barr) => (bi === barr.length - 1 ? { ...b, cache_control: EPHEMERAL } : b));
     return { ...m, content };
   });
 
   return { ...req, ...(system ? { system } : {}), messages };
 }
 
-interface ClaudeUsage { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number; output_tokens?: number; }
+interface ClaudeUsage {
+  input_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  output_tokens?: number;
+}
 export type ClaudeStreamEvent =
   | { type: "message_start"; message: { usage: ClaudeUsage } }
-  | { type: "content_block_start"; index: number; content_block: { type: "text" | "tool_use"; id?: string; name?: string } }
-  | { type: "content_block_delta"; index: number; delta: { type: "text_delta"; text: string } | { type: "input_json_delta"; partial_json: string } }
+  | {
+      type: "content_block_start";
+      index: number;
+      content_block: { type: "text" | "tool_use"; id?: string; name?: string };
+    }
+  | {
+      type: "content_block_delta";
+      index: number;
+      delta: { type: "text_delta"; text: string } | { type: "input_json_delta"; partial_json: string };
+    }
   | { type: "content_block_stop"; index: number }
   | { type: "message_delta"; delta: { stop_reason?: string }; usage?: ClaudeUsage }
   | { type: "message_stop" };

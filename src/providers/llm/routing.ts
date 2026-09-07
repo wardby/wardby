@@ -6,7 +6,10 @@
  */
 import type { LlmMessage, LlmProvider, LlmRequest, LlmStreamEvent, LlmToolDef } from "./types.js";
 
-export interface LlmRegistration { provider: LlmProvider; models: string[]; }
+export interface LlmRegistration {
+  provider: LlmProvider;
+  models: string[];
+}
 
 export class RoutingLlmProvider implements LlmProvider {
   private readonly byModel = new Map<string, LlmProvider>();
@@ -15,7 +18,9 @@ export class RoutingLlmProvider implements LlmProvider {
     for (const reg of registrations) {
       for (const model of reg.models) {
         if (this.byModel.has(model)) {
-          throw new Error(`Model "${model}" is registered by more than one LLM provider — check the routing configuration.`);
+          throw new Error(
+            `Model "${model}" is registered by more than one LLM provider — check the routing configuration.`,
+          );
         }
         this.byModel.set(model, reg.provider);
       }
@@ -29,7 +34,9 @@ export class RoutingLlmProvider implements LlmProvider {
   private resolve(model: string): LlmProvider {
     const provider = this.byModel.get(model);
     if (!provider) {
-      throw new Error(`No LLM provider is registered for model "${model}". Known models: ${[...this.byModel.keys()].join(", ") || "(none)"}.`);
+      throw new Error(
+        `No LLM provider is registered for model "${model}". Known models: ${[...this.byModel.keys()].join(", ") || "(none)"}.`,
+      );
     }
     return provider;
   }

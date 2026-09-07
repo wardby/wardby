@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { createSecret, listSecrets, attachSecret, detachSecret, deleteSecret, buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
+import {
+  createSecret,
+  listSecrets,
+  attachSecret,
+  detachSecret,
+  deleteSecret,
+  buildSecretsAccessor,
+  scopeSecretsAccessor,
+} from "./secrets.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
 
 function fakeCipher(): SecretCipher {
@@ -43,13 +51,22 @@ function fakeDb() {
     secret: {
       create: async ({ data }: { data: Partial<FakeSecretRow> & { name: string } }) => {
         const now = new Date();
-        const row: FakeSecretRow = { id: `secret_${++counter}`, createdAt: now, updatedAt: now, ownerId: null, ...data } as FakeSecretRow;
+        const row: FakeSecretRow = {
+          id: `secret_${++counter}`,
+          createdAt: now,
+          updatedAt: now,
+          ownerId: null,
+          ...data,
+        } as FakeSecretRow;
         secrets.set(row.id, row);
         return row;
       },
-      findMany: async ({ where }: { where: { ownerId: string } }) => [...secrets.values()].filter((s) => s.ownerId === where.ownerId),
+      findMany: async ({ where }: { where: { ownerId: string } }) =>
+        [...secrets.values()].filter((s) => s.ownerId === where.ownerId),
       findUnique: async ({ where }: { where: { ownerId_name: { ownerId: string; name: string } } }) =>
-        [...secrets.values()].find((s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name) ?? null,
+        [...secrets.values()].find(
+          (s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name,
+        ) ?? null,
       upsert: async ({
         where,
         create,
@@ -59,14 +76,22 @@ function fakeDb() {
         create: Partial<FakeSecretRow> & { name: string };
         update: Partial<FakeSecretRow>;
       }) => {
-        const existing = [...secrets.values()].find((s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name);
+        const existing = [...secrets.values()].find(
+          (s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name,
+        );
         if (existing) {
           const row = { ...existing, ...update, updatedAt: new Date() };
           secrets.set(row.id, row);
           return row;
         }
         const now = new Date();
-        const row: FakeSecretRow = { id: `secret_${++counter}`, createdAt: now, updatedAt: now, ownerId: null, ...create } as FakeSecretRow;
+        const row: FakeSecretRow = {
+          id: `secret_${++counter}`,
+          createdAt: now,
+          updatedAt: now,
+          ownerId: null,
+          ...create,
+        } as FakeSecretRow;
         secrets.set(row.id, row);
         return row;
       },
@@ -179,7 +204,11 @@ describe("core/secrets", () => {
 
 describe("scopeSecretsAccessor", () => {
   function fakeAccessor(values: Record<string, string>) {
-    return { async get(name: string) { return values[name]; } };
+    return {
+      async get(name: string) {
+        return values[name];
+      },
+    };
   }
 
   it("resolves a name that is in the allowlist", async () => {
@@ -194,7 +223,12 @@ describe("scopeSecretsAccessor", () => {
 
   it("never calls the underlying accessor for a disallowed name", async () => {
     let calls = 0;
-    const accessor = { async get(_name: string) { calls++; return "x"; } };
+    const accessor = {
+      async get(_name: string) {
+        calls++;
+        return "x";
+      },
+    };
     const scoped = scopeSecretsAccessor(accessor, []);
     await scoped.get("ANYTHING");
     expect(calls).toBe(0);

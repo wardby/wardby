@@ -137,9 +137,7 @@ describe("reconcileOnce", () => {
     // This is the bug this scoping fixes: an attended `reevo run` has no
     // heartbeat by design, so without the trigger scope a long-streaming
     // manual run would get flipped to `lost` while a human still watches it.
-    const runs = [
-      baseRun({ trigger: "manual", executionManaged: false, heartbeatAt: null, startedAt: STALE }),
-    ];
+    const runs = [baseRun({ trigger: "manual", executionManaged: false, heartbeatAt: null, startedAt: STALE })];
     const db = fakeDb(runs);
 
     const count = await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS);
@@ -192,13 +190,17 @@ describe("reconcileOnce", () => {
   });
 
   it("does not relaunch a stale coding run whose handle was never persisted", async () => {
-    const runs = [baseRun({
-      status: "pending",
-      heartbeatAt: null,
-      startedAt: STALE,
-      agent: { kind: "coding" },
-    })];
-    const start = async () => { throw new Error("must not relaunch"); };
+    const runs = [
+      baseRun({
+        status: "pending",
+        heartbeatAt: null,
+        startedAt: STALE,
+        agent: { kind: "coding" },
+      }),
+    ];
+    const start = async () => {
+      throw new Error("must not relaunch");
+    };
     const executor = { start, async stop() {} } satisfies Executor;
 
     const count = await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, executor);
@@ -209,16 +211,21 @@ describe("reconcileOnce", () => {
   });
 
   it("passes the persisted handle to recovery and refreshes a confirmed active job", async () => {
-    const runs = [baseRun({
-      heartbeatAt: STALE,
-      agent: { kind: "coding" },
-      codingRun: { jobBackend: "docker", jobHandle: "container-1" },
-    })];
+    const runs = [
+      baseRun({
+        heartbeatAt: STALE,
+        agent: { kind: "coding" },
+        codingRun: { jobBackend: "docker", jobHandle: "container-1" },
+      }),
+    ];
     const seen: unknown[] = [];
     const executor: Executor = {
       async start() {},
       async stop() {},
-      async recover(handle) { seen.push(handle); return { state: "active" }; },
+      async recover(handle) {
+        seen.push(handle);
+        return { state: "active" };
+      },
     };
 
     const count = await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, executor);
@@ -229,15 +236,19 @@ describe("reconcileOnce", () => {
   });
 
   it("marks a handled coding job lost only after recovery reports stop and collection complete", async () => {
-    const runs = [baseRun({
-      heartbeatAt: STALE,
-      agent: { kind: "coding" },
-      codingRun: { jobBackend: "docker", jobHandle: "container-1" },
-    })];
+    const runs = [
+      baseRun({
+        heartbeatAt: STALE,
+        agent: { kind: "coding" },
+        codingRun: { jobBackend: "docker", jobHandle: "container-1" },
+      }),
+    ];
     const executor: Executor = {
       async start() {},
       async stop() {},
-      async recover() { return { state: "lost", reason: "container disappeared after collection" }; },
+      async recover() {
+        return { state: "lost", reason: "container disappeared after collection" };
+      },
     };
 
     const count = await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, executor);
@@ -247,15 +258,19 @@ describe("reconcileOnce", () => {
   });
 
   it("leaves the run recoverable when collection fails, so a later pass can retry", async () => {
-    const runs = [baseRun({
-      heartbeatAt: STALE,
-      agent: { kind: "coding" },
-      codingRun: { jobBackend: "docker", jobHandle: "container-1" },
-    })];
+    const runs = [
+      baseRun({
+        heartbeatAt: STALE,
+        agent: { kind: "coding" },
+        codingRun: { jobBackend: "docker", jobHandle: "container-1" },
+      }),
+    ];
     const executor: Executor = {
       async start() {},
       async stop() {},
-      async recover() { throw new Error("artifact temporarily unavailable"); },
+      async recover() {
+        throw new Error("artifact temporarily unavailable");
+      },
     };
 
     const count = await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, executor);
@@ -265,15 +280,20 @@ describe("reconcileOnce", () => {
   });
 
   it("does not overwrite a terminal result recovered after PR creation", async () => {
-    const runs = [baseRun({
-      heartbeatAt: STALE,
-      agent: { kind: "coding" },
-      codingRun: { jobBackend: "docker", jobHandle: "container-1" },
-    })];
+    const runs = [
+      baseRun({
+        heartbeatAt: STALE,
+        agent: { kind: "coding" },
+        codingRun: { jobBackend: "docker", jobHandle: "container-1" },
+      }),
+    ];
     const executor: Executor = {
       async start() {},
       async stop() {},
-      async recover() { runs[0].status = "succeeded"; return { state: "terminal" }; },
+      async recover() {
+        runs[0].status = "succeeded";
+        return { state: "terminal" };
+      },
     };
 
     const count = await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, executor);

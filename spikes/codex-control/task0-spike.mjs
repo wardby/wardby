@@ -81,9 +81,7 @@ class RpcClient {
     });
     child.once("exit", (code, signal) => {
       const detail = this.stderr.replaceAll(capability, "[redacted]").trim();
-      const error = new Error(
-        `app server exited (${code ?? signal ?? "unknown"})${detail ? `: ${detail}` : ""}`,
-      );
+      const error = new Error(`app server exited (${code ?? signal ?? "unknown"})${detail ? `: ${detail}` : ""}`);
       for (const { reject } of this.pending.values()) reject(error);
       this.pending.clear();
     });
@@ -141,10 +139,7 @@ class RpcClient {
   }
 
   async event(method, predicate = () => true) {
-    await eventually(
-      () => this.events.some((event) => event.method === method && predicate(event.params)),
-      method,
-    );
+    await eventually(() => this.events.some((event) => event.method === method && predicate(event.params)), method);
     return this.events.find((event) => event.method === method && predicate(event.params));
   }
 }
@@ -153,13 +148,20 @@ async function startAppServer(port) {
   const child = spawn(
     "codex",
     [
-      "-c", "model_provider=\"reevo_proxy\"",
-      "-c", "model_providers.reevo_proxy.name=\"Reevo Task 0 Proxy\"",
-      "-c", `model_providers.reevo_proxy.base_url=\"http://127.0.0.1:${port}/v1\"`,
-      "-c", "model_providers.reevo_proxy.wire_api=\"responses\"",
-      "-c", `model_providers.reevo_proxy.auth.command=\"${tokenPath}\"`,
-      "-c", "model_providers.reevo_proxy.request_max_retries=0",
-      "-c", "model_providers.reevo_proxy.stream_max_retries=0",
+      "-c",
+      'model_provider="reevo_proxy"',
+      "-c",
+      'model_providers.reevo_proxy.name="Reevo Task 0 Proxy"',
+      "-c",
+      `model_providers.reevo_proxy.base_url=\"http://127.0.0.1:${port}/v1\"`,
+      "-c",
+      'model_providers.reevo_proxy.wire_api="responses"',
+      "-c",
+      `model_providers.reevo_proxy.auth.command=\"${tokenPath}\"`,
+      "-c",
+      "model_providers.reevo_proxy.request_max_retries=0",
+      "-c",
+      "model_providers.reevo_proxy.stream_max_retries=0",
       "app-server",
       "--stdio",
     ],
@@ -302,8 +304,10 @@ try {
 
 console.log(JSON.stringify(result, null, 2));
 
-if (!Object.entries(result)
-  .filter(([key]) => !["auth", "details", "rejectionMs"].includes(key))
-  .every(([, value]) => value === true)) {
+if (
+  !Object.entries(result)
+    .filter(([key]) => !["auth", "details", "rejectionMs"].includes(key))
+    .every(([, value]) => value === true)
+) {
   process.exitCode = 1;
 }

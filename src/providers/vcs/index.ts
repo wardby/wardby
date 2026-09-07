@@ -9,10 +9,7 @@ export * from "./types.js";
 export { GitHubAppClient } from "./github.js";
 export { GitVcsProvider, NodeGitCommandRunner } from "./git.js";
 
-export function buildVcsProvider(
-  providerConfig: Pick<ProviderConfig, "vcs">,
-  config: GitHubVcsConfig,
-): VcsProvider {
+export function buildVcsProvider(providerConfig: Pick<ProviderConfig, "vcs">, config: GitHubVcsConfig): VcsProvider {
   if (providerConfig.vcs !== "github") throw new Error(`VCS_PROVIDER=${String(providerConfig.vcs)} is not supported.`);
   if (!config.appId || !config.privateKey) {
     throw new Error("GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY are required by the GitHub VCS adapter.");

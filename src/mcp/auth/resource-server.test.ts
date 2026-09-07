@@ -32,7 +32,10 @@ const fakeProviders = {} as unknown as import("../../providers/index.js").Provid
 
 describe("protectedResourceMetadata", () => {
   it("matches RFC 9728 shape and constructs the well-known URI by inserting before the path", () => {
-    const meta = protectedResourceMetadata({ canonicalUri: CANONICAL_URI, authorizationServers: ["https://idp.example.com"] });
+    const meta = protectedResourceMetadata({
+      canonicalUri: CANONICAL_URI,
+      authorizationServers: ["https://idp.example.com"],
+    });
     expect(meta.resource).toBe(CANONICAL_URI);
     expect(meta.authorization_servers).toEqual(["https://idp.example.com"]);
     expect(meta.scopes_supported.length).toBeGreaterThan(0);
@@ -95,22 +98,38 @@ describe("authenticate", () => {
     // structurally invisible to authenticate() since it only reads
     // `headers.authorization`.
     await expect(
-      authenticate(
-        { query: { access_token: "sneaky" } } as never,
-        { authProvider, db: fakeDb(), providers: fakeProviders, canonicalUri: CANONICAL_URI },
-      ),
+      authenticate({ query: { access_token: "sneaky" } } as never, {
+        authProvider,
+        db: fakeDb(),
+        providers: fakeProviders,
+        canonicalUri: CANONICAL_URI,
+      }),
     ).rejects.toMatchObject({ httpStatus: 401 });
   });
 });
 
 describe("requireScope", () => {
   it("passes when the context holds the required scope", () => {
-    const ctx = { principal: {} as never, scopes: new Set(["agents:write"]), providers: fakeProviders, db: fakeDb(), clientSupportsTasks: false, mcpReq: { requestState: () => undefined } };
+    const ctx = {
+      principal: {} as never,
+      scopes: new Set(["agents:write"]),
+      providers: fakeProviders,
+      db: fakeDb(),
+      clientSupportsTasks: false,
+      mcpReq: { requestState: () => undefined },
+    };
     expect(() => requireScope(ctx, CANONICAL_URI, "agents:write")).not.toThrow();
   });
 
   it("throws 403 with a WWW-Authenticate challenge listing all required scopes", () => {
-    const ctx = { principal: {} as never, scopes: new Set(["agents:read"]), providers: fakeProviders, db: fakeDb(), clientSupportsTasks: false, mcpReq: { requestState: () => undefined } };
+    const ctx = {
+      principal: {} as never,
+      scopes: new Set(["agents:read"]),
+      providers: fakeProviders,
+      db: fakeDb(),
+      clientSupportsTasks: false,
+      mcpReq: { requestState: () => undefined },
+    };
     try {
       requireScope(ctx, CANONICAL_URI, "agents:write", "tools:write");
       expect.unreachable("requireScope should have thrown");

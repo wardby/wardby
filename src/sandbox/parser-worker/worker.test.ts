@@ -4,7 +4,9 @@ import { HTML_LINKS_LIMIT } from "../limits.js";
 
 describe("parseHtmlPayload", () => {
   it("extracts title, visible text, and links", () => {
-    const result = parseHtmlPayload('<html><head><title>Hi</title></head><body><p>Hello</p><a href="/a">A</a></body></html>');
+    const result = parseHtmlPayload(
+      '<html><head><title>Hi</title></head><body><p>Hello</p><a href="/a">A</a></body></html>',
+    );
     expect(result.title).toBe("Hi");
     expect(result.text).toContain("Hello");
     expect(result.links).toEqual([{ href: "/a", text: "A" }]);

@@ -7,14 +7,7 @@
 import OpenAI from "openai";
 import { encode as encodeCl100kBase } from "gpt-tokenizer/encoding/cl100k_base";
 import { encode as encodeO200kBase } from "gpt-tokenizer/encoding/o200k_base";
-import type {
-  LlmMessage,
-  LlmProvider,
-  LlmRequest,
-  LlmStreamEvent,
-  LlmToolDef,
-  LlmUsage,
-} from "./types.js";
+import type { LlmMessage, LlmProvider, LlmRequest, LlmStreamEvent, LlmToolDef, LlmUsage } from "./types.js";
 import { getModelPricing, priceUsd as priceUsdFromTable } from "./pricing.js";
 
 /** Whether the OpenAI adapter has credentials to run (used by the router's enable-by-credential wiring). */
@@ -84,17 +77,12 @@ export class OpenAiLlmProvider implements LlmProvider {
       return;
     }
     if (!apiKey) {
-      throw new Error(
-        "OPENAI_API_KEY is not set — required by the OpenAI LlmProvider adapter.",
-      );
+      throw new Error("OPENAI_API_KEY is not set — required by the OpenAI LlmProvider adapter.");
     }
     this.client = new OpenAI({ apiKey });
   }
 
-  async *stream(
-    req: LlmRequest,
-    signal?: AbortSignal,
-  ): AsyncIterable<LlmStreamEvent> {
+  async *stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<LlmStreamEvent> {
     const stream = await this.client.chat.completions.create(
       {
         model: req.model,

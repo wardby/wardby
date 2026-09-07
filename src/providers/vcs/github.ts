@@ -49,8 +49,16 @@ function safeApiError(response: Response): Error {
 
 function normalizeApiBaseUrl(value: string): string {
   const url = new URL(value);
-  if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "api.github.com"
-    || url.port || url.username || url.password || url.search || url.hash || url.pathname !== "/") {
+  if (
+    url.protocol !== "https:" ||
+    url.hostname.toLowerCase() !== "api.github.com" ||
+    url.port ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    url.pathname !== "/"
+  ) {
     throw new Error("github_api_base_url_invalid");
   }
   return url.toString().replace(/\/$/, "");
@@ -90,8 +98,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     const repository = normalizeGitHubRepository(input.repository);
     const baseRef = normalizeGitRef(input.baseRef);
     const headRef = normalizeGitRef(input.headRef);
-    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.runId)
-      || headRef !== `reevo/run-${input.runId}`) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.runId) || headRef !== `reevo/run-${input.runId}`) {
       throw new Error("github_pull_request_input_invalid");
     }
 
@@ -166,18 +173,30 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     const payload = record(await tokenResponse.json());
     const permissions = record(payload.permissions);
     const repositories = Array.isArray(payload.repositories) ? payload.repositories.map(record) : [];
-    const scopedRepository = repositories.some((candidate) =>
-      typeof candidate.full_name === "string" && candidate.full_name.toLowerCase() === repository);
+    const scopedRepository = repositories.some(
+      (candidate) => typeof candidate.full_name === "string" && candidate.full_name.toLowerCase() === repository,
+    );
     const expiresAt = typeof payload.expires_at === "string" ? Date.parse(payload.expires_at) : Number.NaN;
-    const unexpectedPermission = Object.entries(permissions).some(([name, level]) =>
-      !((name === "contents" && level === "write")
-        || (name === "pull_requests" && level === "write")
-        || (name === "metadata" && level === "read")));
-    if (typeof payload.token !== "string" || payload.token.length < 20
-      || Buffer.byteLength(payload.token, "utf8") > 512 || !/^[A-Za-z0-9_]+$/.test(payload.token)
-      || !Number.isFinite(expiresAt) || expiresAt <= this.now().getTime() + 60_000
-      || permissions.contents !== "write" || permissions.pull_requests !== "write"
-      || unexpectedPermission || !scopedRepository) {
+    const unexpectedPermission = Object.entries(permissions).some(
+      ([name, level]) =>
+        !(
+          (name === "contents" && level === "write") ||
+          (name === "pull_requests" && level === "write") ||
+          (name === "metadata" && level === "read")
+        ),
+    );
+    if (
+      typeof payload.token !== "string" ||
+      payload.token.length < 20 ||
+      Buffer.byteLength(payload.token, "utf8") > 512 ||
+      !/^[A-Za-z0-9_]+$/.test(payload.token) ||
+      !Number.isFinite(expiresAt) ||
+      expiresAt <= this.now().getTime() + 60_000 ||
+      permissions.contents !== "write" ||
+      permissions.pull_requests !== "write" ||
+      unexpectedPermission ||
+      !scopedRepository
+    ) {
       throw new Error("github_installation_token_scope_invalid");
     }
     return payload.token;
@@ -224,9 +243,16 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     } catch {
       throw new Error("github_pull_request_response_invalid");
     }
-    if (receivedUrl.protocol !== "https:" || receivedUrl.hostname.toLowerCase() !== "github.com"
-      || receivedUrl.port || receivedUrl.username || receivedUrl.password || receivedUrl.search || receivedUrl.hash
-      || receivedUrl.pathname.toLowerCase() !== new URL(expectedUrl).pathname.toLowerCase()) {
+    if (
+      receivedUrl.protocol !== "https:" ||
+      receivedUrl.hostname.toLowerCase() !== "github.com" ||
+      receivedUrl.port ||
+      receivedUrl.username ||
+      receivedUrl.password ||
+      receivedUrl.search ||
+      receivedUrl.hash ||
+      receivedUrl.pathname.toLowerCase() !== new URL(expectedUrl).pathname.toLowerCase()
+    ) {
       throw new Error("github_pull_request_response_invalid");
     }
     return { number, url: expectedUrl };

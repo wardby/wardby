@@ -32,35 +32,87 @@ function fakeSecrets(values: Record<string, string>): SecretsAccessor {
 
 describe("secrets.get sandbox host function", () => {
   it.each(["-1", "1.5", "Infinity", "NaN", "65537"])("rejects invalid random byte length %s", async (length) => {
-    const result = await runInSandbox({ code: `return await __bridge_randomBytes(JSON.stringify([${length}]));`, params: {}, agentId: "a", datastore: fakeDatastore(), toolName: "limits" });
+    const result = await runInSandbox({
+      code: `return await __bridge_randomBytes(JSON.stringify([${length}]));`,
+      params: {},
+      agentId: "a",
+      datastore: fakeDatastore(),
+      toolName: "limits",
+    });
     expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("random_bytes_limit") });
   });
-  it.each(["return await parseHTML('x'.repeat(262145));", "return await parseCSV('x'.repeat(262145));", "return await parseXML('<!DOCTYPE x><x/>');", "return await parseXML('<x/>', {processEntities:true});", "return await __bridge_randomBytes({evil:'x'});", "return await datastore.set('key', 'x'.repeat(1048577));"])("caps parser and bridge input %s", async (code) => {
-    const result = await runInSandbox({ code, params: {}, agentId: "a", datastore: fakeDatastore(), toolName: "limits" });
+  it.each([
+    "return await parseHTML('x'.repeat(262145));",
+    "return await parseCSV('x'.repeat(262145));",
+    "return await parseXML('<!DOCTYPE x><x/>');",
+    "return await parseXML('<x/>', {processEntities:true});",
+    "return await __bridge_randomBytes({evil:'x'});",
+    "return await datastore.set('key', 'x'.repeat(1048577));",
+  ])("caps parser and bridge input %s", async (code) => {
+    const result = await runInSandbox({
+      code,
+      params: {},
+      agentId: "a",
+      datastore: fakeDatastore(),
+      toolName: "limits",
+    });
     expect(result).toMatchObject({ ok: false });
   });
   it("clears successful invocation wall timers", async () => {
     await runInSandbox({ code: "return 1", params: {}, agentId: "a", datastore: fakeDatastore(), toolName: "warmup" });
     vi.useFakeTimers();
     try {
-      for (let i = 0; i < 5; i++) await runInSandbox({ code: "return 1", params: {}, agentId: "a", datastore: fakeDatastore(), toolName: "timer" });
+      for (let i = 0; i < 5; i++)
+        await runInSandbox({
+          code: "return 1",
+          params: {},
+          agentId: "a",
+          datastore: fakeDatastore(),
+          toolName: "timer",
+        });
       expect(vi.getTimerCount()).toBe(0);
-    } finally { vi.useRealTimers(); }
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it("bounds HTML link extraction before constructing an amplified result", async () => {
-    const result = await runInSandbox({ code: "return await parseHTML('<a href=\"/\">text</a>'.repeat(1001));", params: {}, agentId: "a", datastore: fakeDatastore(), toolName: "limits" });
+    const result = await runInSandbox({
+      code: "return await parseHTML('<a href=\"/\">text</a>'.repeat(1001));",
+      params: {},
+      agentId: "a",
+      datastore: fakeDatastore(),
+      toolName: "limits",
+    });
     expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("html_link_limit") });
   });
   it("parses valid CSV end-to-end through the worker pool", async () => {
-    const result = await runInSandbox({ code: "return await parseCSV('a,b\\n1,2');", params: {}, agentId: "a", datastore: fakeDatastore(), toolName: "csv-smoke" });
+    const result = await runInSandbox({
+      code: "return await parseCSV('a,b\\n1,2');",
+      params: {},
+      agentId: "a",
+      datastore: fakeDatastore(),
+      toolName: "csv-smoke",
+    });
     expect(result).toMatchObject({ ok: true, value: { data: [{ a: "1", b: "2" }] } });
   });
   it("parses valid XML end-to-end through the worker pool", async () => {
-    const result = await runInSandbox({ code: "return await parseXML('<x>hi</x>');", params: {}, agentId: "a", datastore: fakeDatastore(), toolName: "xml-smoke" });
+    const result = await runInSandbox({
+      code: "return await parseXML('<x>hi</x>');",
+      params: {},
+      agentId: "a",
+      datastore: fakeDatastore(),
+      toolName: "xml-smoke",
+    });
     expect(result).toMatchObject({ ok: true, value: { x: "hi" } });
   });
   it("parses valid HTML end-to-end through the worker pool", async () => {
-    const result = await runInSandbox({ code: "return await parseHTML('<title>T</title><a href=\"/x\">L</a>');", params: {}, agentId: "a", datastore: fakeDatastore(), toolName: "html-smoke" });
+    const result = await runInSandbox({
+      code: "return await parseHTML('<title>T</title><a href=\"/x\">L</a>');",
+      params: {},
+      agentId: "a",
+      datastore: fakeDatastore(),
+      toolName: "html-smoke",
+    });
     expect(result).toMatchObject({ ok: true, value: { title: "T", links: [{ href: "/x", text: "L" }] } });
   });
   it("returns the plaintext for an attached secret", async () => {
@@ -120,7 +172,11 @@ describe("secrets.get sandbox host function", () => {
 
   function fakeLogger() {
     const calls: { level: string; args: unknown[] }[] = [];
-    const record = (level: string) => (...args: unknown[]) => { calls.push({ level, args }); };
+    const record =
+      (level: string) =>
+      (...args: unknown[]) => {
+        calls.push({ level, args });
+      };
     const instance = { info: record("info"), warn: record("warn"), error: record("error"), child: () => instance };
     return { logger: instance as never, calls };
   }

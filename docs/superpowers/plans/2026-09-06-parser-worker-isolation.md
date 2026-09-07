@@ -26,17 +26,19 @@ A persistent pool (fixed long-lived workers, reused across calls) avoids per-cal
 
 ### D2: Per-worker memory limit — RESOLVED
 
-`resourceLimits.maxOldGenerationSizeMb` on the `Worker` constructor bounds the V8 JS heap (plain objects/strings/arrays — what these three parsers actually produce). Scoping first found that it does **not** bound raw `Buffer`/`ArrayBuffer` allocation (a `Buffer.alloc` loop ran past a 16MB cap for a full 10s test timeout without triggering `'error'`/`'exit'`) — Buffers live off the V8 heap. That's a real general Node fact, but a follow-up experiment confirmed it doesn't apply to this code path: a realistic JS-heap bomb (an ever-growing array of many bounded-size plain objects/strings — the actual shape an amplifying HTML/CSV/XML parse produces, as opposed to a single pathologically-doubling string, which hits V8's separate "Invalid string length" ceiling and gives a false pass/fail unrelated to `resourceLimits`) was correctly killed in ~97ms: `Worker terminated due to reaching memory limit: JS heap out of memory`. None of `node-html-parser`/`papaparse`/`fast-xml-parser` allocate `Buffer`s during parsing — they operate on JS strings/objects/arrays throughout — so the heap cap is the right mitigation for this specific threat model. `PARSER_WORKER_MAX_OLD_GEN_MB = 64` (Task 1) stands as the default; it's also a fast-path, not the only backstop — the per-call wall-clock timeout (D1) independently reclaims a worker via `terminate()` regardless of *why* it's unhealthy (CPU spin or memory thrashing), so even a hypothetical Buffer-based amplification would still be bounded, just on the timeout's slower clock instead of the heap cap's near-instant one.
+`resourceLimits.maxOldGenerationSizeMb` on the `Worker` constructor bounds the V8 JS heap (plain objects/strings/arrays — what these three parsers actually produce). Scoping first found that it does **not** bound raw `Buffer`/`ArrayBuffer` allocation (a `Buffer.alloc` loop ran past a 16MB cap for a full 10s test timeout without triggering `'error'`/`'exit'`) — Buffers live off the V8 heap. That's a real general Node fact, but a follow-up experiment confirmed it doesn't apply to this code path: a realistic JS-heap bomb (an ever-growing array of many bounded-size plain objects/strings — the actual shape an amplifying HTML/CSV/XML parse produces, as opposed to a single pathologically-doubling string, which hits V8's separate "Invalid string length" ceiling and gives a false pass/fail unrelated to `resourceLimits`) was correctly killed in ~97ms: `Worker terminated due to reaching memory limit: JS heap out of memory`. None of `node-html-parser`/`papaparse`/`fast-xml-parser` allocate `Buffer`s during parsing — they operate on JS strings/objects/arrays throughout — so the heap cap is the right mitigation for this specific threat model. `PARSER_WORKER_MAX_OLD_GEN_MB = 64` (Task 1) stands as the default; it's also a fast-path, not the only backstop — the per-call wall-clock timeout (D1) independently reclaims a worker via `terminate()` regardless of _why_ it's unhealthy (CPU spin or memory thrashing), so even a hypothetical Buffer-based amplification would still be bounded, just on the timeout's slower clock instead of the heap cap's near-instant one.
 
 ---
 
 ## Task 1: Add pool-tuning constants to `limits.ts`
 
 **Files:**
+
 - Modify: `src/sandbox/limits.ts`
 - Test: none (pure constants; exercised by Task 3's tests)
 
 **Interfaces:**
+
 - Produces: `PARSER_WORKER_MAX_CONCURRENCY`, `PARSER_WORKER_QUEUE_LIMIT`, `PARSER_WORKER_TIMEOUT_MS`, `PARSER_WORKER_MAX_OLD_GEN_MB` — consumed by Task 3's `pool.ts`.
 
 - [x] **Step 1: Add the four constants**
@@ -73,10 +75,12 @@ git commit -m "feat(sandbox): add parser worker pool tuning constants"
 Pure extraction — moves the existing parsing logic out of `host-functions.ts` into pure, directly-testable functions, plus the worker-thread message wiring. Does not yet touch `host-functions.ts`; that's Task 4. Safe to land on its own.
 
 **Files:**
+
 - Create: `src/sandbox/parser-worker/worker.ts`
 - Create: `src/sandbox/parser-worker/worker.test.ts`
 
 **Interfaces:**
+
 - Produces: `parseHtmlPayload(html: string): { title: string | null; text: string; links: { href: string; text: string }[] }`, `parseCsvPayload(csv: string, header: boolean): { data: unknown; errors: unknown; meta: unknown }`, `parseXmlPayload(xml: string, xmlOptions: Record<string, unknown> | null): unknown` — consumed directly by this task's tests, and indirectly (via the message handler, not by import) by Task 3's pool.
 - Consumes: `boundedJson` (`../bounded-json.js`), `BRIDGE_RESULT_BYTES`, `HTML_LINKS_LIMIT` (`../limits.js`) — both already exist today.
 
@@ -91,7 +95,9 @@ import { HTML_LINKS_LIMIT } from "../limits.js";
 
 describe("parseHtmlPayload", () => {
   it("extracts title, visible text, and links", () => {
-    const result = parseHtmlPayload('<html><head><title>Hi</title></head><body><p>Hello</p><a href="/a">A</a></body></html>');
+    const result = parseHtmlPayload(
+      '<html><head><title>Hi</title></head><body><p>Hello</p><a href="/a">A</a></body></html>',
+    );
     expect(result.title).toBe("Hi");
     expect(result.text).toContain("Hello");
     expect(result.links).toEqual([{ href: "/a", text: "A" }]);
@@ -153,7 +159,11 @@ import { XMLParser } from "fast-xml-parser";
 import { boundedJson } from "../bounded-json.js";
 import { BRIDGE_RESULT_BYTES, HTML_LINKS_LIMIT } from "../limits.js";
 
-export function parseHtmlPayload(html: string): { title: string | null; text: string; links: { href: string; text: string }[] } {
+export function parseHtmlPayload(html: string): {
+  title: string | null;
+  text: string;
+  links: { href: string; text: string }[];
+} {
   const root = parseHtmlDom(html);
   const title = root.querySelector("title")?.text?.trim() ?? null;
   const text = root.text.replace(/\s+/g, " ").trim();
@@ -183,7 +193,8 @@ export function parseXmlPayload(xml: string, xmlOptions: Record<string, unknown>
 
 interface ParseRequest {
   kind: "html" | "csv" | "xml";
-  payload: { html: string } | { csv: string; header: boolean } | { xml: string; xmlOptions: Record<string, unknown> | null };
+  payload:
+    { html: string } | { csv: string; header: boolean } | { xml: string; xmlOptions: Record<string, unknown> | null };
 }
 
 function handle(request: ParseRequest): unknown {
@@ -225,6 +236,7 @@ git commit -m "feat(sandbox): extract HTML/CSV/XML parsing into a worker-thread 
 ## Task 3: Build the bounded worker pool (`pool.ts`)
 
 **Files:**
+
 - Create: `src/sandbox/parser-worker/pool.ts`
 - Create: `src/sandbox/parser-worker/__fixtures__/echo.ts`
 - Create: `src/sandbox/parser-worker/__fixtures__/reject.ts`
@@ -233,6 +245,7 @@ git commit -m "feat(sandbox): extract HTML/CSV/XML parsing into a worker-thread 
 - Create: `src/sandbox/parser-worker/pool.test.ts`
 
 **Interfaces:**
+
 - Consumes: `PARSER_WORKER_MAX_CONCURRENCY`, `PARSER_WORKER_QUEUE_LIMIT`, `PARSER_WORKER_TIMEOUT_MS`, `PARSER_WORKER_MAX_OLD_GEN_MB` (Task 1, `../limits.js`).
 - Produces: `export type ParserKind = "html" | "csv" | "xml"`, `export interface ParserWorkerPool { run(kind: ParserKind, payload: unknown, signal?: AbortSignal): Promise<unknown>; }`, `export interface ParserWorkerPoolOptions { maxConcurrency?: number; timeoutMs?: number; maxOldGenerationSizeMb?: number; queueLimit?: number; workerUrl?: URL }`, `export function createParserWorkerPool(options?: ParserWorkerPoolOptions): ParserWorkerPool` — consumed by Task 4's `host-functions.ts`.
 
@@ -318,7 +331,12 @@ describe("createParserWorkerPool", () => {
   });
 
   it("rejects fast once maxConcurrency + queueLimit is exceeded", async () => {
-    const pool = createParserWorkerPool({ workerUrl: fixture("spin-forever"), timeoutMs: 300, maxConcurrency: 1, queueLimit: 1 });
+    const pool = createParserWorkerPool({
+      workerUrl: fixture("spin-forever"),
+      timeoutMs: 300,
+      maxConcurrency: 1,
+      queueLimit: 1,
+    });
     const first = pool.run("html", {}); // occupies the one worker slot
     const second = pool.run("html", {}); // fills the one queue slot
     const third = pool.run("html", {}); // must be rejected immediately, no slot or queue room left
@@ -404,7 +422,9 @@ const defaultWorkerJsUrl = new URL("./worker.js", import.meta.url);
 // statements. Under tsx/vitest only worker.ts exists on disk; after
 // `tsc -p tsconfig.build.json` only the compiled worker.js does. Verified
 // both branches load and run correctly.
-const DEFAULT_WORKER_URL = existsSync(fileURLToPath(defaultWorkerJsUrl)) ? defaultWorkerJsUrl : new URL("./worker.ts", import.meta.url);
+const DEFAULT_WORKER_URL = existsSync(fileURLToPath(defaultWorkerJsUrl))
+  ? defaultWorkerJsUrl
+  : new URL("./worker.ts", import.meta.url);
 
 export function createParserWorkerPool(options: ParserWorkerPoolOptions = {}): ParserWorkerPool {
   const maxConcurrency = options.maxConcurrency ?? PARSER_WORKER_MAX_CONCURRENCY;
@@ -497,9 +517,11 @@ git commit -m "feat(sandbox): add bounded worker pool for parser isolation"
 ## Task 4: Wire `host-functions.ts` to the pool
 
 **Files:**
+
 - Modify: `src/sandbox/host-functions.ts`
 
 **Interfaces:**
+
 - Consumes: `createParserWorkerPool`, `ParserWorkerPool` (Task 3, `./parser-worker/pool.js`).
 
 - [x] **Step 1: Remove the direct parser-library imports and update the `limits.js` import**
@@ -521,7 +543,14 @@ import { createParserWorkerPool, type ParserWorkerPool } from "./parser-worker/p
 And replace the `limits.js` import line:
 
 ```ts
-import { PARSER_INPUT_BYTES, HTML_LINKS_LIMIT, BRIDGE_RESULT_BYTES, RANDOM_BYTES_LIMIT, LOG_BYTES, WALL_TIME_LIMIT_MS } from "./limits.js";
+import {
+  PARSER_INPUT_BYTES,
+  HTML_LINKS_LIMIT,
+  BRIDGE_RESULT_BYTES,
+  RANDOM_BYTES_LIMIT,
+  LOG_BYTES,
+  WALL_TIME_LIMIT_MS,
+} from "./limits.js";
 ```
 
 with:
@@ -550,7 +579,7 @@ let sharedParserPool: ParserWorkerPool | undefined;
 Inside `installHostFunctions`, right after the existing `const sandboxLog = ...` line, add:
 
 ```ts
-  const parserPool = options.parserPool ?? (sharedParserPool ??= createParserWorkerPool());
+const parserPool = options.parserPool ?? (sharedParserPool ??= createParserWorkerPool());
 ```
 
 - [x] **Step 3: Replace the three parser bridge handlers**
@@ -558,25 +587,32 @@ Inside `installHostFunctions`, right after the existing `const sandboxLog = ...`
 Replace the bodies of `__bridge_parseHTML`, `__bridge_parseCSV`, and `__bridge_parseXML` with:
 
 ```ts
-  register("__bridge_parseHTML", async (argsJson) => {
-    const [html] = args<[string]>(argsJson);
-    boundedString(html, PARSER_INPUT_BYTES);
-    return parserPool.run("html", { html }, signal);
-  });
+register("__bridge_parseHTML", async (argsJson) => {
+  const [html] = args<[string]>(argsJson);
+  boundedString(html, PARSER_INPUT_BYTES);
+  return parserPool.run("html", { html }, signal);
+});
 
-  register("__bridge_parseCSV", async (argsJson) => {
-    const [csv, csvOptions] = args<[string, { header?: boolean } | null]>(argsJson);
-    boundedString(csv, PARSER_INPUT_BYTES);
-    return parserPool.run("csv", { csv, header: csvOptions?.header ?? true }, signal);
-  });
+register("__bridge_parseCSV", async (argsJson) => {
+  const [csv, csvOptions] = args<[string, { header?: boolean } | null]>(argsJson);
+  boundedString(csv, PARSER_INPUT_BYTES);
+  return parserPool.run("csv", { csv, header: csvOptions?.header ?? true }, signal);
+});
 
-  register("__bridge_parseXML", async (argsJson) => {
-    const [xml, xmlOptions] = args<[string, Record<string, unknown> | null]>(argsJson);
-    boundedString(xml, PARSER_INPUT_BYTES);
-    if (/<!DOCTYPE|<!ENTITY/i.test(xml)) throw new Error("xml_entities_blocked");
-    if (xmlOptions && Object.entries(xmlOptions).some(([key, value]) => !["ignoreAttributes", "trimValues", "parseTagValue"].includes(key) || typeof value !== "boolean")) throw new Error("xml_options_invalid");
-    return parserPool.run("xml", { xml, xmlOptions }, signal);
-  });
+register("__bridge_parseXML", async (argsJson) => {
+  const [xml, xmlOptions] = args<[string, Record<string, unknown> | null]>(argsJson);
+  boundedString(xml, PARSER_INPUT_BYTES);
+  if (/<!DOCTYPE|<!ENTITY/i.test(xml)) throw new Error("xml_entities_blocked");
+  if (
+    xmlOptions &&
+    Object.entries(xmlOptions).some(
+      ([key, value]) =>
+        !["ignoreAttributes", "trimValues", "parseTagValue"].includes(key) || typeof value !== "boolean",
+    )
+  )
+    throw new Error("xml_options_invalid");
+  return parserPool.run("xml", { xml, xmlOptions }, signal);
+});
 ```
 
 The cheap pre-checks (size bound, DOCTYPE/ENTITY regex, options allowlist) stay on the main thread exactly as before — they're pure and fast, so failing input never even reaches a worker.
@@ -602,6 +638,7 @@ git commit -m "refactor(sandbox): route HTML/CSV/XML parsing through the worker 
 The existing `host-functions.test.ts` only exercises the oversized/malformed rejection paths for these three parsers at the `runInSandbox` layer — there's no happy-path (valid, successful) integration test for CSV or XML there today. Add one for each to prove the new worker-thread relay (structured-clone across `postMessage`, etc.) doesn't break normal usage end-to-end.
 
 **Files:**
+
 - Modify: `src/sandbox/host-functions.test.ts`
 - Modify: memory file `reevo_run_code_review_findings.md` (outside the repo, in the user's memory store)
 
@@ -610,20 +647,38 @@ The existing `host-functions.test.ts` only exercises the oversized/malformed rej
 Add to `src/sandbox/host-functions.test.ts` (near the existing `bounds HTML link extraction` test):
 
 ```ts
-  it("parses valid CSV end-to-end through the worker pool", async () => {
-    const result = await runInSandbox({ code: "return await parseCSV('a,b\\n1,2');", params: {}, agentId: "a", datastore: fakeDatastore(), toolName: "csv-smoke" });
-    expect(result).toMatchObject({ ok: true, value: { data: [{ a: "1", b: "2" }] } });
+it("parses valid CSV end-to-end through the worker pool", async () => {
+  const result = await runInSandbox({
+    code: "return await parseCSV('a,b\\n1,2');",
+    params: {},
+    agentId: "a",
+    datastore: fakeDatastore(),
+    toolName: "csv-smoke",
   });
+  expect(result).toMatchObject({ ok: true, value: { data: [{ a: "1", b: "2" }] } });
+});
 
-  it("parses valid XML end-to-end through the worker pool", async () => {
-    const result = await runInSandbox({ code: "return await parseXML('<x>hi</x>');", params: {}, agentId: "a", datastore: fakeDatastore(), toolName: "xml-smoke" });
-    expect(result).toMatchObject({ ok: true, value: { x: "hi" } });
+it("parses valid XML end-to-end through the worker pool", async () => {
+  const result = await runInSandbox({
+    code: "return await parseXML('<x>hi</x>');",
+    params: {},
+    agentId: "a",
+    datastore: fakeDatastore(),
+    toolName: "xml-smoke",
   });
+  expect(result).toMatchObject({ ok: true, value: { x: "hi" } });
+});
 
-  it("parses valid HTML end-to-end through the worker pool", async () => {
-    const result = await runInSandbox({ code: "return await parseHTML('<title>T</title><a href=\"/x\">L</a>');", params: {}, agentId: "a", datastore: fakeDatastore(), toolName: "html-smoke" });
-    expect(result).toMatchObject({ ok: true, value: { title: "T", links: [{ href: "/x", text: "L" }] } });
+it("parses valid HTML end-to-end through the worker pool", async () => {
+  const result = await runInSandbox({
+    code: "return await parseHTML('<title>T</title><a href=\"/x\">L</a>');",
+    params: {},
+    agentId: "a",
+    datastore: fakeDatastore(),
+    toolName: "html-smoke",
   });
+  expect(result).toMatchObject({ ok: true, value: { title: "T", links: [{ href: "/x", text: "L" }] } });
+});
 ```
 
 (Check the exact shape `runInSandbox` wraps a successful result in — match whatever the existing passing tests in this file already assert for the `ok: true` case, e.g. `result.ok` / `result.value` field names, before finalizing this step.)

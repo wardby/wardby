@@ -30,11 +30,19 @@ function fakeDb(agents: FakeAgentRow[]) {
   return {
     webhook: {
       create: async ({ data }: { data: Partial<FakeWebhookRow> & { agentId: string; secretHash: string } }) => {
-        const row: FakeWebhookRow = { id: `webhook_${++counter}`, status: "enabled", ownerId: null, createdAt: new Date(), lastFiredAt: null, ...data };
+        const row: FakeWebhookRow = {
+          id: `webhook_${++counter}`,
+          status: "enabled",
+          ownerId: null,
+          createdAt: new Date(),
+          lastFiredAt: null,
+          ...data,
+        };
         webhooks.set(row.id, row);
         return row;
       },
-      findMany: async ({ where }: { where: { ownerId: string } }) => [...webhooks.values()].filter((w) => w.ownerId === where.ownerId),
+      findMany: async ({ where }: { where: { ownerId: string } }) =>
+        [...webhooks.values()].filter((w) => w.ownerId === where.ownerId),
       findUnique: async ({ where }: { where: { id: string } }) => webhooks.get(where.id) ?? null,
       delete: async ({ where }: { where: { id: string } }) => {
         const row = webhooks.get(where.id);

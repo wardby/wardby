@@ -65,8 +65,7 @@ export function getModelPricing(model: string): ModelPricing {
   const pricing = PRICING[model];
   if (!pricing) {
     throw new Error(
-      `No pricing entry for model "${model}" — refusing to price at zero. ` +
-        `Add it to src/providers/llm/pricing.ts.`,
+      `No pricing entry for model "${model}" — refusing to price at zero. ` + `Add it to src/providers/llm/pricing.ts.`,
     );
   }
   return pricing;

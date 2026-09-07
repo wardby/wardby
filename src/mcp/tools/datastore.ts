@@ -7,7 +7,11 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
   mcp.registerTool({
     name: "datastore_get",
     scope: "agents:read",
-    inputSchema: { type: "object", properties: { agentId: { type: "string" }, key: { type: "string" } }, required: ["agentId", "key"] },
+    inputSchema: {
+      type: "object",
+      properties: { agentId: { type: "string" }, key: { type: "string" } },
+      required: ["agentId", "key"],
+    },
     handler: async (args: { agentId: string; key: string }, ctx) => {
       await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
       const value = await ctx.providers.datastore.get(args.agentId, args.key);
@@ -18,7 +22,11 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
   mcp.registerTool({
     name: "datastore_list",
     scope: "agents:read",
-    inputSchema: { type: "object", properties: { agentId: { type: "string" }, prefix: { type: "string" } }, required: ["agentId"] },
+    inputSchema: {
+      type: "object",
+      properties: { agentId: { type: "string" }, prefix: { type: "string" } },
+      required: ["agentId"],
+    },
     handler: async (args: { agentId: string; prefix?: string }, ctx) => {
       await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
       const keys = await ctx.providers.datastore.list(args.agentId, args.prefix);
@@ -29,7 +37,8 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
   mcp.registerTool({
     name: "datastore_set",
     scope: "datastore:write",
-    description: 'Sets a datastore value. Pass "pii": true to encrypt the value at rest (AES-256-GCM) — opt in only for values that actually carry PII, never inferred automatically.',
+    description:
+      'Sets a datastore value. Pass "pii": true to encrypt the value at rest (AES-256-GCM) — opt in only for values that actually carry PII, never inferred automatically.',
     inputSchema: {
       type: "object",
       properties: { agentId: { type: "string" }, key: { type: "string" }, value: {}, pii: { type: "boolean" } },
@@ -45,7 +54,11 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
   mcp.registerTool({
     name: "datastore_delete",
     scope: "datastore:write",
-    inputSchema: { type: "object", properties: { agentId: { type: "string" }, key: { type: "string" } }, required: ["agentId", "key"] },
+    inputSchema: {
+      type: "object",
+      properties: { agentId: { type: "string" }, key: { type: "string" } },
+      required: ["agentId", "key"],
+    },
     handler: async (args: { agentId: string; key: string }, ctx) => {
       await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
       await ctx.providers.datastore.delete(args.agentId, args.key);

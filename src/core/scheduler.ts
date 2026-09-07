@@ -34,13 +34,14 @@ export async function findDueCandidates(db: Pick<SchedulerDb, "agent">, now: Dat
   const candidates = await db.agent.findMany({
     where: { scheduleEnabled: true, schedule: { not: null } },
   });
-  return candidates.filter((agent) =>
-    dueWindow({
-      schedule: agent.schedule as string,
-      timezone: agent.timezone,
-      lastScheduledAt: agent.lastScheduledAt,
-      now,
-    }) !== null,
+  return candidates.filter(
+    (agent) =>
+      dueWindow({
+        schedule: agent.schedule as string,
+        timezone: agent.timezone,
+        lastScheduledAt: agent.lastScheduledAt,
+        now,
+      }) !== null,
   );
 }
 

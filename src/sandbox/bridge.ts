@@ -28,32 +28,45 @@ export function registerJsonAsyncFunction(
   const fnHandle = context.newFunction(name, (argHandle) => {
     const budget = budgets.get(runtime) ?? { calls: 0, pending: 0 };
     budgets.set(runtime, budget);
-    if (signal?.aborted || ++budget.calls > MAX_HOST_CALLS || budget.pending >= MAX_PENDING_HOST_CALLS) return { error: context.newError("bridge_call_limit") };
-    if (!argHandle || context.typeof(argHandle) !== "string") return { error: context.newError("bridge_input_invalid") };
+    if (signal?.aborted || ++budget.calls > MAX_HOST_CALLS || budget.pending >= MAX_PENDING_HOST_CALLS)
+      return { error: context.newError("bridge_call_limit") };
+    if (!argHandle || context.typeof(argHandle) !== "string")
+      return { error: context.newError("bridge_input_invalid") };
     const lengthHandle = context.getProp(argHandle, "length");
-    const length = context.getNumber(lengthHandle); lengthHandle.dispose();
+    const length = context.getNumber(lengthHandle);
+    lengthHandle.dispose();
     if (length > BRIDGE_INPUT_BYTES) return { error: context.newError("bridge_input_limit") };
     const argsJson = context.getString(argHandle);
     if (Buffer.byteLength(argsJson) > BRIDGE_INPUT_BYTES) return { error: context.newError("bridge_input_limit") };
     const deferred = context.newPromise();
     budget.pending++;
-    const abort = () => { if (deferred.alive) deferred.dispose(); };
+    const abort = () => {
+      if (deferred.alive) deferred.dispose();
+    };
     signal?.addEventListener("abort", abort, { once: true });
 
-    Promise.resolve().then(() => { signal?.throwIfAborted(); return impl(argsJson); }).then(
-      (value) => {
+    Promise.resolve()
+      .then(() => {
+        signal?.throwIfAborted();
+        return impl(argsJson);
+      })
+      .then((value) => {
         if (!deferred.alive) return;
         const resultHandle = context.newString(boundedJson(value, BRIDGE_RESULT_BYTES));
         deferred.resolve(resultHandle);
         resultHandle.dispose();
-      },
-    ).catch((err: unknown) => {
+      })
+      .catch((err: unknown) => {
         if (!deferred.alive) return;
         const message = err instanceof Error ? err.message.slice(0, 1024) : "Host function failed.";
         const errorHandle = context.newError(message);
         deferred.reject(errorHandle);
         errorHandle.dispose();
-      }).finally(() => { budget.pending--; signal?.removeEventListener("abort", abort); });
+      })
+      .finally(() => {
+        budget.pending--;
+        signal?.removeEventListener("abort", abort);
+      });
 
     deferred.settled
       .then(() => {
@@ -61,7 +74,8 @@ export function registerJsonAsyncFunction(
       })
       .finally(() => {
         if (deferred.alive) deferred.dispose();
-      }).catch(() => {});
+      })
+      .catch(() => {});
 
     return deferred.handle;
   });

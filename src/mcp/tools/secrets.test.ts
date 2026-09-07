@@ -40,21 +40,35 @@ function fakeDb(agents: FakeAgentRow[] = []) {
   const secrets = new Map<string, FakeSecretRow>();
   const agentRows = new Map(agents.map((a) => [a.id, a]));
   const agentSecrets: { agentId: string; secretId: string }[] = [];
-  const elicitationOutcomes = new Map<string, { ownerId: string; secretName: string; outcome: unknown; expiresAt: Date }>();
+  const elicitationOutcomes = new Map<
+    string,
+    { ownerId: string; secretName: string; outcome: unknown; expiresAt: Date }
+  >();
   let counter = 0;
 
   return {
     secret: {
       create: async ({ data }: { data: Partial<FakeSecretRow> & { name: string } }) => {
         const now = new Date();
-        const row: FakeSecretRow = { id: `secret_${++counter}`, createdAt: now, updatedAt: now, ownerId: null, ...data } as FakeSecretRow;
+        const row: FakeSecretRow = {
+          id: `secret_${++counter}`,
+          createdAt: now,
+          updatedAt: now,
+          ownerId: null,
+          ...data,
+        } as FakeSecretRow;
         secrets.set(row.id, row);
         return row;
       },
-      findMany: async ({ where }: { where: { ownerId: string } }) => [...secrets.values()].filter((s) => s.ownerId === where.ownerId),
+      findMany: async ({ where }: { where: { ownerId: string } }) =>
+        [...secrets.values()].filter((s) => s.ownerId === where.ownerId),
       findUnique: async ({ where }: { where: { id?: string; ownerId_name?: { ownerId: string; name: string } } }) => {
         if (where.id !== undefined) return secrets.get(where.id) ?? null;
-        return [...secrets.values()].find((s) => s.ownerId === where.ownerId_name!.ownerId && s.name === where.ownerId_name!.name) ?? null;
+        return (
+          [...secrets.values()].find(
+            (s) => s.ownerId === where.ownerId_name!.ownerId && s.name === where.ownerId_name!.name,
+          ) ?? null
+        );
       },
       upsert: async ({
         where,
@@ -65,14 +79,22 @@ function fakeDb(agents: FakeAgentRow[] = []) {
         create: Partial<FakeSecretRow> & { name: string };
         update: Partial<FakeSecretRow>;
       }) => {
-        const existing = [...secrets.values()].find((s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name);
+        const existing = [...secrets.values()].find(
+          (s) => s.ownerId === where.ownerId_name.ownerId && s.name === where.ownerId_name.name,
+        );
         if (existing) {
           const row = { ...existing, ...update, updatedAt: new Date() };
           secrets.set(row.id, row);
           return row;
         }
         const now = new Date();
-        const row: FakeSecretRow = { id: `secret_${++counter}`, createdAt: now, updatedAt: now, ownerId: null, ...create } as FakeSecretRow;
+        const row: FakeSecretRow = {
+          id: `secret_${++counter}`,
+          createdAt: now,
+          updatedAt: now,
+          ownerId: null,
+          ...create,
+        } as FakeSecretRow;
         secrets.set(row.id, row);
         return row;
       },
@@ -98,13 +120,18 @@ function fakeDb(agents: FakeAgentRow[] = []) {
         return { count: before - kept.length };
       },
       findFirst: async ({ where }: { where: { agentId: string; secret: { name: string } } }) => {
-        const match = agentSecrets.find((a) => a.agentId === where.agentId && secrets.get(a.secretId)?.name === where.secret.name);
+        const match = agentSecrets.find(
+          (a) => a.agentId === where.agentId && secrets.get(a.secretId)?.name === where.secret.name,
+        );
         return match ? { ...match, secret: secrets.get(match.secretId) } : null;
       },
     },
     secretElicitationOutcome: {
-      findUnique: async ({ where: { ownerId_secretName } }: { where: { ownerId_secretName: { ownerId: string; secretName: string } } }) =>
-        elicitationOutcomes.get(`${ownerId_secretName.ownerId}\0${ownerId_secretName.secretName}`) ?? null,
+      findUnique: async ({
+        where: { ownerId_secretName },
+      }: {
+        where: { ownerId_secretName: { ownerId: string; secretName: string } };
+      }) => elicitationOutcomes.get(`${ownerId_secretName.ownerId}\0${ownerId_secretName.secretName}`) ?? null,
       upsert: async ({
         where: { ownerId_secretName },
         create,
@@ -134,7 +161,12 @@ function fakeDb(agents: FakeAgentRow[] = []) {
   } as unknown as import("@prisma/client").PrismaClient;
 }
 
-function fakeCtx(db: ReturnType<typeof fakeDb>, cipher: SecretCipher, principalId: string, scopes: string[]): McpRequestContext {
+function fakeCtx(
+  db: ReturnType<typeof fakeDb>,
+  cipher: SecretCipher,
+  principalId: string,
+  scopes: string[],
+): McpRequestContext {
   return {
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
@@ -145,10 +177,16 @@ function fakeCtx(db: ReturnType<typeof fakeDb>, cipher: SecretCipher, principalI
   };
 }
 
-async function connectClient(mcp: ReturnType<typeof buildMcpServer>, capabilities?: import("@modelcontextprotocol/client").ClientCapabilities) {
+async function connectClient(
+  mcp: ReturnType<typeof buildMcpServer>,
+  capabilities?: import("@modelcontextprotocol/client").ClientCapabilities,
+) {
   const server = mcp.factory({ era: "modern" }) as import("@modelcontextprotocol/server").McpServer;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "test-client", version: "1.0.0" }, { versionNegotiation: { mode: "auto" }, capabilities });
+  const client = new Client(
+    { name: "test-client", version: "1.0.0" },
+    { versionNegotiation: { mode: "auto" }, capabilities },
+  );
   await server.connect(serverTransport);
   await client.connect(clientTransport);
   return client;
@@ -162,12 +200,22 @@ describe("secrets tools", () => {
   it("create_secret requires secrets:write and never returns the value", async () => {
     const db = fakeDb();
     const cipher = fakeCipher();
-    const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    const mcp = buildMcpServer({
+      providers: { secrets: cipher } as never,
+      db,
+      config: { canonicalUri: CANONICAL_URI },
+    });
     mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
-    registerSecretsTools(mcp, { buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`, protocolElicitation: false });
+    registerSecretsTools(mcp, {
+      buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
+      protocolElicitation: false,
+    });
     const client = await connectClient(mcp);
 
-    const result = await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-live-abc123" } });
+    const result = await client.callTool({
+      name: "create_secret",
+      arguments: { name: "API_KEY", value: "sk-live-abc123" },
+    });
     expect(result.isError).toBeFalsy();
     const body = parseText(result as never) as Record<string, unknown>;
     expect(body).not.toHaveProperty("value");
@@ -179,9 +227,16 @@ describe("secrets tools", () => {
   it("create_secret without secrets:write is rejected", async () => {
     const db = fakeDb();
     const cipher = fakeCipher();
-    const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    const mcp = buildMcpServer({
+      providers: { secrets: cipher } as never,
+      db,
+      config: { canonicalUri: CANONICAL_URI },
+    });
     mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["agents:read"]));
-    registerSecretsTools(mcp, { buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`, protocolElicitation: false });
+    registerSecretsTools(mcp, {
+      buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
+      protocolElicitation: false,
+    });
     const client = await connectClient(mcp);
 
     const result = await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "x" } });
@@ -192,9 +247,16 @@ describe("secrets tools", () => {
   it("list_secrets never returns the value", async () => {
     const db = fakeDb();
     const cipher = fakeCipher();
-    const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    const mcp = buildMcpServer({
+      providers: { secrets: cipher } as never,
+      db,
+      config: { canonicalUri: CANONICAL_URI },
+    });
     mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
-    registerSecretsTools(mcp, { buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`, protocolElicitation: false });
+    registerSecretsTools(mcp, {
+      buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
+      protocolElicitation: false,
+    });
     const client = await connectClient(mcp);
 
     await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-live-abc123" } });
@@ -208,9 +270,16 @@ describe("secrets tools", () => {
   it("attach_secret by a non-owner of the agent is forbidden", async () => {
     const db = fakeDb([{ id: "a1", ownerId: "someone-else" }]);
     const cipher = fakeCipher();
-    const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    const mcp = buildMcpServer({
+      providers: { secrets: cipher } as never,
+      db,
+      config: { canonicalUri: CANONICAL_URI },
+    });
     mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
-    registerSecretsTools(mcp, { buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`, protocolElicitation: false });
+    registerSecretsTools(mcp, {
+      buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
+      protocolElicitation: false,
+    });
     const client = await connectClient(mcp);
 
     await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-live-abc123" } });
@@ -222,12 +291,22 @@ describe("secrets tools", () => {
   it("attach_secret + delete_secret round-trip for the owner", async () => {
     const db = fakeDb([{ id: "a1", ownerId: "p1" }]);
     const cipher = fakeCipher();
-    const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    const mcp = buildMcpServer({
+      providers: { secrets: cipher } as never,
+      db,
+      config: { canonicalUri: CANONICAL_URI },
+    });
     mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
-    registerSecretsTools(mcp, { buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`, protocolElicitation: false });
+    registerSecretsTools(mcp, {
+      buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
+      protocolElicitation: false,
+    });
     const client = await connectClient(mcp);
 
-    const created = await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-live-abc123" } });
+    const created = await client.callTool({
+      name: "create_secret",
+      arguments: { name: "API_KEY", value: "sk-live-abc123" },
+    });
     const { id } = parseText(created as never) as { id: string };
 
     const attached = await client.callTool({ name: "attach_secret", arguments: { agentId: "a1", name: "API_KEY" } });
@@ -244,9 +323,16 @@ describe("secrets tools", () => {
   it("[protocolElicitation: true] create_secret without a value elicits it via a one-time browser URL, then succeeds once submitted", async () => {
     const db = fakeDb();
     const cipher = fakeCipher();
-    const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    const mcp = buildMcpServer({
+      providers: { secrets: cipher } as never,
+      db,
+      config: { canonicalUri: CANONICAL_URI },
+    });
     mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
-    registerSecretsTools(mcp, { buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`, protocolElicitation: true });
+    registerSecretsTools(mcp, {
+      buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
+      protocolElicitation: true,
+    });
     const client = await connectClient(mcp, { elicitation: { url: {} } });
 
     let visitedUrl: string | undefined;
@@ -280,9 +366,16 @@ describe("secrets tools", () => {
   it("[protocolElicitation: true] create_secret without a value surfaces a clear error if the user declines", async () => {
     const db = fakeDb();
     const cipher = fakeCipher();
-    const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    const mcp = buildMcpServer({
+      providers: { secrets: cipher } as never,
+      db,
+      config: { canonicalUri: CANONICAL_URI },
+    });
     mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
-    registerSecretsTools(mcp, { buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`, protocolElicitation: true });
+    registerSecretsTools(mcp, {
+      buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
+      protocolElicitation: true,
+    });
     const client = await connectClient(mcp, { elicitation: { url: {} } });
     client.setRequestHandler("elicitation/create", async () => ({ action: "decline" }));
 
@@ -295,9 +388,16 @@ describe("secrets tools", () => {
   it("[default: polling] create_secret without a value returns a plain link, then a plain 'still pending' link, then succeeds once submitted", async () => {
     const db = fakeDb();
     const cipher = fakeCipher();
-    const mcp = buildMcpServer({ providers: { secrets: cipher } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    const mcp = buildMcpServer({
+      providers: { secrets: cipher } as never,
+      db,
+      config: { canonicalUri: CANONICAL_URI },
+    });
     mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
-    registerSecretsTools(mcp, { buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`, protocolElicitation: false });
+    registerSecretsTools(mcp, {
+      buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
+      protocolElicitation: false,
+    });
     const client = await connectClient(mcp);
 
     const first = await client.callTool({ name: "create_secret", arguments: { name: "POLL_KEY" } });

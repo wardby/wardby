@@ -10,8 +10,5 @@ export interface BlobStore {
   get(key: string): Promise<Buffer>;
   delete(key: string): Promise<void>;
   /** Pre-signed URL for direct client GET/PUT without proxying through the app. */
-  signedUrl(
-    key: string,
-    opts: { expiresSec: number; method: "GET" | "PUT" },
-  ): Promise<string>;
+  signedUrl(key: string, opts: { expiresSec: number; method: "GET" | "PUT" }): Promise<string>;
 }
