@@ -153,11 +153,14 @@ export interface DbosConfig {
   systemDatabaseUrl: string | undefined;
   schemaName: string;
   /**
-   * Stable per-deployment executor identity. At launch DBOS re-drives every
+   * Stable per-*process* executor identity. At launch DBOS re-drives every
    * PENDING workflow that this id owned, so a restarted process picks up its
-   * own interrupted runs. Give each long-lived instance its own value.
+   * own interrupted runs — which also means two processes sharing an id each
+   * re-drive the other's live workflows. There is deliberately no default:
+   * `DbosExecutor` refuses to construct without one (a default would silently
+   * give the scheduler and the MCP server the same identity).
    */
-  executorId: string;
+  executorId: string | undefined;
 }
 
 /** Read DBOS executor config from the environment (only used when EXECUTOR=dbos). */
@@ -165,6 +168,6 @@ export function loadDbosConfig(env: NodeJS.ProcessEnv = process.env): DbosConfig
   return {
     systemDatabaseUrl: env.DBOS_SYSTEM_DATABASE_URL ?? env.DATABASE_URL,
     schemaName: env.DBOS_SCHEMA ?? "dbos",
-    executorId: env.DBOS_EXECUTOR_ID ?? "local",
+    executorId: env.DBOS_EXECUTOR_ID,
   };
 }

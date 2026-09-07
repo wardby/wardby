@@ -74,12 +74,14 @@ describe("loadMcpConfig", () => {
 });
 
 describe("loadDbosConfig", () => {
-  it("defaults the system database to DATABASE_URL, schema dbos, executor id local", () => {
+  it("defaults the system database to DATABASE_URL and the schema to dbos, and leaves the executor id unset", () => {
     const config = loadDbosConfig({ DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo" });
     expect(config).toEqual({
       systemDatabaseUrl: "postgresql://reevo:reevo@localhost:55432/reevo",
       schemaName: "dbos",
-      executorId: "local",
+      // No default: two processes sharing an executor id re-drive each
+      // other's live workflows, so DbosExecutor makes it mandatory instead.
+      executorId: undefined,
     });
   });
 

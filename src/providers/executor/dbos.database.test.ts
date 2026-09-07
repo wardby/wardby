@@ -75,20 +75,67 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     await executor?.close();
     await db.run.deleteMany({ where: { agentId } });
     await db.agent.deleteMany({ where: { id: agentId } });
+    // DBOS creates and migrates `dbos_test` itself at launch(); drop it so a
+    // local database doesn't accumulate this suite's workflow/step rows (and
+    // so a later SDK bump starts from a clean schema). Only after close(),
+    // which is what releases DBOS's own pool on it.
+    await db.$executeRawUnsafe("DROP SCHEMA IF EXISTS dbos_test CASCADE");
     await db.$disconnect();
   });
+
+  /** Poll until `check` is true, failing with a readable message instead of a suite-level timeout. */
+  async function waitFor(what: string, check: () => boolean | Promise<boolean>, timeoutMs = 20_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (await check()) return;
+      if (Date.now() > deadline) throw new Error(`Timed out after ${timeoutMs}ms waiting for ${what}.`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
 
   function build(llm: LlmProvider) {
     return buildWith(llm, executorId);
   }
 
-  function buildWith(llm: LlmProvider, id: string) {
+  function buildWith(llm: LlmProvider, id: string, runnerDb: PrismaClient = db) {
     return new DbosExecutor(
       { llm, engine: new NativeEngine(), datastore: fakeDatastore(), secrets: fakeCipher },
       { systemDatabaseUrl: process.env.DATABASE_URL, schemaName: "dbos_test", executorId: id },
-      db,
+      runnerDb,
       /* heartbeatIntervalMs */ 50,
     );
+  }
+
+  /**
+   * A database handle that stops accepting Run writes once `kill()` is
+   * called. A process killed mid-run cannot write the Run row afterwards;
+   * `executor.close()` alone doesn't model that, because the workflow body
+   * keeps running in this test process with a live Prisma client and would
+   * land a terminal row that the real, resumed attempt is then (correctly)
+   * forbidden to overwrite.
+   */
+  function killableDb(): { client: PrismaClient; kill: () => void } {
+    let alive = true;
+    const guard =
+      <A extends unknown[], R>(fn: (...args: A) => Promise<R>) =>
+      (...args: A): Promise<R> =>
+        alive ? fn(...args) : Promise.reject(new Error("simulated process death: database handle is gone"));
+    const run = {
+      create: (args: never) => db.run.create(args),
+      findUnique: guard((args: never) => db.run.findUnique(args)),
+      findUniqueOrThrow: guard((args: never) => db.run.findUniqueOrThrow(args)),
+      findMany: guard((args: never) => db.run.findMany(args)),
+      update: guard((args: never) => db.run.update(args)),
+      updateMany: guard((args: never) => db.run.updateMany(args)),
+    };
+    const client = {
+      agent: db.agent,
+      agentTool: db.agentTool,
+      agentSecret: db.agentSecret,
+      budgetGroup: db.budgetGroup,
+      run,
+    } as unknown as PrismaClient;
+    return { client, kill: () => (alive = false) };
   }
 
   it("runs a native run to a terminal state under DBOS and marks the backend on the row", async () => {
@@ -121,7 +168,7 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     expect(llm.calls).toHaveLength(1);
   });
 
-  it("stop cancels a running workflow and the run lands failed rather than hanging", async () => {
+  it("stop cancels a running workflow and the run lands cancelled with the operator's reason, rather than hanging", async () => {
     let release!: () => void;
     const open = new Promise<void>((resolve) => (release = resolve));
     const llm = scriptedLlm([toolCall("t"), toolCall("t"), finalAnswer("never")], { turn: 2, open });
@@ -131,20 +178,16 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
 
     const started = executor.start(run.id);
     // Wait until turn 2 is blocked inside the LLM step.
-    await new Promise<void>((resolve) => {
-      const poll = setInterval(() => {
-        if (llm.calls.length === 2) {
-          clearInterval(poll);
-          resolve();
-        }
-      }, 20);
-    });
+    await waitFor("turn 2 to block inside the LLM step", () => llm.calls.length === 2);
     await executor.stop(run.id, "operator cancelled");
     release();
     await started.catch(() => undefined);
 
     const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
-    expect(after.status).toBe("failed");
+    // Cancellation is its own terminal state, and carries the operator's
+    // reason rather than a DBOS-internal message.
+    expect(after.status).toBe("cancelled");
+    expect(after.error).toContain("operator cancelled");
     expect(after.finishedAt).not.toBeNull();
   });
 
@@ -156,14 +199,7 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     await executor.launch();
     const run = await db.run.create({ data: { agentId, executionManaged: true } });
     const started = executor.start(run.id);
-    await new Promise<void>((resolve) => {
-      const poll = setInterval(() => {
-        if (llm.calls.length === 2) {
-          clearInterval(poll);
-          resolve();
-        }
-      }, 20);
-    });
+    await waitFor("turn 2 to block inside the LLM step", () => llm.calls.length === 2);
 
     const live = await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id });
     expect(live).toEqual({ state: "active" });
@@ -198,22 +234,18 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     let release!: () => void;
     const open = new Promise<void>((resolve) => (release = resolve));
     const llm = scriptedLlm([toolCall("t"), finalAnswer("resumed")], { turn: 2, open });
-    executor = build(llm);
+    const dying = killableDb();
+    executor = buildWith(llm, executorId, dying.client);
     await executor.launch();
     const run = await db.run.create({ data: { agentId, executionManaged: true } });
 
     const firstAttempt = executor.start(run.id).catch(() => undefined);
-    await new Promise<void>((resolve) => {
-      const poll = setInterval(() => {
-        if (llm.calls.length === 2) {
-          clearInterval(poll);
-          resolve();
-        }
-      }, 20);
-    });
-    // "Crash": tear DBOS down while turn 2 is in flight. Turn 1 and its tool
-    // call are already recorded as completed steps.
+    await waitFor("turn 2 to block inside the LLM step", () => llm.calls.length === 2);
+    // "Crash": tear DBOS down while turn 2 is in flight, and take this
+    // attempt's database handle with it — a killed process writes nothing
+    // more. Turn 1 and its tool call are already recorded as completed steps.
     await executor.close();
+    dying.kill();
 
     // "Restart": a fresh executor with a DIFFERENT executor id re-drives the
     // orphaned PENDING workflow via recover()'s resume branch (adoption),
@@ -230,21 +262,12 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     const resumed = await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id });
     expect(["active", "terminal"]).toContain(resumed.state);
     // recover()'s resume branch fires the adopted workflow without awaiting
-    // it, and the dead first attempt's own backstop write (an unconditional
-    // `db.run.update`, absorbed by `firstAttempt`'s `.catch`) may have
-    // already landed a transient "failed" row before the real resumed
-    // workflow's write lands. Poll for `finalText`, which only the
-    // successfully-resumed run ever sets, rather than the first non-active
-    // status.
-    await new Promise<void>((resolve) => {
-      const poll = setInterval(() => {
-        void db.run.findUnique({ where: { id: run.id } }).then((row) => {
-          if (row?.finalText != null) {
-            clearInterval(poll);
-            resolve();
-          }
-        });
-      }, 50);
+    // it, so poll for the terminal write. `finalText` (rather than the first
+    // non-pending status) is what the assertions below need, and only the
+    // successfully-resumed run ever sets it.
+    await waitFor("the adopted workflow to persist its result", async () => {
+      const row = await db.run.findUnique({ where: { id: run.id } });
+      return row?.finalText != null;
     });
 
     const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
@@ -254,4 +277,12 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     expect(resumedLlm.calls).toHaveLength(1);
     expect(resumedLlm.calls[0].messages.some((m) => m.role === "tool")).toBe(true);
   }, 30_000);
+
+  it("refuses to launch a second executor with a different id in a process where DBOS is already launched", async () => {
+    // DBOS is a process singleton: launch() would silently skip setConfig and
+    // leave this executor's recovery decisions made against someone else's id.
+    const second = buildWith(scriptedLlm([]), `${executorId}-conflict`);
+    await expect(second.launch()).rejects.toThrow(/already launched with executor id/);
+    expect(DBOS.executorID).not.toBe(`${executorId}-conflict`);
+  });
 });

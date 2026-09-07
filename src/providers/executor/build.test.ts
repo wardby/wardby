@@ -17,9 +17,10 @@ describe("buildExecutor", () => {
     expect(buildExecutor({ executor: "in-process" }, providers, undefined, {})).toBeInstanceOf(InProcessExecutor);
   });
 
-  it("builds the DBOS executor when EXECUTOR=dbos and a database url is present", () => {
+  it("builds the DBOS executor when EXECUTOR=dbos and a database url and executor id are present", () => {
     const executor = buildExecutor({ executor: "dbos" }, providers, undefined, {
       DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo",
+      DBOS_EXECUTOR_ID: "scheduler-1",
     });
     expect(executor).toBeInstanceOf(DbosExecutor);
     expect(typeof executor.launch).toBe("function");
@@ -28,6 +29,14 @@ describe("buildExecutor", () => {
 
   it("fails fast for EXECUTOR=dbos without any database url", () => {
     expect(() => buildExecutor({ executor: "dbos" }, providers, undefined, {})).toThrow(/DBOS_SYSTEM_DATABASE_URL/);
+  });
+
+  it("fails fast for EXECUTOR=dbos without DBOS_EXECUTOR_ID rather than defaulting to a shared id", () => {
+    expect(() =>
+      buildExecutor({ executor: "dbos" }, providers, undefined, {
+        DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo",
+      }),
+    ).toThrow(/DBOS_EXECUTOR_ID, unique per running process/);
   });
 
   it("rejects an unknown executor kind", () => {

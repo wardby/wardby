@@ -91,9 +91,18 @@ export async function reconcileOnce(
     } else if (run.agent.kind === "coding") {
       reason = "Managed coding job became stale before its launcher handle was persisted; it was not relaunched.";
     } else if (run.executionBackend && executor?.recover) {
-      // Claim before asking, so two reconciler instances can't both adopt
-      // the same orphaned workflow: whichever CAS wins refreshes the
-      // heartbeat and takes the run out of the stale set for the other.
+      // Claim before asking. For a `running` row this is a real CAS: the
+      // winner's UPDATE refreshes heartbeatAt, which takes the row out of
+      // the stale set, so a concurrent reconciler's WHERE matches zero rows
+      // and only one instance calls recover() this pass.
+      //
+      // For a `pending` row it de-duplicates nothing across passes: `pending`
+      // is matched on startedAt, not heartbeatAt, so the row stays stale and
+      // every later pass calls recover() again. That is accepted rather than
+      // fixed: DBOS's dequeue is atomic and `resumeWorkflow` is idempotent
+      // (re-enqueueing an already-enqueued workflow does not run it twice),
+      // and DbosExecutor bounds the repeats — after MAX_RESUME_ATTEMPTS
+      // adoptions of one run it reports `lost` and the run gets reaped.
       const claimed = await db.run.updateMany({
         where: { id: run.id, ...stale },
         data: { heartbeatAt: now },
