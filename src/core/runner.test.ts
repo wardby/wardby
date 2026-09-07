@@ -3,7 +3,7 @@ import type { Datastore, DatastoreValue } from "../providers/datastore/types.js"
 import type { Engine, EngineResult, EngineRunContext, StepRunner } from "../providers/engine/types.js";
 import type { LlmProvider } from "../providers/index.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
-import { executeRun, runAgent, type RunnerDb } from "./runner.js";
+import { executeRun, runAgent, RunCancelledError, type RunnerDb } from "./runner.js";
 
 // Phase 3: executeRun is a thin wrapper — budget/loop logic now lives in
 // the Engine (covered by engine-native.test.ts). These tests cover the
@@ -86,10 +86,25 @@ function fakeDb(
         return record;
       }) as any,
       findUnique: (async ({ where }: any) => runs.get(where.id) ?? null) as any,
+      findUniqueOrThrow: (async ({ where }: any) => {
+        const record = runs.get(where.id);
+        if (!record) throw new Error(`No Run with id "${where.id}".`);
+        return record;
+      }) as any,
       update: (async ({ where, data }: any) => {
         const record = { ...runs.get(where.id), ...data };
         runs.set(where.id, record);
         return record;
+      }) as any,
+      updateMany: (async ({ where, data }: any) => {
+        const record = runs.get(where.id);
+        if (!record) return { count: 0 };
+        if (where.status !== undefined) {
+          const allowed = typeof where.status === "string" ? [where.status] : where.status.in;
+          if (!allowed.includes(record.status)) return { count: 0 };
+        }
+        runs.set(where.id, { ...record, ...data });
+        return { count: 1 };
       }) as any,
       findMany: (async ({ where }: any) =>
         priorRuns.filter((r) => where.agentId.in.includes(r.agentId) && r.startedAt >= where.startedAt.gte)) as any,
@@ -549,11 +564,130 @@ describe("runAgent", () => {
     const providers = { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher };
 
     await executeRun(run.id, providers, db, undefined, step);
+    // A resumed workflow re-enters executeRun on a row that is still
+    // non-terminal (the crash is what stopped the terminal write from
+    // landing) — a terminal row is short-circuited by the pre-flight guard.
+    await db.run.update({ where: { id: run.id }, data: { status: "running", finishedAt: null } });
     // Simulate the agent being edited between crash and resume.
     agent.budgetUsd = 999;
     await executeRun(run.id, providers, db, undefined, step);
 
     expect(names[0]).toBe("load");
     expect(seenBudgets).toEqual([5, 5]);
+  });
+});
+
+describe("executeRun terminal-write races", () => {
+  const noTools: FakeTool[] = [];
+
+  function pendingRun(agentBudget = 5) {
+    const db = fakeDb(
+      [{ id: "a1", name: "racer", systemPrompt: "sys", model: "m", budgetUsd: agentBudget, maxTurns: 3 }],
+      noTools,
+    );
+    return db;
+  }
+
+  it("lets the first terminal write win: a second attempt's result is discarded", async () => {
+    const db = pendingRun();
+    const run = await db.run.create({ data: { agentId: "a1" } });
+    const providers = (engine: Engine) => ({
+      llm: noopLlm,
+      engine,
+      datastore: fakeDatastore(),
+      secrets: noopSecretCipher,
+    });
+
+    const first = await executeRun(
+      run.id,
+      providers(
+        fakeEngine({
+          status: "succeeded",
+          finalText: "first wins",
+          turns: 2,
+          usage: { tokensIn: 5, tokensOut: 6, costUsd: 0.02 },
+        }),
+      ),
+      db,
+    );
+    expect(first.status).toBe("succeeded");
+
+    // The still-live original attempt returns after the adopted attempt
+    // already finished the run. Its write must be a no-op.
+    let secondEngineCalled = false;
+    const second = await executeRun(
+      run.id,
+      providers(
+        fakeEngine(
+          {
+            status: "failed",
+            finalText: "",
+            turns: 1,
+            usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.5 },
+            error: "late loser",
+          },
+          () => {
+            secondEngineCalled = true;
+          },
+        ),
+      ),
+      db,
+    );
+
+    expect(secondEngineCalled).toBe(false);
+    expect(second.status).toBe("succeeded");
+    expect(second.finalText).toBe("first wins");
+    expect(second.error).toBeNull();
+    expect(second.costUsd).toBe(0.02);
+    const stored = await db.run.findUnique({ where: { id: run.id } });
+    expect(stored?.status).toBe("succeeded");
+  });
+
+  it("does not resurrect a run the reconciler already marked lost: no engine call, row untouched", async () => {
+    const db = pendingRun();
+    const run = await db.run.create({ data: { agentId: "a1" } });
+    await db.run.update({
+      where: { id: run.id },
+      data: { status: "lost", error: "Orphaned: no heartbeat.", finishedAt: new Date() },
+    });
+
+    let engineCalled = false;
+    const engine = fakeEngine(
+      { status: "succeeded", finalText: "resurrected", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 9 } },
+      () => {
+        engineCalled = true;
+      },
+    );
+
+    const result = await executeRun(
+      run.id,
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher },
+      db,
+    );
+
+    expect(engineCalled).toBe(false);
+    expect(result.status).toBe("lost");
+    expect(result.error).toBe("Orphaned: no heartbeat.");
+    expect(result.finalText).toBeUndefined();
+  });
+
+  it("persists a cancelled status (not failed) when the backstop catches a RunCancelledError", async () => {
+    const db = pendingRun();
+    const run = await db.run.create({ data: { agentId: "a1" } });
+    const engine: Engine = {
+      async run() {
+        throw new RunCancelledError("Run cancelled: operator cancelled");
+      },
+    };
+
+    const result = await executeRun(
+      run.id,
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher },
+      db,
+    );
+
+    expect(result.status).toBe("cancelled");
+    expect(result.error).toBe("Run cancelled: operator cancelled");
+    expect(result.finishedAt).not.toBeNull();
   });
 });

@@ -37,6 +37,14 @@ function isSerializationConflict(err: unknown): boolean {
   return candidate.code === "P2034" || (candidate.code === "P2010" && candidate.meta?.code === "40001");
 }
 
+/**
+ * Record an executor-level failure on a run that never reached a terminal
+ * state itself. Deliberately idempotent: the same failure can arrive twice —
+ * DbosExecutor.start() calls this when the workflow handle rejects, and
+ * dispatchRun's `.catch` around that same `start()` call calls it again — and
+ * the conditional `updateMany` makes the second call match zero rows rather
+ * than overwrite whatever landed in between.
+ */
 export async function markRunFailedFromExecutorError(
   db: Pick<DispatchDb, "run">,
   runId: string,

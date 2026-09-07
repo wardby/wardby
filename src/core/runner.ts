@@ -17,7 +17,7 @@
  * reasons about cost, not one here plus one in the engine.
  */
 
-import type { PrismaClient, Run, RunTrigger } from "@prisma/client";
+import type { Prisma, PrismaClient, Run, RunTrigger } from "@prisma/client";
 import type { ProviderRegistry } from "../providers/index.js";
 import type { LoadedTool } from "../providers/engine/types.js";
 import { runStepInline, type StepRunner } from "../providers/engine/types.js";
@@ -28,9 +28,46 @@ import { scopeDatastore } from "../providers/datastore/scoped.js";
 import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
 import { effectiveBudgetForRun } from "./budget-groups.js";
 import { prisma as defaultDb } from "./db.js";
+import { logger } from "./logger.js";
+
+const runnerLog = logger.child({ module: "runner" });
 
 /** The subset of the Prisma client the runner touches — mockable in tests. */
 export type RunnerDb = Pick<PrismaClient, "agent" | "run" | "agentTool" | "agentSecret" | "budgetGroup">;
+
+/**
+ * The two states a Run can still be driven out of. Every write `executeRun`
+ * makes is filtered on these: a durable executor can have two attempts of the
+ * same run in flight at once (a still-live original parked in a slow LLM step
+ * and an adopted attempt the reconciler resumed elsewhere), and whichever
+ * reaches a terminal state first must win. A conditional `updateMany` makes
+ * that a database-level CAS rather than a race — the loser's WHERE matches
+ * zero rows. It also stops a *later* attempt resurrecting a run the
+ * reconciler already reaped: a `lost` row stays `lost`.
+ */
+const DRIVABLE = ["pending", "running"] as const;
+
+/**
+ * Raised when a run's step boundary observed a cancellation (DbosExecutor's
+ * `stop`). `executeRun`'s backstop persists these as `cancelled` with the
+ * operator's reason, rather than `failed` with an executor-internal message.
+ */
+export class RunCancelledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RunCancelledError";
+  }
+}
+
+/**
+ * Terminal write + read-back. The write is conditional (see DRIVABLE), so
+ * the returned row is the run's real state — this attempt's result if it won
+ * the race, the winner's if it did not.
+ */
+async function finishRun(db: RunnerDb, runId: string, data: Prisma.RunUpdateManyMutationInput): Promise<Run> {
+  await db.run.updateMany({ where: { id: runId, status: { in: [...DRIVABLE] } }, data });
+  return db.run.findUniqueOrThrow({ where: { id: runId } });
+}
 
 /** Persists a new pending Run for the named agent. Throws if the agent is unknown. */
 export async function createRun(db: RunnerDb, agentName: string, trigger: RunTrigger = "manual"): Promise<Run> {
@@ -55,6 +92,18 @@ export async function executeRun(
   const existingRun = await db.run.findUnique({ where: { id: runId } });
   if (!existingRun) {
     throw new Error(`Unknown run "${runId}".`);
+  }
+
+  // Pre-flight guard. A run that already reached a terminal state must never
+  // be re-driven: a durable workflow re-dispatched after the reconciler
+  // reaped its row (rollback to EXECUTOR=in-process, then roll forward) would
+  // otherwise re-spend the whole run against a `lost` row, and a duplicate
+  // attempt of a finished run would spend a second time for a result no write
+  // can land. Cheaper and clearer than letting it run and discarding the
+  // result at the conditional write.
+  if (!DRIVABLE.includes(existingRun.status as (typeof DRIVABLE)[number])) {
+    runnerLog.info({ runId, status: existingRun.status }, "skipping execution of an already-terminal run");
+    return existingRun;
   }
 
   // Pinned in one checkpointed step: on replay after a crash, the agent row
@@ -107,17 +156,17 @@ export async function executeRun(
   });
 
   if (loaded.kind === "coding") {
-    return db.run.update({
-      where: { id: runId },
-      data: {
-        status: "failed",
-        error: "Coding agent execution requires the Phase 5 container executor.",
-        finishedAt: new Date(),
-      },
+    return finishRun(db, runId, {
+      status: "failed",
+      error: "Coding agent execution requires the Phase 5 container executor.",
+      finishedAt: new Date(),
     });
   }
 
-  await db.run.update({ where: { id: runId }, data: { status: "running" } });
+  // Conditional on DRIVABLE rather than on `pending`: an adopted attempt
+  // legitimately finds the row already `running`, but a terminal row must
+  // never be flipped back to `running`.
+  await db.run.updateMany({ where: { id: runId, status: { in: [...DRIVABLE] } }, data: { status: "running" } });
 
   try {
     const toolsByName = new Map(Object.entries(loaded.toolsByName));
@@ -173,31 +222,26 @@ export async function executeRun(
       step,
     });
 
-    return db.run.update({
-      where: { id: runId },
-      data: {
-        status: engineResult.status,
-        tokensIn: engineResult.usage.tokensIn,
-        tokensOut: engineResult.usage.tokensOut,
-        costUsd: engineResult.usage.costUsd,
-        error: engineResult.error ?? null,
-        finalText: engineResult.finalText || null,
-        turns: engineResult.turns,
-        finishedAt: new Date(),
-      },
+    return finishRun(db, runId, {
+      status: engineResult.status,
+      tokensIn: engineResult.usage.tokensIn,
+      tokensOut: engineResult.usage.tokensOut,
+      costUsd: engineResult.usage.costUsd,
+      error: engineResult.error ?? null,
+      finalText: engineResult.finalText || null,
+      turns: engineResult.turns,
+      finishedAt: new Date(),
     });
   } catch (err) {
     // Defensive backstop: the engine is expected to catch its own errors
     // and return a "failed" EngineResult, but an unexpected throw here
     // (a real bug, or tool-loading failing outside the per-tool try above)
-    // must still never leave the run dangling in "running".
-    return db.run.update({
-      where: { id: runId },
-      data: {
-        status: "failed",
-        error: err instanceof Error ? err.message : String(err),
-        finishedAt: new Date(),
-      },
+    // must still never leave the run dangling in "running". A cancellation
+    // is not a failure: it carries the operator's own reason.
+    return finishRun(db, runId, {
+      status: err instanceof RunCancelledError ? "cancelled" : "failed",
+      error: err instanceof Error ? err.message : String(err),
+      finishedAt: new Date(),
     });
   }
 }
