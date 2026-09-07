@@ -15,6 +15,7 @@ export * from "./storage/types.js";
 export * from "./executor/types.js";
 export * from "./datastore/types.js";
 export * from "./engine/types.js";
+export * from "./vcs/types.js";
 
 import type { JobLauncher } from "./jobs/types.js";
 import type { EmailProvider } from "./email/types.js";
@@ -25,6 +26,7 @@ import type { BlobStore } from "./storage/types.js";
 import type { Executor } from "./executor/types.js";
 import type { Datastore } from "./datastore/types.js";
 import type { Engine } from "./engine/types.js";
+import type { VcsProvider } from "./vcs/types.js";
 
 /** The full set of providers the core is given at startup. */
 export interface ProviderRegistry {
@@ -37,4 +39,5 @@ export interface ProviderRegistry {
   executor: Executor;
   datastore: Datastore;
   engine: Engine;
+  vcs: VcsProvider;
 }
