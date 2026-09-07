@@ -41,6 +41,9 @@ import { registerSecretsTools, type SecretElicitationUrlBuilder } from "./tools/
 import { registerWebhookTools } from "./tools/webhooks.js";
 import { createStdioSecretElicitationHost } from "./tools/secret-elicitation-server.js";
 import { SECRET_ELICITATION_PATH } from "./tools/secret-elicitation-form.js";
+import { logger } from "../core/logger.js";
+
+const mcpLog = logger.child({ module: "mcp-index" });
 
 /** Placeholder identifier for stdio, which has no HTTP endpoint to name. Never surfaced: stdio's fixed context always holds every scope, so no scope challenge is ever built against it. */
 const STDIO_PLACEHOLDER_URI = "urn:reevo:local-stdio";
@@ -90,8 +93,22 @@ export function buildMcpProviders(): McpProviderComposition {
   return { providers: { llm, engine, datastore, secrets, executor } };
 }
 
+/** Handle returned by `startMcp()` — closes the running transport, then the executor. */
+export interface McpServerHandle {
+  close(): Promise<void>;
+}
+
+/** Awaits `promise` (if any), logging and swallowing a rejection instead of propagating it. */
+async function closeQuietly(promise: Promise<void> | undefined, what: string): Promise<void> {
+  try {
+    await promise;
+  } catch (err) {
+    mcpLog.warn({ err }, `${what} failed during MCP shutdown`);
+  }
+}
+
 /** The real CLI entry point: `reevo mcp`. Reads config from the environment, starts stdio or HTTP per MCP_TRANSPORT. */
-export async function startMcp(): Promise<void> {
+export async function startMcp(): Promise<McpServerHandle> {
   const mcpConfig = loadMcpConfig();
   const { providers } = buildMcpProviders();
   await providers.executor.launch?.();
@@ -122,10 +139,13 @@ export async function startMcp(): Promise<void> {
       // current call's real mcpReq on every dispatch.
       mcpReq: { requestState: () => undefined },
     });
-    process.once("SIGINT", () => void providers.executor.close?.());
-    process.once("SIGTERM", () => void providers.executor.close?.());
-    runStdioServer(mcp);
-    return;
+    const stdio = runStdioServer(mcp);
+    return {
+      close: async () => {
+        await closeQuietly(stdio.close(), "stdio transport close");
+        await closeQuietly(providers.executor.close?.(), "executor close");
+      },
+    };
   }
 
   if (!mcpConfig.canonicalUri) {
@@ -152,7 +172,7 @@ export async function startMcp(): Promise<void> {
     secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
   });
 
-  await startHttpServer({
+  const http = await startHttpServer({
     mcp,
     config: {
       canonicalUri: canonicalUrl(mcpConfig.canonicalUri).href,
@@ -164,6 +184,10 @@ export async function startMcp(): Promise<void> {
     auth: { authProvider, db: prisma, providers },
     selfHosted,
   });
-  process.once("SIGINT", () => void providers.executor.close?.());
-  process.once("SIGTERM", () => void providers.executor.close?.());
+  return {
+    close: async () => {
+      await closeQuietly(http.close(), "HTTP transport close");
+      await closeQuietly(providers.executor.close?.(), "executor close");
+    },
+  };
 }

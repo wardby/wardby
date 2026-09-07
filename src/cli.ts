@@ -28,10 +28,13 @@ import { validateCronExpression } from "./core/cron.js";
 import { startScheduler } from "./core/scheduler.js";
 import { startReconciler } from "./core/reconciler.js";
 import { NativeEngine } from "./core/engine-native.js";
+import { logger } from "./core/logger.js";
 import { deriveJsonSchema } from "./sandbox/zod-params.js";
 import { ToolCapabilitiesPatchSchema } from "./sandbox/tool-capabilities.js";
 import { startMcp } from "./mcp/index.js";
 import { authCommand } from "./mcp/auth/self-hosted/cli.js";
+
+const cliLog = logger.child({ module: "cli" });
 
 const RUN_STATUSES: RunStatus[] = [
   "pending",
@@ -418,7 +421,9 @@ async function scheduler(args: string[]): Promise<void> {
       console.log("\nreevo scheduler shutting down...");
       sched.stop();
       reconciler.stop();
-      void Promise.resolve(executor.close?.()).finally(resolve);
+      void Promise.resolve(executor.close?.())
+        .catch((err: unknown) => cliLog.warn({ err }, "executor close failed during scheduler shutdown"))
+        .finally(resolve);
     };
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);
@@ -426,7 +431,7 @@ async function scheduler(args: string[]): Promise<void> {
 }
 
 async function mcp(): Promise<void> {
-  await startMcp();
+  const handle = await startMcp();
   // startMcp() resolves once the transport is up (bound/listening), not
   // when it stops — block here the same way `scheduler` does, so main()'s
   // `finally { prisma.$disconnect() }` doesn't tear the connection down
@@ -439,7 +444,9 @@ async function mcp(): Promise<void> {
   await new Promise<void>((resolve) => {
     const shutdown = () => {
       console.error("\nreevo mcp shutting down...");
-      resolve();
+      void Promise.resolve(handle.close())
+        .catch((err: unknown) => cliLog.warn({ err }, "mcp handle close failed during shutdown"))
+        .finally(resolve);
     };
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);
