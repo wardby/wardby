@@ -18,7 +18,7 @@ import { parseArgs } from "node:util";
 import type { RunStatus } from "@prisma/client";
 import { loadProviderConfig } from "./config/providers.js";
 import { RoutingLlmProvider, resolveLlmRegistrations } from "./providers/llm/index.js";
-import { InProcessExecutor } from "./providers/executor/index.js";
+import { buildExecutor } from "./providers/executor/index.js";
 import { PostgresDatastore } from "./providers/datastore/index.js";
 import { buildSecretCipher } from "./providers/secrets/index.js";
 import type { ProviderRegistry } from "./providers/index.js";
@@ -83,13 +83,6 @@ function buildSecrets(): ProviderRegistry["secrets"] {
     return buildSecretCipher(config);
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err));
-  }
-}
-
-function assertInProcessExecutor(): void {
-  const config = loadProviderConfig();
-  if (config.executor !== "in-process") {
-    fail(`EXECUTOR "${config.executor}" has no adapter yet (only "in-process").`);
   }
 }
 
@@ -408,12 +401,13 @@ async function scheduler(args: string[]): Promise<void> {
   const { values } = parseArgs({ args, options: { scope: { type: "string" } } });
   const scope = values.scope ?? "default";
 
-  assertInProcessExecutor();
+  const config = loadProviderConfig();
   const llm = buildLlmProvider();
   const engine = buildEngine();
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
-  const executor = new InProcessExecutor({ llm, engine, datastore, secrets }, prisma);
+  const executor = buildExecutor(config, { llm, engine, datastore, secrets }, prisma);
+  await executor.launch?.();
   const reconciler = startReconciler({ db: prisma, executor });
   const sched = startScheduler({ executor, db: prisma, scope });
 
@@ -424,7 +418,7 @@ async function scheduler(args: string[]): Promise<void> {
       console.log("\nreevo scheduler shutting down...");
       sched.stop();
       reconciler.stop();
-      resolve();
+      void Promise.resolve(executor.close?.()).finally(resolve);
     };
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);

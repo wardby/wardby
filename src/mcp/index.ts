@@ -18,7 +18,7 @@ import { prisma } from "../core/db.js";
 import { NativeEngine } from "../core/engine-native.js";
 import { resolveLlmRegistrations, RoutingLlmProvider } from "../providers/llm/index.js";
 import { PostgresDatastore } from "../providers/datastore/index.js";
-import { InProcessExecutor } from "../providers/executor/index.js";
+import { buildExecutor } from "../providers/executor/index.js";
 import { buildSecretCipher } from "../providers/secrets/index.js";
 import { buildAuthProvider } from "../providers/auth/index.js";
 import type { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
@@ -85,7 +85,7 @@ export function buildMcpProviders(): McpProviderComposition {
   const engine = new NativeEngine();
   const secrets = buildSecretCipher(providerConfig);
   const datastore = new PostgresDatastore(prisma, secrets);
-  const executor = new InProcessExecutor({ llm, engine, datastore, secrets }, prisma);
+  const executor = buildExecutor(providerConfig, { llm, engine, datastore, secrets }, prisma);
 
   return { providers: { llm, engine, datastore, secrets, executor } };
 }
@@ -94,6 +94,7 @@ export function buildMcpProviders(): McpProviderComposition {
 export async function startMcp(): Promise<void> {
   const mcpConfig = loadMcpConfig();
   const { providers } = buildMcpProviders();
+  await providers.executor.launch?.();
 
   if (mcpConfig.transport === "stdio") {
     const mcp = buildMcpServer({ providers, db: prisma, config: { canonicalUri: STDIO_PLACEHOLDER_URI } });
@@ -121,6 +122,8 @@ export async function startMcp(): Promise<void> {
       // current call's real mcpReq on every dispatch.
       mcpReq: { requestState: () => undefined },
     });
+    process.once("SIGINT", () => void providers.executor.close?.());
+    process.once("SIGTERM", () => void providers.executor.close?.());
     runStdioServer(mcp);
     return;
   }
@@ -161,4 +164,6 @@ export async function startMcp(): Promise<void> {
     auth: { authProvider, db: prisma, providers },
     selfHosted,
   });
+  process.once("SIGINT", () => void providers.executor.close?.());
+  process.once("SIGTERM", () => void providers.executor.close?.());
 }
