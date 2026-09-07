@@ -18,7 +18,7 @@ import { parseArgs } from "node:util";
 import type { RunStatus } from "@prisma/client";
 import { loadProviderConfig } from "./config/providers.js";
 import { RoutingLlmProvider, resolveLlmRegistrations } from "./providers/llm/index.js";
-import { buildConfiguredExecutor, InProcessExecutor } from "./providers/executor/index.js";
+import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/index.js";
 import { PostgresDatastore } from "./providers/datastore/index.js";
 import { buildSecretCipher } from "./providers/secrets/index.js";
 import type { ProviderRegistry } from "./providers/index.js";
@@ -28,10 +28,13 @@ import { validateCronExpression } from "./core/cron.js";
 import { startScheduler } from "./core/scheduler.js";
 import { startReconciler } from "./core/reconciler.js";
 import { NativeEngine } from "./core/engine-native.js";
+import { logger } from "./core/logger.js";
 import { deriveJsonSchema } from "./sandbox/zod-params.js";
 import { ToolCapabilitiesPatchSchema } from "./sandbox/tool-capabilities.js";
 import { startMcp } from "./mcp/index.js";
 import { authCommand } from "./mcp/auth/self-hosted/cli.js";
+
+const cliLog = logger.child({ module: "cli" });
 
 const RUN_STATUSES: RunStatus[] = [
   "pending",
@@ -83,13 +86,6 @@ function buildSecrets(): ProviderRegistry["secrets"] {
     return buildSecretCipher(config);
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err));
-  }
-}
-
-function assertInProcessExecutor(): void {
-  const config = loadProviderConfig();
-  if (config.executor !== "in-process") {
-    fail(`EXECUTOR "${config.executor}" has no adapter yet (only "in-process").`);
   }
 }
 
@@ -408,13 +404,14 @@ async function scheduler(args: string[]): Promise<void> {
   const { values } = parseArgs({ args, options: { scope: { type: "string" } } });
   const scope = values.scope ?? "default";
 
-  assertInProcessExecutor();
+  const config = loadProviderConfig();
   const llm = buildLlmProvider();
   const engine = buildEngine();
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
-  const nativeExecutor = new InProcessExecutor({ llm, engine, datastore, secrets }, prisma);
-  const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma });
+  const nativeExecutor = buildExecutor(config, { llm, engine, datastore, secrets }, prisma);
+  const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig: config });
+  await executor.launch?.();
   const reconciler = startReconciler({ db: prisma, executor });
   const sched = startScheduler({ executor, db: prisma, scope });
 
@@ -425,7 +422,9 @@ async function scheduler(args: string[]): Promise<void> {
       console.log("\nreevo scheduler shutting down...");
       sched.stop();
       reconciler.stop();
-      resolve();
+      void Promise.resolve(executor.close?.())
+        .catch((err: unknown) => cliLog.warn({ err }, "executor close failed during scheduler shutdown"))
+        .finally(resolve);
     };
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);
@@ -433,7 +432,7 @@ async function scheduler(args: string[]): Promise<void> {
 }
 
 async function mcp(): Promise<void> {
-  await startMcp();
+  const handle = await startMcp();
   // startMcp() resolves once the transport is up (bound/listening), not
   // when it stops — block here the same way `scheduler` does, so main()'s
   // `finally { prisma.$disconnect() }` doesn't tear the connection down
@@ -446,7 +445,9 @@ async function mcp(): Promise<void> {
   await new Promise<void>((resolve) => {
     const shutdown = () => {
       console.error("\nreevo mcp shutting down...");
-      resolve();
+      void Promise.resolve(handle.close())
+        .catch((err: unknown) => cliLog.warn({ err }, "mcp handle close failed during shutdown"))
+        .finally(resolve);
     };
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);

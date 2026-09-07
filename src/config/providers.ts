@@ -176,3 +176,31 @@ export function loadSecretConfig(env: NodeJS.ProcessEnv = process.env): SecretCo
     appKey: env.SECRET_APP_KEY,
   };
 }
+
+export interface DbosConfig {
+  /**
+   * Where DBOS keeps its workflow/step tables. Defaults to DATABASE_URL —
+   * the tables live in their own schema (`schemaName`), so Prisma's `public`
+   * schema and the migration drift check are untouched.
+   */
+  systemDatabaseUrl: string | undefined;
+  schemaName: string;
+  /**
+   * Stable per-*process* executor identity. At launch DBOS re-drives every
+   * PENDING workflow that this id owned, so a restarted process picks up its
+   * own interrupted runs — which also means two processes sharing an id each
+   * re-drive the other's live workflows. There is deliberately no default:
+   * `DbosExecutor` refuses to construct without one (a default would silently
+   * give the scheduler and the MCP server the same identity).
+   */
+  executorId: string | undefined;
+}
+
+/** Read DBOS executor config from the environment (only used when EXECUTOR=dbos). */
+export function loadDbosConfig(env: NodeJS.ProcessEnv = process.env): DbosConfig {
+  return {
+    systemDatabaseUrl: env.DBOS_SYSTEM_DATABASE_URL ?? env.DATABASE_URL,
+    schemaName: env.DBOS_SCHEMA ?? "dbos",
+    executorId: env.DBOS_EXECUTOR_ID,
+  };
+}

@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { loadContainerExecutorConfig, loadProviderConfig, loadMcpConfig, loadGitHubVcsConfig } from "./providers.js";
+import {
+  loadContainerExecutorConfig,
+  loadProviderConfig,
+  loadMcpConfig,
+  loadGitHubVcsConfig,
+  loadDbosConfig,
+} from "./providers.js";
 
 describe("provider config", () => {
   it("accepts anthropic and bedrock as llm kinds", () => {
@@ -93,5 +99,32 @@ describe("loadMcpConfig", () => {
   it("defaults secretElicitationProtocol to off, and reads it on when explicitly set", () => {
     expect(loadMcpConfig({}).secretElicitationProtocol).toBe(false);
     expect(loadMcpConfig({ MCP_SECRET_ELICITATION_PROTOCOL: "true" }).secretElicitationProtocol).toBe(true);
+  });
+});
+
+describe("loadDbosConfig", () => {
+  it("defaults the system database to DATABASE_URL and the schema to dbos, and leaves the executor id unset", () => {
+    const config = loadDbosConfig({ DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo" });
+    expect(config).toEqual({
+      systemDatabaseUrl: "postgresql://reevo:reevo@localhost:55432/reevo",
+      schemaName: "dbos",
+      // No default: two processes sharing an executor id re-drive each
+      // other's live workflows, so DbosExecutor makes it mandatory instead.
+      executorId: undefined,
+    });
+  });
+
+  it("honours explicit overrides", () => {
+    const config = loadDbosConfig({
+      DATABASE_URL: "postgresql://a",
+      DBOS_SYSTEM_DATABASE_URL: "postgresql://b",
+      DBOS_SCHEMA: "durable",
+      DBOS_EXECUTOR_ID: "scheduler-1",
+    });
+    expect(config).toEqual({ systemDatabaseUrl: "postgresql://b", schemaName: "durable", executorId: "scheduler-1" });
+  });
+
+  it("leaves systemDatabaseUrl undefined when neither variable is set", () => {
+    expect(loadDbosConfig({}).systemDatabaseUrl).toBeUndefined();
   });
 });

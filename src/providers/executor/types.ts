@@ -24,4 +24,12 @@ export interface Executor {
    * terminal Run persistence completed. Recovery must never relaunch a job.
    */
   recover?: (handle: PersistedExecutionHandle) => Promise<ExecutionRecoveryResult>;
+  /**
+   * Optional one-time startup. A durable backend connects and re-drives the
+   * workflows it owned before the last restart. Composition roots call it
+   * before starting the scheduler or MCP server.
+   */
+  launch?: () => Promise<void>;
+  /** Optional graceful shutdown counterpart to `launch`. */
+  close?: () => Promise<void>;
 }

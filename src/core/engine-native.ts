@@ -8,6 +8,7 @@
  */
 
 import type { Engine, EngineResult, EngineRunContext, EngineStatus } from "../providers/engine/types.js";
+import { runStepInline } from "../providers/engine/types.js";
 import type { LlmMessage, LlmToolDef, LlmUsage } from "../providers/index.js";
 import { applyPreflightSafetyMargin, checkTokenCalibration, estimateInputCost, isOverBudget } from "./budget.js";
 import { logger } from "./logger.js";
@@ -72,6 +73,7 @@ export class NativeEngine implements Engine {
       description: t.description,
       parameters: t.jsonSchema,
     }));
+    const step = ctx.step ?? runStepInline;
 
     let cumulative = zeroUsage();
     let lastText = "";
@@ -92,12 +94,14 @@ export class NativeEngine implements Engine {
       // whatever the actual request sends, or the turn-1 refuse gate
       // (cumulative is still zero, nothing else to catch an under-count)
       // can admit a run whose real input cost already exceeds budget.
-      const { costUsd: inputEstimateCost, tokens: inputTokens } = await estimateInputCost(
-        { model: ctx.agent.model, budgetUsd: ctx.agent.budgetUsd },
-        messages,
-        ctx.providers.llm,
-        toolDefs,
-        lastCacheRatio,
+      const { costUsd: inputEstimateCost, tokens: inputTokens } = await step(`turn:${turns}:estimate`, () =>
+        estimateInputCost(
+          { model: ctx.agent.model, budgetUsd: ctx.agent.budgetUsd },
+          messages,
+          ctx.providers.llm,
+          toolDefs,
+          lastCacheRatio,
+        ),
       );
       const guardedEstimate = applyPreflightSafetyMargin(inputEstimateCost);
       const projected = cumulative.costUsd + guardedEstimate;
@@ -120,7 +124,9 @@ export class NativeEngine implements Engine {
         return this.windDown(ctx, messages, cumulative, turns, lastText);
       }
 
-      const turn = await this.runOneTurn(ctx, messages, inputTokens, cumulative.costUsd, toolDefs, lastCacheRatio);
+      const turn = await step(`turn:${turns}:llm`, () =>
+        this.runOneTurn(ctx, messages, inputTokens, cumulative.costUsd, toolDefs, lastCacheRatio),
+      );
 
       if (turn.error) {
         return this.finish("failed", lastText, turns, addUsage(cumulative, turn.usage), turn.error);
@@ -138,8 +144,10 @@ export class NativeEngine implements Engine {
       messages.push(assistantMessage);
 
       if (turn.toolCalls.length > 0) {
-        for (const toolCall of turn.toolCalls) {
-          const resultJson = await ctx.runSandboxTool(toolCall.name, toolCall.argsJson);
+        for (const [index, toolCall] of turn.toolCalls.entries()) {
+          const resultJson = await step(`turn:${turns}:tool:${index}`, () =>
+            ctx.runSandboxTool(toolCall.name, toolCall.argsJson),
+          );
           messages.push({
             role: "tool",
             toolCallId: toolCall.id,
@@ -168,6 +176,7 @@ export class NativeEngine implements Engine {
     turns: number,
     lastText: string,
   ): Promise<EngineResult> {
+    const step = ctx.step ?? runStepInline;
     const windDownMessages: LlmMessage[] = [
       ...messages,
       { role: "user", content: "You are out of budget; summarize what you have and stop." },
@@ -176,10 +185,12 @@ export class NativeEngine implements Engine {
     // No toolDefs here — the wind-down call itself passes `tools: []`
     // below (disabled), so the real request won't carry tool schemas and
     // the estimate must match what's actually sent.
-    const { costUsd: inputEstimateCost, tokens: inputTokens } = await estimateInputCost(
-      { model: ctx.agent.model, budgetUsd: ctx.agent.budgetUsd },
-      windDownMessages,
-      ctx.providers.llm,
+    const { costUsd: inputEstimateCost, tokens: inputTokens } = await step("winddown:estimate", () =>
+      estimateInputCost(
+        { model: ctx.agent.model, budgetUsd: ctx.agent.budgetUsd },
+        windDownMessages,
+        ctx.providers.llm,
+      ),
     );
     const guardedEstimate = applyPreflightSafetyMargin(inputEstimateCost);
 
@@ -193,7 +204,9 @@ export class NativeEngine implements Engine {
       );
     }
 
-    const turn = await this.runOneTurn(ctx, windDownMessages, inputTokens, cumulative.costUsd, [], 0);
+    const turn = await step("winddown:llm", () =>
+      this.runOneTurn(ctx, windDownMessages, inputTokens, cumulative.costUsd, [], 0),
+    );
     const finalUsage = addUsage(cumulative, turn.usage);
 
     if (turn.error) {

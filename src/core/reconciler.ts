@@ -90,6 +90,39 @@ export async function reconcileOnce(
       reason = recovered.reason ?? "Managed coding job was lost after stop and collection attempts.";
     } else if (run.agent.kind === "coding") {
       reason = "Managed coding job became stale before its launcher handle was persisted; it was not relaunched.";
+    } else if (run.executionBackend && executor?.recover) {
+      // Claim before asking. For a `running` row this is a real CAS: the
+      // winner's UPDATE refreshes heartbeatAt, which takes the row out of
+      // the stale set, so a concurrent reconciler's WHERE matches zero rows
+      // and only one instance calls recover() this pass.
+      //
+      // For a `pending` row it de-duplicates nothing across passes: `pending`
+      // is matched on startedAt, not heartbeatAt, so the row stays stale and
+      // every later pass calls recover() again. That is accepted rather than
+      // fixed: DBOS's dequeue is atomic and `resumeWorkflow` is idempotent
+      // (re-enqueueing an already-enqueued workflow does not run it twice),
+      // and DbosExecutor bounds the repeats — after MAX_RESUME_ATTEMPTS
+      // adoptions of one run it reports `lost` and the run gets reaped.
+      const claimed = await db.run.updateMany({
+        where: { id: run.id, ...stale },
+        data: { heartbeatAt: now },
+      });
+      if (claimed.count === 0) continue;
+      let recovered;
+      try {
+        recovered = await executor.recover({ runId: run.id, backend: run.executionBackend, id: run.id });
+      } catch (err) {
+        reconcilerLog.error({ err, runId: run.id }, "durable run recovery failed");
+        continue;
+      }
+      if (recovered.state === "active" || recovered.state === "terminal") continue;
+      reason = recovered.reason ?? "Durable backend reported the run lost.";
+      const result = await db.run.updateMany({
+        where: { id: run.id, executionManaged: true, status: { in: ["pending", "running"] } },
+        data: { status: "lost", error: reason, finishedAt: now },
+      });
+      lost += result.count;
+      continue;
     }
 
     const result = await db.run.updateMany({

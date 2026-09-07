@@ -25,9 +25,31 @@ export class RoutingExecutor implements Executor {
     if (kind === "coding") return this.coding.stop(runId, reason);
   }
 
+  /**
+   * Recovery is routed by the run's agent kind, exactly like start/stop: a
+   * native run's handle belongs to the native executor (e.g. a DBOS
+   * workflow handle), a coding run's to the container executor. Routing by
+   * handle backend would need this class to know every backend name.
+   */
   async recover(handle: PersistedExecutionHandle): Promise<ExecutionRecoveryResult> {
+    const kind = await this.resolver.kindForRun(handle.runId);
+    if (kind === "native") {
+      if (!this.native.recover) return { state: "lost", reason: "native_recovery_unavailable" };
+      return this.native.recover(handle);
+    }
     if (!this.coding.recover) return { state: "lost", reason: "coding_recovery_unavailable" };
     return this.coding.recover(handle);
+  }
+
+  /** Lifecycle fans out to both executors; each is optional on the seam. */
+  async launch(): Promise<void> {
+    await this.native.launch?.();
+    await this.coding.launch?.();
+  }
+
+  async close(): Promise<void> {
+    await this.coding.close?.();
+    await this.native.close?.();
   }
 }
 

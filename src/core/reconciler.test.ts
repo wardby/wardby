@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Executor } from "../providers/executor/types.js";
 import { reconcileOnce, type ReconcilerDb } from "./reconciler.js";
 
@@ -11,6 +11,7 @@ interface FakeRun {
   finishedAt: Date | null;
   error: string | null;
   executionManaged: boolean;
+  executionBackend: string | null;
   agent: { kind: "native" | "coding" };
   codingRun: { jobBackend: string | null; jobHandle: string | null } | null;
 }
@@ -74,6 +75,7 @@ function baseRun(overrides: Partial<FakeRun>): FakeRun {
     finishedAt: null,
     error: null,
     executionManaged: true,
+    executionBackend: null,
     agent: { kind: "native" },
     codingRun: null,
     ...overrides,
@@ -300,5 +302,56 @@ describe("reconcileOnce", () => {
 
     expect(count).toBe(0);
     expect(runs[0].status).toBe("succeeded");
+  });
+
+  it("consults the executor before reaping a stale run held by a durable backend, and keeps it alive when active", async () => {
+    const runs = [baseRun({ heartbeatAt: STALE, executionBackend: "dbos" })];
+    const db = fakeDb(runs);
+    const recover = vi.fn(async () => ({ state: "active" as const }));
+    const executor: Executor = { start: async () => undefined, stop: async () => undefined, recover };
+
+    const lost = await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, executor);
+
+    expect(lost).toBe(0);
+    expect(recover).toHaveBeenCalledWith({ runId: runs[0].id, backend: "dbos", id: runs[0].id });
+    expect(runs[0].status).toBe("running");
+    expect(runs[0].heartbeatAt).toEqual(NOW);
+  });
+
+  it("marks a durable-backend run lost when the executor reports it lost", async () => {
+    const runs = [baseRun({ heartbeatAt: STALE, executionBackend: "dbos" })];
+    const db = fakeDb(runs);
+    const executor: Executor = {
+      start: async () => undefined,
+      stop: async () => undefined,
+      recover: async () => ({ state: "lost", reason: "gone" }),
+    };
+
+    const lost = await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, executor);
+
+    expect(lost).toBe(1);
+    expect(runs[0].status).toBe("lost");
+    expect(runs[0].error).toBe("gone");
+  });
+
+  it("leaves a durable-backend run alone when the executor reports terminal", async () => {
+    const runs = [baseRun({ heartbeatAt: STALE, executionBackend: "dbos" })];
+    const db = fakeDb(runs);
+    const executor: Executor = {
+      start: async () => undefined,
+      stop: async () => undefined,
+      recover: async () => ({ state: "terminal" }),
+    };
+
+    expect(await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, executor)).toBe(0);
+    expect(runs[0].status).toBe("running"); // the executor's recover() owns the terminal write
+  });
+
+  it("falls back to the plain lost path for a durable-backend run when no executor can recover", async () => {
+    const runs = [baseRun({ heartbeatAt: STALE, executionBackend: "dbos" })];
+    const db = fakeDb(runs);
+
+    expect(await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined)).toBe(1);
+    expect(runs[0].status).toBe("lost");
   });
 });

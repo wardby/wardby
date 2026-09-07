@@ -26,10 +26,28 @@ function fakeDb(agents: FakeAgent[], runs: Record<string, any>): RunnerDb {
     },
     run: {
       findUnique: (async ({ where }: any) => store.get(where.id) ?? null) as any,
+      findUniqueOrThrow: (async ({ where }: any) => {
+        const record = store.get(where.id);
+        if (!record) throw new Error(`No Run with id "${where.id}".`);
+        return record;
+      }) as any,
       update: (async ({ where, data }: any) => {
         const record = { ...store.get(where.id), ...data };
         store.set(where.id, record);
         return record;
+      }) as any,
+      // executeRun's writes are conditional on the run still being drivable
+      // (pending/running) so the first terminal write wins — the fake has to
+      // apply that filter, or these tests would not exercise the real path.
+      updateMany: (async ({ where, data }: any) => {
+        const record = store.get(where.id);
+        if (!record) return { count: 0 };
+        if (where.status !== undefined) {
+          const allowed = typeof where.status === "string" ? [where.status] : where.status.in;
+          if (!allowed.includes(record.status)) return { count: 0 };
+        }
+        store.set(where.id, { ...record, ...data });
+        return { count: 1 };
       }) as any,
       create: (async () => {
         throw new Error("not used in this test");

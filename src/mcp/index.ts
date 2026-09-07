@@ -18,7 +18,7 @@ import { prisma } from "../core/db.js";
 import { NativeEngine } from "../core/engine-native.js";
 import { resolveLlmRegistrations, RoutingLlmProvider } from "../providers/llm/index.js";
 import { PostgresDatastore } from "../providers/datastore/index.js";
-import { buildConfiguredExecutor, InProcessExecutor } from "../providers/executor/index.js";
+import { buildConfiguredExecutor, buildExecutor } from "../providers/executor/index.js";
 import { buildSecretCipher } from "../providers/secrets/index.js";
 import { buildAuthProvider } from "../providers/auth/index.js";
 import type { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
@@ -41,6 +41,9 @@ import { registerSecretsTools, type SecretElicitationUrlBuilder } from "./tools/
 import { registerWebhookTools } from "./tools/webhooks.js";
 import { createStdioSecretElicitationHost } from "./tools/secret-elicitation-server.js";
 import { SECRET_ELICITATION_PATH } from "./tools/secret-elicitation-form.js";
+import { logger } from "../core/logger.js";
+
+const mcpLog = logger.child({ module: "mcp-index" });
 
 /** Placeholder identifier for stdio, which has no HTTP endpoint to name. Never surfaced: stdio's fixed context always holds every scope, so no scope challenge is ever built against it. */
 const STDIO_PLACEHOLDER_URI = "urn:reevo:local-stdio";
@@ -85,16 +88,31 @@ export function buildMcpProviders(): McpProviderComposition {
   const engine = new NativeEngine();
   const secrets = buildSecretCipher(providerConfig);
   const datastore = new PostgresDatastore(prisma, secrets);
-  const nativeExecutor = new InProcessExecutor({ llm, engine, datastore, secrets }, prisma);
+  const nativeExecutor = buildExecutor(providerConfig, { llm, engine, datastore, secrets }, prisma);
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig });
 
   return { providers: { llm, engine, datastore, secrets, executor } };
 }
 
+/** Handle returned by `startMcp()` — closes the running transport, then the executor. */
+export interface McpServerHandle {
+  close(): Promise<void>;
+}
+
+/** Awaits `promise` (if any), logging and swallowing a rejection instead of propagating it. */
+async function closeQuietly(promise: Promise<void> | undefined, what: string): Promise<void> {
+  try {
+    await promise;
+  } catch (err) {
+    mcpLog.warn({ err }, `${what} failed during MCP shutdown`);
+  }
+}
+
 /** The real CLI entry point: `reevo mcp`. Reads config from the environment, starts stdio or HTTP per MCP_TRANSPORT. */
-export async function startMcp(): Promise<void> {
+export async function startMcp(): Promise<McpServerHandle> {
   const mcpConfig = loadMcpConfig();
   const { providers } = buildMcpProviders();
+  await providers.executor.launch?.();
 
   if (mcpConfig.transport === "stdio") {
     const mcp = buildMcpServer({ providers, db: prisma, config: { canonicalUri: STDIO_PLACEHOLDER_URI } });
@@ -122,8 +140,13 @@ export async function startMcp(): Promise<void> {
       // current call's real mcpReq on every dispatch.
       mcpReq: { requestState: () => undefined },
     });
-    runStdioServer(mcp);
-    return;
+    const stdio = runStdioServer(mcp);
+    return {
+      close: async () => {
+        await closeQuietly(stdio.close(), "stdio transport close");
+        await closeQuietly(providers.executor.close?.(), "executor close");
+      },
+    };
   }
 
   if (!mcpConfig.canonicalUri) {
@@ -150,7 +173,7 @@ export async function startMcp(): Promise<void> {
     secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
   });
 
-  await startHttpServer({
+  const http = await startHttpServer({
     mcp,
     config: {
       canonicalUri: canonicalUrl(mcpConfig.canonicalUri).href,
@@ -162,4 +185,10 @@ export async function startMcp(): Promise<void> {
     auth: { authProvider, db: prisma, providers },
     selfHosted,
   });
+  return {
+    close: async () => {
+      await closeQuietly(http.close(), "HTTP transport close");
+      await closeQuietly(providers.executor.close?.(), "executor close");
+    },
+  };
 }
