@@ -13,7 +13,7 @@ function v4(ip: string) { return ip.split(".").reduce((a, b) => (a << 8) + Numbe
 function v6(ip: string): bigint {
   const [left, right] = ip.split("::");
   const a = left ? left.split(":") : []; const b = right ? right.split(":") : [];
-  const groups = ip.includes("::") ? [...a, ...Array(8 - a.length - b.length).fill("0"), ...b] : a;
+  const groups = ip.includes("::") ? [...a, ...new Array<string>(8 - a.length - b.length).fill("0"), ...b] : a;
   return groups.reduce((n: bigint, g: string) => (n << 16n) + BigInt("0x" + g), 0n);
 }
 export function isGlobalAddress(address: string): boolean {

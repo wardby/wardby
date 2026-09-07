@@ -66,6 +66,19 @@ export default tseslint.config(
     rules: {
       "@typescript-eslint/consistent-type-imports": "off",
       "no-console": "off",
+      // 214 of 216 repo-wide hits for this cluster are test-double `any`
+      // (fake Prisma-shaped DB objects, loosely-typed mock args) -- the
+      // same deliberate loose-typing convention as the two exceptions
+      // above. Rewriting every test fake to satisfy Prisma's exact
+      // generated generic signatures would make one-off test doubles more
+      // brittle for no real safety benefit; production code (src/**/*.ts
+      // outside tests) keeps these rules at "error".
+      "@typescript-eslint/no-explicit-any": "off",
+      "@typescript-eslint/no-unsafe-assignment": "off",
+      "@typescript-eslint/no-unsafe-member-access": "off",
+      "@typescript-eslint/no-unsafe-argument": "off",
+      "@typescript-eslint/no-unsafe-return": "off",
+      "@typescript-eslint/no-unsafe-call": "off",
     },
   },
   {
