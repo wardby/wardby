@@ -18,7 +18,7 @@ import { parseArgs } from "node:util";
 import type { RunStatus } from "@prisma/client";
 import { loadProviderConfig } from "./config/providers.js";
 import { RoutingLlmProvider, resolveLlmRegistrations } from "./providers/llm/index.js";
-import { InProcessExecutor } from "./providers/executor/index.js";
+import { buildConfiguredExecutor, InProcessExecutor } from "./providers/executor/index.js";
 import { PostgresDatastore } from "./providers/datastore/index.js";
 import { buildSecretCipher } from "./providers/secrets/index.js";
 import type { ProviderRegistry } from "./providers/index.js";
@@ -413,7 +413,8 @@ async function scheduler(args: string[]): Promise<void> {
   const engine = buildEngine();
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
-  const executor = new InProcessExecutor({ llm, engine, datastore, secrets }, prisma);
+  const nativeExecutor = new InProcessExecutor({ llm, engine, datastore, secrets }, prisma);
+  const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma });
   const reconciler = startReconciler({ db: prisma, executor });
   const sched = startScheduler({ executor, db: prisma, scope });
 

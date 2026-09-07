@@ -39,6 +39,7 @@ export type FinalizeChangesResult =
 
 export interface VcsProvider {
   prepareWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace>;
+  recoverWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace | null>;
   finalizeChanges(workspace: PreparedWorkspace): Promise<FinalizeChangesResult>;
   cleanup(workspace: PreparedWorkspace): Promise<void>;
 }

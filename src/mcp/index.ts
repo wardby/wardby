@@ -18,7 +18,7 @@ import { prisma } from "../core/db.js";
 import { NativeEngine } from "../core/engine-native.js";
 import { resolveLlmRegistrations, RoutingLlmProvider } from "../providers/llm/index.js";
 import { PostgresDatastore } from "../providers/datastore/index.js";
-import { InProcessExecutor } from "../providers/executor/index.js";
+import { buildConfiguredExecutor, InProcessExecutor } from "../providers/executor/index.js";
 import { buildSecretCipher } from "../providers/secrets/index.js";
 import { buildAuthProvider } from "../providers/auth/index.js";
 import type { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
@@ -85,7 +85,8 @@ export function buildMcpProviders(): McpProviderComposition {
   const engine = new NativeEngine();
   const secrets = buildSecretCipher(providerConfig);
   const datastore = new PostgresDatastore(prisma, secrets);
-  const executor = new InProcessExecutor({ llm, engine, datastore, secrets }, prisma);
+  const nativeExecutor = new InProcessExecutor({ llm, engine, datastore, secrets }, prisma);
+  const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig });
 
   return { providers: { llm, engine, datastore, secrets, executor } };
 }

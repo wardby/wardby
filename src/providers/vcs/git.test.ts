@@ -147,6 +147,13 @@ afterEach(async () => {
 });
 
 describe("GitVcsProvider", () => {
+  it("recovers and revalidates a deterministic workspace without minting another token", async () => {
+    const { provider, github, input } = await harness();
+    const prepared = await provider.prepareWorkspace(input);
+    await expect(provider.recoverWorkspace(input)).resolves.toEqual(prepared);
+    expect(github.tokenCalls).toBe(1);
+  });
+
   it("prepares separate Git metadata at an immutable base commit without leaking the token", async () => {
     const { provider, github, git, input } = await harness();
     const prepared = await provider.prepareWorkspace(input);

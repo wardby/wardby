@@ -74,6 +74,39 @@ export function loadGitHubVcsConfig(env: NodeJS.ProcessEnv = process.env): GitHu
   };
 }
 
+export interface ContainerExecutorConfig {
+  workerImage?: string;
+  proxyContainer?: string;
+  stateRoot?: string;
+  artifactRoot?: string;
+  credentialRef: string;
+  cpus: number;
+  memoryMb: number;
+  pids: number;
+  diskMb: number;
+}
+
+function optionalPositiveNumber(value: string | undefined, name: string, fallback: number): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`${name} must be a positive number.`);
+  return parsed;
+}
+
+export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env): ContainerExecutorConfig {
+  return {
+    workerImage: env.CODING_WORKER_IMAGE,
+    proxyContainer: env.CODING_PROXY_CONTAINER,
+    stateRoot: env.CODING_JOB_STATE_ROOT,
+    artifactRoot: env.CODING_ARTIFACT_ROOT,
+    credentialRef: env.CODING_OPENAI_CREDENTIAL_REF ?? "env:OPENAI_API_KEY",
+    cpus: optionalPositiveNumber(env.CODING_CPUS, "CODING_CPUS", 1),
+    memoryMb: optionalPositiveInteger(env.CODING_MEMORY_MB, "CODING_MEMORY_MB") ?? 2048,
+    pids: optionalPositiveInteger(env.CODING_PIDS, "CODING_PIDS") ?? 128,
+    diskMb: optionalPositiveInteger(env.CODING_DISK_MB, "CODING_DISK_MB") ?? 2048,
+  };
+}
+
 export interface McpConfig {
   allowedOrigins?: string[];
   transport: "http" | "stdio";
