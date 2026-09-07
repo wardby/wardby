@@ -69,13 +69,21 @@ export async function computeGroupSpend(
     { period: "month", capUsd: toNullableNumber(group.monthlyBudgetUsd) },
   ];
   const configured = caps.filter((c): c is { period: Period; capUsd: number } => c.capUsd !== null);
-  if (configured.length === 0 || memberAgentIds.length === 0) return [];
+  if (configured.length === 0) return [];
 
+  // A cap can be configured before any agent is ever attached to the group
+  // (e.g. right after create_budget_group) -- that's still a real,
+  // reportable state (spentUsd: 0), not "nothing to report." Only skip the
+  // query itself as a cheap no-op; an empty `agentId: { in: [] }` would
+  // match nothing anyway.
   const widestStart = periodStart("month", now);
-  const runs = await db.run.findMany({
-    where: { agentId: { in: memberAgentIds }, startedAt: { gte: widestStart } },
-    select: { costUsd: true, startedAt: true },
-  });
+  const runs =
+    memberAgentIds.length === 0
+      ? []
+      : await db.run.findMany({
+          where: { agentId: { in: memberAgentIds }, startedAt: { gte: widestStart } },
+          select: { costUsd: true, startedAt: true },
+        });
 
   return configured.map(({ period, capUsd }) => {
     const start = periodStart(period, now);
