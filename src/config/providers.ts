@@ -16,6 +16,7 @@ export type BlobStoreKind = "local" | "s3";
 export type ExecutorKind = "in-process" | "dbos";
 export type DatastoreKind = "postgres";
 export type EngineKind = "native" | "langgraph";
+export type VcsProviderKind = "github";
 
 export interface ProviderConfig {
   jobs: JobLauncherKind;
@@ -27,6 +28,7 @@ export interface ProviderConfig {
   executor: ExecutorKind;
   datastore: DatastoreKind;
   engine: EngineKind;
+  vcs: VcsProviderKind;
 }
 
 /** Read provider selection from environment variables, defaulting to portable. */
@@ -43,6 +45,34 @@ export function loadProviderConfig(
     executor: (env.EXECUTOR as ExecutorKind) ?? "in-process",
     datastore: (env.DATASTORE as DatastoreKind) ?? "postgres",
     engine: (env.ENGINE as EngineKind) ?? "native",
+    vcs: (env.VCS_PROVIDER as VcsProviderKind) ?? "github",
+  };
+}
+
+export interface GitHubVcsConfig {
+  appId?: string;
+  privateKey?: string;
+  workRoot?: string;
+  apiVersion?: string;
+  maxChangedFiles?: number;
+  maxDiffBytes?: number;
+}
+
+function optionalPositiveInteger(value: string | undefined, name: string): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer.`);
+  return parsed;
+}
+
+export function loadGitHubVcsConfig(env: NodeJS.ProcessEnv = process.env): GitHubVcsConfig {
+  return {
+    appId: env.GITHUB_APP_ID,
+    privateKey: env.GITHUB_APP_PRIVATE_KEY,
+    workRoot: env.VCS_WORK_ROOT,
+    apiVersion: env.GITHUB_API_VERSION,
+    maxChangedFiles: optionalPositiveInteger(env.VCS_MAX_CHANGED_FILES, "VCS_MAX_CHANGED_FILES"),
+    maxDiffBytes: optionalPositiveInteger(env.VCS_MAX_DIFF_BYTES, "VCS_MAX_DIFF_BYTES"),
   };
 }
 
