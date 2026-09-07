@@ -36,3 +36,21 @@ jobs:
           name: dependency-tree
           path: dependency-tree.json
       - run: node scripts/security-audit.mjs
+      - run: npm run worker:image:policy
+      - run: docker build -f src/coding-worker/Dockerfile -t reevo-coding-worker:${{ github.sha }} .
+      - uses: anchore/sbom-action@v0.20.5
+        with:
+          image: reevo-coding-worker:${{ github.sha }}
+          format: spdx-json
+          output-file: coding-worker.spdx.json
+      - uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: reevo-coding-worker:${{ github.sha }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coding-worker-sbom
+          path: coding-worker.spdx.json

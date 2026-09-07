@@ -1,0 +1,9 @@
+{
+  "name": "reevo-coding-worker-runtime",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@openai/codex-sdk": "0.153.4",
+    "zod": "3.25.76"
+  }
+}
