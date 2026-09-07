@@ -14,6 +14,8 @@ interface FakeAgentRow {
   id: string;
   name: string;
   ownerId: string | null;
+  kind?: "native" | "coding";
+  codingProfile?: Record<string, unknown> | null;
 }
 interface FakeRunRow {
   id: string;
@@ -172,6 +174,22 @@ describe("trigger_agent", () => {
 
     const result = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
     expect(result.isError).toBe(true);
+    await client.close();
+  });
+
+  it("rejects task and base-ref overrides for a native agent", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "p1" }]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["runs:trigger"], false));
+    registerTriggerTool(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "trigger_agent",
+      arguments: { agentId: "a1", task: "Do not run", baseRef: "main" },
+    });
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0].text).toMatch(/only valid for coding agents/i);
     await client.close();
   });
 

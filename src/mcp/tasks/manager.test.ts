@@ -120,6 +120,65 @@ describe.skipIf(!databaseUrl)("MCP task manager (database)", () => {
     expect("error" in result).toBe(false);
   });
 
+  it("returns only the validated coding result for a completed coding task", async () => {
+    const agent = await db.agent.create({
+      data: {
+        name: `task-mgr-coding-${randomUUID()}`,
+        systemPrompt: "x",
+        model: "gpt-5.6-terra",
+        budgetUsd: 10,
+        kind: "coding",
+        codingProfile: {
+          create: {
+            repository: "openai/reevo",
+            baseRef: "main",
+            allowedEgress: [],
+            protectedPaths: ["CODEOWNERS"],
+          },
+        },
+      },
+    });
+    agentIds.push(agent.id);
+    const run = await db.run.create({ data: { agentId: agent.id, status: "succeeded" } });
+    runIds.push(run.id);
+    await db.codingRun.create({
+      data: {
+        runId: run.id,
+        task: "Verify the result projection",
+        repository: "openai/reevo",
+        baseRef: "main",
+        headRef: `reevo/run-${run.id}`,
+        provider: "codex",
+        model: "gpt-5.6-terra",
+        timeoutSec: 900,
+        allowedEgress: [],
+        protectedPaths: ["CODEOWNERS"],
+        jobBackend: "docker",
+        jobHandle: "container-private",
+        budgetReservedUsd: 10,
+        result: {
+          schemaVersion: 1,
+          outcome: "no_changes",
+          repository: "openai/reevo",
+          baseRef: "main",
+          summary: "No changes; github_pat_abcdefghijklmnopqrstuvwxyz123456",
+          tests: [{ command: "npm test", outcome: "passed" }],
+          usage: { tokensIn: 1, tokensOut: 2, costUsd: 0.01 },
+        },
+      },
+    });
+    const created = await createRunTask(run.id, TEST_PRINCIPAL_ID, db, 60_000);
+    taskIds.push(created.taskId);
+
+    const result = await getTask(created.taskId, db);
+    expect(result).toMatchObject({
+      status: "completed",
+      result: { outcome: "no_changes", summary: "No changes; [REDACTED]" },
+    });
+    expect("result" in result && result.result).not.toHaveProperty("jobHandle");
+    expect("result" in result && result.result).not.toHaveProperty("protectedPaths");
+  });
+
   it("cancelTask invokes the stop hook for a still-running task", async () => {
     const run = await newRun({ status: "running" });
     const created = await createRunTask(run.id, TEST_PRINCIPAL_ID, db, 60_000);

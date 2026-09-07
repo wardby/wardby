@@ -17,6 +17,8 @@ interface FakeWebhookRow {
 interface FakeAgentRow {
   id: string;
   name: string;
+  kind?: "native" | "coding";
+  codingProfile?: Record<string, unknown> | null;
 }
 
 function fakeDb(agents: FakeAgentRow[]) {
@@ -121,5 +123,17 @@ describe("webhook ingress", () => {
     const { id } = await createWebhook("a1", "p1", db);
     const result = await handleWebhookIngress(id, { headers: {}, body: {} }, db, executor);
     expect(result.status).toBe(401);
+  });
+
+  it("rejects malformed webhook task input before dispatch", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter" }]);
+    const { id, secret } = await createWebhook("a1", "p1", db);
+    const result = await handleWebhookIngress(
+      id,
+      { headers: { "x-webhook-secret": secret }, body: { task: "\u0000not valid" } },
+      db,
+      executor,
+    );
+    expect(result).toEqual({ status: 400, body: { error: "invalid_task" } });
   });
 });

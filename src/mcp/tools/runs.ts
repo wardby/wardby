@@ -1,6 +1,7 @@
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { requireReadableAgent } from "../auth/ownership.js";
+import { publicCodingRunResult } from "../../coding/protocol.js";
 import { textResult } from "./text-result.js";
 
 export function registerRunTools(mcp: ReevoMcpServer): void {
@@ -31,7 +32,9 @@ export function registerRunTools(mcp: ReevoMcpServer): void {
       const run = await ctx.db.run.findUnique({ where: { id: args.runId } });
       if (!run) throw new McpError(404, `Run "${args.runId}" not found.`);
       await requireReadableAgent(ctx.db, run.agentId, ctx.principal.id);
-      return textResult(run);
+      const codingRun = await ctx.db.codingRun.findUnique({ where: { runId: run.id }, select: { result: true } });
+      const codingResult = publicCodingRunResult(codingRun?.result);
+      return textResult(codingResult ? { ...run, codingResult } : run);
     },
   });
 }

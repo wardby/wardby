@@ -29,6 +29,8 @@
  * gets 404, not another principal's final text/cost.
  */
 import { dispatchRun } from "../../core/dispatch.js";
+import { CodingBaseRefSchema, CodingTaskOverrideSchema } from "../../coding/protocol.js";
+import { z } from "zod";
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { createTaskResult, getTask, cancelTask } from "../tasks/manager.js";
@@ -37,19 +39,45 @@ import { textResult } from "./text-result.js";
 
 const DEFAULT_TASK_TTL_MS = 24 * 60 * 60 * 1000;
 
+const TriggerAgentSchema = z
+  .object({
+    agentId: z.string().trim().min(1).max(128),
+    task: CodingTaskOverrideSchema.optional(),
+    baseRef: CodingBaseRefSchema.optional(),
+  })
+  .strict();
+
+function parseTriggerArgs(args: unknown): z.infer<typeof TriggerAgentSchema> {
+  const parsed = TriggerAgentSchema.safeParse(args);
+  if (parsed.success) return parsed.data;
+  const details = parsed.error.issues.map((issue) => `${issue.path.join(".") || "input"}: ${issue.message}`).join("; ");
+  throw new McpError(400, `Invalid trigger_agent arguments: ${details}`);
+}
+
 export function registerTriggerTool(mcp: ReevoMcpServer): void {
   mcp.registerTool({
     name: "trigger_agent",
     scope: "runs:trigger",
-    inputSchema: { type: "object", properties: { agentId: { type: "string" } }, required: ["agentId"] },
-    handler: async (args: { agentId: string }, ctx) => {
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { agentId: { type: "string" }, task: { type: "string" }, baseRef: { type: "string" } },
+      required: ["agentId"],
+    },
+    handler: async (rawArgs: unknown, ctx) => {
+      const args = parseTriggerArgs(rawArgs);
       const agent = await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+      if (agent.kind !== "coding" && (args.task !== undefined || args.baseRef !== undefined)) {
+        throw new McpError(400, "Task and baseRef overrides are only valid for coding agents.");
+      }
 
       const dispatched = await dispatchRun({
         db: ctx.db,
         executor: ctx.providers.executor,
         agentId: agent.id,
         trigger: "manual",
+        codingTask: args.task,
+        codingBaseRef: args.baseRef,
         task: ctx.clientSupportsTasks ? { principalId: ctx.principal.id, ttlMs: DEFAULT_TASK_TTL_MS } : undefined,
         beforePersist: async (_tx, current) => {
           if (!canMutate(current.ownerId, ctx.principal.id)) {

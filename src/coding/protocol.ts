@@ -116,7 +116,9 @@ const repositorySchema = z
   .refine(isGitHubRepository, "must be a canonical name or uncredentialed github.com repository")
   .transform(normalizeGitHubRepository);
 
-const refSchema = z.string().refine(isGitRef, "must be a safe branch ref").transform(normalizeGitRef);
+export const CodingBaseRefSchema = z.string().refine(isGitRef, "must be a safe branch ref").transform(normalizeGitRef);
+
+export const CodingTaskOverrideSchema = boundedText(MAX_CODING_TASK_BYTES);
 
 const runIdSchema = boundedText(MAX_RUN_ID_BYTES, true).refine(
   (value) => /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value),
@@ -148,9 +150,9 @@ export const CodingTaskInputSchema = z
     schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
     runId: runIdSchema,
     repository: repositorySchema,
-    baseRef: refSchema,
-    headRef: refSchema,
-    task: boundedText(MAX_CODING_TASK_BYTES),
+    baseRef: CodingBaseRefSchema,
+    headRef: CodingBaseRefSchema,
+    task: CodingTaskOverrideSchema,
     model: modelSchema,
     budgetUsd: z.number().finite().positive().max(MAX_COST_USD),
     deadlineAt: z.string().datetime({ offset: true }),
@@ -202,8 +204,8 @@ export const CodingRunResultSchema = z
     schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
     outcome: z.enum(["pull_request_opened", "no_changes", "budget_exhausted"]),
     repository: repositorySchema,
-    baseRef: refSchema,
-    headRef: refSchema.optional(),
+    baseRef: CodingBaseRefSchema,
+    headRef: CodingBaseRefSchema.optional(),
     commitSha: z
       .string()
       .regex(/^[0-9a-fA-F]{40}$/)
@@ -244,6 +246,13 @@ export const CodingRunResultSchema = z
 export type CodingTaskInput = z.infer<typeof CodingTaskInputSchema>;
 export type CodingAgentOutput = z.infer<typeof CodingAgentOutputSchema>;
 export type CodingRunResult = z.infer<typeof CodingRunResultSchema>;
+
+/** Parses stored worker output into the only coding result shape callers may receive. */
+export function publicCodingRunResult(value: unknown): CodingRunResult | undefined {
+  if (value === null || value === undefined) return undefined;
+  const parsed = CodingRunResultSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
 
 const TOKEN_PATTERNS = [
   /sk-(?:ant-)?[A-Za-z0-9_-]{16,}/gi,

@@ -20,6 +20,7 @@ export interface DispatchRunOptions {
   agentId: string;
   trigger?: RunTrigger;
   codingTask?: string;
+  codingBaseRef?: string;
   now?: Date;
   lockAgent?: boolean;
   task?: { principalId: string; ttlMs: number };
@@ -101,7 +102,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             schemaVersion: CODING_PROTOCOL_VERSION,
             runId: run.id,
             repository: agent.codingProfile.repository,
-            baseRef: agent.codingProfile.baseRef,
+            baseRef: options.codingBaseRef ?? agent.codingProfile.baseRef,
             headRef,
             task,
             model: agent.model,
@@ -123,8 +124,8 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               budgetReservedUsd: agent.budgetUsd,
             },
           });
-        } else if (options.codingTask !== undefined) {
-          throw new Error("A coding task cannot be supplied for a native agent.");
+        } else if (options.codingTask !== undefined || options.codingBaseRef !== undefined) {
+          throw new Error("Coding overrides cannot be supplied for a native agent.");
         }
 
         const task = options.task

@@ -8,6 +8,7 @@ describe("CodingProfileSchema", () => {
       repository: "openai/example",
       baseRef: "main",
       defaultTask: null,
+      allowWebhookTaskOverride: false,
       timeoutSec: 1800,
       allowedEgress: [],
       protectedPaths: [...DEFAULT_PROTECTED_PATHS],
@@ -43,8 +44,11 @@ describe("CodingProfileSchema", () => {
 
 describe("CodingProfilePatchSchema", () => {
   it("accepts bounded partial updates and explicit default-task clearing", () => {
-    expect(CodingProfilePatchSchema.parse({ defaultTask: null, timeoutSec: 600 })).toEqual({
+    expect(
+      CodingProfilePatchSchema.parse({ defaultTask: null, allowWebhookTaskOverride: true, timeoutSec: 600 }),
+    ).toEqual({
       defaultTask: null,
+      allowWebhookTaskOverride: true,
       timeoutSec: 600,
     });
   });

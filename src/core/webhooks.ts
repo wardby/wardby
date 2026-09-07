@@ -67,14 +67,18 @@ export async function resolveWebhookRun(
   presentedSecret: string,
   db: PrismaClient,
   executor: Executor,
+  codingTask?: string,
 ): Promise<ResolveWebhookRunResult> {
   const webhook = await db.webhook.findUnique({ where: { id } });
   if (!webhook) return { ok: false, reason: "not_found" };
   if (!secretMatches(presentedSecret, webhook.secretHash)) return { ok: false, reason: "invalid_secret" };
   if (webhook.status !== "enabled") return { ok: false, reason: "disabled" };
 
-  const agent = await db.agent.findUnique({ where: { id: webhook.agentId } });
+  const agent = await db.agent.findUnique({ where: { id: webhook.agentId }, include: { codingProfile: true } });
   if (!agent) return { ok: false, reason: "not_found" };
+  if (codingTask !== undefined && (agent.kind !== "coding" || !agent.codingProfile?.allowWebhookTaskOverride)) {
+    return { ok: false, reason: "disabled" };
+  }
 
   let rejected: "not_found" | "invalid_secret" | "disabled" = "disabled";
   const dispatched = await dispatchRun({
@@ -82,7 +86,8 @@ export async function resolveWebhookRun(
     executor,
     agentId: agent.id,
     trigger: "manual",
-    beforePersist: async (tx) => {
+    codingTask,
+    beforePersist: async (tx, currentAgent) => {
       const current = await tx.webhook.findUnique({ where: { id } });
       if (!current) {
         rejected = "not_found";
@@ -93,6 +98,13 @@ export async function resolveWebhookRun(
         return false;
       }
       if (current.status !== "enabled") {
+        rejected = "disabled";
+        return false;
+      }
+      if (
+        codingTask !== undefined &&
+        (currentAgent.kind !== "coding" || !currentAgent.codingProfile?.allowWebhookTaskOverride)
+      ) {
         rejected = "disabled";
         return false;
       }
