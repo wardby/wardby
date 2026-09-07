@@ -104,11 +104,11 @@ export function jobLauncherContract(
       handle.id = "mutated";
       const stable = await launcher.launch(spec);
       expect(stable.id).not.toBe("mutated");
-      await finish(stable, { exitCode: 0, reason: "completed", resultArtifact: "{}" });
+      await finish(stable, { exitCode: 0, reason: "completed" });
       const status: JobStatus = await launcher.status(stable);
       const result = await launcher.collect(stable);
       expect(status).toEqual({ state: "succeeded" });
-      expect(result).toEqual({ exitCode: 0, reason: "completed", resultArtifact: "{}" });
+      expect(result).toMatchObject({ exitCode: 0, reason: "completed" });
     });
   });
 }

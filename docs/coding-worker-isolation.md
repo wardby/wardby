@@ -2,7 +2,8 @@
 
 Date: 2026-09-07
 
-Status: Task 8 complete; Task 9 must use this policy without weakening it.
+Status: Tasks 8-9 complete; the Docker JobLauncher executes and attests this
+policy without weakening it.
 
 ## Security Boundary
 
@@ -29,8 +30,8 @@ production composition.
 ## Container Policy
 
 `src/providers/jobs/docker-isolation.ts` is the canonical policy builder and
-startup attestation layer. Task 9 must execute its argument arrays directly
-with an API client or `spawn`/`execFile`; it must never invoke a shell.
+startup attestation layer. `DockerJobLauncher` executes its argument arrays
+directly with `spawn`; it never invokes a shell.
 
 The worker policy requires:
 
@@ -65,9 +66,9 @@ The worker sees only these volume subpaths:
 - `/run/reevo/input`: read-only, validated input artifact.
 - `/run/reevo/output`: read-write result artifact.
 
-There are no production host bind mounts. Task 9 must transfer data through the
-keeper with Docker copy/archive APIs, validate it before launch and after
-collection, and stop the keeper only after collection. Stopping the last
+There are no production host bind mounts. The Docker JobLauncher transfers data
+through the keeper with Docker copy/archive APIs, validates it before launch and
+after collection, and stops the keeper only after collection. Stopping the last
 container that mounts this local tmpfs intentionally destroys the run data.
 The quota is RAM-backed; operators must bound aggregate concurrent `diskMb`
 allocations at the host scheduler as well as per run.

@@ -7,7 +7,7 @@
  * adapters) is added once the adapters exist.
  */
 
-export type JobLauncherKind = "local" | "ecs";
+export type JobLauncherKind = "local" | "docker" | "ecs";
 export type EmailProviderKind = "smtp" | "ses";
 export type LlmProviderKind = "openai" | "anthropic" | "bedrock";
 export type SecretCipherKind = "app-key" | "kms";
