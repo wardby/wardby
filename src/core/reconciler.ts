@@ -90,6 +90,30 @@ export async function reconcileOnce(
       reason = recovered.reason ?? "Managed coding job was lost after stop and collection attempts.";
     } else if (run.agent.kind === "coding") {
       reason = "Managed coding job became stale before its launcher handle was persisted; it was not relaunched.";
+    } else if (run.executionBackend && executor?.recover) {
+      // Claim before asking, so two reconciler instances can't both adopt
+      // the same orphaned workflow: whichever CAS wins refreshes the
+      // heartbeat and takes the run out of the stale set for the other.
+      const claimed = await db.run.updateMany({
+        where: { id: run.id, ...stale },
+        data: { heartbeatAt: now },
+      });
+      if (claimed.count === 0) continue;
+      let recovered;
+      try {
+        recovered = await executor.recover({ runId: run.id, backend: run.executionBackend, id: run.id });
+      } catch (err) {
+        reconcilerLog.error({ err, runId: run.id }, "durable run recovery failed");
+        continue;
+      }
+      if (recovered.state === "active" || recovered.state === "terminal") continue;
+      reason = recovered.reason ?? "Durable backend reported the run lost.";
+      const result = await db.run.updateMany({
+        where: { id: run.id, executionManaged: true, status: { in: ["pending", "running"] } },
+        data: { status: "lost", error: reason, finishedAt: now },
+      });
+      lost += result.count;
+      continue;
     }
 
     const result = await db.run.updateMany({

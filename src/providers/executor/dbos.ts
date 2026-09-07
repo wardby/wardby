@@ -23,7 +23,8 @@ import { markRunFailedFromExecutorError } from "../../core/dispatch.js";
 import { prisma as defaultDb } from "../../core/db.js";
 import { HEARTBEAT_INTERVAL_MS } from "../../core/timing.js";
 import { logger } from "../../core/logger.js";
-import type { Executor } from "./types.js";
+import { decideRecovery } from "./dbos-status.js";
+import type { Executor, ExecutionRecoveryResult, PersistedExecutionHandle } from "./types.js";
 
 export const DBOS_BACKEND = "dbos";
 
@@ -135,6 +136,43 @@ export class DbosExecutor implements Executor {
   async stop(runId: string, reason?: string): Promise<void> {
     dbosLog.info({ runId, reason }, "cancelling durable run");
     await DBOS.cancelWorkflow(runId);
+  }
+
+  /**
+   * Answer the reconciler for a stale run. Never relaunches: `resume`
+   * re-drives the existing workflow from its last completed step, which is
+   * the same thing launch() does for this executor's own workflows.
+   */
+  async recover(handle: PersistedExecutionHandle): Promise<ExecutionRecoveryResult> {
+    if (handle.backend !== DBOS_BACKEND) {
+      return { state: "lost", reason: `DbosExecutor cannot recover backend "${handle.backend}".` };
+    }
+    if (!this.launched) await this.launch();
+    const status = await DBOS.getWorkflowStatus(handle.id);
+    const row = await this.db.run.findUnique({ where: { id: handle.runId }, select: { status: true } });
+    const runIsTerminal = !!row && !["pending", "running"].includes(row.status);
+    const decision = decideRecovery(status, runIsTerminal, this.config.executorId);
+
+    switch (decision.action) {
+      case "active":
+        return { state: "active" };
+      case "resume": {
+        dbosLog.warn({ runId: handle.runId, owner: status?.executorId }, "adopting orphaned durable run");
+        const resumed = await DBOS.resumeWorkflow<void>(handle.id);
+        void resumed.getResult().catch((err) => dbosLog.error({ err, runId: handle.runId }, "adopted run failed"));
+        return { state: "active" };
+      }
+      case "terminal":
+        return { state: "terminal" };
+      case "mark-failed":
+        await this.db.run.updateMany({
+          where: { id: handle.runId, status: { in: ["pending", "running"] } },
+          data: { status: "failed", error: decision.error, finishedAt: new Date() },
+        });
+        return { state: "terminal" };
+      case "lost":
+        return { state: "lost", reason: decision.reason };
+    }
   }
 
   /** Workflow body. Public only so the module-level registration can reach it. */

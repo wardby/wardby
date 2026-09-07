@@ -143,4 +143,50 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     expect(after.status).toBe("failed");
     expect(after.finishedAt).not.toBeNull();
   });
+
+  it("recover(): reports active for its own live workflow, terminal for a finished one, lost for an unknown id", async () => {
+    let release!: () => void;
+    const open = new Promise<void>((resolve) => (release = resolve));
+    const llm = scriptedLlm([toolCall("t"), finalAnswer("ok")], { turn: 2, open });
+    executor = build(llm);
+    await executor.launch();
+    const run = await db.run.create({ data: { agentId, executionManaged: true } });
+    const started = executor.start(run.id);
+    await new Promise<void>((resolve) => {
+      const poll = setInterval(() => {
+        if (llm.calls.length === 2) {
+          clearInterval(poll);
+          resolve();
+        }
+      }, 20);
+    });
+
+    const live = await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id });
+    expect(live).toEqual({ state: "active" });
+
+    release();
+    await started;
+    const done = await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id });
+    expect(done).toEqual({ state: "terminal" });
+
+    const unknown = await executor.recover({ runId: "nope", backend: DBOS_BACKEND, id: "nope" });
+    expect(unknown.state).toBe("lost");
+  });
+
+  it("recover(): marks the run failed when the workflow finished but the row never went terminal", async () => {
+    const llm = scriptedLlm([finalAnswer("ok")]);
+    executor = build(llm);
+    await executor.launch();
+    const run = await db.run.create({ data: { agentId, executionManaged: true } });
+    await executor.start(run.id);
+    // Simulate a lost terminal write.
+    await db.run.update({ where: { id: run.id }, data: { status: "running", finishedAt: null } });
+
+    const result = await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id });
+
+    expect(result).toEqual({ state: "terminal" });
+    const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.status).toBe("failed");
+    expect(after.error).toContain("without persisting a terminal run state");
+  });
 });
