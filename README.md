@@ -6,10 +6,17 @@ cost, and a sandboxed tool executor.
 
 > Reevo runs your agents on a schedule, within a budget.
 
+## Who it's for
+
+People who want to run a handful of scheduled Claude, Codex, or other LLM
+agents on their own box or VPS, with a hard spend cap they can trust, and
+without handing tool execution to an unsandboxed process.
+
 ## Status
 
-Early scaffold. The provider-seam architecture and interface contracts are in
-place; adapters and the core engine are being built out.
+Working. The core engine, scheduler, budget groups, QuickJS tool sandbox,
+secrets, webhooks, MCP server (stdio and OAuth 2.1 HTTP), and containerized
+coding workers are implemented and tested.
 
 ## Architecture at a glance
 
