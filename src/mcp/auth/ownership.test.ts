@@ -9,6 +9,8 @@ import {
   requireOwnedTask,
   requireOwnedSecret,
   requireOwnedWebhook,
+  requireOwnedBudgetGroup,
+  requireReadableBudgetGroup,
 } from "./ownership.js";
 import { McpError } from "../errors.js";
 
@@ -63,12 +65,14 @@ function fakeDb(
   tasks: Record<string, { id: string; principalId: string | null }> = {},
   secrets: Record<string, { id: string; ownerId: string | null }> = {},
   webhooks: Record<string, { id: string; ownerId: string | null }> = {},
+  budgetGroups: Record<string, { id: string; ownerId: string | null }> = {},
 ) {
   return {
     agent: { findUnique: async ({ where }: { where: { id: string } }) => agents[where.id] ?? null },
     task: { findUnique: async ({ where }: { where: { id: string } }) => tasks[where.id] ?? null },
     secret: { findUnique: async ({ where }: { where: { id: string } }) => secrets[where.id] ?? null },
     webhook: { findUnique: async ({ where }: { where: { id: string } }) => webhooks[where.id] ?? null },
+    budgetGroup: { findUnique: async ({ where }: { where: { id: string } }) => budgetGroups[where.id] ?? null },
   } as unknown as import("@prisma/client").PrismaClient;
 }
 
@@ -148,5 +152,39 @@ describe("requireOwnedWebhook", () => {
   it("403s for a different owner", async () => {
     const db = fakeDb({}, {}, {}, { w1: { id: "w1", ownerId: "owner-1" } });
     await expect(requireOwnedWebhook(db, "w1", "p1")).rejects.toMatchObject({ httpStatus: 403 });
+  });
+});
+
+describe("requireOwnedBudgetGroup", () => {
+  it("returns the group when the caller owns it", async () => {
+    const db = fakeDb({}, {}, {}, {}, { g1: { id: "g1", ownerId: "p1" } });
+    await expect(requireOwnedBudgetGroup(db, "g1", "p1")).resolves.toMatchObject({ id: "g1" });
+  });
+  it("throws 404 when the group doesn't exist", async () => {
+    const db = fakeDb({}, {}, {}, {}, {});
+    await expect(requireOwnedBudgetGroup(db, "missing", "p1")).rejects.toMatchObject({ httpStatus: 404 });
+  });
+  it("throws 403 when the caller doesn't own a group someone else owns", async () => {
+    const db = fakeDb({}, {}, {}, {}, { g1: { id: "g1", ownerId: "someone-else" } });
+    await expect(requireOwnedBudgetGroup(db, "g1", "p1")).rejects.toMatchObject({ httpStatus: 403 });
+  });
+  it("403s for a public (null-owner) group — mutation is never implicitly public", async () => {
+    const db = fakeDb({}, {}, {}, {}, { g1: { id: "g1", ownerId: null } });
+    await expect(requireOwnedBudgetGroup(db, "g1", "p1")).rejects.toMatchObject({ httpStatus: 403 });
+  });
+});
+
+describe("requireReadableBudgetGroup", () => {
+  it("returns a public (null-owner) group for any caller", async () => {
+    const db = fakeDb({}, {}, {}, {}, { g1: { id: "g1", ownerId: null } });
+    await expect(requireReadableBudgetGroup(db, "g1", "p1")).resolves.toMatchObject({ id: "g1" });
+  });
+  it("returns the group when the caller owns it", async () => {
+    const db = fakeDb({}, {}, {}, {}, { g1: { id: "g1", ownerId: "p1" } });
+    await expect(requireReadableBudgetGroup(db, "g1", "p1")).resolves.toMatchObject({ id: "g1" });
+  });
+  it("404s for a group owned by someone else", async () => {
+    const db = fakeDb({}, {}, {}, {}, { g1: { id: "g1", ownerId: "someone-else" } });
+    await expect(requireReadableBudgetGroup(db, "g1", "p1")).rejects.toMatchObject({ httpStatus: 404 });
   });
 });

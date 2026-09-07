@@ -19,6 +19,7 @@ export const SCOPES_SUPPORTED = [
   "datastore:write",
   "secrets:write",
   "webhooks:write",
+  "budget_groups:write",
 ];
 
 export interface ProtectedResourceMetadata {

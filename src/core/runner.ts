@@ -25,10 +25,11 @@ import { runInSandbox } from "../sandbox/run-in-sandbox.js";
 import { asStringArray } from "../sandbox/tool-capabilities.js";
 import { scopeDatastore } from "../providers/datastore/scoped.js";
 import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
+import { effectiveBudgetForRun } from "./budget-groups.js";
 import { prisma as defaultDb } from "./db.js";
 
 /** The subset of the Prisma client the runner touches — mockable in tests. */
-export type RunnerDb = Pick<PrismaClient, "agent" | "run" | "agentTool" | "agentSecret">;
+export type RunnerDb = Pick<PrismaClient, "agent" | "run" | "agentTool" | "agentSecret" | "budgetGroup">;
 
 /** Persists a new pending Run for the named agent. Throws if the agent is unknown. */
 export async function createRun(db: RunnerDb, agentName: string, trigger: RunTrigger = "manual"): Promise<Run> {
@@ -141,11 +142,12 @@ export async function executeRun(
       return JSON.stringify(result.value);
     };
 
+    const { effectiveBudgetUsd } = await effectiveBudgetForRun(db, agent);
     const engineResult = await providers.engine.run({
       agent: {
         systemPrompt: agent.systemPrompt,
         model: agent.model,
-        budgetUsd: Number(agent.budgetUsd),
+        budgetUsd: effectiveBudgetUsd,
         maxTurns: agent.maxTurns,
       },
       tools,

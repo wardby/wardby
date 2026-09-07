@@ -39,6 +39,35 @@ model Agent {
   owner    Principal?    @relation(fields: [ownerId], references: [id])
   secrets  AgentSecret[]
   webhooks Webhook[]
+
+  // Phase 7: at most one budget group. Null = uncapped beyond its own budgetUsd.
+  budgetGroupId String?
+  budgetGroup   BudgetGroup? @relation(fields: [budgetGroupId], references: [id])
+}
+
+/// Phase 7: an optional recurring spend cap across a group of agents,
+/// layered on top of each agent's own per-run budgetUsd (which stays
+/// required and unchanged). All three period caps are independently
+/// optional -- unset means "no cap for that period." warnThresholdRatio
+/// is per-group so different groups can choose their own early-warning
+/// point; enforcement itself never lives here -- see
+/// src/core/budget-groups.ts and runner.ts's executeRun, which turn a
+/// group's remaining period budget into a tightened *effective* per-run
+/// budget the existing engine budget machinery enforces unchanged.
+model BudgetGroup {
+  id                 String     @id @default(cuid())
+  name               String
+  ownerId            String?
+  owner              Principal? @relation(fields: [ownerId], references: [id])
+  dailyBudgetUsd     Decimal?   @db.Decimal(10, 4)
+  weeklyBudgetUsd    Decimal?   @db.Decimal(10, 4)
+  monthlyBudgetUsd   Decimal?   @db.Decimal(10, 4)
+  warnThresholdRatio Decimal    @default(0.8) @db.Decimal(3, 2)
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+  agents             Agent[]
+
+  @@unique([ownerId, name])
 }
 
 enum AgentKind {
@@ -278,14 +307,15 @@ model SchedulerLease {
 /// (delegating mode) or the configured LOCAL_PRINCIPAL (stdio, no token).
 /// Created on first sight (find-or-create by subject).
 model Principal {
-  id        String    @id @default(cuid())
-  subject   String    @unique
-  createdAt DateTime  @default(now())
-  agents    Agent[]
-  tools     Tool[]
-  secrets   Secret[]
-  webhooks  Webhook[]
-  authUser  AuthUser?
+  id           String        @id @default(cuid())
+  subject      String        @unique
+  createdAt    DateTime      @default(now())
+  agents       Agent[]
+  tools        Tool[]
+  secrets      Secret[]
+  webhooks     Webhook[]
+  authUser     AuthUser?
+  budgetGroups BudgetGroup[]
 }
 
 /// Phase 4: durable handle backing both a triggered run and (reserved,

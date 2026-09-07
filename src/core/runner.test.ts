@@ -18,6 +18,7 @@ interface FakeAgent {
   budgetUsd: number;
   maxTurns: number;
   kind?: "native" | "coding";
+  budgetGroupId?: string | null;
 }
 
 interface FakeTool {
@@ -37,15 +38,27 @@ interface FakeAttachment {
   allowedHosts?: string[];
 }
 
+interface FakeBudgetGroup {
+  id: string;
+  name: string;
+  dailyBudgetUsd?: number | null;
+  weeklyBudgetUsd?: number | null;
+  monthlyBudgetUsd?: number | null;
+  warnThresholdRatio?: number;
+}
+
 function fakeDb(
   agents: FakeAgent[],
   tools: FakeTool[] = [],
   attachments: FakeAttachment[] = [],
   secretsData: { agentId: string; name: string; value: string }[] = [],
+  budgetGroups: FakeBudgetGroup[] = [],
+  priorRuns: { agentId: string; costUsd: number; startedAt: Date }[] = [],
 ): RunnerDb {
   const byName = new Map(agents.map((a) => [a.name, a]));
   const byId = new Map(agents.map((a) => [a.id, a]));
   const toolsById = new Map(tools.map((t) => [t.id, t]));
+  const groupsById = new Map(budgetGroups.map((g) => [g.id, g]));
   const runs = new Map<string, any>();
   let counter = 0;
 
@@ -78,6 +91,8 @@ function fakeDb(
         runs.set(where.id, record);
         return record;
       }) as any,
+      findMany: (async ({ where }: any) =>
+        priorRuns.filter((r) => where.agentId.in.includes(r.agentId) && r.startedAt >= where.startedAt.gte)) as any,
     },
     agentTool: {
       findMany: (async ({ where }: any) =>
@@ -89,6 +104,20 @@ function fakeDb(
       findFirst: (async ({ where }: any) => {
         const row = secretsData.find((s) => s.agentId === where.agentId && s.name === where.secret.name);
         return row ? { secret: { ciphertext: row.value } } : null;
+      }) as any,
+    },
+    budgetGroup: {
+      findUnique: (async ({ where }: any) => {
+        const g = groupsById.get(where.id);
+        if (!g) return null;
+        return {
+          dailyBudgetUsd: null,
+          weeklyBudgetUsd: null,
+          monthlyBudgetUsd: null,
+          warnThresholdRatio: 0.8,
+          ...g,
+          agents: agents.filter((a) => a.budgetGroupId === where.id).map((a) => ({ id: a.id })),
+        };
       }) as any,
     },
   } as unknown as RunnerDb;
@@ -205,6 +234,74 @@ describe("runAgent", () => {
 
     expect(run.status).toBe("refused");
     expect(run.error).toBe("Estimated input cost exceeds budget before any LLM call.");
+  });
+
+  it("passes the agent's own budgetUsd unchanged to the engine when it has no budget group", async () => {
+    const db = fakeDb([{ id: "a1", name: "solo", systemPrompt: "s", model: "m", budgetUsd: 5, maxTurns: 10 }]);
+    let capturedBudget: number | undefined;
+    const engine = fakeEngine(
+      { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.01 } },
+      (ctx) => {
+        capturedBudget = ctx.agent.budgetUsd;
+      },
+    );
+    await runAgent("solo", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
+    expect(capturedBudget).toBe(5);
+  });
+
+  it("tightens the budget handed to the engine when the agent's group has a smaller remaining daily cap", async () => {
+    const db = fakeDb(
+      [{ id: "a1", name: "grouped", systemPrompt: "s", model: "m", budgetUsd: 5, maxTurns: 10, budgetGroupId: "g1" }],
+      [],
+      [],
+      [],
+      [{ id: "g1", name: "team", dailyBudgetUsd: 10 }],
+      [{ agentId: "a1", costUsd: 8, startedAt: new Date() }],
+    );
+    let capturedBudget: number | undefined;
+    const engine = fakeEngine(
+      { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.01 } },
+      (ctx) => {
+        capturedBudget = ctx.agent.budgetUsd;
+      },
+    );
+    await runAgent("grouped", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
+    expect(capturedBudget).toBe(2); // 10 cap - 8 already spent = 2 remaining, tighter than the agent's own 5
+  });
+
+  it("hands the engine a 0 budget once the group's daily cap is fully spent, regardless of the agent's own budgetUsd", async () => {
+    const db = fakeDb(
+      [{ id: "a1", name: "exhausted", systemPrompt: "s", model: "m", budgetUsd: 5, maxTurns: 10, budgetGroupId: "g1" }],
+      [],
+      [],
+      [],
+      [{ id: "g1", name: "team", dailyBudgetUsd: 10 }],
+      [{ agentId: "a1", costUsd: 10, startedAt: new Date() }],
+    );
+    let capturedBudget: number | undefined;
+    const engine = fakeEngine(
+      {
+        status: "refused",
+        finalText: "",
+        turns: 1,
+        usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+        error: "budget exhausted before any LLM call",
+      },
+      (ctx) => {
+        capturedBudget = ctx.agent.budgetUsd;
+      },
+    );
+    const run = await runAgent(
+      "exhausted",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher },
+      db,
+    );
+    expect(capturedBudget).toBe(0);
+    // The engine result is a fake here (its own zero-budget refuse behavior
+    // is engine-native.test.ts's job, not this file's) -- this test's job
+    // is only to prove runner.ts computed and passed a 0, then persisted
+    // whatever status the engine returned for it.
+    expect(run.status).toBe("refused");
   });
 
   it("builds the EngineRunContext with the agent's fields and no tools when none are attached", async () => {

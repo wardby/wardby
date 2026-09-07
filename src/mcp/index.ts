@@ -30,6 +30,7 @@ import { resolvePrincipal } from "./auth/principal.js";
 import { SCOPES_SUPPORTED } from "./auth/resource-server.js";
 import { canonicalUrl } from "./transport/http-limits.js";
 import { registerAgentTools } from "./tools/agents.js";
+import { registerBudgetGroupTools } from "./tools/budget-groups.js";
 import { registerModelTools } from "./tools/models.js";
 import { registerTriggerTool } from "./tools/trigger.js";
 import { registerToolAuthoringTools } from "./tools/tools.js";
@@ -50,6 +51,7 @@ export function registerAllTools(
   opts: { secretElicitationUrl: SecretElicitationUrlBuilder; secretElicitationProtocol: boolean },
 ): void {
   registerAgentTools(mcp);
+  registerBudgetGroupTools(mcp);
   registerModelTools(mcp);
   registerTriggerTool(mcp);
   registerToolAuthoringTools(mcp);
