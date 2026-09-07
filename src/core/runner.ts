@@ -20,6 +20,7 @@
 import type { PrismaClient, Run, RunTrigger } from "@prisma/client";
 import type { ProviderRegistry } from "../providers/index.js";
 import type { LoadedTool } from "../providers/engine/types.js";
+import { runStepInline, type StepRunner } from "../providers/engine/types.js";
 import { validateParams } from "../sandbox/zod-params.js";
 import { runInSandbox } from "../sandbox/run-in-sandbox.js";
 import { asStringArray } from "../sandbox/tool-capabilities.js";
@@ -49,16 +50,63 @@ export async function executeRun(
   providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets">,
   db: RunnerDb = defaultDb,
   onText?: (delta: string) => void,
+  step: StepRunner = runStepInline,
 ): Promise<Run> {
   const existingRun = await db.run.findUnique({ where: { id: runId } });
   if (!existingRun) {
     throw new Error(`Unknown run "${runId}".`);
   }
-  const agent = await db.agent.findUnique({ where: { id: existingRun.agentId } });
-  if (!agent) {
-    throw new Error(`Run "${runId}" references missing agent "${existingRun.agentId}".`);
-  }
-  if (agent.kind === "coding") {
+
+  // Pinned in one checkpointed step: on replay after a crash, the agent row
+  // or its budget group may have changed since first execution. The
+  // engine's control flow depends on budgetUsd and maxTurns, so they must
+  // be pinned to the values seen on first execution or the replay's step
+  // order diverges from the record.
+  const loaded = await step("load", async () => {
+    const agent = await db.agent.findUnique({ where: { id: existingRun.agentId } });
+    if (!agent) {
+      throw new Error(`Run "${runId}" references missing agent "${existingRun.agentId}".`);
+    }
+    const attached = await db.agentTool.findMany({
+      where: { agentId: agent.id },
+      include: { tool: true },
+    });
+    const { effectiveBudgetUsd } = await effectiveBudgetForRun(db, agent);
+    return {
+      agentId: agent.id,
+      kind: agent.kind,
+      agent: {
+        systemPrompt: agent.systemPrompt,
+        model: agent.model,
+        budgetUsd: effectiveBudgetUsd,
+        maxTurns: agent.maxTurns,
+      },
+      // jsonSchema was derived and validated once at `reevo tool create`
+      // time (cli.ts) and cached on the row — there's no "update tool"
+      // path, so it can't go stale. Re-deriving it here on every run would
+      // spin a fresh QuickJS runtime and evaluate the whole vendored zod
+      // bundle per attached tool, before the first LLM call, on every run.
+      tools: attached.map((attachment): LoadedTool => ({
+        name: attachment.tool.name,
+        description: attachment.tool.description,
+        jsonSchema: attachment.tool.jsonSchema as Record<string, unknown>,
+      })),
+      toolsByName: Object.fromEntries(
+        attached.map((attachment) => [
+          attachment.tool.name,
+          {
+            code: attachment.tool.code,
+            paramsZod: attachment.tool.paramsZod,
+            allowedSecrets: asStringArray(attachment.allowedSecrets),
+            allowedDatastorePrefixes: asStringArray(attachment.allowedDatastorePrefixes),
+            allowedHosts: asStringArray(attachment.allowedHosts),
+          },
+        ]),
+      ),
+    };
+  });
+
+  if (loaded.kind === "coding") {
     return db.run.update({
       where: { id: runId },
       data: {
@@ -72,34 +120,8 @@ export async function executeRun(
   await db.run.update({ where: { id: runId }, data: { status: "running" } });
 
   try {
-    const attached = await db.agentTool.findMany({
-      where: { agentId: agent.id },
-      include: { tool: true },
-    });
-
-    // jsonSchema was derived and validated once at `reevo tool create` time
-    // (cli.ts) and cached on the row — there's no "update tool" path, so it
-    // can't go stale. Re-deriving it here on every run would spin a fresh
-    // QuickJS runtime and evaluate the whole vendored zod bundle per
-    // attached tool, before the first LLM call, on every single run.
-    const tools: LoadedTool[] = attached.map((attachment) => ({
-      name: attachment.tool.name,
-      description: attachment.tool.description,
-      jsonSchema: attachment.tool.jsonSchema as Record<string, unknown>,
-    }));
-    const toolsByName = new Map(
-      attached.map((attachment) => [
-        attachment.tool.name,
-        {
-          code: attachment.tool.code,
-          paramsZod: attachment.tool.paramsZod,
-          allowedSecrets: asStringArray(attachment.allowedSecrets),
-          allowedDatastorePrefixes: asStringArray(attachment.allowedDatastorePrefixes),
-          allowedHosts: asStringArray(attachment.allowedHosts),
-        },
-      ]),
-    );
-    const secretsAccessor = buildSecretsAccessor(agent.id, providers.secrets, db);
+    const toolsByName = new Map(Object.entries(loaded.toolsByName));
+    const secretsAccessor = buildSecretsAccessor(loaded.agentId, providers.secrets, db);
 
     const runSandboxTool = async (name: string, argsJson: string): Promise<string> => {
       const tool = toolsByName.get(name);
@@ -130,7 +152,7 @@ export async function executeRun(
       const result = await runInSandbox({
         code: tool.code,
         params: validation.value,
-        agentId: agent.id,
+        agentId: loaded.agentId,
         datastore: scopeDatastore(providers.datastore, tool.allowedDatastorePrefixes),
         secrets: scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets),
         allowedFetchHosts: tool.allowedHosts,
@@ -142,18 +164,13 @@ export async function executeRun(
       return JSON.stringify(result.value);
     };
 
-    const { effectiveBudgetUsd } = await effectiveBudgetForRun(db, agent);
     const engineResult = await providers.engine.run({
-      agent: {
-        systemPrompt: agent.systemPrompt,
-        model: agent.model,
-        budgetUsd: effectiveBudgetUsd,
-        maxTurns: agent.maxTurns,
-      },
-      tools,
+      agent: loaded.agent,
+      tools: loaded.tools,
       providers: { llm: providers.llm },
       runSandboxTool,
       onText,
+      step,
     });
 
     return db.run.update({

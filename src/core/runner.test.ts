@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
-import type { Engine, EngineResult, EngineRunContext } from "../providers/engine/types.js";
+import type { Engine, EngineResult, EngineRunContext, StepRunner } from "../providers/engine/types.js";
 import type { LlmProvider } from "../providers/index.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
-import { runAgent, type RunnerDb } from "./runner.js";
+import { executeRun, runAgent, type RunnerDb } from "./runner.js";
 
 // Phase 3: executeRun is a thin wrapper — budget/loop logic now lives in
 // the Engine (covered by engine-native.test.ts). These tests cover the
@@ -517,5 +517,43 @@ describe("runAgent", () => {
 
     const blocked = JSON.parse(await captured!.runSandboxTool("read_secret", JSON.stringify({ name: "BLOCKED" })));
     expect(blocked).toBeNull();
+  });
+
+  it("pins agent fields, tools, and effective budget in a 'load' step so a replay sees first-run values", async () => {
+    const agent = { id: "a1", name: "pinned", systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 3 };
+    const db = fakeDb([agent]);
+    const run = await db.run.create({ data: { agentId: "a1" } });
+
+    const record = new Map<string, unknown>();
+    const names: string[] = [];
+    const step: StepRunner = async (name, fn) => {
+      names.push(name);
+      if (record.has(name)) return record.get(name) as never;
+      const value = await fn();
+      record.set(name, JSON.parse(JSON.stringify(value)));
+      return value;
+    };
+
+    const seenBudgets: number[] = [];
+    const engine: Engine = {
+      async run(ctx: EngineRunContext) {
+        seenBudgets.push(ctx.agent.budgetUsd);
+        return {
+          status: "succeeded",
+          finalText: "",
+          turns: 1,
+          usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+        };
+      },
+    };
+    const providers = { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher };
+
+    await executeRun(run.id, providers, db, undefined, step);
+    // Simulate the agent being edited between crash and resume.
+    agent.budgetUsd = 999;
+    await executeRun(run.id, providers, db, undefined, step);
+
+    expect(names[0]).toBe("load");
+    expect(seenBudgets).toEqual([5, 5]);
   });
 });
