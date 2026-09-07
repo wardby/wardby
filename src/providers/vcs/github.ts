@@ -196,7 +196,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
       per_page: "100",
     });
     const response = await this.requestJson(
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls?${query}`,
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls?${query.toString()}`,
       token,
     );
     const payload: unknown = await response.json();

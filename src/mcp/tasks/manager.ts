@@ -123,7 +123,7 @@ export async function getTask(taskId: string, db: PrismaClient): Promise<GetTask
     case "failed":
     case "lost": {
       const mapped = mapTerminalRunStatus(run.status, run);
-      return { ...base, ...mapped } as GetTaskResult;
+      return { ...base, ...mapped };
     }
   }
 }

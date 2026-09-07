@@ -30,7 +30,7 @@ function fakeDb(agents: FakeAgentRow[]) {
   return {
     webhook: {
       create: async ({ data }: { data: Partial<FakeWebhookRow> & { agentId: string; secretHash: string } }) => {
-        const row: FakeWebhookRow = { id: `webhook_${++counter}`, status: "enabled", ownerId: null, createdAt: new Date(), lastFiredAt: null, ...data } as FakeWebhookRow;
+        const row: FakeWebhookRow = { id: `webhook_${++counter}`, status: "enabled", ownerId: null, createdAt: new Date(), lastFiredAt: null, ...data };
         webhooks.set(row.id, row);
         return row;
       },
@@ -50,7 +50,7 @@ function fakeDb(agents: FakeAgentRow[]) {
 
 function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {
   return {
-    principal: { id: principalId, subject: principalId, createdAt: new Date() } as never,
+    principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
     providers: fakeProviders,
     db,

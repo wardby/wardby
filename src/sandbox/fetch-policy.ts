@@ -27,7 +27,7 @@ export function isGlobalAddress(address: string): boolean {
   });
 }
 export function normalizeHost(host: string): string {
-  if (!host || /[\s*\/@?#\\]/.test(host)) throw new FetchPolicyError();
+  if (!host || /[\s*/@?#\\]/.test(host)) throw new FetchPolicyError();
   const value = host.startsWith("[") ? host.slice(1, -1) : host;
   if (isIP(value)) return new URL(isIP(value) === 6 ? "http://[" + value + "]" : "http://" + value).hostname.replace(/^\[|\]$/g, "").toLowerCase();
   if (host.includes(":")) throw new FetchPolicyError();

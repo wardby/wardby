@@ -136,7 +136,7 @@ function fakeDb(agents: FakeAgentRow[] = []) {
 
 function fakeCtx(db: ReturnType<typeof fakeDb>, cipher: SecretCipher, principalId: string, scopes: string[]): McpRequestContext {
   return {
-    principal: { id: principalId, subject: principalId, createdAt: new Date() } as never,
+    principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
     providers: { secrets: cipher } as never,
     db,

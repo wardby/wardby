@@ -100,7 +100,7 @@ function fakeCipher(): SecretCipher {
     keyId: () => "k1",
     encrypt: async (v: string) => v,
     decrypt: async (v: string) => v,
-  } as unknown as SecretCipher;
+  };
 }
 
 function fakeDatastore(): Datastore {

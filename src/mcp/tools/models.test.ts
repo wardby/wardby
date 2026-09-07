@@ -19,7 +19,7 @@ function fakeLlm(name: string): LlmProvider {
 
 function fakeCtx(llm: LlmProvider): McpRequestContext {
   return {
-    principal: { id: "p1", subject: "p1", createdAt: new Date() } as never,
+    principal: { id: "p1", subject: "p1", createdAt: new Date() },
     scopes: new Set(["agents:read"]),
     providers: { llm } as unknown as McpRequestContext["providers"],
     db: {} as never,

@@ -180,6 +180,7 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
         db: opts.db,
         mcpReq: mcpReqOf(sdkCtx),
         clientSupportsTasks: clientSupportsTasks(
+          // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- ESLint's type-checked view of `envelope` disagrees with the real tsc build; the cast is load-bearing there.
           (sdkCtx.mcpReq?.envelope as Record<string, unknown> | undefined)?.[CLIENT_CAPABILITIES_META_KEY] as
             | { extensions?: Record<string, unknown> }
             | undefined,
@@ -191,7 +192,7 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
   }
 
   function registerTool<Args = Record<string, unknown>>(spec: ToolSpec<Args>): void {
-    specs.push(spec as ToolSpec<never>);
+    specs.push(spec);
   }
 
   function registerRequestHandler(

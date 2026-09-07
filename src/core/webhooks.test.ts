@@ -34,7 +34,7 @@ function fakeDb(agents: FakeAgentRow[] = []) {
           createdAt: new Date(),
           lastFiredAt: null,
           ...data,
-        } as FakeWebhookRow;
+        };
         webhooks.set(row.id, row);
         return row;
       },

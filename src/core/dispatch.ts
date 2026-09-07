@@ -1,4 +1,4 @@
-import type { Agent, Prisma, PrismaClient, Run, RunTrigger, Task } from "@prisma/client";
+import type { Prisma, PrismaClient, Run, RunTrigger, Task } from "@prisma/client";
 import type { Executor } from "../providers/executor/types.js";
 import { CODING_PROTOCOL_VERSION, CodingTaskInputSchema } from "../coding/protocol.js";
 import { logger } from "./logger.js";

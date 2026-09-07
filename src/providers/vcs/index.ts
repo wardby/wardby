@@ -13,7 +13,7 @@ export function buildVcsProvider(
   providerConfig: Pick<ProviderConfig, "vcs">,
   config: GitHubVcsConfig,
 ): VcsProvider {
-  if (providerConfig.vcs !== "github") throw new Error(`VCS_PROVIDER=${providerConfig.vcs} is not supported.`);
+  if (providerConfig.vcs !== "github") throw new Error(`VCS_PROVIDER=${String(providerConfig.vcs)} is not supported.`);
   if (!config.appId || !config.privateKey) {
     throw new Error("GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY are required by the GitHub VCS adapter.");
   }

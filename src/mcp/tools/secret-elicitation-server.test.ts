@@ -24,7 +24,7 @@ function fakeDb() {
     secret: {
       upsert: async ({ create }: { create: Record<string, unknown> }) => {
         const row = { id: `secret_${++counter}`, createdAt: new Date(), updatedAt: new Date(), ...create };
-        secrets.set(row.id as string, row);
+        secrets.set(row.id, row);
         return row;
       },
     },

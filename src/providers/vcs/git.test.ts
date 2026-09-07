@@ -12,7 +12,7 @@ import {
   type GitCommandResult,
   type GitCommandRunner,
 } from "./git.js";
-import type { PreparedWorkspace, VcsPrepareInput } from "./types.js";
+import type { VcsPrepareInput } from "./types.js";
 
 const TOKEN = "ghs_abcdefghijklmnopqrstuvwxyz1234567890";
 const BASE_SHA = "a".repeat(40);
@@ -266,7 +266,7 @@ describe("GitVcsProvider", () => {
     const prepared = await provider.prepareWorkspace(input);
     await provider.cleanup(prepared);
     await provider.cleanup(prepared);
-    await expect(provider.cleanup({ ...prepared, workspacePath: rootDir } as PreparedWorkspace))
+    await expect(provider.cleanup({ ...prepared, workspacePath: rootDir }))
       .rejects.toThrow("vcs_workspace_handle_invalid");
   });
 });

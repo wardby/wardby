@@ -37,6 +37,7 @@ function getVendorPrelude(): string {
       `Sandbox vendor bundles missing (run "npm run build:vendor" first): ${
         err instanceof Error ? err.message : String(err)
       }`,
+      { cause: err },
     );
   }
   vendorPreludeCache =

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import { Readable } from "node:stream";
 import type { IncomingMessage } from "node:http";
 import { safeFetch, pinnedLookup, type SafeFetchOptions } from "./safe-fetch.js";
@@ -30,7 +30,7 @@ it("rejects mixed DNS answers before a connection", async () => {
 it("pins the vetted DNS address to both Node lookup calling conventions", async () => {
   const resolve = vi.fn(publicDns);
   const destination = await resolveDestination("https://public.example", { resolve });
-  const lookup = pinnedLookup(destination) as Function;
+  const lookup = pinnedLookup(destination);
   const callback = vi.fn(); lookup("public.example", {}, callback);
   expect(callback).toHaveBeenLastCalledWith(null, "93.184.216.34", 4);
   lookup("public.example", { all: true }, callback);

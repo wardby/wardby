@@ -77,7 +77,7 @@ export async function authenticate(headers: AuthenticateHeaders, deps: Authentic
   let verified;
   try {
     verified = await deps.authProvider.verifyBearer(token);
-  } catch (err) {
+  } catch {
     throw unauthorized("Invalid token.", resourceMetadataUrl);
   }
 

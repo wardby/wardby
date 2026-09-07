@@ -54,7 +54,7 @@ describe("AnthropicLlmProvider", () => {
   });
 
   it("credentials presence reflects env", () => {
-    expect(anthropicCredentialsPresent({ ANTHROPIC_API_KEY: "sk-ant" } as NodeJS.ProcessEnv)).toBe(true);
-    expect(anthropicCredentialsPresent({} as NodeJS.ProcessEnv)).toBe(false);
+    expect(anthropicCredentialsPresent({ ANTHROPIC_API_KEY: "sk-ant" })).toBe(true);
+    expect(anthropicCredentialsPresent({})).toBe(false);
   });
 });

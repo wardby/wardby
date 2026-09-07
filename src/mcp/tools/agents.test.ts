@@ -63,7 +63,7 @@ function fakeDb(seed: FakeAgentSeed[] = []) {
           kind: "native",
           codingProfile: codingProfile?.create ?? null,
           ...agentData,
-        } as FakeAgentRow;
+        };
         rows.set(row.id, row);
         return row;
       },
@@ -86,7 +86,7 @@ function fakeDb(seed: FakeAgentSeed[] = []) {
           codingProfile: codingProfile?.delete
             ? null
             : codingProfile?.create ?? codingProfile?.update ?? row.codingProfile,
-        } as FakeAgentRow;
+        };
         rows.set(where.id, updated);
         return updated;
       },
@@ -109,7 +109,7 @@ function fakeDb(seed: FakeAgentSeed[] = []) {
 
 function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {
   return {
-    principal: { id: principalId, subject: principalId, createdAt: new Date() } as never,
+    principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
     providers: fakeProviders,
     db,

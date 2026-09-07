@@ -53,9 +53,9 @@ export interface JobResult {
  * - no operation implicitly relaunches a missing, stopped, or removed job.
  */
 export interface JobLauncher {
-  launch(spec: JobSpec): Promise<JobHandle>;
-  status(handle: JobHandle): Promise<JobStatus>;
-  collect(handle: JobHandle): Promise<JobResult>;
-  stop(handle: JobHandle, reason?: string): Promise<void>;
-  remove(handle: JobHandle): Promise<void>;
+  launch: (spec: JobSpec) => Promise<JobHandle>;
+  status: (handle: JobHandle) => Promise<JobStatus>;
+  collect: (handle: JobHandle) => Promise<JobResult>;
+  stop: (handle: JobHandle, reason?: string) => Promise<void>;
+  remove: (handle: JobHandle) => Promise<void>;
 }

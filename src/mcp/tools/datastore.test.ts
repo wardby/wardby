@@ -49,7 +49,7 @@ function fakeCtx(
   scopes: string[],
 ): McpRequestContext {
   return {
-    principal: { id: principalId, subject: principalId, createdAt: new Date() } as never,
+    principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
     providers: { datastore } as unknown as import("../../providers/index.js").ProviderRegistry,
     db,

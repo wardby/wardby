@@ -44,7 +44,7 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[]) {
 
 function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {
   return {
-    principal: { id: principalId, subject: principalId, createdAt: new Date() } as never,
+    principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
     providers: fakeProviders,
     db,

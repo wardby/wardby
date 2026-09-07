@@ -1,5 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
-import { Credentials, DAY, lockUser, type AuthDb } from "./credentials.js";
+import type { Credentials} from "./credentials.js";
+import { DAY, lockUser, type AuthDb } from "./credentials.js";
 
 export class Sessions {
   constructor(readonly db: PrismaClient, readonly credentials: Credentials) {}

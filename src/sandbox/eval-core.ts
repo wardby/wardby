@@ -71,7 +71,7 @@ export function classifyEvalError(dumped: { name?: string; message?: string }): 
   return {
     ok: false,
     errorKind: "thrown",
-    errorMessage: dumped.message ? `${dumped.name ?? "Error"}: ${dumped.message}` : String(dumped),
+    errorMessage: dumped.message ? `${dumped.name ?? "Error"}: ${dumped.message}` : JSON.stringify(dumped),
   };
 }
 

@@ -1,0 +1,5 @@
+dist
+node_modules
+src/sandbox/generated
+coverage
+package-lock.json

@@ -4,8 +4,8 @@ import type { JobHandle, JobLauncher, JobResult, JobSpec, JobStatus } from "./ty
 export interface JobLauncherContractHarness {
   launcher: JobLauncher;
   spec: JobSpec;
-  finish(handle: JobHandle, result?: JobResult): Promise<void>;
-  lose(handle: JobHandle): Promise<void>;
+  finish: (handle: JobHandle, result?: JobResult) => Promise<void>;
+  lose: (handle: JobHandle) => Promise<void>;
 }
 
 export function jobLauncherContract(

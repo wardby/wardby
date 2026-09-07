@@ -10,10 +10,10 @@ import { BRIDGE_INPUT_BYTES, FETCH_RESPONSE_BYTES, FETCH_TIMEOUT_MS, MAX_REDIREC
 type Destination = Awaited<ReturnType<typeof resolveDestination>>;
 export interface SafeFetchInit { method?: string; headers?: Record<string, string>; body?: string; }
 export function pinnedLookup(destination: Destination): LookupFunction {
-  return ((_: string, options: { all?: boolean }, callback: Function) => {
+  return ((_: string, options: { all?: boolean }, callback: (err: NodeJS.ErrnoException | null, address: string | { address: string; family: number }[], family?: number) => void) => {
     if (options?.all) callback(null, [{ address: destination.address, family: destination.family }]);
     else callback(null, destination.address, destination.family);
-  }) as LookupFunction;
+  });
 }
 export function requestPinned(destination: Destination, init: SafeFetchInit, signal: AbortSignal): Promise<IncomingMessage> {
   return new Promise((resolve, reject) => {
@@ -87,8 +87,8 @@ export async function safeFetch(input: string, init: SafeFetchInit = {}, options
       return { ok: status >= 200 && status < 300, status, statusText: response.statusMessage ?? "", url: destination.url.href, headers: resultHeaders, bodyBase64: Buffer.concat(chunks, size).toString("base64") };
     }
   } catch (err) {
-    if (signal.aborted) throw new Error("fetch_cancelled_or_timeout");
+    if (signal.aborted) throw new Error("fetch_cancelled_or_timeout", { cause: err });
     if (err instanceof Error && /^fetch_/.test(err.message)) throw err;
-    throw new Error("fetch_failed");
+    throw new Error("fetch_failed", { cause: err });
   } finally { clearTimeout(timer); response?.destroy(); abort.abort(); }
 }

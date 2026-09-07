@@ -10,7 +10,7 @@ const fakeDb = {} as unknown as import("@prisma/client").PrismaClient;
 
 function fakeCtx(scopes: string[] = []): McpRequestContext {
   return {
-    principal: { id: "p1", subject: "user-1", createdAt: new Date() } as never,
+    principal: { id: "p1", subject: "user-1", createdAt: new Date() },
     scopes: new Set(scopes),
     providers: fakeProviders,
     db: fakeDb,

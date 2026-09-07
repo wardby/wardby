@@ -37,7 +37,7 @@ function makeContext(overrides: Partial<EngineRunContext> & { llm: LlmProvider }
     providers: { llm: overrides.llm },
     runSandboxTool: vi.fn(async () => '{"ok":true}'),
     ...overrides,
-  } as EngineRunContext;
+  };
 }
 
 describe("NativeEngine", () => {

@@ -72,7 +72,7 @@ function buildEngine(): ProviderRegistry["engine"] {
 function buildDatastore(cipher: ProviderRegistry["secrets"]): ProviderRegistry["datastore"] {
   const config = loadProviderConfig();
   if (config.datastore !== "postgres") {
-    fail(`DATASTORE "${config.datastore}" has no adapter yet (only "postgres").`);
+    fail(`DATASTORE "${String(config.datastore)}" has no adapter yet (only "postgres").`);
   }
   return new PostgresDatastore(prisma, cipher);
 }
@@ -132,9 +132,9 @@ async function agentCreate(args: string[]): Promise<void> {
 
   const agent = await prisma.agent.create({
     data: {
-      name: values.name!,
-      model: values.model!,
-      systemPrompt: values.prompt!,
+      name: values.name,
+      model: values.model,
+      systemPrompt: values.prompt,
       budgetUsd,
       schedule: values.schedule ?? null,
       timezone,
@@ -162,12 +162,12 @@ async function toolCreate(args: string[]): Promise<void> {
   let paramsZod: string;
   let code: string;
   try {
-    paramsZod = readFileSync(values.params!, "utf8");
+    paramsZod = readFileSync(values.params, "utf8");
   } catch (err) {
     fail(`could not read --params file "${values.params}": ${err instanceof Error ? err.message : String(err)}`);
   }
   try {
-    code = readFileSync(values.code!, "utf8");
+    code = readFileSync(values.code, "utf8");
   } catch (err) {
     fail(`could not read --code file "${values.code}": ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -182,8 +182,8 @@ async function toolCreate(args: string[]): Promise<void> {
 
   const tool = await prisma.tool.create({
     data: {
-      name: values.name!,
-      description: values.description!,
+      name: values.name,
+      description: values.description,
       paramsZod: paramsZod!,
       jsonSchema: schemaResult.value as object,
       code: code!,
@@ -207,13 +207,13 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
     fail(`tool ${detach ? "detach" : "attach"} requires <tool-name> <agent-name>.`);
   }
 
-  const tool = await prisma.tool.findUnique({ where: { name: toolName! } });
+  const tool = await prisma.tool.findUnique({ where: { name: toolName } });
   if (!tool) fail(`unknown tool "${toolName}".`);
-  const agent = await prisma.agent.findUnique({ where: { name: agentName! } });
+  const agent = await prisma.agent.findUnique({ where: { name: agentName } });
   if (!agent) fail(`unknown agent "${agentName}".`);
 
   if (detach) {
-    await prisma.agentTool.deleteMany({ where: { agentId: agent!.id, toolId: tool!.id } });
+    await prisma.agentTool.deleteMany({ where: { agentId: agent.id, toolId: tool.id } });
     console.log(`detached "${toolName}" from "${agentName}".`);
     return;
   }
@@ -228,18 +228,18 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
   }
 
   await prisma.agentTool.upsert({
-    where: { agentId_toolId: { agentId: agent!.id, toolId: tool!.id } },
+    where: { agentId_toolId: { agentId: agent.id, toolId: tool.id } },
     create: {
-      agentId: agent!.id,
-      toolId: tool!.id,
-      allowedSecrets: patch.data!.allowedSecrets ?? [],
-      allowedDatastorePrefixes: patch.data!.allowedDatastorePrefixes ?? [],
-      allowedHosts: patch.data!.allowedHosts ?? [],
+      agentId: agent.id,
+      toolId: tool.id,
+      allowedSecrets: patch.data.allowedSecrets ?? [],
+      allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes ?? [],
+      allowedHosts: patch.data.allowedHosts ?? [],
     },
     update: {
-      ...(patch.data!.allowedSecrets !== undefined ? { allowedSecrets: patch.data!.allowedSecrets } : {}),
-      ...(patch.data!.allowedDatastorePrefixes !== undefined ? { allowedDatastorePrefixes: patch.data!.allowedDatastorePrefixes } : {}),
-      ...(patch.data!.allowedHosts !== undefined ? { allowedHosts: patch.data!.allowedHosts } : {}),
+      ...(patch.data.allowedSecrets !== undefined ? { allowedSecrets: patch.data.allowedSecrets } : {}),
+      ...(patch.data.allowedDatastorePrefixes !== undefined ? { allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes } : {}),
+      ...(patch.data.allowedHosts !== undefined ? { allowedHosts: patch.data.allowedHosts } : {}),
     },
   });
   console.log(`attached "${toolName}" to "${agentName}".`);
@@ -251,7 +251,7 @@ async function toolList(args: string[]): Promise<void> {
   if (values.agent) {
     const agent = await prisma.agent.findUnique({ where: { name: values.agent } });
     if (!agent) fail(`unknown agent "${values.agent}".`);
-    const attached = await prisma.agentTool.findMany({ where: { agentId: agent!.id }, include: { tool: true } });
+    const attached = await prisma.agentTool.findMany({ where: { agentId: agent.id }, include: { tool: true } });
     if (attached.length === 0) {
       console.log(`no tools attached to "${values.agent}".`);
       return;
@@ -283,31 +283,31 @@ async function agentSchedule(args: string[]): Promise<void> {
     },
   });
 
-  const agent = await prisma.agent.findUnique({ where: { name: name! } });
+  const agent = await prisma.agent.findUnique({ where: { name: name } });
   if (!agent) {
     fail(`unknown agent "${name}".`);
   }
 
   if (values.disable) {
-    await prisma.agent.update({ where: { name: name! }, data: { scheduleEnabled: false } });
+    await prisma.agent.update({ where: { name: name }, data: { scheduleEnabled: false } });
     console.log(`schedule disabled for "${name}".`);
     return;
   }
 
-  const timezone = values.timezone ?? agent!.timezone;
-  const schedule = values.cron ?? agent!.schedule;
+  const timezone = values.timezone ?? agent.timezone;
+  const schedule = values.cron ?? agent.schedule;
   if (!schedule) {
     fail("no --cron given and the agent has no existing schedule to re-enable.");
   }
 
   try {
-    validateCronExpression(schedule!, timezone);
+    validateCronExpression(schedule, timezone);
   } catch (err) {
     fail(`invalid --cron/--timezone: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   await prisma.agent.update({
-    where: { name: name! },
+    where: { name: name },
     data: { schedule, timezone, scheduleEnabled: true },
   });
   console.log(`schedule set for "${name}": "${schedule}" (${timezone}).`);
@@ -325,7 +325,7 @@ async function run(name: string | undefined): Promise<void> {
 
   let run;
   try {
-    run = await runAgent(name!, { llm, engine, datastore, secrets }, prisma, (delta) => {
+    run = await runAgent(name, { llm, engine, datastore, secrets }, prisma, (delta) => {
       process.stdout.write(delta);
     });
   } catch (err) {
@@ -374,7 +374,7 @@ async function listRuns(args: string[]): Promise<void> {
     if (!agent) {
       fail(`unknown agent "${values.agent}".`);
     }
-    agentId = agent!.id;
+    agentId = agent.id;
   }
 
   const runs = await prisma.run.findMany({

@@ -244,7 +244,7 @@ export class GitVcsProvider implements VcsProvider {
     try {
       await mkdir(runRoot, { mode: 0o700 });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("vcs_workspace_exists");
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("vcs_workspace_exists", { cause: error });
       throw error;
     }
     const workspacePath = resolve(runRoot, "workspace");
@@ -314,7 +314,7 @@ export class GitVcsProvider implements VcsProvider {
       ], { maxOutputBytes: this.maxDiffBytes })).stdout;
     } catch (error) {
       if (error instanceof GitCommandError && error.message.includes("git_output_limit")) {
-        throw new Error("vcs_diff_size_limit");
+        throw new Error("vcs_diff_size_limit", { cause: error });
       }
       throw error;
     }

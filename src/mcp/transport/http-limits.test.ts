@@ -1,4 +1,4 @@
-import { expect, it, vi } from "vitest";
+import { expect, it } from "vitest";
 import { PassThrough } from "node:stream";
 import type { IncomingMessage } from "node:http";
 import { canonicalUrl, parseBody, readBody } from "./http-limits.js";

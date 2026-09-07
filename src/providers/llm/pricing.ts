@@ -20,7 +20,7 @@
  * direction as the unknown-model error, never fail-toward-underestimate.
  */
 
-import { computeCost, type ModelPricing, type TokenizerEncoding, type UsageTokens } from "./pricing-core.js";
+import { computeCost, type ModelPricing, type UsageTokens } from "./pricing-core.js";
 export { computeCost } from "./pricing-core.js";
 export type { ModelPricing, TokenizerEncoding, UsageTokens } from "./pricing-core.js";
 

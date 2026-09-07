@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
@@ -152,7 +151,7 @@ function buildFakeDb() {
           kind: "native",
           codingProfile: null,
           ...data,
-        } as FakeAgentRow;
+        };
         agents.set(row.id, row);
         return row;
       },
@@ -205,7 +204,7 @@ function buildFakeDb() {
     },
     tool: {
       create: async ({ data }: { data: Partial<FakeToolRow> & { name: string } }) => {
-        const row: FakeToolRow = { id: `tool_${++n}`, description: "", paramsZod: "", jsonSchema: {}, code: "", ownerId: null, ...data } as FakeToolRow;
+        const row: FakeToolRow = { id: `tool_${++n}`, description: "", paramsZod: "", jsonSchema: {}, code: "", ownerId: null, ...data };
         tools.set(row.id, row);
         return row;
       },
@@ -223,10 +222,10 @@ function buildFakeDb() {
         const idx = agentTools.findIndex((a) => a.agentId === where.agentId_toolId.agentId && a.toolId === where.agentId_toolId.toolId);
         if (idx === -1) {
           const row = { agentId: where.agentId_toolId.agentId, toolId: where.agentId_toolId.toolId, allowedSecrets: [], allowedDatastorePrefixes: [], allowedHosts: [], ...create };
-          agentTools.push(row as never);
+          agentTools.push(row);
           return row;
         }
-        agentTools[idx] = { ...agentTools[idx], ...update } as never;
+        agentTools[idx] = { ...agentTools[idx], ...update };
         return agentTools[idx];
       },
       deleteMany: async ({ where }: { where: { agentId: string; toolId: string } }) => {
@@ -286,7 +285,7 @@ function buildFakeDb() {
     },
     webhook: {
       create: async ({ data }: { data: Partial<FakeWebhookRow> & { agentId: string; secretHash: string } }) => {
-        const row: FakeWebhookRow = { id: `webhook_${++n}`, status: "enabled", ownerId: null, createdAt: new Date(), lastFiredAt: null, ...data } as FakeWebhookRow;
+        const row: FakeWebhookRow = { id: `webhook_${++n}`, status: "enabled", ownerId: null, createdAt: new Date(), lastFiredAt: null, ...data };
         webhooks.set(row.id, row);
         return row;
       },
@@ -309,7 +308,7 @@ function buildFakeDb() {
 
 function fakeCtx(db: PrismaClient, providers: McpRequestContext["providers"], principalId: string, scopes: string[]): McpRequestContext {
   return {
-    principal: { id: principalId, subject: principalId, createdAt: new Date() } as never,
+    principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
     providers,
     db,

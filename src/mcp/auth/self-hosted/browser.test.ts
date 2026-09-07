@@ -51,7 +51,7 @@ describe.skipIf(!process.env.DATABASE_URL)("browser HTTP OAuth flow (database)",
       page.setDefaultTimeout(5_000);
       page.setDefaultNavigationTimeout(5_000);
       await page.route("https://client.example/**", (route) => route.fulfill({ body: "Callback received" }));
-      await page.goto(origin + "/authorize?" + query);
+      await page.goto(origin + "/authorize?" + query.toString());
       await page.locator('input[name="login_key"]').fill(user.loginKey);
       const [loginResponse] = await Promise.all([
         page.waitForResponse((r) => r.url() === origin + "/login" && r.request().method() === "POST"),
@@ -72,8 +72,8 @@ describe.skipIf(!process.env.DATABASE_URL)("browser HTTP OAuth flow (database)",
       await page.getByRole("heading", { name: "Sign in to reevo" }).waitFor();
       expect((await context.cookies()).find((c) => c.name === "reevo-dev-session")).toBeUndefined();
     } finally { await browser.close(); }
-    expect((await visit("/authorize?" + query + "&subject=victim")).status).toBe(400);
-    const authorized = await visit("/authorize?" + query);
+    expect((await visit("/authorize?" + query.toString() + "&subject=victim")).status).toBe(400);
+    const authorized = await visit("/authorize?" + query.toString());
     expect(authorized.status).toBe(303); expect(authorized.headers.get("location")).toMatch(/^\/login\?interaction=/);
     const login = await visit(authorized.headers.get("location")!);
     expect(login.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");

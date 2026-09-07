@@ -10,7 +10,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { encode as encodeO200kBase } from "gpt-tokenizer/encoding/o200k_base";
 import type { LlmMessage, LlmProvider, LlmRequest, LlmStreamEvent, LlmToolDef } from "./types.js";
 import { toClaudeRequest, withCacheBreakpoints, mapClaudeStream, toClaudeTools, type ClaudeStreamEvent } from "./claude-messages.js";
-import { anthropicPriceUsd, anthropicSupportedModels, getAnthropicPricing } from "./pricing-anthropic.js";
+import { anthropicPriceUsd, getAnthropicPricing } from "./pricing-anthropic.js";
 
 export { anthropicSupportedModels } from "./pricing-anthropic.js";
 

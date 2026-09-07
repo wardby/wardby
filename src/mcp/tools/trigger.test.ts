@@ -100,7 +100,7 @@ function fakeDb(agents: FakeAgentRow[]) {
 
 function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[], clientSupportsTasks: boolean): McpRequestContext {
   return {
-    principal: { id: principalId, subject: principalId, createdAt: new Date() } as never,
+    principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
     providers: fakeProviders,
     db,
@@ -201,7 +201,7 @@ describe("trigger_agent", () => {
     const getResult = (await client.request(
       { method: "tasks/get", params: { taskId } },
       fromJsonSchema<{ status: string }>({ type: "object", additionalProperties: true }),
-    )) as { status: string };
+    ));
     expect(getResult.status).toBe("cancelled");
     expect(fakeProviders.executor.stop).toHaveBeenCalledWith(expect.any(String), "cancelled by caller");
 

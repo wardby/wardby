@@ -9,8 +9,7 @@
  * (attach/detach on an agent or tool you don't own) DO throw, same
  * convention as every other tool in this codebase.
  */
-import type { Datastore } from "../../providers/index.js";
-import { Prisma, type PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient, type Tool } from "@prisma/client";
 import { deriveJsonSchema, validateParams } from "../../sandbox/zod-params.js";
 import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
@@ -104,7 +103,7 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
         code: args.code,
         params: validated.value,
         agentId: ctx.principal.id,
-        datastore: ctx.providers.datastore as Datastore,
+        datastore: ctx.providers.datastore,
         toolName: "dry_run_tool",
         allowedFetchHosts: hosts.data.allowedHosts ?? [],
       });
@@ -189,7 +188,7 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
     scope: "tools:write",
     inputSchema: { type: "object", properties: { agentId: { type: "string" } } },
     handler: async (args: { agentId?: string }, ctx) => {
-      const project = (tool: import("@prisma/client").Tool) => tool.ownerId === ctx.principal.id ? tool : { id: tool.id, name: tool.name, description: tool.description };
+      const project = (tool: Tool) => tool.ownerId === ctx.principal.id ? tool : { id: tool.id, name: tool.name, description: tool.description };
       if (args.agentId) {
         await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
         const rows = await ctx.db.agentTool.findMany({ where: { agentId: args.agentId }, include: { tool: true } });

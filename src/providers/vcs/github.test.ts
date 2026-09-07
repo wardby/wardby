@@ -20,6 +20,11 @@ function json(value: unknown, status = 200, headers?: Record<string, string>): R
   });
 }
 
+/** github.ts always sends a JSON.stringify()'d string body -- narrows RequestInit's broad BodyInit type down for these test assertions. */
+function bodyText(body: RequestInit["body"]): string {
+  return typeof body === "string" ? body : "";
+}
+
 function tokenResponse(overrides: Record<string, unknown> = {}): Response {
   return json({
     token: TOKEN,
@@ -33,7 +38,7 @@ function tokenResponse(overrides: Record<string, unknown> = {}): Response {
 describe("GitHubAppClient", () => {
   it("mints and revokes a repository-scoped minimum-permission installation token", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
-    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
       const url = String(input);
       calls.push({ url, init });
       if (url.endsWith("/repos/openai/example/installation")) return json({ id: 42 });
@@ -55,7 +60,7 @@ describe("GitHubAppClient", () => {
     const installationAuth = new Headers(calls[0].init?.headers).get("authorization")!;
     const jwt = installationAuth.replace(/^Bearer /, "");
     expect(decodeJwt(jwt)).toMatchObject({ iss: "123", iat: 1788695940, exp: 1788696540 });
-    expect(JSON.parse(String(calls[1].init?.body))).toEqual({
+    expect(JSON.parse(bodyText(calls[1].init?.body))).toEqual({
       repositories: ["example"],
       permissions: { contents: "write", pull_requests: "write" },
     });
@@ -65,7 +70,7 @@ describe("GitHubAppClient", () => {
   });
 
   it("fails closed when GitHub does not confirm exact repository and permission scope", async () => {
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchMock = vi.fn(async (input: string) => {
       if (String(input).endsWith("/installation")) return json({ id: 42 });
       return tokenResponse({
         permissions: { contents: "read", pull_requests: "write" },
@@ -79,7 +84,7 @@ describe("GitHubAppClient", () => {
 
   it("returns an existing marked pull request without creating a duplicate", async () => {
     const methods: string[] = [];
-    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
       const url = String(input);
       methods.push(`${init?.method ?? "GET"} ${new URL(url).pathname}`);
       if (url.endsWith("/installation")) return json({ id: 42 });
@@ -110,7 +115,7 @@ describe("GitHubAppClient", () => {
   it("creates only a draft PR with fixed metadata and recovers a duplicate-create race", async () => {
     let lookups = 0;
     let createBody: Record<string, unknown> | undefined;
-    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/installation")) return json({ id: 42 });
       if (url.endsWith("/access_tokens")) return tokenResponse();
@@ -124,7 +129,7 @@ describe("GitHubAppClient", () => {
         }]);
       }
       if (url.endsWith("/pulls") && init?.method === "POST") {
-        createBody = JSON.parse(String(init.body));
+        createBody = JSON.parse(bodyText(init.body));
         return json({ message: `duplicate ${TOKEN}` }, 422);
       }
       if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
@@ -148,7 +153,7 @@ describe("GitHubAppClient", () => {
   });
 
   it("normalizes the URL returned by a successful draft PR creation", async () => {
-    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/installation")) return json({ id: 42 });
       if (url.endsWith("/access_tokens")) return tokenResponse();
@@ -185,7 +190,7 @@ describe("GitHubAppClient", () => {
   });
 
   it("rejects a marked PR that is not a draft", async () => {
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchMock = vi.fn(async (input: string) => {
       const url = String(input);
       if (url.endsWith("/installation")) return json({ id: 42 });
       if (url.endsWith("/access_tokens")) return tokenResponse();

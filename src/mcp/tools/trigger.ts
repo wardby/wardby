@@ -80,7 +80,7 @@ export function registerTriggerTool(mcp: ReevoMcpServer): void {
   mcp.registerRequestHandler("tasks/get", "agents:read", async (params, ctx) => {
     const { taskId } = params as { taskId: string };
     await requireOwnedTask(ctx.db, taskId, ctx.principal.id);
-    return getTask(taskId, ctx.db) as unknown as Record<string, unknown>;
+    return getTask(taskId, ctx.db);
   });
 
   mcp.registerRequestHandler("tasks/cancel", "runs:trigger", async (params, ctx) => {

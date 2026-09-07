@@ -89,7 +89,7 @@ describe("pricing routing helpers", () => {
   });
 
   it("openaiCredentialsPresent reflects the env", () => {
-    expect(openaiCredentialsPresent({ OPENAI_API_KEY: "sk-x" } as NodeJS.ProcessEnv)).toBe(true);
-    expect(openaiCredentialsPresent({} as NodeJS.ProcessEnv)).toBe(false);
+    expect(openaiCredentialsPresent({ OPENAI_API_KEY: "sk-x" })).toBe(true);
+    expect(openaiCredentialsPresent({})).toBe(false);
   });
 });

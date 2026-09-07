@@ -21,7 +21,7 @@ import { PostgresDatastore } from "../providers/datastore/index.js";
 import { InProcessExecutor } from "../providers/executor/index.js";
 import { buildSecretCipher } from "../providers/secrets/index.js";
 import { buildAuthProvider } from "../providers/auth/index.js";
-import { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
+import type { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
 import { buildMcpServer, type ReevoMcpServer } from "./server.js";
 import type { McpProviders } from "./context.js";
 import { runStdioServer } from "./transport/stdio.js";

@@ -3,7 +3,7 @@
  * so a future Bedrock-Claude adapter reuses them unchanged — Bedrock and the
  * direct API differ only in client/auth, model IDs, and pricing.
  */
-import type { LlmMessage, LlmRequest, LlmToolDef, LlmStreamEvent, LlmUsage } from "./types.js";
+import type { LlmRequest, LlmToolDef, LlmStreamEvent, LlmUsage } from "./types.js";
 
 export interface CacheControl { type: "ephemeral"; }
 export interface ClaudeTextBlock { type: "text"; text: string; cache_control?: CacheControl; }
@@ -36,7 +36,7 @@ export function toClaudeTools(tools: LlmToolDef[]): ClaudeTool[] {
   return tools.map((t) => ({
     name: t.name,
     description: t.description,
-    input_schema: t.parameters as Record<string, unknown>,
+    input_schema: t.parameters,
   }));
 }
 
@@ -44,7 +44,7 @@ export function toClaudeRequest(req: LlmRequest, defaultMaxTokens: number): Clau
   const system: ClaudeTextBlock[] = [];
   const messages: ClaudeMessage[] = [];
 
-  for (const m of req.messages as LlmMessage[]) {
+  for (const m of req.messages) {
     if (m.role === "system") {
       system.push({ type: "text", text: m.content });
       continue;

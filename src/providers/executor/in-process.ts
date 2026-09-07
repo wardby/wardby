@@ -27,7 +27,7 @@ export class InProcessExecutor implements Executor {
       });
 
     await beat();
-    const timer = setInterval(beat, this.heartbeatIntervalMs);
+    const timer = setInterval(() => void beat(), this.heartbeatIntervalMs);
     try {
       await executeRun(runId, this.providers, this.db);
     } finally {

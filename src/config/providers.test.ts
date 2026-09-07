@@ -3,20 +3,20 @@ import { loadProviderConfig, loadMcpConfig, loadGitHubVcsConfig } from "./provid
 
 describe("provider config", () => {
   it("accepts anthropic and bedrock as llm kinds", () => {
-    expect(loadProviderConfig({ LLM_PROVIDER: "anthropic" } as NodeJS.ProcessEnv).llm).toBe("anthropic");
-    expect(loadProviderConfig({ LLM_PROVIDER: "bedrock" } as NodeJS.ProcessEnv).llm).toBe("bedrock");
+    expect(loadProviderConfig({ LLM_PROVIDER: "anthropic" }).llm).toBe("anthropic");
+    expect(loadProviderConfig({ LLM_PROVIDER: "bedrock" }).llm).toBe("bedrock");
   });
 
   it("defaults auth to delegating", () => {
-    expect(loadProviderConfig({} as NodeJS.ProcessEnv).auth).toBe("delegating");
+    expect(loadProviderConfig({}).auth).toBe("delegating");
   });
 
   it("accepts self-hosted as an auth kind", () => {
-    expect(loadProviderConfig({ AUTH_PROVIDER: "self-hosted" } as NodeJS.ProcessEnv).auth).toBe("self-hosted");
+    expect(loadProviderConfig({ AUTH_PROVIDER: "self-hosted" }).auth).toBe("self-hosted");
   });
 
   it("defaults VCS to GitHub", () => {
-    expect(loadProviderConfig({} as NodeJS.ProcessEnv).vcs).toBe("github");
+    expect(loadProviderConfig({}).vcs).toBe("github");
   });
 });
 
@@ -29,7 +29,7 @@ describe("loadGitHubVcsConfig", () => {
       GITHUB_API_VERSION: "2026-03-10",
       VCS_MAX_CHANGED_FILES: "50",
       VCS_MAX_DIFF_BYTES: "4096",
-    } as NodeJS.ProcessEnv)).toEqual({
+    })).toEqual({
       appId: "123",
       privateKey: "private-key",
       workRoot: "/var/lib/reevo-vcs",
@@ -40,7 +40,7 @@ describe("loadGitHubVcsConfig", () => {
   });
 
   it.each(["0", "-1", "1.5", "nope"])("rejects invalid VCS limits (%s)", (value) => {
-    expect(() => loadGitHubVcsConfig({ VCS_MAX_DIFF_BYTES: value } as NodeJS.ProcessEnv)).toThrow(
+    expect(() => loadGitHubVcsConfig({ VCS_MAX_DIFF_BYTES: value })).toThrow(
       "VCS_MAX_DIFF_BYTES must be a positive integer",
     );
   });
@@ -48,7 +48,7 @@ describe("loadGitHubVcsConfig", () => {
 
 describe("loadMcpConfig", () => {
   it("defaults to stdio + delegating with loopback bind", () => {
-    const c = loadMcpConfig({} as NodeJS.ProcessEnv);
+    const c = loadMcpConfig({});
     expect(c.transport).toBe("stdio");
     expect(c.canonicalUri).toBeUndefined();
     expect(c.localPrincipal).toBe("local");
@@ -59,14 +59,14 @@ describe("loadMcpConfig", () => {
       MCP_TRANSPORT: "http",
       MCP_HTTP_BIND: "127.0.0.1:8080",
       MCP_CANONICAL_URI: "https://host/mcp",
-    } as NodeJS.ProcessEnv);
+    });
     expect(c.transport).toBe("http");
     expect(c.httpBind).toEqual({ host: "127.0.0.1", port: 8080 });
     expect(c.canonicalUri).toBe("https://host/mcp");
   });
 
   it("defaults secretElicitationProtocol to off, and reads it on when explicitly set", () => {
-    expect(loadMcpConfig({} as NodeJS.ProcessEnv).secretElicitationProtocol).toBe(false);
-    expect(loadMcpConfig({ MCP_SECRET_ELICITATION_PROTOCOL: "true" } as NodeJS.ProcessEnv).secretElicitationProtocol).toBe(true);
+    expect(loadMcpConfig({}).secretElicitationProtocol).toBe(false);
+    expect(loadMcpConfig({ MCP_SECRET_ELICITATION_PROTOCOL: "true" }).secretElicitationProtocol).toBe(true);
   });
 });

@@ -40,7 +40,7 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
   const transactionDb = {
     tool: {
       create: async ({ data }: { data: Partial<FakeToolRow> & { name: string } }) => {
-        const row: FakeToolRow = { id: `tool_${++counter}`, description: "", paramsZod: "", jsonSchema: {}, code: "", ownerId: null, ...data } as FakeToolRow;
+        const row: FakeToolRow = { id: `tool_${++counter}`, description: "", paramsZod: "", jsonSchema: {}, code: "", ownerId: null, ...data };
         toolRows.set(row.id, row);
         return row;
       },
@@ -63,10 +63,10 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
         const idx = attachments.findIndex((a) => a.agentId === where.agentId_toolId.agentId && a.toolId === where.agentId_toolId.toolId);
         if (idx === -1) {
           const row = { agentId: where.agentId_toolId.agentId, toolId: where.agentId_toolId.toolId, allowedSecrets: [], allowedDatastorePrefixes: [], allowedHosts: [], ...create };
-          attachments.push(row as never);
+          attachments.push(row);
           return row;
         }
-        attachments[idx] = { ...attachments[idx], ...update } as never;
+        attachments[idx] = { ...attachments[idx], ...update };
         return attachments[idx];
       },
       deleteMany: async ({ where }: { where: { agentId: string; toolId: string } }) => {
@@ -88,7 +88,7 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
 
 function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {
   return {
-    principal: { id: principalId, subject: principalId, createdAt: new Date() } as never,
+    principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
     providers: fakeProviders,
     db,

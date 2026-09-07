@@ -4,7 +4,6 @@ import { buildMcpServer } from "../server.js";
 import { startHttpServer as realStartHttpServer, type HttpServerHandle, type StartHttpServerOptions } from "./streamable-http.js";
 import { createServer } from "node:http";
 import type { AuthProvider, VerifiedToken } from "../../providers/auth/types.js";
-import { SelfHostedAuthProvider } from "../../providers/auth/self-hosted.js";
 
 const fetch: typeof globalThis.fetch = (input, init) => globalThis.fetch(input, { ...init, headers: { host: "host", ...init?.headers } });
 let CANONICAL_URI = "https://host/mcp";
@@ -234,7 +233,7 @@ describe("startHttpServer (webhook ingress)", () => {
     const webhookDb: any = {
       webhook: {
         create: async ({ data }: { data: Partial<FakeWebhookRow> & { agentId: string; secretHash: string } }) => {
-          const row: FakeWebhookRow = { id: `webhook_${++webhookCounter}`, status: "enabled", ownerId: null, createdAt: new Date(), lastFiredAt: null, ...data } as FakeWebhookRow;
+          const row: FakeWebhookRow = { id: `webhook_${++webhookCounter}`, status: "enabled", ownerId: null, createdAt: new Date(), lastFiredAt: null, ...data };
           webhooks.set(row.id, row);
           return row;
         },

@@ -5,12 +5,18 @@
   "description": "Schedule and run budget-guarded LLM agents.",
   "license": "Apache-2.0",
   "type": "module",
-  "engines": { "node": ">=22.12.0" },
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "bin": {
     "reevo": "./dist/cli.js"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "build:vendor": "node scripts/build-sandbox-vendor.mjs",
     "build": "npm run build:vendor && tsc -p tsconfig.build.json",
     "prepare": "npm run build:vendor",
@@ -42,13 +48,19 @@
     "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.0.0",
     "@types/papaparse": "^5.5.2",
     "esbuild": "^0.25.12",
+    "eslint": "^10.10.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.12.0",
     "playwright": "^1.63.0",
+    "prettier": "^3.9.6",
     "prisma": "^6.19.3",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
+    "typescript-eslint": "^8.69.0",
     "vitest": "^3.2.6"
   }
 }

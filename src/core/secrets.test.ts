@@ -194,7 +194,7 @@ describe("scopeSecretsAccessor", () => {
 
   it("never calls the underlying accessor for a disallowed name", async () => {
     let calls = 0;
-    const accessor = { async get(name: string) { calls++; return "x"; } };
+    const accessor = { async get(_name: string) { calls++; return "x"; } };
     const scoped = scopeSecretsAccessor(accessor, []);
     await scoped.get("ANYTHING");
     expect(calls).toBe(0);

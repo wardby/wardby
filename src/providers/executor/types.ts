@@ -19,12 +19,12 @@ export type ExecutionRecoveryResult =
   | { state: "lost"; reason?: string };
 
 export interface Executor {
-  start(runId: string): Promise<void>;
-  stop(runId: string, reason?: string): Promise<void>;
+  start: (runId: string) => Promise<void>;
+  stop: (runId: string, reason?: string) => Promise<void>;
   /**
    * Implementations must query the persisted handle and, before returning
    * `lost`, best-effort stop and collect it. `terminal` means collection and
    * terminal Run persistence completed. Recovery must never relaunch a job.
    */
-  recover?(handle: PersistedExecutionHandle): Promise<ExecutionRecoveryResult>;
+  recover?: (handle: PersistedExecutionHandle) => Promise<ExecutionRecoveryResult>;
 }
