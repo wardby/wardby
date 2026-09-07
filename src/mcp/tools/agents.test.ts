@@ -22,6 +22,7 @@ interface FakeAgentRow {
   tools: unknown[];
   kind: "native" | "coding";
   codingProfile: FakeCodingProfile | null;
+  budgetGroupId: string | null;
 }
 
 interface FakeCodingProfile {
@@ -34,10 +35,10 @@ interface FakeCodingProfile {
   protectedPaths: string[];
 }
 
-type FakeAgentSeed = Omit<FakeAgentRow, "kind" | "codingProfile" | "scheduleEnabled"> &
-  Partial<Pick<FakeAgentRow, "kind" | "codingProfile" | "scheduleEnabled">>;
+type FakeAgentSeed = Omit<FakeAgentRow, "kind" | "codingProfile" | "scheduleEnabled" | "budgetGroupId"> &
+  Partial<Pick<FakeAgentRow, "kind" | "codingProfile" | "scheduleEnabled" | "budgetGroupId">>;
 
-function fakeDb(seed: FakeAgentSeed[] = []) {
+function fakeDb(seed: FakeAgentSeed[] = [], budgetGroups: { id: string; ownerId: string | null }[] = []) {
   const rows = new Map(
     seed.map((r) => [
       r.id,
@@ -45,10 +46,12 @@ function fakeDb(seed: FakeAgentSeed[] = []) {
         kind: "native" as const,
         codingProfile: null,
         scheduleEnabled: true,
+        budgetGroupId: null,
         ...r,
       },
     ]),
   );
+  const groupsById = new Map(budgetGroups.map((g) => [g.id, g]));
   let counter = rows.size;
   const transactionDb = {
     agent: {
@@ -71,6 +74,7 @@ function fakeDb(seed: FakeAgentSeed[] = []) {
           tools: [],
           kind: "native",
           codingProfile: codingProfile?.create ?? null,
+          budgetGroupId: null,
           ...agentData,
         };
         rows.set(row.id, row);
@@ -112,6 +116,9 @@ function fakeDb(seed: FakeAgentSeed[] = []) {
     },
     agentTool: {
       count: async ({ where }: { where: { agentId: string } }) => rows.get(where.agentId)?.tools.length ?? 0,
+    },
+    budgetGroup: {
+      findUnique: async ({ where }: { where: { id: string } }) => groupsById.get(where.id) ?? null,
     },
   };
   const db = {
@@ -465,6 +472,71 @@ describe("agent CRUD tools", () => {
     const list = JSON.parse((result.content as { text: string }[])[0].text) as { name: string }[];
     const names = list.map((a) => a.name).sort();
     expect(names).toEqual(["mine", "public"]);
+    await client.close();
+  });
+
+  it("create_agent accepts a budgetGroupId for a group the caller can read (public)", async () => {
+    const db = fakeDb([], [{ id: "g1", ownerId: null }]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "create_agent",
+      arguments: { name: "grouped", systemPrompt: "s", model: "m", budgetUsd: 1, budgetGroupId: "g1" },
+    });
+    expect(result.isError).toBeFalsy();
+    const body = JSON.parse((result.content as { text: string }[])[0].text) as { budgetGroupId: string };
+    expect(body.budgetGroupId).toBe("g1");
+    await client.close();
+  });
+
+  it("create_agent rejects a budgetGroupId for a group owned by someone else", async () => {
+    const db = fakeDb([], [{ id: "g1", ownerId: "someone-else" }]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "create_agent",
+      arguments: { name: "grouped", systemPrompt: "s", model: "m", budgetUsd: 1, budgetGroupId: "g1" },
+    });
+    expect(result.isError).toBe(true);
+    await client.close();
+  });
+
+  it("update_agent can clear an agent's budgetGroupId back to null", async () => {
+    const db = fakeDb(
+      [
+        {
+          id: "a1",
+          name: "grouped",
+          systemPrompt: "s",
+          model: "m",
+          budgetUsd: 1,
+          maxTurns: 10,
+          schedule: null,
+          timezone: "UTC",
+          ownerId: "p1",
+          tools: [],
+          budgetGroupId: "g1",
+        },
+      ],
+      [{ id: "g1", ownerId: null }],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", budgetGroupId: null },
+    });
+    const body = JSON.parse((result.content as { text: string }[])[0].text) as { budgetGroupId: string | null };
+    expect(body.budgetGroupId).toBeNull();
     await client.close();
   });
 });

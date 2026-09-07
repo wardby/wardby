@@ -3,7 +3,13 @@ import { Prisma, type CodingAgentProfile } from "@prisma/client";
 import { z } from "zod";
 import { CodingProfilePatchSchema, CodingProfileSchema, type CodingProfile } from "../../coding/profile.js";
 import { validateCronExpression } from "../../core/cron.js";
-import { assertCanMutate, canRead, requireOwnedAgent, visibleToPrincipal } from "../auth/ownership.js";
+import {
+  assertCanMutate,
+  canRead,
+  requireOwnedAgent,
+  requireReadableBudgetGroup,
+  visibleToPrincipal,
+} from "../auth/ownership.js";
 import { McpError } from "../errors.js";
 import type { ReevoMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
@@ -23,6 +29,7 @@ const agentFields = {
   timezone: z.string().trim().min(1).max(128),
   scheduleEnabled: z.boolean(),
   kind: z.enum(["native", "coding"]),
+  budgetGroupId: z.string().min(1).max(128),
 };
 
 const CreateAgentSchema = z
@@ -36,6 +43,7 @@ const CreateAgentSchema = z
     timezone: agentFields.timezone.optional(),
     scheduleEnabled: agentFields.scheduleEnabled.optional(),
     kind: agentFields.kind.default("native"),
+    budgetGroupId: agentFields.budgetGroupId.optional(),
     codingProfile: CodingProfileSchema.optional(),
   })
   .strict()
@@ -72,6 +80,7 @@ const UpdateAgentSchema = z
     timezone: agentFields.timezone.optional(),
     scheduleEnabled: agentFields.scheduleEnabled.optional(),
     kind: agentFields.kind.optional(),
+    budgetGroupId: agentFields.budgetGroupId.nullable().optional(),
     codingProfile: CodingProfilePatchSchema.optional(),
   })
   .strict();
@@ -148,6 +157,7 @@ export function registerAgentTools(mcp: ReevoMcpServer): void {
         timezone: { type: "string" },
         scheduleEnabled: { type: "boolean" },
         kind: { type: "string", enum: ["native", "coding"] },
+        budgetGroupId: { type: "string" },
         codingProfile: { ...profileJsonSchema, required: ["repository"] },
       },
       required: ["name", "systemPrompt", "model", "budgetUsd"],
@@ -155,6 +165,9 @@ export function registerAgentTools(mcp: ReevoMcpServer): void {
     handler: async (rawArgs: unknown, ctx) => {
       const args = parseCreateAgent(rawArgs);
       validateSchedule(args.schedule, args.timezone ?? "UTC");
+      if (args.budgetGroupId) {
+        await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id);
+      }
       const { codingProfile, ...agentData } = args;
       const agent = await ctx.db.agent.create({
         data: {
@@ -185,6 +198,7 @@ export function registerAgentTools(mcp: ReevoMcpServer): void {
         timezone: { type: "string" },
         scheduleEnabled: { type: "boolean" },
         kind: { type: "string", enum: ["native", "coding"] },
+        budgetGroupId: { type: ["string", "null"] },
         codingProfile: profileJsonSchema,
       },
       required: ["id"],
@@ -196,6 +210,9 @@ export function registerAgentTools(mcp: ReevoMcpServer): void {
           const existing = await tx.agent.findUnique({ where: { id: args.id }, include: { codingProfile: true } });
           if (!existing) throw new McpError(404, `Agent "${args.id}" not found.`);
           assertCanMutate(existing.ownerId, ctx.principal.id, `Agent "${args.id}" is not owned by the caller.`);
+          if (args.budgetGroupId) {
+            await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id);
+          }
 
           const nextKind = args.kind ?? existing.kind;
           if (nextKind === "native" && args.codingProfile) {
