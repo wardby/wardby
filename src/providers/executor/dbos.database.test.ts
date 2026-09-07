@@ -120,7 +120,7 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
   it("stop cancels a running workflow and the run lands failed rather than hanging", async () => {
     let release!: () => void;
     const open = new Promise<void>((resolve) => (release = resolve));
-    const llm = scriptedLlm([toolCall("t"), finalAnswer("never")], { turn: 2, open });
+    const llm = scriptedLlm([toolCall("t"), toolCall("t"), finalAnswer("never")], { turn: 2, open });
     executor = build(llm);
     await executor.launch();
     const run = await db.run.create({ data: { agentId, executionManaged: true } });

@@ -19,6 +19,7 @@ import type { ProviderRegistry } from "../index.js";
 import type { DbosConfig } from "../../config/providers.js";
 import type { StepRunner } from "../engine/types.js";
 import { executeRun, type RunnerDb } from "../../core/runner.js";
+import { markRunFailedFromExecutorError } from "../../core/dispatch.js";
 import { prisma as defaultDb } from "../../core/db.js";
 import { HEARTBEAT_INTERVAL_MS } from "../../core/timing.js";
 import { logger } from "../../core/logger.js";
@@ -117,20 +118,16 @@ export class DbosExecutor implements Executor {
     try {
       await handle.getResult();
     } catch (err) {
-      // DBOS only interrupts a running `runStep` at its *next* entry (see
-      // callStepFunction in the SDK); a cancellation that races past a run's
-      // last step is never seen inside the workflow body, so executeRun's
-      // own catch backstop never fires and it persists the run's real
-      // (non-cancelled) terminal status. DBOS's own bookkeeping still
-      // refuses to commit that outcome once the workflow row is CANCELLED —
-      // recordWorkflowOutput declines, adoptRecordedOutcome revives the
-      // cancellation, and it surfaces here. This is the only place left to
-      // make the Run row agree with the durable, authoritative outcome, so
-      // it wins even over a status executeRun already wrote.
-      await this.db.run.updateMany({
-        where: { id: runId, status: { not: "failed" } },
-        data: { status: "failed", error: err instanceof Error ? err.message : String(err), finishedAt: new Date() },
-      });
+      // executeRun's own catch backstop owns every terminal write for a run
+      // whose workflow body actually reached it — this only catches a
+      // workflow that failed or was cancelled *before* the body got that
+      // far, leaving the row pending/running. (A cancellation that races
+      // past a run's final step can leave the row's real, already-terminal
+      // outcome in place instead; that's expected — the reason is in the
+      // DBOS log, not here.) markRunFailedFromExecutorError's conditional
+      // update only ever touches a non-terminal row, so it never clobbers
+      // one executeRun already finished.
+      await markRunFailedFromExecutorError(this.db, runId, err);
       throw err;
     }
   }
