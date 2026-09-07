@@ -175,6 +175,18 @@ describe("trigger_agent", () => {
     await client.close();
   });
 
+  it("any principal can trigger a public (ownerId: null) agent", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: null }]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "anyone", ["runs:trigger"], false));
+    registerTriggerTool(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+    expect(result.isError).toBeFalsy();
+    await client.close();
+  });
+
   it("missing runs:trigger scope is rejected", async () => {
     const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "p1" }]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });

@@ -141,7 +141,7 @@ describe("datastore tools", () => {
     await client.close();
   });
 
-  it("a public (ownerId: null) agent's datastore is readable by any principal, but not writable", async () => {
+  it("a public (ownerId: null) agent's datastore is readable and writable by any principal", async () => {
     const db = fakeDb([{ id: "a1", ownerId: null }]);
     const datastore = fakeDatastore();
     const mcp = buildMcpServer({ providers: { datastore } as never, db, config: { canonicalUri: CANONICAL_URI } });
@@ -159,10 +159,10 @@ describe("datastore tools", () => {
       name: "datastore_set",
       arguments: { agentId: "a1", key: "k1", value: "v1" },
     });
-    expect(setResult.isError).toBe(true);
+    expect(setResult.isError).toBeFalsy();
 
     const deleteResult = await client.callTool({ name: "datastore_delete", arguments: { agentId: "a1", key: "k1" } });
-    expect(deleteResult.isError).toBe(true);
+    expect(deleteResult.isError).toBeFalsy();
     await client.close();
   });
 

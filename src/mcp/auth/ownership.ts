@@ -1,12 +1,16 @@
 /**
- * Single seam for ownership decisions across Agent/Task (and anything else
- * that gains a nullable owner column later). A null owner means "public":
- * readable by anyone, but never a mutation target for anyone but its real
- * owner. Every tool file routes through this module instead of re-deriving
- * the null-handling itself, so adding real sharing later is a change here,
- * not an N-file sweep.
+ * Single seam for ownership decisions across Agent/BudgetGroup/Tool/Secret/
+ * Webhook/Task (and anything else that gains a nullable owner column
+ * later). A null owner means "public": readable AND mutable by anyone —
+ * there is no gatekeeper, so no principal is turned away. `isOwner` stays
+ * available (strict, no null-passthrough) for checks that must stay
+ * owner-only regardless of publicness — e.g. a future claim-on-edit
+ * feature would use it to tell "already owned" apart from "public" before
+ * deciding whether to stamp a new owner. Every tool file routes through
+ * this module instead of re-deriving the null-handling itself, so changing
+ * the policy again later is a change here, not an N-file sweep.
  */
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient, Tool } from "@prisma/client";
 import { McpError } from "../errors.js";
 
 export function canRead(ownerId: string | null, principalId: string): boolean {
@@ -17,8 +21,13 @@ export function isOwner(ownerId: string | null, principalId: string): boolean {
   return ownerId === principalId;
 }
 
+/** Same rule as canRead: a null owner is a mutation target for anyone, same as it's a read target for anyone. */
+export function canMutate(ownerId: string | null, principalId: string): boolean {
+  return ownerId === null || ownerId === principalId;
+}
+
 export function assertCanMutate(ownerId: string | null, principalId: string, notFoundMessage: string): void {
-  if (!isOwner(ownerId, principalId)) throw new McpError(403, notFoundMessage);
+  if (!canMutate(ownerId, principalId)) throw new McpError(403, notFoundMessage);
 }
 
 /** Prisma where-clause fragment: rows owned by the caller, plus public (null-owner) rows. */
@@ -58,16 +67,21 @@ export async function requireReadableBudgetGroup(db: PrismaClient, id: string, p
 
 export async function requireOwnedSecret(db: PrismaClient, id: string, principalId: string): Promise<void> {
   const secret = await db.secret.findUnique({ where: { id } });
-  if (!secret || !isOwner(secret.ownerId, principalId)) {
-    throw new McpError(403, `Secret "${id}" is not owned by the caller.`);
-  }
+  if (!secret) throw new McpError(403, `Secret "${id}" is not owned by the caller.`);
+  assertCanMutate(secret.ownerId, principalId, `Secret "${id}" is not owned by the caller.`);
 }
 
 export async function requireOwnedWebhook(db: PrismaClient, id: string, principalId: string): Promise<void> {
   const webhook = await db.webhook.findUnique({ where: { id } });
-  if (!webhook || !isOwner(webhook.ownerId, principalId)) {
-    throw new McpError(403, `Webhook "${id}" is not owned by the caller.`);
-  }
+  if (!webhook) throw new McpError(403, `Webhook "${id}" is not owned by the caller.`);
+  assertCanMutate(webhook.ownerId, principalId, `Webhook "${id}" is not owned by the caller.`);
+}
+
+export async function requireOwnedTool(db: Pick<PrismaClient, "tool">, id: string, principalId: string): Promise<Tool> {
+  const tool = await db.tool.findUnique({ where: { id } });
+  if (!tool) throw new McpError(404, `Tool "${id}" not found.`);
+  assertCanMutate(tool.ownerId, principalId, `Tool "${id}" is not owned by the caller.`);
+  return tool;
 }
 
 /**

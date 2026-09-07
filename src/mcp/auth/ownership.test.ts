@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   canRead,
   isOwner,
+  canMutate,
   assertCanMutate,
   visibleToPrincipal,
   requireOwnedAgent,
@@ -9,6 +10,7 @@ import {
   requireOwnedTask,
   requireOwnedSecret,
   requireOwnedWebhook,
+  requireOwnedTool,
   requireOwnedBudgetGroup,
   requireReadableBudgetGroup,
 } from "./ownership.js";
@@ -35,12 +37,24 @@ describe("isOwner", () => {
   });
 });
 
+describe("canMutate", () => {
+  it("null owner (public) is mutable by anyone", () => {
+    expect(canMutate(null, "p1")).toBe(true);
+  });
+  it("owner mutating their own resource", () => {
+    expect(canMutate("p1", "p1")).toBe(true);
+  });
+  it("a different principal cannot mutate an owned (non-null) resource", () => {
+    expect(canMutate("owner-1", "p1")).toBe(false);
+  });
+});
+
 describe("assertCanMutate", () => {
   it("passes for the owner", () => {
     expect(() => assertCanMutate("p1", "p1", "nope")).not.toThrow();
   });
-  it("throws 403 for a null (public) owner — mutation is never implicitly public", () => {
-    expect(() => assertCanMutate(null, "p1", "nope")).toThrow(McpError);
+  it("passes for a null (public) owner — public rows are mutable by anyone", () => {
+    expect(() => assertCanMutate(null, "p1", "nope")).not.toThrow();
   });
   it("throws 403 for a different owner", () => {
     try {
@@ -66,6 +80,7 @@ function fakeDb(
   secrets: Record<string, { id: string; ownerId: string | null }> = {},
   webhooks: Record<string, { id: string; ownerId: string | null }> = {},
   budgetGroups: Record<string, { id: string; ownerId: string | null }> = {},
+  tools: Record<string, { id: string; ownerId: string | null }> = {},
 ) {
   return {
     agent: { findUnique: async ({ where }: { where: { id: string } }) => agents[where.id] ?? null },
@@ -73,6 +88,7 @@ function fakeDb(
     secret: { findUnique: async ({ where }: { where: { id: string } }) => secrets[where.id] ?? null },
     webhook: { findUnique: async ({ where }: { where: { id: string } }) => webhooks[where.id] ?? null },
     budgetGroup: { findUnique: async ({ where }: { where: { id: string } }) => budgetGroups[where.id] ?? null },
+    tool: { findUnique: async ({ where }: { where: { id: string } }) => tools[where.id] ?? null },
   } as unknown as import("@prisma/client").PrismaClient;
 }
 
@@ -85,9 +101,9 @@ describe("requireOwnedAgent", () => {
     const db = fakeDb({});
     await expect(requireOwnedAgent(db, "missing", "p1")).rejects.toMatchObject({ httpStatus: 404 });
   });
-  it("403s for a public (null-owner) agent — mutation is never implicitly public", async () => {
+  it("returns a public (null-owner) agent for any principal — public rows are mutable by anyone", async () => {
     const db = fakeDb({ a1: { id: "a1", ownerId: null } });
-    await expect(requireOwnedAgent(db, "a1", "p1")).rejects.toMatchObject({ httpStatus: 403 });
+    await expect(requireOwnedAgent(db, "a1", "anyone")).resolves.toMatchObject({ id: "a1" });
   });
   it("403s for a different owner", async () => {
     const db = fakeDb({ a1: { id: "a1", ownerId: "owner-1" } });
@@ -138,6 +154,10 @@ describe("requireOwnedSecret", () => {
     const db = fakeDb({}, {}, { s1: { id: "s1", ownerId: "owner-1" } });
     await expect(requireOwnedSecret(db, "s1", "p1")).rejects.toMatchObject({ httpStatus: 403 });
   });
+  it("resolves for any principal on a public (null-owner) secret", async () => {
+    const db = fakeDb({}, {}, { s1: { id: "s1", ownerId: null } });
+    await expect(requireOwnedSecret(db, "s1", "anyone")).resolves.toBeUndefined();
+  });
 });
 
 describe("requireOwnedWebhook", () => {
@@ -152,6 +172,29 @@ describe("requireOwnedWebhook", () => {
   it("403s for a different owner", async () => {
     const db = fakeDb({}, {}, {}, { w1: { id: "w1", ownerId: "owner-1" } });
     await expect(requireOwnedWebhook(db, "w1", "p1")).rejects.toMatchObject({ httpStatus: 403 });
+  });
+  it("resolves for any principal on a public (null-owner) webhook", async () => {
+    const db = fakeDb({}, {}, {}, { w1: { id: "w1", ownerId: null } });
+    await expect(requireOwnedWebhook(db, "w1", "anyone")).resolves.toBeUndefined();
+  });
+});
+
+describe("requireOwnedTool", () => {
+  it("returns the tool for its owner", async () => {
+    const db = fakeDb({}, {}, {}, {}, {}, { t1: { id: "t1", ownerId: "p1" } });
+    await expect(requireOwnedTool(db, "t1", "p1")).resolves.toMatchObject({ id: "t1" });
+  });
+  it("404s for a missing tool", async () => {
+    const db = fakeDb({}, {}, {}, {}, {}, {});
+    await expect(requireOwnedTool(db, "missing", "p1")).rejects.toMatchObject({ httpStatus: 404 });
+  });
+  it("403s for a different owner", async () => {
+    const db = fakeDb({}, {}, {}, {}, {}, { t1: { id: "t1", ownerId: "owner-1" } });
+    await expect(requireOwnedTool(db, "t1", "p1")).rejects.toMatchObject({ httpStatus: 403 });
+  });
+  it("returns a public (null-owner) tool for any principal", async () => {
+    const db = fakeDb({}, {}, {}, {}, {}, { t1: { id: "t1", ownerId: null } });
+    await expect(requireOwnedTool(db, "t1", "anyone")).resolves.toMatchObject({ id: "t1" });
   });
 });
 
@@ -168,9 +211,9 @@ describe("requireOwnedBudgetGroup", () => {
     const db = fakeDb({}, {}, {}, {}, { g1: { id: "g1", ownerId: "someone-else" } });
     await expect(requireOwnedBudgetGroup(db, "g1", "p1")).rejects.toMatchObject({ httpStatus: 403 });
   });
-  it("403s for a public (null-owner) group — mutation is never implicitly public", async () => {
+  it("returns a public (null-owner) group for any caller — public rows are mutable by anyone", async () => {
     const db = fakeDb({}, {}, {}, {}, { g1: { id: "g1", ownerId: null } });
-    await expect(requireOwnedBudgetGroup(db, "g1", "p1")).rejects.toMatchObject({ httpStatus: 403 });
+    await expect(requireOwnedBudgetGroup(db, "g1", "anyone")).resolves.toMatchObject({ id: "g1" });
   });
 });
 

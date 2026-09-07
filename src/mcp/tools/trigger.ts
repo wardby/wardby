@@ -32,7 +32,7 @@ import { dispatchRun } from "../../core/dispatch.js";
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { createTaskResult, getTask, cancelTask } from "../tasks/manager.js";
-import { requireOwnedAgent, requireOwnedTask } from "../auth/ownership.js";
+import { canMutate, requireOwnedAgent, requireOwnedTask } from "../auth/ownership.js";
 import { textResult } from "./text-result.js";
 
 const DEFAULT_TASK_TTL_MS = 24 * 60 * 60 * 1000;
@@ -52,7 +52,7 @@ export function registerTriggerTool(mcp: ReevoMcpServer): void {
         trigger: "manual",
         task: ctx.clientSupportsTasks ? { principalId: ctx.principal.id, ttlMs: DEFAULT_TASK_TTL_MS } : undefined,
         beforePersist: async (_tx, current) => {
-          if (current.ownerId !== ctx.principal.id) {
+          if (!canMutate(current.ownerId, ctx.principal.id)) {
             throw new McpError(403, `Agent "${agent.id}" is not owned by the caller.`);
           }
           return true;

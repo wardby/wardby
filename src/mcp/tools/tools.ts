@@ -9,7 +9,7 @@
  * (attach/detach on an agent or tool you don't own) DO throw, same
  * convention as every other tool in this codebase.
  */
-import { Prisma, type PrismaClient, type Tool } from "@prisma/client";
+import { Prisma, type Tool } from "@prisma/client";
 import { deriveJsonSchema, validateParams } from "../../sandbox/zod-params.js";
 import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
@@ -18,18 +18,12 @@ import { McpError } from "../errors.js";
 import {
   assertCanMutate,
   requireOwnedAgent,
+  requireOwnedTool,
   requireReadableAgent,
   visibleToPrincipal,
   canRead,
 } from "../auth/ownership.js";
 import { textResult } from "./text-result.js";
-
-async function requireOwnedTool(db: Pick<PrismaClient, "tool">, id: string, principalId: string) {
-  const tool = await db.tool.findUnique({ where: { id } });
-  if (!tool) throw new McpError(404, `Tool "${id}" not found.`);
-  if (tool.ownerId !== principalId) throw new McpError(403, `Tool "${id}" is not owned by the caller.`);
-  return tool;
-}
 
 export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
   mcp.registerTool({
