@@ -6,7 +6,9 @@ import { registerTriggerTool } from "./trigger.js";
 import type { McpRequestContext } from "../context.js";
 
 const CANONICAL_URI = "https://host/mcp";
-const fakeProviders = { executor: { start: vi.fn(async () => {}) } } as unknown as import("../../providers/index.js").ProviderRegistry;
+const fakeProviders = {
+  executor: { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) },
+} as unknown as import("../../providers/index.js").ProviderRegistry;
 
 interface FakeAgentRow {
   id: string;
@@ -36,11 +38,11 @@ function fakeDb(agents: FakeAgentRow[]) {
   let runCounter = 0;
   let taskCounter = 0;
 
-  return {
+  const db: any = {
     agent: {
       findUnique: async ({ where }: { where: { id?: string; name?: string } }) => {
-        if (where.id) return agentsById.get(where.id) ?? null;
-        if (where.name) return agents.find((a) => a.name === where.name) ?? null;
+        const row = where.id ? agentsById.get(where.id) : agents.find((a) => a.name === where.name);
+        if (row) return { kind: "native", codingProfile: null, budgetUsd: 1, model: "m", ...row };
         return null;
       },
     },
@@ -56,6 +58,7 @@ function fakeDb(agents: FakeAgentRow[]) {
         if (!row) throw new Error("not found");
         return row;
       },
+      updateMany: async () => ({ count: 1 }),
     },
     task: {
       create: async ({ data }: { data: { kind: string; runId: string; principalId: string | null; status: string } }) => {
@@ -87,7 +90,12 @@ function fakeDb(agents: FakeAgentRow[]) {
         return updated;
       },
     },
-  } as unknown as import("@prisma/client").PrismaClient;
+    codingRun: { create: async ({ data }: { data: unknown }) => data },
+    webhook: {},
+    $queryRaw: async () => [],
+  };
+  db.$transaction = async (fn: (tx: any) => unknown) => fn(db);
+  return db as import("@prisma/client").PrismaClient;
 }
 
 function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[], clientSupportsTasks: boolean): McpRequestContext {
@@ -172,6 +180,7 @@ describe("trigger_agent", () => {
   });
 
   it("cancel_run invokes the executor's cooperative stop path", async () => {
+    vi.mocked(fakeProviders.executor.stop).mockClear();
     const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "p1" }]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, "p1", ["runs:trigger", "agents:read"], true));
@@ -194,6 +203,7 @@ describe("trigger_agent", () => {
       fromJsonSchema<{ status: string }>({ type: "object", additionalProperties: true }),
     )) as { status: string };
     expect(getResult.status).toBe("cancelled");
+    expect(fakeProviders.executor.stop).toHaveBeenCalledWith(expect.any(String), "cancelled by caller");
 
     await client.close();
   });

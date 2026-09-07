@@ -8,9 +8,10 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { Agent, PrismaClient } from "@prisma/client";
+import type { Agent } from "@prisma/client";
 import type { Executor } from "../providers/executor/types.js";
 import { dueWindow } from "./cron.js";
+import { dispatchRun, type DispatchDb } from "./dispatch.js";
 import { tryAcquireLease } from "./lease.js";
 import { prisma as defaultDb } from "./db.js";
 import { LEASE_RENEW_INTERVAL_MS, LEASE_TTL_MS, TICK_INTERVAL_MS } from "./timing.js";
@@ -18,7 +19,7 @@ import { logger } from "./logger.js";
 
 const schedulerLog = logger.child({ module: "scheduler" });
 
-export type SchedulerDb = Pick<PrismaClient, "agent" | "run" | "$transaction" | "$queryRaw">;
+export type SchedulerDb = DispatchDb;
 
 /**
  * Per spec: "Executor throws synchronously on start → the run is marked
@@ -26,25 +27,12 @@ export type SchedulerDb = Pick<PrismaClient, "agent" | "run" | "$transaction" | 
  * rather than an unconditional `update`, so this can never clobber a run
  * that already reached a terminal state through some other path.
  */
-export async function markRunFailedFromExecutorError(
-  db: Pick<SchedulerDb, "run">,
-  runId: string,
-  err: unknown,
-): Promise<void> {
-  await db.run.updateMany({
-    where: { id: runId, status: { in: ["pending", "running"] } },
-    data: {
-      status: "failed",
-      error: err instanceof Error ? err.message : String(err),
-      finishedAt: new Date(),
-    },
-  });
-}
+export { markRunFailedFromExecutorError } from "./dispatch.js";
 
 /** Cheap, lock-free pass: which enabled+scheduled agents look due right now. */
 export async function findDueCandidates(db: Pick<SchedulerDb, "agent">, now: Date): Promise<Agent[]> {
   const candidates = await db.agent.findMany({
-    where: { kind: "native", scheduleEnabled: true, schedule: { not: null } },
+    where: { scheduleEnabled: true, schedule: { not: null } },
   });
   return candidates.filter((agent) =>
     dueWindow({
@@ -62,34 +50,33 @@ export async function findDueCandidates(db: Pick<SchedulerDb, "agent">, now: Dat
  * Returns the new run's id, or null if the agent wasn't (or is no longer)
  * due, or another tick already holds its row lock.
  */
-export async function claimDueRun(db: SchedulerDb, agentId: string, now: Date): Promise<string | null> {
-  return db.$transaction(async (tx) => {
-    const locked = await tx.$queryRaw<{ id: string }[]>`
-      SELECT "id" FROM "Agent" WHERE "id" = ${agentId} FOR UPDATE SKIP LOCKED
-    `;
-    if (locked.length === 0) {
-      return null;
-    }
-
-    const agent = await tx.agent.findUnique({ where: { id: agentId } });
-    if (!agent || agent.kind !== "native" || !agent.scheduleEnabled || !agent.schedule) {
-      return null;
-    }
-
-    const window = dueWindow({
-      schedule: agent.schedule,
-      timezone: agent.timezone,
-      lastScheduledAt: agent.lastScheduledAt,
-      now,
-    });
-    if (!window) {
-      return null;
-    }
-
-    await tx.agent.update({ where: { id: agentId }, data: { lastScheduledAt: window } });
-    const run = await tx.run.create({ data: { agentId, trigger: "scheduled" } });
-    return run.id;
+export async function claimDueRun(
+  db: SchedulerDb,
+  executor: Executor,
+  agentId: string,
+  now: Date,
+): Promise<string | null> {
+  const dispatched = await dispatchRun({
+    db,
+    executor,
+    agentId,
+    trigger: "scheduled",
+    now,
+    lockAgent: true,
+    beforePersist: async (tx, agent) => {
+      if (!agent.scheduleEnabled || !agent.schedule) return false;
+      const window = dueWindow({
+        schedule: agent.schedule,
+        timezone: agent.timezone,
+        lastScheduledAt: agent.lastScheduledAt,
+        now,
+      });
+      if (!window) return false;
+      await tx.agent.update({ where: { id: agentId }, data: { lastScheduledAt: window } });
+      return true;
+    },
   });
+  return dispatched?.run.id ?? null;
 }
 
 export interface SchedulerOptions {
@@ -132,17 +119,9 @@ export function startScheduler(options: SchedulerOptions): SchedulerHandle {
     const due = await findDueCandidates(db, now());
     for (const agent of due) {
       try {
-        const runId = await claimDueRun(db, agent.id, now());
+        const runId = await claimDueRun(db, options.executor, agent.id, now());
         if (runId) {
           log(`firing agent "${agent.name}" -> run ${runId}`);
-          options.executor.start(runId).catch(async (err) => {
-            schedulerLog.error({ err, runId, agentName: agent.name }, "run failed to start");
-            try {
-              await markRunFailedFromExecutorError(db, runId, err);
-            } catch (updateErr) {
-              schedulerLog.error({ err: updateErr, runId }, "failed to mark run as failed");
-            }
-          });
         }
       } catch (err) {
         schedulerLog.error({ err, agentName: agent.name }, "error claiming a due run");

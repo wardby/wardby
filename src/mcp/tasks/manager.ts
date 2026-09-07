@@ -10,7 +10,7 @@
  * cancellation is cooperative and eventually consistent, per the
  * extension's own spec language).
  */
-import type { PrismaClient, RunStatus } from "@prisma/client";
+import type { PrismaClient, RunStatus, Task } from "@prisma/client";
 import { INTERNAL_ERROR } from "@modelcontextprotocol/server";
 
 export type TaskStatus = "working" | "input_required" | "completed" | "failed" | "cancelled";
@@ -42,6 +42,18 @@ export type GetTaskResult =
 
 const DEFAULT_POLL_INTERVAL_MS = 1000;
 
+export function createTaskResult(row: Task, ttlMs: number): CreateTaskResult {
+  return {
+    resultType: "task",
+    taskId: row.id,
+    status: "working",
+    createdAt: row.createdAt.toISOString(),
+    lastUpdatedAt: row.updatedAt.toISOString(),
+    ttlMs,
+    pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
+  };
+}
+
 /** Starts a run-backed task: persists the Task row BEFORE returning, so a client's first tasks/get always finds it. */
 export async function createRunTask(runId: string, principalId: string, db: PrismaClient, ttlMs: number): Promise<CreateTaskResult> {
   const row = await db.task.create({
@@ -53,15 +65,7 @@ export async function createRunTask(runId: string, principalId: string, db: Pris
       ttlAt: new Date(Date.now() + ttlMs),
     },
   });
-  return {
-    resultType: "task",
-    taskId: row.id,
-    status: "working",
-    createdAt: row.createdAt.toISOString(),
-    lastUpdatedAt: row.updatedAt.toISOString(),
-    ttlMs,
-    pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
-  };
+  return createTaskResult(row, ttlMs);
 }
 
 function mapTerminalRunStatus(status: Extract<RunStatus, "succeeded" | "budget_exhausted" | "refused" | "failed" | "lost">, run: {

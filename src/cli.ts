@@ -412,7 +412,7 @@ async function scheduler(args: string[]): Promise<void> {
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
   const executor = new InProcessExecutor({ llm, engine, datastore, secrets }, prisma);
-  const reconciler = startReconciler({ db: prisma });
+  const reconciler = startReconciler({ db: prisma, executor });
   const sched = startScheduler({ executor, db: prisma, scope });
 
   console.log(`reevo scheduler started (scope "${scope}"). Press Ctrl+C to stop.`);

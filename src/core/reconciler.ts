@@ -5,13 +5,10 @@
  * shouldn't wait on leadership) periodically transitions such runs to a
  * terminal `lost` state.
  *
- * Scoped to `trigger: "scheduled"` only. An attended `reevo run` (trigger
- * "manual") intentionally has no heartbeat — nothing is watching it but the
- * human running it — so treating a plain `heartbeatAt IS NULL` as orphaned
- * would reap any manual run that simply streams for longer than
- * `HEARTBEAT_TIMEOUT`. That's the bug this scoping fixes: without it, a
- * long-running `reevo run` gets flipped to `lost` out from under a human
- * still watching it complete.
+ * Scoped by `executionManaged`, not trigger. Scheduled, MCP, and webhook
+ * runs are detached and managed; an attended `reevo run` is not. Coding
+ * jobs with persisted handles are delegated to the executor's recovery
+ * path, which must query/stop/collect and must never relaunch.
  *
  * Two states get reclaimed:
  *  - `running` past the heartbeat timeout (the executor died mid-run). The
@@ -30,7 +27,8 @@
  * no-op, not a race.
  */
 
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
+import type { Executor } from "../providers/executor/types.js";
 import { HEARTBEAT_TIMEOUT_MS, RECONCILE_INTERVAL_MS } from "./timing.js";
 import { prisma as defaultDb } from "./db.js";
 import { logger } from "./logger.js";
@@ -44,32 +42,70 @@ export async function reconcileOnce(
   db: ReconcilerDb,
   now: Date = new Date(),
   heartbeatTimeoutMs: number = HEARTBEAT_TIMEOUT_MS,
+  executor?: Executor,
 ): Promise<number> {
   const cutoff = new Date(now.getTime() - heartbeatTimeoutMs);
-  const result = await db.run.updateMany({
-    where: {
-      trigger: "scheduled",
-      OR: [
-        {
-          status: "running",
-          OR: [{ heartbeatAt: { lt: cutoff } }, { heartbeatAt: null, startedAt: { lt: cutoff } }],
-        },
-        { status: "pending", startedAt: { lt: cutoff } },
-      ],
-    },
-    data: {
-      status: "lost",
-      error: `Orphaned: no heartbeat/progress since before ${cutoff.toISOString()}.`,
-      finishedAt: now,
+  const stale = {
+    executionManaged: true,
+    OR: [
+      {
+        status: "running" as const,
+        OR: [{ heartbeatAt: { lt: cutoff } }, { heartbeatAt: null, startedAt: { lt: cutoff } }],
+      },
+      { status: "pending" as const, startedAt: { lt: cutoff } },
+    ],
+  } satisfies Prisma.RunWhereInput;
+  const candidates = await db.run.findMany({
+    where: stale,
+    include: {
+      agent: { select: { kind: true } },
+      codingRun: { select: { jobBackend: true, jobHandle: true } },
     },
   });
-  return result.count;
+
+  let lost = 0;
+  for (const run of candidates) {
+    let reason = `Orphaned: no heartbeat/progress since before ${cutoff.toISOString()}.`;
+    if (run.agent.kind === "coding" && run.codingRun?.jobHandle) {
+      if (!executor?.recover || !run.codingRun.jobBackend) continue;
+      let recovered;
+      try {
+        recovered = await executor.recover({
+          runId: run.id,
+          backend: run.codingRun.jobBackend,
+          id: run.codingRun.jobHandle,
+        });
+      } catch (err) {
+        reconcilerLog.error({ err, runId: run.id }, "managed run recovery failed");
+        continue;
+      }
+      if (recovered.state === "active") {
+        await db.run.updateMany({
+          where: { id: run.id, executionManaged: true, status: { in: ["pending", "running"] } },
+          data: { heartbeatAt: now },
+        });
+        continue;
+      }
+      if (recovered.state === "terminal") continue;
+      reason = recovered.reason ?? "Managed coding job was lost after stop and collection attempts.";
+    } else if (run.agent.kind === "coding") {
+      reason = "Managed coding job became stale before its launcher handle was persisted; it was not relaunched.";
+    }
+
+    const result = await db.run.updateMany({
+      where: { id: run.id, ...stale },
+      data: { status: "lost", error: reason, finishedAt: now },
+    });
+    lost += result.count;
+  }
+  return lost;
 }
 
 export interface ReconcilerOptions {
   db?: ReconcilerDb;
   intervalMs?: number;
   heartbeatTimeoutMs?: number;
+  executor?: Executor;
 }
 
 export interface ReconcilerHandle {
@@ -82,7 +118,7 @@ export function startReconciler(options: ReconcilerOptions = {}): ReconcilerHand
   const heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT_MS;
 
   const timer = setInterval(() => {
-    reconcileOnce(db, new Date(), heartbeatTimeoutMs).catch((err) => {
+    reconcileOnce(db, new Date(), heartbeatTimeoutMs, options.executor).catch((err) => {
       reconcilerLog.error({ err }, "reconcile pass failed");
     });
   }, intervalMs);

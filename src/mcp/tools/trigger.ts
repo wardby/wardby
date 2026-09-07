@@ -15,15 +15,9 @@
  * calls it a clear, on-protocol "this task isn't awaiting input" instead
  * of a generic method-not-found.
  *
- * Cancellation caveat: `Executor.start(runId)`/the engine expose no
- * interrupt hook at all today — `cancelTask`'s "cooperative stop" (per the
- * extension's own "cooperative and eventually consistent" language, a
- * best-effort contract, not a guarantee) has nothing to cooperate with yet.
- * The stop hook here marks the Task row cancelled (so tasks/get reflects
- * cancellation immediately) but cannot actually interrupt an in-flight
- * run — building real interruption is a new Executor/Engine capability out
- * of scope for this plan (no task in it adds one). Flagged in the ledger,
- * not silently glossed over.
+ * Cancellation calls the Executor's best-effort stop seam after the Task is
+ * marked cancelled. Native execution remains cooperative until the Engine
+ * accepts an AbortSignal; coding executors must stop the isolated job.
  *
  * Ownership: a Task is stamped with the triggering principal's id at
  * creation (Task.principalId) — a direct column, not resolved transitively
@@ -34,10 +28,10 @@
  * task manager — a caller who guesses or is handed someone else's taskId
  * gets 404, not another principal's final text/cost.
  */
-import { createRun } from "../../core/runner.js";
+import { dispatchRun } from "../../core/dispatch.js";
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
-import { createRunTask, getTask, cancelTask } from "../tasks/manager.js";
+import { createTaskResult, getTask, cancelTask } from "../tasks/manager.js";
 import { requireOwnedAgent, requireOwnedTask } from "../auth/ownership.js";
 import { textResult } from "./text-result.js";
 
@@ -51,22 +45,28 @@ export function registerTriggerTool(mcp: ReevoMcpServer): void {
     handler: async (args: { agentId: string }, ctx) => {
       const agent = await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
 
-      const run = await createRun(ctx.db, agent.name, "manual");
-
-      // Detached on purpose: Executor.start() only resolves once the run
-      // reaches a terminal state (see InProcessExecutor), which would block
-      // this tool call for the run's entire duration — the whole point of
-      // returning a Task/runId is NOT waiting for that here.
-      void ctx.providers.executor.start(run.id).catch(() => {
-        // executeRun already persists failures onto the Run row itself;
-        // an executor-level throw beyond that has nowhere else to go.
+      const dispatched = await dispatchRun({
+        db: ctx.db,
+        executor: ctx.providers.executor,
+        agentId: agent.id,
+        trigger: "manual",
+        task: ctx.clientSupportsTasks
+          ? { principalId: ctx.principal.id, ttlMs: DEFAULT_TASK_TTL_MS }
+          : undefined,
+        beforePersist: async (_tx, current) => {
+          if (current.ownerId !== ctx.principal.id) {
+            throw new McpError(403, `Agent "${agent.id}" is not owned by the caller.`);
+          }
+          return true;
+        },
       });
+      if (!dispatched) throw new Error("Run dispatch was not claimed.");
 
       if (ctx.clientSupportsTasks) {
-        const task = await createRunTask(run.id, ctx.principal.id, ctx.db, DEFAULT_TASK_TTL_MS);
-        return textResult(task);
+        if (!dispatched.task) throw new Error("Run task was not persisted.");
+        return textResult(createTaskResult(dispatched.task, DEFAULT_TASK_TTL_MS));
       }
-      return textResult({ runId: run.id });
+      return textResult({ runId: dispatched.run.id });
     },
   });
 
@@ -87,8 +87,7 @@ export function registerTriggerTool(mcp: ReevoMcpServer): void {
     const { taskId } = params as { taskId: string };
     await requireOwnedTask(ctx.db, taskId, ctx.principal.id);
     await cancelTask(taskId, ctx.db, async (runId) => {
-      // See module-level caveat: no real interrupt hook exists yet.
-      void runId;
+      await ctx.providers.executor.stop(runId, "cancelled by caller");
     });
     return {};
   });

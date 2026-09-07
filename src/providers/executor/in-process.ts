@@ -34,4 +34,9 @@ export class InProcessExecutor implements Executor {
       clearInterval(timer);
     }
   }
+
+  async stop(_runId: string, _reason?: string): Promise<void> {
+    // Native engine cancellation remains cooperative until Engine accepts an
+    // AbortSignal. The task state still records the caller's request.
+  }
 }

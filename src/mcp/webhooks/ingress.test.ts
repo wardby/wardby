@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { handleWebhookIngress } from "./ingress.js";
 import { createWebhook } from "../../core/webhooks.js";
+import type { Executor } from "../../providers/executor/types.js";
+
+const executor: Executor = { async start() {}, async stop() {} };
 
 interface FakeWebhookRow {
   id: string;
@@ -22,7 +25,7 @@ function fakeDb(agents: FakeAgentRow[]) {
   let counter = 0;
   let runCounter = 0;
 
-  return {
+  const db: any = {
     webhook: {
       create: async ({ data }: { data: Partial<FakeWebhookRow> & { agentId: string; secretHash: string } }) => {
         const row: FakeWebhookRow = { id: `webhook_${++counter}`, status: "enabled", ownerId: null, createdAt: new Date(), lastFiredAt: null, ...data } as FakeWebhookRow;
@@ -40,22 +43,28 @@ function fakeDb(agents: FakeAgentRow[]) {
     },
     agent: {
       findUnique: async ({ where }: { where: { id?: string; name?: string } }) => {
-        if (where.id) return agentsById.get(where.id) ?? null;
-        if (where.name) return agents.find((a) => a.name === where.name) ?? null;
+        const row = where.id ? agentsById.get(where.id) : agents.find((a) => a.name === where.name);
+        if (row) return { kind: "native", codingProfile: null, budgetUsd: 1, model: "m", ...row };
         return null;
       },
     },
     run: {
-      create: async ({ data }: { data: { agentId: string; trigger: string } }) => ({ id: `run_${++runCounter}`, ...data }),
+      create: async ({ data }: { data: { agentId: string; trigger: string } }) => ({ id: `run_${++runCounter}`, status: "pending", startedAt: new Date(), ...data }),
+      updateMany: async () => ({ count: 1 }),
     },
-  } as unknown as import("@prisma/client").PrismaClient;
+    codingRun: { create: async ({ data }: any) => data },
+    task: { create: async ({ data }: any) => ({ id: "task_1", createdAt: new Date(), updatedAt: new Date(), ...data }) },
+    $queryRaw: async () => [],
+  };
+  db.$transaction = async (fn: (tx: any) => unknown) => fn(db);
+  return db as import("@prisma/client").PrismaClient;
 }
 
 describe("webhook ingress", () => {
   it("valid secret in the header -> 202 with a runId", async () => {
     const db = fakeDb([{ id: "a1", name: "greeter" }]);
     const { id, secret } = await createWebhook("a1", "p1", db);
-    const result = await handleWebhookIngress(id, { headers: { "x-webhook-secret": secret }, body: {} }, db);
+    const result = await handleWebhookIngress(id, { headers: { "x-webhook-secret": secret }, body: {} }, db, executor);
     expect(result.status).toBe(202);
     expect((result.body as { runId: string }).runId).toBeTruthy();
   });
@@ -63,20 +72,20 @@ describe("webhook ingress", () => {
   it("valid secret in the body -> 202", async () => {
     const db = fakeDb([{ id: "a1", name: "greeter" }]);
     const { id, secret } = await createWebhook("a1", "p1", db);
-    const result = await handleWebhookIngress(id, { headers: {}, body: { secret } }, db);
+    const result = await handleWebhookIngress(id, { headers: {}, body: { secret } }, db, executor);
     expect(result.status).toBe(202);
   });
 
   it("wrong secret -> 401", async () => {
     const db = fakeDb([{ id: "a1", name: "greeter" }]);
     const { id } = await createWebhook("a1", "p1", db);
-    const result = await handleWebhookIngress(id, { headers: { "x-webhook-secret": "wrong" }, body: {} }, db);
+    const result = await handleWebhookIngress(id, { headers: { "x-webhook-secret": "wrong" }, body: {} }, db, executor);
     expect(result.status).toBe(401);
   });
 
   it("unknown webhook id -> 404", async () => {
     const db = fakeDb([{ id: "a1", name: "greeter" }]);
-    const result = await handleWebhookIngress("no-such-id", { headers: { "x-webhook-secret": "x" }, body: {} }, db);
+    const result = await handleWebhookIngress("no-such-id", { headers: { "x-webhook-secret": "x" }, body: {} }, db, executor);
     expect(result.status).toBe(404);
   });
 
@@ -84,14 +93,14 @@ describe("webhook ingress", () => {
     const db = fakeDb([{ id: "a1", name: "greeter" }]);
     const { id, secret } = await createWebhook("a1", "p1", db);
     await db.webhook.update({ where: { id }, data: { status: "disabled" } });
-    const result = await handleWebhookIngress(id, { headers: { "x-webhook-secret": secret }, body: {} }, db);
+    const result = await handleWebhookIngress(id, { headers: { "x-webhook-secret": secret }, body: {} }, db, executor);
     expect(result.status).toBe(403);
   });
 
   it("missing secret entirely -> 401", async () => {
     const db = fakeDb([{ id: "a1", name: "greeter" }]);
     const { id } = await createWebhook("a1", "p1", db);
-    const result = await handleWebhookIngress(id, { headers: {}, body: {} }, db);
+    const result = await handleWebhookIngress(id, { headers: {}, body: {} }, db, executor);
     expect(result.status).toBe(401);
   });
 });

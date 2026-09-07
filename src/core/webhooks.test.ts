@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
+import type { Executor } from "../providers/executor/types.js";
 import { createWebhook, listWebhooks, deleteWebhook, resolveWebhookRun } from "./webhooks.js";
+
+const executor: Executor = { async start() {}, async stop() {} };
 
 interface FakeWebhookRow {
   id: string;
@@ -21,7 +24,7 @@ function fakeDb(agents: FakeAgentRow[] = []) {
   let counter = 0;
   let runCounter = 0;
 
-  return {
+  const db: any = {
     webhook: {
       create: async ({ data }: { data: Partial<FakeWebhookRow> & { agentId: string; secretHash: string } }) => {
         const row: FakeWebhookRow = {
@@ -52,15 +55,26 @@ function fakeDb(agents: FakeAgentRow[] = []) {
     },
     agent: {
       findUnique: async ({ where }: { where: { id?: string; name?: string } }) => {
-        if (where.id) return agentsById.get(where.id) ?? null;
-        if (where.name) return agents.find((a) => a.name === where.name) ?? null;
+        const row = where.id ? agentsById.get(where.id) : agents.find((a) => a.name === where.name);
+        if (row) return { kind: "native", codingProfile: null, budgetUsd: 1, model: "m", ...row };
         return null;
       },
     },
     run: {
-      create: async ({ data }: { data: { agentId: string; trigger: string } }) => ({ id: `run_${++runCounter}`, ...data }),
+      create: async ({ data }: { data: { agentId: string; trigger: string } }) => ({
+        id: `run_${++runCounter}`,
+        status: "pending",
+        startedAt: new Date(),
+        ...data,
+      }),
+      updateMany: async () => ({ count: 1 }),
     },
-  } as unknown as import("@prisma/client").PrismaClient;
+    codingRun: { create: async ({ data }: any) => data },
+    task: { create: async ({ data }: any) => ({ id: "task_1", createdAt: new Date(), updatedAt: new Date(), ...data }) },
+    $queryRaw: async () => [],
+  };
+  db.$transaction = async (fn: (tx: any) => unknown) => fn(db);
+  return db as import("@prisma/client").PrismaClient;
 }
 
 describe("core/webhooks", () => {
@@ -85,7 +99,7 @@ describe("core/webhooks", () => {
   it("resolveWebhookRun with the valid secret creates a manual run and stamps lastFiredAt", async () => {
     const db = fakeDb([{ id: "a1", name: "greeter" }]);
     const { id, secret } = await createWebhook("a1", "p1", db);
-    const result = await resolveWebhookRun(id, secret, db);
+    const result = await resolveWebhookRun(id, secret, db, executor);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.runId).toBeTruthy();
     const row = await db.webhook.findUnique({ where: { id } });
@@ -95,14 +109,14 @@ describe("core/webhooks", () => {
   it("resolveWebhookRun with the wrong secret is rejected without creating a run", async () => {
     const db = fakeDb([{ id: "a1", name: "greeter" }]);
     const { id } = await createWebhook("a1", "p1", db);
-    const result = await resolveWebhookRun(id, "wrong-secret", db);
+    const result = await resolveWebhookRun(id, "wrong-secret", db, executor);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("invalid_secret");
   });
 
   it("resolveWebhookRun for an unknown id is not_found", async () => {
     const db = fakeDb([{ id: "a1", name: "greeter" }]);
-    const result = await resolveWebhookRun("no-such-webhook", "anything", db);
+    const result = await resolveWebhookRun("no-such-webhook", "anything", db, executor);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("not_found");
   });
@@ -111,7 +125,7 @@ describe("core/webhooks", () => {
     const db = fakeDb([{ id: "a1", name: "greeter" }]);
     const { id, secret } = await createWebhook("a1", "p1", db);
     await db.webhook.update({ where: { id }, data: { status: "disabled" } });
-    const result = await resolveWebhookRun(id, secret, db);
+    const result = await resolveWebhookRun(id, secret, db, executor);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("disabled");
   });

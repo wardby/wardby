@@ -40,7 +40,9 @@ function fakeDb() {
   } as unknown as import("@prisma/client").PrismaClient;
 }
 
-const fakeProviders = {} as unknown as import("../../providers/index.js").ProviderRegistry;
+const fakeProviders = {
+  executor: { async start() {}, async stop() {} },
+} as unknown as import("../../providers/index.js").ProviderRegistry;
 
 let handle: HttpServerHandle | undefined;
 
@@ -229,7 +231,7 @@ describe("startHttpServer (webhook ingress)", () => {
     const webhooks = new Map<string, FakeWebhookRow>();
     let webhookCounter = 0;
     let runCounter = 0;
-    const webhookDb = {
+    const webhookDb: any = {
       webhook: {
         create: async ({ data }: { data: Partial<FakeWebhookRow> & { agentId: string; secretHash: string } }) => {
           const row: FakeWebhookRow = { id: `webhook_${++webhookCounter}`, status: "enabled", ownerId: null, createdAt: new Date(), lastFiredAt: null, ...data } as FakeWebhookRow;
@@ -246,12 +248,18 @@ describe("startHttpServer (webhook ingress)", () => {
       },
       agent: {
         findUnique: async ({ where }: { where: { id?: string; name?: string } }) =>
-          where.id === "a1" || where.name === "greeter" ? { id: "a1", name: "greeter" } : null,
+          where.id === "a1" || where.name === "greeter"
+            ? { id: "a1", name: "greeter", kind: "native", codingProfile: null, budgetUsd: 1, model: "m" }
+            : null,
       },
       run: {
-        create: async ({ data }: { data: { agentId: string; trigger: string } }) => ({ id: `run_${++runCounter}`, ...data }),
+        create: async ({ data }: { data: { agentId: string; trigger: string } }) => ({ id: `run_${++runCounter}`, status: "pending", startedAt: new Date(), ...data }),
+        updateMany: async () => ({ count: 1 }),
       },
-    } as unknown as import("@prisma/client").PrismaClient;
+      codingRun: { create: async ({ data }: { data: unknown }) => data },
+      task: { create: async ({ data }: { data: unknown }) => data },
+    };
+    webhookDb.$transaction = async (callback: (tx: unknown) => Promise<unknown>) => callback(webhookDb);
 
     const { id, secret } = await createWebhook("a1", "p1", webhookDb);
 

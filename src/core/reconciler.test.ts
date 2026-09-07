@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Executor } from "../providers/executor/types.js";
 import { reconcileOnce, type ReconcilerDb } from "./reconciler.js";
 
 interface FakeRun {
@@ -9,6 +10,9 @@ interface FakeRun {
   startedAt: Date;
   finishedAt: Date | null;
   error: string | null;
+  executionManaged: boolean;
+  agent: { kind: "native" | "coding" };
+  codingRun: { jobBackend: string | null; jobHandle: string | null } | null;
 }
 
 /** Minimal Prisma-`where`-filter matcher: equality, `{lt}`, `null`, and nested `OR` arrays. */
@@ -22,9 +26,13 @@ function matches(run: FakeRun, where: Record<string, unknown>): boolean {
     const value = (run as unknown as Record<string, unknown>)[key];
     if (cond === null) {
       if (value !== null) return false;
-    } else if (typeof cond === "object" && cond !== null && "lt" in cond) {
-      const lt = (cond as { lt: Date }).lt;
-      if (!(value instanceof Date) || !(value < lt)) return false;
+    } else if (typeof cond === "object" && cond !== null) {
+      if ("lt" in cond) {
+        const lt = (cond as { lt: Date }).lt;
+        if (!(value instanceof Date) || !(value < lt)) return false;
+      } else if ("in" in cond) {
+        if (!(cond as { in: unknown[] }).in.includes(value)) return false;
+      }
     } else if (value !== cond) {
       return false;
     }
@@ -37,6 +45,7 @@ function fakeDb(runs: FakeRun[]): ReconcilerDb {
 
   return {
     run: {
+      findMany: (async ({ where }: any) => [...byId.values()].filter((run) => matches(run, where))) as any,
       updateMany: (async ({ where, data }: any) => {
         let count = 0;
         for (const run of byId.values()) {
@@ -64,6 +73,9 @@ function baseRun(overrides: Partial<FakeRun>): FakeRun {
     startedAt: new Date(NOW.getTime() - 60_000),
     finishedAt: null,
     error: null,
+    executionManaged: true,
+    agent: { kind: "native" },
+    codingRun: null,
     ...overrides,
   };
 }
@@ -121,12 +133,12 @@ describe("reconcileOnce", () => {
     expect(runs[0].status).toBe("pending");
   });
 
-  it("never reaps a manual run, even with no heartbeat and an old startedAt", async () => {
+  it("never reaps an attended unmanaged run, even with no heartbeat and an old startedAt", async () => {
     // This is the bug this scoping fixes: an attended `reevo run` has no
     // heartbeat by design, so without the trigger scope a long-streaming
     // manual run would get flipped to `lost` while a human still watches it.
     const runs = [
-      baseRun({ trigger: "manual", heartbeatAt: null, startedAt: STALE }),
+      baseRun({ trigger: "manual", executionManaged: false, heartbeatAt: null, startedAt: STALE }),
     ];
     const db = fakeDb(runs);
 
@@ -155,5 +167,118 @@ describe("reconcileOnce", () => {
 
     expect(first).toBe(1);
     expect(second).toBe(0);
+  });
+
+  it("does not overwrite a heartbeat that becomes fresh after candidate selection", async () => {
+    const runs = [baseRun({ heartbeatAt: STALE })];
+    const db = fakeDb(runs);
+    const updateMany = db.run.updateMany.bind(db.run);
+    db.run.updateMany = (async (args: any) => {
+      runs[0].heartbeatAt = FRESH;
+      return updateMany(args);
+    }) as typeof db.run.updateMany;
+
+    const count = await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS);
+
+    expect(count).toBe(0);
+    expect(runs[0].status).toBe("running");
+  });
+
+  it("recovers a detached manual run because management is explicit rather than inferred from trigger", async () => {
+    const runs = [baseRun({ trigger: "manual", heartbeatAt: STALE })];
+    const count = await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS);
+    expect(count).toBe(1);
+    expect(runs[0].status).toBe("lost");
+  });
+
+  it("does not relaunch a stale coding run whose handle was never persisted", async () => {
+    const runs = [baseRun({
+      status: "pending",
+      heartbeatAt: null,
+      startedAt: STALE,
+      agent: { kind: "coding" },
+    })];
+    const start = async () => { throw new Error("must not relaunch"); };
+    const executor = { start, async stop() {} } satisfies Executor;
+
+    const count = await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, executor);
+
+    expect(count).toBe(1);
+    expect(runs[0].status).toBe("lost");
+    expect(runs[0].error).toMatch(/not relaunched/i);
+  });
+
+  it("passes the persisted handle to recovery and refreshes a confirmed active job", async () => {
+    const runs = [baseRun({
+      heartbeatAt: STALE,
+      agent: { kind: "coding" },
+      codingRun: { jobBackend: "docker", jobHandle: "container-1" },
+    })];
+    const seen: unknown[] = [];
+    const executor: Executor = {
+      async start() {},
+      async stop() {},
+      async recover(handle) { seen.push(handle); return { state: "active" }; },
+    };
+
+    const count = await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, executor);
+
+    expect(count).toBe(0);
+    expect(seen).toEqual([{ runId: "r1", backend: "docker", id: "container-1" }]);
+    expect(runs[0].heartbeatAt).toEqual(NOW);
+  });
+
+  it("marks a handled coding job lost only after recovery reports stop and collection complete", async () => {
+    const runs = [baseRun({
+      heartbeatAt: STALE,
+      agent: { kind: "coding" },
+      codingRun: { jobBackend: "docker", jobHandle: "container-1" },
+    })];
+    const executor: Executor = {
+      async start() {},
+      async stop() {},
+      async recover() { return { state: "lost", reason: "container disappeared after collection" }; },
+    };
+
+    const count = await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, executor);
+
+    expect(count).toBe(1);
+    expect(runs[0].error).toBe("container disappeared after collection");
+  });
+
+  it("leaves the run recoverable when collection fails, so a later pass can retry", async () => {
+    const runs = [baseRun({
+      heartbeatAt: STALE,
+      agent: { kind: "coding" },
+      codingRun: { jobBackend: "docker", jobHandle: "container-1" },
+    })];
+    const executor: Executor = {
+      async start() {},
+      async stop() {},
+      async recover() { throw new Error("artifact temporarily unavailable"); },
+    };
+
+    const count = await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, executor);
+
+    expect(count).toBe(0);
+    expect(runs[0].status).toBe("running");
+  });
+
+  it("does not overwrite a terminal result recovered after PR creation", async () => {
+    const runs = [baseRun({
+      heartbeatAt: STALE,
+      agent: { kind: "coding" },
+      codingRun: { jobBackend: "docker", jobHandle: "container-1" },
+    })];
+    const executor: Executor = {
+      async start() {},
+      async stop() {},
+      async recover() { runs[0].status = "succeeded"; return { state: "terminal" }; },
+    };
+
+    const count = await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, executor);
+
+    expect(count).toBe(0);
+    expect(runs[0].status).toBe("succeeded");
   });
 });
