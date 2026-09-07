@@ -110,7 +110,12 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
     if (webhook && req.method === "POST") {
       if (!body || Array.isArray(body) || body instanceof URLSearchParams) throw new HttpBoundaryError(415, "expected_json_object");
       const headers = Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v[0] : v]));
-      const result = await handleWebhookIngress(webhook[1], { headers, body: body as Record<string, unknown> }, opts.auth.db);
+      const result = await handleWebhookIngress(
+        webhook[1],
+        { headers, body: body as Record<string, unknown> },
+        opts.auth.db,
+        opts.auth.providers.executor,
+      );
       sendJson(res, result.status, result.body); return;
     }
     if (url.pathname === "/mcp") {

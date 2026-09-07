@@ -10,7 +10,8 @@
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { PrismaClient, Webhook } from "@prisma/client";
-import { createRun } from "./runner.js";
+import type { Executor } from "../providers/executor/types.js";
+import { dispatchRun } from "./dispatch.js";
 
 export type WebhookMetadata = Pick<Webhook, "id" | "agentId" | "status" | "ownerId" | "createdAt" | "lastFiredAt">;
 
@@ -58,7 +59,12 @@ export type ResolveWebhookRunResult =
  * scheduler use — the budget guardrail applies identically regardless of
  * what triggered the run.
  */
-export async function resolveWebhookRun(id: string, presentedSecret: string, db: PrismaClient): Promise<ResolveWebhookRunResult> {
+export async function resolveWebhookRun(
+  id: string,
+  presentedSecret: string,
+  db: PrismaClient,
+  executor: Executor,
+): Promise<ResolveWebhookRunResult> {
   const webhook = await db.webhook.findUnique({ where: { id } });
   if (!webhook) return { ok: false, reason: "not_found" };
   if (!secretMatches(presentedSecret, webhook.secretHash)) return { ok: false, reason: "invalid_secret" };
@@ -67,7 +73,21 @@ export async function resolveWebhookRun(id: string, presentedSecret: string, db:
   const agent = await db.agent.findUnique({ where: { id: webhook.agentId } });
   if (!agent) return { ok: false, reason: "not_found" };
 
-  const run = await createRun(db, agent.name, "manual");
-  await db.webhook.update({ where: { id }, data: { lastFiredAt: new Date() } });
-  return { ok: true, runId: run.id };
+  let rejected: "not_found" | "invalid_secret" | "disabled" = "disabled";
+  const dispatched = await dispatchRun({
+    db,
+    executor,
+    agentId: agent.id,
+    trigger: "manual",
+    beforePersist: async (tx) => {
+      const current = await tx.webhook.findUnique({ where: { id } });
+      if (!current) { rejected = "not_found"; return false; }
+      if (!secretMatches(presentedSecret, current.secretHash)) { rejected = "invalid_secret"; return false; }
+      if (current.status !== "enabled") { rejected = "disabled"; return false; }
+      await tx.webhook.update({ where: { id }, data: { lastFiredAt: new Date() } });
+      return true;
+    },
+  });
+  if (!dispatched) return { ok: false, reason: rejected };
+  return { ok: true, runId: dispatched.run.id };
 }

@@ -1,12 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
+import type { Executor } from "../providers/executor/types.js";
 import {
   findDueCandidates,
   claimDueRun,
   markRunFailedFromExecutorError,
   type SchedulerDb,
 } from "./scheduler.js";
+
+const executor: Executor = {
+  async start() {},
+  async stop() {},
+};
 
 interface FakeAgent {
   id: string;
@@ -79,7 +85,7 @@ describe("findDueCandidates", () => {
     const db = fakeAgentDb([due, notYetDue, disabled, manualOnly, coding]);
     const result = await findDueCandidates(db, now);
 
-    expect(result.map((a) => a.name)).toEqual(["due-agent"]);
+    expect(result.map((a) => a.name)).toEqual(["due-agent", "coding-agent"]);
   });
 });
 
@@ -179,8 +185,8 @@ describe.skipIf(!databaseUrl)("claimDueRun (database)", () => {
     const now = new Date("2026-09-05T12:16:00.000Z");
 
     const [first, second] = await Promise.all([
-      claimDueRun(db, agent.id, now),
-      claimDueRun(db, agent.id, now),
+      claimDueRun(db, executor, agent.id, now),
+      claimDueRun(db, executor, agent.id, now),
     ]);
 
     const runIds = [first, second].filter((id): id is string => id !== null);
@@ -201,20 +207,35 @@ describe.skipIf(!databaseUrl)("claimDueRun (database)", () => {
       data: { lastScheduledAt: new Date("2026-09-05T12:15:00.000Z") },
     });
 
-    const runId = await claimDueRun(db, agent.id, new Date("2026-09-05T12:16:00.000Z"));
+    const runId = await claimDueRun(db, executor, agent.id, new Date("2026-09-05T12:16:00.000Z"));
 
     expect(runId).toBeNull();
     const runs = await db.run.findMany({ where: { agentId: agent.id } });
     expect(runs.length).toBe(0);
   });
 
-  it("does not claim coding agents before the routing executor is available", async () => {
+  it("claims coding agents and snapshots their default task for routing", async () => {
     const agent = await makeScheduledAgent();
-    await db.agent.update({ where: { id: agent.id }, data: { kind: "coding" } });
+    await db.agent.update({
+      where: { id: agent.id },
+      data: {
+        kind: "coding",
+        codingProfile: {
+          create: {
+            repository: "openai/reevo",
+            defaultTask: "Update dependencies",
+            allowedEgress: [],
+            protectedPaths: [".github/workflows/**"],
+          },
+        },
+      },
+    });
 
-    const runId = await claimDueRun(db, agent.id, new Date("2026-09-05T12:16:00.000Z"));
+    const runId = await claimDueRun(db, executor, agent.id, new Date("2026-09-05T12:16:00.000Z"));
 
-    expect(runId).toBeNull();
-    expect(await db.run.count({ where: { agentId: agent.id } })).toBe(0);
+    expect(runId).not.toBeNull();
+    const run = await db.run.findUnique({ where: { id: runId! }, include: { codingRun: true } });
+    expect(run?.executionManaged).toBe(true);
+    expect(run?.codingRun?.task).toBe("Update dependencies");
   });
 });

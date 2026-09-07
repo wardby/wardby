@@ -109,6 +109,7 @@ function fakeExecutor(runs: Map<string, FakeRunRow>): Executor {
       // (covered exhaustively by engine-native.test.ts).
       runs.set(runId, { ...run, status: "succeeded", turns: 1, tokensIn: 10, tokensOut: 5, costUsd: 0.001, finalText: "done" });
     },
+    async stop() {},
   };
 }
 
@@ -181,6 +182,7 @@ function buildFakeDb() {
       },
       findMany: async ({ where }: { where: { agentId: string; status?: string } }) =>
         [...runs.values()].filter((r) => r.agentId === where.agentId && (!where.status || r.status === where.status)),
+      updateMany: async () => ({ count: 1 }),
     },
     task: {
       create: async ({ data }: { data: { kind: string; runId: string; status: string } }) => {
@@ -296,6 +298,7 @@ function buildFakeDb() {
         return row;
       },
     },
+    codingRun: { create: async ({ data }: { data: unknown }) => data },
   } as unknown as PrismaClient;
 
   (db as unknown as { $transaction: (callback: (tx: PrismaClient) => Promise<unknown>) => Promise<unknown> }).$transaction =
@@ -435,7 +438,12 @@ describe("MCP integration (all tool modules, in-memory)", () => {
     const webhookResult = await client.callTool({ name: "create_webhook", arguments: { agentId: agent.id } });
     const { id: webhookId, secret } = parseText(webhookResult as never) as { id: string; secret: string };
 
-    const ingressResult = await handleWebhookIngress(webhookId, { headers: { "x-webhook-secret": secret }, body: {} }, db);
+    const ingressResult = await handleWebhookIngress(
+      webhookId,
+      { headers: { "x-webhook-secret": secret }, body: {} },
+      db,
+      providers.executor,
+    );
     expect(ingressResult.status).toBe(202);
     expect(runs.size).toBe(1);
 

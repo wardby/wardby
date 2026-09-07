@@ -5,6 +5,7 @@
  * unauthenticated by OAuth" invariant.
  */
 import type { PrismaClient } from "@prisma/client";
+import type { Executor } from "../../providers/executor/types.js";
 import { resolveWebhookRun } from "../../core/webhooks.js";
 
 export interface WebhookIngressRequest {
@@ -25,13 +26,14 @@ export async function handleWebhookIngress(
   webhookId: string,
   req: WebhookIngressRequest,
   db: PrismaClient,
+  executor: Executor,
 ): Promise<WebhookIngressResult> {
   const secret = extractSecret(req);
   if (!secret) {
     return { status: 401, body: { error: "invalid_secret", error_description: "No webhook secret presented." } };
   }
 
-  const result = await resolveWebhookRun(webhookId, secret, db);
+  const result = await resolveWebhookRun(webhookId, secret, db, executor);
   if (result.ok) {
     return { status: 202, body: { runId: result.runId } };
   }
