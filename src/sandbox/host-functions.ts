@@ -18,6 +18,7 @@ import { PARSER_INPUT_BYTES, RANDOM_BYTES_LIMIT, LOG_BYTES, WALL_TIME_LIMIT_MS }
 import { setTimeout as sleep } from "node:timers/promises";
 import { logger as defaultLogger, type Logger } from "../core/logger.js";
 import { createParserWorkerPool, type ParserWorkerPool } from "./parser-worker/pool.js";
+import { redactPii } from "./pii-redaction.js";
 
 /** Below this length a "secret" is too likely to coincidentally match ordinary log text — not worth the false-positive risk of redacting it. */
 const MIN_REDACTABLE_SECRET_LENGTH = 6;
@@ -71,7 +72,7 @@ export function installHostFunctions(
 
   register("__bridge_console", async (argsJson) => {
     const [level, logArgs] = args<[string, unknown[]]>(argsJson);
-    const message = redactSecrets(boundedJson(logArgs, LOG_BYTES));
+    const message = redactPii(redactSecrets(boundedJson(logArgs, LOG_BYTES)));
     if (level === "warn") sandboxLog.warn(message);
     else if (level === "error") sandboxLog.error(message);
     else sandboxLog.info(message);

@@ -140,6 +140,21 @@ describe("secrets.get sandbox host function", () => {
     expect(serialized).not.toContain("sk-live-abc123");
     expect(serialized).toContain("REDACTED");
   });
+
+  it("redacts PII-shaped content a tool logs from fetched data, even though it was never a fetched secret", async () => {
+    const { logger, calls } = fakeLogger();
+    await runInSandbox({
+      code: "console.log('found contact:', 'jane.doe@example.com'); return 'ok';",
+      params: {},
+      agentId: "a1",
+      datastore: fakeDatastore(),
+      toolName: "scrape",
+      logger,
+    });
+    const serialized = JSON.stringify(calls);
+    expect(serialized).not.toContain("jane.doe@example.com");
+    expect(serialized).toContain("REDACTED_EMAIL");
+  });
 });
 
 describe("__bridge_fetch host scoping", () => {
