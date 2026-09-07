@@ -1,0 +1,117 @@
+# Coding Worker Isolation
+
+Date: 2026-09-07
+
+Status: Task 8 complete; Task 9 must use this policy without weakening it.
+
+## Security Boundary
+
+Coding-agent repositories and instructions are untrusted. The Docker daemon,
+host kernel, Reevo control plane, immutable worker image, and dedicated coding
+proxy are trusted. Containers are defense in depth rather than a VM boundary;
+production should run the Docker host on a dedicated worker node or VM with no
+production credentials beyond those required by the proxy.
+
+The worker has one network attachment: a unique per-run internal bridge using
+Docker's isolated gateway mode. It has no default external route, published
+port, host mapping, custom DNS server, or direct connection to the control
+plane. A dedicated proxy container is attached to both that internal network
+as `reevo-proxy` and an external network. No other service may join the run
+network.
+
+The proxy accepts a run-scoped capability, resolves only exact configured HTTPS
+hostnames, rejects IP literals and every private, loopback, link-local,
+documentation, transition, multicast, and metadata address, rejects mixed DNS
+answers, and pins the vetted address into the socket lookup. Redirects are
+denied. Injected fetch implementations are a test seam and must not be used in
+production composition.
+
+## Container Policy
+
+`src/providers/jobs/docker-isolation.ts` is the canonical policy builder and
+startup attestation layer. Task 9 must execute its argument arrays directly
+with an API client or `spawn`/`execFile`; it must never invoke a shell.
+
+The worker policy requires:
+
+- An immutable `sha256:` image ID or repository digest with `--pull never`.
+- UID/GID `10001:10001`, all capabilities dropped, no new privileges, Docker's
+  built-in seccomp profile, private cgroup and PID namespaces, and no host IPC.
+- A read-only root filesystem with bounded `noexec,nosuid,nodev` tmpfs mounts
+  for `/tmp` and `/home/reevo`.
+- Exact CPU, memory, equal memory+swap, PID, shared-memory, disk, and wall-clock
+  limits. Equal memory and memory+swap disables additional swap allowance.
+- No devices, device requests, bind mounts, extra groups, custom DNS, extra
+  hosts, published ports, or restart policy.
+- At most 2 MiB of local Docker logs and a cooperative SIGTERM grace period
+  before forced termination.
+
+The capability value is inherited from the trusted launcher's child-process
+environment with `--env REEVO_RUN_CAPABILITY`; it is never included in command
+arguments. Docker administrators can still inspect container environment, so
+daemon access remains privileged and must be tightly restricted.
+
+## Ephemeral Storage
+
+Each run receives one quota-bounded local tmpfs volume. A hardened, no-network
+keeper container holds the volume open from preparation through result
+collection. It creates exactly four private subdirectories and emits
+`reevo_storage_ready` before the launcher may seed them.
+
+The worker sees only these volume subpaths:
+
+- `/workspace`: read-write checkout files.
+- `/workspace/.git`: read-only Git metadata.
+- `/run/reevo/input`: read-only, validated input artifact.
+- `/run/reevo/output`: read-write result artifact.
+
+There are no production host bind mounts. Task 9 must transfer data through the
+keeper with Docker copy/archive APIs, validate it before launch and after
+collection, and stop the keeper only after collection. Stopping the last
+container that mounts this local tmpfs intentionally destroys the run data.
+The quota is RAM-backed; operators must bound aggregate concurrent `diskMb`
+allocations at the host scheduler as well as per run.
+
+## Required Lifecycle
+
+1. Validate `JobSpec`, image digest, proxy identity, and host support.
+2. Create and inspect the internal network and tmpfs volume.
+3. Create, inspect, and start the keeper; wait for its readiness marker.
+4. Seed the four fixed storage areas through the keeper, never a bind mount.
+5. Attach the dedicated proxy and attest that it is both internally and
+   externally connected.
+6. Create the worker with the run capability supplied only in the child
+   environment; inspect every effective control before start.
+7. Start the worker and enforce `deadlineMs`. Send SIGTERM at expiry, then
+   SIGKILL after `stopGraceSeconds` if it remains alive.
+8. Collect and validate bounded output, remove the worker, disconnect the proxy,
+   stop/remove the keeper, remove the network, and remove the volume.
+
+Any missing host feature, unsupported network option, failed inspection,
+unexpected mount/network/environment, or cleanup ambiguity is the fixed
+`docker_isolation_unsupported` failure. Production must not fall back to a
+weaker profile.
+
+## Verification
+
+Build the image and run the destructive, self-cleaning acceptance suite:
+
+```sh
+docker build -f src/coding-worker/Dockerfile -t reevo-coding-worker:task8 .
+npm run test:docker-isolation
+```
+
+Set `REEVO_WORKER_IMAGE` to test another local tag. The runner resolves that
+tag to an immutable image ID before testing. The suite verifies effective
+Docker inspection, no default route, proxy-only connectivity, denied
+Docker-socket/host/metadata/localhost/public access, read-only mounts and
+rootfs, zero effective capabilities, seccomp and no-new-privileges, private PID
+1, PID exhaustion, OOM containment, disk ENOSPC, and wall-clock termination.
+
+Related Docker references:
+
+- Internal and isolated bridge networks: https://docs.docker.com/reference/cli/docker/network/create/
+- CPU, memory, swap, and PID controls: https://docs.docker.com/engine/containers/resource_constraints/
+- Seccomp and no-new-privileges: https://docs.docker.com/reference/cli/docker/container/run/
+- Tmpfs behavior and limits: https://docs.docker.com/engine/storage/tmpfs/
+- Volume subpaths and `nocopy`: https://docs.docker.com/engine/storage/volumes/

@@ -4,6 +4,7 @@ export type ResolvedAddress = { address: string; family: number };
 export type Resolver = (hostname: string) => Promise<ResolvedAddress[]>;
 export interface FetchPolicyOptions {
   allowedHosts?: string[];
+  allowPrivateHosts?: boolean;
   resolve?: Resolver;
   restrictToAllowedHosts?: boolean;
 }
@@ -90,7 +91,12 @@ export async function resolveDestination(urlString: string, options: FetchPolicy
     : await (options.resolve ?? ((host) => lookup(host, { all: true })))(hostname);
   if (
     !addresses.length ||
-    addresses.some((a) => !isIP(a.address) || isIP(a.address) !== a.family || (!allowed && !isGlobalAddress(a.address)))
+    addresses.some(
+      (a) =>
+        !isIP(a.address) ||
+        isIP(a.address) !== a.family ||
+        (!isGlobalAddress(a.address) && !(allowed && options.allowPrivateHosts !== false)),
+    )
   )
     throw new FetchPolicyError();
   return { url, hostname, address: addresses[0].address, family: addresses[0].family };

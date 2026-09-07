@@ -38,6 +38,9 @@ jobs:
       - run: node scripts/security-audit.mjs
       - run: npm run worker:image:policy
       - run: docker build -f src/coding-worker/Dockerfile -t reevo-coding-worker:${{ github.sha }} .
+      - run: npm run test:docker-isolation
+        env:
+          REEVO_WORKER_IMAGE: reevo-coding-worker:${{ github.sha }}
       - uses: anchore/sbom-action@v0.20.5
         with:
           image: reevo-coding-worker:${{ github.sha }}

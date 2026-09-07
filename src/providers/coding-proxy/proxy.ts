@@ -8,6 +8,7 @@ import {
   pricingSnapshot,
   terminalUsageFromSseFrame,
 } from "./metering.js";
+import { createPinnedProxyFetch } from "./secure-fetch.js";
 import type { CredentialResolver, ProxyAuditSink, ProxyLedger, ProxyRequest, ProxySession } from "./types.js";
 
 export const PROXY_MAX_BODY_BYTES = 8 * 1024 * 1024;
@@ -58,6 +59,7 @@ export interface CodingProxyOptions {
   ledger: ProxyLedger;
   credentials: CredentialResolver;
   upstreamUrl?: string;
+  upstreamAllowedHosts?: string[];
   fetch?: typeof globalThis.fetch;
   now?: () => Date;
   audit?: ProxyAuditSink;
@@ -159,7 +161,12 @@ export class CodingProxy {
     this.ledger = options.ledger;
     this.credentials = options.credentials;
     this.upstreamUrl = options.upstreamUrl ?? "https://api.openai.com/v1/responses";
-    this.fetchImpl = options.fetch ?? globalThis.fetch;
+    const upstreamHost = new URL(this.upstreamUrl).hostname;
+    this.fetchImpl =
+      options.fetch ??
+      createPinnedProxyFetch({
+        allowedHosts: options.upstreamAllowedHosts ?? [upstreamHost],
+      });
     this.now = options.now ?? (() => new Date());
     this.audit = options.audit ?? (() => undefined);
     this.getPricing = options.pricing ?? getModelPricing;
