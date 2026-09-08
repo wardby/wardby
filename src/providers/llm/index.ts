@@ -2,6 +2,8 @@ export * from "./types.js";
 export * from "./pricing.js";
 export * from "./openai.js";
 export { AnthropicLlmProvider, anthropicCredentialsPresent, anthropicSupportedModels } from "./anthropic.js";
+export { BedrockClaudeLlmProvider, bedrockCredentialsPresent, bedrockClaudeSupportedModels } from "./bedrock.js";
+export { ClaudeLlmProvider, type ClaudeMessagesClient, type ClaudePricingModule } from "./claude-provider.js";
 export { openaiCredentialsPresent } from "./openai.js";
 export { supportedModels as openaiSupportedModels } from "./pricing.js";
 export { RoutingLlmProvider, type LlmRegistration } from "./routing.js";

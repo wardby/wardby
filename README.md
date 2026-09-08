@@ -48,12 +48,12 @@ Providers are selected purely by environment variable — e.g.
 a native cloud deployment is configuration, not a code change.
 
 The `llm/` provider is the one exception: it's not a single-adapter switch but
-a per-agent **model router**. An OpenAI adapter and a direct Anthropic (Claude)
-adapter each register for the model names they own; whichever adapters have
-credentials present (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) are enabled, and an
-agent's `model` field picks which adapter handles its calls — so OpenAI and
-Claude agents can run side by side in one deployment. Bedrock-hosted Claude is
-a reserved `LLM_PROVIDER` kind with no adapter yet.
+a per-agent **model router**. An OpenAI adapter, a direct Anthropic (Claude)
+adapter, and a Bedrock-Claude adapter each register for the model names they
+own; whichever adapters have credentials present (`OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, `BEDROCK_REGION`/`AWS_REGION`) are enabled, and an agent's
+`model` field picks which adapter handles its calls — so OpenAI, direct-Claude,
+and Bedrock-Claude agents can all run side by side in one deployment.
 
 ## MCP server (Phase 4)
 
