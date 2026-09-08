@@ -73,7 +73,8 @@ export async function startCodingProxyServer(
       } finally {
         clearTimeout(timer);
       }
-      const requestKeyHeader = request.headers["idempotency-key"] ?? request.headers["x-client-request-id"];
+      // x-client-request-id is a tracing identifier that Codex may reuse across a multi-request tool loop.
+      const requestKeyHeader = request.headers["idempotency-key"];
       await proxy.execute(
         {
           bearer: bearer(request.headers.authorization),

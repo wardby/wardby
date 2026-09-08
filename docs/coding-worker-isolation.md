@@ -62,7 +62,7 @@ collection. It creates exactly four private subdirectories and emits
 The worker sees only these volume subpaths:
 
 - `/workspace`: read-write checkout files.
-- `/workspace/.git`: read-only Git metadata.
+- Git metadata remains in the trusted keeper volume and is not mounted into the worker.
 - `/run/reevo/input`: read-only, validated input artifact.
 - `/run/reevo/output`: read-write result artifact.
 
@@ -111,7 +111,7 @@ weaker profile.
 ## Control Plane Configuration
 
 Set `JOB_LAUNCHER=docker`, `CODING_WORKER_IMAGE` to an immutable repository
-digest, and `CODING_PROXY_CONTAINER` to the dedicated proxy container name.
+digest or Docker local image ID, and `CODING_PROXY_CONTAINER` to the dedicated proxy container name.
 `VCS_WORK_ROOT`, `CODING_JOB_STATE_ROOT`, and `CODING_ARTIFACT_ROOT` must be
 trusted host-only directories. Resource limits are controlled by
 `CODING_CPUS`, `CODING_MEMORY_MB`, `CODING_PIDS`, and `CODING_DISK_MB`.
@@ -121,6 +121,13 @@ App installation is checked while preparing the workspace, before the
 billable proxy session is created. The upstream key remains behind
 `CODING_OPENAI_CREDENTIAL_REF` and is never written to the database, input
 artifact, Docker arguments, or Git workspace.
+
+The embedded Codex SDK runs with its inner sandbox disabled because the
+worker's Docker boundary is authoritative: it has a read-only root filesystem,
+no Linux capabilities, no host mounts or Docker socket, no public network,
+and only isolated workspace/output volumes plus the trusted proxy connection.
+This avoids relying on a nested sandbox that cannot validate Reevo's
+intentionally Git-metadata-free workspace.
 
 Coding-agent authoring and execution are MCP-first. `trigger_agent` accepts
 an optional bounded `task` and `baseRef` only for a coding agent owned by the

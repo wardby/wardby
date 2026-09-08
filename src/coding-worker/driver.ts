@@ -1,4 +1,5 @@
 import { CODING_PROTOCOL_VERSION, parseCodingAgentOutputJson, type CodingAgentOutput } from "../coding/protocol.js";
+import { safeWorkerErrorCode } from "./errors.js";
 import type { WorkerEvent, WorkerProgressEvent, WorkerRunOptions } from "./types.js";
 
 export const WORKER_SECURITY_INSTRUCTIONS = `You are running inside an isolated Reevo coding worker.
@@ -86,8 +87,11 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
   });
   const thread = client.startThread({
     model: options.input.model,
-    sandboxMode: "workspace-write",
+    // Docker, not the nested Codex sandbox, is the enforcement boundary.
+    sandboxMode: "danger-full-access",
     workingDirectory: options.workspace,
+    // The trusted VCS layer intentionally removes .git before mounting the workspace.
+    skipGitRepoCheck: true,
     networkAccessEnabled: false,
     webSearchMode: "disabled",
     approvalPolicy: "never",
@@ -98,15 +102,20 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
   });
   let finalJson: string | undefined;
   let failure: string | undefined;
-  for await (const event of streamed.events) {
-    const safeProgress = progress(options.input, event);
-    if (safeProgress) options.onProgress?.(safeProgress);
-    if (event.type === "item.completed" && event.item?.type === "agent_message") {
-      if (typeof event.item.text === "string") finalJson = event.item.text;
+  let streamFailed = false;
+  try {
+    for await (const event of streamed.events) {
+      const safeProgress = progress(options.input, event);
+      if (safeProgress) options.onProgress?.(safeProgress);
+      if (event.type === "item.completed" && event.item?.type === "agent_message") {
+        if (typeof event.item.text === "string") finalJson = event.item.text;
+      }
+      if (event.type === "turn.failed" || event.type === "error") {
+        failure = event.type === "turn.failed" ? event.error?.message : event.message;
+      }
     }
-    if (event.type === "turn.failed" || event.type === "error") {
-      failure = event.type === "turn.failed" ? event.error?.message : event.message;
-    }
+  } catch {
+    streamFailed = true;
   }
   if (!finalJson) {
     if (failure?.includes("reevo_budget_exhausted")) {
@@ -125,9 +134,17 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
       });
       return exhausted;
     }
+    if (streamFailed) throw new Error("coding_stream_failed");
     throw new Error(failure ? "coding_turn_failed" : "coding_output_missing");
   }
-  const output = parseCodingAgentOutputJson(finalJson);
+  if (streamFailed) throw new Error("coding_stream_failed");
+  let output: CodingAgentOutput;
+  try {
+    output = parseCodingAgentOutputJson(finalJson);
+  } catch (error) {
+    if (safeWorkerErrorCode(error) !== "worker_failed") throw error;
+    throw new Error("coding_output_invalid", { cause: error });
+  }
   if (output.runId !== options.input.runId) throw new Error("coding_output_run_mismatch");
   options.onProgress?.({ schemaVersion: 1, runId: options.input.runId, type: "completed", outcome: output.outcome });
   return output;

@@ -27,6 +27,9 @@
     "prisma:migrate": "prisma migrate deploy",
     "db:up": "docker compose -f deploy/local/docker-compose.yml up -d",
     "db:down": "docker compose -f deploy/local/docker-compose.yml down",
+    "coding:local:up": "docker compose --env-file .env.local -f deploy/local/docker-compose.yml -f deploy/local/docker-compose.phase5.yml up --build -d coding-proxy",
+    "coding:local:down": "docker compose --env-file .env.local -f deploy/local/docker-compose.yml -f deploy/local/docker-compose.phase5.yml down",
+    "worker:image:local": "node scripts/build-local-coding-worker.mjs",
     "test:docker-isolation": "node scripts/docker-isolation-acceptance.mjs",
     "test:docker-job": "node scripts/docker-job-acceptance.mjs",
     "worker:image:policy": "node scripts/coding-worker-image-policy.mjs"

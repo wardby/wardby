@@ -75,8 +75,9 @@ describe("runCodingWorker", () => {
     });
     expect(capture.thread).toEqual({
       model: input.model,
-      sandboxMode: "workspace-write",
+      sandboxMode: "danger-full-access",
       workingDirectory: "/workspace",
+      skipGitRepoCheck: true,
       networkAccessEnabled: false,
       webSearchMode: "disabled",
       approvalPolicy: "never",
@@ -159,5 +160,45 @@ describe("runCodingWorker", () => {
         createClient: clientFor([{ type: "turn.failed", error: { message: "raw upstream failure" } }], {}),
       }),
     ).rejects.toThrow("coding_turn_failed");
+  });
+
+  it("reports a fixed code when the Codex event stream terminates unexpectedly", async () => {
+    const createClient = () => ({
+      startThread: () => ({
+        runStreamed: async () => ({
+          events: (async function* () {
+            yield { type: "turn.started" } as WorkerEvent;
+            throw new Error("provider detail must not escape");
+          })(),
+        }),
+      }),
+    });
+
+    await expect(
+      runCodingWorker({
+        input,
+        workspace: "/workspace",
+        proxyBaseUrl: "http://proxy",
+        capability: "cap",
+        signal: new AbortController().signal,
+        createClient,
+      }),
+    ).rejects.toThrow("coding_stream_failed");
+  });
+
+  it("reports a fixed code when structured output violates the worker schema", async () => {
+    await expect(
+      runCodingWorker({
+        input,
+        workspace: "/workspace",
+        proxyBaseUrl: "http://proxy",
+        capability: "cap",
+        signal: new AbortController().signal,
+        createClient: clientFor(
+          [{ type: "item.completed", item: { type: "agent_message", text: '{"unexpected":"value"}' } }],
+          {},
+        ),
+      }),
+    ).rejects.toThrow("coding_output_invalid");
   });
 });

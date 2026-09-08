@@ -13,6 +13,7 @@ import {
   type CodingRunResult,
 } from "../../coding/protocol.js";
 import { getModelPricing } from "../llm/pricing.js";
+import { isImmutableDockerImage } from "../jobs/docker-isolation.js";
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
 import type { PreparedWorkspace, VcsPrepareInput, VcsProvider } from "../vcs/types.js";
 import type { ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
@@ -233,7 +234,7 @@ export class ContainerExecutor implements Executor {
   constructor(private readonly options: ContainerExecutorOptions) {
     this.artifactRoot = resolve(options.artifactRoot);
     if (this.artifactRoot === resolve("/")) throw new Error("coding_artifact_root_invalid");
-    if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}@sha256:[0-9a-f]{64}$/.test(options.workerImage)) {
+    if (!isImmutableDockerImage(options.workerImage)) {
       throw new Error("coding_worker_image_invalid");
     }
     if (!/^[A-Za-z][A-Za-z0-9_.:-]{0,199}$/.test(options.credentialRef)) {
@@ -442,7 +443,7 @@ export class ContainerExecutor implements Executor {
     try {
       if (jobState !== "succeeded") {
         const collected = await this.options.jobs.collect(handle).catch(() => null);
-        const reason = collected?.reason ?? jobState;
+        const reason = collected?.diagnostic ?? collected?.reason ?? jobState;
         await this.options.store.terminate(run.runId, jobState === "lost" ? "lost" : "failed", `coding_job_${reason}`);
         return;
       }
@@ -556,7 +557,8 @@ export class ContainerExecutor implements Executor {
       budgetUsd: run.budgetUsd,
       deadlineAt: deadlineAt.toISOString(),
     });
-    await writeFile(temporary, JSON.stringify(input), { flag: "wx", mode: 0o600 });
+    // The run directory is 0700; world-readable mode only crosses Docker's UID boundary.
+    await writeFile(temporary, JSON.stringify(input), { flag: "wx", mode: 0o444 });
     await rename(temporary, destination);
     return destination;
   }

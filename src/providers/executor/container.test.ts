@@ -207,7 +207,7 @@ class FakeSessions implements CodingSessionController {
   }
 }
 
-async function harness(overrides: Partial<ContainerRunSnapshot> = {}) {
+async function harness(overrides: Partial<ContainerRunSnapshot> = {}, workerImage = IMAGE) {
   const root = await mkdtemp("/private/tmp/reevo-container-executor-");
   roots.push(root);
   const events: string[] = [];
@@ -223,7 +223,7 @@ async function harness(overrides: Partial<ContainerRunSnapshot> = {}) {
     sessions,
     capabilities,
     artifactRoot: join(root, "artifacts"),
-    workerImage: IMAGE,
+    workerImage,
     credentialRef: "env:OPENAI_API_KEY",
     limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
     sleep: async () => {},
@@ -236,6 +236,10 @@ afterEach(async () => {
 });
 
 describe("ContainerExecutor", () => {
+  it("accepts a content-addressed local Docker image ID", async () => {
+    await expect(harness({}, `sha256:${"a".repeat(64)}`)).resolves.toBeDefined();
+  });
+
   it("launches once, cancels spend before materialization, and persists a typed PR result", async () => {
     const created = await harness();
     await Promise.all([created.executor.start("run-1"), created.executor.start("run-1")]);

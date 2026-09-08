@@ -8,7 +8,9 @@ const SAFE_WORKER_ERROR_CODES = new Set([
   "coding_artifact_nesting_limit",
   "coding_artifact_duplicate_key",
   "coding_turn_failed",
+  "coding_stream_failed",
   "coding_output_missing",
+  "coding_output_invalid",
   "coding_output_run_mismatch",
 ]);
 

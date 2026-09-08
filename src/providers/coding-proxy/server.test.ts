@@ -69,4 +69,20 @@ describe("coding proxy HTTP boundary", () => {
     expect(headers.get("authorization")).toBe("Bearer UPSTREAM_SECRET");
     expect(headers.get("x-untrusted-secret")).toBeNull();
   });
+
+  it("does not treat Codex's reusable client request id as an idempotency key", async () => {
+    const callWithInput = (input: string) =>
+      call("/v1/responses", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${session.capability}`,
+          "x-client-request-id": "codex-tool-loop",
+        },
+        body: JSON.stringify({ model: "test-model", input, stream: false }),
+      });
+
+    expect((await callWithInput("first tool-loop request")).status).toBe(200);
+    expect((await callWithInput("second tool-loop request")).status).toBe(200);
+  });
 });

@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { estimateReservationUsd } from "./metering.js";
 import { MemoryProxyLedger } from "./memory-ledger.js";
-import { CodingProxy, CodingProxyError, type CreatedCodingProxySession, type ProxyResponseSink } from "./proxy.js";
+import {
+  CodingProxy,
+  CodingProxyError,
+  PROXY_DEFAULT_MAX_OUTPUT_TOKENS,
+  type CreatedCodingProxySession,
+  type ProxyResponseSink,
+} from "./proxy.js";
 import type { ModelPricing } from "../llm/pricing.js";
 import type { ProxyAuditEvent } from "./types.js";
 
@@ -128,6 +134,21 @@ describe("CodingProxy", () => {
     });
     expect(JSON.stringify(h.events)).not.toContain("UPSTREAM_SECRET");
     expect(JSON.stringify(h.events)).not.toContain("hello");
+  });
+
+  it("adds a budgeted output ceiling when the Codex SDK omits max_output_tokens", async () => {
+    const h = await harness();
+    const body = JSON.stringify({ model: "test-model", input: "hello", stream: false });
+
+    await execute(h, "codex-sdk-request", new TestSink(), body);
+
+    const init = h.fetch.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      max_output_tokens: PROXY_DEFAULT_MAX_OUTPUT_TOKENS,
+      store: false,
+      background: false,
+    });
+    expect(h.events.find((event) => event.type === "request.reserved")?.reservationUsd).toBeGreaterThan(0);
   });
 
   it("rejects invalid capabilities and models without resolving credentials or calling upstream", async () => {

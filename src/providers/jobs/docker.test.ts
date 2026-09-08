@@ -7,6 +7,8 @@ import { jobLauncherContract } from "./contract-suite.js";
 import {
   DockerCommandError,
   DockerJobLauncher,
+  dockerTransferEnvironment,
+  isMissingDockerResource,
   validateMaterializedWorkspace,
   type DockerArtifactTransfer,
   type DockerCommandOptions,
@@ -19,6 +21,24 @@ import type { JobHandle, JobResult, JobSpec } from "./types.js";
 const image = `registry.example/reevo-worker@sha256:${"a".repeat(64)}`;
 const capability = "rrp_0123456789abcdef";
 const temporaryRoots: string[] = [];
+
+describe("Docker artifact transfer", () => {
+  it("disables macOS AppleDouble sidecars in streamed workspace archives", () => {
+    expect(dockerTransferEnvironment("/usr/bin")).toMatchObject({
+      PATH: "/usr/bin",
+      LANG: "C",
+      LC_ALL: "C",
+      COPYFILE_DISABLE: "1",
+    });
+  });
+});
+
+describe("Docker cleanup classification", () => {
+  it("treats an already-disconnected network attachment as missing", () => {
+    expect(isMissingDockerResource("container abc is not connected to network reevo-net-run")).toBe(true);
+    expect(isMissingDockerResource("permission denied")).toBe(false);
+  });
+});
 
 function spec(runId = "docker-run-1"): JobSpec {
   return {
@@ -121,6 +141,10 @@ class FakeDocker implements DockerCommandRunner {
       return this.ok();
     }
     if (group === "network" && action === "disconnect") return this.ok();
+    if (group === "container" && action === "cp") {
+      await writeFile(args.at(-1)!, this.output, { mode: 0o600 });
+      return this.ok();
+    }
     if (group === "container" && action === "exec") {
       return args.includes("node") ? { stdout: this.output, stderr: "" } : this.ok();
     }
@@ -226,7 +250,6 @@ class FakeDocker implements DockerCommandRunner {
   private workerInspection(): object {
     const mounts = [
       [WORKER_PATHS.workspace, true, "workspace"],
-      [WORKER_PATHS.git, false, "git"],
       [WORKER_PATHS.input, false, "input"],
       [WORKER_PATHS.output, true, "output"],
     ];

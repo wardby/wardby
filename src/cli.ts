@@ -19,6 +19,7 @@ import { parseArgs } from "node:util";
 import { promisify } from "node:util";
 import type { RunStatus } from "@prisma/client";
 import { loadContainerExecutorConfig, loadProviderConfig } from "./config/providers.js";
+import { isImmutableDockerImage } from "./providers/jobs/docker-isolation.js";
 import { RoutingLlmProvider, resolveLlmRegistrations } from "./providers/llm/index.js";
 import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/index.js";
 import type { Executor } from "./providers/executor/types.js";
@@ -371,8 +372,8 @@ async function codingOps(args: string[]): Promise<void> {
   }
 
   if (operation === "preflight") {
-    if (!/.+@sha256:[a-f0-9]{64}$/i.test(container.workerImage)) {
-      fail("CODING_WORKER_IMAGE must use an immutable sha256 digest.");
+    if (!isImmutableDockerImage(container.workerImage)) {
+      fail("CODING_WORKER_IMAGE must use an immutable repository digest or local image ID.");
     }
     try {
       await execFile("docker", ["image", "inspect", container.workerImage], { maxBuffer: 1024 * 1024 });

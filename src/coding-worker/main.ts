@@ -17,8 +17,10 @@ function required(name: "REEVO_PROXY_URL" | "REEVO_RUN_CAPABILITY"): string {
 const controller = new AbortController();
 for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => controller.abort());
 
+let stage: "input" | "execution" | "output" = "input";
 try {
   const input = await readCodingInput(INPUT_PATH);
+  stage = "execution";
   const output = await runCodingWorker({
     input,
     workspace: WORKSPACE_PATH,
@@ -28,9 +30,15 @@ try {
     createClient: createCodexSdkClient,
     onProgress: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),
   });
+  stage = "output";
   await writeCodingOutputAtomic(OUTPUT_PATH, output);
 } catch (error) {
-  const code = controller.signal.aborted ? "worker_cancelled" : safeWorkerErrorCode(error);
+  const safeCode = safeWorkerErrorCode(error);
+  const code = controller.signal.aborted
+    ? "worker_cancelled"
+    : safeCode === "worker_failed"
+      ? `worker_${stage}_failed`
+      : safeCode;
   process.stderr.write(`${JSON.stringify({ error: code })}\n`);
   process.exitCode = controller.signal.aborted ? 143 : 1;
 }

@@ -3,7 +3,7 @@ import { decodeJwt } from "jose";
 import { describe, expect, it, vi } from "vitest";
 import { GitHubAppClient } from "./github.js";
 
-const TOKEN = "ghs_abcdefghijklmnopqrstuvwxyz1234567890";
+const TOKEN = "ghs_abcdefghijklmnopqrstuvwxyz-1234567890.example";
 const NOW = new Date("2026-09-06T12:00:00.000Z");
 
 function privateKeyPem(): string {

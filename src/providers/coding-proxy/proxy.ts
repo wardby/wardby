@@ -13,6 +13,7 @@ import type { CredentialResolver, ProxyAuditSink, ProxyLedger, ProxyRequest, Pro
 
 export const PROXY_MAX_BODY_BYTES = 8 * 1024 * 1024;
 export const PROXY_MAX_OUTPUT_TOKENS = 1_000_000;
+export const PROXY_DEFAULT_MAX_OUTPUT_TOKENS = 4_096;
 const MAX_UPSTREAM_JSON_BYTES = 16 * 1024 * 1024;
 const REQUEST_KEY_PATTERN = /^[\x21-\x7e]{1,200}$/;
 
@@ -93,23 +94,25 @@ function parseRequest(rawBody: string): ParsedRequest {
   }
   const body = value as Record<string, unknown>;
   if (typeof body.model !== "string" || !body.model) throw new CodingProxyError(400, "model_required");
+  const maxOutputTokens = body.max_output_tokens ?? PROXY_DEFAULT_MAX_OUTPUT_TOKENS;
   if (
-    !Number.isSafeInteger(body.max_output_tokens) ||
-    (body.max_output_tokens as number) < 1 ||
-    (body.max_output_tokens as number) > PROXY_MAX_OUTPUT_TOKENS
+    typeof maxOutputTokens !== "number" ||
+    !Number.isSafeInteger(maxOutputTokens) ||
+    maxOutputTokens < 1 ||
+    maxOutputTokens > PROXY_MAX_OUTPUT_TOKENS
   ) {
     throw new CodingProxyError(400, "invalid_max_output_tokens");
   }
   if (body.stream !== true && body.stream !== false) throw new CodingProxyError(400, "stream_required");
   if (body.background === true) throw new CodingProxyError(400, "background_not_allowed");
-  const normalized = { ...body, store: false, background: false };
+  const normalized = { ...body, max_output_tokens: maxOutputTokens, store: false, background: false };
   const encoded = JSON.stringify(normalized);
   if (Buffer.byteLength(encoded) > PROXY_MAX_BODY_BYTES) throw new CodingProxyError(413, "payload_too_large");
   return {
     body: normalized,
     encoded,
     model: body.model,
-    maxOutputTokens: body.max_output_tokens as number,
+    maxOutputTokens,
     stream: body.stream,
     fingerprint: fingerprintRequest(encoded),
   };

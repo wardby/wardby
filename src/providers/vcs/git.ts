@@ -4,7 +4,7 @@ import { isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Writable } from "node:stream";
 import { redactTokenShapedValues, normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
-import type { GitHubRepositoryAccess } from "./github.js";
+import { isSafeGitHubInstallationToken, type GitHubRepositoryAccess } from "./github.js";
 import type { FinalizeChangesResult, PreparedWorkspace, VcsPrepareInput, VcsProvider } from "./types.js";
 
 export const DEFAULT_MAX_CHANGED_FILES = 1_000;
@@ -81,10 +81,7 @@ export class NodeGitCommandRunner implements GitCommandRunner {
   }
 
   async run(args: readonly string[], options: GitCommandOptions = {}): Promise<GitCommandResult> {
-    if (
-      options.authToken !== undefined &&
-      (!/^[A-Za-z0-9_]+$/.test(options.authToken) || Buffer.byteLength(options.authToken, "utf8") > 512)
-    ) {
+    if (options.authToken !== undefined && !isSafeGitHubInstallationToken(options.authToken)) {
       throw new Error("git_auth_token_invalid");
     }
     const env: NodeJS.ProcessEnv = {

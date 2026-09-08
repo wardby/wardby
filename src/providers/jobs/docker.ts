@@ -34,14 +34,7 @@ const STATE_SCHEMA_VERSION = 1;
 const MAX_DOCKER_OUTPUT_BYTES = 1024 * 1024;
 const MAX_WORKSPACE_ENTRIES = 100_000;
 const TERMINAL_PHASES = new Set<DockerJobRecord["phase"]>(["succeeded", "failed", "stopped", "lost", "removed"]);
-const RESULT_READ_SCRIPT = [
-  "const fs=require('node:fs');",
-  "const p='/run/reevo/storage/output/result.json';",
-  "const s=fs.lstatSync(p);",
-  "if(!s.isFile()||s.isSymbolicLink()||s.size>65536)process.exit(20);",
-  "process.stdout.write(fs.readFileSync(p));",
-].join("");
-
+const SAFE_WORKER_DIAGNOSTIC = /^(?:worker_[a-z_]+|coding_[a-z_]+|reevo_[a-z_]+)$/;
 export interface DockerCommandOptions {
   env?: Record<string, string>;
   maxOutputBytes?: number;
@@ -65,6 +58,10 @@ export class DockerCommandError extends Error {
   ) {
     super(outputExceeded ? "docker_output_limit" : `docker_command_failed:${exitCode ?? "spawn"}`);
   }
+}
+
+export function isMissingDockerResource(stderr: string): boolean {
+  return /no such (?:container|network|volume|object)|is not connected to network/i.test(stderr);
 }
 
 export interface NodeDockerCommandRunnerOptions {
@@ -134,9 +131,7 @@ export class NodeDockerCommandRunner implements DockerCommandRunner {
           stderr: Buffer.concat(stderr).toString("utf8"),
         };
         if (code !== 0) {
-          return rejectPromise(
-            new DockerCommandError(code, /no such (?:container|network|volume|object)/i.test(result.stderr)),
-          );
+          return rejectPromise(new DockerCommandError(code, isMissingDockerResource(result.stderr)));
         }
         resolvePromise(result);
       });
@@ -148,6 +143,10 @@ export interface DockerArtifactTransfer {
   seedDirectory(sourceDirectory: string, container: string, destination: string): Promise<void>;
   seedInput(sourceFile: string, container: string): Promise<void>;
   materializeDirectory(container: string, source: string, destination: string, maxBytes: number): Promise<void>;
+}
+
+export function dockerTransferEnvironment(path: string): NodeJS.ProcessEnv {
+  return { PATH: path, LANG: "C", LC_ALL: "C", COPYFILE_DISABLE: "1" };
 }
 
 /** Streams tar archives into the unprivileged keeper; no host bind mounts are used. */
@@ -162,7 +161,7 @@ export class NodeDockerArtifactTransfer implements DockerArtifactTransfer {
     if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error("docker_seed_directory_invalid");
     await new Promise<void>((resolvePromise, rejectPromise) => {
       const archive = spawn("tar", ["-C", sourceDirectory, "-cf", "-", "."], {
-        env: { PATH: this.path, LANG: "C", LC_ALL: "C" },
+        env: dockerTransferEnvironment(this.path),
         shell: false,
         stdio: ["ignore", "pipe", "ignore"],
       });
@@ -183,7 +182,7 @@ export class NodeDockerArtifactTransfer implements DockerArtifactTransfer {
           "-xf",
           "-",
         ],
-        { env: { PATH: this.path, LANG: "C", LC_ALL: "C" }, shell: false, stdio: ["pipe", "ignore", "ignore"] },
+        { env: dockerTransferEnvironment(this.path), shell: false, stdio: ["pipe", "ignore", "ignore"] },
       );
       let failed = false;
       const fail = () => {
@@ -212,12 +211,12 @@ export class NodeDockerArtifactTransfer implements DockerArtifactTransfer {
     if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_CODING_ARTIFACT_BYTES) {
       throw new Error("docker_input_artifact_invalid");
     }
-    await new NodeDockerCommandRunner({ dockerBinary: this.dockerBinary, homeDir: "/tmp", path: this.path }).run([
-      "container",
-      "cp",
-      sourceFile,
-      `${container}:/run/reevo/storage/input/input.json`,
-    ]);
+    const docker = new NodeDockerCommandRunner({
+      dockerBinary: this.dockerBinary,
+      homeDir: "/tmp",
+      path: this.path,
+    });
+    await docker.run(["container", "cp", sourceFile, `${container}:/run/reevo/storage/input/input.json`]);
   }
 
   async materializeDirectory(container: string, source: string, destination: string, maxBytes: number): Promise<void> {
@@ -488,6 +487,13 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
       await this.refresh(current);
       if (!isTerminal(current)) throw new Error("job_not_terminal");
       if (!current.result) current.result = resultFor(current.phase as "succeeded" | "failed" | "stopped" | "lost");
+      if (current.phase === "failed" && !current.result.diagnostic) {
+        const diagnostic = await this.readWorkerFailureDiagnostic(current);
+        if (diagnostic) {
+          current.result = { ...current.result, diagnostic };
+          await this.writeRecord(current);
+        }
+      }
       if (current.phase === "succeeded" && !current.result.resultArtifact) {
         const artifact = await this.readResultArtifact(current);
         current.result = { ...current.result, resultArtifact: artifact };
@@ -764,23 +770,43 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
   }
 
   private async readResultArtifact(record: DockerJobRecord): Promise<string> {
-    let raw: string;
+    const staging = await mkdtemp(join(this.stateRoot, ".reevo-result-"));
+    const target = join(staging, "result.json");
     try {
-      raw = (
-        await this.run(
-          ["container", "exec", "--user", "10001:10001", this.keeperName(record), "node", "-e", RESULT_READ_SCRIPT],
-          {
-            maxOutputBytes: MAX_CODING_ARTIFACT_BYTES + 1,
-          },
-        )
-      ).stdout;
+      await this.run(["container", "cp", `${this.keeperName(record)}:/run/reevo/storage/output/result.json`, target]);
+      const metadata = await lstat(target);
+      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_CODING_ARTIFACT_BYTES) {
+        throw new Error("docker_result_artifact_invalid");
+      }
+      const raw = await readFile(target, "utf8");
+      if (Buffer.byteLength(raw, "utf8") > MAX_CODING_ARTIFACT_BYTES) throw new Error("docker_result_artifact_invalid");
+      const output = parseCodingAgentOutputJson(raw);
+      if (output.runId !== record.runId) throw new Error("docker_result_run_mismatch");
+      return JSON.stringify(output);
     } catch (error) {
+      if (error instanceof Error && error.message === "docker_result_run_mismatch") throw error;
       throw new Error("docker_result_artifact_invalid", { cause: error });
+    } finally {
+      await rm(staging, { recursive: true, force: true });
     }
-    if (Buffer.byteLength(raw, "utf8") > MAX_CODING_ARTIFACT_BYTES) throw new Error("docker_result_artifact_invalid");
-    const output = parseCodingAgentOutputJson(raw);
-    if (output.runId !== record.runId) throw new Error("docker_result_run_mismatch");
-    return JSON.stringify(output);
+  }
+
+  private async readWorkerFailureDiagnostic(record: DockerJobRecord): Promise<string | undefined> {
+    try {
+      const logs = await this.run(["container", "logs", "--tail", "8", record.handle.id]);
+      const raw = `${logs.stdout}\n${logs.stderr}`;
+      for (const line of raw.split("\n").reverse()) {
+        try {
+          const value = JSON.parse(line) as { error?: unknown };
+          if (typeof value.error === "string" && SAFE_WORKER_DIAGNOSTIC.test(value.error)) return value.error;
+        } catch {
+          // Worker output is untrusted; only parse one fixed JSON shape.
+        }
+      }
+    } catch {
+      // Diagnostics are optional and must never affect terminal cleanup.
+    }
+    return undefined;
   }
 
   private keeperName(record: DockerJobRecord): string {

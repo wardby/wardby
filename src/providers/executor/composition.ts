@@ -7,26 +7,14 @@ import {
   loadProviderConfig,
   type ProviderConfig,
 } from "../../config/providers.js";
+import { EnvironmentCredentialResolver } from "../coding-proxy/environment-credentials.js";
 import { CodingProxy } from "../coding-proxy/proxy.js";
 import { PrismaProxyLedger } from "../coding-proxy/prisma-ledger.js";
-import type { CredentialResolver } from "../coding-proxy/types.js";
 import { DockerJobLauncher } from "../jobs/docker.js";
 import { buildVcsProvider } from "../vcs/index.js";
 import { ContainerExecutor, PrismaContainerExecutionStore, RunCapabilityVault } from "./container.js";
 import { PrismaExecutionKindResolver, RoutingExecutor } from "./routing.js";
 import type { Executor } from "./types.js";
-
-class EnvironmentCredentialResolver implements CredentialResolver {
-  constructor(private readonly env: NodeJS.ProcessEnv) {}
-
-  async resolve(reference: string): Promise<string> {
-    const match = /^env:([A-Z][A-Z0-9_]{0,127})$/.exec(reference);
-    if (!match) throw new Error("coding_credential_reference_invalid");
-    const value = this.env[match[1]];
-    if (!value) throw new Error("coding_credential_unavailable");
-    return value;
-  }
-}
 
 export interface ConfiguredExecutorOptions {
   native: Executor;

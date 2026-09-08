@@ -14,7 +14,7 @@ import {
 } from "./git.js";
 import type { VcsPrepareInput } from "./types.js";
 
-const TOKEN = "ghs_abcdefghijklmnopqrstuvwxyz1234567890";
+const TOKEN = "ghs_abcdefghijklmnopqrstuvwxyz-1234567890.example";
 const BASE_SHA = "a".repeat(40);
 const COMMIT_SHA = "b".repeat(40);
 const OTHER_SHA = "c".repeat(40);

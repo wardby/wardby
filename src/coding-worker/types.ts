@@ -22,8 +22,9 @@ export interface WorkerThread {
 export interface WorkerAgentClient {
   startThread(options: {
     model: string;
-    sandboxMode: "workspace-write";
+    sandboxMode: "danger-full-access";
     workingDirectory: string;
+    skipGitRepoCheck: true;
     networkAccessEnabled: false;
     webSearchMode: "disabled";
     approvalPolicy: "never";

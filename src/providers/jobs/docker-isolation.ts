@@ -167,12 +167,17 @@ function validateSpec(spec: JobSpec): void {
   if (spec.kind !== "coding-agent" || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(spec.runId)) {
     throw isolationError();
   }
-  if (!IMMUTABLE_IMAGE.test(spec.image)) throw isolationError();
+  if (!isImmutableDockerImage(spec.image)) throw isolationError();
   assertFiniteRange(spec.limits.cpus, 0.1, 32);
   assertIntegerRange(spec.limits.memoryMb, 128, 65_536);
   assertIntegerRange(spec.limits.pids, 16, 4_096);
   assertIntegerRange(spec.limits.diskMb, 64, 32_768);
   assertIntegerRange(spec.timeoutSec, 1, 86_400);
+}
+
+/** Accepts a registry digest or Docker's content-addressed local image ID. */
+export function isImmutableDockerImage(image: string): boolean {
+  return IMMUTABLE_IMAGE.test(image);
 }
 
 function validateDockerObject(value: string): void {
@@ -337,8 +342,6 @@ export function buildWorkerCreateArgs(spec: JobSpec, proxyPort = CODING_PROXY_PO
     "--mount",
     `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.workspace},volume-subpath=workspace,volume-nocopy`,
     "--mount",
-    `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.git},volume-subpath=git,volume-nocopy,readonly`,
-    "--mount",
     `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.input},volume-subpath=input,volume-nocopy,readonly`,
     "--mount",
     `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.output},volume-subpath=output,volume-nocopy`,
@@ -501,7 +504,6 @@ export function assertProxyContainerInspection(container: DockerContainerInspect
 function assertExactWorkerMounts(container: DockerContainerInspection, names: DockerIsolationNames): void {
   const expected = new Map<string, boolean>([
     [WORKER_PATHS.workspace, true],
-    [WORKER_PATHS.git, false],
     [WORKER_PATHS.input, false],
     [WORKER_PATHS.output, true],
   ]);
@@ -520,7 +522,6 @@ function assertExactWorkerMounts(container: DockerContainerInspection, names: Do
   const requested = container.HostConfig?.Mounts ?? [];
   const expectedRequested = new Map<string, { readOnly: boolean; subpath: string }>([
     [WORKER_PATHS.workspace, { readOnly: false, subpath: "workspace" }],
-    [WORKER_PATHS.git, { readOnly: true, subpath: "git" }],
     [WORKER_PATHS.input, { readOnly: true, subpath: "input" }],
     [WORKER_PATHS.output, { readOnly: false, subpath: "output" }],
   ]);

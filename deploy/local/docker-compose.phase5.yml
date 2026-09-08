@@ -1,0 +1,23 @@
+services:
+  coding-proxy:
+    container_name: reevo-coding-proxy
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+      target: runtime
+    command: ["node", "dist/coding-proxy/main.js"]
+    environment:
+      DATABASE_URL: postgresql://reevo:reevo@postgres:5432/reevo
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY must be set in .env.local}
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped

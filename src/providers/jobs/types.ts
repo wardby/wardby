@@ -38,6 +38,8 @@ export interface JobResult {
   exitCode: number;
   reason: "completed" | "failed" | "stopped" | "timed_out" | "lost";
   resultArtifact?: string;
+  /** Fixed worker-owned failure code; never raw container output. */
+  diagnostic?: string;
 }
 
 /**

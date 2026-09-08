@@ -46,20 +46,19 @@ describe("Docker isolation policy", () => {
     );
   });
 
-  it("uses only the four fixed volume mounts with explicit access modes", () => {
+  it("uses only the three fixed worker mounts and does not expose Git metadata", () => {
     const args = buildWorkerCreateArgs(spec);
     const mounts = args.filter((value) => value.startsWith("type=volume"));
-    expect(mounts).toHaveLength(4);
+    expect(mounts).toHaveLength(3);
     expect(mounts).toEqual([
       expect.stringContaining(`dst=${WORKER_PATHS.workspace},volume-subpath=workspace`),
-      expect.stringContaining(`dst=${WORKER_PATHS.git},volume-subpath=git`),
       expect.stringContaining(`dst=${WORKER_PATHS.input},volume-subpath=input`),
       expect.stringContaining(`dst=${WORKER_PATHS.output},volume-subpath=output`),
     ]);
     expect(mounts[0]).not.toContain("readonly");
     expect(mounts[1]).toContain("readonly");
-    expect(mounts[2]).toContain("readonly");
-    expect(mounts[3]).not.toContain("readonly");
+    expect(mounts[2]).not.toContain("readonly");
+    expect(args.join(" ")).not.toContain(`dst=${WORKER_PATHS.git}`);
     expect(args).not.toContain("--volume");
   });
 
@@ -166,13 +165,6 @@ describe("Docker isolation policy", () => {
           {
             Type: "volume",
             Source: names.storageVolume,
-            Target: WORKER_PATHS.git,
-            ReadOnly: true,
-            VolumeOptions: { NoCopy: true, Subpath: "git" },
-          },
-          {
-            Type: "volume",
-            Source: names.storageVolume,
             Target: WORKER_PATHS.input,
             ReadOnly: true,
             VolumeOptions: { NoCopy: true, Subpath: "input" },
@@ -187,7 +179,6 @@ describe("Docker isolation policy", () => {
       },
       Mounts: [
         { Type: "volume", Name: names.storageVolume, Destination: WORKER_PATHS.workspace, RW: true },
-        { Type: "volume", Name: names.storageVolume, Destination: WORKER_PATHS.git, RW: false },
         { Type: "volume", Name: names.storageVolume, Destination: WORKER_PATHS.input, RW: false },
         { Type: "volume", Name: names.storageVolume, Destination: WORKER_PATHS.output, RW: true },
       ],
