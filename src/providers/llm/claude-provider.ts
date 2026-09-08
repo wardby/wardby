@@ -23,7 +23,7 @@ import type { ModelPricing, UsageTokens } from "./pricing-core.js";
  */
 export interface ClaudeMessagesClient {
   messages: {
-    stream(params: any, options?: { signal?: AbortSignal }): unknown;
+    stream(params: unknown, options?: { signal?: AbortSignal }): unknown;
   };
 }
 

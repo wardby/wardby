@@ -56,8 +56,8 @@ describe("BedrockClaudeLlmProvider", () => {
   });
 
   it("credentials presence reflects env (BEDROCK_REGION or AWS_REGION)", () => {
-    expect(bedrockCredentialsPresent({ BEDROCK_REGION: "us-east-1" } as NodeJS.ProcessEnv)).toBe(true);
-    expect(bedrockCredentialsPresent({ AWS_REGION: "us-east-1" } as NodeJS.ProcessEnv)).toBe(true);
-    expect(bedrockCredentialsPresent({} as NodeJS.ProcessEnv)).toBe(false);
+    expect(bedrockCredentialsPresent({ BEDROCK_REGION: "us-east-1" })).toBe(true);
+    expect(bedrockCredentialsPresent({ AWS_REGION: "us-east-1" })).toBe(true);
+    expect(bedrockCredentialsPresent({})).toBe(false);
   });
 });
