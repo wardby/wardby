@@ -35,4 +35,26 @@ describe("bedrock-claude pricing", () => {
     const expected = (1000 / 1e6) * p.cachedInputPerMTok! + (500 / 1e6) * p.cacheWritePerMTok!;
     expect(cost).toBeCloseTo(expected, 9);
   });
+
+  it("routes the agent-cron fleet's four Bedrock model IDs (2026-09-08 production export, 81 agents)", () => {
+    // docs/private/2026-09-08-fleet-models-to-roster.md — keys must match
+    // agent.model verbatim; the Phase-9 importer's routability gate is an
+    // exact-set membership test against bedrockClaudeSupportedModels().
+    expect(getBedrockClaudePricing("us.anthropic.claude-sonnet-4-6")).toMatchObject({
+      inputPerMTok: 3,
+      outputPerMTok: 15,
+    });
+    expect(getBedrockClaudePricing("us.anthropic.claude-opus-4-6-v1")).toMatchObject({
+      inputPerMTok: 5,
+      outputPerMTok: 25,
+    });
+    expect(getBedrockClaudePricing("us.anthropic.claude-opus-4-8")).toMatchObject({
+      inputPerMTok: 5,
+      outputPerMTok: 25,
+    });
+    expect(getBedrockClaudePricing("us.anthropic.claude-haiku-4-5-20251001-v1:0")).toMatchObject({
+      inputPerMTok: 1,
+      outputPerMTok: 5,
+    });
+  });
 });

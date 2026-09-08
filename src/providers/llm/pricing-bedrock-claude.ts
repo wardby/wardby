@@ -23,13 +23,22 @@ function claude(inputPerMTok: number, outputPerMTok: number): ModelPricing {
   };
 }
 
-// Seed roster: the global-profile Bedrock ID for claude-sonnet-5, same base
-// rate as pricing-anthropic.ts's "claude-sonnet-5" entry. Add the rest of
-// the supported fleet's model/inference-profile IDs here as they're
-// confirmed (migration bundle / AWS Bedrock console) — each gets its own
-// literal entry, including any regional-profile premium over this rate.
 const PRICING: Record<string, ModelPricing> = {
+  // Global-profile seed entry, same base rate as pricing-anthropic.ts's
+  // "claude-sonnet-5" entry.
   "anthropic.claude-sonnet-5-v1:0": claude(2, 10),
+
+  // agent-cron fleet roster (docs/private/2026-09-08-fleet-models-to-roster.md,
+  // 2026-09-08 production export bundle, 81 agents / 4 distinct IDs). All
+  // four are `us.` cross-region inference profiles (region us-east-1) —
+  // routability is keyed by model ID only; region is a separate adapter
+  // concern (BEDROCK_REGION/AWS_REGION). Rates confirmed against current AWS
+  // Bedrock pricing, each its own literal entry — no computed regional
+  // premium over a base rate.
+  "us.anthropic.claude-sonnet-4-6": claude(3, 15),
+  "us.anthropic.claude-opus-4-6-v1": claude(5, 25),
+  "us.anthropic.claude-opus-4-8": claude(5, 25),
+  "us.anthropic.claude-haiku-4-5-20251001-v1:0": claude(1, 5),
 };
 
 export function getBedrockClaudePricing(model: string): ModelPricing {
