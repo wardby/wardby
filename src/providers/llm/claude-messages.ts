@@ -3,7 +3,8 @@
  * so a future Bedrock-Claude adapter reuses them unchanged — Bedrock and the
  * direct API differ only in client/auth, model IDs, and pricing.
  */
-import type { LlmRequest, LlmToolDef, LlmStreamEvent, LlmUsage } from "./types.js";
+import { encode as encodeO200kBase } from "gpt-tokenizer/encoding/o200k_base";
+import type { LlmMessage, LlmRequest, LlmToolDef, LlmStreamEvent, LlmUsage } from "./types.js";
 
 export interface CacheControl {
   type: "ephemeral";
@@ -67,6 +68,23 @@ export function toClaudeTools(tools: LlmToolDef[]): ClaudeTool[] {
     description: t.description,
     input_schema: t.parameters,
   }));
+}
+
+const TOKENS_PER_MESSAGE = 3;
+
+/**
+ * Raw (pre-inflation) offline token estimate shared by every Claude-protocol
+ * adapter. Each caller applies its own inflation constant on top.
+ */
+export function estimateClaudeTokens(messages: LlmMessage[], tools?: LlmToolDef[]): number {
+  let raw = 0;
+  for (const m of messages) {
+    raw += TOKENS_PER_MESSAGE + encodeO200kBase(m.content).length + encodeO200kBase(m.role).length;
+  }
+  if (tools && tools.length > 0) {
+    raw += encodeO200kBase(JSON.stringify(toClaudeTools(tools))).length;
+  }
+  return raw;
 }
 
 export function toClaudeRequest(req: LlmRequest, defaultMaxTokens: number): ClaudeRequest {

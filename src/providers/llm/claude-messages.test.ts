@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { toClaudeRequest, withCacheBreakpoints } from "./claude-messages.js";
-import type { LlmRequest } from "./types.js";
+import { toClaudeRequest, withCacheBreakpoints, estimateClaudeTokens } from "./claude-messages.js";
+import type { LlmRequest, LlmMessage } from "./types.js";
 
 const base: LlmRequest = {
   model: "claude-opus-5",
@@ -115,5 +115,21 @@ describe("mapClaudeStream", () => {
       outputTokens: 12,
     });
     expect(done.stopReason).toBe("tool_use");
+  });
+});
+
+describe("estimateClaudeTokens", () => {
+  it("returns a positive raw count for a simple message", () => {
+    const raw = estimateClaudeTokens([{ role: "user", content: "hello world" }]);
+    expect(raw).toBeGreaterThan(0);
+  });
+
+  it("counts more raw tokens when tool schemas are included", () => {
+    const messages: LlmMessage[] = [{ role: "user", content: "hello world" }];
+    const withoutTools = estimateClaudeTokens(messages);
+    const withTools = estimateClaudeTokens(messages, [
+      { name: "t", description: "d", parameters: { type: "object", properties: {} } },
+    ]);
+    expect(withTools).toBeGreaterThan(withoutTools);
   });
 });
