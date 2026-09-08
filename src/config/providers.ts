@@ -9,7 +9,6 @@
 
 export type JobLauncherKind = "local" | "docker" | "ecs";
 export type EmailProviderKind = "smtp" | "ses";
-export type LlmProviderKind = "openai" | "anthropic" | "bedrock";
 export type SecretCipherKind = "app-key" | "kms";
 export type AuthProviderKind = "delegating" | "self-hosted";
 export type BlobStoreKind = "local" | "s3";
@@ -21,7 +20,6 @@ export type VcsProviderKind = "github";
 export interface ProviderConfig {
   jobs: JobLauncherKind;
   email: EmailProviderKind;
-  llm: LlmProviderKind;
   secrets: SecretCipherKind;
   auth: AuthProviderKind;
   storage: BlobStoreKind;
@@ -36,7 +34,6 @@ export function loadProviderConfig(env: NodeJS.ProcessEnv = process.env): Provid
   return {
     jobs: (env.JOB_LAUNCHER as JobLauncherKind) ?? "local",
     email: (env.EMAIL_PROVIDER as EmailProviderKind) ?? "smtp",
-    llm: (env.LLM_PROVIDER as LlmProviderKind) ?? "openai",
     secrets: (env.SECRET_CIPHER as SecretCipherKind) ?? "app-key",
     auth: (env.AUTH_PROVIDER as AuthProviderKind) ?? "delegating",
     storage: (env.BLOB_STORE as BlobStoreKind) ?? "local",

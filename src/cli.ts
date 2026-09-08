@@ -58,13 +58,11 @@ function fail(message: string): never {
 }
 
 function buildLlmProvider(): ProviderRegistry["llm"] {
-  const config = loadProviderConfig();
-  const result = resolveLlmRegistrations(config);
-  if (result.kind === "bedrock-reserved") {
-    fail(`LLM_PROVIDER "bedrock" is reserved but has no adapter yet — use "openai" and/or "anthropic".`);
-  }
+  const result = resolveLlmRegistrations();
   if (result.kind === "no-credentials") {
-    fail("No LLM credentials present. Set OPENAI_API_KEY and/or ANTHROPIC_API_KEY.");
+    fail(
+      "No LLM credentials present. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, and/or BEDROCK_REGION (or AWS_REGION).",
+    );
   }
   return new RoutingLlmProvider(result.registrations);
 }

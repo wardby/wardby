@@ -8,11 +8,6 @@ import {
 } from "./providers.js";
 
 describe("provider config", () => {
-  it("accepts anthropic and bedrock as llm kinds", () => {
-    expect(loadProviderConfig({ LLM_PROVIDER: "anthropic" }).llm).toBe("anthropic");
-    expect(loadProviderConfig({ LLM_PROVIDER: "bedrock" }).llm).toBe("bedrock");
-  });
-
   it("defaults auth to delegating", () => {
     expect(loadProviderConfig({}).auth).toBe("delegating");
   });

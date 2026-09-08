@@ -76,13 +76,9 @@ export interface McpProviderComposition {
 export function buildMcpProviders(): McpProviderComposition {
   const providerConfig = loadProviderConfig();
 
-  const llmResult = resolveLlmRegistrations(providerConfig);
+  const llmResult = resolveLlmRegistrations();
   if (llmResult.kind !== "registrations") {
-    throw new Error(
-      llmResult.kind === "bedrock-reserved"
-        ? `LLM_PROVIDER "bedrock" is reserved but has no adapter yet — use "openai" and/or "anthropic".`
-        : "No LLM credentials present. Set OPENAI_API_KEY and/or ANTHROPIC_API_KEY.",
-    );
+    throw new Error("No LLM credentials present. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, and/or BEDROCK_REGION (or AWS_REGION).");
   }
   const llm = new RoutingLlmProvider(llmResult.registrations);
   const engine = new NativeEngine();
