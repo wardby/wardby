@@ -233,6 +233,10 @@ model CodingRun {
   jobHandle         String?
   result            Json?
   resultSchema      Int                 @default(1)
+  /// Sanitized terminal classification and an opaque log correlation reference.
+  /// Neither field may contain task, repository, environment, or credential data.
+  failureCategory   String?
+  diagnosticId      String?
   budgetReservedUsd Decimal             @db.Decimal(10, 6)
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt

@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { InMemoryCodingRunObserver } from "../../coding/observability.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "../jobs/types.js";
 import type { FinalizeChangesResult, PreparedWorkspace, VcsPrepareInput, VcsProvider } from "../vcs/types.js";
 import {
@@ -207,7 +208,11 @@ class FakeSessions implements CodingSessionController {
   }
 }
 
-async function harness(overrides: Partial<ContainerRunSnapshot> = {}, workerImage = IMAGE) {
+async function harness(
+  overrides: Partial<ContainerRunSnapshot> = {},
+  workerImage = IMAGE,
+  observer = new InMemoryCodingRunObserver(),
+) {
   const root = await mkdtemp("/private/tmp/reevo-container-executor-");
   roots.push(root);
   const events: string[] = [];
@@ -227,8 +232,9 @@ async function harness(overrides: Partial<ContainerRunSnapshot> = {}, workerImag
     credentialRef: "env:OPENAI_API_KEY",
     limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
     sleep: async () => {},
+    observer,
   });
-  return { executor, store, jobs, vcs, sessions, capabilities, events };
+  return { executor, store, jobs, vcs, sessions, capabilities, events, observer };
 }
 
 afterEach(async () => {
@@ -264,6 +270,24 @@ describe("ContainerExecutor", () => {
       "cleanup",
     ]);
     await expect(created.capabilities.get("run-1")).rejects.toThrow("coding_capability_unavailable");
+    expect(created.observer.events.map((event) => event.stage)).toEqual([
+      "queued",
+      "prepared",
+      "launched",
+      "collected",
+      "pull_request_opened",
+      "terminal",
+      "cleanup",
+    ]);
+    expect(created.observer.events.every((event) => JSON.stringify(event).includes("Fix the bug") === false)).toBe(
+      true,
+    );
+    expect(created.observer.metrics.snapshot()).toMatchObject({
+      terminalOutcomes: { succeeded: 1 },
+      activeJobs: 0,
+      budgetReservedUsd: 2,
+      budgetActualUsd: 0.01,
+    });
   });
 
   it("skips materialization and VCS finalization for a no-change output", async () => {
@@ -288,6 +312,8 @@ describe("ContainerExecutor", () => {
     expect(created.vcs.finalized).toBe(0);
     expect(created.store.run.status).toBe("budget_exhausted");
     expect(created.store.run.result).toMatchObject({ outcome: "budget_exhausted", usage: { costUsd: 0.01 } });
+    expect(created.observer.events.map((event) => event.stage)).toContain("budget_cutoff");
+    expect(created.observer.metrics.snapshot().terminalOutcomes).toEqual({ budget_exhausted: 1 });
   });
 
   it("refuses invalid ownership before creating a workspace, session, or job", async () => {

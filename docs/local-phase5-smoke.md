@@ -57,6 +57,14 @@ The preflight checks that Docker can inspect the immutable worker image. A real
 run additionally verifies the proxy's isolated-network attachment immediately
 before launching the worker.
 
+After the smoke completes, record the run ID, terminal result, pull-request
+URL, and final cost in the release evidence. Close the fixture PR and delete
+its `reevo/run-*` branch. The worker's volume, artifact, and trusted checkout
+are already removed by terminal cleanup; do not retain them for debugging.
+
+See [Phase 5 release gate](phase-5-release-gate.md) for the repeatable
+automated checks, lifecycle audit fields, and incident cleanup procedure.
+
 ## Stop the setup
 
 ```sh

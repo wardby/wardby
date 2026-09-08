@@ -148,6 +148,26 @@ The preflight command requires Docker mode, validates the pinned worker-image
 digest, and confirms the image is available to Docker. Cleanup delegates to
 the configured executor so it resolves and stops the persisted container job.
 
+## Audit And Retention
+
+The executor emits metadata-only lifecycle events for queueing, preparation,
+launch, running, budget cutoff, stopping, collection, PR creation, terminal
+outcome, and cleanup. Events carry run ID, opaque job ID, sanitized failure
+category, opaque diagnostic ID, duration, and budget totals only. They never
+carry task text, prompts, repository contents, diffs, worker environment, raw
+Docker logs, or credentials.
+
+The production log/metrics collector retains those events for 90 days by
+default policy. `CodingRun` stores only the sanitized failure category and
+diagnostic ID alongside the normal run record; it is not an artifact store.
+Every terminal path removes the worker volume, input artifact, job state, and
+trusted checkout. Restart reconciliation repeats that cleanup from the
+persisted job handle and marks ambiguous provisioning as `lost` instead of
+relaunching it.
+
+See [Phase 5 release gate](phase-5-release-gate.md) for the complete evidence
+set, live-fixture rules, supported scope, and incident procedure.
+
 ## Verification
 
 Build the image and run the destructive, self-cleaning acceptance suite:

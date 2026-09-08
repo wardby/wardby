@@ -3,6 +3,7 @@ import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "@prisma/client";
 import { CodingProfileSchema } from "../../coding/profile.js";
+import { codingRunObserver, type CodingRunObserver } from "../../coding/observability.js";
 import {
   CODING_PROTOCOL_VERSION,
   CodingRunResultSchema,
@@ -51,7 +52,17 @@ export interface ContainerExecutionStore {
   persistHandle(runId: string, claimId: string, handle: JobHandle): Promise<void>;
   heartbeat(runId: string): Promise<void>;
   complete(runId: string, status: "succeeded" | "budget_exhausted", result: CodingRunResult): Promise<void>;
-  terminate(runId: string, status: "failed" | "refused" | "lost" | "cancelled", error: string): Promise<void>;
+  terminate(
+    runId: string,
+    status: "failed" | "refused" | "lost" | "cancelled",
+    error: string,
+    audit?: CodingFailureAudit,
+  ): Promise<void>;
+}
+
+export interface CodingFailureAudit {
+  failureCategory: string;
+  diagnosticId: string;
 }
 
 export class PrismaContainerExecutionStore implements ContainerExecutionStore {
@@ -168,10 +179,23 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     });
   }
 
-  async terminate(runId: string, status: "failed" | "refused" | "lost" | "cancelled", error: string): Promise<void> {
-    await this.db.run.updateMany({
-      where: { id: runId, status: { in: ["pending", "running"] } },
-      data: { status, error, finishedAt: new Date(), heartbeatAt: new Date() },
+  async terminate(
+    runId: string,
+    status: "failed" | "refused" | "lost" | "cancelled",
+    error: string,
+    audit?: CodingFailureAudit,
+  ): Promise<void> {
+    await this.db.$transaction(async (tx) => {
+      const updated = await tx.run.updateMany({
+        where: { id: runId, status: { in: ["pending", "running"] } },
+        data: { status, error, finishedAt: new Date(), heartbeatAt: new Date() },
+      });
+      if (updated.count && audit) {
+        await tx.codingRun.update({
+          where: { runId },
+          data: { failureCategory: audit.failureCategory, diagnosticId: audit.diagnosticId },
+        });
+      }
     });
   }
 }
@@ -221,6 +245,7 @@ export interface ContainerExecutorOptions {
   pollMaxMs?: number;
   sleep?: (milliseconds: number) => Promise<void>;
   now?: () => Date;
+  observer?: CodingRunObserver;
 }
 
 class PreflightError extends Error {}
@@ -230,6 +255,8 @@ export class ContainerExecutor implements Executor {
   private readonly active = new Map<string, Promise<void>>();
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly now: () => Date;
+  private readonly observer: CodingRunObserver;
+  private readonly startedAt = new Map<string, number>();
 
   constructor(private readonly options: ContainerExecutorOptions) {
     this.artifactRoot = resolve(options.artifactRoot);
@@ -256,11 +283,14 @@ export class ContainerExecutor implements Executor {
     this.sleep =
       options.sleep ?? ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
     this.now = options.now ?? (() => new Date());
+    this.observer = options.observer ?? codingRunObserver;
   }
 
   async start(runId: string): Promise<void> {
     const current = this.active.get(runId);
     if (current) return current;
+    this.startedAt.set(runId, this.now().getTime());
+    this.emit({ stage: "queued", runId });
     const execution = this.execute(runId).finally(() => this.active.delete(runId));
     this.active.set(runId, execution);
     return execution;
@@ -270,8 +300,11 @@ export class ContainerExecutor implements Executor {
     const run = await this.options.store.load(runId);
     if (!run) return;
     if (TERMINAL_STATUSES.has(run.status)) return this.cleanupTerminal(run);
+    this.emit({ stage: "stopping", runId, jobId: run.jobHandle?.id });
     // Persist the cancellation fence first so a concurrent finisher cannot publish.
-    await this.options.store.terminate(runId, "cancelled", "coding_run_cancelled");
+    const failure = this.failure("cancelled");
+    await this.options.store.terminate(runId, "cancelled", failure.error, failure.audit);
+    this.terminal(run, "cancelled", failure.audit);
     if (run.proxySessionId) await this.options.sessions.cancelSession(run.proxySessionId).catch(() => undefined);
     if (run.jobHandle) {
       await this.options.jobs.stop(run.jobHandle, reason).catch(() => undefined);
@@ -282,6 +315,7 @@ export class ContainerExecutor implements Executor {
     const workspace = input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null;
     if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
     await rm(this.artifactPath(runId), { recursive: true, force: true }).catch(() => undefined);
+    this.emit({ stage: "cleanup", runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
   }
 
   async recover(handle: PersistedExecutionHandle): Promise<ExecutionRecoveryResult> {
@@ -337,6 +371,7 @@ export class ContainerExecutor implements Executor {
         workspace = await this.options.vcs.recoverWorkspace(prepared);
         if (!workspace && handle) throw new Error("coding_workspace_lost");
         if (!workspace) workspace = await this.options.vcs.prepareWorkspace(prepared);
+        this.emit({ stage: "prepared", runId });
       } catch (error) {
         if (!spendEnabled && !handle) throw new PreflightError(safeError(error), { cause: error });
         throw error;
@@ -363,15 +398,21 @@ export class ContainerExecutor implements Executor {
         handle = await this.options.jobs.launch(this.jobSpec(run, inputArtifact));
         await this.options.store.persistHandle(runId, claimId!, handle);
         this.options.capabilities.delete(runId);
+        this.emit({ stage: "launched", runId, jobId: handle.id, budgetReservedUsd: run.budgetUsd });
       }
 
       let delay = this.options.pollMinMs ?? 250;
       const maximumDelay = this.options.pollMaxMs ?? 5_000;
+      let observedRunning = false;
       for (;;) {
         const status = await this.options.jobs.status(handle);
         if (status.state !== "pending" && status.state !== "running") {
           await this.finishTerminal(run, handle, status.state, workspace, sessionId);
           return;
+        }
+        if (status.state === "running" && !observedRunning) {
+          observedRunning = true;
+          this.emit({ stage: "running", runId, jobId: handle.id });
         }
         await this.options.store.heartbeat(runId);
         await this.sleep(delay);
@@ -384,9 +425,19 @@ export class ContainerExecutor implements Executor {
       if (sessionId) await this.options.sessions.cancelSession(sessionId).catch(() => undefined);
       if (handle) await this.options.jobs.stop(handle, "executor_failure").catch(() => undefined);
       const status = !spendEnabled && error instanceof PreflightError ? "refused" : "failed";
-      await this.options.store.terminate(runId, status, safeError(error));
+      const failure = this.failure(error);
+      this.emit({
+        stage: "stopping",
+        runId,
+        jobId: handle?.id,
+        failureCategory: failure.audit.failureCategory,
+        diagnosticId: failure.audit.diagnosticId,
+      });
+      await this.options.store.terminate(runId, status, failure.error, failure.audit);
+      this.terminal(run, status, failure.audit);
       if (handle) await this.options.jobs.remove(handle).catch(() => undefined);
       if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+      this.emit({ stage: "cleanup", runId, jobId: handle?.id, cleanupSucceeded: true });
     }
   }
 
@@ -444,24 +495,32 @@ export class ContainerExecutor implements Executor {
       if (jobState !== "succeeded") {
         const collected = await this.options.jobs.collect(handle).catch(() => null);
         const reason = collected?.diagnostic ?? collected?.reason ?? jobState;
-        await this.options.store.terminate(run.runId, jobState === "lost" ? "lost" : "failed", `coding_job_${reason}`);
+        this.emit({ stage: "collected", runId: run.runId, jobId: handle.id });
+        const status = jobState === "lost" ? "lost" : "failed";
+        const failure = this.failure(`job_${reason}`);
+        await this.options.store.terminate(run.runId, status, failure.error, failure.audit);
+        this.terminal(run, status, failure.audit);
         return;
       }
       const collected = await this.options.jobs.collect(handle);
+      this.emit({ stage: "collected", runId: run.runId, jobId: handle.id });
       if (collected.reason !== "completed" || !collected.resultArtifact) throw new Error("coding_result_missing");
       const output = parseCodingAgentOutputJson(collected.resultArtifact);
       if (output.runId !== run.runId) throw new Error("coding_result_run_mismatch");
       let current = await this.requireCurrent(run.runId);
       if (current.costUsd > current.budgetUsd || output.outcome === "budget_exhausted") {
+        this.emit({ stage: "budget_cutoff", runId: run.runId, jobId: handle.id });
         await this.options.store.complete(
           run.runId,
           "budget_exhausted",
           this.resultFor(output, current, "budget_exhausted"),
         );
+        this.terminal(current, "budget_exhausted");
         return;
       }
       if (output.outcome === "no_changes") {
         await this.options.store.complete(run.runId, "succeeded", this.resultFor(output, current));
+        this.terminal(current, "succeeded");
         return;
       }
 
@@ -471,18 +530,26 @@ export class ContainerExecutor implements Executor {
       await this.options.jobs.materializeWorkspace(handle, workspace.workspacePath);
       current = await this.requireCurrent(run.runId);
       if (current.costUsd > current.budgetUsd) {
+        this.emit({ stage: "budget_cutoff", runId: run.runId, jobId: handle.id });
         await this.options.store.complete(
           run.runId,
           "budget_exhausted",
           this.resultFor(output, current, "budget_exhausted"),
         );
+        this.terminal(current, "budget_exhausted");
         return;
       }
       const finalized = await this.options.vcs.finalizeChanges(workspace);
       const result = this.resultFor(output, current, finalized.outcome, finalized);
       await this.options.store.complete(run.runId, "succeeded", result);
+      if (finalized.outcome === "pull_request_opened") {
+        this.emit({ stage: "pull_request_opened", runId: run.runId, jobId: handle.id });
+      }
+      this.terminal(current, "succeeded");
     } catch (error) {
-      await this.options.store.terminate(run.runId, "failed", safeError(error));
+      const failure = this.failure(error);
+      await this.options.store.terminate(run.runId, "failed", failure.error, failure.audit);
+      this.terminal(run, "failed", failure.audit);
     } finally {
       await this.options.jobs.remove(handle).catch(() => undefined);
       const input = this.preflightForCleanup(run);
@@ -490,6 +557,7 @@ export class ContainerExecutor implements Executor {
         existingWorkspace ?? (input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null);
       if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
       await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
+      this.emit({ stage: "cleanup", runId: run.runId, jobId: handle.id, cleanupSucceeded: true });
     }
   }
 
@@ -580,7 +648,9 @@ export class ContainerExecutor implements Executor {
   }
 
   private async abandon(run: ContainerRunSnapshot, reason: string): Promise<void> {
-    await this.options.store.terminate(run.runId, "lost", reason);
+    const failure = this.failure(reason);
+    await this.options.store.terminate(run.runId, "lost", failure.error, failure.audit);
+    this.terminal(run, "lost", failure.audit);
     if (run.proxySessionId) await this.options.sessions.cancelSession(run.proxySessionId).catch(() => undefined);
     if (run.jobHandle) {
       await this.options.jobs.stop(run.jobHandle, reason).catch(() => undefined);
@@ -591,6 +661,7 @@ export class ContainerExecutor implements Executor {
     const workspace = input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null;
     if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
     await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
+    this.emit({ stage: "cleanup", runId: run.runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
   }
 
   private async cleanupTerminal(run: ContainerRunSnapshot): Promise<void> {
@@ -607,6 +678,43 @@ export class ContainerExecutor implements Executor {
     const workspace = input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null;
     if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
     await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
+    this.emit({ stage: "cleanup", runId: run.runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
+  }
+
+  private emit(event: Parameters<CodingRunObserver["emit"]>[0]): void {
+    try {
+      this.observer.emit(event);
+    } catch {
+      // Telemetry cannot change a run's security or terminal behavior.
+    }
+  }
+
+  private terminal(
+    run: ContainerRunSnapshot,
+    outcome: "succeeded" | "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
+    audit?: CodingFailureAudit,
+  ): void {
+    this.emit({
+      stage: "terminal",
+      runId: run.runId,
+      jobId: run.jobHandle?.id,
+      outcome,
+      failureCategory: audit?.failureCategory,
+      diagnosticId: audit?.diagnosticId,
+      durationMs: this.duration(run.runId),
+      budgetActualUsd: run.costUsd,
+    });
+  }
+
+  private failure(error: unknown): { error: string; audit: CodingFailureAudit } {
+    const category = failureCategory(error);
+    const diagnosticId = `coding_diag_${randomUUID()}`;
+    return { error: `coding_failure_${category}:${diagnosticId}`, audit: { failureCategory: category, diagnosticId } };
+  }
+
+  private duration(runId: string): number | undefined {
+    const startedAt = this.startedAt.get(runId);
+    return startedAt === undefined ? undefined : Math.max(0, this.now().getTime() - startedAt);
   }
 }
 
@@ -615,6 +723,17 @@ function safeError(error: unknown): string {
   return `coding_executor:${redactTokenShapedValues(message)
     .replace(/[^A-Za-z0-9_.:-]/g, "_")
     .slice(0, 200)}`;
+}
+
+function failureCategory(error: unknown): string {
+  const message = safeError(error);
+  if (message.includes("preflight") || message.includes("ownership") || message.includes("image")) return "preflight";
+  if (message.includes("budget")) return "budget";
+  if (message.includes("artifact") || message.includes("result")) return "artifact";
+  if (message.includes("workspace") || message.includes("git") || message.includes("vcs")) return "workspace";
+  if (message.includes("job") || message.includes("container")) return "job";
+  if (message.includes("cancel")) return "cancelled";
+  return "executor";
 }
 
 function stableJson(value: unknown): string {

@@ -42,6 +42,9 @@ function fakeDb(agents: FakeAgentRow[]) {
 
   const db: any = {
     agent: {
+      // Prompt discovery runs during MCP connection setup; this stub keeps the
+      // focused trigger tests from treating that optional path as a warning.
+      findMany: async () => [],
       findUnique: async ({ where }: { where: { id?: string; name?: string } }) => {
         const row = where.id ? agentsById.get(where.id) : agents.find((a) => a.name === where.name);
         if (row) return { kind: "native", codingProfile: null, budgetUsd: 1, model: "m", ...row };

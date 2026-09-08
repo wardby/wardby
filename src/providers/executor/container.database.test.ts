@@ -80,4 +80,40 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
     expect(terminal.status).toBe("succeeded");
     expect(terminal.codingRun?.result).toEqual(result);
   });
+
+  it("persists a sanitized failure category and opaque diagnostic ID separately from the terminal state", async () => {
+    const failedRunId = `container-failed-${randomUUID()}`;
+    try {
+      await db.run.create({ data: { id: failedRunId, agentId, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId: failedRunId,
+          task: "Never persist this task in failure metadata.",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `reevo/run-${failedRunId}`,
+          provider: "codex",
+          model: "gpt-5.6-luna",
+          timeoutSec: 900,
+          allowedEgress: [],
+          protectedPaths: ["CODEOWNERS"],
+          budgetReservedUsd: 1,
+        },
+      });
+
+      const store = new PrismaContainerExecutionStore(db);
+      await store.terminate(failedRunId, "failed", "coding_failure_artifact:coding_diag_opaque", {
+        failureCategory: "artifact",
+        diagnosticId: "coding_diag_opaque",
+      });
+
+      await expect(db.codingRun.findUniqueOrThrow({ where: { runId: failedRunId } })).resolves.toMatchObject({
+        failureCategory: "artifact",
+        diagnosticId: "coding_diag_opaque",
+      });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: failedRunId } });
+      await db.run.deleteMany({ where: { id: failedRunId } });
+    }
+  });
 });

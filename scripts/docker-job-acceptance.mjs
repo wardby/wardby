@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 
-const requestedImage = process.env.REEVO_WORKER_IMAGE ?? "reevo-coding-worker:task9";
+const requestedImage = process.env.REEVO_WORKER_IMAGE ?? "reevo-coding-worker:phase5-smoke";
 try {
   execFileSync("docker", ["image", "inspect", "--format", "{{.Id}}", requestedImage], {
     encoding: "utf8",
