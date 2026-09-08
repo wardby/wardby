@@ -20,7 +20,7 @@ async function collect(it: AsyncIterable<LlmStreamEvent>) {
   return o;
 }
 
-const MODEL = "anthropic.claude-sonnet-5-v1:0";
+const MODEL = "us.anthropic.claude-sonnet-4-6";
 
 describe("BedrockClaudeLlmProvider", () => {
   it("streams text and a done event with a priced usage, wired through the shared ClaudeLlmProvider logic", async () => {

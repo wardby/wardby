@@ -12,11 +12,12 @@ describe("bedrock-claude pricing", () => {
     for (const m of models) expect(getBedrockClaudePricing(m).encoding).toBe("o200k_base");
   });
 
-  it("prices cache reads at ~0.1x and cache writes at ~1.25x of fresh input", () => {
-    const [model] = bedrockClaudeSupportedModels();
-    const p = getBedrockClaudePricing(model);
-    expect(p.cachedInputPerMTok).toBeCloseTo(p.inputPerMTok * 0.1, 6);
-    expect(p.cacheWritePerMTok).toBeCloseTo(p.inputPerMTok * 1.25, 6);
+  it("every entry has its own literal cache read/write rate set (never left undefined)", () => {
+    for (const m of bedrockClaudeSupportedModels()) {
+      const p = getBedrockClaudePricing(m);
+      expect(p.cachedInputPerMTok, `${m} is missing cachedInputPerMTok`).toBeGreaterThan(0);
+      expect(p.cacheWritePerMTok, `${m} is missing cacheWritePerMTok`).toBeGreaterThan(0);
+    }
   });
 
   it("fails closed on an unknown model", () => {
@@ -36,25 +37,35 @@ describe("bedrock-claude pricing", () => {
     expect(cost).toBeCloseTo(expected, 9);
   });
 
-  it("routes the agent-cron fleet's four Bedrock model IDs (2026-09-08 production export, 81 agents)", () => {
+  it("routes the agent-cron fleet's four Bedrock model IDs at their exact published rates (2026-09-08 production export, 81 agents)", () => {
     // docs/private/2026-09-08-fleet-models-to-roster.md — keys must match
     // agent.model verbatim; the Phase-9 importer's routability gate is an
     // exact-set membership test against bedrockClaudeSupportedModels().
+    // Rates from platform.claude.com/docs/en/about-claude/pricing
+    // (confirmed 2026-09-08), 5-minute cache TTL — see CLAUDE.md.
     expect(getBedrockClaudePricing("us.anthropic.claude-sonnet-4-6")).toMatchObject({
       inputPerMTok: 3,
       outputPerMTok: 15,
+      cachedInputPerMTok: 0.3,
+      cacheWritePerMTok: 3.75,
     });
     expect(getBedrockClaudePricing("us.anthropic.claude-opus-4-6-v1")).toMatchObject({
       inputPerMTok: 5,
       outputPerMTok: 25,
+      cachedInputPerMTok: 0.5,
+      cacheWritePerMTok: 6.25,
     });
     expect(getBedrockClaudePricing("us.anthropic.claude-opus-4-8")).toMatchObject({
       inputPerMTok: 5,
       outputPerMTok: 25,
+      cachedInputPerMTok: 0.5,
+      cacheWritePerMTok: 6.25,
     });
     expect(getBedrockClaudePricing("us.anthropic.claude-haiku-4-5-20251001-v1:0")).toMatchObject({
       inputPerMTok: 1,
       outputPerMTok: 5,
+      cachedInputPerMTok: 0.1,
+      cacheWritePerMTok: 1.25,
     });
   });
 });

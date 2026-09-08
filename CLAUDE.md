@@ -4,6 +4,44 @@ Budget-guarded LLM agents on a schedule, with a sandboxed tool executor and a
 cloud-agnostic core behind swappable provider seams. See `README.md` for the
 architecture and `CLEANROOM.md` for the clean-room rules that bind all work here.
 
+## LLM pricing tables — STRICT
+
+Every model entry in an LLM pricing table (`pricing-anthropic.ts`,
+`pricing-bedrock-claude.ts`, `pricing.ts`, and any future provider's pricing
+file) **must** set cache read/write rates (`cachedInputPerMTok`,
+`cacheWritePerMTok`), never base input/output rates alone. Omitting them
+isn't a silent zero — `pricing-core.ts`'s `computeCost` falls back to the
+full input rate for cache tokens, which fails toward *overestimate* — but
+that defeats the point of the budget guardrail tracking prompt-cache savings
+at all, and understates real savings to the user.
+
+**No multipliers, ever — exact published rates only.** Do not derive
+`cachedInputPerMTok`/`cacheWritePerMTok` from `inputPerMTok` via a ratio
+(e.g. `× 0.1` / `× 1.25`), even if that ratio is currently correct for a
+given model. Look up and hardcode the provider's actual published cache
+read and cache write rate for *that specific model*, as its own literal
+number, every time. Ratios drift per model/tier/provider and silently go
+stale the moment one model's real cache pricing diverges from the pattern —
+a hardcoded wrong number gets caught by whoever reviews the diff against the
+pricing page; a formula that's *become* wrong doesn't announce itself.
+Confirmed real example (2026-09-08, `platform.claude.com/docs/en/about-claude/pricing`)
+proving the ratio *happened* to hold across four different models is not a
+license to compute it instead of looking each one up:
+
+| Model | Input | Cache write (5-min) | Cache read | Output |
+|---|---|---|---|---|
+| Claude Sonnet 4.6 | $3.00/MTok | $3.75/MTok | $0.30/MTok | $15.00/MTok |
+| Claude Opus 4.6 | $5.00/MTok | $6.25/MTok | $0.50/MTok | $25.00/MTok |
+| Claude Opus 4.8 | $5.00/MTok | $6.25/MTok | $0.50/MTok | $25.00/MTok |
+| Claude Haiku 4.5 | $1.00/MTok | $1.25/MTok | $0.10/MTok | $5.00/MTok |
+
+If a web search can't find a model's real published rate on the provider's
+own pricing page, that's a signal to stop and ask — not to accept an AI
+search-overview's plausible-looking number. Search-engine AI summaries have
+fabricated entire nonexistent regional pricing pages under this kind of
+query before; treat anything not sourced from the provider's own docs as
+unconfirmed.
+
 ## Database / Prisma — STRICT
 
 PostgreSQL + Prisma 6. Migrations are the source of truth for the deployed
