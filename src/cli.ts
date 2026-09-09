@@ -37,6 +37,8 @@ import { deriveJsonSchema } from "./sandbox/zod-params.js";
 import { ToolCapabilitiesPatchSchema } from "./sandbox/tool-capabilities.js";
 import { startMcp } from "./mcp/index.js";
 import { authCommand } from "./mcp/auth/self-hosted/cli.js";
+import { parseImportArgs } from "./import/cli-args.js";
+import { runImport } from "./import/index.js";
 
 const cliLog = logger.child({ module: "cli" });
 
@@ -501,6 +503,15 @@ async function mcp(): Promise<void> {
   });
 }
 
+async function importCommand(rest: string[]): Promise<void> {
+  const opts = parseImportArgs(rest);
+  const { report, result } = await runImport({ ...opts, db: prisma, env: process.env });
+  console.log(report);
+  if (result) {
+    for (const w of result.webhookSecrets) console.log(`webhook secret (${w.agentName}): ${w.secret}`);
+  }
+}
+
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
 
@@ -529,6 +540,8 @@ async function main(): Promise<void> {
       await scheduler(rest);
     } else if (command === "mcp") {
       await mcp();
+    } else if (command === "import") {
+      await importCommand(rest);
     } else {
       fail(
         "usage:\n" +
@@ -543,7 +556,8 @@ async function main(): Promise<void> {
           "  reevo coding preflight\n" +
           "  reevo coding cleanup --run-id <id>\n" +
           "  reevo scheduler [--scope default]\n" +
-          "  reevo mcp   (MCP_TRANSPORT=stdio|http selects the transport)",
+          "  reevo mcp   (MCP_TRANSPORT=stdio|http selects the transport)\n" +
+          "  reevo import <bundle-dir> --owner <subject> [--public] [--include-secrets --transfer-key <pem>] [--default-budget <usd>] [--dry-run] [--prefix <p>] [--on-conflict fail|skip|rename] [--allow-open-fetch]",
       );
     }
   } finally {
