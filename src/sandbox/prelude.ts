@@ -382,4 +382,16 @@ globalThis.secrets = {
 globalThis.parseHTML = async (html) => JSON.parse(await __bridge_parseHTML(JSON.stringify([String(html)])));
 globalThis.parseCSV = async (csv, options) => JSON.parse(await __bridge_parseCSV(JSON.stringify([String(csv), options || null])));
 globalThis.parseXML = async (xml, options) => JSON.parse(await __bridge_parseXML(JSON.stringify([String(xml), options || null])));
+
+// ---- email placeholders (roadmap-deferred) ----
+
+// Roadmap placeholders: the Full host surface will implement these; until
+// then they exist so migrated tools import faithfully and fail loudly only
+// when actually called (not silently dropped at import). npmLockUpdate is
+// deliberately NOT provided — it is not on the roadmap.
+const __unimplemented = (name) => () => {
+  throw new Error(name + " is not implemented in this build");
+};
+globalThis.sendEmail = __unimplemented("sendEmail");
+globalThis.getInboundEmail = __unimplemented("getInboundEmail");
 `;
