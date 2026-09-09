@@ -8,7 +8,6 @@ import type { Bundle } from "./bundle.js";
 import type { Reconciliation } from "./preflight.js";
 import type { TransferEnvelope } from "../providers/secrets/transfer-envelope.js";
 
-const SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
 const INFO = Buffer.from("reevo-secret-transfer-v1");
 const rawOf = (k: KeyObject) => (k.export({ type: "spki", format: "der" }) as Buffer).subarray(-32);
 

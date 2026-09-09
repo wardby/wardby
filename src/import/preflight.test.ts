@@ -67,6 +67,19 @@ describe("preflight", () => {
     expect(r.hasFatalCollision).toBe(false);
   });
 
+  it("treats an occupied rename target as a fatal collision instead of adopting it", () => {
+    const r = preflight({
+      bundle: fakeBundle(),
+      ...baseInput,
+      onConflict: "rename",
+      existingToolNames: new Set(["good", "imported-good"]),
+    });
+    expect(r.nameRemap.has("good")).toBe(false);
+    expect(r.hasFatalCollision).toBe(true);
+    expect(r.collisions.some((c) => c.kind === "tool" && c.name === "good" && c.action === "fail")).toBe(true);
+    expect(r.notes.some((n) => n.includes("imported-good") && n.includes("already exists"))).toBe(true);
+  });
+
   it("marks a disabled budget as skipped", () => {
     const r = preflight({ bundle: fakeBundle({ budgets: [
       { name: "cap", period: "monthly", alertThreshold: "80", blockThreshold: "100", enabled: false, alertEmails: [], attachedAgentNames: [], ownerEmail: null },

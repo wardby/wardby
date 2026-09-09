@@ -1,13 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
   generateKeyPairSync, diffieHellman, hkdfSync, randomBytes,
-  createCipheriv, createPublicKey, type KeyObject, type CipherGCM,
+  createCipheriv, type KeyObject, type CipherGCM,
 } from "node:crypto";
 import {
   loadTransferPrivateKey, transferKeyIdOf, decryptTransferEnvelope, type TransferEnvelope,
 } from "./transfer-envelope.js";
 
-const SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
 const INFO = Buffer.from("reevo-secret-transfer-v1");
 const rawOf = (k: KeyObject) => (k.export({ type: "spki", format: "der" }) as Buffer).subarray(-32);
 

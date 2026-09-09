@@ -32,6 +32,7 @@ export function preflight(input: PreflightInput): Reconciliation {
   const { bundle, onConflict, prefix } = input;
   const nameRemap = new Map<string, string>();
   const collisions: Reconciliation["collisions"] = [];
+  const notes: string[] = [];
   let hasFatalCollision = false;
 
   const resolveCollision = (kind: "agent" | "tool", name: string, existing: ReadonlySet<string>) => {
@@ -46,6 +47,14 @@ export function preflight(input: PreflightInput): Reconciliation {
       return { skipped: "collision" };
     }
     const newName = prefix + name;
+    // Rename target must itself be free; otherwise the upsert would adopt an
+    // unrelated pre-existing row. Treat an occupied target as a fatal collision.
+    if (existing.has(newName)) {
+      hasFatalCollision = true;
+      collisions.push({ kind, name, action: "fail" });
+      notes.push(`${kind} ${name}: rename target "${newName}" already exists — cannot resolve collision`);
+      return { skipped: "collision" };
+    }
     nameRemap.set(name, newName);
     collisions.push({ kind, name, action: "rename", newName });
     return { skipped: undefined };
@@ -75,7 +84,6 @@ export function preflight(input: PreflightInput): Reconciliation {
     return m.ok ? { name: b.name } : { name: b.name, skippedReason: m.reason };
   });
 
-  const notes: string[] = [];
   if (!input.allowOpenFetch) {
     for (const at of bundle.readAgentTools()) {
       if (at.allowedHosts.includes("*")) {

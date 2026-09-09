@@ -5,6 +5,7 @@
  */
 
 import type { PrismaClient } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import type { KeyObject } from "node:crypto";
 import type { Bundle } from "./bundle.js";
 import type { Reconciliation } from "./preflight.js";
@@ -121,7 +122,11 @@ export async function createFromBundle(
   for (const at of bundle.readAgentTools()) {
     const agentId = agentIdMap.get(at.agentName);
     const toolId = toolIdMap.get(at.toolName);
-    if (!agentId || !toolId) continue;
+    if (!agentId || !toolId) {
+      const missing = !agentId ? `agent ${at.agentName}` : `tool ${at.toolName}`;
+      warnings.push(`agent-tool ${at.agentName}/${at.toolName}: skipped — ${missing} was not imported`);
+      continue;
+    }
 
     // Validate capabilities (drop "*" unless allowOpenFetch)
     let allowedHosts = at.allowedHosts;
@@ -244,8 +249,8 @@ export async function createFromBundle(
       try {
         await attachSecret(agentId, effectiveName, owner, db);
       } catch (err) {
-        // Idempotent guard: catch unique violation on re-run
-        if (err instanceof Error && err.message.includes("Unique constraint")) {
+        // Idempotent guard: catch unique violation (P2002) on re-run
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
           continue;
         }
         warnings.push(`agent-secret ${as.agentName}/${as.secretName}: failed to attach (${err instanceof Error ? err.message : String(err)})`);

@@ -106,6 +106,11 @@ export async function runImport(opts: ImportOptions): Promise<{ report: string; 
   });
 
   // Early return if dry-run or fatal collision
+  if (recon.hasFatalCollision && !opts.dryRun) {
+    report +=
+      "\n\n*** Import aborted: a name collision was found under --on-conflict fail. No changes were written. ***";
+    return { report };
+  }
   if (opts.dryRun || recon.hasFatalCollision) {
     return { report };
   }
