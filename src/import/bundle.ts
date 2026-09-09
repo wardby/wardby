@@ -42,7 +42,10 @@ export function openBundle(dir: string): Bundle {
 
   const manifestPath = join(dir, "manifest.json");
   if (!existsSync(manifestPath)) throw new BundleError("manifest.json not found in bundle");
-  const parsed = ManifestSchema.safeParse(JSON.parse(readFileSync(manifestPath, "utf8")));
+  let raw: unknown;
+  try { raw = JSON.parse(readFileSync(manifestPath, "utf8")); }
+  catch (e) { throw new BundleError(`manifest.json: invalid JSON (${(e as Error).message})`); }
+  const parsed = ManifestSchema.safeParse(raw);
   if (!parsed.success) throw new BundleError(`manifest.json: ${parsed.error.issues[0]?.message ?? "invalid"}`);
   const manifest = parsed.data;
   if (manifest.bundleVersion !== 1) throw new BundleError(`unsupported bundleVersion ${manifest.bundleVersion}`);

@@ -36,8 +36,9 @@ describe("openBundle", () => {
   it("opens a valid directory and reads agents", () => {
     const b = openBundle(dir);
     expect(b.manifest.bundleVersion).toBe(1);
-    expect(b.readAgents()).toHaveLength(1);
-    expect(b.readAgents()[0].schedule).toBe("");
+    const agents = b.readAgents();
+    expect(agents).toHaveLength(1);
+    expect(agents[0].schedule).toBe("");
   });
 
   it("reads budgets from capabilities/", () => {
@@ -60,5 +61,11 @@ describe("openBundle", () => {
   it("throws BundleError naming the file on invalid content", () => {
     write("config/agents.json", [{ name: "x" }]); // missing required fields
     expect(() => openBundle(dir).readAgents()).toThrow(/config\/agents\.json/);
+  });
+
+  it("throws BundleError on malformed manifest.json", () => {
+    const p = join(dir, "manifest.json");
+    writeFileSync(p, "{ not json");
+    expect(() => openBundle(dir)).toThrow(/manifest\.json/);
   });
 });
