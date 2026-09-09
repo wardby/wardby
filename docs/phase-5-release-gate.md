@@ -33,6 +33,27 @@ a tiny coding budget, and a unique `reevo/run-*` branch. Verify one draft pull
 request, record its run ID and cost, then close the test pull request and delete
 the generated branch.
 
+### Live Smoke — Recorded Evidence
+
+- **Run ID:** `cmts0srn20002sqqadk0asd7i`
+- **Date:** 2026-09-08 01:58 UTC
+- **Agent:** `phase5-local-smoke` (`gpt-5.6-luna`, budget $0.25)
+- **Task:** create one file (`phase5-smoke.md`) at the repository root with
+  exact specified content; no other file modified.
+- **Outcome:** `pull_request_opened` — [PR #1](https://github.com/chfields/reevo-run/pull/1)
+  on `chfields/reevo-run`, commit `36971b0be5a2dd1ab06142aa65db2a37a6127880`,
+  branch `reevo/run-cmts0srn20002sqqadk0asd7i`.
+- **Cost:** $0.007158 (71,847 input / 1,103 output tokens) against the $0.25
+  budget.
+- **Verification:** the requested file's exact-content check passed.
+- **Cleanup:** PR #1 closed at 02:03:57 UTC (~5 min later); branch deleted
+  from `origin`. Both confirmed via `gh pr view` / `git ls-remote` after the
+  fact — this section was not filled in at the time of the run, only
+  reconstructed from `CodingRun`/`Run` table state and GitHub afterward.
+- **Context:** 9 prior attempts against the same agent failed or were
+  cancelled before this one succeeded — expected iteration, not a first-try
+  result.
+
 ## Lifecycle Audit And Metrics
 
 The container executor emits metadata-only structured events for `queued`,
