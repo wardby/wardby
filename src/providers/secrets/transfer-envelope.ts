@@ -1,6 +1,6 @@
 import {
   createPrivateKey, createPublicKey, diffieHellman, hkdfSync,
-  createDecipheriv, createHash, type KeyObject,
+  createDecipheriv, createHash, type KeyObject, type DecipherGCM,
 } from "node:crypto";
 
 const ALG = "x25519-hkdf-sha256-chacha20poly1305-v1";
@@ -38,7 +38,10 @@ export function decryptTransferEnvelope(env: TransferEnvelope, secretName: strin
   const shared = diffieHellman({ privateKey, publicKey: publicFromRaw(epkRaw) });
   const recipientRaw = rawFromSpki(createPublicKey(privateKey));
   const okm = Buffer.from(hkdfSync("sha256", shared, Buffer.concat([epkRaw, recipientRaw]), INFO, 32));
-  const d = createDecipheriv("chacha20-poly1305", okm, Buffer.from(env.nonce, "hex"), { authTagLength: 16 });
+  // chacha20-poly1305 is an AEAD cipher; @types/node only maps the GCM/CCM
+  // algorithm string literals to a typed cipher, so cast to DecipherGCM (whose
+  // setAAD/setAuthTag surface matches chacha20-poly1305's runtime API).
+  const d = createDecipheriv("chacha20-poly1305", okm, Buffer.from(env.nonce, "hex"), { authTagLength: 16 }) as DecipherGCM;
   d.setAAD(Buffer.from(secretName, "utf8"));
   d.setAuthTag(Buffer.from(env.tag, "hex"));
   return Buffer.concat([d.update(Buffer.from(env.ct, "hex")), d.final()]).toString("utf8");

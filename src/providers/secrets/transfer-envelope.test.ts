@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   generateKeyPairSync, diffieHellman, hkdfSync, randomBytes,
-  createCipheriv, createPublicKey, type KeyObject,
+  createCipheriv, createPublicKey, type KeyObject, type CipherGCM,
 } from "node:crypto";
 import {
   loadTransferPrivateKey, transferKeyIdOf, decryptTransferEnvelope, type TransferEnvelope,
@@ -18,7 +18,7 @@ function seal(plaintext: string, name: string, recipientPub: KeyObject): Transfe
   const shared = diffieHellman({ privateKey: esk, publicKey: recipientPub });
   const okm = Buffer.from(hkdfSync("sha256", shared, Buffer.concat([epkRaw, rawOf(recipientPub)]), INFO, 32));
   const nonce = randomBytes(12);
-  const c = createCipheriv("chacha20-poly1305", okm, nonce, { authTagLength: 16 });
+  const c = createCipheriv("chacha20-poly1305", okm, nonce, { authTagLength: 16 }) as CipherGCM;
   c.setAAD(Buffer.from(name, "utf8"));
   const ct = Buffer.concat([c.update(Buffer.from(plaintext, "utf8")), c.final()]);
   return { v: 1, alg: "x25519-hkdf-sha256-chacha20poly1305-v1",

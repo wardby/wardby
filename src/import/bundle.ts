@@ -12,7 +12,7 @@ import {
 
 export class BundleError extends Error {}
 
-function readArray<T>(dir: string, rel: string, schema: z.ZodType<T>): T[] {
+function readArray<S extends z.ZodTypeAny>(dir: string, rel: string, schema: S): z.infer<S>[] {
   const p = join(dir, rel);
   if (!existsSync(p)) return [];
   let raw: unknown;
