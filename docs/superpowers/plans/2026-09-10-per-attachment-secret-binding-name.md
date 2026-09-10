@@ -270,10 +270,27 @@ and the Prisma-double fallback:
 Run: `npx vitest run src/core/secrets.test.ts`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4a: Update the sole production caller of `detachSecret` so the tree compiles**
+
+`detachSecret` dropped its `ownerId` parameter, so its one production caller — the `detach_secret` MCP handler in `src/mcp/tools/secrets.ts` (~line 128) — must match or `npm run build` (tsc) fails. Change:
+
+```ts
+      await detachSecret(args.agentId, args.name, ctx.principal.id, ctx.db);
+```
+to:
+```ts
+      await detachSecret(args.agentId, args.name, ctx.db); // `name` is the point-of-use (bound) name
+```
+
+(The `attach_secret` caller is unaffected — `attachSecret`'s new `boundName` is a trailing optional, so the existing 4-arg call still compiles. Adding the optional `alias` input to `attach_secret` is Task 4.)
+
+- [ ] **Step 5: Full build + commit**
+
+Run: `npm run build`
+Expected: tsc clean (proves the caller update in Step 4a is complete).
 
 ```bash
-git add src/core/secrets.ts src/core/secrets.test.ts
+git add src/core/secrets.ts src/core/secrets.test.ts src/mcp/tools/secrets.ts
 git commit -m "feat(secrets): resolve attachments by boundName, not secret name"
 ```
 
@@ -330,13 +347,15 @@ git commit -m "test(secrets): real-DB regression for boundName resolution"
 
 ---
 
-### Task 4: MCP surface — optional alias on attach, new detach signature
+### Task 4: MCP surface — optional alias on `attach_secret`
 
 **Files:**
-- Modify: `src/mcp/tools/secrets.ts` (the `attach_secret` and `detach_secret` handlers, ~lines 99–131)
+- Modify: `src/mcp/tools/secrets.ts` (the `attach_secret` handler only, ~lines 99–116)
+
+> **Note (RULING P1):** the `detach_secret` handler was already updated to the new `detachSecret` signature in Task 2, Step 4a. This task touches only `attach_secret`, adding the optional `alias`.
 
 **Interfaces:**
-- Consumes: `attachSecret(…, boundName?)`, `detachSecret(agentId, boundName, db)` from Task 2.
+- Consumes: `attachSecret(…, boundName?)` from Task 2.
 
 - [ ] **Step 1: Add optional `alias` to `attach_secret` and pass it as `boundName`**
 
@@ -365,26 +384,16 @@ git commit -m "test(secrets): real-DB regression for boundName resolution"
   });
 ```
 
-- [ ] **Step 2: Update `detach_secret` to the new signature (name = point-of-use name)**
-
-```ts
-    handler: async (args: { agentId: string; name: string }, ctx) => {
-      await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
-      await detachSecret(args.agentId, args.name, ctx.db); // `name` is the point-of-use (bound) name
-      return textResult({ detached: true });
-    },
-```
-
-- [ ] **Step 3: Build + run any MCP secret tests**
+- [ ] **Step 2: Build + run any MCP secret tests**
 
 Run: `npm run build` then `npx vitest run src/mcp` (if MCP tests exist for secrets; otherwise the build is the gate).
 Expected: PASS / tsc clean.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add src/mcp/tools/secrets.ts
-git commit -m "feat(mcp): attach_secret optional alias; detach_secret by point-of-use name"
+git commit -m "feat(mcp): attach_secret optional alias (point-of-use name)"
 ```
 
 ---
