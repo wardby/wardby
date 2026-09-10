@@ -51,7 +51,7 @@ function fakeDb(
   agents: FakeAgent[],
   tools: FakeTool[] = [],
   attachments: FakeAttachment[] = [],
-  secretsData: { agentId: string; name: string; value: string }[] = [],
+  secretsData: { agentId: string; boundName: string; value: string }[] = [],
   budgetGroups: FakeBudgetGroup[] = [],
   priorRuns: { agentId: string; costUsd: number; startedAt: Date }[] = [],
 ): RunnerDb {
@@ -117,7 +117,7 @@ function fakeDb(
     },
     agentSecret: {
       findFirst: (async ({ where }: any) => {
-        const row = secretsData.find((s) => s.agentId === where.agentId && s.name === where.secret.name);
+        const row = secretsData.find((s) => s.agentId === where.agentId && s.boundName === where.boundName);
         return row ? { secret: { ciphertext: row.value } } : null;
       }) as any,
     },
@@ -513,8 +513,8 @@ describe("runAgent", () => {
       ],
       [{ agentId: "a1", toolId: "t1", allowedSecrets: ["ALLOWED"] }],
       [
-        { agentId: "a1", name: "ALLOWED", value: "secret-a" },
-        { agentId: "a1", name: "BLOCKED", value: "secret-b" },
+        { agentId: "a1", boundName: "ALLOWED", value: "secret-a" },
+        { agentId: "a1", boundName: "BLOCKED", value: "secret-b" },
       ],
     );
     let captured: EngineRunContext | undefined;
