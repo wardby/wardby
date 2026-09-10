@@ -61,7 +61,7 @@ async function findOwnedSecretByName(db: PrismaClient, ownerId: string, name: st
 export async function attachSecret(agentId: string, name: string, ownerId: string, db: PrismaClient): Promise<void> {
   const secret = await findOwnedSecretByName(db, ownerId, name);
   if (!secret) throw new Error(`No secret named "${name}" owned by this caller.`);
-  await db.agentSecret.create({ data: { agentId, secretId: secret.id } });
+  await db.agentSecret.create({ data: { agentId, secretId: secret.id, boundName: secret.name } });
 }
 
 export async function detachSecret(agentId: string, name: string, ownerId: string, db: PrismaClient): Promise<void> {

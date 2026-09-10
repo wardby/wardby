@@ -14,7 +14,7 @@ describe.skipIf(!process.env.DATABASE_URL)("bounded legacy secret reads (databas
   it("rejects oversized ciphertext before decryption", async () => {
     await db.agent.create({ data: { id, name: id, systemPrompt: "test", model: "test", budgetUsd: 1 } });
     await db.secret.create({ data: { id, name: "legacy", ciphertext: "x".repeat(262145), keyId: "test" } });
-    await db.agentSecret.create({ data: { agentId: id, secretId: id } });
+    await db.agentSecret.create({ data: { agentId: id, secretId: id, boundName: "legacy" } });
     let decrypted = false;
     const cipher = {
       keyId: () => "test",
