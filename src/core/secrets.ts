@@ -57,17 +57,25 @@ async function findOwnedSecretByName(db: PrismaClient, ownerId: string, name: st
   return db.secret.findUnique({ where: { ownerId_name: { ownerId, name } } });
 }
 
-/** Attaches one of the owner's own secrets (by name) to an agent. */
-export async function attachSecret(agentId: string, name: string, ownerId: string, db: PrismaClient): Promise<void> {
+/** Attaches one of the owner's own secrets (by canonical name) to an agent,
+ *  under `boundName` — the point-of-use name the agent's tools resolve
+ *  (`secrets.get(boundName)`). Defaults to the secret's own name. */
+export async function attachSecret(
+  agentId: string,
+  name: string,
+  ownerId: string,
+  db: PrismaClient,
+  boundName: string = name,
+): Promise<void> {
   const secret = await findOwnedSecretByName(db, ownerId, name);
   if (!secret) throw new Error(`No secret named "${name}" owned by this caller.`);
-  await db.agentSecret.create({ data: { agentId, secretId: secret.id, boundName: secret.name } });
+  await db.agentSecret.create({ data: { agentId, secretId: secret.id, boundName } });
 }
 
-export async function detachSecret(agentId: string, name: string, ownerId: string, db: PrismaClient): Promise<void> {
-  const secret = await findOwnedSecretByName(db, ownerId, name);
-  if (!secret) return;
-  await db.agentSecret.deleteMany({ where: { agentId, secretId: secret.id } });
+/** Detaches by point-of-use name — the pair (agentId, boundName) uniquely
+ *  identifies the edge; agent ownership is enforced by the caller. */
+export async function detachSecret(agentId: string, boundName: string, db: PrismaClient): Promise<void> {
+  await db.agentSecret.deleteMany({ where: { agentId, boundName } });
 }
 
 export async function deleteSecret(secretId: string, db: PrismaClient): Promise<void> {
@@ -92,14 +100,14 @@ export function buildSecretsAccessor(
         const rows = await db.$queryRaw<{ ciphertext: string | null }[]>`
           SELECT CASE WHEN octet_length(s."ciphertext") <= 262144 THEN s."ciphertext" ELSE NULL END AS "ciphertext"
           FROM "Secret" s JOIN "AgentSecret" a ON a."secretId" = s."id"
-          WHERE a."agentId" = ${agentId} AND s."name" = ${name} LIMIT 1`;
+          WHERE a."agentId" = ${agentId} AND a."boundName" = ${name} LIMIT 1`;
         if (!rows.length) return undefined;
         if (rows[0].ciphertext === null) throw new Error("secret_value_limit");
         return cipher.decrypt(rows[0].ciphertext);
       }
       // Lightweight provider doubles use the same post-read bound; production Prisma filters in SQL.
       const attachment = await db.agentSecret.findFirst({
-        where: { agentId, secret: { name } },
+        where: { agentId, boundName: name },
         include: { secret: true },
       });
       if (!attachment) return undefined;

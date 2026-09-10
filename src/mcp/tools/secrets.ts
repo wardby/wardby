@@ -125,7 +125,7 @@ export function registerSecretsTools(mcp: ReevoMcpServer, opts: SecretsToolsOpti
     },
     handler: async (args: { agentId: string; name: string }, ctx) => {
       await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
-      await detachSecret(args.agentId, args.name, ctx.principal.id, ctx.db);
+      await detachSecret(args.agentId, args.name, ctx.db);
       return textResult({ detached: true });
     },
   });
