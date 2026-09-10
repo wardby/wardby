@@ -163,76 +163,38 @@ export async function createFromBundle(
     });
   }
 
-  // Step 4: Secrets (Controller Ruling C applied)
+  // Step 4: Secrets — one row per base secret, under its canonical name.
   if (secretMode === "envelope") {
     if (!hasOwner) {
-      // Secrets require an owner - skip in public import mode
       for (const s of bundle.readSecrets()) {
         warnings.push(`secret ${s.name}: skipped — secrets require an owner (public import)`);
       }
     } else if (!transferPrivateKey) {
       warnings.push("envelope mode requires transferPrivateKey, skipping secrets");
     } else {
-      const owner = ownerId; // TypeScript narrowing: hasOwner guarantees non-null
-
-      // First, collect all distinct effective names needed per secret
-      const secretAliasMap = new Map<string, Set<string>>(); // secretName -> Set of effective names
-
-      for (const s of bundle.readSecrets()) {
-        if (!secretAliasMap.has(s.name)) {
-          secretAliasMap.set(s.name, new Set([s.name])); // Always include the base name
-        }
-      }
-
-      // Add aliases from agent-secret edges
-      for (const as of bundle.readAgentSecrets()) {
-        const effectiveNames = secretAliasMap.get(as.secretName);
-        if (effectiveNames && as.alias) {
-          effectiveNames.add(as.alias);
-        }
-      }
-
-      // Now create secrets for each distinct effective name
+      const owner = ownerId; // hasOwner guarantees non-null
       for (const s of bundle.readSecrets()) {
         if (!s.ciphertext) {
           warnings.push(`secret ${s.name}: no ciphertext in envelope mode, skipping`);
           continue;
         }
-
         let plaintext: string;
         try {
-          // AAD is ALWAYS the original secretName (s.name), never the alias
+          // AAD is ALWAYS the base secret name (s.name), never an alias.
           plaintext = decryptTransferEnvelope(s.ciphertext, s.name, transferPrivateKey);
         } catch (err) {
           warnings.push(`secret ${s.name}: failed to decrypt (${err instanceof Error ? err.message : String(err)})`);
           continue;
         }
-
-        const effectiveNames = secretAliasMap.get(s.name);
-        if (!effectiveNames) continue;
-
-        // Create a Secret row for each distinct effective name
-        const namesArray = Array.from(effectiveNames);
-        for (const effName of namesArray) {
-          try {
-            await createSecret(effName, plaintext, owner, cipher, db);
-            secretsCreated++; // Counts rows (base name + any distinct aliases), not logical secrets
-          } catch (err) {
-            warnings.push(`secret ${s.name} (as ${effName}): failed to create (${err instanceof Error ? err.message : String(err)})`);
-          }
-        }
-
-        // Warn if duplicate (name + alias are the same)
-        if (namesArray.length > 1 && namesArray.includes(s.name)) {
-          const aliases = namesArray.filter((n) => n !== s.name);
-          if (aliases.length > 0) {
-            warnings.push(`secret ${s.name}: created under both base name and alias(es): ${aliases.join(", ")}`);
-          }
+        try {
+          await createSecret(s.name, plaintext, owner, cipher, db);
+          secretsCreated++; // one per distinct base secret (fixes F1 over-count)
+        } catch (err) {
+          warnings.push(`secret ${s.name}: failed to create (${err instanceof Error ? err.message : String(err)})`);
         }
       }
     }
   } else {
-    // references mode: create nothing, list as pending
     for (const s of bundle.readSecrets()) {
       pendingSecretReentry.push(s.name);
     }
@@ -240,17 +202,18 @@ export async function createFromBundle(
 
   // Step 5: Attach secrets (envelope mode only)
   if (secretMode === "envelope" && hasOwner) {
-    const owner = ownerId; // TypeScript narrowing: hasOwner guarantees non-null
+    const owner = ownerId;
     for (const as of bundle.readAgentSecrets()) {
       const agentId = agentIdMap.get(as.agentName);
       if (!agentId) continue;
-
-      const effectiveName = as.alias ?? as.secretName;
+      const boundName = as.alias ?? as.secretName;
       try {
-        await attachSecret(agentId, effectiveName, owner, db);
+        await attachSecret(agentId, as.secretName, owner, db, boundName);
       } catch (err) {
-        // Idempotent guard: catch unique violation (P2002) on re-run
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+          // Either an idempotent re-run, or two secrets bound to the same
+          // point-of-use name for one agent (a bundle inconsistency). Surface it.
+          warnings.push(`agent-secret ${as.agentName}: "${boundName}" already bound — skipped (re-run or duplicate binding)`);
           continue;
         }
         warnings.push(`agent-secret ${as.agentName}/${as.secretName}: failed to attach (${err instanceof Error ? err.message : String(err)})`);

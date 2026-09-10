@@ -35,7 +35,7 @@ function fakeDb() {
     tool: { upsert: vi.fn(async (a: unknown) => { calls.tool.push(a); return { id: "t", name: "n" }; }) },
     agent: { upsert: vi.fn(async (a: unknown) => { calls.agent.push(a); return { id: "a", name: "n" }; }), update: vi.fn(async () => ({})) },
     agentTool: { upsert: vi.fn(async () => ({})) },
-    secret: { upsert: vi.fn(async (a: unknown) => { calls.secret.push(a); return { id: "s", name: "n" }; }) },
+    secret: { upsert: vi.fn(async (a: unknown) => { calls.secret.push(a); return { id: "s", name: "n" }; }), findUnique: vi.fn(async () => ({ id: "s", name: "n" })) },
     agentSecret: { create: vi.fn(async (a: unknown) => { calls.agentSecret.push(a); return {}; }), findFirst: vi.fn(async () => null) },
     budgetGroup: { upsert: vi.fn(async () => ({ id: "b" })) },
     webhook: { findFirst: vi.fn(async () => null), update: vi.fn(async () => ({})) },
@@ -67,11 +67,10 @@ describe("createFromBundle", () => {
     expect(res.pendingSecretReentry).toContain("API_KEY");
   });
 
-  it("envelope mode: decrypts with AAD=secretName, creates rows for base+alias, warns on duplication", async () => {
+  it("envelope mode: decrypts with AAD=secretName, creates one base row, attaches under the alias", async () => {
     const { privateKey, publicKey } = generateKeyPairSync("x25519");
     const db = fakeDb();
 
-    // Seal secret with name "API_KEY" (this becomes the AAD)
     const ciphertext = seal("my-secret-value", "API_KEY", publicKey);
 
     const res = await createFromBundle(
@@ -84,19 +83,17 @@ describe("createFromBundle", () => {
       { db, cipher, ownerId: "p1", defaultBudget: "5.00", secretMode: "envelope", transferPrivateKey: privateKey, allowOpenFetch: false } as any,
     );
 
-    // Assert: two secret rows created (API_KEY and AK)
-    expect(res.secretsCreated).toBe(2);
-    expect(db.calls.secret).toHaveLength(2);
+    // One base-name secret row, counted once.
+    expect(res.secretsCreated).toBe(1);
+    expect(db.calls.secret).toHaveLength(1);
+    expect((db.calls.secret[0] as any).where.ownerId_name.name).toBe("API_KEY");
 
-    // Verify both rows were created with the correct names
-    const secretCalls = db.calls.secret as any[];
-    const names = secretCalls.map((c) => c.where.ownerId_name.name);
-    expect(names).toContain("API_KEY");
-    expect(names).toContain("AK");
+    // Attachment carries the alias as the point-of-use boundName.
+    expect(db.calls.agentSecret).toHaveLength(1);
+    expect((db.calls.agentSecret[0] as any).data.boundName).toBe("AK");
 
-    // Assert: duplication warning fired
-    expect(res.warnings.some((w) => w.includes("created under both base name and alias"))).toBe(true);
-    expect(res.warnings.some((w) => w.includes("AK"))).toBe(true);
+    // No "created under both base name and alias" warning anymore.
+    expect(res.warnings.some((w) => w.includes("created under both base name and alias"))).toBe(false);
   });
 
   it("public import (ownerId: null): creates agents/tools, skips owner-required entities with warnings", async () => {
