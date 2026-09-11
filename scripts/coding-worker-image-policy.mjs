@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 
-const dockerfile = await readFile(new URL("../src/coding-worker/Dockerfile", import.meta.url), "utf8");
+const dockerfilePath = process.argv[2] ?? "../src/coding-worker/Dockerfile";
+const dockerfile = await readFile(new URL(dockerfilePath, import.meta.url), "utf8");
 const workerPackage = JSON.parse(await readFile(new URL("../src/coding-worker/package.json", import.meta.url), "utf8"));
 const workerLock = JSON.parse(
   await readFile(new URL("../src/coding-worker/package-lock.json", import.meta.url), "utf8"),
@@ -25,5 +26,5 @@ if (failures.length) {
   for (const failure of failures) process.stderr.write(`${failure}\n`);
   process.exitCode = 1;
 } else {
-  process.stdout.write("coding worker image policy passed\n");
+  process.stdout.write(`coding worker image policy passed (${dockerfilePath})\n`);
 }

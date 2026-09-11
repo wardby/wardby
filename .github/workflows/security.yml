@@ -36,24 +36,43 @@ jobs:
           name: dependency-tree
           path: dependency-tree.json
       - run: node scripts/security-audit.mjs
-      - run: npm run worker:image:policy
-      - run: docker build -f src/coding-worker/Dockerfile -t reevo-coding-worker:${{ github.sha }} .
-      - run: npm run test:docker-isolation
+
+  worker-image:
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - dockerfile: src/coding-worker/Dockerfile
+            tag-suffix: node
+          - dockerfile: src/coding-worker/Dockerfile.node-python
+            tag-suffix: node-python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node scripts/coding-worker-image-policy.mjs ../${{ matrix.dockerfile }}
+      - run: docker build -f ${{ matrix.dockerfile }} -t reevo-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }} .
+      - if: matrix.tag-suffix == 'node'
+        run: npm run test:docker-isolation
         env:
-          REEVO_WORKER_IMAGE: reevo-coding-worker:${{ github.sha }}
+          REEVO_WORKER_IMAGE: reevo-coding-worker-node:${{ github.sha }}
       - uses: anchore/sbom-action@v0.20.5
         with:
-          image: reevo-coding-worker:${{ github.sha }}
+          image: reevo-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }}
           format: spdx-json
-          output-file: coding-worker.spdx.json
+          output-file: coding-worker-${{ matrix.tag-suffix }}.spdx.json
       - uses: aquasecurity/trivy-action@0.33.1
         with:
-          image-ref: reevo-coding-worker:${{ github.sha }}
+          image-ref: reevo-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }}
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: coding-worker-sbom
-          path: coding-worker.spdx.json
+          name: coding-worker-sbom-${{ matrix.tag-suffix }}
+          path: coding-worker-${{ matrix.tag-suffix }}.spdx.json
