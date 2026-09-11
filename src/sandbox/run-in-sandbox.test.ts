@@ -261,4 +261,34 @@ describe("runInSandbox", () => {
     });
     expect(result).toEqual({ ok: true, value: { token: "abc.def==", plain: "1" } });
   });
+
+  it("sendEmail placeholder throws a clear 'not implemented' error when called", async () => {
+    const result = await runInSandbox({
+      code: "return await sendEmail({ to: 'x@example.com' });",
+      params: {},
+      agentId: "a1",
+      datastore: fakeDatastore(),
+      toolName: "email-test",
+      limits: FAST_LIMITS,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errorMessage).toMatch(/sendEmail is not implemented in this build/);
+    }
+  });
+
+  it("getInboundEmail placeholder throws a clear 'not implemented' error when called", async () => {
+    const result = await runInSandbox({
+      code: "return await getInboundEmail();",
+      params: {},
+      agentId: "a1",
+      datastore: fakeDatastore(),
+      toolName: "email-test-2",
+      limits: FAST_LIMITS,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errorMessage).toMatch(/getInboundEmail is not implemented in this build/);
+    }
+  });
 });

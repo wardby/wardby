@@ -101,13 +101,17 @@ export function registerSecretsTools(mcp: ReevoMcpServer, opts: SecretsToolsOpti
     scope: "secrets:write",
     inputSchema: {
       type: "object",
-      properties: { agentId: { type: "string" }, name: { type: "string" } },
+      properties: {
+        agentId: { type: "string" },
+        name: { type: "string" },
+        alias: { type: "string" },
+      },
       required: ["agentId", "name"],
     },
-    handler: async (args: { agentId: string; name: string }, ctx) => {
+    handler: async (args: { agentId: string; name: string; alias?: string }, ctx) => {
       await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
       try {
-        await attachSecret(args.agentId, args.name, ctx.principal.id, ctx.db);
+        await attachSecret(args.agentId, args.name, ctx.principal.id, ctx.db, args.alias ?? args.name);
       } catch (err) {
         throw new McpError(404, err instanceof Error ? err.message : String(err));
       }
@@ -125,7 +129,7 @@ export function registerSecretsTools(mcp: ReevoMcpServer, opts: SecretsToolsOpti
     },
     handler: async (args: { agentId: string; name: string }, ctx) => {
       await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
-      await detachSecret(args.agentId, args.name, ctx.principal.id, ctx.db);
+      await detachSecret(args.agentId, args.name, ctx.db);
       return textResult({ detached: true });
     },
   });

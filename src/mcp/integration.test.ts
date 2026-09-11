@@ -144,7 +144,7 @@ function buildFakeDb() {
   const tools = new Map<string, FakeToolRow>();
   const agentTools: { agentId: string; toolId: string }[] = [];
   const secrets = new Map<string, FakeSecretRow>();
-  const agentSecrets: { agentId: string; secretId: string }[] = [];
+  const agentSecrets: { agentId: string; secretId: string; boundName: string }[] = [];
   const webhooks = new Map<string, FakeWebhookRow>();
   let n = 0;
 
@@ -343,14 +343,14 @@ function buildFakeDb() {
       },
     },
     agentSecret: {
-      create: async ({ data }: { data: { agentId: string; secretId: string } }) => {
+      create: async ({ data }: { data: { agentId: string; secretId: string; boundName: string } }) => {
         agentSecrets.push(data);
         return data;
       },
       deleteMany: async () => ({ count: 0 }),
-      findFirst: async ({ where }: { where: { agentId: string; secret: { name: string } } }) => {
+      findFirst: async ({ where }: { where: { agentId: string; boundName: string } }) => {
         const match = agentSecrets.find(
-          (a) => a.agentId === where.agentId && secrets.get(a.secretId)?.name === where.secret.name,
+          (a) => a.agentId === where.agentId && a.boundName === where.boundName,
         );
         return match ? { ...match, secret: secrets.get(match.secretId) } : null;
       },
