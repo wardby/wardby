@@ -63,6 +63,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     capabilities,
     artifactRoot,
     workerImage: config.workerImage,
+    additionalWorkerImages: config.additionalWorkerImages,
     credentialRef: config.credentialRef,
     limits: { cpus: config.cpus, memoryMb: config.memoryMb, pids: config.pids, diskMb: config.diskMb },
   });

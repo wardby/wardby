@@ -81,6 +81,7 @@ export interface ContainerExecutorConfig {
   memoryMb: number;
   pids: number;
   diskMb: number;
+  additionalWorkerImages: Record<string, Record<string, string>>;
 }
 
 function optionalPositiveNumber(value: string | undefined, name: string, fallback: number): number {
@@ -91,6 +92,10 @@ function optionalPositiveNumber(value: string | undefined, name: string, fallbac
 }
 
 export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env): ContainerExecutorConfig {
+  const additionalWorkerImages: Record<string, Record<string, string>> = {};
+  if (env.CODING_WORKER_IMAGE_NODE_PYTHON_3_12) {
+    additionalWorkerImages["node-python"] = { "3.12": env.CODING_WORKER_IMAGE_NODE_PYTHON_3_12 };
+  }
   return {
     workerImage: env.CODING_WORKER_IMAGE,
     proxyContainer: env.CODING_PROXY_CONTAINER,
@@ -101,6 +106,7 @@ export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env
     memoryMb: optionalPositiveInteger(env.CODING_MEMORY_MB, "CODING_MEMORY_MB") ?? 2048,
     pids: optionalPositiveInteger(env.CODING_PIDS, "CODING_PIDS") ?? 128,
     diskMb: optionalPositiveInteger(env.CODING_DISK_MB, "CODING_DISK_MB") ?? 2048,
+    additionalWorkerImages,
   };
 }
 
