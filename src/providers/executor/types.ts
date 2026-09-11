@@ -15,6 +15,12 @@ export interface PersistedExecutionHandle {
 
 export type ExecutionRecoveryResult = { state: "active" } | { state: "terminal" } | { state: "lost"; reason?: string };
 
+export interface CodingImageSelector {
+  toolchain: string;
+  toolchainVersion: string | null;
+  workerImageRef: string | null;
+}
+
 export interface Executor {
   start: (runId: string) => Promise<void>;
   stop: (runId: string, reason?: string) => Promise<void>;
@@ -32,4 +38,12 @@ export interface Executor {
   launch?: () => Promise<void>;
   /** Optional graceful shutdown counterpart to `launch`. */
   close?: () => Promise<void>;
+  /**
+   * Resolves a coding agent's profile selection to an immutable worker
+   * image digest, once, at dispatch time (src/core/dispatch.ts) — never
+   * called from the hot path. Must throw on an unresolvable
+   * (toolchain, toolchainVersion) pair, fail-closed, same convention as
+   * the LLM pricing tables' unknown-model throw.
+   */
+  resolveCodingWorkerImage?(selector: CodingImageSelector): string;
 }
