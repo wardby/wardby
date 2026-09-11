@@ -213,6 +213,9 @@ model CodingAgentProfile {
   timeoutSec               Int            @default(1800)
   allowedEgress            Json
   protectedPaths           Json
+  toolchain                String         @default("node")
+  toolchainVersion         String?
+  workerImageRef           String?
 }
 
 /// Phase 5: immutable dispatch inputs plus opaque execution/result state for
@@ -237,12 +240,14 @@ model CodingRun {
   /// Neither field may contain task, repository, environment, or credential data.
   failureCategory   String?
   diagnosticId      String?
+  workerImage       String?
   budgetReservedUsd Decimal             @db.Decimal(10, 6)
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt
   proxySession      CodingProxySession?
 
   @@index([jobBackend, jobHandle])
+  @@index([failureCategory])
 }
 
 enum CodingProxySessionStatus {

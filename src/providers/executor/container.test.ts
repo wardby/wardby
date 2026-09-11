@@ -38,6 +38,7 @@ function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSn
     provisioningClaim: null,
     proxySessionId: null,
     result: null,
+    workerImage: null,
     ...overrides,
   };
 }
@@ -94,6 +95,7 @@ class FakeJobs implements WorkspaceJobLauncher {
   materializations = 0;
   removals = 0;
   stops = 0;
+  lastSpec?: JobSpec;
   statusValue: JobStatus = { state: "succeeded" };
   result: JobResult = {
     exitCode: 0,
@@ -109,8 +111,9 @@ class FakeJobs implements WorkspaceJobLauncher {
 
   constructor(private readonly events: string[]) {}
 
-  async launch(_spec: JobSpec): Promise<JobHandle> {
+  async launch(spec: JobSpec): Promise<JobHandle> {
     this.launches += 1;
+    this.lastSpec = spec;
     this.events.push("launch");
     return this.handle;
   }
@@ -380,5 +383,116 @@ describe("ContainerExecutor", () => {
     expect(created.jobs.stops).toBe(1);
     expect(created.jobs.removals).toBe(2);
     expect(created.vcs.cleaned).toBe(1);
+  });
+});
+
+describe("resolveCodingWorkerImage", () => {
+  it("returns the node baseline (options.workerImage) for toolchain=node", async () => {
+    const { executor } = await harness();
+    expect(executor.resolveCodingWorkerImage?.({ toolchain: "node", toolchainVersion: null, workerImageRef: null })).toBe(
+      IMAGE,
+    );
+  });
+
+  it("resolves an additional toolchain/version from additionalWorkerImages", async () => {
+    const pythonImage = `registry.example/worker-python@sha256:${"b".repeat(64)}`;
+    const root = await mkdtemp("/private/tmp/reevo-container-executor-");
+    roots.push(root);
+    const direct = new ContainerExecutor({
+      store: new FakeStore(snapshot({})),
+      jobs: new FakeJobs([]),
+      vcs: new FakeVcs(join(root, "vcs"), []),
+      sessions: new FakeSessions([], new FakeStore(snapshot({}))),
+      capabilities: new RunCapabilityVault(),
+      artifactRoot: join(root, "artifacts"),
+      workerImage: IMAGE,
+      additionalWorkerImages: { "node-python": { "3.12": pythonImage } },
+      credentialRef: "env:OPENAI_API_KEY",
+      limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
+      sleep: async () => {},
+    });
+    expect(
+      direct.resolveCodingWorkerImage?.({ toolchain: "node-python", toolchainVersion: "3.12", workerImageRef: null }),
+    ).toBe(pythonImage);
+  });
+
+  it("workerImageRef short-circuits the matrix entirely when set", async () => {
+    const byo = `registry.example/byo@sha256:${"c".repeat(64)}`;
+    const { executor } = await harness();
+    expect(
+      executor.resolveCodingWorkerImage?.({ toolchain: "node", toolchainVersion: null, workerImageRef: byo }),
+    ).toBe(byo);
+  });
+
+  it("throws on a malformed workerImageRef", async () => {
+    const { executor } = await harness();
+    expect(() =>
+      executor.resolveCodingWorkerImage?.({ toolchain: "node", toolchainVersion: null, workerImageRef: "not-a-digest" }),
+    ).toThrow(/coding_worker_image_invalid/);
+  });
+
+  it("throws on an unknown toolchain", async () => {
+    const { executor } = await harness();
+    expect(() =>
+      executor.resolveCodingWorkerImage?.({ toolchain: "node-php", toolchainVersion: "8.3", workerImageRef: null }),
+    ).toThrow(/No worker image/);
+  });
+
+  it("throws on a known toolchain with an unknown version", async () => {
+    const pythonImage = `registry.example/worker-python@sha256:${"b".repeat(64)}`;
+    const root = await mkdtemp("/private/tmp/reevo-container-executor-");
+    roots.push(root);
+    const direct = new ContainerExecutor({
+      store: new FakeStore(snapshot({})),
+      jobs: new FakeJobs([]),
+      vcs: new FakeVcs(join(root, "vcs"), []),
+      sessions: new FakeSessions([], new FakeStore(snapshot({}))),
+      capabilities: new RunCapabilityVault(),
+      artifactRoot: join(root, "artifacts"),
+      workerImage: IMAGE,
+      additionalWorkerImages: { "node-python": { "3.12": pythonImage } },
+      credentialRef: "env:OPENAI_API_KEY",
+      limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
+      sleep: async () => {},
+    });
+    expect(() =>
+      direct.resolveCodingWorkerImage?.({ toolchain: "node-python", toolchainVersion: "2.7", workerImageRef: null }),
+    ).toThrow(/No worker image/);
+  });
+
+  it("constructor throws if any additionalWorkerImages entry is not an immutable digest", async () => {
+    const root = await mkdtemp("/private/tmp/reevo-container-executor-");
+    roots.push(root);
+    expect(
+      () =>
+        new ContainerExecutor({
+          store: new FakeStore(snapshot({})),
+          jobs: new FakeJobs([]),
+          vcs: new FakeVcs(join(root, "vcs"), []),
+          sessions: new FakeSessions([], new FakeStore(snapshot({}))),
+          capabilities: new RunCapabilityVault(),
+          artifactRoot: join(root, "artifacts"),
+          workerImage: IMAGE,
+          additionalWorkerImages: { "node-python": { "3.12": "reevo-coding-worker:latest" } },
+          credentialRef: "env:OPENAI_API_KEY",
+          limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
+          sleep: async () => {},
+        }),
+    ).toThrow("coding_worker_image_invalid");
+  });
+});
+
+describe("jobSpec image selection", () => {
+  it("jobSpec uses the run's snapshotted workerImage over the deployment default", async () => {
+    const pythonImage = `registry.example/worker-python@sha256:${"d".repeat(64)}`;
+    const { executor, jobs } = await harness({ workerImage: pythonImage });
+    await executor.start("run-1");
+    expect(jobs.lastSpec?.image).toBe(pythonImage);
+  });
+
+  it("jobSpec falls back to the deployment default when the run has no snapshotted workerImage", async () => {
+    const { executor, jobs } = await harness({ workerImage: null });
+    await executor.start("run-1");
+    expect(jobs.lastSpec?.image).toBe(IMAGE);
   });
 });

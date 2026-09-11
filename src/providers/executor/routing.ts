@@ -1,4 +1,4 @@
-import type { Executor, ExecutionRecoveryResult, PersistedExecutionHandle } from "./types.js";
+import type { CodingImageSelector, Executor, ExecutionRecoveryResult, PersistedExecutionHandle } from "./types.js";
 
 export interface ExecutionKindResolver {
   kindForRun(runId: string): Promise<"native" | "coding" | null>;
@@ -50,6 +50,11 @@ export class RoutingExecutor implements Executor {
   async close(): Promise<void> {
     await this.coding.close?.();
     await this.native.close?.();
+  }
+
+  resolveCodingWorkerImage(selector: CodingImageSelector): string {
+    if (!this.coding.resolveCodingWorkerImage) throw new Error("coding_execution_not_configured");
+    return this.coding.resolveCodingWorkerImage(selector);
   }
 }
 

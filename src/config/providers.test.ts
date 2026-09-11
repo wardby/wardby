@@ -70,6 +70,18 @@ describe("loadContainerExecutorConfig", () => {
   it.each(["0", "-1", "nope"])("rejects invalid container CPU limits (%s)", (value) => {
     expect(() => loadContainerExecutorConfig({ CODING_CPUS: value })).toThrow("CODING_CPUS must be a positive");
   });
+
+  it("builds additionalWorkerImages from known CODING_WORKER_IMAGE_* env vars", () => {
+    const config = loadContainerExecutorConfig({
+      CODING_WORKER_IMAGE_NODE_PYTHON_3_12: `worker-python@sha256:${"b".repeat(64)}`,
+    });
+    expect(config.additionalWorkerImages).toEqual({ "node-python": { "3.12": `worker-python@sha256:${"b".repeat(64)}` } });
+  });
+
+  it("additionalWorkerImages is empty when no toolchain env vars are set", () => {
+    const config = loadContainerExecutorConfig({});
+    expect(config.additionalWorkerImages).toEqual({});
+  });
 });
 
 describe("loadMcpConfig", () => {

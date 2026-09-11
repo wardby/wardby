@@ -1,5 +1,6 @@
 import { isIP } from "node:net";
 import { z } from "zod";
+import { isImmutableDockerImage } from "../providers/jobs/docker-isolation.js";
 import { MAX_CODING_TASK_BYTES, normalizeGitHubRepository, normalizeGitRef } from "./protocol.js";
 
 export const MIN_CODING_TIMEOUT_SEC = 60;
@@ -89,6 +90,18 @@ const protectedPathSchema = z
     "must not contain empty or traversal components",
   );
 
+const KNOWN_TOOLCHAINS = ["node", "node-python"] as const;
+
+const toolchainSchema = z.enum(KNOWN_TOOLCHAINS);
+const toolchainVersionSchema = z.string().trim().min(1).max(32).nullable();
+const workerImageRefSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(512)
+  .refine(isImmutableDockerImage, "must be an immutable repository digest")
+  .nullable();
+
 const codingProfileFields = {
   provider: z.literal("codex"),
   repository: repositorySchema,
@@ -96,6 +109,9 @@ const codingProfileFields = {
   defaultTask: defaultTaskSchema,
   allowWebhookTaskOverride: z.boolean(),
   timeoutSec: z.number().int().min(MIN_CODING_TIMEOUT_SEC).max(MAX_CODING_TIMEOUT_SEC),
+  toolchain: toolchainSchema,
+  toolchainVersion: toolchainVersionSchema,
+  workerImageRef: workerImageRefSchema,
   allowedEgress: z
     .array(egressHostSchema)
     .max(MAX_ALLOWED_EGRESS_HOSTS)
@@ -117,6 +133,9 @@ export const CodingProfileSchema = z
     timeoutSec: codingProfileFields.timeoutSec.default(1800),
     allowedEgress: codingProfileFields.allowedEgress.default([]),
     protectedPaths: codingProfileFields.protectedPaths.default([...DEFAULT_PROTECTED_PATHS]),
+    toolchain: codingProfileFields.toolchain.default("node"),
+    toolchainVersion: codingProfileFields.toolchainVersion.default(null),
+    workerImageRef: codingProfileFields.workerImageRef.default(null),
   })
   .strict();
 
@@ -130,6 +149,9 @@ export const CodingProfilePatchSchema = z
     timeoutSec: codingProfileFields.timeoutSec.optional(),
     allowedEgress: codingProfileFields.allowedEgress.optional(),
     protectedPaths: codingProfileFields.protectedPaths.optional(),
+    toolchain: codingProfileFields.toolchain.optional(),
+    toolchainVersion: codingProfileFields.toolchainVersion.optional(),
+    workerImageRef: codingProfileFields.workerImageRef.optional(),
   })
   .strict();
 

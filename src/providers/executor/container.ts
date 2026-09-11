@@ -17,7 +17,7 @@ import { getModelPricing } from "../llm/pricing.js";
 import { isImmutableDockerImage } from "../jobs/docker-isolation.js";
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
 import type { PreparedWorkspace, VcsPrepareInput, VcsProvider } from "../vcs/types.js";
-import type { ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
+import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
 
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "refused", "lost", "budget_exhausted", "cancelled"]);
 const PROVISIONING_BACKEND = "provisioning";
@@ -44,6 +44,7 @@ export interface ContainerRunSnapshot {
   provisioningClaim: string | null;
   proxySessionId: string | null;
   result: unknown;
+  workerImage: string | null;
 }
 
 export interface ContainerExecutionStore {
@@ -99,6 +100,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       provisioningClaim: row.codingRun.jobBackend === PROVISIONING_BACKEND ? (row.codingRun.jobHandle ?? null) : null,
       proxySessionId: row.codingRun.proxySession?.id ?? null,
       result: row.codingRun.result,
+      workerImage: row.codingRun.workerImage,
     };
   }
 
@@ -239,6 +241,8 @@ export interface ContainerExecutorOptions {
   capabilities: RunCapabilityVault;
   artifactRoot: string;
   workerImage: string;
+  /** Additional toolchains beyond the "node" baseline (workerImage). Keyed by toolchain, then version. */
+  additionalWorkerImages?: Record<string, Record<string, string>>;
   credentialRef: string;
   limits: JobResourceLimits;
   pollMinMs?: number;
@@ -263,6 +267,11 @@ export class ContainerExecutor implements Executor {
     if (this.artifactRoot === resolve("/")) throw new Error("coding_artifact_root_invalid");
     if (!isImmutableDockerImage(options.workerImage)) {
       throw new Error("coding_worker_image_invalid");
+    }
+    for (const versions of Object.values(options.additionalWorkerImages ?? {})) {
+      for (const image of Object.values(versions)) {
+        if (!isImmutableDockerImage(image)) throw new Error("coding_worker_image_invalid");
+      }
     }
     if (!/^[A-Za-z][A-Za-z0-9_.:-]{0,199}$/.test(options.credentialRef)) {
       throw new Error("coding_credential_ref_invalid");
@@ -587,6 +596,22 @@ export class ContainerExecutor implements Executor {
     });
   }
 
+  resolveCodingWorkerImage(selector: CodingImageSelector): string {
+    if (selector.workerImageRef) {
+      if (!isImmutableDockerImage(selector.workerImageRef)) throw new Error("coding_worker_image_invalid");
+      return selector.workerImageRef;
+    }
+    if (selector.toolchain === "node") return this.options.workerImage;
+    const versions = this.options.additionalWorkerImages?.[selector.toolchain];
+    const image = selector.toolchainVersion ? versions?.[selector.toolchainVersion] : undefined;
+    if (!image) {
+      throw new Error(
+        `No worker image for toolchain "${selector.toolchain}" version "${selector.toolchainVersion ?? "(none)"}" — refusing to guess. Add it to additionalWorkerImages.`,
+      );
+    }
+    return image;
+  }
+
   private async requireCurrent(runId: string): Promise<ContainerRunSnapshot> {
     const current = await this.options.store.load(runId);
     if (!current) throw new Error("coding_run_not_found");
@@ -597,7 +622,7 @@ export class ContainerExecutor implements Executor {
     return {
       kind: "coding-agent",
       runId: run.runId,
-      image: this.options.workerImage,
+      image: run.workerImage ?? this.options.workerImage,
       inputArtifact,
       timeoutSec: run.timeoutSec,
       limits: { ...this.options.limits },

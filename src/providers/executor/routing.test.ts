@@ -80,4 +80,28 @@ describe("RoutingExecutor", () => {
     await executor.close();
     expect(order).toEqual(["native-launch", "native-close"]);
   });
+
+  it("delegates resolveCodingWorkerImage to the coding sub-executor", () => {
+    const native = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    const coding = {
+      start: vi.fn(async () => {}),
+      stop: vi.fn(async () => {}),
+      resolveCodingWorkerImage: vi.fn(() => "sha256:deadbeef".padEnd(71, "0")),
+    };
+    const executor = new RoutingExecutor({ kindForRun: async () => "coding" }, native, coding);
+
+    expect(
+      executor.resolveCodingWorkerImage({ toolchain: "node", toolchainVersion: null, workerImageRef: null }),
+    ).toBe("sha256:deadbeef".padEnd(71, "0"));
+  });
+
+  it("throws a clear error if the coding sub-executor doesn't implement resolveCodingWorkerImage", () => {
+    const native = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    const coding = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    const executor = new RoutingExecutor({ kindForRun: async () => "coding" }, native, coding);
+
+    expect(() =>
+      executor.resolveCodingWorkerImage({ toolchain: "node", toolchainVersion: null, workerImageRef: null }),
+    ).toThrow(/coding_execution_not_configured/);
+  });
 });
