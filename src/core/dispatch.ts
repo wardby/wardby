@@ -109,6 +109,11 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             budgetUsd: Number(agent.budgetUsd),
             deadlineAt: new Date(now.getTime() + agent.codingProfile.timeoutSec * 1000).toISOString(),
           });
+          const workerImage = options.executor.resolveCodingWorkerImage?.({
+            toolchain: agent.codingProfile.toolchain,
+            toolchainVersion: agent.codingProfile.toolchainVersion,
+            workerImageRef: agent.codingProfile.workerImageRef,
+          });
           await tx.codingRun.create({
             data: {
               runId: run.id,
@@ -121,6 +126,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               timeoutSec: agent.codingProfile.timeoutSec,
               allowedEgress: agent.codingProfile.allowedEgress as Prisma.InputJsonValue,
               protectedPaths: agent.codingProfile.protectedPaths as Prisma.InputJsonValue,
+              workerImage,
               budgetReservedUsd: agent.budgetUsd,
             },
           });

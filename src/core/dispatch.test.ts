@@ -131,6 +131,71 @@ describe("dispatchRun", () => {
     ]);
   });
 
+  it("resolves and snapshots the worker image for a coding agent, once, immutably", async () => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      budgetUsd: 1.25,
+      codingProfile: {
+        provider: "codex",
+        repository: "openai/reevo",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        allowedEgress: [],
+        protectedPaths: [],
+        toolchain: "node-python",
+        toolchainVersion: "3.12",
+        workerImageRef: null,
+      },
+    };
+    const state = fakeDb(agent);
+    const resolveCodingWorkerImage = vi.fn(() => "sha256:pythonimage".padEnd(71, "0"));
+    const executor: Executor = { async start() {}, async stop() {}, resolveCodingWorkerImage };
+
+    const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+
+    expect(resolveCodingWorkerImage).toHaveBeenCalledWith({
+      toolchain: "node-python",
+      toolchainVersion: "3.12",
+      workerImageRef: null,
+    });
+    expect(state.codingRuns).toEqual([
+      expect.objectContaining({ runId: result?.run.id, workerImage: "sha256:pythonimage".padEnd(71, "0") }),
+    ]);
+  });
+
+  it("an unresolvable toolchain rejects dispatchRun's promise (a real transaction rolls the rest back; this fake's $transaction has no rollback semantics, so only the rejection itself is asserted here)", async () => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      budgetUsd: 1.25,
+      codingProfile: {
+        provider: "codex",
+        repository: "openai/reevo",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        allowedEgress: [],
+        protectedPaths: [],
+        toolchain: "node-cobol",
+        toolchainVersion: null,
+        workerImageRef: null,
+      },
+    };
+    const state = fakeDb(agent);
+    const executor: Executor = {
+      async start() {},
+      async stop() {},
+      resolveCodingWorkerImage: () => {
+        throw new Error('No worker image for toolchain "node-cobol"');
+      },
+    };
+
+    await expect(dispatchRun({ db: state.db, executor, agentId: agent.id })).rejects.toThrow(/No worker image/);
+    expect(state.codingRuns).toHaveLength(0);
+  });
+
   it("snapshots bounded manual coding task and base-ref overrides", async () => {
     const agent = {
       ...nativeAgent(),
