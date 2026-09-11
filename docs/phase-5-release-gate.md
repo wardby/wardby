@@ -75,6 +75,44 @@ the generated branch.
 - **Cleanup:** PR #2 closed and its branch deleted from `origin`
   immediately after review, same day as the run — recorded live this time.
 
+### Coding worker toolchains — live confirmation (2026-09-11)
+
+Confirms the `node-python` toolchain (branch `worktree-coding-worker-toolchains`,
+design/plan in `docs/private/2026-09-10-coding-worker-toolchains-*.md`):
+`phase5-local-smoke`'s profile was updated to
+`toolchain: "node-python"`, `toolchainVersion: "3.12"` via `update_agent`,
+with `CODING_WORKER_IMAGE_NODE_PYTHON_3_12` pointing at the
+`Dockerfile.node-python` build, then the same hello.py task re-triggered.
+
+- **Run ID:** `cmtwuk0du0002sqx12my5fz1f`
+- **Date:** 2026-09-11 11:02 UTC
+- **Outcome:** `failed` (`coding_failure_executor`), $0 cost (failed before
+  any LLM call). The launched container (`reevo-keeper-cb463d11d1d9632daef3`)
+  exited 133 (SIGABRT) with no log output. Confirmed **not** a toolchain-
+  resolution bug: `docker inspect` showed it launched with the correct
+  `sha256:9326...cded9` (node-python) image digest — the new
+  `resolveCodingWorkerImage`/dispatch-snapshot path worked correctly.
+  Reproducing the same resource/security constraints (`--memory`,
+  `--pids-limit=16`, `--network=none`, `--read-only`, seccomp) via a plain
+  `docker run` did not reproduce the crash — treated as a transient
+  container-start flake (this same Docker host was running a dozen+
+  unrelated long-lived containers at the time), not a defect in this
+  feature. Left uncleaned container removed manually afterward — worth a
+  follow-up look if it recurs (terminal-failure cleanup may have a gap for
+  an abrupt SIGABRT specifically).
+- **Retry — Run ID:** `cmtwun2gw0004sqx1kac1dzne`
+- **Date:** 2026-09-11 11:04 UTC
+- **Outcome:** `pull_request_opened` — [PR #3](https://github.com/chfields/reevo-run/pull/3),
+  commit `50dbf79b83c7170a67fc2aa359d88144d8894e5d`.
+- **Cost:** $0.006638 (53,931 input / 1,026 output tokens).
+- **Verification — this is the actual capability being confirmed:** the
+  worker's own runtime check now reports
+  `{"command": "python3 hello.py", "outcome": "passed"}` — not `skipped`,
+  as the 2026-09-09 run above recorded. `python3` is present and the
+  written program actually executes and is verified inside the container.
+- **Cleanup:** PR #3 closed, branch deleted from `origin`, immediately
+  after review.
+
 ## Lifecycle Audit And Metrics
 
 The container executor emits metadata-only structured events for `queued`,
