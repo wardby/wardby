@@ -12,6 +12,9 @@ describe("CodingProfileSchema", () => {
       timeoutSec: 1800,
       allowedEgress: [],
       protectedPaths: [...DEFAULT_PROTECTED_PATHS],
+      toolchain: "node",
+      toolchainVersion: null,
+      workerImageRef: null,
     });
   });
 
@@ -27,8 +30,22 @@ describe("CodingProfileSchema", () => {
     { repository: "openai/example", protectedPaths: ["../secrets"] },
     { repository: "openai/example", protectedPaths: ["/etc/passwd"] },
     { repository: "openai/example", credential: "secret" },
+    { repository: "openai/example", toolchain: "node-cobol" },
+    { repository: "openai/example", workerImageRef: "reevo-coding-worker:latest" },
   ])("rejects unsafe profile %#", (profile) => {
     expect(() => CodingProfileSchema.parse(profile)).toThrow();
+  });
+
+  it("accepts a known toolchain, a version string, and a valid immutable workerImageRef", () => {
+    const result = CodingProfileSchema.parse({
+      repository: "openai/example",
+      toolchain: "node-python",
+      toolchainVersion: "3.12",
+      workerImageRef: `registry.example/byo@sha256:${"e".repeat(64)}`,
+    });
+    expect(result.toolchain).toBe("node-python");
+    expect(result.toolchainVersion).toBe("3.12");
+    expect(result.workerImageRef).toBe(`registry.example/byo@sha256:${"e".repeat(64)}`);
   });
 
   it("normalizes and deduplicates host and protected-path policy", () => {

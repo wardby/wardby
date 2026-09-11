@@ -100,6 +100,9 @@ const profileJsonSchema = {
     timeoutSec: { type: "integer", minimum: 60, maximum: 7200 },
     allowedEgress: { type: "array", maxItems: 64, items: { type: "string" } },
     protectedPaths: { type: "array", minItems: 1, maxItems: 128, items: { type: "string" } },
+    toolchain: { type: "string", enum: ["node", "node-python"] },
+    toolchainVersion: { type: ["string", "null"] },
+    workerImageRef: { type: ["string", "null"] },
   },
 };
 
