@@ -40,6 +40,7 @@ interface FakeSecretRow {
 interface FakeAgentSecretRow {
   agentId: string;
   secretId: string;
+  boundName: string;
 }
 
 function fakeDb() {
@@ -106,19 +107,15 @@ function fakeDb() {
         agentSecrets.push(data);
         return data;
       },
-      deleteMany: async ({ where }: { where: { agentId: string; secretId: string } }) => {
+      deleteMany: async ({ where }: { where: { agentId: string; boundName: string } }) => {
         const before = agentSecrets.length;
-        const kept = agentSecrets.filter((a) => !(a.agentId === where.agentId && a.secretId === where.secretId));
+        const kept = agentSecrets.filter((a) => !(a.agentId === where.agentId && a.boundName === where.boundName));
         agentSecrets.length = 0;
         agentSecrets.push(...kept);
         return { count: before - kept.length };
       },
-      findFirst: async ({ where }: { where: { agentId: string; secret: { name: string } } }) => {
-        const match = agentSecrets.find((a) => {
-          if (a.agentId !== where.agentId) return false;
-          const secret = secrets.get(a.secretId);
-          return secret?.name === where.secret.name;
-        });
+      findFirst: async ({ where }: { where: { agentId: string; boundName: string } }) => {
+        const match = agentSecrets.find((a) => a.agentId === where.agentId && a.boundName === where.boundName);
         if (!match) return null;
         return { ...match, secret: secrets.get(match.secretId) };
       },
@@ -186,10 +183,43 @@ describe("core/secrets", () => {
     const cipher = fakeCipher();
     await createSecret("API_KEY", "sk-live-abc123", "p1", cipher, db);
     await attachSecret("agent-1", "API_KEY", "p1", db);
-    await detachSecret("agent-1", "API_KEY", "p1", db);
+    await detachSecret("agent-1", "API_KEY", db);
 
     const accessor = buildSecretsAccessor("agent-1", cipher, db);
     expect(await accessor.get("API_KEY")).toBeUndefined();
+  });
+
+  it("two agents resolve the same boundName to their own distinct secrets", async () => {
+    const db = fakeDb();
+    const cipher = fakeCipher();
+    await createSecret("bitbucket_aies", "token-aies", "p1", cipher, db);
+    await createSecret("bitbucket_ondemand", "token-ondemand", "p1", cipher, db);
+    await attachSecret("agent-A", "bitbucket_aies", "p1", db, "bitbucket");
+    await attachSecret("agent-B", "bitbucket_ondemand", "p1", db, "bitbucket");
+
+    expect(await buildSecretsAccessor("agent-A", cipher, db).get("bitbucket")).toBe("token-aies");
+    expect(await buildSecretsAccessor("agent-B", cipher, db).get("bitbucket")).toBe("token-ondemand");
+  });
+
+  it("one agent resolves two secrets under two distinct boundNames", async () => {
+    const db = fakeDb();
+    const cipher = fakeCipher();
+    await createSecret("jira_chris", "jc", "p1", cipher, db);
+    await createSecret("bitbucket_aies", "ba", "p1", cipher, db);
+    await attachSecret("agent-1", "jira_chris", "p1", db, "jira");
+    await attachSecret("agent-1", "bitbucket_aies", "p1", db, "bitbucket");
+
+    const accessor = buildSecretsAccessor("agent-1", cipher, db);
+    expect(await accessor.get("jira")).toBe("jc");
+    expect(await accessor.get("bitbucket")).toBe("ba");
+  });
+
+  it("attachSecret defaults boundName to the secret name", async () => {
+    const db = fakeDb();
+    const cipher = fakeCipher();
+    await createSecret("API_KEY", "v", "p1", cipher, db);
+    await attachSecret("agent-1", "API_KEY", "p1", db);
+    expect(await buildSecretsAccessor("agent-1", cipher, db).get("API_KEY")).toBe("v");
   });
 
   it("deleteSecret removes it from listSecrets", async () => {

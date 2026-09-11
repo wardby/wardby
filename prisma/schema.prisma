@@ -377,15 +377,20 @@ model Secret {
   @@unique([ownerId, name])
 }
 
-/// Phase 4: attaches a secret to an agent, addressed by name at sandbox
-/// point-of-use (secrets.get(name)).
+/// Phase 4: attaches a secret to an agent, addressed at sandbox point-of-use
+/// by `boundName` (secrets.get(boundName)). `boundName` defaults to the
+/// secret's canonical name; it differs only when the agent binds the secret
+/// under an alias, letting two agents resolve the same logical name to
+/// different underlying secrets.
 model AgentSecret {
-  agentId  String
-  secretId String
-  agent    Agent  @relation(fields: [agentId], references: [id])
-  secret   Secret @relation(fields: [secretId], references: [id])
+  agentId   String
+  secretId  String
+  boundName String
+  agent     Agent  @relation(fields: [agentId], references: [id])
+  secret    Secret @relation(fields: [secretId], references: [id])
 
   @@id([agentId, secretId])
+  @@unique([agentId, boundName])
 }
 
 /// Cross-instance persistence for the out-of-band secret-entry flow
