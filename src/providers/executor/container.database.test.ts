@@ -44,11 +44,15 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
         timeoutSec: 900,
         allowedEgress: [],
         protectedPaths: ["CODEOWNERS"],
+        workerImage: `sha256:realdbtest${"0".repeat(50)}`,
         budgetReservedUsd: 1,
       },
     });
 
     const store = new PrismaContainerExecutionStore(db);
+    await expect(store.load(runId)).resolves.toMatchObject({
+      workerImage: `sha256:realdbtest${"0".repeat(50)}`,
+    });
     const [first, second] = await Promise.all([
       store.claimProvisioning(runId, "claim-a"),
       store.claimProvisioning(runId, "claim-b"),

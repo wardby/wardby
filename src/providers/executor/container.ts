@@ -44,6 +44,7 @@ export interface ContainerRunSnapshot {
   provisioningClaim: string | null;
   proxySessionId: string | null;
   result: unknown;
+  workerImage: string | null;
 }
 
 export interface ContainerExecutionStore {
@@ -99,6 +100,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       provisioningClaim: row.codingRun.jobBackend === PROVISIONING_BACKEND ? (row.codingRun.jobHandle ?? null) : null,
       proxySessionId: row.codingRun.proxySession?.id ?? null,
       result: row.codingRun.result,
+      workerImage: row.codingRun.workerImage,
     };
   }
 
@@ -620,7 +622,7 @@ export class ContainerExecutor implements Executor {
     return {
       kind: "coding-agent",
       runId: run.runId,
-      image: this.options.workerImage,
+      image: run.workerImage ?? this.options.workerImage,
       inputArtifact,
       timeoutSec: run.timeoutSec,
       limits: { ...this.options.limits },

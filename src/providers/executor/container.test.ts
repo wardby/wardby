@@ -38,6 +38,7 @@ function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSn
     provisioningClaim: null,
     proxySessionId: null,
     result: null,
+    workerImage: null,
     ...overrides,
   };
 }
@@ -94,6 +95,7 @@ class FakeJobs implements WorkspaceJobLauncher {
   materializations = 0;
   removals = 0;
   stops = 0;
+  lastSpec?: JobSpec;
   statusValue: JobStatus = { state: "succeeded" };
   result: JobResult = {
     exitCode: 0,
@@ -109,8 +111,9 @@ class FakeJobs implements WorkspaceJobLauncher {
 
   constructor(private readonly events: string[]) {}
 
-  async launch(_spec: JobSpec): Promise<JobHandle> {
+  async launch(spec: JobSpec): Promise<JobHandle> {
     this.launches += 1;
+    this.lastSpec = spec;
     this.events.push("launch");
     return this.handle;
   }
@@ -476,5 +479,20 @@ describe("resolveCodingWorkerImage", () => {
           sleep: async () => {},
         }),
     ).toThrow("coding_worker_image_invalid");
+  });
+});
+
+describe("jobSpec image selection", () => {
+  it("jobSpec uses the run's snapshotted workerImage over the deployment default", async () => {
+    const pythonImage = `registry.example/worker-python@sha256:${"d".repeat(64)}`;
+    const { executor, jobs } = await harness({ workerImage: pythonImage });
+    await executor.start("run-1");
+    expect(jobs.lastSpec?.image).toBe(pythonImage);
+  });
+
+  it("jobSpec falls back to the deployment default when the run has no snapshotted workerImage", async () => {
+    const { executor, jobs } = await harness({ workerImage: null });
+    await executor.start("run-1");
+    expect(jobs.lastSpec?.image).toBe(IMAGE);
   });
 });
