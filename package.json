@@ -35,6 +35,7 @@
     "verify:phase5": "npm run typecheck && npm run test:phase5 && npm run build && npm run worker:image:policy",
     "test:docker-isolation": "node scripts/docker-isolation-acceptance.mjs",
     "test:docker-job": "node scripts/docker-job-acceptance.mjs",
+    "test:claude-docker": "node scripts/claude-docker-acceptance.mjs",
     "worker:image:policy": "node scripts/coding-worker-image-policy.mjs"
   },
   "dependencies": {

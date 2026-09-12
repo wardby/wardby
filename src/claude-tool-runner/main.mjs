@@ -8,6 +8,7 @@ import { z } from "zod";
 import { MAX_COMMAND_BYTES, MAX_TIMEOUT_MS, runCommand } from "./command.mjs";
 
 const SOCKET_PATH = "/run/reevo/tool/runner.sock";
+export const TOOL_RUNNER_READY_MESSAGE = "reevo_tool_runner_ready";
 function toolServer() {
   const server = new McpServer({ name: "reevo_tools", version: "1.0.0" });
   server.registerTool(
@@ -44,4 +45,5 @@ export async function startToolRunner(socketPath = SOCKET_PATH) {
 
 if (process.argv[1] === new URL(import.meta.url).pathname) {
   await startToolRunner();
+  process.stdout.write(`${TOOL_RUNNER_READY_MESSAGE}\n`);
 }

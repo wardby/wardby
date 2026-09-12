@@ -823,7 +823,9 @@ function assertClaudeContainerBaseline(
     host.Init !== true ||
     host.Memory !== limits.memoryMb * 1024 * 1024 ||
     host.MemorySwap !== host.Memory ||
-    host.MemorySwappiness !== 0 ||
+    // cgroup v2 hosts may report this as null after accepting the explicit
+    // no-swappiness request; MemorySwap still attests that swap is disabled.
+    (host.MemorySwappiness !== 0 && host.MemorySwappiness !== null) ||
     host.PidsLimit !== limits.pids ||
     host.NanoCpus !== Math.round(limits.cpus * 1_000_000_000) ||
     host.ShmSize !== 16 * 1024 * 1024 ||

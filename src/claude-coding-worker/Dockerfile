@@ -21,7 +21,9 @@ RUN apt-get update \
     && mkdir -p /opt/reevo/empty-workspace \
     && chown -R 10001:10001 /opt/reevo
 WORKDIR /opt/reevo
-COPY --from=worker-dependencies /worker/node_modules ./claude-coding-worker/node_modules
+# Shared protocol modules resolve dependencies from /opt/reevo, while the
+# worker's SDK modules resolve upward through that same reviewed runtime tree.
+COPY --from=worker-dependencies /worker/node_modules ./node_modules
 COPY --from=build /build/dist/claude-coding-worker ./claude-coding-worker
 COPY --from=build /build/dist/coding-worker/artifact.js ./coding-worker/artifact.js
 COPY --from=build /build/dist/coding-worker/errors.js ./coding-worker/errors.js
