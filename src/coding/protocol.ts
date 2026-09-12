@@ -139,11 +139,19 @@ const usageSchema = z
   })
   .strict();
 
-/** A short, caller-visible reference (e.g. a ticket ID) surfaced in the PR title. Never free text. */
+/**
+ * A short, caller-visible reference (e.g. a ticket ID) surfaced in the PR title. Never free text.
+ * Accepts null as well as undefined: OpenAI's strict Structured Outputs mode requires every
+ * property in an object schema with additionalProperties:false to be listed in "required" —
+ * optionality there is expressed by a nullable type, not by omitting the key. The worker's raw
+ * JSON therefore always carries a "tag" key, with null meaning "no tag" (coding-worker/driver.ts).
+ */
 const tagSchema = z
   .string()
   .regex(new RegExp(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,${MAX_TAG_BYTES - 1}}$`), "must be a short, safe tag")
-  .optional();
+  .nullable()
+  .optional()
+  .transform((value) => value ?? undefined);
 
 const testResultSchema = z
   .object({

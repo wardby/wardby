@@ -204,8 +204,12 @@ describe("runCodingWorker", () => {
 });
 
 describe("CODING_OUTPUT_JSON_SCHEMA", () => {
-  it("advertises tag as an optional field, not a required one", () => {
-    expect(CODING_OUTPUT_JSON_SCHEMA.properties).toHaveProperty("tag");
-    expect(CODING_OUTPUT_JSON_SCHEMA.required).not.toContain("tag");
+  it("marks every property required with a nullable type for tag, per OpenAI's strict Structured Outputs rules", () => {
+    // additionalProperties:false + strict mode requires every key in "properties" to appear in
+    // "required" — optionality is expressed via a nullable type, never by omitting the key.
+    // Getting this wrong (tag was once absent from "required") makes OpenAI reject every request
+    // with an HTTP 400 before the model runs at all, regardless of whether a tag is even relevant.
+    expect(CODING_OUTPUT_JSON_SCHEMA.required).toEqual(Object.keys(CODING_OUTPUT_JSON_SCHEMA.properties));
+    expect(CODING_OUTPUT_JSON_SCHEMA.properties.tag).toEqual({ type: ["string", "null"] });
   });
 });
