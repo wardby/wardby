@@ -5,6 +5,7 @@ import { MemoryProxyLedger } from "./memory-ledger.js";
 import {
   CodingProxy,
   CodingProxyError,
+  CLAUDE_CODE_ANTHROPIC_BETAS,
   PROXY_DEFAULT_MAX_OUTPUT_TOKENS,
   type CreatedCodingProxySession,
   type ProxyResponseSink,
@@ -114,7 +115,13 @@ async function harness(
 
 async function execute(h: Harness, key: string, sink = new TestSink(), body = requestBody()): Promise<TestSink> {
   await h.proxy.execute(
-    { bearer: h.session.capability, protocol: h.session.protocol, rawBody: body, requestKey: key },
+    {
+      bearer: h.session.capability,
+      protocol: h.session.protocol,
+      rawBody: body,
+      requestKey: key,
+      anthropicBeta: h.session.protocol === "anthropic-messages" ? CLAUDE_CODE_ANTHROPIC_BETAS.join(",") : undefined,
+    },
     sink,
   );
   return sink;
@@ -369,9 +376,13 @@ describe("CodingProxy Anthropic Messages", () => {
     const headers = new Headers(init.headers);
     expect(headers.get("x-api-key")).toBe("UPSTREAM_SECRET");
     expect(headers.get("anthropic-version")).toBe("2023-06-01");
+    expect(headers.get("anthropic-beta")?.split(",")).toEqual(CLAUDE_CODE_ANTHROPIC_BETAS);
     expect(headers.get("authorization")).toBeNull();
     expect(headers.get("idempotency-key")).toBeNull();
-    expect(JSON.parse(init.body as string)).not.toHaveProperty("metadata");
+    const forwarded = JSON.parse(init.body as string);
+    expect(forwarded).not.toHaveProperty("metadata");
+    expect(forwarded.messages).toContainEqual(expect.objectContaining({ role: "system" }));
+    expect(forwarded.system).toHaveLength(2);
     const request = await h.ledger.getRequest(reservedRequestId(h.events));
     expect(request).toMatchObject({
       status: "completed",
@@ -383,6 +394,71 @@ describe("CodingProxy Anthropic Messages", () => {
         reasoningTokens: 0,
       },
     });
+  });
+
+  it("requires the pinned beta contract for beta-gated SDK fields before credential resolution", async () => {
+    const resolve = vi.fn(async () => "secret");
+    const h = await harness({ protocol: "anthropic-messages", credentials: { resolve } });
+
+    await expect(
+      h.proxy.execute(
+        {
+          bearer: h.session.capability,
+          protocol: h.session.protocol,
+          rawBody: await fixture("anthropic-sdk-request.json"),
+          requestKey: "missing-beta",
+        },
+        new TestSink(),
+      ),
+    ).rejects.toMatchObject({ status: 400, code: "anthropic_beta_required" });
+    expect(resolve).not.toHaveBeenCalled();
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+
+  it("preserves Claude Code's bounded second-turn system string", async () => {
+    const response = JSON.parse(await fixture("anthropic-message-response.json"));
+    const body = JSON.parse(await fixture("anthropic-sdk-request.json"));
+    body.stream = false;
+    body.messages[1].content = "<system-reminder>Today's date is 2026-09-12.</system-reminder>";
+    const h = await harness({
+      protocol: "anthropic-messages",
+      fetch: async () => Response.json(response),
+    });
+
+    await execute(h, "anthropic-system-string", new TestSink(), JSON.stringify(body));
+
+    const forwarded = JSON.parse((h.fetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(forwarded.messages[1]).toEqual(body.messages[1]);
+  });
+
+  it.each([
+    ["unknown", "claude-code-20250219,unreviewed-beta-2099-01-01"],
+    ["duplicate", "claude-code-20250219,claude-code-20250219"],
+    ["empty", "claude-code-20250219,"],
+  ])("rejects an %s beta header before credential resolution", async (_name, anthropicBeta) => {
+    const resolve = vi.fn(async () => "secret");
+    const h = await harness({ protocol: "anthropic-messages", credentials: { resolve } });
+    const body = JSON.stringify({
+      model: "claude-sonnet-5",
+      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      max_tokens: 2,
+      stream: false,
+    });
+
+    await expect(
+      h.proxy.execute(
+        {
+          bearer: h.session.capability,
+          protocol: h.session.protocol,
+          rawBody: body,
+          requestKey: `invalid-beta-${_name}`,
+          anthropicBeta,
+        },
+        new TestSink(),
+      ),
+    ).rejects.toMatchObject({ status: 400, code: "invalid_anthropic_beta" });
+    expect(resolve).not.toHaveBeenCalled();
+    expect(h.fetch).not.toHaveBeenCalled();
   });
 
   it("accounts for split authoritative usage in a complete message stream", async () => {
@@ -398,6 +474,75 @@ describe("CodingProxy Anthropic Messages", () => {
     expect(await h.ledger.getRequest(reservedRequestId(h.events))).toMatchObject({
       status: "completed",
       usage: { inputTokens: 125, outputTokens: 2, cachedInputTokens: 25, cacheWriteTokens: 10 },
+    });
+  });
+
+  it("forwards only Reevo's bounded local command tool and matching tool-result blocks", async () => {
+    const response = JSON.parse(await fixture("anthropic-message-response.json"));
+    const body = JSON.parse(await fixture("anthropic-sdk-request.json"));
+    body.stream = false;
+    body.tools = [
+      {
+        name: "StructuredOutput",
+        description: "Return the final structured result.",
+        input_schema: {
+          type: "object",
+          properties: { outcome: { type: "string" } },
+          required: ["outcome"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "mcp__reevo_tools__run_command",
+        description: "Run one bounded shell command in the isolated repository workspace.",
+        input_schema: {
+          type: "object",
+          properties: {
+            command: { type: "string", minLength: 1, maxLength: 8_192 },
+            timeout_ms: { type: "integer", minimum: 1_000, maximum: 60_000 },
+          },
+          required: ["command"],
+          additionalProperties: false,
+        },
+      },
+    ];
+    body.messages.push(
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_reevo_command",
+            name: "mcp__reevo_tools__run_command",
+            input: { command: "git status --short", timeout_ms: 1_000 },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_reevo_command",
+            content: [{ type: "text", text: "exit_code=0\n" }],
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      },
+    );
+    const h = await harness({
+      protocol: "anthropic-messages",
+      fetch: async () => Response.json(response),
+    });
+
+    await execute(h, "reevo-command-tool", new TestSink(), JSON.stringify(body));
+
+    const forwarded = JSON.parse((h.fetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(forwarded.tools).toHaveLength(2);
+    expect(forwarded.messages.at(-1).content[0]).toMatchObject({
+      type: "tool_result",
+      tool_use_id: "toolu_reevo_command",
+      cache_control: { type: "ephemeral" },
     });
   });
 

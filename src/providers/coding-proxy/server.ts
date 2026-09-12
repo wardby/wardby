@@ -89,6 +89,7 @@ export async function startCodingProxyServer(
       // x-client-request-id is a tracing identifier that Codex may reuse across a multi-request tool loop.
       const requestKeyHeader = request.headers["idempotency-key"];
       const apiKeyHeader = request.headers["x-api-key"];
+      const anthropicBetaHeader = request.headers["anthropic-beta"];
       const capability =
         protocol === "anthropic-messages"
           ? request.headers.authorization === undefined && typeof apiKeyHeader === "string"
@@ -103,6 +104,7 @@ export async function startCodingProxyServer(
           protocol,
           rawBody,
           requestKey: Array.isArray(requestKeyHeader) ? undefined : requestKeyHeader,
+          anthropicBeta: Array.isArray(anthropicBetaHeader) ? "" : anthropicBetaHeader,
         },
         responseSink(response),
       );
@@ -112,6 +114,10 @@ export async function startCodingProxyServer(
         return;
       }
       if (error instanceof CodingProxyError || error instanceof HttpBoundaryError) {
+        proxyLog.info(
+          { event: "request.rejected", code: error instanceof CodingProxyError ? error.code : error.message },
+          "coding proxy request rejected",
+        );
         sendError(response, error.status, error instanceof CodingProxyError ? error.code : error.message);
         return;
       }
