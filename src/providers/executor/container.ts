@@ -548,7 +548,11 @@ export class ContainerExecutor implements Executor {
         this.terminal(current, "budget_exhausted");
         return;
       }
-      const finalized = await this.options.vcs.finalizeChanges(workspace);
+      const finalized = await this.options.vcs.finalizeChanges(workspace, {
+        summary: output.summary,
+        tests: output.tests,
+        tag: output.tag,
+      });
       const result = this.resultFor(output, current, finalized.outcome, finalized);
       await this.options.store.complete(run.runId, "succeeded", result);
       if (finalized.outcome === "pull_request_opened") {
@@ -592,6 +596,7 @@ export class ContainerExecutor implements Executor {
         : {}),
       summary: output.summary,
       tests: output.tests,
+      tag: output.tag,
       usage: { tokensIn: run.tokensIn, tokensOut: run.tokensOut, costUsd: run.costUsd },
     });
   }

@@ -206,6 +206,23 @@ describe("GitVcsProvider", () => {
     expect(github.pullRequestCalls).toHaveLength(1);
   });
 
+  it("passes the agent's summary, tests, and tag through to the pull request", async () => {
+    const { provider, github, input } = await harness();
+    const prepared = await provider.prepareWorkspace(input);
+    await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+
+    await provider.finalizeChanges(prepared, {
+      summary: "Fixed the failing test.",
+      tests: [{ command: "npm test", outcome: "passed" }],
+      tag: "JIRA-123",
+    });
+    expect(github.pullRequestCalls[0]).toMatchObject({
+      summary: "Fixed the failing test.",
+      tests: [{ command: "npm test", outcome: "passed" }],
+      tag: "JIRA-123",
+    });
+  });
+
   it.each([".github/workflows/release.yml", "CODEOWNERS"])(
     "rejects protected path changes before commit or push (%s)",
     async (path) => {

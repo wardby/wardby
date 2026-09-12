@@ -19,6 +19,13 @@ export interface PreparedWorkspace {
   protectedPaths: string[];
 }
 
+/** Already-validated/redacted agent-authored fields (coding/protocol.ts) surfaced in the opened PR, if any. */
+export interface FinalizeChangesDetails {
+  summary?: string;
+  tests?: readonly { command: string; outcome: "passed" | "failed" | "skipped" }[];
+  tag?: string;
+}
+
 export type FinalizeChangesResult =
   | {
       outcome: "no_changes";
@@ -40,6 +47,6 @@ export type FinalizeChangesResult =
 export interface VcsProvider {
   prepareWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace>;
   recoverWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace | null>;
-  finalizeChanges(workspace: PreparedWorkspace): Promise<FinalizeChangesResult>;
+  finalizeChanges(workspace: PreparedWorkspace, details?: FinalizeChangesDetails): Promise<FinalizeChangesResult>;
   cleanup(workspace: PreparedWorkspace): Promise<void>;
 }
