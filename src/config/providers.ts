@@ -73,10 +73,13 @@ export function loadGitHubVcsConfig(env: NodeJS.ProcessEnv = process.env): GitHu
 
 export interface ContainerExecutorConfig {
   workerImage?: string;
+  claudeWorkerImage?: string;
+  claudeToolRunnerImage?: string;
   proxyContainer?: string;
   stateRoot?: string;
   artifactRoot?: string;
   credentialRef: string;
+  anthropicCredentialRef: string;
   cpus: number;
   memoryMb: number;
   pids: number;
@@ -98,10 +101,13 @@ export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env
   }
   return {
     workerImage: env.CODING_WORKER_IMAGE,
+    claudeWorkerImage: env.CODING_CLAUDE_WORKER_IMAGE,
+    claudeToolRunnerImage: env.CODING_CLAUDE_TOOL_RUNNER_IMAGE,
     proxyContainer: env.CODING_PROXY_CONTAINER,
     stateRoot: env.CODING_JOB_STATE_ROOT,
     artifactRoot: env.CODING_ARTIFACT_ROOT,
     credentialRef: env.CODING_OPENAI_CREDENTIAL_REF ?? "env:OPENAI_API_KEY",
+    anthropicCredentialRef: env.CODING_ANTHROPIC_CREDENTIAL_REF ?? "env:ANTHROPIC_API_KEY",
     cpus: optionalPositiveNumber(env.CODING_CPUS, "CODING_CPUS", 1),
     memoryMb: optionalPositiveInteger(env.CODING_MEMORY_MB, "CODING_MEMORY_MB") ?? 2048,
     pids: optionalPositiveInteger(env.CODING_PIDS, "CODING_PIDS") ?? 128,

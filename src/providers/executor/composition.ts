@@ -63,8 +63,11 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     capabilities,
     artifactRoot,
     workerImage: config.workerImage,
+    claudeWorkerImage: config.claudeWorkerImage,
+    claudeToolRunnerImage: config.claudeToolRunnerImage,
     additionalWorkerImages: config.additionalWorkerImages,
     credentialRef: config.credentialRef,
+    anthropicCredentialRef: config.anthropicCredentialRef,
     limits: { cpus: config.cpus, memoryMb: config.memoryMb, pids: config.pids, diskMb: config.diskMb },
   });
   return new RoutingExecutor(new PrismaExecutionKindResolver(options.db), options.native, coding);

@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   assertDockerHostSupportsIsolation,
   assertIsolationNetworkInspection,
+  buildClaudeAgentCreateArgs,
+  buildClaudeToolRunnerCreateArgs,
   assertWorkerContainerInspection,
   buildDockerIsolationPlan,
   buildWorkerCreateArgs,
@@ -60,6 +62,33 @@ describe("Docker isolation policy", () => {
     expect(mounts[2]).not.toContain("readonly");
     expect(args.join(" ")).not.toContain(`dst=${WORKER_PATHS.git}`);
     expect(args).not.toContain("--volume");
+  });
+
+  it("gives Claude's agent only input, output, and a socket while the tool runner gets only workspace and socket", () => {
+    const claude = {
+      ...spec,
+      provider: "claude-code" as const,
+      toolImage: `registry.example/reevo-tools@sha256:${"b".repeat(64)}`,
+    };
+    const agent = buildClaudeAgentCreateArgs(claude);
+    const tools = buildClaudeToolRunnerCreateArgs(claude);
+    const agentMounts = agent.filter((value) => value.startsWith("type=volume"));
+    const toolMounts = tools.filter((value) => value.startsWith("type=volume"));
+    expect(agentMounts).toEqual([
+      expect.stringContaining(`dst=${WORKER_PATHS.input},volume-subpath=input`),
+      expect.stringContaining(`dst=${WORKER_PATHS.output},volume-subpath=output`),
+      expect.stringContaining(`dst=${WORKER_PATHS.tool},volume-subpath=tool`),
+    ]);
+    expect(toolMounts).toEqual([
+      expect.stringContaining(`dst=${WORKER_PATHS.workspace},volume-subpath=workspace`),
+      expect.stringContaining(`dst=${WORKER_PATHS.tool},volume-subpath=tool`),
+    ]);
+    expect(agentMounts.join(" ")).not.toContain(WORKER_PATHS.workspace);
+    expect(toolMounts.join(" ")).not.toContain(WORKER_PATHS.input);
+    expect(toolMounts.join(" ")).not.toContain(WORKER_PATHS.output);
+    expect(agent).toContain("REEVO_RUN_CAPABILITY");
+    expect(tools.join(" ")).not.toContain("REEVO_RUN_CAPABILITY");
+    expect(tools).toContain("none");
   });
 
   it("fails closed when mandatory host features are absent", () => {

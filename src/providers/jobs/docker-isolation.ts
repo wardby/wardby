@@ -13,6 +13,7 @@ export const WORKER_PATHS = {
   git: "/workspace/.git",
   input: "/run/reevo/input",
   output: "/run/reevo/output",
+  tool: "/run/reevo/tool",
   storage: "/run/reevo/storage",
 } as const;
 
@@ -26,6 +27,7 @@ export interface DockerIsolationNames {
   storageVolume: string;
   keeperContainer: string;
   workerContainer: string;
+  toolContainer: string;
 }
 
 export interface DockerIsolationPlan {
@@ -36,6 +38,7 @@ export interface DockerIsolationPlan {
   storageVolumeCreateArgs: string[];
   keeperCreateArgs: string[];
   workerCreateArgs: string[];
+  toolCreateArgs?: string[];
   proxyNetworkConnectArgs: string[];
 }
 
@@ -168,6 +171,14 @@ function validateSpec(spec: JobSpec): void {
     throw isolationError();
   }
   if (!isImmutableDockerImage(spec.image)) throw isolationError();
+  if (spec.provider !== undefined && spec.provider !== "codex" && spec.provider !== "claude-code")
+    throw isolationError();
+  if (spec.provider === "claude-code") {
+    if (!spec.toolImage || !isImmutableDockerImage(spec.toolImage)) throw isolationError();
+    if (spec.limits.cpus < 0.35 || spec.limits.memoryMb < 256 || spec.limits.pids < 32) throw isolationError();
+  } else if (spec.toolImage !== undefined) {
+    throw isolationError();
+  }
   assertFiniteRange(spec.limits.cpus, 0.1, 32);
   assertIntegerRange(spec.limits.memoryMb, 128, 65_536);
   assertIntegerRange(spec.limits.pids, 16, 4_096);
@@ -192,6 +203,7 @@ export function isolationNames(runId: string): DockerIsolationNames {
     storageVolume: `reevo-storage-${token}`,
     keeperContainer: `reevo-keeper-${token}`,
     workerContainer: `reevo-worker-${token}`,
+    toolContainer: `reevo-tools-${token}`,
   };
 }
 
@@ -366,6 +378,164 @@ export function buildWorkerCreateArgs(spec: JobSpec, proxyPort = CODING_PROXY_PO
   ];
 }
 
+function claudeToolLimits(spec: JobSpec): { cpus: number; memoryMb: number; pids: number } {
+  return {
+    cpus: 0.25,
+    memoryMb: Math.min(512, Math.max(128, Math.floor(spec.limits.memoryMb / 3))),
+    pids: 16,
+  };
+}
+
+function claudeAgentLimits(spec: JobSpec): { cpus: number; memoryMb: number; pids: number } {
+  const tools = claudeToolLimits(spec);
+  return {
+    cpus: spec.limits.cpus - tools.cpus,
+    memoryMb: spec.limits.memoryMb - tools.memoryMb,
+    pids: spec.limits.pids - tools.pids,
+  };
+}
+
+/** The Claude agent sees the task/result and socket, never the repository workspace. */
+export function buildClaudeAgentCreateArgs(spec: JobSpec, proxyPort = CODING_PROXY_PORT): string[] {
+  validateSpec(spec);
+  if (spec.provider !== "claude-code") throw isolationError();
+  assertIntegerRange(proxyPort, 1, 65_535);
+  const names = isolationNames(spec.runId);
+  const limits = claudeAgentLimits(spec);
+  const scratchMb = Math.max(16, Math.min(64, Math.floor(limits.memoryMb / 8)));
+  return [
+    "container",
+    "create",
+    "--name",
+    names.workerContainer,
+    "--pull",
+    "never",
+    "--user",
+    `${CODING_WORKER_UID}:${CODING_WORKER_GID}`,
+    "--network",
+    names.network,
+    "--read-only",
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges=true",
+    "--security-opt",
+    "seccomp=builtin",
+    "--init",
+    "--cgroupns",
+    "private",
+    "--ipc",
+    "none",
+    "--cpus",
+    String(limits.cpus),
+    "--memory",
+    `${limits.memoryMb}m`,
+    "--memory-swap",
+    `${limits.memoryMb}m`,
+    "--memory-swappiness",
+    "0",
+    "--pids-limit",
+    String(limits.pids),
+    "--shm-size",
+    "16m",
+    "--tmpfs",
+    `/tmp:rw,noexec,nosuid,nodev,size=${scratchMb}m,mode=1777`,
+    "--tmpfs",
+    `/home/reevo:rw,noexec,nosuid,nodev,size=${scratchMb}m,uid=${CODING_WORKER_UID},gid=${CODING_WORKER_GID},mode=0700`,
+    "--mount",
+    `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.input},volume-subpath=input,volume-nocopy,readonly`,
+    "--mount",
+    `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.output},volume-subpath=output,volume-nocopy`,
+    "--mount",
+    `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.tool},volume-subpath=tool,volume-nocopy`,
+    "--env",
+    `REEVO_PROXY_URL=http://${CODING_PROXY_ALIAS}:${proxyPort}`,
+    "--env",
+    "REEVO_RUN_CAPABILITY",
+    "--restart",
+    "no",
+    "--stop-signal",
+    "SIGTERM",
+    "--stop-timeout",
+    String(WORKER_STOP_GRACE_SECONDS),
+    "--log-driver",
+    "local",
+    "--log-opt",
+    "max-size=1m",
+    "--log-opt",
+    "max-file=2",
+    ...labels(spec.runId),
+    spec.image,
+  ];
+}
+
+/** The tool runner receives only the checkout and socket; it never joins the proxy network. */
+export function buildClaudeToolRunnerCreateArgs(spec: JobSpec): string[] {
+  validateSpec(spec);
+  if (spec.provider !== "claude-code" || !spec.toolImage) throw isolationError();
+  const names = isolationNames(spec.runId);
+  const limits = claudeToolLimits(spec);
+  const scratchMb = Math.max(16, Math.min(64, Math.floor(limits.memoryMb / 8)));
+  return [
+    "container",
+    "create",
+    "--name",
+    names.toolContainer,
+    "--pull",
+    "never",
+    "--user",
+    `${CODING_WORKER_UID}:${CODING_WORKER_GID}`,
+    "--network",
+    "none",
+    "--read-only",
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges=true",
+    "--security-opt",
+    "seccomp=builtin",
+    "--init",
+    "--cgroupns",
+    "private",
+    "--ipc",
+    "none",
+    "--cpus",
+    String(limits.cpus),
+    "--memory",
+    `${limits.memoryMb}m`,
+    "--memory-swap",
+    `${limits.memoryMb}m`,
+    "--memory-swappiness",
+    "0",
+    "--pids-limit",
+    String(limits.pids),
+    "--shm-size",
+    "16m",
+    "--tmpfs",
+    `/tmp:rw,noexec,nosuid,nodev,size=${scratchMb}m,mode=1777`,
+    "--tmpfs",
+    `/home/reevo:rw,noexec,nosuid,nodev,size=${scratchMb}m,uid=${CODING_WORKER_UID},gid=${CODING_WORKER_GID},mode=0700`,
+    "--mount",
+    `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.workspace},volume-subpath=workspace,volume-nocopy`,
+    "--mount",
+    `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.tool},volume-subpath=tool,volume-nocopy`,
+    "--restart",
+    "no",
+    "--stop-signal",
+    "SIGTERM",
+    "--stop-timeout",
+    String(WORKER_STOP_GRACE_SECONDS),
+    "--log-driver",
+    "local",
+    "--log-opt",
+    "max-size=1m",
+    "--log-opt",
+    "max-file=2",
+    ...labels(spec.runId),
+    spec.toolImage,
+  ];
+}
+
 export function buildProxyNetworkConnectArgs(runId: string, proxyContainer: string): string[] {
   validateDockerObject(proxyContainer);
   return ["network", "connect", "--alias", CODING_PROXY_ALIAS, isolationNames(runId).network, proxyContainer];
@@ -381,7 +551,8 @@ export function buildDockerIsolationPlan(spec: JobSpec, proxyContainer: string):
     networkCreateArgs: buildIsolationNetworkCreateArgs(spec.runId),
     storageVolumeCreateArgs: buildStorageVolumeCreateArgs(spec),
     keeperCreateArgs: buildKeeperCreateArgs(spec),
-    workerCreateArgs: buildWorkerCreateArgs(spec),
+    workerCreateArgs: spec.provider === "claude-code" ? buildClaudeAgentCreateArgs(spec) : buildWorkerCreateArgs(spec),
+    ...(spec.provider === "claude-code" ? { toolCreateArgs: buildClaudeToolRunnerCreateArgs(spec) } : {}),
     proxyNetworkConnectArgs: buildProxyNetworkConnectArgs(spec.runId, proxyContainer),
   };
 }
@@ -602,4 +773,116 @@ export function assertWorkerContainerInspection(
   const tmpfs = host.Tmpfs ?? {};
   if (!tmpfs["/tmp"]?.includes("noexec") || !tmpfs["/home/reevo"]?.includes("noexec")) throw isolationError();
   assertExactWorkerMounts(container, names);
+}
+
+function assertExactMountSet(
+  container: DockerContainerInspection,
+  names: DockerIsolationNames,
+  expected: ReadonlyArray<{ path: string; writable: boolean; subpath: string }>,
+): void {
+  const mounts = container.Mounts ?? [];
+  const requested = container.HostConfig?.Mounts ?? [];
+  if (mounts.length !== expected.length || requested.length !== expected.length) throw isolationError();
+  for (const item of expected) {
+    const mount = mounts.find((value) => value.Destination === item.path);
+    const request = requested.find((value) => value.Target === item.path);
+    if (
+      mount?.Type !== "volume" ||
+      mount.Name !== names.storageVolume ||
+      mount.RW !== item.writable ||
+      request?.Type !== "volume" ||
+      request.Source !== names.storageVolume ||
+      Boolean(request.ReadOnly) === item.writable ||
+      request.VolumeOptions?.NoCopy !== true ||
+      request.VolumeOptions.Subpath !== item.subpath
+    )
+      throw isolationError();
+  }
+}
+
+function assertClaudeContainerBaseline(
+  container: DockerContainerInspection,
+  image: string,
+  network: string,
+  spec: JobSpec,
+  limits: { cpus: number; memoryMb: number; pids: number },
+): void {
+  const host = container.HostConfig;
+  const security = host?.SecurityOpt ?? [];
+  if (
+    container.Config?.User !== `${CODING_WORKER_UID}:${CODING_WORKER_GID}` ||
+    container.Config.Image !== image ||
+    !hasResourceLabels(container.Config.Labels, spec.runId) ||
+    host?.ReadonlyRootfs !== true ||
+    host.Privileged !== false ||
+    (host.Binds?.length ?? 0) !== 0 ||
+    (host.CapAdd?.length ?? 0) !== 0 ||
+    !host.CapDrop?.includes("ALL") ||
+    host.CgroupnsMode !== "private" ||
+    host.IpcMode !== "none" ||
+    host.Init !== true ||
+    host.Memory !== limits.memoryMb * 1024 * 1024 ||
+    host.MemorySwap !== host.Memory ||
+    host.MemorySwappiness !== 0 ||
+    host.PidsLimit !== limits.pids ||
+    host.NanoCpus !== Math.round(limits.cpus * 1_000_000_000) ||
+    host.ShmSize !== 16 * 1024 * 1024 ||
+    host.NetworkMode !== network ||
+    host.PidMode !== "" ||
+    host.RestartPolicy?.Name !== "no" ||
+    host.LogConfig?.Type !== "local" ||
+    host.LogConfig.Config?.["max-size"] !== "1m" ||
+    host.LogConfig.Config?.["max-file"] !== "2" ||
+    !security.includes("no-new-privileges=true") ||
+    !security.includes("seccomp=builtin") ||
+    (host.Devices?.length ?? 0) !== 0 ||
+    (host.DeviceRequests?.length ?? 0) !== 0 ||
+    (host.Dns?.length ?? 0) !== 0 ||
+    (host.DnsOptions?.length ?? 0) !== 0 ||
+    (host.DnsSearch?.length ?? 0) !== 0 ||
+    (host.ExtraHosts?.length ?? 0) !== 0 ||
+    (host.GroupAdd?.length ?? 0) !== 0 ||
+    Object.keys(host.PortBindings ?? {}).length !== 0 ||
+    host.PublishAllPorts !== false ||
+    !host.Tmpfs?.["/tmp"]?.includes("noexec") ||
+    !host.Tmpfs?.["/home/reevo"]?.includes("noexec")
+  )
+    throw isolationError();
+}
+
+export function assertClaudeAgentContainerInspection(
+  container: DockerContainerInspection,
+  spec: JobSpec,
+  expectedCapability: string,
+): void {
+  validateSpec(spec);
+  if (spec.provider !== "claude-code") throw isolationError();
+  const names = isolationNames(spec.runId);
+  assertClaudeContainerBaseline(container, spec.image, names.network, spec, claudeAgentLimits(spec));
+  const environment = (container.Config?.Env ?? []).filter((value) => value.startsWith("REEVO_"));
+  if (
+    environment.length !== 2 ||
+    !environment.includes(`REEVO_PROXY_URL=http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`) ||
+    !environment.includes(`REEVO_RUN_CAPABILITY=${expectedCapability}`)
+  )
+    throw isolationError();
+  assertExactMountSet(container, names, [
+    { path: WORKER_PATHS.input, writable: false, subpath: "input" },
+    { path: WORKER_PATHS.output, writable: true, subpath: "output" },
+    { path: WORKER_PATHS.tool, writable: true, subpath: "tool" },
+  ]);
+  if (Object.keys(container.NetworkSettings?.Networks ?? {}).join(",") !== names.network) throw isolationError();
+}
+
+export function assertClaudeToolRunnerContainerInspection(container: DockerContainerInspection, spec: JobSpec): void {
+  validateSpec(spec);
+  if (spec.provider !== "claude-code" || !spec.toolImage) throw isolationError();
+  const names = isolationNames(spec.runId);
+  assertClaudeContainerBaseline(container, spec.toolImage, "none", spec, claudeToolLimits(spec));
+  if ((container.Config?.Env ?? []).some((value) => value.startsWith("REEVO_"))) throw isolationError();
+  if (Object.keys(container.NetworkSettings?.Networks ?? {}).join(",") !== "none") throw isolationError();
+  assertExactMountSet(container, names, [
+    { path: WORKER_PATHS.workspace, writable: true, subpath: "workspace" },
+    { path: WORKER_PATHS.tool, writable: true, subpath: "tool" },
+  ]);
 }

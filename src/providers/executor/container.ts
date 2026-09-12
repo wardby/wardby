@@ -14,6 +14,7 @@ import {
   type CodingRunResult,
 } from "../../coding/protocol.js";
 import { getModelPricing } from "../llm/pricing.js";
+import { getAnthropicPricing } from "../llm/pricing-anthropic.js";
 import { isImmutableDockerImage } from "../jobs/docker-isolation.js";
 import type { ProxyProtocol } from "../coding-proxy/types.js";
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
@@ -252,6 +253,9 @@ export interface ContainerExecutorOptions {
   /** Additional toolchains beyond the "node" baseline (workerImage). Keyed by toolchain, then version. */
   additionalWorkerImages?: Record<string, Record<string, string>>;
   credentialRef: string;
+  claudeWorkerImage?: string;
+  claudeToolRunnerImage?: string;
+  anthropicCredentialRef?: string;
   limits: JobResourceLimits;
   pollMinMs?: number;
   pollMaxMs?: number;
@@ -281,7 +285,16 @@ export class ContainerExecutor implements Executor {
         if (!isImmutableDockerImage(image)) throw new Error("coding_worker_image_invalid");
       }
     }
+    for (const image of [options.claudeWorkerImage, options.claudeToolRunnerImage]) {
+      if (image !== undefined && !isImmutableDockerImage(image)) throw new Error("coding_worker_image_invalid");
+    }
     if (!/^[A-Za-z][A-Za-z0-9_.:-]{0,199}$/.test(options.credentialRef)) {
+      throw new Error("coding_credential_ref_invalid");
+    }
+    if (
+      options.anthropicCredentialRef !== undefined &&
+      !/^[A-Za-z][A-Za-z0-9_.:-]{0,199}$/.test(options.anthropicCredentialRef)
+    ) {
       throw new Error("coding_credential_ref_invalid");
     }
     const { cpus, memoryMb, pids, diskMb } = options.limits;
@@ -401,7 +414,7 @@ export class ContainerExecutor implements Executor {
         const deadlineAt = new Date(this.now().getTime() + run.timeoutSec * 1_000);
         const session = await this.options.sessions.createSession({
           runId,
-          credentialRef: this.options.credentialRef,
+          credentialRef: this.credentialRef(run.provider),
           protocol: proxyProtocol(run.provider),
           allowedModels: [run.model],
           deadlineAt,
@@ -463,7 +476,9 @@ export class ContainerExecutor implements Executor {
     try {
       if (run.status !== "pending" && run.status !== "running") throw new Error("coding_run_status_invalid");
       if (run.agentKind !== "coding" || !run.ownerId) throw new Error("coding_run_ownership_invalid");
-      getModelPricing(run.model);
+      if (run.provider === "codex") getModelPricing(run.model);
+      else if (run.provider === "claude-code") getAnthropicPricing(run.model);
+      else throw new Error("coding_provider_unsupported");
       if (!Number.isFinite(run.budgetUsd) || run.budgetUsd <= 0 || run.costUsd > run.budgetUsd) {
         throw new Error("coding_run_budget_invalid");
       }
@@ -611,8 +626,18 @@ export class ContainerExecutor implements Executor {
   }
 
   resolveCodingWorkerImage(selector: CodingImageSelector): string {
+    if (selector.provider === "claude-code") {
+      if (selector.toolchain !== "node" || selector.toolchainVersion !== null) {
+        throw new Error("coding_toolchain_unsupported:claude-code");
+      }
+      const image = selector.workerImageRef ?? this.options.claudeWorkerImage;
+      if (!image || !this.options.claudeToolRunnerImage) throw new Error("coding_provider_not_configured:claude-code");
+      if (!isImmutableDockerImage(image) || !isImmutableDockerImage(this.options.claudeToolRunnerImage)) {
+        throw new Error("coding_worker_image_invalid");
+      }
+      return image;
+    }
     if (selector.provider !== "codex") {
-      if (selector.provider === "claude-code") throw new Error("coding_provider_not_configured:claude-code");
       throw new Error(`coding_provider_unsupported:${String(selector.provider)}`);
     }
     if (selector.workerImageRef) {
@@ -637,15 +662,27 @@ export class ContainerExecutor implements Executor {
   }
 
   private jobSpec(run: ContainerRunSnapshot, inputArtifact: string): JobSpec {
+    const provider = run.provider === "claude-code" ? "claude-code" : "codex";
+    if (provider === "claude-code" && (!run.workerImage || !this.options.claudeToolRunnerImage)) {
+      throw new Error("coding_provider_not_configured:claude-code");
+    }
     return {
       kind: "coding-agent",
       runId: run.runId,
+      provider,
       image: run.workerImage ?? this.options.workerImage,
+      ...(provider === "claude-code" ? { toolImage: this.options.claudeToolRunnerImage } : {}),
       inputArtifact,
       timeoutSec: run.timeoutSec,
       limits: { ...this.options.limits },
       labels: {},
     };
+  }
+
+  private credentialRef(provider: string): string {
+    if (provider === "codex") return this.options.credentialRef;
+    if (provider === "claude-code" && this.options.anthropicCredentialRef) return this.options.anthropicCredentialRef;
+    throw new Error("coding_provider_not_configured:claude-code");
   }
 
   private async writeInput(run: ContainerRunSnapshot, deadlineAt: Date): Promise<string> {
@@ -746,6 +783,9 @@ export class ContainerExecutor implements Executor {
       diagnosticId: audit?.diagnosticId,
       durationMs: this.duration(run.runId),
       budgetActualUsd: run.costUsd,
+      ...(run.provider === "codex" || run.provider === "claude-code"
+        ? { workerProvider: run.provider, proxyProtocol: proxyProtocol(run.provider) }
+        : {}),
     });
   }
 
