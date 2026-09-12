@@ -738,6 +738,102 @@ describe("runAgent", () => {
     expect(unscopedRead).toBeNull();
   });
 
+  it("two separate agents share one datastore end to end: agent A's tool writes, agent B's tool reads it back", async () => {
+    // Both agents attach a tool to the SAME underlying datastoreId ("ds-shared")
+    // under their own boundName, each independently granted
+    // allowedSharedDatastorePrefixes for that binding — proves the full
+    // wiring (attachment lookup, per-attachment scoping, and the shared
+    // Datastore provider methods) works across two independently-run
+    // agents, not just two tools within one runAgent call.
+    const db = fakeDb(
+      [
+        { id: "a1", name: "writer-agent", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 },
+        { id: "a2", name: "reader-agent", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 },
+      ],
+      [
+        {
+          id: "t1",
+          name: "kb_writer",
+          description: "x",
+          paramsZod: "z.object({ key: z.string() })",
+          jsonSchema: {},
+          code: "await sharedDatastore.set('kb', params.key, params.key + '-value'); return 'ok';",
+        },
+        {
+          id: "t2",
+          name: "kb_reader",
+          description: "x",
+          paramsZod: "z.object({ key: z.string() })",
+          jsonSchema: {},
+          code: "const v = await sharedDatastore.get('kb', params.key); return v === undefined ? null : v;",
+        },
+      ],
+      [
+        { agentId: "a1", toolId: "t1", allowedSharedDatastorePrefixes: { kb: ["allowed:"] } },
+        { agentId: "a2", toolId: "t2", allowedSharedDatastorePrefixes: { kb: ["allowed:"] } },
+      ],
+      [],
+      [],
+      [],
+      [
+        { agentId: "a1", boundName: "kb", datastoreId: "ds-shared" },
+        { agentId: "a2", boundName: "kb", datastoreId: "ds-shared" },
+      ],
+    );
+
+    // One shared Datastore provider instance across both runs — a real
+    // deployment has exactly one PostgresDatastore behind both agents too.
+    const sharedProviderDatastore = fakeDatastore();
+
+    let writerCtx: EngineRunContext | undefined;
+    const writerEngine = fakeEngine(
+      { status: "succeeded", finalText: "", turns: 1, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } },
+      (ctx) => {
+        writerCtx = ctx;
+      },
+    );
+    await runAgent(
+      "writer-agent",
+      {
+        llm: noopLlm,
+        engine: writerEngine,
+        datastore: sharedProviderDatastore,
+        secrets: noopSecretCipher,
+        memory: fakeMemory(),
+      },
+      db,
+    );
+    const writeResult = JSON.parse(await writerCtx!.runSandboxTool("kb_writer", JSON.stringify({ key: "allowed:1" })));
+    expect(writeResult).toBe("ok");
+
+    let readerCtx: EngineRunContext | undefined;
+    const readerEngine = fakeEngine(
+      { status: "succeeded", finalText: "", turns: 1, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } },
+      (ctx) => {
+        readerCtx = ctx;
+      },
+    );
+    await runAgent(
+      "reader-agent",
+      {
+        llm: noopLlm,
+        engine: readerEngine,
+        datastore: sharedProviderDatastore,
+        secrets: noopSecretCipher,
+        memory: fakeMemory(),
+      },
+      db,
+    );
+    const readResult = JSON.parse(await readerCtx!.runSandboxTool("kb_reader", JSON.stringify({ key: "allowed:1" })));
+    expect(readResult).toBe("allowed:1-value");
+
+    // Outside the granted prefix, agent B's reader sees nothing, even
+    // though the key exists in the underlying shared store for a
+    // different key.
+    const missResult = JSON.parse(await readerCtx!.runSandboxTool("kb_reader", JSON.stringify({ key: "blocked:1" })));
+    expect(missResult).toBeNull();
+  });
+
   it("scopes a sandboxed tool's secrets access to its declared allowedSecrets", async () => {
     const db = fakeDb(
       [{ id: "a1", name: "scoped-secrets", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 }],
