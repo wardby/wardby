@@ -16,6 +16,8 @@ jobs:
         options: --health-cmd pg_isready --health-interval 5s --health-retries 10
     env:
       DATABASE_URL: postgresql://reevo:test-only@localhost:5432/security
+      # Deterministic test-only key; CI never decrypts production data.
+      SECRET_APP_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

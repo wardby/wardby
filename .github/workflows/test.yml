@@ -26,6 +26,8 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://reevo:reevo@localhost:5432/reevo
+      # Deterministic test-only key; CI never decrypts production data.
+      SECRET_APP_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
 
     steps:
       - uses: actions/checkout@v4
