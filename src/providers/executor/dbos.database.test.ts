@@ -55,6 +55,14 @@ function fakeDatastore(): Datastore {
     async list() {
       return [];
     },
+    async getShared() {
+      return undefined;
+    },
+    async setShared() {},
+    async deleteShared() {},
+    async listShared() {
+      return [];
+    },
   };
 }
 const fakeCipher: SecretCipher = { keyId: () => "t", encrypt: async (s) => s, decrypt: async (s) => s };

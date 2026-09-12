@@ -22,6 +22,14 @@ function fakeDatastore(): Datastore {
         .map((k) => k.slice(agentId.length + 1))
         .sort();
     },
+    async getShared() {
+      return undefined;
+    },
+    async setShared() {},
+    async deleteShared() {},
+    async listShared() {
+      return [];
+    },
   };
 }
 

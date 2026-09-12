@@ -75,6 +75,14 @@ function fakeDatastore(): Datastore {
     async list() {
       return [];
     },
+    async getShared() {
+      return undefined;
+    },
+    async setShared() {},
+    async deleteShared() {},
+    async listShared() {
+      return [];
+    },
   };
 }
 

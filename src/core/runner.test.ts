@@ -164,6 +164,14 @@ function fakeDatastore(): Datastore {
       const p = `${agentId}:${prefix ?? ""}`;
       return [...store.keys()].filter((k) => k.startsWith(p)).sort();
     },
+    async getShared() {
+      return undefined;
+    },
+    async setShared() {},
+    async deleteShared() {},
+    async listShared() {
+      return [];
+    },
   };
 }
 

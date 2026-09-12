@@ -30,5 +30,13 @@ export function scopeDatastore(datastore: Datastore, allowedPrefixes: readonly s
       const keys = await datastore.list(agentId, prefix);
       return keys.filter((key) => isAllowed(key, allowedPrefixes));
     },
+    // Shared-store access has its own dedicated scoping (scopeSharedDatastoreAccessor,
+    // src/core/datastores.ts) applied separately to the unscoped provider — these four
+    // methods are unreachable through a scopeDatastore(...)-wrapped object in this
+    // codebase's call graph, so they pass straight through.
+    getShared: datastore.getShared.bind(datastore),
+    setShared: datastore.setShared.bind(datastore),
+    deleteShared: datastore.deleteShared.bind(datastore),
+    listShared: datastore.listShared.bind(datastore),
   };
 }

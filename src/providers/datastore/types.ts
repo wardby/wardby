@@ -23,4 +23,11 @@ export interface Datastore {
   delete(agentId: string, key: string): Promise<void>;
   /** Lists keys (not values) under an optional prefix, scoped to the agent. */
   list(agentId: string, prefix?: string): Promise<string[]>;
+
+  /** Sibling methods for a named shared store (see Datastore/AgentDatastore
+   *  in schema.prisma), keyed by datastoreId instead of agentId. */
+  getShared(datastoreId: string, key: string): Promise<DatastoreValue | undefined>;
+  setShared(datastoreId: string, key: string, value: DatastoreValue, opts?: DatastoreSetOptions): Promise<void>;
+  deleteShared(datastoreId: string, key: string): Promise<void>;
+  listShared(datastoreId: string, prefix?: string): Promise<string[]>;
 }

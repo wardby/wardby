@@ -77,6 +77,43 @@ describe.skipIf(!databaseUrl)("PostgresDatastore (database)", () => {
     expect(await datastore.get(agentA, "secret")).toBe("a-only");
   });
 
+  it("shared get/set/delete/list round-trip, scoped by datastoreId — never visible via the agentId-scoped methods", async () => {
+    const datastoreId = `shared-${randomUUID()}`;
+    await prisma.datastore.create({ data: { id: datastoreId, name: `test-${datastoreId}`, ownerId: null } });
+
+    await datastore.setShared(datastoreId, "greeting", { hello: "world" });
+    expect(await datastore.getShared(datastoreId, "greeting")).toEqual({ hello: "world" });
+    expect(await datastore.get("agent-should-not-see-this", "greeting")).toBeUndefined();
+
+    await datastore.setShared(datastoreId, "user:1", "a");
+    await datastore.setShared(datastoreId, "user:2", "b");
+    expect(await datastore.listShared(datastoreId, "user:")).toEqual(["user:1", "user:2"]);
+
+    await datastore.deleteShared(datastoreId, "greeting");
+    expect(await datastore.getShared(datastoreId, "greeting")).toBeUndefined();
+
+    // DatastoreEntry.datastoreId is onDelete: Restrict (schema.prisma) — clear
+    // remaining entries (user:1, user:2) before the parent Datastore row.
+    await prisma.datastoreEntry.deleteMany({ where: { datastoreId } });
+    await prisma.datastore.delete({ where: { id: datastoreId } });
+  });
+
+  it("two different datastoreIds never see each other's shared keys", async () => {
+    const dsA = `shared-${randomUUID()}`;
+    const dsB = `shared-${randomUUID()}`;
+    await prisma.datastore.create({ data: { id: dsA, name: `test-${dsA}`, ownerId: null } });
+    await prisma.datastore.create({ data: { id: dsB, name: `test-${dsB}`, ownerId: null } });
+
+    await datastore.setShared(dsA, "secret", "a-only");
+    expect(await datastore.getShared(dsB, "secret")).toBeUndefined();
+    expect(await datastore.getShared(dsA, "secret")).toBe("a-only");
+
+    // DatastoreEntry.datastoreId is onDelete: Restrict (schema.prisma) — clear
+    // the "secret" entry before the parent Datastore rows.
+    await prisma.datastoreEntry.deleteMany({ where: { datastoreId: { in: [dsA, dsB] } } });
+    await prisma.datastore.deleteMany({ where: { id: { in: [dsA, dsB] } } });
+  });
+
   describe("pii: true", () => {
     const cipher = new AppKeySecretCipher(cipherKey);
     const encrypted = new PostgresDatastore(prisma, cipher);
