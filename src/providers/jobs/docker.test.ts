@@ -38,6 +38,12 @@ describe("Docker cleanup classification", () => {
     expect(isMissingDockerResource("container abc is not connected to network reevo-net-run")).toBe(true);
     expect(isMissingDockerResource("permission denied")).toBe(false);
   });
+
+  it("treats Docker's own 'network ... not found' wording as missing", () => {
+    // Verified live against the Docker CLI: `docker network inspect`/`rm`/`disconnect`
+    // on a genuinely-missing network reply "network <name> not found", not "no such network".
+    expect(isMissingDockerResource("Error response from daemon: network reevo-net-run not found")).toBe(true);
+  });
 });
 
 function spec(runId = "docker-run-1"): JobSpec {
@@ -404,6 +410,66 @@ describe("DockerJobLauncher", () => {
     now += created.spec.timeoutSec * 1_000;
     expect(await launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
     expect(await launcher.collect(handle)).toEqual({ exitCode: 124, reason: "timed_out" });
+  });
+
+  it("does not crash the process when a stale record's startup cleanup hits an unrecognized docker error", async () => {
+    const root = await mkdtemp(join(tmpdir(), "reevo-docker-job-"));
+    temporaryRoots.push(root);
+    const stateRoot = join(root, "state");
+    await mkdir(stateRoot, { recursive: true });
+    const runId = "docker-stale-network";
+    const job = spec(runId);
+    const plan = buildDockerIsolationPlan(job, "trusted-proxy");
+    const record = {
+      schemaVersion: 1,
+      runId,
+      spec: job,
+      specHash: "irrelevant-for-startup-sweep",
+      handle: { backend: "docker", id: plan.names.workerContainer },
+      jobId: "job-stale",
+      createdAt: 0,
+      deadlineAt: 0,
+      capabilityHash: "irrelevant-for-startup-sweep",
+      phase: "active",
+    };
+    const fileName = `${createHash("sha256").update(runId).digest("hex")}.json`;
+    await writeFile(join(stateRoot, fileName), `${JSON.stringify(record)}\n`, { mode: 0o600 });
+
+    // Mirrors real Docker: `network inspect` on a genuinely-missing network
+    // replies "network <name> not found", not "no such network" — a wording
+    // isMissingDockerResource doesn't recognize (confirmed live against the
+    // Docker CLI). Container inspect for an already-gone container replies
+    // "No such container: <name>", which the classifier does recognize.
+    class StaleCleanupDocker implements DockerCommandRunner {
+      async run(args: readonly string[]): Promise<DockerCommandResult> {
+        const [group, action] = args;
+        if (group === "container" && action === "inspect") throw new DockerCommandError(1, true);
+        if (group === "network" && action === "disconnect") return { stdout: "", stderr: "" };
+        if (group === "network" && action === "inspect") throw new DockerCommandError(1, false);
+        throw new Error(`unexpected_docker_command:${args.join(" ")}`);
+      }
+    }
+
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    try {
+      new DockerJobLauncher({
+        stateRoot,
+        workspaceRoot: join(root, "workspaces"),
+        proxyContainer: "trusted-proxy",
+        resolveCapability: async () => capability,
+        isRunActive: async () => false,
+        docker: new StaleCleanupDocker(),
+        transfer: new NoopTransfer(),
+      });
+      // Startup runs real fs I/O (mkdir/readdir/readFile) ahead of the sweep,
+      // which needs real macrotask ticks to settle, not just microtasks.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+    expect(rejections).toEqual([]);
   });
 });
 
