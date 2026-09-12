@@ -33,10 +33,22 @@ export function scopeDatastore(datastore: Datastore, allowedPrefixes: readonly s
     // Shared-store access has its own dedicated scoping (scopeSharedDatastoreAccessor,
     // src/core/datastores.ts) applied separately to the unscoped provider — these four
     // methods are unreachable through a scopeDatastore(...)-wrapped object in this
-    // codebase's call graph, so they pass straight through.
-    getShared: datastore.getShared.bind(datastore),
-    setShared: datastore.setShared.bind(datastore),
-    deleteShared: datastore.deleteShared.bind(datastore),
-    listShared: datastore.listShared.bind(datastore),
+    // codebase's call graph. This wrapper is the security boundary for the
+    // private per-agent store, though, so rather than quietly pass an
+    // unreachable-today call straight through to the unscoped datastore (a
+    // hole waiting to happen if that ever changes), every shared-store
+    // method throws — same fail-closed posture as an unscoped write above.
+    async getShared(): Promise<DatastoreValue | undefined> {
+      throw new Error("datastore_shared_access_not_allowed");
+    },
+    async setShared(): Promise<void> {
+      throw new Error("datastore_shared_access_not_allowed");
+    },
+    async deleteShared(): Promise<void> {
+      throw new Error("datastore_shared_access_not_allowed");
+    },
+    async listShared(): Promise<string[]> {
+      throw new Error("datastore_shared_access_not_allowed");
+    },
   };
 }
