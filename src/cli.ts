@@ -3,6 +3,7 @@
  * Minimal CLI.
  *
  *   reevo agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule "<cron>"] [--timezone <tz>] [--memory-enabled]
+ *   reevo agent list
  *   reevo agent schedule <name> --cron "<expr>" [--timezone <tz>] [--disable]
  *   reevo run <name>
  *   reevo runs [--agent <name>] [--limit N] [--status <s>]
@@ -344,6 +345,24 @@ async function agentSchedule(args: string[]): Promise<void> {
   console.log(`schedule set for "${name}": "${schedule}" (${timezone}).`);
 }
 
+async function agentList(): Promise<void> {
+  const agents = await prisma.agent.findMany({ orderBy: { name: "asc" } });
+  if (agents.length === 0) {
+    console.log("no agents registered.");
+    return;
+  }
+
+  for (const agent of agents) {
+    const schedule = agent.schedule
+      ? `${agent.scheduleEnabled ? "enabled" : "disabled"}: ${agent.schedule} (${agent.timezone})`
+      : "manual";
+    console.log(
+      `${agent.name}  ${agent.kind.padEnd(6)}  ${agent.model}  ` +
+        `$${Number(agent.budgetUsd).toFixed(4)}  ${agent.maxTurns} turns  memory ${agent.memoryEnabled ? "on" : "off"}  ${schedule}`,
+    );
+  }
+}
+
 async function run(name: string | undefined): Promise<void> {
   if (!name) {
     fail("run requires an agent name: reevo run <name>");
@@ -550,6 +569,8 @@ async function main(): Promise<void> {
       await authCommand(rest, prisma, process.env.AUTH_CREDENTIAL_HASH_KEY ?? "");
     } else if (command === "agent" && rest[0] === "create") {
       await agentCreate(rest.slice(1));
+    } else if (command === "agent" && rest[0] === "list") {
+      await agentList();
     } else if (command === "agent" && rest[0] === "schedule") {
       await agentSchedule(rest.slice(1));
     } else if (command === "tool" && rest[0] === "create") {
@@ -576,6 +597,7 @@ async function main(): Promise<void> {
       fail(
         "usage:\n" +
           '  reevo agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule "<cron>"] [--timezone <tz>] [--max-turns <n>]\n' +
+          "  reevo agent list\n" +
           '  reevo agent schedule <name> --cron "<expr>" [--timezone <tz>] [--disable]\n' +
           "  reevo tool create --name <n> --description <d> --params <file> --code <file>\n" +
           "  reevo tool attach <tool-name> <agent-name>\n" +
