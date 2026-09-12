@@ -92,6 +92,11 @@ with:
 /// (Prisma has no declarative "exactly one of two columns" constraint).
 /// Phase 6: optional per-entry PII encryption (see `pii`/`keyId` below).
 model DatastoreEntry {
+  // Surrogate key: once agentId/datastoreId are both optional, neither
+  // remaining @@unique has an all-required-fields criterion, and Prisma
+  // rejects a model with none (P1012) — required for `prisma
+  // generate`/`validate` to run at all, not a design choice.
+  id          String     @id @default(cuid())
   agentId     String?
   datastoreId String?
   key         String
@@ -99,12 +104,18 @@ model DatastoreEntry {
   pii         Boolean    @default(false)
   keyId       String?
   updatedAt   DateTime   @updatedAt
-  datastore   Datastore? @relation(fields: [datastoreId], references: [id])
+  // onDelete: Restrict is explicit (Prisma's inferred default for an
+  // optional relation is SetNull) — nulling datastoreId on delete would
+  // leave both agentId and datastoreId null, violating the
+  // DatastoreEntry_scope_xor CHECK the migration adds.
+  datastore   Datastore? @relation(fields: [datastoreId], references: [id], onDelete: Restrict)
 
   @@unique([agentId, key])
   @@unique([datastoreId, key])
 }
 ```
+
+> **Implementation note (added after Task 1 landed):** the block above already reflects corrections made during implementation — Prisma hard-rejects the original text (P1012: no all-required-fields unique criterion once both `agentId`/`datastoreId` are nullable), fixed with the surrogate `id` field and the explicit `onDelete: Restrict` shown above. The migration SQL in Step 5 below is likewise the corrected, drift-check-verified version. Full diagnosis in this plan's SDD workspace, `task-1-report.md`.
 
 - [ ] **Step 3: Edit `prisma/schema.prisma` — add the shared-prefix capability field to `AgentTool`**
 
@@ -174,21 +185,33 @@ ALTER TABLE "AgentDatastore" ADD CONSTRAINT "AgentDatastore_datastoreId_fkey"
 -- Unify DatastoreEntry's keyspace: agentId becomes nullable, datastoreId is
 -- added nullable. Existing rows keep agentId set / datastoreId null, so
 -- their behavior is unchanged.
+--
+-- The old (agentId, key) primary key must be dropped BEFORE agentId's NOT
+-- NULL can be relaxed — Postgres refuses ALTER COLUMN ... DROP NOT NULL on a
+-- column that is still part of a primary key (42P16). Replaced below by two
+-- scoped unique indexes: a datastoreId-scoped row has a null agentId, so the
+-- old PK can't hold anyway. Postgres unique indexes treat NULL as distinct
+-- from NULL, so many datastoreId-scoped rows (all agentId = NULL) never
+-- collide on the first index, and vice versa.
+ALTER TABLE "DatastoreEntry" DROP CONSTRAINT "DatastoreEntry_pkey";
 ALTER TABLE "DatastoreEntry" ALTER COLUMN "agentId" DROP NOT NULL;
 ALTER TABLE "DatastoreEntry" ADD COLUMN "datastoreId" TEXT;
 ALTER TABLE "DatastoreEntry" ADD CONSTRAINT "DatastoreEntry_datastoreId_fkey"
   FOREIGN KEY ("datastoreId") REFERENCES "Datastore"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "DatastoreEntry" ADD CONSTRAINT "DatastoreEntry_scope_xor"
   CHECK (("agentId" IS NOT NULL) <> ("datastoreId" IS NOT NULL));
-
--- Replace the old (agentId, key) primary key with two scoped unique indexes
--- — a datastoreId-scoped row has a null agentId, so the old PK can't hold.
--- Postgres unique indexes treat NULL as distinct from NULL, so many
--- datastoreId-scoped rows (all agentId = NULL) never collide on the first
--- index, and vice versa.
-ALTER TABLE "DatastoreEntry" DROP CONSTRAINT "DatastoreEntry_pkey";
 CREATE UNIQUE INDEX "DatastoreEntry_agentId_key_key" ON "DatastoreEntry" ("agentId", "key");
 CREATE UNIQUE INDEX "DatastoreEntry_datastoreId_key_key" ON "DatastoreEntry" ("datastoreId", "key");
+
+-- Surrogate primary key required by Prisma's schema validator: once agentId
+-- and datastoreId are both optional, neither remaining @@unique has an
+-- all-required-fields criterion, and Prisma rejects a model with none
+-- (P1012). Backfill uses Postgres 16's built-in gen_random_uuid() (no
+-- pgcrypto extension needed) since existing rows predate this column.
+ALTER TABLE "DatastoreEntry" ADD COLUMN "id" TEXT;
+UPDATE "DatastoreEntry" SET "id" = gen_random_uuid()::text WHERE "id" IS NULL;
+ALTER TABLE "DatastoreEntry" ALTER COLUMN "id" SET NOT NULL;
+ALTER TABLE "DatastoreEntry" ADD CONSTRAINT "DatastoreEntry_pkey" PRIMARY KEY ("id");
 
 -- Per-attachment capability scoping for shared stores, keyed by boundName —
 -- mirrors AgentTool.allowedDatastorePrefixes but as a map, since a tool
