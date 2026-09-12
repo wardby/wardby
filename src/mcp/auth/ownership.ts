@@ -77,6 +77,12 @@ export async function requireOwnedWebhook(db: PrismaClient, id: string, principa
   assertCanMutate(webhook.ownerId, principalId, `Webhook "${id}" is not owned by the caller.`);
 }
 
+export async function requireOwnedDatastore(db: PrismaClient, id: string, principalId: string): Promise<void> {
+  const datastore = await db.datastore.findUnique({ where: { id } });
+  if (!datastore) throw new McpError(403, `Datastore "${id}" is not owned by the caller.`);
+  assertCanMutate(datastore.ownerId, principalId, `Datastore "${id}" is not owned by the caller.`);
+}
+
 export async function requireOwnedTool(db: Pick<PrismaClient, "tool">, id: string, principalId: string): Promise<Tool> {
   const tool = await db.tool.findUnique({ where: { id } });
   if (!tool) throw new McpError(404, `Tool "${id}" not found.`);
