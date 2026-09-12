@@ -1726,10 +1726,19 @@ it("creates a shared datastore, seeds its entries, and attaches it to two agents
   expect(entries).toHaveLength(1);
 });
 
-it("a boundName collision across two differently-owned shared stores on one agent warns instead of throwing", async () => {
-  // Two shared-datastore definitions that both attach to the same agent
-  // under the same implicit boundName (their own `name`, both "kb") — the
-  // second attach hits the AgentDatastore unique constraint.
+it("a boundName collision across two same-named shared stores on one agent warns instead of throwing", async () => {
+  // Two shared-datastore definitions with the same `name` ("kb") for the
+  // same (Tier-1's single, global) owner. Datastore's own
+  // @@unique([ownerId, name]) fires on the SECOND createDatastore call,
+  // before attachDatastore's @@unique([agentId, boundName]) is ever
+  // reached — Step 6 below wraps createDatastore itself in a try/catch for
+  // exactly this reason (an addition beyond a first, naive reading of this
+  // step, required once you notice the two definitions share an owner).
+  // Two records "colliding on ownerEmail" (as a first draft of this test
+  // might assume) isn't actually achievable in Tier-1: ownerEmail is parsed
+  // but never read per-record (same as NeutralSecretSchema/NeutralBudgetSchema)
+  // — every shared-datastore definition in one import shares the single
+  // global `ownerId`, so any two definitions with the same `name` collide.
   const bundle: Bundle = {
     manifest: { /* ... */ } as never,
     readAgents: () => [agentA],
@@ -1751,12 +1760,15 @@ it("a boundName collision across two differently-owned shared stores on one agen
     db, cipher, ownerId: owner.id, defaultBudget: "5.00", secretMode: "references", allowOpenFetch: false,
   });
 
-  expect(result.datastoresSharedCreated).toBe(2); // both Datastore rows still created
+  // Only the FIRST "kb" survives createDatastore's own unique constraint;
+  // the second is caught and warned, not thrown — the import as a whole
+  // must not abort.
+  expect(result.datastoresSharedCreated).toBe(1);
   expect(result.warnings.some((w) => w.includes("kb"))).toBe(true);
 });
 ```
 
-Write these two tests following this file's actual existing conventions exactly (agent fixtures, manifest shape, how `recon`/`preflight` is invoked) — read `create.test.ts` and `create.database.test.ts` in full before writing so the fixtures compile; the shapes above are illustrative of intent, not literal drop-in code, since this file's precise fixture-building helpers weren't reproduced in this plan.
+Write these two tests following this file's actual existing conventions exactly (agent fixtures, manifest shape, how `recon`/`preflight` is invoked) — read `create.test.ts` and `create.database.test.ts` in full before writing so the fixtures compile; the shapes above are illustrative of intent, not literal drop-in code, since this file's precise fixture-building helpers weren't reproduced in this plan. `create.test.ts`'s hand-rolled `fakeDb()` has no unique-constraint semantics and no `datastore`/`agentDatastore` models to assert real row state against — if that's still true when you read it, put both of these tests in `create.database.test.ts` (the real-Postgres integration file) instead, so the collision and the resulting row state are asserted for real.
 
 - [ ] **Step 2: Add `readSharedDatastores: () => []` to every other existing `Bundle` fixture**
 
@@ -1846,7 +1858,27 @@ Add the new step immediately after the existing "Step 6: Per-agent datastore see
   } else {
     const owner = ownerId; // hasOwner guarantees non-null
     for (const sd of bundle.readSharedDatastores()) {
-      const created = await createDatastore(sd.name, owner, db);
+      // createDatastore is a plain create, not an upsert (Task 3, deliberate
+      // — see core/datastores.ts), and Datastore has @@unique([ownerId, name]).
+      // Tier-1 uses one global `ownerId` for every shared-datastore
+      // definition in a bundle, so two definitions sharing a `name` collide
+      // HERE, before ever reaching attachDatastore's own unique constraint
+      // below. Without this try/catch, that collision would abort the whole
+      // import (including any later webhooks/budget-group steps) on an
+      // otherwise-recoverable bundle-authoring mistake — every other
+      // per-item creation in this function already follows the
+      // catch-warn-continue idiom; this closes the one gap that wouldn't.
+      let created;
+      try {
+        created = await createDatastore(sd.name, owner, db);
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+          warnings.push(`shared-datastore ${sd.name}: a shared datastore named "${sd.name}" already exists — skipped`);
+          continue;
+        }
+        warnings.push(`shared-datastore ${sd.name}: failed to create (${err instanceof Error ? err.message : String(err)})`);
+        continue;
+      }
       datastoresSharedCreated++;
 
       for (const entry of sd.entries) {
