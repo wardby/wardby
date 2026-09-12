@@ -142,6 +142,9 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
     timeoutSec: profile.timeoutSec,
     allowedEgress: profile.allowedEgress,
     protectedPaths: profile.protectedPaths,
+    toolchain: profile.toolchain,
+    toolchainVersion: profile.toolchainVersion,
+    workerImageRef: profile.workerImageRef,
   });
 }
 
