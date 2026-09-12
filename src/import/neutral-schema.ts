@@ -59,6 +59,7 @@ export const NeutralAgentToolSchema = z.object({
   allowedSecrets: z.array(z.string()).default([]),
   allowedDatastorePrefixes: z.array(z.string()).default([]),
   allowedHosts: z.array(z.string()).default([]),
+  allowedSharedDatastorePrefixes: z.record(z.string(), z.array(z.string())).default({}),
   hostsSource: z.string().optional(),
 });
 export type NeutralAgentTool = z.infer<typeof NeutralAgentToolSchema>;

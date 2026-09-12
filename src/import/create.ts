@@ -142,6 +142,7 @@ export async function createFromBundle(
       allowedSecrets: at.allowedSecrets,
       allowedDatastorePrefixes: at.allowedDatastorePrefixes,
       allowedHosts,
+      allowedSharedDatastorePrefixes: at.allowedSharedDatastorePrefixes,
     });
 
     if (!capsPatch.success) {
@@ -158,11 +159,13 @@ export async function createFromBundle(
         allowedSecrets: caps.allowedSecrets ?? [],
         allowedDatastorePrefixes: caps.allowedDatastorePrefixes ?? [],
         allowedHosts: caps.allowedHosts ?? [],
+        allowedSharedDatastorePrefixes: caps.allowedSharedDatastorePrefixes ?? {},
       },
       update: {
         allowedSecrets: caps.allowedSecrets ?? [],
         allowedDatastorePrefixes: caps.allowedDatastorePrefixes ?? [],
         allowedHosts: caps.allowedHosts ?? [],
+        allowedSharedDatastorePrefixes: caps.allowedSharedDatastorePrefixes ?? {},
       },
     });
   }

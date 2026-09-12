@@ -135,6 +135,14 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
         allowedSecrets: { type: "array", items: { type: "string" } },
         allowedDatastorePrefixes: { type: "array", items: { type: "string" } },
         allowedHosts: { type: "array", items: { type: "string" } },
+        // { [boundName]: allowedKeyPrefixes[] } — per shared-datastore
+        // attachment, the same default-deny grant as allowedDatastorePrefixes
+        // is for the agent's private store. A boundName absent from this map
+        // denies that shared store entirely.
+        allowedSharedDatastorePrefixes: {
+          type: "object",
+          additionalProperties: { type: "array", items: { type: "string" } },
+        },
       },
       required: ["agentId", "toolId"],
     },
@@ -145,6 +153,7 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
         allowedSecrets?: string[];
         allowedDatastorePrefixes?: string[];
         allowedHosts?: string[];
+        allowedSharedDatastorePrefixes?: Record<string, string[]>;
       },
       ctx,
     ) => {
@@ -152,6 +161,7 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
         allowedSecrets: args.allowedSecrets,
         allowedDatastorePrefixes: args.allowedDatastorePrefixes,
         allowedHosts: args.allowedHosts,
+        allowedSharedDatastorePrefixes: args.allowedSharedDatastorePrefixes,
       });
       if (!patch.success) {
         throw new McpError(400, `Invalid tool capabilities: ${patch.error.issues.map((i) => i.message).join("; ")}`);
@@ -173,6 +183,7 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
               allowedSecrets: patch.data.allowedSecrets ?? [],
               allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes ?? [],
               allowedHosts: patch.data.allowedHosts ?? [],
+              allowedSharedDatastorePrefixes: patch.data.allowedSharedDatastorePrefixes ?? {},
             },
             update: {
               ...(patch.data.allowedSecrets !== undefined ? { allowedSecrets: patch.data.allowedSecrets } : {}),
@@ -180,6 +191,9 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
                 ? { allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes }
                 : {}),
               ...(patch.data.allowedHosts !== undefined ? { allowedHosts: patch.data.allowedHosts } : {}),
+              ...(patch.data.allowedSharedDatastorePrefixes !== undefined
+                ? { allowedSharedDatastorePrefixes: patch.data.allowedSharedDatastorePrefixes }
+                : {}),
             },
           });
         },

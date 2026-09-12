@@ -128,6 +128,7 @@ describe.skipIf(!process.env.DATABASE_URL)("createFromBundle (database)", () => 
       allowedSecrets: [],
       allowedDatastorePrefixes: ["test:"],
       allowedHosts: ["example.com"],
+      allowedSharedDatastorePrefixes: { kb: ["team:"] },
     };
 
     const datastore: NeutralSingleDatastore = {
@@ -219,6 +220,14 @@ describe.skipIf(!process.env.DATABASE_URL)("createFromBundle (database)", () => 
     const createdTool = await db.tool.findUnique({ where: { name: toolName } });
     expect(createdTool).toBeTruthy();
     expect(createdTool?.description).toBe("Test tool");
+
+    // allowedSharedDatastorePrefixes must actually reach the AgentTool row —
+    // this is the importer's half of finding #1's write path (tools.ts's
+    // attach_tool and cli.ts's `tool attach` are the other two).
+    const createdAgentTool = await db.agentTool.findUnique({
+      where: { agentId_toolId: { agentId: createdAgent!.id, toolId: createdTool!.id } },
+    });
+    expect(createdAgentTool?.allowedSharedDatastorePrefixes).toEqual({ kb: ["team:"] });
 
     const datastoreEntry = await db.datastoreEntry.findFirst({
       where: { agentId: createdAgent!.id, key: "test-key" },
