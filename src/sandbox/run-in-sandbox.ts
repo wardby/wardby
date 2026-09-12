@@ -13,6 +13,7 @@ import { SANDBOX_PRELUDE } from "./prelude.js";
 import { evalToJson, NON_SERIALIZABLE_MARKER, type SandboxLimits, type SandboxResult } from "./eval-core.js";
 import type { Datastore } from "../providers/datastore/types.js";
 import type { SecretsAccessor } from "../core/secrets.js";
+import type { SharedDatastoreAccessor } from "../core/datastores.js";
 import { boundedJson, boundedString } from "./bounded-json.js";
 import { BRIDGE_INPUT_BYTES } from "./limits.js";
 import type { Logger } from "../core/logger.js";
@@ -25,6 +26,7 @@ export interface SandboxInvocation {
   params: unknown;
   agentId: string;
   datastore: Datastore;
+  sharedDatastore: SharedDatastoreAccessor;
   /** Used only to tag forwarded console output and error messages. */
   toolName: string;
   /** Overrides the default limits (limits.ts) — mainly for fast, deterministic tests. */
@@ -67,6 +69,7 @@ export async function runInSandbox(invocation: SandboxInvocation): Promise<Sandb
     installHostFunctions(context, runtime, {
       agentId: invocation.agentId,
       datastore: invocation.datastore,
+      sharedDatastore: invocation.sharedDatastore,
       logTag: invocation.toolName,
       secrets: invocation.secrets,
       logger: invocation.logger,

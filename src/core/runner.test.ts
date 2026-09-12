@@ -38,6 +38,13 @@ interface FakeAttachment {
   allowedSecrets?: string[];
   allowedDatastorePrefixes?: string[];
   allowedHosts?: string[];
+  allowedSharedDatastorePrefixes?: Record<string, string[]>;
+}
+
+interface FakeAgentDatastore {
+  agentId: string;
+  boundName: string;
+  datastoreId: string;
 }
 
 interface FakeBudgetGroup {
@@ -56,6 +63,7 @@ function fakeDb(
   secretsData: { agentId: string; boundName: string; value: string }[] = [],
   budgetGroups: FakeBudgetGroup[] = [],
   priorRuns: { agentId: string; costUsd: number; startedAt: Date }[] = [],
+  agentDatastores: FakeAgentDatastore[] = [],
 ): RunnerDb {
   const byName = new Map(agents.map((a) => [a.name, a]));
   const byId = new Map(agents.map((a) => [a.id, a]));
@@ -123,6 +131,12 @@ function fakeDb(
         return row ? { secret: { ciphertext: row.value } } : null;
       }) as any,
     },
+    agentDatastore: {
+      findFirst: (async ({ where }: any) => {
+        const row = agentDatastores.find((d) => d.agentId === where.agentId && d.boundName === where.boundName);
+        return row ? { ...row } : null;
+      }) as any,
+    },
     budgetGroup: {
       findUnique: (async ({ where }: any) => {
         const g = groupsById.get(where.id);
@@ -150,6 +164,7 @@ function fakeCipher(): SecretCipher {
 
 function fakeDatastore(): Datastore {
   const store = new Map<string, DatastoreValue>();
+  const sharedStore = new Map<string, DatastoreValue>();
   return {
     async get(agentId, key) {
       return store.get(`${agentId}:${key}`);
@@ -163,6 +178,22 @@ function fakeDatastore(): Datastore {
     async list(agentId, prefix) {
       const p = `${agentId}:${prefix ?? ""}`;
       return [...store.keys()].filter((k) => k.startsWith(p)).sort();
+    },
+    async getShared(datastoreId, key) {
+      return sharedStore.get(`${datastoreId}:${key}`);
+    },
+    async setShared(datastoreId, key, value) {
+      sharedStore.set(`${datastoreId}:${key}`, value);
+    },
+    async deleteShared(datastoreId, key) {
+      sharedStore.delete(`${datastoreId}:${key}`);
+    },
+    async listShared(datastoreId, prefix) {
+      const p = `${datastoreId}:${prefix ?? ""}`;
+      return [...sharedStore.keys()]
+        .filter((k) => k.startsWith(p))
+        .map((k) => k.slice(datastoreId.length + 1))
+        .sort();
     },
   };
 }
@@ -641,6 +672,166 @@ describe("runAgent", () => {
       error: "thrown",
       message: expect.stringContaining("datastore_prefix_not_allowed"),
     });
+  });
+
+  it("round-trips a bound sharedDatastore through the sandbox, scoped per-tool-call to that tool's own allowedSharedDatastorePrefixes", async () => {
+    const db = fakeDb(
+      [{ id: "a1", name: "shared-ds", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 }],
+      [
+        {
+          id: "t1",
+          name: "kb_writer",
+          description: "x",
+          paramsZod: "z.object({ key: z.string() })",
+          jsonSchema: {},
+          code: "await sharedDatastore.set('kb', params.key, 'v'); return await sharedDatastore.get('kb', params.key);",
+        },
+        {
+          id: "t2",
+          name: "kb_reader_unscoped",
+          description: "x",
+          paramsZod: "z.object({ key: z.string() })",
+          jsonSchema: {},
+          code: "const v = await sharedDatastore.get('kb', params.key); return v === undefined ? null : v;",
+        },
+      ],
+      [
+        { agentId: "a1", toolId: "t1", allowedSharedDatastorePrefixes: { kb: ["allowed:"] } },
+        // t2 is attached to the same agent, same "kb" bound name, but was
+        // never granted any allowedSharedDatastorePrefixes at all — proves
+        // scoping is applied per-tool-call from that tool's own capability
+        // declaration, not once for the whole run (t2 must NOT see what t1
+        // wrote, even though both resolve to the same underlying datastore).
+        { agentId: "a1", toolId: "t2", allowedSharedDatastorePrefixes: {} },
+      ],
+      [],
+      [],
+      [],
+      [{ agentId: "a1", boundName: "kb", datastoreId: "ds1" }],
+    );
+    let captured: EngineRunContext | undefined;
+    const engine = fakeEngine(
+      { status: "succeeded", finalText: "", turns: 1, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } },
+      (ctx) => {
+        captured = ctx;
+      },
+    );
+
+    await runAgent(
+      "shared-ds",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+      db,
+    );
+
+    const allowedWrite = JSON.parse(await captured!.runSandboxTool("kb_writer", JSON.stringify({ key: "allowed:1" })));
+    expect(allowedWrite).toBe("v");
+
+    const blockedWrite = JSON.parse(await captured!.runSandboxTool("kb_writer", JSON.stringify({ key: "blocked:1" })));
+    expect(blockedWrite).toMatchObject({
+      error: "thrown",
+      message: expect.stringContaining("datastore_prefix_not_allowed"),
+    });
+
+    const unscopedRead = JSON.parse(
+      await captured!.runSandboxTool("kb_reader_unscoped", JSON.stringify({ key: "allowed:1" })),
+    );
+    expect(unscopedRead).toBeNull();
+  });
+
+  it("two separate agents share one datastore end to end: agent A's tool writes, agent B's tool reads it back", async () => {
+    // Both agents attach a tool to the SAME underlying datastoreId ("ds-shared")
+    // under their own boundName, each independently granted
+    // allowedSharedDatastorePrefixes for that binding — proves the full
+    // wiring (attachment lookup, per-attachment scoping, and the shared
+    // Datastore provider methods) works across two independently-run
+    // agents, not just two tools within one runAgent call.
+    const db = fakeDb(
+      [
+        { id: "a1", name: "writer-agent", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 },
+        { id: "a2", name: "reader-agent", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 },
+      ],
+      [
+        {
+          id: "t1",
+          name: "kb_writer",
+          description: "x",
+          paramsZod: "z.object({ key: z.string() })",
+          jsonSchema: {},
+          code: "await sharedDatastore.set('kb', params.key, params.key + '-value'); return 'ok';",
+        },
+        {
+          id: "t2",
+          name: "kb_reader",
+          description: "x",
+          paramsZod: "z.object({ key: z.string() })",
+          jsonSchema: {},
+          code: "const v = await sharedDatastore.get('kb', params.key); return v === undefined ? null : v;",
+        },
+      ],
+      [
+        { agentId: "a1", toolId: "t1", allowedSharedDatastorePrefixes: { kb: ["allowed:"] } },
+        { agentId: "a2", toolId: "t2", allowedSharedDatastorePrefixes: { kb: ["allowed:"] } },
+      ],
+      [],
+      [],
+      [],
+      [
+        { agentId: "a1", boundName: "kb", datastoreId: "ds-shared" },
+        { agentId: "a2", boundName: "kb", datastoreId: "ds-shared" },
+      ],
+    );
+
+    // One shared Datastore provider instance across both runs — a real
+    // deployment has exactly one PostgresDatastore behind both agents too.
+    const sharedProviderDatastore = fakeDatastore();
+
+    let writerCtx: EngineRunContext | undefined;
+    const writerEngine = fakeEngine(
+      { status: "succeeded", finalText: "", turns: 1, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } },
+      (ctx) => {
+        writerCtx = ctx;
+      },
+    );
+    await runAgent(
+      "writer-agent",
+      {
+        llm: noopLlm,
+        engine: writerEngine,
+        datastore: sharedProviderDatastore,
+        secrets: noopSecretCipher,
+        memory: fakeMemory(),
+      },
+      db,
+    );
+    const writeResult = JSON.parse(await writerCtx!.runSandboxTool("kb_writer", JSON.stringify({ key: "allowed:1" })));
+    expect(writeResult).toBe("ok");
+
+    let readerCtx: EngineRunContext | undefined;
+    const readerEngine = fakeEngine(
+      { status: "succeeded", finalText: "", turns: 1, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } },
+      (ctx) => {
+        readerCtx = ctx;
+      },
+    );
+    await runAgent(
+      "reader-agent",
+      {
+        llm: noopLlm,
+        engine: readerEngine,
+        datastore: sharedProviderDatastore,
+        secrets: noopSecretCipher,
+        memory: fakeMemory(),
+      },
+      db,
+    );
+    const readResult = JSON.parse(await readerCtx!.runSandboxTool("kb_reader", JSON.stringify({ key: "allowed:1" })));
+    expect(readResult).toBe("allowed:1-value");
+
+    // Outside the granted prefix, agent B's reader sees nothing, even
+    // though the key exists in the underlying shared store for a
+    // different key.
+    const missResult = JSON.parse(await readerCtx!.runSandboxTool("kb_reader", JSON.stringify({ key: "blocked:1" })));
+    expect(missResult).toBeNull();
   });
 
   it("scopes a sandboxed tool's secrets access to its declared allowedSecrets", async () => {

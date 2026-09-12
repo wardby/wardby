@@ -70,6 +70,7 @@ function fakeBundle(over: Partial<Record<string, unknown[]>> = {}): Bundle {
     readSecrets: () => [],
     readAgentSecrets: () => [],
     readSingleDatastores: () => [],
+    readSharedDatastores: () => [],
     readWebhooks: () => [],
     readBudgets: () => (over.budgets as any) ?? [],
   };

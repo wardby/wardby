@@ -4,9 +4,11 @@ import { z } from "zod";
 import {
   ManifestSchema, NeutralAgentSchema, NeutralToolSchema, NeutralAgentToolSchema,
   NeutralSecretSchema, NeutralAgentSecretSchema, NeutralSingleDatastoreSchema,
+  NeutralSharedDatastoreSchema,
   NeutralWebhookSchema, NeutralBudgetSchema,
   type Manifest, type NeutralAgent, type NeutralTool, type NeutralAgentTool,
   type NeutralSecret, type NeutralAgentSecret, type NeutralSingleDatastore,
+  type NeutralSharedDatastore,
   type NeutralWebhook, type NeutralBudget,
 } from "./neutral-schema.js";
 
@@ -31,6 +33,7 @@ export interface Bundle {
   readSecrets(): NeutralSecret[];
   readAgentSecrets(): NeutralAgentSecret[];
   readSingleDatastores(): NeutralSingleDatastore[];
+  readSharedDatastores(): NeutralSharedDatastore[];
   readWebhooks(): NeutralWebhook[];
   readBudgets(): NeutralBudget[];
 }
@@ -58,6 +61,7 @@ export function openBundle(dir: string): Bundle {
     readSecrets: () => readArray(dir, "config/secrets.json", NeutralSecretSchema),
     readAgentSecrets: () => readArray(dir, "config/agent-secrets.json", NeutralAgentSecretSchema),
     readSingleDatastores: () => readArray(dir, "config/datastores-single.json", NeutralSingleDatastoreSchema),
+    readSharedDatastores: () => readArray(dir, "config/datastores-shared.json", NeutralSharedDatastoreSchema),
     readWebhooks: () => readArray(dir, "config/webhooks.json", NeutralWebhookSchema),
     readBudgets: () => readArray(dir, "capabilities/budgets.json", NeutralBudgetSchema),
   };

@@ -207,6 +207,10 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
       "allow-secret": { type: "string", multiple: true },
       "allow-datastore-prefix": { type: "string", multiple: true },
       "allow-host": { type: "string", multiple: true },
+      // "<boundName>:<prefix>" — repeatable, one prefix per flag; grouped
+      // below into { [boundName]: prefix[] }, mirroring how
+      // allow-datastore-prefix maps to the agent's own private store.
+      "allow-shared-datastore-prefix": { type: "string", multiple: true },
     },
   });
   const [toolName, agentName] = positionals;
@@ -225,10 +229,25 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
     return;
   }
 
+  let allowedSharedDatastorePrefixes: Record<string, string[]> | undefined;
+  if (values["allow-shared-datastore-prefix"]) {
+    allowedSharedDatastorePrefixes = {};
+    for (const entry of values["allow-shared-datastore-prefix"]) {
+      const sep = entry.indexOf(":");
+      if (sep < 0) {
+        fail(`invalid --allow-shared-datastore-prefix "${entry}" — expected "<boundName>:<prefix>".`);
+      }
+      const boundName = entry.slice(0, sep);
+      const prefix = entry.slice(sep + 1);
+      (allowedSharedDatastorePrefixes[boundName] ??= []).push(prefix);
+    }
+  }
+
   const patch = ToolCapabilitiesPatchSchema.safeParse({
     allowedSecrets: values["allow-secret"],
     allowedDatastorePrefixes: values["allow-datastore-prefix"],
     allowedHosts: values["allow-host"],
+    allowedSharedDatastorePrefixes,
   });
   if (!patch.success) {
     fail(`invalid tool capabilities: ${patch.error.issues.map((i) => i.message).join("; ")}`);
@@ -242,6 +261,7 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
       allowedSecrets: patch.data.allowedSecrets ?? [],
       allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes ?? [],
       allowedHosts: patch.data.allowedHosts ?? [],
+      allowedSharedDatastorePrefixes: patch.data.allowedSharedDatastorePrefixes ?? {},
     },
     update: {
       ...(patch.data.allowedSecrets !== undefined ? { allowedSecrets: patch.data.allowedSecrets } : {}),
@@ -249,6 +269,9 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
         ? { allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes }
         : {}),
       ...(patch.data.allowedHosts !== undefined ? { allowedHosts: patch.data.allowedHosts } : {}),
+      ...(patch.data.allowedSharedDatastorePrefixes !== undefined
+        ? { allowedSharedDatastorePrefixes: patch.data.allowedSharedDatastorePrefixes }
+        : {}),
     },
   });
   console.log(`attached "${toolName}" to "${agentName}".`);

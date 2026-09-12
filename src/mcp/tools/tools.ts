@@ -13,6 +13,7 @@ import { Prisma, type Tool } from "@prisma/client";
 import { deriveJsonSchema, validateParams } from "../../sandbox/zod-params.js";
 import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
+import { buildSharedDatastoreAccessor } from "../../core/datastores.js";
 import { MEMORY_TOOL_NAMES } from "../../core/memory-tools.js";
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
@@ -105,12 +106,17 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
       // deny-by-default here too — same posture as a freshly attached tool
       // (OWASP LLM08) — rather than the unconditional wildcard this used to
       // pass; a caller testing fetch-dependent code must declare the hosts
-      // it needs, same as at attach_tool time.
+      // it needs, same as at attach_tool time. sharedDatastore is likewise
+      // unscoped here: there's no tool attachment to carry
+      // allowedSharedDatastorePrefixes for a dry run, so it resolves exactly
+      // like a real agent with no shared-datastore attachments at all
+      // (empty reads, throwing writes) — never a capability-scoping bypass.
       const sandboxResult = await runInSandbox({
         code: args.code,
         params: validated.value,
         agentId: ctx.principal.id,
         datastore: ctx.providers.datastore,
+        sharedDatastore: buildSharedDatastoreAccessor(ctx.principal.id, ctx.providers.datastore, ctx.db),
         toolName: "dry_run_tool",
         allowedFetchHosts: hosts.data.allowedHosts ?? [],
       });
@@ -129,6 +135,14 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
         allowedSecrets: { type: "array", items: { type: "string" } },
         allowedDatastorePrefixes: { type: "array", items: { type: "string" } },
         allowedHosts: { type: "array", items: { type: "string" } },
+        // { [boundName]: allowedKeyPrefixes[] } — per shared-datastore
+        // attachment, the same default-deny grant as allowedDatastorePrefixes
+        // is for the agent's private store. A boundName absent from this map
+        // denies that shared store entirely.
+        allowedSharedDatastorePrefixes: {
+          type: "object",
+          additionalProperties: { type: "array", items: { type: "string" } },
+        },
       },
       required: ["agentId", "toolId"],
     },
@@ -139,6 +153,7 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
         allowedSecrets?: string[];
         allowedDatastorePrefixes?: string[];
         allowedHosts?: string[];
+        allowedSharedDatastorePrefixes?: Record<string, string[]>;
       },
       ctx,
     ) => {
@@ -146,6 +161,7 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
         allowedSecrets: args.allowedSecrets,
         allowedDatastorePrefixes: args.allowedDatastorePrefixes,
         allowedHosts: args.allowedHosts,
+        allowedSharedDatastorePrefixes: args.allowedSharedDatastorePrefixes,
       });
       if (!patch.success) {
         throw new McpError(400, `Invalid tool capabilities: ${patch.error.issues.map((i) => i.message).join("; ")}`);
@@ -167,6 +183,7 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
               allowedSecrets: patch.data.allowedSecrets ?? [],
               allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes ?? [],
               allowedHosts: patch.data.allowedHosts ?? [],
+              allowedSharedDatastorePrefixes: patch.data.allowedSharedDatastorePrefixes ?? {},
             },
             update: {
               ...(patch.data.allowedSecrets !== undefined ? { allowedSecrets: patch.data.allowedSecrets } : {}),
@@ -174,6 +191,9 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
                 ? { allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes }
                 : {}),
               ...(patch.data.allowedHosts !== undefined ? { allowedHosts: patch.data.allowedHosts } : {}),
+              ...(patch.data.allowedSharedDatastorePrefixes !== undefined
+                ? { allowedSharedDatastorePrefixes: patch.data.allowedSharedDatastorePrefixes }
+                : {}),
             },
           });
         },

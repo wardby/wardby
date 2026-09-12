@@ -11,6 +11,7 @@ import type { Bundle } from "./bundle.js";
 import type { Reconciliation } from "./preflight.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import { createSecret, attachSecret } from "../core/secrets.js";
+import { createDatastore, attachDatastore } from "../core/datastores.js";
 import { createWebhook } from "../core/webhooks.js";
 import { deriveJsonSchema } from "../sandbox/zod-params.js";
 import { ToolCapabilitiesPatchSchema, FETCH_WILDCARD } from "../sandbox/tool-capabilities.js";
@@ -34,6 +35,7 @@ export interface ImportResult {
   toolsCreated: number;
   secretsCreated: number;
   datastoreEntries: number;
+  datastoresSharedCreated: number;
   budgetGroupsCreated: number;
   webhookSecrets: { agentName: string; secret: string }[];
   pendingSecretReentry: string[];
@@ -65,6 +67,7 @@ export async function createFromBundle(
   let agentsCreated = 0;
   let secretsCreated = 0;
   let datastoreEntries = 0;
+  let datastoresSharedCreated = 0;
   let budgetGroupsCreated = 0;
 
   // Step 1: Tools
@@ -139,6 +142,7 @@ export async function createFromBundle(
       allowedSecrets: at.allowedSecrets,
       allowedDatastorePrefixes: at.allowedDatastorePrefixes,
       allowedHosts,
+      allowedSharedDatastorePrefixes: at.allowedSharedDatastorePrefixes,
     });
 
     if (!capsPatch.success) {
@@ -155,11 +159,13 @@ export async function createFromBundle(
         allowedSecrets: caps.allowedSecrets ?? [],
         allowedDatastorePrefixes: caps.allowedDatastorePrefixes ?? [],
         allowedHosts: caps.allowedHosts ?? [],
+        allowedSharedDatastorePrefixes: caps.allowedSharedDatastorePrefixes ?? {},
       },
       update: {
         allowedSecrets: caps.allowedSecrets ?? [],
         allowedDatastorePrefixes: caps.allowedDatastorePrefixes ?? [],
         allowedHosts: caps.allowedHosts ?? [],
+        allowedSharedDatastorePrefixes: caps.allowedSharedDatastorePrefixes ?? {},
       },
     });
   }
@@ -240,6 +246,63 @@ export async function createFromBundle(
         warnings.push(
           `datastore ${d.agentName}/${entry.key}: failed to set (${err instanceof Error ? err.message : String(err)})`,
         );
+      }
+    }
+  }
+
+  // Step 6.5: Shared datastores — require an owner, same rule as
+  // secrets/webhooks/budgets: skip with a warning in public-import mode.
+  if (!hasOwner) {
+    for (const sd of bundle.readSharedDatastores()) {
+      warnings.push(`shared-datastore ${sd.name}: skipped — shared datastores require an owner (public import)`);
+    }
+  } else {
+    const owner = ownerId; // hasOwner guarantees non-null
+    for (const sd of bundle.readSharedDatastores()) {
+      let created: Awaited<ReturnType<typeof createDatastore>>;
+      try {
+        created = await createDatastore(sd.name, owner, db);
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+          // Two shared-datastore definitions in this bundle collide on
+          // (ownerId, name) — createDatastore isn't idempotent (Task 3).
+          // Surface it and move on rather than aborting the whole import.
+          warnings.push(`shared-datastore ${sd.name}: a datastore with this name already exists for this owner — skipped`);
+          continue;
+        }
+        warnings.push(
+          `shared-datastore ${sd.name}: failed to create (${err instanceof Error ? err.message : String(err)})`,
+        );
+        continue;
+      }
+      datastoresSharedCreated++;
+
+      for (const entry of sd.entries) {
+        try {
+          await db.datastoreEntry.create({
+            data: { datastoreId: created.id, key: entry.key, value: entry.value as Prisma.InputJsonValue, pii: false },
+          });
+        } catch (err) {
+          warnings.push(
+            `shared-datastore ${sd.name}/${entry.key}: failed to seed (${err instanceof Error ? err.message : String(err)})`,
+          );
+        }
+      }
+
+      for (const agentName of sd.attachedAgentNames) {
+        const agentId = agentIdMap.get(agentName);
+        if (!agentId) continue;
+        try {
+          await attachDatastore(agentId, created.id, db, sd.name);
+        } catch (err) {
+          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+            warnings.push(`shared-datastore ${sd.name}: agent ${agentName} already binds "${sd.name}" — skipped`);
+            continue;
+          }
+          warnings.push(
+            `shared-datastore ${sd.name}/${agentName}: failed to attach (${err instanceof Error ? err.message : String(err)})`,
+          );
+        }
       }
     }
   }
@@ -348,6 +411,7 @@ export async function createFromBundle(
     toolsCreated,
     secretsCreated,
     datastoreEntries,
+    datastoresSharedCreated,
     budgetGroupsCreated,
     webhookSecrets,
     pendingSecretReentry,

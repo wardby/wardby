@@ -92,6 +92,11 @@ with:
 /// (Prisma has no declarative "exactly one of two columns" constraint).
 /// Phase 6: optional per-entry PII encryption (see `pii`/`keyId` below).
 model DatastoreEntry {
+  // Surrogate key: once agentId/datastoreId are both optional, neither
+  // remaining @@unique has an all-required-fields criterion, and Prisma
+  // rejects a model with none (P1012) — required for `prisma
+  // generate`/`validate` to run at all, not a design choice.
+  id          String     @id @default(cuid())
   agentId     String?
   datastoreId String?
   key         String
@@ -99,12 +104,18 @@ model DatastoreEntry {
   pii         Boolean    @default(false)
   keyId       String?
   updatedAt   DateTime   @updatedAt
-  datastore   Datastore? @relation(fields: [datastoreId], references: [id])
+  // onDelete: Restrict is explicit (Prisma's inferred default for an
+  // optional relation is SetNull) — nulling datastoreId on delete would
+  // leave both agentId and datastoreId null, violating the
+  // DatastoreEntry_scope_xor CHECK the migration adds.
+  datastore   Datastore? @relation(fields: [datastoreId], references: [id], onDelete: Restrict)
 
   @@unique([agentId, key])
   @@unique([datastoreId, key])
 }
 ```
+
+> **Implementation note (added after Task 1 landed):** the block above already reflects corrections made during implementation — Prisma hard-rejects the original text (P1012: no all-required-fields unique criterion once both `agentId`/`datastoreId` are nullable), fixed with the surrogate `id` field and the explicit `onDelete: Restrict` shown above. The migration SQL in Step 5 below is likewise the corrected, drift-check-verified version. Full diagnosis in this plan's SDD workspace, `task-1-report.md`.
 
 - [ ] **Step 3: Edit `prisma/schema.prisma` — add the shared-prefix capability field to `AgentTool`**
 
@@ -174,21 +185,33 @@ ALTER TABLE "AgentDatastore" ADD CONSTRAINT "AgentDatastore_datastoreId_fkey"
 -- Unify DatastoreEntry's keyspace: agentId becomes nullable, datastoreId is
 -- added nullable. Existing rows keep agentId set / datastoreId null, so
 -- their behavior is unchanged.
+--
+-- The old (agentId, key) primary key must be dropped BEFORE agentId's NOT
+-- NULL can be relaxed — Postgres refuses ALTER COLUMN ... DROP NOT NULL on a
+-- column that is still part of a primary key (42P16). Replaced below by two
+-- scoped unique indexes: a datastoreId-scoped row has a null agentId, so the
+-- old PK can't hold anyway. Postgres unique indexes treat NULL as distinct
+-- from NULL, so many datastoreId-scoped rows (all agentId = NULL) never
+-- collide on the first index, and vice versa.
+ALTER TABLE "DatastoreEntry" DROP CONSTRAINT "DatastoreEntry_pkey";
 ALTER TABLE "DatastoreEntry" ALTER COLUMN "agentId" DROP NOT NULL;
 ALTER TABLE "DatastoreEntry" ADD COLUMN "datastoreId" TEXT;
 ALTER TABLE "DatastoreEntry" ADD CONSTRAINT "DatastoreEntry_datastoreId_fkey"
   FOREIGN KEY ("datastoreId") REFERENCES "Datastore"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "DatastoreEntry" ADD CONSTRAINT "DatastoreEntry_scope_xor"
   CHECK (("agentId" IS NOT NULL) <> ("datastoreId" IS NOT NULL));
-
--- Replace the old (agentId, key) primary key with two scoped unique indexes
--- — a datastoreId-scoped row has a null agentId, so the old PK can't hold.
--- Postgres unique indexes treat NULL as distinct from NULL, so many
--- datastoreId-scoped rows (all agentId = NULL) never collide on the first
--- index, and vice versa.
-ALTER TABLE "DatastoreEntry" DROP CONSTRAINT "DatastoreEntry_pkey";
 CREATE UNIQUE INDEX "DatastoreEntry_agentId_key_key" ON "DatastoreEntry" ("agentId", "key");
 CREATE UNIQUE INDEX "DatastoreEntry_datastoreId_key_key" ON "DatastoreEntry" ("datastoreId", "key");
+
+-- Surrogate primary key required by Prisma's schema validator: once agentId
+-- and datastoreId are both optional, neither remaining @@unique has an
+-- all-required-fields criterion, and Prisma rejects a model with none
+-- (P1012). Backfill uses Postgres 16's built-in gen_random_uuid() (no
+-- pgcrypto extension needed) since existing rows predate this column.
+ALTER TABLE "DatastoreEntry" ADD COLUMN "id" TEXT;
+UPDATE "DatastoreEntry" SET "id" = gen_random_uuid()::text WHERE "id" IS NULL;
+ALTER TABLE "DatastoreEntry" ALTER COLUMN "id" SET NOT NULL;
+ALTER TABLE "DatastoreEntry" ADD CONSTRAINT "DatastoreEntry_pkey" PRIMARY KEY ("id");
 
 -- Per-attachment capability scoping for shared stores, keyed by boundName —
 -- mirrors AgentTool.allowedDatastorePrefixes but as a map, since a tool
@@ -836,13 +859,14 @@ Expected: PASS.
 
 - [ ] **Step 5: Add `requireOwnedDatastore` to `src/mcp/auth/ownership.ts`**
 
-Add, mirroring `requireOwnedSecret` exactly:
+Add, mirroring `requireOwnedTool`/`requireOwnedAgent` (which return their row, not `void` — `attach_datastore` in Task 6 needs the datastore's `name` for its default `boundName`, so this returns the row rather than `void` like `requireOwnedSecret`):
 
 ```ts
-export async function requireOwnedDatastore(db: PrismaClient, id: string, principalId: string): Promise<void> {
+export async function requireOwnedDatastore(db: PrismaClient, id: string, principalId: string) {
   const datastore = await db.datastore.findUnique({ where: { id } });
   if (!datastore) throw new McpError(403, `Datastore "${id}" is not owned by the caller.`);
   assertCanMutate(datastore.ownerId, principalId, `Datastore "${id}" is not owned by the caller.`);
+  return datastore;
 }
 ```
 
@@ -1498,11 +1522,12 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
     },
     handler: async (args: { agentId: string; datastoreId: string; boundName?: string }, ctx) => {
       await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
-      await requireOwnedDatastore(ctx.db, args.datastoreId, ctx.principal.id);
+      const datastore = await requireOwnedDatastore(ctx.db, args.datastoreId, ctx.principal.id);
+      const boundName = args.boundName ?? datastore.name;
       try {
-        await attachDatastore(args.agentId, args.datastoreId, ctx.db, args.boundName ?? args.datastoreId);
+        await attachDatastore(args.agentId, args.datastoreId, ctx.db, boundName);
       } catch (err) {
-        throw new McpError(409, `Agent already binds a datastore under name "${args.boundName ?? args.datastoreId}".`);
+        throw new McpError(409, `Agent already binds a datastore under name "${boundName}".`);
       }
       return textResult({ attached: true });
     },
@@ -1701,10 +1726,19 @@ it("creates a shared datastore, seeds its entries, and attaches it to two agents
   expect(entries).toHaveLength(1);
 });
 
-it("a boundName collision across two differently-owned shared stores on one agent warns instead of throwing", async () => {
-  // Two shared-datastore definitions that both attach to the same agent
-  // under the same implicit boundName (their own `name`, both "kb") — the
-  // second attach hits the AgentDatastore unique constraint.
+it("a boundName collision across two same-named shared stores on one agent warns instead of throwing", async () => {
+  // Two shared-datastore definitions with the same `name` ("kb") for the
+  // same (Tier-1's single, global) owner. Datastore's own
+  // @@unique([ownerId, name]) fires on the SECOND createDatastore call,
+  // before attachDatastore's @@unique([agentId, boundName]) is ever
+  // reached — Step 6 below wraps createDatastore itself in a try/catch for
+  // exactly this reason (an addition beyond a first, naive reading of this
+  // step, required once you notice the two definitions share an owner).
+  // Two records "colliding on ownerEmail" (as a first draft of this test
+  // might assume) isn't actually achievable in Tier-1: ownerEmail is parsed
+  // but never read per-record (same as NeutralSecretSchema/NeutralBudgetSchema)
+  // — every shared-datastore definition in one import shares the single
+  // global `ownerId`, so any two definitions with the same `name` collide.
   const bundle: Bundle = {
     manifest: { /* ... */ } as never,
     readAgents: () => [agentA],
@@ -1726,12 +1760,15 @@ it("a boundName collision across two differently-owned shared stores on one agen
     db, cipher, ownerId: owner.id, defaultBudget: "5.00", secretMode: "references", allowOpenFetch: false,
   });
 
-  expect(result.datastoresSharedCreated).toBe(2); // both Datastore rows still created
+  // Only the FIRST "kb" survives createDatastore's own unique constraint;
+  // the second is caught and warned, not thrown — the import as a whole
+  // must not abort.
+  expect(result.datastoresSharedCreated).toBe(1);
   expect(result.warnings.some((w) => w.includes("kb"))).toBe(true);
 });
 ```
 
-Write these two tests following this file's actual existing conventions exactly (agent fixtures, manifest shape, how `recon`/`preflight` is invoked) — read `create.test.ts` and `create.database.test.ts` in full before writing so the fixtures compile; the shapes above are illustrative of intent, not literal drop-in code, since this file's precise fixture-building helpers weren't reproduced in this plan.
+Write these two tests following this file's actual existing conventions exactly (agent fixtures, manifest shape, how `recon`/`preflight` is invoked) — read `create.test.ts` and `create.database.test.ts` in full before writing so the fixtures compile; the shapes above are illustrative of intent, not literal drop-in code, since this file's precise fixture-building helpers weren't reproduced in this plan. `create.test.ts`'s hand-rolled `fakeDb()` has no unique-constraint semantics and no `datastore`/`agentDatastore` models to assert real row state against — if that's still true when you read it, put both of these tests in `create.database.test.ts` (the real-Postgres integration file) instead, so the collision and the resulting row state are asserted for real.
 
 - [ ] **Step 2: Add `readSharedDatastores: () => []` to every other existing `Bundle` fixture**
 
@@ -1821,7 +1858,27 @@ Add the new step immediately after the existing "Step 6: Per-agent datastore see
   } else {
     const owner = ownerId; // hasOwner guarantees non-null
     for (const sd of bundle.readSharedDatastores()) {
-      const created = await createDatastore(sd.name, owner, db);
+      // createDatastore is a plain create, not an upsert (Task 3, deliberate
+      // — see core/datastores.ts), and Datastore has @@unique([ownerId, name]).
+      // Tier-1 uses one global `ownerId` for every shared-datastore
+      // definition in a bundle, so two definitions sharing a `name` collide
+      // HERE, before ever reaching attachDatastore's own unique constraint
+      // below. Without this try/catch, that collision would abort the whole
+      // import (including any later webhooks/budget-group steps) on an
+      // otherwise-recoverable bundle-authoring mistake — every other
+      // per-item creation in this function already follows the
+      // catch-warn-continue idiom; this closes the one gap that wouldn't.
+      let created;
+      try {
+        created = await createDatastore(sd.name, owner, db);
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+          warnings.push(`shared-datastore ${sd.name}: a shared datastore named "${sd.name}" already exists — skipped`);
+          continue;
+        }
+        warnings.push(`shared-datastore ${sd.name}: failed to create (${err instanceof Error ? err.message : String(err)})`);
+        continue;
+      }
       datastoresSharedCreated++;
 
       for (const entry of sd.entries) {

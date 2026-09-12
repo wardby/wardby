@@ -368,6 +368,18 @@ globalThis.datastore = {
   list: async (prefix) => JSON.parse(await __bridge_datastoreList(JSON.stringify([prefix === undefined ? null : prefix]))),
 };
 
+// ---- sharedDatastore (bridged; boundName-addressed, capability-scoped by the host) ----
+
+globalThis.sharedDatastore = {
+  get: async (boundName, key) => JSON.parse(await __bridge_sharedDatastoreGet(JSON.stringify([boundName, key]))),
+  set: async (boundName, key, value, opts) => {
+    await __bridge_sharedDatastoreSet(JSON.stringify([boundName, key, value, opts]));
+  },
+  delete: async (boundName, key) => { await __bridge_sharedDatastoreDelete(JSON.stringify([boundName, key])); },
+  list: async (boundName, prefix) =>
+    JSON.parse(await __bridge_sharedDatastoreList(JSON.stringify([boundName, prefix === undefined ? null : prefix]))),
+};
+
 // ---- secrets (bridged; decrypt-on-demand, scoped per agent by the host) ----
 
 globalThis.secrets = {

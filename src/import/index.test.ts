@@ -10,6 +10,7 @@ vi.mock("./create.js", () => ({
     toolsCreated: 0,
     secretsCreated: 0,
     datastoreEntries: 0,
+    datastoresSharedCreated: 0,
     budgetGroupsCreated: 0,
     webhookSecrets: [],
     pendingSecretReentry: [],
@@ -56,6 +57,7 @@ beforeEach(() => {
   write("config/secrets.json", []);
   write("config/agent-secrets.json", []);
   write("config/datastores-single.json", []);
+  write("config/datastores-shared.json", []);
   write("config/webhooks.json", []);
   write("capabilities/budgets.json", []);
 });

@@ -4,11 +4,14 @@ import { scopeDatastore } from "./scoped.js";
 
 function fakeDatastore(): Datastore & {
   setCalls: [string, string, DatastoreValue, DatastoreSetOptions | undefined][];
+  sharedStore: Map<string, DatastoreValue>;
 } {
   const store = new Map<string, DatastoreValue>();
+  const sharedStore = new Map<string, DatastoreValue>();
   const setCalls: [string, string, DatastoreValue, DatastoreSetOptions | undefined][] = [];
   return {
     setCalls,
+    sharedStore,
     async get(agentId, key) {
       return store.get(`${agentId}:${key}`);
     },
@@ -22,6 +25,18 @@ function fakeDatastore(): Datastore & {
     async list(agentId, prefix) {
       const p = `${agentId}:${prefix ?? ""}`;
       return [...store.keys()].filter((k) => k.startsWith(p)).map((k) => k.slice(agentId.length + 1));
+    },
+    async getShared(datastoreId, key) {
+      return sharedStore.get(`${datastoreId}:${key}`);
+    },
+    async setShared(datastoreId, key, value) {
+      sharedStore.set(`${datastoreId}:${key}`, value);
+    },
+    async deleteShared(datastoreId, key) {
+      sharedStore.delete(`${datastoreId}:${key}`);
+    },
+    async listShared() {
+      return [];
     },
   };
 }
@@ -87,5 +102,26 @@ describe("scopeDatastore", () => {
     await expect(scoped.get("a1", "x")).resolves.toBeUndefined();
     await expect(scoped.set("a1", "x", "v2")).rejects.toThrow("datastore_prefix_not_allowed");
     expect(await scoped.list("a1")).toEqual([]);
+  });
+
+  // Shared-store access is unreachable through a scopeDatastore(...)-wrapped
+  // object in this codebase's call graph today (it has its own dedicated
+  // scoping, scopeSharedDatastoreAccessor in src/core/datastores.ts), but
+  // this wrapper is the security boundary for the private per-agent store —
+  // a silent pass-through to the unscoped datastore would be a hole waiting
+  // to happen the moment that call graph changes. All four must fail
+  // closed instead.
+  it("getShared/setShared/deleteShared/listShared all throw rather than pass through to the unscoped store", async () => {
+    const inner = fakeDatastore();
+    await inner.setShared("ds1", "k", "v");
+    const scoped = scopeDatastore(inner, ["allowed:"]);
+
+    await expect(scoped.getShared("ds1", "k")).rejects.toThrow("datastore_shared_access_not_allowed");
+    await expect(scoped.setShared("ds1", "k", "v2")).rejects.toThrow("datastore_shared_access_not_allowed");
+    await expect(scoped.deleteShared("ds1", "k")).rejects.toThrow("datastore_shared_access_not_allowed");
+    await expect(scoped.listShared("ds1")).rejects.toThrow("datastore_shared_access_not_allowed");
+
+    // Never reached the underlying store.
+    await expect(inner.getShared("ds1", "k")).resolves.toBe("v");
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
 import type { SecretsAccessor } from "../core/secrets.js";
+import type { SharedDatastoreAccessor } from "../core/datastores.js";
 import { runInSandbox } from "./run-in-sandbox.js";
 
 function fakeDatastore(): Datastore {
@@ -19,6 +20,33 @@ function fakeDatastore(): Datastore {
       const p = `${agentId}:${prefix ?? ""}`;
       return [...store.keys()].filter((k) => k.startsWith(p)).map((k) => k.slice(agentId.length + 1));
     },
+    async getShared() {
+      return undefined;
+    },
+    async setShared() {},
+    async deleteShared() {},
+    async listShared() {
+      return [];
+    },
+  };
+}
+
+function fakeSharedDatastore(): SharedDatastoreAccessor {
+  const store = new Map<string, string>();
+  return {
+    async get(boundName, key) {
+      return store.get(`${boundName}:${key}`);
+    },
+    async set(boundName, key, value) {
+      store.set(`${boundName}:${key}`, value as string);
+    },
+    async delete(boundName, key) {
+      store.delete(`${boundName}:${key}`);
+    },
+    async list(boundName, prefix) {
+      const p = `${boundName}:${prefix ?? ""}`;
+      return [...store.keys()].filter((k) => k.startsWith(p)).map((k) => k.slice(boundName.length + 1));
+    },
   };
 }
 
@@ -30,6 +58,8 @@ function fakeSecrets(values: Record<string, string>): SecretsAccessor {
   };
 }
 
+const FAST_LIMITS = { wallTimeLimitMs: 300 };
+
 describe("secrets.get sandbox host function", () => {
   it.each(["-1", "1.5", "Infinity", "NaN", "65537"])("rejects invalid random byte length %s", async (length) => {
     const result = await runInSandbox({
@@ -37,6 +67,7 @@ describe("secrets.get sandbox host function", () => {
       params: {},
       agentId: "a",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "limits",
     });
     expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("random_bytes_limit") });
@@ -54,12 +85,20 @@ describe("secrets.get sandbox host function", () => {
       params: {},
       agentId: "a",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "limits",
     });
     expect(result).toMatchObject({ ok: false });
   });
   it("clears successful invocation wall timers", async () => {
-    await runInSandbox({ code: "return 1", params: {}, agentId: "a", datastore: fakeDatastore(), toolName: "warmup" });
+    await runInSandbox({
+      code: "return 1",
+      params: {},
+      agentId: "a",
+      datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
+      toolName: "warmup",
+    });
     vi.useFakeTimers();
     try {
       for (let i = 0; i < 5; i++)
@@ -68,6 +107,7 @@ describe("secrets.get sandbox host function", () => {
           params: {},
           agentId: "a",
           datastore: fakeDatastore(),
+          sharedDatastore: fakeSharedDatastore(),
           toolName: "timer",
         });
       expect(vi.getTimerCount()).toBe(0);
@@ -81,6 +121,7 @@ describe("secrets.get sandbox host function", () => {
       params: {},
       agentId: "a",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "limits",
     });
     expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("html_link_limit") });
@@ -91,6 +132,7 @@ describe("secrets.get sandbox host function", () => {
       params: {},
       agentId: "a",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "csv-smoke",
     });
     expect(result).toMatchObject({ ok: true, value: { data: [{ a: "1", b: "2" }] } });
@@ -101,6 +143,7 @@ describe("secrets.get sandbox host function", () => {
       params: {},
       agentId: "a",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "xml-smoke",
     });
     expect(result).toMatchObject({ ok: true, value: { x: "hi" } });
@@ -111,6 +154,7 @@ describe("secrets.get sandbox host function", () => {
       params: {},
       agentId: "a",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "html-smoke",
     });
     expect(result).toMatchObject({ ok: true, value: { title: "T", links: [{ href: "/x", text: "L" }] } });
@@ -121,6 +165,7 @@ describe("secrets.get sandbox host function", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       secrets: fakeSecrets({ API_KEY: "sk-live-abc123" }),
       toolName: "read-secret",
     });
@@ -133,6 +178,7 @@ describe("secrets.get sandbox host function", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       secrets: fakeSecrets({ API_KEY: "sk-live-abc123" }),
       toolName: "read-secret",
     });
@@ -145,6 +191,7 @@ describe("secrets.get sandbox host function", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "read-secret",
     });
     expect(result).toEqual({ ok: true, value: "undefined" });
@@ -160,6 +207,7 @@ describe("secrets.get sandbox host function", () => {
         params: {},
         agentId: "a1",
         datastore: fakeDatastore(),
+        sharedDatastore: fakeSharedDatastore(),
         secrets: fakeSecrets({ API_KEY: "sk-live-abc123" }),
         toolName: "read-secret",
       });
@@ -188,6 +236,7 @@ describe("secrets.get sandbox host function", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       secrets: fakeSecrets({ API_KEY: "sk-live-abc123" }),
       toolName: "read-secret",
       logger,
@@ -204,6 +253,7 @@ describe("secrets.get sandbox host function", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "scrape",
       logger,
     });
@@ -220,6 +270,7 @@ describe("__bridge_fetch host scoping", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "fetcher",
     });
     expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("fetch_destination_blocked") });
@@ -231,6 +282,7 @@ describe("__bridge_fetch host scoping", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "fetcher",
       allowedFetchHosts: ["*"],
     });
@@ -243,9 +295,34 @@ describe("__bridge_fetch host scoping", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "fetcher",
       allowedFetchHosts: ["example.com"],
     });
     expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("fetch_destination_blocked") });
+  });
+});
+
+describe("sharedDatastore sandbox host functions", () => {
+  it("sharedDatastore bridge functions round-trip through a bound name", async () => {
+    const sharedDatastore = fakeSharedDatastore();
+    const result = await runInSandbox({
+      code: `
+        await sharedDatastore.set('kb', 'k1', 'v1');
+        const value = await sharedDatastore.get('kb', 'k1');
+        await sharedDatastore.set('kb', 'k2', 'v2');
+        const listed = await sharedDatastore.list('kb');
+        await sharedDatastore.delete('kb', 'k1');
+        const afterDelete = await sharedDatastore.get('kb', 'k1');
+        return { value, listed, afterDelete };
+      `,
+      params: {},
+      agentId: "agent-1",
+      datastore: fakeDatastore(),
+      sharedDatastore,
+      toolName: "shared-roundtrip",
+      limits: FAST_LIMITS,
+    });
+    expect(result).toEqual({ ok: true, value: { value: "v1", listed: ["k1", "k2"], afterDelete: null } });
   });
 });
