@@ -113,6 +113,29 @@ with `CODING_WORKER_IMAGE_NODE_PYTHON_3_12` pointing at the
 - **Cleanup:** PR #3 closed, branch deleted from `origin`, immediately
   after review.
 
+### `node-python` worker image gained real Python TDD support (2026-09-12)
+
+A full ground-up capability test (design a project from an empty repo, TDD
+build, test, PR) surfaced that `node-python` only ever added bare `python3` —
+no `pip`, no `pytest`. A `coding` agent asked to follow TDD wrote a real
+pytest suite but couldn't execute it inside its own sandbox
+(`{"command": "pytest -q", "outcome": "failed"}`, reason: pytest not found),
+falling back to `compileall` + manual checks. Verified independently outside
+the sandbox that the agent's actual code and tests were correct (11/11
+passed) — this was a toolchain gap, not an agent defect.
+
+Fixed in `Dockerfile.node-python`: install `python3-pip`, pin and install
+`pytest==8.3.4`, then `apt-get purge -y --auto-remove python3-pip` — pip's
+own files are apt-tracked and get removed, but pytest's files (installed by
+pip, not apt) are untouched. Added `pip`/`pip3` to the existing
+binary-absence hardening assertion, alongside a build-time check that
+`python3 -m pytest --version` still works after the purge. Verified locally:
+built the image, ran `import pytest` and `python3 -m pytest -q` against a
+real test file inside the hardened, non-root container — passed. `pip`/`pip3`
+confirmed absent at runtime, consistent with the existing curl/wget/ssh/
+docker/sudo/gcc/make hardening (no network-fetch-and-execute vector left
+inside the sandbox).
+
 ## Lifecycle Audit And Metrics
 
 The container executor emits metadata-only structured events for `queued`,
