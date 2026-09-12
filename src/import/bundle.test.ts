@@ -8,8 +8,10 @@ let dir: string;
 const manifest = {
   bundleVersion: 1,
   source: { product: "agent-cron", exporterVersion: "1.0.0", exportedAt: "2026-09-08T00:00:00.000Z" },
-  secretMode: "references", transferKeyId: null,
-  capabilities: ["budgets"], counts: { agents: 1 },
+  secretMode: "references",
+  transferKeyId: null,
+  capabilities: ["budgets"],
+  counts: { agents: 1 },
 };
 function write(rel: string, obj: unknown) {
   const p = join(dir, rel);
@@ -20,15 +22,29 @@ function write(rel: string, obj: unknown) {
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "bundle-"));
   write("manifest.json", manifest);
-  write("config/agents.json", [{
-    name: "digest", systemPrompt: "sp", provider: "bedrock", model: "m",
-    schedule: "", scheduleEnabled: true, maxTurns: 8, budgetUsd: "5.00",
-  }]);
+  write("config/agents.json", [
+    {
+      name: "digest",
+      systemPrompt: "sp",
+      provider: "bedrock",
+      model: "m",
+      schedule: "",
+      scheduleEnabled: true,
+      maxTurns: 8,
+      budgetUsd: "5.00",
+    },
+  ]);
   write("config/budgets.json", []); // wrong place on purpose; real place is capabilities/
-  write("capabilities/budgets.json", [{
-    name: "cap", period: "monthly", alertThreshold: "80.00", blockThreshold: "100.00", enabled: true,
-    attachedAgentNames: ["digest"],
-  }]);
+  write("capabilities/budgets.json", [
+    {
+      name: "cap",
+      period: "monthly",
+      alertThreshold: "80.00",
+      blockThreshold: "100.00",
+      enabled: true,
+      attachedAgentNames: ["digest"],
+    },
+  ]);
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 

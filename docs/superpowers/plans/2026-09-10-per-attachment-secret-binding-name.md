@@ -17,11 +17,12 @@
 - **Prisma migrations only** — never `prisma db push`. reevo uses timestamped migration dirs (`prisma migrate dev`). This migration is additive + backfill; it must never fail on existing rows.
 - **Never modify an already-applied migration file.** Add a new one.
 - **Secret plaintext is never logged or returned.** Preserve the existing "unattached name → `undefined`" convention (never a throw for a missing name).
-- **`Secret` identity uniqueness is unchanged** (`@@unique([ownerId, name])`). Only the *attachment* gains a name.
+- **`Secret` identity uniqueness is unchanged** (`@@unique([ownerId, name])`). Only the _attachment_ gains a name.
 - **Logging:** pino (`@/lib/logger` equivalent in this repo), never `console.*`. (No new logging is required by this plan.)
 - **Verify before commit:** `npm run build` (tsc) and `npm test` (vitest) must pass. DB-gated tests (`describe.skipIf(!process.env.DATABASE_URL)`) require `npm run db:up` + `DATABASE_URL` from `.env.local`.
 
 **Decisions locked (were open questions in the spec):**
+
 1. Column name is **`boundName`** (non-null), not a nullable `alias`.
 2. `detachSecret` identifies the edge by **point-of-use name** `(agentId, boundName)` and drops its now-unused `ownerId` parameter.
 
@@ -30,11 +31,13 @@
 ### Task 1: Schema + migration — add `boundName` to `AgentSecret`
 
 **Files:**
+
 - Modify: `prisma/schema.prisma` (the `AgentSecret` model, ~line 382)
 - Create: `prisma/migrations/<generated-timestamp>_agent_secret_bound_name/migration.sql`
 - Modify: `src/core/secrets.database.test.ts:17` (an `agentSecret.create` that omits `boundName` will fail the new NOT NULL)
 
 **Interfaces:**
+
 - Consumes: nothing.
 - Produces: `AgentSecret.boundName: string` (non-null), unique index `@@unique([agentId, boundName])`. Every consumer of the Prisma client sees the new field.
 
@@ -65,7 +68,7 @@ model AgentSecret {
 Run: `npx prisma migrate dev --create-only --name agent_secret_bound_name`
 Expected: a new `prisma/migrations/<timestamp>_agent_secret_bound_name/migration.sql` is written. Prisma will draft a non-null `ADD COLUMN` (which would fail on existing rows) — you will replace its body in the next step.
 
-*Fallback if the shadow DB errors:* generate the diff with `npx prisma migrate diff --from-schema-datasource prisma/schema.prisma --to-schema-datamodel prisma/schema.prisma --script`, or hand-author the file below and `npx prisma migrate resolve --applied <migration-name>`.
+_Fallback if the shadow DB errors:_ generate the diff with `npx prisma migrate diff --from-schema-datasource prisma/schema.prisma --to-schema-datamodel prisma/schema.prisma --script`, or hand-author the file below and `npx prisma migrate resolve --applied <migration-name>`.
 
 - [ ] **Step 3: Replace the migration SQL with the additive backfill**
 
@@ -102,7 +105,9 @@ In `src/core/secrets.database.test.ts`, line 17, change:
 ```ts
 await db.agentSecret.create({ data: { agentId: id, secretId: id } });
 ```
+
 to:
+
 ```ts
 await db.agentSecret.create({ data: { agentId: id, secretId: id, boundName: "legacy" } });
 ```
@@ -126,10 +131,12 @@ git commit -m "feat(secrets): add boundName to AgentSecret (additive migration +
 ### Task 2: Resolve secrets by `boundName` in `core/secrets.ts`
 
 **Files:**
+
 - Modify: `src/core/secrets.ts` (`attachSecret`, `detachSecret`, `buildSecretsAccessor`)
 - Modify: `src/core/secrets.test.ts` (update `fakeDb`, update the detach test for the new signature, add binding-name tests)
 
 **Interfaces:**
+
 - Consumes: `AgentSecret.boundName` from Task 1.
 - Produces:
   - `attachSecret(agentId: string, name: string, ownerId: string, db: PrismaClient, boundName?: string): Promise<void>` — `boundName` defaults to `name`.
@@ -174,49 +181,49 @@ interface FakeAgentSecretRow {
 Update the existing detach test to the new signature and add binding-name tests:
 
 ```ts
-  it("detachSecret removes access", async () => {
-    const db = fakeDb();
-    const cipher = fakeCipher();
-    await createSecret("API_KEY", "sk-live-abc123", "p1", cipher, db);
-    await attachSecret("agent-1", "API_KEY", "p1", db);
-    await detachSecret("agent-1", "API_KEY", db); // now (agentId, boundName, db)
+it("detachSecret removes access", async () => {
+  const db = fakeDb();
+  const cipher = fakeCipher();
+  await createSecret("API_KEY", "sk-live-abc123", "p1", cipher, db);
+  await attachSecret("agent-1", "API_KEY", "p1", db);
+  await detachSecret("agent-1", "API_KEY", db); // now (agentId, boundName, db)
 
-    const accessor = buildSecretsAccessor("agent-1", cipher, db);
-    expect(await accessor.get("API_KEY")).toBeUndefined();
-  });
+  const accessor = buildSecretsAccessor("agent-1", cipher, db);
+  expect(await accessor.get("API_KEY")).toBeUndefined();
+});
 
-  it("two agents resolve the same boundName to their own distinct secrets", async () => {
-    const db = fakeDb();
-    const cipher = fakeCipher();
-    await createSecret("bitbucket_aies", "token-aies", "p1", cipher, db);
-    await createSecret("bitbucket_ondemand", "token-ondemand", "p1", cipher, db);
-    await attachSecret("agent-A", "bitbucket_aies", "p1", db, "bitbucket");
-    await attachSecret("agent-B", "bitbucket_ondemand", "p1", db, "bitbucket");
+it("two agents resolve the same boundName to their own distinct secrets", async () => {
+  const db = fakeDb();
+  const cipher = fakeCipher();
+  await createSecret("bitbucket_aies", "token-aies", "p1", cipher, db);
+  await createSecret("bitbucket_ondemand", "token-ondemand", "p1", cipher, db);
+  await attachSecret("agent-A", "bitbucket_aies", "p1", db, "bitbucket");
+  await attachSecret("agent-B", "bitbucket_ondemand", "p1", db, "bitbucket");
 
-    expect(await buildSecretsAccessor("agent-A", cipher, db).get("bitbucket")).toBe("token-aies");
-    expect(await buildSecretsAccessor("agent-B", cipher, db).get("bitbucket")).toBe("token-ondemand");
-  });
+  expect(await buildSecretsAccessor("agent-A", cipher, db).get("bitbucket")).toBe("token-aies");
+  expect(await buildSecretsAccessor("agent-B", cipher, db).get("bitbucket")).toBe("token-ondemand");
+});
 
-  it("one agent resolves two secrets under two distinct boundNames", async () => {
-    const db = fakeDb();
-    const cipher = fakeCipher();
-    await createSecret("jira_chris", "jc", "p1", cipher, db);
-    await createSecret("bitbucket_aies", "ba", "p1", cipher, db);
-    await attachSecret("agent-1", "jira_chris", "p1", db, "jira");
-    await attachSecret("agent-1", "bitbucket_aies", "p1", db, "bitbucket");
+it("one agent resolves two secrets under two distinct boundNames", async () => {
+  const db = fakeDb();
+  const cipher = fakeCipher();
+  await createSecret("jira_chris", "jc", "p1", cipher, db);
+  await createSecret("bitbucket_aies", "ba", "p1", cipher, db);
+  await attachSecret("agent-1", "jira_chris", "p1", db, "jira");
+  await attachSecret("agent-1", "bitbucket_aies", "p1", db, "bitbucket");
 
-    const accessor = buildSecretsAccessor("agent-1", cipher, db);
-    expect(await accessor.get("jira")).toBe("jc");
-    expect(await accessor.get("bitbucket")).toBe("ba");
-  });
+  const accessor = buildSecretsAccessor("agent-1", cipher, db);
+  expect(await accessor.get("jira")).toBe("jc");
+  expect(await accessor.get("bitbucket")).toBe("ba");
+});
 
-  it("attachSecret defaults boundName to the secret name", async () => {
-    const db = fakeDb();
-    const cipher = fakeCipher();
-    await createSecret("API_KEY", "v", "p1", cipher, db);
-    await attachSecret("agent-1", "API_KEY", "p1", db); // no boundName
-    expect(await buildSecretsAccessor("agent-1", cipher, db).get("API_KEY")).toBe("v");
-  });
+it("attachSecret defaults boundName to the secret name", async () => {
+  const db = fakeDb();
+  const cipher = fakeCipher();
+  await createSecret("API_KEY", "v", "p1", cipher, db);
+  await attachSecret("agent-1", "API_KEY", "p1", db); // no boundName
+  expect(await buildSecretsAccessor("agent-1", cipher, db).get("API_KEY")).toBe("v");
+});
 ```
 
 Run: `npx vitest run src/core/secrets.test.ts`
@@ -259,10 +266,10 @@ In `buildSecretsAccessor.get`, the `$queryRaw` path WHERE clause:
 and the Prisma-double fallback:
 
 ```ts
-      const attachment = await db.agentSecret.findFirst({
-        where: { agentId, boundName: name },
-        include: { secret: true },
-      });
+const attachment = await db.agentSecret.findFirst({
+  where: { agentId, boundName: name },
+  include: { secret: true },
+});
 ```
 
 - [ ] **Step 4: Run tests**
@@ -275,11 +282,13 @@ Expected: PASS.
 `detachSecret` dropped its `ownerId` parameter, so its one production caller — the `detach_secret` MCP handler in `src/mcp/tools/secrets.ts` (~line 128) — must match or `npm run build` (tsc) fails. Change:
 
 ```ts
-      await detachSecret(args.agentId, args.name, ctx.principal.id, ctx.db);
+await detachSecret(args.agentId, args.name, ctx.principal.id, ctx.db);
 ```
+
 to:
+
 ```ts
-      await detachSecret(args.agentId, args.name, ctx.db); // `name` is the point-of-use (bound) name
+await detachSecret(args.agentId, args.name, ctx.db); // `name` is the point-of-use (bound) name
 ```
 
 (The `attach_secret` caller is unaffected — `attachSecret`'s new `boundName` is a trailing optional, so the existing 4-arg call still compiles. Adding the optional `alias` input to `attach_secret` is Task 4.)
@@ -299,9 +308,11 @@ git commit -m "feat(secrets): resolve attachments by boundName, not secret name"
 ### Task 3: Real-DB resolution regression (gated on `DATABASE_URL`)
 
 **Files:**
+
 - Modify: `src/core/secrets.database.test.ts` (add one gated test that exercises the `$queryRaw` production path)
 
 **Interfaces:**
+
 - Consumes: `attachSecret(…, boundName)` and boundName-based `get()` from Task 2.
 
 - [ ] **Step 1: Add the gated regression test**
@@ -309,28 +320,28 @@ git commit -m "feat(secrets): resolve attachments by boundName, not secret name"
 Append inside the `describe.skipIf(!process.env.DATABASE_URL)(...)` block (use fresh random ids and clean them up in `afterAll`):
 
 ```ts
-  it("two agents resolve the same boundName to distinct secrets via SQL", async () => {
-    const a = "bn-a-" + randomUUID();
-    const b = "bn-b-" + randomUUID();
-    const sa = "bn-sa-" + randomUUID();
-    const sb = "bn-sb-" + randomUUID();
-    const cipher = { keyId: () => "test", encrypt: async (s: string) => s, decrypt: async (s: string) => s };
-    try {
-      await db.agent.create({ data: { id: a, name: a, systemPrompt: "t", model: "t", budgetUsd: 1 } });
-      await db.agent.create({ data: { id: b, name: b, systemPrompt: "t", model: "t", budgetUsd: 1 } });
-      await db.secret.create({ data: { id: sa, name: sa, ciphertext: "token-a", keyId: "test" } });
-      await db.secret.create({ data: { id: sb, name: sb, ciphertext: "token-b", keyId: "test" } });
-      await db.agentSecret.create({ data: { agentId: a, secretId: sa, boundName: "bitbucket" } });
-      await db.agentSecret.create({ data: { agentId: b, secretId: sb, boundName: "bitbucket" } });
+it("two agents resolve the same boundName to distinct secrets via SQL", async () => {
+  const a = "bn-a-" + randomUUID();
+  const b = "bn-b-" + randomUUID();
+  const sa = "bn-sa-" + randomUUID();
+  const sb = "bn-sb-" + randomUUID();
+  const cipher = { keyId: () => "test", encrypt: async (s: string) => s, decrypt: async (s: string) => s };
+  try {
+    await db.agent.create({ data: { id: a, name: a, systemPrompt: "t", model: "t", budgetUsd: 1 } });
+    await db.agent.create({ data: { id: b, name: b, systemPrompt: "t", model: "t", budgetUsd: 1 } });
+    await db.secret.create({ data: { id: sa, name: sa, ciphertext: "token-a", keyId: "test" } });
+    await db.secret.create({ data: { id: sb, name: sb, ciphertext: "token-b", keyId: "test" } });
+    await db.agentSecret.create({ data: { agentId: a, secretId: sa, boundName: "bitbucket" } });
+    await db.agentSecret.create({ data: { agentId: b, secretId: sb, boundName: "bitbucket" } });
 
-      expect(await buildSecretsAccessor(a, cipher, db).get("bitbucket")).toBe("token-a");
-      expect(await buildSecretsAccessor(b, cipher, db).get("bitbucket")).toBe("token-b");
-    } finally {
-      await db.agentSecret.deleteMany({ where: { agentId: { in: [a, b] } } });
-      await db.secret.deleteMany({ where: { id: { in: [sa, sb] } } });
-      await db.agent.deleteMany({ where: { id: { in: [a, b] } } });
-    }
-  });
+    expect(await buildSecretsAccessor(a, cipher, db).get("bitbucket")).toBe("token-a");
+    expect(await buildSecretsAccessor(b, cipher, db).get("bitbucket")).toBe("token-b");
+  } finally {
+    await db.agentSecret.deleteMany({ where: { agentId: { in: [a, b] } } });
+    await db.secret.deleteMany({ where: { id: { in: [sa, sb] } } });
+    await db.agent.deleteMany({ where: { id: { in: [a, b] } } });
+  }
+});
 ```
 
 - [ ] **Step 2: Run against the DB**
@@ -350,38 +361,40 @@ git commit -m "test(secrets): real-DB regression for boundName resolution"
 ### Task 4: MCP surface — optional alias on `attach_secret`
 
 **Files:**
+
 - Modify: `src/mcp/tools/secrets.ts` (the `attach_secret` handler only, ~lines 99–116)
 
 > **Note (RULING P1):** the `detach_secret` handler was already updated to the new `detachSecret` signature in Task 2, Step 4a. This task touches only `attach_secret`, adding the optional `alias`.
 
 **Interfaces:**
+
 - Consumes: `attachSecret(…, boundName?)` from Task 2.
 
 - [ ] **Step 1: Add optional `alias` to `attach_secret` and pass it as `boundName`**
 
 ```ts
-  mcp.registerTool({
-    name: "attach_secret",
-    scope: "secrets:write",
-    inputSchema: {
-      type: "object",
-      properties: {
-        agentId: { type: "string" },
-        name: { type: "string" },
-        alias: { type: "string" }, // optional point-of-use name; defaults to `name`
-      },
-      required: ["agentId", "name"],
+mcp.registerTool({
+  name: "attach_secret",
+  scope: "secrets:write",
+  inputSchema: {
+    type: "object",
+    properties: {
+      agentId: { type: "string" },
+      name: { type: "string" },
+      alias: { type: "string" }, // optional point-of-use name; defaults to `name`
     },
-    handler: async (args: { agentId: string; name: string; alias?: string }, ctx) => {
-      await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
-      try {
-        await attachSecret(args.agentId, args.name, ctx.principal.id, ctx.db, args.alias ?? args.name);
-      } catch (err) {
-        throw new McpError(404, err instanceof Error ? err.message : String(err));
-      }
-      return textResult({ attached: true });
-    },
-  });
+    required: ["agentId", "name"],
+  },
+  handler: async (args: { agentId: string; name: string; alias?: string }, ctx) => {
+    await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+    try {
+      await attachSecret(args.agentId, args.name, ctx.principal.id, ctx.db, args.alias ?? args.name);
+    } catch (err) {
+      throw new McpError(404, err instanceof Error ? err.message : String(err));
+    }
+    return textResult({ attached: true });
+  },
+});
 ```
 
 - [ ] **Step 2: Build + run any MCP secret tests**
@@ -401,11 +414,13 @@ git commit -m "feat(mcp): attach_secret optional alias (point-of-use name)"
 ### Task 5: Importer — one row per base secret, attach with alias as `boundName`
 
 **Files:**
+
 - Modify: `src/import/create.ts` (Step 4 secrets create, ~lines 166–239; Step 5 attach, ~lines 241–259)
 - Modify: `src/import/create.test.ts` (update `fakeDb` `agentSecret`; rewrite the envelope test's assertions)
 - Modify: `src/import/create.database.test.ts` (add a gated F2 regression)
 
 **Interfaces:**
+
 - Consumes: `attachSecret(…, boundName)`, `createSecret` (unchanged).
 - Produces: `ImportResult.secretsCreated` now equals the number of distinct base secrets created (one per bundle secret), not the number of createSecret calls.
 
@@ -414,67 +429,71 @@ git commit -m "feat(mcp): attach_secret optional alias (point-of-use name)"
 Replace the whole `secretMode === "envelope"` create block (the `secretAliasMap` fan-out) with:
 
 ```ts
-  // Step 4: Secrets — one row per base secret, under its canonical name.
-  if (secretMode === "envelope") {
-    if (!hasOwner) {
-      for (const s of bundle.readSecrets()) {
-        warnings.push(`secret ${s.name}: skipped — secrets require an owner (public import)`);
-      }
-    } else if (!transferPrivateKey) {
-      warnings.push("envelope mode requires transferPrivateKey, skipping secrets");
-    } else {
-      const owner = ownerId; // hasOwner guarantees non-null
-      for (const s of bundle.readSecrets()) {
-        if (!s.ciphertext) {
-          warnings.push(`secret ${s.name}: no ciphertext in envelope mode, skipping`);
-          continue;
-        }
-        let plaintext: string;
-        try {
-          // AAD is ALWAYS the base secret name (s.name), never an alias.
-          plaintext = decryptTransferEnvelope(s.ciphertext, s.name, transferPrivateKey);
-        } catch (err) {
-          warnings.push(`secret ${s.name}: failed to decrypt (${err instanceof Error ? err.message : String(err)})`);
-          continue;
-        }
-        try {
-          await createSecret(s.name, plaintext, owner, cipher, db);
-          secretsCreated++; // one per distinct base secret (fixes F1 over-count)
-        } catch (err) {
-          warnings.push(`secret ${s.name}: failed to create (${err instanceof Error ? err.message : String(err)})`);
-        }
-      }
-    }
-  } else {
+// Step 4: Secrets — one row per base secret, under its canonical name.
+if (secretMode === "envelope") {
+  if (!hasOwner) {
     for (const s of bundle.readSecrets()) {
-      pendingSecretReentry.push(s.name);
+      warnings.push(`secret ${s.name}: skipped — secrets require an owner (public import)`);
+    }
+  } else if (!transferPrivateKey) {
+    warnings.push("envelope mode requires transferPrivateKey, skipping secrets");
+  } else {
+    const owner = ownerId; // hasOwner guarantees non-null
+    for (const s of bundle.readSecrets()) {
+      if (!s.ciphertext) {
+        warnings.push(`secret ${s.name}: no ciphertext in envelope mode, skipping`);
+        continue;
+      }
+      let plaintext: string;
+      try {
+        // AAD is ALWAYS the base secret name (s.name), never an alias.
+        plaintext = decryptTransferEnvelope(s.ciphertext, s.name, transferPrivateKey);
+      } catch (err) {
+        warnings.push(`secret ${s.name}: failed to decrypt (${err instanceof Error ? err.message : String(err)})`);
+        continue;
+      }
+      try {
+        await createSecret(s.name, plaintext, owner, cipher, db);
+        secretsCreated++; // one per distinct base secret (fixes F1 over-count)
+      } catch (err) {
+        warnings.push(`secret ${s.name}: failed to create (${err instanceof Error ? err.message : String(err)})`);
+      }
     }
   }
+} else {
+  for (const s of bundle.readSecrets()) {
+    pendingSecretReentry.push(s.name);
+  }
+}
 ```
 
 - [ ] **Step 2: Rewrite Step 5 to attach under the alias as `boundName`**
 
 ```ts
-  // Step 5: Attach secrets (envelope mode only)
-  if (secretMode === "envelope" && hasOwner) {
-    const owner = ownerId;
-    for (const as of bundle.readAgentSecrets()) {
-      const agentId = agentIdMap.get(as.agentName);
-      if (!agentId) continue;
-      const boundName = as.alias ?? as.secretName;
-      try {
-        await attachSecret(agentId, as.secretName, owner, db, boundName);
-      } catch (err) {
-        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-          // Either an idempotent re-run, or two secrets bound to the same
-          // point-of-use name for one agent (a bundle inconsistency). Surface it.
-          warnings.push(`agent-secret ${as.agentName}: "${boundName}" already bound — skipped (re-run or duplicate binding)`);
-          continue;
-        }
-        warnings.push(`agent-secret ${as.agentName}/${as.secretName}: failed to attach (${err instanceof Error ? err.message : String(err)})`);
+// Step 5: Attach secrets (envelope mode only)
+if (secretMode === "envelope" && hasOwner) {
+  const owner = ownerId;
+  for (const as of bundle.readAgentSecrets()) {
+    const agentId = agentIdMap.get(as.agentName);
+    if (!agentId) continue;
+    const boundName = as.alias ?? as.secretName;
+    try {
+      await attachSecret(agentId, as.secretName, owner, db, boundName);
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        // Either an idempotent re-run, or two secrets bound to the same
+        // point-of-use name for one agent (a bundle inconsistency). Surface it.
+        warnings.push(
+          `agent-secret ${as.agentName}: "${boundName}" already bound — skipped (re-run or duplicate binding)`,
+        );
+        continue;
       }
+      warnings.push(
+        `agent-secret ${as.agentName}/${as.secretName}: failed to attach (${err instanceof Error ? err.message : String(err)})`,
+      );
     }
   }
+}
 ```
 
 - [ ] **Step 3: Update the fake `agentSecret` double in `create.test.ts`**
@@ -486,34 +505,42 @@ The double's `create` already captures its argument into `calls.agentSecret`; no
 Replace the body of the `"envelope mode: decrypts …"` test (lines ~70–100) so it asserts the new behavior — one base row, attachment carries the alias as `boundName`:
 
 ```ts
-  it("envelope mode: decrypts with AAD=secretName, creates one base row, attaches under the alias", async () => {
-    const { privateKey, publicKey } = generateKeyPairSync("x25519");
-    const db = fakeDb();
+it("envelope mode: decrypts with AAD=secretName, creates one base row, attaches under the alias", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("x25519");
+  const db = fakeDb();
 
-    const ciphertext = seal("my-secret-value", "API_KEY", publicKey);
+  const ciphertext = seal("my-secret-value", "API_KEY", publicKey);
 
-    const res = await createFromBundle(
-      bundleWith({
-        agents: [{ name: "test-agent" }],
-        secrets: [{ name: "API_KEY", description: null, ownerEmail: null, ciphertext }],
-        agentSecrets: [{ agentName: "test-agent", secretName: "API_KEY", alias: "AK" }],
-      }),
-      emptyRecon,
-      { db, cipher, ownerId: "p1", defaultBudget: "5.00", secretMode: "envelope", transferPrivateKey: privateKey, allowOpenFetch: false } as any,
-    );
+  const res = await createFromBundle(
+    bundleWith({
+      agents: [{ name: "test-agent" }],
+      secrets: [{ name: "API_KEY", description: null, ownerEmail: null, ciphertext }],
+      agentSecrets: [{ agentName: "test-agent", secretName: "API_KEY", alias: "AK" }],
+    }),
+    emptyRecon,
+    {
+      db,
+      cipher,
+      ownerId: "p1",
+      defaultBudget: "5.00",
+      secretMode: "envelope",
+      transferPrivateKey: privateKey,
+      allowOpenFetch: false,
+    } as any,
+  );
 
-    // One base-name secret row, counted once.
-    expect(res.secretsCreated).toBe(1);
-    expect(db.calls.secret).toHaveLength(1);
-    expect((db.calls.secret[0] as any).where.ownerId_name.name).toBe("API_KEY");
+  // One base-name secret row, counted once.
+  expect(res.secretsCreated).toBe(1);
+  expect(db.calls.secret).toHaveLength(1);
+  expect((db.calls.secret[0] as any).where.ownerId_name.name).toBe("API_KEY");
 
-    // Attachment carries the alias as the point-of-use boundName.
-    expect(db.calls.agentSecret).toHaveLength(1);
-    expect((db.calls.agentSecret[0] as any).data.boundName).toBe("AK");
+  // Attachment carries the alias as the point-of-use boundName.
+  expect(db.calls.agentSecret).toHaveLength(1);
+  expect((db.calls.agentSecret[0] as any).data.boundName).toBe("AK");
 
-    // No "created under both base name and alias" warning anymore.
-    expect(res.warnings.some((w) => w.includes("created under both base name and alias"))).toBe(false);
-  });
+  // No "created under both base name and alias" warning anymore.
+  expect(res.warnings.some((w) => w.includes("created under both base name and alias"))).toBe(false);
+});
 ```
 
 Run: `npx vitest run src/import/create.test.ts`

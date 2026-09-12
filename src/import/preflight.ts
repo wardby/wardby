@@ -67,14 +67,20 @@ export function preflight(input: PreflightInput): Reconciliation {
     // Controller Ruling B: disabled flag reflects MODEL ROUTABILITY ONLY
     return routable
       ? { name: a.name, disabled: false }
-      : { name: a.name, disabled: true, disabledReason: `model ${a.model} not routable — no registered provider serves it` };
+      : {
+          name: a.name,
+          disabled: true,
+          disabledReason: `model ${a.model} not routable — no registered provider serves it`,
+        };
   });
 
   const tools = bundle.readTools().map((t) => {
     const c = resolveCollision("tool", t.name, input.existingToolNames);
     if (c.skipped === "collision") return { name: t.name, skipped: "collision" };
     const scan = scanToolCode(t.code, input.supportedGlobals);
-    return scan.ok ? { name: t.name } : { name: t.name, rejected: `uses unsupported host API: ${scan.rejectedApis.join(", ")}` };
+    return scan.ok
+      ? { name: t.name }
+      : { name: t.name, rejected: `uses unsupported host API: ${scan.rejectedApis.join(", ")}` };
   });
 
   const skippedCapabilities = bundle.manifest.capabilities.filter((c) => !input.capabilitiesSupported.has(c));

@@ -2,12 +2,24 @@ import { readFileSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import {
-  ManifestSchema, NeutralAgentSchema, NeutralToolSchema, NeutralAgentToolSchema,
-  NeutralSecretSchema, NeutralAgentSecretSchema, NeutralSingleDatastoreSchema,
-  NeutralWebhookSchema, NeutralBudgetSchema,
-  type Manifest, type NeutralAgent, type NeutralTool, type NeutralAgentTool,
-  type NeutralSecret, type NeutralAgentSecret, type NeutralSingleDatastore,
-  type NeutralWebhook, type NeutralBudget,
+  ManifestSchema,
+  NeutralAgentSchema,
+  NeutralToolSchema,
+  NeutralAgentToolSchema,
+  NeutralSecretSchema,
+  NeutralAgentSecretSchema,
+  NeutralSingleDatastoreSchema,
+  NeutralWebhookSchema,
+  NeutralBudgetSchema,
+  type Manifest,
+  type NeutralAgent,
+  type NeutralTool,
+  type NeutralAgentTool,
+  type NeutralSecret,
+  type NeutralAgentSecret,
+  type NeutralSingleDatastore,
+  type NeutralWebhook,
+  type NeutralBudget,
 } from "./neutral-schema.js";
 
 export class BundleError extends Error {}
@@ -16,8 +28,11 @@ function readArray<S extends z.ZodTypeAny>(dir: string, rel: string, schema: S):
   const p = join(dir, rel);
   if (!existsSync(p)) return [];
   let raw: unknown;
-  try { raw = JSON.parse(readFileSync(p, "utf8")); }
-  catch (e) { throw new BundleError(`${rel}: invalid JSON (${(e as Error).message})`); }
+  try {
+    raw = JSON.parse(readFileSync(p, "utf8"));
+  } catch (e) {
+    throw new BundleError(`${rel}: invalid JSON (${(e as Error).message})`);
+  }
   const parsed = z.array(schema).safeParse(raw);
   if (!parsed.success) throw new BundleError(`${rel}: ${parsed.error.issues[0]?.message ?? "schema mismatch"}`);
   return parsed.data;
@@ -37,14 +52,21 @@ export interface Bundle {
 
 export function openBundle(dir: string): Bundle {
   let st;
-  try { st = statSync(dir); } catch { throw new BundleError(`no such bundle directory: ${dir}`); }
+  try {
+    st = statSync(dir);
+  } catch {
+    throw new BundleError(`no such bundle directory: ${dir}`);
+  }
   if (!st.isDirectory()) throw new BundleError(`bundle path is not a directory (extract the .zip first): ${dir}`);
 
   const manifestPath = join(dir, "manifest.json");
   if (!existsSync(manifestPath)) throw new BundleError("manifest.json not found in bundle");
   let raw: unknown;
-  try { raw = JSON.parse(readFileSync(manifestPath, "utf8")); }
-  catch (e) { throw new BundleError(`manifest.json: invalid JSON (${(e as Error).message})`); }
+  try {
+    raw = JSON.parse(readFileSync(manifestPath, "utf8"));
+  } catch (e) {
+    throw new BundleError(`manifest.json: invalid JSON (${(e as Error).message})`);
+  }
   const parsed = ManifestSchema.safeParse(raw);
   if (!parsed.success) throw new BundleError(`manifest.json: ${parsed.error.issues[0]?.message ?? "invalid"}`);
   const manifest = parsed.data;

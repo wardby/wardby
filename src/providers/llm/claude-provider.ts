@@ -52,9 +52,10 @@ export class ClaudeLlmProvider implements LlmProvider {
 
   async *stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<LlmStreamEvent> {
     const claudeReq = withCacheBreakpoints(toClaudeRequest(req, DEFAULT_MAX_TOKENS));
-    const raw = this.client.messages.stream({ model: req.model, ...claudeReq }, { signal }) as AsyncIterable<
-      ClaudeStreamEvent
-    >;
+    const raw = this.client.messages.stream(
+      { model: req.model, ...claudeReq },
+      { signal },
+    ) as AsyncIterable<ClaudeStreamEvent>;
     yield* mapClaudeStream(raw, (usage) => this.priceUsd(req.model, usage));
   }
 

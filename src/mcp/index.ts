@@ -78,7 +78,9 @@ export function buildMcpProviders(): McpProviderComposition {
 
   const llmResult = resolveLlmRegistrations();
   if (llmResult.kind !== "registrations") {
-    throw new Error("No LLM credentials present. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, and/or BEDROCK_REGION (or AWS_REGION).");
+    throw new Error(
+      "No LLM credentials present. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, and/or BEDROCK_REGION (or AWS_REGION).",
+    );
   }
   const llm = new RoutingLlmProvider(llmResult.registrations);
   const engine = new NativeEngine();

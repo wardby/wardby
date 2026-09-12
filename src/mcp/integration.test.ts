@@ -349,9 +349,7 @@ function buildFakeDb() {
       },
       deleteMany: async () => ({ count: 0 }),
       findFirst: async ({ where }: { where: { agentId: string; boundName: string } }) => {
-        const match = agentSecrets.find(
-          (a) => a.agentId === where.agentId && a.boundName === where.boundName,
-        );
+        const match = agentSecrets.find((a) => a.agentId === where.agentId && a.boundName === where.boundName);
         return match ? { ...match, secret: secrets.get(match.secretId) } : null;
       },
     },

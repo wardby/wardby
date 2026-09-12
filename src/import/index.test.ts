@@ -35,8 +35,10 @@ let dir: string;
 const manifest = {
   bundleVersion: 1,
   source: { product: "agent-cron", exporterVersion: "1.0.0", exportedAt: "2026-09-08T00:00:00.000Z" },
-  secretMode: "references", transferKeyId: null,
-  capabilities: [], counts: { agents: 1 },
+  secretMode: "references",
+  transferKeyId: null,
+  capabilities: [],
+  counts: { agents: 1 },
 };
 function write(rel: string, obj: unknown) {
   const p = join(dir, rel);
@@ -47,10 +49,18 @@ function write(rel: string, obj: unknown) {
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "import-"));
   write("manifest.json", manifest);
-  write("config/agents.json", [{
-    name: "test-agent", systemPrompt: "sp", provider: "openai", model: "gpt-4o",
-    schedule: "", scheduleEnabled: true, maxTurns: 8, budgetUsd: "5.00",
-  }]);
+  write("config/agents.json", [
+    {
+      name: "test-agent",
+      systemPrompt: "sp",
+      provider: "openai",
+      model: "gpt-4o",
+      schedule: "",
+      scheduleEnabled: true,
+      maxTurns: 8,
+      budgetUsd: "5.00",
+    },
+  ]);
   write("config/tools.json", []);
   write("config/agent-tools.json", []);
   write("config/secrets.json", []);
@@ -137,7 +147,7 @@ describe("runImport", () => {
       expect.objectContaining({
         secretMode: "references",
         transferPrivateKey: undefined,
-      })
+      }),
     );
   });
 
@@ -173,7 +183,7 @@ describe("runImport", () => {
         allowOpenFetch: false,
         db,
         env: {},
-      })
+      }),
     ).rejects.toThrow(/transfer-key/i);
   });
 });
