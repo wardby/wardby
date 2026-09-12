@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { InMemoryCodingRunObserver } from "../../coding/observability.js";
@@ -235,7 +236,7 @@ async function harness(
   observer = new InMemoryCodingRunObserver(),
   claude?: { workerImage: string; toolImage: string },
 ) {
-  const root = await mkdtemp("/private/tmp/reevo-container-executor-");
+  const root = await mkdtemp(join(tmpdir(), "reevo-container-executor-"));
   roots.push(root);
   const events: string[] = [];
   const store = new FakeStore(snapshot(overrides));
@@ -473,7 +474,7 @@ describe("resolveCodingWorkerImage", () => {
 
   it("resolves an additional toolchain/version from additionalWorkerImages", async () => {
     const pythonImage = `registry.example/worker-python@sha256:${"b".repeat(64)}`;
-    const root = await mkdtemp("/private/tmp/reevo-container-executor-");
+    const root = await mkdtemp(join(tmpdir(), "reevo-container-executor-"));
     roots.push(root);
     const direct = new ContainerExecutor({
       store: new FakeStore(snapshot({})),
@@ -537,7 +538,7 @@ describe("resolveCodingWorkerImage", () => {
 
   it("throws on a known toolchain with an unknown version", async () => {
     const pythonImage = `registry.example/worker-python@sha256:${"b".repeat(64)}`;
-    const root = await mkdtemp("/private/tmp/reevo-container-executor-");
+    const root = await mkdtemp(join(tmpdir(), "reevo-container-executor-"));
     roots.push(root);
     const direct = new ContainerExecutor({
       store: new FakeStore(snapshot({})),
@@ -590,7 +591,7 @@ describe("resolveCodingWorkerImage", () => {
   });
 
   it("constructor throws if any additionalWorkerImages entry is not an immutable digest", async () => {
-    const root = await mkdtemp("/private/tmp/reevo-container-executor-");
+    const root = await mkdtemp(join(tmpdir(), "reevo-container-executor-"));
     roots.push(root);
     expect(
       () =>

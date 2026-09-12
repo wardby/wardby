@@ -13,12 +13,19 @@ proxy are trusted. Containers are defense in depth rather than a VM boundary;
 production should run the Docker host on a dedicated worker node or VM with no
 production credentials beyond those required by the proxy.
 
-The worker has one network attachment: a unique per-run internal bridge using
+The Codex worker has one network attachment: a unique per-run internal bridge using
 Docker's isolated gateway mode. It has no default external route, published
 port, host mapping, custom DNS server, or direct connection to the control
 plane. A dedicated proxy container is attached to both that internal network
 as `reevo-proxy` and an external network. No other service may join the run
 network.
+
+Claude Code uses a credential-separated composite job. Its agent container is
+attached only to the proxy bridge and does not mount the repository. Its tool
+container mounts the workspace, has `--network none`, and receives no model
+capability or provider credential. A credential-free relay connects the two
+over a private Unix socket. Both containers, the socket volume, keeper,
+network, and artifacts are attested and cleaned as one persisted handle.
 
 The proxy accepts a run-scoped capability, resolves only exact configured HTTPS
 hostnames, rejects IP literals and every private, loopback, link-local,
@@ -112,14 +119,17 @@ weaker profile.
 
 Set `JOB_LAUNCHER=docker`, `CODING_WORKER_IMAGE` to an immutable repository
 digest or Docker local image ID, and `CODING_PROXY_CONTAINER` to the dedicated proxy container name.
+For Claude Code, also set `CODING_CLAUDE_WORKER_IMAGE` and
+`CODING_CLAUDE_TOOL_RUNNER_IMAGE` to their immutable IDs.
 `VCS_WORK_ROOT`, `CODING_JOB_STATE_ROOT`, and `CODING_ARTIFACT_ROOT` must be
 trusted host-only directories. Resource limits are controlled by
 `CODING_CPUS`, `CODING_MEMORY_MB`, `CODING_PIDS`, and `CODING_DISK_MB`.
 
 The GitHub adapter requires `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`; the
 App installation is checked while preparing the workspace, before the
-billable proxy session is created. The upstream key remains behind
-`CODING_OPENAI_CREDENTIAL_REF` and is never written to the database, input
+billable proxy session is created. Upstream keys remain behind
+`CODING_OPENAI_CREDENTIAL_REF` and `CODING_ANTHROPIC_CREDENTIAL_REF` and are
+never written to the database, input
 artifact, Docker arguments, or Git workspace.
 
 The embedded Codex SDK runs with its inner sandbox disabled because the
@@ -175,6 +185,7 @@ Build the image and run the destructive, self-cleaning acceptance suite:
 ```sh
 docker build -f src/coding-worker/Dockerfile -t reevo-coding-worker:task8 .
 npm run test:docker-isolation
+npm run verify:claude-code
 ```
 
 Set `REEVO_WORKER_IMAGE` to test another local tag. The runner resolves that

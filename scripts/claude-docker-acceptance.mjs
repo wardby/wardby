@@ -9,9 +9,9 @@ function imageId(name, label) {
   }
 }
 
-const agent = imageId(process.env.REEVO_CLAUDE_WORKER_IMAGE ?? "reevo-claude-coding-worker:task5", "Claude worker");
+const agent = imageId(process.env.REEVO_CLAUDE_WORKER_IMAGE ?? "reevo-claude-coding-worker:phase5", "Claude worker");
 const tool = imageId(
-  process.env.REEVO_CLAUDE_TOOL_RUNNER_IMAGE ?? "reevo-claude-tool-runner:task5",
+  process.env.REEVO_CLAUDE_TOOL_RUNNER_IMAGE ?? "reevo-claude-tool-runner:phase5",
   "Claude tool runner",
 );
 const vitest = new URL("../node_modules/vitest/vitest.mjs", import.meta.url);

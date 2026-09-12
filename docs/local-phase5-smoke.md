@@ -1,14 +1,17 @@
 # Local Phase 5 smoke setup
 
 This setup starts a dedicated, trusted coding proxy while keeping the coding
-worker untrusted and network-isolated. The proxy has the OpenAI credential and
-database access. The worker receives only a one-run capability and can reach
-only the proxy on its internal Docker network.
+worker untrusted and network-isolated. The proxy has the selected provider
+credential and database access. A worker receives only a one-run capability
+and can reach only the proxy on its internal Docker network. Claude Code uses
+a second, networkless tool-runner container for repository access.
 
 ## Prerequisites
 
 - Docker Desktop is running.
-- `.env.local` contains `DATABASE_URL`, `OPENAI_API_KEY`, and `SECRET_APP_KEY`.
+- `.env.local` contains `DATABASE_URL`, `SECRET_APP_KEY`, and the credential
+  for each enabled coding provider: `OPENAI_API_KEY` and/or
+  `ANTHROPIC_API_KEY`.
 - The local database has the current Prisma migrations applied.
 - A GitHub App is installed on only the repository to be exercised. Grant it
   `Contents: Read and write` and `Pull requests: Read and write`; set
@@ -27,21 +30,26 @@ Run these commands from the repository root:
 ```sh
 npm run coding:local:up
 npm run worker:image:local
+npm run claude:images:local
 ```
 
-The second command prints a content-addressed `sha256:...` Docker image ID.
-Use that exact value in `.env.local`; do not substitute the mutable image tag.
-Then add the following values, replacing the image ID and GitHub values:
+The image commands create local tags. Resolve every enabled image with
+`docker image inspect --format '{{.Id}}' <tag>` and put the resulting immutable
+`sha256:...` ID in `.env.local`; do not use the mutable tag at runtime. Add the
+following values, replacing image IDs and GitHub values:
 
 ```dotenv
 # Leave this as local until every value below is set and reviewed.
 JOB_LAUNCHER=local
 CODING_WORKER_IMAGE=sha256:replace-with-worker-image-id
+CODING_CLAUDE_WORKER_IMAGE=sha256:replace-with-claude-worker-image-id
+CODING_CLAUDE_TOOL_RUNNER_IMAGE=sha256:replace-with-claude-tool-runner-image-id
 CODING_PROXY_CONTAINER=reevo-coding-proxy
 VCS_WORK_ROOT=/tmp/reevo-vcs
 CODING_JOB_STATE_ROOT=/tmp/reevo-docker-jobs
 CODING_ARTIFACT_ROOT=/tmp/reevo-coding-artifacts
 CODING_OPENAI_CREDENTIAL_REF=env:OPENAI_API_KEY
+CODING_ANTHROPIC_CREDENTIAL_REF=env:ANTHROPIC_API_KEY
 GITHUB_APP_ID=replace-with-app-id
 GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
 ```
@@ -56,6 +64,15 @@ npm run cli -- coding preflight
 The preflight checks that Docker can inspect the immutable worker image. A real
 run additionally verifies the proxy's isolated-network attachment immediately
 before launching the worker.
+
+Run the complete no-paid-service Claude gate before an opt-in live smoke:
+
+```sh
+npm run verify:claude-code
+```
+
+The live smoke remains manual because it spends provider credit and can create
+a GitHub branch and draft pull request. Keep its budget deliberately small.
 
 After the smoke completes, record the run ID, terminal result, pull-request
 URL, and final cost in the release evidence. Close the fixture PR and delete

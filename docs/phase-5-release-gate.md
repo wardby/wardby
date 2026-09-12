@@ -16,16 +16,17 @@ npm run test:phase5:database
 npm run worker:image:local
 npm run test:docker-isolation
 npm run test:docker-job
+npm run verify:claude-code
 ```
 
 `test:phase5:database` requires a migrated PostgreSQL test database through
 `DATABASE_URL`; it deliberately stays separate so the fast local gate does not
 silently pass by skipping persistence coverage.
 
-The CI `Security checks` workflow additionally builds the worker image, creates
-an SPDX SBOM, scans it with Trivy, performs migration-backed tests, and runs the
-Docker isolation suite. A release uses that workflow's artifacts for the exact
-commit being released.
+The CI `Security checks` workflow additionally builds the worker images, creates
+SPDX SBOMs, scans them with Trivy, performs migration-backed tests, and runs the
+Codex isolation and Claude composite-worker acceptance suites. A release uses
+that workflow's artifacts for the exact commit being released.
 
 The opt-in live smoke is documented in [local-phase5-smoke.md](local-phase5-smoke.md).
 It must use a dedicated GitHub App installation, a dedicated fixture repository,
@@ -136,6 +137,25 @@ confirmed absent at runtime, consistent with the existing curl/wget/ssh/
 docker/sudo/gcc/make hardening (no network-fetch-and-execute vector left
 inside the sandbox).
 
+### Claude Code live confirmation (2026-09-12)
+
+- **Run ID:** `cmtyjdclo0001sqreyrmd4jjt`
+- **Agent:** `claude-phase5-live-smoke-1789224280679` (`claude-sonnet-5`,
+  provider `claude-code`, budget $0.25)
+- **Task:** create exactly one file, `claude-phase5-smoke.md`, containing one
+  specified line and a trailing newline.
+- **Outcome:** draft [PR #16](https://github.com/chfields/reevo-run/pull/16),
+  commit `d552b2c70cc4317a31607c29b3f281f28e82cffe`.
+- **Cost:** $0.008709 (2,605 input / 444 output tokens).
+- **Verification:** the pull-request diff contained exactly the requested file,
+  line, and trailing newline.
+- **Cleanup:** PR #16 was closed without merging, its generated branch was
+  deleted, and the run's worker resources were removed.
+- **Protocol correction:** PR #17 preserves the exact reviewed Anthropic beta
+  allowlist and header fingerprint, supports the SDK's reviewed tool loop and
+  string-form system prompt, and rejects unsupported requests before resolving
+  the provider credential.
+
 ## Lifecycle Audit And Metrics
 
 The container executor emits metadata-only structured events for `queued`,
@@ -171,12 +191,13 @@ per worker and is collected only as bounded, fixed diagnostic metadata.
 
 ## Supported And Deferred Scope
 
-Phase 5 supports Codex through a trusted OpenAI-compatible budget proxy,
-GitHub App checkout and draft-PR finalization, and the Docker JobLauncher.
-It does not support Claude Code, GitLab or Bitbucket, Fargate, GitHub Actions as
-a launcher, auto-merge, owner-approved workflow-file editing, PR update loops,
-or guaranteed test success. DBOS durable execution is implemented separately in
-Phase 6; it does not resume an in-flight isolated coding job.
+Phase 5 supports Codex and Claude Code through protocol-specific routes on the
+trusted budget proxy, GitHub App checkout and draft-PR finalization, and the
+Docker JobLauncher. It does not support GitLab or Bitbucket, Bedrock or Vertex
+Claude coding credentials, Fargate, GitHub Actions as a launcher, auto-merge,
+owner-approved workflow-file editing, PR update loops, or guaranteed test
+success. DBOS durable execution is implemented separately in Phase 6; it does
+not resume an in-flight isolated coding job.
 
 ## Operator Review
 

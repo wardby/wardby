@@ -550,6 +550,25 @@ describe("CodingProxy Anthropic Messages", () => {
     ["non-empty tools", { tools: [{ name: "shell" }] }, "tools_not_allowed"],
     ["server-side MCP", { mcp_servers: [] }, "unsupported_anthropic_feature"],
     [
+      "oversized command input",
+      {
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "toolu_oversized",
+                name: "mcp__reevo_tools__run_command",
+                input: { command: "x".repeat(16 * 1024 + 1) },
+              },
+            ],
+          },
+        ],
+      },
+      "unsupported_anthropic_feature",
+    ],
+    [
       "unsafe cache policy",
       { system: [{ type: "text", text: "x", cache_control: { type: "forever" } }] },
       "unsupported_anthropic_feature",

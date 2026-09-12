@@ -15,6 +15,7 @@ import { createWebhook } from "../core/webhooks.js";
 import { deriveJsonSchema } from "../sandbox/zod-params.js";
 import { ToolCapabilitiesPatchSchema, FETCH_WILDCARD } from "../sandbox/tool-capabilities.js";
 import { PostgresDatastore } from "../providers/datastore/postgres.js";
+import type { DatastoreValue } from "../providers/datastore/types.js";
 import { decryptTransferEnvelope } from "../providers/secrets/transfer-envelope.js";
 import { mapBudget } from "./budgets.js";
 
@@ -44,7 +45,7 @@ export async function createFromBundle(
   recon: Reconciliation,
   opts: CreateOptions,
 ): Promise<ImportResult> {
-  const { db, cipher, ownerId, defaultBudget, secretMode, transferPrivateKey, allowOpenFetch } = opts;
+  const { db, cipher, ownerId, secretMode, transferPrivateKey, allowOpenFetch } = opts;
   const warnings: string[] = [];
   const webhookSecrets: { agentName: string; secret: string }[] = [];
   const pendingSecretReentry: string[] = [];
@@ -213,10 +214,14 @@ export async function createFromBundle(
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
           // Either an idempotent re-run, or two secrets bound to the same
           // point-of-use name for one agent (a bundle inconsistency). Surface it.
-          warnings.push(`agent-secret ${as.agentName}: "${boundName}" already bound — skipped (re-run or duplicate binding)`);
+          warnings.push(
+            `agent-secret ${as.agentName}: "${boundName}" already bound — skipped (re-run or duplicate binding)`,
+          );
           continue;
         }
-        warnings.push(`agent-secret ${as.agentName}/${as.secretName}: failed to attach (${err instanceof Error ? err.message : String(err)})`);
+        warnings.push(
+          `agent-secret ${as.agentName}/${as.secretName}: failed to attach (${err instanceof Error ? err.message : String(err)})`,
+        );
       }
     }
   }
@@ -229,10 +234,12 @@ export async function createFromBundle(
 
     for (const entry of d.entries) {
       try {
-        await ds.set(agentId, entry.key, entry.value as any, { pii: entry.pii });
+        await ds.set(agentId, entry.key, entry.value as DatastoreValue, { pii: entry.pii });
         datastoreEntries++;
       } catch (err) {
-        warnings.push(`datastore ${d.agentName}/${entry.key}: failed to set (${err instanceof Error ? err.message : String(err)})`);
+        warnings.push(
+          `datastore ${d.agentName}/${entry.key}: failed to set (${err instanceof Error ? err.message : String(err)})`,
+        );
       }
     }
   }
@@ -323,11 +330,15 @@ export async function createFromBundle(
             });
             agentBudgetAssignments.set(agentName, group.name);
           } catch (err) {
-            warnings.push(`agent ${agentName}: failed to attach to budget group "${group.name}" (${err instanceof Error ? err.message : String(err)})`);
+            warnings.push(
+              `agent ${agentName}: failed to attach to budget group "${group.name}" (${err instanceof Error ? err.message : String(err)})`,
+            );
           }
         }
       } catch (err) {
-        warnings.push(`budget group ${group.name}: failed to create (${err instanceof Error ? err.message : String(err)})`);
+        warnings.push(
+          `budget group ${group.name}: failed to create (${err instanceof Error ? err.message : String(err)})`,
+        );
       }
     }
   }

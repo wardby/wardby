@@ -5,22 +5,74 @@ import type { Bundle } from "./bundle.js";
 function fakeBundle(over: Partial<Record<string, unknown[]>> = {}): Bundle {
   return {
     manifest: { capabilities: ["subagents", "memory", "budgets"] } as any,
-    readAgents: () => (over.agents as any) ?? [
-      { name: "ok", model: "gpt-4o", systemPrompt: "s", scheduleEnabled: true, maxTurns: 5, budgetUsd: "5", schedule: null, timezone: "UTC", provider: "openai", kind: "native", memoryEnabled: false, unmodeled: {} },
-      { name: "claude", model: "us.anthropic.x", systemPrompt: "s", scheduleEnabled: true, maxTurns: 5, budgetUsd: "5", schedule: null, timezone: "UTC", provider: "bedrock", kind: "native", memoryEnabled: false, unmodeled: {} },
-    ],
-    readTools: () => (over.tools as any) ?? [
-      { name: "good", paramsZod: "z.object({})", code: "await fetch('x')", description: "", jsonSchema: null, secretSchema: "" },
-      // sendEmail is a throwing placeholder now (Task 5 Part A) — it imports fine.
-      // npmLockUpdate is roadmap-excluded and absent from the sandbox, so it is
-      // the one host API a tool may reference that gets rejected at import.
-      { name: "emailer", paramsZod: "z.object({})", code: "await sendEmail({})", description: "", jsonSchema: null, secretSchema: "" },
-      { name: "locker", paramsZod: "z.object({})", code: "await npmLockUpdate({})", description: "", jsonSchema: null, secretSchema: "" },
-    ],
+    readAgents: () =>
+      (over.agents as any) ?? [
+        {
+          name: "ok",
+          model: "gpt-4o",
+          systemPrompt: "s",
+          scheduleEnabled: true,
+          maxTurns: 5,
+          budgetUsd: "5",
+          schedule: null,
+          timezone: "UTC",
+          provider: "openai",
+          kind: "native",
+          memoryEnabled: false,
+          unmodeled: {},
+        },
+        {
+          name: "claude",
+          model: "us.anthropic.x",
+          systemPrompt: "s",
+          scheduleEnabled: true,
+          maxTurns: 5,
+          budgetUsd: "5",
+          schedule: null,
+          timezone: "UTC",
+          provider: "bedrock",
+          kind: "native",
+          memoryEnabled: false,
+          unmodeled: {},
+        },
+      ],
+    readTools: () =>
+      (over.tools as any) ?? [
+        {
+          name: "good",
+          paramsZod: "z.object({})",
+          code: "await fetch('x')",
+          description: "",
+          jsonSchema: null,
+          secretSchema: "",
+        },
+        // sendEmail is a throwing placeholder now (Task 5 Part A) — it imports fine.
+        // npmLockUpdate is roadmap-excluded and absent from the sandbox, so it is
+        // the one host API a tool may reference that gets rejected at import.
+        {
+          name: "emailer",
+          paramsZod: "z.object({})",
+          code: "await sendEmail({})",
+          description: "",
+          jsonSchema: null,
+          secretSchema: "",
+        },
+        {
+          name: "locker",
+          paramsZod: "z.object({})",
+          code: "await npmLockUpdate({})",
+          description: "",
+          jsonSchema: null,
+          secretSchema: "",
+        },
+      ],
     readAgentTools: () => (over.agentTools as any) ?? [],
-    readSecrets: () => [], readAgentSecrets: () => [], readSingleDatastores: () => [],
-    readWebhooks: () => [], readBudgets: () => (over.budgets as any) ?? [],
-  } as unknown as Bundle;
+    readSecrets: () => [],
+    readAgentSecrets: () => [],
+    readSingleDatastores: () => [],
+    readWebhooks: () => [],
+    readBudgets: () => (over.budgets as any) ?? [],
+  };
 }
 
 const baseInput = {
@@ -31,7 +83,9 @@ const baseInput = {
   existingAgentNames: new Set<string>(),
   existingToolNames: new Set<string>(),
   capabilitiesSupported: new Set(["budgets"]),
-  onConflict: "fail" as const, prefix: "imported-", allowOpenFetch: false,
+  onConflict: "fail" as const,
+  prefix: "imported-",
+  allowOpenFetch: false,
 };
 
 describe("preflight", () => {
@@ -62,7 +116,12 @@ describe("preflight", () => {
   });
 
   it("renames a colliding tool under --on-conflict rename and records the remap", () => {
-    const r = preflight({ bundle: fakeBundle(), ...baseInput, onConflict: "rename", existingToolNames: new Set(["good"]) });
+    const r = preflight({
+      bundle: fakeBundle(),
+      ...baseInput,
+      onConflict: "rename",
+      existingToolNames: new Set(["good"]),
+    });
     expect(r.nameRemap.get("good")).toBe("imported-good");
     expect(r.hasFatalCollision).toBe(false);
   });
@@ -81,9 +140,23 @@ describe("preflight", () => {
   });
 
   it("marks a disabled budget as skipped", () => {
-    const r = preflight({ bundle: fakeBundle({ budgets: [
-      { name: "cap", period: "monthly", alertThreshold: "80", blockThreshold: "100", enabled: false, alertEmails: [], attachedAgentNames: [], ownerEmail: null },
-    ] }), ...baseInput });
+    const r = preflight({
+      bundle: fakeBundle({
+        budgets: [
+          {
+            name: "cap",
+            period: "monthly",
+            alertThreshold: "80",
+            blockThreshold: "100",
+            enabled: false,
+            alertEmails: [],
+            attachedAgentNames: [],
+            ownerEmail: null,
+          },
+        ],
+      }),
+      ...baseInput,
+    });
     expect(r.budgets.find((b) => b.name === "cap")!.skippedReason).toBe("disabled");
   });
 });

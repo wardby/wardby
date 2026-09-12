@@ -1,6 +1,7 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { GitHubRepositoryAccess, PullRequestInput, PullRequestResult } from "./github.js";
 import {
@@ -127,7 +128,7 @@ class ScriptedGitRunner implements GitCommandRunner {
 const roots: string[] = [];
 
 async function harness(overrides: Partial<ConstructorParameters<typeof GitVcsProvider>[0]> = {}) {
-  const rootDir = await mkdtemp("/private/tmp/reevo-vcs-test-");
+  const rootDir = await mkdtemp(join(tmpdir(), "reevo-vcs-test-"));
   roots.push(rootDir);
   const github = new FakeGitHub();
   const git = new ScriptedGitRunner();
@@ -325,12 +326,12 @@ describe("Git process boundary", () => {
   });
 
   it("rejects malformed authentication tokens before spawning Git", async () => {
-    const runner = new NodeGitCommandRunner({ homeDir: "/private/tmp" });
+    const runner = new NodeGitCommandRunner({ homeDir: tmpdir() });
     await expect(runner.run(["status"], { authToken: "token\nsecond-line" })).rejects.toThrow("git_auth_token_invalid");
   });
 
   it("uses argv arrays, strips inherited secrets, and keeps the token outside argv", async () => {
-    const root = await mkdtemp("/private/tmp/reevo-git-runner-");
+    const root = await mkdtemp(join(tmpdir(), "reevo-git-runner-"));
     roots.push(root);
     const executable = resolve(root, "fake-git.mjs");
     await writeFile(
@@ -365,7 +366,7 @@ describe("Git process boundary", () => {
   });
 
   it("redacts authentication material from child-process failures", async () => {
-    const root = await mkdtemp("/private/tmp/reevo-git-runner-");
+    const root = await mkdtemp(join(tmpdir(), "reevo-git-runner-"));
     roots.push(root);
     const executable = resolve(root, "failing-git.mjs");
     await writeFile(
@@ -402,7 +403,7 @@ describe("Git process boundary", () => {
     try {
       const address = server.address();
       if (!address || typeof address === "string") throw new Error("test_server_address_invalid");
-      const root = await mkdtemp("/private/tmp/reevo-git-runner-");
+      const root = await mkdtemp(join(tmpdir(), "reevo-git-runner-"));
       roots.push(root);
       const runner = new NodeGitCommandRunner({ homeDir: root });
       const caught: unknown = await runner

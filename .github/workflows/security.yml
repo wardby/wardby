@@ -76,3 +76,52 @@ jobs:
         with:
           name: coding-worker-sbom-${{ matrix.tag-suffix }}
           path: coding-worker-${{ matrix.tag-suffix }}.spdx.json
+
+  claude-worker-images:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:phase5
+      - run: docker build -f src/claude-coding-worker/Dockerfile.compatibility -t reevo-claude-compat:${{ github.sha }} .
+      - run: docker run --rm reevo-claude-compat:${{ github.sha }}
+      - run: docker build -f src/claude-coding-worker/Dockerfile -t reevo-claude-coding-worker:${{ github.sha }} .
+      - run: docker build -f src/claude-tool-runner/Dockerfile -t reevo-claude-tool-runner:${{ github.sha }} .
+      - run: npm run test:claude-docker
+        env:
+          REEVO_CLAUDE_WORKER_IMAGE: reevo-claude-coding-worker:${{ github.sha }}
+          REEVO_CLAUDE_TOOL_RUNNER_IMAGE: reevo-claude-tool-runner:${{ github.sha }}
+      - uses: anchore/sbom-action@v0.20.5
+        with:
+          image: reevo-claude-coding-worker:${{ github.sha }}
+          format: spdx-json
+          output-file: claude-coding-worker.spdx.json
+      - uses: anchore/sbom-action@v0.20.5
+        with:
+          image: reevo-claude-tool-runner:${{ github.sha }}
+          format: spdx-json
+          output-file: claude-tool-runner.spdx.json
+      - uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: reevo-claude-coding-worker:${{ github.sha }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: reevo-claude-tool-runner:${{ github.sha }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: claude-worker-sboms
+          path: |
+            claude-coding-worker.spdx.json
+            claude-tool-runner.spdx.json
