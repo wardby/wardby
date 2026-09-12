@@ -35,10 +35,11 @@ model Agent {
   maxTurns Int         @default(10)
 
   // Phase 4: ownership. Null = public/unowned (pre-Phase-4 agents migrate this way).
-  ownerId  String?
-  owner    Principal?    @relation(fields: [ownerId], references: [id])
-  secrets  AgentSecret[]
-  webhooks Webhook[]
+  ownerId    String?
+  owner      Principal?       @relation(fields: [ownerId], references: [id])
+  secrets    AgentSecret[]
+  datastores AgentDatastore[]
+  webhooks   Webhook[]
 
   // Phase 7: at most one budget group. Null = uncapped beyond its own budgetUsd.
   budgetGroupId String?
@@ -136,30 +137,74 @@ model AgentTool {
   agent   Agent  @relation(fields: [agentId], references: [id])
   tool    Tool   @relation(fields: [toolId], references: [id])
 
-  allowedSecrets           Json @default("[]")
-  allowedDatastorePrefixes Json @default("[]")
-  allowedHosts             Json @default("[]")
+  allowedSecrets                 Json @default("[]")
+  allowedDatastorePrefixes       Json @default("[]")
+  allowedHosts                   Json @default("[]")
+  allowedSharedDatastorePrefixes Json @default("{}")
 
   @@id([agentId, toolId])
 }
 
-/// Phase 3: the datastore seam's Postgres-backed default. Scoped by agentId
-/// so one agent's tools can't read another's state.
-/// Phase 6: optional per-entry PII encryption. `pii` is opt-in per `set()`
-/// call (never inferred) — when true, `value` holds a SecretCipher blob
-/// (same "iv:tag:ciphertext" envelope as Secret.ciphertext) instead of the
-/// plain JSON value, and `keyId` records which cipher key encrypted it, for
-/// rotation. A `pii: false` row (the default) is stored exactly as before —
-/// unencrypted, and `keyId` is null.
-model DatastoreEntry {
-  agentId   String
-  key       String
-  value     Json
-  pii       Boolean  @default(false)
-  keyId     String?
-  updatedAt DateTime @updatedAt
+/// Named, owned resource shared across agents via AgentDatastore (Un-phased
+/// roadmap item "Named / shared datastores"). Null ownerId = public/unowned,
+/// matching Tool's convention.
+model Datastore {
+  id        String           @id @default(cuid())
+  name      String
+  ownerId   String?
+  owner     Principal?       @relation(fields: [ownerId], references: [id])
+  agents    AgentDatastore[]
+  entries   DatastoreEntry[]
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
 
-  @@id([agentId, key])
+  @@unique([ownerId, name])
+}
+
+/// Attaches a Datastore to an agent, addressed at sandbox point-of-use by
+/// `boundName` (sharedDatastore.get(boundName, key)) — same boundName
+/// convention as AgentSecret. Defaults to the datastore's own name.
+model AgentDatastore {
+  agentId     String
+  datastoreId String
+  boundName   String
+  agent       Agent     @relation(fields: [agentId], references: [id])
+  datastore   Datastore @relation(fields: [datastoreId], references: [id])
+
+  @@id([agentId, datastoreId])
+  @@unique([agentId, boundName])
+}
+
+/// Phase 3: the datastore seam's Postgres-backed default. Scoped by agentId
+/// (private, per-agent) or datastoreId (shared, see Datastore above) — a row
+/// carries exactly one, enforced by a hand-written CHECK in the migration
+/// (Prisma has no declarative "exactly one of two columns" constraint).
+/// Phase 6: optional per-entry PII encryption (see `pii`/`keyId` below).
+///
+/// `id` is a surrogate key required by Prisma's schema validator: with
+/// agentId and datastoreId both optional, neither `@@unique` below has an
+/// all-required-fields criterion, and Prisma rejects a model with no such
+/// criterion (P1012, "Each model must have at least one unique criteria
+/// that has only required fields") — `prisma generate`/`validate` refuse to
+/// run at all without it. Point lookups still go through the
+/// agentId_key/datastoreId_key compound uniques; `id` is not otherwise used.
+model DatastoreEntry {
+  id          String     @id @default(cuid())
+  agentId     String?
+  datastoreId String?
+  key         String
+  value       Json
+  pii         Boolean    @default(false)
+  keyId       String?
+  updatedAt   DateTime   @updatedAt
+  // onDelete: Restrict is explicit (Prisma's inferred default for an
+  // optional relation is SetNull) because the migration's FK is RESTRICT:
+  // nulling datastoreId on delete would leave both agentId and datastoreId
+  // null, violating the DatastoreEntry_scope_xor CHECK above.
+  datastore   Datastore? @relation(fields: [datastoreId], references: [id], onDelete: Restrict)
+
+  @@unique([agentId, key])
+  @@unique([datastoreId, key])
 }
 
 /// Un-phased: agent-controlled persistent memory (key/content per agent),
@@ -355,6 +400,7 @@ model Principal {
   agents       Agent[]
   tools        Tool[]
   secrets      Secret[]
+  datastores   Datastore[]
   webhooks     Webhook[]
   authUser     AuthUser?
   budgetGroups BudgetGroup[]
