@@ -1,0 +1,12 @@
+{
+  "name": "reevo-claude-tool-runner",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test *.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "4.6.2"
+  }
+}
