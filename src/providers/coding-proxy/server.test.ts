@@ -118,13 +118,18 @@ describe("coding proxy HTTP boundary", () => {
     });
     const response = await call("/v1/messages?beta=true", {
       method: "POST",
-      headers: { "content-type": "application/json", "x-api-key": anthropicSession.capability },
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": anthropicSession.capability,
+        "anthropic-beta": "claude-code-20250219",
+      },
       body,
     });
     expect(response.status).toBe(200);
     const init = upstream.mock.calls.at(-1)![1] as RequestInit;
     const headers = new Headers(init.headers);
     expect(headers.get("x-api-key")).toBe("UPSTREAM_SECRET");
+    expect(headers.get("anthropic-beta")).toBe("claude-code-20250219");
     expect(headers.get("authorization")).toBeNull();
 
     expect(

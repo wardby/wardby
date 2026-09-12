@@ -4,7 +4,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 
 const MODEL = "claude-sonnet-5";
 const CAPABILITY = "rrp_compatibility_only_not_a_real_credential";
@@ -110,7 +111,7 @@ async function fakeAnthropic(handler) {
   };
 }
 
-async function runQuery(baseUrl, abortController = new AbortController(), tools = []) {
+async function runQuery(baseUrl, abortController = new AbortController(), tools = [], overrides = {}) {
   const workspace = await mkdtemp(join(tmpdir(), "reevo-claude-compat-workspace-"));
   const config = await mkdtemp(join(tmpdir(), "reevo-claude-compat-config-"));
   workspaces.push(workspace, config);
@@ -121,13 +122,13 @@ async function runQuery(baseUrl, abortController = new AbortController(), tools 
       abortController,
       cwd: workspace,
       model: MODEL,
-      maxTurns: tools.length > 0 ? 2 : 1,
+      maxTurns: overrides.maxTurns ?? (tools.length > 0 ? 2 : 1),
       maxBudgetUsd: 0.25,
       tools,
-      allowedTools: tools,
+      allowedTools: overrides.allowedTools ?? tools,
       settingSources: [],
       strictMcpConfig: true,
-      mcpServers: {},
+      mcpServers: overrides.mcpServers ?? {},
       managedSettings: {
         sandbox: {
           enabled: true,
@@ -142,6 +143,7 @@ async function runQuery(baseUrl, abortController = new AbortController(), tools 
       },
       systemPrompt: "You are a deterministic compatibility probe.",
       permissionMode: "dontAsk",
+      outputFormat: overrides.outputFormat,
       permissionPrompts: "none",
       persistSession: false,
       env: {
@@ -187,6 +189,22 @@ test("pinned SDK uses only the configured Messages endpoint and capability", asy
     assert.equal(messageRequest.headers["x-api-key"], CAPABILITY);
     assert.equal(messageRequest.headers.authorization, undefined);
     assert.match(String(messageRequest.headers["anthropic-version"]), /^\d{4}-\d{2}-\d{2}$/);
+    assert.deepEqual(
+      String(messageRequest.headers["anthropic-beta"])
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .sort(),
+      [
+        "claude-code-20250219",
+        "context-management-2025-06-27",
+        "effort-2025-11-24",
+        "interleaved-thinking-2025-05-14",
+        "mid-conversation-system-2026-04-07",
+        "prompt-caching-scope-2026-01-05",
+        "thinking-token-count-2026-05-13",
+      ],
+    );
     const body = JSON.parse(messageRequest.body);
     assert.equal(body.model, MODEL);
     assert.equal(body.stream, true);
@@ -254,6 +272,65 @@ test("tool subprocess scrubs the capability or fails closed", async () => {
     assert.notEqual(toolResult.content, "exposed");
     assert.match(toolResult.content, /^(?:absent|Exit code 1\nbwrap: No permissions to create new namespace)/);
     assert.doesNotMatch(messageRequests[1].body, new RegExp(CAPABILITY));
+  } finally {
+    await fake.close();
+  }
+});
+
+test("Reevo MCP tool loop preserves the pinned second-turn request shape", async () => {
+  let turn = 0;
+  const fake = await fakeAnthropic((_request, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
+    if (turn++ === 0) {
+      response.end(
+        toolUseSse("toolu_reevo_compatibility", "mcp__reevo_tools__run_command", {
+          command: "git status --short",
+          timeout_ms: 1000,
+        }),
+      );
+      return;
+    }
+    response.end(toolUseSse("toolu_structured_compatibility", "StructuredOutput", { outcome: "changes_ready" }));
+  });
+  const reevoTools = createSdkMcpServer({
+    name: "reevo_tools",
+    tools: [
+      tool(
+        "run_command",
+        "Run one bounded command.",
+        { command: z.string(), timeout_ms: z.number().int().optional() },
+        async () => ({ content: [{ type: "text", text: "exit_code=0\n" }] }),
+      ),
+    ],
+  });
+  try {
+    await runQuery(fake.baseUrl, new AbortController(), [], {
+      maxTurns: 2,
+      mcpServers: { reevo_tools: reevoTools },
+      allowedTools: ["mcp__reevo_tools__run_command"],
+      outputFormat: {
+        type: "json_schema",
+        schema: {
+          type: "object",
+          properties: { outcome: { type: "string" } },
+          required: ["outcome"],
+          additionalProperties: false,
+        },
+      },
+    });
+    const messageRequests = fake.requests.filter((request) => request.url === "/v1/messages?beta=true");
+    assert.equal(messageRequests.length, 2);
+    assert.deepEqual(JSON.parse(messageRequests[1].body).messages.at(-1), {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "toolu_reevo_compatibility",
+          content: [{ type: "text", text: "exit_code=0\n" }],
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+    });
   } finally {
     await fake.close();
   }

@@ -25,8 +25,21 @@ import type {
 export const PROXY_MAX_BODY_BYTES = 8 * 1024 * 1024;
 export const PROXY_MAX_OUTPUT_TOKENS = 1_000_000;
 export const PROXY_DEFAULT_MAX_OUTPUT_TOKENS = 4_096;
+export const CLAUDE_CODE_ANTHROPIC_BETAS = [
+  "claude-code-20250219",
+  "context-management-2025-06-27",
+  "effort-2025-11-24",
+  "interleaved-thinking-2025-05-14",
+  "mid-conversation-system-2026-04-07",
+  "prompt-caching-scope-2026-01-05",
+  "thinking-token-count-2026-05-13",
+] as const;
 const MAX_UPSTREAM_JSON_BYTES = 16 * 1024 * 1024;
 const REQUEST_KEY_PATTERN = /^[\x21-\x7e]{1,200}$/;
+const APPROVED_ANTHROPIC_BETAS = new Set<string>(CLAUDE_CODE_ANTHROPIC_BETAS);
+const REEVO_COMMAND_TOOL = "mcp__reevo_tools__run_command";
+const STRUCTURED_OUTPUT_TOOL = "StructuredOutput";
+const MAX_TOOL_TEXT_BYTES = 256 * 1024;
 
 export class CodingProxyError extends Error {
   constructor(
@@ -49,6 +62,7 @@ export interface ExecuteProxyRequest {
   protocol: ProxyProtocol;
   rawBody: string;
   requestKey?: string;
+  anthropicBeta?: string;
 }
 
 export interface CreateCodingProxySession {
@@ -90,6 +104,7 @@ interface ParsedRequest {
   maxOutputTokens: number;
   stream: boolean;
   fingerprint: string;
+  anthropicBeta?: string;
 }
 
 function capabilityHash(capability: string): string {
@@ -165,7 +180,132 @@ function validateTextBlocks(value: unknown): void {
   for (const block of value) validateTextBlock(block);
 }
 
-function parseAnthropicRequest(rawBody: string): ParsedRequest {
+function validateCommandInput(value: unknown): void {
+  const input = record(value, "unsupported_anthropic_feature");
+  onlyKeys(input, ["command", "timeout_ms"]);
+  if (typeof input.command !== "string" || input.command.length < 1 || input.command.length > MAX_TOOL_TEXT_BYTES) {
+    throw new CodingProxyError(400, "unsupported_anthropic_feature");
+  }
+  if (
+    input.timeout_ms !== undefined &&
+    (typeof input.timeout_ms !== "number" ||
+      !Number.isSafeInteger(input.timeout_ms) ||
+      input.timeout_ms < 1_000 ||
+      input.timeout_ms > 60_000)
+  ) {
+    throw new CodingProxyError(400, "unsupported_anthropic_feature");
+  }
+}
+
+function validateCommandTool(value: unknown): void {
+  const tool = record(value, "tools_not_allowed");
+  onlyKeys(tool, ["name", "description", "input_schema", "cache_control", "type"]);
+  if (
+    tool.name !== REEVO_COMMAND_TOOL ||
+    typeof tool.description !== "string" ||
+    tool.description.length > MAX_TOOL_TEXT_BYTES ||
+    (tool.type !== undefined && tool.type !== "custom")
+  ) {
+    throw new CodingProxyError(400, "tools_not_allowed");
+  }
+  record(tool.input_schema, "tools_not_allowed");
+  if (tool.cache_control !== undefined) validateCacheControl(tool.cache_control);
+}
+
+function validateStructuredOutputTool(value: unknown): void {
+  const tool = record(value, "tools_not_allowed");
+  onlyKeys(tool, ["name", "description", "input_schema", "cache_control", "type"]);
+  if (
+    tool.name !== STRUCTURED_OUTPUT_TOOL ||
+    typeof tool.description !== "string" ||
+    tool.description.length > MAX_TOOL_TEXT_BYTES ||
+    (tool.type !== undefined && tool.type !== "custom")
+  ) {
+    throw new CodingProxyError(400, "tools_not_allowed");
+  }
+  record(tool.input_schema, "tools_not_allowed");
+  if (tool.cache_control !== undefined) validateCacheControl(tool.cache_control);
+}
+
+function validateApprovedTool(value: unknown): void {
+  const tool = record(value, "tools_not_allowed");
+  if (tool.name === REEVO_COMMAND_TOOL) return validateCommandTool(tool);
+  if (tool.name === STRUCTURED_OUTPUT_TOOL) return validateStructuredOutputTool(tool);
+  throw new CodingProxyError(400, "tools_not_allowed");
+}
+
+function validateToolUseBlock(value: Record<string, unknown>): void {
+  onlyKeys(value, ["type", "id", "name", "input"]);
+  if (typeof value.id !== "string" || value.id.length < 1 || value.id.length > 512) {
+    throw new CodingProxyError(400, "unsupported_anthropic_feature");
+  }
+  if (value.name === REEVO_COMMAND_TOOL) return validateCommandInput(value.input);
+  if (value.name === STRUCTURED_OUTPUT_TOOL) return void record(value.input, "unsupported_anthropic_feature");
+  throw new CodingProxyError(400, "unsupported_anthropic_feature");
+}
+
+function validateToolResultBlock(value: Record<string, unknown>): void {
+  onlyKeys(value, ["type", "tool_use_id", "content", "is_error", "cache_control"]);
+  if (typeof value.tool_use_id !== "string" || value.tool_use_id.length < 1 || value.tool_use_id.length > 512) {
+    throw new CodingProxyError(400, "unsupported_anthropic_feature");
+  }
+  if (typeof value.content === "string") {
+    if (value.content.length > MAX_TOOL_TEXT_BYTES) throw new CodingProxyError(400, "unsupported_anthropic_feature");
+  } else {
+    validateTextBlocks(value.content);
+  }
+  if (value.is_error !== undefined && typeof value.is_error !== "boolean") {
+    throw new CodingProxyError(400, "unsupported_anthropic_feature");
+  }
+  if (value.cache_control !== undefined) validateCacheControl(value.cache_control);
+}
+
+function validateThinkingBlock(value: Record<string, unknown>): void {
+  onlyKeys(value, ["type", "thinking", "signature"]);
+  if (typeof value.thinking !== "string" || typeof value.signature !== "string") {
+    throw new CodingProxyError(400, "unsupported_anthropic_feature");
+  }
+}
+
+function validateMessageBlocks(value: unknown, role: unknown): void {
+  if (!Array.isArray(value) || value.length > 10_000) throw new CodingProxyError(400, "invalid_anthropic_request");
+  for (const candidate of value) {
+    const block = record(candidate);
+    if (block.type === "text") {
+      validateTextBlock(block);
+    } else if (block.type === "tool_use" && role === "assistant") {
+      validateToolUseBlock(block);
+    } else if (block.type === "tool_result" && role === "user") {
+      validateToolResultBlock(block);
+    } else if (block.type === "thinking" && role === "assistant") {
+      validateThinkingBlock(block);
+    } else {
+      throw new CodingProxyError(400, "unsupported_anthropic_feature");
+    }
+  }
+}
+
+function parseAnthropicBeta(value: string | undefined): { header?: string; values: Set<string> } {
+  if (value === undefined) return { values: new Set() };
+  if (value.length < 1 || value.length > 2_048) throw new CodingProxyError(400, "invalid_anthropic_beta");
+  const values = value.split(",").map((candidate) => candidate.trim());
+  const unique = new Set(values);
+  if (
+    values.some((candidate) => !candidate || !APPROVED_ANTHROPIC_BETAS.has(candidate)) ||
+    unique.size !== values.length
+  ) {
+    throw new CodingProxyError(400, "invalid_anthropic_beta");
+  }
+  const normalized = [...unique].sort();
+  return { header: normalized.join(","), values: new Set(normalized) };
+}
+
+function requireAnthropicBeta(values: Set<string>, beta: (typeof CLAUDE_CODE_ANTHROPIC_BETAS)[number]): void {
+  if (!values.has(beta)) throw new CodingProxyError(400, "anthropic_beta_required");
+}
+
+function parseAnthropicRequest(rawBody: string, betaHeader: string | undefined): ParsedRequest {
+  const beta = parseAnthropicBeta(betaHeader);
   if (Buffer.byteLength(rawBody) > PROXY_MAX_BODY_BYTES) throw new CodingProxyError(413, "payload_too_large");
   let value: unknown;
   try {
@@ -199,17 +339,34 @@ function parseAnthropicRequest(rawBody: string): ParsedRequest {
   if (!Array.isArray(body.messages) || body.messages.length < 1 || body.messages.length > 10_000) {
     throw new CodingProxyError(400, "invalid_anthropic_request");
   }
+  if (body.system !== undefined) validateTextBlocks(body.system);
   for (const value of body.messages) {
     const message = record(value);
     onlyKeys(message, ["role", "content"]);
     if (message.role !== "user" && message.role !== "assistant" && message.role !== "system") {
       throw new CodingProxyError(400, "unsupported_anthropic_feature");
     }
-    validateTextBlocks(message.content);
+    if (message.role === "system") {
+      requireAnthropicBeta(beta.values, "mid-conversation-system-2026-04-07");
+      if (typeof message.content === "string") {
+        if (Buffer.byteLength(message.content) > MAX_TOOL_TEXT_BYTES) {
+          throw new CodingProxyError(400, "unsupported_anthropic_feature");
+        }
+        continue;
+      }
+    }
+    validateMessageBlocks(message.content, message.role);
   }
-  if (body.system !== undefined) validateTextBlocks(body.system);
-  if (body.tools !== undefined && (!Array.isArray(body.tools) || body.tools.length !== 0)) {
-    throw new CodingProxyError(400, "tools_not_allowed");
+  if (body.tools !== undefined) {
+    if (!Array.isArray(body.tools) || body.tools.length > 2) throw new CodingProxyError(400, "tools_not_allowed");
+    const names = new Set<string>();
+    for (const tool of body.tools) {
+      const definition = record(tool, "tools_not_allowed");
+      if (typeof definition.name !== "string" || names.has(definition.name))
+        throw new CodingProxyError(400, "tools_not_allowed");
+      names.add(definition.name);
+      validateApprovedTool(definition);
+    }
   }
   if (body.metadata !== undefined) {
     const metadata = record(body.metadata);
@@ -217,11 +374,14 @@ function parseAnthropicRequest(rawBody: string): ParsedRequest {
     if (typeof metadata.user_id !== "string") throw new CodingProxyError(400, "invalid_anthropic_request");
   }
   if (body.thinking !== undefined) {
+    requireAnthropicBeta(beta.values, "interleaved-thinking-2025-05-14");
+    requireAnthropicBeta(beta.values, "thinking-token-count-2026-05-13");
     const thinking = record(body.thinking);
     onlyKeys(thinking, ["type"]);
     if (thinking.type !== "adaptive") throw new CodingProxyError(400, "unsupported_anthropic_feature");
   }
   if (body.context_management !== undefined) {
+    requireAnthropicBeta(beta.values, "context-management-2025-06-27");
     const context = record(body.context_management);
     onlyKeys(context, ["edits"]);
     const edits = context.edits;
@@ -233,11 +393,12 @@ function parseAnthropicRequest(rawBody: string): ParsedRequest {
     }
   }
   if (body.output_config !== undefined) {
+    requireAnthropicBeta(beta.values, "effort-2025-11-24");
     const output = record(body.output_config);
     onlyKeys(output, ["effort"]);
     if (output.effort !== "high") throw new CodingProxyError(400, "unsupported_anthropic_feature");
   }
-  const normalized = { ...body };
+  const normalized: Record<string, unknown> = { ...body };
   delete normalized.metadata;
   const encoded = JSON.stringify(normalized);
   if (Buffer.byteLength(encoded) > PROXY_MAX_BODY_BYTES) throw new CodingProxyError(413, "payload_too_large");
@@ -247,12 +408,18 @@ function parseAnthropicRequest(rawBody: string): ParsedRequest {
     model: body.model,
     maxOutputTokens: body.max_tokens,
     stream: body.stream,
-    fingerprint: fingerprintRequest(encoded),
+    fingerprint: fingerprintRequest(`${beta.header ?? ""}\n${encoded}`),
+    anthropicBeta: beta.header,
   };
 }
 
-function parseRequest(protocol: ProxyProtocol, rawBody: string): ParsedRequest {
-  return protocol === "anthropic-messages" ? parseAnthropicRequest(rawBody) : parseOpenAiRequest(rawBody);
+function parseRequest(protocol: ProxyProtocol, rawBody: string, anthropicBeta: string | undefined): ParsedRequest {
+  if (protocol !== "anthropic-messages" && anthropicBeta !== undefined) {
+    throw new CodingProxyError(400, "invalid_anthropic_beta");
+  }
+  return protocol === "anthropic-messages"
+    ? parseAnthropicRequest(rawBody, anthropicBeta)
+    : parseOpenAiRequest(rawBody);
 }
 
 function safeRequestKey(value: string | undefined, fingerprint: string): string {
@@ -365,7 +532,7 @@ export class CodingProxy {
       this.audit({ type: "request.rejected", runId: session.runId, reason: "protocol_mismatch" });
       throw new CodingProxyError(403, "protocol_mismatch");
     }
-    const parsed = parseRequest(input.protocol, input.rawBody);
+    const parsed = parseRequest(input.protocol, input.rawBody, input.anthropicBeta);
     if (!session.allowedModels.includes(parsed.model)) {
       this.audit({ type: "request.rejected", runId: session.runId, model: parsed.model, reason: "model_not_allowed" });
       throw new CodingProxyError(403, "model_not_allowed");
@@ -457,6 +624,7 @@ export class CodingProxy {
       if (session.protocol === "anthropic-messages") {
         headers["x-api-key"] = key;
         headers["anthropic-version"] = "2023-06-01";
+        if (parsed.anthropicBeta) headers["anthropic-beta"] = parsed.anthropicBeta;
       } else {
         headers.authorization = `Bearer ${key}`;
         headers["idempotency-key"] = `${session.id}:${request.id}`;

@@ -9,6 +9,7 @@ services:
     environment:
       DATABASE_URL: postgresql://reevo:reevo@postgres:5432/reevo
       OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY must be set in .env.local}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set in .env.local}
       NODE_ENV: production
     depends_on:
       postgres:

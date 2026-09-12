@@ -50,31 +50,39 @@ function fakeProxyProgram(): string {
   return String.raw`
 const http = require('node:http');
 const text = process.env.FAKE_RESULT;
-const sse = [
+let turn = 0;
+function toolSse(id, name, input) { return [
   { type: 'message_start', message: { id: 'msg_reevo_fixture', type: 'message', role: 'assistant', model: 'claude-sonnet-5', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 12, output_tokens: 0 } } },
-  { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
-  { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+  { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id, name, input: {} } },
+  { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } },
   { type: 'content_block_stop', index: 0 },
-  { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 7 } },
+  { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 7 } },
   { type: 'message_stop' },
-].map((frame) => 'event: ' + frame.type + '\\ndata: ' + JSON.stringify(frame) + '\\n\\n').join('');
+].map((frame) => 'event: ' + frame.type + '\\ndata: ' + JSON.stringify(frame) + '\\n\\n').join(''); }
 http.createServer(async (request, response) => {
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
   const raw = Buffer.concat(chunks).toString('utf8');
-  let stream;
-  try { stream = JSON.parse(raw).stream; } catch {}
-  console.log(JSON.stringify({ method: request.method, url: request.url, stream, validCapability: request.headers['x-api-key'] === process.env.EXPECTED_CAPABILITY }));
+  let body;
+  try { body = JSON.parse(raw); } catch {}
+  console.log(JSON.stringify({ method: request.method, url: request.url, stream: body?.stream, messages: body?.messages, lastMessage: body?.messages?.at(-1), validCapability: request.headers['x-api-key'] === process.env.EXPECTED_CAPABILITY }));
   if (request.method === 'HEAD' && request.url === '/api/hello') return response.writeHead(200, { 'cache-control': 'no-store' }).end();
   if (request.method === 'POST' && request.url === '/v1/messages?beta=true') {
-    if (stream === false) {
+    if (body?.stream === false) {
+      const structured = turn > 1;
+      const id = structured ? 'toolu_structured_docker' : 'toolu_reevo_docker';
+      const name = structured ? 'StructuredOutput' : 'mcp__reevo_tools__run_command';
+      const input = structured ? JSON.parse(text) : { command: 'git status --short', timeout_ms: 1000 };
       return response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({
         id: 'msg_reevo_fixture', type: 'message', role: 'assistant', model: 'claude-sonnet-5',
-        content: [{ type: 'text', text }], stop_reason: 'end_turn', stop_sequence: null,
+        content: [{ type: 'tool_use', id, name, input }], stop_reason: 'tool_use', stop_sequence: null,
         usage: { input_tokens: 12, output_tokens: 7 },
       }));
     }
-    return response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' }).end(sse);
+    const payload = turn++ === 0
+      ? toolSse('toolu_reevo_docker', 'mcp__reevo_tools__run_command', { command: 'git status --short', timeout_ms: 1000 })
+      : toolSse('toolu_structured_docker', 'StructuredOutput', JSON.parse(text));
+    return response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' }).end(payload);
   }
   response.writeHead(404).end();
 }).listen(8787, '0.0.0.0');
@@ -186,7 +194,16 @@ describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance
     const proxyEvents = (await docker(["container", "logs", proxy]))
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line) as { method: string; url: string; validCapability: boolean });
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            method: string;
+            url: string;
+            validCapability: boolean;
+            lastMessage?: { role: string; content: Array<Record<string, unknown>> };
+            messages?: Array<{ role: string; content: unknown }>;
+          },
+      );
     expect(proxyEvents).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ method: "HEAD", url: "/api/hello", validCapability: false }),
@@ -194,6 +211,33 @@ describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance
       ]),
     );
     expect(proxyEvents.every((event) => event.method === "HEAD" || event.validCapability)).toBe(true);
+    const messageEvents = proxyEvents.filter((event) => event.url === "/v1/messages?beta=true");
+    expect(messageEvents.length).toBeGreaterThanOrEqual(2);
+    expect(
+      messageEvents.some((event) =>
+        event.messages?.some(
+          (message) =>
+            message.role === "system" &&
+            typeof message.content === "string" &&
+            message.content.includes("Today's date"),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      messageEvents.some((event) =>
+        event.messages?.some(
+          (message) =>
+            message.role === "user" &&
+            Array.isArray(message.content) &&
+            message.content.some(
+              (block) =>
+                block.type === "tool_result" &&
+                block.tool_use_id === "toolu_reevo_docker" &&
+                JSON.stringify(block.cache_control) === JSON.stringify({ type: "ephemeral" }),
+            ),
+        ),
+      ),
+    ).toBe(true);
     await launcher.remove(handle);
     await expect(launcher.status(handle)).rejects.toThrow("job_removed");
   }, 45_000);
