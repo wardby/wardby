@@ -5,7 +5,11 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { startToolRunner } from "./main.mjs";
+import { startToolRunner, TOOL_RUNNER_READY_MESSAGE } from "./main.mjs";
+
+test("exposes a fixed lifecycle readiness marker", () => {
+  assert.equal(TOOL_RUNNER_READY_MESSAGE, "reevo_tool_runner_ready");
+});
 
 function waitForResponse(socket, id) {
   return new Promise((resolve, reject) => {
@@ -55,7 +59,10 @@ test("serves only the bounded run_command MCP tool over its private socket", asy
     const listed = waitForResponse(socket, 2);
     socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`);
     const tools = await listed;
-    assert.deepEqual(tools.result.tools.map((tool) => tool.name), ["run_command"]);
+    assert.deepEqual(
+      tools.result.tools.map((tool) => tool.name),
+      ["run_command"],
+    );
   } finally {
     socket.destroy();
     await new Promise((resolve) => server.close(resolve));

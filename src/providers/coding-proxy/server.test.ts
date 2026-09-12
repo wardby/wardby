@@ -62,6 +62,7 @@ describe("coding proxy HTTP boundary", () => {
   it("requires the one-run bearer and JSON content type", async () => {
     const raw = JSON.stringify({ model: "test-model", input: "x", max_output_tokens: 2, stream: false });
     expect((await call("/v1/responses", { method: "POST", body: raw })).status).toBe(415);
+    const upstreamCalls = upstream.mock.calls.length;
     const denied = await call("/v1/responses", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer wrong" },
@@ -69,6 +70,7 @@ describe("coding proxy HTTP boundary", () => {
     });
     expect(denied.status).toBe(401);
     expect(await denied.text()).not.toContain("wrong");
+    expect(upstream).toHaveBeenCalledTimes(upstreamCalls);
   });
 
   it("forwards an authenticated bounded request without exposing the credential", async () => {
@@ -146,5 +148,19 @@ describe("coding proxy HTTP boundary", () => {
         })
       ).status,
     ).toBe(401);
+  });
+
+  it("rejects malformed Claude requests before they can reach the credential holder", async () => {
+    const upstreamCalls = upstream.mock.calls.length;
+    const response = await call("/v1/messages?beta=true", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": anthropicSession.capability,
+      },
+      body: "not-json",
+    });
+    expect(response.status).toBe(400);
+    expect(upstream).toHaveBeenCalledTimes(upstreamCalls);
   });
 });

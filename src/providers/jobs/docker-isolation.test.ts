@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   assertDockerHostSupportsIsolation,
+  assertClaudeToolRunnerContainerInspection,
   assertIsolationNetworkInspection,
   buildClaudeAgentCreateArgs,
   buildClaudeToolRunnerCreateArgs,
@@ -221,5 +222,77 @@ describe("Docker isolation policy", () => {
         "test-capability",
       ),
     ).toThrow("docker_isolation_unsupported");
+  });
+
+  it("accepts Docker's cgroup v2 null swappiness report while swap remains disabled", () => {
+    const names = isolationNames(spec.runId);
+    const claude: JobSpec = {
+      ...spec,
+      provider: "claude-code",
+      toolImage: `registry.example/reevo-tools@sha256:${"b".repeat(64)}`,
+    };
+    const container: DockerContainerInspection = {
+      Config: {
+        User: "10001:10001",
+        Image: claude.toolImage,
+        Env: [],
+        Labels: {
+          "io.reevo.managed": "true",
+          "io.reevo.component": "coding-worker",
+          "io.reevo.run-sha256": runHash,
+        },
+      },
+      HostConfig: {
+        Binds: null,
+        CapAdd: null,
+        CapDrop: ["ALL"],
+        CgroupnsMode: "private",
+        Devices: [],
+        DeviceRequests: null,
+        Dns: [],
+        DnsOptions: [],
+        DnsSearch: [],
+        ExtraHosts: null,
+        GroupAdd: null,
+        Init: true,
+        IpcMode: "none",
+        LogConfig: { Type: "local", Config: { "max-size": "1m", "max-file": "2" } },
+        Memory: Math.floor(claude.limits.memoryMb / 3) * 1024 * 1024,
+        MemorySwap: Math.floor(claude.limits.memoryMb / 3) * 1024 * 1024,
+        MemorySwappiness: null,
+        NetworkMode: "none",
+        NanoCpus: 250_000_000,
+        PidsLimit: 16,
+        PidMode: "",
+        PortBindings: {},
+        Privileged: false,
+        PublishAllPorts: false,
+        ReadonlyRootfs: true,
+        RestartPolicy: { Name: "no" },
+        SecurityOpt: ["no-new-privileges=true", "seccomp=builtin"],
+        ShmSize: 16 * 1024 * 1024,
+        Tmpfs: { "/tmp": "rw,noexec", "/home/reevo": "rw,noexec" },
+        Mounts: [
+          {
+            Type: "volume",
+            Source: names.storageVolume,
+            Target: WORKER_PATHS.workspace,
+            VolumeOptions: { NoCopy: true, Subpath: "workspace" },
+          },
+          {
+            Type: "volume",
+            Source: names.storageVolume,
+            Target: WORKER_PATHS.tool,
+            VolumeOptions: { NoCopy: true, Subpath: "tool" },
+          },
+        ],
+      },
+      Mounts: [
+        { Type: "volume", Name: names.storageVolume, Destination: WORKER_PATHS.workspace, RW: true },
+        { Type: "volume", Name: names.storageVolume, Destination: WORKER_PATHS.tool, RW: true },
+      ],
+      NetworkSettings: { Networks: { none: {} }, Ports: {} },
+    };
+    expect(() => assertClaudeToolRunnerContainerInspection(container, claude)).not.toThrow();
   });
 });

@@ -10,6 +10,7 @@ describe("Claude coding worker image policy", () => {
     expect(dockerfile).not.toContain("COPY src/claude-tool-runner");
     expect(dockerfile).not.toContain("COPY --from=build /build/.git");
     expect(dockerfile).toContain("/build/dist/coding-worker/keeper.js");
+    expect(dockerfile).toContain("/worker/node_modules ./node_modules");
     expect(dockerfile).toContain("USER 10001:10001");
     expect(dockerfile).toContain('ENTRYPOINT ["node"');
     for (const executable of ["docker", "ssh", "curl", "wget", "sudo", "gcc", "make", "git"]) {

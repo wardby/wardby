@@ -908,43 +908,31 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
   }
 
   private async waitForStorage(keeper: string): Promise<void> {
-    for (let attempt = 0; attempt < 50; attempt += 1) {
+    // The keeper emits this fixed marker only after creating every storage
+    // directory. Reading logs avoids consuming one of its 16 PID slots.
+    for (let attempt = 0; attempt < 100; attempt += 1) {
       try {
-        await this.run([
-          "container",
-          "exec",
-          "--user",
-          "10001:10001",
-          keeper,
-          "test",
-          "-d",
-          "/run/reevo/storage/output",
-        ]);
-        return;
+        const logs = await this.run(["container", "logs", "--tail", "8", keeper]);
+        if (`${logs.stdout}\n${logs.stderr}`.split("\n").includes("reevo_storage_ready")) return;
       } catch {
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+        // A just-started container can reject log reads before its log driver initializes.
       }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
     }
     throw new Error("docker_storage_not_ready");
   }
 
   private async waitForToolRunner(tool: string): Promise<void> {
-    for (let attempt = 0; attempt < 50; attempt += 1) {
+    // The runner prints this fixed marker only after binding its Unix socket.
+    // Reading logs avoids adding a process to its tightly bounded PID cgroup.
+    for (let attempt = 0; attempt < 100; attempt += 1) {
       try {
-        await this.run([
-          "container",
-          "exec",
-          "--user",
-          "10001:10001",
-          tool,
-          "test",
-          "-S",
-          "/run/reevo/tool/runner.sock",
-        ]);
-        return;
+        const logs = await this.run(["container", "logs", "--tail", "8", tool]);
+        if (`${logs.stdout}\n${logs.stderr}`.split("\n").includes("reevo_tool_runner_ready")) return;
       } catch {
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+        // A just-started container can reject log reads before its log driver initializes.
       }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
     }
     throw new Error("docker_tool_runner_not_ready");
   }

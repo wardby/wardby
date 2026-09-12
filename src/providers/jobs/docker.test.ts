@@ -158,6 +158,12 @@ class FakeDocker implements DockerCommandRunner {
       await writeFile(args.at(-1)!, this.output, { mode: 0o600 });
       return this.ok();
     }
+    if (group === "container" && action === "logs" && args.at(-1) === this.plan.names.keeperContainer) {
+      return { stdout: "reevo_storage_ready\n", stderr: "" };
+    }
+    if (group === "container" && action === "logs" && args.at(-1) === this.plan.names.toolContainer) {
+      return { stdout: "reevo_tool_runner_ready\n", stderr: "" };
+    }
     if (group === "container" && action === "exec") {
       return args.includes("node") ? { stdout: this.output, stderr: "" } : this.ok();
     }
@@ -277,12 +283,17 @@ class FakeDocker implements DockerCommandRunner {
         : [
             [WORKER_PATHS.workspace, true, "workspace"],
             [WORKER_PATHS.input, false, "input"],
-          [WORKER_PATHS.output, true, "output"],
-        ];
+            [WORKER_PATHS.output, true, "output"],
+          ];
     const toolMemoryMb = Math.min(512, Math.max(128, Math.floor(this.job.limits.memoryMb / 3)));
-    const agentLimits = this.job.provider === "claude-code"
-      ? { cpus: this.job.limits.cpus - 0.25, memoryMb: this.job.limits.memoryMb - toolMemoryMb, pids: this.job.limits.pids - 16 }
-      : this.job.limits;
+    const agentLimits =
+      this.job.provider === "claude-code"
+        ? {
+            cpus: this.job.limits.cpus - 0.25,
+            memoryMb: this.job.limits.memoryMb - toolMemoryMb,
+            pids: this.job.limits.pids - 16,
+          }
+        : this.job.limits;
     return {
       Config: {
         User: "10001:10001",
