@@ -35,6 +35,19 @@ export function parseAuthoritativeUsage(value: unknown): ProxyUsage {
   return parsed;
 }
 
+export function parseAnthropicAuthoritativeUsage(value: unknown): ProxyUsage {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid_authoritative_usage");
+  const usage = value as Record<string, unknown>;
+  const cachedInputTokens = tokenCount(usage.cache_read_input_tokens ?? 0, "cache_read_input_tokens");
+  return {
+    inputTokens: tokenCount(usage.input_tokens, "input_tokens") + cachedInputTokens,
+    outputTokens: tokenCount(usage.output_tokens, "output_tokens"),
+    cachedInputTokens,
+    cacheWriteTokens: tokenCount(usage.cache_creation_input_tokens ?? 0, "cache_creation_input_tokens"),
+    reasoningTokens: 0,
+  };
+}
+
 export function actualCostUsd(usage: ProxyUsage, pricing: ModelPricing): number {
   return computeCost(pricing, usage);
 }
@@ -75,6 +88,75 @@ export function terminalUsageFromSseFrame(frame: string): TerminalUsage {
   if (!response || typeof response !== "object") throw new Error("invalid_upstream_terminal_event");
   const usage = (response as Record<string, unknown>).usage;
   return { terminal: true, usage: usage == null ? undefined : parseAuthoritativeUsage(usage) };
+}
+
+function sseEvent(frame: string): { name?: string; value?: Record<string, unknown> } {
+  const lines = frame.split("\n");
+  const name = lines
+    .find((line) => line.startsWith("event:"))
+    ?.slice(6)
+    .trim();
+  const data = lines
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart())
+    .join("\n");
+  if (!data || data === "[DONE]") return { name };
+  let value: unknown;
+  try {
+    value = JSON.parse(data);
+  } catch {
+    throw new Error("invalid_upstream_sse");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid_upstream_sse");
+  const record = value as Record<string, unknown>;
+  if (typeof record.type !== "string" || (name && name !== record.type)) throw new Error("invalid_upstream_sse");
+  return { name, value: record };
+}
+
+/** Accumulates Anthropic's split input/output usage until message_stop. */
+export class AnthropicSseUsageTracker {
+  private startUsage?: Record<string, unknown>;
+  private outputTokens?: number;
+  private stopped = false;
+
+  consume(frame: string): TerminalUsage {
+    const { value } = sseEvent(frame);
+    if (!value) return { terminal: false };
+    switch (value.type) {
+      case "message_start": {
+        if (this.startUsage || !value.message || typeof value.message !== "object") {
+          throw new Error("invalid_upstream_sse");
+        }
+        const usage = (value.message as Record<string, unknown>).usage;
+        if (!usage || typeof usage !== "object" || Array.isArray(usage)) throw new Error("invalid_upstream_sse");
+        const record = usage as Record<string, unknown>;
+        tokenCount(record.input_tokens, "input_tokens");
+        tokenCount(record.cache_read_input_tokens ?? 0, "cache_read_input_tokens");
+        tokenCount(record.cache_creation_input_tokens ?? 0, "cache_creation_input_tokens");
+        this.startUsage = record;
+        if (record.output_tokens !== undefined) this.outputTokens = tokenCount(record.output_tokens, "output_tokens");
+        return { terminal: false };
+      }
+      case "message_delta": {
+        const usage = value.usage;
+        if (!usage || typeof usage !== "object" || Array.isArray(usage)) throw new Error("invalid_upstream_sse");
+        this.outputTokens = tokenCount((usage as Record<string, unknown>).output_tokens, "output_tokens");
+        return { terminal: false };
+      }
+      case "message_stop": {
+        if (this.stopped || !this.startUsage || this.outputTokens === undefined) {
+          return { terminal: true };
+        }
+        this.stopped = true;
+        return {
+          terminal: true,
+          usage: parseAnthropicAuthoritativeUsage({ ...this.startUsage, output_tokens: this.outputTokens }),
+        };
+      }
+      default:
+        return { terminal: false };
+    }
+  }
 }
 
 export function pricingSnapshot(version: string, pricing: ModelPricing): PricingSnapshot {

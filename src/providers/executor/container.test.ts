@@ -198,14 +198,19 @@ class FakeVcs implements VcsProvider {
 class FakeSessions implements CodingSessionController {
   creates = 0;
   cancels = 0;
+  lastInput?: Parameters<CodingSessionController["createSession"]>[0];
 
   constructor(
     private readonly events: string[],
     private readonly store: FakeStore,
   ) {}
 
-  async createSession(): Promise<{ id: string; capability: string }> {
+  async createSession(input: Parameters<CodingSessionController["createSession"]>[0]): Promise<{
+    id: string;
+    capability: string;
+  }> {
     this.creates += 1;
+    this.lastInput = input;
     this.events.push("session");
     this.store.run.proxySessionId = "session-1";
     return { id: "session-1", capability: `rrp_${"x".repeat(32)}` };
@@ -263,6 +268,7 @@ describe("ContainerExecutor", () => {
 
     expect(created.jobs.launches).toBe(1);
     expect(created.sessions.creates).toBe(1);
+    expect(created.sessions.lastInput).toMatchObject({ protocol: "openai-responses" });
     expect(created.store.run.status).toBe("succeeded");
     expect(created.store.run.result).toMatchObject({
       outcome: "pull_request_opened",

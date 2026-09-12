@@ -1,0 +1,32 @@
+{
+  "model": "claude-sonnet-5",
+  "messages": [
+    {
+      "role": "user",
+      "content": [{ "type": "text", "text": "Reply with exactly OK." }]
+    },
+    {
+      "role": "system",
+      "content": [
+        {
+          "type": "text",
+          "text": "<system-reminder>Use the repository instructions.</system-reminder>",
+          "cache_control": { "type": "ephemeral" }
+        }
+      ]
+    }
+  ],
+  "system": [
+    { "type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.269.363; cc_entrypoint=sdk-ts;" },
+    { "type": "text", "text": "You are a Claude agent.", "cache_control": { "type": "ephemeral" } }
+  ],
+  "tools": [],
+  "metadata": {
+    "user_id": "{\"device_id\":\"fixture-device\",\"account_uuid\":\"\",\"session_id\":\"fixture-session\"}"
+  },
+  "max_tokens": 4096,
+  "thinking": { "type": "adaptive" },
+  "context_management": { "edits": [{ "type": "clear_thinking_20251015", "keep": "all" }] },
+  "output_config": { "effort": "high" },
+  "stream": true
+}
