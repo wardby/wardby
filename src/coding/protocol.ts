@@ -6,6 +6,7 @@ export const MAX_CODING_TASK_BYTES = 16 * 1024;
 export const MAX_CODING_SUMMARY_BYTES = 8 * 1024;
 export const MAX_CODING_TESTS = 64;
 export const MAX_CODING_TEST_COMMAND_BYTES = 2 * 1024;
+export const MAX_TAG_BYTES = 32;
 
 const MAX_REPOSITORY_INPUT_BYTES = 512;
 const MAX_REF_BYTES = 255;
@@ -138,6 +139,12 @@ const usageSchema = z
   })
   .strict();
 
+/** A short, caller-visible reference (e.g. a ticket ID) surfaced in the PR title. Never free text. */
+const tagSchema = z
+  .string()
+  .regex(new RegExp(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,${MAX_TAG_BYTES - 1}}$`), "must be a short, safe tag")
+  .optional();
+
 const testResultSchema = z
   .object({
     command: boundedText(MAX_CODING_TEST_COMMAND_BYTES, true),
@@ -171,12 +178,14 @@ export const CodingAgentOutputSchema = z
     outcome: z.enum(["changes_ready", "no_changes", "budget_exhausted"]),
     summary: boundedText(MAX_CODING_SUMMARY_BYTES),
     tests: z.array(testResultSchema).max(MAX_CODING_TESTS),
+    tag: tagSchema,
   })
   .strict()
   .transform((value) => ({
     ...value,
     summary: redactTokenShapedValues(value.summary),
     tests: value.tests.map((test) => ({ ...test, command: redactTokenShapedValues(test.command) })),
+    ...(value.tag !== undefined ? { tag: redactTokenShapedValues(value.tag) } : {}),
   }));
 
 const pullRequestUrlSchema = z
@@ -216,6 +225,7 @@ export const CodingRunResultSchema = z
     summary: boundedText(MAX_CODING_SUMMARY_BYTES),
     tests: z.array(testResultSchema).max(MAX_CODING_TESTS),
     usage: usageSchema,
+    tag: tagSchema,
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -241,6 +251,7 @@ export const CodingRunResultSchema = z
     ...value,
     summary: redactTokenShapedValues(value.summary),
     tests: value.tests.map((test) => ({ ...test, command: redactTokenShapedValues(test.command) })),
+    ...(value.tag !== undefined ? { tag: redactTokenShapedValues(value.tag) } : {}),
   }));
 
 export type CodingTaskInput = z.infer<typeof CodingTaskInputSchema>;

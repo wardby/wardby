@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CodingTaskInput } from "../coding/protocol.js";
-import { runCodingWorker, WORKER_SECURITY_INSTRUCTIONS } from "./driver.js";
+import { CODING_OUTPUT_JSON_SCHEMA, runCodingWorker, WORKER_SECURITY_INSTRUCTIONS } from "./driver.js";
 import type { WorkerClientConfig, WorkerEvent, WorkerThread } from "./types.js";
 
 const input: CodingTaskInput = {
@@ -200,5 +200,12 @@ describe("runCodingWorker", () => {
         ),
       }),
     ).rejects.toThrow("coding_output_invalid");
+  });
+});
+
+describe("CODING_OUTPUT_JSON_SCHEMA", () => {
+  it("advertises tag as an optional field, not a required one", () => {
+    expect(CODING_OUTPUT_JSON_SCHEMA.properties).toHaveProperty("tag");
+    expect(CODING_OUTPUT_JSON_SCHEMA.required).not.toContain("tag");
   });
 });

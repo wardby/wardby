@@ -5,7 +5,13 @@ import { fileURLToPath } from "node:url";
 import type { Writable } from "node:stream";
 import { redactTokenShapedValues, normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
 import { isSafeGitHubInstallationToken, type GitHubRepositoryAccess } from "./github.js";
-import type { FinalizeChangesResult, PreparedWorkspace, VcsPrepareInput, VcsProvider } from "./types.js";
+import type {
+  FinalizeChangesDetails,
+  FinalizeChangesResult,
+  PreparedWorkspace,
+  VcsPrepareInput,
+  VcsProvider,
+} from "./types.js";
 
 export const DEFAULT_MAX_CHANGED_FILES = 1_000;
 export const DEFAULT_MAX_DIFF_BYTES = 1024 * 1024;
@@ -369,7 +375,10 @@ export class GitVcsProvider implements VcsProvider {
     return prepared;
   }
 
-  async finalizeChanges(workspace: PreparedWorkspace): Promise<FinalizeChangesResult> {
+  async finalizeChanges(
+    workspace: PreparedWorkspace,
+    details?: FinalizeChangesDetails,
+  ): Promise<FinalizeChangesResult> {
     const prepared = await this.validatePrepared(workspace);
     await this.inspectWorkspace(prepared.workspacePath);
     await this.assertRemote(prepared);
@@ -441,6 +450,9 @@ export class GitVcsProvider implements VcsProvider {
       repository: prepared.repository,
       baseRef: prepared.baseRef,
       headRef: prepared.headRef,
+      summary: details?.summary,
+      tests: details?.tests,
+      tag: details?.tag,
     });
     return {
       outcome: "pull_request_opened",

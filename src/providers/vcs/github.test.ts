@@ -166,6 +166,68 @@ describe("GitHubAppClient", () => {
     });
   });
 
+  it("puts the agent's summary and test results in the PR body, keeping the tracking marker first", async () => {
+    let createBody: Record<string, unknown> | undefined;
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/installation")) return json({ id: 42 });
+      if (url.endsWith("/access_tokens")) return tokenResponse();
+      if (url.includes("/pulls?")) return json([]);
+      if (url.endsWith("/pulls") && init?.method === "POST") {
+        createBody = JSON.parse(bodyText(init.body));
+        return json({ number: 10, html_url: "https://github.com/openai/example/pull/10", draft: true }, 201);
+      }
+      if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+      throw new Error(`unexpected request ${url}`);
+    }) as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+
+    await client.createOrFindDraftPullRequest({
+      runId: "run-1",
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: "reevo/run-run-1",
+      summary: "Added a hello.py script and confirmed it runs.",
+      tests: [
+        { command: "python3 hello.py", outcome: "passed" },
+        { command: "pytest -q", outcome: "failed" },
+      ],
+    });
+
+    expect(createBody?.title).toBe("Reevo run run-1");
+    const body = createBody?.body as string;
+    expect(body.startsWith("<!-- reevo-run:run-1 -->\n")).toBe(true);
+    expect(body).toContain("Added a hello.py script and confirmed it runs.");
+    expect(body).toContain("`python3 hello.py`: passed");
+    expect(body).toContain("`pytest -q`: failed");
+  });
+
+  it("prefixes the PR title with a caller-provided tag, leaving it unchanged when absent", async () => {
+    let createBody: Record<string, unknown> | undefined;
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/installation")) return json({ id: 42 });
+      if (url.endsWith("/access_tokens")) return tokenResponse();
+      if (url.includes("/pulls?")) return json([]);
+      if (url.endsWith("/pulls") && init?.method === "POST") {
+        createBody = JSON.parse(bodyText(init.body));
+        return json({ number: 11, html_url: "https://github.com/openai/example/pull/11", draft: true }, 201);
+      }
+      if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+      throw new Error(`unexpected request ${url}`);
+    }) as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+
+    await client.createOrFindDraftPullRequest({
+      runId: "run-1",
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: "reevo/run-run-1",
+      tag: "JIRA-123",
+    });
+    expect(createBody?.title).toBe("[JIRA-123] Reevo run run-1");
+  });
+
   it("normalizes the URL returned by a successful draft PR creation", async () => {
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
       const url = String(input);

@@ -3,7 +3,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { InMemoryCodingRunObserver } from "../../coding/observability.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "../jobs/types.js";
-import type { FinalizeChangesResult, PreparedWorkspace, VcsPrepareInput, VcsProvider } from "../vcs/types.js";
+import type {
+  FinalizeChangesDetails,
+  FinalizeChangesResult,
+  PreparedWorkspace,
+  VcsPrepareInput,
+  VcsProvider,
+} from "../vcs/types.js";
 import {
   ContainerExecutor,
   RunCapabilityVault,
@@ -142,6 +148,7 @@ class FakeVcs implements VcsProvider {
   finalized = 0;
   cleaned = 0;
   workspace: PreparedWorkspace | null = null;
+  lastFinalizeDetails?: FinalizeChangesDetails;
 
   constructor(
     private readonly root: string,
@@ -157,8 +164,9 @@ class FakeVcs implements VcsProvider {
   async recoverWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace | null> {
     return this.workspace?.runId === input.runId ? this.workspace : null;
   }
-  async finalizeChanges(): Promise<FinalizeChangesResult> {
+  async finalizeChanges(_workspace: PreparedWorkspace, details?: FinalizeChangesDetails): Promise<FinalizeChangesResult> {
     this.finalized += 1;
+    this.lastFinalizeDetails = details;
     this.events.push("finalize");
     return {
       outcome: "pull_request_opened",
@@ -291,6 +299,27 @@ describe("ContainerExecutor", () => {
       budgetReservedUsd: 2,
       budgetActualUsd: 0.01,
     });
+  });
+
+  it("passes the worker's summary, tests, and tag through to VCS finalization and the persisted result", async () => {
+    const created = await harness();
+    created.jobs.result.resultArtifact = JSON.stringify({
+      schemaVersion: 1,
+      runId: "run-1",
+      outcome: "changes_ready",
+      summary: "Fixed it.",
+      tests: [{ command: "npm test", outcome: "passed" }],
+      tag: "JIRA-123",
+    });
+
+    await created.executor.start("run-1");
+
+    expect(created.vcs.lastFinalizeDetails).toEqual({
+      summary: "Fixed it.",
+      tests: [{ command: "npm test", outcome: "passed" }],
+      tag: "JIRA-123",
+    });
+    expect(created.store.run.result).toMatchObject({ tag: "JIRA-123" });
   });
 
   it("skips materialization and VCS finalization for a no-change output", async () => {

@@ -5,6 +5,8 @@ import { normalizeGitHubRepository, normalizeGitRef } from "../../coding/protoco
 const DEFAULT_API_BASE_URL = "https://api.github.com";
 const DEFAULT_API_VERSION = "2026-03-10";
 const RUN_MARKER_PREFIX = "<!-- reevo-run:";
+/** Mirrors coding/protocol.ts's tagSchema — validated independently here since this is where it reaches GitHub. */
+const SAFE_PULL_REQUEST_TAG = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,31}$/;
 
 export interface GitHubAppConfig {
   appId: string;
@@ -13,11 +15,20 @@ export interface GitHubAppConfig {
   apiVersion?: string;
 }
 
+export interface PullRequestTestResult {
+  command: string;
+  outcome: "passed" | "failed" | "skipped";
+}
+
 export interface PullRequestInput {
   runId: string;
   repository: string;
   baseRef: string;
   headRef: string;
+  /** Already-validated/redacted agent-authored fields (coding/protocol.ts); optional for callers with none. */
+  summary?: string;
+  tests?: readonly PullRequestTestResult[];
+  tag?: string;
 }
 
 export interface PullRequestResult {
@@ -55,6 +66,20 @@ export function isSafeGitHubInstallationToken(value: unknown): value is string {
     Buffer.byteLength(value, "utf8") <= 512 &&
     /^[A-Za-z0-9._-]+$/.test(value)
   );
+}
+
+function pullRequestTitle(input: PullRequestInput): string {
+  return input.tag ? `[${input.tag}] Reevo run ${input.runId}` : `Reevo run ${input.runId}`;
+}
+
+/** The hidden run marker stays first and unconditional: createOrFindDraftPullRequest's idempotent lookup depends on it. */
+function pullRequestBody(input: PullRequestInput): string {
+  const sections = [`${RUN_MARKER_PREFIX}${input.runId} -->`];
+  if (input.summary) sections.push(input.summary);
+  if (input.tests?.length) {
+    sections.push(["**Tests:**", ...input.tests.map((test) => `- \`${test.command}\`: ${test.outcome}`)].join("\n"));
+  }
+  return sections.join("\n\n");
 }
 
 function normalizeApiBaseUrl(value: string): string {
@@ -111,23 +136,25 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.runId) || headRef !== `reevo/run-${input.runId}`) {
       throw new Error("github_pull_request_input_invalid");
     }
+    if (input.tag !== undefined && !SAFE_PULL_REQUEST_TAG.test(input.tag)) {
+      throw new Error("github_pull_request_tag_invalid");
+    }
 
     return this.withRepositoryToken(repository, async (token) => {
       const existing = await this.findPullRequest(token, { ...input, repository, baseRef, headRef });
       if (existing) return existing;
 
       const [owner, name] = repository.split("/");
-      const marker = `${RUN_MARKER_PREFIX}${input.runId} -->`;
       const response = await this.requestJson(
         `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls`,
         token,
         {
           method: "POST",
           body: JSON.stringify({
-            title: `Reevo run ${input.runId}`,
+            title: pullRequestTitle(input),
             head: headRef,
             base: baseRef,
-            body: marker,
+            body: pullRequestBody(input),
             draft: true,
           }),
         },
