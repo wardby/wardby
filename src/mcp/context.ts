@@ -2,8 +2,8 @@
  * Per-request context every MCP tool handler receives: who's calling
  * (principal + granted scopes) and what they can call into. Narrowed to
  * the seams Phase 4's tool modules actually touch (llm/engine/datastore/
- * secrets/executor) — same `Pick<ProviderRegistry, ...>` narrowing this
- * codebase already uses for `executeRun`/`RunnerDb`, since the full
+ * secrets/executor/memory) — same `Pick<ProviderRegistry, ...>` narrowing
+ * this codebase already uses for `executeRun`/`RunnerDb`, since the full
  * registry also carries jobs/email/auth/storage seams no Phase 4 tool
  * needs and this plan never builds real adapters for.
  */
@@ -11,7 +11,7 @@ import type { Principal, PrismaClient } from "@prisma/client";
 import type { RequestStateAccessor } from "@modelcontextprotocol/server";
 import type { ProviderRegistry } from "../providers/index.js";
 
-export type McpProviders = Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "executor">;
+export type McpProviders = Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "executor" | "memory">;
 
 export interface McpRequestContext {
   principal: Principal;

@@ -182,6 +182,29 @@ describe("agent CRUD tools", () => {
     await client.close();
   });
 
+  it("create_agent defaults memoryEnabled to false, and update_agent can turn it on", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const created = await client.callTool({
+      name: "create_agent",
+      arguments: { name: "rememberer", systemPrompt: "be nice", model: "gpt-4o", budgetUsd: 5 },
+    });
+    const agent = JSON.parse((created.content as { text: string }[])[0].text);
+    expect(agent.memoryEnabled).toBe(false);
+
+    const updated = await client.callTool({
+      name: "update_agent",
+      arguments: { id: agent.id, memoryEnabled: true },
+    });
+    expect(JSON.parse((updated.content as { text: string }[])[0].text).memoryEnabled).toBe(true);
+
+    await client.close();
+  });
+
   it("create_agent atomically creates a normalized coding profile", async () => {
     const db = fakeDb();
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });

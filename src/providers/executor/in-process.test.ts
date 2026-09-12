@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { LlmProvider } from "../llm/types.js";
 import type { SecretCipher } from "../secrets/types.js";
 import type { Datastore, DatastoreValue } from "../datastore/types.js";
+import type { AgentMemoryStore } from "../memory/types.js";
 import type { RunnerDb } from "../../core/runner.js";
 import { NativeEngine } from "../../core/engine-native.js";
 import { InProcessExecutor } from "./in-process.js";
@@ -117,7 +118,13 @@ describe("InProcessExecutor", () => {
     const llm = slowLlm(["a", "b", "c"], 15);
 
     const executor = new InProcessExecutor(
-      { llm, engine: new NativeEngine(), datastore: fakeDatastore(), secrets: {} as SecretCipher },
+      {
+        llm,
+        engine: new NativeEngine(),
+        datastore: fakeDatastore(),
+        secrets: {} as SecretCipher,
+        memory: {} as AgentMemoryStore,
+      },
       db,
       /* heartbeatIntervalMs */ 5,
     );
@@ -153,7 +160,13 @@ describe("InProcessExecutor", () => {
     };
 
     const executor = new InProcessExecutor(
-      { llm, engine: new NativeEngine(), datastore: fakeDatastore(), secrets: {} as SecretCipher },
+      {
+        llm,
+        engine: new NativeEngine(),
+        datastore: fakeDatastore(),
+        secrets: {} as SecretCipher,
+        memory: {} as AgentMemoryStore,
+      },
       db,
       5,
     );

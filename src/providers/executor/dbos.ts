@@ -35,7 +35,7 @@ export const DBOS_BACKEND = "dbos";
 
 const dbosLog = logger.child({ module: "dbos-executor" });
 
-type Providers = Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets">;
+type Providers = Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory">;
 type Db = RunnerDb & Pick<PrismaClient, "run">;
 
 /** The executor whose deps the registered workflow uses. Set by launch(). */

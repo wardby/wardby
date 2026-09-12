@@ -18,6 +18,7 @@ import { prisma } from "../core/db.js";
 import { NativeEngine } from "../core/engine-native.js";
 import { resolveLlmRegistrations, RoutingLlmProvider } from "../providers/llm/index.js";
 import { PostgresDatastore } from "../providers/datastore/index.js";
+import { PostgresAgentMemory } from "../providers/memory/index.js";
 import { buildConfiguredExecutor, buildExecutor } from "../providers/executor/index.js";
 import { buildSecretCipher } from "../providers/secrets/index.js";
 import { buildAuthProvider } from "../providers/auth/index.js";
@@ -37,6 +38,7 @@ import { registerToolAuthoringTools } from "./tools/tools.js";
 import { registerSchedulingTools } from "./tools/scheduling.js";
 import { registerRunTools } from "./tools/runs.js";
 import { registerDatastoreTools } from "./tools/datastore.js";
+import { registerMemoryTools } from "./tools/memory.js";
 import { registerSecretsTools, type SecretElicitationUrlBuilder } from "./tools/secrets.js";
 import { registerWebhookTools } from "./tools/webhooks.js";
 import { createStdioSecretElicitationHost } from "./tools/secret-elicitation-server.js";
@@ -61,6 +63,7 @@ export function registerAllTools(
   registerSchedulingTools(mcp);
   registerRunTools(mcp);
   registerDatastoreTools(mcp);
+  registerMemoryTools(mcp);
   registerSecretsTools(mcp, {
     buildElicitationUrl: opts.secretElicitationUrl,
     protocolElicitation: opts.secretElicitationProtocol,
@@ -78,16 +81,19 @@ export function buildMcpProviders(): McpProviderComposition {
 
   const llmResult = resolveLlmRegistrations();
   if (llmResult.kind !== "registrations") {
-    throw new Error("No LLM credentials present. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, and/or BEDROCK_REGION (or AWS_REGION).");
+    throw new Error(
+      "No LLM credentials present. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, and/or BEDROCK_REGION (or AWS_REGION).",
+    );
   }
   const llm = new RoutingLlmProvider(llmResult.registrations);
   const engine = new NativeEngine();
   const secrets = buildSecretCipher(providerConfig);
   const datastore = new PostgresDatastore(prisma, secrets);
-  const nativeExecutor = buildExecutor(providerConfig, { llm, engine, datastore, secrets }, prisma);
+  const memory = new PostgresAgentMemory(prisma);
+  const nativeExecutor = buildExecutor(providerConfig, { llm, engine, datastore, secrets, memory }, prisma);
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig });
 
-  return { providers: { llm, engine, datastore, secrets, executor } };
+  return { providers: { llm, engine, datastore, secrets, executor, memory } };
 }
 
 /** Handle returned by `startMcp()` — closes the running transport, then the executor. */

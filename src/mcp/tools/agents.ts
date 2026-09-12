@@ -31,6 +31,7 @@ const agentFields = {
   scheduleEnabled: z.boolean(),
   kind: z.enum(["native", "coding"]),
   budgetGroupId: z.string().min(1).max(128),
+  memoryEnabled: z.boolean(),
 };
 
 const CreateAgentSchema = z
@@ -45,6 +46,7 @@ const CreateAgentSchema = z
     scheduleEnabled: agentFields.scheduleEnabled.optional(),
     kind: agentFields.kind.default("native"),
     budgetGroupId: agentFields.budgetGroupId.optional(),
+    memoryEnabled: agentFields.memoryEnabled.default(false),
     codingProfile: CodingProfileSchema.optional(),
   })
   .strict()
@@ -93,6 +95,7 @@ const UpdateAgentSchema = z
     scheduleEnabled: agentFields.scheduleEnabled.optional(),
     kind: agentFields.kind.optional(),
     budgetGroupId: agentFields.budgetGroupId.nullable().optional(),
+    memoryEnabled: agentFields.memoryEnabled.optional(),
     codingProfile: CodingProfilePatchSchema.optional(),
   })
   .strict();
@@ -178,6 +181,7 @@ export function registerAgentTools(mcp: ReevoMcpServer): void {
         scheduleEnabled: { type: "boolean" },
         kind: { type: "string", enum: ["native", "coding"] },
         budgetGroupId: { type: "string" },
+        memoryEnabled: { type: "boolean" },
         codingProfile: { ...profileJsonSchema, required: ["repository"] },
       },
       required: ["name", "systemPrompt", "model", "budgetUsd"],
@@ -219,6 +223,7 @@ export function registerAgentTools(mcp: ReevoMcpServer): void {
         scheduleEnabled: { type: "boolean" },
         kind: { type: "string", enum: ["native", "coding"] },
         budgetGroupId: { type: ["string", "null"] },
+        memoryEnabled: { type: "boolean" },
         codingProfile: profileJsonSchema,
       },
       required: ["id"],

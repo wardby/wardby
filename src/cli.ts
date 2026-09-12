@@ -2,7 +2,7 @@
 /**
  * Minimal CLI.
  *
- *   reevo agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule "<cron>"] [--timezone <tz>]
+ *   reevo agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule "<cron>"] [--timezone <tz>] [--memory-enabled]
  *   reevo agent schedule <name> --cron "<expr>" [--timezone <tz>] [--disable]
  *   reevo run <name>
  *   reevo runs [--agent <name>] [--limit N] [--status <s>]
@@ -24,6 +24,7 @@ import { RoutingLlmProvider, resolveLlmRegistrations } from "./providers/llm/ind
 import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/index.js";
 import type { Executor } from "./providers/executor/types.js";
 import { PostgresDatastore } from "./providers/datastore/index.js";
+import { PostgresAgentMemory } from "./providers/memory/index.js";
 import { buildSecretCipher } from "./providers/secrets/index.js";
 import type { ProviderRegistry } from "./providers/index.js";
 import { prisma } from "./core/db.js";
@@ -62,9 +63,7 @@ function fail(message: string): never {
 function buildLlmProvider(): ProviderRegistry["llm"] {
   const result = resolveLlmRegistrations();
   if (result.kind === "no-credentials") {
-    fail(
-      "No LLM credentials present. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, and/or BEDROCK_REGION (or AWS_REGION).",
-    );
+    fail("No LLM credentials present. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, and/or BEDROCK_REGION (or AWS_REGION).");
   }
   return new RoutingLlmProvider(result.registrations);
 }
@@ -83,6 +82,10 @@ function buildDatastore(cipher: ProviderRegistry["secrets"]): ProviderRegistry["
     fail(`DATASTORE "${String(config.datastore)}" has no adapter yet (only "postgres").`);
   }
   return new PostgresDatastore(prisma, cipher);
+}
+
+function buildMemory(): ProviderRegistry["memory"] {
+  return new PostgresAgentMemory(prisma);
 }
 
 function buildSecrets(): ProviderRegistry["secrets"] {
@@ -105,6 +108,7 @@ async function agentCreate(args: string[]): Promise<void> {
       schedule: { type: "string" },
       timezone: { type: "string" },
       "max-turns": { type: "string" },
+      "memory-enabled": { type: "boolean" },
     },
   });
 
@@ -140,6 +144,7 @@ async function agentCreate(args: string[]): Promise<void> {
       schedule: values.schedule ?? null,
       timezone,
       maxTurns,
+      memoryEnabled: values["memory-enabled"] ?? false,
     },
   });
   console.log(agent.id);
@@ -331,10 +336,11 @@ async function run(name: string | undefined): Promise<void> {
   const engine = buildEngine();
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
+  const memory = buildMemory();
 
   let run;
   try {
-    run = await runAgent(name, { llm, engine, datastore, secrets }, prisma, (delta) => {
+    run = await runAgent(name, { llm, engine, datastore, secrets, memory }, prisma, (delta) => {
       process.stdout.write(delta);
     });
   } catch (err) {
@@ -458,7 +464,8 @@ async function scheduler(args: string[]): Promise<void> {
   const engine = buildEngine();
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
-  const nativeExecutor = buildExecutor(config, { llm, engine, datastore, secrets }, prisma);
+  const memory = buildMemory();
+  const nativeExecutor = buildExecutor(config, { llm, engine, datastore, secrets, memory }, prisma);
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig: config });
   await executor.launch?.();
   const reconciler = startReconciler({ db: prisma, executor });

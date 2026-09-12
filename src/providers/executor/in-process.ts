@@ -14,7 +14,7 @@ import type { Executor } from "./types.js";
 
 export class InProcessExecutor implements Executor {
   constructor(
-    private readonly providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets">,
+    private readonly providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory">,
     private readonly db: RunnerDb = defaultDb,
     private readonly heartbeatIntervalMs: number = HEARTBEAT_INTERVAL_MS,
   ) {}

@@ -13,6 +13,7 @@ import { Prisma, type Tool } from "@prisma/client";
 import { deriveJsonSchema, validateParams } from "../../sandbox/zod-params.js";
 import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
+import { MEMORY_TOOL_NAMES } from "../../core/memory-tools.js";
 import type { ReevoMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import {
@@ -40,6 +41,9 @@ export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
       required: ["name", "description", "paramsZod", "code"],
     },
     handler: async (args: { name: string; description: string; paramsZod: string; code: string }, ctx) => {
+      if (MEMORY_TOOL_NAMES.has(args.name)) {
+        throw new McpError(400, `Tool name "${args.name}" is reserved for the built-in agent-memory tools.`);
+      }
       const schemaResult = await deriveJsonSchema(args.paramsZod);
       if (!schemaResult.ok) {
         return textResult({ ok: false, errorKind: schemaResult.errorKind, errorMessage: schemaResult.errorMessage });

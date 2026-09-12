@@ -27,6 +27,7 @@ import { asStringArray } from "../sandbox/tool-capabilities.js";
 import { scopeDatastore } from "../providers/datastore/scoped.js";
 import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
 import { effectiveBudgetForRun } from "./budget-groups.js";
+import { MEMORY_TOOL_DEFS, MEMORY_TOOL_NAMES, handleMemoryTool } from "./memory-tools.js";
 import { prisma as defaultDb } from "./db.js";
 import { logger } from "./logger.js";
 
@@ -84,7 +85,7 @@ export async function createRun(db: RunnerDb, agentName: string, trigger: RunTri
 /** Drives an existing Run (created by `createRun` or the scheduler) to a terminal state. */
 export async function executeRun(
   runId: string,
-  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets">,
+  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory">,
   db: RunnerDb = defaultDb,
   onText?: (delta: string) => void,
   step: StepRunner = runStepInline,
@@ -124,6 +125,7 @@ export async function executeRun(
     return {
       agentId: agent.id,
       kind: agent.kind,
+      memoryEnabled: agent.memoryEnabled,
       agent: {
         systemPrompt: agent.systemPrompt,
         model: agent.model,
@@ -135,11 +137,16 @@ export async function executeRun(
       // path, so it can't go stale. Re-deriving it here on every run would
       // spin a fresh QuickJS runtime and evaluate the whole vendored zod
       // bundle per attached tool, before the first LLM call, on every run.
-      tools: attached.map((attachment): LoadedTool => ({
-        name: attachment.tool.name,
-        description: attachment.tool.description,
-        jsonSchema: attachment.tool.jsonSchema as Record<string, unknown>,
-      })),
+      // The memory built-ins (recognized by name in runSandboxTool below,
+      // never sandboxed) are appended the same way when enabled.
+      tools: [
+        ...attached.map((attachment): LoadedTool => ({
+          name: attachment.tool.name,
+          description: attachment.tool.description,
+          jsonSchema: attachment.tool.jsonSchema as Record<string, unknown>,
+        })),
+        ...(agent.memoryEnabled ? MEMORY_TOOL_DEFS : []),
+      ],
       toolsByName: Object.fromEntries(
         attached.map((attachment) => [
           attachment.tool.name,
@@ -173,6 +180,10 @@ export async function executeRun(
     const secretsAccessor = buildSecretsAccessor(loaded.agentId, providers.secrets, db);
 
     const runSandboxTool = async (name: string, argsJson: string): Promise<string> => {
+      if (loaded.memoryEnabled && MEMORY_TOOL_NAMES.has(name)) {
+        return handleMemoryTool(name, argsJson, loaded.agentId, providers.memory);
+      }
+
       const tool = toolsByName.get(name);
       if (!tool) {
         return JSON.stringify({
@@ -249,7 +260,7 @@ export async function executeRun(
 /** Convenience: create + execute a manual run in one call (what the CLI's `reevo run` uses). */
 export async function runAgent(
   agentName: string,
-  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets">,
+  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory">,
   db: RunnerDb = defaultDb,
   onText?: (delta: string) => void,
 ): Promise<Run> {
