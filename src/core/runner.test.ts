@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
+import type { AgentMemoryStore } from "../providers/memory/types.js";
 import type { Engine, EngineResult, EngineRunContext, StepRunner } from "../providers/engine/types.js";
 import type { LlmProvider } from "../providers/index.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
@@ -19,6 +20,7 @@ interface FakeAgent {
   maxTurns: number;
   kind?: "native" | "coding";
   budgetGroupId?: string | null;
+  memoryEnabled?: boolean;
 }
 
 interface FakeTool {
@@ -165,6 +167,34 @@ function fakeDatastore(): Datastore {
   };
 }
 
+function fakeMemory(): AgentMemoryStore {
+  const store = new Map<string, string>();
+  return {
+    async get(agentId, key) {
+      return store.get(`${agentId}:${key}`);
+    },
+    async set(agentId, key, content) {
+      store.set(`${agentId}:${key}`, content);
+    },
+    async list(agentId) {
+      const p = `${agentId}:`;
+      return [...store.keys()]
+        .filter((k) => k.startsWith(p))
+        .map((k) => k.slice(p.length))
+        .sort();
+    },
+    async search(agentId, query) {
+      const p = `${agentId}:`;
+      return [...store.entries()]
+        .filter(([k, content]) => k.startsWith(p) && content.includes(query))
+        .map(([k, content]) => ({ key: k.slice(p.length), content, rank: 1 }));
+    },
+    async delete(agentId, key) {
+      store.delete(`${agentId}:${key}`);
+    },
+  };
+}
+
 const noopLlm = {} as LlmProvider;
 // None of these tests' sandboxed tool bodies call secrets.get, so this
 // cipher is constructed into a SecretsAccessor closure but never invoked.
@@ -201,7 +231,11 @@ describe("runAgent", () => {
     );
 
     await expect(
-      runAgent("coder", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db),
+      runAgent(
+        "coder",
+        { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+        db,
+      ),
     ).rejects.toThrow(/coding.*executor|executor.*coding/i);
     expect(engineCalled).toBe(false);
   });
@@ -219,7 +253,7 @@ describe("runAgent", () => {
 
     const run = await runAgent(
       "greeter",
-      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher },
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
       db,
     );
 
@@ -243,7 +277,7 @@ describe("runAgent", () => {
 
     const run = await runAgent(
       "tight",
-      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher },
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
       db,
     );
 
@@ -260,7 +294,11 @@ describe("runAgent", () => {
         capturedBudget = ctx.agent.budgetUsd;
       },
     );
-    await runAgent("solo", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
+    await runAgent(
+      "solo",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+      db,
+    );
     expect(capturedBudget).toBe(5);
   });
 
@@ -280,7 +318,11 @@ describe("runAgent", () => {
         capturedBudget = ctx.agent.budgetUsd;
       },
     );
-    await runAgent("grouped", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
+    await runAgent(
+      "grouped",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+      db,
+    );
     expect(capturedBudget).toBe(2); // 10 cap - 8 already spent = 2 remaining, tighter than the agent's own 5
   });
 
@@ -308,7 +350,7 @@ describe("runAgent", () => {
     );
     const run = await runAgent(
       "exhausted",
-      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher },
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
       db,
     );
     expect(capturedBudget).toBe(0);
@@ -329,7 +371,11 @@ describe("runAgent", () => {
       },
     );
 
-    await runAgent("solo", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
+    await runAgent(
+      "solo",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+      db,
+    );
 
     expect(captured?.agent).toEqual({ systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 7 });
     expect(captured?.tools).toEqual([]);
@@ -364,7 +410,11 @@ describe("runAgent", () => {
       },
     );
 
-    await runAgent("weatherbot", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
+    await runAgent(
+      "weatherbot",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+      db,
+    );
 
     expect(captured?.tools).toHaveLength(1);
     expect(captured?.tools[0].name).toBe("getWeather");
@@ -396,11 +446,94 @@ describe("runAgent", () => {
       },
     };
 
-    await runAgent("doubler", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
+    await runAgent(
+      "doubler",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+      db,
+    );
 
     expect(JSON.parse(results[0])).toEqual({ doubled: 42 });
     expect(JSON.parse(results[1]).error).toBe("validation_failed");
     expect(JSON.parse(results[2]).error).toBe("unknown_tool");
+  });
+
+  it("appends the built-in memory tools only when the agent has memoryEnabled", async () => {
+    const db = fakeDb([
+      { id: "a1", name: "remembers", systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 10, memoryEnabled: true },
+      { id: "a2", name: "forgets", systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 10, memoryEnabled: false },
+    ]);
+    const captured: EngineRunContext[] = [];
+    const engine = fakeEngine(
+      { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.001 } },
+      (ctx) => {
+        captured.push(ctx);
+      },
+    );
+
+    await runAgent(
+      "remembers",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+      db,
+    );
+    await runAgent(
+      "forgets",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+      db,
+    );
+
+    expect(captured[0].tools.map((t) => t.name).sort()).toEqual([
+      "memory_get",
+      "memory_list",
+      "memory_search",
+      "memory_set",
+    ]);
+    expect(captured[1].tools).toEqual([]);
+  });
+
+  it("dispatches memory_set/memory_get through the memory provider, scoped to the agent's own id", async () => {
+    const db = fakeDb([
+      { id: "a1", name: "remembers", systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 10, memoryEnabled: true },
+    ]);
+    const memory = fakeMemory();
+    const results: string[] = [];
+    const engine: Engine = {
+      async run(ctx) {
+        results.push(await ctx.runSandboxTool("memory_set", JSON.stringify({ key: "k", content: "v" })));
+        results.push(await ctx.runSandboxTool("memory_get", JSON.stringify({ key: "k" })));
+        return { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.001 } };
+      },
+    };
+
+    await runAgent(
+      "remembers",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory },
+      db,
+    );
+
+    expect(JSON.parse(results[0])).toEqual({ ok: true });
+    expect(JSON.parse(results[1])).toEqual({ content: "v" });
+    expect(await memory.get("a1", "k")).toBe("v");
+  });
+
+  it("a memory-disabled agent gets unknown_tool for a memory tool name, never silent dispatch", async () => {
+    const db = fakeDb([
+      { id: "a1", name: "forgets", systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 10, memoryEnabled: false },
+    ]);
+    let result = "";
+    const engine: Engine = {
+      async run(ctx) {
+        result = await ctx.runSandboxTool("memory_set", JSON.stringify({ key: "k", content: "v" }));
+        return { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.001 } };
+      },
+    };
+
+    await runAgent(
+      "forgets",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+      db,
+    );
+
+    expect(JSON.parse(result).error).toBe("unknown_tool");
   });
 
   it("runSandboxTool treats an empty argsJson as {} for a zero-parameter tool (some providers stream no delta at all for empty args)", async () => {
@@ -426,7 +559,11 @@ describe("runAgent", () => {
       },
     };
 
-    await runAgent("pinger", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
+    await runAgent(
+      "pinger",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+      db,
+    );
 
     expect(JSON.parse(result)).toEqual({ pong: true });
   });
@@ -441,7 +578,7 @@ describe("runAgent", () => {
 
     const run = await runAgent(
       "flaky",
-      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher },
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
       db,
     );
 
@@ -459,7 +596,11 @@ describe("runAgent", () => {
     });
 
     await expect(
-      runAgent("ghost", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db),
+      runAgent(
+        "ghost",
+        { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+        db,
+      ),
     ).rejects.toThrow(/Unknown agent/);
   });
 
@@ -486,7 +627,11 @@ describe("runAgent", () => {
       },
     );
 
-    await runAgent("scoped-ds", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher }, db);
+    await runAgent(
+      "scoped-ds",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+      db,
+    );
 
     const allowed = JSON.parse(await captured!.runSandboxTool("write_key", JSON.stringify({ key: "allowed:1" })));
     expect(allowed).toBe("ok");
@@ -525,7 +670,11 @@ describe("runAgent", () => {
       },
     );
 
-    await runAgent("scoped-secrets", { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: fakeCipher() }, db);
+    await runAgent(
+      "scoped-secrets",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: fakeCipher(), memory: fakeMemory() },
+      db,
+    );
 
     const allowed = JSON.parse(await captured!.runSandboxTool("read_secret", JSON.stringify({ name: "ALLOWED" })));
     expect(allowed).toBe("secret-a");
@@ -561,7 +710,13 @@ describe("runAgent", () => {
         };
       },
     };
-    const providers = { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher };
+    const providers = {
+      llm: noopLlm,
+      engine,
+      datastore: fakeDatastore(),
+      secrets: noopSecretCipher,
+      memory: fakeMemory(),
+    };
 
     await executeRun(run.id, providers, db, undefined, step);
     // A resumed workflow re-enters executeRun on a row that is still
@@ -596,6 +751,7 @@ describe("executeRun terminal-write races", () => {
       engine,
       datastore: fakeDatastore(),
       secrets: noopSecretCipher,
+      memory: fakeMemory(),
     });
 
     const first = await executeRun(
@@ -661,7 +817,7 @@ describe("executeRun terminal-write races", () => {
 
     const result = await executeRun(
       run.id,
-      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher },
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
       db,
     );
 
@@ -682,7 +838,7 @@ describe("executeRun terminal-write races", () => {
 
     const result = await executeRun(
       run.id,
-      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher },
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
       db,
     );
 

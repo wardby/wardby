@@ -14,6 +14,7 @@ export * from "./auth/types.js";
 export * from "./storage/types.js";
 export * from "./executor/types.js";
 export * from "./datastore/types.js";
+export * from "./memory/types.js";
 export * from "./engine/types.js";
 export * from "./vcs/types.js";
 
@@ -25,6 +26,7 @@ import type { AuthProvider } from "./auth/types.js";
 import type { BlobStore } from "./storage/types.js";
 import type { Executor } from "./executor/types.js";
 import type { Datastore } from "./datastore/types.js";
+import type { AgentMemoryStore } from "./memory/types.js";
 import type { Engine } from "./engine/types.js";
 import type { VcsProvider } from "./vcs/types.js";
 
@@ -38,6 +40,7 @@ export interface ProviderRegistry {
   storage: BlobStore;
   executor: Executor;
   datastore: Datastore;
+  memory: AgentMemoryStore;
   engine: Engine;
   vcs: VcsProvider;
 }

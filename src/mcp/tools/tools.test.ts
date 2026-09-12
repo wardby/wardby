@@ -211,6 +211,25 @@ describe("tool authoring tools", () => {
     await client.close();
   });
 
+  it("create_tool rejects a name reserved for a built-in memory tool", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "create_tool",
+      arguments: { name: "memory_get", description: "x", paramsZod: "z.object({})", code: "return 1;" },
+    });
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0].text).toMatch(/reserved/i);
+
+    const stored = await db.tool.findMany();
+    expect(stored.length).toBe(0);
+    await client.close();
+  });
+
   it("create_tool with invalid Zod source returns a structured error and persists nothing", async () => {
     const db = fakeDb();
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });

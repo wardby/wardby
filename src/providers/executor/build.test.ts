@@ -3,6 +3,7 @@ import { NativeEngine } from "../../core/engine-native.js";
 import type { LlmProvider } from "../llm/types.js";
 import type { Datastore } from "../datastore/types.js";
 import type { SecretCipher } from "../secrets/types.js";
+import type { AgentMemoryStore } from "../memory/types.js";
 import { buildExecutor } from "./build.js";
 import { InProcessExecutor } from "./in-process.js";
 import { DbosExecutor } from "./dbos.js";
@@ -10,7 +11,8 @@ import { DbosExecutor } from "./dbos.js";
 const llm = {} as LlmProvider;
 const datastore = {} as Datastore;
 const secrets = {} as SecretCipher;
-const providers = { llm, engine: new NativeEngine(), datastore, secrets };
+const memory = {} as AgentMemoryStore;
+const providers = { llm, engine: new NativeEngine(), datastore, secrets, memory };
 
 describe("buildExecutor", () => {
   it("builds the in-process executor by default", () => {

@@ -9,7 +9,7 @@ import type { Executor } from "./types.js";
 /** Select the Executor adapter from EXECUTOR. Constructing never connects; call `launch?.()` for that. */
 export function buildExecutor(
   config: Pick<ProviderConfig, "executor">,
-  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets">,
+  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory">,
   db: PrismaClient = defaultDb,
   env: NodeJS.ProcessEnv = process.env,
 ): Executor {

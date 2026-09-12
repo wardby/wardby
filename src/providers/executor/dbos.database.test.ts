@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { LlmProvider, LlmRequest, LlmStreamEvent } from "../llm/types.js";
 import type { Datastore, DatastoreValue } from "../datastore/types.js";
 import type { SecretCipher } from "../secrets/types.js";
+import type { AgentMemoryStore } from "../memory/types.js";
 import { NativeEngine } from "../../core/engine-native.js";
 import { DBOS } from "@dbos-inc/dbos-sdk";
 import { DBOS_BACKEND, DbosExecutor } from "./dbos.js";
@@ -99,7 +100,13 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
 
   function buildWith(llm: LlmProvider, id: string, runnerDb: PrismaClient = db) {
     return new DbosExecutor(
-      { llm, engine: new NativeEngine(), datastore: fakeDatastore(), secrets: fakeCipher },
+      {
+        llm,
+        engine: new NativeEngine(),
+        datastore: fakeDatastore(),
+        secrets: fakeCipher,
+        memory: {} as AgentMemoryStore,
+      },
       { systemDatabaseUrl: process.env.DATABASE_URL, schemaName: "dbos_test", executorId: id },
       runnerDb,
       /* heartbeatIntervalMs */ 50,

@@ -43,6 +43,12 @@ model Agent {
   // Phase 7: at most one budget group. Null = uncapped beyond its own budgetUsd.
   budgetGroupId String?
   budgetGroup   BudgetGroup? @relation(fields: [budgetGroupId], references: [id])
+
+  /// Un-phased: gates the memory_get/memory_set/memory_list/memory_search
+  /// built-in tools (see AgentMemory below). Off by default — a memory-less
+  /// agent sees no memory tools at all, and no AgentMemory rows are ever
+  /// created for it.
+  memoryEnabled Boolean @default(false)
 }
 
 /// Phase 7: an optional recurring spend cap across a group of agents,
@@ -154,6 +160,30 @@ model DatastoreEntry {
   updatedAt DateTime @updatedAt
 
   @@id([agentId, key])
+}
+
+/// Un-phased: agent-controlled persistent memory (key/content per agent),
+/// gated by Agent.memoryEnabled. Deliberately a separate table rather than a
+/// Datastore convention — memory has its own access surface (built-in
+/// memory_get/memory_set/memory_list/memory_search tools, not user-authored
+/// sandbox code) and its own full-text search index, which would be an odd
+/// fit bolted onto Datastore's opaque-JSON-value shape. No FK to Agent,
+/// matching DatastoreEntry: deleting an agent leaves orphaned rows today,
+/// same pre-existing gap, not a new one.
+///
+/// `contentTsv` is maintained by application code (see
+/// PostgresAgentMemory.set), never a Postgres GENERATED column — a generated
+/// column's expression has no representation in `Unsupported()`, which risks
+/// the migration-vs-schema drift check (CLAUDE.md) never landing clean.
+model AgentMemory {
+  agentId    String
+  key        String
+  content    String
+  contentTsv Unsupported("tsvector")?
+  updatedAt  DateTime                 @updatedAt
+
+  @@id([agentId, key])
+  @@index([contentTsv], type: Gin)
 }
 
 /// Phase 2: how a Run was created.

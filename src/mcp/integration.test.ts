@@ -11,6 +11,7 @@ import type { McpRequestContext } from "./context.js";
 import type { Executor } from "../providers/executor/types.js";
 import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
+import type { AgentMemoryStore } from "../providers/memory/types.js";
 
 // End-to-end per the spec's Definition of Done. Every individual tool
 // module already has its own focused test file (Tasks 9-14) — this file's
@@ -349,9 +350,7 @@ function buildFakeDb() {
       },
       deleteMany: async () => ({ count: 0 }),
       findFirst: async ({ where }: { where: { agentId: string; boundName: string } }) => {
-        const match = agentSecrets.find(
-          (a) => a.agentId === where.agentId && a.boundName === where.boundName,
-        );
+        const match = agentSecrets.find((a) => a.agentId === where.agentId && a.boundName === where.boundName);
         return match ? { ...match, secret: secrets.get(match.secretId) } : null;
       },
     },
@@ -435,7 +434,14 @@ describe("MCP integration (all tool modules, in-memory)", () => {
     const cipher = fakeCipher();
     const datastore = fakeDatastore();
     const executor = fakeExecutor(runs);
-    const providers = { llm: {} as never, engine: {} as never, datastore, secrets: cipher, executor };
+    const providers = {
+      llm: {} as never,
+      engine: {} as never,
+      datastore,
+      secrets: cipher,
+      executor,
+      memory: {} as AgentMemoryStore,
+    };
 
     const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, providers, "p1", ALL_SCOPES));
@@ -520,6 +526,7 @@ describe("MCP integration (all tool modules, in-memory)", () => {
       datastore: fakeDatastore(),
       secrets: cipher,
       executor: {} as Executor,
+      memory: {} as AgentMemoryStore,
     };
 
     const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
@@ -557,6 +564,7 @@ describe("MCP integration (all tool modules, in-memory)", () => {
       datastore: fakeDatastore(),
       secrets: fakeCipher(),
       executor: {} as Executor,
+      memory: {} as AgentMemoryStore,
     };
     const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, providers, "p1", ALL_SCOPES));
@@ -595,6 +603,7 @@ describe("MCP integration (all tool modules, in-memory)", () => {
       datastore: fakeDatastore(),
       secrets: fakeCipher(),
       executor: {} as Executor,
+      memory: {} as AgentMemoryStore,
     };
     const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, providers, "p1", ["agents:read"])); // no agents:write
