@@ -1,7 +1,13 @@
-import { Prisma } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
 import type { ReevoMcpServer } from "../server.js";
 import type { DatastoreValue } from "../../providers/index.js";
-import { requireOwnedAgent, requireReadableAgent, requireOwnedDatastore } from "../auth/ownership.js";
+import {
+  requireOwnedAgent,
+  requireReadableAgent,
+  requireOwnedDatastore,
+  canRead,
+  assertCanMutate,
+} from "../auth/ownership.js";
 import {
   createDatastore,
   listDatastores,
@@ -13,6 +19,53 @@ import {
 import { McpError } from "../errors.js";
 import { textResult } from "./text-result.js";
 
+/**
+ * A `boundName` names an *attachment* (agentId, boundName) -> Datastore.
+ * requireOwnedAgent/requireReadableAgent only check the agent's own
+ * ownership — for a public (null-owner) agent that's readable/mutable by
+ * anyone, so gating solely on the agent would let a principal who attaches
+ * their own private Datastore to a public agent inadvertently expose that
+ * Datastore's full read/write access to every other principal, with no
+ * sandbox mediation. So every boundName branch additionally checks the
+ * underlying Datastore's own ownership. When no attachment exists under
+ * that boundName, this resolves to `undefined` and callers fall through to
+ * today's unchanged behavior (miss for reads, throw for writes) — this
+ * check only ever narrows access when an attachment IS found, it never
+ * grants access an attachment didn't already imply.
+ */
+async function findAttachedDatastore(
+  db: Pick<PrismaClient, "agentDatastore">,
+  agentId: string,
+  boundName: string,
+): Promise<{ ownerId: string | null } | undefined> {
+  const attachment = await db.agentDatastore.findFirst({ where: { agentId, boundName }, include: { datastore: true } });
+  return attachment?.datastore;
+}
+
+async function requireReadableSharedDatastore(
+  db: Pick<PrismaClient, "agentDatastore">,
+  agentId: string,
+  boundName: string,
+  principalId: string,
+): Promise<void> {
+  const datastore = await findAttachedDatastore(db, agentId, boundName);
+  if (!datastore) return;
+  if (!canRead(datastore.ownerId, principalId)) {
+    throw new McpError(404, `Datastore bound as "${boundName}" not found.`);
+  }
+}
+
+async function requireMutableSharedDatastore(
+  db: Pick<PrismaClient, "agentDatastore">,
+  agentId: string,
+  boundName: string,
+  principalId: string,
+): Promise<void> {
+  const datastore = await findAttachedDatastore(db, agentId, boundName);
+  if (!datastore) return;
+  assertCanMutate(datastore.ownerId, principalId, `Datastore bound as "${boundName}" is not owned by the caller.`);
+}
+
 export function registerDatastoreTools(mcp: ReevoMcpServer): void {
   mcp.registerTool({
     name: "create_datastore",
@@ -23,8 +76,15 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
       required: ["name"],
     },
     handler: async (args: { name: string }, ctx) => {
-      const datastore = await createDatastore(args.name, ctx.principal.id, ctx.db);
-      return textResult({ id: datastore.id, name: datastore.name, createdAt: datastore.createdAt });
+      try {
+        const datastore = await createDatastore(args.name, ctx.principal.id, ctx.db);
+        return textResult({ id: datastore.id, name: datastore.name, createdAt: datastore.createdAt });
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+          throw new McpError(409, `A datastore named "${args.name}" already exists.`);
+        }
+        throw err;
+      }
     },
   });
 
@@ -44,7 +104,14 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
     inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
     handler: async (args: { id: string }, ctx) => {
       await requireOwnedDatastore(ctx.db, args.id, ctx.principal.id);
-      await deleteDatastore(args.id, ctx.db);
+      try {
+        await deleteDatastore(args.id, ctx.db);
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && (err.code === "P2003" || err.code === "P2014")) {
+          throw new McpError(409, "Datastore still has attached agents or entries — detach/clear it first.");
+        }
+        throw err;
+      }
       return textResult({ deleted: args.id });
     },
   });
@@ -57,7 +124,7 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
       properties: {
         agentId: { type: "string" },
         datastoreId: { type: "string" },
-        boundName: { type: "string" },
+        boundName: { type: "string", minLength: 1 },
       },
       required: ["agentId", "datastoreId"],
     },
@@ -87,6 +154,7 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
     },
     handler: async (args: { agentId: string; boundName: string }, ctx) => {
       await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+      await requireMutableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id);
       await detachDatastore(args.agentId, args.boundName, ctx.db);
       return textResult({ detached: true });
     },
@@ -103,6 +171,7 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
     handler: async (args: { agentId: string; key: string; boundName?: string }, ctx) => {
       await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
       if (args.boundName) {
+        await requireReadableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id);
         const accessor = buildSharedDatastoreAccessor(args.agentId, ctx.providers.datastore, ctx.db);
         const value = await accessor.get(args.boundName, args.key);
         return textResult({ value: value ?? null });
@@ -123,6 +192,7 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
     handler: async (args: { agentId: string; prefix?: string; boundName?: string }, ctx) => {
       await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
       if (args.boundName) {
+        await requireReadableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id);
         const accessor = buildSharedDatastoreAccessor(args.agentId, ctx.providers.datastore, ctx.db);
         const keys = await accessor.list(args.boundName, args.prefix);
         return textResult(keys);
@@ -154,6 +224,7 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
     ) => {
       await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
       if (args.boundName) {
+        await requireMutableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id);
         const accessor = buildSharedDatastoreAccessor(args.agentId, ctx.providers.datastore, ctx.db);
         await accessor.set(args.boundName, args.key, args.value, { pii: args.pii });
         return textResult({ ok: true });
@@ -174,6 +245,7 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
     handler: async (args: { agentId: string; key: string; boundName?: string }, ctx) => {
       await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
       if (args.boundName) {
+        await requireMutableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id);
         const accessor = buildSharedDatastoreAccessor(args.agentId, ctx.providers.datastore, ctx.db);
         await accessor.delete(args.boundName, args.key);
         return textResult({ ok: true });
