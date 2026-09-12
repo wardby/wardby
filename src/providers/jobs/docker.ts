@@ -15,6 +15,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { logger } from "../../core/logger.js";
 import { parseCodingAgentOutputJson, MAX_CODING_ARTIFACT_BYTES } from "../../coding/protocol.js";
 import {
   assertDockerHostSupportsIsolation,
@@ -35,6 +36,7 @@ const MAX_DOCKER_OUTPUT_BYTES = 1024 * 1024;
 const MAX_WORKSPACE_ENTRIES = 100_000;
 const TERMINAL_PHASES = new Set<DockerJobRecord["phase"]>(["succeeded", "failed", "stopped", "lost", "removed"]);
 const SAFE_WORKER_DIAGNOSTIC = /^(?:worker_[a-z_]+|coding_[a-z_]+|reevo_[a-z_]+)$/;
+const dockerLog = logger.child({ module: "docker-jobs" });
 export interface DockerCommandOptions {
   env?: Record<string, string>;
   maxOutputBytes?: number;
@@ -61,7 +63,7 @@ export class DockerCommandError extends Error {
 }
 
 export function isMissingDockerResource(stderr: string): boolean {
-  return /no such (?:container|network|volume|object)|is not connected to network/i.test(stderr);
+  return /no such (?:container|network|volume|object)|network .+ not found|is not connected to network/i.test(stderr);
 }
 
 export interface NodeDockerCommandRunnerOptions {
@@ -558,12 +560,20 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     const records = await this.allRecords();
     for (const record of records) {
       if (record.phase === "removed") continue;
-      if (record.deadlineAt <= this.now()) {
-        const active = await this.options.isRunActive(record.runId, clone(record.handle));
-        if (active) await this.withRun(record.runId, async () => this.stopRecord(record, true));
-        else await this.withRun(record.runId, async () => this.sweepExpired(record));
-      } else if (!isTerminal(record)) {
-        this.scheduleDeadline(record);
+      try {
+        if (record.deadlineAt <= this.now()) {
+          const active = await this.options.isRunActive(record.runId, clone(record.handle));
+          if (active) await this.withRun(record.runId, async () => this.stopRecord(record, true));
+          else await this.withRun(record.runId, async () => this.sweepExpired(record));
+        } else if (!isTerminal(record)) {
+          this.scheduleDeadline(record);
+        }
+      } catch (error) {
+        // One record's startup recovery must never abort the whole launcher:
+        // a stale container/network another process already reaped, a
+        // transient daemon hiccup, or an unrecognized Docker error string
+        // should surface as a logged recovery failure, not crash the server.
+        dockerLog.warn({ err: error, runId: record.runId }, "docker_startup_recovery_failed");
       }
     }
   }
