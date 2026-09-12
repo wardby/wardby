@@ -1,0 +1,16 @@
+FROM node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends bubblewrap ca-certificates git socat \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin reevo
+
+WORKDIR /opt/reevo/claude-compatibility
+COPY src/claude-coding-worker/package.json src/claude-coding-worker/package-lock.json ./
+RUN npm ci --ignore-scripts \
+    && npm cache clean --force
+COPY src/claude-coding-worker/compatibility.test.mjs ./
+
+USER 10001:10001
+ENV NODE_ENV=production HOME=/home/reevo
+ENTRYPOINT ["npm", "run", "test:compatibility"]

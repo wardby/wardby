@@ -2,6 +2,7 @@
 import { Prisma, type CodingAgentProfile } from "@prisma/client";
 import { z } from "zod";
 import { CodingProfilePatchSchema, CodingProfileSchema, type CodingProfile } from "../../coding/profile.js";
+import { codingProviderSupportsModel } from "../../coding/provider.js";
 import { validateCronExpression } from "../../core/cron.js";
 import {
   assertCanMutate,
@@ -58,6 +59,17 @@ const CreateAgentSchema = z
         message: "is only valid for coding agents",
       });
     }
+    if (
+      value.kind === "coding" &&
+      value.codingProfile &&
+      !codingProviderSupportsModel(value.codingProfile.provider, value.model)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["model"],
+        message: `is not supported by coding provider "${value.codingProfile.provider}"`,
+      });
+    }
     const enabledSchedule = value.schedule && value.scheduleEnabled !== false;
     if (value.kind === "coding" && enabledSchedule && !value.codingProfile?.defaultTask) {
       ctx.addIssue({
@@ -92,7 +104,7 @@ const profileJsonSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
-    provider: { type: "string", enum: ["codex"] },
+    provider: { type: "string", enum: ["codex", "claude-code"] },
     repository: { type: "string" },
     baseRef: { type: "string" },
     defaultTask: { type: ["string", "null"] },
@@ -234,6 +246,13 @@ export function registerAgentTools(mcp: ReevoMcpServer): void {
             const profileResult = CodingProfileSchema.safeParse({ ...currentProfile, ...args.codingProfile });
             if (!profileResult.success) throw invalidArguments("coding profile", profileResult.error);
             nextProfile = profileResult.data;
+            const nextModel = args.model ?? existing.model;
+            if (!codingProviderSupportsModel(nextProfile.provider, nextModel)) {
+              throw new McpError(
+                400,
+                `Model "${nextModel}" is not supported by coding provider "${nextProfile.provider}".`,
+              );
+            }
           }
 
           const nextSchedule = args.schedule !== undefined ? args.schedule : existing.schedule;

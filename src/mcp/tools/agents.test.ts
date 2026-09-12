@@ -26,7 +26,7 @@ interface FakeAgentRow {
 }
 
 interface FakeCodingProfile {
-  provider: "codex";
+  provider: "codex" | "claude-code";
   repository: string;
   baseRef: string;
   defaultTask: string | null;
@@ -215,6 +215,54 @@ describe("agent CRUD tools", () => {
     await client.close();
   });
 
+  it("create_agent accepts a Claude Code profile with a Claude model", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "create_agent",
+      arguments: {
+        name: "claude-coder",
+        systemPrompt: "Make the requested change.",
+        model: "claude-sonnet-5",
+        budgetUsd: 0.25,
+        kind: "coding",
+        codingProfile: { provider: "claude-code", repository: "OpenAI/Example.git" },
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse((result.content as { text: string }[])[0].text).codingProfile.provider).toBe("claude-code");
+    await client.close();
+  });
+
+  it("create_agent rejects a model from a different coding provider", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "create_agent",
+      arguments: {
+        name: "mismatched-coder",
+        systemPrompt: "Make the requested change.",
+        model: "gpt-5.6-luna",
+        budgetUsd: 0.25,
+        kind: "coding",
+        codingProfile: { provider: "claude-code", repository: "openai/example" },
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).toMatch(/not supported by coding provider/);
+    await client.close();
+  });
+
   it.each([
     {
       label: "missing profile",
@@ -252,7 +300,7 @@ describe("agent CRUD tools", () => {
         id: "a1",
         name: "agent",
         systemPrompt: "x",
-        model: "m",
+        model: "gpt-5.6-luna",
         budgetUsd: 1,
         maxTurns: 10,
         schedule: null,
@@ -291,7 +339,7 @@ describe("agent CRUD tools", () => {
         id: "a1",
         name: "agent",
         systemPrompt: "x",
-        model: "m",
+        model: "gpt-5.6-luna",
         budgetUsd: 1,
         maxTurns: 10,
         schedule: null,
@@ -328,7 +376,7 @@ describe("agent CRUD tools", () => {
         id: "a1",
         name: "agent",
         systemPrompt: "x",
-        model: "m",
+        model: "gpt-5.6-luna",
         budgetUsd: 1,
         maxTurns: 10,
         schedule: "0 * * * *",
@@ -362,6 +410,47 @@ describe("agent CRUD tools", () => {
     });
     expect(unsafeClear.isError).toBe(true);
     expect(JSON.stringify(unsafeClear)).toMatch(/default task/i);
+    await client.close();
+  });
+
+  it("update_agent rejects changing a coding provider without a compatible model", async () => {
+    const profile: FakeCodingProfile = {
+      provider: "codex",
+      repository: "openai/example",
+      baseRef: "main",
+      defaultTask: null,
+      timeoutSec: 1800,
+      allowedEgress: [],
+      protectedPaths: ["CODEOWNERS"],
+    };
+    const db = fakeDb([
+      {
+        id: "a1",
+        name: "agent",
+        systemPrompt: "x",
+        model: "gpt-5.6-luna",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId: "p1",
+        tools: [],
+        kind: "coding",
+        codingProfile: profile,
+      },
+    ]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { provider: "claude-code" } },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).toMatch(/not supported by coding provider/);
     await client.close();
   });
 

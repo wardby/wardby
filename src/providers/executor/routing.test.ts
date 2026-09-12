@@ -91,7 +91,12 @@ describe("RoutingExecutor", () => {
     const executor = new RoutingExecutor({ kindForRun: async () => "coding" }, native, coding);
 
     expect(
-      executor.resolveCodingWorkerImage({ toolchain: "node", toolchainVersion: null, workerImageRef: null }),
+      executor.resolveCodingWorkerImage({
+        provider: "codex",
+        toolchain: "node",
+        toolchainVersion: null,
+        workerImageRef: null,
+      }),
     ).toBe("sha256:deadbeef".padEnd(71, "0"));
   });
 
@@ -101,7 +106,12 @@ describe("RoutingExecutor", () => {
     const executor = new RoutingExecutor({ kindForRun: async () => "coding" }, native, coding);
 
     expect(() =>
-      executor.resolveCodingWorkerImage({ toolchain: "node", toolchainVersion: null, workerImageRef: null }),
+      executor.resolveCodingWorkerImage({
+        provider: "codex",
+        toolchain: "node",
+        toolchainVersion: null,
+        workerImageRef: null,
+      }),
     ).toThrow(/coding_execution_not_configured/);
   });
 });

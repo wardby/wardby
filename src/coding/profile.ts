@@ -2,6 +2,7 @@ import { isIP } from "node:net";
 import { z } from "zod";
 import { isImmutableDockerImage } from "../providers/jobs/docker-isolation.js";
 import { MAX_CODING_TASK_BYTES, normalizeGitHubRepository, normalizeGitRef } from "./protocol.js";
+import { CODING_PROVIDERS } from "./provider.js";
 
 export const MIN_CODING_TIMEOUT_SEC = 60;
 export const MAX_CODING_TIMEOUT_SEC = 7200;
@@ -103,7 +104,7 @@ const workerImageRefSchema = z
   .nullable();
 
 const codingProfileFields = {
-  provider: z.literal("codex"),
+  provider: z.enum(CODING_PROVIDERS),
   repository: repositorySchema,
   baseRef: baseRefSchema,
   defaultTask: defaultTaskSchema,

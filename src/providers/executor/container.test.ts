@@ -389,9 +389,14 @@ describe("ContainerExecutor", () => {
 describe("resolveCodingWorkerImage", () => {
   it("returns the node baseline (options.workerImage) for toolchain=node", async () => {
     const { executor } = await harness();
-    expect(executor.resolveCodingWorkerImage?.({ toolchain: "node", toolchainVersion: null, workerImageRef: null })).toBe(
-      IMAGE,
-    );
+    expect(
+      executor.resolveCodingWorkerImage?.({
+        provider: "codex",
+        toolchain: "node",
+        toolchainVersion: null,
+        workerImageRef: null,
+      }),
+    ).toBe(IMAGE);
   });
 
   it("resolves an additional toolchain/version from additionalWorkerImages", async () => {
@@ -412,7 +417,12 @@ describe("resolveCodingWorkerImage", () => {
       sleep: async () => {},
     });
     expect(
-      direct.resolveCodingWorkerImage?.({ toolchain: "node-python", toolchainVersion: "3.12", workerImageRef: null }),
+      direct.resolveCodingWorkerImage?.({
+        provider: "codex",
+        toolchain: "node-python",
+        toolchainVersion: "3.12",
+        workerImageRef: null,
+      }),
     ).toBe(pythonImage);
   });
 
@@ -420,21 +430,36 @@ describe("resolveCodingWorkerImage", () => {
     const byo = `registry.example/byo@sha256:${"c".repeat(64)}`;
     const { executor } = await harness();
     expect(
-      executor.resolveCodingWorkerImage?.({ toolchain: "node", toolchainVersion: null, workerImageRef: byo }),
+      executor.resolveCodingWorkerImage?.({
+        provider: "codex",
+        toolchain: "node",
+        toolchainVersion: null,
+        workerImageRef: byo,
+      }),
     ).toBe(byo);
   });
 
   it("throws on a malformed workerImageRef", async () => {
     const { executor } = await harness();
     expect(() =>
-      executor.resolveCodingWorkerImage?.({ toolchain: "node", toolchainVersion: null, workerImageRef: "not-a-digest" }),
+      executor.resolveCodingWorkerImage?.({
+        provider: "codex",
+        toolchain: "node",
+        toolchainVersion: null,
+        workerImageRef: "not-a-digest",
+      }),
     ).toThrow(/coding_worker_image_invalid/);
   });
 
   it("throws on an unknown toolchain", async () => {
     const { executor } = await harness();
     expect(() =>
-      executor.resolveCodingWorkerImage?.({ toolchain: "node-php", toolchainVersion: "8.3", workerImageRef: null }),
+      executor.resolveCodingWorkerImage?.({
+        provider: "codex",
+        toolchain: "node-php",
+        toolchainVersion: "8.3",
+        workerImageRef: null,
+      }),
     ).toThrow(/No worker image/);
   });
 
@@ -456,8 +481,25 @@ describe("resolveCodingWorkerImage", () => {
       sleep: async () => {},
     });
     expect(() =>
-      direct.resolveCodingWorkerImage?.({ toolchain: "node-python", toolchainVersion: "2.7", workerImageRef: null }),
+      direct.resolveCodingWorkerImage?.({
+        provider: "codex",
+        toolchain: "node-python",
+        toolchainVersion: "2.7",
+        workerImageRef: null,
+      }),
     ).toThrow(/No worker image/);
+  });
+
+  it("fails closed for Claude Code even when a BYO image is supplied", async () => {
+    const { executor } = await harness();
+    expect(() =>
+      executor.resolveCodingWorkerImage?.({
+        provider: "claude-code",
+        toolchain: "node",
+        toolchainVersion: null,
+        workerImageRef: `registry.example/byo@sha256:${"c".repeat(64)}`,
+      }),
+    ).toThrow(/coding_provider_not_configured:claude-code/);
   });
 
   it("constructor throws if any additionalWorkerImages entry is not an immutable digest", async () => {

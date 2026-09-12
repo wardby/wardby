@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient, Run, RunTrigger, Task } from "@prisma/client";
 import type { Executor } from "../providers/executor/types.js";
 import { CODING_PROTOCOL_VERSION, CodingTaskInputSchema } from "../coding/protocol.js";
+import { assertCodingProviderModel } from "../coding/provider.js";
 import { logger } from "./logger.js";
 
 const dispatchLog = logger.child({ module: "dispatch" });
@@ -95,6 +96,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
 
         if (agent.kind === "coding") {
           if (!agent.codingProfile) throw new Error(`Coding agent "${agent.id}" has no coding profile.`);
+          assertCodingProviderModel(agent.codingProfile.provider, agent.model);
           const task = options.codingTask ?? agent.codingProfile.defaultTask;
           if (!task) throw new Error(`Coding agent "${agent.id}" requires a task.`);
           const headRef = `reevo/run-${run.id}`;
@@ -110,6 +112,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             deadlineAt: new Date(now.getTime() + agent.codingProfile.timeoutSec * 1000).toISOString(),
           });
           const workerImage = options.executor.resolveCodingWorkerImage?.({
+            provider: agent.codingProfile.provider,
             toolchain: agent.codingProfile.toolchain,
             toolchainVersion: agent.codingProfile.toolchainVersion,
             workerImageRef: agent.codingProfile.workerImageRef,
