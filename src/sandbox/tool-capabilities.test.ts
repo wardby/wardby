@@ -3,14 +3,21 @@ import {
   ToolCapabilitiesSchema,
   ToolCapabilitiesPatchSchema,
   asStringArray,
+  asPrefixMap,
   FETCH_WILDCARD,
   MAX_ALLOWED_HOSTS,
+  MAX_ALLOWED_SHARED_DATASTORES,
 } from "./tool-capabilities.js";
 
 describe("ToolCapabilitiesSchema", () => {
-  it("defaults every field to an empty (deny-all) array", () => {
+  it("defaults every field to an empty (deny-all) array or object", () => {
     const result = ToolCapabilitiesSchema.parse({});
-    expect(result).toEqual({ allowedSecrets: [], allowedDatastorePrefixes: [], allowedHosts: [] });
+    expect(result).toEqual({
+      allowedSecrets: [],
+      allowedDatastorePrefixes: [],
+      allowedHosts: [],
+      allowedSharedDatastorePrefixes: {},
+    });
   });
 
   it("accepts the fetch wildcard alongside normalized hostnames, deduplicated", () => {
@@ -63,5 +70,42 @@ describe("asStringArray", () => {
     expect(asStringArray(undefined)).toEqual([]);
     expect(asStringArray({})).toEqual([]);
     expect(asStringArray("not-an-array")).toEqual([]);
+  });
+});
+
+describe("allowedSharedDatastorePrefixes", () => {
+  it("defaults to {} when omitted from a full ToolCapabilitiesSchema parse", () => {
+    const result = ToolCapabilitiesSchema.parse({});
+    expect(result.allowedSharedDatastorePrefixes).toEqual({});
+  });
+
+  it("accepts a map of boundName to prefix list", () => {
+    const result = ToolCapabilitiesSchema.parse({ allowedSharedDatastorePrefixes: { kb: ["docs:", "faq:"] } });
+    expect(result.allowedSharedDatastorePrefixes).toEqual({ kb: ["docs:", "faq:"] });
+  });
+
+  it("rejects more than MAX_ALLOWED_SHARED_DATASTORES bound names", () => {
+    const tooMany = Object.fromEntries(
+      Array.from({ length: MAX_ALLOWED_SHARED_DATASTORES + 1 }, (_, i) => [`kb${i}`, [""]]),
+    );
+    expect(() => ToolCapabilitiesSchema.parse({ allowedSharedDatastorePrefixes: tooMany })).toThrow();
+  });
+
+  it("ToolCapabilitiesPatchSchema leaves it optional (undefined when omitted)", () => {
+    const result = ToolCapabilitiesPatchSchema.parse({});
+    expect(result.allowedSharedDatastorePrefixes).toBeUndefined();
+  });
+});
+
+describe("asPrefixMap", () => {
+  it("coerces a plain object of string arrays", () => {
+    expect(asPrefixMap({ kb: ["a:", "b:"] })).toEqual({ kb: ["a:", "b:"] });
+  });
+
+  it("degrades foreign/malformed data to {} rather than throwing", () => {
+    expect(asPrefixMap(null)).toEqual({});
+    expect(asPrefixMap("not an object")).toEqual({});
+    expect(asPrefixMap({ kb: "not an array" })).toEqual({ kb: [] });
+    expect(asPrefixMap({ kb: [1, "a:", null] })).toEqual({ kb: ["a:"] });
   });
 });
