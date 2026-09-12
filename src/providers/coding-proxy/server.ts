@@ -2,6 +2,7 @@ import { createServer, type ServerResponse } from "node:http";
 import { HTTP_LIMITS, HttpBoundaryError, readBody } from "../../mcp/transport/http-limits.js";
 import { logger } from "../../core/logger.js";
 import { CodingProxyError, PROXY_MAX_BODY_BYTES, type CodingProxy, type ProxyResponseSink } from "./proxy.js";
+import type { ProxyProtocol } from "./types.js";
 
 const proxyLog = logger.child({ module: "coding-proxy" });
 
@@ -25,6 +26,13 @@ function sendError(response: ServerResponse, status: number, code: string): void
 function bearer(value: string | undefined): string {
   if (!value?.startsWith("Bearer ") || value.indexOf(" ", 7) !== -1) return "";
   return value.slice(7);
+}
+
+function routeProtocol(method: string | undefined, url: string | undefined): ProxyProtocol | undefined {
+  if (method !== "POST") return undefined;
+  if (url === "/v1/responses") return "openai-responses";
+  if (url === "/v1/messages" || url === "/v1/messages?beta=true") return "anthropic-messages";
+  return undefined;
 }
 
 function responseSink(response: ServerResponse): ProxyResponseSink {
@@ -57,7 +65,12 @@ export async function startCodingProxyServer(
         sendError(response, 403, "invalid_host");
         return;
       }
-      if (request.method !== "POST" || request.url !== "/v1/responses") {
+      if (request.method === "HEAD" && request.url === "/api/hello") {
+        response.writeHead(200, { "cache-control": "no-store" }).end();
+        return;
+      }
+      const protocol = routeProtocol(request.method, request.url);
+      if (!protocol) {
         sendError(response, 404, "not_found");
         return;
       }
@@ -75,9 +88,19 @@ export async function startCodingProxyServer(
       }
       // x-client-request-id is a tracing identifier that Codex may reuse across a multi-request tool loop.
       const requestKeyHeader = request.headers["idempotency-key"];
+      const apiKeyHeader = request.headers["x-api-key"];
+      const capability =
+        protocol === "anthropic-messages"
+          ? request.headers.authorization === undefined && typeof apiKeyHeader === "string"
+            ? apiKeyHeader
+            : ""
+          : apiKeyHeader === undefined
+            ? bearer(request.headers.authorization)
+            : "";
       await proxy.execute(
         {
-          bearer: bearer(request.headers.authorization),
+          bearer: capability,
+          protocol,
           rawBody,
           requestKey: Array.isArray(requestKeyHeader) ? undefined : requestKeyHeader,
         },

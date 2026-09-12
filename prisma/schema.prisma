@@ -266,6 +266,7 @@ model CodingProxySession {
   run            CodingRun                @relation(fields: [runId], references: [runId], onDelete: Cascade)
   capabilityHash String                   @unique
   credentialRef  String
+  protocol       String                   @default("openai-responses")
   allowedModels  Json
   deadlineAt     DateTime
   budgetUsd      Decimal                  @db.Decimal(18, 10)

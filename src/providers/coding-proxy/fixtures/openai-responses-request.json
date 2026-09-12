@@ -1,0 +1,6 @@
+{
+  "model": "test-model",
+  "input": "hello",
+  "max_output_tokens": 10,
+  "stream": false
+}

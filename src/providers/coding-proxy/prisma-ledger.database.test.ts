@@ -44,9 +44,13 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       runId,
       capabilityHash: `hash-${suffix}`,
       credentialRef: "openai/test",
+      protocol: "openai-responses",
       allowedModels: ["gpt-5.6-luna"],
       deadlineAt: new Date(Date.now() + 60_000),
       budgetUsd: 0.0002,
+    });
+    expect(await ledger.findSessionByCapabilityHash(`hash-${suffix}`)).toMatchObject({
+      protocol: "openai-responses",
     });
     const request = (id: string) => ({
       id: `${id}-${suffix}`,

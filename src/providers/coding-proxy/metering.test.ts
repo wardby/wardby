@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  AnthropicSseUsageTracker,
   actualCostUsd,
   estimateReservationUsd,
   parseAuthoritativeUsage,
+  parseAnthropicAuthoritativeUsage,
   terminalUsageFromSseFrame,
 } from "./metering.js";
 
@@ -57,5 +59,46 @@ describe("coding proxy metering", () => {
     expect(
       terminalUsageFromSseFrame('event: response.failed\ndata: {"type":"response.failed","response":{"usage":null}}'),
     ).toEqual({ terminal: true, usage: undefined });
+  });
+
+  it("maps Anthropic cache accounting without charging cache reads as fresh input", () => {
+    const usage = parseAnthropicAuthoritativeUsage({
+      input_tokens: 600,
+      cache_read_input_tokens: 400,
+      cache_creation_input_tokens: 500,
+      output_tokens: 100,
+    });
+    expect(usage).toEqual({
+      inputTokens: 1_000,
+      outputTokens: 100,
+      cachedInputTokens: 400,
+      cacheWriteTokens: 500,
+      reasoningTokens: 0,
+    });
+    expect(actualCostUsd(usage, pricing)).toBeCloseTo(0.000373, 12);
+  });
+
+  it("requires a complete, internally consistent Anthropic stream", () => {
+    const tracker = new AnthropicSseUsageTracker();
+    expect(
+      tracker.consume(
+        'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":7,"cache_read_input_tokens":3,"cache_creation_input_tokens":2,"output_tokens":0}}}',
+      ),
+    ).toEqual({ terminal: false });
+    expect(tracker.consume('event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":4}}')).toEqual(
+      { terminal: false },
+    );
+    expect(tracker.consume('event: message_stop\ndata: {"type":"message_stop"}')).toEqual({
+      terminal: true,
+      usage: { inputTokens: 10, outputTokens: 4, cachedInputTokens: 3, cacheWriteTokens: 2, reasoningTokens: 0 },
+    });
+
+    expect(new AnthropicSseUsageTracker().consume('event: message_stop\ndata: {"type":"message_stop"}')).toEqual({
+      terminal: true,
+      usage: undefined,
+    });
+    expect(() =>
+      new AnthropicSseUsageTracker().consume('event: message_start\ndata: {"type":"message_delta","usage":{}}'),
+    ).toThrow("invalid_upstream_sse");
   });
 });

@@ -15,12 +15,19 @@ import {
 } from "../../coding/protocol.js";
 import { getModelPricing } from "../llm/pricing.js";
 import { isImmutableDockerImage } from "../jobs/docker-isolation.js";
+import type { ProxyProtocol } from "../coding-proxy/types.js";
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
 import type { PreparedWorkspace, VcsPrepareInput, VcsProvider } from "../vcs/types.js";
 import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
 
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "refused", "lost", "budget_exhausted", "cancelled"]);
 const PROVISIONING_BACKEND = "provisioning";
+
+function proxyProtocol(provider: string): ProxyProtocol {
+  if (provider === "codex") return "openai-responses";
+  if (provider === "claude-code") return "anthropic-messages";
+  throw new Error("coding_provider_unsupported");
+}
 
 export interface ContainerRunSnapshot {
   runId: string;
@@ -206,6 +213,7 @@ export interface CodingSessionController {
   createSession(input: {
     runId: string;
     credentialRef: string;
+    protocol: ProxyProtocol;
     allowedModels: string[];
     deadlineAt: Date;
     budgetUsd: number;
@@ -394,6 +402,7 @@ export class ContainerExecutor implements Executor {
         const session = await this.options.sessions.createSession({
           runId,
           credentialRef: this.options.credentialRef,
+          protocol: proxyProtocol(run.provider),
           allowedModels: [run.model],
           deadlineAt,
           budgetUsd: run.budgetUsd,

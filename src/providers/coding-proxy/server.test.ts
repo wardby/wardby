@@ -6,13 +6,21 @@ import { startCodingProxyServer, type CodingProxyServerHandle } from "./server.j
 describe("coding proxy HTTP boundary", () => {
   let server: CodingProxyServerHandle;
   let session: CreatedCodingProxySession;
-  const upstream = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) =>
-    Response.json({ usage: { input_tokens: 1, output_tokens: 1 } }, { status: 200 }),
-  );
+  let anthropicSession: CreatedCodingProxySession;
+  const upstream = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    return Response.json(
+      url.includes("anthropic.com")
+        ? { usage: { input_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 1 } }
+        : { usage: { input_tokens: 1, output_tokens: 1 } },
+      { status: 200 },
+    );
+  });
 
   beforeAll(async () => {
+    const ledger = new MemoryProxyLedger();
     const proxy = new CodingProxy({
-      ledger: new MemoryProxyLedger(),
+      ledger,
       credentials: { resolve: async () => "UPSTREAM_SECRET" },
       fetch: upstream,
       pricing: () => ({ encoding: "o200k_base", inputPerMTok: 1, outputPerMTok: 1 }),
@@ -20,6 +28,15 @@ describe("coding proxy HTTP boundary", () => {
     session = await proxy.createSession({
       runId: "http-run",
       credentialRef: "openai/test",
+      protocol: "openai-responses",
+      allowedModels: ["test-model"],
+      deadlineAt: new Date(Date.now() + 60_000),
+      budgetUsd: 1,
+    });
+    anthropicSession = await proxy.createSession({
+      runId: "http-anthropic-run",
+      credentialRef: "anthropic/test",
+      protocol: "anthropic-messages",
       allowedModels: ["test-model"],
       deadlineAt: new Date(Date.now() + 60_000),
       budgetUsd: 1,
@@ -33,10 +50,13 @@ describe("coding proxy HTTP boundary", () => {
     return fetch(`http://127.0.0.1:${server.port}${path}`, init);
   }
 
-  it("mounts only the Responses endpoint", async () => {
+  it("mounts only the reviewed endpoints and exact Claude compatibility probe", async () => {
     expect((await call("/mcp")).status).toBe(404);
     expect((await call("/health")).status).toBe(404);
     expect((await call("/v1/responses?run=other")).status).toBe(404);
+    expect((await call("/v1/messages?beta=false", { method: "POST" })).status).toBe(404);
+    expect((await call("/api/hello", { method: "HEAD" })).status).toBe(200);
+    expect((await call("/api/hello", { method: "GET" })).status).toBe(404);
   });
 
   it("requires the one-run bearer and JSON content type", async () => {
@@ -84,5 +104,47 @@ describe("coding proxy HTTP boundary", () => {
 
     expect((await callWithInput("first tool-loop request")).status).toBe(200);
     expect((await callWithInput("second tool-loop request")).status).toBe(200);
+  });
+
+  it("accepts Claude's x-api-key capability only on the Messages route", async () => {
+    const body = JSON.stringify({
+      model: "test-model",
+      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      tools: [],
+      max_tokens: 2,
+      stream: false,
+    });
+    const response = await call("/v1/messages?beta=true", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": anthropicSession.capability },
+      body,
+    });
+    expect(response.status).toBe(200);
+    const init = upstream.mock.calls.at(-1)![1] as RequestInit;
+    const headers = new Headers(init.headers);
+    expect(headers.get("x-api-key")).toBe("UPSTREAM_SECRET");
+    expect(headers.get("authorization")).toBeNull();
+
+    expect(
+      (
+        await call("/v1/messages", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${anthropicSession.capability}`,
+          },
+          body,
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await call("/v1/responses", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-api-key": session.capability },
+          body: JSON.stringify({ model: "test-model", input: "x", stream: false }),
+        })
+      ).status,
+    ).toBe(401);
   });
 });

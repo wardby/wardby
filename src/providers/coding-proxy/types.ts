@@ -2,6 +2,7 @@ import type { ModelPricing } from "../llm/pricing.js";
 
 export type ProxySessionStatus = "active" | "cancelled";
 export type ProxyRequestStatus = "reserved" | "completed" | "released" | "uncertain";
+export type ProxyProtocol = "openai-responses" | "anthropic-messages";
 
 export interface PricingSnapshot extends ModelPricing {
   version: string;
@@ -20,6 +21,7 @@ export interface ProxySession {
   runId: string;
   capabilityHash: string;
   credentialRef: string;
+  protocol: ProxyProtocol;
   allowedModels: string[];
   deadlineAt: Date;
   budgetUsd: number;
@@ -45,6 +47,7 @@ export interface CreateProxySessionInput {
   runId: string;
   capabilityHash: string;
   credentialRef: string;
+  protocol: ProxyProtocol;
   allowedModels: string[];
   deadlineAt: Date;
   budgetUsd: number;

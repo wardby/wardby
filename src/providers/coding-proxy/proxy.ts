@@ -1,15 +1,26 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { getModelPricing, PRICING_VERSION, type ModelPricing } from "../llm/pricing.js";
+import { getAnthropicPricing } from "../llm/pricing-anthropic.js";
 import {
+  AnthropicSseUsageTracker,
   actualCostUsd,
   estimateReservationUsd,
   fingerprintRequest,
+  parseAnthropicAuthoritativeUsage,
   parseAuthoritativeUsage,
   pricingSnapshot,
   terminalUsageFromSseFrame,
 } from "./metering.js";
 import { createPinnedProxyFetch } from "./secure-fetch.js";
-import type { CredentialResolver, ProxyAuditSink, ProxyLedger, ProxyRequest, ProxySession } from "./types.js";
+import type {
+  CredentialResolver,
+  ProxyAuditSink,
+  ProxyLedger,
+  ProxyProtocol,
+  ProxyRequest,
+  ProxySession,
+  ProxyUsage,
+} from "./types.js";
 
 export const PROXY_MAX_BODY_BYTES = 8 * 1024 * 1024;
 export const PROXY_MAX_OUTPUT_TOKENS = 1_000_000;
@@ -35,6 +46,7 @@ export interface ProxyResponseSink {
 
 export interface ExecuteProxyRequest {
   bearer: string;
+  protocol: ProxyProtocol;
   rawBody: string;
   requestKey?: string;
 }
@@ -42,6 +54,7 @@ export interface ExecuteProxyRequest {
 export interface CreateCodingProxySession {
   runId: string;
   credentialRef: string;
+  protocol: ProxyProtocol;
   allowedModels: string[];
   deadlineAt: Date;
   budgetUsd: number;
@@ -51,6 +64,7 @@ export interface CreatedCodingProxySession {
   id: string;
   runId: string;
   capability: string;
+  protocol: ProxyProtocol;
   allowedModels: string[];
   deadlineAt: Date;
   budgetUsd: number;
@@ -60,11 +74,12 @@ export interface CodingProxyOptions {
   ledger: ProxyLedger;
   credentials: CredentialResolver;
   upstreamUrl?: string;
+  anthropicUpstreamUrl?: string;
   upstreamAllowedHosts?: string[];
   fetch?: typeof globalThis.fetch;
   now?: () => Date;
   audit?: ProxyAuditSink;
-  pricing?: (model: string) => ModelPricing;
+  pricing?: (model: string, protocol: ProxyProtocol) => ModelPricing;
   pricingVersion?: string;
 }
 
@@ -81,7 +96,7 @@ function capabilityHash(capability: string): string {
   return createHash("sha256").update(capability).digest("base64url");
 }
 
-function parseRequest(rawBody: string): ParsedRequest {
+function parseOpenAiRequest(rawBody: string): ParsedRequest {
   if (Buffer.byteLength(rawBody) > PROXY_MAX_BODY_BYTES) throw new CodingProxyError(413, "payload_too_large");
   let value: unknown;
   try {
@@ -118,6 +133,128 @@ function parseRequest(rawBody: string): ParsedRequest {
   };
 }
 
+function record(value: unknown, code = "invalid_anthropic_request"): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new CodingProxyError(400, code);
+  return value as Record<string, unknown>;
+}
+
+function onlyKeys(value: Record<string, unknown>, keys: readonly string[]): void {
+  const allowed = new Set(keys);
+  if (Object.keys(value).some((key) => !allowed.has(key))) {
+    throw new CodingProxyError(400, "unsupported_anthropic_feature");
+  }
+}
+
+function validateCacheControl(value: unknown): void {
+  const cache = record(value);
+  onlyKeys(cache, ["type"]);
+  if (cache.type !== "ephemeral") throw new CodingProxyError(400, "unsupported_anthropic_feature");
+}
+
+function validateTextBlock(value: unknown): void {
+  const block = record(value);
+  onlyKeys(block, ["type", "text", "cache_control"]);
+  if (block.type !== "text" || typeof block.text !== "string") {
+    throw new CodingProxyError(400, "unsupported_anthropic_feature");
+  }
+  if (block.cache_control !== undefined) validateCacheControl(block.cache_control);
+}
+
+function validateTextBlocks(value: unknown): void {
+  if (!Array.isArray(value) || value.length > 10_000) throw new CodingProxyError(400, "invalid_anthropic_request");
+  for (const block of value) validateTextBlock(block);
+}
+
+function parseAnthropicRequest(rawBody: string): ParsedRequest {
+  if (Buffer.byteLength(rawBody) > PROXY_MAX_BODY_BYTES) throw new CodingProxyError(413, "payload_too_large");
+  let value: unknown;
+  try {
+    value = JSON.parse(rawBody);
+  } catch {
+    throw new CodingProxyError(400, "invalid_json");
+  }
+  const body = record(value, "expected_json_object");
+  onlyKeys(body, [
+    "model",
+    "messages",
+    "system",
+    "tools",
+    "metadata",
+    "max_tokens",
+    "thinking",
+    "context_management",
+    "output_config",
+    "stream",
+  ]);
+  if (typeof body.model !== "string" || !body.model) throw new CodingProxyError(400, "model_required");
+  if (
+    typeof body.max_tokens !== "number" ||
+    !Number.isSafeInteger(body.max_tokens) ||
+    body.max_tokens < 1 ||
+    body.max_tokens > PROXY_MAX_OUTPUT_TOKENS
+  ) {
+    throw new CodingProxyError(400, "invalid_max_output_tokens");
+  }
+  if (body.stream !== true && body.stream !== false) throw new CodingProxyError(400, "stream_required");
+  if (!Array.isArray(body.messages) || body.messages.length < 1 || body.messages.length > 10_000) {
+    throw new CodingProxyError(400, "invalid_anthropic_request");
+  }
+  for (const value of body.messages) {
+    const message = record(value);
+    onlyKeys(message, ["role", "content"]);
+    if (message.role !== "user" && message.role !== "assistant" && message.role !== "system") {
+      throw new CodingProxyError(400, "unsupported_anthropic_feature");
+    }
+    validateTextBlocks(message.content);
+  }
+  if (body.system !== undefined) validateTextBlocks(body.system);
+  if (body.tools !== undefined && (!Array.isArray(body.tools) || body.tools.length !== 0)) {
+    throw new CodingProxyError(400, "tools_not_allowed");
+  }
+  if (body.metadata !== undefined) {
+    const metadata = record(body.metadata);
+    onlyKeys(metadata, ["user_id"]);
+    if (typeof metadata.user_id !== "string") throw new CodingProxyError(400, "invalid_anthropic_request");
+  }
+  if (body.thinking !== undefined) {
+    const thinking = record(body.thinking);
+    onlyKeys(thinking, ["type"]);
+    if (thinking.type !== "adaptive") throw new CodingProxyError(400, "unsupported_anthropic_feature");
+  }
+  if (body.context_management !== undefined) {
+    const context = record(body.context_management);
+    onlyKeys(context, ["edits"]);
+    const edits = context.edits;
+    if (!Array.isArray(edits) || edits.length !== 1) throw new CodingProxyError(400, "unsupported_anthropic_feature");
+    const edit = record(edits[0]);
+    onlyKeys(edit, ["type", "keep"]);
+    if (edit.type !== "clear_thinking_20251015" || edit.keep !== "all") {
+      throw new CodingProxyError(400, "unsupported_anthropic_feature");
+    }
+  }
+  if (body.output_config !== undefined) {
+    const output = record(body.output_config);
+    onlyKeys(output, ["effort"]);
+    if (output.effort !== "high") throw new CodingProxyError(400, "unsupported_anthropic_feature");
+  }
+  const normalized = { ...body };
+  delete normalized.metadata;
+  const encoded = JSON.stringify(normalized);
+  if (Buffer.byteLength(encoded) > PROXY_MAX_BODY_BYTES) throw new CodingProxyError(413, "payload_too_large");
+  return {
+    body: normalized,
+    encoded,
+    model: body.model,
+    maxOutputTokens: body.max_tokens,
+    stream: body.stream,
+    fingerprint: fingerprintRequest(encoded),
+  };
+}
+
+function parseRequest(protocol: ProxyProtocol, rawBody: string): ParsedRequest {
+  return protocol === "anthropic-messages" ? parseAnthropicRequest(rawBody) : parseOpenAiRequest(rawBody);
+}
+
 function safeRequestKey(value: string | undefined, fingerprint: string): string {
   if (value === undefined) return `body:${fingerprint}`;
   if (!REQUEST_KEY_PATTERN.test(value)) throw new CodingProxyError(400, "invalid_idempotency_key");
@@ -152,36 +289,44 @@ async function readBoundedBody(body: ReadableStream<Uint8Array> | null, maxBytes
 export class CodingProxy {
   private readonly ledger: ProxyLedger;
   private readonly credentials: CredentialResolver;
-  private readonly upstreamUrl: string;
+  private readonly upstreamUrls: Record<ProxyProtocol, string>;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly now: () => Date;
   private readonly audit: ProxyAuditSink;
-  private readonly getPricing: (model: string) => ModelPricing;
+  private readonly getPricing: (model: string, protocol: ProxyProtocol) => ModelPricing;
   private readonly priceVersion: string;
   private readonly activeRequests = new Map<string, Set<AbortController>>();
 
   constructor(options: CodingProxyOptions) {
     this.ledger = options.ledger;
     this.credentials = options.credentials;
-    this.upstreamUrl = options.upstreamUrl ?? "https://api.openai.com/v1/responses";
-    const upstreamHost = new URL(this.upstreamUrl).hostname;
+    this.upstreamUrls = {
+      "openai-responses": options.upstreamUrl ?? "https://api.openai.com/v1/responses",
+      "anthropic-messages": options.anthropicUpstreamUrl ?? "https://api.anthropic.com/v1/messages?beta=true",
+    };
+    const upstreamHosts = Object.values(this.upstreamUrls).map((url) => new URL(url).hostname);
     this.fetchImpl =
       options.fetch ??
       createPinnedProxyFetch({
-        allowedHosts: options.upstreamAllowedHosts ?? [upstreamHost],
+        allowedHosts: options.upstreamAllowedHosts ?? upstreamHosts,
       });
     this.now = options.now ?? (() => new Date());
     this.audit = options.audit ?? (() => undefined);
-    this.getPricing = options.pricing ?? getModelPricing;
+    this.getPricing =
+      options.pricing ??
+      ((model, protocol) => (protocol === "anthropic-messages" ? getAnthropicPricing(model) : getModelPricing(model)));
     this.priceVersion = options.pricingVersion ?? PRICING_VERSION;
   }
 
   async createSession(input: CreateCodingProxySession): Promise<CreatedCodingProxySession> {
+    if (input.protocol !== "openai-responses" && input.protocol !== "anthropic-messages") {
+      throw new Error("invalid_proxy_protocol");
+    }
     const models = [...new Set(input.allowedModels)];
     if (models.length < 1 || models.length > 8 || models.some((model) => !model || model.length > 100)) {
       throw new Error("invalid_proxy_model_allowlist");
     }
-    for (const model of models) this.getPricing(model);
+    for (const model of models) this.getPricing(model, input.protocol);
     if (!Number.isFinite(input.budgetUsd) || input.budgetUsd <= 0) throw new Error("invalid_proxy_budget");
     if (input.deadlineAt.getTime() <= this.now().getTime()) throw new Error("invalid_proxy_deadline");
     if (!input.credentialRef || input.credentialRef.length > 200) throw new Error("invalid_proxy_credential_reference");
@@ -192,6 +337,7 @@ export class CodingProxy {
       runId: input.runId,
       capabilityHash: capabilityHash(capability),
       credentialRef: input.credentialRef,
+      protocol: input.protocol,
       allowedModels: models,
       deadlineAt: input.deadlineAt,
       budgetUsd: input.budgetUsd,
@@ -201,6 +347,7 @@ export class CodingProxy {
       id,
       runId: input.runId,
       capability,
+      protocol: input.protocol,
       allowedModels: models,
       deadlineAt: input.deadlineAt,
       budgetUsd: input.budgetUsd,
@@ -214,14 +361,18 @@ export class CodingProxy {
 
   async execute(input: ExecuteProxyRequest, sink: ProxyResponseSink): Promise<void> {
     const session = await this.authenticate(input.bearer);
-    const parsed = parseRequest(input.rawBody);
+    if (session.protocol !== input.protocol) {
+      this.audit({ type: "request.rejected", runId: session.runId, reason: "protocol_mismatch" });
+      throw new CodingProxyError(403, "protocol_mismatch");
+    }
+    const parsed = parseRequest(input.protocol, input.rawBody);
     if (!session.allowedModels.includes(parsed.model)) {
       this.audit({ type: "request.rejected", runId: session.runId, model: parsed.model, reason: "model_not_allowed" });
       throw new CodingProxyError(403, "model_not_allowed");
     }
     let pricing: ModelPricing;
     try {
-      pricing = this.getPricing(parsed.model);
+      pricing = this.getPricing(parsed.model, session.protocol);
     } catch {
       this.audit({ type: "request.rejected", runId: session.runId, model: parsed.model, reason: "unknown_model" });
       throw new CodingProxyError(400, "unknown_model");
@@ -299,14 +450,20 @@ export class CodingProxy {
 
     let upstream: Response;
     try {
-      upstream = await this.fetchImpl(this.upstreamUrl, {
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+        accept: parsed.stream ? "text/event-stream" : "application/json",
+      };
+      if (session.protocol === "anthropic-messages") {
+        headers["x-api-key"] = key;
+        headers["anthropic-version"] = "2023-06-01";
+      } else {
+        headers.authorization = `Bearer ${key}`;
+        headers["idempotency-key"] = `${session.id}:${request.id}`;
+      }
+      upstream = await this.fetchImpl(this.upstreamUrls[session.protocol], {
         method: "POST",
-        headers: {
-          authorization: `Bearer ${key}`,
-          "content-type": "application/json",
-          accept: parsed.stream ? "text/event-stream" : "application/json",
-          "idempotency-key": `${session.id}:${request.id}`,
-        },
+        headers,
         body: parsed.encoded,
         redirect: "error",
         signal: controller.signal,
@@ -372,7 +529,7 @@ export class CodingProxy {
   private async complete(
     session: ProxySession,
     request: ProxyRequest,
-    usage: ReturnType<typeof parseAuthoritativeUsage>,
+    usage: ProxyUsage,
     upstreamStatus: number,
   ): Promise<void> {
     const costUsd = actualCostUsd(usage, request.pricing);
@@ -413,7 +570,10 @@ export class CodingProxy {
     } catch {
       throw new Error("invalid_upstream_json");
     }
-    const usage = parseAuthoritativeUsage((value as Record<string, unknown>)?.usage);
+    const usage =
+      session.protocol === "anthropic-messages"
+        ? parseAnthropicAuthoritativeUsage((value as Record<string, unknown>)?.usage)
+        : parseAuthoritativeUsage((value as Record<string, unknown>)?.usage);
     await this.complete(session, request, usage, upstream.status);
     sink.start(upstream.status, { "content-type": "application/json", "cache-control": "no-store" });
     await safeWrite(sink, bytes, { value: true });
@@ -433,6 +593,7 @@ export class CodingProxy {
     let buffer = "";
     let receivedBytes = 0;
     let completed = false;
+    const anthropicUsage = session.protocol === "anthropic-messages" ? new AnthropicSseUsageTracker() : undefined;
     const body = upstream.body as unknown as AsyncIterable<Uint8Array>;
     for await (const chunk of body) {
       receivedBytes += chunk.byteLength;
@@ -443,7 +604,7 @@ export class CodingProxy {
         if (boundary < 0) break;
         const frame = buffer.slice(0, boundary);
         buffer = buffer.slice(boundary + 2);
-        const terminal = terminalUsageFromSseFrame(frame);
+        const terminal = anthropicUsage ? anthropicUsage.consume(frame) : terminalUsageFromSseFrame(frame);
         if (!terminal.terminal) {
           await safeWrite(sink, Buffer.from(`${frame}\n\n`), connected);
           continue;

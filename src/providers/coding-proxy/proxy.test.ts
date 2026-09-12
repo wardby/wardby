@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFile } from "node:fs/promises";
 import { estimateReservationUsd } from "./metering.js";
 import { MemoryProxyLedger } from "./memory-ledger.js";
 import {
@@ -9,7 +10,7 @@ import {
   type ProxyResponseSink,
 } from "./proxy.js";
 import type { ModelPricing } from "../llm/pricing.js";
-import type { ProxyAuditEvent } from "./types.js";
+import type { ProxyAuditEvent, ProxyProtocol } from "./types.js";
 
 const NOW = new Date("2026-09-07T12:00:00.000Z");
 const PRICE: ModelPricing = {
@@ -25,6 +26,8 @@ const USAGE = {
   output_tokens: 5,
   output_tokens_details: { reasoning_tokens: 1 },
 };
+
+const fixture = (name: string) => readFile(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
 
 function requestBody(stream = false): string {
   return JSON.stringify({ model: "test-model", input: "hello", max_output_tokens: 10, stream });
@@ -81,6 +84,7 @@ async function harness(
     now?: () => Date;
     price?: () => ModelPricing;
     credentials?: { resolve(reference: string): Promise<string> };
+    protocol?: ProxyProtocol;
   } = {},
 ): Promise<Harness> {
   const ledger = overrides.ledger ?? new MemoryProxyLedger();
@@ -99,8 +103,9 @@ async function harness(
   });
   const session = await proxy.createSession({
     runId: `run-${Math.random()}`,
-    credentialRef: "openai/project-a",
-    allowedModels: ["test-model"],
+    credentialRef: overrides.protocol === "anthropic-messages" ? "anthropic/project-a" : "openai/project-a",
+    protocol: overrides.protocol ?? "openai-responses",
+    allowedModels: [overrides.protocol === "anthropic-messages" ? "claude-sonnet-5" : "test-model"],
     deadlineAt: overrides.deadlineAt ?? new Date(NOW.getTime() + 60_000),
     budgetUsd: overrides.budgetUsd ?? 1,
   });
@@ -108,7 +113,10 @@ async function harness(
 }
 
 async function execute(h: Harness, key: string, sink = new TestSink(), body = requestBody()): Promise<TestSink> {
-  await h.proxy.execute({ bearer: h.session.capability, rawBody: body, requestKey: key }, sink);
+  await h.proxy.execute(
+    { bearer: h.session.capability, protocol: h.session.protocol, rawBody: body, requestKey: key },
+    sink,
+  );
   return sink;
 }
 
@@ -118,8 +126,9 @@ function reservedRequestId(events: ProxyAuditEvent[]): string {
 
 describe("CodingProxy", () => {
   it("injects only the resolved upstream credential and persists authoritative usage before responding", async () => {
-    const h = await harness();
-    const sink = await execute(h, "request-1");
+    const response = JSON.parse(await fixture("openai-responses-response.json"));
+    const h = await harness({ fetch: async () => Response.json(response) });
+    const sink = await execute(h, "request-1", new TestSink(), await fixture("openai-responses-request.json"));
 
     expect(sink.status).toBe(200);
     expect(sink.ended).toBe(true);
@@ -155,11 +164,17 @@ describe("CodingProxy", () => {
     const resolve = vi.fn(async () => "secret");
     const h = await harness({ credentials: { resolve } });
     await expect(
-      h.proxy.execute({ bearer: "wrong", rawBody: requestBody(), requestKey: "a" }, new TestSink()),
+      h.proxy.execute(
+        { bearer: "wrong", protocol: "openai-responses", rawBody: requestBody(), requestKey: "a" },
+        new TestSink(),
+      ),
     ).rejects.toMatchObject({ status: 401 });
     const other = JSON.stringify({ model: "other", input: "x", max_output_tokens: 10, stream: false });
     await expect(
-      h.proxy.execute({ bearer: h.session.capability, rawBody: other, requestKey: "b" }, new TestSink()),
+      h.proxy.execute(
+        { bearer: h.session.capability, protocol: "openai-responses", rawBody: other, requestKey: "b" },
+        new TestSink(),
+      ),
     ).rejects.toMatchObject({ status: 403 });
     expect(resolve).not.toHaveBeenCalled();
     expect(h.fetch).not.toHaveBeenCalled();
@@ -177,6 +192,7 @@ describe("CodingProxy", () => {
       proxy.createSession({
         runId: "run",
         credentialRef: "ref",
+        protocol: "openai-responses",
         allowedModels: ["unknown"],
         deadlineAt: new Date(Date.now() + 60_000),
         budgetUsd: 1,
@@ -287,7 +303,12 @@ describe("CodingProxy", () => {
     });
     await expect(
       restarted.execute(
-        { bearer: first.session.capability, rawBody: requestBody(), requestKey: "durable" },
+        {
+          bearer: first.session.capability,
+          protocol: "openai-responses",
+          rawBody: requestBody(),
+          requestKey: "durable",
+        },
         new TestSink(),
       ),
     ).rejects.toMatchObject({ status: 409 });
@@ -328,5 +349,104 @@ describe("CodingProxy", () => {
       CodingProxyError,
     );
     expect((await h.ledger.getRequest(reservedRequestId(h.events)))?.status).toBe("uncertain");
+  });
+});
+
+describe("CodingProxy Anthropic Messages", () => {
+  it("forwards only the reviewed SDK envelope and strips client metadata", async () => {
+    const response = JSON.parse(await fixture("anthropic-message-response.json"));
+    const h = await harness({
+      protocol: "anthropic-messages",
+      fetch: async () => Response.json(response),
+    });
+    const body = JSON.parse(await fixture("anthropic-sdk-request.json"));
+    body.stream = false;
+
+    await execute(h, "anthropic-json", new TestSink(), JSON.stringify(body));
+
+    expect(h.fetch.mock.calls[0][0]).toBe("https://api.anthropic.com/v1/messages?beta=true");
+    const init = h.fetch.mock.calls[0][1] as RequestInit;
+    const headers = new Headers(init.headers);
+    expect(headers.get("x-api-key")).toBe("UPSTREAM_SECRET");
+    expect(headers.get("anthropic-version")).toBe("2023-06-01");
+    expect(headers.get("authorization")).toBeNull();
+    expect(headers.get("idempotency-key")).toBeNull();
+    expect(JSON.parse(init.body as string)).not.toHaveProperty("metadata");
+    const request = await h.ledger.getRequest(reservedRequestId(h.events));
+    expect(request).toMatchObject({
+      status: "completed",
+      usage: {
+        inputTokens: 125,
+        outputTokens: 2,
+        cachedInputTokens: 25,
+        cacheWriteTokens: 10,
+        reasoningTokens: 0,
+      },
+    });
+  });
+
+  it("accounts for split authoritative usage in a complete message stream", async () => {
+    const stream = await fixture("anthropic-message-stream.txt");
+    const body = await fixture("anthropic-sdk-request.json");
+    const h = await harness({
+      protocol: "anthropic-messages",
+      fetch: async () => new Response(stream, { headers: { "content-type": "text/event-stream" } }),
+    });
+
+    await execute(h, "anthropic-stream", new TestSink(), body);
+
+    expect(await h.ledger.getRequest(reservedRequestId(h.events))).toMatchObject({
+      status: "completed",
+      usage: { inputTokens: 125, outputTokens: 2, cachedInputTokens: 25, cacheWriteTokens: 10 },
+    });
+  });
+
+  it.each([
+    ["non-empty tools", { tools: [{ name: "shell" }] }, "tools_not_allowed"],
+    ["server-side MCP", { mcp_servers: [] }, "unsupported_anthropic_feature"],
+    [
+      "unsafe cache policy",
+      { system: [{ type: "text", text: "x", cache_control: { type: "forever" } }] },
+      "unsupported_anthropic_feature",
+    ],
+    ["unreviewed effort", { output_config: { effort: "max" } }, "unsupported_anthropic_feature"],
+  ])("rejects %s before credential resolution", async (_name, change, code) => {
+    const resolve = vi.fn(async () => "secret");
+    const h = await harness({ protocol: "anthropic-messages", credentials: { resolve } });
+    const body = { ...JSON.parse(await fixture("anthropic-sdk-request.json")), ...change };
+
+    await expect(execute(h, `reject-${_name}`, new TestSink(), JSON.stringify(body))).rejects.toMatchObject({ code });
+    expect(resolve).not.toHaveBeenCalled();
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["anthropic-messages", "openai-responses"],
+    ["openai-responses", "anthropic-messages"],
+  ] as const)("rejects a %s capability on the %s route", async (sessionProtocol, routeProtocol) => {
+    const resolve = vi.fn(async () => "secret");
+    const h = await harness({ protocol: sessionProtocol, credentials: { resolve } });
+
+    await expect(
+      h.proxy.execute(
+        { bearer: h.session.capability, protocol: routeProtocol, rawBody: "not-even-json", requestKey: "confused" },
+        new TestSink(),
+      ),
+    ).rejects.toMatchObject({ status: 403, code: "protocol_mismatch" });
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it("holds the reservation when a successful response has no authoritative usage", async () => {
+    const h = await harness({
+      protocol: "anthropic-messages",
+      fetch: async () => Response.json({ type: "message", content: [] }),
+    });
+    const body = JSON.parse(await fixture("anthropic-sdk-request.json"));
+    body.stream = false;
+
+    await expect(execute(h, "anthropic-no-usage", new TestSink(), JSON.stringify(body))).rejects.toMatchObject({
+      status: 502,
+    });
+    expect(await h.ledger.getRequest(reservedRequestId(h.events))).toMatchObject({ status: "uncertain" });
   });
 });
