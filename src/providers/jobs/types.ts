@@ -14,7 +14,11 @@ export interface JobResourceLimits {
 export interface JobSpec {
   kind: "coding-agent";
   runId: string;
+  /** Omitted specs are legacy Codex jobs and retain the single-worker topology. */
+  provider?: "codex" | "claude-code";
   image: string;
+  /** Required only for Claude's credential-free repository tool container. */
+  toolImage?: string;
   inputArtifact: string;
   timeoutSec: number;
   limits: JobResourceLimits;

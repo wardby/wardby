@@ -19,6 +19,8 @@ import { logger } from "../../core/logger.js";
 import { parseCodingAgentOutputJson, MAX_CODING_ARTIFACT_BYTES } from "../../coding/protocol.js";
 import {
   assertDockerHostSupportsIsolation,
+  assertClaudeAgentContainerInspection,
+  assertClaudeToolRunnerContainerInspection,
   assertIsolationNetworkInspection,
   assertKeeperContainerInspection,
   assertProxyContainerInspection,
@@ -585,6 +587,16 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     if (existing) {
       if (existing.specHash !== specHash) throw new Error("job_spec_conflict");
       if (existing.phase === "removed" || isTerminal(existing)) return clone(existing.handle);
+      if (existing.phase === "provisioning") {
+        // Provisioning can create some resources before a host crash. Never
+        // guess which side effects completed or launch another agent pair.
+        await this.cleanupResources(existing).catch(() => undefined);
+        existing.phase = "lost";
+        existing.result = resultFor("lost");
+        await this.writeRecord(existing);
+        this.clearDeadline(existing);
+        return clone(existing.handle);
+      }
       const capability = ensureCapability(await this.options.resolveCapability(spec.runId));
       if (hash(capability) !== existing.capabilityHash) throw new Error("docker_capability_changed");
       if (existing.phase === "active") {
@@ -609,7 +621,15 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     };
     // This durable record is the idempotency fence before any Docker side effect.
     await this.writeRecord(record);
-    return this.provision(record, plan, capability);
+    try {
+      return await this.provision(record, plan, capability);
+    } catch (error) {
+      await this.cleanupResources(record).catch(() => undefined);
+      record.phase = "lost";
+      record.result = resultFor("lost");
+      await this.writeRecord(record).catch(() => undefined);
+      throw error;
+    }
   }
 
   private async provision(
@@ -652,13 +672,31 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     await this.run(plan.proxyNetworkConnectArgs);
     const proxy = await this.inspect<DockerContainerInspection>(["container", "inspect", this.options.proxyContainer]);
     assertProxyContainerInspection(proxy, record.runId);
+    if (plan.toolCreateArgs) {
+      await this.createAndAssert(
+        appendLabels(plan.toolCreateArgs, labels),
+        ["container", "inspect", plan.names.toolContainer],
+        (value) => {
+          assertClaudeToolRunnerContainerInspection(value as DockerContainerInspection, record.spec);
+          if (!labelsMatch((value as DockerContainerInspection).Config?.Labels, labels)) {
+            throw new Error("docker_resource_attestation_failed");
+          }
+        },
+      );
+      await this.startContainer(plan.names.toolContainer);
+      await this.waitForToolRunner(plan.names.toolContainer);
+    }
     const workerArgs = appendLabels(plan.workerCreateArgs, labels);
     await this.createAndAssert(
       workerArgs,
       ["container", "inspect", plan.names.workerContainer],
       (value) => {
         const inspected = value as DockerContainerInspection;
-        assertWorkerContainerInspection(inspected, record.spec, capability);
+        if (record.spec.provider === "claude-code") {
+          assertClaudeAgentContainerInspection(inspected, record.spec, capability);
+        } else {
+          assertWorkerContainerInspection(inspected, record.spec, capability);
+        }
         if (!labelsMatch(inspected.Config?.Labels, labels)) throw new Error("docker_resource_attestation_failed");
       },
       { env: { REEVO_RUN_CAPABILITY: capability } },
@@ -696,7 +734,24 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     const capability = capabilityFromInspection(inspection);
     if (!capability || hash(capability) !== record.capabilityHash)
       throw new Error("docker_resource_attestation_failed");
-    assertWorkerContainerInspection(inspection, record.spec, capability);
+    if (record.spec.provider === "claude-code") {
+      assertClaudeAgentContainerInspection(inspection, record.spec, capability);
+      const tool = await this.inspect<DockerContainerInspection & { State?: { Running?: boolean; Status?: string } }>([
+        "container",
+        "inspect",
+        buildDockerIsolationPlan(record.spec, this.options.proxyContainer).names.toolContainer,
+      ]);
+      assertClaudeToolRunnerContainerInspection(tool, record.spec);
+      if (tool.State?.Running !== true || tool.State?.Status !== "running") {
+        record.phase = "failed";
+        record.result = { exitCode: 1, reason: "failed", diagnostic: "worker_tool_runner_failed" };
+        await this.writeRecord(record);
+        this.clearDeadline(record);
+        return;
+      }
+    } else {
+      assertWorkerContainerInspection(inspection, record.spec, capability);
+    }
     const phase = dockerState(inspection);
     if (!phase || phase === "provisioning" || phase === "active") return;
     record.phase = phase;
@@ -712,6 +767,15 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     } catch (error) {
       if (!(error instanceof DockerCommandError && error.notFound))
         throw new Error("docker_stop_failed", { cause: error });
+    }
+    if (record.spec.provider === "claude-code") {
+      const tool = buildDockerIsolationPlan(record.spec, this.options.proxyContainer).names.toolContainer;
+      try {
+        await this.run(["container", "stop", "--time", "10", tool]);
+      } catch (error) {
+        if (!(error instanceof DockerCommandError && error.notFound))
+          throw new Error("docker_stop_failed", { cause: error });
+      }
     }
     record.phase = timedOut ? "failed" : "stopped";
     record.result = timedOut ? { exitCode: 124, reason: "timed_out" } : resultFor("stopped");
@@ -735,6 +799,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     const plan = buildDockerIsolationPlan(record.spec, this.options.proxyContainer);
     const labels = resourceLabels(record);
     await this.removeContainerIfAttested(plan.names.workerContainer, labels);
+    if (plan.toolCreateArgs) await this.removeContainerIfAttested(plan.names.toolContainer, labels);
     await this.runIgnoreMissing(["network", "disconnect", plan.names.network, this.options.proxyContainer]);
     await this.removeContainerIfAttested(plan.names.keeperContainer, labels);
     await this.removeNetworkIfAttested(plan.names.network, labels);
@@ -861,6 +926,27 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
       }
     }
     throw new Error("docker_storage_not_ready");
+  }
+
+  private async waitForToolRunner(tool: string): Promise<void> {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      try {
+        await this.run([
+          "container",
+          "exec",
+          "--user",
+          "10001:10001",
+          tool,
+          "test",
+          "-S",
+          "/run/reevo/tool/runner.sock",
+        ]);
+        return;
+      } catch {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+      }
+    }
+    throw new Error("docker_tool_runner_not_ready");
   }
 
   private async validateInputArtifact(path: string): Promise<void> {

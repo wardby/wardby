@@ -29,6 +29,9 @@ export interface CodingLifecycleEvent {
   budgetReservedUsd?: number;
   budgetActualUsd?: number;
   cleanupSucceeded?: boolean;
+  /** Enumerated execution metadata only; never a model request or source field. */
+  workerProvider?: "codex" | "claude-code";
+  proxyProtocol?: "openai-responses" | "anthropic-messages";
 }
 
 export interface CodingRunObserver {

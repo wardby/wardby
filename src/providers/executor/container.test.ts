@@ -19,6 +19,8 @@ import {
 } from "./container.js";
 
 const IMAGE = `registry.example/worker@sha256:${"a".repeat(64)}`;
+const CLAUDE_IMAGE = `registry.example/claude-worker@sha256:${"b".repeat(64)}`;
+const CLAUDE_TOOL_IMAGE = `registry.example/claude-tools@sha256:${"c".repeat(64)}`;
 const roots: string[] = [];
 
 function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSnapshot {
@@ -164,7 +166,10 @@ class FakeVcs implements VcsProvider {
   async recoverWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace | null> {
     return this.workspace?.runId === input.runId ? this.workspace : null;
   }
-  async finalizeChanges(_workspace: PreparedWorkspace, details?: FinalizeChangesDetails): Promise<FinalizeChangesResult> {
+  async finalizeChanges(
+    _workspace: PreparedWorkspace,
+    details?: FinalizeChangesDetails,
+  ): Promise<FinalizeChangesResult> {
     this.finalized += 1;
     this.lastFinalizeDetails = details;
     this.events.push("finalize");
@@ -228,6 +233,7 @@ async function harness(
   overrides: Partial<ContainerRunSnapshot> = {},
   workerImage = IMAGE,
   observer = new InMemoryCodingRunObserver(),
+  claude?: { workerImage: string; toolImage: string },
 ) {
   const root = await mkdtemp("/private/tmp/reevo-container-executor-");
   roots.push(root);
@@ -246,6 +252,13 @@ async function harness(
     artifactRoot: join(root, "artifacts"),
     workerImage,
     credentialRef: "env:OPENAI_API_KEY",
+    ...(claude
+      ? {
+          claudeWorkerImage: claude.workerImage,
+          claudeToolRunnerImage: claude.toolImage,
+          anthropicCredentialRef: "env:ANTHROPIC_API_KEY",
+        }
+      : {}),
     limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
     sleep: async () => {},
     observer,
@@ -304,6 +317,30 @@ describe("ContainerExecutor", () => {
       activeJobs: 0,
       budgetReservedUsd: 2,
       budgetActualUsd: 0.01,
+    });
+  });
+
+  it("routes Claude through its dedicated proxy credential and composite job spec", async () => {
+    const created = await harness(
+      { provider: "claude-code", model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE },
+      IMAGE,
+      new InMemoryCodingRunObserver(),
+      { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+    );
+    await created.executor.start("run-1");
+    expect(created.sessions.lastInput).toMatchObject({
+      credentialRef: "env:ANTHROPIC_API_KEY",
+      protocol: "anthropic-messages",
+      allowedModels: ["claude-sonnet-5"],
+    });
+    expect(created.jobs.lastSpec).toMatchObject({
+      provider: "claude-code",
+      image: CLAUDE_IMAGE,
+      toolImage: CLAUDE_TOOL_IMAGE,
+    });
+    expect(created.observer.events.find((event) => event.stage === "terminal")).toMatchObject({
+      workerProvider: "claude-code",
+      proxyProtocol: "anthropic-messages",
     });
   });
 
@@ -535,6 +572,21 @@ describe("resolveCodingWorkerImage", () => {
         workerImageRef: `registry.example/byo@sha256:${"c".repeat(64)}`,
       }),
     ).toThrow(/coding_provider_not_configured:claude-code/);
+  });
+
+  it("resolves Claude only when the immutable agent and tool images are configured", async () => {
+    const { executor } = await harness({}, IMAGE, new InMemoryCodingRunObserver(), {
+      workerImage: CLAUDE_IMAGE,
+      toolImage: CLAUDE_TOOL_IMAGE,
+    });
+    expect(
+      executor.resolveCodingWorkerImage?.({
+        provider: "claude-code",
+        toolchain: "node",
+        toolchainVersion: null,
+        workerImageRef: null,
+      }),
+    ).toBe(CLAUDE_IMAGE);
   });
 
   it("constructor throws if any additionalWorkerImages entry is not an immutable digest", async () => {

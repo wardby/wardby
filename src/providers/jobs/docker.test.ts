@@ -19,6 +19,7 @@ import { buildDockerIsolationPlan, WORKER_PATHS } from "./docker-isolation.js";
 import type { JobHandle, JobResult, JobSpec } from "./types.js";
 
 const image = `registry.example/reevo-worker@sha256:${"a".repeat(64)}`;
+const toolImage = `registry.example/reevo-tools@sha256:${"b".repeat(64)}`;
 const capability = "rrp_0123456789abcdef";
 const temporaryRoots: string[] = [];
 
@@ -85,8 +86,10 @@ class FakeDocker implements DockerCommandRunner {
     status: "created",
     running: false,
   };
+  private toolState: { status: string; running: boolean } = { status: "created", running: false };
   private keeperRemoved = false;
   private workerRemoved = false;
+  toolRemoved = false;
   private networkRemoved = false;
   private volumeRemoved = false;
   private proxyConnected = false;
@@ -126,15 +129,19 @@ class FakeDocker implements DockerCommandRunner {
     }
     if (group === "container" && action === "start") {
       if (target === this.plan.names.workerContainer) this.workerState = { status: "running", running: true };
+      if (target === this.plan.names.toolContainer) this.toolState = { status: "running", running: true };
       return this.ok();
     }
     if (group === "container" && action === "stop") {
-      this.workerState = { status: "exited", running: false, exitCode: 143 };
+      if (target === this.plan.names.workerContainer)
+        this.workerState = { status: "exited", running: false, exitCode: 143 };
+      if (target === this.plan.names.toolContainer) this.toolState = { status: "exited", running: false };
       return this.ok();
     }
     if (group === "container" && action === "rm") {
       const name = args.at(-1)!;
       if (name === this.plan.names.workerContainer) this.workerRemoved = true;
+      if (name === this.plan.names.toolContainer) this.toolRemoved = true;
       if (name === this.plan.names.keeperContainer) this.keeperRemoved = true;
       return this.ok();
     }
@@ -173,9 +180,14 @@ class FakeDocker implements DockerCommandRunner {
     this.workerRemoved = true;
   }
 
+  failTool(): void {
+    this.toolState = { status: "exited", running: false };
+  }
+
   private inspect(name: string): DockerCommandResult {
     if (
       (name === this.plan.names.workerContainer && this.workerRemoved) ||
+      (name === this.plan.names.toolContainer && this.toolRemoved) ||
       (name === this.plan.names.keeperContainer && this.keeperRemoved) ||
       (name === this.plan.names.network && this.networkRemoved) ||
       (name === this.plan.names.storageVolume && this.volumeRemoved)
@@ -211,6 +223,7 @@ class FakeDocker implements DockerCommandRunner {
     }
     if (name === this.plan.names.keeperContainer) return this.json(this.keeperInspection());
     if (name === this.plan.names.workerContainer) return this.json(this.workerInspection());
+    if (name === this.plan.names.toolContainer) return this.json(this.toolInspection());
     if (name === this.proxy) {
       return this.json({
         NetworkSettings: {
@@ -254,15 +267,26 @@ class FakeDocker implements DockerCommandRunner {
   }
 
   private workerInspection(): object {
-    const mounts = [
-      [WORKER_PATHS.workspace, true, "workspace"],
-      [WORKER_PATHS.input, false, "input"],
-      [WORKER_PATHS.output, true, "output"],
-    ];
+    const mounts =
+      this.job.provider === "claude-code"
+        ? [
+            [WORKER_PATHS.input, false, "input"],
+            [WORKER_PATHS.output, true, "output"],
+            [WORKER_PATHS.tool, true, "tool"],
+          ]
+        : [
+            [WORKER_PATHS.workspace, true, "workspace"],
+            [WORKER_PATHS.input, false, "input"],
+          [WORKER_PATHS.output, true, "output"],
+        ];
+    const toolMemoryMb = Math.min(512, Math.max(128, Math.floor(this.job.limits.memoryMb / 3)));
+    const agentLimits = this.job.provider === "claude-code"
+      ? { cpus: this.job.limits.cpus - 0.25, memoryMb: this.job.limits.memoryMb - toolMemoryMb, pids: this.job.limits.pids - 16 }
+      : this.job.limits;
     return {
       Config: {
         User: "10001:10001",
-        Image: image,
+        Image: this.job.image,
         Env: ["REEVO_PROXY_URL=http://reevo-proxy:8787", `REEVO_RUN_CAPABILITY=${capability}`],
         Labels: this.resourceLabels.get(this.plan.names.workerContainer),
       },
@@ -275,10 +299,11 @@ class FakeDocker implements DockerCommandRunner {
         CgroupnsMode: "private",
         IpcMode: "none",
         Init: true,
-        Memory: 1024 * 1024 * 1024,
-        MemorySwap: 1024 * 1024 * 1024,
-        PidsLimit: 64,
-        NanoCpus: 1_500_000_000,
+        Memory: agentLimits.memoryMb * 1024 * 1024,
+        MemorySwap: agentLimits.memoryMb * 1024 * 1024,
+        MemorySwappiness: 0,
+        PidsLimit: agentLimits.pids,
+        NanoCpus: Math.round(agentLimits.cpus * 1_000_000_000),
         ShmSize: 16 * 1024 * 1024,
         NetworkMode: this.plan.names.network,
         PidMode: "",
@@ -319,6 +344,71 @@ class FakeDocker implements DockerCommandRunner {
     };
   }
 
+  private toolInspection(): object {
+    const mounts = [
+      [WORKER_PATHS.workspace, true, "workspace"],
+      [WORKER_PATHS.tool, true, "tool"],
+    ];
+    const memoryMb = Math.min(512, Math.max(128, Math.floor(this.job.limits.memoryMb / 3)));
+    return {
+      Config: {
+        User: "10001:10001",
+        Image: this.job.toolImage,
+        Env: [],
+        Labels: this.resourceLabels.get(this.plan.names.toolContainer),
+      },
+      HostConfig: {
+        ReadonlyRootfs: true,
+        Privileged: false,
+        Binds: null,
+        CapAdd: null,
+        CapDrop: ["ALL"],
+        CgroupnsMode: "private",
+        IpcMode: "none",
+        Init: true,
+        Memory: memoryMb * 1024 * 1024,
+        MemorySwap: memoryMb * 1024 * 1024,
+        MemorySwappiness: 0,
+        PidsLimit: 16,
+        NanoCpus: 250_000_000,
+        ShmSize: 16 * 1024 * 1024,
+        NetworkMode: "none",
+        PidMode: "",
+        RestartPolicy: { Name: "no" },
+        LogConfig: { Type: "local", Config: { "max-size": "1m", "max-file": "2" } },
+        SecurityOpt: ["no-new-privileges=true", "seccomp=builtin"],
+        Devices: [],
+        DeviceRequests: null,
+        Dns: [],
+        DnsOptions: [],
+        DnsSearch: [],
+        ExtraHosts: null,
+        GroupAdd: null,
+        PortBindings: {},
+        PublishAllPorts: false,
+        Tmpfs: { "/tmp": "rw,noexec", "/home/reevo": "rw,noexec" },
+        Mounts: mounts.map(([target, writable, subpath]) => ({
+          Type: "volume",
+          Source: this.plan.names.storageVolume,
+          Target: target,
+          ReadOnly: !writable,
+          VolumeOptions: { NoCopy: true, Subpath: subpath },
+        })),
+      },
+      Mounts: mounts.map(([Destination, RW]) => ({
+        Type: "volume",
+        Name: this.plan.names.storageVolume,
+        Destination,
+        RW,
+      })),
+      NetworkSettings: { Networks: { none: {} }, Ports: {} },
+      State: {
+        Running: this.toolState.running,
+        Status: this.toolState.status,
+      },
+    };
+  }
+
   private ok(): DockerCommandResult {
     return { stdout: "", stderr: "" };
   }
@@ -327,10 +417,10 @@ class FakeDocker implements DockerCommandRunner {
   }
 }
 
-async function harness(runId = "docker-run-1") {
+async function harness(runId = "docker-run-1", override: Partial<JobSpec> = {}) {
   const root = await mkdtemp(join(tmpdir(), "reevo-docker-job-"));
   temporaryRoots.push(root);
-  const job = spec(runId);
+  const job = { ...spec(runId), ...override };
   const runRoot = join(root, "workspaces", runId);
   await Promise.all([
     mkdir(join(runRoot, "workspace"), { recursive: true }),
@@ -349,7 +439,7 @@ async function harness(runId = "docker-run-1") {
     docker,
     transfer,
   });
-  return { launcher, docker, spec: job, transfer, runRoot };
+  return { launcher, docker, spec: job, transfer, runRoot, root };
 }
 
 afterEach(async () => {
@@ -410,6 +500,69 @@ describe("DockerJobLauncher", () => {
     now += created.spec.timeoutSec * 1_000;
     expect(await launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
     expect(await launcher.collect(handle)).toEqual({ exitCode: 124, reason: "timed_out" });
+  });
+
+  it("treats Claude's agent and no-network tool runner as one cleanup unit", async () => {
+    const created = await harness("docker-claude", { provider: "claude-code", toolImage });
+    const handle = await created.launcher.launch(created.spec);
+    const createdContainers = created.docker.calls
+      .filter((call) => call.args[0] === "container" && call.args[1] === "create")
+      .map((call) => call.args[call.args.indexOf("--name") + 1]);
+    expect(createdContainers).toEqual([
+      created.docker.plan.names.keeperContainer,
+      created.docker.plan.names.toolContainer,
+      created.docker.plan.names.workerContainer,
+    ]);
+    expect(JSON.stringify(created.docker.calls)).not.toContain(`REEVO_RUN_CAPABILITY=${capability}`);
+    await expect(created.launcher.status(handle)).resolves.toEqual({ state: "running" });
+    created.docker.finish();
+    await expect(created.launcher.collect(handle)).resolves.toMatchObject({ reason: "completed" });
+    await created.launcher.remove(handle);
+    expect(created.docker.toolRemoved).toBe(true);
+  });
+
+  it("fails the composite job when the Claude tool runner exits", async () => {
+    const created = await harness("docker-claude-tool-failure", { provider: "claude-code", toolImage });
+    const handle = await created.launcher.launch(created.spec);
+    created.docker.failTool();
+    await expect(created.launcher.status(handle)).resolves.toEqual({ state: "failed" });
+    await expect(created.launcher.collect(handle)).resolves.toMatchObject({ diagnostic: "worker_tool_runner_failed" });
+  });
+
+  it("never relaunches an ambiguous provisioning record", async () => {
+    const created = await harness("docker-ambiguous", { provider: "claude-code", toolImage });
+    const plan = created.docker.plan;
+    const specHash = createHash("sha256")
+      .update(JSON.stringify({ ...created.spec, labels: { untrusted: "must-not-reach-docker" } }))
+      .digest("hex");
+    const record = {
+      schemaVersion: 1,
+      runId: created.spec.runId,
+      spec: created.spec,
+      specHash,
+      handle: { backend: "docker", id: plan.names.workerContainer },
+      jobId: "job-ambiguous",
+      createdAt: 0,
+      deadlineAt: Date.now() + 60_000,
+      capabilityHash: "irrelevant",
+      phase: "provisioning",
+    };
+    const stateFile = `${createHash("sha256").update(created.spec.runId).digest("hex")}.json`;
+    await mkdir(join(created.root, "ambiguous-state"), { recursive: true });
+    await writeFile(join(created.root, "ambiguous-state", stateFile), `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    const recovered = new DockerJobLauncher({
+      stateRoot: join(created.root, "ambiguous-state"),
+      workspaceRoot: join(created.root, "workspaces"),
+      proxyContainer: "trusted-proxy",
+      resolveCapability: async () => capability,
+      isRunActive: async () => false,
+      docker: created.docker,
+      transfer: new NoopTransfer(),
+    });
+    const handle = await recovered.launch(created.spec);
+    expect(handle).toEqual(record.handle);
+    expect(created.docker.calls.some((call) => call.args[0] === "container" && call.args[1] === "create")).toBe(false);
+    await expect(recovered.status(handle)).resolves.toEqual({ state: "lost" });
   });
 
   it("does not crash the process when a stale record's startup cleanup hits an unrecognized docker error", async () => {

@@ -25,6 +25,7 @@ COPY --from=worker-dependencies /worker/node_modules ./claude-coding-worker/node
 COPY --from=build /build/dist/claude-coding-worker ./claude-coding-worker
 COPY --from=build /build/dist/coding-worker/artifact.js ./coding-worker/artifact.js
 COPY --from=build /build/dist/coding-worker/errors.js ./coding-worker/errors.js
+COPY --from=build /build/dist/coding-worker/keeper.js ./coding-worker/keeper.js
 COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
 RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/ssh \

@@ -64,6 +64,20 @@ describe("loadContainerExecutorConfig", () => {
       pids: 128,
       diskMb: 2048,
       credentialRef: "env:OPENAI_API_KEY",
+      anthropicCredentialRef: "env:ANTHROPIC_API_KEY",
+    });
+  });
+
+  it("loads the separate immutable Claude agent and tool-runner images", () => {
+    const config = loadContainerExecutorConfig({
+      CODING_CLAUDE_WORKER_IMAGE: `claude-worker@sha256:${"c".repeat(64)}`,
+      CODING_CLAUDE_TOOL_RUNNER_IMAGE: `claude-tools@sha256:${"d".repeat(64)}`,
+      CODING_ANTHROPIC_CREDENTIAL_REF: "env:ANTHROPIC_KEY",
+    });
+    expect(config).toMatchObject({
+      claudeWorkerImage: `claude-worker@sha256:${"c".repeat(64)}`,
+      claudeToolRunnerImage: `claude-tools@sha256:${"d".repeat(64)}`,
+      anthropicCredentialRef: "env:ANTHROPIC_KEY",
     });
   });
 
@@ -75,7 +89,9 @@ describe("loadContainerExecutorConfig", () => {
     const config = loadContainerExecutorConfig({
       CODING_WORKER_IMAGE_NODE_PYTHON_3_12: `worker-python@sha256:${"b".repeat(64)}`,
     });
-    expect(config.additionalWorkerImages).toEqual({ "node-python": { "3.12": `worker-python@sha256:${"b".repeat(64)}` } });
+    expect(config.additionalWorkerImages).toEqual({
+      "node-python": { "3.12": `worker-python@sha256:${"b".repeat(64)}` },
+    });
   });
 
   it("additionalWorkerImages is empty when no toolchain env vars are set", () => {
