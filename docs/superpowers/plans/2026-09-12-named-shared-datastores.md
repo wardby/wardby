@@ -859,13 +859,14 @@ Expected: PASS.
 
 - [ ] **Step 5: Add `requireOwnedDatastore` to `src/mcp/auth/ownership.ts`**
 
-Add, mirroring `requireOwnedSecret` exactly:
+Add, mirroring `requireOwnedTool`/`requireOwnedAgent` (which return their row, not `void` — `attach_datastore` in Task 6 needs the datastore's `name` for its default `boundName`, so this returns the row rather than `void` like `requireOwnedSecret`):
 
 ```ts
-export async function requireOwnedDatastore(db: PrismaClient, id: string, principalId: string): Promise<void> {
+export async function requireOwnedDatastore(db: PrismaClient, id: string, principalId: string) {
   const datastore = await db.datastore.findUnique({ where: { id } });
   if (!datastore) throw new McpError(403, `Datastore "${id}" is not owned by the caller.`);
   assertCanMutate(datastore.ownerId, principalId, `Datastore "${id}" is not owned by the caller.`);
+  return datastore;
 }
 ```
 
@@ -1521,11 +1522,12 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
     },
     handler: async (args: { agentId: string; datastoreId: string; boundName?: string }, ctx) => {
       await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
-      await requireOwnedDatastore(ctx.db, args.datastoreId, ctx.principal.id);
+      const datastore = await requireOwnedDatastore(ctx.db, args.datastoreId, ctx.principal.id);
+      const boundName = args.boundName ?? datastore.name;
       try {
-        await attachDatastore(args.agentId, args.datastoreId, ctx.db, args.boundName ?? args.datastoreId);
+        await attachDatastore(args.agentId, args.datastoreId, ctx.db, boundName);
       } catch (err) {
-        throw new McpError(409, `Agent already binds a datastore under name "${args.boundName ?? args.datastoreId}".`);
+        throw new McpError(409, `Agent already binds a datastore under name "${boundName}".`);
       }
       return textResult({ attached: true });
     },
