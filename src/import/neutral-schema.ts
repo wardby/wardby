@@ -87,6 +87,16 @@ export const NeutralSingleDatastoreSchema = z.object({
 });
 export type NeutralSingleDatastore = z.infer<typeof NeutralSingleDatastoreSchema>;
 
+export const NeutralSharedDatastoreSchema = z.object({
+  name: z.string(),
+  ownerEmail: z.string().nullable().default(null),
+  attachedAgentNames: z.array(z.string()).default([]),
+  entries: z.array(z.object({
+    key: z.string(), value: z.unknown(),
+  })).default([]),
+});
+export type NeutralSharedDatastore = z.infer<typeof NeutralSharedDatastoreSchema>;
+
 export const NeutralWebhookSchema = z.object({
   agentName: z.string(),
   enabled: z.boolean(),

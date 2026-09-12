@@ -70,8 +70,8 @@ export async function runImport(opts: ImportOptions): Promise<{ report: string; 
   // For owner-scoped entities (secrets, budgets), load only if we have an owner
   const ownerId = opts.owner !== null && !opts.isPublic ? (await resolvePrincipal(opts.owner, opts.db)).id : null;
 
-  // Tier-1 capabilities: only "budgets" is implemented
-  const capabilitiesSupported = new Set(["budgets"]);
+  // Tier-1 capabilities: "budgets" and "shared-datastores" are implemented
+  const capabilitiesSupported = new Set(["budgets", "shared-datastores"]);
 
   // Run preflight reconciliation
   const recon = preflight({
@@ -141,6 +141,7 @@ export async function runImport(opts: ImportOptions): Promise<{ report: string; 
   finalLines.push(`Tools created: ${result.toolsCreated}`);
   finalLines.push(`Secrets created: ${result.secretsCreated}`);
   finalLines.push(`Datastore entries: ${result.datastoreEntries}`);
+  finalLines.push(`Shared datastores created: ${result.datastoresSharedCreated}`);
   finalLines.push(`Budget groups created: ${result.budgetGroupsCreated}`);
 
   if (result.webhookSecrets.length > 0) {

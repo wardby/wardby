@@ -88,6 +88,7 @@ function bundleWith(over: Partial<Record<string, unknown[]>>): Bundle {
     readSecrets: rd("secrets"),
     readAgentSecrets: rd("agentSecrets"),
     readSingleDatastores: rd("datastores"),
+    readSharedDatastores: rd("sharedDatastores"),
     readWebhooks: rd("webhooks"),
     readBudgets: rd("budgets"),
   };

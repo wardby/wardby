@@ -20,6 +20,7 @@ import type {
   NeutralTool,
   NeutralAgentTool,
   NeutralSingleDatastore,
+  NeutralSharedDatastore,
   NeutralWebhook,
   NeutralBudget,
   NeutralSecret,
@@ -159,6 +160,7 @@ describe.skipIf(!process.env.DATABASE_URL)("createFromBundle (database)", () => 
       readSecrets: () => [],
       readAgentSecrets: () => [],
       readSingleDatastores: () => [datastore],
+      readSharedDatastores: () => [],
       readWebhooks: () => [webhook],
       readBudgets: () => [budget],
     };
@@ -337,6 +339,7 @@ describe.skipIf(!process.env.DATABASE_URL)("createFromBundle (database)", () => 
       readSecrets: () => [secretA, secretB],
       readAgentSecrets: () => [agentSecretA, agentSecretB],
       readSingleDatastores: () => [],
+      readSharedDatastores: () => [],
       readWebhooks: () => [],
       readBudgets: () => [],
     };
@@ -438,6 +441,255 @@ describe.skipIf(!process.env.DATABASE_URL)("createFromBundle (database)", () => 
         });
         await db.principal.deleteMany({ where: { subject: ownerSubject2 } });
       }
+    }
+  });
+
+  it("creates a shared datastore, seeds its entries, and attaches it to two agents", async () => {
+    const testId3 = randomUUID().slice(0, 8);
+    const agentNameA = `test-shared-a-${testId3}`;
+    const agentNameB = `test-shared-b-${testId3}`;
+    const sharedName = `shared-kb-${testId3}`;
+    const ownerSubject3 = `test-owner-shared-${testId3}`;
+
+    const mkAgent = (name: string): NeutralAgent => ({
+      name,
+      systemPrompt: "Test agent",
+      provider: "bedrock",
+      model: "claude-opus-4",
+      region: null,
+      schedule: null,
+      timezone: "UTC",
+      scheduleEnabled: false,
+      maxTurns: 10,
+      budgetUsd: "5.00",
+      ownerEmail: null,
+      kind: "native",
+      memoryEnabled: false,
+      unmodeled: {},
+    });
+
+    const manifest: Manifest = {
+      bundleVersion: 1,
+      source: { product: "test", exporterVersion: "1.0", exportedAt: new Date().toISOString() },
+      secretMode: "references",
+      transferKeyId: null,
+      contentWindowDays: null,
+      contentSince: null,
+      toolCallDetail: "metadata",
+      runAuditWindowDays: null,
+      runAuditSince: null,
+      capabilities: [],
+      counts: { agents: 2 },
+    };
+
+    const agentA = mkAgent(agentNameA);
+    const agentB = mkAgent(agentNameB);
+
+    const sharedDatastore: NeutralSharedDatastore = {
+      name: sharedName,
+      ownerEmail: null,
+      attachedAgentNames: [agentNameA, agentNameB],
+      entries: [{ key: "k1", value: { hello: "world" } }],
+    };
+
+    const bundle: Bundle = {
+      manifest,
+      readAgents: () => [agentA, agentB],
+      readTools: () => [],
+      readAgentTools: () => [],
+      readSecrets: () => [],
+      readAgentSecrets: () => [],
+      readSingleDatastores: () => [],
+      readSharedDatastores: () => [sharedDatastore],
+      readWebhooks: () => [],
+      readBudgets: () => [],
+    };
+
+    let owner: { id: string } | undefined;
+    let agentIdA: string | undefined;
+    let agentIdB: string | undefined;
+    let datastoreId: string | undefined;
+
+    try {
+      owner = await resolvePrincipal(ownerSubject3, db);
+      const cipher = buildSecretCipher(loadProviderConfig());
+
+      const recon = preflight({
+        bundle,
+        routableModels: new Set(["claude-opus-4"]),
+        supportedGlobals: new Set(),
+        existingAgentNames: new Set(),
+        existingToolNames: new Set(),
+        capabilitiesSupported: new Set(["shared-datastores"]),
+        onConflict: "fail",
+        prefix: "",
+        allowOpenFetch: false,
+      });
+      expect(recon.hasFatalCollision).toBe(false);
+
+      const result = await createFromBundle(bundle, recon, {
+        db,
+        cipher,
+        ownerId: owner.id,
+        defaultBudget: "5.00",
+        secretMode: "references",
+        allowOpenFetch: false,
+      });
+
+      expect(result.datastoresSharedCreated).toBe(1);
+
+      const createdAgentA = await db.agent.findUnique({ where: { name: agentNameA } });
+      const createdAgentB = await db.agent.findUnique({ where: { name: agentNameB } });
+      expect(createdAgentA).toBeTruthy();
+      expect(createdAgentB).toBeTruthy();
+      agentIdA = createdAgentA!.id;
+      agentIdB = createdAgentB!.id;
+
+      const created = await db.datastore.findFirstOrThrow({
+        where: { name: sharedName, ownerId: owner.id },
+      });
+      datastoreId = created.id;
+
+      const attachments = await db.agentDatastore.findMany({ where: { datastoreId: created.id } });
+      expect(attachments).toHaveLength(2);
+      expect(attachments.map((a) => a.boundName).sort()).toEqual([sharedName, sharedName]);
+      expect(attachments.map((a) => a.agentId).sort()).toEqual([agentIdA, agentIdB].sort());
+
+      const entries = await db.datastoreEntry.findMany({ where: { datastoreId: created.id } });
+      expect(entries).toHaveLength(1);
+      expect(entries[0]?.key).toBe("k1");
+      expect(entries[0]?.value).toEqual({ hello: "world" });
+    } finally {
+      if (datastoreId) {
+        await db.agentDatastore.deleteMany({ where: { datastoreId } });
+        await db.datastoreEntry.deleteMany({ where: { datastoreId } });
+        await db.datastore.deleteMany({ where: { id: datastoreId } });
+      }
+      if (agentIdA) await db.agent.deleteMany({ where: { id: agentIdA } });
+      if (agentIdB) await db.agent.deleteMany({ where: { id: agentIdB } });
+      if (owner) await db.principal.deleteMany({ where: { subject: ownerSubject3 } });
+    }
+  });
+
+  it("a boundName collision across two same-named shared stores on one agent warns instead of throwing", async () => {
+    // createDatastore (Task 3) is a plain create, not an upsert (deliberate,
+    // per progress.md's Task 3 note) — two shared-datastore definitions with
+    // the same name for the same owner collide on Datastore's own
+    // @@unique([ownerId, name]) at creation time, before either ever reaches
+    // attachDatastore's @@unique([agentId, boundName]). Either constraint
+    // firing must warn-and-skip rather than aborting the whole import; this
+    // test proves the first definition still succeeds end-to-end and the
+    // second is skipped with a warning naming it.
+    const testId4 = randomUUID().slice(0, 8);
+    const agentName = `test-shared-collision-${testId4}`;
+    const sharedName = `kb-${testId4}`;
+    const ownerSubject4 = `test-owner-shared-collision-${testId4}`;
+
+    const agent: NeutralAgent = {
+      name: agentName,
+      systemPrompt: "Test agent",
+      provider: "bedrock",
+      model: "claude-opus-4",
+      region: null,
+      schedule: null,
+      timezone: "UTC",
+      scheduleEnabled: false,
+      maxTurns: 10,
+      budgetUsd: "5.00",
+      ownerEmail: null,
+      kind: "native",
+      memoryEnabled: false,
+      unmodeled: {},
+    };
+
+    const manifest: Manifest = {
+      bundleVersion: 1,
+      source: { product: "test", exporterVersion: "1.0", exportedAt: new Date().toISOString() },
+      secretMode: "references",
+      transferKeyId: null,
+      contentWindowDays: null,
+      contentSince: null,
+      toolCallDetail: "metadata",
+      runAuditWindowDays: null,
+      runAuditSince: null,
+      capabilities: [],
+      counts: { agents: 1 },
+    };
+
+    const sharedDatastoreDup: NeutralSharedDatastore = {
+      name: sharedName,
+      ownerEmail: null,
+      attachedAgentNames: [agentName],
+      entries: [],
+    };
+
+    const bundle: Bundle = {
+      manifest,
+      readAgents: () => [agent],
+      readTools: () => [],
+      readAgentTools: () => [],
+      readSecrets: () => [],
+      readAgentSecrets: () => [],
+      readSingleDatastores: () => [],
+      readSharedDatastores: () => [sharedDatastoreDup, sharedDatastoreDup],
+      readWebhooks: () => [],
+      readBudgets: () => [],
+    };
+
+    let owner: { id: string } | undefined;
+    let agentId: string | undefined;
+    let datastoreId: string | undefined;
+
+    try {
+      owner = await resolvePrincipal(ownerSubject4, db);
+      const cipher = buildSecretCipher(loadProviderConfig());
+
+      const recon = preflight({
+        bundle,
+        routableModels: new Set(["claude-opus-4"]),
+        supportedGlobals: new Set(),
+        existingAgentNames: new Set(),
+        existingToolNames: new Set(),
+        capabilitiesSupported: new Set(["shared-datastores"]),
+        onConflict: "fail",
+        prefix: "",
+        allowOpenFetch: false,
+      });
+      expect(recon.hasFatalCollision).toBe(false);
+
+      const result = await createFromBundle(bundle, recon, {
+        db,
+        cipher,
+        ownerId: owner.id,
+        defaultBudget: "5.00",
+        secretMode: "references",
+        allowOpenFetch: false,
+      });
+
+      // Only the first "kb" definition actually creates a row; the second
+      // collides on (ownerId, name) and is skipped with a warning — it must
+      // not throw and abort the whole import.
+      expect(result.datastoresSharedCreated).toBe(1);
+      expect(result.warnings.some((w) => w.includes(sharedName))).toBe(true);
+
+      const createdAgent = await db.agent.findUnique({ where: { name: agentName } });
+      expect(createdAgent).toBeTruthy();
+      agentId = createdAgent!.id;
+
+      const rows = await db.datastore.findMany({ where: { name: sharedName, ownerId: owner.id } });
+      expect(rows).toHaveLength(1);
+      datastoreId = rows[0].id;
+
+      const attachments = await db.agentDatastore.findMany({ where: { datastoreId } });
+      expect(attachments).toHaveLength(1);
+      expect(attachments[0]?.boundName).toBe(sharedName);
+    } finally {
+      if (datastoreId) {
+        await db.agentDatastore.deleteMany({ where: { datastoreId } });
+        await db.datastore.deleteMany({ where: { id: datastoreId } });
+      }
+      if (agentId) await db.agent.deleteMany({ where: { id: agentId } });
+      if (owner) await db.principal.deleteMany({ where: { subject: ownerSubject4 } });
     }
   });
 });
