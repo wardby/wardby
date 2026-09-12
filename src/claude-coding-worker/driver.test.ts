@@ -94,7 +94,7 @@ describe("runClaudeCodingWorker", () => {
       createQuery: () =>
         (async function* () {
           controller.abort();
-          throw new Error("provider secret");
+          yield Promise.reject(new Error("provider secret"));
         })(),
     });
     await expect(run).rejects.toThrow("coding_stream_failed");

@@ -30,12 +30,15 @@
     "coding:local:up": "docker compose --env-file .env.local -f deploy/local/docker-compose.yml -f deploy/local/docker-compose.phase5.yml up --build -d coding-proxy",
     "coding:local:down": "docker compose --env-file .env.local -f deploy/local/docker-compose.yml -f deploy/local/docker-compose.phase5.yml down",
     "worker:image:local": "node scripts/build-local-coding-worker.mjs",
-    "test:phase5": "vitest run src/coding/observability.test.ts src/coding/profile.test.ts src/coding/protocol.test.ts src/providers/coding-proxy/proxy.test.ts src/providers/coding-proxy/secure-fetch.test.ts src/providers/coding-proxy/metering.test.ts src/providers/coding-proxy/runtime.test.ts src/providers/executor/container.test.ts src/providers/jobs/docker.test.ts src/providers/jobs/docker-isolation.test.ts src/providers/jobs/fake.test.ts src/providers/vcs/github.test.ts src/mcp/tools/trigger.test.ts src/core/webhooks.test.ts",
+    "test:phase5": "vitest run src/coding/observability.test.ts src/coding/profile.test.ts src/coding/protocol.test.ts src/providers/coding-proxy/proxy.test.ts src/providers/coding-proxy/secure-fetch.test.ts src/providers/coding-proxy/metering.test.ts src/providers/coding-proxy/runtime.test.ts src/providers/executor/container.test.ts src/providers/jobs/docker.test.ts src/providers/jobs/docker-isolation.test.ts src/providers/jobs/fake.test.ts src/providers/vcs/github.test.ts src/mcp/tools/trigger.test.ts src/core/webhooks.test.ts src/claude-coding-worker/driver.test.ts src/claude-coding-worker/sdk.test.ts src/claude-coding-worker/image-policy.test.ts src/claude-tool-runner/command.test.mjs src/claude-tool-runner/main.test.mjs src/claude-tool-runner/image-policy.test.ts",
     "test:phase5:database": "vitest run src/coding/schema.database.test.ts src/providers/coding-proxy/prisma-ledger.database.test.ts src/providers/executor/container.database.test.ts src/core/scheduler.test.ts src/mcp/integration.test.ts",
     "verify:phase5": "npm run typecheck && npm run test:phase5 && npm run build && npm run worker:image:policy",
     "test:docker-isolation": "node scripts/docker-isolation-acceptance.mjs",
     "test:docker-job": "node scripts/docker-job-acceptance.mjs",
+    "claude:images:local": "docker build -f src/claude-coding-worker/Dockerfile -t reevo-claude-coding-worker:phase5 . && docker build -f src/claude-tool-runner/Dockerfile -t reevo-claude-tool-runner:phase5 .",
+    "test:claude-compatibility": "docker build -f src/claude-coding-worker/Dockerfile.compatibility -t reevo-claude-compat:phase5 . && docker run --rm reevo-claude-compat:phase5",
     "test:claude-docker": "node scripts/claude-docker-acceptance.mjs",
+    "verify:claude-code": "npm run typecheck && npm run test:phase5 && npm run test:claude-compatibility && npm run claude:images:local && npm run test:claude-docker",
     "worker:image:policy": "node scripts/coding-worker-image-policy.mjs"
   },
   "dependencies": {

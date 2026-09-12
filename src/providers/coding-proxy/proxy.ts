@@ -39,6 +39,7 @@ const REQUEST_KEY_PATTERN = /^[\x21-\x7e]{1,200}$/;
 const APPROVED_ANTHROPIC_BETAS = new Set<string>(CLAUDE_CODE_ANTHROPIC_BETAS);
 const REEVO_COMMAND_TOOL = "mcp__reevo_tools__run_command";
 const STRUCTURED_OUTPUT_TOOL = "StructuredOutput";
+const MAX_COMMAND_BYTES = 16 * 1024;
 const MAX_TOOL_TEXT_BYTES = 256 * 1024;
 
 export class CodingProxyError extends Error {
@@ -183,7 +184,11 @@ function validateTextBlocks(value: unknown): void {
 function validateCommandInput(value: unknown): void {
   const input = record(value, "unsupported_anthropic_feature");
   onlyKeys(input, ["command", "timeout_ms"]);
-  if (typeof input.command !== "string" || input.command.length < 1 || input.command.length > MAX_TOOL_TEXT_BYTES) {
+  if (
+    typeof input.command !== "string" ||
+    input.command.length < 1 ||
+    Buffer.byteLength(input.command) > MAX_COMMAND_BYTES
+  ) {
     throw new CodingProxyError(400, "unsupported_anthropic_feature");
   }
   if (

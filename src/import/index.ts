@@ -54,9 +54,8 @@ export async function runImport(opts: ImportOptions): Promise<{ report: string; 
 
   // Build routableModels from LLM registrations
   const reg = resolveLlmRegistrations(env);
-  const routableModels = reg.kind === "registrations"
-    ? new Set(new RoutingLlmProvider(reg.registrations).listModels())
-    : new Set<string>();
+  const routableModels =
+    reg.kind === "registrations" ? new Set(new RoutingLlmProvider(reg.registrations).listModels()) : new Set<string>();
 
   // Get supportedGlobals from prelude
   const supportedGlobals = supportedGlobalsFromPrelude(SANDBOX_PRELUDE);
@@ -69,19 +68,7 @@ export async function runImport(opts: ImportOptions): Promise<{ report: string; 
   const existingToolNames = new Set(existingTools.map((t) => t.name));
 
   // For owner-scoped entities (secrets, budgets), load only if we have an owner
-  const ownerId = opts.owner !== null && !opts.isPublic
-    ? (await resolvePrincipal(opts.owner, opts.db)).id
-    : null;
-
-  const existingSecrets = ownerId
-    ? await opts.db.secret.findMany({ where: { ownerId }, select: { name: true } })
-    : [];
-  const existingSecretNames = new Set(existingSecrets.map((s) => s.name));
-
-  const existingBudgetGroups = ownerId
-    ? await opts.db.budgetGroup.findMany({ where: { ownerId }, select: { name: true } })
-    : [];
-  const existingBudgetGroupNames = new Set(existingBudgetGroups.map((b) => b.name));
+  const ownerId = opts.owner !== null && !opts.isPublic ? (await resolvePrincipal(opts.owner, opts.db)).id : null;
 
   // Tier-1 capabilities: only "budgets" is implemented
   const capabilitiesSupported = new Set(["budgets"]);
@@ -126,7 +113,7 @@ export async function runImport(opts: ImportOptions): Promise<{ report: string; 
     const keyId = transferKeyIdOf(transferPrivateKey);
     if (keyId !== bundle.manifest.transferKeyId) {
       throw new Error(
-        `Transfer key ID mismatch: key has ${keyId}, bundle manifest declares ${bundle.manifest.transferKeyId}`
+        `Transfer key ID mismatch: key has ${keyId}, bundle manifest declares ${bundle.manifest.transferKeyId}`,
       );
     }
   }

@@ -1,6 +1,11 @@
 import {
-  createPrivateKey, createPublicKey, diffieHellman, hkdfSync,
-  createDecipheriv, createHash, type KeyObject, type DecipherGCM,
+  createPrivateKey,
+  createPublicKey,
+  diffieHellman,
+  hkdfSync,
+  createDecipheriv,
+  createHash,
+  type KeyObject,
 } from "node:crypto";
 
 const ALG = "x25519-hkdf-sha256-chacha20poly1305-v1";
@@ -8,7 +13,12 @@ const INFO = Buffer.from("reevo-secret-transfer-v1");
 const SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex"); // X25519 SPKI DER header
 
 export interface TransferEnvelope {
-  v: number; alg: string; epk: string; nonce: string; ct: string; tag: string;
+  v: number;
+  alg: string;
+  epk: string;
+  nonce: string;
+  ct: string;
+  tag: string;
 }
 
 function rawFromSpki(key: KeyObject): Buffer {
@@ -38,11 +48,10 @@ export function decryptTransferEnvelope(env: TransferEnvelope, secretName: strin
   const shared = diffieHellman({ privateKey, publicKey: publicFromRaw(epkRaw) });
   const recipientRaw = rawFromSpki(createPublicKey(privateKey));
   const okm = Buffer.from(hkdfSync("sha256", shared, Buffer.concat([epkRaw, recipientRaw]), INFO, 32));
-  // chacha20-poly1305 is an AEAD cipher; @types/node only maps the GCM/CCM
-  // algorithm string literals to a typed cipher, so cast to DecipherGCM (whose
-  // setAAD/setAuthTag surface matches chacha20-poly1305's runtime API).
-  const d = createDecipheriv("chacha20-poly1305", okm, Buffer.from(env.nonce, "hex"), { authTagLength: 16 }) as DecipherGCM;
-  d.setAAD(Buffer.from(secretName, "utf8"));
+  // Supplying the plaintext length satisfies Node's generic AEAD typing and
+  // keeps the authenticated-data call explicit for chacha20-poly1305.
+  const d = createDecipheriv("chacha20-poly1305", okm, Buffer.from(env.nonce, "hex"), { authTagLength: 16 });
+  d.setAAD(Buffer.from(secretName, "utf8"), { plaintextLength: Buffer.byteLength(env.ct, "hex") });
   d.setAuthTag(Buffer.from(env.tag, "hex"));
   return Buffer.concat([d.update(Buffer.from(env.ct, "hex")), d.final()]).toString("utf8");
 }

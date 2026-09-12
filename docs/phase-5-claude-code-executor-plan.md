@@ -77,15 +77,18 @@ model alias cannot cross a billing or authentication boundary.
 
 ### Current implementation status (2026-09-12)
 
-- Task 0 is complete. The pinned SDK compatibility suite passes on the host
-  and under the production-style Docker restrictions.
-- Task 1 is complete. Profiles and durable run snapshots support the exact
-  `codex | claude-code` identifiers, enforce provider/model compatibility at
-  create, update, and dispatch, and resolve worker images by provider without
-  allowing Claude to fall through to a Codex or BYO image.
-- Task 2 is next. Claude dispatch remains intentionally fail-closed with
-  `coding_provider_not_configured:claude-code` until the protocol-aware proxy
-  and composite runtime are available.
+- Tasks 0-5 are complete. The pinned SDK contract, explicit provider routing,
+  Anthropic Messages proxy, credential-separated worker/tool images, composite
+  Docker lifecycle, deterministic acceptance suite, and capped live smoke all
+  pass without giving either worker a long-lived provider or GitHub credential.
+- Task 6 is implemented by the release-closure change: `verify:claude-code`,
+  Claude compatibility and Docker acceptance in CI, SBOMs and Trivy scans for
+  both runtime images, updated operator documentation, and final security
+  evidence. Phase 5 is release-closed when that change is green on GitHub.
+- The live run `cmtyjdclo0001sqreyrmd4jjt` used `claude-sonnet-5`, spent
+  `$0.008709` of a `$0.25` cap, and opened draft PR #16 containing exactly one
+  requested file. The PR was verified, closed without merge, and its branch
+  deleted. The proxy fix was merged separately in PR #17.
 
 ### Task 0: Compatibility and threat-model spike
 
@@ -251,6 +254,9 @@ environment.
 Add `verify:claude-code` and make Phase 5 verification cover both worker
 providers. CI must build both pinned images, generate and scan both SBOMs, run
 proxy and isolation acceptance tests, and retain only safe test artifacts.
+
+**Status:** Complete locally on 2026-09-12. Release closure requires the
+GitHub checks for the closure change to pass.
 
 ## Release Criteria
 

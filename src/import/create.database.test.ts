@@ -4,9 +4,27 @@
  */
 import { describe, it, expect, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
-import { randomUUID, generateKeyPairSync, diffieHellman, hkdfSync, randomBytes, createCipheriv, type KeyObject, type CipherGCM } from "node:crypto";
+import {
+  randomUUID,
+  generateKeyPairSync,
+  diffieHellman,
+  hkdfSync,
+  randomBytes,
+  createCipheriv,
+  type KeyObject,
+} from "node:crypto";
 import type { Bundle } from "./bundle.js";
-import type { Manifest, NeutralAgent, NeutralTool, NeutralAgentTool, NeutralSingleDatastore, NeutralWebhook, NeutralBudget, NeutralSecret, NeutralAgentSecret } from "./neutral-schema.js";
+import type {
+  Manifest,
+  NeutralAgent,
+  NeutralTool,
+  NeutralAgentTool,
+  NeutralSingleDatastore,
+  NeutralWebhook,
+  NeutralBudget,
+  NeutralSecret,
+  NeutralAgentSecret,
+} from "./neutral-schema.js";
 import { preflight } from "./preflight.js";
 import { createFromBundle } from "./create.js";
 import { resolvePrincipal } from "../mcp/auth/principal.js";
@@ -25,12 +43,17 @@ function seal(plaintext: string, name: string, recipientPub: KeyObject): Transfe
   const shared = diffieHellman({ privateKey: esk, publicKey: recipientPub });
   const okm = Buffer.from(hkdfSync("sha256", shared, Buffer.concat([epkRaw, rawOf(recipientPub)]), INFO, 32));
   const nonce = randomBytes(12);
-  const c = createCipheriv("chacha20-poly1305", okm, nonce, { authTagLength: 16 }) as CipherGCM;
-  c.setAAD(Buffer.from(name, "utf8"));
+  const c = createCipheriv("chacha20-poly1305", okm, nonce, { authTagLength: 16 });
+  c.setAAD(Buffer.from(name, "utf8"), { plaintextLength: Buffer.byteLength(plaintext) });
   const ct = Buffer.concat([c.update(Buffer.from(plaintext, "utf8")), c.final()]);
-  return { v: 1, alg: "x25519-hkdf-sha256-chacha20poly1305-v1",
-    epk: epkRaw.toString("hex"), nonce: nonce.toString("hex"),
-    ct: ct.toString("hex"), tag: c.getAuthTag().toString("hex") };
+  return {
+    v: 1,
+    alg: "x25519-hkdf-sha256-chacha20poly1305-v1",
+    epk: epkRaw.toString("hex"),
+    nonce: nonce.toString("hex"),
+    ct: ct.toString("hex"),
+    tag: c.getAuthTag().toString("hex"),
+  };
 }
 
 describe.skipIf(!process.env.DATABASE_URL)("createFromBundle (database)", () => {
@@ -109,9 +132,7 @@ describe.skipIf(!process.env.DATABASE_URL)("createFromBundle (database)", () => 
     const datastore: NeutralSingleDatastore = {
       agentName,
       name: undefined,
-      entries: [
-        { key: "test-key", value: { data: "test-value" }, pii: false },
-      ],
+      entries: [{ key: "test-key", value: { data: "test-value" }, pii: false }],
     };
 
     const webhook: NeutralWebhook = {

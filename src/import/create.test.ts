@@ -1,8 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import {
-  generateKeyPairSync, diffieHellman, hkdfSync, randomBytes,
-  createCipheriv, type KeyObject, type CipherGCM,
-} from "node:crypto";
+import { generateKeyPairSync, diffieHellman, hkdfSync, randomBytes, createCipheriv, type KeyObject } from "node:crypto";
 import { createFromBundle } from "./create.js";
 import type { Bundle } from "./bundle.js";
 import type { Reconciliation } from "./preflight.js";
@@ -18,12 +15,17 @@ function seal(plaintext: string, name: string, recipientPub: KeyObject): Transfe
   const shared = diffieHellman({ privateKey: esk, publicKey: recipientPub });
   const okm = Buffer.from(hkdfSync("sha256", shared, Buffer.concat([epkRaw, rawOf(recipientPub)]), INFO, 32));
   const nonce = randomBytes(12);
-  const c = createCipheriv("chacha20-poly1305", okm, nonce, { authTagLength: 16 }) as CipherGCM;
-  c.setAAD(Buffer.from(name, "utf8"));
+  const c = createCipheriv("chacha20-poly1305", okm, nonce, { authTagLength: 16 });
+  c.setAAD(Buffer.from(name, "utf8"), { plaintextLength: Buffer.byteLength(plaintext) });
   const ct = Buffer.concat([c.update(Buffer.from(plaintext, "utf8")), c.final()]);
-  return { v: 1, alg: "x25519-hkdf-sha256-chacha20poly1305-v1",
-    epk: epkRaw.toString("hex"), nonce: nonce.toString("hex"),
-    ct: ct.toString("hex"), tag: c.getAuthTag().toString("hex") };
+  return {
+    v: 1,
+    alg: "x25519-hkdf-sha256-chacha20poly1305-v1",
+    epk: epkRaw.toString("hex"),
+    nonce: nonce.toString("hex"),
+    ct: ct.toString("hex"),
+    tag: c.getAuthTag().toString("hex"),
+  };
 }
 
 // Minimal fake db capturing calls; enough to prove references-mode creates no secrets
@@ -32,26 +34,63 @@ function fakeDb() {
   const calls: Record<string, unknown[]> = { tool: [], agent: [], secret: [], agentSecret: [], webhook: [] };
   return {
     calls,
-    tool: { upsert: vi.fn(async (a: unknown) => { calls.tool.push(a); return { id: "t", name: "n" }; }) },
-    agent: { upsert: vi.fn(async (a: unknown) => { calls.agent.push(a); return { id: "a", name: "n" }; }), update: vi.fn(async () => ({})) },
+    tool: {
+      upsert: vi.fn(async (a: unknown) => {
+        calls.tool.push(a);
+        return { id: "t", name: "n" };
+      }),
+    },
+    agent: {
+      upsert: vi.fn(async (a: unknown) => {
+        calls.agent.push(a);
+        return { id: "a", name: "n" };
+      }),
+      update: vi.fn(async () => ({})),
+    },
     agentTool: { upsert: vi.fn(async () => ({})) },
-    secret: { upsert: vi.fn(async (a: unknown) => { calls.secret.push(a); return { id: "s", name: "n" }; }), findUnique: vi.fn(async () => ({ id: "s", name: "n" })) },
-    agentSecret: { create: vi.fn(async (a: unknown) => { calls.agentSecret.push(a); return {}; }), findFirst: vi.fn(async () => null) },
+    secret: {
+      upsert: vi.fn(async (a: unknown) => {
+        calls.secret.push(a);
+        return { id: "s", name: "n" };
+      }),
+      findUnique: vi.fn(async () => ({ id: "s", name: "n" })),
+    },
+    agentSecret: {
+      create: vi.fn(async (a: unknown) => {
+        calls.agentSecret.push(a);
+        return {};
+      }),
+      findFirst: vi.fn(async () => null),
+    },
     budgetGroup: { upsert: vi.fn(async () => ({ id: "b" })) },
     webhook: { findFirst: vi.fn(async () => null), update: vi.fn(async () => ({})) },
     datastoreEntry: { upsert: vi.fn(async () => ({})) },
   } as any;
 }
-const emptyRecon: Reconciliation = { nameRemap: new Map(), agents: [], tools: [], skippedCapabilities: [], budgets: [], collisions: [], notes: [], hasFatalCollision: false };
+const emptyRecon: Reconciliation = {
+  nameRemap: new Map(),
+  agents: [],
+  tools: [],
+  skippedCapabilities: [],
+  budgets: [],
+  collisions: [],
+  notes: [],
+  hasFatalCollision: false,
+};
 
 function bundleWith(over: Partial<Record<string, unknown[]>>): Bundle {
   const rd = (k: string) => () => (over[k] as any) ?? [];
   return {
     manifest: {} as any,
-    readAgents: rd("agents"), readTools: rd("tools"), readAgentTools: rd("agentTools"),
-    readSecrets: rd("secrets"), readAgentSecrets: rd("agentSecrets"),
-    readSingleDatastores: rd("datastores"), readWebhooks: rd("webhooks"), readBudgets: rd("budgets"),
-  } as unknown as Bundle;
+    readAgents: rd("agents"),
+    readTools: rd("tools"),
+    readAgentTools: rd("agentTools"),
+    readSecrets: rd("secrets"),
+    readAgentSecrets: rd("agentSecrets"),
+    readSingleDatastores: rd("datastores"),
+    readWebhooks: rd("webhooks"),
+    readBudgets: rd("budgets"),
+  };
 }
 const cipher = { keyId: () => "appkey:test", encrypt: async (s: string) => `E::${s}`, decrypt: async (s: string) => s };
 
@@ -80,17 +119,25 @@ describe("createFromBundle", () => {
         agentSecrets: [{ agentName: "test-agent", secretName: "API_KEY", alias: "AK" }],
       }),
       emptyRecon,
-      { db, cipher, ownerId: "p1", defaultBudget: "5.00", secretMode: "envelope", transferPrivateKey: privateKey, allowOpenFetch: false } as any,
+      {
+        db,
+        cipher,
+        ownerId: "p1",
+        defaultBudget: "5.00",
+        secretMode: "envelope",
+        transferPrivateKey: privateKey,
+        allowOpenFetch: false,
+      } as any,
     );
 
     // One base-name secret row, counted once.
     expect(res.secretsCreated).toBe(1);
     expect(db.calls.secret).toHaveLength(1);
-    expect((db.calls.secret[0] as any).where.ownerId_name.name).toBe("API_KEY");
+    expect(db.calls.secret[0].where.ownerId_name.name).toBe("API_KEY");
 
     // Attachment carries the alias as the point-of-use boundName.
     expect(db.calls.agentSecret).toHaveLength(1);
-    expect((db.calls.agentSecret[0] as any).data.boundName).toBe("AK");
+    expect(db.calls.agentSecret[0].data.boundName).toBe("AK");
 
     // No "created under both base name and alias" warning anymore.
     expect(res.warnings.some((w) => w.includes("created under both base name and alias"))).toBe(false);
@@ -104,7 +151,16 @@ describe("createFromBundle", () => {
         agents: [{ name: "public-agent" }],
         tools: [{ name: "public-tool", code: "code", paramsZod: "z.object({})", description: "" }],
         webhooks: [{ agentName: "public-agent", enabled: true }],
-        budgets: [{ name: "monthly-budget", period: "monthly", alertThreshold: "80", blockThreshold: "100", enabled: true, attachedAgentNames: ["public-agent"] }],
+        budgets: [
+          {
+            name: "monthly-budget",
+            period: "monthly",
+            alertThreshold: "80",
+            blockThreshold: "100",
+            enabled: true,
+            attachedAgentNames: ["public-agent"],
+          },
+        ],
         agentSecrets: [{ agentName: "public-agent", secretName: "API_KEY", alias: null }],
       }),
       emptyRecon,
@@ -122,7 +178,11 @@ describe("createFromBundle", () => {
     expect(res.budgetGroupsCreated).toBe(0);
 
     // Assert: warnings present for skipped entities
-    expect(res.warnings.some((w) => w.includes("webhook for agent public-agent: skipped — webhooks require an owner"))).toBe(true);
-    expect(res.warnings.some((w) => w.includes("budget group monthly-budget: skipped — budget groups require an owner"))).toBe(true);
+    expect(
+      res.warnings.some((w) => w.includes("webhook for agent public-agent: skipped — webhooks require an owner")),
+    ).toBe(true);
+    expect(
+      res.warnings.some((w) => w.includes("budget group monthly-budget: skipped — budget groups require an owner")),
+    ).toBe(true);
   });
 });
