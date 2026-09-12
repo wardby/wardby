@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
+import type { SharedDatastoreAccessor } from "../core/datastores.js";
 import { runInSandbox } from "./run-in-sandbox.js";
 
 function fakeDatastore(): Datastore {
@@ -33,6 +34,25 @@ function fakeDatastore(): Datastore {
   };
 }
 
+function fakeSharedDatastore(): SharedDatastoreAccessor {
+  const store = new Map<string, string>();
+  return {
+    async get(boundName, key) {
+      return store.get(`${boundName}:${key}`);
+    },
+    async set(boundName, key, value) {
+      store.set(`${boundName}:${key}`, value as string);
+    },
+    async delete(boundName, key) {
+      store.delete(`${boundName}:${key}`);
+    },
+    async list(boundName, prefix) {
+      const p = `${boundName}:${prefix ?? ""}`;
+      return [...store.keys()].filter((k) => k.startsWith(p)).map((k) => k.slice(boundName.length + 1));
+    },
+  };
+}
+
 const FAST_LIMITS = { wallTimeLimitMs: 300 };
 
 describe("runInSandbox", () => {
@@ -42,6 +62,7 @@ describe("runInSandbox", () => {
       params: { n: 21 },
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "double",
     });
     expect(result).toEqual({ ok: true, value: { doubled: 42 } });
@@ -53,6 +74,7 @@ describe("runInSandbox", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "boom",
     });
     expect(result.ok).toBe(false);
@@ -68,6 +90,7 @@ describe("runInSandbox", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "spinner",
       limits: { maxInterruptChecks: 10_000, wallTimeLimitMs: 5_000 },
     });
@@ -81,6 +104,7 @@ describe("runInSandbox", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "hog",
       limits: { memoryLimitBytes: 256 * 1024, wallTimeLimitMs: 5_000, maxInterruptChecks: 50_000_000 },
     });
@@ -94,6 +118,7 @@ describe("runInSandbox", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "hangs",
       limits: FAST_LIMITS,
     });
@@ -110,6 +135,7 @@ describe("runInSandbox", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "circular",
       limits: FAST_LIMITS,
     });
@@ -127,6 +153,7 @@ describe("runInSandbox", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "probe",
       limits: FAST_LIMITS,
     });
@@ -143,6 +170,7 @@ describe("runInSandbox", () => {
       params: {},
       agentId: "agent-a",
       datastore,
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "setter",
       limits: FAST_LIMITS,
     });
@@ -153,6 +181,7 @@ describe("runInSandbox", () => {
       params: {},
       agentId: "agent-a",
       datastore,
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "getter",
       limits: FAST_LIMITS,
     });
@@ -163,6 +192,7 @@ describe("runInSandbox", () => {
       params: {},
       agentId: "agent-b",
       datastore,
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "getter",
       limits: FAST_LIMITS,
     });
@@ -182,6 +212,7 @@ describe("runInSandbox", () => {
       params: {},
       agentId: "agent-a",
       datastore,
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "pii-setter",
       limits: FAST_LIMITS,
     });
@@ -202,6 +233,7 @@ describe("runInSandbox", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "probe2",
       limits: FAST_LIMITS,
     });
@@ -224,6 +256,7 @@ describe("runInSandbox", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "ssrf-probe",
       limits: FAST_LIMITS,
     });
@@ -246,6 +279,7 @@ describe("runInSandbox", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "ssrf-probe-2",
       limits: FAST_LIMITS,
     });
@@ -264,6 +298,7 @@ describe("runInSandbox", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "urlsearchparams-probe",
       limits: FAST_LIMITS,
     });
@@ -276,6 +311,7 @@ describe("runInSandbox", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "email-test",
       limits: FAST_LIMITS,
     });
@@ -291,6 +327,7 @@ describe("runInSandbox", () => {
       params: {},
       agentId: "a1",
       datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
       toolName: "email-test-2",
       limits: FAST_LIMITS,
     });

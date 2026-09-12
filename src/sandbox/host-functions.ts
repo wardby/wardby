@@ -9,6 +9,7 @@ import { randomUUID, randomBytes as nodeRandomBytes } from "node:crypto";
 import type { QuickJSContext, QuickJSRuntime } from "quickjs-emscripten";
 import type { Datastore, DatastoreSetOptions, DatastoreValue } from "../providers/datastore/types.js";
 import type { SecretsAccessor } from "../core/secrets.js";
+import type { SharedDatastoreAccessor } from "../core/datastores.js";
 import { registerJsonAsyncFunction } from "./bridge.js";
 import { parseAllowedHosts } from "./fetch-policy.js";
 import { safeFetch } from "./safe-fetch.js";
@@ -30,6 +31,7 @@ export interface HostFunctionOptions {
   signal?: AbortSignal;
   agentId: string;
   datastore: Datastore;
+  sharedDatastore: SharedDatastoreAccessor;
   /** Tag prefixed onto forwarded console output — typically the tool name. */
   logTag: string;
   /** Omitted (e.g. dry_run_tool, no real agent) — secrets.get always resolves undefined. */
@@ -51,7 +53,7 @@ export function installHostFunctions(
   runtime: QuickJSRuntime,
   options: HostFunctionOptions,
 ): void {
-  const { agentId, datastore, logTag, secrets, signal, allowedFetchHosts } = options;
+  const { agentId, datastore, sharedDatastore, logTag, secrets, signal, allowedFetchHosts } = options;
   const register = (name: string, fn: (json: string) => Promise<unknown>) =>
     registerJsonAsyncFunction(context, runtime, name, fn, signal);
   const sandboxLog = (options.logger ?? defaultLogger).child({
@@ -135,6 +137,37 @@ export function installHostFunctions(
     const [prefix] = args<[string | null]>(argsJson);
     if (prefix !== null) boundedString(prefix, 1024);
     return datastore.list(agentId, prefix ?? undefined);
+  });
+
+  register("__bridge_sharedDatastoreGet", async (argsJson) => {
+    const [boundName, key] = args<[string, string]>(argsJson);
+    boundedString(boundName, 1024);
+    boundedString(key, 1024);
+    const value = await sharedDatastore.get(boundName, key);
+    return value === undefined ? null : value;
+  });
+
+  register("__bridge_sharedDatastoreSet", async (argsJson) => {
+    const [boundName, key, value, opts] = args<[string, string, DatastoreValue, DatastoreSetOptions | undefined]>(argsJson);
+    boundedString(boundName, 1024);
+    boundedString(key, 1024);
+    await sharedDatastore.set(boundName, key, value, opts);
+    return null;
+  });
+
+  register("__bridge_sharedDatastoreDelete", async (argsJson) => {
+    const [boundName, key] = args<[string, string]>(argsJson);
+    boundedString(boundName, 1024);
+    boundedString(key, 1024);
+    await sharedDatastore.delete(boundName, key);
+    return null;
+  });
+
+  register("__bridge_sharedDatastoreList", async (argsJson) => {
+    const [boundName, prefix] = args<[string, string | null]>(argsJson);
+    boundedString(boundName, 1024);
+    if (prefix !== null) boundedString(prefix, 1024);
+    return sharedDatastore.list(boundName, prefix ?? undefined);
   });
 
   register("__bridge_secretsGet", async (argsJson) => {

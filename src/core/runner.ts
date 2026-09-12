@@ -23,9 +23,10 @@ import type { LoadedTool } from "../providers/engine/types.js";
 import { runStepInline, type StepRunner } from "../providers/engine/types.js";
 import { validateParams } from "../sandbox/zod-params.js";
 import { runInSandbox } from "../sandbox/run-in-sandbox.js";
-import { asStringArray } from "../sandbox/tool-capabilities.js";
+import { asStringArray, asPrefixMap } from "../sandbox/tool-capabilities.js";
 import { scopeDatastore } from "../providers/datastore/scoped.js";
 import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
+import { buildSharedDatastoreAccessor, scopeSharedDatastoreAccessor } from "./datastores.js";
 import { effectiveBudgetForRun } from "./budget-groups.js";
 import { MEMORY_TOOL_DEFS, MEMORY_TOOL_NAMES, handleMemoryTool } from "./memory-tools.js";
 import { prisma as defaultDb } from "./db.js";
@@ -34,7 +35,7 @@ import { logger } from "./logger.js";
 const runnerLog = logger.child({ module: "runner" });
 
 /** The subset of the Prisma client the runner touches — mockable in tests. */
-export type RunnerDb = Pick<PrismaClient, "agent" | "run" | "agentTool" | "agentSecret" | "budgetGroup">;
+export type RunnerDb = Pick<PrismaClient, "agent" | "run" | "agentTool" | "agentSecret" | "agentDatastore" | "budgetGroup">;
 
 /**
  * The two states a Run can still be driven out of. Every write `executeRun`
@@ -156,6 +157,7 @@ export async function executeRun(
             allowedSecrets: asStringArray(attachment.allowedSecrets),
             allowedDatastorePrefixes: asStringArray(attachment.allowedDatastorePrefixes),
             allowedHosts: asStringArray(attachment.allowedHosts),
+            allowedSharedDatastorePrefixes: asPrefixMap(attachment.allowedSharedDatastorePrefixes),
           },
         ]),
       ),
@@ -178,6 +180,7 @@ export async function executeRun(
   try {
     const toolsByName = new Map(Object.entries(loaded.toolsByName));
     const secretsAccessor = buildSecretsAccessor(loaded.agentId, providers.secrets, db);
+    const sharedDatastoreAccessor = buildSharedDatastoreAccessor(loaded.agentId, providers.datastore, db);
 
     const runSandboxTool = async (name: string, argsJson: string): Promise<string> => {
       if (loaded.memoryEnabled && MEMORY_TOOL_NAMES.has(name)) {
@@ -214,6 +217,7 @@ export async function executeRun(
         params: validation.value,
         agentId: loaded.agentId,
         datastore: scopeDatastore(providers.datastore, tool.allowedDatastorePrefixes),
+        sharedDatastore: scopeSharedDatastoreAccessor(sharedDatastoreAccessor, tool.allowedSharedDatastorePrefixes),
         secrets: scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets),
         allowedFetchHosts: tool.allowedHosts,
         toolName: name,
