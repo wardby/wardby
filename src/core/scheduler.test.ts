@@ -217,6 +217,7 @@ describe.skipIf(!databaseUrl)("claimDueRun (database)", () => {
       where: { id: agent.id },
       data: {
         kind: "coding",
+        model: "gpt-5.6-luna",
         codingProfile: {
           create: {
             repository: "openai/reevo",
