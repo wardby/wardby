@@ -75,10 +75,6 @@ enum AgentKind {
   coding
 }
 
-enum CodingProvider {
-  codex
-}
-
 enum RunStatus {
   pending
   running
@@ -203,17 +199,17 @@ model Run {
 /// Phase 5: owner-configured coding behavior. Runtime credentials and opaque
 /// launcher handles never live on the reusable profile.
 model CodingAgentProfile {
-  agentId                  String         @id
-  agent                    Agent          @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  provider                 CodingProvider @default(codex)
+  agentId                  String  @id
+  agent                    Agent   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  provider                 String  @default("codex")
   repository               String
-  baseRef                  String         @default("main")
+  baseRef                  String  @default("main")
   defaultTask              String?
-  allowWebhookTaskOverride Boolean        @default(false)
-  timeoutSec               Int            @default(1800)
+  allowWebhookTaskOverride Boolean @default(false)
+  timeoutSec               Int     @default(1800)
   allowedEgress            Json
   protectedPaths           Json
-  toolchain                String         @default("node")
+  toolchain                String  @default("node")
   toolchainVersion         String?
   workerImageRef           String?
 }
@@ -227,7 +223,7 @@ model CodingRun {
   repository        String
   baseRef           String
   headRef           String
-  provider          CodingProvider
+  provider          String
   model             String
   timeoutSec        Int
   allowedEgress     Json

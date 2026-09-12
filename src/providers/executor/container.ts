@@ -597,6 +597,10 @@ export class ContainerExecutor implements Executor {
   }
 
   resolveCodingWorkerImage(selector: CodingImageSelector): string {
+    if (selector.provider !== "codex") {
+      if (selector.provider === "claude-code") throw new Error("coding_provider_not_configured:claude-code");
+      throw new Error(`coding_provider_unsupported:${String(selector.provider)}`);
+    }
     if (selector.workerImageRef) {
       if (!isImmutableDockerImage(selector.workerImageRef)) throw new Error("coding_worker_image_invalid");
       return selector.workerImageRef;

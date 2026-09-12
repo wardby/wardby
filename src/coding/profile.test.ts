@@ -32,6 +32,7 @@ describe("CodingProfileSchema", () => {
     { repository: "openai/example", credential: "secret" },
     { repository: "openai/example", toolchain: "node-cobol" },
     { repository: "openai/example", workerImageRef: "reevo-coding-worker:latest" },
+    { repository: "openai/example", provider: "unknown" },
   ])("rejects unsafe profile %#", (profile) => {
     expect(() => CodingProfileSchema.parse(profile)).toThrow();
   });
@@ -46,6 +47,12 @@ describe("CodingProfileSchema", () => {
     expect(result.toolchain).toBe("node-python");
     expect(result.toolchainVersion).toBe("3.12");
     expect(result.workerImageRef).toBe(`registry.example/byo@sha256:${"e".repeat(64)}`);
+  });
+
+  it("accepts the explicit Claude Code provider", () => {
+    expect(CodingProfileSchema.parse({ repository: "openai/example", provider: "claude-code" }).provider).toBe(
+      "claude-code",
+    );
   });
 
   it("normalizes and deduplicates host and protected-path policy", () => {

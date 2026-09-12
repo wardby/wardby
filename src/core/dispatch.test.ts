@@ -156,6 +156,7 @@ describe("dispatchRun", () => {
     const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
 
     expect(resolveCodingWorkerImage).toHaveBeenCalledWith({
+      provider: "codex",
       toolchain: "node-python",
       toolchainVersion: "3.12",
       workerImageRef: null,
@@ -163,6 +164,60 @@ describe("dispatchRun", () => {
     expect(state.codingRuns).toEqual([
       expect.objectContaining({ runId: result?.run.id, workerImage: "sha256:pythonimage".padEnd(71, "0") }),
     ]);
+  });
+
+  it("passes the Claude provider to image resolution and snapshots it", async () => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      model: "claude-sonnet-5",
+      codingProfile: {
+        provider: "claude-code",
+        repository: "openai/reevo",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        allowedEgress: [],
+        protectedPaths: [],
+        toolchain: "node",
+        toolchainVersion: null,
+        workerImageRef: null,
+      },
+    };
+    const state = fakeDb(agent);
+    const resolveCodingWorkerImage = vi.fn(() => "sha256:claudeimage".padEnd(71, "0"));
+    const executor: Executor = { async start() {}, async stop() {}, resolveCodingWorkerImage };
+
+    await dispatchRun({ db: state.db, executor, agentId: agent.id });
+
+    expect(resolveCodingWorkerImage).toHaveBeenCalledWith({
+      provider: "claude-code",
+      toolchain: "node",
+      toolchainVersion: null,
+      workerImageRef: null,
+    });
+    expect(state.codingRuns).toEqual([expect.objectContaining({ provider: "claude-code" })]);
+  });
+
+  it("rejects a model that does not belong to the selected coding provider", async () => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      model: "gpt-5.6-luna",
+      codingProfile: {
+        provider: "claude-code",
+        repository: "openai/reevo",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        allowedEgress: [],
+        protectedPaths: [],
+      },
+    };
+
+    await expect(
+      dispatchRun({ db: fakeDb(agent).db, executor: { async start() {}, async stop() {} }, agentId: agent.id }),
+    ).rejects.toThrow(/not supported by coding provider/);
   });
 
   it("an unresolvable toolchain rejects dispatchRun's promise (a real transaction rolls the rest back; this fake's $transaction has no rollback semantics, so only the rejection itself is asserted here)", async () => {
