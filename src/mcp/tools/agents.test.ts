@@ -33,6 +33,9 @@ interface FakeCodingProfile {
   timeoutSec: number;
   allowedEgress: string[];
   protectedPaths: string[];
+  toolchain?: "node" | "node-python";
+  toolchainVersion?: string | null;
+  workerImageRef?: string | null;
 }
 
 type FakeAgentSeed = Omit<FakeAgentRow, "kind" | "codingProfile" | "scheduleEnabled" | "budgetGroupId"> &
@@ -362,6 +365,53 @@ describe("agent CRUD tools", () => {
     });
     expect(unsafeClear.isError).toBe(true);
     expect(JSON.stringify(unsafeClear)).toMatch(/default task/i);
+    await client.close();
+  });
+
+  it("update_agent preserves toolchain fields it was not asked to change", async () => {
+    const profile: FakeCodingProfile = {
+      provider: "codex",
+      repository: "openai/example",
+      baseRef: "main",
+      defaultTask: "Keep dependencies current.",
+      timeoutSec: 1800,
+      allowedEgress: [],
+      protectedPaths: ["CODEOWNERS"],
+      toolchain: "node-python",
+      toolchainVersion: "3.12",
+    };
+    const db = fakeDb([
+      {
+        id: "a1",
+        name: "agent",
+        systemPrompt: "x",
+        model: "m",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        scheduleEnabled: true,
+        ownerId: "p1",
+        tools: [],
+        kind: "coding",
+        codingProfile: profile,
+      },
+    ]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    // No codingProfile in this call at all — only an unrelated top-level field changes.
+    const updated = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", model: "gpt-4.1-nano" },
+    });
+    expect(updated.isError).toBeFalsy();
+    expect(JSON.parse((updated.content as { text: string }[])[0].text).codingProfile).toMatchObject({
+      toolchain: "node-python",
+      toolchainVersion: "3.12",
+    });
     await client.close();
   });
 
