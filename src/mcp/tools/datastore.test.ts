@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
+import { Prisma } from "@prisma/client";
 import { buildMcpServer } from "../server.js";
 import { registerDatastoreTools } from "./datastore.js";
 import type { McpRequestContext } from "../context.js";
@@ -92,8 +93,14 @@ function fakeDb(agents: FakeAgentRow[]) {
     },
     agentDatastore: {
       create: async ({ data }: { data: FakeAgentDatastoreRow }) => {
+        if (data.boundName === "force-unexpected-error") {
+          throw new Error("connection reset");
+        }
         if (agentDatastores.some((a) => a.agentId === data.agentId && a.boundName === data.boundName)) {
-          throw Object.assign(new Error("Unique constraint failed"), { code: "P2002" });
+          throw new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+            code: "P2002",
+            clientVersion: "test",
+          });
         }
         agentDatastores.push(data);
         return data;
@@ -300,6 +307,59 @@ describe("shared datastore tools", () => {
     mcp.setFixedContext(fakeCtx(db, datastore, "not-the-owner", ["agents:read", "datastore:write"]));
     const attached = await client.callTool({ name: "attach_datastore", arguments: { agentId: "a1", datastoreId } });
     expect(attached.isError).toBe(true);
+    await client.close();
+  });
+
+  it("attach_datastore also rejects when the caller owns the agent but not the datastore", async () => {
+    const db = fakeDb([{ id: "a1", ownerId: "p1" }]);
+    const datastore = fakeDatastore();
+    const mcp = buildMcpServer({ providers: { datastore } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, datastore, "someone-else", ["agents:read", "datastore:write"]));
+    registerDatastoreTools(mcp);
+    const client = await connectClient(mcp);
+
+    const created = await client.callTool({ name: "create_datastore", arguments: { name: "shared-kb" } });
+    const { id: datastoreId } = parseText(created as never) as { id: string };
+
+    // "p1" owns the agent but not the datastore (owned by "someone-else").
+    mcp.setFixedContext(fakeCtx(db, datastore, "p1", ["agents:read", "datastore:write"]));
+    const attached = await client.callTool({ name: "attach_datastore", arguments: { agentId: "a1", datastoreId } });
+    expect(attached.isError).toBe(true);
+    await client.close();
+  });
+
+  it("attach_datastore maps a duplicate boundName (P2002) to a 409, without relabeling other errors", async () => {
+    const db = fakeDb([{ id: "a1", ownerId: "p1" }]);
+    const datastore = fakeDatastore();
+    const mcp = buildMcpServer({ providers: { datastore } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, datastore, "p1", ["agents:read", "datastore:write"]));
+    registerDatastoreTools(mcp);
+    const client = await connectClient(mcp);
+
+    const createdA = await client.callTool({ name: "create_datastore", arguments: { name: "store-a" } });
+    const { id: datastoreIdA } = parseText(createdA as never) as { id: string };
+    const createdB = await client.callTool({ name: "create_datastore", arguments: { name: "store-b" } });
+    const { id: datastoreIdB } = parseText(createdB as never) as { id: string };
+
+    await client.callTool({
+      name: "attach_datastore",
+      arguments: { agentId: "a1", datastoreId: datastoreIdA, boundName: "kb" },
+    });
+    const duplicate = await client.callTool({
+      name: "attach_datastore",
+      arguments: { agentId: "a1", datastoreId: datastoreIdB, boundName: "kb" },
+    });
+    expect(duplicate.isError).toBe(true);
+    expect((duplicate.content as { text: string }[])[0].text).toMatch(/already binds a datastore under name "kb"/);
+
+    // A non-P2002 failure from the same call site must propagate as itself,
+    // not get relabeled as the "already binds" conflict.
+    const unrelated = await client.callTool({
+      name: "attach_datastore",
+      arguments: { agentId: "a1", datastoreId: datastoreIdA, boundName: "force-unexpected-error" },
+    });
+    expect(unrelated.isError).toBe(true);
+    expect((unrelated.content as { text: string }[])[0].text).not.toMatch(/already binds/);
     await client.close();
   });
 

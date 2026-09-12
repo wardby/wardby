@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import type { ReevoMcpServer } from "../server.js";
 import type { DatastoreValue } from "../../providers/index.js";
 import { requireOwnedAgent, requireReadableAgent, requireOwnedDatastore } from "../auth/ownership.js";
@@ -66,8 +67,11 @@ export function registerDatastoreTools(mcp: ReevoMcpServer): void {
       const boundName = args.boundName ?? datastore.name;
       try {
         await attachDatastore(args.agentId, args.datastoreId, ctx.db, boundName);
-      } catch {
-        throw new McpError(409, `Agent already binds a datastore under name "${boundName}".`);
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+          throw new McpError(409, `Agent already binds a datastore under name "${boundName}".`);
+        }
+        throw err;
       }
       return textResult({ attached: true });
     },
