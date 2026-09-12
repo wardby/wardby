@@ -25,7 +25,13 @@ export async function createDatastore(name: string, ownerId: string, db: PrismaC
 
 export async function listDatastores(ownerId: string, db: PrismaClient): Promise<DatastoreMetadata[]> {
   const rows = await db.datastore.findMany({ where: { ownerId } });
-  return rows.map(({ id, name, ownerId: owner, createdAt, updatedAt }) => ({ id, name, ownerId: owner, createdAt, updatedAt }));
+  return rows.map(({ id, name, ownerId: owner, createdAt, updatedAt }) => ({
+    id,
+    name,
+    ownerId: owner,
+    createdAt,
+    updatedAt,
+  }));
 }
 
 export async function deleteDatastore(datastoreId: string, db: PrismaClient): Promise<void> {
