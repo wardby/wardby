@@ -123,6 +123,9 @@ function buildCombinedDb(
     budgetGroup: {
       findUnique: async () => null,
     },
+    agentSubAgent: {
+      findFirst: async () => null,
+    },
     $transaction: async (callback: any) => callback(db),
   };
 

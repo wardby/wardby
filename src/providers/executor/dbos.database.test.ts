@@ -148,6 +148,7 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
       agentTool: db.agentTool,
       agentSecret: db.agentSecret,
       budgetGroup: db.budgetGroup,
+      agentSubAgent: db.agentSubAgent,
       run,
     } as unknown as PrismaClient;
     return { client, kill: () => (alive = false) };

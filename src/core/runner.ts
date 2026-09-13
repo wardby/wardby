@@ -29,6 +29,12 @@ import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
 import { buildSharedDatastoreAccessor, scopeSharedDatastoreAccessor } from "./datastores.js";
 import { effectiveBudgetForRun } from "./budget-groups.js";
 import { MEMORY_TOOL_DEFS, MEMORY_TOOL_NAMES, handleMemoryTool } from "./memory-tools.js";
+import {
+  SUBAGENT_MEMORY_GET_TOOL,
+  PARENT_MEMORY_GET_TOOL,
+  handleSubAgentMemoryGet,
+  handleParentMemoryGet,
+} from "./subagent-memory-tools.js";
 import { prisma as defaultDb } from "./db.js";
 import { logger } from "./logger.js";
 
@@ -37,7 +43,7 @@ const runnerLog = logger.child({ module: "runner" });
 /** The subset of the Prisma client the runner touches — mockable in tests. */
 export type RunnerDb = Pick<
   PrismaClient,
-  "agent" | "run" | "agentTool" | "agentSecret" | "agentDatastore" | "budgetGroup"
+  "agent" | "run" | "agentTool" | "agentSecret" | "agentDatastore" | "budgetGroup" | "agentSubAgent"
 >;
 
 /**
@@ -131,6 +137,12 @@ export async function executeRun(
       new Date(),
       existingRun.parentRunId ?? undefined,
     );
+    // Visibility only, not the security boundary — subagent_memory_get and
+    // parent_memory_get each re-check the actual AgentSubAgent edge /
+    // per-run grant against the database at call time regardless of
+    // whether the tool was advertised here.
+    const hasSubAgentChildren = (await db.agentSubAgent.findFirst({ where: { parentAgentId: agent.id } })) !== null;
+    const isDispatchedChild = existingRun.parentRunId != null;
     return {
       agentId: agent.id,
       kind: agent.kind,
@@ -155,6 +167,8 @@ export async function executeRun(
           jsonSchema: attachment.tool.jsonSchema as Record<string, unknown>,
         })),
         ...(agent.memoryEnabled ? MEMORY_TOOL_DEFS : []),
+        ...(hasSubAgentChildren ? [SUBAGENT_MEMORY_GET_TOOL] : []),
+        ...(isDispatchedChild ? [PARENT_MEMORY_GET_TOOL] : []),
       ],
       toolsByName: Object.fromEntries(
         attached.map((attachment) => [
@@ -193,6 +207,12 @@ export async function executeRun(
     const runSandboxTool = async (name: string, argsJson: string): Promise<string> => {
       if (loaded.memoryEnabled && MEMORY_TOOL_NAMES.has(name)) {
         return handleMemoryTool(name, argsJson, loaded.agentId, providers.memory);
+      }
+      if (name === "subagent_memory_get") {
+        return handleSubAgentMemoryGet(argsJson, loaded.agentId, db, providers.memory);
+      }
+      if (name === "parent_memory_get") {
+        return handleParentMemoryGet(argsJson, runId, db, providers.memory);
       }
 
       const tool = toolsByName.get(name);

@@ -151,6 +151,11 @@ function fakeDb(
         };
       }) as any,
     },
+    // No test in this file dispatches a sub-agent (existingRun.parentRunId
+    // is always null/undefined here), so a fixed "no edges" stub is enough.
+    agentSubAgent: {
+      findFirst: (async () => null) as any,
+    },
   } as unknown as RunnerDb;
 }
 
