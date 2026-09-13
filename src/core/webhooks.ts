@@ -9,7 +9,7 @@
  * is always 32 bytes, so there's no length-mismatch case to special-case).
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import type { PrismaClient, Webhook } from "@prisma/client";
+import type { AgentKind, CodingAgentProfile, PrismaClient, Webhook } from "@prisma/client";
 import type { Executor } from "../providers/executor/types.js";
 import { dispatchRun } from "./dispatch.js";
 
@@ -17,6 +17,19 @@ export type WebhookMetadata = Pick<Webhook, "id" | "agentId" | "status" | "owner
 
 function hashSecret(secret: string): string {
   return createHash("sha256").update(secret).digest("hex");
+}
+
+/**
+ * Whether a webhook is allowed to hand this agent per-run task text.
+ * Coding agents keep the existing explicit opt-in (allowWebhookTaskOverride)
+ * since the text can drive real repository changes. A native agent has no
+ * per-run input at all otherwise (its systemPrompt is fixed) and the
+ * resulting run is sandboxed, so accepting task text needs no separate
+ * opt-in — always allowed once the caller already holds the webhook secret.
+ */
+function taskAllowed(kind: AgentKind, codingProfile: CodingAgentProfile | null): boolean {
+  if (kind === "native") return true;
+  return kind === "coding" && (codingProfile?.allowWebhookTaskOverride ?? false);
 }
 
 function secretMatches(presented: string, storedHash: string): boolean {
@@ -75,7 +88,7 @@ export async function resolveWebhookRun(
 
   const agent = await db.agent.findUnique({ where: { id: webhook.agentId }, include: { codingProfile: true } });
   if (!agent) return { ok: false, reason: "not_found" };
-  if (codingTask !== undefined && (agent.kind !== "coding" || !agent.codingProfile?.allowWebhookTaskOverride)) {
+  if (codingTask !== undefined && !taskAllowed(agent.kind, agent.codingProfile)) {
     return { ok: false, reason: "disabled" };
   }
 
@@ -85,7 +98,13 @@ export async function resolveWebhookRun(
     executor,
     agentId: agent.id,
     trigger: "webhook",
-    codingTask,
+    // Coding agents keep the existing per-agent opt-in (allowWebhookTaskOverride);
+    // a native agent's system prompt has no per-run input at all otherwise, so
+    // accepting task text over an authenticated webhook call needs no separate
+    // opt-in — it's a much lower-risk capability than a coding agent being told
+    // to modify a real repository.
+    codingTask: agent.kind === "coding" ? codingTask : undefined,
+    taskOverride: agent.kind === "native" ? codingTask : undefined,
     beforePersist: async (tx, currentAgent) => {
       const current = await tx.webhook.findUnique({ where: { id } });
       if (!current) {
@@ -100,10 +119,7 @@ export async function resolveWebhookRun(
         rejected = "disabled";
         return false;
       }
-      if (
-        codingTask !== undefined &&
-        (currentAgent.kind !== "coding" || !currentAgent.codingProfile?.allowWebhookTaskOverride)
-      ) {
+      if (codingTask !== undefined && !taskAllowed(currentAgent.kind, currentAgent.codingProfile)) {
         rejected = "disabled";
         return false;
       }

@@ -23,6 +23,7 @@ interface FakeAgentRow {
 function fakeDb(agents: FakeAgentRow[] = []) {
   const webhooks = new Map<string, FakeWebhookRow>();
   const agentsById = new Map(agents.map((a) => [a.id, a]));
+  const runs = new Map<string, any>();
   let counter = 0;
   let runCounter = 0;
 
@@ -64,12 +65,12 @@ function fakeDb(agents: FakeAgentRow[] = []) {
       },
     },
     run: {
-      create: async ({ data }: { data: { agentId: string; trigger: string } }) => ({
-        id: `run_${++runCounter}`,
-        status: "pending",
-        startedAt: new Date(),
-        ...data,
-      }),
+      create: async ({ data }: { data: { agentId: string; trigger: string } }) => {
+        const row = { id: `run_${++runCounter}`, status: "pending", startedAt: new Date(), ...data };
+        runs.set(row.id, row);
+        return row;
+      },
+      findUnique: async ({ where }: { where: { id: string } }) => runs.get(where.id) ?? null,
       updateMany: async () => ({ count: 1 }),
     },
     codingRun: { create: async ({ data }: any) => data },
@@ -162,6 +163,17 @@ describe("core/webhooks", () => {
       ok: false,
       reason: "disabled",
     });
+  });
+
+  it("accepts webhook task input for a native agent unconditionally, storing it as Run.taskOverride", async () => {
+    const db = fakeDb([{ id: "a1", name: "classifier", kind: "native" }]);
+    const { id, secret } = await createWebhook("a1", "p1", db);
+    const result = await resolveWebhookRun(id, secret, db, executor, "plan this feature");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const run = await db.run.findUnique({ where: { id: result.runId } });
+    expect((run as any)?.taskOverride).toBe("plan this feature");
+    expect((run as any)?.trigger).toBe("webhook");
   });
 
   it("deleteWebhook removes it from listWebhooks", async () => {
