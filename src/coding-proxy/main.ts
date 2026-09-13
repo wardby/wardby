@@ -1,13 +1,32 @@
 import "../env.js";
 import { prisma } from "../core/db.js";
 import { logger } from "../core/logger.js";
+import { loadMetricsConfig } from "../observability/config.js";
+import { ReevoMetrics } from "../observability/metrics.js";
+import { startMetricsServer, type MetricsServerHandle } from "../observability/metrics-server.js";
 import { startConfiguredCodingProxy } from "../providers/coding-proxy/runtime.js";
 
 const proxyLog = logger.child({ module: "coding-proxy-runtime" });
 
 async function main(): Promise<void> {
-  const server = await startConfiguredCodingProxy({ db: prisma });
+  const metrics = new ReevoMetrics();
+  const metricsConfig = loadMetricsConfig();
+  const server = await startConfiguredCodingProxy({
+    db: prisma,
+    audit: metrics.observeProxyAudit,
+    onRequest: (event) => metrics.observeProxyRequest(event),
+  });
+  let metricsServer: MetricsServerHandle | undefined;
+  try {
+    metricsServer = metricsConfig.bind ? await startMetricsServer(metrics.registry, metricsConfig.bind) : undefined;
+  } catch (error) {
+    await server.close();
+    throw error;
+  }
   proxyLog.info({ event: "proxy.started", port: server.port }, "coding proxy started");
+  if (metricsServer) {
+    proxyLog.info({ event: "metrics.started", port: metricsServer.port }, "private metrics server started");
+  }
 
   let stopping = false;
   const shutdown = (signal: string) => {
@@ -15,6 +34,7 @@ async function main(): Promise<void> {
     stopping = true;
     void (async () => {
       proxyLog.info({ event: "proxy.stopping", signal }, "coding proxy stopping");
+      await metricsServer?.close();
       await server.close();
       await prisma.$disconnect();
     })().catch((error: unknown) => {

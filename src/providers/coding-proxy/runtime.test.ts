@@ -13,10 +13,13 @@ describe("configured coding proxy runtime", () => {
       startConfiguredCodingProxy({ db: {} as PrismaClient, env: { OPENAI_API_KEY: "test-secret" }, startServer }),
     ).resolves.toBe(handle);
 
-    expect(startServer).toHaveBeenCalledWith(expect.anything(), {
-      host: "0.0.0.0",
-      port: CODING_PROXY_PORT,
-      expectedHost: `${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
-    });
+    expect(startServer).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        host: "0.0.0.0",
+        port: CODING_PROXY_PORT,
+        expectedHost: `${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
+      }),
+    );
   });
 });

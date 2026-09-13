@@ -1,0 +1,96 @@
+{
+  "uid": "reevo-knock-knock",
+  "title": "Knock-Knock: Budget & Runs",
+  "tags": ["reevo", "budget", "runs", "local"],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "refresh": "5s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Runs Created (24h)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(reevo_proxy_audit_events_total{event=\"session.created\"}[24h])) or vector(0)"
+        }
+      ],
+      "fieldConfig": { "defaults": { "decimals": 0 }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Reserved Budget (24h)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(increase(reevo_proxy_budget_reserved_usd_total[24h])) or vector(0)" }],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Actual Spend (24h)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(increase(reevo_proxy_cost_usd_total[24h])) or vector(0)" }],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Actual / Reserved",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum(increase(reevo_proxy_cost_usd_total[24h])) or vector(0)) / clamp_min(sum(increase(reevo_proxy_budget_reserved_usd_total[24h])) or vector(0), 0.000001)"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "decimals": 1 }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Reserved Budget vs Actual Spend",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(reevo_proxy_budget_reserved_usd_total[$__rate_interval])) or vector(0)",
+          "legendFormat": "reserved"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(reevo_proxy_cost_usd_total[$__rate_interval])) or vector(0)",
+          "legendFormat": "actual"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 6 }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Runs and Completed Requests",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(reevo_proxy_audit_events_total{event=\"session.created\"}[$__rate_interval])) or vector(0)",
+          "legendFormat": "runs created"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(reevo_proxy_audit_events_total{event=\"response.completed\"}[$__rate_interval])) or vector(0)",
+          "legendFormat": "completed requests"
+        }
+      ],
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 6 }
+    }
+  ]
+}
