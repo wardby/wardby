@@ -12,6 +12,20 @@ import { executeRun, type RunnerDb } from "./runner.js";
 // deliberately abstracts the engine away). This is the only place the full
 // parent -> child -> parent round trip is exercised together.
 
+interface FakeCodingProfile {
+  provider: string;
+  repository: string;
+  baseRef: string;
+  defaultTask: string | null;
+  allowWebhookTaskOverride: boolean;
+  timeoutSec: number;
+  allowedEgress: string[];
+  protectedPaths: string[];
+  toolchain: string;
+  toolchainVersion: string | null;
+  workerImageRef: string | null;
+}
+
 interface FakeAgent {
   id: string;
   name: string;
@@ -20,6 +34,8 @@ interface FakeAgent {
   budgetUsd: number;
   maxTurns: number;
   budgetGroupId?: string | null;
+  kind?: "native" | "coding";
+  codingProfile?: FakeCodingProfile;
 }
 
 interface FakeRun {
@@ -52,7 +68,7 @@ function fakeDb(agents: FakeAgent[], edges: FakeEdge[], priorRuns: FakeRun[] = [
   const runs = new Map(priorRuns.map((r) => [r.id, r]));
   let counter = 0;
 
-  return {
+  const db: any = {
     agent: {
       findUnique: (async ({ where }: any) => agentsById.get(where.id) ?? null) as any,
       findUniqueOrThrow: (async ({ where }: any) => {
@@ -61,6 +77,7 @@ function fakeDb(agents: FakeAgent[], edges: FakeEdge[], priorRuns: FakeRun[] = [
         return a;
       }) as any,
     },
+    codingRun: { create: (async ({ data }: any) => data) as any },
     run: {
       create: (async ({ data }: any) => {
         const id = data.id ?? `run_${++counter}`;
@@ -128,7 +145,24 @@ function fakeDb(agents: FakeAgent[], edges: FakeEdge[], priorRuns: FakeRun[] = [
       findFirst: (async ({ where }: any) => edges.find((e) => e.parentAgentId === where.parentAgentId) ?? null) as any,
       findMany: (async ({ where }: any) => edges.filter((e) => e.parentAgentId === where.parentAgentId)) as any,
     },
-  } as unknown as RunnerDb;
+  };
+  // dispatchRun wraps everything in one transaction — the fake just runs the
+  // callback against this same object rather than modeling real isolation.
+  db.$transaction = async (callback: (tx: unknown) => unknown) => callback(db);
+  return db;
+}
+
+/** A fake Executor whose start() immediately resolves the run to a fixed terminal state, simulating a container finishing. */
+function fakeCodingExecutor(db: RunnerDb, result: { status: string; finalText: string; costUsd: number }) {
+  return {
+    async start(runId: string) {
+      await (db as any).run.update({
+        where: { id: runId },
+        data: { status: result.status, finalText: result.finalText, costUsd: result.costUsd, finishedAt: new Date() },
+      });
+    },
+    async stop() {},
+  };
 }
 
 function fakeDatastore(): Datastore {
@@ -197,13 +231,14 @@ function scriptedLlm(scripts: LlmStreamEvent[][]): LlmProvider & { calls: LlmReq
   };
 }
 
-function providers(llm: LlmProvider) {
+function providers(llm: LlmProvider, executor?: { start(runId: string): Promise<void>; stop(): Promise<void> }) {
   return {
     llm,
     engine: new NativeEngine(),
     datastore: fakeDatastore(),
     secrets: {} as SecretCipher,
     memory: fakeMemory(),
+    executor: executor as never,
   };
 }
 
@@ -364,5 +399,127 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     }>;
     expect(childRun).toHaveLength(1);
     expect(childRun[0].status).toBe("refused");
+  });
+
+  const codingProfile: FakeCodingProfile = {
+    provider: "codex",
+    repository: "chfields/knock-knock-jokes",
+    baseRef: "main",
+    defaultTask: null,
+    allowWebhookTaskOverride: true,
+    timeoutSec: 900,
+    allowedEgress: [],
+    protectedPaths: ["tests/**"],
+    toolchain: "node-python",
+    toolchainVersion: "3.12",
+    workerImageRef: null,
+  };
+
+  it("dispatches to a coding-kind child via dispatchRun/Executor, since executeRun cannot drive one itself", async () => {
+    const dispatcher: FakeAgent = {
+      id: "dispatcher-agent",
+      name: "knock-knock-delivery",
+      systemPrompt: "You classify and delegate.",
+      model: "m",
+      budgetUsd: 5,
+      maxTurns: 10,
+    };
+    const implementer: FakeAgent = {
+      id: "implement-agent",
+      name: "knock-knock-implement",
+      systemPrompt: "unused for coding agents",
+      model: "gpt-5.6-luna",
+      budgetUsd: 5,
+      maxTurns: 10,
+      kind: "coding",
+      codingProfile,
+    };
+    const db = fakeDb(
+      [dispatcher, implementer],
+      [{ parentAgentId: "dispatcher-agent", childAgentId: "implement-agent", boundName: "implement" }],
+    );
+    const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+    const executor = fakeCodingExecutor(db, {
+      status: "succeeded",
+      finalText: "Implemented the requested change.",
+      costUsd: 0.02,
+    });
+
+    const llm = scriptedLlm([
+      toolCall("delegate_to_implement", JSON.stringify({ task: "add the feature" })),
+      finalAnswer("delegated to implement, done"),
+    ]);
+    const result = await executeRun(parentRun.id, providers(llm, executor), db);
+
+    expect(result.status).toBe("succeeded");
+    expect(result.finalText).toBe("delegated to implement, done");
+
+    const childRuns = (await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })) as Array<{
+      agentId: string;
+      trigger: string;
+      status: string;
+      finalText: string | null;
+      executionManaged: boolean;
+    }>;
+    expect(childRuns).toHaveLength(1);
+    expect(childRuns[0].agentId).toBe("implement-agent");
+    expect(childRuns[0].trigger).toBe("subagent");
+    expect(childRuns[0].status).toBe("succeeded");
+    expect(childRuns[0].finalText).toBe("Implemented the requested change.");
+    // Unlike native dispatch, the coding child IS executionManaged: true —
+    // a long-running container crash mid-dispatch is exactly what the
+    // reconciler exists for.
+    expect(childRuns[0].executionManaged).toBe(true);
+  });
+
+  it("refuses a second delegate_to_* call in the same run, even to a different bound sub-agent", async () => {
+    const dispatcher: FakeAgent = {
+      id: "dispatcher-agent",
+      name: "knock-knock-delivery",
+      systemPrompt: "sys",
+      model: "m",
+      budgetUsd: 5,
+      maxTurns: 10,
+    };
+    const planAgent: FakeAgent = {
+      id: "plan-agent",
+      name: "knock-knock-plan",
+      systemPrompt: "unused",
+      model: "gpt-6-astra",
+      budgetUsd: 5,
+      maxTurns: 10,
+      kind: "coding",
+      codingProfile,
+    };
+    const implementAgent: FakeAgent = {
+      id: "implement-agent",
+      name: "knock-knock-implement",
+      systemPrompt: "unused",
+      model: "gpt-5.6-luna",
+      budgetUsd: 5,
+      maxTurns: 10,
+      kind: "coding",
+      codingProfile,
+    };
+    const db = fakeDb(
+      [dispatcher, planAgent, implementAgent],
+      [
+        { parentAgentId: "dispatcher-agent", childAgentId: "plan-agent", boundName: "plan" },
+        { parentAgentId: "dispatcher-agent", childAgentId: "implement-agent", boundName: "implement" },
+      ],
+    );
+    const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+    const executor = fakeCodingExecutor(db, { status: "succeeded", finalText: "planned", costUsd: 0.01 });
+
+    // A misbehaving classifier tries to call both — the second must be refused.
+    const llm = scriptedLlm([
+      toolCall("delegate_to_plan", JSON.stringify({ task: "figure out the approach" })),
+      toolCall("delegate_to_implement", JSON.stringify({ task: "do it anyway" })),
+      finalAnswer("noticed the refusal and stopped"),
+    ]);
+    await executeRun(parentRun.id, providers(llm, executor), db);
+
+    const childRuns = await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } });
+    expect(childRuns).toHaveLength(1); // only the plan dispatch went through
   });
 });

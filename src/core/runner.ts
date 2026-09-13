@@ -29,6 +29,7 @@ import { scopeDatastore } from "../providers/datastore/scoped.js";
 import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
 import { buildSharedDatastoreAccessor, scopeSharedDatastoreAccessor } from "./datastores.js";
 import { effectiveBudgetForRun } from "./budget-groups.js";
+import { dispatchRun } from "./dispatch.js";
 import { MEMORY_TOOL_DEFS, MEMORY_TOOL_NAMES, handleMemoryTool } from "./memory-tools.js";
 import {
   SUBAGENT_MEMORY_GET_TOOL,
@@ -47,10 +48,25 @@ const runnerLog = logger.child({ module: "runner" });
  * synthetic tool per declared child, named by the boundName it's attached
  * under. Synchronous only for v1: the parent's turn blocks until the child
  * run reaches a terminal state, and its result comes back as this tool
- * call's result. Deliberately calls `executeRun` directly rather than going
- * through an `Executor` — the created Run row is never marked
- * `executionManaged`, so the reconciler leaves it alone even if it runs
- * long, the same way an attended `reevo run` foreground execution does.
+ * call's result. At most one dispatch is honored per run (see the
+ * "already dispatched" check below) — a haiku-tier classifier deciding
+ * plan-vs-implement should commit to exactly one child, not spray both.
+ *
+ * Two execution paths depending on the child's `kind`:
+ * - `native`: calls `executeRun` directly, bypassing any `Executor` — the
+ *   created Run row is never marked `executionManaged`, so the reconciler
+ *   leaves it alone even if it runs long, the same way an attended
+ *   `reevo run` foreground execution does. Fast, in-process, no durability
+ *   machinery needed for a native turn loop.
+ * - `coding`: a coding-kind child needs a real Docker container (Codex),
+ *   which `executeRun` explicitly refuses to drive itself. Goes through
+ *   `dispatchRun` (the same persistence path webhooks/trigger_agent use)
+ *   with `awaitExecution: true`, so the already-existing `RoutingExecutor`
+ *   sends it to the container backend and this call blocks until it's
+ *   terminal — reusing proven infrastructure rather than re-implementing
+ *   container dispatch. Marked `executionManaged: true` here (unlike the
+ *   native path) since a long-running container crash mid-dispatch is
+ *   exactly the case the reconciler exists for.
  */
 const DELEGATE_TOOL_PREFIX = "delegate_to_";
 
@@ -84,10 +100,26 @@ const DelegateArgs = z
   })
   .strict();
 
-/** The subset of the Prisma client the runner touches — mockable in tests. */
+/**
+ * The subset of the Prisma client the runner touches — mockable in tests.
+ * Includes `codingRun`/`task`/`webhook`/`$transaction`/`$queryRaw` so this
+ * also satisfies `dispatch.ts`'s `DispatchDb`, needed for dispatching a
+ * coding-kind sub-agent from inside a running native turn loop.
+ */
 export type RunnerDb = Pick<
   PrismaClient,
-  "agent" | "run" | "agentTool" | "agentSecret" | "agentDatastore" | "budgetGroup" | "agentSubAgent"
+  | "agent"
+  | "run"
+  | "agentTool"
+  | "agentSecret"
+  | "agentDatastore"
+  | "budgetGroup"
+  | "agentSubAgent"
+  | "codingRun"
+  | "task"
+  | "webhook"
+  | "$transaction"
+  | "$queryRaw"
 >;
 
 /**
@@ -139,7 +171,9 @@ export async function createRun(db: RunnerDb, agentName: string, trigger: RunTri
 /** Drives an existing Run (created by `createRun` or the scheduler) to a terminal state. */
 export async function executeRun(
   runId: string,
-  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory">,
+  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory"> & {
+    executor?: ProviderRegistry["executor"];
+  },
   db: RunnerDb = defaultDb,
   onText?: (delta: string) => void,
   step: StepRunner = runStepInline,
@@ -278,6 +312,16 @@ export async function executeRun(
             message: `No sub-agent is bound to name "${boundName}".`,
           });
         }
+        // At most one dispatch per run: a classifier deciding plan-vs-implement
+        // should commit to exactly one child, never both and never a retry
+        // that leaves two children racing on the same task.
+        const priorDispatches = await db.run.findMany({ where: { parentRunId: { in: [runId] } } });
+        if (priorDispatches.length > 0) {
+          return JSON.stringify({
+            error: "already_dispatched",
+            message: "This run already delegated to a sub-agent; only one delegation is allowed per run.",
+          });
+        }
         let parsed: unknown;
         try {
           parsed = JSON.parse(argsJson || "{}");
@@ -299,6 +343,52 @@ export async function executeRun(
           }
           throw err;
         }
+
+        const childAgent = await db.agent.findUniqueOrThrow({
+          where: { id: edge.childAgentId },
+          select: { id: true, kind: true, budgetGroupId: true, budgetUsd: true },
+        });
+
+        if (childAgent.kind === "coding") {
+          // Coding-kind children need a real Docker container (Codex/Claude
+          // Code), which executeRun explicitly refuses to drive — go through
+          // the same dispatchRun path webhooks/trigger_agent use instead.
+          // datastoreRef/grantParentMemoryKeys have no equivalent inside a
+          // coding container's own tool surface (subagent_memory_get/
+          // parent_memory_get are native-engine built-ins only), so they're
+          // deliberately dropped here rather than silently implying a
+          // capability that doesn't exist for this path.
+          if (!providers.executor) {
+            return JSON.stringify({
+              error: "coding_dispatch_unavailable",
+              message:
+                "This execution context has no Executor wired in, so a coding-kind sub-agent cannot be dispatched.",
+            });
+          }
+          const { effectiveBudgetUsd } = await effectiveBudgetForRun(db, childAgent, new Date(), runId);
+          const dispatched = await dispatchRun({
+            db,
+            executor: providers.executor,
+            agentId: edge.childAgentId,
+            trigger: "subagent",
+            codingTask: args.task,
+            parentRunId: runId,
+            budgetUsdOverride: effectiveBudgetUsd,
+            awaitExecution: true,
+          });
+          if (!dispatched) {
+            return JSON.stringify({ error: "dispatch_failed", message: "The sub-agent run could not be created." });
+          }
+          const childResult = await db.run.findUniqueOrThrow({ where: { id: dispatched.run.id } });
+          return JSON.stringify({
+            status: childResult.status,
+            finalText: childResult.finalText,
+            costUsd: Number(childResult.costUsd),
+            tokensIn: childResult.tokensIn,
+            tokensOut: childResult.tokensOut,
+          });
+        }
+
         const taskOverride = args.datastoreRef
           ? `${args.task}\n\n[Referenced datastore: name="${args.datastoreRef.name}", key="${args.datastoreRef.key}" — use your datastore tools to read it.]`
           : args.task;
@@ -398,7 +488,9 @@ export async function executeRun(
 /** Convenience: create + execute a manual run in one call (what the CLI's `reevo run` uses). */
 export async function runAgent(
   agentName: string,
-  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory">,
+  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory"> & {
+    executor?: ProviderRegistry["executor"];
+  },
   db: RunnerDb = defaultDb,
   onText?: (delta: string) => void,
 ): Promise<Run> {

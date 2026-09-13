@@ -26,6 +26,26 @@ export interface DispatchRunOptions {
   lockAgent?: boolean;
   task?: { principalId: string; ttlMs: number };
   beforePersist?: (tx: DispatchTx, agent: DispatchAgent) => Promise<boolean>;
+  /** Sub-agent dispatch (see AgentSubAgent): links this run into a run tree. */
+  parentRunId?: string;
+  grantedParentMemoryKeys?: string[];
+  /**
+   * Overrides `agent.budgetUsd` for this run's coding budget reservation —
+   * used by sub-agent dispatch to apply the run-tree's tightened effective
+   * budget (see src/core/budget-groups.ts) instead of the agent's raw
+   * per-run ceiling, the same composability already applied to native runs.
+   * Ignored for native agents, which compute their own effective budget
+   * inside executeRun's load step.
+   */
+  budgetUsdOverride?: number;
+  /**
+   * Default (false/undefined): fire-and-forget, matching every existing
+   * caller (webhook ingress, trigger_agent, the scheduler) — none of them
+   * want to block on a potentially long-running coding container. Set true
+   * only when the caller genuinely wants to await the run's terminal state,
+   * e.g. a sub-agent dispatch tool blocking the parent's own turn.
+   */
+  awaitExecution?: boolean;
 }
 
 export interface DispatchRunResult {
@@ -91,6 +111,8 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             agentId: agent.id,
             trigger: options.trigger ?? "manual",
             executionManaged: true,
+            parentRunId: options.parentRunId,
+            grantedParentMemoryKeys: options.grantedParentMemoryKeys ?? [],
           },
         });
 
@@ -100,6 +122,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           const task = options.codingTask ?? agent.codingProfile.defaultTask;
           if (!task) throw new Error(`Coding agent "${agent.id}" requires a task.`);
           const headRef = `reevo/run-${run.id}`;
+          const budgetUsd = options.budgetUsdOverride ?? Number(agent.budgetUsd);
           const input = CodingTaskInputSchema.parse({
             schemaVersion: CODING_PROTOCOL_VERSION,
             runId: run.id,
@@ -108,7 +131,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             headRef,
             task,
             model: agent.model,
-            budgetUsd: Number(agent.budgetUsd),
+            budgetUsd,
             deadlineAt: new Date(now.getTime() + agent.codingProfile.timeoutSec * 1000).toISOString(),
           });
           const workerImage = options.executor.resolveCodingWorkerImage?.({
@@ -130,7 +153,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               allowedEgress: agent.codingProfile.allowedEgress as Prisma.InputJsonValue,
               protectedPaths: agent.codingProfile.protectedPaths as Prisma.InputJsonValue,
               workerImage,
-              budgetReservedUsd: agent.budgetUsd,
+              budgetReservedUsd: budgetUsd,
             },
           });
         } else if (options.codingTask !== undefined || options.codingBaseRef !== undefined) {
@@ -164,13 +187,19 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
   }
 
   if (!persisted) return null;
-  try {
-    void options.executor
-      .start(persisted.run.id)
-      .catch((err) => markRunFailedFromExecutorError(options.db, persisted.run.id, err))
-      .catch((err) => dispatchLog.error({ err, runId: persisted.run.id }, "failed to persist executor start failure"));
-  } catch (err) {
-    await markRunFailedFromExecutorError(options.db, persisted.run.id, err);
+  const runStart = async () => {
+    try {
+      await options.executor.start(persisted.run.id);
+    } catch (err) {
+      await markRunFailedFromExecutorError(options.db, persisted.run.id, err).catch((err2) =>
+        dispatchLog.error({ err: err2, runId: persisted.run.id }, "failed to persist executor start failure"),
+      );
+    }
+  };
+  if (options.awaitExecution) {
+    await runStart();
+  } else {
+    void runStart();
   }
   return persisted;
 }

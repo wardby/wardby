@@ -13,6 +13,7 @@
  * missing `AUTH_JWKS_URI`/`AUTH_SIGNING_KEY` a deployment running stdio-only
  * never needed to set.
  */
+import type { ProviderRegistry } from "../providers/index.js";
 import { loadProviderConfig, loadMcpConfig, loadAuthConfig } from "../config/providers.js";
 import { prisma } from "../core/db.js";
 import { NativeEngine } from "../core/engine-native.js";
@@ -92,8 +93,20 @@ export function buildMcpProviders(): McpProviderComposition {
   const secrets = buildSecretCipher(providerConfig);
   const datastore = new PostgresDatastore(prisma, secrets);
   const memory = new PostgresAgentMemory(prisma);
-  const nativeExecutor = buildExecutor(providerConfig, { llm, engine, datastore, secrets, memory }, prisma);
+  // `nativeProviders` is passed by reference into buildExecutor, and native
+  // runs it drives read `this.providers.executor` at call time (not at
+  // construction time) — so patching `.executor` on afterward, once the
+  // full RoutingExecutor exists, is enough for a native run's own
+  // delegate_to_<boundName> dispatch to reach a coding-kind sub-agent
+  // through the same composed executor everything else uses. There's no
+  // way to hand the native executor a reference to its own wrapping
+  // RoutingExecutor before that wrapper is constructed.
+  const nativeProviders: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory"> & {
+    executor?: ProviderRegistry["executor"];
+  } = { llm, engine, datastore, secrets, memory };
+  const nativeExecutor = buildExecutor(providerConfig, nativeProviders, prisma);
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig });
+  nativeProviders.executor = executor;
 
   return { providers: { llm, engine, datastore, secrets, executor, memory } };
 }
