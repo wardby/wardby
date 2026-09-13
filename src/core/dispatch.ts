@@ -30,6 +30,12 @@ export interface DispatchRunOptions {
   parentRunId?: string;
   grantedParentMemoryKeys?: string[];
   /**
+   * Per-run task text for a NATIVE agent (appended to its systemPrompt at
+   * load time — see runner.ts). The native equivalent of `codingTask`;
+   * mutually exclusive with it, since a native run has no CodingRun.
+   */
+  taskOverride?: string;
+  /**
    * Overrides `agent.budgetUsd` for this run's coding budget reservation —
    * used by sub-agent dispatch to apply the run-tree's tightened effective
    * budget (see src/core/budget-groups.ts) instead of the agent's raw
@@ -106,6 +112,10 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
         if (!agent) throw new Error(`Unknown agent "${options.agentId}".`);
         if (options.beforePersist && !(await options.beforePersist(tx, agent))) return null;
 
+        if (options.taskOverride !== undefined && agent.kind !== "native") {
+          throw new Error("taskOverride can only be supplied for a native agent.");
+        }
+
         const run = await tx.run.create({
           data: {
             agentId: agent.id,
@@ -113,6 +123,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             executionManaged: true,
             parentRunId: options.parentRunId,
             grantedParentMemoryKeys: options.grantedParentMemoryKeys ?? [],
+            taskOverride: options.taskOverride,
           },
         });
 
