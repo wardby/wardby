@@ -19,7 +19,7 @@ const budgetGroupLog = logger.child({ module: "budget-groups" });
 
 export type Period = "day" | "week" | "month";
 
-export type BudgetGroupsDb = Pick<PrismaClient, "budgetGroup" | "run">;
+export type BudgetGroupsDb = Pick<PrismaClient, "budgetGroup" | "run" | "agent">;
 
 /**
  * Calendar-aligned UTC period start. "week" is the ISO week: Monday 00:00
@@ -92,53 +92,138 @@ export async function computeGroupSpend(
   });
 }
 
+export interface RunTreeSpend {
+  rootRunId: string;
+  capUsd: number;
+  spentUsd: number;
+  remainingUsd: number;
+}
+
+/** Walks parentRunId upward from `runId` to the tree's root (parentRunId null). */
+async function findRootRun(
+  db: Pick<BudgetGroupsDb, "run">,
+  runId: string,
+): Promise<{ id: string; agentId: string; parentRunId: string | null }> {
+  let current = await db.run.findUniqueOrThrow({
+    where: { id: runId },
+    select: { id: true, agentId: true, parentRunId: true },
+  });
+  while (current.parentRunId) {
+    current = await db.run.findUniqueOrThrow({
+      where: { id: current.parentRunId },
+      select: { id: true, agentId: true, parentRunId: true },
+    });
+  }
+  return current;
+}
+
+/** Breadth-first walk down childRuns from `rootRunId`, collecting every run id in the tree. */
+async function collectTreeRunIds(db: Pick<BudgetGroupsDb, "run">, rootRunId: string): Promise<string[]> {
+  const all = [rootRunId];
+  let frontier = [rootRunId];
+  while (frontier.length > 0) {
+    const children = await db.run.findMany({ where: { parentRunId: { in: frontier } }, select: { id: true } });
+    const childIds = children.map((c) => c.id);
+    all.push(...childIds);
+    frontier = childIds;
+  }
+  return all;
+}
+
+/**
+ * Real-time shared budget scope for a sub-agent dispatch (see
+ * docs/private/2026-09-13-agent-subagent-design-and-plan.md §4): the whole
+ * run tree rooted at `parentRunId`'s ultimate ancestor shares one ceiling —
+ * the root's own effective budget (its own budgetUsd, itself tightened by
+ * its own BudgetGroup if any) minus everything every run in the tree has
+ * spent so far. The root's ceiling is recomputed fresh here, not pinned
+ * from whatever it was when the root run started — consistent with
+ * BudgetGroup periods already always being live-recomputed rather than
+ * snapshotted.
+ */
+export async function computeRunTreeSpend(
+  db: BudgetGroupsDb,
+  parentRunId: string,
+  now: Date = new Date(),
+): Promise<RunTreeSpend> {
+  const root = await findRootRun(db, parentRunId);
+  const treeRunIds = await collectTreeRunIds(db, root.id);
+  const rows = await db.run.findMany({ where: { id: { in: treeRunIds } }, select: { costUsd: true } });
+  const spentUsd = rows.reduce((sum, r) => sum + Number(r.costUsd), 0);
+
+  const rootAgent = await db.agent.findUniqueOrThrow({
+    where: { id: root.agentId },
+    select: { id: true, budgetGroupId: true, budgetUsd: true },
+  });
+  // Root has no parentRunId of its own, so this terminates in one level —
+  // no unbounded recursion regardless of how deep `parentRunId` itself was.
+  const rootCeiling = await effectiveBudgetForRun(db, rootAgent, now);
+
+  const capUsd = rootCeiling.effectiveBudgetUsd;
+  return { rootRunId: root.id, capUsd, spentUsd, remainingUsd: Math.max(0, capUsd - spentUsd) };
+}
+
 export interface EffectiveBudgetResult {
   effectiveBudgetUsd: number;
-  /** Which period(s), if any, are tighter than the agent's own budgetUsd right now. */
-  constrainedBy: Period[];
+  /** Which constraint(s), if any, are tighter than the agent's own budgetUsd right now. */
+  constrainedBy: (Period | "run-tree")[];
 }
 
 /**
  * The per-run budget ceiling to actually use for `agent`: its own
  * budgetUsd, tightened to whatever's left of its budget group's
- * daily/weekly/monthly caps (whichever are set). An ungrouped agent (no
- * budgetGroupId), or one whose group has no caps configured, is returned
- * unchanged. Also logs a warning (never blocks, never throws) once a
- * period's spend crosses the group's own warnThresholdRatio.
+ * daily/weekly/monthly caps (whichever are set) AND, when `parentRunId` is
+ * given (this run was dispatched as a sub-agent — see AgentSubAgent),
+ * whatever's left of its run tree's shared ceiling. These are independent,
+ * composable constraints: the final ceiling is the minimum of all that
+ * apply, never one replacing another. An ungrouped, top-level agent run
+ * with no caps configured is returned unchanged. Also logs a warning
+ * (never blocks, never throws) once a period's spend crosses the group's
+ * own warnThresholdRatio.
  */
 export async function effectiveBudgetForRun(
   db: BudgetGroupsDb,
   agent: Pick<Agent, "id" | "budgetGroupId" | "budgetUsd">,
   now: Date = new Date(),
+  parentRunId?: string,
 ): Promise<EffectiveBudgetResult> {
   const ownBudgetUsd = Number(agent.budgetUsd);
-  if (!agent.budgetGroupId) return { effectiveBudgetUsd: ownBudgetUsd, constrainedBy: [] };
+  const candidates: { value: number; reason: Period | "run-tree" }[] = [];
 
-  const group = await db.budgetGroup.findUnique({
-    where: { id: agent.budgetGroupId },
-    include: { agents: { select: { id: true } } },
-  });
-  if (!group) return { effectiveBudgetUsd: ownBudgetUsd, constrainedBy: [] };
-
-  const spend = await computeGroupSpend(
-    db,
-    group,
-    group.agents.map((a) => a.id),
-    now,
-  );
-  const warnThresholdRatio = Number(group.warnThresholdRatio);
-
-  for (const s of spend) {
-    if (s.spentUsd >= s.capUsd * warnThresholdRatio) {
-      budgetGroupLog.warn(
-        { groupId: group.id, groupName: group.name, period: s.period, capUsd: s.capUsd, spentUsd: s.spentUsd },
-        `budget group "${group.name}"'s ${s.period} spend ($${s.spentUsd.toFixed(4)}) has reached ` +
-          `${(warnThresholdRatio * 100).toFixed(0)}% of its $${s.capUsd.toFixed(4)} cap`,
+  if (agent.budgetGroupId) {
+    const group = await db.budgetGroup.findUnique({
+      where: { id: agent.budgetGroupId },
+      include: { agents: { select: { id: true } } },
+    });
+    if (group) {
+      const spend = await computeGroupSpend(
+        db,
+        group,
+        group.agents.map((a) => a.id),
+        now,
       );
+      const warnThresholdRatio = Number(group.warnThresholdRatio);
+      for (const s of spend) {
+        candidates.push({ value: s.remainingUsd, reason: s.period });
+        if (s.spentUsd >= s.capUsd * warnThresholdRatio) {
+          budgetGroupLog.warn(
+            { groupId: group.id, groupName: group.name, period: s.period, capUsd: s.capUsd, spentUsd: s.spentUsd },
+            `budget group "${group.name}"'s ${s.period} spend ($${s.spentUsd.toFixed(4)}) has reached ` +
+              `${(warnThresholdRatio * 100).toFixed(0)}% of its $${s.capUsd.toFixed(4)} cap`,
+          );
+        }
+      }
     }
   }
 
-  const constrainedBy = spend.filter((s) => s.remainingUsd < ownBudgetUsd).map((s) => s.period);
-  const effectiveBudgetUsd = Math.min(ownBudgetUsd, ...spend.map((s) => s.remainingUsd));
+  if (parentRunId) {
+    const tree = await computeRunTreeSpend(db, parentRunId, now);
+    candidates.push({ value: tree.remainingUsd, reason: "run-tree" });
+  }
+
+  if (candidates.length === 0) return { effectiveBudgetUsd: ownBudgetUsd, constrainedBy: [] };
+
+  const constrainedBy = candidates.filter((c) => c.value < ownBudgetUsd).map((c) => c.reason);
+  const effectiveBudgetUsd = Math.min(ownBudgetUsd, ...candidates.map((c) => c.value));
   return { effectiveBudgetUsd, constrainedBy };
 }

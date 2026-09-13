@@ -35,7 +35,10 @@ import { logger } from "./logger.js";
 const runnerLog = logger.child({ module: "runner" });
 
 /** The subset of the Prisma client the runner touches — mockable in tests. */
-export type RunnerDb = Pick<PrismaClient, "agent" | "run" | "agentTool" | "agentSecret" | "agentDatastore" | "budgetGroup">;
+export type RunnerDb = Pick<
+  PrismaClient,
+  "agent" | "run" | "agentTool" | "agentSecret" | "agentDatastore" | "budgetGroup"
+>;
 
 /**
  * The two states a Run can still be driven out of. Every write `executeRun`
@@ -122,7 +125,12 @@ export async function executeRun(
       where: { agentId: agent.id },
       include: { tool: true },
     });
-    const { effectiveBudgetUsd } = await effectiveBudgetForRun(db, agent);
+    const { effectiveBudgetUsd } = await effectiveBudgetForRun(
+      db,
+      agent,
+      new Date(),
+      existingRun.parentRunId ?? undefined,
+    );
     return {
       agentId: agent.id,
       kind: agent.kind,
