@@ -5,6 +5,7 @@ import { startCodingProxyServer, type CodingProxyServerHandle } from "./server.j
 
 describe("coding proxy HTTP boundary", () => {
   let server: CodingProxyServerHandle;
+  const observedRequests: Array<{ protocol: string; status: number }> = [];
   let session: CreatedCodingProxySession;
   let anthropicSession: CreatedCodingProxySession;
   const upstream = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
@@ -41,7 +42,11 @@ describe("coding proxy HTTP boundary", () => {
       deadlineAt: new Date(Date.now() + 60_000),
       budgetUsd: 1,
     });
-    server = await startCodingProxyServer(proxy, { host: "127.0.0.1", port: 0 });
+    server = await startCodingProxyServer(proxy, {
+      host: "127.0.0.1",
+      port: 0,
+      onRequest: (event) => observedRequests.push(event),
+    });
   });
 
   afterAll(async () => server.close());
@@ -71,6 +76,7 @@ describe("coding proxy HTTP boundary", () => {
     expect(denied.status).toBe(401);
     expect(await denied.text()).not.toContain("wrong");
     expect(upstream).toHaveBeenCalledTimes(upstreamCalls);
+    expect(observedRequests).toContainEqual(expect.objectContaining({ protocol: "openai-responses", status: 401 }));
   });
 
   it("forwards an authenticated bounded request without exposing the credential", async () => {

@@ -2,7 +2,7 @@
 
 Date: 2026-09-06
 
-Status: Proposed
+Status: In progress (initial Workstream 5 local proof complete)
 
 ## Objective
 
@@ -152,6 +152,42 @@ Acceptance gate:
 - Operator access and emergency procedures are documented and reviewed.
 
 ## Workstream 5: Observability and Incident Response
+
+Initial local proof (implemented on the Phase 7 observability branch):
+
+- The coding proxy can expose a disabled-by-default Prometheus listener through
+  `METRICS_BIND`. Loopback is accepted directly; a non-loopback bind requires
+  `METRICS_ALLOW_NON_LOOPBACK=true` and must remain on an internal-only network.
+- `deploy/observability/docker-compose.grafana.yml` provisions local Prometheus
+  and Grafana. Grafana is available only at `127.0.0.1:3000`, Prometheus only at
+  `127.0.0.1:9090`, and the proxy metrics port has no host publication.
+- The dashboard proves proxy request/error rate and latency, proxy audit event
+  rate, proxy cost, and Node process memory. It also includes a future-facing
+  coding lifecycle panel: the exporter adapter is implemented, but the
+  application/MCP process still needs its own metrics listener and observer
+  wiring before that panel has staging data. Metrics use only fixed labels;
+  request/run IDs, credentials, request bodies, model names, and rejection text
+  are intentionally excluded.
+- `Knock-Knock: Budget & Runs` is a separate dashboard for 24-hour run volume,
+  reserved budget, actual spend, actual-to-reserved ratio, and their trends.
+- Verify the proof with `npm run observability:up` then
+  `npm run observability:smoke`. It starts no paid model request. Stop it with
+  `npm run observability:down`.
+
+This proof does not satisfy the production acceptance gate: application/MCP
+request metrics, database-pool and sandbox runtime metrics, alerts, SLOs,
+runbooks, ownership, staging events, and alert-delivery/tabletop validation
+remain required before launch.
+
+Local completion evidence (2026-09-13):
+
+- `npm run observability:smoke` verified Grafana health, Prometheus scraping of
+  the coding proxy, and provisioning of both local dashboards.
+- A deliberately unauthorized proxy request was recorded and scraped as an
+  `openai-responses` `4xx` metric without invoking an upstream model provider.
+- The local Prometheus TSDB retains 24 hours in its named Docker volume;
+  Grafana persists dashboards separately. This is operational telemetry, not
+  the authoritative historical accounting store.
 
 Implementation:
 

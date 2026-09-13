@@ -1,0 +1,57 @@
+services:
+  migration:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+      target: migration
+    environment:
+      DATABASE_URL: postgresql://reevo:reevo@postgres:5432/reevo
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  coding-proxy:
+    environment:
+      METRICS_BIND: 0.0.0.0:9464
+      METRICS_ALLOW_NON_LOOPBACK: "true"
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=24h
+    volumes:
+      - ../observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - reevo-prometheus-data:/prometheus
+    ports:
+      - 127.0.0.1:9090:9090
+    depends_on:
+      coding-proxy:
+        condition: service_started
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.0.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: reevo-local-only
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - reevo-grafana-data:/var/lib/grafana
+    ports:
+      - 127.0.0.1:3000:3000
+    depends_on:
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  reevo-prometheus-data:
+  reevo-grafana-data:

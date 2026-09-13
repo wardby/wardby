@@ -10,6 +10,7 @@ export interface CodingProxyServerConfig {
   host: string;
   port: number;
   expectedHost?: string;
+  onRequest?: (event: { protocol: ProxyProtocol | "other"; status: number; durationMs: number }) => void;
 }
 
 export interface CodingProxyServerHandle {
@@ -60,6 +61,15 @@ export async function startCodingProxyServer(
   config: CodingProxyServerConfig,
 ): Promise<CodingProxyServerHandle> {
   const server = createServer({ maxHeaderSize: 16 * 1024, requireHostHeader: true }, (request, response) => {
+    const startedAt = performance.now();
+    const protocol = routeProtocol(request.method, request.url) ?? "other";
+    response.once("finish", () => {
+      try {
+        config.onRequest?.({ protocol, status: response.statusCode, durationMs: performance.now() - startedAt });
+      } catch (error) {
+        proxyLog.warn({ event: "metrics.observe_failed", err: error }, "coding proxy metrics observer failed");
+      }
+    });
     void (async () => {
       if (config.expectedHost && request.headers.host !== config.expectedHost) {
         sendError(response, 403, "invalid_host");
