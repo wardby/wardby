@@ -57,10 +57,9 @@ export type ResolveWebhookRunResult =
   { ok: true; runId: string } | { ok: false; reason: "not_found" | "invalid_secret" | "disabled" };
 
 /**
- * Validates the presented secret and, if valid + enabled, enqueues a
- * manual run via the exact same `createRun` path `trigger_agent`/the
- * scheduler use — the budget guardrail applies identically regardless of
- * what triggered the run.
+ * Validates the presented secret and, if valid + enabled, enqueues a run via
+ * the exact same `createRun` path `trigger_agent`/the scheduler use — the
+ * budget guardrail applies identically regardless of what triggered the run.
  */
 export async function resolveWebhookRun(
   id: string,
@@ -85,7 +84,7 @@ export async function resolveWebhookRun(
     db,
     executor,
     agentId: agent.id,
-    trigger: "manual",
+    trigger: "webhook",
     codingTask,
     beforePersist: async (tx, currentAgent) => {
       const current = await tx.webhook.findUnique({ where: { id } });

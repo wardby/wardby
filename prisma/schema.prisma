@@ -235,6 +235,7 @@ model AgentMemory {
 enum RunTrigger {
   manual
   scheduled
+  webhook
 }
 
 model Run {
