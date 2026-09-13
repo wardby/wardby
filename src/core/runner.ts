@@ -85,6 +85,11 @@ function delegateToolDef(boundName: string): LoadedTool {
           additionalProperties: false,
         },
         grantParentMemoryKeys: { type: "array", items: { type: "string" } },
+        continuePriorRun: {
+          type: "string",
+          description:
+            "Coding sub-agents only. The run id of a prior coding run whose branch/PR this dispatch should push a new commit onto, instead of opening a fresh one — use when the task is a revision to an existing PR (a plan/spec update, or a code-review follow-up), even across a different sub-agent than the one that opened it.",
+        },
       },
       required: ["task"],
       additionalProperties: false,
@@ -97,6 +102,7 @@ const DelegateArgs = z
     task: z.string(),
     datastoreRef: z.object({ name: z.string(), key: z.string() }).strict().optional(),
     grantParentMemoryKeys: z.array(z.string()).optional(),
+    continuePriorRun: z.string().optional(),
   })
   .strict();
 
@@ -354,6 +360,13 @@ export async function executeRun(
           select: { id: true, kind: true, budgetGroupId: true, budgetUsd: true },
         });
 
+        if (args.continuePriorRun !== undefined && childAgent.kind !== "coding") {
+          return JSON.stringify({
+            error: "continuation_requires_coding_agent",
+            message: "continuePriorRun is only supported when the sub-agent is coding-kind.",
+          });
+        }
+
         if (childAgent.kind === "coding") {
           // Coding-kind children need a real Docker container (Codex/Claude
           // Code), which executeRun explicitly refuses to drive — go through
@@ -377,6 +390,7 @@ export async function executeRun(
             agentId: edge.childAgentId,
             trigger: "subagent",
             codingTask: args.task,
+            continuesCodingRunId: args.continuePriorRun,
             parentRunId: runId,
             budgetUsdOverride: effectiveBudgetUsd,
             awaitExecution: true,

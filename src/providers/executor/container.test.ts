@@ -39,6 +39,7 @@ function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSn
     timeoutSec: 900,
     allowedEgress: [],
     protectedPaths: [".github/workflows/**", "CODEOWNERS"],
+    rootCodingRunId: null,
     budgetUsd: 2,
     tokensIn: 0,
     tokensOut: 0,
@@ -152,6 +153,7 @@ class FakeVcs implements VcsProvider {
   cleaned = 0;
   workspace: PreparedWorkspace | null = null;
   lastFinalizeDetails?: FinalizeChangesDetails;
+  lastPrepareInput?: VcsPrepareInput;
 
   constructor(
     private readonly root: string,
@@ -160,6 +162,7 @@ class FakeVcs implements VcsProvider {
 
   async prepareWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace> {
     this.prepared += 1;
+    this.lastPrepareInput = input;
     this.events.push("prepare");
     this.workspace = this.makeWorkspace(input);
     return this.workspace;
@@ -168,18 +171,18 @@ class FakeVcs implements VcsProvider {
     return this.workspace?.runId === input.runId ? this.workspace : null;
   }
   async finalizeChanges(
-    _workspace: PreparedWorkspace,
+    workspace: PreparedWorkspace,
     details?: FinalizeChangesDetails,
   ): Promise<FinalizeChangesResult> {
     this.finalized += 1;
     this.lastFinalizeDetails = details;
     this.events.push("finalize");
     return {
-      outcome: "pull_request_opened",
+      outcome: workspace.continuation ? "pull_request_updated" : "pull_request_opened",
       repository: "openai/example",
       baseRef: "main",
       baseCommit: "a".repeat(40),
-      headRef: "reevo/run-run-1",
+      headRef: workspace.headRef,
       commitSha: "b".repeat(40),
       pullRequestNumber: 42,
       pullRequestUrl: "https://github.com/openai/example/pull/42",
@@ -319,6 +322,18 @@ describe("ContainerExecutor", () => {
       budgetReservedUsd: 2,
       budgetActualUsd: 0.01,
     });
+  });
+
+  it("revision-in-place: threads continuation through to the VCS layer and persists pull_request_updated", async () => {
+    const created = await harness({ rootCodingRunId: "root-run", headRef: "reevo/run-root-run" });
+    await created.executor.start("run-1");
+
+    expect(created.vcs.lastPrepareInput).toMatchObject({
+      headRef: "reevo/run-root-run",
+      continuation: { rootRunId: "root-run" },
+    });
+    expect(created.store.run.result).toMatchObject({ outcome: "pull_request_updated", pullRequestNumber: 42 });
+    expect(created.observer.events.map((event) => event.stage)).toContain("pull_request_updated");
   });
 
   it("routes Claude through its dedicated proxy credential and composite job spec", async () => {

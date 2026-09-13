@@ -171,11 +171,26 @@ export const CodingTaskInputSchema = z
     model: modelSchema,
     budgetUsd: z.number().finite().positive().max(MAX_COST_USD),
     deadlineAt: z.string().datetime({ offset: true }),
+    /**
+     * Revision-in-place (see
+     * docs/private/2026-09-13-coding-pr-revision-in-place-design.md): set
+     * when this run pushes a new commit onto the branch/PR the named run
+     * (the thread's ROOT CodingRun, always -- never a chain) originally
+     * opened, instead of opening a fresh branch of its own. Resolved and
+     * verified server-side (dispatch.ts) against the database; this schema
+     * only enforces that headRef is internally consistent with it.
+     */
+    continuationOf: z.object({ runId: runIdSchema }).strict().optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
-    if (value.headRef !== `reevo/run-${value.runId}`) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["headRef"], message: "must match reevo/run-<runId>" });
+    const expectedHeadRunId = value.continuationOf?.runId ?? value.runId;
+    if (value.headRef !== `reevo/run-${expectedHeadRunId}`) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["headRef"],
+        message: "must match reevo/run-<runId> (or reevo/run-<continuationOf.runId>)",
+      });
     }
   });
 
@@ -219,7 +234,7 @@ const pullRequestUrlSchema = z
 export const CodingRunResultSchema = z
   .object({
     schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
-    outcome: z.enum(["pull_request_opened", "no_changes", "budget_exhausted"]),
+    outcome: z.enum(["pull_request_opened", "pull_request_updated", "no_changes", "budget_exhausted"]),
     repository: repositorySchema,
     baseRef: CodingBaseRefSchema,
     headRef: CodingBaseRefSchema.optional(),
@@ -238,10 +253,11 @@ export const CodingRunResultSchema = z
   .strict()
   .superRefine((value, ctx) => {
     const prFields = [value.headRef, value.commitSha, value.pullRequestUrl, value.pullRequestNumber];
-    if (value.outcome === "pull_request_opened" && prFields.some((field) => field === undefined)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "pull_request_opened requires all PR fields" });
+    const isPrOutcome = value.outcome === "pull_request_opened" || value.outcome === "pull_request_updated";
+    if (isPrOutcome && prFields.some((field) => field === undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a PR outcome requires all PR fields" });
     }
-    if (value.outcome !== "pull_request_opened" && prFields.some((field) => field !== undefined)) {
+    if (!isPrOutcome && prFields.some((field) => field !== undefined)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "non-PR outcomes must not include PR fields" });
     }
     if (value.pullRequestUrl && value.pullRequestNumber) {

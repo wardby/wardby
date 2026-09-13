@@ -14,6 +14,7 @@ export type CodingLifecycleStage =
   | "stopping"
   | "collected"
   | "pull_request_opened"
+  | "pull_request_updated"
   | "terminal"
   | "cleanup";
 
@@ -60,6 +61,7 @@ export class CodingMetrics implements CodingRunObserver {
       "stopping",
       "collected",
       "pull_request_opened",
+      "pull_request_updated",
       "terminal",
       "cleanup",
     ].map((stage) => [stage, 0]),
