@@ -125,6 +125,7 @@ function buildCombinedDb(
     },
     agentSubAgent: {
       findFirst: async () => null,
+      findMany: async () => [],
     },
     $transaction: async (callback: any) => callback(db),
   };

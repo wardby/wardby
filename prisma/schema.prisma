@@ -303,13 +303,21 @@ model Run {
   /// top-level ancestor shares one real-time budget scope (see
   /// src/core/budget-groups.ts's pattern, generalized from BudgetGroup
   /// membership to this tree).
-  parentRunId String?
-  parentRun   Run?    @relation("RunTree", fields: [parentRunId], references: [id])
-  childRuns   Run[]   @relation("RunTree")
+  parentRunId             String?
+  parentRun               Run?     @relation("RunTree", fields: [parentRunId], references: [id])
+  childRuns               Run[]    @relation("RunTree")
   /// Ephemeral, per-dispatch grant: exactly the parent-memory keys this
   /// one child run was handed permission to read via parent_memory_get.
   /// Never a standing allowlist — re-granted on every dispatch call.
   grantedParentMemoryKeys String[] @default([])
+  /// Per-run task text for a native agent, which otherwise has no
+  /// per-invocation input at all (only its fixed systemPrompt). Set only by
+  /// delegate_to_<boundName> dispatch today — never exposed as a public
+  /// trigger_agent/webhook parameter for native agents, unlike coding
+  /// agents' CodingTaskOverrideSchema. Appended (never prepended) to the
+  /// loaded systemPrompt at run time so the stable prefix stays
+  /// prompt-cache-eligible across dispatches.
+  taskOverride            String?
 }
 
 /// Phase 5: owner-configured coding behavior. Runtime credentials and opaque

@@ -17,6 +17,7 @@
  * reasons about cost, not one here plus one in the engine.
  */
 
+import { z } from "zod";
 import type { Prisma, PrismaClient, Run, RunTrigger } from "@prisma/client";
 import type { ProviderRegistry } from "../providers/index.js";
 import type { LoadedTool } from "../providers/engine/types.js";
@@ -39,6 +40,49 @@ import { prisma as defaultDb } from "./db.js";
 import { logger } from "./logger.js";
 
 const runnerLog = logger.child({ module: "runner" });
+
+/**
+ * Sub-agent dispatch (see AgentSubAgent and
+ * docs/private/2026-09-13-agent-subagent-design-and-plan.md §6). One
+ * synthetic tool per declared child, named by the boundName it's attached
+ * under. Synchronous only for v1: the parent's turn blocks until the child
+ * run reaches a terminal state, and its result comes back as this tool
+ * call's result. Deliberately calls `executeRun` directly rather than going
+ * through an `Executor` — the created Run row is never marked
+ * `executionManaged`, so the reconciler leaves it alone even if it runs
+ * long, the same way an attended `reevo run` foreground execution does.
+ */
+const DELEGATE_TOOL_PREFIX = "delegate_to_";
+
+function delegateToolDef(boundName: string): LoadedTool {
+  return {
+    name: `${DELEGATE_TOOL_PREFIX}${boundName}`,
+    description: `Delegates a task to your "${boundName}" sub-agent. Runs synchronously and blocks until it finishes; its spend counts against your own run's shared budget scope.`,
+    jsonSchema: {
+      type: "object",
+      properties: {
+        task: { type: "string" },
+        datastoreRef: {
+          type: "object",
+          properties: { name: { type: "string" }, key: { type: "string" } },
+          required: ["name", "key"],
+          additionalProperties: false,
+        },
+        grantParentMemoryKeys: { type: "array", items: { type: "string" } },
+      },
+      required: ["task"],
+      additionalProperties: false,
+    },
+  };
+}
+
+const DelegateArgs = z
+  .object({
+    task: z.string(),
+    datastoreRef: z.object({ name: z.string(), key: z.string() }).strict().optional(),
+    grantParentMemoryKeys: z.array(z.string()).optional(),
+  })
+  .strict();
 
 /** The subset of the Prisma client the runner touches — mockable in tests. */
 export type RunnerDb = Pick<
@@ -137,18 +181,28 @@ export async function executeRun(
       new Date(),
       existingRun.parentRunId ?? undefined,
     );
-    // Visibility only, not the security boundary — subagent_memory_get and
-    // parent_memory_get each re-check the actual AgentSubAgent edge /
-    // per-run grant against the database at call time regardless of
-    // whether the tool was advertised here.
-    const hasSubAgentChildren = (await db.agentSubAgent.findFirst({ where: { parentAgentId: agent.id } })) !== null;
+    // Visibility only, not the security boundary — subagent_memory_get,
+    // parent_memory_get, and delegate_to_<boundName> each re-check the
+    // actual AgentSubAgent edge / per-run grant against the database at
+    // call time regardless of whether the tool was advertised here.
+    const subAgentEdges = await db.agentSubAgent.findMany({
+      where: { parentAgentId: agent.id },
+      select: { boundName: true, childAgentId: true },
+    });
     const isDispatchedChild = existingRun.parentRunId != null;
+    // Appended, never prepended: the loaded systemPrompt's stable prefix
+    // stays prompt-cache-eligible across every dispatch, even though the
+    // task text itself differs call to call.
+    const systemPrompt = existingRun.taskOverride
+      ? `${agent.systemPrompt}\n\n${existingRun.taskOverride}`
+      : agent.systemPrompt;
     return {
       agentId: agent.id,
       kind: agent.kind,
       memoryEnabled: agent.memoryEnabled,
+      subAgentEdges,
       agent: {
-        systemPrompt: agent.systemPrompt,
+        systemPrompt,
         model: agent.model,
         budgetUsd: effectiveBudgetUsd,
         maxTurns: agent.maxTurns,
@@ -167,8 +221,9 @@ export async function executeRun(
           jsonSchema: attachment.tool.jsonSchema as Record<string, unknown>,
         })),
         ...(agent.memoryEnabled ? MEMORY_TOOL_DEFS : []),
-        ...(hasSubAgentChildren ? [SUBAGENT_MEMORY_GET_TOOL] : []),
+        ...(subAgentEdges.length > 0 ? [SUBAGENT_MEMORY_GET_TOOL] : []),
         ...(isDispatchedChild ? [PARENT_MEMORY_GET_TOOL] : []),
+        ...subAgentEdges.map((edge): LoadedTool => delegateToolDef(edge.boundName)),
       ],
       toolsByName: Object.fromEntries(
         attached.map((attachment) => [
@@ -213,6 +268,57 @@ export async function executeRun(
       }
       if (name === "parent_memory_get") {
         return handleParentMemoryGet(argsJson, runId, db, providers.memory);
+      }
+      if (name.startsWith(DELEGATE_TOOL_PREFIX)) {
+        const boundName = name.slice(DELEGATE_TOOL_PREFIX.length);
+        const edge = loaded.subAgentEdges.find((e) => e.boundName === boundName);
+        if (!edge) {
+          return JSON.stringify({
+            error: "no_such_subagent",
+            message: `No sub-agent is bound to name "${boundName}".`,
+          });
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(argsJson || "{}");
+        } catch (err) {
+          return JSON.stringify({
+            error: "invalid_arguments_json",
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+        let args: z.infer<typeof DelegateArgs>;
+        try {
+          args = DelegateArgs.parse(parsed);
+        } catch (err) {
+          if (err instanceof z.ZodError) {
+            return JSON.stringify({
+              error: "validation_failed",
+              message: err.issues.map((issue) => `${issue.path.join(".") || "input"}: ${issue.message}`).join("; "),
+            });
+          }
+          throw err;
+        }
+        const taskOverride = args.datastoreRef
+          ? `${args.task}\n\n[Referenced datastore: name="${args.datastoreRef.name}", key="${args.datastoreRef.key}" — use your datastore tools to read it.]`
+          : args.task;
+        const childRun = await db.run.create({
+          data: {
+            agentId: edge.childAgentId,
+            trigger: "subagent",
+            parentRunId: runId,
+            grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [],
+            taskOverride,
+          },
+        });
+        const childResult = await executeRun(childRun.id, providers, db);
+        return JSON.stringify({
+          status: childResult.status,
+          finalText: childResult.finalText,
+          costUsd: Number(childResult.costUsd),
+          tokensIn: childResult.tokensIn,
+          tokensOut: childResult.tokensOut,
+        });
       }
 
       const tool = toolsByName.get(name);
