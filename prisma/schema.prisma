@@ -50,6 +50,31 @@ model Agent {
   /// agent sees no memory tools at all, and no AgentMemory rows are ever
   /// created for it.
   memoryEnabled Boolean @default(false)
+
+  /// Un-phased: sub-agent composition edges (see AgentSubAgent below). An
+  /// agent can be a parent (has children it can delegate to) and/or a
+  /// child (is delegated to by others) independently.
+  subAgentEdgesAsParent AgentSubAgent[] @relation("SubAgentParent")
+  subAgentEdgesAsChild  AgentSubAgent[] @relation("SubAgentChild")
+}
+
+/// Un-phased: agent-composition edge, referenced by agent name at the
+/// import boundary (capabilities/subagents.json) but id-based here to
+/// match that Tier-1 convention. Cycle-checked in the MCP tool handler at
+/// creation time, not enforced by the database (Postgres has no native
+/// "no cycles" constraint).
+model AgentSubAgent {
+  parentAgentId String
+  childAgentId  String
+  /// Local name the parent's dispatch tool is exposed under
+  /// (delegate_to_<boundName>) — decoupled from the child's own possibly-
+  /// renamed Agent.name, same convention as AgentDatastore.boundName.
+  boundName     String
+  parent        Agent  @relation("SubAgentParent", fields: [parentAgentId], references: [id], onDelete: Cascade)
+  child         Agent  @relation("SubAgentChild", fields: [childAgentId], references: [id], onDelete: Cascade)
+
+  @@id([parentAgentId, childAgentId])
+  @@unique([parentAgentId, boundName])
 }
 
 /// Phase 7: an optional recurring spend cap across a group of agents,
@@ -236,6 +261,7 @@ enum RunTrigger {
   manual
   scheduled
   webhook
+  subagent
 }
 
 model Run {
@@ -270,6 +296,28 @@ model Run {
   /// stale run lost, and can adopt one orphaned by a dead instance.
   executionBackend String?
   codingRun        CodingRun?
+
+  /// Un-phased: sub-agent dispatch (see AgentSubAgent). Null for a
+  /// top-level run; set when this run was created by a parent run's
+  /// delegate_to_<boundName> tool call. The run tree rooted at the
+  /// top-level ancestor shares one real-time budget scope (see
+  /// src/core/budget-groups.ts's pattern, generalized from BudgetGroup
+  /// membership to this tree).
+  parentRunId             String?
+  parentRun               Run?     @relation("RunTree", fields: [parentRunId], references: [id])
+  childRuns               Run[]    @relation("RunTree")
+  /// Ephemeral, per-dispatch grant: exactly the parent-memory keys this
+  /// one child run was handed permission to read via parent_memory_get.
+  /// Never a standing allowlist — re-granted on every dispatch call.
+  grantedParentMemoryKeys String[] @default([])
+  /// Per-run task text for a native agent, which otherwise has no
+  /// per-invocation input at all (only its fixed systemPrompt). Set only by
+  /// delegate_to_<boundName> dispatch today — never exposed as a public
+  /// trigger_agent/webhook parameter for native agents, unlike coding
+  /// agents' CodingTaskOverrideSchema. Appended (never prepended) to the
+  /// loaded systemPrompt at run time so the stable prefix stays
+  /// prompt-cache-eligible across dispatches.
+  taskOverride            String?
 }
 
 /// Phase 5: owner-configured coding behavior. Runtime credentials and opaque

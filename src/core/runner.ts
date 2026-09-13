@@ -17,6 +17,7 @@
  * reasons about cost, not one here plus one in the engine.
  */
 
+import { z } from "zod";
 import type { Prisma, PrismaClient, Run, RunTrigger } from "@prisma/client";
 import type { ProviderRegistry } from "../providers/index.js";
 import type { LoadedTool } from "../providers/engine/types.js";
@@ -28,14 +29,98 @@ import { scopeDatastore } from "../providers/datastore/scoped.js";
 import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
 import { buildSharedDatastoreAccessor, scopeSharedDatastoreAccessor } from "./datastores.js";
 import { effectiveBudgetForRun } from "./budget-groups.js";
+import { dispatchRun } from "./dispatch.js";
 import { MEMORY_TOOL_DEFS, MEMORY_TOOL_NAMES, handleMemoryTool } from "./memory-tools.js";
+import {
+  SUBAGENT_MEMORY_GET_TOOL,
+  PARENT_MEMORY_GET_TOOL,
+  handleSubAgentMemoryGet,
+  handleParentMemoryGet,
+} from "./subagent-memory-tools.js";
 import { prisma as defaultDb } from "./db.js";
 import { logger } from "./logger.js";
 
 const runnerLog = logger.child({ module: "runner" });
 
-/** The subset of the Prisma client the runner touches — mockable in tests. */
-export type RunnerDb = Pick<PrismaClient, "agent" | "run" | "agentTool" | "agentSecret" | "agentDatastore" | "budgetGroup">;
+/**
+ * Sub-agent dispatch (see AgentSubAgent and
+ * docs/private/2026-09-13-agent-subagent-design-and-plan.md §6). One
+ * synthetic tool per declared child, named by the boundName it's attached
+ * under. Synchronous only for v1: the parent's turn blocks until the child
+ * run reaches a terminal state, and its result comes back as this tool
+ * call's result. At most one dispatch is honored per run (see the
+ * "already dispatched" check below) — a haiku-tier classifier deciding
+ * plan-vs-implement should commit to exactly one child, not spray both.
+ *
+ * Two execution paths depending on the child's `kind`:
+ * - `native`: calls `executeRun` directly, bypassing any `Executor` — the
+ *   created Run row is never marked `executionManaged`, so the reconciler
+ *   leaves it alone even if it runs long, the same way an attended
+ *   `reevo run` foreground execution does. Fast, in-process, no durability
+ *   machinery needed for a native turn loop.
+ * - `coding`: a coding-kind child needs a real Docker container (Codex),
+ *   which `executeRun` explicitly refuses to drive itself. Goes through
+ *   `dispatchRun` (the same persistence path webhooks/trigger_agent use)
+ *   with `awaitExecution: true`, so the already-existing `RoutingExecutor`
+ *   sends it to the container backend and this call blocks until it's
+ *   terminal — reusing proven infrastructure rather than re-implementing
+ *   container dispatch. Marked `executionManaged: true` here (unlike the
+ *   native path) since a long-running container crash mid-dispatch is
+ *   exactly the case the reconciler exists for.
+ */
+const DELEGATE_TOOL_PREFIX = "delegate_to_";
+
+function delegateToolDef(boundName: string): LoadedTool {
+  return {
+    name: `${DELEGATE_TOOL_PREFIX}${boundName}`,
+    description: `Delegates a task to your "${boundName}" sub-agent. Runs synchronously and blocks until it finishes; its spend counts against your own run's shared budget scope.`,
+    jsonSchema: {
+      type: "object",
+      properties: {
+        task: { type: "string" },
+        datastoreRef: {
+          type: "object",
+          properties: { name: { type: "string" }, key: { type: "string" } },
+          required: ["name", "key"],
+          additionalProperties: false,
+        },
+        grantParentMemoryKeys: { type: "array", items: { type: "string" } },
+      },
+      required: ["task"],
+      additionalProperties: false,
+    },
+  };
+}
+
+const DelegateArgs = z
+  .object({
+    task: z.string(),
+    datastoreRef: z.object({ name: z.string(), key: z.string() }).strict().optional(),
+    grantParentMemoryKeys: z.array(z.string()).optional(),
+  })
+  .strict();
+
+/**
+ * The subset of the Prisma client the runner touches — mockable in tests.
+ * Includes `codingRun`/`task`/`webhook`/`$transaction`/`$queryRaw` so this
+ * also satisfies `dispatch.ts`'s `DispatchDb`, needed for dispatching a
+ * coding-kind sub-agent from inside a running native turn loop.
+ */
+export type RunnerDb = Pick<
+  PrismaClient,
+  | "agent"
+  | "run"
+  | "agentTool"
+  | "agentSecret"
+  | "agentDatastore"
+  | "budgetGroup"
+  | "agentSubAgent"
+  | "codingRun"
+  | "task"
+  | "webhook"
+  | "$transaction"
+  | "$queryRaw"
+>;
 
 /**
  * The two states a Run can still be driven out of. Every write `executeRun`
@@ -86,7 +171,9 @@ export async function createRun(db: RunnerDb, agentName: string, trigger: RunTri
 /** Drives an existing Run (created by `createRun` or the scheduler) to a terminal state. */
 export async function executeRun(
   runId: string,
-  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory">,
+  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory"> & {
+    executor?: ProviderRegistry["executor"];
+  },
   db: RunnerDb = defaultDb,
   onText?: (delta: string) => void,
   step: StepRunner = runStepInline,
@@ -122,13 +209,34 @@ export async function executeRun(
       where: { agentId: agent.id },
       include: { tool: true },
     });
-    const { effectiveBudgetUsd } = await effectiveBudgetForRun(db, agent);
+    const { effectiveBudgetUsd } = await effectiveBudgetForRun(
+      db,
+      agent,
+      new Date(),
+      existingRun.parentRunId ?? undefined,
+    );
+    // Visibility only, not the security boundary — subagent_memory_get,
+    // parent_memory_get, and delegate_to_<boundName> each re-check the
+    // actual AgentSubAgent edge / per-run grant against the database at
+    // call time regardless of whether the tool was advertised here.
+    const subAgentEdges = await db.agentSubAgent.findMany({
+      where: { parentAgentId: agent.id },
+      select: { boundName: true, childAgentId: true },
+    });
+    const isDispatchedChild = existingRun.parentRunId != null;
+    // Appended, never prepended: the loaded systemPrompt's stable prefix
+    // stays prompt-cache-eligible across every dispatch, even though the
+    // task text itself differs call to call.
+    const systemPrompt = existingRun.taskOverride
+      ? `${agent.systemPrompt}\n\n${existingRun.taskOverride}`
+      : agent.systemPrompt;
     return {
       agentId: agent.id,
       kind: agent.kind,
       memoryEnabled: agent.memoryEnabled,
+      subAgentEdges,
       agent: {
-        systemPrompt: agent.systemPrompt,
+        systemPrompt,
         model: agent.model,
         budgetUsd: effectiveBudgetUsd,
         maxTurns: agent.maxTurns,
@@ -147,6 +255,9 @@ export async function executeRun(
           jsonSchema: attachment.tool.jsonSchema as Record<string, unknown>,
         })),
         ...(agent.memoryEnabled ? MEMORY_TOOL_DEFS : []),
+        ...(subAgentEdges.length > 0 ? [SUBAGENT_MEMORY_GET_TOOL] : []),
+        ...(isDispatchedChild ? [PARENT_MEMORY_GET_TOOL] : []),
+        ...subAgentEdges.map((edge): LoadedTool => delegateToolDef(edge.boundName)),
       ],
       toolsByName: Object.fromEntries(
         attached.map((attachment) => [
@@ -185,6 +296,119 @@ export async function executeRun(
     const runSandboxTool = async (name: string, argsJson: string): Promise<string> => {
       if (loaded.memoryEnabled && MEMORY_TOOL_NAMES.has(name)) {
         return handleMemoryTool(name, argsJson, loaded.agentId, providers.memory);
+      }
+      if (name === "subagent_memory_get") {
+        return handleSubAgentMemoryGet(argsJson, loaded.agentId, db, providers.memory);
+      }
+      if (name === "parent_memory_get") {
+        return handleParentMemoryGet(argsJson, runId, db, providers.memory);
+      }
+      if (name.startsWith(DELEGATE_TOOL_PREFIX)) {
+        const boundName = name.slice(DELEGATE_TOOL_PREFIX.length);
+        const edge = loaded.subAgentEdges.find((e) => e.boundName === boundName);
+        if (!edge) {
+          return JSON.stringify({
+            error: "no_such_subagent",
+            message: `No sub-agent is bound to name "${boundName}".`,
+          });
+        }
+        // At most one dispatch per run: a classifier deciding plan-vs-implement
+        // should commit to exactly one child, never both and never a retry
+        // that leaves two children racing on the same task.
+        const priorDispatches = await db.run.findMany({ where: { parentRunId: { in: [runId] } } });
+        if (priorDispatches.length > 0) {
+          return JSON.stringify({
+            error: "already_dispatched",
+            message: "This run already delegated to a sub-agent; only one delegation is allowed per run.",
+          });
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(argsJson || "{}");
+        } catch (err) {
+          return JSON.stringify({
+            error: "invalid_arguments_json",
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+        let args: z.infer<typeof DelegateArgs>;
+        try {
+          args = DelegateArgs.parse(parsed);
+        } catch (err) {
+          if (err instanceof z.ZodError) {
+            return JSON.stringify({
+              error: "validation_failed",
+              message: err.issues.map((issue) => `${issue.path.join(".") || "input"}: ${issue.message}`).join("; "),
+            });
+          }
+          throw err;
+        }
+
+        const childAgent = await db.agent.findUniqueOrThrow({
+          where: { id: edge.childAgentId },
+          select: { id: true, kind: true, budgetGroupId: true, budgetUsd: true },
+        });
+
+        if (childAgent.kind === "coding") {
+          // Coding-kind children need a real Docker container (Codex/Claude
+          // Code), which executeRun explicitly refuses to drive — go through
+          // the same dispatchRun path webhooks/trigger_agent use instead.
+          // datastoreRef/grantParentMemoryKeys have no equivalent inside a
+          // coding container's own tool surface (subagent_memory_get/
+          // parent_memory_get are native-engine built-ins only), so they're
+          // deliberately dropped here rather than silently implying a
+          // capability that doesn't exist for this path.
+          if (!providers.executor) {
+            return JSON.stringify({
+              error: "coding_dispatch_unavailable",
+              message:
+                "This execution context has no Executor wired in, so a coding-kind sub-agent cannot be dispatched.",
+            });
+          }
+          const { effectiveBudgetUsd } = await effectiveBudgetForRun(db, childAgent, new Date(), runId);
+          const dispatched = await dispatchRun({
+            db,
+            executor: providers.executor,
+            agentId: edge.childAgentId,
+            trigger: "subagent",
+            codingTask: args.task,
+            parentRunId: runId,
+            budgetUsdOverride: effectiveBudgetUsd,
+            awaitExecution: true,
+          });
+          if (!dispatched) {
+            return JSON.stringify({ error: "dispatch_failed", message: "The sub-agent run could not be created." });
+          }
+          const childResult = await db.run.findUniqueOrThrow({ where: { id: dispatched.run.id } });
+          return JSON.stringify({
+            status: childResult.status,
+            finalText: childResult.finalText,
+            costUsd: Number(childResult.costUsd),
+            tokensIn: childResult.tokensIn,
+            tokensOut: childResult.tokensOut,
+          });
+        }
+
+        const taskOverride = args.datastoreRef
+          ? `${args.task}\n\n[Referenced datastore: name="${args.datastoreRef.name}", key="${args.datastoreRef.key}" — use your datastore tools to read it.]`
+          : args.task;
+        const childRun = await db.run.create({
+          data: {
+            agentId: edge.childAgentId,
+            trigger: "subagent",
+            parentRunId: runId,
+            grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [],
+            taskOverride,
+          },
+        });
+        const childResult = await executeRun(childRun.id, providers, db);
+        return JSON.stringify({
+          status: childResult.status,
+          finalText: childResult.finalText,
+          costUsd: Number(childResult.costUsd),
+          tokensIn: childResult.tokensIn,
+          tokensOut: childResult.tokensOut,
+        });
       }
 
       const tool = toolsByName.get(name);
@@ -264,7 +488,9 @@ export async function executeRun(
 /** Convenience: create + execute a manual run in one call (what the CLI's `reevo run` uses). */
 export async function runAgent(
   agentName: string,
-  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory">,
+  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory"> & {
+    executor?: ProviderRegistry["executor"];
+  },
   db: RunnerDb = defaultDb,
   onText?: (delta: string) => void,
 ): Promise<Run> {
