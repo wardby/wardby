@@ -335,6 +335,11 @@ describe("GitVcsProvider", () => {
       const branchFlagIndex = clone.args.indexOf("--branch");
       expect(clone.args[branchFlagIndex + 1]).toBe("reevo/run-run-1");
 
+      // Fidelity: a continuation's remote branch is NOT empty -- it already
+      // sits at baseCommit (the tip we just cloned), unlike a fresh run's
+      // brand-new headRef. pushOnce must treat that as the expected
+      // fast-forward pre-push state, not a conflict.
+      git.remoteSha = BASE_SHA;
       await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
       await expect(provider.finalizeChanges(prepared)).resolves.toEqual({
         outcome: "pull_request_updated",
@@ -377,6 +382,14 @@ describe("GitVcsProvider", () => {
       const prepared = await provider.prepareWorkspace(continuationInput());
       git.changedPaths = ["CODEOWNERS"];
       await expect(provider.finalizeChanges(prepared)).rejects.toThrow("vcs_protected_path:CODEOWNERS");
+    });
+
+    it("still rejects a genuine conflict: the remote branch moved to neither baseCommit nor our new commit", async () => {
+      const { provider, git } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+      git.remoteSha = OTHER_SHA;
+      await expect(provider.finalizeChanges(prepared)).rejects.toThrow("vcs_head_ref_conflict");
     });
   });
 

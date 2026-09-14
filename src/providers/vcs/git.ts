@@ -323,7 +323,15 @@ export class GitVcsProvider implements VcsProvider {
         "user.email",
         "reevo-run@users.noreply.github.com",
       ]);
-      await this.gitForPaths(gitMetadataPath, workspacePath, ["branch", "--force", normalized.headRef, baseCommit]);
+      // Revision-in-place: a continuation's clone (--branch === headRef, above)
+      // already leaves headRef checked out locally, pointing at exactly
+      // baseCommit -- `branch --force` on an already-checked-out branch is
+      // both unnecessary here and something Git refuses outright ("cannot
+      // force update the branch ... checked out"). Only a fresh run (cloned
+      // baseRef, a DIFFERENT name from headRef) needs this to create headRef.
+      if (!normalized.continuation) {
+        await this.gitForPaths(gitMetadataPath, workspacePath, ["branch", "--force", normalized.headRef, baseCommit]);
+      }
       await this.gitForPaths(gitMetadataPath, workspacePath, [
         "symbolic-ref",
         "HEAD",
@@ -633,7 +641,12 @@ export class GitVcsProvider implements VcsProvider {
     await this.options.github.withRepositoryToken(workspace.repository, async (token) => {
       const remote = await this.remoteHead(workspace, token);
       if (remote === commitSha) return;
-      if (remote) throw new Error("vcs_head_ref_conflict");
+      // A continuation's remote branch legitimately already sits at
+      // baseCommit (that's the tip we cloned and committed on top of) --
+      // that's the expected fast-forward pre-push state, not a conflict.
+      // Any OTHER non-null value means something else moved the branch
+      // since we cloned (a human push, a race), which is a real conflict.
+      if (remote && remote !== workspace.baseCommit) throw new Error("vcs_head_ref_conflict");
       try {
         await this.gitFor(workspace, ["push", "origin", `${commitSha}:refs/heads/${workspace.headRef}`], {
           authToken: token,
