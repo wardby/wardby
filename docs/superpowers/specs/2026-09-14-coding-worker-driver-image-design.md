@@ -97,7 +97,7 @@ which must run them (as root, after installing its toolchain) before
 switching to the `reevo` user. `Dockerfile.node-python` (§3) is the worked
 example of doing this correctly.
 
-The `ca-certificates`/`git` install and the `reevo` uid/gid (10001) *are*
+The `ca-certificates`/`git` install and the `reevo` uid/gid (10001) _are_
 baked in, since every coding-worker image needs them regardless of language,
 and pre-creating the uid keeps file ownership consistent across every image
 derived from this base.
@@ -127,7 +127,7 @@ image to a registry — `security.yml`'s `worker-image` job only builds images
 locally (tagged `:$github.sha`) to run the policy check and acceptance
 tests, then discards them. `CODING_WORKER_IMAGE_*` env vars are populated by
 whoever deploys reevo, building/pushing images themselves, out of band. This
-design does not change that for the *node/node-python* images reevo already
+design does not change that for the _node/node-python_ images reevo already
 ships — only the new driver image gets a real publish pipeline.
 
 ## 3. `Dockerfile.node-python` refactor + Node 24 bump
@@ -216,7 +216,7 @@ step-up.
 - `scripts/coding-worker-image-policy.mjs` gains a `--kind=driver` mode
   (default remains today's implicit "runtime" behavior, unchanged for
   existing callers) that keeps the digest-pinning, no-mutable-`FROM`/`npm
-  install`, and Codex-SDK-pin checks, but skips the `USER 10001:10001` /
+install`, and Codex-SDK-pin checks, but skips the `USER 10001:10001` /
   `ENTRYPOINT ["node"` requirements — the driver intentionally has neither.
 - `.github/workflows/security.yml`'s `worker-image` matrix gains a
   `dockerfile: src/coding-worker/Dockerfile.driver` entry (tag-suffix
