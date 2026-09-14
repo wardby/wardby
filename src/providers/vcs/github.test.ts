@@ -297,6 +297,224 @@ describe("GitHubAppClient", () => {
     ).rejects.toThrow("github_pull_request_not_draft");
   });
 
+  describe("continuation status notifications", () => {
+    const PR_LOOKUP_RESPONSE = [
+      {
+        number: 23,
+        html_url: "https://github.com/openai/example/pull/23",
+        body: "<!-- reevo-run:run-1 -->",
+        draft: true,
+      },
+    ];
+
+    it("upsertContinuationStatusComment posts a new comment (with the hidden marker first) when none exists yet", async () => {
+      let createdBody: string | undefined;
+      const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (url.endsWith("/installation")) return json({ id: 42 });
+        if (url.endsWith("/access_tokens")) return tokenResponse();
+        if (url.includes("/pulls?")) return json(PR_LOOKUP_RESPONSE);
+        if (url.includes("/issues/23/comments") && method === "GET") return json([]);
+        if (url.includes("/issues/23/comments") && method === "POST") {
+          createdBody = JSON.parse(bodyText(init?.body)).body;
+          return json({ id: 555 }, 201);
+        }
+        if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+        throw new Error(`unexpected request ${method} ${url}`);
+      }) as typeof fetch;
+      const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+
+      await client.upsertContinuationStatusComment({
+        runId: "run-2",
+        rootRunId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "reevo/run-run-1",
+        body: "working...",
+      });
+
+      expect(createdBody).toBe("<!-- reevo-run-status:run-2 -->\n\nworking...");
+    });
+
+    it("upsertContinuationStatusComment PATCHes the existing marked comment instead of creating a duplicate", async () => {
+      let patchedBody: string | undefined;
+      let postCalls = 0;
+      const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (url.endsWith("/installation")) return json({ id: 42 });
+        if (url.endsWith("/access_tokens")) return tokenResponse();
+        if (url.includes("/pulls?")) return json(PR_LOOKUP_RESPONSE);
+        if (url.includes("/issues/23/comments") && method === "GET") {
+          return json([{ id: 555, body: "<!-- reevo-run-status:run-2 -->\n\nold" }]);
+        }
+        if (url.includes("/issues/23/comments") && method === "POST") {
+          postCalls += 1;
+          return json({ id: 999 }, 201);
+        }
+        if (url.endsWith("/issues/comments/555") && method === "PATCH") {
+          patchedBody = JSON.parse(bodyText(init?.body)).body;
+          return json({ id: 555 }, 200);
+        }
+        if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+        throw new Error(`unexpected request ${method} ${url}`);
+      }) as typeof fetch;
+      const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+
+      await client.upsertContinuationStatusComment({
+        runId: "run-2",
+        rootRunId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "reevo/run-run-1",
+        body: "still working...",
+      });
+
+      expect(patchedBody).toBe("<!-- reevo-run-status:run-2 -->\n\nstill working...");
+      expect(postCalls).toBe(0);
+    });
+
+    it("updateContinuationStatusComment no-ops (never creates) when no marked comment exists yet", async () => {
+      let writeCalls = 0;
+      const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (url.endsWith("/installation")) return json({ id: 42 });
+        if (url.endsWith("/access_tokens")) return tokenResponse();
+        if (url.includes("/pulls?")) return json(PR_LOOKUP_RESPONSE);
+        if (url.includes("/issues/23/comments") && method === "GET") return json([]);
+        if (method === "POST" || method === "PATCH") {
+          writeCalls += 1;
+          return json({}, 200);
+        }
+        if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+        throw new Error(`unexpected request ${method} ${url}`);
+      }) as typeof fetch;
+      const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+
+      await client.updateContinuationStatusComment({
+        runId: "run-2",
+        rootRunId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "reevo/run-run-1",
+        body: "done",
+      });
+
+      expect(writeCalls).toBe(0);
+    });
+
+    it("createContinuationCheckRun creates an in-progress check run keyed by external_id, or no-ops if one already exists", async () => {
+      let createCalls = 0;
+      let createdBody: Record<string, unknown> | undefined;
+      const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (url.endsWith("/installation")) return json({ id: 42 });
+        if (url.endsWith("/access_tokens")) return tokenResponse({ permissions: { checks: "write" } });
+        if (url.includes("/check-runs?") && method === "GET") return json({ check_runs: [] });
+        if (url.endsWith("/check-runs") && method === "POST") {
+          createCalls += 1;
+          createdBody = JSON.parse(bodyText(init?.body));
+          return json({ id: 777 }, 201);
+        }
+        if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+        throw new Error(`unexpected request ${method} ${url}`);
+      }) as typeof fetch;
+      const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+      const sha = "a".repeat(40);
+
+      await client.createContinuationCheckRun({ repository: "openai/example", headSha: sha, runId: "run-2" });
+
+      expect(createCalls).toBe(1);
+      expect(createdBody).toMatchObject({ head_sha: sha, status: "in_progress", external_id: "run-2" });
+    });
+
+    it("createContinuationCheckRun no-ops when a check run already exists for that external_id", async () => {
+      let createCalls = 0;
+      const sha = "a".repeat(40);
+      const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (url.endsWith("/installation")) return json({ id: 42 });
+        if (url.endsWith("/access_tokens")) return tokenResponse({ permissions: { checks: "write" } });
+        if (url.includes("/check-runs?") && method === "GET") {
+          return json({ check_runs: [{ id: 777, external_id: "run-2" }] });
+        }
+        if (url.endsWith("/check-runs") && method === "POST") {
+          createCalls += 1;
+          return json({ id: 999 }, 201);
+        }
+        if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+        throw new Error(`unexpected request ${method} ${url}`);
+      }) as typeof fetch;
+      const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+
+      await client.createContinuationCheckRun({ repository: "openai/example", headSha: sha, runId: "run-2" });
+
+      expect(createCalls).toBe(0);
+    });
+
+    it("completeContinuationCheckRun PATCHes the matching check run with the right conclusion, or no-ops if absent", async () => {
+      let patchedBody: Record<string, unknown> | undefined;
+      const sha = "a".repeat(40);
+      const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (url.endsWith("/installation")) return json({ id: 42 });
+        if (url.endsWith("/access_tokens")) return tokenResponse({ permissions: { checks: "write" } });
+        if (url.includes("/check-runs?") && method === "GET") {
+          return json({ check_runs: [{ id: 777, external_id: "run-2" }] });
+        }
+        if (url.endsWith("/check-runs/777") && method === "PATCH") {
+          patchedBody = JSON.parse(bodyText(init?.body));
+          return json({ id: 777 }, 200);
+        }
+        if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+        throw new Error(`unexpected request ${method} ${url}`);
+      }) as typeof fetch;
+      const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+
+      await client.completeContinuationCheckRun({
+        repository: "openai/example",
+        headSha: sha,
+        runId: "run-2",
+        outcome: "succeeded",
+      });
+
+      expect(patchedBody).toEqual({ status: "completed", conclusion: "success" });
+    });
+
+    it("mints the checks token separately from the repository token, so a rejection on one never affects the other", async () => {
+      const permissionSetsRequested: string[] = [];
+      const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/installation")) return json({ id: 42 });
+        if (url.endsWith("/access_tokens")) {
+          const body = JSON.parse(bodyText(init?.body)) as { permissions: Record<string, string> };
+          const key = Object.keys(body.permissions).sort().join(",");
+          permissionSetsRequested.push(key);
+          // Simulate the Checks permission not having been granted on this installation yet.
+          if (key === "checks") return json({ message: "Resource not accessible by integration" }, 422);
+          return tokenResponse({ permissions: body.permissions });
+        }
+        if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+        throw new Error(`unexpected request ${url}`);
+      }) as typeof fetch;
+      const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+
+      await expect(
+        client.createContinuationCheckRun({ repository: "openai/example", headSha: "a".repeat(40), runId: "run-2" }),
+      ).rejects.toThrow();
+
+      // The real git-push/PR-creation token mint is unaffected by the checks mint's 422 above.
+      await expect(client.withRepositoryToken("openai/example", async (token) => token)).resolves.toBe(TOKEN);
+
+      expect(permissionSetsRequested).toEqual(["checks", "contents,pull_requests"]);
+    });
+  });
+
   it("rejects non-HTTPS or credentialed API base URLs", () => {
     expect(
       () =>

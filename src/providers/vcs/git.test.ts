@@ -3,7 +3,14 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { GitHubRepositoryAccess, PullRequestInput, PullRequestResult } from "./github.js";
+import type {
+  ContinuationCheckRunCompleteInput,
+  ContinuationCheckRunInput,
+  ContinuationStatusCommentInput,
+  GitHubRepositoryAccess,
+  PullRequestInput,
+  PullRequestResult,
+} from "./github.js";
 import {
   GitCommandError,
   GitVcsProvider,
@@ -25,6 +32,13 @@ const REMOTE_URL = "https://github.com/openai/example.git";
 class FakeGitHub implements GitHubRepositoryAccess {
   tokenCalls = 0;
   pullRequestCalls: PullRequestInput[] = [];
+  statusCommentCalls: { method: "upsert" | "update"; input: ContinuationStatusCommentInput }[] = [];
+  checkRunCalls: {
+    method: "create" | "complete";
+    input: ContinuationCheckRunInput | ContinuationCheckRunCompleteInput;
+  }[] = [];
+  /** Set to make every continuation-notification call reject, to prove the caller swallows it. */
+  failContinuationCalls = false;
 
   async withRepositoryToken<T>(_repository: string, action: (token: string) => Promise<T>): Promise<T> {
     this.tokenCalls += 1;
@@ -34,6 +48,26 @@ class FakeGitHub implements GitHubRepositoryAccess {
   async createOrFindDraftPullRequest(input: PullRequestInput): Promise<PullRequestResult> {
     this.pullRequestCalls.push(structuredClone(input));
     return { number: 42, url: "https://github.com/openai/example/pull/42" };
+  }
+
+  async upsertContinuationStatusComment(input: ContinuationStatusCommentInput): Promise<void> {
+    if (this.failContinuationCalls) throw new Error("github_api_error:500");
+    this.statusCommentCalls.push({ method: "upsert", input: structuredClone(input) });
+  }
+
+  async updateContinuationStatusComment(input: ContinuationStatusCommentInput): Promise<void> {
+    if (this.failContinuationCalls) throw new Error("github_api_error:500");
+    this.statusCommentCalls.push({ method: "update", input: structuredClone(input) });
+  }
+
+  async createContinuationCheckRun(input: ContinuationCheckRunInput): Promise<void> {
+    if (this.failContinuationCalls) throw new Error("github_api_error:500");
+    this.checkRunCalls.push({ method: "create", input: structuredClone(input) });
+  }
+
+  async completeContinuationCheckRun(input: ContinuationCheckRunCompleteInput): Promise<void> {
+    if (this.failContinuationCalls) throw new Error("github_api_error:500");
+    this.checkRunCalls.push({ method: "complete", input: structuredClone(input) });
   }
 }
 
@@ -51,6 +85,7 @@ class ScriptedGitRunner implements GitCommandRunner {
   remoteSha: string | null = null;
   remoteUrl = REMOTE_URL;
   pushFails = false;
+  headRef = "reevo/run-run-1";
 
   async run(args: readonly string[], options?: GitCommandOptions): Promise<GitCommandResult> {
     const copied = [...args];
@@ -101,7 +136,7 @@ class ScriptedGitRunner implements GitCommandRunner {
       return { stdout: `${this.headSha}\n`, stderr: "" };
     }
     if (command === "symbolic-ref" && copied.includes("--short")) {
-      return { stdout: "reevo/run-run-1\n", stderr: "" };
+      return { stdout: `${this.headRef}\n`, stderr: "" };
     }
     if (command === "diff") {
       if (copied.includes("--name-only")) {
@@ -113,7 +148,7 @@ class ScriptedGitRunner implements GitCommandRunner {
     if (command === "commit") this.headSha = COMMIT_SHA;
     if (command === "ls-remote") {
       return {
-        stdout: this.remoteSha ? `${this.remoteSha}\trefs/heads/reevo/run-run-1\n` : "",
+        stdout: this.remoteSha ? `${this.remoteSha}\trefs/heads/${this.headRef}\n` : "",
         stderr: "",
       };
     }
@@ -305,6 +340,216 @@ describe("GitVcsProvider", () => {
     git.remoteSha = OTHER_SHA;
     await expect(provider.finalizeChanges(prepared)).rejects.toThrow("vcs_head_ref_conflict");
     expect(git.calls.some((call) => call.args.includes("push"))).toBe(false);
+  });
+
+  describe("revision-in-place (continuation)", () => {
+    function continuationInput(overrides: Partial<VcsPrepareInput> = {}): VcsPrepareInput {
+      return {
+        runId: "run-2",
+        repository: REPOSITORY,
+        baseRef: "main",
+        headRef: "reevo/run-run-1",
+        protectedPaths: [".github/workflows/**", "CODEOWNERS"],
+        continuation: { rootRunId: "run-1" },
+        ...overrides,
+      };
+    }
+
+    it("clones the existing branch (not baseRef), anchors baseCommit on its tip, and updates rather than opens a PR", async () => {
+      const { provider, github, git } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+
+      expect(prepared).toMatchObject({
+        id: "vcs-run-2",
+        headRef: "reevo/run-run-1",
+        baseCommit: BASE_SHA,
+        continuation: { rootRunId: "run-1" },
+      });
+      const clone = git.calls.find((call) => call.args.includes("clone"))!;
+      const branchFlagIndex = clone.args.indexOf("--branch");
+      expect(clone.args[branchFlagIndex + 1]).toBe("reevo/run-run-1");
+
+      // Fidelity: a continuation's remote branch is NOT empty -- it already
+      // sits at baseCommit (the tip we just cloned), unlike a fresh run's
+      // brand-new headRef. pushOnce must treat that as the expected
+      // fast-forward pre-push state, not a conflict.
+      git.remoteSha = BASE_SHA;
+      await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+      await expect(provider.finalizeChanges(prepared)).resolves.toEqual({
+        outcome: "pull_request_updated",
+        repository: REPOSITORY,
+        baseRef: "main",
+        baseCommit: BASE_SHA,
+        headRef: "reevo/run-run-1",
+        commitSha: COMMIT_SHA,
+        pullRequestNumber: 42,
+        pullRequestUrl: "https://github.com/openai/example/pull/42",
+      });
+      // PR identity is keyed to the ROOT run's id, not this (continuation) run's own.
+      expect(github.pullRequestCalls[0]).toMatchObject({ runId: "run-1", headRef: "reevo/run-run-1" });
+    });
+
+    it("recovers a continuation workspace deterministically without minting another token", async () => {
+      const { provider, github } = await harness();
+      const input = continuationInput();
+      const prepared = await provider.prepareWorkspace(input);
+      await expect(provider.recoverWorkspace(input)).resolves.toEqual(prepared);
+      expect(github.tokenCalls).toBe(1);
+    });
+
+    it("rejects a continuation whose headRef doesn't match the claimed root run", async () => {
+      const { provider } = await harness();
+      await expect(
+        provider.prepareWorkspace(continuationInput({ continuation: { rootRunId: "some-other-run" } })),
+      ).rejects.toThrow("vcs_head_ref_invalid");
+    });
+
+    it("rejects a malformed continuation root run id", async () => {
+      const { provider } = await harness();
+      await expect(
+        provider.prepareWorkspace(continuationInput({ continuation: { rootRunId: "not valid!" } })),
+      ).rejects.toThrow("vcs_root_run_id_invalid");
+    });
+
+    it("still enforces protected paths across the continuation's own diff", async () => {
+      const { provider, git } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      git.changedPaths = ["CODEOWNERS"];
+      await expect(provider.finalizeChanges(prepared)).rejects.toThrow("vcs_protected_path:CODEOWNERS");
+    });
+
+    it("still rejects a genuine conflict: the remote branch moved to neither baseCommit nor our new commit", async () => {
+      const { provider, git } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+      git.remoteSha = OTHER_SHA;
+      await expect(provider.finalizeChanges(prepared)).rejects.toThrow("vcs_head_ref_conflict");
+    });
+
+    describe("continuation notifications (best-effort GitHub status signal)", () => {
+      it("notifyContinuationStarted posts a status comment and creates a check run, keyed to this round's own runId", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationStarted(prepared);
+
+        expect(github.statusCommentCalls).toEqual([
+          {
+            method: "upsert",
+            input: {
+              runId: "run-2",
+              rootRunId: "run-1",
+              repository: REPOSITORY,
+              baseRef: "main",
+              headRef: "reevo/run-run-1",
+              body: "🔄 reevo run run-2 is working on this PR...",
+            },
+          },
+        ]);
+        expect(github.checkRunCalls).toEqual([
+          { method: "create", input: { repository: REPOSITORY, headSha: BASE_SHA, runId: "run-2" } },
+        ]);
+      });
+
+      it("notifyContinuationFinished updates the status comment and completes the check run with the given outcome", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationFinished(prepared, "succeeded");
+
+        expect(github.statusCommentCalls).toEqual([
+          {
+            method: "update",
+            input: {
+              runId: "run-2",
+              rootRunId: "run-1",
+              repository: REPOSITORY,
+              baseRef: "main",
+              headRef: "reevo/run-run-1",
+              body: "✅ reevo run run-2 finished.",
+            },
+          },
+        ]);
+        expect(github.checkRunCalls).toEqual([
+          {
+            method: "complete",
+            input: { repository: REPOSITORY, headSha: BASE_SHA, runId: "run-2", outcome: "succeeded" },
+          },
+        ]);
+      });
+
+      it("prefixes the human-readable agent name ahead of the opaque run id when given one", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationStarted(prepared, { agentName: "knock-knock-implement" });
+
+        expect(github.statusCommentCalls[0].input.body).toBe(
+          "🔄 knock-knock-implement (reevo run run-2) is working on this PR...",
+        );
+      });
+
+      it("includes the agent name in the done comment too, particularly useful for the cross-agent case", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationFinished(prepared, "succeeded", { agentName: "knock-knock-implement" });
+
+        expect(github.statusCommentCalls[0].input.body).toBe("✅ knock-knock-implement (reevo run run-2) finished.");
+      });
+
+      it("includes the agent's own summary in the done comment when given one", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationFinished(prepared, "succeeded", {
+          summary: "Added timestamped logging for every served joke.",
+        });
+
+        expect(github.statusCommentCalls[0].input.body).toBe(
+          "✅ reevo run run-2 finished.\n\nAdded timestamped logging for every served joke.",
+        );
+      });
+
+      it("omits the summary suffix entirely when none is given", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationFinished(prepared, "failed", {});
+
+        expect(github.statusCommentCalls[0].input.body).toBe("❌ reevo run run-2 failed.");
+      });
+
+      it("uses a failed-shaped body/outcome when the run failed", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationFinished(prepared, "failed");
+
+        expect(github.statusCommentCalls[0].input.body).toBe("❌ reevo run run-2 failed.");
+        expect(github.checkRunCalls[0].input).toMatchObject({ outcome: "failed" });
+      });
+
+      it("is a no-op for a fresh (non-continuation) workspace", async () => {
+        const { provider, github, input } = await harness();
+        const prepared = await provider.prepareWorkspace(input);
+
+        await provider.notifyContinuationStarted(prepared);
+        await provider.notifyContinuationFinished(prepared, "succeeded");
+
+        expect(github.statusCommentCalls).toHaveLength(0);
+        expect(github.checkRunCalls).toHaveLength(0);
+      });
+
+      it("swallows a GitHub API failure without throwing -- must never affect the real coding run", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+        github.failContinuationCalls = true;
+
+        await expect(provider.notifyContinuationStarted(prepared)).resolves.toBeUndefined();
+        await expect(provider.notifyContinuationFinished(prepared, "failed")).resolves.toBeUndefined();
+      });
+    });
   });
 
   it("cleans up idempotently but rejects a forged cleanup path", async () => {

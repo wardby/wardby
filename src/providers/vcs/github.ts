@@ -5,8 +5,13 @@ import { normalizeGitHubRepository, normalizeGitRef } from "../../coding/protoco
 const DEFAULT_API_BASE_URL = "https://api.github.com";
 const DEFAULT_API_VERSION = "2026-03-10";
 const RUN_MARKER_PREFIX = "<!-- reevo-run:";
+const STATUS_COMMENT_MARKER_PREFIX = "<!-- reevo-run-status:";
+const CONTINUATION_CHECK_RUN_NAME = "reevo/continuation";
 /** Mirrors coding/protocol.ts's tagSchema — validated independently here since this is where it reaches GitHub. */
 const SAFE_PULL_REQUEST_TAG = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,31}$/;
+/** Mirrors the runId shape validated elsewhere (coding/protocol.ts, git.ts) — validated independently here too. */
+const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const SAFE_COMMIT_SHA = /^[0-9a-f]{40}$/;
 
 export interface GitHubAppConfig {
   appId: string;
@@ -36,9 +41,40 @@ export interface PullRequestResult {
   url: string;
 }
 
+/** See VcsProvider.notifyContinuationStarted/Finished (types.ts) — these back that GitHub-specific mechanism. */
+export interface ContinuationStatusCommentInput {
+  /** This continuation round's own run id — the comment's identity/marker key. */
+  runId: string;
+  /** The run whose PR this belongs to (used only to re-find the PR via the existing marker lookup). */
+  rootRunId: string;
+  repository: string;
+  baseRef: string;
+  headRef: string;
+  body: string;
+}
+
+export interface ContinuationCheckRunInput {
+  repository: string;
+  headSha: string;
+  /** Stored as the check run's external_id — the re-lookup key, so no numeric id needs to be cached anywhere. */
+  runId: string;
+}
+
+export interface ContinuationCheckRunCompleteInput extends ContinuationCheckRunInput {
+  outcome: "succeeded" | "failed";
+}
+
 export interface GitHubRepositoryAccess {
   withRepositoryToken<T>(repository: string, action: (token: string) => Promise<T>): Promise<T>;
   createOrFindDraftPullRequest(input: PullRequestInput): Promise<PullRequestResult>;
+  /** Creates the status comment if none exists yet for this run, else updates it. */
+  upsertContinuationStatusComment(input: ContinuationStatusCommentInput): Promise<void>;
+  /** Updates the status comment if one already exists for this run; a no-op otherwise (never creates). */
+  updateContinuationStatusComment(input: ContinuationStatusCommentInput): Promise<void>;
+  /** Creates an in-progress check run if none exists yet for this run+commit; a no-op if one already does. */
+  createContinuationCheckRun(input: ContinuationCheckRunInput): Promise<void>;
+  /** Completes the check run if one exists for this run+commit; a no-op otherwise (never creates). */
+  completeContinuationCheckRun(input: ContinuationCheckRunCompleteInput): Promise<void>;
 }
 
 type Fetch = typeof globalThis.fetch;
@@ -80,6 +116,11 @@ function pullRequestBody(input: PullRequestInput): string {
     sections.push(["**Tests:**", ...input.tests.map((test) => `- \`${test.command}\`: ${test.outcome}`)].join("\n"));
   }
   return sections.join("\n\n");
+}
+
+/** The hidden marker stays first and unconditional: findStatusComment's lookup depends on it. */
+function statusCommentBody(runId: string, body: string): string {
+  return `${STATUS_COMMENT_MARKER_PREFIX}${runId} -->\n\n${body}`;
 }
 
 function normalizeApiBaseUrl(value: string): string {
@@ -127,6 +168,131 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     } finally {
       await this.revokeToken(token).catch(() => undefined);
     }
+  }
+
+  /**
+   * Isolated from withRepositoryToken on purpose: "Checks: write" is a
+   * genuinely distinct GitHub App permission from contents/pull_requests
+   * (confirmed empirically). Minting it separately means an ungranted-permission
+   * failure here can only ever disable the check-run mechanism, never the
+   * real git push, PR, or status comment. (Status comments, below, do NOT
+   * need this treatment: PR-comment writes work fine on the existing
+   * contents/pull_requests token -- confirmed empirically after "Issues:
+   * write" alone, on its own isolated token, kept returning 403 "Resource
+   * not accessible by integration" even once granted; commenting on a PR
+   * apparently isn't gated the same way a genuine issue comment might be.)
+   */
+  private async withChecksToken<T>(repository: string, action: (token: string) => Promise<T>): Promise<T> {
+    const normalized = normalizeGitHubRepository(repository);
+    const token = await this.mintChecksToken(normalized);
+    try {
+      return await action(token);
+    } finally {
+      await this.revokeToken(token).catch(() => undefined);
+    }
+  }
+
+  async upsertContinuationStatusComment(input: ContinuationStatusCommentInput): Promise<void> {
+    const repository = normalizeGitHubRepository(input.repository);
+    const baseRef = normalizeGitRef(input.baseRef);
+    const headRef = normalizeGitRef(input.headRef);
+    if (!SAFE_RUN_ID.test(input.runId) || !SAFE_RUN_ID.test(input.rootRunId)) {
+      throw new Error("github_status_comment_input_invalid");
+    }
+    await this.withRepositoryToken(repository, async (token) => {
+      const pr = await this.findPullRequest(token, { runId: input.rootRunId, repository, baseRef, headRef });
+      if (!pr) return;
+      const existing = await this.findStatusComment(token, repository, pr.number, input.runId);
+      const [owner, name] = repository.split("/");
+      const body = statusCommentBody(input.runId, input.body);
+      if (existing) {
+        await this.requestJson(
+          `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issues/comments/${existing.id}`,
+          token,
+          { method: "PATCH", body: JSON.stringify({ body }) },
+          [200],
+        );
+      } else {
+        await this.requestJson(
+          `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issues/${pr.number}/comments`,
+          token,
+          { method: "POST", body: JSON.stringify({ body }) },
+          [201],
+        );
+      }
+    });
+  }
+
+  async updateContinuationStatusComment(input: ContinuationStatusCommentInput): Promise<void> {
+    const repository = normalizeGitHubRepository(input.repository);
+    const baseRef = normalizeGitRef(input.baseRef);
+    const headRef = normalizeGitRef(input.headRef);
+    if (!SAFE_RUN_ID.test(input.runId) || !SAFE_RUN_ID.test(input.rootRunId)) {
+      throw new Error("github_status_comment_input_invalid");
+    }
+    await this.withRepositoryToken(repository, async (token) => {
+      const pr = await this.findPullRequest(token, { runId: input.rootRunId, repository, baseRef, headRef });
+      if (!pr) return;
+      const existing = await this.findStatusComment(token, repository, pr.number, input.runId);
+      if (!existing) return;
+      const [owner, name] = repository.split("/");
+      await this.requestJson(
+        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issues/comments/${existing.id}`,
+        token,
+        { method: "PATCH", body: JSON.stringify({ body: statusCommentBody(input.runId, input.body) }) },
+        [200],
+      );
+    });
+  }
+
+  async createContinuationCheckRun(input: ContinuationCheckRunInput): Promise<void> {
+    const repository = normalizeGitHubRepository(input.repository);
+    if (!SAFE_RUN_ID.test(input.runId) || !SAFE_COMMIT_SHA.test(input.headSha)) {
+      throw new Error("github_check_run_input_invalid");
+    }
+    await this.withChecksToken(repository, async (token) => {
+      const existing = await this.findCheckRun(token, repository, input.headSha, input.runId);
+      if (existing) return;
+      const [owner, name] = repository.split("/");
+      await this.requestJson(
+        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/check-runs`,
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            name: CONTINUATION_CHECK_RUN_NAME,
+            head_sha: input.headSha,
+            status: "in_progress",
+            external_id: input.runId,
+          }),
+        },
+        [201],
+      );
+    });
+  }
+
+  async completeContinuationCheckRun(input: ContinuationCheckRunCompleteInput): Promise<void> {
+    const repository = normalizeGitHubRepository(input.repository);
+    if (!SAFE_RUN_ID.test(input.runId) || !SAFE_COMMIT_SHA.test(input.headSha)) {
+      throw new Error("github_check_run_input_invalid");
+    }
+    await this.withChecksToken(repository, async (token) => {
+      const existing = await this.findCheckRun(token, repository, input.headSha, input.runId);
+      if (!existing) return;
+      const [owner, name] = repository.split("/");
+      await this.requestJson(
+        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/check-runs/${existing.id}`,
+        token,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            status: "completed",
+            conclusion: input.outcome === "succeeded" ? "success" : "failure",
+          }),
+        },
+        [200],
+      );
+    });
   }
 
   async createOrFindDraftPullRequest(input: PullRequestInput): Promise<PullRequestResult> {
@@ -187,6 +353,37 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
   }
 
   private async mintRepositoryToken(repository: string): Promise<string> {
+    return this.mintScopedToken(
+      repository,
+      { contents: "write", pull_requests: "write" },
+      (name, level) =>
+        (name === "contents" && level === "write") ||
+        (name === "pull_requests" && level === "write") ||
+        (name === "metadata" && level === "read"),
+    );
+  }
+
+  private async mintChecksToken(repository: string): Promise<string> {
+    return this.mintScopedToken(
+      repository,
+      { checks: "write" },
+      (name, level) => (name === "checks" && level === "write") || (name === "metadata" && level === "read"),
+    );
+  }
+
+  /**
+   * Shared installation-token mint: requests exactly `permissions`, then
+   * verifies the response granted exactly that (no more, no less, modulo
+   * the always-implicit `metadata: read`) before trusting the token. Each
+   * caller requests the narrowest permission set it needs — see
+   * withIssuesToken/withChecksToken for why these are minted separately
+   * from withRepositoryToken rather than requesting a union of everything.
+   */
+  private async mintScopedToken(
+    repository: string,
+    permissions: Record<string, string>,
+    isAllowedPermission: (name: string, level: string) => boolean,
+  ): Promise<string> {
     const [owner, name] = repository.split("/");
     const appJwt = await this.appJwt();
     const installationResponse = await this.requestJson(
@@ -198,36 +395,27 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     const tokenResponse = await this.requestJson(
       `/app/installations/${installationId}/access_tokens`,
       appJwt,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          repositories: [name],
-          permissions: { contents: "write", pull_requests: "write" },
-        }),
-      },
+      { method: "POST", body: JSON.stringify({ repositories: [name], permissions }) },
       [201],
     );
     const payload = record(await tokenResponse.json());
-    const permissions = record(payload.permissions);
+    const grantedPermissions = record(payload.permissions);
     const repositories = Array.isArray(payload.repositories) ? payload.repositories.map(record) : [];
     const scopedRepository = repositories.some(
       (candidate) => typeof candidate.full_name === "string" && candidate.full_name.toLowerCase() === repository,
     );
     const expiresAt = typeof payload.expires_at === "string" ? Date.parse(payload.expires_at) : Number.NaN;
-    const unexpectedPermission = Object.entries(permissions).some(
-      ([name, level]) =>
-        !(
-          (name === "contents" && level === "write") ||
-          (name === "pull_requests" && level === "write") ||
-          (name === "metadata" && level === "read")
-        ),
+    const unexpectedPermission = Object.entries(grantedPermissions).some(
+      ([permissionName, level]) => !isAllowedPermission(permissionName, level as string),
+    );
+    const requestedGranted = Object.entries(permissions).every(
+      ([permissionName, level]) => grantedPermissions[permissionName] === level,
     );
     if (
       !isSafeGitHubInstallationToken(payload.token) ||
       !Number.isFinite(expiresAt) ||
       expiresAt <= this.now().getTime() + 60_000 ||
-      permissions.contents !== "write" ||
-      permissions.pull_requests !== "write" ||
+      !requestedGranted ||
       unexpectedPermission ||
       !scopedRepository
     ) {
@@ -290,6 +478,48 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
       throw new Error("github_pull_request_response_invalid");
     }
     return { number, url: expectedUrl };
+  }
+
+  private async findStatusComment(
+    token: string,
+    repository: string,
+    pullRequestNumber: number,
+    runId: string,
+  ): Promise<{ id: number } | null> {
+    const [owner, name] = repository.split("/");
+    const response = await this.requestJson(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issues/${pullRequestNumber}/comments?per_page=100`,
+      token,
+    );
+    const payload: unknown = await response.json();
+    if (!Array.isArray(payload)) throw new Error("github_api_invalid_response");
+    const marker = `${STATUS_COMMENT_MARKER_PREFIX}${runId} -->`;
+    for (const item of payload) {
+      const candidate = record(item);
+      if (typeof candidate.body === "string" && candidate.body.includes(marker)) {
+        return { id: positiveInteger(candidate.id) };
+      }
+    }
+    return null;
+  }
+
+  private async findCheckRun(
+    token: string,
+    repository: string,
+    headSha: string,
+    runId: string,
+  ): Promise<{ id: number } | null> {
+    const [owner, name] = repository.split("/");
+    const response = await this.requestJson(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/commits/${headSha}/check-runs?per_page=100`,
+      token,
+    );
+    const payload = record(await response.json());
+    const checkRuns = Array.isArray(payload.check_runs) ? payload.check_runs.map(record) : [];
+    for (const candidate of checkRuns) {
+      if (candidate.external_id === runId) return { id: positiveInteger(candidate.id) };
+    }
+    return null;
   }
 
   private async requestJson(

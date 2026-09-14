@@ -366,8 +366,19 @@ model CodingRun {
   updatedAt         DateTime            @updatedAt
   proxySession      CodingProxySession?
 
+  /// Revision-in-place (see docs/private/2026-09-13-coding-pr-revision-in-place-design.md).
+  /// Points directly at the ROOT CodingRun that actually owns the branch/PR
+  /// this run's headRef reuses -- never a chain to "whichever run
+  /// immediately preceded this one." Deliberately not restricted to the
+  /// same agent: a plan run's PR can be continued by an implement run on
+  /// the same branch. Null means this run owns its own fresh branch/PR.
+  rootCodingRunId String?
+  rootCodingRun   CodingRun?  @relation("CodingRunContinuation", fields: [rootCodingRunId], references: [runId])
+  continuations   CodingRun[] @relation("CodingRunContinuation")
+
   @@index([jobBackend, jobHandle])
   @@index([failureCategory])
+  @@index([rootCodingRunId])
 }
 
 enum CodingProxySessionStatus {

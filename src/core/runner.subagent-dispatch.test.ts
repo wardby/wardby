@@ -63,9 +63,15 @@ interface FakeEdge {
   boundName: string;
 }
 
-function fakeDb(agents: FakeAgent[], edges: FakeEdge[], priorRuns: FakeRun[] = []): RunnerDb {
+function fakeDb(
+  agents: FakeAgent[],
+  edges: FakeEdge[],
+  priorRuns: FakeRun[] = [],
+  seedCodingRuns: Record<string, any>[] = [],
+): RunnerDb {
   const agentsById = new Map(agents.map((a) => [a.id, a]));
   const runs = new Map(priorRuns.map((r) => [r.id, r]));
+  const codingRuns = new Map(seedCodingRuns.map((r) => [r.runId, r]));
   let counter = 0;
 
   const db: any = {
@@ -77,7 +83,13 @@ function fakeDb(agents: FakeAgent[], edges: FakeEdge[], priorRuns: FakeRun[] = [
         return a;
       }) as any,
     },
-    codingRun: { create: (async ({ data }: any) => data) as any },
+    codingRun: {
+      create: (async ({ data }: any) => {
+        codingRuns.set(data.runId, data);
+        return data;
+      }) as any,
+      findUnique: (async ({ where }: any) => codingRuns.get(where.runId) ?? null) as any,
+    },
     run: {
       create: (async ({ data }: any) => {
         const id = data.id ?? `run_${++counter}`;
@@ -470,6 +482,78 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     // a long-running container crash mid-dispatch is exactly what the
     // reconciler exists for.
     expect(childRuns[0].executionManaged).toBe(true);
+  });
+
+  it("revision-in-place: continuePriorRun threads through dispatchRun to the child's CodingRun, even to a different bound sub-agent", async () => {
+    const dispatcher: FakeAgent = {
+      id: "dispatcher-agent",
+      name: "knock-knock-delivery",
+      systemPrompt: "You classify and delegate.",
+      model: "m",
+      budgetUsd: 5,
+      maxTurns: 10,
+    };
+    const implementer: FakeAgent = {
+      id: "implement-agent",
+      name: "knock-knock-implement",
+      systemPrompt: "unused for coding agents",
+      model: "gpt-5.6-luna",
+      budgetUsd: 5,
+      maxTurns: 10,
+      kind: "coding",
+      codingProfile,
+    };
+    const db = fakeDb(
+      [dispatcher, implementer],
+      [{ parentAgentId: "dispatcher-agent", childAgentId: "implement-agent", boundName: "implement" }],
+      [],
+      [
+        {
+          runId: "plan-run-1",
+          repository: codingProfile.repository,
+          baseRef: codingProfile.baseRef,
+          headRef: "reevo/run-plan-run-1",
+          rootCodingRunId: null,
+          result: {
+            schemaVersion: 1,
+            outcome: "pull_request_opened",
+            repository: codingProfile.repository,
+            baseRef: codingProfile.baseRef,
+            headRef: "reevo/run-plan-run-1",
+            commitSha: "a".repeat(40),
+            pullRequestUrl: `https://github.com/${codingProfile.repository}/pull/22`,
+            pullRequestNumber: 22,
+            summary: "Posted the plan",
+            tests: [],
+            usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+          },
+        },
+      ],
+    );
+    const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+    const executor = fakeCodingExecutor(db, {
+      status: "succeeded",
+      finalText: "Implemented the requested change.",
+      costUsd: 0.02,
+    });
+
+    const llm = scriptedLlm([
+      toolCall(
+        "delegate_to_implement",
+        JSON.stringify({ task: "implement the approved plan", continuePriorRun: "plan-run-1" }),
+      ),
+      finalAnswer("delegated to implement, done"),
+    ]);
+    const result = await executeRun(parentRun.id, providers(llm, executor), db);
+
+    expect(result.status).toBe("succeeded");
+    const childRuns = (await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })) as Array<{
+      id: string;
+    }>;
+    expect(childRuns).toHaveLength(1);
+    const childCodingRun = await (db as any).codingRun.findUnique({ where: { runId: childRuns[0].id } });
+    // Same branch/PR the plan agent opened -- a DIFFERENT sub-agent continuing it (cross-role, allowed by design).
+    expect(childCodingRun).toMatchObject({ rootCodingRunId: "plan-run-1", headRef: "reevo/run-plan-run-1" });
   });
 
   it("refuses a second delegate_to_* call in the same run, even to a different bound sub-agent", async () => {

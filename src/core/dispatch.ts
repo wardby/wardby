@@ -1,6 +1,11 @@
 import type { Prisma, PrismaClient, Run, RunTrigger, Task } from "@prisma/client";
 import type { Executor } from "../providers/executor/types.js";
-import { CODING_PROTOCOL_VERSION, CodingTaskInputSchema } from "../coding/protocol.js";
+import {
+  CODING_PROTOCOL_VERSION,
+  CodingTaskInputSchema,
+  normalizeGitHubRepository,
+  publicCodingRunResult,
+} from "../coding/protocol.js";
 import { assertCodingProviderModel } from "../coding/provider.js";
 import { logger } from "./logger.js";
 
@@ -22,6 +27,18 @@ export interface DispatchRunOptions {
   trigger?: RunTrigger;
   codingTask?: string;
   codingBaseRef?: string;
+  /**
+   * Revision-in-place (see
+   * docs/private/2026-09-13-coding-pr-revision-in-place-design.md): the id
+   * of a prior CodingRun whose branch/PR this dispatch should push a new
+   * commit onto instead of opening a fresh branch. Resolved and verified
+   * here against the database (same repository, and it actually reached a
+   * PR-opening outcome) -- never trusted as a raw branch name, and
+   * deliberately not restricted to the same agent (cross-role continuation,
+   * e.g. plan -> implement on one PR, is allowed by design). Mutually
+   * exclusive with `codingBaseRef`. Coding agents only.
+   */
+  continuesCodingRunId?: string;
   now?: Date;
   lockAgent?: boolean;
   task?: { principalId: string; ttlMs: number };
@@ -132,18 +149,48 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           assertCodingProviderModel(agent.codingProfile.provider, agent.model);
           const task = options.codingTask ?? agent.codingProfile.defaultTask;
           if (!task) throw new Error(`Coding agent "${agent.id}" requires a task.`);
-          const headRef = `reevo/run-${run.id}`;
           const budgetUsd = options.budgetUsdOverride ?? Number(agent.budgetUsd);
+
+          let baseRef = options.codingBaseRef ?? agent.codingProfile.baseRef;
+          let headRef = `reevo/run-${run.id}`;
+          let continuationOf: { runId: string } | undefined;
+          let rootCodingRunId: string | undefined;
+          if (options.continuesCodingRunId !== undefined) {
+            if (options.codingBaseRef !== undefined) {
+              throw new Error("continuesCodingRunId cannot be combined with codingBaseRef.");
+            }
+            const candidate = await tx.codingRun.findUnique({ where: { runId: options.continuesCodingRunId } });
+            if (!candidate) throw new Error("Cannot continue an unknown coding run.");
+            const root = candidate.rootCodingRunId
+              ? await tx.codingRun.findUnique({ where: { runId: candidate.rootCodingRunId } })
+              : candidate;
+            if (!root) throw new Error("Cannot continue an unknown coding run.");
+            if (
+              normalizeGitHubRepository(root.repository) !== normalizeGitHubRepository(agent.codingProfile.repository)
+            ) {
+              throw new Error("Cannot continue a coding run from a different repository.");
+            }
+            const rootResult = publicCodingRunResult(root.result);
+            if (rootResult?.outcome !== "pull_request_opened" && rootResult?.outcome !== "pull_request_updated") {
+              throw new Error("Cannot continue a coding run that never opened a pull request.");
+            }
+            baseRef = root.baseRef;
+            headRef = root.headRef;
+            continuationOf = { runId: root.runId };
+            rootCodingRunId = root.runId;
+          }
+
           const input = CodingTaskInputSchema.parse({
             schemaVersion: CODING_PROTOCOL_VERSION,
             runId: run.id,
             repository: agent.codingProfile.repository,
-            baseRef: options.codingBaseRef ?? agent.codingProfile.baseRef,
+            baseRef,
             headRef,
             task,
             model: agent.model,
             budgetUsd,
             deadlineAt: new Date(now.getTime() + agent.codingProfile.timeoutSec * 1000).toISOString(),
+            continuationOf,
           });
           const workerImage = options.executor.resolveCodingWorkerImage?.({
             provider: agent.codingProfile.provider,
@@ -165,9 +212,14 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               protectedPaths: agent.codingProfile.protectedPaths as Prisma.InputJsonValue,
               workerImage,
               budgetReservedUsd: budgetUsd,
+              rootCodingRunId,
             },
           });
-        } else if (options.codingTask !== undefined || options.codingBaseRef !== undefined) {
+        } else if (
+          options.codingTask !== undefined ||
+          options.codingBaseRef !== undefined ||
+          options.continuesCodingRunId !== undefined
+        ) {
           throw new Error("Coding overrides cannot be supplied for a native agent.");
         }
 

@@ -29,6 +29,7 @@ function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSn
     runId: "run-1",
     status: "running",
     agentKind: "coding",
+    agentName: "knock-knock-implement",
     ownerId: "principal-1",
     task: "Fix the bug and test it.",
     repository: "openai/example",
@@ -39,6 +40,7 @@ function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSn
     timeoutSec: 900,
     allowedEgress: [],
     protectedPaths: [".github/workflows/**", "CODEOWNERS"],
+    rootCodingRunId: null,
     budgetUsd: 2,
     tokensIn: 0,
     tokensOut: 0,
@@ -152,6 +154,10 @@ class FakeVcs implements VcsProvider {
   cleaned = 0;
   workspace: PreparedWorkspace | null = null;
   lastFinalizeDetails?: FinalizeChangesDetails;
+  lastPrepareInput?: VcsPrepareInput;
+  notifyStartedCalls = 0;
+  lastNotifyStartedAgentName?: string;
+  notifyFinishedCalls: Array<{ outcome: "succeeded" | "failed"; summary?: string; agentName?: string }> = [];
 
   constructor(
     private readonly root: string,
@@ -160,6 +166,7 @@ class FakeVcs implements VcsProvider {
 
   async prepareWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace> {
     this.prepared += 1;
+    this.lastPrepareInput = input;
     this.events.push("prepare");
     this.workspace = this.makeWorkspace(input);
     return this.workspace;
@@ -168,18 +175,18 @@ class FakeVcs implements VcsProvider {
     return this.workspace?.runId === input.runId ? this.workspace : null;
   }
   async finalizeChanges(
-    _workspace: PreparedWorkspace,
+    workspace: PreparedWorkspace,
     details?: FinalizeChangesDetails,
   ): Promise<FinalizeChangesResult> {
     this.finalized += 1;
     this.lastFinalizeDetails = details;
     this.events.push("finalize");
     return {
-      outcome: "pull_request_opened",
+      outcome: workspace.continuation ? "pull_request_updated" : "pull_request_opened",
       repository: "openai/example",
       baseRef: "main",
       baseCommit: "a".repeat(40),
-      headRef: "reevo/run-run-1",
+      headRef: workspace.headRef,
       commitSha: "b".repeat(40),
       pullRequestNumber: 42,
       pullRequestUrl: "https://github.com/openai/example/pull/42",
@@ -189,6 +196,19 @@ class FakeVcs implements VcsProvider {
     this.cleaned += 1;
     this.events.push("cleanup");
     this.workspace = null;
+  }
+  async notifyContinuationStarted(_workspace: PreparedWorkspace, details?: { agentName?: string }): Promise<void> {
+    this.notifyStartedCalls += 1;
+    this.lastNotifyStartedAgentName = details?.agentName;
+    this.events.push("notifyStarted");
+  }
+  async notifyContinuationFinished(
+    _workspace: PreparedWorkspace,
+    outcome: "succeeded" | "failed",
+    details?: { summary?: string; agentName?: string },
+  ): Promise<void> {
+    this.notifyFinishedCalls.push({ outcome, summary: details?.summary, agentName: details?.agentName });
+    this.events.push(`notifyFinished:${outcome}`);
   }
   private makeWorkspace(input: VcsPrepareInput): PreparedWorkspace {
     return {
@@ -291,6 +311,7 @@ describe("ContainerExecutor", () => {
     });
     expect(created.events).toEqual([
       "prepare",
+      "notifyStarted",
       "session",
       "launch",
       "cancel",
@@ -299,6 +320,7 @@ describe("ContainerExecutor", () => {
       "finalize",
       "remove",
       "cleanup",
+      "notifyFinished:succeeded",
     ]);
     await expect(created.capabilities.get("run-1")).rejects.toThrow("coding_capability_unavailable");
     expect(created.observer.events.map((event) => event.stage)).toEqual([
@@ -318,6 +340,79 @@ describe("ContainerExecutor", () => {
       activeJobs: 0,
       budgetReservedUsd: 2,
       budgetActualUsd: 0.01,
+    });
+  });
+
+  it("revision-in-place: threads continuation through to the VCS layer and persists pull_request_updated", async () => {
+    const created = await harness({ rootCodingRunId: "root-run", headRef: "reevo/run-root-run" });
+    await created.executor.start("run-1");
+
+    expect(created.vcs.lastPrepareInput).toMatchObject({
+      headRef: "reevo/run-root-run",
+      continuation: { rootRunId: "root-run" },
+    });
+    expect(created.store.run.result).toMatchObject({ outcome: "pull_request_updated", pullRequestNumber: 42 });
+    expect(created.observer.events.map((event) => event.stage)).toContain("pull_request_updated");
+    expect(created.vcs.notifyStartedCalls).toBe(1);
+    expect(created.vcs.notifyFinishedCalls).toEqual([
+      { outcome: "succeeded", summary: "Fixed it.", agentName: "knock-knock-implement" },
+    ]);
+  });
+
+  describe("continuation status notifications (notifyContinuationStarted/Finished lifecycle hooks)", () => {
+    it("notifies started once workspace is obtained, and finished with 'succeeded' on the success path", async () => {
+      const created = await harness();
+      await created.executor.start("run-1");
+
+      expect(created.vcs.notifyStartedCalls).toBe(1);
+      expect(created.vcs.lastNotifyStartedAgentName).toBe("knock-knock-implement");
+      expect(created.vcs.notifyFinishedCalls).toEqual([
+        { outcome: "succeeded", summary: "Fixed it.", agentName: "knock-knock-implement" },
+      ]);
+    });
+
+    it("notifies finished with 'failed' when the budget is exhausted", async () => {
+      const created = await harness({ budgetUsd: 0.005 });
+      await created.executor.start("run-1");
+
+      expect(created.vcs.notifyStartedCalls).toBe(1);
+      expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "failed", agentName: "knock-knock-implement" }]);
+    });
+
+    it("notifies finished with 'failed' when the underlying job fails", async () => {
+      const created = await harness();
+      created.jobs.statusValue = { state: "failed" };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("failed");
+      expect(created.vcs.notifyStartedCalls).toBe(1);
+      expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "failed", agentName: "knock-knock-implement" }]);
+    });
+
+    it("never notifies started when the run is refused before a workspace exists", async () => {
+      const created = await harness({ ownerId: null });
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("refused");
+      expect(created.vcs.notifyStartedCalls).toBe(0);
+      expect(created.vcs.notifyFinishedCalls).toHaveLength(0);
+    });
+
+    it("notifies finished with 'failed' when stopped mid-run", async () => {
+      const handle = { backend: "fake", id: "job-1" };
+      const created = await harness({ jobHandle: handle, proxySessionId: "session-1" });
+      await created.vcs.prepareWorkspace({
+        runId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "reevo/run-run-1",
+        protectedPaths: ["CODEOWNERS"],
+      });
+
+      await created.executor.stop("run-1", "requested");
+
+      expect(created.store.run.status).toBe("cancelled");
+      expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "failed", agentName: "knock-knock-implement" }]);
     });
   });
 

@@ -2,11 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import type { Executor } from "../providers/executor/types.js";
 import { dispatchRun, type DispatchDb } from "./dispatch.js";
 
-function fakeDb(agent: Record<string, any>) {
+function fakeDb(agent: Record<string, any>, seedCodingRuns: Record<string, any>[] = []) {
   let transactionActive = false;
   let runNumber = 0;
   const runs: Record<string, any>[] = [];
-  const codingRuns: Record<string, any>[] = [];
+  const codingRuns: Record<string, any>[] = [...seedCodingRuns];
   const tasks: Record<string, any>[] = [];
   const db: any = {
     agent: {
@@ -34,6 +34,7 @@ function fakeDb(agent: Record<string, any>) {
         codingRuns.push(data);
         return data;
       },
+      findUnique: async ({ where }: any) => codingRuns.find((row) => row.runId === where.runId) ?? null,
     },
     task: {
       create: async ({ data }: any) => {
@@ -311,5 +312,171 @@ describe("dispatchRun", () => {
     await vi.waitFor(() => expect(state.runs[0].status).toBe("failed"));
     expect(state.runs[0].id).toBe(result?.run.id);
     expect(state.runs[0].error).toBe("launcher unavailable");
+  });
+
+  describe("revision-in-place (continuesCodingRunId)", () => {
+    function codingAgent(overrides: Record<string, any> = {}) {
+      return {
+        ...nativeAgent(),
+        kind: "coding",
+        budgetUsd: 1.25,
+        codingProfile: {
+          provider: "codex",
+          repository: "openai/reevo",
+          baseRef: "main",
+          defaultTask: "Follow up on review comments",
+          timeoutSec: 900,
+          allowedEgress: [],
+          protectedPaths: ["CODEOWNERS"],
+        },
+        ...overrides,
+      };
+    }
+
+    function openPrCodingRun(runId: string, overrides: Record<string, any> = {}) {
+      return {
+        runId,
+        repository: "openai/reevo",
+        baseRef: "main",
+        headRef: `reevo/run-${runId}`,
+        rootCodingRunId: null,
+        result: {
+          schemaVersion: 1,
+          outcome: "pull_request_opened",
+          repository: "openai/reevo",
+          baseRef: "main",
+          headRef: `reevo/run-${runId}`,
+          commitSha: "a".repeat(40),
+          pullRequestUrl: "https://github.com/openai/reevo/pull/22",
+          pullRequestNumber: 22,
+          summary: "Opened the PR",
+          tests: [],
+          usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+        },
+        ...overrides,
+      };
+    }
+
+    it("resolves the root run's branch and links rootCodingRunId, even across agents", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent, [openPrCodingRun("root_run")]);
+
+      const result = await dispatchRun({
+        db: state.db,
+        executor: { async start() {}, async stop() {} },
+        agentId: agent.id,
+        continuesCodingRunId: "root_run",
+      });
+
+      expect(state.codingRuns).toContainEqual(
+        expect.objectContaining({
+          runId: result?.run.id,
+          baseRef: "main",
+          headRef: "reevo/run-root_run",
+          rootCodingRunId: "root_run",
+        }),
+      );
+    });
+
+    it("resolves through an intermediate continuation straight to the true root (flat, not chained)", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent, [
+        openPrCodingRun("root_run"),
+        openPrCodingRun("round_2_run", { rootCodingRunId: "root_run", headRef: "reevo/run-root_run" }),
+      ]);
+
+      const result = await dispatchRun({
+        db: state.db,
+        executor: { async start() {}, async stop() {} },
+        agentId: agent.id,
+        continuesCodingRunId: "round_2_run",
+      });
+
+      expect(state.codingRuns).toContainEqual(
+        expect.objectContaining({ runId: result?.run.id, rootCodingRunId: "root_run" }),
+      );
+    });
+
+    it("rejects continuing a coding run from a different repository", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent, [openPrCodingRun("root_run", { repository: "openai/other-repo" })]);
+
+      await expect(
+        dispatchRun({
+          db: state.db,
+          executor: { async start() {}, async stop() {} },
+          agentId: agent.id,
+          continuesCodingRunId: "root_run",
+        }),
+      ).rejects.toThrow(/different repository/);
+    });
+
+    it("rejects continuing a coding run that never opened a pull request", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent, [
+        openPrCodingRun("root_run", {
+          result: {
+            schemaVersion: 1,
+            outcome: "no_changes",
+            repository: "openai/reevo",
+            baseRef: "main",
+            summary: "Nothing to do",
+            tests: [],
+            usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+          },
+        }),
+      ]);
+
+      await expect(
+        dispatchRun({
+          db: state.db,
+          executor: { async start() {}, async stop() {} },
+          agentId: agent.id,
+          continuesCodingRunId: "root_run",
+        }),
+      ).rejects.toThrow(/never opened a pull request/);
+    });
+
+    it("rejects an unknown continuesCodingRunId", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent, []);
+
+      await expect(
+        dispatchRun({
+          db: state.db,
+          executor: { async start() {}, async stop() {} },
+          agentId: agent.id,
+          continuesCodingRunId: "does_not_exist",
+        }),
+      ).rejects.toThrow(/unknown coding run/);
+    });
+
+    it("rejects combining continuesCodingRunId with codingBaseRef", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent, [openPrCodingRun("root_run")]);
+
+      await expect(
+        dispatchRun({
+          db: state.db,
+          executor: { async start() {}, async stop() {} },
+          agentId: agent.id,
+          continuesCodingRunId: "root_run",
+          codingBaseRef: "refs/heads/other",
+        }),
+      ).rejects.toThrow(/cannot be combined/);
+    });
+
+    it("rejects continuesCodingRunId for a native agent", async () => {
+      const state = fakeDb(nativeAgent());
+
+      await expect(
+        dispatchRun({
+          db: state.db,
+          executor: { async start() {}, async stop() {} },
+          agentId: "agent_1",
+          continuesCodingRunId: "root_run",
+        }),
+      ).rejects.toThrow(/Coding overrides cannot be supplied/);
+    });
   });
 });

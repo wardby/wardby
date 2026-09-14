@@ -237,6 +237,11 @@ function directChild(root: string, child: string): boolean {
   return child.startsWith(`${root}${sep}`) && !child.slice(root.length + 1).includes(sep);
 }
 
+/** Human-readable label for continuation status notifications -- falls back to the opaque run id alone when no agent name is known. */
+function runLabel(agentName: string | undefined, runId: string): string {
+  return agentName ? `${agentName} (reevo run ${runId})` : `reevo run ${runId}`;
+}
+
 export class GitVcsProvider implements VcsProvider {
   private readonly rootDir: string;
   private readonly git: GitCommandRunner;
@@ -280,6 +285,13 @@ export class GitVcsProvider implements VcsProvider {
     if (!this.options.cloneUrlForRepository && cloneUrl !== `https://github.com/${normalized.repository}.git`) {
       throw new Error("vcs_remote_invalid");
     }
+    // Revision-in-place: a continuation clones the EXISTING headRef branch
+    // directly (its current tip becomes baseCommit below) instead of
+    // baseRef -- everything after this line (branch/checkout/reset, and
+    // every check in finalizeChanges) is unchanged either way, since
+    // baseCommit already means exactly what it needs to: "where this
+    // round started." See docs/private/2026-09-13-coding-pr-revision-in-place-design.md.
+    const cloneBranch = normalized.continuation ? normalized.headRef : normalized.baseRef;
 
     try {
       await this.options.github.withRepositoryToken(normalized.repository, async (token) => {
@@ -291,7 +303,7 @@ export class GitVcsProvider implements VcsProvider {
             "--single-branch",
             "--no-tags",
             "--branch",
-            normalized.baseRef,
+            cloneBranch,
             "--separate-git-dir",
             gitMetadataPath,
             cloneUrl,
@@ -304,7 +316,7 @@ export class GitVcsProvider implements VcsProvider {
       const baseCommit = await this.revParseRaw(
         gitMetadataPath,
         workspacePath,
-        `refs/remotes/origin/${normalized.baseRef}^{commit}`,
+        `refs/remotes/origin/${cloneBranch}^{commit}`,
       );
       await this.gitForPaths(gitMetadataPath, workspacePath, ["config", "--local", "core.hooksPath", "/dev/null"]);
       await this.gitForPaths(gitMetadataPath, workspacePath, ["config", "--local", "commit.gpgSign", "false"]);
@@ -316,7 +328,15 @@ export class GitVcsProvider implements VcsProvider {
         "user.email",
         "reevo-run@users.noreply.github.com",
       ]);
-      await this.gitForPaths(gitMetadataPath, workspacePath, ["branch", "--force", normalized.headRef, baseCommit]);
+      // Revision-in-place: a continuation's clone (--branch === headRef, above)
+      // already leaves headRef checked out locally, pointing at exactly
+      // baseCommit -- `branch --force` on an already-checked-out branch is
+      // both unnecessary here and something Git refuses outright ("cannot
+      // force update the branch ... checked out"). Only a fresh run (cloned
+      // baseRef, a DIFFERENT name from headRef) needs this to create headRef.
+      if (!normalized.continuation) {
+        await this.gitForPaths(gitMetadataPath, workspacePath, ["branch", "--force", normalized.headRef, baseCommit]);
+      }
       await this.gitForPaths(gitMetadataPath, workspacePath, [
         "symbolic-ref",
         "HEAD",
@@ -349,10 +369,11 @@ export class GitVcsProvider implements VcsProvider {
       throw error;
     }
 
+    const cloneBranch = normalized.continuation ? normalized.headRef : normalized.baseRef;
     const baseCommit = await this.revParseRaw(
       expected.gitMetadataPath,
       expected.workspacePath,
-      `refs/remotes/origin/${normalized.baseRef}^{commit}`,
+      `refs/remotes/origin/${cloneBranch}^{commit}`,
     );
     const recovered: PreparedWorkspace = {
       id: `vcs-${normalized.runId}`,
@@ -445,8 +466,14 @@ export class GitVcsProvider implements VcsProvider {
     }
 
     await this.pushOnce(prepared, commitSha);
+    // Revision-in-place: identify the PR by the run that originally opened
+    // it (createOrFindDraftPullRequest's marker-based lookup keys on that
+    // run's id), not this run's own -- this finds the existing open PR and
+    // returns it rather than creating a new one, since headRef/baseRef
+    // already match it exactly. No other change needed here: pushing a new
+    // commit onto that branch already updates the PR natively.
     const pullRequest = await this.options.github.createOrFindDraftPullRequest({
-      runId: prepared.runId,
+      runId: prepared.continuation?.rootRunId ?? prepared.runId,
       repository: prepared.repository,
       baseRef: prepared.baseRef,
       headRef: prepared.headRef,
@@ -455,7 +482,7 @@ export class GitVcsProvider implements VcsProvider {
       tag: details?.tag,
     });
     return {
-      outcome: "pull_request_opened",
+      outcome: prepared.continuation ? "pull_request_updated" : "pull_request_opened",
       repository: prepared.repository,
       baseRef: prepared.baseRef,
       baseCommit: prepared.baseCommit,
@@ -478,6 +505,80 @@ export class GitVcsProvider implements VcsProvider {
     await rm(expected.runRoot, { recursive: true, force: true });
   }
 
+  /**
+   * Best-effort "reevo is working on this PR" signal (see VcsProvider) --
+   * whole body wrapped so this can NEVER throw or otherwise affect the
+   * real coding run, mirroring docker.ts's readWorkerFailureDiagnostic
+   * ("diagnostics are optional and must never affect terminal cleanup").
+   * No-op for a fresh (non-continuation) workspace: there's no PR to
+   * attach anything to until its one commit lands.
+   */
+  async notifyContinuationStarted(workspace: PreparedWorkspace, details?: { agentName?: string }): Promise<void> {
+    if (!workspace.continuation) return;
+    try {
+      const identity = {
+        runId: workspace.runId,
+        rootRunId: workspace.continuation.rootRunId,
+        repository: workspace.repository,
+        baseRef: workspace.baseRef,
+        headRef: workspace.headRef,
+      };
+      await Promise.allSettled([
+        this.options.github.upsertContinuationStatusComment({
+          ...identity,
+          body: `🔄 ${runLabel(details?.agentName, workspace.runId)} is working on this PR...`,
+        }),
+        this.options.github.createContinuationCheckRun({
+          repository: workspace.repository,
+          headSha: workspace.baseCommit,
+          runId: workspace.runId,
+        }),
+      ]);
+    } catch {
+      // Best-effort observability only -- must never affect the real run.
+    }
+  }
+
+  /**
+   * Companion to notifyContinuationStarted -- finds and updates whatever
+   * that call created, never creates fresh state itself (see
+   * upsertContinuationStatusComment vs updateContinuationStatusComment,
+   * and createContinuationCheckRun vs completeContinuationCheckRun in
+   * github.ts). Safe to call more than once for the same run. Same
+   * never-throw contract as notifyContinuationStarted.
+   */
+  async notifyContinuationFinished(
+    workspace: PreparedWorkspace,
+    outcome: "succeeded" | "failed",
+    details?: { summary?: string; agentName?: string },
+  ): Promise<void> {
+    if (!workspace.continuation) return;
+    try {
+      const identity = {
+        runId: workspace.runId,
+        rootRunId: workspace.continuation.rootRunId,
+        repository: workspace.repository,
+        baseRef: workspace.baseRef,
+        headRef: workspace.headRef,
+      };
+      const label = runLabel(details?.agentName, workspace.runId);
+      const summarySuffix = details?.summary ? `\n\n${details.summary}` : "";
+      const body =
+        outcome === "succeeded" ? `✅ ${label} finished.${summarySuffix}` : `❌ ${label} failed.${summarySuffix}`;
+      await Promise.allSettled([
+        this.options.github.updateContinuationStatusComment({ ...identity, body }),
+        this.options.github.completeContinuationCheckRun({
+          repository: workspace.repository,
+          headSha: workspace.baseCommit,
+          runId: workspace.runId,
+          outcome,
+        }),
+      ]);
+    } catch {
+      // Best-effort observability only -- must never affect the real run.
+    }
+  }
+
   private validateInput(
     input: VcsPrepareInput,
   ): Omit<PreparedWorkspace, "id" | "baseCommit" | "workspacePath" | "gitMetadataPath"> {
@@ -485,10 +586,24 @@ export class GitVcsProvider implements VcsProvider {
     const repository = normalizeGitHubRepository(input.repository);
     const baseRef = normalizeGitRef(input.baseRef);
     const headRef = normalizeGitRef(input.headRef);
-    if (headRef !== `reevo/run-${input.runId}`) throw new Error("vcs_head_ref_invalid");
+    // Revision-in-place: a continuation's headRef legitimately belongs to a
+    // DIFFERENT run (the one that originally opened the PR), so it can't
+    // match this run's own derived pattern -- it must instead match that
+    // run's. The caller (dispatch.ts) is responsible for having verified,
+    // against the database, that this run is actually allowed to continue
+    // that branch before ever setting `continuation`; this is a structural
+    // check only, not the security boundary.
+    let continuation: { rootRunId: string } | undefined;
+    if (input.continuation) {
+      if (!SAFE_RUN_ID.test(input.continuation.rootRunId)) throw new Error("vcs_root_run_id_invalid");
+      if (headRef !== `reevo/run-${input.continuation.rootRunId}`) throw new Error("vcs_head_ref_invalid");
+      continuation = { rootRunId: input.continuation.rootRunId };
+    } else if (headRef !== `reevo/run-${input.runId}`) {
+      throw new Error("vcs_head_ref_invalid");
+    }
     const protectedPaths = [...new Set(input.protectedPaths.map(validateProtectedPath))];
     if (protectedPaths.length === 0 || protectedPaths.length > 128) throw new Error("vcs_protected_paths_invalid");
-    return { runId: input.runId, repository, baseRef, headRef, protectedPaths };
+    return { runId: input.runId, repository, baseRef, headRef, protectedPaths, continuation };
   }
 
   private expectedPaths(runId: string): { runRoot: string; workspacePath: string; gitMetadataPath: string } {
@@ -514,7 +629,8 @@ export class GitVcsProvider implements VcsProvider {
       workspace.workspacePath !== expected.workspacePath ||
       workspace.gitMetadataPath !== expected.gitMetadataPath ||
       workspace.protectedPaths.length !== normalized.protectedPaths.length ||
-      workspace.protectedPaths.some((path, index) => path !== normalized.protectedPaths[index])
+      workspace.protectedPaths.some((path, index) => path !== normalized.protectedPaths[index]) ||
+      workspace.continuation?.rootRunId !== normalized.continuation?.rootRunId
     ) {
       throw new Error("vcs_workspace_handle_invalid");
     }
@@ -604,7 +720,12 @@ export class GitVcsProvider implements VcsProvider {
     await this.options.github.withRepositoryToken(workspace.repository, async (token) => {
       const remote = await this.remoteHead(workspace, token);
       if (remote === commitSha) return;
-      if (remote) throw new Error("vcs_head_ref_conflict");
+      // A continuation's remote branch legitimately already sits at
+      // baseCommit (that's the tip we cloned and committed on top of) --
+      // that's the expected fast-forward pre-push state, not a conflict.
+      // Any OTHER non-null value means something else moved the branch
+      // since we cloned (a human push, a race), which is a real conflict.
+      if (remote && remote !== workspace.baseCommit) throw new Error("vcs_head_ref_conflict");
       try {
         await this.gitFor(workspace, ["push", "origin", `${commitSha}:refs/heads/${workspace.headRef}`], {
           authToken: token,

@@ -34,6 +34,8 @@ export interface ContainerRunSnapshot {
   runId: string;
   status: string;
   agentKind: string;
+  /** Human-readable agent name (e.g. "knock-knock-implement") -- surfaced in continuation status notifications. */
+  agentName: string;
   ownerId: string | null;
   task: string;
   repository: string;
@@ -44,6 +46,8 @@ export interface ContainerRunSnapshot {
   timeoutSec: number;
   allowedEgress: unknown;
   protectedPaths: unknown;
+  /** Revision-in-place: set when this run continues another run's branch/PR. See preflight(). */
+  rootCodingRunId: string | null;
   budgetUsd: number;
   tokensIn: number;
   tokensOut: number;
@@ -87,6 +91,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       runId: row.id,
       status: row.status,
       agentKind: row.agent.kind,
+      agentName: row.agent.name,
       ownerId: row.agent.ownerId,
       task: row.codingRun.task,
       repository: row.codingRun.repository,
@@ -97,6 +102,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       timeoutSec: row.codingRun.timeoutSec,
       allowedEgress: row.codingRun.allowedEgress,
       protectedPaths: row.codingRun.protectedPaths,
+      rootCodingRunId: row.codingRun.rootCodingRunId,
       budgetUsd: Number(row.codingRun.budgetReservedUsd),
       tokensIn: row.tokensIn,
       tokensOut: row.tokensOut,
@@ -343,7 +349,10 @@ export class ContainerExecutor implements Executor {
     this.options.capabilities.delete(runId);
     const input = this.preflightForCleanup(run);
     const workspace = input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null;
-    if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+    if (workspace) {
+      await this.options.vcs.cleanup(workspace).catch(() => undefined);
+      await this.options.vcs.notifyContinuationFinished?.(workspace, "failed", { agentName: run.agentName });
+    }
     await rm(this.artifactPath(runId), { recursive: true, force: true }).catch(() => undefined);
     this.emit({ stage: "cleanup", runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
   }
@@ -406,6 +415,7 @@ export class ContainerExecutor implements Executor {
         if (!spendEnabled && !handle) throw new PreflightError(safeError(error), { cause: error });
         throw error;
       }
+      await this.options.vcs.notifyContinuationStarted?.(workspace, { agentName: run.agentName });
 
       if (!handle) {
         if (sessionId) throw new Error("coding_ambiguous_provisioning");
@@ -467,7 +477,10 @@ export class ContainerExecutor implements Executor {
       await this.options.store.terminate(runId, status, failure.error, failure.audit);
       this.terminal(run, status, failure.audit);
       if (handle) await this.options.jobs.remove(handle).catch(() => undefined);
-      if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+      if (workspace) {
+        await this.options.vcs.cleanup(workspace).catch(() => undefined);
+        await this.options.vcs.notifyContinuationFinished?.(workspace, "failed", { agentName: run.agentName });
+      }
       this.emit({ stage: "cleanup", runId, jobId: handle?.id, cleanupSucceeded: true });
     }
   }
@@ -491,7 +504,9 @@ export class ContainerExecutor implements Executor {
         allowedEgress: run.allowedEgress,
         protectedPaths: run.protectedPaths,
       });
-      if (run.headRef !== `reevo/run-${run.runId}`) throw new Error("coding_head_ref_invalid");
+      const expectedHeadRunId = run.rootCodingRunId ?? run.runId;
+      if (run.headRef !== `reevo/run-${expectedHeadRunId}`) throw new Error("coding_head_ref_invalid");
+      const continuationOf = run.rootCodingRunId ? { runId: run.rootCodingRunId } : undefined;
       CodingTaskInputSchema.parse({
         schemaVersion: CODING_PROTOCOL_VERSION,
         runId: run.runId,
@@ -502,6 +517,7 @@ export class ContainerExecutor implements Executor {
         model: run.model,
         budgetUsd: run.budgetUsd,
         deadlineAt: new Date(this.now().getTime() + run.timeoutSec * 1_000).toISOString(),
+        continuationOf,
       });
       return {
         runId: run.runId,
@@ -509,6 +525,7 @@ export class ContainerExecutor implements Executor {
         baseRef: profile.baseRef,
         headRef: run.headRef,
         protectedPaths: profile.protectedPaths,
+        continuation: run.rootCodingRunId ? { rootRunId: run.rootCodingRunId } : undefined,
       };
     } catch (error) {
       throw new PreflightError(safeError(error), { cause: error });
@@ -524,6 +541,10 @@ export class ContainerExecutor implements Executor {
   ): Promise<void> {
     const sessionId = existingSessionId ?? run.proxySessionId;
     if (sessionId) await this.options.sessions.cancelSession(sessionId).catch(() => undefined);
+    // For notifyContinuationFinished in the `finally` below -- defaults to
+    // "failed" and is only flipped right before an actual success return.
+    let outcome: "succeeded" | "failed" = "failed";
+    let finishedSummary: string | undefined;
     try {
       if (jobState !== "succeeded") {
         const collected = await this.options.jobs.collect(handle).catch(() => null);
@@ -554,6 +575,8 @@ export class ContainerExecutor implements Executor {
       if (output.outcome === "no_changes") {
         await this.options.store.complete(run.runId, "succeeded", this.resultFor(output, current));
         this.terminal(current, "succeeded");
+        outcome = "succeeded";
+        finishedSummary = output.summary;
         return;
       }
 
@@ -579,10 +602,12 @@ export class ContainerExecutor implements Executor {
       });
       const result = this.resultFor(output, current, finalized.outcome, finalized);
       await this.options.store.complete(run.runId, "succeeded", result);
-      if (finalized.outcome === "pull_request_opened") {
-        this.emit({ stage: "pull_request_opened", runId: run.runId, jobId: handle.id });
+      if (finalized.outcome === "pull_request_opened" || finalized.outcome === "pull_request_updated") {
+        this.emit({ stage: finalized.outcome, runId: run.runId, jobId: handle.id });
       }
       this.terminal(current, "succeeded");
+      outcome = "succeeded";
+      finishedSummary = output.summary;
     } catch (error) {
       const failure = this.failure(error);
       await this.options.store.terminate(run.runId, "failed", failure.error, failure.audit);
@@ -592,7 +617,13 @@ export class ContainerExecutor implements Executor {
       const input = this.preflightForCleanup(run);
       const workspace =
         existingWorkspace ?? (input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null);
-      if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+      if (workspace) {
+        await this.options.vcs.cleanup(workspace).catch(() => undefined);
+        await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, {
+          summary: finishedSummary,
+          agentName: run.agentName,
+        });
+      }
       await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
       this.emit({ stage: "cleanup", runId: run.runId, jobId: handle.id, cleanupSucceeded: true });
     }
@@ -601,7 +632,7 @@ export class ContainerExecutor implements Executor {
   private resultFor(
     output: CodingAgentOutput,
     run: ContainerRunSnapshot,
-    forcedOutcome?: "pull_request_opened" | "no_changes" | "budget_exhausted",
+    forcedOutcome?: "pull_request_opened" | "pull_request_updated" | "no_changes" | "budget_exhausted",
     finalized?: Awaited<ReturnType<VcsProvider["finalizeChanges"]>>,
   ): CodingRunResult {
     const outcome = forcedOutcome ?? (output.outcome === "budget_exhausted" ? "budget_exhausted" : "no_changes");
@@ -610,7 +641,8 @@ export class ContainerExecutor implements Executor {
       outcome,
       repository: run.repository,
       baseRef: run.baseRef,
-      ...(outcome === "pull_request_opened" && finalized?.outcome === "pull_request_opened"
+      ...((outcome === "pull_request_opened" || outcome === "pull_request_updated") &&
+      (finalized?.outcome === "pull_request_opened" || finalized?.outcome === "pull_request_updated")
         ? {
             headRef: finalized.headRef,
             commitSha: finalized.commitSha,
@@ -704,6 +736,7 @@ export class ContainerExecutor implements Executor {
       model: run.model,
       budgetUsd: run.budgetUsd,
       deadlineAt: deadlineAt.toISOString(),
+      continuationOf: run.rootCodingRunId ? { runId: run.rootCodingRunId } : undefined,
     });
     // The run directory is 0700; world-readable mode only crosses Docker's UID boundary.
     await writeFile(temporary, JSON.stringify(input), { flag: "wx", mode: 0o444 });
@@ -724,6 +757,7 @@ export class ContainerExecutor implements Executor {
       baseRef: run.baseRef,
       headRef: run.headRef,
       protectedPaths: run.protectedPaths,
+      continuation: run.rootCodingRunId ? { rootRunId: run.rootCodingRunId } : undefined,
     };
   }
 
@@ -739,7 +773,10 @@ export class ContainerExecutor implements Executor {
     }
     const input = this.preflightForCleanup(run);
     const workspace = input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null;
-    if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+    if (workspace) {
+      await this.options.vcs.cleanup(workspace).catch(() => undefined);
+      await this.options.vcs.notifyContinuationFinished?.(workspace, "failed", { agentName: run.agentName });
+    }
     await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
     this.emit({ stage: "cleanup", runId: run.runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
   }
@@ -756,7 +793,19 @@ export class ContainerExecutor implements Executor {
     }
     const input = this.preflightForCleanup(run);
     const workspace = input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null;
-    if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+    if (workspace) {
+      await this.options.vcs.cleanup(workspace).catch(() => undefined);
+      // Safety-net retry for an already-terminal run recovered later (e.g.
+      // a crash between an earlier store.complete/terminate and this
+      // notification actually firing) -- safe to call again because
+      // notifyContinuationFinished is find-and-update-or-no-op, never
+      // find-or-create.
+      await this.options.vcs.notifyContinuationFinished?.(
+        workspace,
+        run.status === "succeeded" ? "succeeded" : "failed",
+        { agentName: run.agentName },
+      );
+    }
     await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
     this.emit({ stage: "cleanup", runId: run.runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
   }
