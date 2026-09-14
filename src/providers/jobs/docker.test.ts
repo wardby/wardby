@@ -263,7 +263,7 @@ class FakeDocker implements DockerCommandRunner {
         CapAdd: null,
         CapDrop: ["ALL"],
         SecurityOpt: ["no-new-privileges=true", "seccomp=builtin"],
-        PidsLimit: 16,
+        PidsLimit: 32,
         RestartPolicy: { Name: "no" },
         Mounts: [
           {

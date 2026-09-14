@@ -3,6 +3,8 @@ import type { JobSpec } from "./types.js";
 
 export const CODING_WORKER_UID = 10001;
 export const CODING_WORKER_GID = 10001;
+// The keeper needs headroom for runc's short-lived exec process plus Node's threads.
+const KEEPER_PIDS_LIMIT = 32;
 export const CODING_PROXY_ALIAS = "reevo-proxy";
 export const CODING_PROXY_PORT = 8787;
 export const DOCKER_ISOLATION_ERROR = "docker_isolation_unsupported";
@@ -288,7 +290,7 @@ export function buildKeeperCreateArgs(spec: JobSpec): string[] {
     "--memory-swappiness",
     "0",
     "--pids-limit",
-    "16",
+    String(KEEPER_PIDS_LIMIT),
     "--restart",
     "no",
     "--log-driver",
@@ -637,7 +639,7 @@ export function assertKeeperContainerInspection(container: DockerContainerInspec
     !host.CapDrop?.includes("ALL") ||
     !security.includes("no-new-privileges=true") ||
     !security.includes("seccomp=builtin") ||
-    host.PidsLimit !== 16 ||
+    host.PidsLimit !== KEEPER_PIDS_LIMIT ||
     host.RestartPolicy?.Name !== "no" ||
     (container.Mounts?.length ?? 0) !== 1 ||
     mount?.Type !== "volume" ||
