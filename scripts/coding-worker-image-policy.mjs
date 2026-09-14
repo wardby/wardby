@@ -26,11 +26,17 @@ if (sdkVersion !== "0.153.4" || lockedSdk?.version !== sdkVersion || !lockedSdk?
 }
 // The driver image is an intermediate layer other Dockerfiles build on top
 // of — it never sets USER/ENTRYPOINT itself (those depend on whatever
-// language toolchain and hardening checks the derived Dockerfile adds).
-const requiredControls =
-  kind === "driver"
-    ? ["--no-install-recommends", "npm ci --omit=dev"]
-    : ["--no-install-recommends", "USER 10001:10001", 'ENTRYPOINT ["node"', "npm ci --omit=dev"];
+// language toolchain and hardening checks the derived Dockerfile adds). A
+// runtime Dockerfile that FROMs the driver by digest inherits its npm ci
+// --omit=dev already (checked when the driver itself was policy-checked at
+// --kind=driver) and may have no apt-get install of its own at all — only
+// check for controls this specific file is actually responsible for.
+const fromsDriverImage = fromLines.some((line) => /reevo-coding-worker-driver@sha256:/i.test(line));
+const installsAptPackages = /apt-get install/i.test(dockerfile);
+const requiredControls = [];
+if (installsAptPackages) requiredControls.push("--no-install-recommends");
+if (kind === "driver" || !fromsDriverImage) requiredControls.push("npm ci --omit=dev");
+if (kind !== "driver") requiredControls.push("USER 10001:10001", 'ENTRYPOINT ["node"');
 for (const required of requiredControls) {
   if (!dockerfile.includes(required)) failures.push(`missing image control: ${required}`);
 }

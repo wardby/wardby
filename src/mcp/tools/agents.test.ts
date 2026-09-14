@@ -609,7 +609,15 @@ describe("agent CRUD tools", () => {
         ownerId: "p1",
         tools: [],
         kind: "coding",
-        codingProfile: { provider: "codex", repository: "openai/example", baseRef: "main" },
+        codingProfile: {
+          provider: "codex",
+          repository: "openai/example",
+          baseRef: "main",
+          defaultTask: null,
+          timeoutSec: 1800,
+          allowedEgress: [],
+          protectedPaths: ["CODEOWNERS"],
+        },
       },
     ]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
@@ -640,7 +648,15 @@ describe("agent CRUD tools", () => {
         ownerId: "p1",
         tools: [],
         kind: "coding",
-        codingProfile: { provider: "codex", repository: "openai/example", baseRef: "main" },
+        codingProfile: {
+          provider: "codex",
+          repository: "openai/example",
+          baseRef: "main",
+          defaultTask: null,
+          timeoutSec: 1800,
+          allowedEgress: [],
+          protectedPaths: ["CODEOWNERS"],
+        },
       },
     ]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
