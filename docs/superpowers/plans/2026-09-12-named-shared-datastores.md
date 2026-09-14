@@ -24,10 +24,12 @@
 ### Task 1: Schema + migration
 
 **Files:**
+
 - Modify: `prisma/schema.prisma`
 - Create: `prisma/migrations/20260912040000_named_shared_datastores/migration.sql`
 
 **Interfaces:**
+
 - Produces: `Datastore` model (`id`, `name`, `ownerId`, `agents: AgentDatastore[]`, `entries: DatastoreEntry[]`), `AgentDatastore` model (`agentId`, `datastoreId`, `boundName`, `@@unique([agentId, boundName])`), `DatastoreEntry.datastoreId` (nullable, alongside now-nullable `agentId`), `AgentTool.allowedSharedDatastorePrefixes` (`Json @default("{}")`). Every later task's Prisma calls (`db.datastore.*`, `db.agentDatastore.*`, `db.datastoreEntry.*` with `datastoreId`) depend on these exact names.
 
 - [ ] **Step 1: Edit `prisma/schema.prisma` — add `Datastore` and `AgentDatastore` models**
@@ -266,6 +268,7 @@ git commit -m "feat(db): add Datastore/AgentDatastore models, unify DatastoreEnt
 ### Task 2: Provider layer — `Datastore` interface + `PostgresDatastore` shared methods
 
 **Files:**
+
 - Modify: `src/providers/datastore/types.ts`
 - Modify: `src/providers/datastore/postgres.ts`
 - Modify: `src/providers/datastore/postgres.test.ts`
@@ -274,6 +277,7 @@ git commit -m "feat(db): add Datastore/AgentDatastore models, unify DatastoreEnt
 - Modify (mechanical stub additions only — see Step 6): `src/core/runner.test.ts`, `src/providers/executor/dbos.database.test.ts`, `src/providers/executor/in-process.test.ts`, `src/mcp/integration.test.ts`, `src/sandbox/host-functions.test.ts`, `src/sandbox/run-in-sandbox.test.ts`
 
 **Interfaces:**
+
 - Consumes: `DatastoreEntry.datastoreId` (Task 1).
 - Produces: `Datastore.getShared(datastoreId, key)`, `.setShared(datastoreId, key, value, opts?)`, `.deleteShared(datastoreId, key)`, `.listShared(datastoreId, prefix?)` — Task 3's `buildSharedDatastoreAccessor` calls these by name.
 
@@ -282,36 +286,36 @@ git commit -m "feat(db): add Datastore/AgentDatastore models, unify DatastoreEnt
 Add to `src/providers/datastore/postgres.test.ts`, inside the existing `describe.skipIf(!databaseUrl)("PostgresDatastore (database)", ...)` block (after the `it("scopes entries per agent...")` test, before the `describe("pii: true", ...)` block):
 
 ```ts
-  it("shared get/set/delete/list round-trip, scoped by datastoreId — never visible via the agentId-scoped methods", async () => {
-    const datastoreId = `shared-${randomUUID()}`;
-    await prisma.datastore.create({ data: { id: datastoreId, name: `test-${datastoreId}`, ownerId: null } });
+it("shared get/set/delete/list round-trip, scoped by datastoreId — never visible via the agentId-scoped methods", async () => {
+  const datastoreId = `shared-${randomUUID()}`;
+  await prisma.datastore.create({ data: { id: datastoreId, name: `test-${datastoreId}`, ownerId: null } });
 
-    await datastore.setShared(datastoreId, "greeting", { hello: "world" });
-    expect(await datastore.getShared(datastoreId, "greeting")).toEqual({ hello: "world" });
-    expect(await datastore.get("agent-should-not-see-this", "greeting")).toBeUndefined();
+  await datastore.setShared(datastoreId, "greeting", { hello: "world" });
+  expect(await datastore.getShared(datastoreId, "greeting")).toEqual({ hello: "world" });
+  expect(await datastore.get("agent-should-not-see-this", "greeting")).toBeUndefined();
 
-    await datastore.setShared(datastoreId, "user:1", "a");
-    await datastore.setShared(datastoreId, "user:2", "b");
-    expect(await datastore.listShared(datastoreId, "user:")).toEqual(["user:1", "user:2"]);
+  await datastore.setShared(datastoreId, "user:1", "a");
+  await datastore.setShared(datastoreId, "user:2", "b");
+  expect(await datastore.listShared(datastoreId, "user:")).toEqual(["user:1", "user:2"]);
 
-    await datastore.deleteShared(datastoreId, "greeting");
-    expect(await datastore.getShared(datastoreId, "greeting")).toBeUndefined();
+  await datastore.deleteShared(datastoreId, "greeting");
+  expect(await datastore.getShared(datastoreId, "greeting")).toBeUndefined();
 
-    await prisma.datastore.delete({ where: { id: datastoreId } });
-  });
+  await prisma.datastore.delete({ where: { id: datastoreId } });
+});
 
-  it("two different datastoreIds never see each other's shared keys", async () => {
-    const dsA = `shared-${randomUUID()}`;
-    const dsB = `shared-${randomUUID()}`;
-    await prisma.datastore.create({ data: { id: dsA, name: `test-${dsA}`, ownerId: null } });
-    await prisma.datastore.create({ data: { id: dsB, name: `test-${dsB}`, ownerId: null } });
+it("two different datastoreIds never see each other's shared keys", async () => {
+  const dsA = `shared-${randomUUID()}`;
+  const dsB = `shared-${randomUUID()}`;
+  await prisma.datastore.create({ data: { id: dsA, name: `test-${dsA}`, ownerId: null } });
+  await prisma.datastore.create({ data: { id: dsB, name: `test-${dsB}`, ownerId: null } });
 
-    await datastore.setShared(dsA, "secret", "a-only");
-    expect(await datastore.getShared(dsB, "secret")).toBeUndefined();
-    expect(await datastore.getShared(dsA, "secret")).toBe("a-only");
+  await datastore.setShared(dsA, "secret", "a-only");
+  expect(await datastore.getShared(dsB, "secret")).toBeUndefined();
+  expect(await datastore.getShared(dsA, "secret")).toBe("a-only");
 
-    await prisma.datastore.deleteMany({ where: { id: { in: [dsA, dsB] } } });
-  });
+  await prisma.datastore.deleteMany({ where: { id: { in: [dsA, dsB] } } });
+});
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -427,6 +431,7 @@ Adding required methods to the `Datastore` interface breaks every object literal
 ```
 
 Apply to:
+
 - `src/core/runner.test.ts` — inside `function fakeDatastore(): Datastore { ... }` (around line 151).
 - `src/providers/executor/dbos.database.test.ts` — inside `function fakeDatastore(): Datastore { ... }` (around line 43).
 - `src/providers/executor/in-process.test.ts` — inside `function fakeDatastore(): Datastore { ... }` (around line 63).
@@ -499,11 +504,13 @@ git commit -m "feat(datastore): add shared (datastoreId-keyed) methods to the Da
 ### Task 3: Core datastore management + shared accessor (`src/core/datastores.ts`)
 
 **Files:**
+
 - Create: `src/core/datastores.ts`
 - Create: `src/core/datastores.test.ts`
 - Modify: `src/mcp/auth/ownership.ts`
 
 **Interfaces:**
+
 - Consumes: `Datastore` provider's `getShared/setShared/deleteShared/listShared` (Task 2); `db.datastore`/`db.agentDatastore` (Task 1).
 - Produces: `createDatastore(name, ownerId, db)`, `listDatastores(ownerId, db)`, `deleteDatastore(datastoreId, db)`, `attachDatastore(agentId, datastoreId, db, boundName)`, `detachDatastore(agentId, boundName, db)`, `buildSharedDatastoreAccessor(agentId, datastore, db): SharedDatastoreAccessor`, `scopeSharedDatastoreAccessor(accessor, allowedPrefixes): SharedDatastoreAccessor`, `requireOwnedDatastore(db, id, principalId)` — all consumed by Task 5 (sandbox/runner wiring), Task 6 (MCP tools), Task 7 (importer).
 
@@ -546,7 +553,13 @@ function fakeDb() {
     datastore: {
       create: async ({ data }: { data: Partial<FakeDatastoreRow> & { name: string } }) => {
         const now = new Date();
-        const row: FakeDatastoreRow = { id: `ds_${++counter}`, createdAt: now, updatedAt: now, ownerId: null, ...data } as FakeDatastoreRow;
+        const row: FakeDatastoreRow = {
+          id: `ds_${++counter}`,
+          createdAt: now,
+          updatedAt: now,
+          ownerId: null,
+          ...data,
+        } as FakeDatastoreRow;
         datastores.set(row.id, row);
         return row;
       },
@@ -745,7 +758,13 @@ export async function createDatastore(name: string, ownerId: string, db: PrismaC
 
 export async function listDatastores(ownerId: string, db: PrismaClient): Promise<DatastoreMetadata[]> {
   const rows = await db.datastore.findMany({ where: { ownerId } });
-  return rows.map(({ id, name, ownerId: owner, createdAt, updatedAt }) => ({ id, name, ownerId: owner, createdAt, updatedAt }));
+  return rows.map(({ id, name, ownerId: owner, createdAt, updatedAt }) => ({
+    id,
+    name,
+    ownerId: owner,
+    createdAt,
+    updatedAt,
+  }));
 }
 
 export async function deleteDatastore(datastoreId: string, db: PrismaClient): Promise<void> {
@@ -891,10 +910,12 @@ git commit -m "feat(datastore): add core datastore management + shared accessor 
 ### Task 4: Capability scoping — `allowedSharedDatastorePrefixes`
 
 **Files:**
+
 - Modify: `src/sandbox/tool-capabilities.ts`
 - Modify: `src/sandbox/tool-capabilities.test.ts`
 
 **Interfaces:**
+
 - Produces: `ToolCapabilitiesSchema`/`ToolCapabilitiesPatchSchema` gain `allowedSharedDatastorePrefixes: Record<string, string[]>`; `asPrefixMap(value: unknown): Record<string, string[]>` — Task 5 (runner.ts) and Task 6/7 (MCP tools, importer) consume both.
 
 - [ ] **Step 1: Write the failing tests**
@@ -902,7 +923,12 @@ git commit -m "feat(datastore): add core datastore management + shared accessor 
 Add to `src/sandbox/tool-capabilities.test.ts` (find the existing `describe` block covering `ToolCapabilitiesSchema`/`asStringArray`, or create one if the file doesn't already group them):
 
 ```ts
-import { ToolCapabilitiesSchema, ToolCapabilitiesPatchSchema, asPrefixMap, MAX_ALLOWED_SHARED_DATASTORES } from "./tool-capabilities.js";
+import {
+  ToolCapabilitiesSchema,
+  ToolCapabilitiesPatchSchema,
+  asPrefixMap,
+  MAX_ALLOWED_SHARED_DATASTORES,
+} from "./tool-capabilities.js";
 
 describe("allowedSharedDatastorePrefixes", () => {
   it("defaults to {} when omitted from a full ToolCapabilitiesSchema parse", () => {
@@ -1052,6 +1078,7 @@ git commit -m "feat(datastore): add allowedSharedDatastorePrefixes capability sc
 ### Task 5: Sandbox wiring — `sharedDatastore` global + runner
 
 **Files:**
+
 - Modify: `src/sandbox/prelude.ts`
 - Modify: `src/sandbox/host-functions.ts`
 - Modify: `src/sandbox/host-functions.test.ts`
@@ -1061,6 +1088,7 @@ git commit -m "feat(datastore): add allowedSharedDatastorePrefixes capability sc
 - Modify: `src/core/runner.test.ts`
 
 **Interfaces:**
+
 - Consumes: `buildSharedDatastoreAccessor`/`scopeSharedDatastoreAccessor`/`SharedDatastoreAccessor` (Task 3); `asPrefixMap` (Task 4).
 - Produces: `globalThis.sharedDatastore` (sandbox JS API: `get/set/delete/list(boundName, key, ...)`), `SandboxInvocation.sharedDatastore`, `HostFunctionOptions.sharedDatastore` — all internal to the runtime path; no other task consumes these by name.
 
@@ -1136,7 +1164,9 @@ globalThis.sharedDatastore = {
   set: async (boundName, key, value, opts) => {
     await __bridge_sharedDatastoreSet(JSON.stringify([boundName, key, value, opts]));
   },
-  delete: async (boundName, key) => { await __bridge_sharedDatastoreDelete(JSON.stringify([boundName, key])); },
+  delete: async (boundName, key) => {
+    await __bridge_sharedDatastoreDelete(JSON.stringify([boundName, key]));
+  },
   list: async (boundName, prefix) =>
     JSON.parse(await __bridge_sharedDatastoreList(JSON.stringify([boundName, prefix === undefined ? null : prefix]))),
 };
@@ -1153,48 +1183,49 @@ import type { SharedDatastoreAccessor } from "../core/datastores.js";
 Add `sharedDatastore` to `HostFunctionOptions` (after `datastore: Datastore;`):
 
 ```ts
-  sharedDatastore: SharedDatastoreAccessor;
+sharedDatastore: SharedDatastoreAccessor;
 ```
 
 Destructure it in `installHostFunctions` (alongside the existing `const { agentId, datastore, ... } = options;`):
 
 ```ts
-  const { agentId, datastore, sharedDatastore, logTag, secrets, signal, allowedFetchHosts } = options;
+const { agentId, datastore, sharedDatastore, logTag, secrets, signal, allowedFetchHosts } = options;
 ```
 
 Add the four bridge registrations, immediately after the existing `__bridge_datastoreList` registration:
 
 ```ts
-  register("__bridge_sharedDatastoreGet", async (argsJson) => {
-    const [boundName, key] = args<[string, string]>(argsJson);
-    boundedString(boundName, 1024);
-    boundedString(key, 1024);
-    const value = await sharedDatastore.get(boundName, key);
-    return value === undefined ? null : value;
-  });
+register("__bridge_sharedDatastoreGet", async (argsJson) => {
+  const [boundName, key] = args<[string, string]>(argsJson);
+  boundedString(boundName, 1024);
+  boundedString(key, 1024);
+  const value = await sharedDatastore.get(boundName, key);
+  return value === undefined ? null : value;
+});
 
-  register("__bridge_sharedDatastoreSet", async (argsJson) => {
-    const [boundName, key, value, opts] = args<[string, string, DatastoreValue, DatastoreSetOptions | undefined]>(argsJson);
-    boundedString(boundName, 1024);
-    boundedString(key, 1024);
-    await sharedDatastore.set(boundName, key, value, opts);
-    return null;
-  });
+register("__bridge_sharedDatastoreSet", async (argsJson) => {
+  const [boundName, key, value, opts] =
+    args<[string, string, DatastoreValue, DatastoreSetOptions | undefined]>(argsJson);
+  boundedString(boundName, 1024);
+  boundedString(key, 1024);
+  await sharedDatastore.set(boundName, key, value, opts);
+  return null;
+});
 
-  register("__bridge_sharedDatastoreDelete", async (argsJson) => {
-    const [boundName, key] = args<[string, string]>(argsJson);
-    boundedString(boundName, 1024);
-    boundedString(key, 1024);
-    await sharedDatastore.delete(boundName, key);
-    return null;
-  });
+register("__bridge_sharedDatastoreDelete", async (argsJson) => {
+  const [boundName, key] = args<[string, string]>(argsJson);
+  boundedString(boundName, 1024);
+  boundedString(key, 1024);
+  await sharedDatastore.delete(boundName, key);
+  return null;
+});
 
-  register("__bridge_sharedDatastoreList", async (argsJson) => {
-    const [boundName, prefix] = args<[string, string | null]>(argsJson);
-    boundedString(boundName, 1024);
-    if (prefix !== null) boundedString(prefix, 1024);
-    return sharedDatastore.list(boundName, prefix ?? undefined);
-  });
+register("__bridge_sharedDatastoreList", async (argsJson) => {
+  const [boundName, prefix] = args<[string, string | null]>(argsJson);
+  boundedString(boundName, 1024);
+  if (prefix !== null) boundedString(prefix, 1024);
+  return sharedDatastore.list(boundName, prefix ?? undefined);
+});
 ```
 
 - [ ] **Step 5: Thread `sharedDatastore` through `src/sandbox/run-in-sandbox.ts`**
@@ -1223,18 +1254,18 @@ export interface SandboxInvocation {
 Pass it through in `installHostFunctions(...)`:
 
 ```ts
-  return evalToJson(code, invocation.limits, (context, runtime, signal) => {
-    installHostFunctions(context, runtime, {
-      agentId: invocation.agentId,
-      datastore: invocation.datastore,
-      sharedDatastore: invocation.sharedDatastore,
-      logTag: invocation.toolName,
-      secrets: invocation.secrets,
-      logger: invocation.logger,
-      allowedFetchHosts: invocation.allowedFetchHosts,
-      signal,
-    });
+return evalToJson(code, invocation.limits, (context, runtime, signal) => {
+  installHostFunctions(context, runtime, {
+    agentId: invocation.agentId,
+    datastore: invocation.datastore,
+    sharedDatastore: invocation.sharedDatastore,
+    logTag: invocation.toolName,
+    secrets: invocation.secrets,
+    logger: invocation.logger,
+    allowedFetchHosts: invocation.allowedFetchHosts,
+    signal,
   });
+});
 ```
 
 - [ ] **Step 6: Fix the resulting compile breaks in `run-in-sandbox.test.ts`**
@@ -1260,7 +1291,10 @@ import { asPrefixMap } from "../sandbox/tool-capabilities.js";
 Widen `RunnerDb`:
 
 ```ts
-export type RunnerDb = Pick<PrismaClient, "agent" | "run" | "agentTool" | "agentSecret" | "agentDatastore" | "budgetGroup">;
+export type RunnerDb = Pick<
+  PrismaClient,
+  "agent" | "run" | "agentTool" | "agentSecret" | "agentDatastore" | "budgetGroup"
+>;
 ```
 
 In the `load` step's `toolsByName` map, add the new field alongside the existing three:
@@ -1284,22 +1318,22 @@ In the `load` step's `toolsByName` map, add the new field alongside the existing
 Build the per-run shared accessor alongside the existing `secretsAccessor` (in `executeRun`, right after `const secretsAccessor = buildSecretsAccessor(loaded.agentId, providers.secrets, db);`):
 
 ```ts
-    const sharedDatastoreAccessor = buildSharedDatastoreAccessor(loaded.agentId, providers.datastore, db);
+const sharedDatastoreAccessor = buildSharedDatastoreAccessor(loaded.agentId, providers.datastore, db);
 ```
 
 Pass the scoped accessor into `runInSandbox`, alongside the existing `datastore:`/`secrets:` lines:
 
 ```ts
-      const result = await runInSandbox({
-        code: tool.code,
-        params: validation.value,
-        agentId: loaded.agentId,
-        datastore: scopeDatastore(providers.datastore, tool.allowedDatastorePrefixes),
-        sharedDatastore: scopeSharedDatastoreAccessor(sharedDatastoreAccessor, tool.allowedSharedDatastorePrefixes),
-        secrets: scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets),
-        allowedFetchHosts: tool.allowedHosts,
-        toolName: name,
-      });
+const result = await runInSandbox({
+  code: tool.code,
+  params: validation.value,
+  agentId: loaded.agentId,
+  datastore: scopeDatastore(providers.datastore, tool.allowedDatastorePrefixes),
+  sharedDatastore: scopeSharedDatastoreAccessor(sharedDatastoreAccessor, tool.allowedSharedDatastorePrefixes),
+  secrets: scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets),
+  allowedFetchHosts: tool.allowedHosts,
+  toolName: name,
+});
 ```
 
 - [ ] **Step 9: Write a failing runner-level test, then confirm it passes**
@@ -1327,10 +1361,12 @@ git commit -m "feat(sandbox): add sharedDatastore global, wire through runner"
 ### Task 6: MCP tools
 
 **Files:**
+
 - Modify: `src/mcp/tools/datastore.ts`
 - Modify: `src/mcp/tools/datastore.test.ts`
 
 **Interfaces:**
+
 - Consumes: `createDatastore/listDatastores/deleteDatastore/attachDatastore/detachDatastore/buildSharedDatastoreAccessor` (Task 3), `requireOwnedDatastore/requireOwnedAgent/requireReadableAgent` (Task 3 + existing).
 - Produces: MCP tools `create_datastore`, `list_datastores`, `delete_datastore`, `attach_datastore`, `detach_datastore`; `datastore_get`/`datastore_set`/`datastore_list`/`datastore_delete` gain an optional `boundName` argument.
 
@@ -1463,7 +1499,14 @@ Expected: FAIL — `create_datastore`/`attach_datastore`/etc. are not registered
 Add imports:
 
 ```ts
-import { createDatastore, listDatastores, deleteDatastore, attachDatastore, detachDatastore, buildSharedDatastoreAccessor } from "../../core/datastores.js";
+import {
+  createDatastore,
+  listDatastores,
+  deleteDatastore,
+  attachDatastore,
+  detachDatastore,
+  buildSharedDatastoreAccessor,
+} from "../../core/datastores.js";
 import { requireOwnedDatastore } from "../auth/ownership.js";
 ```
 
@@ -1667,6 +1710,7 @@ git commit -m "feat(mcp): add create/list/delete/attach/detach_datastore tools, 
 ### Task 7: Importer wiring (`config/datastores-shared.json`)
 
 **Files:**
+
 - Modify: `src/import/neutral-schema.ts`
 - Modify: `src/import/bundle.ts`
 - Modify: `src/import/create.ts`
@@ -1677,6 +1721,7 @@ git commit -m "feat(mcp): add create/list/delete/attach/detach_datastore tools, 
 - Modify: `src/import/index.test.ts`
 
 **Interfaces:**
+
 - Consumes: `createDatastore`/`attachDatastore` (Task 3).
 - Produces: `Bundle.readSharedDatastores(): NeutralSharedDatastore[]`; `ImportResult.datastoresSharedCreated: number`.
 
@@ -1773,6 +1818,7 @@ Write these two tests following this file's actual existing conventions exactly 
 - [ ] **Step 2: Add `readSharedDatastores: () => []` to every other existing `Bundle` fixture**
 
 Same interface-change ripple as Task 2 Step 6, but for `Bundle`. Add `readSharedDatastores: () => []` to every `Bundle` object literal in:
+
 - `src/import/create.database.test.ts` (two occurrences, per the earlier grep — lines ~161 and ~339 build `readSingleDatastores`; add the new field next to each)
 - `src/import/preflight.test.ts`
 - `src/import/index.test.ts` — this one also writes bundle files to a temp directory (`write("config/datastores-single.json", [])`); add `write("config/datastores-shared.json", []);` alongside it.
@@ -1791,9 +1837,14 @@ export const NeutralSharedDatastoreSchema = z.object({
   name: z.string(),
   ownerEmail: z.string().nullable().default(null),
   attachedAgentNames: z.array(z.string()).default([]),
-  entries: z.array(z.object({
-    key: z.string(), value: z.unknown(),
-  })).default([]),
+  entries: z
+    .array(
+      z.object({
+        key: z.string(),
+        value: z.unknown(),
+      }),
+    )
+    .default([]),
 });
 export type NeutralSharedDatastore = z.infer<typeof NeutralSharedDatastoreSchema>;
 ```
@@ -1844,88 +1895,90 @@ export interface ImportResult {
 ```
 
 ```ts
-  let datastoresSharedCreated = 0;
+let datastoresSharedCreated = 0;
 ```
 
 Add the new step immediately after the existing "Step 6: Per-agent datastore seed" block (before "Step 7: Webhooks"). Shared datastores require an owner, same rule as secrets/webhooks/budgets:
 
 ```ts
-  // Step 6.5: Shared datastores
-  if (!hasOwner) {
-    for (const sd of bundle.readSharedDatastores()) {
-      warnings.push(`shared-datastore ${sd.name}: skipped — shared datastores require an owner (public import)`);
-    }
-  } else {
-    const owner = ownerId; // hasOwner guarantees non-null
-    for (const sd of bundle.readSharedDatastores()) {
-      // createDatastore is a plain create, not an upsert (Task 3, deliberate
-      // — see core/datastores.ts), and Datastore has @@unique([ownerId, name]).
-      // Tier-1 uses one global `ownerId` for every shared-datastore
-      // definition in a bundle, so two definitions sharing a `name` collide
-      // HERE, before ever reaching attachDatastore's own unique constraint
-      // below. Without this try/catch, that collision would abort the whole
-      // import (including any later webhooks/budget-group steps) on an
-      // otherwise-recoverable bundle-authoring mistake — every other
-      // per-item creation in this function already follows the
-      // catch-warn-continue idiom; this closes the one gap that wouldn't.
-      let created;
-      try {
-        created = await createDatastore(sd.name, owner, db);
-      } catch (err) {
-        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-          warnings.push(`shared-datastore ${sd.name}: a shared datastore named "${sd.name}" already exists — skipped`);
-          continue;
-        }
-        warnings.push(`shared-datastore ${sd.name}: failed to create (${err instanceof Error ? err.message : String(err)})`);
+// Step 6.5: Shared datastores
+if (!hasOwner) {
+  for (const sd of bundle.readSharedDatastores()) {
+    warnings.push(`shared-datastore ${sd.name}: skipped — shared datastores require an owner (public import)`);
+  }
+} else {
+  const owner = ownerId; // hasOwner guarantees non-null
+  for (const sd of bundle.readSharedDatastores()) {
+    // createDatastore is a plain create, not an upsert (Task 3, deliberate
+    // — see core/datastores.ts), and Datastore has @@unique([ownerId, name]).
+    // Tier-1 uses one global `ownerId` for every shared-datastore
+    // definition in a bundle, so two definitions sharing a `name` collide
+    // HERE, before ever reaching attachDatastore's own unique constraint
+    // below. Without this try/catch, that collision would abort the whole
+    // import (including any later webhooks/budget-group steps) on an
+    // otherwise-recoverable bundle-authoring mistake — every other
+    // per-item creation in this function already follows the
+    // catch-warn-continue idiom; this closes the one gap that wouldn't.
+    let created;
+    try {
+      created = await createDatastore(sd.name, owner, db);
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        warnings.push(`shared-datastore ${sd.name}: a shared datastore named "${sd.name}" already exists — skipped`);
         continue;
       }
-      datastoresSharedCreated++;
+      warnings.push(
+        `shared-datastore ${sd.name}: failed to create (${err instanceof Error ? err.message : String(err)})`,
+      );
+      continue;
+    }
+    datastoresSharedCreated++;
 
-      for (const entry of sd.entries) {
-        try {
-          await db.datastoreEntry.create({
-            data: { datastoreId: created.id, key: entry.key, value: entry.value as Prisma.InputJsonValue, pii: false },
-          });
-        } catch (err) {
-          warnings.push(
-            `shared-datastore ${sd.name}/${entry.key}: failed to seed (${err instanceof Error ? err.message : String(err)})`,
-          );
-        }
+    for (const entry of sd.entries) {
+      try {
+        await db.datastoreEntry.create({
+          data: { datastoreId: created.id, key: entry.key, value: entry.value as Prisma.InputJsonValue, pii: false },
+        });
+      } catch (err) {
+        warnings.push(
+          `shared-datastore ${sd.name}/${entry.key}: failed to seed (${err instanceof Error ? err.message : String(err)})`,
+        );
       }
+    }
 
-      for (const agentName of sd.attachedAgentNames) {
-        const agentId = agentIdMap.get(agentName);
-        if (!agentId) continue;
-        try {
-          await attachDatastore(agentId, created.id, db, sd.name);
-        } catch (err) {
-          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-            warnings.push(`shared-datastore ${sd.name}: agent ${agentName} already binds "${sd.name}" — skipped`);
-            continue;
-          }
-          warnings.push(
-            `shared-datastore ${sd.name}/${agentName}: failed to attach (${err instanceof Error ? err.message : String(err)})`,
-          );
+    for (const agentName of sd.attachedAgentNames) {
+      const agentId = agentIdMap.get(agentName);
+      if (!agentId) continue;
+      try {
+        await attachDatastore(agentId, created.id, db, sd.name);
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+          warnings.push(`shared-datastore ${sd.name}: agent ${agentName} already binds "${sd.name}" — skipped`);
+          continue;
         }
+        warnings.push(
+          `shared-datastore ${sd.name}/${agentName}: failed to attach (${err instanceof Error ? err.message : String(err)})`,
+        );
       }
     }
   }
+}
 ```
 
 Add `datastoresSharedCreated` to the final `return`:
 
 ```ts
-  return {
-    agentsCreated,
-    toolsCreated,
-    secretsCreated,
-    datastoreEntries,
-    datastoresSharedCreated,
-    budgetGroupsCreated,
-    webhookSecrets,
-    pendingSecretReentry,
-    warnings,
-  };
+return {
+  agentsCreated,
+  toolsCreated,
+  secretsCreated,
+  datastoreEntries,
+  datastoresSharedCreated,
+  budgetGroupsCreated,
+  webhookSecrets,
+  pendingSecretReentry,
+  warnings,
+};
 ```
 
 - [ ] **Step 7: Wire the report and capability gate in `src/import/index.ts`**
@@ -1933,14 +1986,14 @@ Add `datastoresSharedCreated` to the final `return`:
 Change the capabilities-supported set:
 
 ```ts
-  const capabilitiesSupported = new Set(["budgets", "shared-datastores"]);
+const capabilitiesSupported = new Set(["budgets", "shared-datastores"]);
 ```
 
 Add a report line alongside the existing `Datastore entries:` line:
 
 ```ts
-  finalLines.push(`Datastore entries: ${result.datastoreEntries}`);
-  finalLines.push(`Shared datastores created: ${result.datastoresSharedCreated}`);
+finalLines.push(`Datastore entries: ${result.datastoreEntries}`);
+finalLines.push(`Shared datastores created: ${result.datastoresSharedCreated}`);
 ```
 
 - [ ] **Step 8: Run tests, fix fixtures until they pass**

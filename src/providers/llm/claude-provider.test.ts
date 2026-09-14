@@ -110,9 +110,7 @@ describe("ClaudeLlmProvider", () => {
     );
     expect(withoutTools).toBeGreaterThan(0);
     expect(withTools).toBeGreaterThan(withoutTools);
-    await expect(p.countTokens("unknown-model", [{ role: "user", content: "hi" }])).rejects.toThrow(
-      /No pricing entry/,
-    );
+    await expect(p.countTokens("unknown-model", [{ role: "user", content: "hi" }])).rejects.toThrow(/No pricing entry/);
   });
 
   it("priceUsd delegates to the injected pricing module", () => {

@@ -2,7 +2,7 @@ import type { Reconciliation } from "./preflight.js";
 
 export function renderReconciliation(
   r: Reconciliation,
-  opts: { secretMode: "references" | "envelope"; dryRun: boolean }
+  opts: { secretMode: "references" | "envelope"; dryRun: boolean },
 ): string {
   const lines: string[] = [];
 
@@ -18,7 +18,7 @@ export function renderReconciliation(
 
   // Agents
   lines.push("Agents:");
-  const disabledAgents = r.agents.filter(a => a.disabled || a.skipped);
+  const disabledAgents = r.agents.filter((a) => a.disabled || a.skipped);
   if (disabledAgents.length > 0) {
     for (const a of disabledAgents) {
       if (a.disabled && a.disabledReason) {
@@ -34,7 +34,7 @@ export function renderReconciliation(
 
   // Tools
   lines.push("Tools:");
-  const rejectedTools = r.tools.filter(t => t.rejected || t.skipped);
+  const rejectedTools = r.tools.filter((t) => t.rejected || t.skipped);
   if (rejectedTools.length > 0) {
     for (const t of rejectedTools) {
       if (t.rejected) {
@@ -61,7 +61,7 @@ export function renderReconciliation(
 
   // Budgets
   lines.push("Budgets:");
-  const skippedBudgets = r.budgets.filter(b => b.skippedReason);
+  const skippedBudgets = r.budgets.filter((b) => b.skippedReason);
   if (skippedBudgets.length > 0) {
     for (const b of skippedBudgets) {
       lines.push(`  - ${b.name}: skipped (${b.skippedReason})`);

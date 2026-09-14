@@ -6,7 +6,7 @@
 **Related:** `docs/private/2026-09-07-migration-bundle-spec.md` (§ secrets/alias); Tier-1 importer finding **F2** (shared-alias collapse)
 
 > **Clean-room note.** This is a reevo-run platform change grounded entirely in
-> reevo's own data model. It describes the *concept* of a per-attachment alias
+> reevo's own data model. It describes the _concept_ of a per-attachment alias
 > (which reevo already documents in the migration-bundle spec) and does not read
 > from or copy any agent-cron source.
 
@@ -62,7 +62,7 @@ silently (the import reports success).
   the `SecretCipher` provider interface.
 - No change to secret **identity** uniqueness (`Secret` stays unique per
   `(ownerId, name)`).
-- Does not add "one physical secret under multiple aliases for the *same*
+- Does not add "one physical secret under multiple aliases for the _same_
   agent" — the attachment cardinality stays one row per `(agent, secret)`.
 
 ---
@@ -81,14 +81,14 @@ considered and rejected:
 
 - The correctness invariant is "one point-of-use name per agent." A non-null
   `boundName` lets Postgres enforce that directly with `@@unique([agentId,
-  boundName])`. With a nullable alias, a row where `alias IS NULL` (effective =
+boundName])`. With a nullable alias, a row where `alias IS NULL` (effective =
   `s.name`) can silently collide with another row where `alias = 'foo'` and
   `s.name` happens to equal `foo` for the first — a collision the unique index
   cannot see.
 - Resolution becomes a plain equality (`a."boundName" = ${name}`), fully
   index-backed, no `COALESCE`.
 
-Denormalizing the point-of-use name onto the attachment is *semantically*
+Denormalizing the point-of-use name onto the attachment is _semantically_
 correct here: the name tool code uses must be independent of the underlying
 secret's canonical name, so renaming the secret must not move the binding.
 
@@ -148,7 +148,7 @@ name, preserving today's one-arg callers' behavior):
 ```ts
 export async function attachSecret(
   agentId: string,
-  name: string,          // the secret's CANONICAL name — how we find the row
+  name: string, // the secret's CANONICAL name — how we find the row
   ownerId: string,
   db: PrismaClient,
   boundName: string = name, // point-of-use name; defaults to the canonical name
@@ -163,11 +163,7 @@ export async function attachSecret(
 since that is what an agent config knows and what `get()` resolves by:
 
 ```ts
-export async function detachSecret(
-  agentId: string,
-  boundName: string,
-  db: PrismaClient,
-): Promise<void> {
+export async function detachSecret(agentId: string, boundName: string, db: PrismaClient): Promise<void> {
   await db.agentSecret.deleteMany({ where: { agentId, boundName } });
 }
 ```
@@ -195,7 +191,7 @@ const attachment = await db.agentSecret.findFirst({
 **`scopeSecretsAccessor` stays as-is.** It filters `get()` by the tool's
 allowed point-of-use names (`AgentTool.allowedSecrets`). Those entries are
 already point-of-use names, and `get()` now resolves by exactly that, so the
-capability allow-list keeps working with no change — the change is *consistent*
+capability allow-list keeps working with no change — the change is _consistent_
 across attach, get, and scope.
 
 ### 4. Importer (`src/import/create.ts`)
@@ -241,7 +237,7 @@ for (const as of bundle.readAgentSecrets()) {
 
 Net effect on the real bundle: 39 distinct base-name `Secret` rows, each with
 its own decrypted value; 97 `AgentSecret` rows whose `boundName` is the
-point-of-use name; every agent resolves `bitbucket` to *its own* credential; no
+point-of-use name; every agent resolves `bitbucket` to _its own_ credential; no
 orphans. Fixes **F2** (correctness) and **F1** (`secretsCreated` now counts rows).
 
 ### 5. MCP surface (`src/mcp/tools/secrets.ts`)
@@ -283,22 +279,22 @@ runtime: tool on agent A calls secrets.get("bitbucket")
 ## Testing
 
 Unit — `src/core/secrets.test.ts`:
-1. Two agents each attach a *different* secret under the same `boundName`;
+
+1. Two agents each attach a _different_ secret under the same `boundName`;
    `get()` returns each agent's own distinct value. (Direct F2 regression.)
 2. One agent attaches two secrets under two distinct bound names; `get()`
    resolves each correctly.
-3. One agent attaching two different secrets under the *same* bound name → the
+3. One agent attaching two different secrets under the _same_ bound name → the
    second `attachSecret` rejects (P2002).
 4. `boundName` defaults to the secret name when the arg is omitted (back-compat).
 5. Both accessor paths covered: the `$queryRaw` production path and the
    Prisma-double fallback (`agentSecret.findFirst`).
 6. `detachSecret(agent, boundName)` removes only the matching edge.
 
-Integration — `src/import/create.test.ts`:
-7. Bundle with two agents, two distinct base secrets, both aliased to
-   `bitbucket`: assert two `Secret` rows under base names, two `AgentSecret`
-   rows with `boundName = "bitbucket"`, `secretsCreated == 2`, and an accessor
-   per agent returns the right token. (The test the current importer lacks.)
+Integration — `src/import/create.test.ts`: 7. Bundle with two agents, two distinct base secrets, both aliased to
+`bitbucket`: assert two `Secret` rows under base names, two `AgentSecret`
+rows with `boundName = "bitbucket"`, `secretsCreated == 2`, and an accessor
+per agent returns the right token. (The test the current importer lacks.)
 
 MCP — `src/mcp/tools/secrets.test.ts` (if present): `attach_secret` with and
 without `alias`; `detach_secret` by point-of-use name.
@@ -309,7 +305,7 @@ without `alias`; `detach_secret` by point-of-use name.
   behavior (`boundName` backfilled to the name they already resolved by).
 - `attachSecret`'s new parameter is defaulted, so non-importer callers compile
   and behave unchanged.
-- No data recovery needed for a *re-import*: a fresh import under this change
+- No data recovery needed for a _re-import_: a fresh import under this change
   produces the correct graph. (An already-imported DB carrying F2 damage would
   need a re-import or a one-off remap, out of scope here.)
 

@@ -11,7 +11,7 @@ datastores" item); `docs/private/2026-09-07-migration-bundle-spec.md`
 (the `boundName` precedent this design reuses)
 
 > **Clean-room note.** This is a reevo-run platform change grounded entirely in
-> reevo's own data model. It describes the *concept* of a named datastore shared
+> reevo's own data model. It describes the _concept_ of a named datastore shared
 > across agents (which the migration-bundle spec already documents as a gated
 > capability reevo lacks) and does not read from or copy any agent-cron source.
 
@@ -20,8 +20,8 @@ datastores" item); `docs/private/2026-09-07-migration-bundle-spec.md`
 ## Goal
 
 Let multiple agents read and write a common, named key/value store — closing
-the gap the roadmap and migration-bundle docs already flag: *"agent-cron has
-named datastores shared across agents; reevo's is per-agent."* Land the core
+the gap the roadmap and migration-bundle docs already flag: _"agent-cron has
+named datastores shared across agents; reevo's is per-agent."_ Land the core
 subsystem (schema, ownership, attach/detach, sandbox API, MCP tools) and wire
 the Tier-1 importer to consume `config/datastores-shared.json` instead of
 unconditionally skipping it.
@@ -42,12 +42,12 @@ substituted** — real bundles lose this data on import today.
 
 ## Non-goals
 
-- Cross-*principal* sharing (a datastore owned by A attached to an agent owned
+- Cross-_principal_ sharing (a datastore owned by A attached to an agent owned
   by B). Attaching still requires owning both the datastore and the agent —
   the roadmap doc explicitly defers "access grants / sharing" until a concrete
   need appears; this design composes with that later work rather than
   building it now.
-- Per-attachment PII flag or per-agent aliasing for *shared* entries seeded by
+- Per-attachment PII flag or per-agent aliasing for _shared_ entries seeded by
   the importer — the source bundle shape carries neither field, so importing
   `datastores-shared.json` faithfully means plain, store-name-bound entries.
   Anyone wanting PII-flagged or aliased shared data sets that up post-import
@@ -238,9 +238,14 @@ Shared access is a separate global keyed by bound name:
 // prelude.ts
 globalThis.sharedDatastore = {
   get: async (boundName, key) => JSON.parse(await __bridge_sharedDatastoreGet(JSON.stringify([boundName, key]))),
-  set: async (boundName, key, value, opts) => { await __bridge_sharedDatastoreSet(JSON.stringify([boundName, key, value, opts])); },
-  delete: async (boundName, key) => { await __bridge_sharedDatastoreDelete(JSON.stringify([boundName, key])); },
-  list: async (boundName, prefix) => JSON.parse(await __bridge_sharedDatastoreList(JSON.stringify([boundName, prefix ?? null]))),
+  set: async (boundName, key, value, opts) => {
+    await __bridge_sharedDatastoreSet(JSON.stringify([boundName, key, value, opts]));
+  },
+  delete: async (boundName, key) => {
+    await __bridge_sharedDatastoreDelete(JSON.stringify([boundName, key]));
+  },
+  list: async (boundName, prefix) =>
+    JSON.parse(await __bridge_sharedDatastoreList(JSON.stringify([boundName, prefix ?? null]))),
 };
 ```
 
@@ -360,38 +365,29 @@ runtime: a tool on agent A (granted allowedSharedDatastorePrefixes: {"shared-kb"
 ## Testing
 
 Unit — `src/providers/datastore/postgres.test.ts`:
+
 1. Shared get/set/delete/list scoped by `datastoreId`; two different
    `datastoreId`s never see each other's keys.
 2. Existing private-scope tests untouched and still passing (regression guard
    for the nullable-`agentId` change).
 
-Unit — `src/providers/datastore/scoped.test.ts`:
-3. `scopeSharedDatastore` resolves a bound name to the right `datastoreId` for
-   the calling agent; a name unbound for that agent denies read (undefined)
-   and write (throw).
-4. Prefix allow/deny per bound name; empty/missing map = full deny.
+Unit — `src/providers/datastore/scoped.test.ts`: 3. `scopeSharedDatastore` resolves a bound name to the right `datastoreId` for
+the calling agent; a name unbound for that agent denies read (undefined)
+and write (throw). 4. Prefix allow/deny per bound name; empty/missing map = full deny.
 
-Core — `src/core/datastores.test.ts` (new):
-5. `attachDatastore` twice with different datastores under the same
-   `boundName` for one agent → second rejects (P2002).
-6. `detachDatastore` removes only the matching edge.
-7. Two agents attached to the same `Datastore` both see writes the other made.
+Core — `src/core/datastores.test.ts` (new): 5. `attachDatastore` twice with different datastores under the same
+`boundName` for one agent → second rejects (P2002). 6. `detachDatastore` removes only the matching edge. 7. Two agents attached to the same `Datastore` both see writes the other made.
 
-Sandbox — `src/sandbox/host-functions.test.ts`:
-8. `sharedDatastore.*` bridge round-trips through a real bound name; an
-   unbound name behaves per the rules above.
+Sandbox — `src/sandbox/host-functions.test.ts`: 8. `sharedDatastore.*` bridge round-trips through a real bound name; an
+unbound name behaves per the rules above.
 
-MCP — `src/mcp/tools/datastore.test.ts`:
-9. `create_datastore`/`attach_datastore`/`detach_datastore` end-to-end,
-   including the cross-owner-attach rejection.
-10. `datastore_get`/`datastore_set` with and without `boundName`.
+MCP — `src/mcp/tools/datastore.test.ts`: 9. `create_datastore`/`attach_datastore`/`detach_datastore` end-to-end,
+including the cross-owner-attach rejection. 10. `datastore_get`/`datastore_set` with and without `boundName`.
 
-Integration — `src/import/create.test.ts`:
-11. A bundle with one shared store attached to two agents → one `Datastore`
-    row, two `AgentDatastore` rows, entries visible to both agents via
-    `sharedDatastore.get`; `datastoresSharedCreated` count correct.
-12. A boundName collision across two differently-owned shared stores on one
-    agent → warning, not a crash; the first attachment wins.
+Integration — `src/import/create.test.ts`: 11. A bundle with one shared store attached to two agents → one `Datastore`
+row, two `AgentDatastore` rows, entries visible to both agents via
+`sharedDatastore.get`; `datastoresSharedCreated` count correct. 12. A boundName collision across two differently-owned shared stores on one
+agent → warning, not a crash; the first attachment wins.
 
 ## Rollout / backward compatibility
 

@@ -3,7 +3,10 @@ import { z } from "zod";
 export const CiphertextSchema = z.object({
   v: z.number(),
   alg: z.string(),
-  epk: z.string(), nonce: z.string(), ct: z.string(), tag: z.string(),
+  epk: z.string(),
+  nonce: z.string(),
+  ct: z.string(),
+  tag: z.string(),
 });
 
 export const ManifestSchema = z.object({
@@ -35,11 +38,14 @@ export const NeutralAgentSchema = z.object({
   ownerEmail: z.string().nullable().default(null),
   kind: z.enum(["native"]).default("native"),
   memoryEnabled: z.boolean().default(false),
-  unmodeled: z.object({
-    description: z.string().nullable().default(null),
-    slug: z.string().nullable().default(null),
-    emailAllowlist: z.unknown().nullable().default(null),
-  }).partial().default({}),
+  unmodeled: z
+    .object({
+      description: z.string().nullable().default(null),
+      slug: z.string().nullable().default(null),
+      emailAllowlist: z.unknown().nullable().default(null),
+    })
+    .partial()
+    .default({}),
 });
 export type NeutralAgent = z.infer<typeof NeutralAgentSchema>;
 
@@ -82,9 +88,15 @@ export type NeutralAgentSecret = z.infer<typeof NeutralAgentSecretSchema>;
 export const NeutralSingleDatastoreSchema = z.object({
   agentName: z.string(),
   name: z.string().optional(),
-  entries: z.array(z.object({
-    key: z.string(), value: z.unknown(), pii: z.boolean().default(false),
-  })).default([]),
+  entries: z
+    .array(
+      z.object({
+        key: z.string(),
+        value: z.unknown(),
+        pii: z.boolean().default(false),
+      }),
+    )
+    .default([]),
 });
 export type NeutralSingleDatastore = z.infer<typeof NeutralSingleDatastoreSchema>;
 
@@ -92,9 +104,14 @@ export const NeutralSharedDatastoreSchema = z.object({
   name: z.string(),
   ownerEmail: z.string().nullable().default(null),
   attachedAgentNames: z.array(z.string()).default([]),
-  entries: z.array(z.object({
-    key: z.string(), value: z.unknown(),
-  })).default([]),
+  entries: z
+    .array(
+      z.object({
+        key: z.string(),
+        value: z.unknown(),
+      }),
+    )
+    .default([]),
 });
 export type NeutralSharedDatastore = z.infer<typeof NeutralSharedDatastoreSchema>;
 

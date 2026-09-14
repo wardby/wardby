@@ -16,6 +16,8 @@ jobs:
         options: --health-cmd pg_isready --health-interval 5s --health-retries 10
     env:
       DATABASE_URL: postgresql://reevo:test-only@localhost:5432/security
+      # Public deterministic fixture material for tests only; never a deployment key.
+      SECRET_APP_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

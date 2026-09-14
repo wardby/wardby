@@ -11,7 +11,16 @@ describe("parseImportArgs", () => {
     expect(o.dryRun).toBe(false);
   });
   it("parses --public, --dry-run, --include-secrets, --on-conflict rename", () => {
-    const o = parseImportArgs(["/tmp/b", "--public", "--dry-run", "--include-secrets", "--transfer-key", "/k.pem", "--on-conflict", "rename"]);
+    const o = parseImportArgs([
+      "/tmp/b",
+      "--public",
+      "--dry-run",
+      "--include-secrets",
+      "--transfer-key",
+      "/k.pem",
+      "--on-conflict",
+      "rename",
+    ]);
     expect(o.isPublic).toBe(true);
     expect(o.dryRun).toBe(true);
     expect(o.includeSecrets).toBe(true);

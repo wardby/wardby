@@ -46,9 +46,7 @@ describe("BedrockClaudeLlmProvider", () => {
 
   it("countTokens fails closed on an unknown model", async () => {
     const p = new BedrockClaudeLlmProvider("us-east-1", fakeClient([]));
-    await expect(p.countTokens("unknown-model", [{ role: "user", content: "hi" }])).rejects.toThrow(
-      /No pricing entry/,
-    );
+    await expect(p.countTokens("unknown-model", [{ role: "user", content: "hi" }])).rejects.toThrow(/No pricing entry/);
   });
 
   it("throws when constructed with no region and no injected client", () => {

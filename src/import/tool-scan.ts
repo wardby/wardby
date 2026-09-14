@@ -15,7 +15,8 @@ export function supportedGlobalsFromPrelude(preludeSource: string): Set<string> 
 }
 
 export function scanToolCode(
-  code: string, supported: ReadonlySet<string>,
+  code: string,
+  supported: ReadonlySet<string>,
 ): { ok: true } | { ok: false; rejectedApis: string[] } {
   const denied = SPEC_UNSUPPORTED_HOST_APIS.filter((api) => !supported.has(api));
   const hit = denied.filter((api) => new RegExp(`\\b${api}\\b`).test(code));

@@ -26,6 +26,8 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://reevo:reevo@localhost:5432/reevo
+      # Public deterministic fixture material for tests only; never a deployment key.
+      SECRET_APP_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +38,8 @@ jobs:
           cache: npm
 
       - run: npm ci
+
+      - run: npx playwright install --with-deps chromium
 
       - run: npx prisma generate
 
