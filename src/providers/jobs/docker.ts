@@ -345,6 +345,8 @@ export interface DockerJobLauncherOptions {
   docker?: DockerCommandRunner;
   transfer?: DockerArtifactTransfer;
   now?: () => number;
+  /** Optional observer invoked after provisioning fails but before resources are cleaned up. */
+  onProvisionFailure?: (context: { runId: string; keeperContainer: string }) => Promise<void>;
 }
 
 type DockerJobPhase = "provisioning" | "active" | "succeeded" | "failed" | "stopped" | "lost" | "removed";
@@ -666,6 +668,9 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     try {
       return await this.provision(record, plan, capability);
     } catch (error) {
+      await this.options
+        .onProvisionFailure?.({ runId: record.runId, keeperContainer: plan.names.keeperContainer })
+        .catch(() => undefined);
       await this.cleanupResources(record).catch(() => undefined);
       record.phase = "lost";
       record.result = resultFor("lost");

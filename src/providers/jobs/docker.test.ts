@@ -79,6 +79,12 @@ class NoopTransfer implements DockerArtifactTransfer {
   }
 }
 
+class FailingSeedTransfer extends NoopTransfer {
+  override async seedDirectory(): Promise<void> {
+    throw new Error("seed_failed");
+  }
+}
+
 class FakeDocker implements DockerCommandRunner {
   readonly plan: ReturnType<typeof buildDockerIsolationPlan>;
   readonly calls: { args: readonly string[]; options?: DockerCommandOptions }[] = [];
@@ -468,6 +474,28 @@ jobLauncherContract("Docker", async () => {
 });
 
 describe("DockerJobLauncher", () => {
+  it("observes provisioning failures before cleaning up the keeper", async () => {
+    const created = await harness("docker-provision-failure");
+    const observations: Array<{ runId: string; keeperContainer: string }> = [];
+    const launcher = new DockerJobLauncher({
+      stateRoot: join(created.root, "failure-state"),
+      workspaceRoot: join(created.root, "workspaces"),
+      proxyContainer: "trusted-proxy",
+      resolveCapability: async () => capability,
+      isRunActive: async () => false,
+      docker: created.docker,
+      transfer: new FailingSeedTransfer(),
+      onProvisionFailure: async (context) => {
+        observations.push(context);
+      },
+    });
+
+    await expect(launcher.launch(created.spec)).rejects.toThrow("seed_failed");
+    expect(observations).toEqual([
+      { runId: created.spec.runId, keeperContainer: created.docker.plan.names.keeperContainer },
+    ]);
+  });
+
   it("materializes only a succeeded job into its exact trusted workspace", async () => {
     const created = await harness("docker-materialize");
     const handle = await created.launcher.launch(created.spec);
