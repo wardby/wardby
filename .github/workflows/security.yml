@@ -72,7 +72,7 @@ jobs:
           image: reevo-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }}
           format: spdx-json
           output-file: coding-worker-${{ matrix.tag-suffix }}.spdx.json
-      - uses: aquasecurity/trivy-action@0.33.1
+      - uses: aquasecurity/trivy-action@v0.33.1
         with:
           image-ref: reevo-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }}
           severity: CRITICAL
@@ -113,13 +113,13 @@ jobs:
           image: reevo-claude-tool-runner:${{ github.sha }}
           format: spdx-json
           output-file: claude-tool-runner.spdx.json
-      - uses: aquasecurity/trivy-action@0.33.1
+      - uses: aquasecurity/trivy-action@v0.33.1
         with:
           image-ref: reevo-claude-coding-worker:${{ github.sha }}
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-      - uses: aquasecurity/trivy-action@0.33.1
+      - uses: aquasecurity/trivy-action@v0.33.1
         with:
           image-ref: reevo-claude-tool-runner:${{ github.sha }}
           severity: CRITICAL
