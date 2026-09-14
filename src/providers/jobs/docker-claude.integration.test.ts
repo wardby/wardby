@@ -29,8 +29,9 @@ async function keeperProbe(container: string): Promise<string> {
     try {
       const output = await docker(args);
       return `${label}:ok:${JSON.stringify(output.slice(0, 256))}`;
-    } catch {
-      return `${label}:failed`;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `${label}:failed:${JSON.stringify(message.slice(0, 512))}`;
     }
   };
   return [
@@ -42,6 +43,16 @@ async function keeperProbe(container: string): Promise<string> {
       container,
     ]),
     await run("logs", ["container", "logs", "--tail", "8", container]),
+    await run("node_default_user", [
+      "container",
+      "exec",
+      "--workdir",
+      "/",
+      container,
+      "node",
+      "-e",
+      "process.stdout.write('exec_ok')",
+    ]),
     await run("node_exec", [
       "container",
       "exec",
