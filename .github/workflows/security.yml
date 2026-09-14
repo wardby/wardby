@@ -104,6 +104,7 @@ jobs:
         env:
           REEVO_CLAUDE_WORKER_IMAGE: reevo-claude-coding-worker:${{ github.sha }}
           REEVO_CLAUDE_TOOL_RUNNER_IMAGE: reevo-claude-tool-runner:${{ github.sha }}
+          REEVO_DOCKER_SEED_DEBUG: "1"
       - uses: anchore/sbom-action@v0.20.5
         with:
           image: reevo-claude-coding-worker:${{ github.sha }}

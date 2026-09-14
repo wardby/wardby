@@ -161,7 +161,10 @@ function dockerSeedFailure(stage: "archive" | "extract", exitCode: number | null
   if (/permission denied/i.test(output)) diagnostic = "permission_denied";
   else if (/executable file not found|command not found/i.test(output)) diagnostic = "command_missing";
   else if (/no such file or directory/i.test(output)) diagnostic = "path_missing";
-  return new Error(`docker_seed_failed:${stage}:${diagnostic}`);
+  // CI enables this only for the synthetic Vitest fixture, never for production runs.
+  const debugOutput = process.env.NODE_ENV === "test" && process.env.REEVO_DOCKER_SEED_DEBUG === "1";
+  const details = debugOutput ? `:stderr=${JSON.stringify(output.trim() || "<empty>")}` : "";
+  return new Error(`docker_seed_failed:${stage}:${diagnostic}${details}`);
 }
 
 /** Streams tar archives into the unprivileged keeper; no host bind mounts are used. */
