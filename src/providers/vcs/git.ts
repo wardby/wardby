@@ -500,6 +500,76 @@ export class GitVcsProvider implements VcsProvider {
     await rm(expected.runRoot, { recursive: true, force: true });
   }
 
+  /**
+   * Best-effort "reevo is working on this PR" signal (see VcsProvider) --
+   * whole body wrapped so this can NEVER throw or otherwise affect the
+   * real coding run, mirroring docker.ts's readWorkerFailureDiagnostic
+   * ("diagnostics are optional and must never affect terminal cleanup").
+   * No-op for a fresh (non-continuation) workspace: there's no PR to
+   * attach anything to until its one commit lands.
+   */
+  async notifyContinuationStarted(workspace: PreparedWorkspace): Promise<void> {
+    if (!workspace.continuation) return;
+    try {
+      const identity = {
+        runId: workspace.runId,
+        rootRunId: workspace.continuation.rootRunId,
+        repository: workspace.repository,
+        baseRef: workspace.baseRef,
+        headRef: workspace.headRef,
+      };
+      await Promise.allSettled([
+        this.options.github.upsertContinuationStatusComment({
+          ...identity,
+          body: `🔄 reevo run ${workspace.runId} is working on this PR...`,
+        }),
+        this.options.github.createContinuationCheckRun({
+          repository: workspace.repository,
+          headSha: workspace.baseCommit,
+          runId: workspace.runId,
+        }),
+      ]);
+    } catch {
+      // Best-effort observability only -- must never affect the real run.
+    }
+  }
+
+  /**
+   * Companion to notifyContinuationStarted -- finds and updates whatever
+   * that call created, never creates fresh state itself (see
+   * upsertContinuationStatusComment vs updateContinuationStatusComment,
+   * and createContinuationCheckRun vs completeContinuationCheckRun in
+   * github.ts). Safe to call more than once for the same run. Same
+   * never-throw contract as notifyContinuationStarted.
+   */
+  async notifyContinuationFinished(workspace: PreparedWorkspace, outcome: "succeeded" | "failed"): Promise<void> {
+    if (!workspace.continuation) return;
+    try {
+      const identity = {
+        runId: workspace.runId,
+        rootRunId: workspace.continuation.rootRunId,
+        repository: workspace.repository,
+        baseRef: workspace.baseRef,
+        headRef: workspace.headRef,
+      };
+      const body =
+        outcome === "succeeded"
+          ? `✅ reevo run ${workspace.runId} finished.`
+          : `❌ reevo run ${workspace.runId} failed.`;
+      await Promise.allSettled([
+        this.options.github.updateContinuationStatusComment({ ...identity, body }),
+        this.options.github.completeContinuationCheckRun({
+          repository: workspace.repository,
+          headSha: workspace.baseCommit,
+          runId: workspace.runId,
+          outcome,
+        }),
+      ]);
+    } catch {
+      // Best-effort observability only -- must never affect the real run.
+    }
+  }
+
   private validateInput(
     input: VcsPrepareInput,
   ): Omit<PreparedWorkspace, "id" | "baseCommit" | "workspacePath" | "gitMetadataPath"> {

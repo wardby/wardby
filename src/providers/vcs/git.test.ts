@@ -3,7 +3,14 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { GitHubRepositoryAccess, PullRequestInput, PullRequestResult } from "./github.js";
+import type {
+  ContinuationCheckRunCompleteInput,
+  ContinuationCheckRunInput,
+  ContinuationStatusCommentInput,
+  GitHubRepositoryAccess,
+  PullRequestInput,
+  PullRequestResult,
+} from "./github.js";
 import {
   GitCommandError,
   GitVcsProvider,
@@ -25,6 +32,13 @@ const REMOTE_URL = "https://github.com/openai/example.git";
 class FakeGitHub implements GitHubRepositoryAccess {
   tokenCalls = 0;
   pullRequestCalls: PullRequestInput[] = [];
+  statusCommentCalls: { method: "upsert" | "update"; input: ContinuationStatusCommentInput }[] = [];
+  checkRunCalls: {
+    method: "create" | "complete";
+    input: ContinuationCheckRunInput | ContinuationCheckRunCompleteInput;
+  }[] = [];
+  /** Set to make every continuation-notification call reject, to prove the caller swallows it. */
+  failContinuationCalls = false;
 
   async withRepositoryToken<T>(_repository: string, action: (token: string) => Promise<T>): Promise<T> {
     this.tokenCalls += 1;
@@ -34,6 +48,26 @@ class FakeGitHub implements GitHubRepositoryAccess {
   async createOrFindDraftPullRequest(input: PullRequestInput): Promise<PullRequestResult> {
     this.pullRequestCalls.push(structuredClone(input));
     return { number: 42, url: "https://github.com/openai/example/pull/42" };
+  }
+
+  async upsertContinuationStatusComment(input: ContinuationStatusCommentInput): Promise<void> {
+    if (this.failContinuationCalls) throw new Error("github_api_error:500");
+    this.statusCommentCalls.push({ method: "upsert", input: structuredClone(input) });
+  }
+
+  async updateContinuationStatusComment(input: ContinuationStatusCommentInput): Promise<void> {
+    if (this.failContinuationCalls) throw new Error("github_api_error:500");
+    this.statusCommentCalls.push({ method: "update", input: structuredClone(input) });
+  }
+
+  async createContinuationCheckRun(input: ContinuationCheckRunInput): Promise<void> {
+    if (this.failContinuationCalls) throw new Error("github_api_error:500");
+    this.checkRunCalls.push({ method: "create", input: structuredClone(input) });
+  }
+
+  async completeContinuationCheckRun(input: ContinuationCheckRunCompleteInput): Promise<void> {
+    if (this.failContinuationCalls) throw new Error("github_api_error:500");
+    this.checkRunCalls.push({ method: "complete", input: structuredClone(input) });
   }
 }
 
@@ -390,6 +424,89 @@ describe("GitVcsProvider", () => {
       await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
       git.remoteSha = OTHER_SHA;
       await expect(provider.finalizeChanges(prepared)).rejects.toThrow("vcs_head_ref_conflict");
+    });
+
+    describe("continuation notifications (best-effort GitHub status signal)", () => {
+      it("notifyContinuationStarted posts a status comment and creates a check run, keyed to this round's own runId", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationStarted(prepared);
+
+        expect(github.statusCommentCalls).toEqual([
+          {
+            method: "upsert",
+            input: {
+              runId: "run-2",
+              rootRunId: "run-1",
+              repository: REPOSITORY,
+              baseRef: "main",
+              headRef: "reevo/run-run-1",
+              body: "🔄 reevo run run-2 is working on this PR...",
+            },
+          },
+        ]);
+        expect(github.checkRunCalls).toEqual([
+          { method: "create", input: { repository: REPOSITORY, headSha: BASE_SHA, runId: "run-2" } },
+        ]);
+      });
+
+      it("notifyContinuationFinished updates the status comment and completes the check run with the given outcome", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationFinished(prepared, "succeeded");
+
+        expect(github.statusCommentCalls).toEqual([
+          {
+            method: "update",
+            input: {
+              runId: "run-2",
+              rootRunId: "run-1",
+              repository: REPOSITORY,
+              baseRef: "main",
+              headRef: "reevo/run-run-1",
+              body: "✅ reevo run run-2 finished.",
+            },
+          },
+        ]);
+        expect(github.checkRunCalls).toEqual([
+          {
+            method: "complete",
+            input: { repository: REPOSITORY, headSha: BASE_SHA, runId: "run-2", outcome: "succeeded" },
+          },
+        ]);
+      });
+
+      it("uses a failed-shaped body/outcome when the run failed", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationFinished(prepared, "failed");
+
+        expect(github.statusCommentCalls[0].input.body).toBe("❌ reevo run run-2 failed.");
+        expect(github.checkRunCalls[0].input).toMatchObject({ outcome: "failed" });
+      });
+
+      it("is a no-op for a fresh (non-continuation) workspace", async () => {
+        const { provider, github, input } = await harness();
+        const prepared = await provider.prepareWorkspace(input);
+
+        await provider.notifyContinuationStarted(prepared);
+        await provider.notifyContinuationFinished(prepared, "succeeded");
+
+        expect(github.statusCommentCalls).toHaveLength(0);
+        expect(github.checkRunCalls).toHaveLength(0);
+      });
+
+      it("swallows a GitHub API failure without throwing -- must never affect the real coding run", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+        github.failContinuationCalls = true;
+
+        await expect(provider.notifyContinuationStarted(prepared)).resolves.toBeUndefined();
+        await expect(provider.notifyContinuationFinished(prepared, "failed")).resolves.toBeUndefined();
+      });
     });
   });
 

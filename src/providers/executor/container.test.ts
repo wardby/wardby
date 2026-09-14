@@ -154,6 +154,8 @@ class FakeVcs implements VcsProvider {
   workspace: PreparedWorkspace | null = null;
   lastFinalizeDetails?: FinalizeChangesDetails;
   lastPrepareInput?: VcsPrepareInput;
+  notifyStartedCalls = 0;
+  notifyFinishedCalls: Array<{ outcome: "succeeded" | "failed" }> = [];
 
   constructor(
     private readonly root: string,
@@ -192,6 +194,14 @@ class FakeVcs implements VcsProvider {
     this.cleaned += 1;
     this.events.push("cleanup");
     this.workspace = null;
+  }
+  async notifyContinuationStarted(): Promise<void> {
+    this.notifyStartedCalls += 1;
+    this.events.push("notifyStarted");
+  }
+  async notifyContinuationFinished(_workspace: PreparedWorkspace, outcome: "succeeded" | "failed"): Promise<void> {
+    this.notifyFinishedCalls.push({ outcome });
+    this.events.push(`notifyFinished:${outcome}`);
   }
   private makeWorkspace(input: VcsPrepareInput): PreparedWorkspace {
     return {
@@ -294,6 +304,7 @@ describe("ContainerExecutor", () => {
     });
     expect(created.events).toEqual([
       "prepare",
+      "notifyStarted",
       "session",
       "launch",
       "cancel",
@@ -302,6 +313,7 @@ describe("ContainerExecutor", () => {
       "finalize",
       "remove",
       "cleanup",
+      "notifyFinished:succeeded",
     ]);
     await expect(created.capabilities.get("run-1")).rejects.toThrow("coding_capability_unavailable");
     expect(created.observer.events.map((event) => event.stage)).toEqual([
@@ -334,6 +346,62 @@ describe("ContainerExecutor", () => {
     });
     expect(created.store.run.result).toMatchObject({ outcome: "pull_request_updated", pullRequestNumber: 42 });
     expect(created.observer.events.map((event) => event.stage)).toContain("pull_request_updated");
+    expect(created.vcs.notifyStartedCalls).toBe(1);
+    expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "succeeded" }]);
+  });
+
+  describe("continuation status notifications (notifyContinuationStarted/Finished lifecycle hooks)", () => {
+    it("notifies started once workspace is obtained, and finished with 'succeeded' on the success path", async () => {
+      const created = await harness();
+      await created.executor.start("run-1");
+
+      expect(created.vcs.notifyStartedCalls).toBe(1);
+      expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "succeeded" }]);
+    });
+
+    it("notifies finished with 'failed' when the budget is exhausted", async () => {
+      const created = await harness({ budgetUsd: 0.005 });
+      await created.executor.start("run-1");
+
+      expect(created.vcs.notifyStartedCalls).toBe(1);
+      expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "failed" }]);
+    });
+
+    it("notifies finished with 'failed' when the underlying job fails", async () => {
+      const created = await harness();
+      created.jobs.statusValue = { state: "failed" };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("failed");
+      expect(created.vcs.notifyStartedCalls).toBe(1);
+      expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "failed" }]);
+    });
+
+    it("never notifies started when the run is refused before a workspace exists", async () => {
+      const created = await harness({ ownerId: null });
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("refused");
+      expect(created.vcs.notifyStartedCalls).toBe(0);
+      expect(created.vcs.notifyFinishedCalls).toHaveLength(0);
+    });
+
+    it("notifies finished with 'failed' when stopped mid-run", async () => {
+      const handle = { backend: "fake", id: "job-1" };
+      const created = await harness({ jobHandle: handle, proxySessionId: "session-1" });
+      await created.vcs.prepareWorkspace({
+        runId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "reevo/run-run-1",
+        protectedPaths: ["CODEOWNERS"],
+      });
+
+      await created.executor.stop("run-1", "requested");
+
+      expect(created.store.run.status).toBe("cancelled");
+      expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "failed" }]);
+    });
   });
 
   it("routes Claude through its dedicated proxy credential and composite job spec", async () => {

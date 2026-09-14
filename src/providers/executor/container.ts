@@ -346,7 +346,10 @@ export class ContainerExecutor implements Executor {
     this.options.capabilities.delete(runId);
     const input = this.preflightForCleanup(run);
     const workspace = input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null;
-    if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+    if (workspace) {
+      await this.options.vcs.cleanup(workspace).catch(() => undefined);
+      await this.options.vcs.notifyContinuationFinished?.(workspace, "failed");
+    }
     await rm(this.artifactPath(runId), { recursive: true, force: true }).catch(() => undefined);
     this.emit({ stage: "cleanup", runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
   }
@@ -409,6 +412,7 @@ export class ContainerExecutor implements Executor {
         if (!spendEnabled && !handle) throw new PreflightError(safeError(error), { cause: error });
         throw error;
       }
+      await this.options.vcs.notifyContinuationStarted?.(workspace);
 
       if (!handle) {
         if (sessionId) throw new Error("coding_ambiguous_provisioning");
@@ -470,7 +474,10 @@ export class ContainerExecutor implements Executor {
       await this.options.store.terminate(runId, status, failure.error, failure.audit);
       this.terminal(run, status, failure.audit);
       if (handle) await this.options.jobs.remove(handle).catch(() => undefined);
-      if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+      if (workspace) {
+        await this.options.vcs.cleanup(workspace).catch(() => undefined);
+        await this.options.vcs.notifyContinuationFinished?.(workspace, "failed");
+      }
       this.emit({ stage: "cleanup", runId, jobId: handle?.id, cleanupSucceeded: true });
     }
   }
@@ -531,6 +538,9 @@ export class ContainerExecutor implements Executor {
   ): Promise<void> {
     const sessionId = existingSessionId ?? run.proxySessionId;
     if (sessionId) await this.options.sessions.cancelSession(sessionId).catch(() => undefined);
+    // For notifyContinuationFinished in the `finally` below -- defaults to
+    // "failed" and is only flipped right before an actual success return.
+    let outcome: "succeeded" | "failed" = "failed";
     try {
       if (jobState !== "succeeded") {
         const collected = await this.options.jobs.collect(handle).catch(() => null);
@@ -561,6 +571,7 @@ export class ContainerExecutor implements Executor {
       if (output.outcome === "no_changes") {
         await this.options.store.complete(run.runId, "succeeded", this.resultFor(output, current));
         this.terminal(current, "succeeded");
+        outcome = "succeeded";
         return;
       }
 
@@ -590,6 +601,7 @@ export class ContainerExecutor implements Executor {
         this.emit({ stage: finalized.outcome, runId: run.runId, jobId: handle.id });
       }
       this.terminal(current, "succeeded");
+      outcome = "succeeded";
     } catch (error) {
       const failure = this.failure(error);
       await this.options.store.terminate(run.runId, "failed", failure.error, failure.audit);
@@ -599,7 +611,10 @@ export class ContainerExecutor implements Executor {
       const input = this.preflightForCleanup(run);
       const workspace =
         existingWorkspace ?? (input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null);
-      if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+      if (workspace) {
+        await this.options.vcs.cleanup(workspace).catch(() => undefined);
+        await this.options.vcs.notifyContinuationFinished?.(workspace, outcome);
+      }
       await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
       this.emit({ stage: "cleanup", runId: run.runId, jobId: handle.id, cleanupSucceeded: true });
     }
@@ -749,7 +764,10 @@ export class ContainerExecutor implements Executor {
     }
     const input = this.preflightForCleanup(run);
     const workspace = input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null;
-    if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+    if (workspace) {
+      await this.options.vcs.cleanup(workspace).catch(() => undefined);
+      await this.options.vcs.notifyContinuationFinished?.(workspace, "failed");
+    }
     await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
     this.emit({ stage: "cleanup", runId: run.runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
   }
@@ -766,7 +784,18 @@ export class ContainerExecutor implements Executor {
     }
     const input = this.preflightForCleanup(run);
     const workspace = input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null;
-    if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+    if (workspace) {
+      await this.options.vcs.cleanup(workspace).catch(() => undefined);
+      // Safety-net retry for an already-terminal run recovered later (e.g.
+      // a crash between an earlier store.complete/terminate and this
+      // notification actually firing) -- safe to call again because
+      // notifyContinuationFinished is find-and-update-or-no-op, never
+      // find-or-create.
+      await this.options.vcs.notifyContinuationFinished?.(
+        workspace,
+        run.status === "succeeded" ? "succeeded" : "failed",
+      );
+    }
     await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
     this.emit({ stage: "cleanup", runId: run.runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
   }

@@ -83,4 +83,25 @@ export interface VcsProvider {
   recoverWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace | null>;
   finalizeChanges(workspace: PreparedWorkspace, details?: FinalizeChangesDetails): Promise<FinalizeChangesResult>;
   cleanup(workspace: PreparedWorkspace): Promise<void>;
+  /**
+   * Best-effort "reevo is working on this" signal for a continuation
+   * (see docs/private/2026-09-13-coding-pr-revision-in-place-design.md) --
+   * a no-op when `workspace.continuation` is unset, since a fresh run has
+   * no PR to attach anything to until its one commit lands. Optional
+   * because this is a GitHub-specific concept, not a universal VCS one --
+   * a future non-GitHub provider (or a test double) can simply omit it,
+   * mirroring `Executor.resolveCodingWorkerImage?` (dispatch.ts calls it
+   * with `?.()`). Implementations MUST NOT throw: this is strictly
+   * observability, never allowed to affect the real coding run.
+   */
+  notifyContinuationStarted?(workspace: PreparedWorkspace): Promise<void>;
+  /**
+   * Companion to `notifyContinuationStarted` -- must find and update
+   * whatever that call created, never create fresh state itself (a
+   * "finished" status with no preceding "in progress" one would be
+   * confusing, and could happen if the process crashed between the two
+   * calls). Safe to call more than once for the same run. Same
+   * never-throw contract as `notifyContinuationStarted`.
+   */
+  notifyContinuationFinished?(workspace: PreparedWorkspace, outcome: "succeeded" | "failed"): Promise<void>;
 }
