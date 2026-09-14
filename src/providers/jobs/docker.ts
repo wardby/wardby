@@ -151,7 +151,8 @@ export interface DockerArtifactTransfer {
 }
 
 export function dockerTransferEnvironment(path: string): NodeJS.ProcessEnv {
-  return { PATH: path, LANG: "C", LC_ALL: "C", COPYFILE_DISABLE: "1" };
+  // Docker CLI needs a home directory for its isolated client configuration.
+  return { PATH: path, HOME: "/tmp", LANG: "C", LC_ALL: "C", COPYFILE_DISABLE: "1" };
 }
 
 function dockerSeedFailure(stage: "archive" | "extract", exitCode: number | null, stderr: Buffer[]): Error {

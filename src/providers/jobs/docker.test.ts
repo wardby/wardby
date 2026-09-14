@@ -27,6 +27,7 @@ describe("Docker artifact transfer", () => {
   it("disables macOS AppleDouble sidecars in streamed workspace archives", () => {
     expect(dockerTransferEnvironment("/usr/bin")).toMatchObject({
       PATH: "/usr/bin",
+      HOME: "/tmp",
       LANG: "C",
       LC_ALL: "C",
       COPYFILE_DISABLE: "1",
