@@ -34,6 +34,8 @@ export interface ContainerRunSnapshot {
   runId: string;
   status: string;
   agentKind: string;
+  /** Human-readable agent name (e.g. "knock-knock-implement") -- surfaced in continuation status notifications. */
+  agentName: string;
   ownerId: string | null;
   task: string;
   repository: string;
@@ -89,6 +91,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       runId: row.id,
       status: row.status,
       agentKind: row.agent.kind,
+      agentName: row.agent.name,
       ownerId: row.agent.ownerId,
       task: row.codingRun.task,
       repository: row.codingRun.repository,
@@ -348,7 +351,7 @@ export class ContainerExecutor implements Executor {
     const workspace = input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null;
     if (workspace) {
       await this.options.vcs.cleanup(workspace).catch(() => undefined);
-      await this.options.vcs.notifyContinuationFinished?.(workspace, "failed");
+      await this.options.vcs.notifyContinuationFinished?.(workspace, "failed", { agentName: run.agentName });
     }
     await rm(this.artifactPath(runId), { recursive: true, force: true }).catch(() => undefined);
     this.emit({ stage: "cleanup", runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
@@ -412,7 +415,7 @@ export class ContainerExecutor implements Executor {
         if (!spendEnabled && !handle) throw new PreflightError(safeError(error), { cause: error });
         throw error;
       }
-      await this.options.vcs.notifyContinuationStarted?.(workspace);
+      await this.options.vcs.notifyContinuationStarted?.(workspace, { agentName: run.agentName });
 
       if (!handle) {
         if (sessionId) throw new Error("coding_ambiguous_provisioning");
@@ -476,7 +479,7 @@ export class ContainerExecutor implements Executor {
       if (handle) await this.options.jobs.remove(handle).catch(() => undefined);
       if (workspace) {
         await this.options.vcs.cleanup(workspace).catch(() => undefined);
-        await this.options.vcs.notifyContinuationFinished?.(workspace, "failed");
+        await this.options.vcs.notifyContinuationFinished?.(workspace, "failed", { agentName: run.agentName });
       }
       this.emit({ stage: "cleanup", runId, jobId: handle?.id, cleanupSucceeded: true });
     }
@@ -616,7 +619,10 @@ export class ContainerExecutor implements Executor {
         existingWorkspace ?? (input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null);
       if (workspace) {
         await this.options.vcs.cleanup(workspace).catch(() => undefined);
-        await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, { summary: finishedSummary });
+        await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, {
+          summary: finishedSummary,
+          agentName: run.agentName,
+        });
       }
       await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
       this.emit({ stage: "cleanup", runId: run.runId, jobId: handle.id, cleanupSucceeded: true });
@@ -769,7 +775,7 @@ export class ContainerExecutor implements Executor {
     const workspace = input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null;
     if (workspace) {
       await this.options.vcs.cleanup(workspace).catch(() => undefined);
-      await this.options.vcs.notifyContinuationFinished?.(workspace, "failed");
+      await this.options.vcs.notifyContinuationFinished?.(workspace, "failed", { agentName: run.agentName });
     }
     await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
     this.emit({ stage: "cleanup", runId: run.runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
@@ -797,6 +803,7 @@ export class ContainerExecutor implements Executor {
       await this.options.vcs.notifyContinuationFinished?.(
         workspace,
         run.status === "succeeded" ? "succeeded" : "failed",
+        { agentName: run.agentName },
       );
     }
     await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);

@@ -237,6 +237,11 @@ function directChild(root: string, child: string): boolean {
   return child.startsWith(`${root}${sep}`) && !child.slice(root.length + 1).includes(sep);
 }
 
+/** Human-readable label for continuation status notifications -- falls back to the opaque run id alone when no agent name is known. */
+function runLabel(agentName: string | undefined, runId: string): string {
+  return agentName ? `${agentName} (reevo run ${runId})` : `reevo run ${runId}`;
+}
+
 export class GitVcsProvider implements VcsProvider {
   private readonly rootDir: string;
   private readonly git: GitCommandRunner;
@@ -508,7 +513,7 @@ export class GitVcsProvider implements VcsProvider {
    * No-op for a fresh (non-continuation) workspace: there's no PR to
    * attach anything to until its one commit lands.
    */
-  async notifyContinuationStarted(workspace: PreparedWorkspace): Promise<void> {
+  async notifyContinuationStarted(workspace: PreparedWorkspace, details?: { agentName?: string }): Promise<void> {
     if (!workspace.continuation) return;
     try {
       const identity = {
@@ -521,7 +526,7 @@ export class GitVcsProvider implements VcsProvider {
       await Promise.allSettled([
         this.options.github.upsertContinuationStatusComment({
           ...identity,
-          body: `🔄 reevo run ${workspace.runId} is working on this PR...`,
+          body: `🔄 ${runLabel(details?.agentName, workspace.runId)} is working on this PR...`,
         }),
         this.options.github.createContinuationCheckRun({
           repository: workspace.repository,
@@ -545,7 +550,7 @@ export class GitVcsProvider implements VcsProvider {
   async notifyContinuationFinished(
     workspace: PreparedWorkspace,
     outcome: "succeeded" | "failed",
-    details?: { summary?: string },
+    details?: { summary?: string; agentName?: string },
   ): Promise<void> {
     if (!workspace.continuation) return;
     try {
@@ -556,11 +561,10 @@ export class GitVcsProvider implements VcsProvider {
         baseRef: workspace.baseRef,
         headRef: workspace.headRef,
       };
+      const label = runLabel(details?.agentName, workspace.runId);
       const summarySuffix = details?.summary ? `\n\n${details.summary}` : "";
       const body =
-        outcome === "succeeded"
-          ? `✅ reevo run ${workspace.runId} finished.${summarySuffix}`
-          : `❌ reevo run ${workspace.runId} failed.${summarySuffix}`;
+        outcome === "succeeded" ? `✅ ${label} finished.${summarySuffix}` : `❌ ${label} failed.${summarySuffix}`;
       await Promise.allSettled([
         this.options.github.updateContinuationStatusComment({ ...identity, body }),
         this.options.github.completeContinuationCheckRun({

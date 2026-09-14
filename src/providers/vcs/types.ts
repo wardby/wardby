@@ -93,8 +93,12 @@ export interface VcsProvider {
    * mirroring `Executor.resolveCodingWorkerImage?` (dispatch.ts calls it
    * with `?.()`). Implementations MUST NOT throw: this is strictly
    * observability, never allowed to affect the real coding run.
+   * `details.agentName`, when present, is the human-readable agent name
+   * (e.g. "knock-knock-implement") surfaced alongside the opaque run id --
+   * particularly useful for the cross-agent case, where the agent
+   * continuing the PR isn't the one that originally opened it.
    */
-  notifyContinuationStarted?(workspace: PreparedWorkspace): Promise<void>;
+  notifyContinuationStarted?(workspace: PreparedWorkspace, details?: { agentName?: string }): Promise<void>;
   /**
    * Companion to `notifyContinuationStarted` -- must find and update
    * whatever that call created, never create fresh state itself (a
@@ -110,6 +114,6 @@ export interface VcsProvider {
   notifyContinuationFinished?(
     workspace: PreparedWorkspace,
     outcome: "succeeded" | "failed",
-    details?: { summary?: string },
+    details?: { summary?: string; agentName?: string },
   ): Promise<void>;
 }

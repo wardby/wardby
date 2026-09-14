@@ -29,6 +29,7 @@ function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSn
     runId: "run-1",
     status: "running",
     agentKind: "coding",
+    agentName: "knock-knock-implement",
     ownerId: "principal-1",
     task: "Fix the bug and test it.",
     repository: "openai/example",
@@ -155,7 +156,8 @@ class FakeVcs implements VcsProvider {
   lastFinalizeDetails?: FinalizeChangesDetails;
   lastPrepareInput?: VcsPrepareInput;
   notifyStartedCalls = 0;
-  notifyFinishedCalls: Array<{ outcome: "succeeded" | "failed"; summary?: string }> = [];
+  lastNotifyStartedAgentName?: string;
+  notifyFinishedCalls: Array<{ outcome: "succeeded" | "failed"; summary?: string; agentName?: string }> = [];
 
   constructor(
     private readonly root: string,
@@ -195,16 +197,17 @@ class FakeVcs implements VcsProvider {
     this.events.push("cleanup");
     this.workspace = null;
   }
-  async notifyContinuationStarted(): Promise<void> {
+  async notifyContinuationStarted(_workspace: PreparedWorkspace, details?: { agentName?: string }): Promise<void> {
     this.notifyStartedCalls += 1;
+    this.lastNotifyStartedAgentName = details?.agentName;
     this.events.push("notifyStarted");
   }
   async notifyContinuationFinished(
     _workspace: PreparedWorkspace,
     outcome: "succeeded" | "failed",
-    details?: { summary?: string },
+    details?: { summary?: string; agentName?: string },
   ): Promise<void> {
-    this.notifyFinishedCalls.push({ outcome, summary: details?.summary });
+    this.notifyFinishedCalls.push({ outcome, summary: details?.summary, agentName: details?.agentName });
     this.events.push(`notifyFinished:${outcome}`);
   }
   private makeWorkspace(input: VcsPrepareInput): PreparedWorkspace {
@@ -351,7 +354,9 @@ describe("ContainerExecutor", () => {
     expect(created.store.run.result).toMatchObject({ outcome: "pull_request_updated", pullRequestNumber: 42 });
     expect(created.observer.events.map((event) => event.stage)).toContain("pull_request_updated");
     expect(created.vcs.notifyStartedCalls).toBe(1);
-    expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "succeeded", summary: "Fixed it." }]);
+    expect(created.vcs.notifyFinishedCalls).toEqual([
+      { outcome: "succeeded", summary: "Fixed it.", agentName: "knock-knock-implement" },
+    ]);
   });
 
   describe("continuation status notifications (notifyContinuationStarted/Finished lifecycle hooks)", () => {
@@ -360,7 +365,10 @@ describe("ContainerExecutor", () => {
       await created.executor.start("run-1");
 
       expect(created.vcs.notifyStartedCalls).toBe(1);
-      expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "succeeded", summary: "Fixed it." }]);
+      expect(created.vcs.lastNotifyStartedAgentName).toBe("knock-knock-implement");
+      expect(created.vcs.notifyFinishedCalls).toEqual([
+        { outcome: "succeeded", summary: "Fixed it.", agentName: "knock-knock-implement" },
+      ]);
     });
 
     it("notifies finished with 'failed' when the budget is exhausted", async () => {
@@ -368,7 +376,7 @@ describe("ContainerExecutor", () => {
       await created.executor.start("run-1");
 
       expect(created.vcs.notifyStartedCalls).toBe(1);
-      expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "failed" }]);
+      expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "failed", agentName: "knock-knock-implement" }]);
     });
 
     it("notifies finished with 'failed' when the underlying job fails", async () => {
@@ -378,7 +386,7 @@ describe("ContainerExecutor", () => {
 
       expect(created.store.run.status).toBe("failed");
       expect(created.vcs.notifyStartedCalls).toBe(1);
-      expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "failed" }]);
+      expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "failed", agentName: "knock-knock-implement" }]);
     });
 
     it("never notifies started when the run is refused before a workspace exists", async () => {
@@ -404,7 +412,7 @@ describe("ContainerExecutor", () => {
       await created.executor.stop("run-1", "requested");
 
       expect(created.store.run.status).toBe("cancelled");
-      expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "failed" }]);
+      expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "failed", agentName: "knock-knock-implement" }]);
     });
   });
 

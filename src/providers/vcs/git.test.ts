@@ -478,6 +478,26 @@ describe("GitVcsProvider", () => {
         ]);
       });
 
+      it("prefixes the human-readable agent name ahead of the opaque run id when given one", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationStarted(prepared, { agentName: "knock-knock-implement" });
+
+        expect(github.statusCommentCalls[0].input.body).toBe(
+          "🔄 knock-knock-implement (reevo run run-2) is working on this PR...",
+        );
+      });
+
+      it("includes the agent name in the done comment too, particularly useful for the cross-agent case", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationFinished(prepared, "succeeded", { agentName: "knock-knock-implement" });
+
+        expect(github.statusCommentCalls[0].input.body).toBe("✅ knock-knock-implement (reevo run run-2) finished.");
+      });
+
       it("includes the agent's own summary in the done comment when given one", async () => {
         const { provider, github } = await harness();
         const prepared = await provider.prepareWorkspace(continuationInput());
