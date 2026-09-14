@@ -71,7 +71,7 @@
     "@openai/codex-sdk": "0.153.4",
     "@types/node": "^22.0.0",
     "@types/papaparse": "^5.5.2",
-    "esbuild": "^0.25.12",
+    "esbuild": "^0.28.2",
     "eslint": "^10.10.0",
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.12.0",
