@@ -541,6 +541,7 @@ export class ContainerExecutor implements Executor {
     // For notifyContinuationFinished in the `finally` below -- defaults to
     // "failed" and is only flipped right before an actual success return.
     let outcome: "succeeded" | "failed" = "failed";
+    let finishedSummary: string | undefined;
     try {
       if (jobState !== "succeeded") {
         const collected = await this.options.jobs.collect(handle).catch(() => null);
@@ -572,6 +573,7 @@ export class ContainerExecutor implements Executor {
         await this.options.store.complete(run.runId, "succeeded", this.resultFor(output, current));
         this.terminal(current, "succeeded");
         outcome = "succeeded";
+        finishedSummary = output.summary;
         return;
       }
 
@@ -602,6 +604,7 @@ export class ContainerExecutor implements Executor {
       }
       this.terminal(current, "succeeded");
       outcome = "succeeded";
+      finishedSummary = output.summary;
     } catch (error) {
       const failure = this.failure(error);
       await this.options.store.terminate(run.runId, "failed", failure.error, failure.audit);
@@ -613,7 +616,7 @@ export class ContainerExecutor implements Executor {
         existingWorkspace ?? (input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null);
       if (workspace) {
         await this.options.vcs.cleanup(workspace).catch(() => undefined);
-        await this.options.vcs.notifyContinuationFinished?.(workspace, outcome);
+        await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, { summary: finishedSummary });
       }
       await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
       this.emit({ stage: "cleanup", runId: run.runId, jobId: handle.id, cleanupSucceeded: true });

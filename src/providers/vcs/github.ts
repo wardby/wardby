@@ -171,24 +171,17 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
   }
 
   /**
-   * Isolated from withRepositoryToken on purpose: Issue-comment writes need
-   * their own "Issues: write" permission (confirmed against GitHub's REST
-   * permissions reference — distinct from "Pull requests"/"Contents", which
-   * is all the git-push/PR-create token above requests). Minting it
-   * separately means an ungranted-permission failure here can only ever
-   * disable the status-comment mechanism, never the real git push or PR.
+   * Isolated from withRepositoryToken on purpose: "Checks: write" is a
+   * genuinely distinct GitHub App permission from contents/pull_requests
+   * (confirmed empirically). Minting it separately means an ungranted-permission
+   * failure here can only ever disable the check-run mechanism, never the
+   * real git push, PR, or status comment. (Status comments, below, do NOT
+   * need this treatment: PR-comment writes work fine on the existing
+   * contents/pull_requests token -- confirmed empirically after "Issues:
+   * write" alone, on its own isolated token, kept returning 403 "Resource
+   * not accessible by integration" even once granted; commenting on a PR
+   * apparently isn't gated the same way a genuine issue comment might be.)
    */
-  private async withIssuesToken<T>(repository: string, action: (token: string) => Promise<T>): Promise<T> {
-    const normalized = normalizeGitHubRepository(repository);
-    const token = await this.mintIssuesToken(normalized);
-    try {
-      return await action(token);
-    } finally {
-      await this.revokeToken(token).catch(() => undefined);
-    }
-  }
-
-  /** Isolated from withRepositoryToken for the same reason as withIssuesToken, for "Checks: write". */
   private async withChecksToken<T>(repository: string, action: (token: string) => Promise<T>): Promise<T> {
     const normalized = normalizeGitHubRepository(repository);
     const token = await this.mintChecksToken(normalized);
@@ -206,7 +199,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     if (!SAFE_RUN_ID.test(input.runId) || !SAFE_RUN_ID.test(input.rootRunId)) {
       throw new Error("github_status_comment_input_invalid");
     }
-    await this.withIssuesToken(repository, async (token) => {
+    await this.withRepositoryToken(repository, async (token) => {
       const pr = await this.findPullRequest(token, { runId: input.rootRunId, repository, baseRef, headRef });
       if (!pr) return;
       const existing = await this.findStatusComment(token, repository, pr.number, input.runId);
@@ -237,7 +230,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     if (!SAFE_RUN_ID.test(input.runId) || !SAFE_RUN_ID.test(input.rootRunId)) {
       throw new Error("github_status_comment_input_invalid");
     }
-    await this.withIssuesToken(repository, async (token) => {
+    await this.withRepositoryToken(repository, async (token) => {
       const pr = await this.findPullRequest(token, { runId: input.rootRunId, repository, baseRef, headRef });
       if (!pr) return;
       const existing = await this.findStatusComment(token, repository, pr.number, input.runId);
@@ -367,14 +360,6 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
         (name === "contents" && level === "write") ||
         (name === "pull_requests" && level === "write") ||
         (name === "metadata" && level === "read"),
-    );
-  }
-
-  private async mintIssuesToken(repository: string): Promise<string> {
-    return this.mintScopedToken(
-      repository,
-      { issues: "write" },
-      (name, level) => (name === "issues" && level === "write") || (name === "metadata" && level === "read"),
     );
   }
 

@@ -478,6 +478,28 @@ describe("GitVcsProvider", () => {
         ]);
       });
 
+      it("includes the agent's own summary in the done comment when given one", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationFinished(prepared, "succeeded", {
+          summary: "Added timestamped logging for every served joke.",
+        });
+
+        expect(github.statusCommentCalls[0].input.body).toBe(
+          "✅ reevo run run-2 finished.\n\nAdded timestamped logging for every served joke.",
+        );
+      });
+
+      it("omits the summary suffix entirely when none is given", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationFinished(prepared, "failed", {});
+
+        expect(github.statusCommentCalls[0].input.body).toBe("❌ reevo run run-2 failed.");
+      });
+
       it("uses a failed-shaped body/outcome when the run failed", async () => {
         const { provider, github } = await harness();
         const prepared = await provider.prepareWorkspace(continuationInput());

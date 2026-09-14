@@ -101,7 +101,15 @@ export interface VcsProvider {
    * "finished" status with no preceding "in progress" one would be
    * confusing, and could happen if the process crashed between the two
    * calls). Safe to call more than once for the same run. Same
-   * never-throw contract as `notifyContinuationStarted`.
+   * never-throw contract as `notifyContinuationStarted`. `details.summary`,
+   * when present, is the agent's own already-validated/redacted summary
+   * (the same text that goes in the PR body -- see
+   * `FinalizeChangesDetails.summary`) so the "done" status reflects what
+   * actually happened instead of a caller having to go find out.
    */
-  notifyContinuationFinished?(workspace: PreparedWorkspace, outcome: "succeeded" | "failed"): Promise<void>;
+  notifyContinuationFinished?(
+    workspace: PreparedWorkspace,
+    outcome: "succeeded" | "failed",
+    details?: { summary?: string },
+  ): Promise<void>;
 }

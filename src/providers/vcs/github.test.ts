@@ -313,7 +313,7 @@ describe("GitHubAppClient", () => {
         const url = String(input);
         const method = init?.method ?? "GET";
         if (url.endsWith("/installation")) return json({ id: 42 });
-        if (url.endsWith("/access_tokens")) return tokenResponse({ permissions: { issues: "write" } });
+        if (url.endsWith("/access_tokens")) return tokenResponse();
         if (url.includes("/pulls?")) return json(PR_LOOKUP_RESPONSE);
         if (url.includes("/issues/23/comments") && method === "GET") return json([]);
         if (url.includes("/issues/23/comments") && method === "POST") {
@@ -344,7 +344,7 @@ describe("GitHubAppClient", () => {
         const url = String(input);
         const method = init?.method ?? "GET";
         if (url.endsWith("/installation")) return json({ id: 42 });
-        if (url.endsWith("/access_tokens")) return tokenResponse({ permissions: { issues: "write" } });
+        if (url.endsWith("/access_tokens")) return tokenResponse();
         if (url.includes("/pulls?")) return json(PR_LOOKUP_RESPONSE);
         if (url.includes("/issues/23/comments") && method === "GET") {
           return json([{ id: 555, body: "<!-- reevo-run-status:run-2 -->\n\nold" }]);
@@ -381,7 +381,7 @@ describe("GitHubAppClient", () => {
         const url = String(input);
         const method = init?.method ?? "GET";
         if (url.endsWith("/installation")) return json({ id: 42 });
-        if (url.endsWith("/access_tokens")) return tokenResponse({ permissions: { issues: "write" } });
+        if (url.endsWith("/access_tokens")) return tokenResponse();
         if (url.includes("/pulls?")) return json(PR_LOOKUP_RESPONSE);
         if (url.includes("/issues/23/comments") && method === "GET") return json([]);
         if (method === "POST" || method === "PATCH") {
@@ -486,7 +486,7 @@ describe("GitHubAppClient", () => {
       expect(patchedBody).toEqual({ status: "completed", conclusion: "success" });
     });
 
-    it("mints checks/issues tokens separately from the repository token, so a rejection on one never affects the others", async () => {
+    it("mints the checks token separately from the repository token, so a rejection on one never affects the other", async () => {
       const permissionSetsRequested: string[] = [];
       const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
         const url = String(input);

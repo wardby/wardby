@@ -542,7 +542,11 @@ export class GitVcsProvider implements VcsProvider {
    * github.ts). Safe to call more than once for the same run. Same
    * never-throw contract as notifyContinuationStarted.
    */
-  async notifyContinuationFinished(workspace: PreparedWorkspace, outcome: "succeeded" | "failed"): Promise<void> {
+  async notifyContinuationFinished(
+    workspace: PreparedWorkspace,
+    outcome: "succeeded" | "failed",
+    details?: { summary?: string },
+  ): Promise<void> {
     if (!workspace.continuation) return;
     try {
       const identity = {
@@ -552,10 +556,11 @@ export class GitVcsProvider implements VcsProvider {
         baseRef: workspace.baseRef,
         headRef: workspace.headRef,
       };
+      const summarySuffix = details?.summary ? `\n\n${details.summary}` : "";
       const body =
         outcome === "succeeded"
-          ? `✅ reevo run ${workspace.runId} finished.`
-          : `❌ reevo run ${workspace.runId} failed.`;
+          ? `✅ reevo run ${workspace.runId} finished.${summarySuffix}`
+          : `❌ reevo run ${workspace.runId} failed.${summarySuffix}`;
       await Promise.allSettled([
         this.options.github.updateContinuationStatusComment({ ...identity, body }),
         this.options.github.completeContinuationCheckRun({

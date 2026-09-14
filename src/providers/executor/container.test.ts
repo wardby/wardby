@@ -155,7 +155,7 @@ class FakeVcs implements VcsProvider {
   lastFinalizeDetails?: FinalizeChangesDetails;
   lastPrepareInput?: VcsPrepareInput;
   notifyStartedCalls = 0;
-  notifyFinishedCalls: Array<{ outcome: "succeeded" | "failed" }> = [];
+  notifyFinishedCalls: Array<{ outcome: "succeeded" | "failed"; summary?: string }> = [];
 
   constructor(
     private readonly root: string,
@@ -199,8 +199,12 @@ class FakeVcs implements VcsProvider {
     this.notifyStartedCalls += 1;
     this.events.push("notifyStarted");
   }
-  async notifyContinuationFinished(_workspace: PreparedWorkspace, outcome: "succeeded" | "failed"): Promise<void> {
-    this.notifyFinishedCalls.push({ outcome });
+  async notifyContinuationFinished(
+    _workspace: PreparedWorkspace,
+    outcome: "succeeded" | "failed",
+    details?: { summary?: string },
+  ): Promise<void> {
+    this.notifyFinishedCalls.push({ outcome, summary: details?.summary });
     this.events.push(`notifyFinished:${outcome}`);
   }
   private makeWorkspace(input: VcsPrepareInput): PreparedWorkspace {
@@ -347,7 +351,7 @@ describe("ContainerExecutor", () => {
     expect(created.store.run.result).toMatchObject({ outcome: "pull_request_updated", pullRequestNumber: 42 });
     expect(created.observer.events.map((event) => event.stage)).toContain("pull_request_updated");
     expect(created.vcs.notifyStartedCalls).toBe(1);
-    expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "succeeded" }]);
+    expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "succeeded", summary: "Fixed it." }]);
   });
 
   describe("continuation status notifications (notifyContinuationStarted/Finished lifecycle hooks)", () => {
@@ -356,7 +360,7 @@ describe("ContainerExecutor", () => {
       await created.executor.start("run-1");
 
       expect(created.vcs.notifyStartedCalls).toBe(1);
-      expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "succeeded" }]);
+      expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "succeeded", summary: "Fixed it." }]);
     });
 
     it("notifies finished with 'failed' when the budget is exhausted", async () => {
