@@ -150,6 +150,7 @@ export async function startMcp(): Promise<McpServerHandle> {
     mcp.setFixedContext({
       principal,
       scopes: new Set(SCOPES_SUPPORTED),
+      canonicalUri: STDIO_PLACEHOLDER_URI,
       providers,
       db: prisma,
       clientSupportsTasks: false,

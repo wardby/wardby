@@ -16,6 +16,13 @@ export type McpProviders = Pick<ProviderRegistry, "llm" | "engine" | "datastore"
 export interface McpRequestContext {
   principal: Principal;
   scopes: Set<string>;
+  /**
+   * The server's resource identifier, for tool handlers that need a
+   * field-level scope step-up beyond the tool's own declared scope (e.g.
+   * requiring agents:admin only when a mutation touches workerImageRef).
+   * Passed to requireScope the same way ReevoMcpServer does centrally.
+   */
+  canonicalUri: string;
   providers: McpProviders;
   db: PrismaClient;
   /**

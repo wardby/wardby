@@ -12,6 +12,7 @@ function fakeCtx(scopes: string[] = []): McpRequestContext {
   return {
     principal: { id: "p1", subject: "user-1", createdAt: new Date() },
     scopes: new Set(scopes),
+    canonicalUri: "https://host/mcp",
     providers: fakeProviders,
     db: fakeDb,
     clientSupportsTasks: false,

@@ -113,6 +113,7 @@ describe("requireScope", () => {
     const ctx = {
       principal: {} as never,
       scopes: new Set(["agents:write"]),
+      canonicalUri: CANONICAL_URI,
       providers: fakeProviders,
       db: fakeDb(),
       clientSupportsTasks: false,
@@ -125,6 +126,7 @@ describe("requireScope", () => {
     const ctx = {
       principal: {} as never,
       scopes: new Set(["agents:read"]),
+      canonicalUri: CANONICAL_URI,
       providers: fakeProviders,
       db: fakeDb(),
       clientSupportsTasks: false,

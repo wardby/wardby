@@ -42,6 +42,7 @@ function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: str
   return {
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
+    canonicalUri: CANONICAL_URI,
     providers: fakeProviders,
     db,
     clientSupportsTasks: false,

@@ -207,6 +207,7 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
       return {
         principal: extra.principal,
         scopes: new Set(authInfo!.scopes),
+        canonicalUri: opts.config.canonicalUri,
         providers: opts.providers,
         db: opts.db,
         mcpReq: mcpReqOf(sdkCtx),

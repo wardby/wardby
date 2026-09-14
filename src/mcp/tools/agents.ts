@@ -11,9 +11,19 @@ import {
   requireReadableBudgetGroup,
   visibleToPrincipal,
 } from "../auth/ownership.js";
+import { requireScope } from "../auth/resource-server.js";
+import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import type { ReevoMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
+
+// workerImageRef is the BYO-arbitrary-image escape hatch (see
+// resolveCodingWorkerImage in container.ts) — setting or changing it
+// requires a step-up beyond agents:write, the same pattern make_owner below
+// uses for its own sensitive, ownership-bypassing mutation.
+function requireWorkerImageRefScope(ctx: McpRequestContext): void {
+  requireScope(ctx, ctx.canonicalUri, "agents:admin");
+}
 
 const MAX_AGENT_NAME_CHARS = 200;
 const MAX_SYSTEM_PROMPT_CHARS = 64 * 1024;
@@ -188,6 +198,7 @@ export function registerAgentTools(mcp: ReevoMcpServer): void {
     },
     handler: async (rawArgs: unknown, ctx) => {
       const args = parseCreateAgent(rawArgs);
+      if (args.codingProfile?.workerImageRef != null) requireWorkerImageRefScope(ctx);
       validateSchedule(args.schedule, args.timezone ?? "UTC");
       if (args.budgetGroupId) {
         await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id);
@@ -230,6 +241,7 @@ export function registerAgentTools(mcp: ReevoMcpServer): void {
     },
     handler: async (rawArgs: unknown, ctx) => {
       const args = parseUpdateAgent(rawArgs);
+      if (args.codingProfile?.workerImageRef !== undefined) requireWorkerImageRefScope(ctx);
       const agent = await ctx.db.$transaction(
         async (tx) => {
           const existing = await tx.agent.findUnique({ where: { id: args.id }, include: { codingProfile: true } });
