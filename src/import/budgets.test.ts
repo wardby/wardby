@@ -5,7 +5,13 @@ const base = { name: "cap", ownerEmail: null, alertEmails: [], attachedAgentName
 
 describe("mapBudget", () => {
   it("maps a monthly budget to monthlyBudgetUsd with the other periods null", () => {
-    const r = mapBudget({ ...base, period: "monthly", alertThreshold: "80.00", blockThreshold: "100.00", enabled: true });
+    const r = mapBudget({
+      ...base,
+      period: "monthly",
+      alertThreshold: "80.00",
+      blockThreshold: "100.00",
+      enabled: true,
+    });
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.group.monthlyBudgetUsd).toBe("100.00");
@@ -16,8 +22,14 @@ describe("mapBudget", () => {
   });
 
   it("maps daily and weekly", () => {
-    expect((mapBudget({ ...base, period: "daily", alertThreshold: "5", blockThreshold: "10", enabled: true }) as any).group.dailyBudgetUsd).toBe("10");
-    expect((mapBudget({ ...base, period: "weekly", alertThreshold: "5", blockThreshold: "10", enabled: true }) as any).group.weeklyBudgetUsd).toBe("10");
+    expect(
+      (mapBudget({ ...base, period: "daily", alertThreshold: "5", blockThreshold: "10", enabled: true }) as any).group
+        .dailyBudgetUsd,
+    ).toBe("10");
+    expect(
+      (mapBudget({ ...base, period: "weekly", alertThreshold: "5", blockThreshold: "10", enabled: true }) as any).group
+        .weeklyBudgetUsd,
+    ).toBe("10");
   });
 
   it("skips a disabled budget", () => {

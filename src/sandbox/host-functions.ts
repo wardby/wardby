@@ -148,7 +148,8 @@ export function installHostFunctions(
   });
 
   register("__bridge_sharedDatastoreSet", async (argsJson) => {
-    const [boundName, key, value, opts] = args<[string, string, DatastoreValue, DatastoreSetOptions | undefined]>(argsJson);
+    const [boundName, key, value, opts] =
+      args<[string, string, DatastoreValue, DatastoreSetOptions | undefined]>(argsJson);
     boundedString(boundName, 1024);
     boundedString(key, 1024);
     await sharedDatastore.set(boundName, key, value, opts);

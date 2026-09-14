@@ -4,11 +4,16 @@ import type { Reconciliation } from "./preflight.js";
 
 const r: Reconciliation = {
   nameRemap: new Map(),
-  agents: [{ name: "ok", disabled: false }, { name: "claude", disabled: true, disabledReason: "model X not routable — no registered provider serves it" }],
+  agents: [
+    { name: "ok", disabled: false },
+    { name: "claude", disabled: true, disabledReason: "model X not routable — no registered provider serves it" },
+  ],
   tools: [{ name: "good" }, { name: "locker", rejected: "uses unsupported host API: npmLockUpdate" }],
   skippedCapabilities: ["subagents", "memory"],
   budgets: [{ name: "cap", skippedReason: "disabled" }],
-  collisions: [], notes: [], hasFatalCollision: false,
+  collisions: [],
+  notes: [],
+  hasFatalCollision: false,
 };
 
 describe("renderReconciliation", () => {

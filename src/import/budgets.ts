@@ -9,7 +9,8 @@ export interface BudgetGroupData {
 }
 
 function warnRatio(alert: string, block: string): string {
-  const a = Number(alert), b = Number(block);
+  const a = Number(alert),
+    b = Number(block);
   if (!Number.isFinite(a) || !Number.isFinite(b) || b <= 0) return "0.8";
   const r = a / b;
   if (!Number.isFinite(r) || r <= 0) return "0.8";

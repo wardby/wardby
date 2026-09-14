@@ -18,8 +18,7 @@ import { BedrockClaudeLlmProvider, bedrockCredentialsPresent, bedrockClaudeSuppo
 import type { LlmRegistration } from "./routing.js";
 
 export type LlmRegistrationResult =
-  | { kind: "registrations"; registrations: LlmRegistration[] }
-  | { kind: "no-credentials" };
+  { kind: "registrations"; registrations: LlmRegistration[] } | { kind: "no-credentials" };
 
 export function resolveLlmRegistrations(env: NodeJS.ProcessEnv = process.env): LlmRegistrationResult {
   const registrations: LlmRegistration[] = [];

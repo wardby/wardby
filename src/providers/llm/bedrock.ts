@@ -24,10 +24,7 @@ export function bedrockCredentialsPresent(env: NodeJS.ProcessEnv = process.env):
 }
 
 export class BedrockClaudeLlmProvider extends ClaudeLlmProvider {
-  constructor(
-    region: string = process.env.BEDROCK_REGION ?? process.env.AWS_REGION ?? "",
-    client?: AnthropicBedrock,
-  ) {
+  constructor(region: string = process.env.BEDROCK_REGION ?? process.env.AWS_REGION ?? "", client?: AnthropicBedrock) {
     if (!client && !region) {
       throw new Error("BEDROCK_REGION (or AWS_REGION) is required by the Bedrock Claude LlmProvider adapter.");
     }

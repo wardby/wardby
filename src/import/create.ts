@@ -267,7 +267,9 @@ export async function createFromBundle(
           // Two shared-datastore definitions in this bundle collide on
           // (ownerId, name) — createDatastore isn't idempotent (Task 3).
           // Surface it and move on rather than aborting the whole import.
-          warnings.push(`shared-datastore ${sd.name}: a datastore with this name already exists for this owner — skipped`);
+          warnings.push(
+            `shared-datastore ${sd.name}: a datastore with this name already exists for this owner — skipped`,
+          );
           continue;
         }
         warnings.push(

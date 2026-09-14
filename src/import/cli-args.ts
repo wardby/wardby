@@ -35,7 +35,7 @@ export function parseImportArgs(args: string[]): Omit<ImportOptions, "db" | "env
   const onConflict = (values["on-conflict"] ?? "fail") as ConflictPolicy;
   if (!VALID_CONFLICT_POLICIES.includes(onConflict)) {
     throw new Error(
-      `Invalid --on-conflict value "${onConflict}". Must be one of: ${VALID_CONFLICT_POLICIES.join(", ")}`
+      `Invalid --on-conflict value "${onConflict}". Must be one of: ${VALID_CONFLICT_POLICIES.join(", ")}`,
     );
   }
 
