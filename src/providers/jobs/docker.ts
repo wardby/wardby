@@ -187,6 +187,8 @@ export class NodeDockerArtifactTransfer implements DockerArtifactTransfer {
           "--interactive",
           "--user",
           "10001:10001",
+          "--workdir",
+          "/",
           container,
           "tar",
           "-C",

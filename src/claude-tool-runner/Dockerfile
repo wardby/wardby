@@ -4,7 +4,10 @@ COPY src/claude-tool-runner/package.json src/claude-tool-runner/package-lock.jso
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS runtime
-RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin reevo
+FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS runtime
+RUN npm install --global --omit=dev npm@12.0.2 \
+    && npm cache clean --force \
+    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin reevo
 WORKDIR /opt/reevo/claude-tool-runner
 COPY --from=dependencies /runner/node_modules ./node_modules
 COPY src/claude-tool-runner/main.mjs ./main.mjs
