@@ -144,6 +144,7 @@ function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: str
   return {
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
+    canonicalUri: CANONICAL_URI,
     providers: fakeProviders,
     db,
     clientSupportsTasks: false,
@@ -540,6 +541,118 @@ describe("agent CRUD tools", () => {
     });
     expect(result.isError).toBe(true);
     expect((result.content as { text: string }[])[0].text).toMatch(/scope/i);
+    await client.close();
+  });
+
+  const VALID_WORKER_IMAGE_REF = `ghcr.io/example/coding-worker-driver@sha256:${"a".repeat(64)}`;
+
+  it("create_agent with a workerImageRef requires agents:admin, not just agents:write", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "create_agent",
+      arguments: {
+        name: "byo-coder",
+        systemPrompt: "Make the requested change.",
+        model: "gpt-5.6-luna",
+        budgetUsd: 0.25,
+        kind: "coding",
+        codingProfile: { repository: "openai/example", workerImageRef: VALID_WORKER_IMAGE_REF },
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0].text).toMatch(/scope/i);
+    await client.close();
+  });
+
+  it("create_agent with a workerImageRef succeeds when the caller also holds agents:admin", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:admin"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "create_agent",
+      arguments: {
+        name: "byo-coder",
+        systemPrompt: "Make the requested change.",
+        model: "gpt-5.6-luna",
+        budgetUsd: 0.25,
+        kind: "coding",
+        codingProfile: { repository: "openai/example", workerImageRef: VALID_WORKER_IMAGE_REF },
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    const created = JSON.parse((result.content as { text: string }[])[0].text);
+    expect(created.codingProfile.workerImageRef).toBe(VALID_WORKER_IMAGE_REF);
+    await client.close();
+  });
+
+  it("update_agent patching workerImageRef requires agents:admin, not just agents:write", async () => {
+    const db = fakeDb([
+      {
+        id: "a1",
+        name: "coder",
+        systemPrompt: "x",
+        model: "gpt-5.6-luna",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId: "p1",
+        tools: [],
+        kind: "coding",
+        codingProfile: { provider: "codex", repository: "openai/example", baseRef: "main" },
+      },
+    ]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { workerImageRef: VALID_WORKER_IMAGE_REF } },
+    });
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0].text).toMatch(/scope/i);
+    await client.close();
+  });
+
+  it("update_agent can patch other coding-profile fields without agents:admin", async () => {
+    const db = fakeDb([
+      {
+        id: "a1",
+        name: "coder",
+        systemPrompt: "x",
+        model: "gpt-5.6-luna",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId: "p1",
+        tools: [],
+        kind: "coding",
+        codingProfile: { provider: "codex", repository: "openai/example", baseRef: "main" },
+      },
+    ]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { toolchainVersion: "3.12" } },
+    });
+    expect(result.isError).toBeFalsy();
     await client.close();
   });
 

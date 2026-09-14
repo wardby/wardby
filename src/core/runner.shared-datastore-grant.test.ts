@@ -215,6 +215,7 @@ describe("attach_tool -> runAgent shared-datastore grant, end to end", () => {
     const ctx: McpRequestContext = {
       principal: { id: "p1", subject: "p1", createdAt: new Date() },
       scopes: new Set(["tools:write"]),
+      canonicalUri: "https://host/mcp",
       providers: fakeProviders,
       db: db as never,
       clientSupportsTasks: false,

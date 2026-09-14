@@ -116,6 +116,7 @@ function fakeCtx(
   return {
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
+    canonicalUri: CANONICAL_URI,
     providers: fakeProviders,
     db,
     clientSupportsTasks,

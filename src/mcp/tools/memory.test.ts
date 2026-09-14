@@ -46,6 +46,7 @@ function fakeCtx(
   return {
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
+    canonicalUri: CANONICAL_URI,
     providers: { memory } as unknown as import("../../providers/index.js").ProviderRegistry,
     db,
     clientSupportsTasks: false,

@@ -45,8 +45,13 @@ jobs:
         include:
           - dockerfile: src/coding-worker/Dockerfile
             tag-suffix: node
+            kind: runtime
           - dockerfile: src/coding-worker/Dockerfile.node-python
             tag-suffix: node-python
+            kind: runtime
+          - dockerfile: src/coding-worker/Dockerfile.driver
+            tag-suffix: driver
+            kind: driver
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -54,7 +59,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: node scripts/coding-worker-image-policy.mjs ../${{ matrix.dockerfile }}
+      - run: node scripts/coding-worker-image-policy.mjs ../${{ matrix.dockerfile }} --kind=${{ matrix.kind }}
       - run: docker build -f ${{ matrix.dockerfile }} -t reevo-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }} .
       - if: matrix.tag-suffix == 'node'
         run: npm run test:docker-isolation

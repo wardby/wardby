@@ -90,6 +90,7 @@ export async function authenticate(headers: AuthenticateHeaders, deps: Authentic
   return {
     principal,
     scopes: new Set(verified.scopes),
+    canonicalUri: deps.canonicalUri,
     providers: deps.providers,
     db: deps.db,
     // authenticate() only sees the HTTP Authorization header, before the
