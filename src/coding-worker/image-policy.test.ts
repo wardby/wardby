@@ -9,6 +9,7 @@ describe("coding worker image policy", () => {
     expect(from.every((line) => /@sha256:[0-9a-f]{64}/.test(line))).toBe(true);
     expect(dockerfile).toContain("--no-install-recommends ca-certificates git");
     expect(dockerfile).toContain("npm ci --omit=dev");
+    expect(dockerfile).toContain("npm install --global --omit=dev npm@12.0.2");
     // The driver is an intermediate layer other Dockerfiles build on top of —
     // it must not set USER/ENTRYPOINT itself (those depend on whatever
     // language toolchain and hardening checks the derived Dockerfile adds).

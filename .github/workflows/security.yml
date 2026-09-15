@@ -72,9 +72,10 @@ jobs:
           image: reevo-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }}
           format: spdx-json
           output-file: coding-worker-${{ matrix.tag-suffix }}.spdx.json
-      - uses: aquasecurity/trivy-action@0.33.1
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: reevo-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }}
+          version: v0.70.0
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"
@@ -103,6 +104,8 @@ jobs:
         env:
           REEVO_CLAUDE_WORKER_IMAGE: reevo-claude-coding-worker:${{ github.sha }}
           REEVO_CLAUDE_TOOL_RUNNER_IMAGE: reevo-claude-tool-runner:${{ github.sha }}
+          REEVO_DOCKER_SEED_DEBUG: "1"
+          REEVO_CLAUDE_KEEPER_PROBE: "1"
       - uses: anchore/sbom-action@v0.20.5
         with:
           image: reevo-claude-coding-worker:${{ github.sha }}
@@ -113,15 +116,17 @@ jobs:
           image: reevo-claude-tool-runner:${{ github.sha }}
           format: spdx-json
           output-file: claude-tool-runner.spdx.json
-      - uses: aquasecurity/trivy-action@0.33.1
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: reevo-claude-coding-worker:${{ github.sha }}
+          version: v0.70.0
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-      - uses: aquasecurity/trivy-action@0.33.1
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: reevo-claude-tool-runner:${{ github.sha }}
+          version: v0.70.0
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"

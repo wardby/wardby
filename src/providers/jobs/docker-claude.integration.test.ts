@@ -11,7 +11,7 @@ import {
   isolationNames,
   type DockerContainerInspection,
 } from "./docker-isolation.js";
-import type { JobSpec } from "./types.js";
+import type { JobHandle, JobSpec } from "./types.js";
 
 const execute = promisify(execFile);
 const enabled = process.env.REEVO_CLAUDE_DOCKER_TEST === "1";
@@ -23,6 +23,61 @@ const proxy = `reevo-claude-job-proxy-${token}`;
 const capability = "rrp_0123456789abcdef";
 const names = isolationNames(runId);
 let root: string | undefined;
+
+async function keeperProbe(container: string): Promise<string> {
+  const run = async (label: string, args: string[]): Promise<string> => {
+    try {
+      const output = await docker(args);
+      return `${label}:ok:${JSON.stringify(output.slice(0, 256))}`;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `${label}:failed:${JSON.stringify(message.slice(0, 512))}`;
+    }
+  };
+  return [
+    await run("state", [
+      "container",
+      "inspect",
+      "--format",
+      "{{.State.Status}}/{{.State.ExitCode}}/{{.State.OOMKilled}}",
+      container,
+    ]),
+    await run("logs", ["container", "logs", "--tail", "8", container]),
+    await run("node_default_user", [
+      "container",
+      "exec",
+      "--workdir",
+      "/",
+      container,
+      "node",
+      "-e",
+      "process.stdout.write('exec_ok')",
+    ]),
+    await run("node_exec", [
+      "container",
+      "exec",
+      "--user",
+      "10001:10001",
+      "--workdir",
+      "/",
+      container,
+      "node",
+      "-e",
+      "process.stdout.write('exec_ok')",
+    ]),
+    await run("tar_exec", [
+      "container",
+      "exec",
+      "--user",
+      "10001:10001",
+      "--workdir",
+      "/",
+      container,
+      "tar",
+      "--version",
+    ]),
+  ].join(";");
+}
 
 async function docker(args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
   try {
@@ -90,6 +145,8 @@ http.createServer(async (request, response) => {
 }
 
 describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance", () => {
+  let failedKeeperProbe: string | undefined;
+
   afterAll(async () => {
     await cleanup(["container", "rm", "--force", names.workerContainer]);
     await cleanup(["container", "rm", "--force", names.toolContainer]);
@@ -150,6 +207,9 @@ describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance
       proxyContainer: proxy,
       resolveCapability: async () => capability,
       isRunActive: async () => false,
+      onProvisionFailure: async ({ keeperContainer }) => {
+        if (process.env.REEVO_CLAUDE_KEEPER_PROBE === "1") failedKeeperProbe = await keeperProbe(keeperContainer);
+      },
     });
     const spec: JobSpec = {
       kind: "coding-agent",
@@ -162,7 +222,14 @@ describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance
       limits: { cpus: 1, memoryMb: 512, pids: 64, diskMb: 64 },
       labels: {},
     };
-    const handle = await launcher.launch(spec);
+    let handle: JobHandle;
+    try {
+      handle = await launcher.launch(spec);
+    } catch (error) {
+      if (error instanceof Error && failedKeeperProbe)
+        throw new Error(`${error.message}:keeper_probe=${failedKeeperProbe}`, { cause: error });
+      throw error;
+    }
     const [agent, tool] = await Promise.all([
       docker(["container", "inspect", names.workerContainer]).then(
         (value) => JSON.parse(value)[0] as DockerContainerInspection,

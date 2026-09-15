@@ -35,6 +35,7 @@ import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } f
 const BACKEND = "docker";
 const STATE_SCHEMA_VERSION = 1;
 const MAX_DOCKER_OUTPUT_BYTES = 1024 * 1024;
+const MAX_DOCKER_SEED_DIAGNOSTIC_BYTES = 4 * 1024;
 const MAX_WORKSPACE_ENTRIES = 100_000;
 const TERMINAL_PHASES = new Set<DockerJobRecord["phase"]>(["succeeded", "failed", "stopped", "lost", "removed"]);
 const SAFE_WORKER_DIAGNOSTIC = /^(?:worker_[a-z_]+|coding_[a-z_]+|reevo_[a-z_]+)$/;
@@ -150,7 +151,20 @@ export interface DockerArtifactTransfer {
 }
 
 export function dockerTransferEnvironment(path: string): NodeJS.ProcessEnv {
-  return { PATH: path, LANG: "C", LC_ALL: "C", COPYFILE_DISABLE: "1" };
+  // Docker CLI needs a home directory for its isolated client configuration.
+  return { PATH: path, HOME: "/tmp", LANG: "C", LC_ALL: "C", COPYFILE_DISABLE: "1" };
+}
+
+function dockerSeedFailure(stage: "archive" | "extract", exitCode: number | null, stderr: Buffer[]): Error {
+  const output = Buffer.concat(stderr).toString("utf8");
+  let diagnostic = exitCode === null ? "spawn" : `exit_${exitCode}`;
+  if (/permission denied/i.test(output)) diagnostic = "permission_denied";
+  else if (/executable file not found|command not found/i.test(output)) diagnostic = "command_missing";
+  else if (/no such file or directory/i.test(output)) diagnostic = "path_missing";
+  // CI enables this only for the synthetic Vitest fixture, never for production runs.
+  const debugOutput = process.env.NODE_ENV === "test" && process.env.REEVO_DOCKER_SEED_DEBUG === "1";
+  const details = debugOutput ? `:stderr=${JSON.stringify(output.trim() || "<empty>")}` : "";
+  return new Error(`docker_seed_failed:${stage}:${diagnostic}${details}`);
 }
 
 /** Streams tar archives into the unprivileged keeper; no host bind mounts are used. */
@@ -167,7 +181,7 @@ export class NodeDockerArtifactTransfer implements DockerArtifactTransfer {
       const archive = spawn("tar", ["-C", sourceDirectory, "-cf", "-", "."], {
         env: dockerTransferEnvironment(this.path),
         shell: false,
-        stdio: ["ignore", "pipe", "ignore"],
+        stdio: ["ignore", "pipe", "pipe"],
       });
       const extract = spawn(
         this.dockerBinary,
@@ -177,6 +191,8 @@ export class NodeDockerArtifactTransfer implements DockerArtifactTransfer {
           "--interactive",
           "--user",
           "10001:10001",
+          "--workdir",
+          "/",
           container,
           "tar",
           "-C",
@@ -186,26 +202,52 @@ export class NodeDockerArtifactTransfer implements DockerArtifactTransfer {
           "-xf",
           "-",
         ],
-        { env: dockerTransferEnvironment(this.path), shell: false, stdio: ["pipe", "ignore", "ignore"] },
+        { env: dockerTransferEnvironment(this.path), shell: false, stdio: ["pipe", "ignore", "pipe"] },
       );
       let failed = false;
-      const fail = () => {
+      let archiveExit: number | null | undefined;
+      let extractExit: number | null | undefined;
+      const archiveStderr: Buffer[] = [];
+      const extractStderr: Buffer[] = [];
+      const capture = (chunks: Buffer[]) => {
+        let capturedBytes = 0;
+        return (chunk: Buffer) => {
+          const remaining = MAX_DOCKER_SEED_DIAGNOSTIC_BYTES - capturedBytes;
+          if (remaining <= 0) return;
+          const captured = chunk.subarray(0, remaining);
+          chunks.push(captured);
+          capturedBytes += captured.length;
+        };
+      };
+      const fail = (error: Error) => {
         if (failed) return;
         failed = true;
         archive.kill("SIGKILL");
         extract.kill("SIGKILL");
-        rejectPromise(new Error("docker_seed_failed"));
+        rejectPromise(error);
       };
-      archive.once("error", fail);
-      extract.once("error", fail);
-      if (!archive.stdout || !extract.stdin) return fail();
+      const finish = () => {
+        if (failed || archiveExit === undefined || extractExit === undefined) return;
+        if (archiveExit !== 0) return fail(dockerSeedFailure("archive", archiveExit, archiveStderr));
+        if (extractExit !== 0) return fail(dockerSeedFailure("extract", extractExit, extractStderr));
+        resolvePromise();
+      };
+      archive.once("error", () => fail(dockerSeedFailure("archive", null, archiveStderr)));
+      extract.once("error", () => fail(dockerSeedFailure("extract", null, extractStderr)));
+      if (!archive.stdout || !archive.stderr || !extract.stdin || !extract.stderr)
+        return fail(dockerSeedFailure("extract", null, extractStderr));
       archive.stdout.pipe(extract.stdin);
+      archive.stderr.on("data", capture(archiveStderr));
+      extract.stderr.on("data", capture(extractStderr));
+      archive.stdout.once("error", () => fail(dockerSeedFailure("archive", null, archiveStderr)));
+      extract.stdin.once("error", () => fail(dockerSeedFailure("extract", null, extractStderr)));
       archive.once("close", (code) => {
-        if (code !== 0) fail();
+        archiveExit = code;
+        finish();
       });
       extract.once("close", (code) => {
-        if (code !== 0) fail();
-        else if (!failed) resolvePromise();
+        extractExit = code;
+        finish();
       });
     });
   }
@@ -303,6 +345,8 @@ export interface DockerJobLauncherOptions {
   docker?: DockerCommandRunner;
   transfer?: DockerArtifactTransfer;
   now?: () => number;
+  /** Optional observer invoked after provisioning fails but before resources are cleaned up. */
+  onProvisionFailure?: (context: { runId: string; keeperContainer: string }) => Promise<void>;
 }
 
 type DockerJobPhase = "provisioning" | "active" | "succeeded" | "failed" | "stopped" | "lost" | "removed";
@@ -624,6 +668,9 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     try {
       return await this.provision(record, plan, capability);
     } catch (error) {
+      await this.options
+        .onProvisionFailure?.({ runId: record.runId, keeperContainer: plan.names.keeperContainer })
+        .catch(() => undefined);
       await this.cleanupResources(record).catch(() => undefined);
       record.phase = "lost";
       record.result = resultFor("lost");

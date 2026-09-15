@@ -36,11 +36,15 @@ const installsAptPackages = /apt-get install/i.test(dockerfile);
 const requiredControls = [];
 if (installsAptPackages) requiredControls.push("--no-install-recommends");
 if (kind === "driver" || !fromsDriverImage) requiredControls.push("npm ci --omit=dev");
+if (kind === "driver") requiredControls.push("npm install --global --omit=dev npm@12.0.2");
 if (kind !== "driver") requiredControls.push("USER 10001:10001", 'ENTRYPOINT ["node"');
 for (const required of requiredControls) {
   if (!dockerfile.includes(required)) failures.push(`missing image control: ${required}`);
 }
-for (const mutable of [/^FROM\s+[^\s@]+:[^\s@]+\s/im, /npm install\s+(?!.*--package-lock)/i]) {
+for (const mutable of [
+  /^FROM\s+[^\s@]+:[^\s@]+\s/im,
+  /npm install\s+(?!.*--package-lock)(?!.*--global --omit=dev npm@12\.0\.2)/i,
+]) {
   if (mutable.test(dockerfile)) failures.push(`mutable production input matched ${mutable}`);
 }
 if (failures.length) {
