@@ -35,7 +35,7 @@ Traced precisely in conversation, verified against the actual SDK source
 - The actual gap is narrower and worse than "clobbering an already-finished
   row": it's **a loser prematurely finishing a row the winner is still
   legitimately advancing**. `executeRun`'s defensive backstop (line
-  493–504) catches *any* uncaught error and unconditionally calls
+  493–504) catches _any_ uncaught error and unconditionally calls
   `finishRun(db, runId, { status: ... "failed" ..., ... })`. Since the row
   is still `running` (DRIVABLE) at that point — the winner hasn't finished
   yet — this write **succeeds**, and permanently terminates the row. When
@@ -63,10 +63,12 @@ Traced precisely in conversation, verified against the actual SDK source
 ## Task 1: `RunOwnershipLostError` + backstop handling in the runner
 
 **Files:**
+
 - Modify: `src/core/runner.ts:148` (next to `RunCancelledError`), and the backstop catch block at `src/core/runner.ts:493-504`
 - Test: `src/core/runner.test.ts`
 
 **Interfaces:**
+
 - Produces: `export class RunOwnershipLostError extends Error` (same shape as `RunCancelledError`: `constructor(message: string)`, sets `this.name = "RunOwnershipLostError"`). `dbosStep` (Task 2) throws this; `executeRun`'s backstop catches it by `instanceof`.
 
 - [ ] **Step 1: Write the failing test**
@@ -75,44 +77,44 @@ Add to `src/core/runner.test.ts`, in the same `describe` block as the existing
 `"persists a cancelled status (not failed) when the backstop catches a RunCancelledError"` test (find it via that exact string), right after it:
 
 ```typescript
-  it("leaves a run untouched (not failed) when the backstop catches a RunOwnershipLostError, so the real winner can still finish it", async () => {
-    const db = pendingRun();
-    const run = await db.run.create({ data: { agentId: "a1" } });
-    const engine: Engine = {
-      async run() {
-        throw new RunOwnershipLostError("Lost ownership of the durable workflow: another execution is advancing it.");
-      },
-    };
+it("leaves a run untouched (not failed) when the backstop catches a RunOwnershipLostError, so the real winner can still finish it", async () => {
+  const db = pendingRun();
+  const run = await db.run.create({ data: { agentId: "a1" } });
+  const engine: Engine = {
+    async run() {
+      throw new RunOwnershipLostError("Lost ownership of the durable workflow: another execution is advancing it.");
+    },
+  };
 
-    const result = await executeRun(
-      run.id,
-      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
-      db,
-    );
+  const result = await executeRun(
+    run.id,
+    { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+    db,
+  );
 
-    // The loser writes nothing: the row is still exactly where executeRun's
-    // own pending->running transition left it, not "failed".
-    expect(result.status).toBe("running");
-    expect(result.error).toBeNull();
-    expect(result.finishedAt).toBeNull();
+  // The loser writes nothing: the row is still exactly where executeRun's
+  // own pending->running transition left it, not "failed".
+  expect(result.status).toBe("running");
+  expect(result.error).toBeNull();
+  expect(result.finishedAt).toBeNull();
 
-    // Prove the winner can still land its real result afterward — this is
-    // the actual bug this fixes: today's unconditional "failed" write would
-    // make this second call a no-op (finishRun only updates DRIVABLE rows).
-    const winnerEngine = fakeEngine({
-      status: "succeeded",
-      finalText: "winner finished",
-      turns: 1,
-      usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.01 },
-    });
-    const winnerResult = await executeRun(
-      run.id,
-      { llm: noopLlm, engine: winnerEngine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
-      db,
-    );
-    expect(winnerResult.status).toBe("succeeded");
-    expect(winnerResult.finalText).toBe("winner finished");
+  // Prove the winner can still land its real result afterward — this is
+  // the actual bug this fixes: today's unconditional "failed" write would
+  // make this second call a no-op (finishRun only updates DRIVABLE rows).
+  const winnerEngine = fakeEngine({
+    status: "succeeded",
+    finalText: "winner finished",
+    turns: 1,
+    usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.01 },
   });
+  const winnerResult = await executeRun(
+    run.id,
+    { llm: noopLlm, engine: winnerEngine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+    db,
+  );
+  expect(winnerResult.status).toBe("succeeded");
+  expect(winnerResult.finalText).toBe("winner finished");
+});
 ```
 
 Also add `RunOwnershipLostError` to the existing import line at the top of
@@ -211,10 +213,12 @@ EOF
 ## Task 2: Translate `DBOSWorkflowConflictError` in `dbosStep`
 
 **Files:**
+
 - Modify: `src/providers/executor/dbos.ts` (the `dbosStep` const)
 - Create: `src/providers/executor/dbos-step.test.ts` (new — a pure unit test with no `DATABASE_URL` requirement, unlike `dbos.database.test.ts`)
 
 **Interfaces:**
+
 - Consumes: `RunOwnershipLostError` from `../../core/runner.js` (Task 1). `DBOS.runStep` and `DbosErrors.DBOSWorkflowConflictError` from `@dbos-inc/dbos-sdk` (already imported in `dbos.ts` as `DBOS, Error as DbosErrors`).
 - Produces: `dbosStep` becomes `export const dbosStep: StepRunner = ...` (currently unexported) so Task 2's test can call it directly without going through the full DB-backed `DbosExecutor`.
 
@@ -369,6 +373,7 @@ mark it shipped before the code and tests are in, per this project's own
 "verify doc claims against code" rule.
 
 **Files:**
+
 - Modify: `docs/private/2026-09-05-roadmap-mcp-native.md` (Phase 6 entry)
 - Modify: `docs/private/2026-09-14-roadmap-status-table.md` (Phase 6 row)
 
