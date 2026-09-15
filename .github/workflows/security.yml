@@ -1,5 +1,8 @@
 name: Security checks
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
 permissions:
   contents: read
 jobs:
@@ -29,6 +32,8 @@ jobs:
       - run: npm run prisma:generate
       - run: npm run prisma:migrate
       - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run format:check
       - run: npm test
       - run: npm run build
       - run: node --expose-gc scripts/security-allocation-check.mjs
