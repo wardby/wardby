@@ -13,7 +13,13 @@ Deployment configuration for reevo-run, organized by target.
   reference example future cloud targets, e.g. `aws/`, follow). Design:
   `docs/superpowers/specs/2026-09-17-gcp-control-plane-hosting-design.md`.
 
-  **Usage:**
+  **First time against a real project?** See `gcp/SETUP.md` — project
+  creation, billing, required APIs, domain verification, a Terraform state
+  bucket, and building/pushing the container image all have to happen
+  before `terraform apply` will succeed; none of it is scriptable from
+  inside the Terraform module itself.
+
+  **Usage (once SETUP.md's prerequisites are done):**
   1. `cd deploy/gcp`
   2. Configure a Terraform state backend for your own deployment (not
      included in this module — e.g. add a `backend "gcs" { bucket = "..." }`
