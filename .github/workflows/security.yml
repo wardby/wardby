@@ -34,6 +34,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run format:check
+      - run: npm run test:production-boundary
       - run: npm test
       - run: npm run build
       - run: node --expose-gc scripts/security-allocation-check.mjs

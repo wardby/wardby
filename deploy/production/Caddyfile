@@ -1,0 +1,37 @@
+{
+	admin off
+	email {$ACME_EMAIL}
+
+	servers {
+		timeouts {
+			read_body 15s
+			read_header 10s
+			write 15s
+			idle 5s
+		}
+	}
+}
+
+# A named site enables Caddy's automatic HTTP-to-HTTPS redirect. The upstream
+# Host is deliberately overwritten, so application-level canonical-host checks
+# remain meaningful even if a proxy setting later changes.
+{$MCP_PUBLIC_HOST} {
+	request_body {
+		max_size 1MB
+	}
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		X-Frame-Options "DENY"
+	}
+
+	reverse_proxy mcp:8080 {
+		header_up Host {$MCP_PUBLIC_HOST}
+		header_up -X-Forwarded-For
+		header_up -X-Forwarded-Host
+		header_up -X-Forwarded-Proto
+	}
+}
