@@ -49,6 +49,8 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     strategy:
+      # Keep image scan evidence from the unaffected variants when one fails.
+      fail-fast: false
       matrix:
         include:
           - dockerfile: src/coding-worker/Dockerfile
