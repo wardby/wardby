@@ -2,7 +2,7 @@
 
 Date: 2026-09-06
 
-Status: In progress (Workstreams 1 and 2 local implementation plus initial Workstream 5 local proof complete)
+Status: In progress (Workstreams 1 and 2 implementation are merged; Workstream 5 has a local observability proof; production and GitHub-administration acceptance gates remain open)
 
 ## Objective
 
@@ -26,12 +26,21 @@ Source documents:
   time-bounded dependency audit policy.
 - The duplicate `test` workflow has been removed so a feature-branch push does
   not create a second, potentially divergent status for the same test suite.
-- GitHub Dependabot alerts, code scanning, and secret scanning are disabled.
+- GitHub administration review (2026-09-17) found Dependabot vulnerability
+  alerts and automated security fixes disabled. Code scanning and secret
+  scanning are also disabled. The repository is private, and GitHub rejects
+  main-branch protection administration on the current plan with an
+  upgrade-required response; reviewed-merge enforcement cannot be configured
+  until the repository is made eligible.
 - SR-009 is accepted only for trusted build and migration tooling through
   2026-10-06. The affected packages are excluded from the runtime image.
 - Production migration, TLS/proxy behavior, network policy, database controls,
   secret injection, monitoring, backup, and recovery have not been verified in
   the target environment.
+- The complete worker-image matrix, including the Docker OOM acceptance path,
+  passed on 2026-09-17 after PR #35 made the assertion accept either Docker's
+  daemon `oom` event or its `OOMKilled` state. The test still requires a
+  nonzero worker exit and does not treat a generic failure as OOM evidence.
 
 ## Delivery Order
 
@@ -44,13 +53,19 @@ Source documents:
 
 ## Workstream 1: CI and Repository Protection
 
-Local implementation evidence (2026-09-15):
+Merged implementation and administration evidence (2026-09-17):
 
 - `security.yml` is now the sole repository workflow for pull requests and
   `main`; it includes the former `test.yml` lint and formatting checks.
-- The remaining Workstream 1 items require GitHub repository administration:
-  branch protection, Dependabot, CodeQL, secret scanning/push protection, and
-  action-SHA pinning remain outstanding.
+- PR #35 passed `verify`, Claude review, and every worker-image variant after
+  hardening the Docker OOM acceptance test. The matrix uses `fail-fast: false`
+  so unaffected image SBOM and scan evidence is retained if one variant fails.
+- GitHub API verification found Dependabot alerts and automated security fixes
+  disabled; code scanning and secret scanning are disabled. Main-branch
+  protection cannot be configured for this private repository on the current
+  GitHub plan (the protection API returns an upgrade-required response).
+- Action SHA pinning remains a repository-code task: the Claude workflows use
+  mutable `actions/checkout@v4` and `anthropics/claude-code-action@v1` tags.
 
 Implementation:
 
