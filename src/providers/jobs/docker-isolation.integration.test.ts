@@ -216,10 +216,32 @@ describe.skipIf(!enabled || !image)("Docker isolation acceptance", () => {
   }, 30_000);
 
   it("contains OOM termination to the worker", async () => {
+    // Docker's OOMKilled field is not set reliably on every hosted runner, but
+    // the daemon's own event stream records the kernel cgroup OOM decision.
+    const since = Math.floor(Date.now() / 1_000) - 1;
     const result = await runProbe("oom");
     expect(result.exitCode).not.toBe(0);
+    const workerId = await docker(["container", "inspect", "--format", "{{.Id}}", currentWorker!]);
     const oomKilled = await docker(["container", "inspect", "--format", "{{.State.OOMKilled}}", currentWorker!]);
-    expect(oomKilled).toBe("true");
+    const events = await docker([
+      "events",
+      "--since",
+      String(since),
+      "--until",
+      String(Math.ceil(Date.now() / 1_000) + 1),
+      "--filter",
+      "type=container",
+      "--filter",
+      `container=${workerId}`,
+      "--filter",
+      "event=oom",
+      "--format",
+      "{{.Action}}",
+    ]);
+    const oomEvent = events.split("\n").includes("oom");
+    expect(oomEvent || oomKilled === "true", JSON.stringify({ exitCode: result.exitCode, oomKilled, events })).toBe(
+      true,
+    );
     await removeCurrentWorker();
   }, 30_000);
 
