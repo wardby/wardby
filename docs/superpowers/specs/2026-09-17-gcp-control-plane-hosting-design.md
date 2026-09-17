@@ -40,7 +40,7 @@ separate spec cycles.
 ## Non-goals
 
 - **The coding-worker `JobLauncher`.** The roadmap's Phase 12 sketch of
-  Cloud Run *Jobs* replacing local Docker for Phase 5's containerized
+  Cloud Run _Jobs_ replacing local Docker for Phase 5's containerized
   coding-agent runs is a separate, mostly-independent sub-project. Nothing
   in this design blocks it — it will consume the control plane this design
   builds — but its own Terraform (VPC connector, firewall rules for the
@@ -48,7 +48,7 @@ separate spec cycles.
   scope here.
 - **CI/CD deploy pipeline.** How new container images get built and rolled
   out to the Cloud Run service is not designed here. `deploy/gcp/` describes
-  the infrastructure a pipeline would deploy *to*, not the pipeline itself.
+  the infrastructure a pipeline would deploy _to_, not the pipeline itself.
 - **Cloud Monitoring/Logging migration.** The existing local
   Prometheus/Grafana stack (`deploy/observability/`) is untouched; whether
   and how to add Cloud-native observability is future work.
@@ -88,6 +88,7 @@ free to set it to 1 for a cheaper/dev deployment.
 
 Running multiple concurrent replicas is already safe with the existing
 code, verified in this session, not assumed:
+
 - **Scheduler correctness:** `SchedulerLease` (`prisma/schema.prisma`) is a
   single-row-per-scope lease that already ensures exactly one replica's
   scheduler tick claims a given cron fire.
@@ -110,9 +111,9 @@ Cloud Run metadata server (`instance/id`). That works, but it's the wrong
 tool: Cloud Run **services** set environment variables at the revision
 level, so a value passed in via Terraform is identical across every
 replica — there's no per-replica template variable the way Cloud Run
-*Jobs* get `CLOUD_RUN_TASK_INDEX` (Jobs know their fixed task count
+_Jobs_ get `CLOUD_RUN_TASK_INDEX` (Jobs know their fixed task count
 upfront; a Service's replica count changes dynamically with autoscaling,
-so the platform has nothing fixed to hand out per replica). That's *why* a
+so the platform has nothing fixed to hand out per replica). That's _why_ a
 plain passed-in env var alone can't satisfy `min_instance_count = 2` — both
 replicas would get the same id, exactly what `DbosExecutor`'s constructor
 is designed to prevent.
@@ -121,7 +122,7 @@ But reaching for a GCP-specific metadata call to solve it was
 over-engineering: `DbosExecutor`'s own doc comment
 (`src/providers/executor/dbos.ts`) only requires the id be **stable for one
 process's lifetime**, not across restarts — a restarted process is
-*expected* to get a fresh id and have its old one's PENDING workflows
+_expected_ to get a fresh id and have its old one's PENDING workflows
 adopted as orphaned by the reconciler, which already exists (`recover()`'s
 `resume` branch). A plain `crypto.randomUUID()` generated once at process
 startup satisfies that completely: unique per process, zero network calls,
@@ -263,7 +264,7 @@ existing convention of small, focused files over one large one.
   that case — it's a generated UUID, so the test asserts
   `expect(config.executorId).toMatch(/^[0-9a-f-]{36}$/)` instead of
   `toBeUndefined()`. New test: two calls with no env var produce two
-  *different* ids (proving each call — i.e. each process — gets its own).
+  _different_ ids (proving each call — i.e. each process — gets its own).
 
 ## Rollout order
 

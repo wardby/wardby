@@ -23,10 +23,12 @@
 ## Task 1: Per-process `DBOS_EXECUTOR_ID` via `crypto.randomUUID()`
 
 **Files:**
+
 - Modify: `src/config/providers.ts` (`loadDbosConfig`, find via `export function loadDbosConfig`)
 - Test: `src/config/providers.test.ts`
 
 **Interfaces:**
+
 - No signature change: `loadDbosConfig(env: NodeJS.ProcessEnv = process.env): DbosConfig` stays synchronous, same parameters, same return type. Only `executorId`'s value when `DBOS_EXECUTOR_ID` is unset changes (was `undefined`, now a generated UUID string).
 
 - [ ] **Step 1: Write the failing test**
@@ -34,19 +36,19 @@
 In `src/config/providers.test.ts`, find the `describe("loadDbosConfig", ...)` block and replace its first test (currently asserting `executorId: undefined`):
 
 ```typescript
-  it("generates a per-call UUID for the executor id when none is set, rather than leaving it undefined", () => {
-    const config = loadDbosConfig({ DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo" });
-    expect(config.systemDatabaseUrl).toBe("postgresql://reevo:reevo@localhost:55432/reevo");
-    expect(config.schemaName).toBe("dbos");
-    // v4 UUID shape: 8-4-4-4-12 hex, third group starts with "4".
-    expect(config.executorId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-  });
+it("generates a per-call UUID for the executor id when none is set, rather than leaving it undefined", () => {
+  const config = loadDbosConfig({ DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo" });
+  expect(config.systemDatabaseUrl).toBe("postgresql://reevo:reevo@localhost:55432/reevo");
+  expect(config.schemaName).toBe("dbos");
+  // v4 UUID shape: 8-4-4-4-12 hex, third group starts with "4".
+  expect(config.executorId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+});
 
-  it("generates a different id on each call, so two processes never collide by default", () => {
-    const a = loadDbosConfig({ DATABASE_URL: "postgresql://x" });
-    const b = loadDbosConfig({ DATABASE_URL: "postgresql://x" });
-    expect(a.executorId).not.toBe(b.executorId);
-  });
+it("generates a different id on each call, so two processes never collide by default", () => {
+  const a = loadDbosConfig({ DATABASE_URL: "postgresql://x" });
+  const b = loadDbosConfig({ DATABASE_URL: "postgresql://x" });
+  expect(a.executorId).not.toBe(b.executorId);
+});
 ```
 
 Leave the other two existing tests in that `describe` block ("honours explicit
@@ -105,7 +107,7 @@ Expected: PASS
 - [ ] **Step 5: Run the full file and adjacent executor tests to check for regressions**
 
 Run: `npx vitest run src/config/providers.test.ts src/providers/executor/build.test.ts`
-Expected: All PASS. (`build.test.ts`'s "fails fast for EXECUTOR=dbos without DBOS_EXECUTOR_ID" test passes a `DATABASE_URL` but no `DBOS_EXECUTOR_ID` and expects a throw — verify this doesn't break: it does not, because that test calls `buildExecutor` directly with a raw env object that also omits `DATABASE_URL`'s... no — re-check: that specific test *does* set `DATABASE_URL` and omits `DBOS_EXECUTOR_ID`, expecting `DbosExecutor`'s constructor to throw "DBOS_EXECUTOR_ID, unique per running process". After this change, `loadDbosConfig` now generates a UUID instead of leaving it undefined, so `DbosExecutor` **will no longer throw** for that case — this test's expectation is now wrong and must be updated in this same step.)
+Expected: All PASS. (`build.test.ts`'s "fails fast for EXECUTOR=dbos without DBOS_EXECUTOR_ID" test passes a `DATABASE_URL` but no `DBOS_EXECUTOR_ID` and expects a throw — verify this doesn't break: it does not, because that test calls `buildExecutor` directly with a raw env object that also omits `DATABASE_URL`'s... no — re-check: that specific test _does_ set `DATABASE_URL` and omits `DBOS_EXECUTOR_ID`, expecting `DbosExecutor`'s constructor to throw "DBOS_EXECUTOR_ID, unique per running process". After this change, `loadDbosConfig` now generates a UUID instead of leaving it undefined, so `DbosExecutor` **will no longer throw** for that case — this test's expectation is now wrong and must be updated in this same step.)
 
 - [ ] **Step 6: Fix the now-invalid `build.test.ts` expectation**
 
@@ -113,12 +115,12 @@ In `src/providers/executor/build.test.ts`, find the test
 `"fails fast for EXECUTOR=dbos without DBOS_EXECUTOR_ID rather than defaulting to a shared id"` and delete it — the behavior it asserted (throwing when `DBOS_EXECUTOR_ID` is unset) is exactly what Task 1 intentionally changes. Replace it with:
 
 ```typescript
-  it("generates its own executor id for EXECUTOR=dbos when DBOS_EXECUTOR_ID is not set", () => {
-    const executor = buildExecutor({ executor: "dbos" }, providers, undefined, {
-      DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo",
-    });
-    expect(executor).toBeInstanceOf(DbosExecutor);
+it("generates its own executor id for EXECUTOR=dbos when DBOS_EXECUTOR_ID is not set", () => {
+  const executor = buildExecutor({ executor: "dbos" }, providers, undefined, {
+    DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo",
   });
+  expect(executor).toBeInstanceOf(DbosExecutor);
+});
 ```
 
 - [ ] **Step 7: Run the full test suite to check for regressions**
@@ -157,6 +159,7 @@ EOF
 ## Task 2: Terraform scaffold — `versions.tf` + `variables.tf`
 
 **Files:**
+
 - Create: `deploy/gcp/versions.tf`
 - Create: `deploy/gcp/variables.tf`
 
@@ -291,9 +294,11 @@ EOF
 ## Task 3: `cloudsql.tf` — one instance, one database, a generated app-user password
 
 **Files:**
+
 - Create: `deploy/gcp/cloudsql.tf`
 
 **Interfaces:**
+
 - Produces: `google_sql_database_instance.main`, `google_sql_database.app`,
   `google_sql_user.app`, `random_password.db_password` — referenced by
   Task 5's `cloud-run.tf` (connection name, database name, user, password)
@@ -392,10 +397,12 @@ EOF
 ## Task 4: `service-accounts.tf` + `secrets.tf`
 
 **Files:**
+
 - Create: `deploy/gcp/service-accounts.tf`
 - Create: `deploy/gcp/secrets.tf`
 
 **Interfaces:**
+
 - Consumes: `random_password.db_password`, `google_sql_database_instance.main`, `google_sql_database.app`, `google_sql_user.app` (Task 3).
 - Produces: `google_service_account.cloud_run` (referenced by Task 5's `cloud-run.tf` as the service's identity), `google_secret_manager_secret.db_url` (referenced by Task 5 as an env var source).
 
@@ -479,9 +486,11 @@ EOF
 ## Task 5: `cloud-run.tf`
 
 **Files:**
+
 - Create: `deploy/gcp/cloud-run.tf`
 
 **Interfaces:**
+
 - Consumes: `google_service_account.cloud_run` (Task 4), `google_secret_manager_secret.db_url` (Task 4), `google_sql_database_instance.main.connection_name` (Task 3), `var.min_instance_count`/`var.max_instance_count`/`var.container_image` (Task 2).
 - Produces: `google_cloud_run_v2_service.main` (referenced by Task 6's `domain.tf` and `outputs.tf`).
 
@@ -570,10 +579,12 @@ EOF
 ## Task 6: `domain.tf` + `outputs.tf`
 
 **Files:**
+
 - Create: `deploy/gcp/domain.tf`
 - Create: `deploy/gcp/outputs.tf`
 
 **Interfaces:**
+
 - Consumes: `google_cloud_run_v2_service.main` (Task 5).
 
 - [ ] **Step 1: Write `domain.tf`**
@@ -645,6 +656,7 @@ EOF
 ## Task 7: `terraform.tfvars.example` + `deploy/README.md` finalization
 
 **Files:**
+
 - Create: `deploy/gcp/terraform.tfvars.example`
 - Modify: `deploy/README.md`
 
@@ -731,6 +743,7 @@ EOF
 ## Task 8: Mark the ngrok plan superseded
 
 **Files:**
+
 - Modify: `docs/private/2026-09-13-http-reachable-service-plan.md` (git-ignored — no commit for this file)
 - Modify: `docs/private/2026-09-05-roadmap-mcp-native.md` (git-ignored — no commit)
 - Modify: `docs/private/2026-09-14-roadmap-status-table.md` (git-ignored — no commit)
