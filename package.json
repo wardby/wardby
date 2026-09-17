@@ -41,6 +41,7 @@
     "claude:images:local": "docker build -f src/claude-coding-worker/Dockerfile -t reevo-claude-coding-worker:phase5 . && docker build -f src/claude-tool-runner/Dockerfile -t reevo-claude-tool-runner:phase5 .",
     "test:claude-compatibility": "docker build -f src/claude-coding-worker/Dockerfile.compatibility -t reevo-claude-compat:phase5 . && docker run --rm reevo-claude-compat:phase5",
     "test:claude-docker": "node scripts/claude-docker-acceptance.mjs",
+    "test:production-boundary": "node scripts/production-boundary-policy.mjs",
     "verify:claude-code": "npm run typecheck && npm run test:phase5 && npm run test:claude-compatibility && npm run claude:images:local && npm run test:claude-docker",
     "worker:image:policy": "node scripts/coding-worker-image-policy.mjs"
   },

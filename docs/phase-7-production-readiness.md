@@ -2,7 +2,7 @@
 
 Date: 2026-09-06
 
-Status: In progress (Workstream 1 CI consolidation and initial Workstream 5 local proof complete)
+Status: In progress (Workstreams 1 and 2 local implementation plus initial Workstream 5 local proof complete)
 
 ## Objective
 
@@ -77,6 +77,18 @@ Acceptance gate:
 - No duplicate workflow can remain red without blocking or being removed.
 
 ## Workstream 2: Production Network and Runtime Boundary
+
+Local implementation evidence (2026-09-17):
+
+- `deploy/production/compose.yml` supplies a portable TLS edge, private
+  application port, non-root read-only runtime containers, separate migration
+  profile, and distinct DBOS identities for MCP and scheduler processes.
+- `deploy/production/Caddyfile` terminates TLS, redirects HTTP, normalizes the
+  upstream Host, limits edge request bodies, and sets baseline browser headers.
+- The platform-specific egress allowlist, load-balancer/WAF rate limits, and
+  direct-ingress firewall rule remain deployment-administration tasks and are
+  called out in `deploy/production/README.md` rather than being claimed by the
+  Compose topology.
 
 Implementation:
 

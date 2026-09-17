@@ -1,0 +1,120 @@
+name: reevo-production
+
+# This topology deliberately does not run PostgreSQL. Production database
+# lifecycle, backup, and migration ownership belong to Phase 7 Workstream 3.
+services:
+  edge:
+    image: ${CADDY_IMAGE:?Set CADDY_IMAGE to a reviewed immutable digest}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL for certificate expiry notices}
+      MCP_PUBLIC_HOST: ${MCP_PUBLIC_HOST:?Set MCP_PUBLIC_HOST to the canonical DNS host}
+    networks:
+      - edge
+      - service
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+
+  mcp:
+    image: ${REEVO_RUNTIME_IMAGE:?Set REEVO_RUNTIME_IMAGE to a reviewed immutable digest}
+    command: ["node", "dist/cli.js", "mcp"]
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: production
+      MCP_TRANSPORT: http
+      MCP_HTTP_BIND: 0.0.0.0:8080
+      MCP_CANONICAL_URI: ${MCP_CANONICAL_URI:?Set MCP_CANONICAL_URI to the canonical HTTPS URL}
+      AUTH_AUDIENCE: ${AUTH_AUDIENCE:?Set AUTH_AUDIENCE to exactly MCP_CANONICAL_URI}
+      DBOS_EXECUTOR_ID: mcp-1
+    expose:
+      - "8080"
+    networks:
+      - service
+    read_only: true
+    user: "1000:1000"
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('node:net').connect(8080, '127.0.0.1').once('connect', () => process.exit(0)).once('error', () => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  scheduler:
+    image: ${REEVO_RUNTIME_IMAGE:?Set REEVO_RUNTIME_IMAGE to a reviewed immutable digest}
+    command: ["node", "dist/cli.js", "scheduler"]
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: production
+      DBOS_EXECUTOR_ID: scheduler-1
+    networks:
+      - service
+    read_only: true
+    user: "1000:1000"
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+
+  migrate:
+    image: ${REEVO_MIGRATION_IMAGE:?Set REEVO_MIGRATION_IMAGE to a reviewed immutable digest}
+    command: ["npm", "run", "prisma:migrate"]
+    profiles: ["migration"]
+    env_file:
+      - .env.production
+    environment:
+      DATABASE_URL: ${MIGRATION_DATABASE_URL:?Set MIGRATION_DATABASE_URL to the migration role connection string}
+    networks:
+      - service
+    read_only: true
+    user: "1000:1000"
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+
+networks:
+  edge:
+    driver: bridge
+  service:
+    driver: bridge
+
+volumes:
+  caddy-data:
+  caddy-config:
