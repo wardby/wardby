@@ -24,3 +24,19 @@ coverage/
 
 # local SDD/plan-execution ledger scratch (never published)
 /.superpowers/
+
+# Terraform (deploy/gcp/ and future cloud-target modules)
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+*.tfvars
+*.tfvars.json
+!*.tfvars.example

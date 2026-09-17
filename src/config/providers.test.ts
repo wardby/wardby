@@ -126,15 +126,18 @@ describe("loadMcpConfig", () => {
 });
 
 describe("loadDbosConfig", () => {
-  it("defaults the system database to DATABASE_URL and the schema to dbos, and leaves the executor id unset", () => {
+  it("generates a per-call UUID for the executor id when none is set, rather than leaving it undefined", () => {
     const config = loadDbosConfig({ DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo" });
-    expect(config).toEqual({
-      systemDatabaseUrl: "postgresql://reevo:reevo@localhost:55432/reevo",
-      schemaName: "dbos",
-      // No default: two processes sharing an executor id re-drive each
-      // other's live workflows, so DbosExecutor makes it mandatory instead.
-      executorId: undefined,
-    });
+    expect(config.systemDatabaseUrl).toBe("postgresql://reevo:reevo@localhost:55432/reevo");
+    expect(config.schemaName).toBe("dbos");
+    // v4 UUID shape: 8-4-4-4-12 hex, third group starts with "4".
+    expect(config.executorId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
+
+  it("generates a different id on each call, so two processes never collide by default", () => {
+    const a = loadDbosConfig({ DATABASE_URL: "postgresql://x" });
+    const b = loadDbosConfig({ DATABASE_URL: "postgresql://x" });
+    expect(a.executorId).not.toBe(b.executorId);
   });
 
   it("honours explicit overrides", () => {

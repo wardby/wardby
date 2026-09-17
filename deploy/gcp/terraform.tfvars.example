@@ -1,0 +1,22 @@
+# Copy this file to terraform.tfvars and fill in your own values, OR pass
+# these as -var flags / a different .tfvars file - this module reads
+# variables, it doesn't assume this exact file exists.
+#
+# Usage pattern A: fork this whole deploy/gcp/ folder into your own repo
+# and edit in place.
+# Usage pattern B: keep this folder as-is (e.g. as a git submodule or a
+# vendored copy) and supply only your own terraform.tfvars alongside it.
+
+project_id  = "my-gcp-project-id"
+region      = "us-central1"
+domain_name = "reevo.example.com"
+
+# Optional overrides (defaults shown):
+# name_prefix                 = "reevo-run"
+# min_instance_count          = 2
+# max_instance_count          = 10
+# cloudsql_tier                = "db-f1-micro"
+# cloudsql_availability_type   = "ZONAL"
+# cloudsql_deletion_protection = true
+
+container_image = "us-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane@sha256:REPLACE_ME"

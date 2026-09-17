@@ -33,12 +33,11 @@ describe("buildExecutor", () => {
     expect(() => buildExecutor({ executor: "dbos" }, providers, undefined, {})).toThrow(/DBOS_SYSTEM_DATABASE_URL/);
   });
 
-  it("fails fast for EXECUTOR=dbos without DBOS_EXECUTOR_ID rather than defaulting to a shared id", () => {
-    expect(() =>
-      buildExecutor({ executor: "dbos" }, providers, undefined, {
-        DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo",
-      }),
-    ).toThrow(/DBOS_EXECUTOR_ID, unique per running process/);
+  it("generates its own executor id for EXECUTOR=dbos when DBOS_EXECUTOR_ID is not set", () => {
+    const executor = buildExecutor({ executor: "dbos" }, providers, undefined, {
+      DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo",
+    });
+    expect(executor).toBeInstanceOf(DbosExecutor);
   });
 
   it("rejects an unknown executor kind", () => {
