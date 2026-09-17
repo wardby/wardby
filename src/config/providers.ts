@@ -201,6 +201,13 @@ export interface DbosConfig {
    * re-drive the other's live workflows. There is deliberately no default:
    * `DbosExecutor` refuses to construct without one (a default would silently
    * give the scheduler and the MCP server the same identity).
+   *
+   * Defaults to a freshly generated UUID per call (per process) when unset
+   * — not left undefined — so two replicas of a horizontally-scaled
+   * deployment (e.g. a Cloud Run service with min_instance_count > 1) never
+   * silently share an identity just because no one set one explicitly. An
+   * explicit DBOS_EXECUTOR_ID still always wins, for local dev or a small
+   * deployment wanting a stable, human-readable id across restarts.
    */
   executorId: string | undefined;
 }
@@ -210,6 +217,6 @@ export function loadDbosConfig(env: NodeJS.ProcessEnv = process.env): DbosConfig
   return {
     systemDatabaseUrl: env.DBOS_SYSTEM_DATABASE_URL ?? env.DATABASE_URL,
     schemaName: env.DBOS_SCHEMA ?? "dbos",
-    executorId: env.DBOS_EXECUTOR_ID,
+    executorId: env.DBOS_EXECUTOR_ID ?? crypto.randomUUID(),
   };
 }
