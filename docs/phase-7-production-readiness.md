@@ -2,7 +2,7 @@
 
 Date: 2026-09-06
 
-Status: In progress (initial Workstream 5 local proof complete)
+Status: In progress (Workstream 1 CI consolidation and initial Workstream 5 local proof complete)
 
 ## Objective
 
@@ -19,12 +19,13 @@ Source documents:
 
 ## Starting State
 
-- Commit `72dfd41` enables the secured self-hosted OAuth implementation.
-- The dedicated GitHub `Security checks` workflow passes migrations, typecheck,
-  all tests with Chromium, build, allocation checks, dependency inventory, and
-  the time-bounded dependency audit policy.
-- The separate `test` workflow is red because it does not install Playwright's
-  Chromium binary before running the browser test.
+- The GitHub `Security checks` workflow is the single authoritative repository
+  gate. It runs on pull requests and pushes to `main`, and covers migrations,
+  typecheck, lint, format checks, all tests with Chromium, build, allocation
+  checks, dependency inventory, runtime-image SBOMs, image scans, and the
+  time-bounded dependency audit policy.
+- The duplicate `test` workflow has been removed so a feature-branch push does
+  not create a second, potentially divergent status for the same test suite.
 - GitHub Dependabot alerts, code scanning, and secret scanning are disabled.
 - SR-009 is accepted only for trusted build and migration tooling through
   2026-10-06. The affected packages are excluded from the runtime image.
@@ -42,6 +43,14 @@ Source documents:
 6. Perform a reviewed canary release and record the production evidence.
 
 ## Workstream 1: CI and Repository Protection
+
+Local implementation evidence (2026-09-15):
+
+- `security.yml` is now the sole repository workflow for pull requests and
+  `main`; it includes the former `test.yml` lint and formatting checks.
+- The remaining Workstream 1 items require GitHub repository administration:
+  branch protection, Dependabot, CodeQL, secret scanning/push protection, and
+  action-SHA pinning remain outstanding.
 
 Implementation:
 
