@@ -11,6 +11,21 @@ repeatable deployment, recovery, monitoring, and supply-chain controls. Phase 7
 does not reopen closed code findings; it proves that the production environment
 preserves the boundaries already implemented and tested.
 
+This is a self-hosted project, not a plan to operate one mandatory centrally
+hosted service. The roadmap has two separate audiences:
+
+- **Release maintainers** publish a reviewed release commit, images, SBOMs, and
+  verification evidence from the canonical source repository. GitHub-specific
+  controls apply only when GitHub is the forge used for that repository.
+- **Self-host operators** choose their own cloud, on-premises environment,
+  forge, DNS, identity provider, secret manager, database, and monitoring
+  stack. They must meet the security outcomes in the deployment workstreams,
+  using equivalent controls supported by their chosen platform.
+
+Reference deployments, including the optional GCP control-plane module, prove
+portable patterns. They are examples rather than a prerequisite or the sole
+supported way to run Reevo Run.
+
 Source documents:
 
 - [Security deployment and recovery](security-deployment.md)
@@ -26,12 +41,10 @@ Source documents:
   time-bounded dependency audit policy.
 - The duplicate `test` workflow has been removed so a feature-branch push does
   not create a second, potentially divergent status for the same test suite.
-- GitHub administration review (2026-09-17) found Dependabot vulnerability
-  alerts and automated security fixes disabled. Code scanning and secret
-  scanning are also disabled. The repository is private, and GitHub rejects
-  main-branch protection administration on the current plan with an
-  upgrade-required response; reviewed-merge enforcement cannot be configured
-  until the repository is made eligible.
+- The canonical GitHub repository's administration status is tracked below as
+  maintainer evidence only. It is not a self-host deployment prerequisite and
+  must not be interpreted as requiring every operator to use GitHub or a paid
+  GitHub plan.
 - SR-009 is accepted only for trusted build and migration tooling through
   2026-10-06. The affected packages are excluded from the runtime image.
 - Production migration, TLS/proxy behavior, network policy, database controls,
@@ -51,7 +64,12 @@ Source documents:
 5. Establish monitoring, incident response, and operational ownership.
 6. Perform a reviewed canary release and record the production evidence.
 
-## Workstream 1: CI and Repository Protection
+## Workstream 1: Release Repository CI and Forge Policy
+
+Scope: this workstream protects the canonical release repository and its
+published artifacts. Self-host operators consume a verified release and apply
+their forge's equivalent review, scanning, and credential-protection controls;
+they do not inherit GitHub-specific setup requirements.
 
 Merged implementation and administration evidence (2026-09-17):
 
@@ -60,10 +78,12 @@ Merged implementation and administration evidence (2026-09-17):
 - PR #35 passed `verify`, Claude review, and every worker-image variant after
   hardening the Docker OOM acceptance test. The matrix uses `fail-fast: false`
   so unaffected image SBOM and scan evidence is retained if one variant fails.
-- GitHub API verification found Dependabot alerts and automated security fixes
-  disabled; code scanning and secret scanning are disabled. Main-branch
-  protection cannot be configured for this private repository on the current
-  GitHub plan (the protection API returns an upgrade-required response).
+- GitHub API verification of the current canonical repository found Dependabot
+  alerts and automated security fixes disabled; code scanning and secret
+  scanning are disabled. Main-branch protection cannot be configured for this
+  private repository on its current GitHub plan (the protection API returns an
+  upgrade-required response). This is a release-maintainer backlog item, not a
+  self-host operator deployment blocker.
 - Action SHA pinning remains a repository-code task: the Claude workflows use
   mutable `actions/checkout@v4` and `anthropics/claude-code-action@v1` tags.
 
@@ -74,11 +94,16 @@ Implementation:
    same suite is not maintained twice.
 2. Require typecheck, full database-backed tests, browser OAuth tests, build,
    migration replay, allocation checks, and the dependency policy on pull requests.
-3. Protect `main` from direct unreviewed changes and require current green checks
-   before merge.
-4. Enable Dependabot alerts and supported dependency update automation.
-5. Enable CodeQL or an equivalent code-scanning workflow for JavaScript/TypeScript.
-6. Enable secret scanning and push protection where the repository plan supports it.
+3. Protect the canonical release branch from direct unreviewed changes and
+   require current green checks before merge. On a forge or plan without this
+   feature, document a reviewed release-maintainer process and its compensating
+   controls.
+4. Enable Dependabot alerts and supported dependency update automation on
+   GitHub, or the selected forge's equivalent for the canonical repository.
+5. Enable CodeQL or an equivalent JavaScript/TypeScript code scanner for the
+   canonical repository.
+6. Enable secret scanning and push protection where the canonical repository's
+   forge and plan support it.
 7. Pin third-party GitHub Actions to reviewed immutable commit SHAs and schedule
    periodic updates.
 8. Retain the dependency tree and an SBOM as release artifacts.
@@ -88,10 +113,15 @@ Acceptance gate:
 - Every required workflow is green on the exact release commit.
 - A deliberately failing test blocks a rehearsal pull request.
 - New dependency, code-scanning, and secret-scanning alerts are visible and have
-  an assigned response owner.
+  an assigned response owner, or documented equivalent controls exist where the
+  selected forge or plan does not provide those features.
 - No duplicate workflow can remain red without blocking or being removed.
 
 ## Workstream 2: Production Network and Runtime Boundary
+
+Scope: each self-host operator implements these outcomes in its own platform.
+The checked-in Compose and Caddy configuration are a portable reference shape;
+they do not require Caddy, Docker Compose, GCP, or any single hosting provider.
 
 Local implementation evidence (2026-09-17):
 
@@ -326,6 +356,8 @@ Acceptance gate:
 - [ ] Full HTTPS staging, abuse, load, and soak validation passes without skips.
 - [ ] Canary, rollback, and post-deployment verification are approved.
 
-Production go-live is blocked until every checklist item has linked evidence and
-an accountable owner. A risk acceptance must name its scope, owner, compensating
-controls, and expiration; it cannot silently convert a failed check into a pass.
+A particular deployment's go-live is blocked until every applicable checklist
+item has linked evidence and an accountable owner. Release maintainers must not
+claim a configuration is production-ready beyond the environments they have
+verified. A risk acceptance must name its scope, owner, compensating controls,
+and expiration; it cannot silently convert a failed check into a pass.
