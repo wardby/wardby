@@ -5,7 +5,7 @@ Deployment configuration for reevo-run, organized by target.
 - **`local/`** — docker-compose for local development (Postgres, the coding
   proxy). `npm run db:up` / `npm run coding:local:up`.
 - **`observability/`** — local Prometheus + Grafana stack (`npm run
-  observability:up`), dev/local only. See `docs/phase-7-production-readiness.md`.
+observability:up`), dev/local only. See `docs/phase-7-production-readiness.md`.
 - **`aws/`** — placeholder for an AWS target (Fargate `JobLauncher`, per the
   roadmap's Phase 5 follow-ons). Not yet built.
 - **`gcp/`** — GCP production hosting via Terraform (the baseline IaC tool
