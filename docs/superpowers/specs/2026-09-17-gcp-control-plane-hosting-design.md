@@ -141,22 +141,43 @@ export async function fetchGcpInstanceId(timeoutMs = 2_000): Promise<string | un
 only `env.DBOS_EXECUTOR_ID`) becomes:
 
 ```typescript
-export async function loadDbosConfig(env: NodeJS.ProcessEnv = process.env): Promise<DbosConfig> {
+export async function loadDbosConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  fetchInstanceId: () => Promise<string | undefined> = fetchGcpInstanceId,
+): Promise<DbosConfig> {
   return {
     systemDatabaseUrl: env.DBOS_SYSTEM_DATABASE_URL ?? env.DATABASE_URL,
     schemaName: env.DBOS_SCHEMA ?? "dbos",
-    executorId: env.DBOS_EXECUTOR_ID ?? (await fetchGcpInstanceId()),
+    executorId: env.DBOS_EXECUTOR_ID ?? (await fetchInstanceId()),
   };
 }
 ```
 
-Its one existing caller, `buildExecutor` in
-`src/providers/executor/build.ts:20`, becomes `async` to `await` it —
-verified to be this function's only call site in `src/`, so this is a
-contained, single-path change, not a wide ripple. An explicit
-`DBOS_EXECUTOR_ID` env var (local dev, non-GCP hosts, the scheduler and MCP
-server needing visibly-different fixed ids in a small deployment) always
-wins over the metadata fetch.
+`loadDbosConfig` also gains an injectable `fetchInstanceId` parameter
+(defaulting to the real `fetchGcpInstanceId`), matching this codebase's
+existing pattern for testability (`env`, `db` are already
+injectable-with-a-default elsewhere) — so unit tests can stub it instead of
+waiting out a real 2-second network timeout per test.
+
+Traced fully (corrected from an earlier, too-optimistic read of this as a
+single-caller change): `loadDbosConfig`'s only caller,
+`buildExecutor` (`src/providers/executor/build.ts:20`), becomes `async`.
+`buildExecutor`'s two call sites are `src/cli.ts:510` inside `scheduler()`
+(already `async` — just add `await`) and `src/mcp/index.ts:107` inside
+`buildMcpProviders()` (currently **not** `async` — this function itself
+must become `async` too). `buildMcpProviders`'s only caller is
+`startMcp()` (`src/mcp/index.ts:131`, already `async` — add `await`
+there). No test file calls `buildMcpProviders` directly, so the test-side
+ripple is exactly `src/config/providers.test.ts` (3 existing cases) and
+`src/providers/executor/build.test.ts` (5 existing cases, two of which
+assert a **synchronous** throw via
+`expect(() => buildExecutor(...)).toThrow(...)` and must become
+`await expect(buildExecutor(...)).rejects.toThrow(...)` since an async
+function's internal throw becomes a rejected promise, not a synchronous
+exception). An explicit `DBOS_EXECUTOR_ID` env var (local dev, non-GCP
+hosts, the scheduler and MCP server needing visibly-different fixed ids in
+a small deployment) always wins over the metadata fetch and short-circuits
+it via `??` (the fetch is never even attempted when the env var is set).
 
 ## 3. Database: one Cloud SQL instance, two schemas, HA tier as a variable
 
