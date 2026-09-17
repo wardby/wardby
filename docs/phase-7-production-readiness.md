@@ -84,8 +84,10 @@ Merged implementation and administration evidence (2026-09-17):
   private repository on its current GitHub plan (the protection API returns an
   upgrade-required response). This is a release-maintainer backlog item, not a
   self-host operator deployment blocker.
-- Action SHA pinning remains a repository-code task: the Claude workflows use
-  mutable `actions/checkout@v4` and `anthropics/claude-code-action@v1` tags.
+- The Claude workflows pin `actions/checkout` and
+  `anthropics/claude-code-action` to reviewed immutable commits, with their
+  release tags recorded beside each pin. Release maintainers still need a
+  periodic review cadence for updating those pins.
 
 Implementation:
 
