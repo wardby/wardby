@@ -25,3 +25,4 @@ create_domain_mapping = true
 # cloudsql_deletion_protection = true
 
 container_image = "us-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane@sha256:REPLACE_ME"
+migration_image = "us-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane-migrate@sha256:REPLACE_ME"

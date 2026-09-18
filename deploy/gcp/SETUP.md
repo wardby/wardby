@@ -108,11 +108,19 @@ docker build -f deploy/Dockerfile --target runtime \
 docker push us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane:latest
 docker inspect --format '{{index .RepoDigests 0}}' \
   us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane:latest
+
+docker build -f deploy/Dockerfile --target migration \
+  -t us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane-migrate:latest .
+docker push us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane-migrate:latest
+docker inspect --format '{{index .RepoDigests 0}}' \
+  us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane-migrate:latest
 ```
 
-Use the resulting `@sha256:...` digest (not a mutable tag) as
-`container_image` in your `terraform.tfvars` — consistent with how every
-other image in this repo is pinned.
+Use the first digest as `container_image` and the second as
+`migration_image` in your `terraform.tfvars` (not mutable tags — consistent
+with how every other image in this repo is pinned). `terraform apply` runs
+the migration image automatically against the live database on every
+apply where it changes — see `migration-job.tf`.
 
 ## 8. Plan and apply
 

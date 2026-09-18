@@ -170,5 +170,6 @@ resource "google_cloud_run_v2_service" "main" {
     google_secret_manager_secret_version.auth_credential_hash_key,
     google_secret_manager_secret_iam_member.llm_api_key_access,
     google_secret_manager_secret_version.llm_api_key,
+    null_resource.run_migration,
   ]
 }

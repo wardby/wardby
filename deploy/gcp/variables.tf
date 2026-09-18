@@ -69,6 +69,11 @@ variable "container_image" {
   type        = string
 }
 
+variable "migration_image" {
+  description = "Fully-qualified image reference for the one-off Prisma migration job, built from deploy/Dockerfile's `migration` target (not the `runtime` target used by container_image). No default: this module doesn't build or publish the image."
+  type        = string
+}
+
 variable "openai_api_key_value" {
   description = "OpenAI API key, exposed to the container as OPENAI_API_KEY. No default, and never write a real value to a committed .tfvars file - pass it as -var or via TF_VAR_openai_api_key_value from a local, gitignored source. Null (the default) skips creating this secret. The app registers providers additively by credential presence, so this and anthropic_api_key_value can both be set at once."
   type        = string
