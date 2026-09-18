@@ -7,9 +7,14 @@
 # Usage pattern B: keep this folder as-is (e.g. as a git submodule or a
 # vendored copy) and supply only your own terraform.tfvars alongside it.
 
-project_id  = "my-gcp-project-id"
-region      = "us-central1"
-domain_name = "reevo.example.com"
+project_id = "my-gcp-project-id"
+region     = "us-central1"
+
+# Custom domain (requires prior `gcloud domains verify` - see SETUP.md).
+# Skip both lines below to deploy without a domain - the service still gets
+# a free *.run.app URL (see the cloud_run_service_url output either way).
+domain_name           = "reevo.example.com"
+create_domain_mapping = true
 
 # Optional overrides (defaults shown):
 # name_prefix                 = "reevo-run"

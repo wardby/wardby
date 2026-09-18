@@ -14,9 +14,20 @@ variable "name_prefix" {
   default     = "reevo-run"
 }
 
+variable "create_domain_mapping" {
+  description = "Whether to create a custom domain mapping for the Cloud Run service. Requires domain_name and prior domain ownership verification (gcloud domains verify) - see SETUP.md. Set false to test/deploy without a domain; the service still gets a free *.run.app URL (see the cloud_run_service_url output) either way."
+  type        = bool
+  default     = true
+}
+
 variable "domain_name" {
-  description = "Custom domain to map to the Cloud Run service (e.g. \"reevo.example.com\"). No default: DNS ownership is deployment-specific."
+  description = "Custom domain to map to the Cloud Run service (e.g. \"reevo.example.com\"). Required only when create_domain_mapping is true; ignored otherwise."
   type        = string
+  default     = null
+  validation {
+    condition     = !var.create_domain_mapping || var.domain_name != null
+    error_message = "domain_name is required when create_domain_mapping is true."
+  }
 }
 
 variable "min_instance_count" {

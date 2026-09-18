@@ -4,8 +4,8 @@ output "cloud_run_service_url" {
 }
 
 output "custom_domain" {
-  description = "The custom domain mapped to the service - this is the stable MCP canonicalUri/AUTH_AUDIENCE."
-  value       = var.domain_name
+  description = "The custom domain mapped to the service (null when create_domain_mapping is false - use cloud_run_service_url instead)."
+  value       = var.create_domain_mapping ? var.domain_name : null
 }
 
 output "cloudsql_connection_name" {
