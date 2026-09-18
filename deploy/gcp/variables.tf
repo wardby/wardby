@@ -68,3 +68,23 @@ variable "container_image" {
   description = "Fully-qualified image reference for the Cloud Run service (e.g. a digest-pinned image built from ../Dockerfile). No default: this module doesn't build or publish the image."
   type        = string
 }
+
+variable "openai_api_key_value" {
+  description = "OpenAI API key, exposed to the container as OPENAI_API_KEY. No default, and never write a real value to a committed .tfvars file - pass it as -var or via TF_VAR_openai_api_key_value from a local, gitignored source. Null (the default) skips creating this secret. The app registers providers additively by credential presence, so this and anthropic_api_key_value can both be set at once."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
+variable "anthropic_api_key_value" {
+  description = "Anthropic API key, exposed to the container as ANTHROPIC_API_KEY. Same rules as openai_api_key_value - no default, never committed, both may be set at once."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
+variable "mcp_canonical_uri_override" {
+  description = "MCP_CANONICAL_URI value when create_domain_mapping is false. Only needed for a domainless deployment: the *.run.app URL doesn't exist until the Cloud Run service is created, so it can't be known on the first apply. Workflow: apply once (the app fails its own MCP_CANONICAL_URI check and won't serve real traffic yet, but every other resource - Cloud SQL, secrets, IAM - is created correctly), read the real URL from the cloud_run_service_url output, then apply again with this variable set to that URL. Ignored when create_domain_mapping is true (domain_name is used instead)."
+  type        = string
+  default     = "https://placeholder.invalid"
+}
