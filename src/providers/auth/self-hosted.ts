@@ -345,6 +345,16 @@ export class SelfHostedAuthProvider implements AuthProvider {
     await this.db.authFormChallenge.deleteMany({ where: { expiresAt: { lt: now } } });
     await this.db.authSession.deleteMany({ where: { expiresAt: { lt: now } } });
     await this.db.authRateLimit.deleteMany({ where: { expiresAt: { lt: now } } });
+    // /register has no auth in front of it once Cloud Run allows
+    // unauthenticated invocation (required for self-hosted OAuth to serve
+    // real clients at all), and maxClients is a hard global cap - so
+    // unthrottled registrations could permanently exhaust it. A client
+    // that never completes a single token exchange within a week is
+    // abandoned or spam, never a real client still mid-flow (authorization
+    // requests expire in 10 minutes, codes in 60 seconds).
+    await this.db.oAuthClient.deleteMany({
+      where: { createdAt: { lt: new Date(now.getTime() - 7 * DAY) }, families: { none: {} } },
+    });
   }
   async profile(token: string): Promise<AuthProfile> {
     const v = await this.verifyBearer(token);

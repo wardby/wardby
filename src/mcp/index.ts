@@ -48,6 +48,7 @@ import { SECRET_ELICITATION_PATH } from "./tools/secret-elicitation-form.js";
 import { logger } from "../core/logger.js";
 
 const mcpLog = logger.child({ module: "mcp-index" });
+const SELF_HOSTED_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // hourly
 
 /** Placeholder identifier for stdio, which has no HTTP endpoint to name. Never surfaced: stdio's fixed context always holds every scope, so no scope challenge is ever built against it. */
 const STDIO_PLACEHOLDER_URI = "urn:reevo:local-stdio";
@@ -203,8 +204,14 @@ export async function startMcp(): Promise<McpServerHandle> {
     auth: { authProvider, db: prisma, providers },
     selfHosted,
   });
+  const cleanupTimer = selfHosted
+    ? setInterval(() => {
+        selfHosted.cleanup().catch((err: unknown) => mcpLog.warn({ err }, "self-hosted auth cleanup failed"));
+      }, SELF_HOSTED_CLEANUP_INTERVAL_MS)
+    : undefined;
   return {
     close: async () => {
+      if (cleanupTimer) clearInterval(cleanupTimer);
       await closeQuietly(http.close(), "HTTP transport close");
       await closeQuietly(providers.executor.close?.(), "executor close");
     },

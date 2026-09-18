@@ -256,4 +256,21 @@ describe.skipIf(!process.env.DATABASE_URL)("secure self-hosted OAuth (PostgreSQL
     await a.check("test", id, 1);
     await expect(b.check("test", id, 1)).rejects.toThrow(/Rate limited/);
   });
+  it("garbage-collects abandoned clients that never completed a token exchange, keeping used ones", async () => {
+    const abandoned = await provider.registerClient({ redirectUris: ["https://abandoned.example/cb"] });
+    clients.push(abandoned.clientId);
+    await db.oAuthClient.update({
+      where: { clientId: abandoned.clientId },
+      data: { createdAt: new Date(Date.now() - 8 * DAY) },
+    });
+    const f = await setup();
+    await provider.handleToken(await f.code());
+    await db.oAuthClient.update({
+      where: { clientId: f.client.clientId },
+      data: { createdAt: new Date(Date.now() - 8 * DAY) },
+    });
+    await provider.cleanup();
+    await expect(db.oAuthClient.findUnique({ where: { clientId: abandoned.clientId } })).resolves.toBeNull();
+    await expect(db.oAuthClient.findUnique({ where: { clientId: f.client.clientId } })).resolves.not.toBeNull();
+  });
 });
