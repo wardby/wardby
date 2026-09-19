@@ -1,23 +1,18 @@
-<table>
-  <tr>
-    <td width="34%" align="center">
-      <img src="docs/assets/reevo-run-agent.png" alt="Reevo Run agent with scheduling, coding, and budget guardrails" width="280">
-    </td>
-    <td width="66%">
-      <h1>Reevo Run</h1>
-      <h3>Your agents. Your cloud. Your budget.</h3>
-      <p><strong>Design and operate governed AI agents from Claude or Codex, on infrastructure you control.</strong></p>
-      <p>Give agents schedules, tools, hard budgets, isolated execution, and human-reviewed outcomes without handing your code, credentials, or operating model to a hosted agent platform.</p>
-      <p>
-        <a href="#why-reevo-run">Why Reevo Run</a> ·
-        <a href="#a-full-cycle-agent-from-one-conversation">Full-cycle example</a> ·
-        <a href="#host-it-in-your-cloud">Deployments</a> ·
-        <a href="#quickstart">Quickstart</a> ·
-        <a href="#security-boundaries">Security</a>
-      </p>
-    </td>
-  </tr>
-</table>
+<div>
+  <img align="left" hspace="24" src="docs/assets/reevo-run-agent.png" alt="Reevo Run agent with scheduling, coding, and budget guardrails" width="280">
+  <h1>Reevo Run</h1>
+  <h3>Your agents. Your cloud. Your budget.</h3>
+  <p><strong>Design and operate governed AI agents from Claude or Codex, on infrastructure you control.</strong></p>
+  <p>Give agents schedules, tools, hard budgets, isolated execution, and human-reviewed outcomes without handing your code, credentials, or operating model to a hosted agent platform.</p>
+  <p>
+    <a href="#why-reevo-run">Why Reevo Run</a> ·
+    <a href="#a-full-cycle-agent-from-one-conversation">Full-cycle example</a> ·
+    <a href="#host-it-in-your-cloud">Deployments</a> ·
+    <a href="#quickstart">Quickstart</a> ·
+    <a href="#security-boundaries">Security</a>
+  </p>
+</div>
+<br clear="left">
 
 [![Security checks](https://github.com/chfields/reevo-run/actions/workflows/security.yml/badge.svg)](https://github.com/chfields/reevo-run/actions/workflows/security.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-0f766e.svg)](LICENSE)
