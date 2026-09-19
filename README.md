@@ -2,10 +2,11 @@
   <img align="left" hspace="24" src="docs/assets/reevo-run-agent.png" alt="Reevo Run agent with scheduling, coding, and budget guardrails" width="280">
   <h1>Reevo Run</h1>
   <h3>Your agents. Your cloud. Your budget.</h3>
-  <p><strong>Most agent runners focus on helping a model complete a task. Reevo Run is the self-hosted control plane that decides whether the task should run, limits what it can access, and returns a human-reviewable outcome.</strong></p>
+  <p><strong>Most agent runners focus on helping a model complete a task. Reevo Run is the self-hosted control plane that decides whether the task should run, limits what it can access, and returns a reviewable outcome governed by explicit policy.</strong></p>
   <p>Budget is enforced as admission control: spend is reserved before execution, so work that cannot fit the budget never starts.</p>
   <p>
     <a href="#why-reevo-run">Why Reevo Run</a> ·
+    <a href="#why-reevo-instead-of-another-agent-runner">Why it is different</a> ·
     <a href="#a-full-cycle-agent-from-one-conversation">Full-cycle example</a> ·
     <a href="#host-it-in-your-cloud">Deployments</a> ·
     <a href="#quickstart">Quickstart</a> ·
@@ -30,19 +31,37 @@ teams need more than a prompt and a cron job.
 
 Reevo Run provides the control plane around the model:
 
-| For engineering leaders                                                     | For developers                                                                    |
-| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| Put explicit cost, ownership, and approval boundaries around agent work.    | Create and manage agents from Claude or Codex through MCP.                        |
-| Keep execution, data, and credentials in infrastructure your team controls. | Choose OpenAI, Anthropic, or Bedrock-backed models per agent.                     |
-| Turn one-off experiments into scheduled, observable operating processes.    | Attach scoped tools, secrets, schedules, memory, and sub-agents.                  |
-| Preserve human accountability for code and production changes.              | Run coding tasks in isolated Codex or Claude Code workers that produce draft PRs. |
+| For engineering leaders                                                     | For developers                                                                             |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Put explicit cost, ownership, and approval boundaries around agent work.    | Create and manage agents from Claude or Codex through MCP.                                 |
+| Keep execution, data, and credentials in infrastructure your team controls. | Choose OpenAI, Anthropic, or Bedrock-backed models per agent.                              |
+| Turn one-off experiments into scheduled, observable operating processes.    | Attach scoped tools, secrets, schedules, memory, and sub-agents.                           |
+| Keep approval and action authority explicit for consequential outcomes.     | Run optional coding tasks in isolated Codex or Claude Code workers that produce draft PRs. |
 
 The result is not another autonomous black box. It is a way to make agent work
 repeatable, bounded, inspectable, and reviewable.
 
+## Why Reevo instead of another agent runner?
+
+Agent tools solve different layers of the problem. Reevo does not need to
+replace them: it provides the self-hosted operating boundary around agents and
+the work they perform.
+
+| Category                   | What it primarily helps you do                              | What Reevo adds                                                                            |
+| -------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| **Agent frameworks**       | Build reasoning loops, tool calls, and multi-agent logic.   | Persistent ownership, schedules, budgets, credentials, run history, and lifecycle control. |
+| **Coding agents**          | Plan, edit, and test code for an interactive task.          | Isolated managed workers, admission-time budgets, scoped access, and optional draft PRs.   |
+| **Hosted agent platforms** | Start quickly on infrastructure operated by another vendor. | A control plane, data, credentials, and execution boundary you can host in your own cloud. |
+| **Workflow orchestrators** | Make application jobs durable, retryable, and observable.   | Agent-specific policy, model usage, capabilities, budgets, and MCP-native operations.      |
+
+The distinction is control, not just execution. Reevo reserves spend before a
+run starts, grants only assigned capabilities, records what happened, and
+keeps downstream action authority separate from the worker that produced the
+result.
+
 ## One control plane, the full lifecycle
 
-![Reevo Run workflow: ask in Claude or Codex, define an agent through MCP, govern it in Reevo Run, execute it in isolation, and review its outcome](docs/assets/reevo-run-workflow.svg)
+![Reevo Run workflow: ask in Claude or Codex, define an agent through MCP, govern it in Reevo Run, execute it in isolation, and apply review policy to its outcome](docs/assets/reevo-run-workflow.svg)
 
 Claude and Codex are the operator experience. Reevo Run is the durable system
 behind them: it stores agent definitions, triggers work, reserves budget,
@@ -81,12 +100,12 @@ floor.
 Reevo provides lifecycle primitives rather than prescribing one fixed catalog.
 These are example systems a team can build and manage through MCP:
 
-| Agent system             | Typical cycle                                                      | Human-reviewed outcome               |
+| Agent system             | Typical cycle                                                      | Governed outcome                     |
 | ------------------------ | ------------------------------------------------------------------ | ------------------------------------ |
-| **Delivery pipeline**    | Work request → plan → implementation → tests → review              | Draft feature or bug-fix PR          |
-| **Security maintenance** | Scheduled scan → assess → patch → verify                           | Draft dependency or remediation PR   |
+| **Delivery pipeline**    | Work request → plan → implementation → tests → review              | Optional draft feature or bug-fix PR |
+| **Security maintenance** | Scheduled scan → assess → patch → verify                           | Report or optional remediation PR    |
 | **Architecture review**  | Inspect codebase → score risks → prioritize findings               | Architecture and risk report         |
-| **QA coverage**          | Map journeys → rank gaps → add tests → run suite                   | Draft test-coverage PR               |
+| **QA coverage**          | Map journeys → rank gaps → add tests → run suite                   | Coverage report or optional test PR  |
 | **System monitoring**    | Receive signal → investigate → correlate → escalate                | Actionable defect or incident report |
 | **Project tracking**     | Read delivery data → compare plan, cost, and progress → flag drift | Portfolio or program update          |
 
@@ -126,8 +145,9 @@ not a requirement to use one vendor.
   access.
 - **Credential separation:** workers do not receive provider credentials or the
   GitHub App private key; trusted components proxy model use and finalize Git.
-- **Human merge gate:** coding runs create draft pull requests. Reevo does not
-  auto-merge them.
+- **Explicit action authority:** the worker that produces an outcome does not
+  implicitly gain authority to apply it. Current coding finalization creates a
+  draft pull request and does not auto-merge it.
 - **Protected remote MCP:** HTTP transport is an OAuth 2.1 resource server;
   local stdio mode trusts the local operator.
 - **Sanitized operations:** lifecycle events and metrics exclude prompts,
@@ -137,6 +157,10 @@ Read the [runtime architecture](docs/architecture-runtime.md),
 [coding-worker isolation model](docs/coding-worker-isolation.md), and
 [security deployment guide](docs/security-deployment.md) before enabling a
 production repository.
+
+Review policy is designed to support designated agents as well as people.
+Agent approvals will be recorded as workflow evidence; operators will decide
+whether that evidence permits an automated action or still requires a person.
 
 ## Quickstart
 
