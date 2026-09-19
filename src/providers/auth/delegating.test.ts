@@ -78,6 +78,36 @@ describe("DelegatingAuthProvider.verifyBearer", () => {
     const token = await mintToken({ key: otherKey });
     await expect(provider.verifyBearer(token)).rejects.toThrow();
   });
+
+  // An http(s) origin with an empty path and the same origin with "/" name one
+  // resource. The protected-resource metadata advertises the "/" form while an
+  // operator typically configures the IdP's audience without it, so tokens
+  // legitimately arrive spelled either way and both must verify.
+  it.each([
+    ["configured bare, token normalized", "https://host", "https://host/"],
+    ["configured normalized, token bare", "https://host/", "https://host"],
+    ["configured bare, token bare", "https://host", "https://host"],
+    ["configured normalized, token normalized", "https://host/", "https://host/"],
+  ])("accepts equivalent audience spellings (%s)", async (_label, configured, tokenAud) => {
+    const provider = new DelegatingAuthProvider({ issuer: ISSUER, audience: configured }, jwks);
+    const token = await mintToken({ audience: tokenAud });
+    await expect(provider.verifyBearer(token)).resolves.toMatchObject({ subject: "user-123" });
+  });
+
+  it("still rejects a different resource on the same host", async () => {
+    const provider = new DelegatingAuthProvider({ issuer: ISSUER, audience: "https://host/mcp" }, jwks);
+    for (const aud of ["https://host/", "https://host/other", "https://evil-host/mcp"]) {
+      await expect(provider.verifyBearer(await mintToken({ audience: aud }))).rejects.toThrow(AudienceError);
+    }
+  });
+
+  it("matches an opaque non-URL audience exactly", async () => {
+    const provider = new DelegatingAuthProvider({ issuer: ISSUER, audience: "reevo-run-api" }, jwks);
+    await expect(provider.verifyBearer(await mintToken({ audience: "reevo-run-api" }))).resolves.toMatchObject({
+      subject: "user-123",
+    });
+    await expect(provider.verifyBearer(await mintToken({ audience: "reevo-run-api/" }))).rejects.toThrow(AudienceError);
+  });
 });
 
 describe("DelegatingAuthProvider auth-code flow", () => {

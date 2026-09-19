@@ -18,6 +18,36 @@ export interface DelegatingAuthConfig {
   jwksUri?: string;
 }
 
+/**
+ * Every spelling of the configured audience a token may legitimately carry.
+ *
+ * `aud` is compared as an exact string, but for an http(s) URI an empty path
+ * and "/" denote the same resource (RFC 3986 §6.2.3) — and the two halves of
+ * this system disagree about which spelling to use. The protected-resource
+ * metadata advertises the normalized ("/") form, so a spec-compliant client
+ * asks its IdP for that; an IdP whose audience is configured from a
+ * hand-written identifier (Auth0's API Identifier, say) echoes back whatever
+ * the operator typed, usually without the slash. Matching only one form
+ * rejects real tokens from the other, and the startup check in
+ * mcp/index.ts normalizes both sides, so the misconfiguration passes
+ * validation and only surfaces as an opaque invalid_token at request time.
+ *
+ * A non-URL audience (some IdPs use opaque identifiers) has exactly one form.
+ */
+export function audienceCandidates(audience: string): string[] {
+  try {
+    const url = new URL(audience);
+    const forms = [audience, url.href];
+    // Only an empty path is interchangeable with "/". A trailing slash on a
+    // non-empty path ("…/mcp/" vs "…/mcp") is significant, so those stay
+    // distinct resources and keep matching strictly.
+    if (url.pathname === "/") forms.push(url.href.replace(/\/$/, ""));
+    return [...new Set(forms)];
+  } catch {
+    return [audience];
+  }
+}
+
 /** Splits an OAuth `scope`/`scp` claim (space-delimited string, or already an array) into scopes. */
 function scopesFromClaim(claim: unknown): string[] {
   if (Array.isArray(claim)) return claim.map(String);
@@ -27,11 +57,13 @@ function scopesFromClaim(claim: unknown): string[] {
 
 export class DelegatingAuthProvider implements AuthProvider {
   private readonly config: DelegatingAuthConfig;
+  private readonly audiences: string[];
   private readonly jwks: JWTVerifyGetKey;
 
   constructor(config: DelegatingAuthConfig, jwks?: JWTVerifyGetKey) {
     if (!config.issuer || !config.audience) throw new Error("AUTH_ISSUER and AUTH_AUDIENCE are required.");
     this.config = config;
+    this.audiences = audienceCandidates(config.audience);
     if (jwks) {
       this.jwks = jwks;
     } else {
@@ -46,7 +78,7 @@ export class DelegatingAuthProvider implements AuthProvider {
     try {
       const { payload } = await jwtVerify(token, this.jwks, {
         issuer: this.config.issuer,
-        audience: this.config.audience,
+        audience: this.audiences,
         requiredClaims: ["sub", "exp", "iss", "aud"],
       });
       return {
