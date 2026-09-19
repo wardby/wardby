@@ -9,13 +9,19 @@
     <a href="#why-reevo-instead-of-another-agent-runner">Why it is different</a> ·
     <a href="#a-full-cycle-agent-from-one-conversation">Full-cycle example</a> ·
     <a href="#host-it-in-your-cloud">Deployments</a> ·
+    <a href="#bring-your-own-observability">Observability</a> ·
     <a href="#quickstart">Quickstart</a> ·
     <a href="#security-boundaries">Security</a>
   </p>
 </div>
 <br clear="left">
 
-[![Security checks](https://github.com/chfields/reevo-run/actions/workflows/security.yml/badge.svg)](https://github.com/chfields/reevo-run/actions/workflows/security.yml)
+<!-- GitHub does not expose live Actions badge images for private repositories. These capability badges link authenticated readers to the authoritative workflow. -->
+
+[![Security CI](https://img.shields.io/badge/security%20CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)](https://github.com/chfields/reevo-run/actions/workflows/security.yml?query=branch%3Amain)
+[![Dependency audit](https://img.shields.io/badge/dependencies-audit%20policy-0f766e.svg)](https://github.com/chfields/reevo-run/actions/workflows/security.yml?query=branch%3Amain)
+[![Container scan](https://img.shields.io/badge/container%20images-Trivy%20CRITICAL%20gate-0f766e.svg)](https://github.com/chfields/reevo-run/actions/workflows/security.yml?query=branch%3Amain)
+[![SBOM](https://img.shields.io/badge/SBOM-SPDX%20JSON-0f766e.svg)](https://github.com/chfields/reevo-run/actions/workflows/security.yml?query=branch%3Amain)
 [![License](https://img.shields.io/badge/license-Apache--2.0-0f766e.svg)](LICENSE)
 
 > **Project status:** the control plane, scheduler, budget groups, MCP server,
@@ -131,6 +137,33 @@ Start with [deployment targets](deploy/README.md), the
 [portable production boundary](deploy/production/README.md), or the
 [GCP setup guide](deploy/gcp/SETUP.md). Reference deployments are examples,
 not a requirement to use one vendor.
+
+## Bring your own observability
+
+The coding proxy can expose standard Prometheus metrics at `/metrics` when
+`METRICS_BIND` is configured. Collection is pull-based: keep the endpoint on a
+private network and give only your chosen collector access to it.
+
+| Destination                      | Integration path                                                                                                                                                                                                                                  |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Local Prometheus and Grafana** | The included Compose profile provisions Prometheus, Grafana, and dashboards for requests, errors, latency, cost, budgets, runs, and actual spend.                                                                                                 |
+| **AWS CloudWatch**               | Configure the [CloudWatch Agent's Prometheus collector](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Agent-PrometheusEC2.html) to scrape Reevo over private EC2, ECS, or EKS networking and import selected metrics. |
+| **Google Cloud Monitoring**      | Configure the [Google Cloud Ops Agent Prometheus receiver](https://cloud.google.com/stackdriver/docs/managed-prometheus/setup-opsagent), or a Managed Service for Prometheus collector, to scrape the private endpoint.                           |
+| **Other monitoring platforms**   | Use any collector or hosted service that accepts the Prometheus exposition format.                                                                                                                                                                |
+
+Run the local proof without making a paid model request:
+
+```sh
+npm run observability:up
+npm run observability:smoke
+npm run observability:down
+```
+
+The included cloud deployments do not yet provision AWS or GCP collectors.
+Current metrics primarily cover the coding proxy; application/MCP metrics,
+production alerts, and SLOs remain Phase 7 work. See the
+[observability roadmap](docs/phase-7-production-readiness.md#workstream-5-observability-and-incident-response)
+for the current boundary and retention details.
 
 ## Security boundaries
 
