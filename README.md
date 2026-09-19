@@ -2,8 +2,8 @@
   <img align="left" hspace="24" src="docs/assets/reevo-run-agent.png" alt="Reevo Run agent with scheduling, coding, and budget guardrails" width="280">
   <h1>Reevo Run</h1>
   <h3>Your agents. Your cloud. Your budget.</h3>
-  <p><strong>Design and operate governed AI agents from Claude or Codex, on infrastructure you control.</strong></p>
-  <p>Give agents schedules, tools, hard budgets, isolated execution, and human-reviewed outcomes without handing your code, credentials, or operating model to a hosted agent platform.</p>
+  <p><strong>Most agent runners focus on helping a model complete a task. Reevo Run is the self-hosted control plane that decides whether the task should run, limits what it can access, and returns a human-reviewable outcome.</strong></p>
+  <p>Budget is enforced as admission control: spend is reserved before execution, so work that cannot fit the budget never starts.</p>
   <p>
     <a href="#why-reevo-run">Why Reevo Run</a> ·
     <a href="#a-full-cycle-agent-from-one-conversation">Full-cycle example</a> ·
