@@ -2,6 +2,8 @@ locals {
   # AUTH_AUDIENCE must be byte-identical to MCP_CANONICAL_URI (the app
   # enforces this at startup) - one source of truth for both env vars below.
   mcp_canonical_uri = var.create_domain_mapping ? "https://${var.domain_name}" : var.mcp_canonical_uri_override
+  # Self-hosted mode issues its own tokens, so it is its own issuer.
+  auth_issuer = var.auth_provider == "self-hosted" ? local.mcp_canonical_uri : var.auth_issuer
 }
 
 resource "google_cloud_run_v2_service" "main" {
@@ -89,46 +91,65 @@ resource "google_cloud_run_v2_service" "main" {
         value = local.mcp_canonical_uri
       }
 
-      # AUTH_PROVIDER defaults to "delegating" (src/config/providers.ts),
-      # which needs a real external IdP's issuer URL - not available for a
-      # baseline deployment. "self-hosted" makes the server its own OAuth
-      # issuer, so AUTH_ISSUER is just the same canonical URI again.
       env {
         name  = "AUTH_PROVIDER"
-        value = "self-hosted"
+        value = var.auth_provider
       }
 
+      # Self-hosted mode is its own issuer, so the canonical URI serves as
+      # AUTH_ISSUER; delegating mode takes the external IdP's issuer verbatim,
+      # because it must match the `iss` claim byte for byte.
       env {
         name  = "AUTH_ISSUER"
-        value = local.mcp_canonical_uri
+        value = local.auth_issuer
       }
 
-      # Must be byte-identical to MCP_CANONICAL_URI - the app's OAuth
-      # resource-server validation rejects startup otherwise.
+      # Must equal MCP_CANONICAL_URI - the app's OAuth resource-server
+      # validation rejects startup otherwise. In delegating mode this is also
+      # the audience your IdP has to mint into `aud`; reevo accepts either
+      # spelling of an origin (with or without the trailing slash), so copying
+      # the `resource` value straight out of reevo's own
+      # /.well-known/oauth-protected-resource is safe.
       env {
         name  = "AUTH_AUDIENCE"
         value = local.mcp_canonical_uri
       }
 
-      # Required alongside AUTH_AUDIENCE whenever AUTH_PROVIDER=self-hosted
-      # (src/providers/auth/index.ts) - signs/verifies the server's own
-      # OAuth tokens and hashes stored credentials, respectively.
-      env {
-        name = "AUTH_SIGNING_KEY"
-        value_source {
-          secret_key_ref {
-            secret  = google_secret_manager_secret.auth_signing_key.secret_id
-            version = "latest"
+      # Signature verification key source, delegating mode only.
+      dynamic "env" {
+        for_each = var.auth_provider == "delegating" ? [var.auth_jwks_uri] : []
+        content {
+          name  = "AUTH_JWKS_URI"
+          value = env.value
+        }
+      }
+
+      # Self-hosted mode only: these sign reevo's own OAuth tokens and hash
+      # stored credentials (src/providers/auth/index.ts). Delegating mode
+      # issues no tokens and stores no login keys, so they are neither
+      # generated nor mounted.
+      dynamic "env" {
+        for_each = var.auth_provider == "self-hosted" ? [1] : []
+        content {
+          name = "AUTH_SIGNING_KEY"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.auth_signing_key[0].secret_id
+              version = "latest"
+            }
           }
         }
       }
 
-      env {
-        name = "AUTH_CREDENTIAL_HASH_KEY"
-        value_source {
-          secret_key_ref {
-            secret  = google_secret_manager_secret.auth_credential_hash_key.secret_id
-            version = "latest"
+      dynamic "env" {
+        for_each = var.auth_provider == "self-hosted" ? [1] : []
+        content {
+          name = "AUTH_CREDENTIAL_HASH_KEY"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.auth_credential_hash_key[0].secret_id
+              version = "latest"
+            }
           }
         }
       }

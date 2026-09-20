@@ -26,3 +26,16 @@ create_domain_mapping = true
 
 container_image = "us-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane@sha256:REPLACE_ME"
 migration_image = "us-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane-migrate@sha256:REPLACE_ME"
+
+# Authentication. The default ("self-hosted") makes reevo its own OAuth
+# authorization server, with login keys issued by `reevo auth user create` -
+# no external identity system required, which is the quickest way to stand a
+# deployment up. Most real deployments instead front an existing IdP:
+#
+# auth_provider = "delegating"
+# auth_issuer   = "https://login.example.com/realms/prod"
+# auth_jwks_uri = "https://login.example.com/realms/prod/protocol/openid-connect/certs"
+#
+# In delegating mode reevo verifies tokens and never issues them, and users are
+# administered entirely in your IdP. See SETUP.md for what the IdP must be
+# configured to emit.

@@ -156,3 +156,55 @@ gcloud projects delete my-gcp-project-id
 `deletion_protection = true` (the default) blocks `terraform destroy` from
 removing the Cloud SQL instance — set `cloudsql_deletion_protection = false`
 in `terraform.tfvars` first if this is genuinely a disposable sandbox.
+
+## 11. Using your own identity provider (delegating mode)
+
+By default the module deploys `auth_provider = "self-hosted"`: reevo acts as
+its own OAuth authorization server, and you create accounts with
+`reevo auth user create`, which hands back a login key. That needs no external
+identity system, which makes it the fastest way to get a deployment running —
+but most deployments will want to front an IdP they already run:
+
+```hcl
+auth_provider = "delegating"
+auth_issuer   = "https://login.example.com/realms/prod"
+auth_jwks_uri = "https://login.example.com/realms/prod/protocol/openid-connect/certs"
+```
+
+In this mode reevo only _verifies_ tokens — it never issues them — and there is
+no local user administration at all: a `Principal` row is created from the
+token's subject the first time each person authenticates. `reevo auth` and
+login keys are self-hosted-mode concepts and play no part here. The module also
+stops generating `AUTH_SIGNING_KEY`/`AUTH_CREDENTIAL_HASH_KEY`, since nothing
+signs tokens or hashes login keys any more.
+
+Four things must line up on the IdP side, and each fails in a way that does not
+obviously point at its cause:
+
+1. **Audience.** Tokens must carry an `aud` equal to this deployment's
+   canonical URI (`domain_name`, or `mcp_canonical_uri_override`). Most IdPs
+   call this an API identifier or resource, and it usually needs an explicit
+   audience mapper — the default is often the client id. reevo accepts an
+   origin with or without its trailing slash, so copying `resource` verbatim
+   out of `https://<your-domain>/.well-known/oauth-protected-resource` is safe.
+2. **Scopes.** reevo authorizes per-tool off the token's `scope` claim, and a
+   spec-compliant client requests _every_ scope listed in that same metadata
+   document. All of them must exist in the IdP or the authorization request
+   fails wholesale with `invalid_scope` — at the IdP, before reevo is involved.
+3. **Client registration.** MCP clients self-register via dynamic client
+   registration, which most IdPs disable by default. If yours does, register
+   one client yourself and have people connect with it explicitly:
+
+   ```bash
+   claude mcp add --transport http reevo https://<your-domain>/mcp \
+     --client-id <your-client-id> --callback-port 8765
+   ```
+
+   `--callback-port` pins the redirect URI, for IdPs that will not accept a
+   wildcard localhost port.
+
+4. **Reachability.** Cloud Run must be able to reach `auth_jwks_uri` to fetch
+   signing keys.
+
+`deploy/keycloak-test/` brings up a throwaway Keycloak configured correctly for
+all four, which is worth running locally before pointing this at a real IdP.

@@ -57,11 +57,17 @@ resource "google_secret_manager_secret_iam_member" "app_key_access" {
 # app also rejects startup if AUTH_CREDENTIAL_HASH_KEY equals SECRET_APP_KEY
 # (index.ts) - two independent random_id resources make a collision
 # astronomically unlikely, so no extra handling is needed here.
+#
+# Created only in self-hosted mode: a delegating deployment issues no tokens
+# and stores no login keys, so generating this key material would leave
+# unused secrets that look like something an operator has to rotate.
 resource "random_id" "auth_signing_key" {
+  count       = var.auth_provider == "self-hosted" ? 1 : 0
   byte_length = 32
 }
 
 resource "google_secret_manager_secret" "auth_signing_key" {
+  count     = var.auth_provider == "self-hosted" ? 1 : 0
   project   = var.project_id
   secret_id = "${var.name_prefix}-auth-signing-key"
 
@@ -71,22 +77,26 @@ resource "google_secret_manager_secret" "auth_signing_key" {
 }
 
 resource "google_secret_manager_secret_version" "auth_signing_key" {
-  secret      = google_secret_manager_secret.auth_signing_key.id
-  secret_data = random_id.auth_signing_key.hex
+  count       = var.auth_provider == "self-hosted" ? 1 : 0
+  secret      = google_secret_manager_secret.auth_signing_key[0].id
+  secret_data = random_id.auth_signing_key[0].hex
 }
 
 resource "google_secret_manager_secret_iam_member" "auth_signing_key_access" {
+  count     = var.auth_provider == "self-hosted" ? 1 : 0
   project   = var.project_id
-  secret_id = google_secret_manager_secret.auth_signing_key.secret_id
+  secret_id = google_secret_manager_secret.auth_signing_key[0].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.cloud_run.email}"
 }
 
 resource "random_id" "auth_credential_hash_key" {
+  count       = var.auth_provider == "self-hosted" ? 1 : 0
   byte_length = 32
 }
 
 resource "google_secret_manager_secret" "auth_credential_hash_key" {
+  count     = var.auth_provider == "self-hosted" ? 1 : 0
   project   = var.project_id
   secret_id = "${var.name_prefix}-auth-credential-hash-key"
 
@@ -96,13 +106,15 @@ resource "google_secret_manager_secret" "auth_credential_hash_key" {
 }
 
 resource "google_secret_manager_secret_version" "auth_credential_hash_key" {
-  secret      = google_secret_manager_secret.auth_credential_hash_key.id
-  secret_data = random_id.auth_credential_hash_key.hex
+  count       = var.auth_provider == "self-hosted" ? 1 : 0
+  secret      = google_secret_manager_secret.auth_credential_hash_key[0].id
+  secret_data = random_id.auth_credential_hash_key[0].hex
 }
 
 resource "google_secret_manager_secret_iam_member" "auth_credential_hash_key_access" {
+  count     = var.auth_provider == "self-hosted" ? 1 : 0
   project   = var.project_id
-  secret_id = google_secret_manager_secret.auth_credential_hash_key.secret_id
+  secret_id = google_secret_manager_secret.auth_credential_hash_key[0].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.cloud_run.email}"
 }
