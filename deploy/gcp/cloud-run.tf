@@ -194,3 +194,16 @@ resource "google_cloud_run_v2_service" "main" {
     null_resource.run_migration,
   ]
 }
+
+# Without this the service 403s every caller, including the OAuth endpoints,
+# with nothing in the response pointing at IAM as the cause - the failure
+# looks like reevo rejecting the request. See var.allow_unauthenticated for
+# why public invoker is the working default rather than a lax one.
+resource "google_cloud_run_v2_service_iam_member" "public_invoker" {
+  count    = var.allow_unauthenticated ? 1 : 0
+  project  = var.project_id
+  location = var.region
+  name     = google_cloud_run_v2_service.main.name
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}

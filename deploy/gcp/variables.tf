@@ -88,6 +88,12 @@ variable "anthropic_api_key_value" {
   sensitive   = true
 }
 
+variable "allow_unauthenticated" {
+  description = "Grant allUsers roles/run.invoker on the service. Required for reevo to be reachable by MCP clients in BOTH auth modes, and on by default because the module does not work without it: Cloud Run's own IAM check and reevo's OAuth both read the Authorization header, so a client carrying a bearer token cannot also present a Google identity token. Authorization is enforced by reevo itself (every /mcp call needs a valid token, and tools are gated per-scope), not by Cloud Run IAM. Set false only if you front the service with something else that terminates auth — an external load balancer with IAP, say — or if only Google-identity callers will ever reach it."
+  type        = bool
+  default     = true
+}
+
 variable "auth_provider" {
   description = "Which AuthProvider the app runs. \"delegating\" (the expected choice for most deployments) makes reevo a pure OAuth resource server in front of your own IdP — it never issues tokens, and users are administered entirely in that IdP. \"self-hosted\" makes reevo its own authorization server with login keys issued by the `reevo auth` CLI; it needs no external identity system, which makes it the zero-config way to stand a deployment up."
   type        = string
