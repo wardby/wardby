@@ -30,11 +30,13 @@ These make the module usable at all for a from-scratch production deploy. Withou
 **Context:** `SelfHostedAuthProvider.cleanup()` (`src/providers/auth/self-hosted.ts:339-347`) expires stale `OAuthFamily`/`OAuthAuthorizationCode`/`OAuthAuthorizationRequest`/`AuthFormChallenge`/`AuthSession`/`AuthRateLimit` rows — but **nothing in the codebase ever calls it** (confirmed via `grep -rn "\.cleanup(" src/` — zero callers outside the test file). Worse, it never touches `OAuthClient` rows at all. Self-hosted OAuth mode requires Cloud Run to allow unauthenticated invocation (`allUsers` as `run.invoker` — see `deploy/gcp/cloud-run.tf`'s auth env vars and the live test's finding that the app itself rejects any `Authorization` header on `/token`), which means `POST /register` (`src/mcp/auth/self-hosted/browser.ts:97-124`) is reachable by anyone on the internet, rate-limited only per-IP (`limiter.check("registration", ip, 10)`). `registerClient` (`self-hosted.ts:99-119`) enforces a **global** cap (`maxClients`, default 1000) with no expiry — so a distributed requester can permanently exhaust client-registration capacity for everyone, including real users, with no automatic recovery.
 
 **Files:**
+
 - Modify: `src/providers/auth/self-hosted.ts:339-347` (extend `cleanup()`)
 - Modify: `src/mcp/index.ts` (start/stop a periodic call to `cleanup()`)
 - Test: `src/providers/auth/self-hosted.test.ts` (extend the existing `describe.skipIf(!process.env.DATABASE_URL)` block)
 
 **Interfaces:**
+
 - Consumes: `SelfHostedAuthProvider.cleanup(): Promise<void>` (already exists, unchanged signature), `DAY` constant from `src/mcp/auth/self-hosted/credentials.ts` (already imported in `self-hosted.ts`).
 - Produces: no new exports — `cleanup()`'s behavior changes (also GCs abandoned `OAuthClient` rows), and `startMcp()`'s returned `McpServerHandle.close()` now also clears the new interval.
 
@@ -43,23 +45,23 @@ These make the module usable at all for a from-scratch production deploy. Withou
 Add to `src/providers/auth/self-hosted.test.ts`, immediately before the file's final `});` (after the `"shares login throttles across limiter instances"` test, still inside the `describe.skipIf(!process.env.DATABASE_URL)` block):
 
 ```typescript
-  it("garbage-collects abandoned clients that never completed a token exchange, keeping used ones", async () => {
-    const abandoned = await provider.registerClient({ redirectUris: ["https://abandoned.example/cb"] });
-    clients.push(abandoned.clientId);
-    await db.oAuthClient.update({
-      where: { clientId: abandoned.clientId },
-      data: { createdAt: new Date(Date.now() - 8 * DAY) },
-    });
-    const f = await setup();
-    await provider.handleToken(await f.code());
-    await db.oAuthClient.update({
-      where: { clientId: f.client.clientId },
-      data: { createdAt: new Date(Date.now() - 8 * DAY) },
-    });
-    await provider.cleanup();
-    await expect(db.oAuthClient.findUnique({ where: { clientId: abandoned.clientId } })).resolves.toBeNull();
-    await expect(db.oAuthClient.findUnique({ where: { clientId: f.client.clientId } })).resolves.not.toBeNull();
+it("garbage-collects abandoned clients that never completed a token exchange, keeping used ones", async () => {
+  const abandoned = await provider.registerClient({ redirectUris: ["https://abandoned.example/cb"] });
+  clients.push(abandoned.clientId);
+  await db.oAuthClient.update({
+    where: { clientId: abandoned.clientId },
+    data: { createdAt: new Date(Date.now() - 8 * DAY) },
   });
+  const f = await setup();
+  await provider.handleToken(await f.code());
+  await db.oAuthClient.update({
+    where: { clientId: f.client.clientId },
+    data: { createdAt: new Date(Date.now() - 8 * DAY) },
+  });
+  await provider.cleanup();
+  await expect(db.oAuthClient.findUnique({ where: { clientId: abandoned.clientId } })).resolves.toBeNull();
+  await expect(db.oAuthClient.findUnique({ where: { clientId: f.client.clientId } })).resolves.not.toBeNull();
+});
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -152,6 +154,7 @@ EOF
 **Context:** `deploy/Dockerfile` already has a dedicated `migration` build target (`FROM build AS migration` / `CMD ["npm", "run", "prisma:migrate"]`, lines 12-13) meant to be run once before/alongside a deploy — but `deploy/gcp/` never builds or runs it. The live test found this the hard way: a fresh `onit-dashboard` deploy left `public.Principal` (and every other Prisma table) missing, discovered only when `reevo auth user create` failed with `The table \`public.Principal\` does not exist`. Every future fresh deploy will hit the exact same wall until this is fixed.
 
 **Files:**
+
 - Create: `deploy/gcp/migration-job.tf`
 - Modify: `deploy/gcp/variables.tf` (add `migration_image`)
 - Modify: `deploy/gcp/versions.tf` (add the `null` provider, needed for the `local-exec` trigger)
@@ -159,6 +162,7 @@ EOF
 - Modify: `deploy/gcp/SETUP.md` (step 7: build+push both targets, not just `runtime`)
 
 **Interfaces:**
+
 - Consumes: `google_service_account.cloud_run` (from `service-accounts.tf`), `google_sql_database_instance.main` (from `cloudsql.tf`), `google_secret_manager_secret.db_url` / `google_secret_manager_secret_version.db_url` / `google_secret_manager_secret_iam_member.db_url_access` (from `secrets.tf`) — all pre-existing.
 - Produces: `google_cloud_run_v2_job.migrate` and `null_resource.run_migration`, consumed by `cloud-run.tf`'s `depends_on`.
 
@@ -338,6 +342,7 @@ Should land before real (non-test) user traffic hits a deployment.
 **Context:** `deploy/gcp/cloudsql.tf`'s `backup_configuration` block only sets `enabled = true` — daily backups, no point-in-time recovery. A single bad migration or accidental `DELETE` between daily backups is otherwise unrecoverable except back to the previous day.
 
 **Files:**
+
 - Modify: `deploy/gcp/cloudsql.tf`
 
 **Interfaces:** none (leaf change to an existing resource's config block).
@@ -389,9 +394,11 @@ EOF
 **Context:** The only way to provision a self-hosted-auth user today is `reevo auth user create --subject <x>`, which needs a Cloud SQL Auth Proxy tunnel plus manually fetching `DATABASE_URL`/`AUTH_CREDENTIAL_HASH_KEY` out of Secret Manager onto a local machine (exactly what this session had to do to complete the OAuth live test). A Cloud Run Job running inside the same VPC, using the existing Cloud SQL volume mount and Secret Manager env vars already wired for the main service, needs neither a local proxy nor local secret handling.
 
 **Files:**
+
 - Create: `deploy/gcp/admin-cli-job.tf`
 
 **Interfaces:**
+
 - Consumes: `google_service_account.cloud_run`, `google_sql_database_instance.main`, `google_secret_manager_secret.db_url`/`.app_key`/`.auth_signing_key`/`.auth_credential_hash_key` and their `_version`/`_iam_member` counterparts (all pre-existing), `var.container_image` (reuses the runtime image — it already contains `dist/cli.js`).
 - Produces: `google_cloud_run_v2_job.admin_cli`, invoked ad hoc via `gcloud run jobs execute ... --args=...` — nothing else in this module depends on it.
 
@@ -501,10 +508,12 @@ EOF
 **Context:** No monitoring exists today — the live test only found problems by manually running `gcloud run services describe` and `curl` by hand. A basic uptime check against a safe, unauthenticated, always-200 endpoint (the OAuth discovery document) with an email alert on failure catches the next `HealthCheckContainerError`-class regression automatically.
 
 **Files:**
+
 - Create: `deploy/gcp/monitoring.tf`
 - Modify: `deploy/gcp/variables.tf` (add `alert_notification_email`)
 
 **Interfaces:**
+
 - Consumes: `google_cloud_run_v2_service.main.uri` (existing output-producing attribute).
 - Produces: nothing consumed elsewhere — leaf task.
 
@@ -612,6 +621,7 @@ Operational maturity — valuable, not blocking initial production traffic.
 **Context:** `AppKeySecretCipher` (`src/providers/secrets/app-key.ts`) supports exactly one key at a time — no key ID/versioning, no dual-key decrypt-old-encrypt-new path. `SelfHostedAuthProvider.verifyBearer` similarly has no old-key fallback (confirmed by the existing test `"rejects legacy signed tokens even when the old signing key is retained"` in `self-hosted.test.ts`). Rotating any of `SECRET_APP_KEY`/`AUTH_SIGNING_KEY`/`AUTH_CREDENTIAL_HASH_KEY` today has real, different blast radii that aren't documented anywhere. This task documents the actual behavior rather than pretending safe rotation exists — building real key-rotation support (versioned keys, dual-read/single-write) is a separate, larger effort belonging in its own future plan.
 
 **Files:**
+
 - Modify: `deploy/gcp/SETUP.md` (new section)
 
 - [ ] **Step 1: Write the runbook section**
@@ -636,7 +646,7 @@ Know the blast radius before rotating any of them:
   refresh tokens, and CSRF challenges. Rotating it invalidates every
   outstanding login key, in-flight authorization code, and refresh token
   at once — every user must be issued a new login key (`reevo auth key
-  create --subject <x>`) and re-authorize from scratch. **High impact** —
+create --subject <x>`) and re-authorize from scratch. **High impact** —
   plan a maintenance window.
 - **`SECRET_APP_KEY`** — the sole key for `AppKeySecretCipher`
   (`src/providers/secrets/app-key.ts`), which encrypts agent tool secrets
@@ -677,10 +687,12 @@ EOF
 **Context:** Once `allUsers` has `run.invoker` (required for self-hosted OAuth — see Phase 1's live-test findings), Cloud Run's own platform has no rate limiting or WAF beyond Google's basic infrastructure-level DDoS mitigation; the app's own `PostgresRateLimiter` is the only defense, and it adds a Postgres round-trip per request. This task adds an **optional** external HTTPS Load Balancer + Cloud Armor policy in front of Cloud Run, gated behind a new variable so it doesn't force a migration off the existing `google_cloud_run_domain_mapping` (`domain.tf`) approach for deployments that don't need it — the two are mutually exclusive ways to front the same service with a custom domain, and switching requires a deliberate DNS change (an LB uses an `A` record to a static IP; domain mapping uses a `CNAME`).
 
 **Files:**
+
 - Create: `deploy/gcp/edge.tf`
 - Modify: `deploy/gcp/variables.tf` (add `enable_cloud_armor`)
 
 **Interfaces:**
+
 - Consumes: `google_cloud_run_v2_service.main.name`, `var.region`, `var.name_prefix`, `var.project_id` (all pre-existing).
 - Produces: nothing consumed elsewhere — leaf task, and only created at all when `var.enable_cloud_armor = true`.
 
