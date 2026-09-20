@@ -50,6 +50,30 @@ import { logger } from "../core/logger.js";
 const mcpLog = logger.child({ module: "mcp-index" });
 const SELF_HOSTED_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // hourly
 
+/**
+ * `reevo mcp` serves the MCP surface and launches the executor, but the
+ * scheduler and reconciler belong to `reevo scheduler` - a second process. A
+ * deployment that runs only this one accepts schedules through set_schedule
+ * and then never fires them: no error, no crash, `lastScheduledAt` simply
+ * stays null. Nothing else surfaces that, so say it out loud at startup when
+ * there is something that would have fired.
+ */
+async function warnIfNothingWillFireSchedules(): Promise<void> {
+  try {
+    // Same predicate the scheduler uses to find candidates (core/scheduler.ts).
+    const scheduled = await prisma.agent.count({ where: { scheduleEnabled: true, schedule: { not: null } } });
+    if (scheduled === 0) return;
+    mcpLog.warn(
+      { scheduledAgents: scheduled },
+      `${scheduled} agent(s) have an enabled schedule, but this process does not run the scheduler. ` +
+        `Run "reevo scheduler" alongside it, or those schedules will never fire.`,
+    );
+  } catch (err) {
+    // Advisory only - never let it stop the server coming up.
+    mcpLog.debug({ err }, "could not check for unattended schedules");
+  }
+}
+
 /** Placeholder identifier for stdio, which has no HTTP endpoint to name. Never surfaced: stdio's fixed context always holds every scope, so no scope challenge is ever built against it. */
 const STDIO_PLACEHOLDER_URI = "urn:reevo:local-stdio";
 
@@ -131,6 +155,7 @@ export async function startMcp(): Promise<McpServerHandle> {
   const mcpConfig = loadMcpConfig();
   const { providers } = buildMcpProviders();
   await providers.executor.launch?.();
+  await warnIfNothingWillFireSchedules();
 
   if (mcpConfig.transport === "stdio") {
     const mcp = buildMcpServer({ providers, db: prisma, config: { canonicalUri: STDIO_PLACEHOLDER_URI } });
