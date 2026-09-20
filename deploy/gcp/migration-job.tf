@@ -10,6 +10,13 @@ resource "google_cloud_run_v2_job" "migrate" {
   project  = var.project_id
   location = var.region
 
+  # Same reasoning as the service in cloud-run.tf: the provider defaults this
+  # to true, and a job holds no state worth protecting - it is rebuilt from
+  # the image on every apply. Left at the default, `terraform destroy` fails
+  # partway through with "cannot destroy job without setting
+  # deletion_protection=false", after other resources are already gone.
+  deletion_protection = false
+
   template {
     template {
       service_account = google_service_account.cloud_run.email

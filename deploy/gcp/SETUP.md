@@ -153,9 +153,23 @@ terraform destroy
 gcloud projects delete my-gcp-project-id
 ```
 
-`deletion_protection = true` (the default) blocks `terraform destroy` from
-removing the Cloud SQL instance — set `cloudsql_deletion_protection = false`
-in `terraform.tfvars` first if this is genuinely a disposable sandbox.
+`cloudsql_deletion_protection = true` (the default) blocks `terraform destroy`
+from removing the Cloud SQL instance. Setting it to `false` is not enough on
+its own: the provider reads that guard from **state**, not from the flags
+passed to `destroy`, so it has to be applied first. For a genuinely disposable
+sandbox:
+
+```bash
+terraform apply -var="cloudsql_deletion_protection=false"   # writes it to state
+terraform destroy -var="cloudsql_deletion_protection=false"
+```
+
+Passing it only to `destroy` fails partway through — after the service,
+secrets, and service account are already gone — with "failed to delete
+instance because deletion_protection is set to true", leaving a half-torn-down
+deployment. If you hit that, the targeted recovery is
+`terraform apply -target=google_sql_database_instance.main -var="cloudsql_deletion_protection=false"`,
+then destroy again.
 
 ## 11. Using your own identity provider (delegating mode)
 
