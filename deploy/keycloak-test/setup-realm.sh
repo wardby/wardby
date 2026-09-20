@@ -29,7 +29,15 @@ PASSWORD=${PASSWORD:-reevo-password}
 # because that is what reevo's protected-resource metadata advertises as
 # `resource`, and therefore what a spec-compliant client asks the IdP for.
 AUDIENCE=${AUDIENCE:-http://127.0.0.1:8099/}
-SCOPES=${SCOPES:-"agents:read agents:write runs:trigger"}
+# Every scope reevo lists in SCOPES_SUPPORTED (src/mcp/auth/resource-server.ts).
+# All of them must exist in the realm: a spec-compliant client reads
+# scopes_supported from the protected-resource metadata and asks for the lot,
+# and Keycloak rejects the whole authorization request with invalid_scope if
+# even one is unknown.
+ALL_SCOPES=${ALL_SCOPES:-"agents:read agents:write tools:write runs:trigger datastore:write secrets:write webhooks:write budget_groups:write agents:admin"}
+# Deliberately narrower for the machine client, so scope enforcement stays
+# observable: a token with these may call list_agents but not create_secret.
+M2M_SCOPES=${M2M_SCOPES:-"agents:read agents:write runs:trigger"}
 
 need() { command -v "$1" >/dev/null || { echo "missing required command: $1" >&2; exit 1; }; }
 need curl; need python3
@@ -75,31 +83,31 @@ echo "    create: HTTP $code"
 echo "==> client scopes"
 # reevo authorizes per-tool on the token's `scope` claim, so each reevo scope
 # must exist as a client scope and be included in the token.
-for s in $SCOPES; do
+for s in $ALL_SCOPES; do
   body=$(printf '{"name":"%s","protocol":"openid-connect","attributes":{"include.in.token.scope":"true","display.on.consent.screen":"false"}}' "$s")
   code=$(api POST "/$REALM/client-scopes" "$body")
   echo "    $s: HTTP $code"
 done
 
-configure_client() { # configure_client UUID LABEL
-  local uuid=$1 label=$2 body code sid
+configure_client() { # configure_client UUID LABEL SCOPES
+  local uuid=$1 label=$2 scopes=$3 body code sid
   # Keycloak's default audience is the client itself; reevo requires the
   # resource it protects, so map it explicitly.
   body=$(printf '{"name":"reevo-audience","protocol":"openid-connect","protocolMapper":"oidc-audience-mapper","config":{"included.custom.audience":"%s","access.token.claim":"true","id.token.claim":"false"}}' "$AUDIENCE")
   code=$(api POST "/$REALM/clients/$uuid/protocol-mappers/models" "$body")
   echo "    $label audience -> $AUDIENCE: HTTP $code"
-  for s in $SCOPES; do
+  for s in $scopes; do
     sid=$(scope_id "$s")
     api PUT "/$REALM/clients/$uuid/default-client-scopes/$sid" >/dev/null
   done
-  echo "    $label default scopes: $SCOPES"
+  echo "    $label default scopes: $scopes"
 }
 
 echo "==> confidential client $M2M_CLIENT (service account)"
 body=$(printf '{"clientId":"%s","enabled":true,"publicClient":false,"secret":"%s","serviceAccountsEnabled":true,"standardFlowEnabled":false,"directAccessGrantsEnabled":false,"attributes":{"access.token.lifespan":"28800"}}' "$M2M_CLIENT" "$M2M_SECRET")
 code=$(api POST "/$REALM/clients" "$body")
 echo "    create: HTTP $code"
-configure_client "$(client_uuid "$M2M_CLIENT")" "$M2M_CLIENT"
+configure_client "$(client_uuid "$M2M_CLIENT")" "$M2M_CLIENT" "$M2M_SCOPES"
 
 echo "==> public client $PUB_CLIENT (PKCE S256, no secret)"
 # Public + PKCE rather than a secret: a client_secret sitting in every user's
@@ -109,7 +117,7 @@ echo "==> public client $PUB_CLIENT (PKCE S256, no secret)"
 body=$(printf '{"clientId":"%s","enabled":true,"publicClient":true,"standardFlowEnabled":true,"serviceAccountsEnabled":false,"directAccessGrantsEnabled":false,"redirectUris":["http://localhost:*","http://127.0.0.1:*"],"webOrigins":["+"],"attributes":{"pkce.code.challenge.method":"S256","access.token.lifespan":"3600"}}' "$PUB_CLIENT")
 code=$(api POST "/$REALM/clients" "$body")
 echo "    create: HTTP $code"
-configure_client "$(client_uuid "$PUB_CLIENT")" "$PUB_CLIENT"
+configure_client "$(client_uuid "$PUB_CLIENT")" "$PUB_CLIENT" "$ALL_SCOPES"
 
 echo "==> user $USERNAME"
 body=$(printf '{"username":"%s","enabled":true,"emailVerified":true,"email":"%s@example.com","firstName":"Reevo","lastName":"Tester","requiredActions":[],"credentials":[{"type":"password","value":"%s","temporary":false}]}' "$USERNAME" "$USERNAME" "$PASSWORD")

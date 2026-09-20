@@ -56,6 +56,14 @@ normalizes both sides before comparing. `DelegatingAuthProvider` now accepts
 both spellings of an origin; this harness is how that gets verified against a
 real IdP rather than a hand-minted token.
 
+**Every advertised scope must exist in the IdP.** A spec-compliant client reads
+`scopes_supported` from reevo's protected-resource metadata and requests _all_
+of them; Keycloak fails the whole authorization request with `invalid_scope` if
+even one is unknown to the realm. Claude Code hit exactly this when the realm
+carried only three of reevo's nine scopes. `setup-realm.sh` creates all nine
+(and assigns a deliberately narrower set to the machine client, so scope
+enforcement stays observable).
+
 **Scopes must be mapped into the token, not just requested.** A token that
 authenticates fine will still fail per-tool authorization if the `scope` claim
 does not carry reevo's scopes. The harness attaches them as _default_ client
