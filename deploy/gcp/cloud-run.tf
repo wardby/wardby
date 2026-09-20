@@ -1,7 +1,17 @@
 locals {
+  # null unless enable_cloud_armor created one; one() keeps this safe to
+  # reference when the count is zero.
+  lb_ip = one(google_compute_global_address.control_plane[*].address)
   # AUTH_AUDIENCE must be byte-identical to MCP_CANONICAL_URI (the app
   # enforces this at startup) - one source of truth for both env vars below.
-  mcp_canonical_uri = var.create_domain_mapping ? "https://${var.domain_name}" : var.mcp_canonical_uri_override
+  # An armored deployment names itself by the load balancer's static IP,
+  # which exists before the service does - so unlike the *.run.app case it
+  # needs no second apply to learn its own address.
+  mcp_canonical_uri = (
+    var.create_domain_mapping ? "https://${var.domain_name}" :
+    var.enable_cloud_armor ? "https://${local.lb_ip}" :
+    var.mcp_canonical_uri_override
+  )
   # Self-hosted mode issues its own tokens, so it is its own issuer.
   auth_issuer = var.auth_provider == "self-hosted" ? local.mcp_canonical_uri : var.auth_issuer
 }
@@ -17,6 +27,10 @@ resource "google_cloud_run_v2_service" "main" {
   # override short of a separate apply; false matches how disposable this
   # resource actually is.
   deletion_protection = false
+
+  # With the load balancer in front, close the direct *.run.app path so the
+  # Cloud Armor policy cannot simply be bypassed by addressing Cloud Run.
+  ingress = var.enable_cloud_armor ? "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" : "INGRESS_TRAFFIC_ALL"
 
   template {
     service_account = google_service_account.cloud_run.email

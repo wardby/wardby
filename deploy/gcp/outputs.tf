@@ -12,3 +12,8 @@ output "cloudsql_connection_name" {
   description = "Cloud SQL instance connection name, for gcloud/psql access outside the app."
   value       = google_sql_database_instance.main.connection_name
 }
+
+output "cloud_armor_ip" {
+  description = "Static IP the load balancer answers on when enable_cloud_armor is true (null otherwise). Point an A record here, or reach it directly — with a self-signed certificate, clients must skip verification."
+  value       = local.lb_ip
+}

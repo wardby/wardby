@@ -14,6 +14,10 @@ terraform {
       source  = "hashicorp/null"
       version = "~> 3.2"
     }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
   }
 
   # No backend block: state storage is a per-deployment choice, documented

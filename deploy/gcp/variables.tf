@@ -88,6 +88,22 @@ variable "anthropic_api_key_value" {
   sensitive   = true
 }
 
+variable "enable_cloud_armor" {
+  description = "Put an external HTTPS load balancer with a Cloud Armor policy in front of the service, and restrict the service's own ingress so the *.run.app URL can no longer be reached directly. Cloud Run offers no request rate limiting of its own, so without this the only throttle is the app's per-IP limiter, which a distributed caller walks straight past. Off by default: it is a different fronting strategy than create_domain_mapping (an A record to a static IP rather than a CNAME to Cloud Run), not an addition to it — enabling both is not meaningful."
+  type        = bool
+  default     = false
+  validation {
+    condition     = !(var.enable_cloud_armor && var.create_domain_mapping)
+    error_message = "enable_cloud_armor and create_domain_mapping are alternative ways to front the service; enable at most one."
+  }
+}
+
+variable "cloud_armor_rate_limit_per_minute" {
+  description = "Requests per minute per client IP allowed through Cloud Armor before it starts returning 429. Only meaningful when enable_cloud_armor is true."
+  type        = number
+  default     = 120
+}
+
 variable "allow_unauthenticated" {
   description = "Grant allUsers roles/run.invoker on the service. Required for reevo to be reachable by MCP clients in BOTH auth modes, and on by default because the module does not work without it: Cloud Run's own IAM check and reevo's OAuth both read the Authorization header, so a client carrying a bearer token cannot also present a Google identity token. Authorization is enforced by reevo itself (every /mcp call needs a valid token, and tools are gated per-scope), not by Cloud Run IAM. Set false only if you front the service with something else that terminates auth — an external load balancer with IAP, say — or if only Google-identity callers will ever reach it."
   type        = bool
