@@ -2,6 +2,9 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID, randomBytes } from "node:crypto";
 import type { SelfHostedAuthProvider } from "../../../providers/auth/self-hosted.js";
 import { PostgresRateLimiter, RateLimitError } from "./rate-limit.js";
+import { logger } from "../../../core/logger.js";
+
+const authLog = logger.child({ module: "self-hosted-oauth" });
 
 const paths = new Set([
   "/login",
@@ -84,10 +87,11 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
       const cookies = new Map<string, string>();
       for (const part of (req.headers.cookie ?? "").split(";")) {
         const [key, ...value] = part.trim().split("=");
-        if (cookies.has(key)) throw new Error();
+        if (cookies.has(key)) throw new Error("duplicate cookie");
         cookies.set(key, value.join("="));
       }
-      for (const key of url.searchParams.keys()) if (url.searchParams.getAll(key).length !== 1) throw new Error();
+      for (const key of url.searchParams.keys())
+        if (url.searchParams.getAll(key).length !== 1) throw new Error("duplicate query parameter");
       const ip = req.socket.remoteAddress ?? "unknown";
       await limiter.check("auth-ip", ip, 120);
       if (req.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") {
@@ -97,18 +101,34 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
       if (req.method === "POST" && url.pathname === "/register") {
         await limiter.check("registration", ip, 10);
         if (!body || typeof body !== "object" || body instanceof URLSearchParams || Array.isArray(body))
-          throw new Error();
+          throw new Error("JSON object body required");
         const p = body as Record<string, unknown>;
         if (
           Object.keys(p).some(
             (k) =>
-              !["redirect_uris", "client_name", "grant_types", "token_endpoint_auth_method", "response_types"].includes(
-                k,
-              ),
+              ![
+                "redirect_uris",
+                "client_name",
+                "grant_types",
+                "token_endpoint_auth_method",
+                "response_types",
+                "scope",
+                "application_type",
+              ].includes(k),
           )
         )
-          throw new Error();
-        if (p.response_types && JSON.stringify(p.response_types) !== '["code"]') throw new Error();
+          throw new Error("unsupported registration field");
+        if (p.response_types && JSON.stringify(p.response_types) !== '["code"]')
+          throw new Error("unsupported response_types");
+        // Claude Code sends both of the following. Neither is stored.
+        // RFC 7591 `scope`: scopes are requested and consented per
+        // authorization at /authorize, never fixed at registration.
+        if (p.scope !== undefined && (typeof p.scope !== "string" || p.scope.length > 512))
+          throw new Error("invalid scope");
+        // OIDC Dynamic Client Registration `application_type`: every client
+        // here is already a public PKCE client with validated redirect URIs.
+        if (p.application_type !== undefined && p.application_type !== "native" && p.application_type !== "web")
+          throw new Error("unsupported application_type");
         const registered = await provider.registerClient({
           redirectUris: p.redirect_uris as string[],
           clientName: p.client_name as string | undefined,
@@ -124,7 +144,7 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
       }
       if (req.method === "GET" && url.pathname === "/authorize") {
         const p = url.searchParams;
-        if (p.has("subject") || p.get("response_type") !== "code") throw new Error();
+        if (p.has("subject") || p.get("response_type") !== "code") throw new Error("invalid authorize parameters");
         const result = await provider.handleAuthorize({
           clientId: p.get("client_id") ?? "",
           redirectUri: p.get("redirect_uri") ?? "",
@@ -166,16 +186,16 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
         json(res, 403, { error: "invalid_origin" });
         return true;
       }
-      if (req.method === "POST" && !(body instanceof URLSearchParams)) throw new Error();
+      if (req.method === "POST" && !(body instanceof URLSearchParams)) throw new Error("form body required");
       const p = body instanceof URLSearchParams ? body : new URLSearchParams();
       if (req.method === "POST" && url.pathname === "/login") {
-        if (p.has("subject")) throw new Error();
+        if (p.has("subject")) throw new Error("subject parameter not allowed");
         const key = p.get("login_key") ?? "";
         await limiter.check("login-ip", ip, 10);
         await limiter.check("login-key", provider.credentials.id(key, "rvk") ?? "invalid", 5);
         const interaction = p.get("interaction") ?? "";
         const nonce = cookies.get(loginName);
-        if (!nonce) throw new Error();
+        if (!nonce) throw new Error("missing login nonce");
         const session = await provider.sessions.login(
           key,
           p.get("csrf") ?? "",
@@ -209,7 +229,7 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
         return true;
       }
       if (req.method === "POST" && url.pathname === "/consent") {
-        if (!["approve", "deny"].includes(p.get("decision") ?? "")) throw new Error();
+        if (!["approve", "deny"].includes(p.get("decision") ?? "")) throw new Error("invalid consent decision");
         redirect(
           res,
           await provider.consent(
@@ -238,7 +258,9 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
         return true;
       }
       if (req.method === "POST" && ["/token", "/revoke"].includes(url.pathname)) {
-        if (req.headers.authorization || p.has("client_secret") || p.has("client_assertion")) throw new Error();
+        if (req.headers.authorization) throw new Error("Authorization header not allowed (public clients only)");
+        if (p.has("client_secret") || p.has("client_assertion"))
+          throw new Error("client credentials not allowed (public clients only)");
         const clientId = p.get("client_id") ?? "";
         if (url.pathname === "/revoke") {
           await provider.revoke(p.get("token") ?? "", clientId);
@@ -246,7 +268,8 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
           return true;
         }
         const grantType = p.get("grant_type");
-        if (grantType !== "authorization_code" && grantType !== "refresh_token") throw new Error();
+        if (grantType !== "authorization_code" && grantType !== "refresh_token")
+          throw new Error("unsupported grant_type");
         const common = { clientId, resource: p.get("resource") ?? undefined };
         const token = await provider.handleToken(
           grantType === "refresh_token"
@@ -274,7 +297,15 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
         res.setHeader("retry-after", "60");
         json(res, 429, { error: "rate_limited" });
       } else {
-        json(res, 400, { error: url.pathname === "/token" ? "invalid_grant" : "invalid_request", id: randomUUID() });
+        // The id is returned to the client and logged with the reason, so a
+        // rejection reported by a client can be traced. Only the reason is
+        // logged - never request values, which include codes and tokens.
+        const id = randomUUID();
+        authLog.warn(
+          { id, path: url.pathname, reason: err instanceof Error ? err.message || "unspecified" : "unspecified" },
+          "self-hosted OAuth request rejected",
+        );
+        json(res, 400, { error: url.pathname === "/token" ? "invalid_grant" : "invalid_request", id });
       }
     }
     return true;

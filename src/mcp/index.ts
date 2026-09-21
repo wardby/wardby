@@ -26,6 +26,7 @@ import { buildAuthProvider } from "../providers/auth/index.js";
 import type { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
 import { buildMcpServer, type ReevoMcpServer } from "./server.js";
 import type { McpProviders } from "./context.js";
+import { countUnattendedSchedules, unattendedSchedulesWarning } from "./unattended-schedules.js";
 import { runStdioServer } from "./transport/stdio.js";
 import { startHttpServer } from "./transport/streamable-http.js";
 import { resolvePrincipal } from "./auth/principal.js";
@@ -48,6 +49,18 @@ import { SECRET_ELICITATION_PATH } from "./tools/secret-elicitation-form.js";
 import { logger } from "../core/logger.js";
 
 const mcpLog = logger.child({ module: "mcp-index" });
+const SELF_HOSTED_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // hourly
+
+/** Says out loud at startup when enabled schedules exist that nothing in this process will fire (see ./unattended-schedules.ts). */
+async function warnIfNothingWillFireSchedules(): Promise<void> {
+  try {
+    const message = unattendedSchedulesWarning(await countUnattendedSchedules(prisma));
+    if (message) mcpLog.warn(message);
+  } catch (err) {
+    // Advisory only - never let it stop the server coming up.
+    mcpLog.debug({ err }, "could not check for unattended schedules");
+  }
+}
 
 /** Placeholder identifier for stdio, which has no HTTP endpoint to name. Never surfaced: stdio's fixed context always holds every scope, so no scope challenge is ever built against it. */
 const STDIO_PLACEHOLDER_URI = "urn:reevo:local-stdio";
@@ -116,6 +129,20 @@ export interface McpServerHandle {
   close(): Promise<void>;
 }
 
+export interface StartMcpOptions {
+  /**
+   * A pre-built provider set. `reevo serve` builds one and shares it, because
+   * DbosExecutor is a per-process singleton and two executors cannot coexist
+   * (dbos.ts launch()). Built internally when omitted.
+   */
+  providers?: McpProviders;
+  /**
+   * Set by a composition root that also runs the scheduler, so startup does
+   * not warn that enabled schedules will never fire.
+   */
+  schedulerAttached?: boolean;
+}
+
 /** Awaits `promise` (if any), logging and swallowing a rejection instead of propagating it. */
 async function closeQuietly(promise: Promise<void> | undefined, what: string): Promise<void> {
   try {
@@ -126,10 +153,11 @@ async function closeQuietly(promise: Promise<void> | undefined, what: string): P
 }
 
 /** The real CLI entry point: `reevo mcp`. Reads config from the environment, starts stdio or HTTP per MCP_TRANSPORT. */
-export async function startMcp(): Promise<McpServerHandle> {
+export async function startMcp(options: StartMcpOptions = {}): Promise<McpServerHandle> {
   const mcpConfig = loadMcpConfig();
-  const { providers } = buildMcpProviders();
+  const providers = options.providers ?? buildMcpProviders().providers;
   await providers.executor.launch?.();
+  if (!options.schedulerAttached) await warnIfNothingWillFireSchedules();
 
   if (mcpConfig.transport === "stdio") {
     const mcp = buildMcpServer({ providers, db: prisma, config: { canonicalUri: STDIO_PLACEHOLDER_URI } });
@@ -203,8 +231,14 @@ export async function startMcp(): Promise<McpServerHandle> {
     auth: { authProvider, db: prisma, providers },
     selfHosted,
   });
+  const cleanupTimer = selfHosted
+    ? setInterval(() => {
+        selfHosted.cleanup().catch((err: unknown) => mcpLog.warn({ err }, "self-hosted auth cleanup failed"));
+      }, SELF_HOSTED_CLEANUP_INTERVAL_MS)
+    : undefined;
   return {
     close: async () => {
+      if (cleanupTimer) clearInterval(cleanupTimer);
       await closeQuietly(http.close(), "HTTP transport close");
       await closeQuietly(providers.executor.close?.(), "executor close");
     },

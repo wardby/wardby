@@ -138,6 +138,15 @@ Start with [deployment targets](deploy/README.md), the
 [GCP setup guide](deploy/gcp/SETUP.md). Reference deployments are examples,
 not a requirement to use one vendor.
 
+**A complete deployment runs more than `reevo mcp`.** `mcp` serves the MCP
+surface; the scheduler that fires due agents and the reconciler that recovers
+orphaned runs live in `reevo scheduler`. Run **`reevo serve`** to get all three
+in one process. It is the container image's default command and what a
+single-container deployment (Cloud Run, a lone VM) should run. Alternatively,
+run `mcp` and `scheduler` as two processes, as `deploy/production/compose.yml`
+does. Running `mcp` alone logs a startup warning if enabled schedules exist
+that nothing will fire.
+
 ## Bring your own observability
 
 The coding proxy can expose standard Prometheus metrics at `/metrics` when

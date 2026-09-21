@@ -11,6 +11,9 @@
  *   reevo mcp   (MCP_TRANSPORT=stdio|http selects the transport; authoring/
  *                control is MCP-first from here — this floor keeps working
  *                before/without an MCP client)
+ *   reevo serve [--scope default]   (everything: mcp + scheduler + reconciler; the
+ *                                    image's default command, and what a
+ *                                    single-container deployment should run)
  */
 
 import "./env.js";
@@ -38,6 +41,7 @@ import { logger } from "./core/logger.js";
 import { deriveJsonSchema } from "./sandbox/zod-params.js";
 import { ToolCapabilitiesPatchSchema } from "./sandbox/tool-capabilities.js";
 import { startMcp } from "./mcp/index.js";
+import { startServe } from "./serve.js";
 import { authCommand } from "./mcp/auth/self-hosted/cli.js";
 import { parseImportArgs } from "./import/cli-args.js";
 import { runImport } from "./import/index.js";
@@ -552,6 +556,25 @@ async function mcp(): Promise<void> {
   });
 }
 
+async function serve(args: string[]): Promise<void> {
+  const { values } = parseArgs({ args, options: { scope: { type: "string" } } });
+  const handle = await startServe({ scope: values.scope });
+  // stderr, like `mcp`: stdout must stay clean in case a future transport
+  // multiplexes it, and this keeps the two commands' output consistent.
+  console.error(`reevo serve started (scope "${values.scope ?? "default"}"). Press Ctrl+C to stop.`);
+  await new Promise<void>((resolve) => {
+    const shutdown = () => {
+      console.error("\nreevo serve shutting down...");
+      void handle
+        .close()
+        .catch((err: unknown) => cliLog.warn({ err }, "serve close failed during shutdown"))
+        .finally(resolve);
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+  });
+}
+
 async function importCommand(rest: string[]): Promise<void> {
   const opts = parseImportArgs(rest);
   const { report, result } = await runImport({ ...opts, db: prisma, env: process.env });
@@ -591,6 +614,8 @@ async function main(): Promise<void> {
       await scheduler(rest);
     } else if (command === "mcp") {
       await mcp();
+    } else if (command === "serve") {
+      await serve(rest);
     } else if (command === "import") {
       await importCommand(rest);
     } else {
@@ -609,6 +634,7 @@ async function main(): Promise<void> {
           "  reevo coding cleanup --run-id <id>\n" +
           "  reevo scheduler [--scope default]\n" +
           "  reevo mcp   (MCP_TRANSPORT=stdio|http selects the transport)\n" +
+          "  reevo serve [--scope default]   (mcp + scheduler + reconciler in one process; http only)\n" +
           "  reevo import <bundle-dir> --owner <subject> [--public] [--include-secrets --transfer-key <pem>] [--default-budget <usd>] [--dry-run] [--prefix <p>] [--on-conflict fail|skip|rename] [--allow-open-fetch]",
       );
     }

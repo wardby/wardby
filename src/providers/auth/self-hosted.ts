@@ -187,32 +187,52 @@ export class SelfHostedAuthProvider implements AuthProvider {
     });
   }
   async handleToken(params: TokenParams): Promise<TokenResult> {
-    if (params.resource !== undefined && params.resource !== this.config.canonicalUri)
-      throw new Error("Invalid grant.");
+    if (params.resource !== undefined && !this.withinCanonical(params.resource))
+      throw new Error("Invalid grant: resource does not match the canonical URI.");
     if (params.grantType === "authorization_code") return this.exchange(params);
     if (params.grantType === "refresh_token") return this.rotate(params);
     throw new Error("Unsupported grant.");
   }
+  /**
+   * Whether a token request's `resource` names this server: the canonical URI
+   * itself, or a URL beneath it. The MCP SDK sends the metadata's canonical
+   * URI when it has it, but falls back to the MCP endpoint URL (e.g. `/mcp`
+   * under a root canonical URI) on refresh - rejecting that logged every
+   * Claude Code session out after one access-token lifetime. The issued
+   * token's audience still comes from the grant (code.resource /
+   * family.resource), never from this parameter.
+   */
+  private withinCanonical(resource: string): boolean {
+    let url: URL;
+    try {
+      url = new URL(resource);
+    } catch {
+      return false;
+    }
+    const canonical = new URL(this.config.canonicalUri);
+    if (url.origin !== canonical.origin || url.search || url.hash) return false;
+    const base = canonical.pathname.endsWith("/") ? canonical.pathname : canonical.pathname + "/";
+    return url.pathname === canonical.pathname || url.pathname.startsWith(base);
+  }
   private async exchange(p: Extract<TokenParams, { grantType: "authorization_code" }>): Promise<TokenResult> {
     const id = this.credentials.id(p.code, "rva");
     const code = id ? await this.db.oAuthAuthorizationCode.findUnique({ where: { codeId: id } }) : null;
+    if (!code || !this.credentials.matches(p.code, code.secretHash)) throw new Error("Invalid grant: unknown code.");
+    if (code.clientId !== p.clientId) throw new Error("Invalid grant: client_id does not match the code.");
+    if (code.redirectUri !== p.redirectUri) throw new Error("Invalid grant: redirect_uri does not match the code.");
+    if (code.resource !== this.config.canonicalUri) throw new Error("Invalid grant: code resource mismatch.");
     if (
-      !code ||
-      !this.credentials.matches(p.code, code.secretHash) ||
-      code.clientId !== p.clientId ||
-      code.redirectUri !== p.redirectUri ||
-      code.resource !== this.config.canonicalUri ||
       !/^[A-Za-z0-9._~-]{43,128}$/.test(p.codeVerifier) ||
       createHash("sha256").update(p.codeVerifier).digest("base64url") !== code.codeChallenge
     )
-      throw new Error("Invalid grant.");
+      throw new Error("Invalid grant: PKCE verifier mismatch.");
     return this.db.$transaction(async (tx) => {
       const user = await lockUser(tx, code.userId);
       const consumed = await tx.oAuthAuthorizationCode.updateMany({
         where: { codeId: code.codeId, consumedAt: null, expiresAt: { gt: new Date() } },
         data: { consumedAt: new Date() },
       });
-      if (consumed.count !== 1) throw new Error("Invalid grant.");
+      if (consumed.count !== 1) throw new Error("Invalid grant: code expired or already used.");
       const family = await tx.oAuthFamily.create({
         data: {
           id: randomUUID(),
@@ -229,12 +249,10 @@ export class SelfHostedAuthProvider implements AuthProvider {
   private async rotate(p: Extract<TokenParams, { grantType: "refresh_token" }>): Promise<TokenResult> {
     const id = this.credentials.id(p.refreshToken, "rvr");
     const initial = id ? await this.db.oAuthGrant.findUnique({ where: { id }, include: { family: true } }) : null;
-    if (
-      !initial ||
-      !this.credentials.matches(p.refreshToken, initial.refreshTokenHash) ||
-      initial.family.clientId !== p.clientId
-    )
-      throw new Error("Invalid grant.");
+    if (!initial || !this.credentials.matches(p.refreshToken, initial.refreshTokenHash))
+      throw new Error("Invalid grant: unknown refresh token.");
+    if (initial.family.clientId !== p.clientId)
+      throw new Error("Invalid grant: client_id does not match the refresh token.");
     const result = await this.db.$transaction(async (tx) => {
       const user = await lockUser(tx, initial.family.userId);
       await tx.$queryRawUnsafe('SELECT "id" FROM "OAuthFamily" WHERE "id" = $1 FOR UPDATE', initial.familyId);
@@ -242,20 +260,16 @@ export class SelfHostedAuthProvider implements AuthProvider {
         where: { id: initial.id },
         include: { family: { include: { client: true } } },
       });
-      if (
-        !grant ||
-        grant.revokedAt ||
-        grant.family.revokedAt ||
-        grant.family.expiresAt.getTime() <= Date.now() ||
-        grant.expiresAt.getTime() <= Date.now()
-      )
-        return null;
+      // Failures return a reason instead of throwing so the reuse revocation
+      // below COMMITs; the caller throws after the transaction.
+      if (!grant || grant.revokedAt || grant.family.revokedAt) return "refresh token revoked";
+      if (grant.family.expiresAt.getTime() <= Date.now() || grant.expiresAt.getTime() <= Date.now())
+        return "refresh token expired";
       if (!(grant.family.client.metadata as { grant_types?: string[] }).grant_types?.includes("refresh_token"))
-        return null;
+        return "client not registered for refresh_token";
       if (grant.consumedAt) {
-        // Return instead of throwing: the transaction must COMMIT reuse revocation.
         await this.revokeFamily(tx, grant.familyId);
-        return null;
+        return "refresh token reused; family revoked";
       }
       const result = await this.issue(tx, grant.family, user.principal.subject);
       await tx.oAuthGrant.update({
@@ -264,7 +278,7 @@ export class SelfHostedAuthProvider implements AuthProvider {
       });
       return result;
     });
-    if (!result) throw new Error("Invalid grant.");
+    if (typeof result === "string") throw new Error(`Invalid grant: ${result}.`);
     return result;
   }
   private async issue(tx: AuthDb, family: OAuthFamily, subject: string): Promise<TokenResult> {
@@ -345,6 +359,16 @@ export class SelfHostedAuthProvider implements AuthProvider {
     await this.db.authFormChallenge.deleteMany({ where: { expiresAt: { lt: now } } });
     await this.db.authSession.deleteMany({ where: { expiresAt: { lt: now } } });
     await this.db.authRateLimit.deleteMany({ where: { expiresAt: { lt: now } } });
+    // /register has no auth in front of it once Cloud Run allows
+    // unauthenticated invocation (required for self-hosted OAuth to serve
+    // real clients at all), and maxClients is a hard global cap - so
+    // unthrottled registrations could permanently exhaust it. A client
+    // that never completes a single token exchange within a week is
+    // abandoned or spam, never a real client still mid-flow (authorization
+    // requests expire in 10 minutes, codes in 60 seconds).
+    await this.db.oAuthClient.deleteMany({
+      where: { createdAt: { lt: new Date(now.getTime() - 7 * DAY) }, families: { none: {} } },
+    });
   }
   async profile(token: string): Promise<AuthProfile> {
     const v = await this.verifyBearer(token);

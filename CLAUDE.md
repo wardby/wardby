@@ -104,3 +104,24 @@ migration). Also run `npx prisma validate`.
 
 Production applies migrations with `prisma migrate deploy` (`npm run
 prisma:migrate`) — never `migrate dev`, never `db push`.
+
+## Deployment (deploy/) — STRICT
+
+`deploy/` holds reevo-run's reference deployment modules, one per cloud
+target (`deploy/gcp/`, `deploy/aws/`, and future targets) — Terraform is the
+baseline IaC tool for all of them. Each is meant to be reused by others,
+either by copying the folder or by parameterizing it against a different
+project/account: no target-specific identity (project/account id, domain,
+resource names, real credentials) may ever be hardcoded into a committed
+module — every such value is a variable.
+
+**Never commit anything produced only for testing/validating a deployment.**
+Filling in a real `terraform.tfvars` (or any `*.tfvars`), pointing a module
+at a real project/account to prove it applies, capturing real resource IDs
+or outputs, local `.terraform/` state, or any other artifact from a live
+test run must stay local. `.gitignore` already excludes `.terraform/`,
+`*.tfstate*`, and `*.tfvars` (except the committed `*.tfvars.example`) for
+this reason — do not work around it by inlining test values into a tracked
+file, a commit message, or a doc. If a real test surfaces a genuine bug or
+missing piece in the module itself, fix the module (variables, resource
+definitions, docs) — never the specific values used to exercise it.

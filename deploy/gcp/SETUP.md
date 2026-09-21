@@ -108,11 +108,19 @@ docker build -f deploy/Dockerfile --target runtime \
 docker push us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane:latest
 docker inspect --format '{{index .RepoDigests 0}}' \
   us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane:latest
+
+docker build -f deploy/Dockerfile --target migration \
+  -t us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane-migrate:latest .
+docker push us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane-migrate:latest
+docker inspect --format '{{index .RepoDigests 0}}' \
+  us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane-migrate:latest
 ```
 
-Use the resulting `@sha256:...` digest (not a mutable tag) as
-`container_image` in your `terraform.tfvars` — consistent with how every
-other image in this repo is pinned.
+Use the first digest as `container_image` and the second as
+`migration_image` in your `terraform.tfvars` (not mutable tags — consistent
+with how every other image in this repo is pinned). `terraform apply` runs
+the migration image automatically against the live database on every
+apply where it changes — see `migration-job.tf`.
 
 ## 8. Plan and apply
 
@@ -145,6 +153,92 @@ terraform destroy
 gcloud projects delete my-gcp-project-id
 ```
 
-`deletion_protection = true` (the default) blocks `terraform destroy` from
-removing the Cloud SQL instance — set `cloudsql_deletion_protection = false`
-in `terraform.tfvars` first if this is genuinely a disposable sandbox.
+`cloudsql_deletion_protection = true` (the default) blocks `terraform destroy`
+from removing the Cloud SQL instance. Setting it to `false` is not enough on
+its own: the provider reads that guard from **state**, not from the flags
+passed to `destroy`, so it has to be applied first. For a genuinely disposable
+sandbox:
+
+```bash
+terraform apply -var="cloudsql_deletion_protection=false"   # writes it to state
+terraform destroy -var="cloudsql_deletion_protection=false"
+```
+
+Passing it only to `destroy` fails partway through — after the service,
+secrets, and service account are already gone — with "failed to delete
+instance because deletion_protection is set to true", leaving a half-torn-down
+deployment. If you hit that, the targeted recovery is
+`terraform apply -target=google_sql_database_instance.main -var="cloudsql_deletion_protection=false"`,
+then destroy again.
+
+## 11. Using your own identity provider (delegating mode)
+
+By default the module deploys `auth_provider = "self-hosted"`: reevo acts as
+its own OAuth authorization server, and you create accounts with
+`reevo auth user create`, which hands back a login key. That needs no external
+identity system, which makes it the fastest way to get a deployment running —
+but most deployments will want to front an IdP they already run:
+
+```hcl
+auth_provider = "delegating"
+auth_issuer   = "https://login.example.com/realms/prod"
+auth_jwks_uri = "https://login.example.com/realms/prod/protocol/openid-connect/certs"
+```
+
+In this mode reevo only _verifies_ tokens — it never issues them — and there is
+no local user administration at all: a `Principal` row is created from the
+token's subject the first time each person authenticates. `reevo auth` and
+login keys are self-hosted-mode concepts and play no part here. The module also
+stops generating `AUTH_SIGNING_KEY`/`AUTH_CREDENTIAL_HASH_KEY`, since nothing
+signs tokens or hashes login keys any more.
+
+Four things must line up on the IdP side, and each fails in a way that does not
+obviously point at its cause:
+
+1. **Audience.** Tokens must carry an `aud` equal to this deployment's
+   canonical URI (`domain_name`, or `mcp_canonical_uri_override`). Most IdPs
+   call this an API identifier or resource, and it usually needs an explicit
+   audience mapper — the default is often the client id. reevo accepts an
+   origin with or without its trailing slash, so copying `resource` verbatim
+   out of `https://<your-domain>/.well-known/oauth-protected-resource` is safe.
+2. **Scopes.** reevo authorizes per-tool off the token's `scope` claim, and a
+   spec-compliant client requests _every_ scope listed in that same metadata
+   document. All of them must exist in the IdP or the authorization request
+   fails wholesale with `invalid_scope` — at the IdP, before reevo is involved.
+3. **Client registration.** MCP clients self-register via dynamic client
+   registration, which most IdPs disable by default. If yours does, register
+   one client yourself and have people connect with it explicitly:
+
+   ```bash
+   claude mcp add --transport http reevo https://<your-domain>/mcp \
+     --client-id <your-client-id> --callback-port 8765
+   ```
+
+   `--callback-port` pins the redirect URI, for IdPs that will not accept a
+   wildcard localhost port.
+
+4. **Reachability.** Cloud Run must be able to reach `auth_jwks_uri` to fetch
+   signing keys.
+
+`deploy/keycloak-test/` brings up a throwaway Keycloak configured correctly for
+all four, which is worth running locally before pointing this at a real IdP.
+
+## 12. What the container runs
+
+The image's default command is `reevo serve`: the MCP server, the scheduler
+that fires due agents, and the reconciler that recovers orphaned runs, in one
+process. The module does not override it, so scheduled agents fire in this
+deployment.
+
+Two consequences of running a background worker on Cloud Run:
+
+- **CPU is always allocated** (`cpu_idle = false` in `cloud-run.tf`). The
+  default only gives a container CPU while it handles a request, which
+  starves the scheduler's timers and — worse — the heartbeat every running
+  agent sends; the reconciler would then reap healthy runs as lost. This is
+  billed at a higher rate than idle CPU.
+- **Every replica runs all three.** With `min_instance_count = 2`, both
+  instances run a scheduler; a Postgres lease elects one to tick and row
+  locks make firing at-most-once regardless. Both run the reconciler by
+  design. Each instance gets its own DBOS executor id automatically — do not
+  set `DBOS_EXECUTOR_ID` here, or replicas would share one.

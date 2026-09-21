@@ -14,9 +14,20 @@ variable "name_prefix" {
   default     = "reevo-run"
 }
 
+variable "create_domain_mapping" {
+  description = "Whether to create a custom domain mapping for the Cloud Run service. Requires domain_name and prior domain ownership verification (gcloud domains verify) - see SETUP.md. Set false to test/deploy without a domain; the service still gets a free *.run.app URL (see the cloud_run_service_url output) either way."
+  type        = bool
+  default     = true
+}
+
 variable "domain_name" {
-  description = "Custom domain to map to the Cloud Run service (e.g. \"reevo.example.com\"). No default: DNS ownership is deployment-specific."
+  description = "Custom domain to map to the Cloud Run service (e.g. \"reevo.example.com\"). Required only when create_domain_mapping is true; ignored otherwise."
   type        = string
+  default     = null
+  validation {
+    condition     = !var.create_domain_mapping || var.domain_name != null
+    error_message = "domain_name is required when create_domain_mapping is true."
+  }
 }
 
 variable "min_instance_count" {
@@ -56,4 +67,77 @@ variable "cloudsql_deletion_protection" {
 variable "container_image" {
   description = "Fully-qualified image reference for the Cloud Run service (e.g. a digest-pinned image built from ../Dockerfile). No default: this module doesn't build or publish the image."
   type        = string
+}
+
+variable "migration_image" {
+  description = "Fully-qualified image reference for the one-off Prisma migration job, built from deploy/Dockerfile's `migration` target (not the `runtime` target used by container_image). No default: this module doesn't build or publish the image."
+  type        = string
+}
+
+variable "openai_api_key_value" {
+  description = "OpenAI API key, exposed to the container as OPENAI_API_KEY. No default, and never write a real value to a committed .tfvars file - pass it as -var or via TF_VAR_openai_api_key_value from a local, gitignored source. Null (the default) skips creating this secret. The app registers providers additively by credential presence, so this and anthropic_api_key_value can both be set at once."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
+variable "anthropic_api_key_value" {
+  description = "Anthropic API key, exposed to the container as ANTHROPIC_API_KEY. Same rules as openai_api_key_value - no default, never committed, both may be set at once."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
+variable "enable_cloud_armor" {
+  description = "Put an external HTTPS load balancer with a Cloud Armor policy in front of the service, and restrict the service's own ingress so the *.run.app URL can no longer be reached directly. Cloud Run offers no request rate limiting of its own, so without this the only throttle is the app's per-IP limiter, which a distributed caller walks straight past. Off by default: it is a different fronting strategy than create_domain_mapping (an A record to a static IP rather than a CNAME to Cloud Run), not an addition to it — enabling both is not meaningful."
+  type        = bool
+  default     = false
+  validation {
+    condition     = !(var.enable_cloud_armor && var.create_domain_mapping)
+    error_message = "enable_cloud_armor and create_domain_mapping are alternative ways to front the service; enable at most one."
+  }
+}
+
+variable "cloud_armor_rate_limit_per_minute" {
+  description = "Requests per minute per client IP allowed through Cloud Armor before it starts returning 429. Only meaningful when enable_cloud_armor is true."
+  type        = number
+  default     = 120
+}
+
+variable "allow_unauthenticated" {
+  description = "Grant allUsers roles/run.invoker on the service. Required for reevo to be reachable by MCP clients in BOTH auth modes, and on by default because the module does not work without it: Cloud Run's own IAM check and reevo's OAuth both read the Authorization header, so a client carrying a bearer token cannot also present a Google identity token. Authorization is enforced by reevo itself (every /mcp call needs a valid token, and tools are gated per-scope), not by Cloud Run IAM. Set false only if you front the service with something else that terminates auth — an external load balancer with IAP, say — or if only Google-identity callers will ever reach it."
+  type        = bool
+  default     = true
+}
+
+variable "auth_provider" {
+  description = "Which AuthProvider the app runs. \"delegating\" (the expected choice for most deployments) makes reevo a pure OAuth resource server in front of your own IdP — it never issues tokens, and users are administered entirely in that IdP. \"self-hosted\" makes reevo its own authorization server with login keys issued by the `reevo auth` CLI; it needs no external identity system, which makes it the zero-config way to stand a deployment up."
+  type        = string
+  default     = "self-hosted"
+  validation {
+    condition     = contains(["self-hosted", "delegating"], var.auth_provider)
+    error_message = "auth_provider must be \"self-hosted\" or \"delegating\"."
+  }
+  validation {
+    condition     = var.auth_provider != "delegating" || (var.auth_issuer != null && var.auth_jwks_uri != null)
+    error_message = "auth_issuer and auth_jwks_uri are required when auth_provider is \"delegating\"."
+  }
+}
+
+variable "auth_issuer" {
+  description = "Your IdP's issuer URL, exactly as it appears in the `iss` claim of the tokens it mints (e.g. \"https://login.example.com/realms/prod\"). Required when auth_provider is \"delegating\"; ignored otherwise, since self-hosted mode is its own issuer."
+  type        = string
+  default     = null
+}
+
+variable "auth_jwks_uri" {
+  description = "Your IdP's JWKS endpoint, used to verify token signatures (e.g. \"https://login.example.com/realms/prod/protocol/openid-connect/certs\"). Required when auth_provider is \"delegating\"; ignored otherwise. Must be reachable from the Cloud Run service."
+  type        = string
+  default     = null
+}
+
+variable "mcp_canonical_uri_override" {
+  description = "MCP_CANONICAL_URI value when create_domain_mapping is false. Only needed for a domainless deployment: the *.run.app URL doesn't exist until the Cloud Run service is created, so it can't be known on the first apply. Workflow: apply once (the app fails its own MCP_CANONICAL_URI check and won't serve real traffic yet, but every other resource - Cloud SQL, secrets, IAM - is created correctly), read the real URL from the cloud_run_service_url output, then apply again with this variable set to that URL. Ignored when create_domain_mapping is true (domain_name is used instead)."
+  type        = string
+  default     = "https://placeholder.invalid"
 }
