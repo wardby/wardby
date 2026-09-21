@@ -188,7 +188,7 @@ export class SelfHostedAuthProvider implements AuthProvider {
   }
   async handleToken(params: TokenParams): Promise<TokenResult> {
     if (params.resource !== undefined && params.resource !== this.config.canonicalUri)
-      throw new Error("Invalid grant.");
+      throw new Error("Invalid grant: resource does not match the canonical URI.");
     if (params.grantType === "authorization_code") return this.exchange(params);
     if (params.grantType === "refresh_token") return this.rotate(params);
     throw new Error("Unsupported grant.");
@@ -196,23 +196,22 @@ export class SelfHostedAuthProvider implements AuthProvider {
   private async exchange(p: Extract<TokenParams, { grantType: "authorization_code" }>): Promise<TokenResult> {
     const id = this.credentials.id(p.code, "rva");
     const code = id ? await this.db.oAuthAuthorizationCode.findUnique({ where: { codeId: id } }) : null;
+    if (!code || !this.credentials.matches(p.code, code.secretHash)) throw new Error("Invalid grant: unknown code.");
+    if (code.clientId !== p.clientId) throw new Error("Invalid grant: client_id does not match the code.");
+    if (code.redirectUri !== p.redirectUri) throw new Error("Invalid grant: redirect_uri does not match the code.");
+    if (code.resource !== this.config.canonicalUri) throw new Error("Invalid grant: code resource mismatch.");
     if (
-      !code ||
-      !this.credentials.matches(p.code, code.secretHash) ||
-      code.clientId !== p.clientId ||
-      code.redirectUri !== p.redirectUri ||
-      code.resource !== this.config.canonicalUri ||
       !/^[A-Za-z0-9._~-]{43,128}$/.test(p.codeVerifier) ||
       createHash("sha256").update(p.codeVerifier).digest("base64url") !== code.codeChallenge
     )
-      throw new Error("Invalid grant.");
+      throw new Error("Invalid grant: PKCE verifier mismatch.");
     return this.db.$transaction(async (tx) => {
       const user = await lockUser(tx, code.userId);
       const consumed = await tx.oAuthAuthorizationCode.updateMany({
         where: { codeId: code.codeId, consumedAt: null, expiresAt: { gt: new Date() } },
         data: { consumedAt: new Date() },
       });
-      if (consumed.count !== 1) throw new Error("Invalid grant.");
+      if (consumed.count !== 1) throw new Error("Invalid grant: code expired or already used.");
       const family = await tx.oAuthFamily.create({
         data: {
           id: randomUUID(),
@@ -229,12 +228,10 @@ export class SelfHostedAuthProvider implements AuthProvider {
   private async rotate(p: Extract<TokenParams, { grantType: "refresh_token" }>): Promise<TokenResult> {
     const id = this.credentials.id(p.refreshToken, "rvr");
     const initial = id ? await this.db.oAuthGrant.findUnique({ where: { id }, include: { family: true } }) : null;
-    if (
-      !initial ||
-      !this.credentials.matches(p.refreshToken, initial.refreshTokenHash) ||
-      initial.family.clientId !== p.clientId
-    )
-      throw new Error("Invalid grant.");
+    if (!initial || !this.credentials.matches(p.refreshToken, initial.refreshTokenHash))
+      throw new Error("Invalid grant: unknown refresh token.");
+    if (initial.family.clientId !== p.clientId)
+      throw new Error("Invalid grant: client_id does not match the refresh token.");
     const result = await this.db.$transaction(async (tx) => {
       const user = await lockUser(tx, initial.family.userId);
       await tx.$queryRawUnsafe('SELECT "id" FROM "OAuthFamily" WHERE "id" = $1 FOR UPDATE', initial.familyId);
@@ -242,20 +239,16 @@ export class SelfHostedAuthProvider implements AuthProvider {
         where: { id: initial.id },
         include: { family: { include: { client: true } } },
       });
-      if (
-        !grant ||
-        grant.revokedAt ||
-        grant.family.revokedAt ||
-        grant.family.expiresAt.getTime() <= Date.now() ||
-        grant.expiresAt.getTime() <= Date.now()
-      )
-        return null;
+      // Failures return a reason instead of throwing so the reuse revocation
+      // below COMMITs; the caller throws after the transaction.
+      if (!grant || grant.revokedAt || grant.family.revokedAt) return "refresh token revoked";
+      if (grant.family.expiresAt.getTime() <= Date.now() || grant.expiresAt.getTime() <= Date.now())
+        return "refresh token expired";
       if (!(grant.family.client.metadata as { grant_types?: string[] }).grant_types?.includes("refresh_token"))
-        return null;
+        return "client not registered for refresh_token";
       if (grant.consumedAt) {
-        // Return instead of throwing: the transaction must COMMIT reuse revocation.
         await this.revokeFamily(tx, grant.familyId);
-        return null;
+        return "refresh token reused; family revoked";
       }
       const result = await this.issue(tx, grant.family, user.principal.subject);
       await tx.oAuthGrant.update({
@@ -264,7 +257,7 @@ export class SelfHostedAuthProvider implements AuthProvider {
       });
       return result;
     });
-    if (!result) throw new Error("Invalid grant.");
+    if (typeof result === "string") throw new Error(`Invalid grant: ${result}.`);
     return result;
   }
   private async issue(tx: AuthDb, family: OAuthFamily, subject: string): Promise<TokenResult> {
