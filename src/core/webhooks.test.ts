@@ -139,7 +139,7 @@ describe("core/webhooks", () => {
   it("accepts webhook task input only for an opted-in coding profile", async () => {
     const codingProfile = {
       provider: "codex",
-      repository: "openai/reevo",
+      repository: "openai/wardby",
       baseRef: "main",
       defaultTask: "Default task",
       allowWebhookTaskOverride: true,

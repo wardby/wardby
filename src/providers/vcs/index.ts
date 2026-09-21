@@ -14,7 +14,7 @@ export function buildVcsProvider(providerConfig: Pick<ProviderConfig, "vcs">, co
   if (!config.appId || !config.privateKey) {
     throw new Error("GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY are required by the GitHub VCS adapter.");
   }
-  const rootDir = resolve(config.workRoot ?? resolve(tmpdir(), "reevo-vcs"));
+  const rootDir = resolve(config.workRoot ?? resolve(tmpdir(), "wardby-vcs"));
   const github = new GitHubAppClient({
     appId: config.appId,
     privateKey: config.privateKey,

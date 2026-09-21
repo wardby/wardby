@@ -31,7 +31,7 @@ describe("CodingProfileSchema", () => {
     { repository: "openai/example", protectedPaths: ["/etc/passwd"] },
     { repository: "openai/example", credential: "secret" },
     { repository: "openai/example", toolchain: "node-cobol" },
-    { repository: "openai/example", workerImageRef: "reevo-coding-worker:latest" },
+    { repository: "openai/example", workerImageRef: "wardby-coding-worker:latest" },
     { repository: "openai/example", provider: "unknown" },
   ])("rejects unsafe profile %#", (profile) => {
     expect(() => CodingProfileSchema.parse(profile)).toThrow();

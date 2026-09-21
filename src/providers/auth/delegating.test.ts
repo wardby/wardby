@@ -102,11 +102,11 @@ describe("DelegatingAuthProvider.verifyBearer", () => {
   });
 
   it("matches an opaque non-URL audience exactly", async () => {
-    const provider = new DelegatingAuthProvider({ issuer: ISSUER, audience: "reevo-run-api" }, jwks);
-    await expect(provider.verifyBearer(await mintToken({ audience: "reevo-run-api" }))).resolves.toMatchObject({
+    const provider = new DelegatingAuthProvider({ issuer: ISSUER, audience: "wardby-api" }, jwks);
+    await expect(provider.verifyBearer(await mintToken({ audience: "wardby-api" }))).resolves.toMatchObject({
       subject: "user-123",
     });
-    await expect(provider.verifyBearer(await mintToken({ audience: "reevo-run-api/" }))).rejects.toThrow(AudienceError);
+    await expect(provider.verifyBearer(await mintToken({ audience: "wardby-api/" }))).rejects.toThrow(AudienceError);
   });
 });
 

@@ -21,7 +21,7 @@ describe("coding worker image policy", () => {
     const dockerfile = await readFile(new URL("./Dockerfile", import.meta.url), "utf8");
     const from = dockerfile.split("\n").filter((line) => line.startsWith("FROM "));
     expect(from.length).toBe(1);
-    expect(from[0]).toMatch(/reevo-coding-worker-driver@sha256:[0-9a-f]{64}/);
+    expect(from[0]).toMatch(/wardby-coding-worker-driver@sha256:[0-9a-f]{64}/);
     expect(dockerfile).toContain("USER 10001:10001");
     expect(dockerfile).toContain('ENTRYPOINT ["node"');
     for (const executable of ["docker", "ssh", "curl", "wget", "sudo", "gcc", "make"]) {
@@ -33,7 +33,7 @@ describe("coding worker image policy", () => {
     const dockerfile = await readFile(new URL("./Dockerfile.node-python", import.meta.url), "utf8");
     const from = dockerfile.split("\n").filter((line) => line.startsWith("FROM "));
     expect(from.length).toBe(1);
-    expect(from[0]).toMatch(/reevo-coding-worker-driver@sha256:[0-9a-f]{64}/);
+    expect(from[0]).toMatch(/wardby-coding-worker-driver@sha256:[0-9a-f]{64}/);
     expect(dockerfile).toContain("--no-install-recommends python3 python3-pip");
     expect(dockerfile).toContain("USER 10001:10001");
     expect(dockerfile).toContain('ENTRYPOINT ["node"');

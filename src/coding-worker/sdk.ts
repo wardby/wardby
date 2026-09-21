@@ -12,10 +12,10 @@ export function codexSdkOptions(config: WorkerClientConfig) {
         ignore_default_excludes: false,
         set: config.environment,
       },
-      model_provider: "reevo_proxy",
+      model_provider: "wardby_proxy",
       model_providers: {
-        reevo_proxy: {
-          name: "Reevo per-run proxy",
+        wardby_proxy: {
+          name: "Wardby per-run proxy",
           base_url: `${config.proxyBaseUrl.replace(/\/$/, "")}/v1`,
           env_key: "CODEX_API_KEY",
           wire_api: "responses",

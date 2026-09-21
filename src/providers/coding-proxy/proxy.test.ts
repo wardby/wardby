@@ -212,7 +212,7 @@ describe("CodingProxy", () => {
     const normalized = JSON.stringify({ ...JSON.parse(raw), store: false, background: false });
     const exactBudget = estimateReservationUsd(Buffer.byteLength(normalized), 10, PRICE);
     const h = await harness({ budgetUsd: exactBudget });
-    await expect(execute(h, "boundary")).rejects.toMatchObject({ status: 429, code: "reevo_budget_exhausted" });
+    await expect(execute(h, "boundary")).rejects.toMatchObject({ status: 429, code: "wardby_budget_exhausted" });
     expect(h.fetch).not.toHaveBeenCalled();
   });
 
@@ -477,7 +477,7 @@ describe("CodingProxy Anthropic Messages", () => {
     });
   });
 
-  it("forwards only Reevo's bounded local command tool and matching tool-result blocks", async () => {
+  it("forwards only Wardby's bounded local command tool and matching tool-result blocks", async () => {
     const response = JSON.parse(await fixture("anthropic-message-response.json"));
     const body = JSON.parse(await fixture("anthropic-sdk-request.json"));
     body.stream = false;
@@ -493,7 +493,7 @@ describe("CodingProxy Anthropic Messages", () => {
         },
       },
       {
-        name: "mcp__reevo_tools__run_command",
+        name: "mcp__wardby_tools__run_command",
         description: "Run one bounded shell command in the isolated repository workspace.",
         input_schema: {
           type: "object",
@@ -512,8 +512,8 @@ describe("CodingProxy Anthropic Messages", () => {
         content: [
           {
             type: "tool_use",
-            id: "toolu_reevo_command",
-            name: "mcp__reevo_tools__run_command",
+            id: "toolu_wardby_command",
+            name: "mcp__wardby_tools__run_command",
             input: { command: "git status --short", timeout_ms: 1_000 },
           },
         ],
@@ -523,7 +523,7 @@ describe("CodingProxy Anthropic Messages", () => {
         content: [
           {
             type: "tool_result",
-            tool_use_id: "toolu_reevo_command",
+            tool_use_id: "toolu_wardby_command",
             content: [{ type: "text", text: "exit_code=0\n" }],
             cache_control: { type: "ephemeral" },
           },
@@ -535,13 +535,13 @@ describe("CodingProxy Anthropic Messages", () => {
       fetch: async () => Response.json(response),
     });
 
-    await execute(h, "reevo-command-tool", new TestSink(), JSON.stringify(body));
+    await execute(h, "wardby-command-tool", new TestSink(), JSON.stringify(body));
 
     const forwarded = JSON.parse((h.fetch.mock.calls[0][1] as RequestInit).body as string);
     expect(forwarded.tools).toHaveLength(2);
     expect(forwarded.messages.at(-1).content[0]).toMatchObject({
       type: "tool_result",
-      tool_use_id: "toolu_reevo_command",
+      tool_use_id: "toolu_wardby_command",
       cache_control: { type: "ephemeral" },
     });
   });
@@ -559,7 +559,7 @@ describe("CodingProxy Anthropic Messages", () => {
               {
                 type: "tool_use",
                 id: "toolu_oversized",
-                name: "mcp__reevo_tools__run_command",
+                name: "mcp__wardby_tools__run_command",
                 input: { command: "x".repeat(16 * 1024 + 1) },
               },
             ],

@@ -6,7 +6,7 @@
  * terminal `lost` state.
  *
  * Scoped by `executionManaged`, not trigger. Scheduled, MCP, and webhook
- * runs are detached and managed; an attended `reevo run` is not. Coding
+ * runs are detached and managed; an attended `wardby run` is not. Coding
  * jobs with persisted handles are delegated to the executor's recovery
  * path, which must query/stop/collect and must never relaunch.
  *

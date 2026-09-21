@@ -5,14 +5,14 @@ RUN apt-get update \
     && npm install --global --omit=dev npm@12.0.2 \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin reevo
+    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin wardby
 
-WORKDIR /opt/reevo/claude-compatibility
+WORKDIR /opt/wardby/claude-compatibility
 COPY src/claude-coding-worker/package.json src/claude-coding-worker/package-lock.json ./
 RUN npm ci --ignore-scripts \
     && npm cache clean --force
 COPY src/claude-coding-worker/compatibility.test.mjs ./
 
 USER 10001:10001
-ENV NODE_ENV=production HOME=/home/reevo
+ENV NODE_ENV=production HOME=/home/wardby
 ENTRYPOINT ["npm", "run", "test:compatibility"]

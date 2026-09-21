@@ -10,7 +10,7 @@ if [ "$key_mode" != "600" ]; then
   exit 1
 fi
 
-capability=${REEVO_RUN_CAPABILITY:-"reevo-task0b-$(openssl rand -hex 24)"}
+capability=${WARDBY_RUN_CAPABILITY:-"wardby-task0b-$(openssl rand -hex 24)"}
 if [ -n "${TASK0B_EVIDENCE_DIR:-}" ]; then
   evidence_dir=$TASK0B_EVIDENCE_DIR
   mkdir -p "$evidence_dir"
@@ -21,7 +21,7 @@ fi
 chmod 700 "$evidence_dir"
 
 export TASK0B_EVIDENCE_DIR="$evidence_dir"
-export REEVO_RUN_CAPABILITY="$capability"
+export WARDBY_RUN_CAPABILITY="$capability"
 
 cleanup() {
   docker compose -f "$here/compose.task0b.yml" down --volumes --remove-orphans >/dev/null 2>&1 || true

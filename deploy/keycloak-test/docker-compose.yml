@@ -8,7 +8,7 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
     ports:
-      # 8081 because reevo's own dev server commonly holds 8080.
+      # 8081 because wardby's own dev server commonly holds 8080.
       - "8081:8080"
     # No healthcheck: the Keycloak image ships no curl/wget, so the usual
     # probes never report healthy. setup-realm.sh waits for readiness itself.

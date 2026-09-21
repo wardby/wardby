@@ -1,5 +1,5 @@
 {
-  "name": "reevo-coding-worker-runtime",
+  "name": "@wardby/coding-worker-runtime",
   "private": true,
   "type": "module",
   "dependencies": {

@@ -505,7 +505,7 @@ export class ContainerExecutor implements Executor {
         protectedPaths: run.protectedPaths,
       });
       const expectedHeadRunId = run.rootCodingRunId ?? run.runId;
-      if (run.headRef !== `reevo/run-${expectedHeadRunId}`) throw new Error("coding_head_ref_invalid");
+      if (run.headRef !== `wardby/run-${expectedHeadRunId}`) throw new Error("coding_head_ref_invalid");
       const continuationOf = run.rootCodingRunId ? { runId: run.rootCodingRunId } : undefined;
       CodingTaskInputSchema.parse({
         schemaVersion: CODING_PROTOCOL_VERSION,

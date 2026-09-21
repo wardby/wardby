@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Provision a throwaway Keycloak realm that issues tokens reevo's delegating
+# Provision a throwaway Keycloak realm that issues tokens wardby's delegating
 # AuthProvider (AUTH_PROVIDER=delegating) accepts. Destroys and recreates the
 # realm on every run, so it is safe to re-run while iterating.
 #
@@ -19,17 +19,17 @@
 set -euo pipefail
 
 KC=${KC:-http://localhost:8081}
-REALM=${REALM:-reevo}
-M2M_CLIENT=${M2M_CLIENT:-reevo-mcp-client}
+REALM=${REALM:-wardby}
+M2M_CLIENT=${M2M_CLIENT:-wardby-mcp-client}
 M2M_SECRET=${M2M_SECRET:-test-client-secret}
-PUB_CLIENT=${PUB_CLIENT:-reevo-mcp-cli}
-USERNAME=${USERNAME:-reevo-user}
-PASSWORD=${PASSWORD:-reevo-password}
-# Must equal reevo's MCP_CANONICAL_URI. Defaults to the trailing-slash form
-# because that is what reevo's protected-resource metadata advertises as
+PUB_CLIENT=${PUB_CLIENT:-wardby-mcp-cli}
+USERNAME=${USERNAME:-wardby-user}
+PASSWORD=${PASSWORD:-wardby-password}
+# Must equal wardby's MCP_CANONICAL_URI. Defaults to the trailing-slash form
+# because that is what wardby's protected-resource metadata advertises as
 # `resource`, and therefore what a spec-compliant client asks the IdP for.
 AUDIENCE=${AUDIENCE:-http://127.0.0.1:8099/}
-# Every scope reevo lists in SCOPES_SUPPORTED (src/mcp/auth/resource-server.ts).
+# Every scope wardby lists in SCOPES_SUPPORTED (src/mcp/auth/resource-server.ts).
 # All of them must exist in the realm: a spec-compliant client reads
 # scopes_supported from the protected-resource metadata and asks for the lot,
 # and Keycloak rejects the whole authorization request with invalid_scope if
@@ -81,7 +81,7 @@ code=$(api POST "" "$body")
 echo "    create: HTTP $code"
 
 echo "==> client scopes"
-# reevo authorizes per-tool on the token's `scope` claim, so each reevo scope
+# wardby authorizes per-tool on the token's `scope` claim, so each wardby scope
 # must exist as a client scope and be included in the token.
 for s in $ALL_SCOPES; do
   body=$(printf '{"name":"%s","protocol":"openid-connect","attributes":{"include.in.token.scope":"true","display.on.consent.screen":"false"}}' "$s")
@@ -91,9 +91,9 @@ done
 
 configure_client() { # configure_client UUID LABEL SCOPES
   local uuid=$1 label=$2 scopes=$3 body code sid
-  # Keycloak's default audience is the client itself; reevo requires the
+  # Keycloak's default audience is the client itself; wardby requires the
   # resource it protects, so map it explicitly.
-  body=$(printf '{"name":"reevo-audience","protocol":"openid-connect","protocolMapper":"oidc-audience-mapper","config":{"included.custom.audience":"%s","access.token.claim":"true","id.token.claim":"false"}}' "$AUDIENCE")
+  body=$(printf '{"name":"wardby-audience","protocol":"openid-connect","protocolMapper":"oidc-audience-mapper","config":{"included.custom.audience":"%s","access.token.claim":"true","id.token.claim":"false"}}' "$AUDIENCE")
   code=$(api POST "/$REALM/clients/$uuid/protocol-mappers/models" "$body")
   echo "    $label audience -> $AUDIENCE: HTTP $code"
   for s in $scopes; do
@@ -120,13 +120,13 @@ echo "    create: HTTP $code"
 configure_client "$(client_uuid "$PUB_CLIENT")" "$PUB_CLIENT" "$ALL_SCOPES"
 
 echo "==> user $USERNAME"
-body=$(printf '{"username":"%s","enabled":true,"emailVerified":true,"email":"%s@example.com","firstName":"Reevo","lastName":"Tester","requiredActions":[],"credentials":[{"type":"password","value":"%s","temporary":false}]}' "$USERNAME" "$USERNAME" "$PASSWORD")
+body=$(printf '{"username":"%s","enabled":true,"emailVerified":true,"email":"%s@example.com","firstName":"Wardby","lastName":"Tester","requiredActions":[],"credentials":[{"type":"password","value":"%s","temporary":false}]}' "$USERNAME" "$USERNAME" "$PASSWORD")
 code=$(api POST "/$REALM/users" "$body")
 echo "    create: HTTP $code"
 
 cat <<EOF
 
-Realm ready. Point reevo at it with:
+Realm ready. Point wardby at it with:
 
   AUTH_PROVIDER=delegating
   AUTH_ISSUER=$KC/realms/$REALM
@@ -142,7 +142,7 @@ Machine token (no browser):
 
 Real MCP client (browser, pre-registered client id):
 
-  claude mcp add --transport http reevo-idp ${AUDIENCE%/}/mcp \\
+  claude mcp add --transport http wardby-idp ${AUDIENCE%/}/mcp \\
     --client-id $PUB_CLIENT --callback-port 8765
   # then /mcp -> Authenticate, and log in as $USERNAME / $PASSWORD
 EOF

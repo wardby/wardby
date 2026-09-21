@@ -84,7 +84,7 @@ export interface VcsProvider {
   finalizeChanges(workspace: PreparedWorkspace, details?: FinalizeChangesDetails): Promise<FinalizeChangesResult>;
   cleanup(workspace: PreparedWorkspace): Promise<void>;
   /**
-   * Best-effort "reevo is working on this" signal for a continuation
+   * Best-effort "wardby is working on this" signal for a continuation
    * (see docs/private/2026-09-13-coding-pr-revision-in-place-design.md) --
    * a no-op when `workspace.continuation` is unset, since a fresh run has
    * no PR to attach anything to until its one commit lands. Optional

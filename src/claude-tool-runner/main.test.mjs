@@ -8,7 +8,7 @@ import test from "node:test";
 import { startToolRunner, TOOL_RUNNER_READY_MESSAGE } from "./main.mjs";
 
 test("exposes a fixed lifecycle readiness marker", () => {
-  assert.equal(TOOL_RUNNER_READY_MESSAGE, "reevo_tool_runner_ready");
+  assert.equal(TOOL_RUNNER_READY_MESSAGE, "wardby_tool_runner_ready");
 });
 
 function waitForResponse(socket, id) {
@@ -37,7 +37,7 @@ function waitForResponse(socket, id) {
 }
 
 test("serves only the bounded run_command MCP tool over its private socket", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "reevo-claude-mcp-"));
+  const directory = await mkdtemp(join(tmpdir(), "wardby-claude-mcp-"));
   const socketPath = join(directory, "runner.sock");
   const server = await startToolRunner(socketPath);
   const socket = net.createConnection(socketPath);
@@ -53,7 +53,7 @@ test("serves only the bounded run_command MCP tool over its private socket", asy
       })}\n`,
     );
     const init = await initialized;
-    assert.equal(init.result.serverInfo.name, "reevo_tools");
+    assert.equal(init.result.serverInfo.name, "wardby_tools");
 
     socket.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
     const listed = waitForResponse(socket, 2);

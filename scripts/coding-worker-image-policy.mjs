@@ -31,7 +31,7 @@ if (sdkVersion !== "0.153.4" || lockedSdk?.version !== sdkVersion || !lockedSdk?
 // --omit=dev already (checked when the driver itself was policy-checked at
 // --kind=driver) and may have no apt-get install of its own at all — only
 // check for controls this specific file is actually responsible for.
-const fromsDriverImage = fromLines.some((line) => /reevo-coding-worker-driver@sha256:/i.test(line));
+const fromsDriverImage = fromLines.some((line) => /wardby-coding-worker-driver@sha256:/i.test(line));
 const installsAptPackages = /apt-get install/i.test(dockerfile);
 const requiredControls = [];
 if (installsAptPackages) requiredControls.push("--no-install-recommends");

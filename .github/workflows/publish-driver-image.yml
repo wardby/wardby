@@ -11,7 +11,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     env:
-      IMAGE: ghcr.io/${{ github.repository }}/reevo-coding-worker-driver
+      IMAGE: ghcr.io/${{ github.repository }}/wardby-coding-worker-driver
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

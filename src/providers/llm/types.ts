@@ -1,7 +1,7 @@
 /**
  * LLM seam — streaming chat with tool-calling and usage accounting.
  *
- * The budget guardrail (reevo-run's differentiator) hangs off `countTokens`
+ * The budget guardrail (wardby's differentiator) hangs off `countTokens`
  * and `priceUsd`: the core estimates cost pre-flight and can stop a run
  * *before* it incurs spend, not just report spend after the fact.
  *

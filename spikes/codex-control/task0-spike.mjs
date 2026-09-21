@@ -9,11 +9,11 @@ import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const timeoutMs = 8_000;
-const root = await mkdtemp(join(tmpdir(), "reevo-codex-task0-"));
+const root = await mkdtemp(join(tmpdir(), "wardby-codex-task0-"));
 const workspace = join(root, "workspace");
 const outsideFile = join(root, "outside-write-must-fail");
 const tokenPath = join(root, "proxy-token.sh");
-const capability = "reevo-task0-capability";
+const capability = "wardby-task0-capability";
 const execFileAsync = promisify(execFile);
 
 const result = {
@@ -149,19 +149,19 @@ async function startAppServer(port) {
     "codex",
     [
       "-c",
-      'model_provider="reevo_proxy"',
+      'model_provider="wardby_proxy"',
       "-c",
-      'model_providers.reevo_proxy.name="Reevo Task 0 Proxy"',
+      'model_providers.wardby_proxy.name="Wardby Task 0 Proxy"',
       "-c",
-      `model_providers.reevo_proxy.base_url=\"http://127.0.0.1:${port}/v1\"`,
+      `model_providers.wardby_proxy.base_url=\"http://127.0.0.1:${port}/v1\"`,
       "-c",
-      'model_providers.reevo_proxy.wire_api="responses"',
+      'model_providers.wardby_proxy.wire_api="responses"',
       "-c",
-      `model_providers.reevo_proxy.auth.command=\"${tokenPath}\"`,
+      `model_providers.wardby_proxy.auth.command=\"${tokenPath}\"`,
       "-c",
-      "model_providers.reevo_proxy.request_max_retries=0",
+      "model_providers.wardby_proxy.request_max_retries=0",
       "-c",
-      "model_providers.reevo_proxy.stream_max_retries=0",
+      "model_providers.wardby_proxy.stream_max_retries=0",
       "app-server",
       "--stdio",
     ],
@@ -169,7 +169,7 @@ async function startAppServer(port) {
   );
   const rpc = new RpcClient(child);
   await rpc.request("initialize", {
-    clientInfo: { name: "reevo-task0-spike", version: "0" },
+    clientInfo: { name: "wardby-task0-spike", version: "0" },
     capabilities: {},
   });
   rpc.notify("initialized", {});

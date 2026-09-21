@@ -31,7 +31,7 @@
 import { dispatchRun } from "../../core/dispatch.js";
 import { CodingBaseRefSchema, CodingTaskOverrideSchema } from "../../coding/protocol.js";
 import { z } from "zod";
-import type { ReevoMcpServer } from "../server.js";
+import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { createTaskResult, getTask, cancelTask } from "../tasks/manager.js";
 import { canMutate, requireOwnedAgent, requireOwnedTask } from "../auth/ownership.js";
@@ -54,7 +54,7 @@ function parseTriggerArgs(args: unknown): z.infer<typeof TriggerAgentSchema> {
   throw new McpError(400, `Invalid trigger_agent arguments: ${details}`);
 }
 
-export function registerTriggerTool(mcp: ReevoMcpServer): void {
+export function registerTriggerTool(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "trigger_agent",
     scope: "runs:trigger",

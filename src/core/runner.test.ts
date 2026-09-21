@@ -419,7 +419,7 @@ describe("runAgent", () => {
   });
 
   it("loads attached tools' cached JSON Schema for the engine (not re-derived per run)", async () => {
-    // jsonSchema is derived once at `reevo tool create` time (cli.ts) and
+    // jsonSchema is derived once at `wardby tool create` time (cli.ts) and
     // cached on the row — executeRun just reads it, it never re-derives.
     const cachedJsonSchema = {
       type: "object",

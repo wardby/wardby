@@ -94,12 +94,12 @@ describe("GitHubAppClient", () => {
       if (url.endsWith("/installation")) return json({ id: 42 });
       if (url.endsWith("/access_tokens")) return tokenResponse();
       if (url.includes("/pulls?")) {
-        expect(new URL(url).searchParams.get("head")).toBe("openai:reevo/run-run-1");
+        expect(new URL(url).searchParams.get("head")).toBe("openai:wardby/run-run-1");
         return json([
           {
             number: 7,
             html_url: "https://github.com/openai/example/pull/7",
-            body: "<!-- reevo-run:run-1 -->",
+            body: "<!-- wardby:run-1 -->",
             draft: true,
           },
         ]);
@@ -114,7 +114,7 @@ describe("GitHubAppClient", () => {
         runId: "run-1",
         repository: "openai/example",
         baseRef: "main",
-        headRef: "reevo/run-run-1",
+        headRef: "wardby/run-run-1",
       }),
     ).resolves.toEqual({ number: 7, url: "https://github.com/openai/example/pull/7" });
     expect(methods.filter((method) => method === "POST /repos/openai/example/pulls")).toHaveLength(0);
@@ -135,7 +135,7 @@ describe("GitHubAppClient", () => {
               {
                 number: 8,
                 html_url: "https://github.com/openai/example/pull/8",
-                body: "<!-- reevo-run:run-1 -->",
+                body: "<!-- wardby:run-1 -->",
                 draft: true,
               },
             ]);
@@ -154,14 +154,14 @@ describe("GitHubAppClient", () => {
         runId: "run-1",
         repository: "openai/example",
         baseRef: "main",
-        headRef: "reevo/run-run-1",
+        headRef: "wardby/run-run-1",
       }),
     ).resolves.toEqual({ number: 8, url: "https://github.com/openai/example/pull/8" });
     expect(createBody).toEqual({
-      title: "Reevo run run-1",
-      head: "reevo/run-run-1",
+      title: "Wardby run run-1",
+      head: "wardby/run-run-1",
       base: "main",
-      body: "<!-- reevo-run:run-1 -->",
+      body: "<!-- wardby:run-1 -->",
       draft: true,
     });
   });
@@ -186,7 +186,7 @@ describe("GitHubAppClient", () => {
       runId: "run-1",
       repository: "openai/example",
       baseRef: "main",
-      headRef: "reevo/run-run-1",
+      headRef: "wardby/run-run-1",
       summary: "Added a hello.py script and confirmed it runs.",
       tests: [
         { command: "python3 hello.py", outcome: "passed" },
@@ -194,9 +194,9 @@ describe("GitHubAppClient", () => {
       ],
     });
 
-    expect(createBody?.title).toBe("Reevo run run-1");
+    expect(createBody?.title).toBe("Wardby run run-1");
     const body = createBody?.body as string;
-    expect(body.startsWith("<!-- reevo-run:run-1 -->\n")).toBe(true);
+    expect(body.startsWith("<!-- wardby:run-1 -->\n")).toBe(true);
     expect(body).toContain("Added a hello.py script and confirmed it runs.");
     expect(body).toContain("`python3 hello.py`: passed");
     expect(body).toContain("`pytest -q`: failed");
@@ -222,10 +222,10 @@ describe("GitHubAppClient", () => {
       runId: "run-1",
       repository: "openai/example",
       baseRef: "main",
-      headRef: "reevo/run-run-1",
+      headRef: "wardby/run-run-1",
       tag: "JIRA-123",
     });
-    expect(createBody?.title).toBe("[JIRA-123] Reevo run run-1");
+    expect(createBody?.title).toBe("[JIRA-123] Wardby run run-1");
   });
 
   it("normalizes the URL returned by a successful draft PR creation", async () => {
@@ -253,7 +253,7 @@ describe("GitHubAppClient", () => {
         runId: "run-1",
         repository: "openai/example",
         baseRef: "main",
-        headRef: "reevo/run-run-1",
+        headRef: "wardby/run-run-1",
       }),
     ).resolves.toEqual({ number: 9, url: "https://github.com/openai/example/pull/9" });
   });
@@ -279,7 +279,7 @@ describe("GitHubAppClient", () => {
           {
             number: 7,
             html_url: "https://github.com/OpenAI/Example/pull/7",
-            body: "<!-- reevo-run:run-1 -->",
+            body: "<!-- wardby:run-1 -->",
             draft: false,
           },
         ]);
@@ -292,7 +292,7 @@ describe("GitHubAppClient", () => {
         runId: "run-1",
         repository: "openai/example",
         baseRef: "main",
-        headRef: "reevo/run-run-1",
+        headRef: "wardby/run-run-1",
       }),
     ).rejects.toThrow("github_pull_request_not_draft");
   });
@@ -302,7 +302,7 @@ describe("GitHubAppClient", () => {
       {
         number: 23,
         html_url: "https://github.com/openai/example/pull/23",
-        body: "<!-- reevo-run:run-1 -->",
+        body: "<!-- wardby:run-1 -->",
         draft: true,
       },
     ];
@@ -330,11 +330,11 @@ describe("GitHubAppClient", () => {
         rootRunId: "run-1",
         repository: "openai/example",
         baseRef: "main",
-        headRef: "reevo/run-run-1",
+        headRef: "wardby/run-run-1",
         body: "working...",
       });
 
-      expect(createdBody).toBe("<!-- reevo-run-status:run-2 -->\n\nworking...");
+      expect(createdBody).toBe("<!-- wardby-status:run-2 -->\n\nworking...");
     });
 
     it("upsertContinuationStatusComment PATCHes the existing marked comment instead of creating a duplicate", async () => {
@@ -347,7 +347,7 @@ describe("GitHubAppClient", () => {
         if (url.endsWith("/access_tokens")) return tokenResponse();
         if (url.includes("/pulls?")) return json(PR_LOOKUP_RESPONSE);
         if (url.includes("/issues/23/comments") && method === "GET") {
-          return json([{ id: 555, body: "<!-- reevo-run-status:run-2 -->\n\nold" }]);
+          return json([{ id: 555, body: "<!-- wardby-status:run-2 -->\n\nold" }]);
         }
         if (url.includes("/issues/23/comments") && method === "POST") {
           postCalls += 1;
@@ -367,11 +367,11 @@ describe("GitHubAppClient", () => {
         rootRunId: "run-1",
         repository: "openai/example",
         baseRef: "main",
-        headRef: "reevo/run-run-1",
+        headRef: "wardby/run-run-1",
         body: "still working...",
       });
 
-      expect(patchedBody).toBe("<!-- reevo-run-status:run-2 -->\n\nstill working...");
+      expect(patchedBody).toBe("<!-- wardby-status:run-2 -->\n\nstill working...");
       expect(postCalls).toBe(0);
     });
 
@@ -398,7 +398,7 @@ describe("GitHubAppClient", () => {
         rootRunId: "run-1",
         repository: "openai/example",
         baseRef: "main",
-        headRef: "reevo/run-run-1",
+        headRef: "wardby/run-run-1",
         body: "done",
       });
 

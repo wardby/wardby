@@ -1,4 +1,4 @@
-// Host APIs a migration bundle's tool may reference that reevo will NOT
+// Host APIs a migration bundle's tool may reference that wardby will NOT
 // provide. sendEmail/getInboundEmail are intentionally absent here: they
 // exist as throwing placeholders in SANDBOX_PRELUDE (they import fine and
 // fail at runtime). npmLockUpdate is roadmap-excluded (spec §3.3), so a tool

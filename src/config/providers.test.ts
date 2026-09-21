@@ -27,7 +27,7 @@ describe("loadGitHubVcsConfig", () => {
       loadGitHubVcsConfig({
         GITHUB_APP_ID: "123",
         GITHUB_APP_PRIVATE_KEY: "private-key",
-        VCS_WORK_ROOT: "/var/lib/reevo-vcs",
+        VCS_WORK_ROOT: "/var/lib/wardby-vcs",
         GITHUB_API_VERSION: "2026-03-10",
         VCS_MAX_CHANGED_FILES: "50",
         VCS_MAX_DIFF_BYTES: "4096",
@@ -35,7 +35,7 @@ describe("loadGitHubVcsConfig", () => {
     ).toEqual({
       appId: "123",
       privateKey: "private-key",
-      workRoot: "/var/lib/reevo-vcs",
+      workRoot: "/var/lib/wardby-vcs",
       apiVersion: "2026-03-10",
       maxChangedFiles: 50,
       maxDiffBytes: 4096,
@@ -54,11 +54,11 @@ describe("loadContainerExecutorConfig", () => {
     expect(
       loadContainerExecutorConfig({
         CODING_WORKER_IMAGE: `worker@sha256:${"a".repeat(64)}`,
-        CODING_PROXY_CONTAINER: "reevo-proxy",
+        CODING_PROXY_CONTAINER: "wardby-proxy",
         CODING_CPUS: "1.5",
       }),
     ).toMatchObject({
-      proxyContainer: "reevo-proxy",
+      proxyContainer: "wardby-proxy",
       cpus: 1.5,
       memoryMb: 2048,
       pids: 128,
@@ -127,8 +127,8 @@ describe("loadMcpConfig", () => {
 
 describe("loadDbosConfig", () => {
   it("generates a per-call UUID for the executor id when none is set, rather than leaving it undefined", () => {
-    const config = loadDbosConfig({ DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo" });
-    expect(config.systemDatabaseUrl).toBe("postgresql://reevo:reevo@localhost:55432/reevo");
+    const config = loadDbosConfig({ DATABASE_URL: "postgresql://wardby:wardby@localhost:55432/wardby" });
+    expect(config.systemDatabaseUrl).toBe("postgresql://wardby:wardby@localhost:55432/wardby");
     expect(config.schemaName).toBe("dbos");
     // v4 UUID shape: 8-4-4-4-12 hex, third group starts with "4".
     expect(config.executorId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);

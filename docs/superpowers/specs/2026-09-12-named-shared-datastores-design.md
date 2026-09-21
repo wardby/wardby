@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-12
 **Status:** Proposed (design; not yet planned or implemented)
-**Author:** reevo-run maintainer
+**Author:** wardby maintainer
 **Related:** `docs/private/2026-09-05-roadmap-mcp-native.md` (un-phased "Named / shared
 datastores" item); `docs/private/2026-09-07-migration-bundle-spec.md`
 (§ `datastores-shared.json`); `docs/private/2026-09-08-tier1-importer-plan.md`
@@ -10,10 +10,10 @@ datastores" item); `docs/private/2026-09-07-migration-bundle-spec.md`
 `docs/superpowers/specs/2026-09-10-per-attachment-secret-binding-name-design.md`
 (the `boundName` precedent this design reuses)
 
-> **Clean-room note.** This is a reevo-run platform change grounded entirely in
-> reevo's own data model. It describes the _concept_ of a named datastore shared
+> **Clean-room note.** This is a wardby platform change grounded entirely in
+> wardby's own data model. It describes the _concept_ of a named datastore shared
 > across agents (which the migration-bundle spec already documents as a gated
-> capability reevo lacks) and does not read from or copy any agent-cron source.
+> capability wardby lacks) and does not read from or copy any agent-cron source.
 
 ---
 
@@ -21,14 +21,14 @@ datastores" item); `docs/private/2026-09-07-migration-bundle-spec.md`
 
 Let multiple agents read and write a common, named key/value store — closing
 the gap the roadmap and migration-bundle docs already flag: _"agent-cron has
-named datastores shared across agents; reevo's is per-agent."_ Land the core
+named datastores shared across agents; wardby's is per-agent."_ Land the core
 subsystem (schema, ownership, attach/detach, sandbox API, MCP tools) and wire
 the Tier-1 importer to consume `config/datastores-shared.json` instead of
 unconditionally skipping it.
 
 ## Background: what's missing today
 
-reevo's `Datastore` seam (`src/providers/datastore/`) is strictly per-agent:
+wardby's `Datastore` seam (`src/providers/datastore/`) is strictly per-agent:
 `DatastoreEntry` is keyed `(agentId, key)`, and every sandboxed tool call is
 bound to its own run's `agentId` before it ever reaches `datastore.get/set`
 (`src/sandbox/host-functions.ts`). There is no resource one agent can name and

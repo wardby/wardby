@@ -4,10 +4,10 @@ import { safeWorkerErrorCode } from "../coding-worker/errors.js";
 import { runClaudeCodingWorker } from "./driver.js";
 import { createClaudeSdkQuery } from "./sdk.js";
 
-const INPUT_PATH = "/run/reevo/input/input.json";
-const OUTPUT_PATH = "/run/reevo/output/result.json";
+const INPUT_PATH = "/run/wardby/input/input.json";
+const OUTPUT_PATH = "/run/wardby/output/result.json";
 
-function required(name: "REEVO_PROXY_URL" | "REEVO_RUN_CAPABILITY"): string {
+function required(name: "WARDBY_PROXY_URL" | "WARDBY_RUN_CAPABILITY"): string {
   const value = process.env[name];
   if (!value) throw new Error(`${name.toLowerCase()}_missing`);
   return value;
@@ -22,8 +22,8 @@ try {
   stage = "execution";
   const output = await runClaudeCodingWorker({
     input,
-    proxyBaseUrl: required("REEVO_PROXY_URL"),
-    capability: required("REEVO_RUN_CAPABILITY"),
+    proxyBaseUrl: required("WARDBY_PROXY_URL"),
+    capability: required("WARDBY_RUN_CAPABILITY"),
     signal: controller.signal,
     createQuery: createClaudeSdkQuery,
     onProgress: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),

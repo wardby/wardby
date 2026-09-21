@@ -234,14 +234,14 @@ Expected: `prisma:migrate` reports the new migration applied; no errors.
 - [ ] **Step 7: Run the required drift check (CLAUDE.md)**
 
 ```bash
-docker exec local-postgres-1 psql -U reevo -d reevo \
-  -c "DROP DATABASE IF EXISTS reevo_shadow;" -c "CREATE DATABASE reevo_shadow;"
+docker exec local-postgres-1 psql -U wardby -d wardby \
+  -c "DROP DATABASE IF EXISTS wardby_shadow;" -c "CREATE DATABASE wardby_shadow;"
 npx prisma migrate diff \
   --from-migrations prisma/migrations \
   --to-schema-datamodel prisma/schema.prisma \
-  --shadow-database-url "postgresql://reevo:reevo@localhost:55432/reevo_shadow" \
+  --shadow-database-url "postgresql://wardby:wardby@localhost:55432/wardby_shadow" \
   --script
-docker exec local-postgres-1 psql -U reevo -d reevo -c "DROP DATABASE IF EXISTS reevo_shadow;"
+docker exec local-postgres-1 psql -U wardby -d wardby -c "DROP DATABASE IF EXISTS wardby_shadow;"
 npx prisma validate
 ```
 
@@ -320,7 +320,7 @@ it("two different datastoreIds never see each other's shared keys", async () => 
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `DATABASE_URL=postgresql://reevo:reevo@localhost:55432/reevo npx vitest run src/providers/datastore/postgres.test.ts`
+Run: `DATABASE_URL=postgresql://wardby:wardby@localhost:55432/wardby npx vitest run src/providers/datastore/postgres.test.ts`
 Expected: FAIL — `datastore.setShared is not a function` (the method doesn't exist yet).
 
 - [ ] **Step 3: Add `getShared`/`setShared`/`deleteShared`/`listShared` to the `Datastore` interface**
@@ -412,7 +412,7 @@ export type DatastoreDb = Pick<PrismaClient, "datastoreEntry" | "datastore" | "$
 
 - [ ] **Step 5: Run test to verify it passes**
 
-Run: `DATABASE_URL=postgresql://reevo:reevo@localhost:55432/reevo npx vitest run src/providers/datastore/postgres.test.ts`
+Run: `DATABASE_URL=postgresql://wardby:wardby@localhost:55432/wardby npx vitest run src/providers/datastore/postgres.test.ts`
 Expected: PASS (all tests, including the two new ones and every pre-existing one).
 
 - [ ] **Step 6: Fix the compile break — add trivial shared-method stubs to every fake `Datastore`**
@@ -1515,7 +1515,7 @@ import { requireOwnedDatastore } from "../auth/ownership.js";
 Add the new tools inside `registerDatastoreTools`, and update the four existing ones. Full replacement of the file body from the `handler` of `datastore_get` through the end of `registerDatastoreTools`:
 
 ```ts
-export function registerDatastoreTools(mcp: ReevoMcpServer): void {
+export function registerDatastoreTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "create_datastore",
     scope: "datastore:write",

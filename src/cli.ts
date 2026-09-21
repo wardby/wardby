@@ -2,16 +2,16 @@
 /**
  * Minimal CLI.
  *
- *   reevo agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule "<cron>"] [--timezone <tz>] [--memory-enabled]
- *   reevo agent list
- *   reevo agent schedule <name> --cron "<expr>" [--timezone <tz>] [--disable]
- *   reevo run <name>
- *   reevo runs [--agent <name>] [--limit N] [--status <s>]
- *   reevo scheduler [--scope default]
- *   reevo mcp   (MCP_TRANSPORT=stdio|http selects the transport; authoring/
+ *   wardby agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule "<cron>"] [--timezone <tz>] [--memory-enabled]
+ *   wardby agent list
+ *   wardby agent schedule <name> --cron "<expr>" [--timezone <tz>] [--disable]
+ *   wardby run <name>
+ *   wardby runs [--agent <name>] [--limit N] [--status <s>]
+ *   wardby scheduler [--scope default]
+ *   wardby mcp   (MCP_TRANSPORT=stdio|http selects the transport; authoring/
  *                control is MCP-first from here — this floor keeps working
  *                before/without an MCP client)
- *   reevo serve [--scope default]   (everything: mcp + scheduler + reconciler; the
+ *   wardby serve [--scope default]   (everything: mcp + scheduler + reconciler; the
  *                                    image's default command, and what a
  *                                    single-container deployment should run)
  */
@@ -307,7 +307,7 @@ async function toolList(args: string[]): Promise<void> {
 async function agentSchedule(args: string[]): Promise<void> {
   const [name, ...rest] = args;
   if (!name) {
-    fail('agent schedule requires an agent name: reevo agent schedule <name> --cron "<expr>"');
+    fail('agent schedule requires an agent name: wardby agent schedule <name> --cron "<expr>"');
   }
 
   const { values } = parseArgs({
@@ -369,7 +369,7 @@ async function agentList(): Promise<void> {
 
 async function run(name: string | undefined): Promise<void> {
   if (!name) {
-    fail("run requires an agent name: reevo run <name>");
+    fail("run requires an agent name: wardby run <name>");
   }
 
   const agent = await prisma.agent.findUnique({ where: { name } });
@@ -517,11 +517,11 @@ async function scheduler(args: string[]): Promise<void> {
   const reconciler = startReconciler({ db: prisma, executor });
   const sched = startScheduler({ executor, db: prisma, scope });
 
-  console.log(`reevo scheduler started (scope "${scope}"). Press Ctrl+C to stop.`);
+  console.log(`wardby scheduler started (scope "${scope}"). Press Ctrl+C to stop.`);
 
   await new Promise<void>((resolve) => {
     const shutdown = () => {
-      console.log("\nreevo scheduler shutting down...");
+      console.log("\nwardby scheduler shutting down...");
       sched.stop();
       reconciler.stop();
       void Promise.resolve(executor.close?.())
@@ -543,10 +543,10 @@ async function mcp(): Promise<void> {
   // stderr, not stdout: in stdio mode stdout IS the JSON-RPC protocol
   // stream (unlike `scheduler`, which owns no such stream), so a stray
   // console.log here would corrupt every stdio-connected client.
-  console.error("reevo mcp started. Press Ctrl+C to stop.");
+  console.error("wardby mcp started. Press Ctrl+C to stop.");
   await new Promise<void>((resolve) => {
     const shutdown = () => {
-      console.error("\nreevo mcp shutting down...");
+      console.error("\nwardby mcp shutting down...");
       void Promise.resolve(handle.close())
         .catch((err: unknown) => cliLog.warn({ err }, "mcp handle close failed during shutdown"))
         .finally(resolve);
@@ -561,10 +561,10 @@ async function serve(args: string[]): Promise<void> {
   const handle = await startServe({ scope: values.scope });
   // stderr, like `mcp`: stdout must stay clean in case a future transport
   // multiplexes it, and this keeps the two commands' output consistent.
-  console.error(`reevo serve started (scope "${values.scope ?? "default"}"). Press Ctrl+C to stop.`);
+  console.error(`wardby serve started (scope "${values.scope ?? "default"}"). Press Ctrl+C to stop.`);
   await new Promise<void>((resolve) => {
     const shutdown = () => {
-      console.error("\nreevo serve shutting down...");
+      console.error("\nwardby serve shutting down...");
       void handle
         .close()
         .catch((err: unknown) => cliLog.warn({ err }, "serve close failed during shutdown"))
@@ -621,21 +621,21 @@ async function main(): Promise<void> {
     } else {
       fail(
         "usage:\n" +
-          '  reevo agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule "<cron>"] [--timezone <tz>] [--max-turns <n>]\n' +
-          "  reevo agent list\n" +
-          '  reevo agent schedule <name> --cron "<expr>" [--timezone <tz>] [--disable]\n' +
-          "  reevo tool create --name <n> --description <d> --params <file> --code <file>\n" +
-          "  reevo tool attach <tool-name> <agent-name>\n" +
-          "  reevo tool detach <tool-name> <agent-name>\n" +
-          "  reevo tool list [--agent <name>]\n" +
-          "  reevo run <name>\n" +
-          "  reevo runs [--agent <name>] [--limit N] [--status <s>]\n" +
-          "  reevo coding preflight\n" +
-          "  reevo coding cleanup --run-id <id>\n" +
-          "  reevo scheduler [--scope default]\n" +
-          "  reevo mcp   (MCP_TRANSPORT=stdio|http selects the transport)\n" +
-          "  reevo serve [--scope default]   (mcp + scheduler + reconciler in one process; http only)\n" +
-          "  reevo import <bundle-dir> --owner <subject> [--public] [--include-secrets --transfer-key <pem>] [--default-budget <usd>] [--dry-run] [--prefix <p>] [--on-conflict fail|skip|rename] [--allow-open-fetch]",
+          '  wardby agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule "<cron>"] [--timezone <tz>] [--max-turns <n>]\n' +
+          "  wardby agent list\n" +
+          '  wardby agent schedule <name> --cron "<expr>" [--timezone <tz>] [--disable]\n' +
+          "  wardby tool create --name <n> --description <d> --params <file> --code <file>\n" +
+          "  wardby tool attach <tool-name> <agent-name>\n" +
+          "  wardby tool detach <tool-name> <agent-name>\n" +
+          "  wardby tool list [--agent <name>]\n" +
+          "  wardby run <name>\n" +
+          "  wardby runs [--agent <name>] [--limit N] [--status <s>]\n" +
+          "  wardby coding preflight\n" +
+          "  wardby coding cleanup --run-id <id>\n" +
+          "  wardby scheduler [--scope default]\n" +
+          "  wardby mcp   (MCP_TRANSPORT=stdio|http selects the transport)\n" +
+          "  wardby serve [--scope default]   (mcp + scheduler + reconciler in one process; http only)\n" +
+          "  wardby import <bundle-dir> --owner <subject> [--public] [--include-secrets --transfer-key <pem>] [--default-budget <usd>] [--dry-run] [--prefix <p>] [--on-conflict fail|skip|rename] [--allow-open-fetch]",
       );
     }
   } finally {

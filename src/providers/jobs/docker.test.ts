@@ -18,8 +18,8 @@ import {
 import { buildDockerIsolationPlan, WORKER_PATHS } from "./docker-isolation.js";
 import type { JobHandle, JobResult, JobSpec } from "./types.js";
 
-const image = `registry.example/reevo-worker@sha256:${"a".repeat(64)}`;
-const toolImage = `registry.example/reevo-tools@sha256:${"b".repeat(64)}`;
+const image = `registry.example/wardby-worker@sha256:${"a".repeat(64)}`;
+const toolImage = `registry.example/wardby-tools@sha256:${"b".repeat(64)}`;
 const capability = "rrp_0123456789abcdef";
 const temporaryRoots: string[] = [];
 
@@ -37,14 +37,14 @@ describe("Docker artifact transfer", () => {
 
 describe("Docker cleanup classification", () => {
   it("treats an already-disconnected network attachment as missing", () => {
-    expect(isMissingDockerResource("container abc is not connected to network reevo-net-run")).toBe(true);
+    expect(isMissingDockerResource("container abc is not connected to network wardby-net-run")).toBe(true);
     expect(isMissingDockerResource("permission denied")).toBe(false);
   });
 
   it("treats Docker's own 'network ... not found' wording as missing", () => {
     // Verified live against the Docker CLI: `docker network inspect`/`rm`/`disconnect`
     // on a genuinely-missing network reply "network <name> not found", not "no such network".
-    expect(isMissingDockerResource("Error response from daemon: network reevo-net-run not found")).toBe(true);
+    expect(isMissingDockerResource("Error response from daemon: network wardby-net-run not found")).toBe(true);
   });
 });
 
@@ -166,10 +166,10 @@ class FakeDocker implements DockerCommandRunner {
       return this.ok();
     }
     if (group === "container" && action === "logs" && args.at(-1) === this.plan.names.keeperContainer) {
-      return { stdout: "reevo_storage_ready\n", stderr: "" };
+      return { stdout: "wardby_storage_ready\n", stderr: "" };
     }
     if (group === "container" && action === "logs" && args.at(-1) === this.plan.names.toolContainer) {
-      return { stdout: "reevo_tool_runner_ready\n", stderr: "" };
+      return { stdout: "wardby_tool_runner_ready\n", stderr: "" };
     }
     if (group === "container" && action === "exec") {
       return args.includes("node") ? { stdout: this.output, stderr: "" } : this.ok();
@@ -243,7 +243,7 @@ class FakeDocker implements DockerCommandRunner {
           Networks: this.proxyConnected
             ? {
                 bridge: { Gateway: "172.17.0.1" },
-                [this.plan.names.network]: { Aliases: ["reevo-proxy"], Gateway: "" },
+                [this.plan.names.network]: { Aliases: ["wardby-proxy"], Gateway: "" },
               }
             : { bridge: { Gateway: "172.17.0.1" } },
         },
@@ -305,7 +305,7 @@ class FakeDocker implements DockerCommandRunner {
       Config: {
         User: "10001:10001",
         Image: this.job.image,
-        Env: ["REEVO_PROXY_URL=http://reevo-proxy:8787", `REEVO_RUN_CAPABILITY=${capability}`],
+        Env: ["WARDBY_PROXY_URL=http://wardby-proxy:8787", `WARDBY_RUN_CAPABILITY=${capability}`],
         Labels: this.resourceLabels.get(this.plan.names.workerContainer),
       },
       HostConfig: {
@@ -337,7 +337,7 @@ class FakeDocker implements DockerCommandRunner {
         GroupAdd: null,
         PortBindings: {},
         PublishAllPorts: false,
-        Tmpfs: { "/tmp": "rw,noexec", "/home/reevo": "rw,noexec" },
+        Tmpfs: { "/tmp": "rw,noexec", "/home/wardby": "rw,noexec" },
         Mounts: mounts.map(([target, readOnly, subpath]) => ({
           Type: "volume",
           Source: this.plan.names.storageVolume,
@@ -404,7 +404,7 @@ class FakeDocker implements DockerCommandRunner {
         GroupAdd: null,
         PortBindings: {},
         PublishAllPorts: false,
-        Tmpfs: { "/tmp": "rw,noexec", "/home/reevo": "rw,noexec" },
+        Tmpfs: { "/tmp": "rw,noexec", "/home/wardby": "rw,noexec" },
         Mounts: mounts.map(([target, writable, subpath]) => ({
           Type: "volume",
           Source: this.plan.names.storageVolume,
@@ -436,7 +436,7 @@ class FakeDocker implements DockerCommandRunner {
 }
 
 async function harness(runId = "docker-run-1", override: Partial<JobSpec> = {}) {
-  const root = await mkdtemp(join(tmpdir(), "reevo-docker-job-"));
+  const root = await mkdtemp(join(tmpdir(), "wardby-docker-job-"));
   temporaryRoots.push(root);
   const job = { ...spec(runId), ...override };
   const runRoot = join(root, "workspaces", runId);
@@ -517,7 +517,7 @@ describe("DockerJobLauncher", () => {
     expect(encoded).not.toContain("must-not-reach-docker");
     expect(encoded).not.toContain(job.inputArtifact);
     expect(encoded).toContain(
-      `io.reevo.spec-sha256=${createHash("sha256")
+      `io.wardby.spec-sha256=${createHash("sha256")
         .update(JSON.stringify({ ...job, labels: { untrusted: "must-not-reach-docker" } }))
         .digest("hex")}`,
     );
@@ -553,7 +553,7 @@ describe("DockerJobLauncher", () => {
       created.docker.plan.names.toolContainer,
       created.docker.plan.names.workerContainer,
     ]);
-    expect(JSON.stringify(created.docker.calls)).not.toContain(`REEVO_RUN_CAPABILITY=${capability}`);
+    expect(JSON.stringify(created.docker.calls)).not.toContain(`WARDBY_RUN_CAPABILITY=${capability}`);
     await expect(created.launcher.status(handle)).resolves.toEqual({ state: "running" });
     created.docker.finish();
     await expect(created.launcher.collect(handle)).resolves.toMatchObject({ reason: "completed" });
@@ -606,7 +606,7 @@ describe("DockerJobLauncher", () => {
   });
 
   it("does not crash the process when a stale record's startup cleanup hits an unrecognized docker error", async () => {
-    const root = await mkdtemp(join(tmpdir(), "reevo-docker-job-"));
+    const root = await mkdtemp(join(tmpdir(), "wardby-docker-job-"));
     temporaryRoots.push(root);
     const stateRoot = join(root, "state");
     await mkdir(stateRoot, { recursive: true });
@@ -668,7 +668,7 @@ describe("DockerJobLauncher", () => {
 
 describe("Docker workspace validation", () => {
   it("rejects nested Git control paths, escaping symlinks, and oversized output", async () => {
-    const root = await mkdtemp(join(tmpdir(), "reevo-docker-output-"));
+    const root = await mkdtemp(join(tmpdir(), "wardby-docker-output-"));
     temporaryRoots.push(root);
     await mkdir(join(root, ".git"));
     await expect(validateMaterializedWorkspace(root, 1024)).rejects.toThrow("docker_workspace_nested_repository");

@@ -37,7 +37,7 @@ export const DEFAULT_SANDBOX_LIMITS: SandboxLimits = {
  * inside the sandbox so a serialization failure is itself a catchable
  * sandbox exception, not a host-side surprise).
  */
-export const NON_SERIALIZABLE_MARKER = "__reevo_non_serializable__:";
+export const NON_SERIALIZABLE_MARKER = "__wardby_non_serializable__:";
 
 function boundedError(context: QuickJSContext, handle: QuickJSHandle) {
   const result: { name?: string; message?: string } = {};

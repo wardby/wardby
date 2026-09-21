@@ -5,7 +5,7 @@ import type { Bundle } from "./bundle.js";
 import type { Reconciliation } from "./preflight.js";
 import type { TransferEnvelope } from "../providers/secrets/transfer-envelope.js";
 
-const INFO = Buffer.from("reevo-secret-transfer-v1");
+const INFO = Buffer.from("wardby-secret-transfer-v1");
 const rawOf = (k: KeyObject) => (k.export({ type: "spki", format: "der" }) as Buffer).subarray(-32);
 
 // Test-only sealer matching spec §5.3 (mirrors the exporter).

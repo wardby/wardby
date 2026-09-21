@@ -8,7 +8,7 @@ const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
 
 async function root() {
-  const path = await mkdtemp(join(tmpdir(), "reevo-worker-"));
+  const path = await mkdtemp(join(tmpdir(), "wardby-worker-"));
   roots.push(path);
   return path;
 }
@@ -24,7 +24,7 @@ describe("coding worker artifacts", () => {
         runId: "r1",
         repository: "OpenAI/Example",
         baseRef: "main",
-        headRef: "reevo/run-r1",
+        headRef: "wardby/run-r1",
         task: "Fix it",
         model: "gpt-5.6-luna",
         budgetUsd: 1,

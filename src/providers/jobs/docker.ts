@@ -38,7 +38,7 @@ const MAX_DOCKER_OUTPUT_BYTES = 1024 * 1024;
 const MAX_DOCKER_SEED_DIAGNOSTIC_BYTES = 4 * 1024;
 const MAX_WORKSPACE_ENTRIES = 100_000;
 const TERMINAL_PHASES = new Set<DockerJobRecord["phase"]>(["succeeded", "failed", "stopped", "lost", "removed"]);
-const SAFE_WORKER_DIAGNOSTIC = /^(?:worker_[a-z_]+|coding_[a-z_]+|reevo_[a-z_]+)$/;
+const SAFE_WORKER_DIAGNOSTIC = /^(?:worker_[a-z_]+|coding_[a-z_]+|wardby_[a-z_]+)$/;
 const dockerLog = logger.child({ module: "docker-jobs" });
 export interface DockerCommandOptions {
   env?: Record<string, string>;
@@ -90,7 +90,7 @@ export class NodeDockerCommandRunner implements DockerCommandRunner {
   async run(args: readonly string[], options: DockerCommandOptions = {}): Promise<DockerCommandResult> {
     if (args.some((argument) => argument.includes("\0"))) throw new Error("docker_argument_invalid");
     const extraEnv = options.env ?? {};
-    if (Object.keys(extraEnv).some((key) => key !== "REEVO_RUN_CAPABILITY"))
+    if (Object.keys(extraEnv).some((key) => key !== "WARDBY_RUN_CAPABILITY"))
       throw new Error("docker_environment_invalid");
     const env: NodeJS.ProcessEnv = {
       PATH: this.path,
@@ -162,7 +162,7 @@ function dockerSeedFailure(stage: "archive" | "extract", exitCode: number | null
   else if (/executable file not found|command not found/i.test(output)) diagnostic = "command_missing";
   else if (/no such file or directory/i.test(output)) diagnostic = "path_missing";
   // CI enables this only for the synthetic Vitest fixture, never for production runs.
-  const debugOutput = process.env.NODE_ENV === "test" && process.env.REEVO_DOCKER_SEED_DEBUG === "1";
+  const debugOutput = process.env.NODE_ENV === "test" && process.env.WARDBY_DOCKER_SEED_DEBUG === "1";
   const details = debugOutput ? `:stderr=${JSON.stringify(output.trim() || "<empty>")}` : "";
   return new Error(`docker_seed_failed:${stage}:${diagnostic}${details}`);
 }
@@ -262,7 +262,7 @@ export class NodeDockerArtifactTransfer implements DockerArtifactTransfer {
       homeDir: "/tmp",
       path: this.path,
     });
-    await docker.run(["container", "cp", sourceFile, `${container}:/run/reevo/storage/input/input.json`]);
+    await docker.run(["container", "cp", sourceFile, `${container}:/run/wardby/storage/input/input.json`]);
   }
 
   async materializeDirectory(container: string, source: string, destination: string, maxBytes: number): Promise<void> {
@@ -277,8 +277,8 @@ export class NodeDockerArtifactTransfer implements DockerArtifactTransfer {
       throw new Error("docker_workspace_destination_invalid");
     }
 
-    const staging = await mkdtemp(join(parentReal, ".reevo-workspace-stage-"));
-    const backup = await mkdtemp(join(parentReal, ".reevo-workspace-backup-"));
+    const staging = await mkdtemp(join(parentReal, ".wardby-workspace-stage-"));
+    const backup = await mkdtemp(join(parentReal, ".wardby-workspace-backup-"));
     await rm(backup, { recursive: true });
     let targetMoved = false;
     try {
@@ -437,14 +437,14 @@ function stateFileName(runId: string): string {
 
 function resourceLabels(record: DockerJobRecord): Record<string, string> {
   return {
-    "io.reevo.managed": "true",
-    "io.reevo.component": "coding-worker",
-    "io.reevo.run-sha256": hash(record.runId),
-    "io.reevo.run-id": record.runId,
-    "io.reevo.job-id": record.jobId,
-    "io.reevo.spec-sha256": record.specHash,
-    "io.reevo.created-at": new Date(record.createdAt).toISOString(),
-    "io.reevo.schema": String(STATE_SCHEMA_VERSION),
+    "io.wardby.managed": "true",
+    "io.wardby.component": "coding-worker",
+    "io.wardby.run-sha256": hash(record.runId),
+    "io.wardby.run-id": record.runId,
+    "io.wardby.job-id": record.jobId,
+    "io.wardby.spec-sha256": record.specHash,
+    "io.wardby.created-at": new Date(record.createdAt).toISOString(),
+    "io.wardby.schema": String(STATE_SCHEMA_VERSION),
   };
 }
 
@@ -453,8 +453,8 @@ function labelsMatch(actual: Record<string, string> | undefined, expected: Recor
 }
 
 function capabilityFromInspection(container: DockerContainerInspection): string | undefined {
-  return container.Config?.Env?.find((value) => value.startsWith("REEVO_RUN_CAPABILITY="))?.slice(
-    "REEVO_RUN_CAPABILITY=".length,
+  return container.Config?.Env?.find((value) => value.startsWith("WARDBY_RUN_CAPABILITY="))?.slice(
+    "WARDBY_RUN_CAPABILITY=".length,
   );
 }
 
@@ -565,7 +565,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
       }
       await this.transfer.materializeDirectory(
         this.keeperName(current),
-        "/run/reevo/storage/workspace",
+        "/run/wardby/storage/workspace",
         expected,
         current.spec.limits.diskMb * 1024 * 1024,
       );
@@ -746,7 +746,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
         }
         if (!labelsMatch(inspected.Config?.Labels, labels)) throw new Error("docker_resource_attestation_failed");
       },
-      { env: { REEVO_RUN_CAPABILITY: capability } },
+      { env: { WARDBY_RUN_CAPABILITY: capability } },
     );
     await this.startContainer(plan.names.workerContainer);
     record.phase = "active";
@@ -886,16 +886,16 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
   private async seedRun(record: DockerJobRecord, keeper: string): Promise<void> {
     const runRoot = resolve(this.workspaceRoot, record.runId);
     if (!runRoot.startsWith(`${this.workspaceRoot}/`)) throw new Error("docker_workspace_path_invalid");
-    await this.transfer.seedDirectory(resolve(runRoot, "workspace"), keeper, "/run/reevo/storage/workspace");
-    await this.transfer.seedDirectory(resolve(runRoot, "git"), keeper, "/run/reevo/storage/git");
+    await this.transfer.seedDirectory(resolve(runRoot, "workspace"), keeper, "/run/wardby/storage/workspace");
+    await this.transfer.seedDirectory(resolve(runRoot, "git"), keeper, "/run/wardby/storage/git");
     await this.transfer.seedInput(record.spec.inputArtifact, keeper);
   }
 
   private async readResultArtifact(record: DockerJobRecord): Promise<string> {
-    const staging = await mkdtemp(join(this.stateRoot, ".reevo-result-"));
+    const staging = await mkdtemp(join(this.stateRoot, ".wardby-result-"));
     const target = join(staging, "result.json");
     try {
-      await this.run(["container", "cp", `${this.keeperName(record)}:/run/reevo/storage/output/result.json`, target]);
+      await this.run(["container", "cp", `${this.keeperName(record)}:/run/wardby/storage/output/result.json`, target]);
       const metadata = await lstat(target);
       if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_CODING_ARTIFACT_BYTES) {
         throw new Error("docker_result_artifact_invalid");
@@ -960,7 +960,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     for (let attempt = 0; attempt < 100; attempt += 1) {
       try {
         const logs = await this.run(["container", "logs", "--tail", "8", keeper]);
-        if (`${logs.stdout}\n${logs.stderr}`.split("\n").includes("reevo_storage_ready")) return;
+        if (`${logs.stdout}\n${logs.stderr}`.split("\n").includes("wardby_storage_ready")) return;
       } catch {
         // A just-started container can reject log reads before its log driver initializes.
       }
@@ -975,7 +975,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     for (let attempt = 0; attempt < 100; attempt += 1) {
       try {
         const logs = await this.run(["container", "logs", "--tail", "8", tool]);
-        if (`${logs.stdout}\n${logs.stderr}`.split("\n").includes("reevo_tool_runner_ready")) return;
+        if (`${logs.stdout}\n${logs.stderr}`.split("\n").includes("wardby_tool_runner_ready")) return;
       } catch {
         // A just-started container can reject log reads before its log driver initializes.
       }

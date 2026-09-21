@@ -14,7 +14,7 @@
 
 - **ESM with explicit `.js` import specifiers** in every relative import. Node ≥22.12.
 - **No new runtime dependencies.** node:crypto and existing deps only.
-- **Prisma migrations only** — never `prisma db push`. reevo uses timestamped migration dirs (`prisma migrate dev`). This migration is additive + backfill; it must never fail on existing rows.
+- **Prisma migrations only** — never `prisma db push`. wardby uses timestamped migration dirs (`prisma migrate dev`). This migration is additive + backfill; it must never fail on existing rows.
 - **Never modify an already-applied migration file.** Add a new one.
 - **Secret plaintext is never logged or returned.** Preserve the existing "unattached name → `undefined`" convention (never a throw for a missing name).
 - **`Secret` identity uniqueness is unchanged** (`@@unique([ownerId, name])`). Only the _attachment_ gains a name.

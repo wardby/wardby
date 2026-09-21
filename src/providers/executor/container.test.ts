@@ -34,7 +34,7 @@ function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSn
     task: "Fix the bug and test it.",
     repository: "openai/example",
     baseRef: "main",
-    headRef: "reevo/run-run-1",
+    headRef: "wardby/run-run-1",
     provider: "codex",
     model: "gpt-5.6-luna",
     timeoutSec: 900,
@@ -256,7 +256,7 @@ async function harness(
   observer = new InMemoryCodingRunObserver(),
   claude?: { workerImage: string; toolImage: string },
 ) {
-  const root = await mkdtemp(join(tmpdir(), "reevo-container-executor-"));
+  const root = await mkdtemp(join(tmpdir(), "wardby-container-executor-"));
   roots.push(root);
   const events: string[] = [];
   const store = new FakeStore(snapshot(overrides));
@@ -344,11 +344,11 @@ describe("ContainerExecutor", () => {
   });
 
   it("revision-in-place: threads continuation through to the VCS layer and persists pull_request_updated", async () => {
-    const created = await harness({ rootCodingRunId: "root-run", headRef: "reevo/run-root-run" });
+    const created = await harness({ rootCodingRunId: "root-run", headRef: "wardby/run-root-run" });
     await created.executor.start("run-1");
 
     expect(created.vcs.lastPrepareInput).toMatchObject({
-      headRef: "reevo/run-root-run",
+      headRef: "wardby/run-root-run",
       continuation: { rootRunId: "root-run" },
     });
     expect(created.store.run.result).toMatchObject({ outcome: "pull_request_updated", pullRequestNumber: 42 });
@@ -405,7 +405,7 @@ describe("ContainerExecutor", () => {
         runId: "run-1",
         repository: "openai/example",
         baseRef: "main",
-        headRef: "reevo/run-run-1",
+        headRef: "wardby/run-run-1",
         protectedPaths: ["CODEOWNERS"],
       });
 
@@ -541,7 +541,7 @@ describe("ContainerExecutor", () => {
       runId: "run-1",
       repository: "openai/example",
       baseRef: "main",
-      headRef: "reevo/run-run-1",
+      headRef: "wardby/run-run-1",
       protectedPaths: ["CODEOWNERS"],
     });
     await created.executor.stop("run-1", "requested");
@@ -569,7 +569,7 @@ describe("resolveCodingWorkerImage", () => {
 
   it("resolves an additional toolchain/version from additionalWorkerImages", async () => {
     const pythonImage = `registry.example/worker-python@sha256:${"b".repeat(64)}`;
-    const root = await mkdtemp(join(tmpdir(), "reevo-container-executor-"));
+    const root = await mkdtemp(join(tmpdir(), "wardby-container-executor-"));
     roots.push(root);
     const direct = new ContainerExecutor({
       store: new FakeStore(snapshot({})),
@@ -633,7 +633,7 @@ describe("resolveCodingWorkerImage", () => {
 
   it("throws on a known toolchain with an unknown version", async () => {
     const pythonImage = `registry.example/worker-python@sha256:${"b".repeat(64)}`;
-    const root = await mkdtemp(join(tmpdir(), "reevo-container-executor-"));
+    const root = await mkdtemp(join(tmpdir(), "wardby-container-executor-"));
     roots.push(root);
     const direct = new ContainerExecutor({
       store: new FakeStore(snapshot({})),
@@ -686,7 +686,7 @@ describe("resolveCodingWorkerImage", () => {
   });
 
   it("constructor throws if any additionalWorkerImages entry is not an immutable digest", async () => {
-    const root = await mkdtemp(join(tmpdir(), "reevo-container-executor-"));
+    const root = await mkdtemp(join(tmpdir(), "wardby-container-executor-"));
     roots.push(root);
     expect(
       () =>
@@ -698,7 +698,7 @@ describe("resolveCodingWorkerImage", () => {
           capabilities: new RunCapabilityVault(),
           artifactRoot: join(root, "artifacts"),
           workerImage: IMAGE,
-          additionalWorkerImages: { "node-python": { "3.12": "reevo-coding-worker:latest" } },
+          additionalWorkerImages: { "node-python": { "3.12": "wardby-coding-worker:latest" } },
           credentialRef: "env:OPENAI_API_KEY",
           limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
           sleep: async () => {},

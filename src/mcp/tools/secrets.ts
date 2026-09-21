@@ -5,7 +5,7 @@
  */
 import { inputRequired, inputResponse } from "@modelcontextprotocol/server";
 import { createSecret, listSecrets, attachSecret, detachSecret, deleteSecret } from "../../core/secrets.js";
-import type { ReevoMcpServer } from "../server.js";
+import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { requireOwnedAgent, requireOwnedSecret } from "../auth/ownership.js";
 import { getSecretElicitationOutcome, type SecretElicitationPayload } from "./secret-elicitation.js";
@@ -24,7 +24,7 @@ export interface SecretsToolsOptions {
   protocolElicitation: boolean;
 }
 
-export function registerSecretsTools(mcp: ReevoMcpServer, opts: SecretsToolsOptions): void {
+export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOptions): void {
   mcp.registerTool({
     name: "create_secret",
     scope: "secrets:write",

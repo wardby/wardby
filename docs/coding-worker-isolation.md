@@ -8,7 +8,7 @@ and trusted VCS finalizer execute and attest this policy without weakening it.
 ## Security Boundary
 
 Coding-agent repositories and instructions are untrusted. The Docker daemon,
-host kernel, Reevo control plane, immutable worker image, and dedicated coding
+host kernel, Wardby control plane, immutable worker image, and dedicated coding
 proxy are trusted. Containers are defense in depth rather than a VM boundary;
 production should run the Docker host on a dedicated worker node or VM with no
 production credentials beyond those required by the proxy.
@@ -17,7 +17,7 @@ The Codex worker has one network attachment: a unique per-run internal bridge us
 Docker's isolated gateway mode. It has no default external route, published
 port, host mapping, custom DNS server, or direct connection to the control
 plane. A dedicated proxy container is attached to both that internal network
-as `reevo-proxy` and an external network. No other service may join the run
+as `wardby-proxy` and an external network. No other service may join the run
 network.
 
 Claude Code uses a credential-separated composite job. Its agent container is
@@ -46,7 +46,7 @@ The worker policy requires:
 - UID/GID `10001:10001`, all capabilities dropped, no new privileges, Docker's
   built-in seccomp profile, private cgroup and PID namespaces, and no host IPC.
 - A read-only root filesystem with bounded `noexec,nosuid,nodev` tmpfs mounts
-  for `/tmp` and `/home/reevo`.
+  for `/tmp` and `/home/wardby`.
 - Exact CPU, memory, equal memory+swap, PID, shared-memory, disk, and wall-clock
   limits. Equal memory and memory+swap disables additional swap allowance.
 - No devices, device requests, bind mounts, extra groups, custom DNS, extra
@@ -55,7 +55,7 @@ The worker policy requires:
   before forced termination.
 
 The capability value is inherited from the trusted launcher's child-process
-environment with `--env REEVO_RUN_CAPABILITY`; it is never included in command
+environment with `--env WARDBY_RUN_CAPABILITY`; it is never included in command
 arguments. Docker administrators can still inspect container environment, so
 daemon access remains privileged and must be tightly restricted.
 
@@ -64,14 +64,14 @@ daemon access remains privileged and must be tightly restricted.
 Each run receives one quota-bounded local tmpfs volume. A hardened, no-network
 keeper container holds the volume open from preparation through result
 collection. It creates exactly four private subdirectories and emits
-`reevo_storage_ready` before the launcher may seed them.
+`wardby_storage_ready` before the launcher may seed them.
 
 The worker sees only these volume subpaths:
 
 - `/workspace`: read-write checkout files.
 - Git metadata remains in the trusted keeper volume and is not mounted into the worker.
-- `/run/reevo/input`: read-only, validated input artifact.
-- `/run/reevo/output`: read-write result artifact.
+- `/run/wardby/input`: read-only, validated input artifact.
+- `/run/wardby/output`: read-write result artifact.
 
 There are no production host bind mounts. The Docker JobLauncher transfers data
 through the keeper with Docker copy/archive APIs, validates it before launch and
@@ -136,7 +136,7 @@ The embedded Codex SDK runs with its inner sandbox disabled because the
 worker's Docker boundary is authoritative: it has a read-only root filesystem,
 no Linux capabilities, no host mounts or Docker socket, no public network,
 and only isolated workspace/output volumes plus the trusted proxy connection.
-This avoids relying on a nested sandbox that cannot validate Reevo's
+This avoids relying on a nested sandbox that cannot validate Wardby's
 intentionally Git-metadata-free workspace.
 
 Coding-agent authoring and execution are MCP-first. `trigger_agent` accepts
@@ -150,8 +150,8 @@ execution policy stay internal.
 Operator-only checks and cleanup remain available through the CLI:
 
 ```sh
-reevo coding preflight
-reevo coding cleanup --run-id <id>
+wardby coding preflight
+wardby coding cleanup --run-id <id>
 ```
 
 The preflight command requires Docker mode, validates the pinned worker-image
@@ -183,12 +183,12 @@ set, live-fixture rules, supported scope, and incident procedure.
 Build the image and run the destructive, self-cleaning acceptance suite:
 
 ```sh
-docker build -f src/coding-worker/Dockerfile -t reevo-coding-worker:task8 .
+docker build -f src/coding-worker/Dockerfile -t wardby-coding-worker:task8 .
 npm run test:docker-isolation
 npm run verify:claude-code
 ```
 
-Set `REEVO_WORKER_IMAGE` to test another local tag. The runner resolves that
+Set `WARDBY_WORKER_IMAGE` to test another local tag. The runner resolves that
 tag to an immutable image ID before testing. The suite verifies effective
 Docker inspection, no default route, proxy-only connectivity, denied
 Docker-socket/host/metadata/localhost/public access, read-only mounts and

@@ -58,7 +58,7 @@ function html(res: ServerResponse, status: number, body: string): void {
     .writeHead(status, { "content-type": "text/html; charset=utf-8" })
     .end(
       `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">` +
-        `<title>reevo secret entry</title><style>${STYLE}</style><body><div class="card">${body}</div></body></html>`,
+        `<title>wardby secret entry</title><style>${STYLE}</style><body><div class="card">${body}</div></body></html>`,
     );
 }
 

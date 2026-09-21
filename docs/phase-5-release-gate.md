@@ -30,7 +30,7 @@ that workflow's artifacts for the exact commit being released.
 
 The opt-in live smoke is documented in [local-phase5-smoke.md](local-phase5-smoke.md).
 It must use a dedicated GitHub App installation, a dedicated fixture repository,
-a tiny coding budget, and a unique `reevo/run-*` branch. Verify one draft pull
+a tiny coding budget, and a unique `wardby/run-*` branch. Verify one draft pull
 request, record its run ID and cost, then close the test pull request and delete
 the generated branch.
 
@@ -41,9 +41,9 @@ the generated branch.
 - **Agent:** `phase5-local-smoke` (`gpt-5.6-luna`, budget $0.25)
 - **Task:** create one file (`phase5-smoke.md`) at the repository root with
   exact specified content; no other file modified.
-- **Outcome:** `pull_request_opened` — [PR #1](https://github.com/chfields/reevo-run/pull/1)
-  on `chfields/reevo-run`, commit `36971b0be5a2dd1ab06142aa65db2a37a6127880`,
-  branch `reevo/run-cmts0srn20002sqqadk0asd7i`.
+- **Outcome:** `pull_request_opened` — [PR #1](https://github.com/wardby/wardby/pull/1)
+  on `wardby/wardby`, commit `36971b0be5a2dd1ab06142aa65db2a37a6127880`,
+  branch `wardby/run-cmts0srn20002sqqadk0asd7i`.
 - **Cost:** $0.007158 (71,847 input / 1,103 output tokens) against the $0.25
   budget.
 - **Verification:** the requested file's exact-content check passed.
@@ -61,9 +61,9 @@ the generated branch.
 - **Task:** create one new file (`hello.py`) at the repository root — a
   classic Python "Hello, World!" program (`print("Hello, World!")`); no
   other file modified.
-- **Outcome:** `pull_request_opened` — [PR #2](https://github.com/chfields/reevo-run/pull/2)
-  on `chfields/reevo-run`, commit `fe5afef8eff08ae881899a4c2899eed27568177f`,
-  branch `reevo/run-cmtu0dxkp0002sqbwy1jnxkj3`.
+- **Outcome:** `pull_request_opened` — [PR #2](https://github.com/wardby/wardby/pull/2)
+  on `wardby/wardby`, commit `fe5afef8eff08ae881899a4c2899eed27568177f`,
+  branch `wardby/run-cmtu0dxkp0002sqbwy1jnxkj3`.
 - **Cost:** $0.00606 (50,255 input / 986 output tokens) against the $0.25
   budget.
 - **Verification:** file content and line count verified correct
@@ -88,7 +88,7 @@ with `CODING_WORKER_IMAGE_NODE_PYTHON_3_12` pointing at the
 - **Run ID:** `cmtwuk0du0002sqx12my5fz1f`
 - **Date:** 2026-09-11 11:02 UTC
 - **Outcome:** `failed` (`coding_failure_executor`), $0 cost (failed before
-  any LLM call). The launched container (`reevo-keeper-cb463d11d1d9632daef3`)
+  any LLM call). The launched container (`wardby-keeper-cb463d11d1d9632daef3`)
   exited 133 (SIGABRT) with no log output. Confirmed **not** a toolchain-
   resolution bug: `docker inspect` showed it launched with the correct
   `sha256:9326...cded9` (node-python) image digest — the new
@@ -103,7 +103,7 @@ with `CODING_WORKER_IMAGE_NODE_PYTHON_3_12` pointing at the
   an abrupt SIGABRT specifically).
 - **Retry — Run ID:** `cmtwun2gw0004sqx1kac1dzne`
 - **Date:** 2026-09-11 11:04 UTC
-- **Outcome:** `pull_request_opened` — [PR #3](https://github.com/chfields/reevo-run/pull/3),
+- **Outcome:** `pull_request_opened` — [PR #3](https://github.com/wardby/wardby/pull/3),
   commit `50dbf79b83c7170a67fc2aa359d88144d8894e5d`.
 - **Cost:** $0.006638 (53,931 input / 1,026 output tokens).
 - **Verification — this is the actual capability being confirmed:** the
@@ -144,7 +144,7 @@ inside the sandbox).
   provider `claude-code`, budget $0.25)
 - **Task:** create exactly one file, `claude-phase5-smoke.md`, containing one
   specified line and a trailing newline.
-- **Outcome:** draft [PR #16](https://github.com/chfields/reevo-run/pull/16),
+- **Outcome:** draft [PR #16](https://github.com/wardby/wardby/pull/16),
   commit `d552b2c70cc4317a31607c29b3f281f28e82cffe`.
 - **Cost:** $0.008709 (2,605 input / 444 output tokens).
 - **Verification:** the pull-request diff contained exactly the requested file,
@@ -207,7 +207,7 @@ budget. Grant the GitHub App only Contents and Pull requests read/write access
 on that repository. Treat Docker-daemon access and the proxy host as privileged
 administrative access.
 
-For an incident, cancel the run through MCP or `reevo coding cleanup --run-id
+For an incident, cancel the run through MCP or `wardby coding cleanup --run-id
 <id>`, revoke the GitHub App installation or OpenAI credential if necessary,
 and use the diagnostic ID to locate sanitized operator logs. Never recover a
 worker filesystem or raw prompt from logs.

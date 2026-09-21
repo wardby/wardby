@@ -9,9 +9,9 @@ function imageId(name, label) {
   }
 }
 
-const agent = imageId(process.env.REEVO_CLAUDE_WORKER_IMAGE ?? "reevo-claude-coding-worker:phase5", "Claude worker");
+const agent = imageId(process.env.WARDBY_CLAUDE_WORKER_IMAGE ?? "wardby-claude-coding-worker:phase5", "Claude worker");
 const tool = imageId(
-  process.env.REEVO_CLAUDE_TOOL_RUNNER_IMAGE ?? "reevo-claude-tool-runner:phase5",
+  process.env.WARDBY_CLAUDE_TOOL_RUNNER_IMAGE ?? "wardby-claude-tool-runner:phase5",
   "Claude tool runner",
 );
 const vitest = new URL("../node_modules/vitest/vitest.mjs", import.meta.url);
@@ -22,9 +22,9 @@ const result = spawnSync(
     cwd: new URL("..", import.meta.url),
     env: {
       ...process.env,
-      REEVO_CLAUDE_DOCKER_TEST: "1",
-      REEVO_CLAUDE_WORKER_IMAGE: agent,
-      REEVO_CLAUDE_TOOL_RUNNER_IMAGE: tool,
+      WARDBY_CLAUDE_DOCKER_TEST: "1",
+      WARDBY_CLAUDE_WORKER_IMAGE: agent,
+      WARDBY_CLAUDE_TOOL_RUNNER_IMAGE: tool,
     },
     stdio: "inherit",
   },

@@ -13,7 +13,7 @@ import { join } from "node:path";
  */
 describe("logger", () => {
   it("writes log output to stderr only, never stdout", () => {
-    const dir = mkdtempSync(join(tmpdir(), "reevo-logger-test-"));
+    const dir = mkdtempSync(join(tmpdir(), "wardby-logger-test-"));
     const script = join(dir, "log-once.mjs");
     writeFileSync(
       script,

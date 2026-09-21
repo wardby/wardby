@@ -43,7 +43,7 @@ function html(res: ServerResponse, content: string) {
   res
     .writeHead(200, { "content-type": "text/html; charset=utf-8" })
     .end(
-      '<!doctype html><html lang="en"><meta charset="utf-8"><title>reevo authorization</title><body>' +
+      '<!doctype html><html lang="en"><meta charset="utf-8"><title>wardby authorization</title><body>' +
         content +
         '<p id="auth-error" role="alert"></p><noscript>JavaScript is required for secure form submission.</noscript><script nonce="' +
         nonce +
@@ -69,8 +69,8 @@ function hidden(name: string, value: string) {
 export function browserHandler(provider: SelfHostedAuthProvider) {
   const canonical = new URL(provider.config.canonicalUri);
   const secure = canonical.protocol === "https:";
-  const sessionName = secure ? "__Host-reevo-session" : "reevo-dev-session";
-  const loginName = secure ? "__Host-reevo-login" : "reevo-dev-login";
+  const sessionName = secure ? "__Host-wardby-session" : "wardby-dev-session";
+  const loginName = secure ? "__Host-wardby-login" : "wardby-dev-login";
   const limiter = new PostgresRateLimiter(provider.db, provider.credentials);
   const cookie = (name: string, value: string, sameSite: string, age: number) =>
     `${name}=${value}; Path=/; HttpOnly; SameSite=${sameSite}; Max-Age=${age}${secure ? "; Secure" : ""}`;
@@ -171,7 +171,7 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
         res.setHeader("set-cookie", cookie(loginName, nonce, "Strict", 600));
         html(
           res,
-          '<h1>Sign in to reevo</h1><form method="post" action="/login">' +
+          '<h1>Sign in to wardby</h1><form method="post" action="/login">' +
             hidden("interaction", interaction) +
             hidden("csrf", challenge) +
             '<label>Login key <input type="password" name="login_key" required autocomplete="off"></label><button>Sign in</button></form>',

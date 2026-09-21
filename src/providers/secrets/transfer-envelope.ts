@@ -9,7 +9,7 @@ import {
 } from "node:crypto";
 
 const ALG = "x25519-hkdf-sha256-chacha20poly1305-v1";
-const INFO = Buffer.from("reevo-secret-transfer-v1");
+const INFO = Buffer.from("wardby-secret-transfer-v1");
 const SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex"); // X25519 SPKI DER header
 
 export interface TransferEnvelope {

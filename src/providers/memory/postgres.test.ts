@@ -8,7 +8,7 @@ const databaseUrl = process.env.DATABASE_URL;
 
 if (!databaseUrl) {
   console.warn(
-    "[reevo-run tests] DATABASE_URL not set — skipping PostgresAgentMemory tests " +
+    "[wardby tests] DATABASE_URL not set — skipping PostgresAgentMemory tests " +
       "(get/set/list/search/delete round-trip, bounds, per-agent scoping). Set DATABASE_URL to run them.",
   );
 }

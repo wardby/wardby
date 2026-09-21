@@ -11,7 +11,7 @@ variable "region" {
 variable "name_prefix" {
   description = "Prefix applied to every resource name, so multiple copies of this module can coexist in one project or across projects without colliding."
   type        = string
-  default     = "reevo-run"
+  default     = "wardby"
 }
 
 variable "create_domain_mapping" {
@@ -21,7 +21,7 @@ variable "create_domain_mapping" {
 }
 
 variable "domain_name" {
-  description = "Custom domain to map to the Cloud Run service (e.g. \"reevo.example.com\"). Required only when create_domain_mapping is true; ignored otherwise."
+  description = "Custom domain to map to the Cloud Run service (e.g. \"wardby.example.com\"). Required only when create_domain_mapping is true; ignored otherwise."
   type        = string
   default     = null
   validation {
@@ -105,13 +105,13 @@ variable "cloud_armor_rate_limit_per_minute" {
 }
 
 variable "allow_unauthenticated" {
-  description = "Grant allUsers roles/run.invoker on the service. Required for reevo to be reachable by MCP clients in BOTH auth modes, and on by default because the module does not work without it: Cloud Run's own IAM check and reevo's OAuth both read the Authorization header, so a client carrying a bearer token cannot also present a Google identity token. Authorization is enforced by reevo itself (every /mcp call needs a valid token, and tools are gated per-scope), not by Cloud Run IAM. Set false only if you front the service with something else that terminates auth — an external load balancer with IAP, say — or if only Google-identity callers will ever reach it."
+  description = "Grant allUsers roles/run.invoker on the service. Required for wardby to be reachable by MCP clients in BOTH auth modes, and on by default because the module does not work without it: Cloud Run's own IAM check and wardby's OAuth both read the Authorization header, so a client carrying a bearer token cannot also present a Google identity token. Authorization is enforced by wardby itself (every /mcp call needs a valid token, and tools are gated per-scope), not by Cloud Run IAM. Set false only if you front the service with something else that terminates auth — an external load balancer with IAP, say — or if only Google-identity callers will ever reach it."
   type        = bool
   default     = true
 }
 
 variable "auth_provider" {
-  description = "Which AuthProvider the app runs. \"delegating\" (the expected choice for most deployments) makes reevo a pure OAuth resource server in front of your own IdP — it never issues tokens, and users are administered entirely in that IdP. \"self-hosted\" makes reevo its own authorization server with login keys issued by the `reevo auth` CLI; it needs no external identity system, which makes it the zero-config way to stand a deployment up."
+  description = "Which AuthProvider the app runs. \"delegating\" (the expected choice for most deployments) makes wardby a pure OAuth resource server in front of your own IdP — it never issues tokens, and users are administered entirely in that IdP. \"self-hosted\" makes wardby its own authorization server with login keys issued by the `wardby auth` CLI; it needs no external identity system, which makes it the zero-config way to stand a deployment up."
   type        = string
   default     = "self-hosted"
   validation {

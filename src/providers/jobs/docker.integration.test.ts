@@ -9,11 +9,11 @@ import { isolationNames } from "./docker-isolation.js";
 import type { JobSpec } from "./types.js";
 
 const execute = promisify(execFile);
-const enabled = process.env.REEVO_DOCKER_JOB_TEST === "1";
-const image = process.env.REEVO_DOCKER_JOB_FIXTURE_IMAGE ?? "";
+const enabled = process.env.WARDBY_DOCKER_JOB_TEST === "1";
+const image = process.env.WARDBY_DOCKER_JOB_FIXTURE_IMAGE ?? "";
 const runId = "docker-smoke";
 const token = `${process.pid}-${Date.now()}`;
-const proxy = `reevo-job-proxy-${token}`;
+const proxy = `wardby-job-proxy-${token}`;
 let root: string | undefined;
 
 async function docker(args: string[]): Promise<string> {
@@ -41,7 +41,7 @@ describe.skipIf(!enabled || !image)("Docker JobLauncher smoke", () => {
   }, 30_000);
 
   it("launches, attests, collects a bounded result, and removes an isolated job", async () => {
-    root = await mkdtemp(join(tmpdir(), "reevo-docker-job-"));
+    root = await mkdtemp(join(tmpdir(), "wardby-docker-job-"));
     const workspace = join(root, "workspaces", runId, "workspace");
     const git = join(root, "workspaces", runId, "git");
     const input = join(root, "input.json");

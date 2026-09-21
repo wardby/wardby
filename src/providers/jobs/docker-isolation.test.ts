@@ -15,7 +15,7 @@ import {
 } from "./docker-isolation.js";
 import type { JobSpec } from "./types.js";
 
-const image = `registry.example/reevo-worker@sha256:${"a".repeat(64)}`;
+const image = `registry.example/wardby-worker@sha256:${"a".repeat(64)}`;
 const runHash = createHash("sha256").update("run-sensitive-name").digest("hex");
 const spec: JobSpec = {
   kind: "coding-agent",
@@ -36,12 +36,12 @@ describe("Docker isolation policy", () => {
     expect(args).not.toContain(spec.runId);
     expect(args).not.toContain(spec.inputArtifact);
     expect(args).not.toContain("do-not-expand");
-    expect(plan.workerCreateArgs).toContain("REEVO_RUN_CAPABILITY");
+    expect(plan.workerCreateArgs).toContain("WARDBY_RUN_CAPABILITY");
     expect(args).not.toContain("rrp_");
   });
 
   it("requires immutable images and bounded resources", () => {
-    expect(() => buildWorkerCreateArgs({ ...spec, image: "reevo-worker:latest" })).toThrow(
+    expect(() => buildWorkerCreateArgs({ ...spec, image: "wardby-worker:latest" })).toThrow(
       "docker_isolation_unsupported",
     );
     expect(() => buildWorkerCreateArgs({ ...spec, limits: { ...spec.limits, pids: 0 } })).toThrow(
@@ -69,7 +69,7 @@ describe("Docker isolation policy", () => {
     const claude = {
       ...spec,
       provider: "claude-code" as const,
-      toolImage: `registry.example/reevo-tools@sha256:${"b".repeat(64)}`,
+      toolImage: `registry.example/wardby-tools@sha256:${"b".repeat(64)}`,
     };
     const agent = buildClaudeAgentCreateArgs(claude);
     const tools = buildClaudeToolRunnerCreateArgs(claude);
@@ -87,8 +87,8 @@ describe("Docker isolation policy", () => {
     expect(agentMounts.join(" ")).not.toContain(WORKER_PATHS.workspace);
     expect(toolMounts.join(" ")).not.toContain(WORKER_PATHS.input);
     expect(toolMounts.join(" ")).not.toContain(WORKER_PATHS.output);
-    expect(agent).toContain("REEVO_RUN_CAPABILITY");
-    expect(tools.join(" ")).not.toContain("REEVO_RUN_CAPABILITY");
+    expect(agent).toContain("WARDBY_RUN_CAPABILITY");
+    expect(tools.join(" ")).not.toContain("WARDBY_RUN_CAPABILITY");
     expect(tools).toContain("none");
   });
 
@@ -125,9 +125,9 @@ describe("Docker isolation policy", () => {
       Attachable: false,
       Ingress: false,
       Labels: {
-        "io.reevo.managed": "true",
-        "io.reevo.component": "coding-worker",
-        "io.reevo.run-sha256": runHash,
+        "io.wardby.managed": "true",
+        "io.wardby.component": "coding-worker",
+        "io.wardby.run-sha256": runHash,
       },
       Options: {
         "com.docker.network.bridge.gateway_mode_ipv4": "isolated",
@@ -146,11 +146,11 @@ describe("Docker isolation policy", () => {
       Config: {
         User: "10001:10001",
         Image: image,
-        Env: ["REEVO_PROXY_URL=http://reevo-proxy:8787", "REEVO_RUN_CAPABILITY=test-capability"],
+        Env: ["WARDBY_PROXY_URL=http://wardby-proxy:8787", "WARDBY_RUN_CAPABILITY=test-capability"],
         Labels: {
-          "io.reevo.managed": "true",
-          "io.reevo.component": "coding-worker",
-          "io.reevo.run-sha256": runHash,
+          "io.wardby.managed": "true",
+          "io.wardby.component": "coding-worker",
+          "io.wardby.run-sha256": runHash,
         },
       },
       HostConfig: {
@@ -184,7 +184,7 @@ describe("Docker isolation policy", () => {
         RestartPolicy: { Name: "no" },
         SecurityOpt: ["no-new-privileges=true", "seccomp=builtin"],
         ShmSize: 16 * 1024 * 1024,
-        Tmpfs: { "/tmp": "rw,noexec", "/home/reevo": "rw,noexec" },
+        Tmpfs: { "/tmp": "rw,noexec", "/home/wardby": "rw,noexec" },
         Mounts: [
           {
             Type: "volume",
@@ -229,7 +229,7 @@ describe("Docker isolation policy", () => {
     const claude: JobSpec = {
       ...spec,
       provider: "claude-code",
-      toolImage: `registry.example/reevo-tools@sha256:${"b".repeat(64)}`,
+      toolImage: `registry.example/wardby-tools@sha256:${"b".repeat(64)}`,
     };
     const container: DockerContainerInspection = {
       Config: {
@@ -237,9 +237,9 @@ describe("Docker isolation policy", () => {
         Image: claude.toolImage,
         Env: [],
         Labels: {
-          "io.reevo.managed": "true",
-          "io.reevo.component": "coding-worker",
-          "io.reevo.run-sha256": runHash,
+          "io.wardby.managed": "true",
+          "io.wardby.component": "coding-worker",
+          "io.wardby.run-sha256": runHash,
         },
       },
       HostConfig: {
@@ -271,7 +271,7 @@ describe("Docker isolation policy", () => {
         RestartPolicy: { Name: "no" },
         SecurityOpt: ["no-new-privileges=true", "seccomp=builtin"],
         ShmSize: 16 * 1024 * 1024,
-        Tmpfs: { "/tmp": "rw,noexec", "/home/reevo": "rw,noexec" },
+        Tmpfs: { "/tmp": "rw,noexec", "/home/wardby": "rw,noexec" },
         Mounts: [
           {
             Type: "volume",

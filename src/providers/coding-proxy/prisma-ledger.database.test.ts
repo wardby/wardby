@@ -29,7 +29,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
         task: "test",
         repository: "openai/example",
         baseRef: "main",
-        headRef: `reevo/run-${runId}`,
+        headRef: `wardby/run-${runId}`,
         provider: "codex",
         model: "gpt-5.6-luna",
         timeoutSec: 60,

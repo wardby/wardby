@@ -66,7 +66,7 @@ it("garbage-collects abandoned clients that never completed a token exchange, ke
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `npm run db:up && DATABASE_URL="postgresql://reevo:reevo@localhost:55432/reevo" npx vitest run src/providers/auth/self-hosted.test.ts -t "garbage-collects abandoned clients"`
+Run: `npm run db:up && DATABASE_URL="postgresql://wardby:wardby@localhost:55432/wardby" npx vitest run src/providers/auth/self-hosted.test.ts -t "garbage-collects abandoned clients"`
 Expected: FAIL — the abandoned client still exists after `cleanup()` (current `cleanup()` never deletes `OAuthClient` rows).
 
 - [ ] **Step 3: Implement the minimal fix**
@@ -122,7 +122,7 @@ Then in `startMcp()`, right after the `const http = await startHttpServer({...})
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `DATABASE_URL="postgresql://reevo:reevo@localhost:55432/reevo" npx vitest run src/providers/auth/self-hosted.test.ts -t "garbage-collects abandoned clients"`
+Run: `DATABASE_URL="postgresql://wardby:wardby@localhost:55432/wardby" npx vitest run src/providers/auth/self-hosted.test.ts -t "garbage-collects abandoned clients"`
 Expected: PASS
 
 - [ ] **Step 5: Run the full suite and typecheck**
@@ -151,7 +151,7 @@ EOF
 
 ### Task 2: Add a migration step to `deploy/gcp` (Cloud Run Job)
 
-**Context:** `deploy/Dockerfile` already has a dedicated `migration` build target (`FROM build AS migration` / `CMD ["npm", "run", "prisma:migrate"]`, lines 12-13) meant to be run once before/alongside a deploy — but `deploy/gcp/` never builds or runs it. The live test found this the hard way: a fresh `onit-dashboard` deploy left `public.Principal` (and every other Prisma table) missing, discovered only when `reevo auth user create` failed with `The table \`public.Principal\` does not exist`. Every future fresh deploy will hit the exact same wall until this is fixed.
+**Context:** `deploy/Dockerfile` already has a dedicated `migration` build target (`FROM build AS migration` / `CMD ["npm", "run", "prisma:migrate"]`, lines 12-13) meant to be run once before/alongside a deploy — but `deploy/gcp/` never builds or runs it. The live test found this the hard way: a fresh `onit-dashboard` deploy left `public.Principal` (and every other Prisma table) missing, discovered only when `wardby auth user create` failed with `The table \`public.Principal\` does not exist`. Every future fresh deploy will hit the exact same wall until this is fixed.
 
 **Files:**
 
@@ -290,21 +290,21 @@ In `deploy/gcp/cloud-run.tf`, extend the existing `depends_on` block on `google_
 In `deploy/gcp/SETUP.md` step 7, replace the single `docker build`/`push`/`inspect` sequence with both targets:
 
 ```bash
-gcloud artifacts repositories create reevo-run \
+gcloud artifacts repositories create wardby \
   --repository-format=docker --location=us-central1
 
 # from the repo root:
 docker build -f deploy/Dockerfile --target runtime \
-  -t us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane:latest .
-docker push us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane:latest
+  -t us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane:latest .
+docker push us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane:latest
 docker inspect --format '{{index .RepoDigests 0}}' \
-  us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane:latest
+  us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane:latest
 
 docker build -f deploy/Dockerfile --target migration \
-  -t us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane-migrate:latest .
-docker push us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane-migrate:latest
+  -t us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane-migrate:latest .
+docker push us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane-migrate:latest
 docker inspect --format '{{index .RepoDigests 0}}' \
-  us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane-migrate:latest
+  us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane-migrate:latest
 ```
 
 Use the first digest as `container_image` and the second as `migration_image` in `terraform.tfvars`.
@@ -391,7 +391,7 @@ EOF
 
 ### Task 4: Admin bootstrap as a Cloud Run Job (retire the manual Cloud SQL proxy tunnel)
 
-**Context:** The only way to provision a self-hosted-auth user today is `reevo auth user create --subject <x>`, which needs a Cloud SQL Auth Proxy tunnel plus manually fetching `DATABASE_URL`/`AUTH_CREDENTIAL_HASH_KEY` out of Secret Manager onto a local machine (exactly what this session had to do to complete the OAuth live test). A Cloud Run Job running inside the same VPC, using the existing Cloud SQL volume mount and Secret Manager env vars already wired for the main service, needs neither a local proxy nor local secret handling.
+**Context:** The only way to provision a self-hosted-auth user today is `wardby auth user create --subject <x>`, which needs a Cloud SQL Auth Proxy tunnel plus manually fetching `DATABASE_URL`/`AUTH_CREDENTIAL_HASH_KEY` out of Secret Manager onto a local machine (exactly what this session had to do to complete the OAuth live test). A Cloud Run Job running inside the same VPC, using the existing Cloud SQL volume mount and Secret Manager env vars already wired for the main service, needs neither a local proxy nor local secret handling.
 
 **Files:**
 
@@ -407,14 +407,14 @@ EOF
 Create `deploy/gcp/admin-cli-job.tf`:
 
 ```hcl
-# Runs `reevo auth ...` (or any other `dist/cli.js` subcommand) inside the
+# Runs `wardby auth ...` (or any other `dist/cli.js` subcommand) inside the
 # same network as the deployed service, reusing its Cloud SQL volume mount
 # and Secret Manager wiring - no local Cloud SQL Auth Proxy tunnel or
 # manual secret-fetching required (the workaround this session needed to
 # provision its first test user, 2026-09-18). Default args are a no-op;
 # override at execution time:
 #
-#   gcloud run jobs execute reevo-run-admin-cli --region=us-central1 \
+#   gcloud run jobs execute wardby-admin-cli --region=us-central1 \
 #     --args="dist/cli.js,auth,user,create,--subject,someone@example.com" \
 #     --wait
 resource "google_cloud_run_v2_job" "admin_cli" {
@@ -645,7 +645,7 @@ Know the blast radius before rotating any of them:
 - **`AUTH_CREDENTIAL_HASH_KEY`** — HMACs login keys, authorization codes,
   refresh tokens, and CSRF challenges. Rotating it invalidates every
   outstanding login key, in-flight authorization code, and refresh token
-  at once — every user must be issued a new login key (`reevo auth key
+  at once — every user must be issued a new login key (`wardby auth key
 create --subject <x>`) and re-authorize from scratch. **High impact** —
   plan a maintenance window.
 - **`SECRET_APP_KEY`** — the sole key for `AppKeySecretCipher`

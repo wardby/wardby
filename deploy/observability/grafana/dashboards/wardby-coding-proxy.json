@@ -1,7 +1,7 @@
 {
-  "uid": "reevo-coding-proxy",
-  "title": "Reevo Coding Proxy",
-  "tags": ["reevo", "phase-7", "local"],
+  "uid": "wardby-coding-proxy",
+  "title": "Wardby Coding Proxy",
+  "tags": ["wardby", "phase-7", "local"],
   "timezone": "browser",
   "schemaVersion": 41,
   "version": 1,
@@ -15,7 +15,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (protocol, status_class) (rate(reevo_proxy_http_requests_total[5m]))",
+          "expr": "sum by (protocol, status_class) (rate(wardby_proxy_http_requests_total[5m]))",
           "legendFormat": "{{protocol}} {{status_class}}"
         }
       ],
@@ -29,7 +29,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, protocol) (rate(reevo_proxy_http_request_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, protocol) (rate(wardby_proxy_http_request_duration_seconds_bucket[5m])))",
           "legendFormat": "{{protocol}}"
         }
       ],
@@ -44,7 +44,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (event) (rate(reevo_proxy_audit_events_total[5m]))",
+          "expr": "sum by (event) (rate(wardby_proxy_audit_events_total[5m]))",
           "legendFormat": "{{event}}"
         }
       ],
@@ -56,10 +56,10 @@
       "title": "Coding Jobs and Cleanup Failures (Application Exporter)",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "reevo_coding_active_jobs", "legendFormat": "active jobs" },
+        { "refId": "A", "expr": "wardby_coding_active_jobs", "legendFormat": "active jobs" },
         {
           "refId": "B",
-          "expr": "increase(reevo_coding_cleanup_failures_total[5m])",
+          "expr": "increase(wardby_coding_cleanup_failures_total[5m])",
           "legendFormat": "cleanup failures (5m)"
         }
       ],
@@ -70,7 +70,7 @@
       "type": "timeseries",
       "title": "Proxy Cost",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "refId": "A", "expr": "increase(reevo_proxy_cost_usd_total[24h])", "legendFormat": "USD / 24h" }],
+      "targets": [{ "refId": "A", "expr": "increase(wardby_proxy_cost_usd_total[24h])", "legendFormat": "USD / 24h" }],
       "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 }
     },
@@ -79,7 +79,7 @@
       "type": "timeseries",
       "title": "Proxy Resident Memory",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "refId": "A", "expr": "reevo_nodejs_process_resident_memory_bytes", "legendFormat": "RSS" }],
+      "targets": [{ "refId": "A", "expr": "wardby_nodejs_process_resident_memory_bytes", "legendFormat": "RSS" }],
       "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 }
     }

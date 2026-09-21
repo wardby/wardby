@@ -4,7 +4,7 @@
  * `memoryEnabled` — never persisted as `Tool`/`AgentTool` rows and never
  * run through the sandbox, the same "recognized by name, no sandbox"
  * treatment the coding proxy already gives its own built-in tools
- * (`StructuredOutput`, `mcp__reevo_tools__run_command`). No capability
+ * (`StructuredOutput`, `mcp__wardby_tools__run_command`). No capability
  * scoping is needed here: memory is inherently scoped to the calling
  * agent's own `agentId` and can't reach secrets, the network, or other
  * agents' data.

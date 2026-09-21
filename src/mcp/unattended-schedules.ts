@@ -1,8 +1,8 @@
 import type { PrismaClient } from "@prisma/client";
 
 /**
- * `reevo mcp` serves the MCP surface and launches the executor, but the
- * scheduler and reconciler live in `reevo scheduler` (or in `reevo serve`,
+ * `wardby mcp` serves the MCP surface and launches the executor, but the
+ * scheduler and reconciler live in `wardby scheduler` (or in `wardby serve`,
  * which runs everything). A deployment running only `mcp` accepts schedules
  * through set_schedule and then never fires them: no error, no crash,
  * `lastScheduledAt` simply stays null. Nothing else surfaces that.
@@ -21,6 +21,6 @@ export function unattendedSchedulesWarning(count: number): string | null {
   if (count === 0) return null;
   return (
     `${count} agent(s) have an enabled schedule, but this process does not run the scheduler. ` +
-    `Run "reevo scheduler" alongside it, or run "reevo serve" instead, or those schedules will never fire.`
+    `Run "wardby scheduler" alongside it, or run "wardby serve" instead, or those schedules will never fire.`
   );
 }

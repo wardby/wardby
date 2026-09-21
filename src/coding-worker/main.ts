@@ -4,11 +4,11 @@ import { runCodingWorker } from "./driver.js";
 import { safeWorkerErrorCode } from "./errors.js";
 import { createCodexSdkClient } from "./sdk.js";
 
-const INPUT_PATH = "/run/reevo/input/input.json";
-const OUTPUT_PATH = "/run/reevo/output/result.json";
+const INPUT_PATH = "/run/wardby/input/input.json";
+const OUTPUT_PATH = "/run/wardby/output/result.json";
 const WORKSPACE_PATH = "/workspace";
 
-function required(name: "REEVO_PROXY_URL" | "REEVO_RUN_CAPABILITY"): string {
+function required(name: "WARDBY_PROXY_URL" | "WARDBY_RUN_CAPABILITY"): string {
   const value = process.env[name];
   if (!value) throw new Error(`${name.toLowerCase()}_missing`);
   return value;
@@ -24,8 +24,8 @@ try {
   const output = await runCodingWorker({
     input,
     workspace: WORKSPACE_PATH,
-    proxyBaseUrl: required("REEVO_PROXY_URL"),
-    capability: required("REEVO_RUN_CAPABILITY"),
+    proxyBaseUrl: required("WARDBY_PROXY_URL"),
+    capability: required("WARDBY_RUN_CAPABILITY"),
     signal: controller.signal,
     createClient: createCodexSdkClient,
     onProgress: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),

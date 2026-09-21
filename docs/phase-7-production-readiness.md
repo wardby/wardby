@@ -24,7 +24,7 @@ hosted service. The roadmap has two separate audiences:
 
 Reference deployments, including the optional GCP control-plane module, prove
 portable patterns. They are examples rather than a prerequisite or the sole
-supported way to run Reevo Run.
+supported way to run Wardby.
 
 Source documents:
 

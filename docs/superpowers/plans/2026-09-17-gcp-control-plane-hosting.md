@@ -37,8 +37,8 @@ In `src/config/providers.test.ts`, find the `describe("loadDbosConfig", ...)` bl
 
 ```typescript
 it("generates a per-call UUID for the executor id when none is set, rather than leaving it undefined", () => {
-  const config = loadDbosConfig({ DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo" });
-  expect(config.systemDatabaseUrl).toBe("postgresql://reevo:reevo@localhost:55432/reevo");
+  const config = loadDbosConfig({ DATABASE_URL: "postgresql://wardby:wardby@localhost:55432/wardby" });
+  expect(config.systemDatabaseUrl).toBe("postgresql://wardby:wardby@localhost:55432/wardby");
   expect(config.schemaName).toBe("dbos");
   // v4 UUID shape: 8-4-4-4-12 hex, third group starts with "4".
   expect(config.executorId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
@@ -117,7 +117,7 @@ In `src/providers/executor/build.test.ts`, find the test
 ```typescript
 it("generates its own executor id for EXECUTOR=dbos when DBOS_EXECUTOR_ID is not set", () => {
   const executor = buildExecutor({ executor: "dbos" }, providers, undefined, {
-    DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo",
+    DATABASE_URL: "postgresql://wardby:wardby@localhost:55432/wardby",
   });
   expect(executor).toBeInstanceOf(DbosExecutor);
 });
@@ -212,11 +212,11 @@ variable "region" {
 variable "name_prefix" {
   description = "Prefix applied to every resource name, so multiple copies of this module can coexist in one project or across projects without colliding."
   type        = string
-  default     = "reevo-run"
+  default     = "wardby"
 }
 
 variable "domain_name" {
-  description = "Custom domain to map to the Cloud Run service (e.g. \"reevo.example.com\"). No default: DNS ownership is deployment-specific."
+  description = "Custom domain to map to the Cloud Run service (e.g. \"wardby.example.com\"). No default: DNS ownership is deployment-specific."
   type        = string
 }
 
@@ -279,7 +279,7 @@ feat(deploy): scaffold the GCP Terraform module - providers and variables
 
 No project-specific identity hardcoded: project_id, region, and
 domain_name have no default and must be supplied per-deployment;
-name_prefix defaults to "reevo-run" but is override-able so multiple
+name_prefix defaults to "wardby" but is override-able so multiple
 copies of this module can coexist. No backend block - state storage is
 documented as a per-deployment choice in deploy/README.md, not baked in.
 
@@ -411,7 +411,7 @@ EOF
 ```hcl
 # Custom, least-privilege identity for the Cloud Run service - deliberately
 # not the broad-scope default compute service account, to bound the blast
-# radius of any future SSRF-class bug to exactly what reevo needs.
+# radius of any future SSRF-class bug to exactly what wardby needs.
 resource "google_service_account" "cloud_run" {
   project      = var.project_id
   account_id   = "${var.name_prefix}-run"
@@ -674,17 +674,17 @@ EOF
 
 project_id  = "my-gcp-project-id"
 region      = "us-central1"
-domain_name = "reevo.example.com"
+domain_name = "wardby.example.com"
 
 # Optional overrides (defaults shown):
-# name_prefix                 = "reevo-run"
+# name_prefix                 = "wardby"
 # min_instance_count          = 2
 # max_instance_count          = 10
 # cloudsql_tier                = "db-f1-micro"
 # cloudsql_availability_type   = "ZONAL"
 # cloudsql_deletion_protection = true
 
-container_image = "us-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane@sha256:REPLACE_ME"
+container_image = "us-docker.pkg.dev/my-gcp-project-id/wardby/control-plane@sha256:REPLACE_ME"
 ```
 
 - [ ] **Step 2: Update `deploy/README.md`'s `gcp/` section**
@@ -694,7 +694,7 @@ replace its whole contents with:
 
 ```markdown
 - **`gcp/`** — GCP production hosting via Terraform (the baseline IaC tool
-  for every reevo-run cloud deployment, GCP included — this module is the
+  for every wardby cloud deployment, GCP included — this module is the
   reference example future cloud targets, e.g. `aws/`, follow). Design:
   `docs/superpowers/specs/2026-09-17-gcp-control-plane-hosting-design.md`.
 
@@ -761,13 +761,13 @@ satisfying this plan's original motivation without a separate tunnel.
 Kept here for the record; do not build this ngrok plan.
 ```
 
-- [ ] **Step 2: Update the roadmap's "HTTPS-reachable reevo service (ngrok)" bullet**
+- [ ] **Step 2: Update the roadmap's "HTTPS-reachable wardby service (ngrok)" bullet**
 
 In `docs/private/2026-09-05-roadmap-mcp-native.md`, find the bullet starting
-`- **HTTPS-reachable reevo service (ngrok)**` and replace it with:
+`- **HTTPS-reachable wardby service (ngrok)**` and replace it with:
 
 ```markdown
-- **HTTPS-reachable reevo service** — ✅ superseded 2026-09-17 by the GCP
+- **HTTPS-reachable wardby service** — ✅ superseded 2026-09-17 by the GCP
   control-plane hosting design's Cloud Run domain mapping
   ([[2026-09-17-gcp-control-plane-hosting-design]]), not the originally
   planned ngrok tunnel ([[2026-09-13-http-reachable-service-plan]], now

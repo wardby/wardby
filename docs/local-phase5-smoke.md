@@ -44,10 +44,10 @@ JOB_LAUNCHER=local
 CODING_WORKER_IMAGE=sha256:replace-with-worker-image-id
 CODING_CLAUDE_WORKER_IMAGE=sha256:replace-with-claude-worker-image-id
 CODING_CLAUDE_TOOL_RUNNER_IMAGE=sha256:replace-with-claude-tool-runner-image-id
-CODING_PROXY_CONTAINER=reevo-coding-proxy
-VCS_WORK_ROOT=/tmp/reevo-vcs
-CODING_JOB_STATE_ROOT=/tmp/reevo-docker-jobs
-CODING_ARTIFACT_ROOT=/tmp/reevo-coding-artifacts
+CODING_PROXY_CONTAINER=wardby-coding-proxy
+VCS_WORK_ROOT=/tmp/wardby-vcs
+CODING_JOB_STATE_ROOT=/tmp/wardby-docker-jobs
+CODING_ARTIFACT_ROOT=/tmp/wardby-coding-artifacts
 CODING_OPENAI_CREDENTIAL_REF=env:OPENAI_API_KEY
 CODING_ANTHROPIC_CREDENTIAL_REF=env:ANTHROPIC_API_KEY
 GITHUB_APP_ID=replace-with-app-id
@@ -76,7 +76,7 @@ a GitHub branch and draft pull request. Keep its budget deliberately small.
 
 After the smoke completes, record the run ID, terminal result, pull-request
 URL, and final cost in the release evidence. Close the fixture PR and delete
-its `reevo/run-*` branch. The worker's volume, artifact, and trusted checkout
+its `wardby/run-*` branch. The worker's volume, artifact, and trusted checkout
 are already removed by terminal cleanup; do not retain them for debugging.
 
 See [Phase 5 release gate](phase-5-release-gate.md) for the repeatable

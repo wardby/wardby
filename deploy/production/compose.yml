@@ -1,4 +1,4 @@
-name: reevo-production
+name: wardby-production
 
 # This topology deliberately does not run PostgreSQL. Production database
 # lifecycle, backup, and migration ownership belong to Phase 7 Workstream 3.
@@ -30,7 +30,7 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
 
   mcp:
-    image: ${REEVO_RUNTIME_IMAGE:?Set REEVO_RUNTIME_IMAGE to a reviewed immutable digest}
+    image: ${WARDBY_RUNTIME_IMAGE:?Set WARDBY_RUNTIME_IMAGE to a reviewed immutable digest}
     command: ["node", "dist/cli.js", "mcp"]
     restart: unless-stopped
     env_file:
@@ -69,7 +69,7 @@ services:
       start_period: 20s
 
   scheduler:
-    image: ${REEVO_RUNTIME_IMAGE:?Set REEVO_RUNTIME_IMAGE to a reviewed immutable digest}
+    image: ${WARDBY_RUNTIME_IMAGE:?Set WARDBY_RUNTIME_IMAGE to a reviewed immutable digest}
     command: ["node", "dist/cli.js", "scheduler"]
     restart: unless-stopped
     env_file:
@@ -90,7 +90,7 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
 
   migrate:
-    image: ${REEVO_MIGRATION_IMAGE:?Set REEVO_MIGRATION_IMAGE to a reviewed immutable digest}
+    image: ${WARDBY_MIGRATION_IMAGE:?Set WARDBY_MIGRATION_IMAGE to a reviewed immutable digest}
     command: ["npm", "run", "prisma:migrate"]
     profiles: ["migration"]
     env_file:

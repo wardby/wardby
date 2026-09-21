@@ -5,7 +5,7 @@ services:
       dockerfile: deploy/Dockerfile
       target: migration
     environment:
-      DATABASE_URL: postgresql://reevo:reevo@postgres:5432/reevo
+      DATABASE_URL: postgresql://wardby:wardby@postgres:5432/wardby
     depends_on:
       postgres:
         condition: service_healthy
@@ -27,7 +27,7 @@ services:
       - --storage.tsdb.retention.time=24h
     volumes:
       - ../observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - reevo-prometheus-data:/prometheus
+      - wardby-prometheus-data:/prometheus
     ports:
       - 127.0.0.1:9090:9090
     depends_on:
@@ -39,12 +39,12 @@ services:
     image: grafana/grafana:12.0.0
     environment:
       GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: reevo-local-only
+      GF_SECURITY_ADMIN_PASSWORD: wardby-local-only
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
-      - reevo-grafana-data:/var/lib/grafana
+      - wardby-grafana-data:/var/lib/grafana
     ports:
       - 127.0.0.1:3000:3000
     depends_on:
@@ -53,5 +53,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  reevo-prometheus-data:
-  reevo-grafana-data:
+  wardby-prometheus-data:
+  wardby-grafana-data:

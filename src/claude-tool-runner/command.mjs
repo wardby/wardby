@@ -5,7 +5,7 @@ export const MAX_COMMAND_BYTES = 16 * 1024;
 export const MAX_TIMEOUT_MS = 120_000;
 
 export function toolEnvironment() {
-  return { HOME: "/home/reevo", LANG: "C.UTF-8", PATH: "/usr/local/bin:/usr/bin:/bin", TMPDIR: "/tmp" };
+  return { HOME: "/home/wardby", LANG: "C.UTF-8", PATH: "/usr/local/bin:/usr/bin:/bin", TMPDIR: "/tmp" };
 }
 
 export async function runCommand(command, timeoutMs, workspacePath = "/workspace") {

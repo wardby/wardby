@@ -1,6 +1,6 @@
 {
   "version": "0.0.0",
-  "name": "reevo-run",
+  "name": "wardby",
   "dependencies": {
     "@anthropic-ai/sdk": {
       "version": "0.124.0",

@@ -1,5 +1,5 @@
 {
-  "name": "reevo-claude-tool-runner",
+  "name": "@wardby/claude-tool-runner",
   "private": true,
   "type": "module",
   "scripts": {

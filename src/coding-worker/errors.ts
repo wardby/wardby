@@ -1,6 +1,6 @@
 const SAFE_WORKER_ERROR_CODES = new Set([
-  "reevo_proxy_url_missing",
-  "reevo_run_capability_missing",
+  "wardby_proxy_url_missing",
+  "wardby_run_capability_missing",
   "coding_input_invalid_file",
   "coding_output_size_limit",
   "coding_artifact_size_limit",

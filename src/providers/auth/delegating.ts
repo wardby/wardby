@@ -1,10 +1,10 @@
 /**
- * Resource-server-only AuthProvider: reevo never issues tokens itself, an
+ * Resource-server-only AuthProvider: wardby never issues tokens itself, an
  * external OIDC/OAuth IdP is the authorization server. verifyBearer is the
  * whole job — validate a caller-supplied access token (signature via JWKS,
  * audience, expiry, issuer) and map its claims to a VerifiedToken (subject
  * + per-token scopes). The auth-code flow methods (authorizeUrl/
- * exchangeCode/refresh) belong to the external IdP, not to reevo, so they
+ * exchangeCode/refresh) belong to the external IdP, not to wardby, so they
  * throw rather than half-implement a flow this adapter doesn't own.
  */
 import { createRemoteJWKSet, jwtVerify, errors as joseErrors, type JWTVerifyGetKey } from "jose";

@@ -33,9 +33,9 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   const config = loadContainerExecutorConfig(env);
   if (!config.workerImage) throw new Error("CODING_WORKER_IMAGE is required when JOB_LAUNCHER=docker.");
   if (!config.proxyContainer) throw new Error("CODING_PROXY_CONTAINER is required when JOB_LAUNCHER=docker.");
-  const workspaceRoot = resolve(github.workRoot ?? resolve(tmpdir(), "reevo-vcs"));
-  const stateRoot = resolve(config.stateRoot ?? resolve(tmpdir(), "reevo-docker-jobs"));
-  const artifactRoot = resolve(config.artifactRoot ?? resolve(tmpdir(), "reevo-coding-artifacts"));
+  const workspaceRoot = resolve(github.workRoot ?? resolve(tmpdir(), "wardby-vcs"));
+  const stateRoot = resolve(config.stateRoot ?? resolve(tmpdir(), "wardby-docker-jobs"));
+  const artifactRoot = resolve(config.artifactRoot ?? resolve(tmpdir(), "wardby-coding-artifacts"));
   const vcs = buildVcsProvider(providerConfig, { ...github, workRoot: workspaceRoot });
   const capabilities = new RunCapabilityVault();
   const sessions = new CodingProxy({

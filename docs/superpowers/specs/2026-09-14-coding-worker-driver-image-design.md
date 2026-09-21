@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-14
 **Status:** Proposed (design; implementation to proceed inline, no separate plan doc)
-**Author:** reevo-run maintainer
+**Author:** wardby maintainer
 **Related:** `src/coding-worker/Dockerfile.node-python` (the pattern this design
 extracts a shared layer from); `src/providers/executor/container.ts`
 (`resolveCodingWorkerImage`, the existing `workerImageRef` BYO-image path);
@@ -11,7 +11,7 @@ extracts a shared layer from); `src/providers/executor/container.ts`
 existing scope-step-up precedent); `src/mcp/auth/resource-server.ts`
 (`requireScope`/`insufficientScope`).
 
-> **Clean-room note.** This design is grounded entirely in reading reevo-run's
+> **Clean-room note.** This design is grounded entirely in reading wardby's
 > own source (`container.ts`, `agents.ts`, `Dockerfile.node-python`,
 > `resource-server.ts`) plus public Docker/GHCR documentation. It copies no
 > external codebase.
@@ -21,9 +21,9 @@ existing scope-step-up precedent); `src/mcp/auth/resource-server.ts`
 ## Goal
 
 Today, adding support for a new language toolchain (Ruby, PHP, .NET, ...)
-means reevo hand-authors a brand-new `Dockerfile.<toolchain>`, each one a
-fully separate multi-stage build that recompiles reevo's own TS coding-worker
-driver from source. This doesn't scale past a handful of languages reevo is
+means wardby hand-authors a brand-new `Dockerfile.<toolchain>`, each one a
+fully separate multi-stage build that recompiles wardby's own TS coding-worker
+driver from source. This doesn't scale past a handful of languages wardby is
 willing to hand-maintain.
 
 This design publishes a small, versioned, digest-pinned **driver base image**
@@ -31,8 +31,8 @@ containing just the compiled Node.js driver (no language runtime). Users
 write their own thin Dockerfile on top of it, adding whatever toolchain they
 need, and point their `CodingAgentProfile.workerImageRef` at their own built
 digest — reusing the BYO-image escape hatch that already exists in
-`container.ts` today. This turns "reevo builds every language's image" into
-"reevo builds one shared driver layer; users build their own on top of it."
+`container.ts` today. This turns "wardby builds every language's image" into
+"wardby builds one shared driver layer; users build their own on top of it."
 
 ## Non-goals
 
@@ -40,7 +40,7 @@ digest — reusing the BYO-image escape hatch that already exists in
   for a compromised/dirty BYO image is (a) the `agents:admin` scope gate below
   and (b) the fact that the high-value guardrails (protected paths, the
   single-commit-per-run invariant, branch/PR scoping, hardened git config)
-  live in reevo's own orchestration code (`git.ts`, `container.ts`), not
+  live in wardby's own orchestration code (`git.ts`, `container.ts`), not
   inside the worker image — a bad image changes the blast radius of one
   sandboxed job, it cannot bypass those checks.
 - A Dockerfile-generator/template script. `Dockerfile.node-python`, refactored
@@ -48,7 +48,7 @@ digest — reusing the BYO-image escape hatch that already exists in
 - Any change to `src/claude-coding-worker/*` or `src/claude-tool-runner/*`
   beyond the Node 24 base-image bump in §6 — they don't consume the driver
   image and are otherwise out of scope.
-- A user/role/workspace model. reevo-run has none today (`Principal` owns
+- A user/role/workspace model. wardby has none today (`Principal` owns
   resources directly; authorization is OAuth scopes per MCP tool call, not
   roles) — this design works within that, it doesn't add one.
 
@@ -80,8 +80,8 @@ FROM node:24.x.x-bookworm-slim@sha256:<same digest>
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin reevo
-WORKDIR /opt/reevo
+    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin wardby
+WORKDIR /opt/wardby
 COPY --from=worker-dependencies /worker/node_modules ./node_modules
 COPY --from=build /build/dist/coding-worker ./coding-worker
 COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
@@ -94,10 +94,10 @@ language toolchain gets layered on — some ecosystems (Ruby native gems, .NET
 native interop) legitimately need a compiler, so the hardening assertions
 can't be baked into a shared base. They belong in the derived Dockerfile,
 which must run them (as root, after installing its toolchain) before
-switching to the `reevo` user. `Dockerfile.node-python` (§3) is the worked
+switching to the `wardby` user. `Dockerfile.node-python` (§3) is the worked
 example of doing this correctly.
 
-The `ca-certificates`/`git` install and the `reevo` uid/gid (10001) _are_
+The `ca-certificates`/`git` install and the `wardby` uid/gid (10001) _are_
 baked in, since every coding-worker image needs them regardless of language,
 and pre-creating the uid keeps file ownership consistent across every image
 derived from this base.
@@ -111,7 +111,7 @@ New workflow `.github/workflows/publish-driver-image.yml`:
   changes) — there is no automated versioning here.
 - Builds `src/coding-worker/Dockerfile.driver`, authenticates to GHCR with
   the built-in `GITHUB_TOKEN` (no new secrets to provision), and pushes to
-  `ghcr.io/chfields/reevo-run/reevo-coding-worker-driver` tagged both
+  `ghcr.io/wardby/wardby/wardby-coding-worker-driver` tagged both
   `driver-vN` and `latest`.
 - The GHCR package must be set to **public** visibility so downstream builds
   (including CI building `Dockerfile.node-python`, and any BYO user's build)
@@ -126,8 +126,8 @@ This is genuinely new infrastructure: today, no CI in this repo publishes any
 image to a registry — `security.yml`'s `worker-image` job only builds images
 locally (tagged `:$github.sha`) to run the policy check and acceptance
 tests, then discards them. `CODING_WORKER_IMAGE_*` env vars are populated by
-whoever deploys reevo, building/pushing images themselves, out of band. This
-design does not change that for the _node/node-python_ images reevo already
+whoever deploys wardby, building/pushing images themselves, out of band. This
+design does not change that for the _node/node-python_ images wardby already
 ships — only the new driver image gets a real publish pipeline.
 
 ## 3. `Dockerfile.node-python` refactor + Node 24 bump
@@ -136,7 +136,7 @@ ships — only the new driver image gets a real publish pipeline.
 It becomes:
 
 ```dockerfile
-FROM ghcr.io/chfields/reevo-run/reevo-coding-worker-driver@sha256:<pinned>
+FROM ghcr.io/wardby/wardby/wardby-coding-worker-driver@sha256:<pinned>
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip \
     && python3 -m pip install --no-cache-dir --break-system-packages pytest==8.3.4 ruff==0.16.7 \
@@ -155,9 +155,9 @@ RUN test ! -e /usr/bin/docker \
     && python3 -m pytest --version \
     && python3 -m ruff --version
 USER 10001:10001
-ENV NODE_ENV=production HOME=/home/reevo
+ENV NODE_ENV=production HOME=/home/wardby
 WORKDIR /workspace
-ENTRYPOINT ["node", "/opt/reevo/coding-worker/main.js"]
+ENTRYPOINT ["node", "/opt/wardby/coding-worker/main.js"]
 ```
 
 This file becomes the **reference example** for BYO users — no separate
@@ -184,7 +184,7 @@ as an explicit implementation step, not guessed here.
 
 ## 4. Scope-gating: `agents:admin` for `workerImageRef`
 
-reevo-run has no user/role model — authorization is OAuth scopes per MCP
+wardby has no user/role model — authorization is OAuth scopes per MCP
 tool call (`agents:read`/`agents:write`/`agents:admin`), already used for
 exactly this kind of step-up (`make_owner` requires `agents:admin` while
 ordinary CRUD requires only `agents:write`). Since the driver image makes
@@ -208,7 +208,7 @@ step-up.
 - This is additive to `agents:write`, not a replacement — a caller still
   needs `agents:write` to call these tools at all (enforced centrally as
   today); `agents:admin` is required in addition, only when touching this
-  one field. Setting `toolchain`/`toolchainVersion` from reevo's own curated
+  one field. Setting `toolchain`/`toolchainVersion` from wardby's own curated
   `additionalWorkerImages` matrix is unaffected and stays at `agents:write`.
 
 ## 5. Docs & CI policy script

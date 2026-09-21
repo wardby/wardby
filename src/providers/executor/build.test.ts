@@ -21,7 +21,7 @@ describe("buildExecutor", () => {
 
   it("builds the DBOS executor when EXECUTOR=dbos and a database url and executor id are present", () => {
     const executor = buildExecutor({ executor: "dbos" }, providers, undefined, {
-      DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo",
+      DATABASE_URL: "postgresql://wardby:wardby@localhost:55432/wardby",
       DBOS_EXECUTOR_ID: "scheduler-1",
     });
     expect(executor).toBeInstanceOf(DbosExecutor);
@@ -35,7 +35,7 @@ describe("buildExecutor", () => {
 
   it("generates its own executor id for EXECUTOR=dbos when DBOS_EXECUTOR_ID is not set", () => {
     const executor = buildExecutor({ executor: "dbos" }, providers, undefined, {
-      DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo",
+      DATABASE_URL: "postgresql://wardby:wardby@localhost:55432/wardby",
     });
     expect(executor).toBeInstanceOf(DbosExecutor);
   });

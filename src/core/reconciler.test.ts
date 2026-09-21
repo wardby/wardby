@@ -136,7 +136,7 @@ describe("reconcileOnce", () => {
   });
 
   it("never reaps an attended unmanaged run, even with no heartbeat and an old startedAt", async () => {
-    // This is the bug this scoping fixes: an attended `reevo run` has no
+    // This is the bug this scoping fixes: an attended `wardby run` has no
     // heartbeat by design, so without the trigger scope a long-streaming
     // manual run would get flipped to `lost` while a human still watches it.
     const runs = [baseRun({ trigger: "manual", executionManaged: false, heartbeatAt: null, startedAt: STALE })];

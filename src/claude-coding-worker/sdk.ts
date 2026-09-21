@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import type { ClaudeQueryFactory, ClaudeQueryOptions, ClaudeSdkMessage } from "./driver.js";
 
 const runtimeRequire = createRequire(import.meta.url);
-const TOOL_NAME = "mcp__reevo_tools__run_command";
+const TOOL_NAME = "mcp__wardby_tools__run_command";
 
 export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string, unknown> {
   const abortController = new AbortController();
@@ -10,7 +10,7 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
   else config.signal.addEventListener("abort", () => abortController.abort(), { once: true });
   return {
     abortController,
-    cwd: "/opt/reevo/empty-workspace",
+    cwd: "/opt/wardby/empty-workspace",
     model: config.model,
     maxTurns: 16,
     maxBudgetUsd: config.budgetUsd,
@@ -18,9 +18,9 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
     allowedTools: [TOOL_NAME],
     strictMcpConfig: true,
     mcpServers: {
-      reevo_tools: {
+      wardby_tools: {
         command: "node",
-        args: ["/opt/reevo/claude-coding-worker/tool-relay.js"],
+        args: ["/opt/wardby/claude-coding-worker/tool-relay.js"],
         env: config.relayEnvironment,
         timeout: 120_000,
         alwaysLoad: true,

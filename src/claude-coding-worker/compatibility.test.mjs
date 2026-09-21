@@ -112,8 +112,8 @@ async function fakeAnthropic(handler) {
 }
 
 async function runQuery(baseUrl, abortController = new AbortController(), tools = [], overrides = {}) {
-  const workspace = await mkdtemp(join(tmpdir(), "reevo-claude-compat-workspace-"));
-  const config = await mkdtemp(join(tmpdir(), "reevo-claude-compat-config-"));
+  const workspace = await mkdtemp(join(tmpdir(), "wardby-claude-compat-workspace-"));
+  const config = await mkdtemp(join(tmpdir(), "wardby-claude-compat-config-"));
   workspaces.push(workspace, config);
   const messages = [];
   const stream = query({
@@ -277,13 +277,13 @@ test("tool subprocess scrubs the capability or fails closed", async () => {
   }
 });
 
-test("Reevo MCP tool loop preserves the pinned second-turn request shape", async () => {
+test("Wardby MCP tool loop preserves the pinned second-turn request shape", async () => {
   let turn = 0;
   const fake = await fakeAnthropic((_request, response) => {
     response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
     if (turn++ === 0) {
       response.end(
-        toolUseSse("toolu_reevo_compatibility", "mcp__reevo_tools__run_command", {
+        toolUseSse("toolu_wardby_compatibility", "mcp__wardby_tools__run_command", {
           command: "git status --short",
           timeout_ms: 1000,
         }),
@@ -292,8 +292,8 @@ test("Reevo MCP tool loop preserves the pinned second-turn request shape", async
     }
     response.end(toolUseSse("toolu_structured_compatibility", "StructuredOutput", { outcome: "changes_ready" }));
   });
-  const reevoTools = createSdkMcpServer({
-    name: "reevo_tools",
+  const wardbyTools = createSdkMcpServer({
+    name: "wardby_tools",
     tools: [
       tool(
         "run_command",
@@ -306,8 +306,8 @@ test("Reevo MCP tool loop preserves the pinned second-turn request shape", async
   try {
     await runQuery(fake.baseUrl, new AbortController(), [], {
       maxTurns: 2,
-      mcpServers: { reevo_tools: reevoTools },
-      allowedTools: ["mcp__reevo_tools__run_command"],
+      mcpServers: { wardby_tools: wardbyTools },
+      allowedTools: ["mcp__wardby_tools__run_command"],
       outputFormat: {
         type: "json_schema",
         schema: {
@@ -325,7 +325,7 @@ test("Reevo MCP tool loop preserves the pinned second-turn request shape", async
       content: [
         {
           type: "tool_result",
-          tool_use_id: "toolu_reevo_compatibility",
+          tool_use_id: "toolu_wardby_compatibility",
           content: [{ type: "text", text: "exit_code=0\n" }],
           cache_control: { type: "ephemeral" },
         },

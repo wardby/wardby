@@ -9,7 +9,7 @@ const cipherKey = "0".repeat(64); // 32 bytes hex
 
 if (!databaseUrl) {
   console.warn(
-    "[reevo-run tests] DATABASE_URL not set — skipping PostgresDatastore tests " +
+    "[wardby tests] DATABASE_URL not set — skipping PostgresDatastore tests " +
       "(get/set/delete/list round-trip, per-agent scoping). Set DATABASE_URL to run them.",
   );
 }

@@ -108,7 +108,7 @@ resource "tls_self_signed_cert" "control_plane" {
 
   subject {
     common_name  = google_compute_global_address.control_plane[0].address
-    organization = "reevo-run (self-signed, evaluation only)"
+    organization = "wardby (self-signed, evaluation only)"
   }
 
   validity_period_hours = 8760

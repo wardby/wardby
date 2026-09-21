@@ -1,10 +1,10 @@
 /**
  * Secrets seam — encryption of secret values at rest.
  *
- * reevo-run uses its own key and its own ciphertext format, independent of any
+ * wardby uses its own key and its own ciphertext format, independent of any
  * other system. `encrypt` returns a self-describing blob (algorithm + key id +
  * IV + ciphertext) so values can be rotated and re-encrypted without ambiguity
- * — this is what makes a one-time migration onto reevo-run clean.
+ * — this is what makes a one-time migration onto wardby clean.
  *
  * Default adapter: AppKeySecretCipher (AES-GCM with an app master key).
  * Native adapter:  KmsSecretCipher (envelope encryption via a KMS key).

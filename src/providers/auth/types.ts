@@ -3,7 +3,7 @@
  *
  * Default adapter: DelegatingAuthProvider (resource-server-only; an external
  * IdP is the authorization server). Native adapter: SelfHostedAuthProvider
- * (reevo additionally runs the AS role: PKCE /authorize+/token, its own
+ * (wardby additionally runs the AS role: PKCE /authorize+/token, its own
  * signed tokens).
  */
 

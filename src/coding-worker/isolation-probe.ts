@@ -66,12 +66,12 @@ async function baseline(): Promise<void> {
     writes: {
       workspace: await writable(`/workspace/.isolation-probe-${marker}`),
       git: await writable(`/workspace/.git/.isolation-probe-${marker}`),
-      input: await writable(`/run/reevo/input/.isolation-probe-${marker}`),
-      output: await writable(`/run/reevo/output/.isolation-probe-${marker}`),
+      input: await writable(`/run/wardby/input/.isolation-probe-${marker}`),
+      output: await writable(`/run/wardby/output/.isolation-probe-${marker}`),
       root: await writable(`/etc/.isolation-probe-${marker}`),
     },
     connects: {
-      proxy: await canConnect("reevo-proxy", 8787),
+      proxy: await canConnect("wardby-proxy", 8787),
       localhost: await canConnect("127.0.0.1", 8787),
       metadata: await canConnect("169.254.169.254", 80),
       publicInternet: await canConnect("1.1.1.1", 80),

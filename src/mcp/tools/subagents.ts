@@ -10,7 +10,7 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { requireOwnedAgent } from "../auth/ownership.js";
 import { McpError } from "../errors.js";
-import type { ReevoMcpServer } from "../server.js";
+import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
 
 type SubAgentDb = Pick<PrismaClient, "agentSubAgent">;
@@ -47,7 +47,7 @@ async function canReach(db: SubAgentDb, fromAgentId: string, toAgentId: string):
   return false;
 }
 
-export function registerSubAgentTools(mcp: ReevoMcpServer): void {
+export function registerSubAgentTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "attach_subagent",
     scope: "agents:write",
