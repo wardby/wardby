@@ -222,3 +222,23 @@ obviously point at its cause:
 
 `deploy/keycloak-test/` brings up a throwaway Keycloak configured correctly for
 all four, which is worth running locally before pointing this at a real IdP.
+
+## 12. What the container runs
+
+The image's default command is `reevo serve`: the MCP server, the scheduler
+that fires due agents, and the reconciler that recovers orphaned runs, in one
+process. The module does not override it, so scheduled agents fire in this
+deployment.
+
+Two consequences of running a background worker on Cloud Run:
+
+- **CPU is always allocated** (`cpu_idle = false` in `cloud-run.tf`). The
+  default only gives a container CPU while it handles a request, which
+  starves the scheduler's timers and — worse — the heartbeat every running
+  agent sends; the reconciler would then reap healthy runs as lost. This is
+  billed at a higher rate than idle CPU.
+- **Every replica runs all three.** With `min_instance_count = 2`, both
+  instances run a scheduler; a Postgres lease elects one to tick and row
+  locks make firing at-most-once regardless. Both run the reconciler by
+  design. Each instance gets its own DBOS executor id automatically — do not
+  set `DBOS_EXECUTOR_ID` here, or replicas would share one.

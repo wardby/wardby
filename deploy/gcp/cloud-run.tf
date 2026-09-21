@@ -50,6 +50,18 @@ resource "google_cloud_run_v2_service" "main" {
     containers {
       image = var.container_image
 
+      # `serve` runs three setInterval loops (scheduler tick, lease renewal,
+      # reconciler) and every in-flight run beats its heartbeat on a fourth.
+      # Cloud Run's default cpu_idle = true allocates CPU only while a request
+      # is being handled, which starves all of them - and a starved heartbeat
+      # is worse than a missed tick, because the reconciler then reaps the
+      # perfectly healthy run as lost. Always-allocated CPU costs more per
+      # instance-hour than the idle rate; it is the price of running a
+      # background worker on Cloud Run at all.
+      resources {
+        cpu_idle = false
+      }
+
       volume_mounts {
         name       = "cloudsql"
         mount_path = "/cloudsql"

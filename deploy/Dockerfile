@@ -25,4 +25,6 @@ COPY --from=build /app/dist ./dist
 RUN test ! -d node_modules/prisma && test ! -d node_modules/@prisma/config && test ! -d node_modules/deepmerge-ts
 USER node
 ENV NODE_ENV=production
-CMD ["node", "dist/cli.js", "mcp"]
+# The complete process: MCP + scheduler + reconciler. A deployment that
+# splits them (deploy/production/compose.yml) overrides this per container.
+CMD ["node", "dist/cli.js", "serve"]
