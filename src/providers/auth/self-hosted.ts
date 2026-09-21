@@ -187,11 +187,32 @@ export class SelfHostedAuthProvider implements AuthProvider {
     });
   }
   async handleToken(params: TokenParams): Promise<TokenResult> {
-    if (params.resource !== undefined && params.resource !== this.config.canonicalUri)
+    if (params.resource !== undefined && !this.withinCanonical(params.resource))
       throw new Error("Invalid grant: resource does not match the canonical URI.");
     if (params.grantType === "authorization_code") return this.exchange(params);
     if (params.grantType === "refresh_token") return this.rotate(params);
     throw new Error("Unsupported grant.");
+  }
+  /**
+   * Whether a token request's `resource` names this server: the canonical URI
+   * itself, or a URL beneath it. The MCP SDK sends the metadata's canonical
+   * URI when it has it, but falls back to the MCP endpoint URL (e.g. `/mcp`
+   * under a root canonical URI) on refresh - rejecting that logged every
+   * Claude Code session out after one access-token lifetime. The issued
+   * token's audience still comes from the grant (code.resource /
+   * family.resource), never from this parameter.
+   */
+  private withinCanonical(resource: string): boolean {
+    let url: URL;
+    try {
+      url = new URL(resource);
+    } catch {
+      return false;
+    }
+    const canonical = new URL(this.config.canonicalUri);
+    if (url.origin !== canonical.origin || url.search || url.hash) return false;
+    const base = canonical.pathname.endsWith("/") ? canonical.pathname : canonical.pathname + "/";
+    return url.pathname === canonical.pathname || url.pathname.startsWith(base);
   }
   private async exchange(p: Extract<TokenParams, { grantType: "authorization_code" }>): Promise<TokenResult> {
     const id = this.credentials.id(p.code, "rva");
