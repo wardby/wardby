@@ -102,13 +102,22 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
         if (
           Object.keys(p).some(
             (k) =>
-              !["redirect_uris", "client_name", "grant_types", "token_endpoint_auth_method", "response_types"].includes(
-                k,
-              ),
+              ![
+                "redirect_uris",
+                "client_name",
+                "grant_types",
+                "token_endpoint_auth_method",
+                "response_types",
+                "scope",
+              ].includes(k),
           )
         )
           throw new Error();
         if (p.response_types && JSON.stringify(p.response_types) !== '["code"]') throw new Error();
+        // RFC 7591 `scope` (Claude Code sends it whenever scopes_supported is
+        // advertised). Accepted and not stored: scopes are requested and
+        // consented per authorization at /authorize, never fixed at registration.
+        if (p.scope !== undefined && (typeof p.scope !== "string" || p.scope.length > 512)) throw new Error();
         const registered = await provider.registerClient({
           redirectUris: p.redirect_uris as string[],
           clientName: p.client_name as string | undefined,
