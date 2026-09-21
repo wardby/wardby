@@ -171,6 +171,14 @@ deployment. If you hit that, the targeted recovery is
 `terraform apply -target=google_sql_database_instance.main -var="cloudsql_deletion_protection=false"`,
 then destroy again.
 
+The database user is created with `deletion_policy = "ABANDON"`: Cloud SQL
+cannot drop a Postgres role that still owns the tables migrations created, so
+`destroy` leaves the user alone and it disappears with the instance. A
+deployment applied before that setting existed still has the old policy in
+state and fails at `google_sql_user.app` with "role ... cannot be dropped
+because some objects depend on it". Recover with
+`terraform state rm google_sql_user.app`, then destroy again.
+
 ## 11. Using your own identity provider (delegating mode)
 
 By default the module deploys `auth_provider = "self-hosted"`: reevo acts as
