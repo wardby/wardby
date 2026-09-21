@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { Prisma } from "@prisma/client";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
@@ -720,6 +721,42 @@ describe("agent CRUD tools", () => {
 
     const result = await client.callTool({ name: "delete_agent", arguments: { id: "a1" } });
     expect(result.isError).toBe(true);
+    await client.close();
+  });
+
+  it("delete_agent explains, instead of leaking a Prisma error, when the agent has run history", async () => {
+    const db = fakeDb([
+      {
+        id: "a1",
+        name: "has-runs",
+        systemPrompt: "x",
+        model: "m",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId: "p1",
+        tools: [],
+      },
+    ]);
+    // What Postgres raises: Run.agentId references the agent with no onDelete rule.
+    (db.agent as unknown as { delete: () => Promise<never> }).delete = async () => {
+      throw new Prisma.PrismaClientKnownRequestError(
+        "Foreign key constraint violated on the constraint: `Run_agentId_fkey`",
+        { code: "P2003", clientVersion: "test" },
+      );
+    };
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "delete_agent", arguments: { id: "a1" } });
+    expect(result.isError).toBe(true);
+    const text = (result.content as { text: string }[])[0].text;
+    expect(text).toMatch(/run history/i);
+    expect(text).toMatch(/disable_schedule/);
+    expect(text).not.toMatch(/prisma|Run_agentId_fkey/i);
     await client.close();
   });
 
