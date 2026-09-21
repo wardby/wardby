@@ -45,4 +45,12 @@ resource "google_sql_user" "app" {
   project  = var.project_id
   instance = google_sql_database_instance.main.name
   password = random_password.db_password.result
+
+  # Postgres refuses to drop a role that owns objects, and this one owns every
+  # table migrations create, so a destroy of a deployment that ever ran fails
+  # here ("role ... cannot be dropped because some objects depend on it") -
+  # after the service, secrets, and database are already gone. ABANDON skips
+  # the drop; the user is removed with the instance. Confirmed tearing down a
+  # live deployment 2026-09-21; an empty-database destroy never hits it.
+  deletion_policy = "ABANDON"
 }
