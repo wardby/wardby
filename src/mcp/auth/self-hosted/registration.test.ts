@@ -52,24 +52,28 @@ describe.skipIf(!process.env.DATABASE_URL)("self-hosted dynamic client registrat
       body: JSON.stringify(body),
     });
 
-  it("accepts the RFC 7591 scope field, as Claude Code sends it", async () => {
-    // Claude Code's registration body verbatim (2.1.278): it adds `scope`
-    // whenever protected-resource metadata advertises scopes_supported.
+  it("accepts Claude Code's registration request verbatim", async () => {
+    // Captured from Claude Code on 2026-09-21. It adds RFC 7591 `scope`
+    // whenever scopes_supported is advertised, and OIDC Dynamic Client
+    // Registration's `application_type`.
     const res = await register({
       client_name: "Claude Code (reevo)",
-      redirect_uris: ["http://localhost:51234/callback"],
+      redirect_uris: ["http://localhost:64862/callback"],
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
       token_endpoint_auth_method: "none",
-      scope: "agents:read agents:write runs:trigger",
+      application_type: "native",
+      scope:
+        "agents:read agents:write tools:write runs:trigger datastore:write secrets:write webhooks:write budget_groups:write agents:admin",
     });
     expect(res.status).toBe(201);
     clients.push(((await res.json()) as { client_id: string }).client_id);
   });
 
-  it("still rejects a non-string scope and unknown fields", async () => {
+  it("still rejects malformed scope/application_type and unknown fields", async () => {
     const base = { redirect_uris: ["http://localhost:51234/callback"], token_endpoint_auth_method: "none" };
     expect((await register({ ...base, scope: ["agents:read"] })).status).toBe(400);
+    expect((await register({ ...base, application_type: "service" })).status).toBe(400);
     expect((await register({ ...base, jwks_uri: "https://evil.example/jwks" })).status).toBe(400);
   });
 });

@@ -109,15 +109,20 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
                 "token_endpoint_auth_method",
                 "response_types",
                 "scope",
+                "application_type",
               ].includes(k),
           )
         )
           throw new Error();
         if (p.response_types && JSON.stringify(p.response_types) !== '["code"]') throw new Error();
-        // RFC 7591 `scope` (Claude Code sends it whenever scopes_supported is
-        // advertised). Accepted and not stored: scopes are requested and
-        // consented per authorization at /authorize, never fixed at registration.
+        // Claude Code sends both of the following. Neither is stored.
+        // RFC 7591 `scope`: scopes are requested and consented per
+        // authorization at /authorize, never fixed at registration.
         if (p.scope !== undefined && (typeof p.scope !== "string" || p.scope.length > 512)) throw new Error();
+        // OIDC Dynamic Client Registration `application_type`: every client
+        // here is already a public PKCE client with validated redirect URIs.
+        if (p.application_type !== undefined && p.application_type !== "native" && p.application_type !== "web")
+          throw new Error();
         const registered = await provider.registerClient({
           redirectUris: p.redirect_uris as string[],
           clientName: p.client_name as string | undefined,
