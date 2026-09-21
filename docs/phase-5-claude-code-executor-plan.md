@@ -33,7 +33,7 @@ than its per-run bridge to the trusted proxy.
 
 - Letting a worker use `ANTHROPIC_API_KEY`, an OAuth login, host credentials,
   Docker access, direct network access, or Git metadata.
-- A generic third-party gateway such as LiteLLM in the trusted path. Reevo's
+- A generic third-party gateway such as LiteLLM in the trusted path. Wardby's
   proxy remains the policy enforcement point and owns the usage ledger.
 - Conversation resumption across jobs, automatic PR updates, auto-merge,
   GitLab/Bitbucket, or workflow-file edits.
@@ -47,7 +47,7 @@ with two isolated containers and a private Unix-socket tool channel:
 1. The **agent container** runs the pinned Claude Agent SDK, connects only to
    the trusted model proxy, and holds the short-lived run capability. It does
    not mount the repository and has no built-in file, shell, web, or MCP tools.
-2. The **tool container** mounts the Gitless workspace and implements Reevo's
+2. The **tool container** mounts the Gitless workspace and implements Wardby's
    bounded read, search, edit, and command tools. It has `--network none`, a
    separate PID namespace, no credential, and no model-proxy attachment.
 3. A trusted, credential-free stdio relay in the agent container carries MCP
@@ -114,7 +114,7 @@ endpoint, stop and redesign rather than adding egress exceptions.
 #### Task 0 findings (2026-09-12)
 
 - Pinned `@anthropic-ai/claude-agent-sdk` `0.3.269`, which bundles Claude Code
-  `2.1.269`; its Zod 4 and SDK peers are isolated from Reevo's main runtime.
+  `2.1.269`; its Zod 4 and SDK peers are isolated from Wardby's main runtime.
 - Startup sends unauthenticated `HEAD /api/hello`, then model traffic to
   `POST /v1/messages?beta=true` with the run token in `x-api-key`.
 - The default request ceiling is 64,000 output tokens and retries default to
@@ -188,7 +188,7 @@ are copied into either image.
 Implement a Claude driver with the same trusted input/output contract as the
 Codex driver:
 
-- The agent reads only `/run/reevo/input/input.json`, writes only the atomic
+- The agent reads only `/run/wardby/input/input.json`, writes only the atomic
   bounded result artifact, and accesses the repository only through the
   credential-free tool runner.
 - Supply the fixed security instructions and task, use non-interactive mode,

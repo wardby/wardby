@@ -10,7 +10,7 @@ import type { McpProviders } from "../../context.js";
 
 // The token requests the MCP SDK (as bundled in Claude Code) sends: form
 // bodies that always carry `resource`, with client_id as the only client
-// authentication. reevo's browser.test.ts refresh omits `resource`.
+// authentication. wardby's browser.test.ts refresh omits `resource`.
 describe.skipIf(!process.env.DATABASE_URL)("self-hosted token refresh, MCP SDK shape (database)", () => {
   const db = new PrismaClient();
   const subject = "refresh-" + randomUUID();
@@ -61,7 +61,7 @@ describe.skipIf(!process.env.DATABASE_URL)("self-hosted token refresh, MCP SDK s
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        client_name: "Claude Code (reevo)",
+        client_name: "Claude Code (wardby)",
         redirect_uris: [redirectUri],
         grant_types: ["authorization_code", "refresh_token"],
         response_types: ["code"],

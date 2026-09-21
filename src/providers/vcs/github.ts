@@ -4,9 +4,9 @@ import { normalizeGitHubRepository, normalizeGitRef } from "../../coding/protoco
 
 const DEFAULT_API_BASE_URL = "https://api.github.com";
 const DEFAULT_API_VERSION = "2026-03-10";
-const RUN_MARKER_PREFIX = "<!-- reevo-run:";
-const STATUS_COMMENT_MARKER_PREFIX = "<!-- reevo-run-status:";
-const CONTINUATION_CHECK_RUN_NAME = "reevo/continuation";
+const RUN_MARKER_PREFIX = "<!-- wardby:";
+const STATUS_COMMENT_MARKER_PREFIX = "<!-- wardby-status:";
+const CONTINUATION_CHECK_RUN_NAME = "wardby/continuation";
 /** Mirrors coding/protocol.ts's tagSchema — validated independently here since this is where it reaches GitHub. */
 const SAFE_PULL_REQUEST_TAG = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,31}$/;
 /** Mirrors the runId shape validated elsewhere (coding/protocol.ts, git.ts) — validated independently here too. */
@@ -105,7 +105,7 @@ export function isSafeGitHubInstallationToken(value: unknown): value is string {
 }
 
 function pullRequestTitle(input: PullRequestInput): string {
-  return input.tag ? `[${input.tag}] Reevo run ${input.runId}` : `Reevo run ${input.runId}`;
+  return input.tag ? `[${input.tag}] Wardby run ${input.runId}` : `Wardby run ${input.runId}`;
 }
 
 /** The hidden run marker stays first and unconditional: createOrFindDraftPullRequest's idempotent lookup depends on it. */
@@ -299,7 +299,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     const repository = normalizeGitHubRepository(input.repository);
     const baseRef = normalizeGitRef(input.baseRef);
     const headRef = normalizeGitRef(input.headRef);
-    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.runId) || headRef !== `reevo/run-${input.runId}`) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.runId) || headRef !== `wardby/run-${input.runId}`) {
       throw new Error("github_pull_request_input_invalid");
     }
     if (input.tag !== undefined && !SAFE_PULL_REQUEST_TAG.test(input.tag)) {
@@ -536,7 +536,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
           accept: "application/vnd.github+json",
           authorization: `Bearer ${bearer}`,
           "content-type": "application/json",
-          "user-agent": "reevo-run",
+          "user-agent": "wardby",
           "x-github-api-version": this.apiVersion,
           ...init.headers,
         },

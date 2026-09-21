@@ -2,12 +2,12 @@
 
 **Date:** 2026-09-10
 **Status:** Proposed (design; not yet planned or implemented)
-**Author:** reevo-run maintainer
+**Author:** wardby maintainer
 **Related:** `docs/private/2026-09-07-migration-bundle-spec.md` (§ secrets/alias); Tier-1 importer finding **F2** (shared-alias collapse)
 
-> **Clean-room note.** This is a reevo-run platform change grounded entirely in
-> reevo's own data model. It describes the _concept_ of a per-attachment alias
-> (which reevo already documents in the migration-bundle spec) and does not read
+> **Clean-room note.** This is a wardby platform change grounded entirely in
+> wardby's own data model. It describes the _concept_ of a per-attachment alias
+> (which wardby already documents in the migration-bundle spec) and does not read
 > from or copy any agent-cron source.
 
 ---
@@ -17,12 +17,12 @@
 Let a single agent reference a secret at sandbox point-of-use by a **stable
 logical name** (`secrets.get("bitbucket")`) while different agents resolve that
 same logical name to **different underlying secrets**. This is the indirection
-layer reevo's schema currently lacks, and its absence is the root cause of
+layer wardby's schema currently lacks, and its absence is the root cause of
 importer finding F2.
 
 ## Background: what breaks today
 
-reevo folds two distinct axes into one:
+wardby folds two distinct axes into one:
 
 - **Secret identity** — `Secret.name`, unique per owner (`@@unique([ownerId, name])`).
 - **Point-of-use name** — the string a tool passes to `secrets.get(name)`.
@@ -36,10 +36,10 @@ WHERE a."agentId" = ${agentId} AND s."name" = ${name} LIMIT 1
 ```
 
 That is correct only when one logical name maps to one physical secret per
-owner — true for greenfield reevo agents. It fails on import, where many
+owner — true for greenfield wardby agents. It fails on import, where many
 physically-distinct secrets (`bitbucket_aies`, `bitbucket_ondemand`,
 `bitbucket_lexitas_infra`, …) all want to answer to the logical name
-`bitbucket`. reevo has nowhere to store that fan-out, so the importer's current
+`bitbucket`. wardby has nowhere to store that fan-out, so the importer's current
 workaround creates one `Secret` row **per distinct effective name** and attaches
 every aliased edge to the alias-named row. Result on the real bundle:
 
@@ -54,9 +54,9 @@ silently (the import reports success).
 
 ## Non-goals
 
-- Not part of Tier-1 importer scope. This is a standalone reevo model change; it
+- Not part of Tier-1 importer scope. This is a standalone wardby model change; it
   is a prerequisite for the importer to round-trip aliased secrets faithfully,
-  but it stands on its own for any reevo user who wants two secrets under one
+  but it stands on its own for any wardby user who wants two secrets under one
   point-of-use name.
 - No change to the transfer-envelope crypto, the reference-mode secret flow, or
   the `SecretCipher` provider interface.
@@ -114,7 +114,7 @@ model AgentSecret {
 
 `Secret` is unchanged.
 
-### 2. Migration (manual SQL, following reevo's timestamped convention)
+### 2. Migration (manual SQL, following wardby's timestamped convention)
 
 New dir `prisma/migrations/<next-timestamp>_agent_secret_bound_name/migration.sql`:
 

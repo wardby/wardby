@@ -109,7 +109,7 @@ Tests first:
 
 Acceptance gate:
 
-- No unauthenticated route can issue a reevo bearer token.
+- No unauthenticated route can issue a wardby bearer token.
 - Remote MCP remains usable with a valid delegated token.
 - Stdio behavior is unchanged.
 
@@ -147,8 +147,8 @@ Schema:
 
 Implementation:
 
-1. Add `reevo auth user create --subject <subject>` and `reevo auth user list`. Creation resolves one `Principal`, then links one `AuthUser` to it.
-2. Add `reevo auth key create --subject <subject>`, `reevo auth key list --subject <subject>`, and `reevo auth key revoke <key-id>`.
+1. Add `wardby auth user create --subject <subject>` and `wardby auth user list`. Creation resolves one `Principal`, then links one `AuthUser` to it.
+2. Add `wardby auth key create --subject <subject>`, `wardby auth key list --subject <subject>`, and `wardby auth key revoke <key-id>`.
 3. Generate login keys as an identifier plus 32 random bytes, for example `rvk_<keyId>.<secret>`. Display the complete value exactly once.
 4. Hash credential secrets with HMAC-SHA-256 using a dedicated 32-byte `AUTH_CREDENTIAL_HASH_KEY`. Do not reuse the JWT signing key or `SECRET_APP_KEY`.
 5. Look up by the public identifier, compute the keyed hash, and compare fixed-size values in constant time.
@@ -172,7 +172,7 @@ Implementation:
 5. Protect consent and logout forms with purpose-bound, short-lived, single-use `AuthFormChallenge` rows tied to the authenticated session.
 6. Add `POST /logout` with CSRF protection and server-side revocation.
 7. Set `Cache-Control: no-store`, a restrictive Content Security Policy, `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer` on login and consent pages.
-8. Apply per-IP and per-key-ID login throttles through a `RateLimiter` interface. The production implementation must use shared persistence when more than one reevo process serves traffic.
+8. Apply per-IP and per-key-ID login throttles through a `RateLimiter` interface. The production implementation must use shared persistence when more than one wardby process serves traffic.
 
 Tests first:
 
@@ -388,7 +388,7 @@ Implementation:
 7. Stream the response while counting decoded bytes. Abort above 8 MiB before creating a full `Buffer` or base64 copy.
 8. Combine fetch timeout and sandbox cancellation with `AbortSignal.any` or equivalent so a timed-out sandbox tears down in-flight host work.
 9. Return a stable sandbox error category for blocked destination, timeout, redirect limit, and response-size limit without exposing internal addresses unnecessarily.
-10. Treat `REEVO_FETCH_ALLOWED_HOSTS` as exact normalized hostnames. Reject wildcards and empty entries. Document that allowlisting private hosts intentionally bypasses network isolation.
+10. Treat `WARDBY_FETCH_ALLOWED_HOSTS` as exact normalized hostnames. Reject wildcards and empty entries. Document that allowlisting private hosts intentionally bypasses network isolation.
 
 Tests first:
 

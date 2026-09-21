@@ -57,7 +57,7 @@ describe.skipIf(!process.env.DATABASE_URL)("self-hosted dynamic client registrat
     // whenever scopes_supported is advertised, and OIDC Dynamic Client
     // Registration's `application_type`.
     const res = await register({
-      client_name: "Claude Code (reevo)",
+      client_name: "Claude Code (wardby)",
       redirect_uris: ["http://localhost:64862/callback"],
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],

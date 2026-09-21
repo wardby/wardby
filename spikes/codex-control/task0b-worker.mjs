@@ -3,8 +3,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 
 const timeoutMs = 90_000;
-const proxyBaseUrl = process.env.REEVO_PROXY_URL ?? "http://proxy:8080";
-const capability = process.env.REEVO_RUN_CAPABILITY ?? "";
+const proxyBaseUrl = process.env.WARDBY_PROXY_URL ?? "http://proxy:8080";
+const capability = process.env.WARDBY_RUN_CAPABILITY ?? "";
 const workspace = "/workspace";
 const result = {
   proxyReachable: false,
@@ -107,19 +107,19 @@ function startServer() {
     "codex",
     [
       "-c",
-      'model_provider="reevo_proxy"',
+      'model_provider="wardby_proxy"',
       "-c",
-      'model_providers.reevo_proxy.name="Reevo Task 0B Proxy"',
+      'model_providers.wardby_proxy.name="Wardby Task 0B Proxy"',
       "-c",
-      `model_providers.reevo_proxy.base_url=\"${proxyBaseUrl}/v1\"`,
+      `model_providers.wardby_proxy.base_url=\"${proxyBaseUrl}/v1\"`,
       "-c",
-      'model_providers.reevo_proxy.wire_api="responses"',
+      'model_providers.wardby_proxy.wire_api="responses"',
       "-c",
-      'model_providers.reevo_proxy.auth.command="/usr/local/bin/reevo-token"',
+      'model_providers.wardby_proxy.auth.command="/usr/local/bin/wardby-token"',
       "-c",
-      "model_providers.reevo_proxy.request_max_retries=0",
+      "model_providers.wardby_proxy.request_max_retries=0",
       "-c",
-      "model_providers.reevo_proxy.stream_max_retries=0",
+      "model_providers.wardby_proxy.stream_max_retries=0",
       "app-server",
       "--stdio",
     ],
@@ -129,7 +129,7 @@ function startServer() {
 }
 
 async function initialize(rpc) {
-  await rpc.request("initialize", { clientInfo: { name: "reevo-task0b", version: "0" }, capabilities: {} });
+  await rpc.request("initialize", { clientInfo: { name: "wardby-task0b", version: "0" }, capabilities: {} });
   rpc.notify("initialized", {});
   const started = await rpc.request("thread/start", {
     model: "gpt-5.6-luna",

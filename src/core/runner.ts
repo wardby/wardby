@@ -4,7 +4,7 @@
  * scheduler can create the Run itself (inside its claim transaction) and
  * hand the id to an `Executor`, which is what actually calls `executeRun`.
  * `runAgent` is the convenience that does both in one call, and is what the
- * CLI's `reevo run` uses directly (an attended, foreground command doesn't
+ * CLI's `wardby run` uses directly (an attended, foreground command doesn't
  * need the executor's heartbeat/reconciler durability — only unattended
  * scheduled runs do).
  *
@@ -56,7 +56,7 @@ const runnerLog = logger.child({ module: "runner" });
  * - `native`: calls `executeRun` directly, bypassing any `Executor` — the
  *   created Run row is never marked `executionManaged`, so the reconciler
  *   leaves it alone even if it runs long, the same way an attended
- *   `reevo run` foreground execution does. Fast, in-process, no durability
+ *   `wardby run` foreground execution does. Fast, in-process, no durability
  *   machinery needed for a native turn loop.
  * - `coding`: a coding-kind child needs a real Docker container (Codex),
  *   which `executeRun` explicitly refuses to drive itself. Goes through
@@ -252,7 +252,7 @@ export async function executeRun(
         budgetUsd: effectiveBudgetUsd,
         maxTurns: agent.maxTurns,
       },
-      // jsonSchema was derived and validated once at `reevo tool create`
+      // jsonSchema was derived and validated once at `wardby tool create`
       // time (cli.ts) and cached on the row — there's no "update tool"
       // path, so it can't go stale. Re-deriving it here on every run would
       // spin a fresh QuickJS runtime and evaluate the whole vendored zod
@@ -504,7 +504,7 @@ export async function executeRun(
   }
 }
 
-/** Convenience: create + execute a manual run in one call (what the CLI's `reevo run` uses). */
+/** Convenience: create + execute a manual run in one call (what the CLI's `wardby run` uses). */
 export async function runAgent(
   agentName: string,
   providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory"> & {

@@ -108,7 +108,7 @@ describe.skipIf(!process.env.DATABASE_URL)("browser HTTP OAuth flow (database)",
       expect(await loginResponse.request().headerValue("origin")).toBe(origin);
       await page.getByRole("heading", { name: /Authorize/ }).waitFor();
       const cookies = await context.cookies();
-      expect(cookies.find((c) => c.name === "reevo-dev-session")).toMatchObject({
+      expect(cookies.find((c) => c.name === "wardby-dev-session")).toMatchObject({
         httpOnly: true,
         sameSite: "Lax",
         path: "/",
@@ -126,8 +126,8 @@ describe.skipIf(!process.env.DATABASE_URL)("browser HTTP OAuth flow (database)",
       expect((await provider.verifyBearer(browserToken.accessToken)).subject).toBe(subject);
       await page.goto(origin + "/logout");
       await page.getByRole("button", { name: "Sign out" }).click();
-      await page.getByRole("heading", { name: "Sign in to reevo" }).waitFor();
-      expect((await context.cookies()).find((c) => c.name === "reevo-dev-session")).toBeUndefined();
+      await page.getByRole("heading", { name: "Sign in to wardby" }).waitFor();
+      expect((await context.cookies()).find((c) => c.name === "wardby-dev-session")).toBeUndefined();
     } finally {
       await browser.close();
     }
@@ -182,7 +182,7 @@ describe.skipIf(!process.env.DATABASE_URL)("browser HTTP OAuth flow (database)",
     expect((await visit("/revoke", { client_id: clientId, token: replacement.refresh_token })).status).toBe(200);
     const logout = await visit("/logout");
     const logoutCsrf = /name="csrf" value="([^"]+)"/.exec(await logout.text())![1];
-    const session = jar.get("reevo-dev-session")!;
+    const session = jar.get("wardby-dev-session")!;
     expect((await visit("/logout", { csrf: logoutCsrf })).status).toBe(303);
     await expect(provider.sessions.get(session)).rejects.toThrow();
   }, 30_000);

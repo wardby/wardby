@@ -142,7 +142,7 @@ const databaseUrl = process.env.DATABASE_URL;
 
 if (!databaseUrl) {
   console.warn(
-    "[reevo-run tests] DATABASE_URL not set — skipping the at-most-once claimDueRun " +
+    "[wardby tests] DATABASE_URL not set — skipping the at-most-once claimDueRun " +
       "concurrency test (FOR UPDATE SKIP LOCKED against two racing ticks). This is one " +
       "of the highest-risk pieces of Phase 2; set DATABASE_URL before trusting a " +
       "scheduler change based on a green run that skipped it.",
@@ -220,7 +220,7 @@ describe.skipIf(!databaseUrl)("claimDueRun (database)", () => {
         model: "gpt-5.6-luna",
         codingProfile: {
           create: {
-            repository: "openai/reevo",
+            repository: "openai/wardby",
             defaultTask: "Update dependencies",
             allowedEgress: [],
             protectedPaths: [".github/workflows/**"],

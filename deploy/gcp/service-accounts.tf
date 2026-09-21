@@ -1,6 +1,6 @@
 # Custom, least-privilege identity for the Cloud Run service - deliberately
 # not the broad-scope default compute service account, to bound the blast
-# radius of any future SSRF-class bug to exactly what reevo needs.
+# radius of any future SSRF-class bug to exactly what wardby needs.
 resource "google_service_account" "cloud_run" {
   project      = var.project_id
   account_id   = "${var.name_prefix}-run"

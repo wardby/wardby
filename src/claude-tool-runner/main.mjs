@@ -7,10 +7,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { MAX_COMMAND_BYTES, MAX_TIMEOUT_MS, runCommand } from "./command.mjs";
 
-const SOCKET_PATH = "/run/reevo/tool/runner.sock";
-export const TOOL_RUNNER_READY_MESSAGE = "reevo_tool_runner_ready";
+const SOCKET_PATH = "/run/wardby/tool/runner.sock";
+export const TOOL_RUNNER_READY_MESSAGE = "wardby_tool_runner_ready";
 function toolServer() {
-  const server = new McpServer({ name: "reevo_tools", version: "1.0.0" });
+  const server = new McpServer({ name: "wardby_tools", version: "1.0.0" });
   server.registerTool(
     "run_command",
     {

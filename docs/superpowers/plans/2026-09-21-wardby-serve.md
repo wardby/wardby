@@ -1,8 +1,8 @@
-# `reevo serve` — One-Process Deployment Implementation Plan
+# `wardby serve` — One-Process Deployment Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give reevo a single `reevo serve` process that runs the MCP server, the scheduler, and the reconciler together, so a Cloud Run deployment actually fires scheduled agents instead of silently accepting schedules it never runs.
+**Goal:** Give wardby a single `wardby serve` process that runs the MCP server, the scheduler, and the reconciler together, so a Cloud Run deployment actually fires scheduled agents instead of silently accepting schedules it never runs.
 
 **Architecture:** No scheduling logic changes. `startServe()` builds the provider set once (satisfying the DBOS one-executor-per-process singleton), hands that single executor to `startMcp()`, `startScheduler()`, and `startReconciler()`, and stops them in the right order on shutdown. The Docker image's default CMD becomes `serve`; the GCP module additionally sets `cpu_idle = false`, without which Cloud Run starves every `setInterval` in the process — including run heartbeats, which the newly-attached reconciler would then reap. Those two deploy changes are one change.
 
@@ -14,8 +14,8 @@
 
 Every task below rests on these facts; an implementer should not have to rediscover them.
 
-- **`reevo mcp` never runs the scheduler.** `startScheduler`/`startReconciler` are called only inside `cli.ts`'s `scheduler()` command. `deploy/Dockerfile:28` runs `mcp`, and `deploy/gcp/cloud-run.tf` does not override it — so scheduled agents on GCP sit at `scheduleEnabled: true` with `lastScheduledAt: null` forever. (Verified structurally; Friday's live "scheduler test" only worked because a second local process was started by hand.)
-- **The two-process model was known but undocumented.** `deploy/production/compose.yml` runs separate `mcp` and `scheduler` containers with distinct `DBOS_EXECUTOR_ID`s. Nothing in `README.md` or `docs/*.md` says a complete deployment needs both; `README.md` line 60 ("`reevo mcp` exposes agents, tools, scheduling, runs…") reads as though `mcp` schedules. It exposes the _management_ tools for schedules.
+- **`wardby mcp` never runs the scheduler.** `startScheduler`/`startReconciler` are called only inside `cli.ts`'s `scheduler()` command. `deploy/Dockerfile:28` runs `mcp`, and `deploy/gcp/cloud-run.tf` does not override it — so scheduled agents on GCP sit at `scheduleEnabled: true` with `lastScheduledAt: null` forever. (Verified structurally; Friday's live "scheduler test" only worked because a second local process was started by hand.)
+- **The two-process model was known but undocumented.** `deploy/production/compose.yml` runs separate `mcp` and `scheduler` containers with distinct `DBOS_EXECUTOR_ID`s. Nothing in `README.md` or `docs/*.md` says a complete deployment needs both; `README.md` line 60 ("`wardby mcp` exposes agents, tools, scheduling, runs…") reads as though `mcp` schedules. It exposes the _management_ tools for schedules.
 - **Multi-instance is the designed topology.** `src/core/scheduler.ts` header: at-most-once is enforced by `claimDueRun`'s `FOR UPDATE SKIP LOCKED` plus advancing `lastScheduledAt` in the same transaction as the `Run` insert — "never by the lease alone." The lease only stops redundant ticking. `src/core/reconciler.ts` is explicitly _not_ lease-gated ("Any instance … periodically transitions such runs") and is made concurrency-safe by conditional `updateMany`. Running both in every replica of a `min_instance_count = 2` service is what the code was written for.
 - **One executor per process.** `DbosExecutor.launch()` (`src/providers/executor/dbos.ts:127-155`) throws if DBOS is already initialized under a different executor id, because `recover()`'s ownership decisions key on `DBOS.executorID`. `startMcp()` builds its own executor (`src/mcp/index.ts:156`) and `scheduler()` builds another (`src/cli.ts:510-512`); composing them naively throws at boot. `serve` must build once and share.
 - **Executor ids are safe across replicas.** `loadDbosConfig()` (`src/config/providers.ts`) defaults `executorId` to a fresh UUID per process when `DBOS_EXECUTOR_ID` is unset, written expressly so replicas of a scaled Cloud Run service never share an identity. No plan work needed; do not set `DBOS_EXECUTOR_ID` in the GCP module.
@@ -46,7 +46,7 @@ Every task below rests on these facts; an implementer should not have to redisco
 | `src/mcp/unattended-schedules.ts` (new)     | The "schedules exist but nothing will fire them" check, as two small functions with no logger or `process` coupling, so it is testable and reusable. |
 | `src/mcp/index.ts` (modify)                 | `startMcp()` gains `StartMcpOptions` — inject pre-built providers, and declare that a scheduler is attached. Uses the new module for the warning.    |
 | `src/serve.ts` (new)                        | `startServe()` — the composition root: one provider set, one executor, MCP + scheduler + reconciler, ordered shutdown, refuses stdio.                |
-| `src/cli.ts` (modify)                       | The `reevo serve` command: `--scope`, one signal handler, stderr-only output.                                                                        |
+| `src/cli.ts` (modify)                       | The `wardby serve` command: `--scope`, one signal handler, stderr-only output.                                                                       |
 | `deploy/Dockerfile` (modify)                | Default CMD becomes `serve`.                                                                                                                         |
 | `deploy/gcp/cloud-run.tf` (modify)          | `resources { cpu_idle = false }` on the container.                                                                                                   |
 | `README.md`, `deploy/gcp/SETUP.md` (modify) | State the process model: `serve` is complete; `mcp` + `scheduler` is the split alternative.                                                          |
@@ -86,8 +86,8 @@ describe("unattendedSchedulesWarning", () => {
     expect(unattendedSchedulesWarning(0)).toBeNull();
     const msg = unattendedSchedulesWarning(2);
     expect(msg).toMatch(/^2 agent\(s\)/);
-    expect(msg).toContain('"reevo scheduler"');
-    expect(msg).toContain('"reevo serve"');
+    expect(msg).toContain('"wardby scheduler"');
+    expect(msg).toContain('"wardby serve"');
   });
 });
 
@@ -132,8 +132,8 @@ Create `src/mcp/unattended-schedules.ts`:
 import type { PrismaClient } from "@prisma/client";
 
 /**
- * `reevo mcp` serves the MCP surface and launches the executor, but the
- * scheduler and reconciler live in `reevo scheduler` (or in `reevo serve`,
+ * `wardby mcp` serves the MCP surface and launches the executor, but the
+ * scheduler and reconciler live in `wardby scheduler` (or in `wardby serve`,
  * which runs everything). A deployment running only `mcp` accepts schedules
  * through set_schedule and then never fires them: no error, no crash,
  * `lastScheduledAt` simply stays null. Nothing else surfaces that.
@@ -152,7 +152,7 @@ export function unattendedSchedulesWarning(count: number): string | null {
   if (count === 0) return null;
   return (
     `${count} agent(s) have an enabled schedule, but this process does not run the scheduler. ` +
-    `Run "reevo scheduler" alongside it, or run "reevo serve" instead, or those schedules will never fire.`
+    `Run "wardby scheduler" alongside it, or run "wardby serve" instead, or those schedules will never fire.`
   );
 }
 ```
@@ -189,7 +189,7 @@ Add the options type directly above `startMcp` (after the `McpServerHandle` inte
 ```typescript
 export interface StartMcpOptions {
   /**
-   * A pre-built provider set. `reevo serve` builds one and shares it, because
+   * A pre-built provider set. `wardby serve` builds one and shares it, because
    * DbosExecutor is a per-process singleton and two executors cannot coexist
    * (dbos.ts launch()). Built internally when omitted.
    */
@@ -236,7 +236,7 @@ git add src/mcp/unattended-schedules.ts src/mcp/unattended-schedules.test.ts src
 git commit -m "$(cat <<'EOF'
 refactor(mcp): make startMcp injectable and scheduler-aware
 
-Groundwork for `reevo serve`, which runs the MCP server, scheduler, and
+Groundwork for `wardby serve`, which runs the MCP server, scheduler, and
 reconciler in one process. DbosExecutor is a per-process singleton -
 launch() throws if a second executor with a different id appears - so a
 combined process must build the provider set once and share it. startMcp
@@ -246,7 +246,7 @@ It also accepts schedulerAttached, so the unattended-schedules warning
 from ccc396d does not fire as a false alarm when a scheduler genuinely is
 running in the same process. The check itself moves to a small module
 with no logger or process coupling, so it is unit-tested for the first
-time; the warning now also names `reevo serve` as a remedy.
+time; the warning now also names `wardby serve` as a remedy.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_0121bZNoqyDGneNVmc2fCds4
@@ -392,17 +392,17 @@ Create `src/serve.ts`:
 
 ```typescript
 /**
- * `reevo serve`: the complete reevo process. Runs the MCP server, the
+ * `wardby serve`: the complete wardby process. Runs the MCP server, the
  * scheduler, and the reconciler together on ONE provider set and ONE
  * executor, which is what a single-container deployment (Cloud Run, a lone
- * VM) needs - `reevo mcp` alone never fires a schedule.
+ * VM) needs - `wardby mcp` alone never fires a schedule.
  *
  * Why one executor: DbosExecutor is a per-process singleton and refuses to
  * launch twice under different ids (providers/executor/dbos.ts), and its
  * recovery decisions key on that id. Building providers once and sharing
  * them is the whole trick; it also gives scheduled native runs the same
  * `providers.executor` wiring MCP-triggered runs get, so sub-agent dispatch
- * from a scheduled run works (it does not from `reevo scheduler`).
+ * from a scheduled run works (it does not from `wardby scheduler`).
  *
  * Why the scheduler and reconciler can run in every replica: the scheduler
  * elects one ticker via a Postgres lease and enforces at-most-once with row
@@ -416,7 +416,7 @@ import type { McpProviders } from "./mcp/context.js";
 import { buildMcpProviders, startMcp } from "./mcp/index.js";
 
 export interface ServeOptions {
-  /** Scheduler lease scope; defaults to "default" like `reevo scheduler --scope`. */
+  /** Scheduler lease scope; defaults to "default" like `wardby scheduler --scope`. */
   scope?: string;
   /** Pre-built providers (tests); built once via buildMcpProviders() when omitted. */
   providers?: McpProviders;
@@ -433,8 +433,8 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
   const transport = loadMcpConfig().transport;
   if (transport !== "http") {
     throw new Error(
-      `reevo serve requires MCP_TRANSPORT=http (got "${transport}"): in stdio mode stdout is the JSON-RPC wire ` +
-        `and a scheduler has no stdio client to serve. Use "reevo mcp" for stdio.`,
+      `wardby serve requires MCP_TRANSPORT=http (got "${transport}"): in stdio mode stdout is the JSON-RPC wire ` +
+        `and a scheduler has no stdio client to serve. Use "wardby mcp" for stdio.`,
     );
   }
 
@@ -473,14 +473,14 @@ git add src/serve.ts src/serve.test.ts
 git commit -m "$(cat <<'EOF'
 feat: add startServe, one process for MCP + scheduler + reconciler
 
-`reevo mcp` never fires a schedule: startScheduler/startReconciler are
+`wardby mcp` never fires a schedule: startScheduler/startReconciler are
 only reached from the `scheduler` command, and the Docker image's default
 CMD is `mcp`. A single-container deployment therefore accepts schedules
 and silently never runs them. startServe composes all three on one
 provider set and one executor - DbosExecutor is a per-process singleton
 and refuses a second id - and stops them in dependency order on shutdown.
 
-Building providers once also fixes a divergence: `reevo scheduler` built
+Building providers once also fixes a divergence: `wardby scheduler` built
 its own set without the executor patched onto nativeProviders, so a
 scheduled native run could not dispatch a coding-kind sub-agent while the
 same agent triggered over MCP could.
@@ -495,17 +495,17 @@ EOF
 
 ---
 
-### Task 3: The `reevo serve` CLI command and the process-model docs
+### Task 3: The `wardby serve` CLI command and the process-model docs
 
 **Files:**
 
 - Modify: `src/cli.ts` (imports at top; add a `serve()` function next to `mcp()` at line 532; the `main()` dispatch at line 592; the usage text at line 611)
-- Modify: `README.md` (line 60, the "`reevo mcp` exposes …" paragraph)
+- Modify: `README.md` (line 60, the "`wardby mcp` exposes …" paragraph)
 
 **Interfaces:**
 
 - Consumes: `startServe(options: ServeOptions): Promise<ServeHandle>` from `src/serve.ts` (Task 2).
-- Produces: the `reevo serve [--scope <s>]` command. Task 4's Dockerfile CMD invokes `dist/cli.js serve`.
+- Produces: the `wardby serve [--scope <s>]` command. Task 4's Dockerfile CMD invokes `dist/cli.js serve`.
 
 - [ ] **Step 1: Add the command**
 
@@ -523,10 +523,10 @@ async function serve(args: string[]): Promise<void> {
   const handle = await startServe({ scope: values.scope });
   // stderr, like `mcp`: stdout must stay clean in case a future transport
   // multiplexes it, and this keeps the two commands' output consistent.
-  console.error(`reevo serve started (scope "${values.scope ?? "default"}"). Press Ctrl+C to stop.`);
+  console.error(`wardby serve started (scope "${values.scope ?? "default"}"). Press Ctrl+C to stop.`);
   await new Promise<void>((resolve) => {
     const shutdown = () => {
-      console.error("\nreevo serve shutting down...");
+      console.error("\nwardby serve shutting down...");
       void handle
         .close()
         .catch((err: unknown) => cliLog.warn({ err }, "serve close failed during shutdown"))
@@ -548,17 +548,17 @@ In `main()`, add a branch directly after the `mcp` one:
     } else if (command === "import") {
 ```
 
-In the usage string in `fail(...)`, add a line directly after the `reevo mcp` line:
+In the usage string in `fail(...)`, add a line directly after the `wardby mcp` line:
 
 ```typescript
-          "  reevo mcp   (MCP_TRANSPORT=stdio|http selects the transport)\n" +
-          "  reevo serve [--scope default]   (mcp + scheduler + reconciler in one process; http only)\n" +
+          "  wardby mcp   (MCP_TRANSPORT=stdio|http selects the transport)\n" +
+          "  wardby serve [--scope default]   (mcp + scheduler + reconciler in one process; http only)\n" +
 ```
 
-Also update the file's header comment (lines 4-13) by adding, after the `reevo mcp` entry:
+Also update the file's header comment (lines 4-13) by adding, after the `wardby mcp` entry:
 
 ```typescript
- *   reevo serve [--scope default]   (everything: mcp + scheduler + reconciler; the
+ *   wardby serve [--scope default]   (everything: mcp + scheduler + reconciler; the
  *                                    image's default command, and what a
  *                                    single-container deployment should run)
 ```
@@ -573,16 +573,16 @@ Expected: pass.
 With local Postgres up (`npm run db:up`), from the repo root:
 
 ```bash
-DATABASE_URL="postgresql://reevo:reevo@localhost:55432/reevo" MCP_TRANSPORT=http \
+DATABASE_URL="postgresql://wardby:wardby@localhost:55432/wardby" MCP_TRANSPORT=http \
 MCP_HTTP_BIND=127.0.0.1:8124 MCP_CANONICAL_URI=http://127.0.0.1:8124 AUTH_AUDIENCE=http://127.0.0.1:8124 \
 AUTH_PROVIDER=self-hosted AUTH_SIGNING_KEY=$(printf 'a1%.0s' {1..32}) AUTH_CREDENTIAL_HASH_KEY=$(printf 'b2%.0s' {1..32}) \
 SECRET_APP_KEY=$(printf 'c3%.0s' {1..32}) JOB_LAUNCHER=native \
 npx tsx src/cli.ts serve > /tmp/serve.log 2>&1 &
 P=$!; sleep 15; kill -TERM $P; wait $P 2>/dev/null
-grep -E 'reevo serve started|acquired leadership|enabled schedule|shutting down' /tmp/serve.log
+grep -E 'wardby serve started|acquired leadership|enabled schedule|shutting down' /tmp/serve.log
 ```
 
-Expected: `reevo serve started (scope "default")`, an `acquired leadership for scope "default"` scheduler line, then `reevo serve shutting down...` — and **no** "enabled schedule … will never fire" warning, even if enabled schedules exist locally (that is the `schedulerAttached` flag working). `.env.local` supplies the LLM key `buildMcpProviders()` requires.
+Expected: `wardby serve started (scope "default")`, an `acquired leadership for scope "default"` scheduler line, then `wardby serve shutting down...` — and **no** "enabled schedule … will never fire" warning, even if enabled schedules exist locally (that is the `schedulerAttached` flag working). `.env.local` supplies the LLM key `buildMcpProviders()` requires.
 
 Then the stdio refusal, which needs no database:
 
@@ -594,22 +594,22 @@ Expected: an error mentioning `MCP_TRANSPORT=http`, exit code 1.
 
 - [ ] **Step 4: Document the process model**
 
-In `README.md`, replace the paragraph at line 60 that begins "`reevo mcp` exposes agents, tools, scheduling, runs, datastore, secrets, and" so that it reads (keep the rest of the paragraph's content after the first sentence):
+In `README.md`, replace the paragraph at line 60 that begins "`wardby mcp` exposes agents, tools, scheduling, runs, datastore, secrets, and" so that it reads (keep the rest of the paragraph's content after the first sentence):
 
 ```markdown
-`reevo mcp` exposes agents, tools, schedule management, runs, datastore,
+`wardby mcp` exposes agents, tools, schedule management, runs, datastore,
 secrets, and
 ```
 
 and add this new paragraph immediately after that paragraph:
 
 ```markdown
-**A complete deployment runs more than `mcp`.** `reevo mcp` serves the MCP
+**A complete deployment runs more than `mcp`.** `wardby mcp` serves the MCP
 surface and launches the executor; the scheduler that fires due agents and
-the reconciler that recovers orphaned runs live in `reevo scheduler`. Run
-**`reevo serve`** to get all of it in one process — it is the container
+the reconciler that recovers orphaned runs live in `wardby scheduler`. Run
+**`wardby serve`** to get all of it in one process — it is the container
 image's default command and what a single-container deployment (Cloud Run,
-a lone VM) should run. Alternatively run `reevo mcp` and `reevo scheduler`
+a lone VM) should run. Alternatively run `wardby mcp` and `wardby scheduler`
 as two processes, as `deploy/production/compose.yml` does. Running `mcp`
 alone logs a warning at startup if schedules exist that nothing will fire.
 ```
@@ -620,7 +620,7 @@ alone logs a warning at startup if schedules exist that nothing will fire.
 npx prettier --write README.md && npm run format:check
 git add src/cli.ts README.md
 git commit -m "$(cat <<'EOF'
-feat(cli): add `reevo serve` and document the process model
+feat(cli): add `wardby serve` and document the process model
 
 One command that runs the MCP server, scheduler, and reconciler together,
 for deployments that run a single container. Logs to stderr like `mcp`,
@@ -628,7 +628,7 @@ takes --scope like `scheduler`, and installs one SIGINT/SIGTERM handler
 that closes in dependency order.
 
 The README never said a complete deployment needs two processes, and its
-"`reevo mcp` exposes ... scheduling" read as though mcp fires schedules -
+"`wardby mcp` exposes ... scheduling" read as though mcp fires schedules -
 it exposes the management tools for them. That gap is how deploy/gcp
 came to run `mcp` alone. Now stated plainly, with `serve` as the answer.
 
@@ -694,7 +694,7 @@ Append to `deploy/gcp/SETUP.md`, after section 11:
 ```markdown
 ## 12. What the container runs
 
-The image's default command is `reevo serve`: the MCP server, the scheduler
+The image's default command is `wardby serve`: the MCP server, the scheduler
 that fires due agents, and the reconciler that recovers orphaned runs, in one
 process. The module does not override it, so scheduled agents fire in this
 deployment.
@@ -754,6 +754,6 @@ EOF
 ## Self-review notes
 
 - **Coverage against the Background findings:** no-scheduler-on-GCP → Tasks 2–4; undocumented process model → Task 3 (README) + Task 4 (SETUP); DBOS singleton → Task 1 (injection) + Task 2 (build once); executor-id across replicas → no code, documented in Task 4 SETUP text; sub-agent divergence → Task 2 (build via `buildMcpProviders()`); CPU throttling reaping runs → Task 4, atomic with CMD; false-alarm warning → Task 1 (`schedulerAttached`); stdio → Task 2 guard + test; shutdown order → Task 2 `close()`, Task 3 single handler.
-- **Not in scope, deliberately:** moving scheduling into DBOS scheduled workflows (a later, internal-only refactor of what `serve` does — the topology, CMD, and Terraform from this plan survive it); a scheduler-only Cloud Run service (a Cloud Run _service_ must listen on `$PORT`, which `reevo scheduler` does not, so that path needs app changes too and gains nothing over `serve`); changing `deploy/production/compose.yml`.
+- **Not in scope, deliberately:** moving scheduling into DBOS scheduled workflows (a later, internal-only refactor of what `serve` does — the topology, CMD, and Terraform from this plan survive it); a scheduler-only Cloud Run service (a Cloud Run _service_ must listen on `$PORT`, which `wardby scheduler` does not, so that path needs app changes too and gains nothing over `serve`); changing `deploy/production/compose.yml`.
 - **Placeholder scan:** every step has real code, exact paths, and a concrete verification command. Step 5 of Task 4 is conditional on a live deployment existing and says so; Step 4 is the required gate.
 - **Name consistency:** `StartMcpOptions` / `schedulerAttached` / `providers` (Task 1) are what Task 2 passes; `startServe` / `ServeOptions` / `ServeHandle` (Task 2) are what Task 3 imports; `countUnattendedSchedules` / `unattendedSchedulesWarning` are used only in Task 1. `handle.isLeader()` in the Task 2 test matches `ServeHandle.isLeader`.

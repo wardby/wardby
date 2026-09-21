@@ -2,21 +2,21 @@
 
 **Date:** 2026-09-14
 **Status:** Proposed (mapping/roadmap doc — not an implementation plan)
-**Author:** reevo-run maintainer
+**Author:** wardby maintainer
 **Source vision:** `/Users/chfields/Documents/ai-agent-ecosystem-v2.html` — a
 six-capability pitch deck (Delivery Pipeline, Architecture Review, Security
 Maintenance, QA End to End, System Monitoring, Project Tracking) with one
 rule running through all of it: nothing merges or ships without a human
 approving it.
 **Target repo:** `chfields/knock-knock-jokes` — a small Python CLI package,
-already delivered end-to-end by reevo-run's Delivery Pipeline (issues #12,
+already delivered end-to-end by wardby's Delivery Pipeline (issues #12,
 #15, #17, #20, #25). Planned to grow a Vercel deployment.
 **Related:** `docs/architecture-runtime.md` (live Delivery Pipeline runtime
 topology), `src/core/runner.subagent-dispatch.test.ts` (dispatcher/plan/implement
 sub-agent pattern), `docs/private/2026-09-14-roadmap-status-table.md`
-(reevo-run engine build status this design assumes).
+(wardby engine build status this design assumes).
 
-> **Clean-room note.** This design is grounded in reading reevo-run's own
+> **Clean-room note.** This design is grounded in reading wardby's own
 > docs/tests (`architecture-runtime.md`, `runner.subagent-dispatch.test.ts`,
 > the roadmap status table) plus the user-supplied vision deck. It copies no
 > external codebase.
@@ -27,8 +27,8 @@ sub-agent pattern), `docs/private/2026-09-14-roadmap-status-table.md`
 
 The vision deck describes six agent capabilities as a unified pitch. In
 reality they are six largely independent subsystems that share one engine
-(reevo-run) and one rule (human approves everything that ships). This
-document maps each of the six onto reevo-run's actual primitives, states
+(wardby) and one rule (human approves everything that ships). This
+document maps each of the six onto wardby's actual primitives, states
 what already exists vs. what's net-new, and gives a build order — so future
 work on any one capability starts from an accurate picture instead of
 re-deriving it.
@@ -40,7 +40,7 @@ superpowers workflow.
 ## Non-goals
 
 - Building anything in this pass. This is the mapping/roadmap artifact only.
-- Redesigning reevo-run's core engine. Every mapping below reuses existing
+- Redesigning wardby's core engine. Every mapping below reuses existing
   primitives (scheduler, webhook triggers, sub-agent dispatch, coding-worker
   sandbox, `continuePriorRun` revision-in-place); none requires new engine
   work.
@@ -59,8 +59,8 @@ The Delivery Pipeline runs today against knock-knock-jokes
 
 ```
 Issue labeled 'ai-plan' (or @knock-knock-delivery comment)
-  -> GitHub Actions (reevo-delivery-trigger.yml)
-  -> webhook -> reevo mcp
+  -> GitHub Actions (wardby-delivery-trigger.yml)
+  -> webhook -> wardby mcp
   -> knock-knock-delivery (dispatcher agent)
        -> knock-knock-plan (sub-agent, kind: coding) -> posts a plan
        -> knock-knock-implement (sub-agent, kind: coding, via continuePriorRun)
@@ -70,7 +70,7 @@ Issue labeled 'ai-plan' (or @knock-knock-delivery comment)
 
 Issues #12, #15, #17, #20, #25 were built this way. The sandboxed
 coding-worker, credential-injecting proxy, budget metering, and local
-Prometheus/Grafana observability (`reevo-knock-knock` dashboard) all already
+Prometheus/Grafana observability (`wardby-knock-knock` dashboard) all already
 run for this repo.
 
 **What's missing from this loop, relative to the deck's Delivery Pipeline
@@ -91,7 +91,7 @@ page:**
 
 ## 2. Per-capability mapping
 
-| Deck capability          | reevo-run mapping                                                                                                                                                             | Status                                                                                         | Sequencing                                                   |
+| Deck capability          | wardby mapping                                                                                                                                                                | Status                                                                                         | Sequencing                                                   |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
 | **Delivery Pipeline**    | `knock-knock-delivery` dispatcher + `knock-knock-plan`/`knock-knock-implement` sub-agents, GitHub webhook trigger                                                             | Live; two gaps (PR-review sub-agent, explicit plan-approval gate)                              | 1 — close gaps first, everything else builds on this pattern |
 | **Architecture Review**  | New weekly-cron agent (`kind: coding`), read-only repo scan, opens a GitHub issue or PR comment with the report — no PR of its own                                            | Net-new, no engine blockers                                                                    | 2                                                            |
@@ -109,7 +109,7 @@ already exists for Delivery Pipeline.
 ## 3. Human-approval gates → real mechanics
 
 The deck's recurring "a human approves" step is not a new primitive to
-build anywhere — it maps onto mechanics reevo-run or GitHub already provide:
+build anywhere — it maps onto mechanics wardby or GitHub already provide:
 
 - **Plan approval** (Delivery Pipeline, page 2 "Architect reviews the
   plan"): a human's approval comment or label on the issue/PR the plan-run
@@ -153,7 +153,7 @@ no separate work-tracking tool.
 ## 5. Open questions for future spec cycles
 
 - What triggers the plan-approval comment check — a second GitHub Actions
-  workflow (`pull_request_review_comment`), or a webhook reevo-run already
+  workflow (`pull_request_review_comment`), or a webhook wardby already
   receives that needs a new handler branch? (Deferred to the Delivery
   Pipeline gap-closing spec.)
 - Should the PR-review sub-agent block the human's own review, or run

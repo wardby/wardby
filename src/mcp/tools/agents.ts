@@ -14,7 +14,7 @@ import {
 import { requireScope } from "../auth/resource-server.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
-import type { ReevoMcpServer } from "../server.js";
+import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
 
 // workerImageRef is the BYO-arbitrary-image escape hatch (see
@@ -173,7 +173,7 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
   });
 }
 
-export function registerAgentTools(mcp: ReevoMcpServer): void {
+export function registerAgentTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "create_agent",
     scope: "agents:write",

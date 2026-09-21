@@ -85,7 +85,7 @@ class ScriptedGitRunner implements GitCommandRunner {
   remoteSha: string | null = null;
   remoteUrl = REMOTE_URL;
   pushFails = false;
-  headRef = "reevo/run-run-1";
+  headRef = "wardby/run-run-1";
 
   async run(args: readonly string[], options?: GitCommandOptions): Promise<GitCommandResult> {
     const copied = [...args];
@@ -163,7 +163,7 @@ class ScriptedGitRunner implements GitCommandRunner {
 const roots: string[] = [];
 
 async function harness(overrides: Partial<ConstructorParameters<typeof GitVcsProvider>[0]> = {}) {
-  const rootDir = await mkdtemp(join(tmpdir(), "reevo-vcs-test-"));
+  const rootDir = await mkdtemp(join(tmpdir(), "wardby-vcs-test-"));
   roots.push(rootDir);
   const github = new FakeGitHub();
   const git = new ScriptedGitRunner();
@@ -172,7 +172,7 @@ async function harness(overrides: Partial<ConstructorParameters<typeof GitVcsPro
     runId: "run-1",
     repository: REPOSITORY,
     baseRef: "main",
-    headRef: "reevo/run-run-1",
+    headRef: "wardby/run-run-1",
     protectedPaths: [".github/workflows/**", "CODEOWNERS"],
   };
   return { rootDir, github, git, provider, input };
@@ -198,7 +198,7 @@ describe("GitVcsProvider", () => {
       id: "vcs-run-1",
       repository: REPOSITORY,
       baseCommit: BASE_SHA,
-      headRef: "reevo/run-run-1",
+      headRef: "wardby/run-run-1",
     });
     expect(prepared.gitMetadataPath).not.toContain(`${prepared.workspacePath}/`);
     await expect(readFile(resolve(prepared.workspacePath, ".git"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
@@ -221,7 +221,7 @@ describe("GitVcsProvider", () => {
       repository: REPOSITORY,
       baseRef: "main",
       baseCommit: BASE_SHA,
-      headRef: "reevo/run-run-1",
+      headRef: "wardby/run-run-1",
       commitSha: COMMIT_SHA,
       pullRequestNumber: 42,
       pullRequestUrl: "https://github.com/openai/example/pull/42",
@@ -238,7 +238,7 @@ describe("GitVcsProvider", () => {
     );
     const push = git.calls.find((call) => call.args.includes("push"))!;
     expect(push.args.join(" ")).not.toContain(TOKEN);
-    expect(push.args).toContain(`${COMMIT_SHA}:refs/heads/reevo/run-run-1`);
+    expect(push.args).toContain(`${COMMIT_SHA}:refs/heads/wardby/run-run-1`);
     expect(github.pullRequestCalls).toHaveLength(1);
   });
 
@@ -348,7 +348,7 @@ describe("GitVcsProvider", () => {
         runId: "run-2",
         repository: REPOSITORY,
         baseRef: "main",
-        headRef: "reevo/run-run-1",
+        headRef: "wardby/run-run-1",
         protectedPaths: [".github/workflows/**", "CODEOWNERS"],
         continuation: { rootRunId: "run-1" },
         ...overrides,
@@ -361,13 +361,13 @@ describe("GitVcsProvider", () => {
 
       expect(prepared).toMatchObject({
         id: "vcs-run-2",
-        headRef: "reevo/run-run-1",
+        headRef: "wardby/run-run-1",
         baseCommit: BASE_SHA,
         continuation: { rootRunId: "run-1" },
       });
       const clone = git.calls.find((call) => call.args.includes("clone"))!;
       const branchFlagIndex = clone.args.indexOf("--branch");
-      expect(clone.args[branchFlagIndex + 1]).toBe("reevo/run-run-1");
+      expect(clone.args[branchFlagIndex + 1]).toBe("wardby/run-run-1");
 
       // Fidelity: a continuation's remote branch is NOT empty -- it already
       // sits at baseCommit (the tip we just cloned), unlike a fresh run's
@@ -380,13 +380,13 @@ describe("GitVcsProvider", () => {
         repository: REPOSITORY,
         baseRef: "main",
         baseCommit: BASE_SHA,
-        headRef: "reevo/run-run-1",
+        headRef: "wardby/run-run-1",
         commitSha: COMMIT_SHA,
         pullRequestNumber: 42,
         pullRequestUrl: "https://github.com/openai/example/pull/42",
       });
       // PR identity is keyed to the ROOT run's id, not this (continuation) run's own.
-      expect(github.pullRequestCalls[0]).toMatchObject({ runId: "run-1", headRef: "reevo/run-run-1" });
+      expect(github.pullRequestCalls[0]).toMatchObject({ runId: "run-1", headRef: "wardby/run-run-1" });
     });
 
     it("recovers a continuation workspace deterministically without minting another token", async () => {
@@ -441,8 +441,8 @@ describe("GitVcsProvider", () => {
               rootRunId: "run-1",
               repository: REPOSITORY,
               baseRef: "main",
-              headRef: "reevo/run-run-1",
-              body: "🔄 reevo run run-2 is working on this PR...",
+              headRef: "wardby/run-run-1",
+              body: "🔄 wardby run run-2 is working on this PR...",
             },
           },
         ]);
@@ -465,8 +465,8 @@ describe("GitVcsProvider", () => {
               rootRunId: "run-1",
               repository: REPOSITORY,
               baseRef: "main",
-              headRef: "reevo/run-run-1",
-              body: "✅ reevo run run-2 finished.",
+              headRef: "wardby/run-run-1",
+              body: "✅ wardby run run-2 finished.",
             },
           },
         ]);
@@ -485,7 +485,7 @@ describe("GitVcsProvider", () => {
         await provider.notifyContinuationStarted(prepared, { agentName: "knock-knock-implement" });
 
         expect(github.statusCommentCalls[0].input.body).toBe(
-          "🔄 knock-knock-implement (reevo run run-2) is working on this PR...",
+          "🔄 knock-knock-implement (wardby run run-2) is working on this PR...",
         );
       });
 
@@ -495,7 +495,7 @@ describe("GitVcsProvider", () => {
 
         await provider.notifyContinuationFinished(prepared, "succeeded", { agentName: "knock-knock-implement" });
 
-        expect(github.statusCommentCalls[0].input.body).toBe("✅ knock-knock-implement (reevo run run-2) finished.");
+        expect(github.statusCommentCalls[0].input.body).toBe("✅ knock-knock-implement (wardby run run-2) finished.");
       });
 
       it("includes the agent's own summary in the done comment when given one", async () => {
@@ -507,7 +507,7 @@ describe("GitVcsProvider", () => {
         });
 
         expect(github.statusCommentCalls[0].input.body).toBe(
-          "✅ reevo run run-2 finished.\n\nAdded timestamped logging for every served joke.",
+          "✅ wardby run run-2 finished.\n\nAdded timestamped logging for every served joke.",
         );
       });
 
@@ -517,7 +517,7 @@ describe("GitVcsProvider", () => {
 
         await provider.notifyContinuationFinished(prepared, "failed", {});
 
-        expect(github.statusCommentCalls[0].input.body).toBe("❌ reevo run run-2 failed.");
+        expect(github.statusCommentCalls[0].input.body).toBe("❌ wardby run run-2 failed.");
       });
 
       it("uses a failed-shaped body/outcome when the run failed", async () => {
@@ -526,7 +526,7 @@ describe("GitVcsProvider", () => {
 
         await provider.notifyContinuationFinished(prepared, "failed");
 
-        expect(github.statusCommentCalls[0].input.body).toBe("❌ reevo run run-2 failed.");
+        expect(github.statusCommentCalls[0].input.body).toBe("❌ wardby run run-2 failed.");
         expect(github.checkRunCalls[0].input).toMatchObject({ outcome: "failed" });
       });
 
@@ -576,7 +576,7 @@ describe("Git process boundary", () => {
   });
 
   it("uses argv arrays, strips inherited secrets, and keeps the token outside argv", async () => {
-    const root = await mkdtemp(join(tmpdir(), "reevo-git-runner-"));
+    const root = await mkdtemp(join(tmpdir(), "wardby-git-runner-"));
     roots.push(root);
     const executable = resolve(root, "fake-git.mjs");
     await writeFile(
@@ -611,7 +611,7 @@ describe("Git process boundary", () => {
   });
 
   it("redacts authentication material from child-process failures", async () => {
-    const root = await mkdtemp(join(tmpdir(), "reevo-git-runner-"));
+    const root = await mkdtemp(join(tmpdir(), "wardby-git-runner-"));
     roots.push(root);
     const executable = resolve(root, "failing-git.mjs");
     await writeFile(
@@ -637,7 +637,7 @@ describe("Git process boundary", () => {
     const server = createServer((request, response) => {
       authorization = request.headers.authorization;
       if (!authorization) {
-        response.writeHead(401, { "www-authenticate": "Basic realm=reevo-test" });
+        response.writeHead(401, { "www-authenticate": "Basic realm=wardby-test" });
         response.end();
         return;
       }
@@ -648,7 +648,7 @@ describe("Git process boundary", () => {
     try {
       const address = server.address();
       if (!address || typeof address === "string") throw new Error("test_server_address_invalid");
-      const root = await mkdtemp(join(tmpdir(), "reevo-git-runner-"));
+      const root = await mkdtemp(join(tmpdir(), "wardby-git-runner-"));
       roots.push(root);
       const runner = new NodeGitCommandRunner({ homeDir: root });
       const caught: unknown = await runner

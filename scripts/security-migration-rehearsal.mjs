@@ -3,14 +3,14 @@ import { readFileSync, readdirSync } from "node:fs";
 import assert from "node:assert/strict";
 
 // Deliberately restricted to the disposable container created for security verification.
-const container = "reevo-security-20260906";
-const database = "reevo_security";
+const container = "wardby-security-20260906";
+const database = "wardby_security";
 const schema = "rehearsal_" + Date.now();
 const restore = schema + "_restore";
 const psql = (sql) =>
   execFileSync(
     "docker",
-    ["exec", "-i", container, "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "reevo", "-d", database],
+    ["exec", "-i", container, "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "wardby", "-d", database],
     { input: sql, encoding: "utf8" },
   );
 const sql = (text, name = schema) => psql('SET search_path TO "' + name + '";\n' + text);
@@ -62,7 +62,7 @@ try {
       container,
       "pg_dump",
       "-U",
-      "reevo",
+      "wardby",
       "-d",
       database,
       "--schema=" + schema,

@@ -1,11 +1,11 @@
 import { Prisma } from "@prisma/client";
 import { validateCronExpression } from "../../core/cron.js";
-import type { ReevoMcpServer } from "../server.js";
+import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { assertCanMutate, requireOwnedAgent } from "../auth/ownership.js";
 import { textResult } from "./text-result.js";
 
-export function registerSchedulingTools(mcp: ReevoMcpServer): void {
+export function registerSchedulingTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "set_schedule",
     scope: "agents:write",

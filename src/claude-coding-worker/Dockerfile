@@ -19,11 +19,11 @@ RUN apt-get update \
     && npm install --global --omit=dev npm@12.0.2 \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin reevo \
-    && mkdir -p /opt/reevo/empty-workspace \
-    && chown -R 10001:10001 /opt/reevo
-WORKDIR /opt/reevo
-# Shared protocol modules resolve dependencies from /opt/reevo, while the
+    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin wardby \
+    && mkdir -p /opt/wardby/empty-workspace \
+    && chown -R 10001:10001 /opt/wardby
+WORKDIR /opt/wardby
+# Shared protocol modules resolve dependencies from /opt/wardby, while the
 # worker's SDK modules resolve upward through that same reviewed runtime tree.
 COPY --from=worker-dependencies /worker/node_modules ./node_modules
 COPY --from=build /build/dist/claude-coding-worker ./claude-coding-worker
@@ -40,6 +40,6 @@ RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/make \
     && test ! -e /usr/bin/git
 USER 10001:10001
-ENV NODE_ENV=production HOME=/home/reevo DISABLE_UPDATES=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-WORKDIR /opt/reevo/empty-workspace
-ENTRYPOINT ["node", "/opt/reevo/claude-coding-worker/main.js"]
+ENV NODE_ENV=production HOME=/home/wardby DISABLE_UPDATES=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+WORKDIR /opt/wardby/empty-workspace
+ENTRYPOINT ["node", "/opt/wardby/claude-coding-worker/main.js"]

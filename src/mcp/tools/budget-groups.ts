@@ -3,7 +3,7 @@ import { z } from "zod";
 import { computeGroupSpend } from "../../core/budget-groups.js";
 import { canRead, requireOwnedBudgetGroup, visibleToPrincipal } from "../auth/ownership.js";
 import { McpError } from "../errors.js";
-import type { ReevoMcpServer } from "../server.js";
+import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
 
 const MAX_GROUP_NAME_CHARS = 200;
@@ -57,7 +57,7 @@ const capSchemaProps = {
   warnThresholdRatio: { type: "number" },
 };
 
-export function registerBudgetGroupTools(mcp: ReevoMcpServer): void {
+export function registerBudgetGroupTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "create_budget_group",
     scope: "budget_groups:write",

@@ -185,11 +185,11 @@ export const CodingTaskInputSchema = z
   .strict()
   .superRefine((value, ctx) => {
     const expectedHeadRunId = value.continuationOf?.runId ?? value.runId;
-    if (value.headRef !== `reevo/run-${expectedHeadRunId}`) {
+    if (value.headRef !== `wardby/run-${expectedHeadRunId}`) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["headRef"],
-        message: "must match reevo/run-<runId> (or reevo/run-<continuationOf.runId>)",
+        message: "must match wardby/run-<runId> (or wardby/run-<continuationOf.runId>)",
       });
     }
   });

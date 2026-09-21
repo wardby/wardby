@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
-import { buildMcpServer, type ReevoMcpServer } from "./server.js";
+import { buildMcpServer, type WardbyMcpServer } from "./server.js";
 import { registerAllTools } from "./index.js";
 import { handleWebhookIngress } from "./webhooks/ingress.js";
 import { buildSecretsAccessor } from "../core/secrets.js";
@@ -407,7 +407,7 @@ function fakeCtx(
   };
 }
 
-async function connectClient(mcp: ReevoMcpServer) {
+async function connectClient(mcp: WardbyMcpServer) {
   const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client(

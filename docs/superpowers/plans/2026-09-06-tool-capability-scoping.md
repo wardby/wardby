@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Close the Excessive Agency (OWASP LLM08) finding from the 2026-09-06 reevo-run code review — any tool attached to an agent currently has unscoped access to _every_ secret and datastore key the agent has, plus unrestricted outbound `fetch`. This plan adds per-tool capability declarations (which secrets, which datastore key prefixes, which fetch hosts) at `attach_tool` time, persisted on `AgentTool`, and enforced at the sandbox bridge layer.
+**Goal:** Close the Excessive Agency (OWASP LLM08) finding from the 2026-09-06 wardby code review — any tool attached to an agent currently has unscoped access to _every_ secret and datastore key the agent has, plus unrestricted outbound `fetch`. This plan adds per-tool capability declarations (which secrets, which datastore key prefixes, which fetch hosts) at `attach_tool` time, persisted on `AgentTool`, and enforced at the sandbox bridge layer.
 
 **Architecture:** A new validation module (`src/sandbox/tool-capabilities.ts`) defines the zod schema and bounded-array conventions for the three capability lists, mirroring the existing `src/coding/profile.ts` pattern (bounded `Json` columns, not native Postgres arrays — this repo's established convention for this kind of config). Two small wrapper functions — `scopeSecretsAccessor` (in `core/secrets.ts`) and `scopeDatastore` (new `providers/datastore/scoped.ts`) — decorate the existing `SecretsAccessor`/`Datastore` interfaces with an allowlist check, so `host-functions.ts`'s bridge functions need no changes for secrets/datastore. Fetch scoping is threaded as a new `allowedFetchHosts` option through `runInSandbox` → `installHostFunctions`, reusing `fetch-policy.ts`'s existing SSRF machinery via one new `restrictToAllowedHosts` flag. `runner.ts` builds these three scoped values per attached tool, from the `AgentTool` row's declared capabilities, immediately before each sandbox invocation.
 
 **Tech Stack:** TypeScript, Prisma 6 + PostgreSQL, Zod, Vitest.
 
-**Spec:** No standalone spec doc — this plan implements the fix direction from the 2026-09-06 codebase-review-agent run (runId `cmtq7dixx0002sqn0thy7d4wc`), memorialized in the user's `reevo-run-code-review-findings` memory: _"Needs per-tool capability scoping (which secrets/datastore prefixes/hosts a tool may touch, declared at attach time) enforced at the bridge layer."_
+**Spec:** No standalone spec doc — this plan implements the fix direction from the 2026-09-06 codebase-review-agent run (runId `cmtq7dixx0002sqn0thy7d4wc`), memorialized in the user's `wardby-code-review-findings` memory: _"Needs per-tool capability scoping (which secrets/datastore prefixes/hosts a tool may touch, declared at attach time) enforced at the bridge layer."_
 
 ## Global Constraints
 
@@ -304,14 +304,14 @@ npm run prisma:generate
 Run:
 
 ```bash
-docker exec local-postgres-1 psql -U reevo -d reevo \
-  -c "DROP DATABASE IF EXISTS reevo_shadow;" -c "CREATE DATABASE reevo_shadow;"
+docker exec local-postgres-1 psql -U wardby -d wardby \
+  -c "DROP DATABASE IF EXISTS wardby_shadow;" -c "CREATE DATABASE wardby_shadow;"
 npx prisma migrate diff \
   --from-migrations prisma/migrations \
   --to-schema-datamodel prisma/schema.prisma \
-  --shadow-database-url "postgresql://reevo:reevo@localhost:55432/reevo_shadow" \
+  --shadow-database-url "postgresql://wardby:wardby@localhost:55432/wardby_shadow" \
   --script
-docker exec local-postgres-1 psql -U reevo -d reevo -c "DROP DATABASE IF EXISTS reevo_shadow;"
+docker exec local-postgres-1 psql -U wardby -d wardby -c "DROP DATABASE IF EXISTS wardby_shadow;"
 npx prisma validate
 ```
 
@@ -915,7 +915,7 @@ Change:
 
 ```
 # Exact normalized hosts only. Allowlisting private hosts bypasses network isolation.
-REEVO_FETCH_ALLOWED_HOSTS=
+WARDBY_FETCH_ALLOWED_HOSTS=
 ```
 
 to:
@@ -925,7 +925,7 @@ to:
 # Only takes effect for a tool attachment whose allowedHosts includes the "*"
 # wildcard (attach_tool / CLI `tool attach`) — a tool with an explicit host
 # list ignores this and is restricted to exactly what it declared.
-REEVO_FETCH_ALLOWED_HOSTS=
+WARDBY_FETCH_ALLOWED_HOSTS=
 ```
 
 - [ ] **Step 12: Run the full sandbox test suite**
@@ -1672,14 +1672,14 @@ node dist/cli.js tool attach smoke_tool smoke_agent --allow-secret FOO --allow-h
 Expected: prints `attached "smoke_tool" to "smoke_agent".` with no thrown error. Then verify the row:
 
 ```bash
-docker exec local-postgres-1 psql -U reevo -d reevo -c \
+docker exec local-postgres-1 psql -U wardby -d wardby -c \
   'SELECT "allowedSecrets", "allowedHosts" FROM "AgentTool" LIMIT 1;'
 ```
 
 Expected: `["FOO"]` and `["api.example.com"]`. Clean up the smoke-test rows afterward:
 
 ```bash
-docker exec local-postgres-1 psql -U reevo -d reevo -c \
+docker exec local-postgres-1 psql -U wardby -d wardby -c \
   'DELETE FROM "AgentTool"; DELETE FROM "Tool" WHERE name = '"'"'smoke_tool'"'"'; DELETE FROM "Agent" WHERE name = '"'"'smoke_agent'"'"';'
 ```
 
@@ -1712,7 +1712,7 @@ Expected: clean TypeScript build, no errors.
 
 - [ ] **Step 4: Update the review-findings memory**
 
-This isn't a code change, but close the loop: update the `reevo-run-code-review-findings` memory to move "Excessive Agency (OWASP LLM08)" from "Still open" to "Already fixed," noting the commit range and the backfill decision (pre-existing attachments keep unrestricted access via `["*"]`/`[""]`/full-secret-set backfill; new attachments default to deny-all).
+This isn't a code change, but close the loop: update the `wardby-code-review-findings` memory to move "Excessive Agency (OWASP LLM08)" from "Still open" to "Already fixed," noting the commit range and the backfill decision (pre-existing attachments keep unrestricted access via `["*"]`/`[""]`/full-secret-set backfill; new attachments default to deny-all).
 
 - [ ] **Step 5: Final commit (if anything is uncommitted)**
 

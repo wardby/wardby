@@ -152,7 +152,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           const budgetUsd = options.budgetUsdOverride ?? Number(agent.budgetUsd);
 
           let baseRef = options.codingBaseRef ?? agent.codingProfile.baseRef;
-          let headRef = `reevo/run-${run.id}`;
+          let headRef = `wardby/run-${run.id}`;
           let continuationOf: { runId: string } | undefined;
           let rootCodingRunId: string | undefined;
           if (options.continuesCodingRunId !== undefined) {

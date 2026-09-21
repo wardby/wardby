@@ -19,10 +19,10 @@ import {
 import type { JobSpec } from "./types.js";
 
 const execute = promisify(execFile);
-const enabled = process.env.REEVO_DOCKER_ISOLATION_TEST === "1";
-const image = process.env.REEVO_WORKER_IMAGE ?? "";
+const enabled = process.env.WARDBY_DOCKER_ISOLATION_TEST === "1";
+const image = process.env.WARDBY_WORKER_IMAGE ?? "";
 const token = `${process.pid}-${Date.now()}`;
-const proxyContainer = `reevo-proxy-probe-${token}`;
+const proxyContainer = `wardby-proxy-probe-${token}`;
 const spec: JobSpec = {
   kind: "coding-agent",
   runId: `acceptance-${token}`,
@@ -73,7 +73,7 @@ function probeCreateArgs(mode: string, name: string): string[] {
   const args = [...plan!.workerCreateArgs];
   args[args.indexOf("--name") + 1] = name;
   args.splice(args.length - 1, 0, "--entrypoint", "node");
-  args.push("/opt/reevo/coding-worker/isolation-probe.js", mode);
+  args.push("/opt/wardby/coding-worker/isolation-probe.js", mode);
   return args;
 }
 
@@ -83,7 +83,7 @@ async function runProbe(
   const name = `${plan!.names.workerContainer}-${mode}-${probeSequence++}`;
   currentWorker = name;
   workers.add(name);
-  await docker(probeCreateArgs(mode, name), { REEVO_RUN_CAPABILITY: "rrp_acceptance_only" });
+  await docker(probeCreateArgs(mode, name), { WARDBY_RUN_CAPABILITY: "rrp_acceptance_only" });
   const inspection = JSON.parse(await docker(["container", "inspect", name]))[0] as DockerContainerInspection;
   await docker(["container", "start", name]);
   const exitCode = Number(await docker(["container", "wait", name]));
@@ -106,21 +106,21 @@ describe.skipIf(!enabled || !image)("Docker isolation acceptance", () => {
     await docker(plan!.storageVolumeCreateArgs);
     await docker(plan!.keeperCreateArgs);
     await docker(["container", "start", plan!.names.keeperContainer]);
-    await waitForLog(plan!.names.keeperContainer, "reevo_storage_ready");
-    seedDirectory = await mkdtemp(join(tmpdir(), "reevo-isolation-seed-"));
+    await waitForLog(plan!.names.keeperContainer, "wardby_storage_ready");
+    seedDirectory = await mkdtemp(join(tmpdir(), "wardby-isolation-seed-"));
     await writeFile(join(seedDirectory, "HEAD"), "ref: refs/heads/main\n");
     await writeFile(join(seedDirectory, "input.json"), "{}");
     await docker([
       "container",
       "cp",
       join(seedDirectory, "HEAD"),
-      `${plan!.names.keeperContainer}:/run/reevo/storage/git/HEAD`,
+      `${plan!.names.keeperContainer}:/run/wardby/storage/git/HEAD`,
     ]);
     await docker([
       "container",
       "cp",
       join(seedDirectory, "input.json"),
-      `${plan!.names.keeperContainer}:/run/reevo/storage/input/input.json`,
+      `${plan!.names.keeperContainer}:/run/wardby/storage/input/input.json`,
     ]);
 
     await docker([
@@ -201,7 +201,7 @@ describe.skipIf(!enabled || !image)("Docker isolation acceptance", () => {
     const name = `${plan!.names.workerContainer}-hang-${probeSequence++}`;
     currentWorker = name;
     workers.add(name);
-    await docker(probeCreateArgs("hang", name), { REEVO_RUN_CAPABILITY: "rrp_acceptance_only" });
+    await docker(probeCreateArgs("hang", name), { WARDBY_RUN_CAPABILITY: "rrp_acceptance_only" });
     await docker(["container", "start", name]);
     const startedAt = Date.now();
     await new Promise((resolve) => setTimeout(resolve, spec.timeoutSec * 1_000));

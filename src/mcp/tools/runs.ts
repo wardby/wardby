@@ -1,10 +1,10 @@
-import type { ReevoMcpServer } from "../server.js";
+import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { requireReadableAgent } from "../auth/ownership.js";
 import { publicCodingRunResult } from "../../coding/protocol.js";
 import { textResult } from "./text-result.js";
 
-export function registerRunTools(mcp: ReevoMcpServer): void {
+export function registerRunTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "list_runs",
     scope: "agents:read",

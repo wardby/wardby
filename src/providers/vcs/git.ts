@@ -239,7 +239,7 @@ function directChild(root: string, child: string): boolean {
 
 /** Human-readable label for continuation status notifications -- falls back to the opaque run id alone when no agent name is known. */
 function runLabel(agentName: string | undefined, runId: string): string {
-  return agentName ? `${agentName} (reevo run ${runId})` : `reevo run ${runId}`;
+  return agentName ? `${agentName} (wardby run ${runId})` : `wardby run ${runId}`;
 }
 
 export class GitVcsProvider implements VcsProvider {
@@ -321,12 +321,12 @@ export class GitVcsProvider implements VcsProvider {
       await this.gitForPaths(gitMetadataPath, workspacePath, ["config", "--local", "core.hooksPath", "/dev/null"]);
       await this.gitForPaths(gitMetadataPath, workspacePath, ["config", "--local", "commit.gpgSign", "false"]);
       await this.gitForPaths(gitMetadataPath, workspacePath, ["config", "--local", "tag.gpgSign", "false"]);
-      await this.gitForPaths(gitMetadataPath, workspacePath, ["config", "--local", "user.name", "Reevo"]);
+      await this.gitForPaths(gitMetadataPath, workspacePath, ["config", "--local", "user.name", "Wardby"]);
       await this.gitForPaths(gitMetadataPath, workspacePath, [
         "config",
         "--local",
         "user.email",
-        "reevo-run@users.noreply.github.com",
+        "wardby@users.noreply.github.com",
       ]);
       // Revision-in-place: a continuation's clone (--branch === headRef, above)
       // already leaves headRef checked out locally, pointing at exactly
@@ -453,7 +453,7 @@ export class GitVcsProvider implements VcsProvider {
     if (symbolicHead !== prepared.headRef) throw new Error("vcs_head_ref_mismatch");
     let commitSha: string;
     if (currentHead === prepared.baseCommit) {
-      await this.gitFor(prepared, ["commit", "--no-verify", "--no-gpg-sign", "-m", `Reevo run ${prepared.runId}`]);
+      await this.gitFor(prepared, ["commit", "--no-verify", "--no-gpg-sign", "-m", `Wardby run ${prepared.runId}`]);
       commitSha = await this.revParse(prepared, "HEAD");
     } else {
       const parent = await this.revParse(prepared, "HEAD^");
@@ -506,7 +506,7 @@ export class GitVcsProvider implements VcsProvider {
   }
 
   /**
-   * Best-effort "reevo is working on this PR" signal (see VcsProvider) --
+   * Best-effort "wardby is working on this PR" signal (see VcsProvider) --
    * whole body wrapped so this can NEVER throw or otherwise affect the
    * real coding run, mirroring docker.ts's readWorkerFailureDiagnostic
    * ("diagnostics are optional and must never affect terminal cleanup").
@@ -596,9 +596,9 @@ export class GitVcsProvider implements VcsProvider {
     let continuation: { rootRunId: string } | undefined;
     if (input.continuation) {
       if (!SAFE_RUN_ID.test(input.continuation.rootRunId)) throw new Error("vcs_root_run_id_invalid");
-      if (headRef !== `reevo/run-${input.continuation.rootRunId}`) throw new Error("vcs_head_ref_invalid");
+      if (headRef !== `wardby/run-${input.continuation.rootRunId}`) throw new Error("vcs_head_ref_invalid");
       continuation = { rootRunId: input.continuation.rootRunId };
-    } else if (headRef !== `reevo/run-${input.runId}`) {
+    } else if (headRef !== `wardby/run-${input.runId}`) {
       throw new Error("vcs_head_ref_invalid");
     }
     const protectedPaths = [...new Set(input.protectedPaths.map(validateProtectedPath))];

@@ -8,7 +8,7 @@ const input: CodingTaskInput = {
   runId: "run_123",
   repository: "openai/example",
   baseRef: "main",
-  headRef: "reevo/run-run_123",
+  headRef: "wardby/run-run_123",
   task: "Fix the failing test.",
   model: "gpt-5.6-luna",
   budgetUsd: 1,
@@ -71,7 +71,7 @@ describe("runCodingWorker", () => {
       proxyBaseUrl: "http://proxy:8080",
       capability: "rrp_worker_capability",
       developerInstructions: WORKER_SECURITY_INSTRUCTIONS,
-      environment: { HOME: "/home/reevo", LANG: "C.UTF-8", PATH: "/usr/local/bin:/usr/bin:/bin", TMPDIR: "/tmp" },
+      environment: { HOME: "/home/wardby", LANG: "C.UTF-8", PATH: "/usr/local/bin:/usr/bin:/bin", TMPDIR: "/tmp" },
     });
     expect(capture.thread).toEqual({
       model: input.model,
@@ -118,7 +118,7 @@ describe("runCodingWorker", () => {
       capability: "cap",
       signal: new AbortController().signal,
       createClient: clientFor(
-        [{ type: "turn.failed", error: { message: "reevo_budget_exhausted SECRET_PROVIDER_BODY" } }],
+        [{ type: "turn.failed", error: { message: "wardby_budget_exhausted SECRET_PROVIDER_BODY" } }],
         {},
       ),
     });

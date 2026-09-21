@@ -1,15 +1,15 @@
 /**
- * `reevo serve`: the complete reevo process. Runs the MCP server, the
+ * `wardby serve`: the complete wardby process. Runs the MCP server, the
  * scheduler, and the reconciler together on ONE provider set and ONE
  * executor, which is what a single-container deployment (Cloud Run, a lone
- * VM) needs - `reevo mcp` alone never fires a schedule.
+ * VM) needs - `wardby mcp` alone never fires a schedule.
  *
  * Why one executor: DbosExecutor is a per-process singleton and refuses to
  * launch twice under different ids (providers/executor/dbos.ts), and its
  * recovery decisions key on that id. Building providers once and sharing
  * them is the whole trick; it also gives scheduled native runs the same
  * `providers.executor` wiring MCP-triggered runs get, so sub-agent dispatch
- * from a scheduled run works (it does not from `reevo scheduler`).
+ * from a scheduled run works (it does not from `wardby scheduler`).
  *
  * Why the scheduler and reconciler can run in every replica: the scheduler
  * elects one ticker via a Postgres lease and enforces at-most-once with row
@@ -23,7 +23,7 @@ import type { McpProviders } from "./mcp/context.js";
 import { buildMcpProviders, startMcp } from "./mcp/index.js";
 
 export interface ServeOptions {
-  /** Scheduler lease scope; defaults to "default" like `reevo scheduler --scope`. */
+  /** Scheduler lease scope; defaults to "default" like `wardby scheduler --scope`. */
   scope?: string;
   /** Pre-built providers (tests); built once via buildMcpProviders() when omitted. */
   providers?: McpProviders;
@@ -40,8 +40,8 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
   const transport = loadMcpConfig().transport;
   if (transport !== "http") {
     throw new Error(
-      `reevo serve requires MCP_TRANSPORT=http (got "${transport}"): in stdio mode stdout is the JSON-RPC wire ` +
-        `and a scheduler has no stdio client to serve. Use "reevo mcp" for stdio.`,
+      `wardby serve requires MCP_TRANSPORT=http (got "${transport}"): in stdio mode stdout is the JSON-RPC wire ` +
+        `and a scheduler has no stdio client to serve. Use "wardby mcp" for stdio.`,
     );
   }
 

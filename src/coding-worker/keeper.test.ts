@@ -6,7 +6,7 @@ import { prepareStorage } from "./keeper.js";
 
 describe("coding worker storage keeper", () => {
   it("creates only the fixed private storage subdirectories", async () => {
-    const root = await mkdtemp(join(tmpdir(), "reevo-keeper-"));
+    const root = await mkdtemp(join(tmpdir(), "wardby-keeper-"));
     await prepareStorage(root);
     for (const directory of ["workspace", "git", "input", "output"]) {
       const details = await stat(join(root, directory));

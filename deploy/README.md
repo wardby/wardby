@@ -1,6 +1,6 @@
 # deploy/
 
-Deployment configuration for reevo-run, organized by target.
+Deployment configuration for wardby, organized by target.
 
 - **`local/`** — docker-compose for local development (Postgres, the coding
   proxy). `npm run db:up` / `npm run coding:local:up`.
@@ -9,7 +9,7 @@ observability:up`), dev/local only. See `docs/phase-7-production-readiness.md`.
 - **`aws/`** — placeholder for an AWS target (Fargate `JobLauncher`, per the
   roadmap's Phase 5 follow-ons). Not yet built.
 - **`gcp/`** — GCP production hosting via Terraform (the baseline IaC tool
-  for every reevo-run cloud deployment, GCP included — this module is the
+  for every wardby cloud deployment, GCP included — this module is the
   reference example future cloud targets, e.g. `aws/`, follow). Design:
   `docs/superpowers/specs/2026-09-17-gcp-control-plane-hosting-design.md`.
 

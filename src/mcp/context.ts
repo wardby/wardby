@@ -20,7 +20,7 @@ export interface McpRequestContext {
    * The server's resource identifier, for tool handlers that need a
    * field-level scope step-up beyond the tool's own declared scope (e.g.
    * requiring agents:admin only when a mutation touches workerImageRef).
-   * Passed to requireScope the same way ReevoMcpServer does centrally.
+   * Passed to requireScope the same way WardbyMcpServer does centrally.
    */
   canonicalUri: string;
   providers: McpProviders;
@@ -30,7 +30,7 @@ export interface McpRequestContext {
    * — present on every call so a tool can tell an initial call from a
    * retried one. `inputResponses` is only populated on a retry;
    * `requestState()` returns the verified payload minted by
-   * `ReevoMcpServer.mintRequestState` on a prior round, or `undefined` on
+   * `WardbyMcpServer.mintRequestState` on a prior round, or `undefined` on
    * an initial call. See src/mcp/tools/secrets.ts for the one current user.
    */
   mcpReq: { inputResponses?: Record<string, unknown>; requestState: RequestStateAccessor };

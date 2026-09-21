@@ -12,13 +12,13 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: reevo
+          POSTGRES_USER: wardby
           POSTGRES_PASSWORD: test-only
           POSTGRES_DB: security
         ports: ["5432:5432"]
         options: --health-cmd pg_isready --health-interval 5s --health-retries 10
     env:
-      DATABASE_URL: postgresql://reevo:test-only@localhost:5432/security
+      DATABASE_URL: postgresql://wardby:test-only@localhost:5432/security
       # Public deterministic fixture material for tests only; never a deployment key.
       SECRET_APP_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     steps:
@@ -70,19 +70,19 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node scripts/coding-worker-image-policy.mjs ../${{ matrix.dockerfile }} --kind=${{ matrix.kind }}
-      - run: docker build -f ${{ matrix.dockerfile }} -t reevo-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }} .
+      - run: docker build -f ${{ matrix.dockerfile }} -t wardby-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }} .
       - if: matrix.tag-suffix == 'node'
         run: npm run test:docker-isolation
         env:
-          REEVO_WORKER_IMAGE: reevo-coding-worker-node:${{ github.sha }}
+          WARDBY_WORKER_IMAGE: wardby-coding-worker-node:${{ github.sha }}
       - uses: anchore/sbom-action@v0.20.5
         with:
-          image: reevo-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }}
+          image: wardby-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }}
           format: spdx-json
           output-file: coding-worker-${{ matrix.tag-suffix }}.spdx.json
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: reevo-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }}
+          image-ref: wardby-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }}
           version: v0.70.0
           severity: CRITICAL
           ignore-unfixed: true
@@ -104,36 +104,36 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run test:phase5
-      - run: docker build -f src/claude-coding-worker/Dockerfile.compatibility -t reevo-claude-compat:${{ github.sha }} .
-      - run: docker run --rm reevo-claude-compat:${{ github.sha }}
-      - run: docker build -f src/claude-coding-worker/Dockerfile -t reevo-claude-coding-worker:${{ github.sha }} .
-      - run: docker build -f src/claude-tool-runner/Dockerfile -t reevo-claude-tool-runner:${{ github.sha }} .
+      - run: docker build -f src/claude-coding-worker/Dockerfile.compatibility -t wardby-claude-compat:${{ github.sha }} .
+      - run: docker run --rm wardby-claude-compat:${{ github.sha }}
+      - run: docker build -f src/claude-coding-worker/Dockerfile -t wardby-claude-coding-worker:${{ github.sha }} .
+      - run: docker build -f src/claude-tool-runner/Dockerfile -t wardby-claude-tool-runner:${{ github.sha }} .
       - run: npm run test:claude-docker
         env:
-          REEVO_CLAUDE_WORKER_IMAGE: reevo-claude-coding-worker:${{ github.sha }}
-          REEVO_CLAUDE_TOOL_RUNNER_IMAGE: reevo-claude-tool-runner:${{ github.sha }}
-          REEVO_DOCKER_SEED_DEBUG: "1"
-          REEVO_CLAUDE_KEEPER_PROBE: "1"
+          WARDBY_CLAUDE_WORKER_IMAGE: wardby-claude-coding-worker:${{ github.sha }}
+          WARDBY_CLAUDE_TOOL_RUNNER_IMAGE: wardby-claude-tool-runner:${{ github.sha }}
+          WARDBY_DOCKER_SEED_DEBUG: "1"
+          WARDBY_CLAUDE_KEEPER_PROBE: "1"
       - uses: anchore/sbom-action@v0.20.5
         with:
-          image: reevo-claude-coding-worker:${{ github.sha }}
+          image: wardby-claude-coding-worker:${{ github.sha }}
           format: spdx-json
           output-file: claude-coding-worker.spdx.json
       - uses: anchore/sbom-action@v0.20.5
         with:
-          image: reevo-claude-tool-runner:${{ github.sha }}
+          image: wardby-claude-tool-runner:${{ github.sha }}
           format: spdx-json
           output-file: claude-tool-runner.spdx.json
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: reevo-claude-coding-worker:${{ github.sha }}
+          image-ref: wardby-claude-coding-worker:${{ github.sha }}
           version: v0.70.0
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: reevo-claude-tool-runner:${{ github.sha }}
+          image-ref: wardby-claude-tool-runner:${{ github.sha }}
           version: v0.70.0
           severity: CRITICAL
           ignore-unfixed: true

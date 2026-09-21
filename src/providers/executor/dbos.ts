@@ -88,7 +88,7 @@ const runWorkflow = DBOS.registerWorkflow(
     if (!self) throw new Error("DbosExecutor workflow invoked before launch().");
     await self.runInsideWorkflow(runId);
   },
-  { name: "reevo.run" },
+  { name: "wardby.run" },
 );
 
 export class DbosExecutor implements Executor {
@@ -139,7 +139,7 @@ export class DbosExecutor implements Executor {
     setActiveExecutor(this);
     if (!DBOS.isInitialized()) {
       DBOS.setConfig({
-        name: "reevo-run",
+        name: "wardby",
         systemDatabaseUrl: this.config.systemDatabaseUrl,
         systemDatabaseSchemaName: this.config.schemaName,
         executorID: this.id,

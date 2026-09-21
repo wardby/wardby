@@ -24,7 +24,7 @@ import { redactPii } from "./pii-redaction.js";
 /** Below this length a "secret" is too likely to coincidentally match ordinary log text — not worth the false-positive risk of redacting it. */
 const MIN_REDACTABLE_SECRET_LENGTH = 6;
 
-const FETCH_ALLOWED_HOSTS = parseAllowedHosts(process.env.REEVO_FETCH_ALLOWED_HOSTS);
+const FETCH_ALLOWED_HOSTS = parseAllowedHosts(process.env.WARDBY_FETCH_ALLOWED_HOSTS);
 let sharedParserPool: ParserWorkerPool | undefined;
 
 export interface HostFunctionOptions {

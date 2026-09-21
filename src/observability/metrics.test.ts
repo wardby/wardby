@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { startMetricsServer, type MetricsServerHandle } from "./metrics-server.js";
-import { ReevoMetrics } from "./metrics.js";
+import { WardbyMetrics } from "./metrics.js";
 
 describe("Prometheus metrics", () => {
   let server: MetricsServerHandle | undefined;
@@ -8,7 +8,7 @@ describe("Prometheus metrics", () => {
   afterEach(async () => server?.close());
 
   it("exports bounded lifecycle and proxy metrics without source or credential data", async () => {
-    const metrics = new ReevoMetrics();
+    const metrics = new WardbyMetrics();
     metrics.emit({ stage: "launched", runId: "run-sensitive", jobId: "job-sensitive", budgetReservedUsd: 0.5 });
     metrics.emit({ stage: "terminal", runId: "run-sensitive", outcome: "succeeded", durationMs: 1_200 });
     metrics.emit({ stage: "cleanup", runId: "run-sensitive", cleanupSucceeded: false, budgetActualUsd: 0.2 });
@@ -25,14 +25,14 @@ describe("Prometheus metrics", () => {
     metrics.observeProxyRequest({ protocol: "openai-responses", status: 403, durationMs: 250 });
 
     const exposition = await metrics.registry.metrics();
-    expect(exposition).toContain('reevo_coding_lifecycle_events_total{stage="launched"} 1');
-    expect(exposition).toContain('reevo_coding_runs_terminal_total{outcome="succeeded"} 1');
-    expect(exposition).toContain("reevo_coding_active_jobs 0");
-    expect(exposition).toContain("reevo_coding_cleanup_failures_total 1");
-    expect(exposition).toContain('reevo_proxy_http_requests_total{protocol="openai-responses",status_class="4xx"} 1');
-    expect(exposition).toContain("reevo_proxy_budget_reserved_usd_total 0.3");
-    expect(exposition).toContain("reevo_proxy_cost_usd_total 0.2");
-    expect(exposition).toContain('reevo_proxy_tokens_total{kind="input"} 10');
+    expect(exposition).toContain('wardby_coding_lifecycle_events_total{stage="launched"} 1');
+    expect(exposition).toContain('wardby_coding_runs_terminal_total{outcome="succeeded"} 1');
+    expect(exposition).toContain("wardby_coding_active_jobs 0");
+    expect(exposition).toContain("wardby_coding_cleanup_failures_total 1");
+    expect(exposition).toContain('wardby_proxy_http_requests_total{protocol="openai-responses",status_class="4xx"} 1');
+    expect(exposition).toContain("wardby_proxy_budget_reserved_usd_total 0.3");
+    expect(exposition).toContain("wardby_proxy_cost_usd_total 0.2");
+    expect(exposition).toContain('wardby_proxy_tokens_total{kind="input"} 10');
     expect(exposition).not.toContain("run-sensitive");
     expect(exposition).not.toContain("job-sensitive");
     expect(exposition).not.toContain("request-sensitive");
@@ -40,7 +40,7 @@ describe("Prometheus metrics", () => {
   });
 
   it("serves only health and Prometheus exposition endpoints", async () => {
-    const metrics = new ReevoMetrics();
+    const metrics = new WardbyMetrics();
     server = await startMetricsServer(metrics.registry, { host: "127.0.0.1", port: 0 });
 
     const health = await fetch(`http://127.0.0.1:${server.port}/healthz`);
@@ -50,7 +50,7 @@ describe("Prometheus metrics", () => {
     const scrape = await fetch(`http://127.0.0.1:${server.port}/metrics`);
     expect(scrape.status).toBe(200);
     expect(scrape.headers.get("content-type")).toContain("text/plain");
-    expect(await scrape.text()).toContain("reevo_nodejs_process_resident_memory_bytes");
+    expect(await scrape.text()).toContain("wardby_nodejs_process_resident_memory_bytes");
 
     expect((await fetch(`http://127.0.0.1:${server.port}/metrics`, { method: "POST" })).status).toBe(404);
     expect((await fetch(`http://127.0.0.1:${server.port}/not-a-route`)).status).toBe(404);

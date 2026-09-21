@@ -1,4 +1,4 @@
-# reevo-run
+# wardby
 
 Budget-guarded LLM agents on a schedule, with a sandboxed tool executor and a
 cloud-agnostic core behind swappable provider seams. See `README.md` for the
@@ -75,14 +75,14 @@ schema in `schema.prisma` — the diff must be empty. Verify it before committin
 
 ```bash
 npm run db:up                       # local Postgres on :55432 (docker compose)
-docker exec local-postgres-1 psql -U reevo -d reevo \
-  -c "DROP DATABASE IF EXISTS reevo_shadow;" -c "CREATE DATABASE reevo_shadow;"
+docker exec local-postgres-1 psql -U wardby -d wardby \
+  -c "DROP DATABASE IF EXISTS wardby_shadow;" -c "CREATE DATABASE wardby_shadow;"
 npx prisma migrate diff \
   --from-migrations prisma/migrations \
   --to-schema-datamodel prisma/schema.prisma \
-  --shadow-database-url "postgresql://reevo:reevo@localhost:55432/reevo_shadow" \
+  --shadow-database-url "postgresql://wardby:wardby@localhost:55432/wardby_shadow" \
   --script
-docker exec local-postgres-1 psql -U reevo -d reevo -c "DROP DATABASE IF EXISTS reevo_shadow;"
+docker exec local-postgres-1 psql -U wardby -d wardby -c "DROP DATABASE IF EXISTS wardby_shadow;"
 ```
 
 **Clean = the output is `-- This is an empty migration.`** Any `CREATE`,
@@ -107,7 +107,7 @@ prisma:migrate`) — never `migrate dev`, never `db push`.
 
 ## Deployment (deploy/) — STRICT
 
-`deploy/` holds reevo-run's reference deployment modules, one per cloud
+`deploy/` holds wardby's reference deployment modules, one per cloud
 target (`deploy/gcp/`, `deploy/aws/`, and future targets) — Terraform is the
 baseline IaC tool for all of them. Each is meant to be reused by others,
 either by copying the folder or by parameterizing it against a different

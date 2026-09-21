@@ -1,12 +1,12 @@
 <div>
-  <img align="left" hspace="24" src="docs/assets/reevo-run-agent.png" alt="Reevo Run agent with scheduling, coding, and budget guardrails" width="280">
-  <h1>Reevo Run</h1>
-  <h3>Your agents. Your cloud. Your budget.</h3>
-  <p><strong>Most agent runners focus on helping a model complete a task. Reevo Run is the self-hosted control plane that decides whether the task should run, limits what it can access, and returns a reviewable outcome governed by explicit policy.</strong></p>
+  <img align="left" hspace="24" src="docs/assets/brand/wardby-mascot.png" alt="Wardby guardian robot protecting an agent budget" width="280">
+  <h1>Wardby</h1>
+  <h3>Autonomous agents, bounded by design.</h3>
+  <p><strong>Most agent runners focus on helping a model complete a task. Wardby is the self-hosted control plane that decides whether the task should run, limits what it can access, and returns a reviewable outcome governed by explicit policy.</strong></p>
   <p>Budget is enforced as admission control: spend is reserved before execution, so work that cannot fit the budget never starts.</p>
   <p>
-    <a href="#why-reevo-run">Why Reevo Run</a> ·
-    <a href="#why-reevo-instead-of-another-agent-runner">Why it is different</a> ·
+    <a href="#why-wardby">Why Wardby</a> ·
+    <a href="#why-wardby-instead-of-another-agent-runner">Why it is different</a> ·
     <a href="#a-full-cycle-agent-from-one-conversation">Full-cycle example</a> ·
     <a href="#host-it-in-your-cloud">Deployments</a> ·
     <a href="#bring-your-own-observability">Observability</a> ·
@@ -18,10 +18,10 @@
 
 <!-- GitHub does not expose live Actions badge images for private repositories. These capability badges link authenticated readers to the authoritative workflow. -->
 
-[![Security CI](https://img.shields.io/badge/security%20CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)](https://github.com/chfields/reevo-run/actions/workflows/security.yml?query=branch%3Amain)
-[![Dependency audit](https://img.shields.io/badge/dependencies-audit%20policy-0f766e.svg)](https://github.com/chfields/reevo-run/actions/workflows/security.yml?query=branch%3Amain)
-[![Container scan](https://img.shields.io/badge/container%20images-Trivy%20CRITICAL%20gate-0f766e.svg)](https://github.com/chfields/reevo-run/actions/workflows/security.yml?query=branch%3Amain)
-[![SBOM](https://img.shields.io/badge/SBOM-SPDX%20JSON-0f766e.svg)](https://github.com/chfields/reevo-run/actions/workflows/security.yml?query=branch%3Amain)
+[![Security CI](https://img.shields.io/badge/security%20CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)](https://github.com/wardby/wardby/actions/workflows/security.yml?query=branch%3Amain)
+[![Dependency audit](https://img.shields.io/badge/dependencies-audit%20policy-0f766e.svg)](https://github.com/wardby/wardby/actions/workflows/security.yml?query=branch%3Amain)
+[![Container scan](https://img.shields.io/badge/container%20images-Trivy%20CRITICAL%20gate-0f766e.svg)](https://github.com/wardby/wardby/actions/workflows/security.yml?query=branch%3Amain)
+[![SBOM](https://img.shields.io/badge/SBOM-SPDX%20JSON-0f766e.svg)](https://github.com/wardby/wardby/actions/workflows/security.yml?query=branch%3Amain)
 [![License](https://img.shields.io/badge/license-Apache--2.0-0f766e.svg)](LICENSE)
 
 > **Project status:** the control plane, scheduler, budget groups, MCP server,
@@ -29,13 +29,13 @@
 > and local observability stack are implemented and tested. Production
 > readiness and cloud deployment coverage are still being expanded.
 
-## Why Reevo Run
+## Why Wardby
 
 AI agents are easy to demo and harder to operate. Once an agent can spend
 money, use credentials, change a repository, or run without a person watching,
 teams need more than a prompt and a cron job.
 
-Reevo Run provides the control plane around the model:
+Wardby provides the control plane around the model:
 
 | For engineering leaders                                                     | For developers                                                                             |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
@@ -47,29 +47,29 @@ Reevo Run provides the control plane around the model:
 The result is not another autonomous black box. It is a way to make agent work
 repeatable, bounded, inspectable, and reviewable.
 
-## Why Reevo instead of another agent runner?
+## Why Wardby instead of another agent runner?
 
-Agent tools solve different layers of the problem. Reevo does not need to
+Agent tools solve different layers of the problem. Wardby does not need to
 replace them: it provides the self-hosted operating boundary around agents and
 the work they perform.
 
-| Category                   | What it primarily helps you do                              | What Reevo adds                                                                            |
+| Category                   | What it primarily helps you do                              | What Wardby adds                                                                           |
 | -------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
 | **Agent frameworks**       | Build reasoning loops, tool calls, and multi-agent logic.   | Persistent ownership, schedules, budgets, credentials, run history, and lifecycle control. |
 | **Coding agents**          | Plan, edit, and test code for an interactive task.          | Isolated managed workers, admission-time budgets, scoped access, and optional draft PRs.   |
 | **Hosted agent platforms** | Start quickly on infrastructure operated by another vendor. | A control plane, data, credentials, and execution boundary you can host in your own cloud. |
 | **Workflow orchestrators** | Make application jobs durable, retryable, and observable.   | Agent-specific policy, model usage, capabilities, budgets, and MCP-native operations.      |
 
-The distinction is control, not just execution. Reevo reserves spend before a
+The distinction is control, not just execution. Wardby reserves spend before a
 run starts, grants only assigned capabilities, records what happened, and
 keeps downstream action authority separate from the worker that produced the
 result.
 
 ## One control plane, the full lifecycle
 
-![Reevo Run workflow: ask in Claude or Codex, define an agent through MCP, govern it in Reevo Run, execute it in isolation, and apply review policy to its outcome](docs/assets/reevo-run-workflow.svg)
+![Wardby workflow: ask in Claude or Codex, define an agent through MCP, govern it in Wardby, execute it in isolation, and apply review policy to its outcome](docs/assets/wardby-workflow.svg)
 
-Claude and Codex are the operator experience. Reevo Run is the durable system
+Claude and Codex are the operator experience. Wardby is the durable system
 behind them: it stores agent definitions, triggers work, reserves budget,
 mediates tools and credentials, records outcomes, and exposes run state through
 MCP.
@@ -83,12 +83,12 @@ Ask your MCP client:
 > the test suite, and open a draft pull request when a safe update is ready.
 > Never merge automatically.
 
-Claude or Codex can translate that request into Reevo MCP operations such as
+Claude or Codex can translate that request into Wardby MCP operations such as
 `create_budget_group`, `create_agent`, `attach_tool`, `trigger_agent`, and
 `get_run`. After that:
 
 1. The scheduler or an event creates an owned run.
-2. Reevo reserves budget and resolves only the capabilities assigned to that
+2. Wardby reserves budget and resolves only the capabilities assigned to that
    agent.
 3. An isolated coding worker receives the task without receiving the GitHub App
    credential or provider API key.
@@ -103,7 +103,7 @@ floor.
 
 ## Agent ecosystems you can compose
 
-Reevo provides lifecycle primitives rather than prescribing one fixed catalog.
+Wardby provides lifecycle primitives rather than prescribing one fixed catalog.
 These are example systems a team can build and manage through MCP:
 
 | Agent system             | Typical cycle                                                      | Governed outcome                     |
@@ -138,9 +138,9 @@ Start with [deployment targets](deploy/README.md), the
 [GCP setup guide](deploy/gcp/SETUP.md). Reference deployments are examples,
 not a requirement to use one vendor.
 
-**A complete deployment runs more than `reevo mcp`.** `mcp` serves the MCP
+**A complete deployment runs more than `wardby mcp`.** `mcp` serves the MCP
 surface; the scheduler that fires due agents and the reconciler that recovers
-orphaned runs live in `reevo scheduler`. Run **`reevo serve`** to get all three
+orphaned runs live in `wardby scheduler`. Run **`wardby serve`** to get all three
 in one process. It is the container image's default command and what a
 single-container deployment (Cloud Run, a lone VM) should run. Alternatively,
 run `mcp` and `scheduler` as two processes, as `deploy/production/compose.yml`
@@ -153,12 +153,12 @@ The coding proxy can expose standard Prometheus metrics at `/metrics` when
 `METRICS_BIND` is configured. Collection is pull-based: keep the endpoint on a
 private network and give only your chosen collector access to it.
 
-| Destination                      | Integration path                                                                                                                                                                                                                                  |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Local Prometheus and Grafana** | The included Compose profile provisions Prometheus, Grafana, and dashboards for requests, errors, latency, cost, budgets, runs, and actual spend.                                                                                                 |
-| **AWS CloudWatch**               | Configure the [CloudWatch Agent's Prometheus collector](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Agent-PrometheusEC2.html) to scrape Reevo over private EC2, ECS, or EKS networking and import selected metrics. |
-| **Google Cloud Monitoring**      | Configure the [Google Cloud Ops Agent Prometheus receiver](https://cloud.google.com/stackdriver/docs/managed-prometheus/setup-opsagent), or a Managed Service for Prometheus collector, to scrape the private endpoint.                           |
-| **Other monitoring platforms**   | Use any collector or hosted service that accepts the Prometheus exposition format.                                                                                                                                                                |
+| Destination                      | Integration path                                                                                                                                                                                                                                   |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Local Prometheus and Grafana** | The included Compose profile provisions Prometheus, Grafana, and dashboards for requests, errors, latency, cost, budgets, runs, and actual spend.                                                                                                  |
+| **AWS CloudWatch**               | Configure the [CloudWatch Agent's Prometheus collector](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Agent-PrometheusEC2.html) to scrape Wardby over private EC2, ECS, or EKS networking and import selected metrics. |
+| **Google Cloud Monitoring**      | Configure the [Google Cloud Ops Agent Prometheus receiver](https://cloud.google.com/stackdriver/docs/managed-prometheus/setup-opsagent), or a Managed Service for Prometheus collector, to scrape the private endpoint.                            |
+| **Other monitoring platforms**   | Use any collector or hosted service that accepts the Prometheus exposition format.                                                                                                                                                                 |
 
 Run the local proof without making a paid model request:
 
@@ -210,8 +210,8 @@ Requirements: Node.js 22.12 or newer, Docker, and one supported model-provider
 credential.
 
 ```sh
-git clone https://github.com/chfields/reevo-run.git
-cd reevo-run
+git clone https://github.com/wardby/wardby.git
+cd wardby
 npm ci
 cp .env.example .env
 ```
@@ -229,11 +229,11 @@ npm run cli -- mcp
 ```
 
 Point Claude or Codex at `npm run cli -- mcp` with the repository as its working
-directory. The exact client configuration format differs, but both use Reevo's
+directory. The exact client configuration format differs, but both use Wardby's
 stdio transport locally. For shared or remote access, use Streamable HTTP with
 OAuth and the production boundary documented above.
 
-Once connected, ask the client to list the available Reevo tools, create an
+Once connected, ask the client to list the available Wardby tools, create an
 agent with a small budget, trigger it, and inspect the run. Coding-agent setup
 additionally requires a dedicated GitHub App, immutable worker images, and the
 proxy boundary described in the [local coding smoke guide](docs/local-phase5-smoke.md).

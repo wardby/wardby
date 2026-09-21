@@ -1,9 +1,9 @@
 /** Operator inspection of agent memory, mirroring the Datastore MCP tools (`./datastore.ts`). */
-import type { ReevoMcpServer } from "../server.js";
+import type { WardbyMcpServer } from "../server.js";
 import { requireOwnedAgent, requireReadableAgent } from "../auth/ownership.js";
 import { textResult } from "./text-result.js";
 
-export function registerMemoryTools(mcp: ReevoMcpServer): void {
+export function registerMemoryTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "get_agent_memory",
     scope: "agents:read",

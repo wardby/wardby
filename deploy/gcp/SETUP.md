@@ -10,7 +10,7 @@ Requires the `gcloud` CLI installed and authenticated
 ## 1. Create or select a project
 
 ```bash
-gcloud projects create my-gcp-project-id --name="reevo-run sandbox"
+gcloud projects create my-gcp-project-id --name="wardby sandbox"
 gcloud config set project my-gcp-project-id
 ```
 
@@ -99,21 +99,21 @@ publish the image. A minimal path using Artifact Registry and the existing
 `deploy/Dockerfile`:
 
 ```bash
-gcloud artifacts repositories create reevo-run \
+gcloud artifacts repositories create wardby \
   --repository-format=docker --location=us-central1
 
 # from the repo root:
 docker build -f deploy/Dockerfile --target runtime \
-  -t us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane:latest .
-docker push us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane:latest
+  -t us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane:latest .
+docker push us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane:latest
 docker inspect --format '{{index .RepoDigests 0}}' \
-  us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane:latest
+  us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane:latest
 
 docker build -f deploy/Dockerfile --target migration \
-  -t us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane-migrate:latest .
-docker push us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane-migrate:latest
+  -t us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane-migrate:latest .
+docker push us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane-migrate:latest
 docker inspect --format '{{index .RepoDigests 0}}' \
-  us-central1-docker.pkg.dev/my-gcp-project-id/reevo-run/control-plane-migrate:latest
+  us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane-migrate:latest
 ```
 
 Use the first digest as `container_image` and the second as
@@ -181,9 +181,9 @@ because some objects depend on it". Recover with
 
 ## 11. Using your own identity provider (delegating mode)
 
-By default the module deploys `auth_provider = "self-hosted"`: reevo acts as
+By default the module deploys `auth_provider = "self-hosted"`: wardby acts as
 its own OAuth authorization server, and you create accounts with
-`reevo auth user create`, which hands back a login key. That needs no external
+`wardby auth user create`, which hands back a login key. That needs no external
 identity system, which makes it the fastest way to get a deployment running —
 but most deployments will want to front an IdP they already run:
 
@@ -193,9 +193,9 @@ auth_issuer   = "https://login.example.com/realms/prod"
 auth_jwks_uri = "https://login.example.com/realms/prod/protocol/openid-connect/certs"
 ```
 
-In this mode reevo only _verifies_ tokens — it never issues them — and there is
+In this mode wardby only _verifies_ tokens — it never issues them — and there is
 no local user administration at all: a `Principal` row is created from the
-token's subject the first time each person authenticates. `reevo auth` and
+token's subject the first time each person authenticates. `wardby auth` and
 login keys are self-hosted-mode concepts and play no part here. The module also
 stops generating `AUTH_SIGNING_KEY`/`AUTH_CREDENTIAL_HASH_KEY`, since nothing
 signs tokens or hashes login keys any more.
@@ -206,19 +206,19 @@ obviously point at its cause:
 1. **Audience.** Tokens must carry an `aud` equal to this deployment's
    canonical URI (`domain_name`, or `mcp_canonical_uri_override`). Most IdPs
    call this an API identifier or resource, and it usually needs an explicit
-   audience mapper — the default is often the client id. reevo accepts an
+   audience mapper — the default is often the client id. wardby accepts an
    origin with or without its trailing slash, so copying `resource` verbatim
    out of `https://<your-domain>/.well-known/oauth-protected-resource` is safe.
-2. **Scopes.** reevo authorizes per-tool off the token's `scope` claim, and a
+2. **Scopes.** wardby authorizes per-tool off the token's `scope` claim, and a
    spec-compliant client requests _every_ scope listed in that same metadata
    document. All of them must exist in the IdP or the authorization request
-   fails wholesale with `invalid_scope` — at the IdP, before reevo is involved.
+   fails wholesale with `invalid_scope` — at the IdP, before wardby is involved.
 3. **Client registration.** MCP clients self-register via dynamic client
    registration, which most IdPs disable by default. If yours does, register
    one client yourself and have people connect with it explicitly:
 
    ```bash
-   claude mcp add --transport http reevo https://<your-domain>/mcp \
+   claude mcp add --transport http wardby https://<your-domain>/mcp \
      --client-id <your-client-id> --callback-port 8765
    ```
 
@@ -233,7 +233,7 @@ all four, which is worth running locally before pointing this at a real IdP.
 
 ## 12. What the container runs
 
-The image's default command is `reevo serve`: the MCP server, the scheduler
+The image's default command is `wardby serve`: the MCP server, the scheduler
 that fires due agents, and the reconciler that recovers orphaned runs, in one
 process. The module does not override it, so scheduled agents fire in this
 deployment.

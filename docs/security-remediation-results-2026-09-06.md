@@ -1,7 +1,7 @@
 # Security Remediation Results
 
 Date: 2026-09-06
-Repository: `/Users/chfields/Personal/reevo-run`
+Repository: `/Users/chfields/Personal/wardby`
 Status: secured self-hosted implementation approved and enabled on 2026-09-06.
 
 ## Release Update
@@ -50,12 +50,12 @@ security documents were updated in place and remain untracked.
 ## Verification
 
 Verification used isolated Node 22 (the shell's Node 20.11 is unsupported),
-PostgreSQL 16 in disposable container `reevo-security-20260906`, and an isolated
+PostgreSQL 16 in disposable container `wardby-security-20260906`, and an isolated
 headless installed-Chrome profile. Database-backed tests were run with
 `DATABASE_URL` explicitly set, overriding the repository's existing environment.
 The original local PostgreSQL service on port 55432 was not changed.
 After verification, the disposable container was stopped, not deleted. Restart
-it with `docker start reevo-security-20260906` to repeat database checks. The
+it with `docker start wardby-security-20260906` to repeat database checks. The
 two reviewed local images remain available; neither was deployed.
 
 | Final check                              | Pass | Fail | Skip | Result                                                                                                     |
@@ -79,8 +79,8 @@ The following shell setup describes the actual isolated environment used. The
 password below is synthetic and valid only for the disposable local test DB.
 
 ```sh
-cd /Users/chfields/Personal/reevo-run
-export DATABASE_URL=postgresql://reevo:reevo-test-only@127.0.0.1:55439/reevo_security
+cd /Users/chfields/Personal/wardby
+export DATABASE_URL=postgresql://wardby:wardby-test-only@127.0.0.1:55439/wardby_security
 export SECURITY_BROWSER_CHANNEL=chrome
 npm exec --yes --package=node@22 -- npm run typecheck
 npm exec --yes --package=node@22 -- npm test
@@ -92,7 +92,7 @@ npm exec --yes --package=node@22 -- npx prisma migrate status
 npm exec --yes --package=node@22 -- npx prisma migrate diff \
   --from-migrations prisma/migrations \
   --to-schema-datamodel prisma/schema.prisma \
-  --shadow-database-url postgresql://reevo:reevo-test-only@127.0.0.1:55439/reevo_security_shadow \
+  --shadow-database-url postgresql://wardby:wardby-test-only@127.0.0.1:55439/wardby_security_shadow \
   --script
 npm exec --yes --package=node@22 -- npx vitest run \
   src/sandbox/host-functions.test.ts src/sandbox/safe-fetch.test.ts \
@@ -104,12 +104,12 @@ npm exec --yes --package=node@22 -- node --expose-gc scripts/security-allocation
 node scripts/security-audit.mjs
 npm ls --all --json
 git diff --check
-docker build -f deploy/Dockerfile --target runtime -t reevo-security-review:20260906 .
-docker build -f deploy/Dockerfile --target migration -t reevo-security-migration:20260906 .
-docker run --rm reevo-security-review:20260906 npm audit --omit=peer --json
+docker build -f deploy/Dockerfile --target runtime -t wardby-security-review:20260906 .
+docker build -f deploy/Dockerfile --target migration -t wardby-security-migration:20260906 .
+docker run --rm wardby-security-review:20260906 npm audit --omit=peer --json
 docker run --rm \
-  --env DATABASE_URL=postgresql://reevo:reevo-test-only@host.docker.internal:55439/reevo_security \
-  reevo-security-migration:20260906 npm run prisma:migrate
+  --env DATABASE_URL=postgresql://wardby:wardby-test-only@host.docker.internal:55439/wardby_security \
+  wardby-security-migration:20260906 npm run prisma:migrate
 ```
 
 `security-audit.mjs` runs both `npm audit --omit=dev --json` and
@@ -192,66 +192,66 @@ the two pre-existing untracked security documents updated, and 28
 new files. Generated ignored `dist/`, vendor bundles, `node_modules/`, and disposable
 Docker/test artifacts are not source changes and are not included below.
 
-- Added: [.dockerignore](/Users/chfields/Personal/reevo-run/.dockerignore)
-- Edited: [.env.example](/Users/chfields/Personal/reevo-run/.env.example)
-- Added: [.github/workflows/security.yml](/Users/chfields/Personal/reevo-run/.github/workflows/security.yml)
-- Added: [deploy/Dockerfile](/Users/chfields/Personal/reevo-run/deploy/Dockerfile)
-- Added: [docs/security-dependency-tree-2026-09-06.json](/Users/chfields/Personal/reevo-run/docs/security-dependency-tree-2026-09-06.json)
-- Added: [docs/security-deployment.md](/Users/chfields/Personal/reevo-run/docs/security-deployment.md)
-- Updated pre-existing untracked: [docs/security-remediation-plan-2026-09-06.md](/Users/chfields/Personal/reevo-run/docs/security-remediation-plan-2026-09-06.md)
-- Added: [docs/security-remediation-results-2026-09-06.md](/Users/chfields/Personal/reevo-run/docs/security-remediation-results-2026-09-06.md)
-- Updated pre-existing untracked: [docs/security-review-2026-09-06.md](/Users/chfields/Personal/reevo-run/docs/security-review-2026-09-06.md)
-- Edited: [package-lock.json](/Users/chfields/Personal/reevo-run/package-lock.json)
-- Edited: [package.json](/Users/chfields/Personal/reevo-run/package.json)
-- Added: [prisma/migrations/20260906040000_secure_self_hosted_oauth/migration.sql](/Users/chfields/Personal/reevo-run/prisma/migrations/20260906040000_secure_self_hosted_oauth/migration.sql)
-- Edited: [prisma/schema.prisma](/Users/chfields/Personal/reevo-run/prisma/schema.prisma)
-- Edited: [README.md](/Users/chfields/Personal/reevo-run/README.md)
-- Added: [scripts/security-allocation-check.mjs](/Users/chfields/Personal/reevo-run/scripts/security-allocation-check.mjs)
-- Added: [scripts/security-audit.mjs](/Users/chfields/Personal/reevo-run/scripts/security-audit.mjs)
-- Added: [scripts/security-migration-rehearsal.mjs](/Users/chfields/Personal/reevo-run/scripts/security-migration-rehearsal.mjs)
-- Edited: [src/cli.ts](/Users/chfields/Personal/reevo-run/src/cli.ts)
-- Edited: [src/config/providers.ts](/Users/chfields/Personal/reevo-run/src/config/providers.ts)
-- Added: [src/core/secrets.database.test.ts](/Users/chfields/Personal/reevo-run/src/core/secrets.database.test.ts)
-- Edited: [src/core/secrets.ts](/Users/chfields/Personal/reevo-run/src/core/secrets.ts)
-- Edited: [src/mcp/auth/principal.ts](/Users/chfields/Personal/reevo-run/src/mcp/auth/principal.ts)
-- Edited: [src/mcp/auth/resource-server.ts](/Users/chfields/Personal/reevo-run/src/mcp/auth/resource-server.ts)
-- Added: [src/mcp/auth/self-hosted/browser.test.ts](/Users/chfields/Personal/reevo-run/src/mcp/auth/self-hosted/browser.test.ts)
-- Added: [src/mcp/auth/self-hosted/browser.ts](/Users/chfields/Personal/reevo-run/src/mcp/auth/self-hosted/browser.ts)
-- Added: [src/mcp/auth/self-hosted/cli.ts](/Users/chfields/Personal/reevo-run/src/mcp/auth/self-hosted/cli.ts)
-- Added: [src/mcp/auth/self-hosted/credentials.ts](/Users/chfields/Personal/reevo-run/src/mcp/auth/self-hosted/credentials.ts)
-- Added: [src/mcp/auth/self-hosted/rate-limit.ts](/Users/chfields/Personal/reevo-run/src/mcp/auth/self-hosted/rate-limit.ts)
-- Added: [src/mcp/auth/self-hosted/session.ts](/Users/chfields/Personal/reevo-run/src/mcp/auth/self-hosted/session.ts)
-- Edited: [src/mcp/index.ts](/Users/chfields/Personal/reevo-run/src/mcp/index.ts)
-- Edited: [src/mcp/integration.test.ts](/Users/chfields/Personal/reevo-run/src/mcp/integration.test.ts)
-- Edited: [src/mcp/tools/tools.test.ts](/Users/chfields/Personal/reevo-run/src/mcp/tools/tools.test.ts)
-- Edited: [src/mcp/tools/tools.ts](/Users/chfields/Personal/reevo-run/src/mcp/tools/tools.ts)
-- Added: [src/mcp/transport/http-limits.test.ts](/Users/chfields/Personal/reevo-run/src/mcp/transport/http-limits.test.ts)
-- Added: [src/mcp/transport/http-limits.ts](/Users/chfields/Personal/reevo-run/src/mcp/transport/http-limits.ts)
-- Added: [src/mcp/transport/http-security.test.ts](/Users/chfields/Personal/reevo-run/src/mcp/transport/http-security.test.ts)
+- Added: [.dockerignore](/Users/chfields/Personal/wardby/.dockerignore)
+- Edited: [.env.example](/Users/chfields/Personal/wardby/.env.example)
+- Added: [.github/workflows/security.yml](/Users/chfields/Personal/wardby/.github/workflows/security.yml)
+- Added: [deploy/Dockerfile](/Users/chfields/Personal/wardby/deploy/Dockerfile)
+- Added: [docs/security-dependency-tree-2026-09-06.json](/Users/chfields/Personal/wardby/docs/security-dependency-tree-2026-09-06.json)
+- Added: [docs/security-deployment.md](/Users/chfields/Personal/wardby/docs/security-deployment.md)
+- Updated pre-existing untracked: [docs/security-remediation-plan-2026-09-06.md](/Users/chfields/Personal/wardby/docs/security-remediation-plan-2026-09-06.md)
+- Added: [docs/security-remediation-results-2026-09-06.md](/Users/chfields/Personal/wardby/docs/security-remediation-results-2026-09-06.md)
+- Updated pre-existing untracked: [docs/security-review-2026-09-06.md](/Users/chfields/Personal/wardby/docs/security-review-2026-09-06.md)
+- Edited: [package-lock.json](/Users/chfields/Personal/wardby/package-lock.json)
+- Edited: [package.json](/Users/chfields/Personal/wardby/package.json)
+- Added: [prisma/migrations/20260906040000_secure_self_hosted_oauth/migration.sql](/Users/chfields/Personal/wardby/prisma/migrations/20260906040000_secure_self_hosted_oauth/migration.sql)
+- Edited: [prisma/schema.prisma](/Users/chfields/Personal/wardby/prisma/schema.prisma)
+- Edited: [README.md](/Users/chfields/Personal/wardby/README.md)
+- Added: [scripts/security-allocation-check.mjs](/Users/chfields/Personal/wardby/scripts/security-allocation-check.mjs)
+- Added: [scripts/security-audit.mjs](/Users/chfields/Personal/wardby/scripts/security-audit.mjs)
+- Added: [scripts/security-migration-rehearsal.mjs](/Users/chfields/Personal/wardby/scripts/security-migration-rehearsal.mjs)
+- Edited: [src/cli.ts](/Users/chfields/Personal/wardby/src/cli.ts)
+- Edited: [src/config/providers.ts](/Users/chfields/Personal/wardby/src/config/providers.ts)
+- Added: [src/core/secrets.database.test.ts](/Users/chfields/Personal/wardby/src/core/secrets.database.test.ts)
+- Edited: [src/core/secrets.ts](/Users/chfields/Personal/wardby/src/core/secrets.ts)
+- Edited: [src/mcp/auth/principal.ts](/Users/chfields/Personal/wardby/src/mcp/auth/principal.ts)
+- Edited: [src/mcp/auth/resource-server.ts](/Users/chfields/Personal/wardby/src/mcp/auth/resource-server.ts)
+- Added: [src/mcp/auth/self-hosted/browser.test.ts](/Users/chfields/Personal/wardby/src/mcp/auth/self-hosted/browser.test.ts)
+- Added: [src/mcp/auth/self-hosted/browser.ts](/Users/chfields/Personal/wardby/src/mcp/auth/self-hosted/browser.ts)
+- Added: [src/mcp/auth/self-hosted/cli.ts](/Users/chfields/Personal/wardby/src/mcp/auth/self-hosted/cli.ts)
+- Added: [src/mcp/auth/self-hosted/credentials.ts](/Users/chfields/Personal/wardby/src/mcp/auth/self-hosted/credentials.ts)
+- Added: [src/mcp/auth/self-hosted/rate-limit.ts](/Users/chfields/Personal/wardby/src/mcp/auth/self-hosted/rate-limit.ts)
+- Added: [src/mcp/auth/self-hosted/session.ts](/Users/chfields/Personal/wardby/src/mcp/auth/self-hosted/session.ts)
+- Edited: [src/mcp/index.ts](/Users/chfields/Personal/wardby/src/mcp/index.ts)
+- Edited: [src/mcp/integration.test.ts](/Users/chfields/Personal/wardby/src/mcp/integration.test.ts)
+- Edited: [src/mcp/tools/tools.test.ts](/Users/chfields/Personal/wardby/src/mcp/tools/tools.test.ts)
+- Edited: [src/mcp/tools/tools.ts](/Users/chfields/Personal/wardby/src/mcp/tools/tools.ts)
+- Added: [src/mcp/transport/http-limits.test.ts](/Users/chfields/Personal/wardby/src/mcp/transport/http-limits.test.ts)
+- Added: [src/mcp/transport/http-limits.ts](/Users/chfields/Personal/wardby/src/mcp/transport/http-limits.ts)
+- Added: [src/mcp/transport/http-security.test.ts](/Users/chfields/Personal/wardby/src/mcp/transport/http-security.test.ts)
 - Added for containment, then removed at release: `src/mcp/transport/quarantine.test.ts`
-- Edited: [src/mcp/transport/streamable-http.test.ts](/Users/chfields/Personal/reevo-run/src/mcp/transport/streamable-http.test.ts)
-- Edited: [src/mcp/transport/streamable-http.ts](/Users/chfields/Personal/reevo-run/src/mcp/transport/streamable-http.ts)
-- Added: [src/providers/auth/authorization-server.ts](/Users/chfields/Personal/reevo-run/src/providers/auth/authorization-server.ts)
-- Edited: [src/providers/auth/delegating.test.ts](/Users/chfields/Personal/reevo-run/src/providers/auth/delegating.test.ts)
-- Edited: [src/providers/auth/delegating.ts](/Users/chfields/Personal/reevo-run/src/providers/auth/delegating.ts)
-- Edited: [src/providers/auth/index.test.ts](/Users/chfields/Personal/reevo-run/src/providers/auth/index.test.ts)
-- Edited: [src/providers/auth/index.ts](/Users/chfields/Personal/reevo-run/src/providers/auth/index.ts)
+- Edited: [src/mcp/transport/streamable-http.test.ts](/Users/chfields/Personal/wardby/src/mcp/transport/streamable-http.test.ts)
+- Edited: [src/mcp/transport/streamable-http.ts](/Users/chfields/Personal/wardby/src/mcp/transport/streamable-http.ts)
+- Added: [src/providers/auth/authorization-server.ts](/Users/chfields/Personal/wardby/src/providers/auth/authorization-server.ts)
+- Edited: [src/providers/auth/delegating.test.ts](/Users/chfields/Personal/wardby/src/providers/auth/delegating.test.ts)
+- Edited: [src/providers/auth/delegating.ts](/Users/chfields/Personal/wardby/src/providers/auth/delegating.ts)
+- Edited: [src/providers/auth/index.test.ts](/Users/chfields/Personal/wardby/src/providers/auth/index.test.ts)
+- Edited: [src/providers/auth/index.ts](/Users/chfields/Personal/wardby/src/providers/auth/index.ts)
 - Added for containment, then removed at release: `src/providers/auth/release-gate.ts`
-- Edited: [src/providers/auth/self-hosted.test.ts](/Users/chfields/Personal/reevo-run/src/providers/auth/self-hosted.test.ts)
-- Edited: [src/providers/auth/self-hosted.ts](/Users/chfields/Personal/reevo-run/src/providers/auth/self-hosted.ts)
-- Added: [src/providers/auth/subject.test.ts](/Users/chfields/Personal/reevo-run/src/providers/auth/subject.test.ts)
-- Added: [src/providers/auth/subject.ts](/Users/chfields/Personal/reevo-run/src/providers/auth/subject.ts)
-- Edited: [src/providers/datastore/postgres.test.ts](/Users/chfields/Personal/reevo-run/src/providers/datastore/postgres.test.ts)
-- Edited: [src/providers/datastore/postgres.ts](/Users/chfields/Personal/reevo-run/src/providers/datastore/postgres.ts)
-- Added: [src/sandbox/bounded-json.ts](/Users/chfields/Personal/reevo-run/src/sandbox/bounded-json.ts)
-- Edited: [src/sandbox/bridge.ts](/Users/chfields/Personal/reevo-run/src/sandbox/bridge.ts)
-- Edited: [src/sandbox/eval-core.ts](/Users/chfields/Personal/reevo-run/src/sandbox/eval-core.ts)
-- Edited: [src/sandbox/fetch-policy.ts](/Users/chfields/Personal/reevo-run/src/sandbox/fetch-policy.ts)
-- Edited: [src/sandbox/host-functions.test.ts](/Users/chfields/Personal/reevo-run/src/sandbox/host-functions.test.ts)
-- Edited: [src/sandbox/host-functions.ts](/Users/chfields/Personal/reevo-run/src/sandbox/host-functions.ts)
-- Edited: [src/sandbox/limits.ts](/Users/chfields/Personal/reevo-run/src/sandbox/limits.ts)
-- Edited: [src/sandbox/run-in-sandbox.ts](/Users/chfields/Personal/reevo-run/src/sandbox/run-in-sandbox.ts)
-- Added: [src/sandbox/safe-fetch.test.ts](/Users/chfields/Personal/reevo-run/src/sandbox/safe-fetch.test.ts)
-- Added: [src/sandbox/safe-fetch.ts](/Users/chfields/Personal/reevo-run/src/sandbox/safe-fetch.ts)
-- Edited: [vitest.config.ts](/Users/chfields/Personal/reevo-run/vitest.config.ts)
-- Edited: [vitest.contract.config.ts](/Users/chfields/Personal/reevo-run/vitest.contract.config.ts)
+- Edited: [src/providers/auth/self-hosted.test.ts](/Users/chfields/Personal/wardby/src/providers/auth/self-hosted.test.ts)
+- Edited: [src/providers/auth/self-hosted.ts](/Users/chfields/Personal/wardby/src/providers/auth/self-hosted.ts)
+- Added: [src/providers/auth/subject.test.ts](/Users/chfields/Personal/wardby/src/providers/auth/subject.test.ts)
+- Added: [src/providers/auth/subject.ts](/Users/chfields/Personal/wardby/src/providers/auth/subject.ts)
+- Edited: [src/providers/datastore/postgres.test.ts](/Users/chfields/Personal/wardby/src/providers/datastore/postgres.test.ts)
+- Edited: [src/providers/datastore/postgres.ts](/Users/chfields/Personal/wardby/src/providers/datastore/postgres.ts)
+- Added: [src/sandbox/bounded-json.ts](/Users/chfields/Personal/wardby/src/sandbox/bounded-json.ts)
+- Edited: [src/sandbox/bridge.ts](/Users/chfields/Personal/wardby/src/sandbox/bridge.ts)
+- Edited: [src/sandbox/eval-core.ts](/Users/chfields/Personal/wardby/src/sandbox/eval-core.ts)
+- Edited: [src/sandbox/fetch-policy.ts](/Users/chfields/Personal/wardby/src/sandbox/fetch-policy.ts)
+- Edited: [src/sandbox/host-functions.test.ts](/Users/chfields/Personal/wardby/src/sandbox/host-functions.test.ts)
+- Edited: [src/sandbox/host-functions.ts](/Users/chfields/Personal/wardby/src/sandbox/host-functions.ts)
+- Edited: [src/sandbox/limits.ts](/Users/chfields/Personal/wardby/src/sandbox/limits.ts)
+- Edited: [src/sandbox/run-in-sandbox.ts](/Users/chfields/Personal/wardby/src/sandbox/run-in-sandbox.ts)
+- Added: [src/sandbox/safe-fetch.test.ts](/Users/chfields/Personal/wardby/src/sandbox/safe-fetch.test.ts)
+- Added: [src/sandbox/safe-fetch.ts](/Users/chfields/Personal/wardby/src/sandbox/safe-fetch.ts)
+- Edited: [vitest.config.ts](/Users/chfields/Personal/wardby/vitest.config.ts)
+- Edited: [vitest.contract.config.ts](/Users/chfields/Personal/wardby/vitest.contract.config.ts)

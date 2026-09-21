@@ -1,6 +1,6 @@
 /**
  * The MCP server core: wraps @modelcontextprotocol/server's McpServer with
- * reevo's own ToolSpec contract (scope-gated, McpRequestContext-aware).
+ * wardby's own ToolSpec contract (scope-gated, McpRequestContext-aware).
  *
  * Architecture note (adapted from the plan during implementation): the SDK
  * already provides correct, spec-compliant serving entries —
@@ -51,7 +51,7 @@ export interface ToolSpec<Args = Record<string, unknown>> {
    * Converted via the SDK's own `fromJsonSchema()` rather than accepted as
    * a zod raw shape: `McpServer.registerTool`'s zod-shape overload requires
    * REAL zod v4, and `@modelcontextprotocol/server` bundles its own nested
-   * zod@4.5.4 copy — any zod v4 reevo-run itself installs (even the exact
+   * zod@4.5.4 copy — any zod v4 wardby itself installs (even the exact
    * same version) is a structurally-incompatible separate module instance.
    * JSON Schema has no such identity problem.
    */
@@ -78,7 +78,7 @@ export interface DiscoverResultLike {
   capabilities: { extensions?: Record<string, unknown>; [key: string]: unknown };
 }
 
-export interface ReevoMcpServer {
+export interface WardbyMcpServer {
   registerTool<Args = Record<string, unknown>>(spec: ToolSpec<Args>): void;
   /**
    * Registers a custom JSON-RPC method (e.g. the Tasks extension's
@@ -103,7 +103,7 @@ export interface ReevoMcpServer {
   /**
    * Seals `payload` into the opaque `requestState` string a multi-round-trip
    * tool hands back via `inputRequired({ requestState })`. Backed by one
-   * HMAC codec created for the life of this `ReevoMcpServer` (stable across
+   * HMAC codec created for the life of this `WardbyMcpServer` (stable across
    * every `factory()` call, so state minted on one call verifies on a
    * later one) — see the module doc for why the key never needs to be
    * shared beyond this process.
@@ -149,25 +149,25 @@ function loadRequestStateKey(env: NodeJS.ProcessEnv): Uint8Array {
 /**
  * Shown to every connecting client at session start (Claude Code and other
  * compliant clients surface this directly to the calling assistant) — the
- * main discovery channel for "you can run a reevo-run agent's prompt
+ * main discovery channel for "you can run a wardby agent's prompt
  * yourself, right now, instead of only via its schedule/trigger." Paired
  * with the per-agent MCP prompts registered below, which are the concrete,
  * one-call way to actually do it.
  */
 const SERVER_INSTRUCTIONS =
-  'reevo-run hosts reusable LLM agents (a system prompt, model, budget, and attached tools) that normally run on a schedule or webhook trigger. Every agent\'s full system prompt is available via list_agents/get_agent ("systemPrompt" field), and agents you can see are also registered as MCP prompts by name — you can adopt an agent\'s instructions and run them yourself, in this session, right now. This is a good way to shift work like code review left: e.g., before committing, run the "systemPrompt" of a code-review agent against your own working tree using your own tools, rather than waiting for a separately triggered run. Where a pulled prompt names a reevo-run-specific sandboxed tool, use your own equivalent tool for the same purpose instead.';
+  'wardby hosts reusable LLM agents (a system prompt, model, budget, and attached tools) that normally run on a schedule or webhook trigger. Every agent\'s full system prompt is available via list_agents/get_agent ("systemPrompt" field), and agents you can see are also registered as MCP prompts by name — you can adopt an agent\'s instructions and run them yourself, in this session, right now. This is a good way to shift work like code review left: e.g., before committing, run the "systemPrompt" of a code-review agent against your own working tree using your own tools, rather than waiting for a separately triggered run. Where a pulled prompt names a wardby-specific sandboxed tool, use your own equivalent tool for the same purpose instead.';
 
 /** The MCP prompt body for one Agent — the message a client injects when a user invokes it (e.g. as a slash command). */
 function agentPromptText(agent: Pick<Agent, "name" | "model" | "systemPrompt">): string {
   return [
-    `You are adopting the instructions of reevo-run agent "${agent.name}" (model "${agent.model}") to run directly in this session, instead of waiting for its schedule/trigger.`,
-    "Follow the instructions below as this conversation's operating instructions. Where they name a specific reevo-run tool that isn't available here, use your own equivalent tool for the same purpose instead.",
+    `You are adopting the instructions of wardby agent "${agent.name}" (model "${agent.model}") to run directly in this session, instead of waiting for its schedule/trigger.`,
+    "Follow the instructions below as this conversation's operating instructions. Where they name a specific wardby tool that isn't available here, use your own equivalent tool for the same purpose instead.",
     "---",
     agent.systemPrompt,
   ].join("\n\n");
 }
 
-export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
+export function buildMcpServer(opts: BuildMcpServerOptions): WardbyMcpServer {
   const specs: ToolSpec<never>[] = [];
   const requestHandlers: {
     method: string;
@@ -236,7 +236,7 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
 
   const factory: McpServerFactory = async () => {
     const mcpServer = new McpServer(
-      { name: "reevo-run", version: "0.0.0" },
+      { name: "wardby", version: "0.0.0" },
       {
         requestState: { verify: (state, ctx) => requestStateCodec.verify(state, ctx) },
         instructions: SERVER_INSTRUCTIONS,
@@ -280,7 +280,7 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
 
     // One MCP prompt per Agent this connection can see, so a client that
     // supports the prompts UI (e.g. a slash-command picker) can run a
-    // reevo-run agent directly — the concrete half of the "shift left"
+    // wardby agent directly — the concrete half of the "shift left"
     // discovery story SERVER_INSTRUCTIONS introduces. Identity isn't
     // reliably known yet for an HTTP connection at this point (resolveCtx
     // resolves it per-dispatch from the SDK's own per-call ServerContext,
@@ -298,7 +298,7 @@ export function buildMcpServer(opts: BuildMcpServerOptions): ReevoMcpServer {
           agent.name,
           {
             title: agent.name,
-            description: `Run reevo-run agent "${agent.name}" (model ${agent.model}) directly in this session, instead of via its schedule/trigger.`,
+            description: `Run wardby agent "${agent.name}" (model ${agent.model}) directly in this session, instead of via its schedule/trigger.`,
           },
           () => ({
             messages: [{ role: "user" as const, content: { type: "text" as const, text: agentPromptText(agent) } }],

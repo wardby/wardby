@@ -2,14 +2,14 @@ import "../env.js";
 import { prisma } from "../core/db.js";
 import { logger } from "../core/logger.js";
 import { loadMetricsConfig } from "../observability/config.js";
-import { ReevoMetrics } from "../observability/metrics.js";
+import { WardbyMetrics } from "../observability/metrics.js";
 import { startMetricsServer, type MetricsServerHandle } from "../observability/metrics-server.js";
 import { startConfiguredCodingProxy } from "../providers/coding-proxy/runtime.js";
 
 const proxyLog = logger.child({ module: "coding-proxy-runtime" });
 
 async function main(): Promise<void> {
-  const metrics = new ReevoMetrics();
+  const metrics = new WardbyMetrics();
   const metricsConfig = loadMetricsConfig();
   const server = await startConfiguredCodingProxy({
     db: prisma,

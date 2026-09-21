@@ -5,7 +5,7 @@ import { toNodeHandler, hostHeaderValidation } from "@modelcontextprotocol/node"
 import type { PrismaClient } from "@prisma/client";
 import type { AuthProvider } from "../../providers/auth/types.js";
 import type { SelfHostedAuthProvider } from "../../providers/auth/self-hosted.js";
-import type { ReevoMcpServer } from "../server.js";
+import type { WardbyMcpServer } from "../server.js";
 import type { McpProviders } from "../context.js";
 import { authenticate, protectedResourceMetadata } from "../auth/resource-server.js";
 import { McpError } from "../errors.js";
@@ -26,7 +26,7 @@ export interface HttpServerConfig {
   responseMode?: PerRequestResponseMode;
 }
 export interface StartHttpServerOptions {
-  mcp: ReevoMcpServer;
+  mcp: WardbyMcpServer;
   config: HttpServerConfig;
   auth: { authProvider: AuthProvider; db: PrismaClient; providers: McpProviders };
   selfHosted?: SelfHostedAuthProvider;

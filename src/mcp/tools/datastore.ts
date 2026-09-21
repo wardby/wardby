@@ -1,5 +1,5 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
-import type { ReevoMcpServer } from "../server.js";
+import type { WardbyMcpServer } from "../server.js";
 import type { DatastoreValue } from "../../providers/index.js";
 import {
   requireOwnedAgent,
@@ -66,7 +66,7 @@ async function requireMutableSharedDatastore(
   assertCanMutate(datastore.ownerId, principalId, `Datastore bound as "${boundName}" is not owned by the caller.`);
 }
 
-export function registerDatastoreTools(mcp: ReevoMcpServer): void {
+export function registerDatastoreTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "create_datastore",
     scope: "datastore:write",

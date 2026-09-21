@@ -5,19 +5,19 @@ import { dirname } from "node:path";
 import { actualCostUsd, completedUsageFromSseFrame, estimateReservationUsd } from "./task0b-metering.mjs";
 
 const listenPort = Number(process.env.PORT ?? 8080);
-const capability = required("REEVO_RUN_CAPABILITY");
-const model = process.env.REEVO_MODEL ?? "gpt-5.6-luna";
-const maxOutputTokens = Number(process.env.REEVO_MAX_OUTPUT_TOKENS ?? 128);
-const absoluteMaxUsd = Number(process.env.REEVO_ABSOLUTE_MAX_USD ?? 0.02);
-const evidencePath = process.env.REEVO_EVIDENCE_PATH ?? "/evidence/task0b-usage.jsonl";
+const capability = required("WARDBY_RUN_CAPABILITY");
+const model = process.env.WARDBY_MODEL ?? "gpt-5.6-luna";
+const maxOutputTokens = Number(process.env.WARDBY_MAX_OUTPUT_TOKENS ?? 128);
+const absoluteMaxUsd = Number(process.env.WARDBY_ABSOLUTE_MAX_USD ?? 0.02);
+const evidencePath = process.env.WARDBY_EVIDENCE_PATH ?? "/evidence/task0b-usage.jsonl";
 const key = (await readFile(process.env.OPENAI_API_KEY_FILE ?? "/run/secrets/openai_api_key", "utf8")).trim();
 
 if (!key) throw new Error("OpenAI API key file is empty");
 if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 128) {
-  throw new Error("REEVO_MAX_OUTPUT_TOKENS must be an integer from 1 through 128");
+  throw new Error("WARDBY_MAX_OUTPUT_TOKENS must be an integer from 1 through 128");
 }
 if (!Number.isFinite(absoluteMaxUsd) || absoluteMaxUsd <= 0 || absoluteMaxUsd > 0.02) {
-  throw new Error("REEVO_ABSOLUTE_MAX_USD must be greater than zero and at most 0.02");
+  throw new Error("WARDBY_ABSOLUTE_MAX_USD must be greater than zero and at most 0.02");
 }
 
 const state = {
@@ -74,7 +74,7 @@ async function rejectBudget(response, reservationUsd, reason = "run budget exhau
     budgetUsd: state.budgetUsd,
     reservationUsd,
   });
-  json(response, 429, { error: { message: reason, type: "reevo_budget_exhausted" } });
+  json(response, 429, { error: { message: reason, type: "wardby_budget_exhausted" } });
 }
 
 async function forward(body, response, reservationUsd) {

@@ -7,11 +7,11 @@ function spec(runId = "run-1"): JobSpec {
   return {
     kind: "coding-agent",
     runId,
-    image: "registry.example/reevo-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    image: "registry.example/wardby-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     inputArtifact: "/artifacts/input.json",
     timeoutSec: 900,
     limits: { cpus: 2, memoryMb: 2048, pids: 128, diskMb: 4096 },
-    labels: { "reevo.run-id": runId, "reevo.schema": "1" },
+    labels: { "wardby.run-id": runId, "wardby.schema": "1" },
   };
 }
 

@@ -22,7 +22,7 @@
 
 Traced precisely in conversation, verified against the actual SDK source
 (`node_modules/@dbos-inc/dbos-sdk/dist/src/system_database.js` and
-`dbos-executor.js`) and reevo's own code:
+`dbos-executor.js`) and wardby's own code:
 
 - `executeRun` (`src/core/runner.ts`) moves a `Run` row from `pending` to
   `running` (line 300) before calling the engine, then on success calls

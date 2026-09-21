@@ -8,8 +8,8 @@ describe("unattendedSchedulesWarning", () => {
     expect(unattendedSchedulesWarning(0)).toBeNull();
     const msg = unattendedSchedulesWarning(2);
     expect(msg).toMatch(/^2 agent\(s\)/);
-    expect(msg).toContain('"reevo scheduler"');
-    expect(msg).toContain('"reevo serve"');
+    expect(msg).toContain('"wardby scheduler"');
+    expect(msg).toContain('"wardby serve"');
   });
 });
 

@@ -1,9 +1,9 @@
 import { createWebhook, listWebhooks, deleteWebhook } from "../../core/webhooks.js";
-import type { ReevoMcpServer } from "../server.js";
+import type { WardbyMcpServer } from "../server.js";
 import { requireOwnedAgent, requireOwnedWebhook } from "../auth/ownership.js";
 import { textResult } from "./text-result.js";
 
-export function registerWebhookTools(mcp: ReevoMcpServer): void {
+export function registerWebhookTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "create_webhook",
     scope: "webhooks:write",

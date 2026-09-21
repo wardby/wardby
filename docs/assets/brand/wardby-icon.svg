@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Wardby icon</title>
+  <desc id="desc">A friendly helmeted guardian carrying a budget shield.</desc>
+
+  <circle cx="64" cy="64" r="58" fill="#071d3b"/>
+  <path d="M20 55C20 25 40 12 64 12s44 13 44 43v35H20Z" fill="#fffaf0"/>
+  <rect x="30" y="43" width="68" height="45" rx="18" fill="#0a2850"/>
+  <path d="M27 48Q64 18 101 48" fill="none" stroke="#c8aa70" stroke-width="10" stroke-linecap="round"/>
+  <path d="M64 7V53" fill="none" stroke="#c8aa70" stroke-width="11" stroke-linecap="round"/>
+  <path d="M44 65q7 10 14 0M70 65q7 10 14 0" fill="none" stroke="#4be6b3" stroke-width="6" stroke-linecap="round"/>
+
+  <path d="M78 76 108 86v18c0 12-10 19-30 24-20-5-30-12-30-24V86Z" fill="#071d3b" stroke="#fffaf0" stroke-width="5" stroke-linejoin="round"/>
+  <g transform="translate(78 105) scale(.72) translate(-78 -105)">
+    <path d="M89 91c-3-4-7-6-12-6-7 0-12 4-12 9 0 6 5 8 13 10 8 2 13 5 13 11 0 7-5 11-13 11-7 0-13-3-17-8M78 82v46" fill="none" stroke="#4be6b3" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

@@ -4,11 +4,11 @@
  * model name was to trigger a run and read the "Known models" list off a
  * failed run's error message.
  */
-import type { ReevoMcpServer } from "../server.js";
+import type { WardbyMcpServer } from "../server.js";
 import type { RoutingLlmProvider } from "../../providers/llm/index.js";
 import { textResult } from "./text-result.js";
 
-export function registerModelTools(mcp: ReevoMcpServer): void {
+export function registerModelTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "list_models",
     scope: "agents:read",

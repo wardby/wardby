@@ -10,7 +10,7 @@ being reconciled to `lost`, and so `stop` becomes a real cancellation.
 **Architecture:** The engine seam gains an optional `step` boundary; the native
 engine wraps every non-deterministic side effect (token estimate, LLM turn, tool
 call) in it. The in-process executor leaves `step` unset, so nothing changes for
-it. `DbosExecutor` registers one DBOS workflow, `reevo.run(runId)`, whose body is
+it. `DbosExecutor` registers one DBOS workflow, `wardby.run(runId)`, whose body is
 the existing `executeRun` with `step` bound to `DBOS.runStep`. DBOS records each
 step's result in its own tables and, on restart, replays completed steps from
 the record without re-executing them. A nullable `Run.executionBackend` column
@@ -49,7 +49,7 @@ Implemented on branch `worktree-dbos-durable-executor`. Where the code differs f
 - CLAUDE.md Prisma rules are STRICT: the schema change in Task 3 ships with a
   hand-written migration, never `prisma db push`, never edit an applied
   migration, and the drift check must print `-- This is an empty migration.`
-- DBOS's own system tables live in the `dbos` schema of the reevo database by
+- DBOS's own system tables live in the `dbos` schema of the wardby database by
   default (override with `DBOS_SYSTEM_DATABASE_URL`). They are NOT part of
   `schema.prisma`. Prisma only manages `public`, so the drift check is
   unaffected. Never add them to `schema.prisma`.
@@ -79,7 +79,7 @@ await DBOS.shutdown({ workflowCompletionTimeoutMS });
 DBOS.isInitialized(): boolean;
 DBOS.executorID: string;                   // static getter; defaults to process.env.DBOS__VMID || "local"
 
-const wf = DBOS.registerWorkflow(async (runId: string) => {...}, { name: "reevo.run" }); // MUST be called before launch()
+const wf = DBOS.registerWorkflow(async (runId: string) => {...}, { name: "wardby.run" }); // MUST be called before launch()
 const handle = await DBOS.startWorkflow(wf, { workflowID: runId, duplicationPolicy: "return-existing" })(runId);
 await DBOS.runStep(() => Promise<T>, { name, retriesAllowed: false });  // only valid inside a workflow
 await DBOS.getWorkflowStatus(id);          // null | { status: "PENDING"|"SUCCESS"|"ERROR"|"MAX_RECOVERY_ATTEMPTS_EXCEEDED"|"CANCELLED"|"ENQUEUED"|"DELAYED", executorId?: string, ... }
@@ -145,9 +145,9 @@ Append to `src/config/providers.test.ts` (keep its existing imports; add `loadDb
 ```ts
 describe("loadDbosConfig", () => {
   it("defaults the system database to DATABASE_URL, schema dbos, executor id local", () => {
-    const config = loadDbosConfig({ DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo" });
+    const config = loadDbosConfig({ DATABASE_URL: "postgresql://wardby:wardby@localhost:55432/wardby" });
     expect(config).toEqual({
-      systemDatabaseUrl: "postgresql://reevo:reevo@localhost:55432/reevo",
+      systemDatabaseUrl: "postgresql://wardby:wardby@localhost:55432/wardby",
       schemaName: "dbos",
       executorId: "local",
     });
@@ -676,14 +676,14 @@ ALTER TABLE "Run" ADD COLUMN "executionBackend" TEXT;
 npm run db:up
 npx prisma migrate deploy
 npm run prisma:generate
-docker exec local-postgres-1 psql -U reevo -d reevo \
-  -c "DROP DATABASE IF EXISTS reevo_shadow;" -c "CREATE DATABASE reevo_shadow;"
+docker exec local-postgres-1 psql -U wardby -d wardby \
+  -c "DROP DATABASE IF EXISTS wardby_shadow;" -c "CREATE DATABASE wardby_shadow;"
 npx prisma migrate diff \
   --from-migrations prisma/migrations \
   --to-schema-datamodel prisma/schema.prisma \
-  --shadow-database-url "postgresql://reevo:reevo@localhost:55432/reevo_shadow" \
+  --shadow-database-url "postgresql://wardby:wardby@localhost:55432/wardby_shadow" \
   --script
-docker exec local-postgres-1 psql -U reevo -d reevo -c "DROP DATABASE IF EXISTS reevo_shadow;"
+docker exec local-postgres-1 psql -U wardby -d wardby -c "DROP DATABASE IF EXISTS wardby_shadow;"
 npx prisma validate
 ```
 
@@ -1120,7 +1120,7 @@ const runWorkflow = DBOS.registerWorkflow(
     if (!self) throw new Error("DbosExecutor workflow invoked before launch().");
     await self.runInsideWorkflow(runId);
   },
-  { name: "reevo.run" },
+  { name: "wardby.run" },
 );
 
 export class DbosExecutor implements Executor {
@@ -1146,7 +1146,7 @@ export class DbosExecutor implements Executor {
     activeExecutor = this;
     if (!DBOS.isInitialized()) {
       DBOS.setConfig({
-        name: "reevo-run",
+        name: "wardby",
         systemDatabaseUrl: this.config.systemDatabaseUrl,
         systemDatabaseSchemaName: this.config.schemaName,
         executorID: this.config.executorId,
@@ -1524,7 +1524,7 @@ describe("buildExecutor", () => {
 
   it("builds the DBOS executor when EXECUTOR=dbos and a database url is present", () => {
     const executor = buildExecutor({ executor: "dbos" }, providers, undefined, {
-      DATABASE_URL: "postgresql://reevo:reevo@localhost:55432/reevo",
+      DATABASE_URL: "postgresql://wardby:wardby@localhost:55432/wardby",
     });
     expect(executor).toBeInstanceOf(DbosExecutor);
     expect(typeof executor.launch).toBe("function");
@@ -1605,7 +1605,7 @@ const sched = startScheduler({ executor, db: prisma, scope });
 and in its `shutdown` closure, after `sched.stop()` and the reconciler stop,
 add `void executor.close?.();` (or `await` it if the closure is async). Import
 `buildExecutor` from `./providers/executor/index.js` and drop the now-unused
-`InProcessExecutor` import if nothing else in `cli.ts` uses it. If `reevo run`
+`InProcessExecutor` import if nothing else in `cli.ts` uses it. If `wardby run`
 (the attended path) uses `InProcessExecutor` elsewhere, leave that call alone:
 attended runs stay in-process by design.
 
@@ -1794,7 +1794,7 @@ git commit -m "test(executor): crash-resume acceptance for DbosExecutor; documen
 
 - Coding-agent (Phase 5) runs: `ContainerExecutor` owns those; `executeRun`'s
   coding branch still fails closed under DBOS exactly as under in-process.
-- DBOS queues, rate limiting, or scheduling: reevo's scheduler and budget
+- DBOS queues, rate limiting, or scheduling: wardby's scheduler and budget
   groups already own concurrency and spend.
 - Cross-instance recovery beyond the reconciler adoption path (Task 6). A
   DBOS Conductor deployment is a later option, not a requirement.

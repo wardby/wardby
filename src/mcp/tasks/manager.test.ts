@@ -10,7 +10,7 @@ const databaseUrl = process.env.DATABASE_URL;
 
 if (!databaseUrl) {
   console.warn(
-    "[reevo-run tests] DATABASE_URL not set — skipping the MCP task-manager tests (Run.status -> " +
+    "[wardby tests] DATABASE_URL not set — skipping the MCP task-manager tests (Run.status -> " +
       "Task lifecycle mapping). Set DATABASE_URL before trusting an MCP task change based on a " +
       "green run that skipped it.",
   );
@@ -130,7 +130,7 @@ describe.skipIf(!databaseUrl)("MCP task manager (database)", () => {
         kind: "coding",
         codingProfile: {
           create: {
-            repository: "openai/reevo",
+            repository: "openai/wardby",
             baseRef: "main",
             allowedEgress: [],
             protectedPaths: ["CODEOWNERS"],
@@ -145,9 +145,9 @@ describe.skipIf(!databaseUrl)("MCP task manager (database)", () => {
       data: {
         runId: run.id,
         task: "Verify the result projection",
-        repository: "openai/reevo",
+        repository: "openai/wardby",
         baseRef: "main",
-        headRef: `reevo/run-${run.id}`,
+        headRef: `wardby/run-${run.id}`,
         provider: "codex",
         model: "gpt-5.6-terra",
         timeoutSec: 900,
@@ -159,7 +159,7 @@ describe.skipIf(!databaseUrl)("MCP task manager (database)", () => {
         result: {
           schemaVersion: 1,
           outcome: "no_changes",
-          repository: "openai/reevo",
+          repository: "openai/wardby",
           baseRef: "main",
           summary: "No changes; github_pat_abcdefghijklmnopqrstuvwxyz123456",
           tests: [{ command: "npm test", outcome: "passed" }],

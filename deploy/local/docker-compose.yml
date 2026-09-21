@@ -2,18 +2,18 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: reevo
-      POSTGRES_PASSWORD: reevo
-      POSTGRES_DB: reevo
+      POSTGRES_USER: wardby
+      POSTGRES_PASSWORD: wardby
+      POSTGRES_DB: wardby
     ports:
       - "55432:5432"
     volumes:
-      - reevo-postgres-data:/var/lib/postgresql/data
+      - wardby-postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U reevo -d reevo"]
+      test: ["CMD-SHELL", "pg_isready -U wardby -d wardby"]
       interval: 5s
       timeout: 5s
       retries: 12
 
 volumes:
-  reevo-postgres-data:
+  wardby-postgres-data:

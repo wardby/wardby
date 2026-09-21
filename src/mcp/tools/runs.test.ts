@@ -169,7 +169,7 @@ describe("run observability tools", () => {
             result: {
               schemaVersion: 1,
               outcome: "no_changes",
-              repository: "openai/reevo",
+              repository: "openai/wardby",
               baseRef: "main",
               summary: "No changes; sk-abcdefghijklmnopqrstuvwxyz0123456789",
               tests: [{ command: "npm test", outcome: "passed" }],

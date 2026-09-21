@@ -1,15 +1,15 @@
 {
-  "name": "reevo-run",
+  "name": "@wardby/cli",
   "version": "0.0.0",
   "private": true,
-  "description": "Schedule and run budget-guarded LLM agents.",
+  "description": "Self-hosted control plane for budget-guarded AI agents.",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
   },
   "bin": {
-    "reevo": "./dist/cli.js"
+    "wardby": "./dist/cli.js"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -38,8 +38,8 @@
     "verify:phase5": "npm run typecheck && npm run test:phase5 && npm run build && npm run worker:image:policy",
     "test:docker-isolation": "node scripts/docker-isolation-acceptance.mjs",
     "test:docker-job": "node scripts/docker-job-acceptance.mjs",
-    "claude:images:local": "docker build -f src/claude-coding-worker/Dockerfile -t reevo-claude-coding-worker:phase5 . && docker build -f src/claude-tool-runner/Dockerfile -t reevo-claude-tool-runner:phase5 .",
-    "test:claude-compatibility": "docker build -f src/claude-coding-worker/Dockerfile.compatibility -t reevo-claude-compat:phase5 . && docker run --rm reevo-claude-compat:phase5",
+    "claude:images:local": "docker build -f src/claude-coding-worker/Dockerfile -t wardby-claude-coding-worker:phase5 . && docker build -f src/claude-tool-runner/Dockerfile -t wardby-claude-tool-runner:phase5 .",
+    "test:claude-compatibility": "docker build -f src/claude-coding-worker/Dockerfile.compatibility -t wardby-claude-compat:phase5 . && docker run --rm wardby-claude-compat:phase5",
     "test:claude-docker": "node scripts/claude-docker-acceptance.mjs",
     "test:production-boundary": "node scripts/production-boundary-policy.mjs",
     "verify:claude-code": "npm run typecheck && npm run test:phase5 && npm run test:claude-compatibility && npm run claude:images:local && npm run test:claude-docker",

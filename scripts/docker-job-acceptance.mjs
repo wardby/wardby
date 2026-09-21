@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 
-const requestedImage = process.env.REEVO_WORKER_IMAGE ?? "reevo-coding-worker:phase5-smoke";
+const requestedImage = process.env.WARDBY_WORKER_IMAGE ?? "wardby-coding-worker:phase5-smoke";
 try {
   execFileSync("docker", ["image", "inspect", "--format", "{{.Id}}", requestedImage], {
     encoding: "utf8",
@@ -10,13 +10,13 @@ try {
   process.exit(1);
 }
 
-const fixtureTag = `reevo-docker-job-fixture-${process.pid}`;
+const fixtureTag = `wardby-docker-job-fixture-${process.pid}`;
 const fixtureSource = [
   `FROM ${requestedImage}`,
   "USER root",
-  "COPY scripts/docker-job-keeper-fixture.js /opt/reevo/coding-worker/keeper.js",
+  "COPY scripts/docker-job-keeper-fixture.js /opt/wardby/coding-worker/keeper.js",
   "USER 10001:10001",
-  "ENTRYPOINT [\"node\", \"-e\", \"require('node:fs').writeFileSync('/run/reevo/output/result.json', JSON.stringify({schemaVersion:1,runId:'docker-smoke',outcome:'no_changes',summary:'fixture',tests:[]})); setTimeout(() => process.exit(0), 500)\"]",
+  "ENTRYPOINT [\"node\", \"-e\", \"require('node:fs').writeFileSync('/run/wardby/output/result.json', JSON.stringify({schemaVersion:1,runId:'docker-smoke',outcome:'no_changes',summary:'fixture',tests:[]})); setTimeout(() => process.exit(0), 500)\"]",
 ].join("\n");
 const built = spawnSync("docker", ["build", "--quiet", "--tag", fixtureTag, "--file", "-", "."], {
   cwd: new URL("..", import.meta.url),
@@ -34,7 +34,7 @@ const fixtureImage = execFileSync("docker", ["image", "inspect", "--format", "{{
 const vitest = new URL("../node_modules/vitest/vitest.mjs", import.meta.url);
 const result = spawnSync(process.execPath, [vitest.pathname, "run", "src/providers/jobs/docker.integration.test.ts"], {
   cwd: new URL("..", import.meta.url),
-  env: { ...process.env, REEVO_DOCKER_JOB_TEST: "1", REEVO_DOCKER_JOB_FIXTURE_IMAGE: fixtureImage },
+  env: { ...process.env, WARDBY_DOCKER_JOB_TEST: "1", WARDBY_DOCKER_JOB_FIXTURE_IMAGE: fixtureImage },
   stdio: "inherit",
 });
 spawnSync("docker", ["image", "rm", "--force", fixtureTag], { stdio: "ignore" });

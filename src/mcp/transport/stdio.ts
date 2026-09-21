@@ -13,7 +13,7 @@
  */
 import type { Readable, Writable } from "node:stream";
 import { serveStdio, StdioServerTransport } from "@modelcontextprotocol/server/stdio";
-import type { ReevoMcpServer } from "../server.js";
+import type { WardbyMcpServer } from "../server.js";
 
 export interface StdioIo {
   input?: Readable;
@@ -24,7 +24,7 @@ export interface StdioHandle {
   close(): Promise<void>;
 }
 
-export function runStdioServer(mcp: ReevoMcpServer, io: StdioIo = {}): StdioHandle {
+export function runStdioServer(mcp: WardbyMcpServer, io: StdioIo = {}): StdioHandle {
   const transport = new StdioServerTransport(io.input, io.output);
   const handle = serveStdio(mcp.factory, { transport });
   return { close: () => handle.close() };

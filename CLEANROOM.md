@@ -1,6 +1,6 @@
 # Clean-Room Charter
 
-reevo-run is an **independent reimplementation** built from behavioral
+wardby is an **independent reimplementation** built from behavioral
 specifications. It is not derived from, and does not copy, any other codebase.
 
 ## Permitted inputs
@@ -43,4 +43,4 @@ copyright holder. When ownership is resolved, add the copyright line and a
 `NOTICE` file naming the agreed holder — do not assert one before then.
 
 This charter is committed from the project's first commit as a record of the
-clean-room discipline under which reevo-run is built.
+clean-room discipline under which wardby is built.

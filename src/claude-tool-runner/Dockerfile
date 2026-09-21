@@ -7,8 +7,8 @@ FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4
 FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS runtime
 RUN npm install --global --omit=dev npm@12.0.2 \
     && npm cache clean --force \
-    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin reevo
-WORKDIR /opt/reevo/claude-tool-runner
+    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin wardby
+WORKDIR /opt/wardby/claude-tool-runner
 COPY --from=dependencies /runner/node_modules ./node_modules
 COPY src/claude-tool-runner/main.mjs ./main.mjs
 COPY src/claude-tool-runner/command.mjs ./command.mjs
@@ -21,5 +21,5 @@ RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/make \
     && test ! -e /usr/bin/git
 USER 10001:10001
-ENV NODE_ENV=production HOME=/home/reevo
-ENTRYPOINT ["node", "/opt/reevo/claude-tool-runner/main.mjs"]
+ENV NODE_ENV=production HOME=/home/wardby
+ENTRYPOINT ["node", "/opt/wardby/claude-tool-runner/main.mjs"]

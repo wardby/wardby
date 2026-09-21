@@ -1,13 +1,13 @@
 services:
   coding-proxy:
-    container_name: reevo-coding-proxy
+    container_name: wardby-coding-proxy
     build:
       context: ../..
       dockerfile: deploy/Dockerfile
       target: runtime
     command: ["node", "dist/coding-proxy/main.js"]
     environment:
-      DATABASE_URL: postgresql://reevo:reevo@postgres:5432/reevo
+      DATABASE_URL: postgresql://wardby:wardby@postgres:5432/wardby
       OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY must be set in .env.local}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set in .env.local}
       NODE_ENV: production

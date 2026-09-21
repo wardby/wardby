@@ -1,6 +1,6 @@
 /**
  * MCP composition root: assembles the real providers, builds one
- * ReevoMcpServer, registers every tool module, and starts whichever
+ * WardbyMcpServer, registers every tool module, and starts whichever
  * transport MCP_TRANSPORT selects. No business logic lives here — this
  * file only wires together pieces every earlier task already built and
  * tested on their own.
@@ -9,7 +9,7 @@
  * ledger): stdio needs no `MCP_CANONICAL_URI` (there's no HTTP endpoint or
  * OAuth challenge to identify) and constructs no real `AuthProvider` at all
  * (per the design: "stdio local mode: no token; the operator is trusted") —
- * building one unconditionally would make `reevo mcp` over stdio fail on
+ * building one unconditionally would make `wardby mcp` over stdio fail on
  * missing `AUTH_JWKS_URI`/`AUTH_SIGNING_KEY` a deployment running stdio-only
  * never needed to set.
  */
@@ -24,7 +24,7 @@ import { buildConfiguredExecutor, buildExecutor } from "../providers/executor/in
 import { buildSecretCipher } from "../providers/secrets/index.js";
 import { buildAuthProvider } from "../providers/auth/index.js";
 import type { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
-import { buildMcpServer, type ReevoMcpServer } from "./server.js";
+import { buildMcpServer, type WardbyMcpServer } from "./server.js";
 import type { McpProviders } from "./context.js";
 import { countUnattendedSchedules, unattendedSchedulesWarning } from "./unattended-schedules.js";
 import { runStdioServer } from "./transport/stdio.js";
@@ -63,11 +63,11 @@ async function warnIfNothingWillFireSchedules(): Promise<void> {
 }
 
 /** Placeholder identifier for stdio, which has no HTTP endpoint to name. Never surfaced: stdio's fixed context always holds every scope, so no scope challenge is ever built against it. */
-const STDIO_PLACEHOLDER_URI = "urn:reevo:local-stdio";
+const STDIO_PLACEHOLDER_URI = "urn:wardby:local-stdio";
 
 /** Registers the full Phase 4 tool surface — every module, in one place. */
 export function registerAllTools(
-  mcp: ReevoMcpServer,
+  mcp: WardbyMcpServer,
   opts: { secretElicitationUrl: SecretElicitationUrlBuilder; secretElicitationProtocol: boolean },
 ): void {
   registerAgentTools(mcp);
@@ -131,7 +131,7 @@ export interface McpServerHandle {
 
 export interface StartMcpOptions {
   /**
-   * A pre-built provider set. `reevo serve` builds one and shares it, because
+   * A pre-built provider set. `wardby serve` builds one and shares it, because
    * DbosExecutor is a per-process singleton and two executors cannot coexist
    * (dbos.ts launch()). Built internally when omitted.
    */
@@ -152,7 +152,7 @@ async function closeQuietly(promise: Promise<void> | undefined, what: string): P
   }
 }
 
-/** The real CLI entry point: `reevo mcp`. Reads config from the environment, starts stdio or HTTP per MCP_TRANSPORT. */
+/** The real CLI entry point: `wardby mcp`. Reads config from the environment, starts stdio or HTTP per MCP_TRANSPORT. */
 export async function startMcp(options: StartMcpOptions = {}): Promise<McpServerHandle> {
   const mcpConfig = loadMcpConfig();
   const providers = options.providers ?? buildMcpProviders().providers;

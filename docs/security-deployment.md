@@ -116,8 +116,8 @@ re-migration against synthetic data in an isolated container:
 node scripts/security-migration-rehearsal.mjs
 ```
 
-That script deliberately targets only container `reevo-security-20260906`,
-database `reevo_security`, and freshly generated temporary schemas. Its
+That script deliberately targets only container `wardby-security-20260906`,
+database `wardby_security`, and freshly generated temporary schemas. Its
 temporary schemas are removed after verification. It is not a production
 backup or rollback command. Have a second reviewer inspect production backup,
 recovery, auth identity derivation, CSRF, transactions, and SSRF before rollout.
@@ -194,7 +194,7 @@ and pins the validated DNS result to the connection while retaining Host and
 TLS verification. Cross-origin redirects remove credentials, including custom
 API-key headers; forwarding a request body across origins is rejected.
 
-`REEVO_FETCH_ALLOWED_HOSTS` accepts exact normalized hosts only. Private-host
+`WARDBY_FETCH_ALLOWED_HOSTS` accepts exact normalized hosts only. Private-host
 allowlisting intentionally bypasses destination isolation for those hosts.
 Separately deny metadata/private egress at the container/VPC/firewall layer.
 Sandbox code can explicitly log secrets it has been given; log size limits do
@@ -214,8 +214,8 @@ Do not claim these per-invocation caps establish a whole-process memory ceiling.
 ## Images and dependency exception
 
 ```sh
-docker build -f deploy/Dockerfile --target runtime -t reevo-runtime .
-docker build -f deploy/Dockerfile --target migration -t reevo-migration .
+docker build -f deploy/Dockerfile --target runtime -t wardby-runtime .
+docker build -f deploy/Dockerfile --target migration -t wardby-migration .
 ```
 
 The runtime runs as uid 1000 and contains the generated Prisma client, but no

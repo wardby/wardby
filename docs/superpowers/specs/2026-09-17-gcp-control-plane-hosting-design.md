@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-17
 **Status:** Proposed (design; implementation plan to follow via writing-plans)
-**Author:** reevo-run maintainer
+**Author:** wardby maintainer
 **Related:** `docs/private/2026-09-05-roadmap-mcp-native.md` (Phase 12 — GCP
 deployment, the informal-numbering "Phase 7+" this design fleshes out);
 `docs/private/2026-09-13-http-reachable-service-plan.md` (the ngrok plan
@@ -12,7 +12,7 @@ this design does not duplicate it); `src/providers/executor/dbos.ts`
 (`DbosExecutor`, the process-singleton/executor-id constraints this design
 satisfies); `src/config/providers.ts` (`loadDbosConfig`, `DbosConfig`).
 
-> **Clean-room note.** Grounded in reevo-run's own code (`dbos.ts`,
+> **Clean-room note.** Grounded in wardby's own code (`dbos.ts`,
 > `providers.ts`, `schema.prisma`'s `SchedulerLease`) plus Google Cloud's own
 > published documentation (Cloud Run, Cloud SQL, the metadata server),
 > fetched and quoted directly in this session rather than recalled from
@@ -22,11 +22,11 @@ satisfies); `src/config/providers.ts` (`loadDbosConfig`, `DbosConfig`).
 
 ## Goal
 
-Reevo-run currently has no cloud hosting story at all — the always-on
+Wardby-run currently has no cloud hosting story at all — the always-on
 control plane (MCP server + scheduler +, when `EXECUTOR=dbos`, the DBOS
 durable-workflow engine) only runs locally or via ad hoc deployment. This
 design specifies the first real cloud target: **GCP, with Terraform as the
-infrastructure-as-code baseline for every reevo-run cloud deployment, not
+infrastructure-as-code baseline for every wardby cloud deployment, not
 just this one.** `deploy/gcp/` is meant to be the reference example future
 targets (AWS, the still-empty `deploy/aws/` placeholder) follow.
 
@@ -187,7 +187,7 @@ for the coding-proxy egress-lockdown sub-project (Non-goals).
 Every project-specific value is a variable with no default tied to this
 project — `project_id`, `region`, `domain_name` have no default at all
 (Terraform requires them explicitly); a `name_prefix` variable (default
-`"reevo-run"`, but override-able) is used in every resource name so a
+`"wardby"`, but override-able) is used in every resource name so a
 second copy deployed under a different prefix in the same or another
 project never collides. `deploy/gcp/terraform.tfvars.example` documents
 both usage patterns explicitly: fork the whole folder and edit in place, or
@@ -204,7 +204,7 @@ project-specific identity this module must not assume.
   account. Directly addresses the SSRF/metadata-token-theft risk class
   discussed while designing this (a compromised broad-scope default SA
   turns any SSRF bug into full project access; a scoped custom SA bounds
-  the blast radius to exactly what reevo needs).
+  the blast radius to exactly what wardby needs).
 - **Secret Manager** (`secrets.tf`) for the Cloud SQL connection string and
   VCS/LLM credential refs, granted to that service account only via IAM,
   not baked into the container image or Terraform state as plaintext.

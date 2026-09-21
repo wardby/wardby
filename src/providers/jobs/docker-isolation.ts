@@ -5,7 +5,7 @@ export const CODING_WORKER_UID = 10001;
 export const CODING_WORKER_GID = 10001;
 // The keeper needs headroom for runc's short-lived exec process plus Node's threads.
 const KEEPER_PIDS_LIMIT = 32;
-export const CODING_PROXY_ALIAS = "reevo-proxy";
+export const CODING_PROXY_ALIAS = "wardby-proxy";
 export const CODING_PROXY_PORT = 8787;
 export const DOCKER_ISOLATION_ERROR = "docker_isolation_unsupported";
 export const WORKER_STOP_GRACE_SECONDS = 10;
@@ -13,14 +13,14 @@ export const WORKER_STOP_GRACE_SECONDS = 10;
 export const WORKER_PATHS = {
   workspace: "/workspace",
   git: "/workspace/.git",
-  input: "/run/reevo/input",
-  output: "/run/reevo/output",
-  tool: "/run/reevo/tool",
-  storage: "/run/reevo/storage",
+  input: "/run/wardby/input",
+  output: "/run/wardby/output",
+  tool: "/run/wardby/tool",
+  storage: "/run/wardby/storage",
 } as const;
 
-const LABEL_MANAGED = "io.reevo.managed=true";
-const LABEL_COMPONENT = "io.reevo.component=coding-worker";
+const LABEL_MANAGED = "io.wardby.managed=true";
+const LABEL_COMPONENT = "io.wardby.component=coding-worker";
 const IMMUTABLE_IMAGE = /^(?:sha256:[a-f0-9]{64}|[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64})$/;
 const DOCKER_OBJECT = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
 
@@ -154,9 +154,9 @@ function runHash(runId: string): string {
 
 function hasResourceLabels(labels: Record<string, string> | undefined, runId: string): boolean {
   return (
-    labels?.["io.reevo.managed"] === "true" &&
-    labels["io.reevo.component"] === "coding-worker" &&
-    labels["io.reevo.run-sha256"] === runHash(runId)
+    labels?.["io.wardby.managed"] === "true" &&
+    labels["io.wardby.component"] === "coding-worker" &&
+    labels["io.wardby.run-sha256"] === runHash(runId)
   );
 }
 
@@ -201,16 +201,16 @@ export function isolationNames(runId: string): DockerIsolationNames {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(runId)) throw isolationError();
   const token = runHash(runId).slice(0, 20);
   return {
-    network: `reevo-net-${token}`,
-    storageVolume: `reevo-storage-${token}`,
-    keeperContainer: `reevo-keeper-${token}`,
-    workerContainer: `reevo-worker-${token}`,
-    toolContainer: `reevo-tools-${token}`,
+    network: `wardby-net-${token}`,
+    storageVolume: `wardby-storage-${token}`,
+    keeperContainer: `wardby-keeper-${token}`,
+    workerContainer: `wardby-worker-${token}`,
+    toolContainer: `wardby-tools-${token}`,
   };
 }
 
 function labels(runId: string): string[] {
-  return ["--label", LABEL_MANAGED, "--label", LABEL_COMPONENT, "--label", `io.reevo.run-sha256=${runHash(runId)}`];
+  return ["--label", LABEL_MANAGED, "--label", LABEL_COMPONENT, "--label", `io.wardby.run-sha256=${runHash(runId)}`];
 }
 
 function storageMountOptions(spec: JobSpec): string {
@@ -305,7 +305,7 @@ export function buildKeeperCreateArgs(spec: JobSpec): string[] {
     "--entrypoint",
     "node",
     spec.image,
-    "/opt/reevo/coding-worker/keeper.js",
+    "/opt/wardby/coding-worker/keeper.js",
   ];
 }
 
@@ -352,7 +352,7 @@ export function buildWorkerCreateArgs(spec: JobSpec, proxyPort = CODING_PROXY_PO
     "--tmpfs",
     `/tmp:rw,noexec,nosuid,nodev,size=${scratchMb}m,mode=1777`,
     "--tmpfs",
-    `/home/reevo:rw,noexec,nosuid,nodev,size=${scratchMb}m,uid=${CODING_WORKER_UID},gid=${CODING_WORKER_GID},mode=0700`,
+    `/home/wardby:rw,noexec,nosuid,nodev,size=${scratchMb}m,uid=${CODING_WORKER_UID},gid=${CODING_WORKER_GID},mode=0700`,
     "--mount",
     `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.workspace},volume-subpath=workspace,volume-nocopy`,
     "--mount",
@@ -360,9 +360,9 @@ export function buildWorkerCreateArgs(spec: JobSpec, proxyPort = CODING_PROXY_PO
     "--mount",
     `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.output},volume-subpath=output,volume-nocopy`,
     "--env",
-    `REEVO_PROXY_URL=http://${CODING_PROXY_ALIAS}:${proxyPort}`,
+    `WARDBY_PROXY_URL=http://${CODING_PROXY_ALIAS}:${proxyPort}`,
     "--env",
-    "REEVO_RUN_CAPABILITY",
+    "WARDBY_RUN_CAPABILITY",
     "--restart",
     "no",
     "--stop-signal",
@@ -443,7 +443,7 @@ export function buildClaudeAgentCreateArgs(spec: JobSpec, proxyPort = CODING_PRO
     "--tmpfs",
     `/tmp:rw,noexec,nosuid,nodev,size=${scratchMb}m,mode=1777`,
     "--tmpfs",
-    `/home/reevo:rw,noexec,nosuid,nodev,size=${scratchMb}m,uid=${CODING_WORKER_UID},gid=${CODING_WORKER_GID},mode=0700`,
+    `/home/wardby:rw,noexec,nosuid,nodev,size=${scratchMb}m,uid=${CODING_WORKER_UID},gid=${CODING_WORKER_GID},mode=0700`,
     "--mount",
     `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.input},volume-subpath=input,volume-nocopy,readonly`,
     "--mount",
@@ -451,9 +451,9 @@ export function buildClaudeAgentCreateArgs(spec: JobSpec, proxyPort = CODING_PRO
     "--mount",
     `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.tool},volume-subpath=tool,volume-nocopy`,
     "--env",
-    `REEVO_PROXY_URL=http://${CODING_PROXY_ALIAS}:${proxyPort}`,
+    `WARDBY_PROXY_URL=http://${CODING_PROXY_ALIAS}:${proxyPort}`,
     "--env",
-    "REEVO_RUN_CAPABILITY",
+    "WARDBY_RUN_CAPABILITY",
     "--restart",
     "no",
     "--stop-signal",
@@ -516,7 +516,7 @@ export function buildClaudeToolRunnerCreateArgs(spec: JobSpec): string[] {
     "--tmpfs",
     `/tmp:rw,noexec,nosuid,nodev,size=${scratchMb}m,mode=1777`,
     "--tmpfs",
-    `/home/reevo:rw,noexec,nosuid,nodev,size=${scratchMb}m,uid=${CODING_WORKER_UID},gid=${CODING_WORKER_GID},mode=0700`,
+    `/home/wardby:rw,noexec,nosuid,nodev,size=${scratchMb}m,uid=${CODING_WORKER_UID},gid=${CODING_WORKER_GID},mode=0700`,
     "--mount",
     `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.workspace},volume-subpath=workspace,volume-nocopy`,
     "--mount",
@@ -724,7 +724,7 @@ export function assertWorkerContainerInspection(
   const host = container.HostConfig;
   const networks = Object.keys(container.NetworkSettings?.Networks ?? {});
   const security = host?.SecurityOpt ?? [];
-  const reevoEnvironment = (container.Config?.Env ?? []).filter((value) => value.startsWith("REEVO_"));
+  const wardbyEnvironment = (container.Config?.Env ?? []).filter((value) => value.startsWith("WARDBY_"));
   if (
     container.Config?.User !== `${CODING_WORKER_UID}:${CODING_WORKER_GID}` ||
     container.Config?.Image !== spec.image ||
@@ -766,14 +766,14 @@ export function assertWorkerContainerInspection(
     throw isolationError();
   }
   if (
-    reevoEnvironment.length !== 2 ||
-    !reevoEnvironment.includes(`REEVO_PROXY_URL=http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`) ||
-    !reevoEnvironment.includes(`REEVO_RUN_CAPABILITY=${expectedCapability}`)
+    wardbyEnvironment.length !== 2 ||
+    !wardbyEnvironment.includes(`WARDBY_PROXY_URL=http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`) ||
+    !wardbyEnvironment.includes(`WARDBY_RUN_CAPABILITY=${expectedCapability}`)
   ) {
     throw isolationError();
   }
   const tmpfs = host.Tmpfs ?? {};
-  if (!tmpfs["/tmp"]?.includes("noexec") || !tmpfs["/home/reevo"]?.includes("noexec")) throw isolationError();
+  if (!tmpfs["/tmp"]?.includes("noexec") || !tmpfs["/home/wardby"]?.includes("noexec")) throw isolationError();
   assertExactWorkerMounts(container, names);
 }
 
@@ -849,7 +849,7 @@ function assertClaudeContainerBaseline(
     Object.keys(host.PortBindings ?? {}).length !== 0 ||
     host.PublishAllPorts !== false ||
     !host.Tmpfs?.["/tmp"]?.includes("noexec") ||
-    !host.Tmpfs?.["/home/reevo"]?.includes("noexec")
+    !host.Tmpfs?.["/home/wardby"]?.includes("noexec")
   )
     throw isolationError();
 }
@@ -863,11 +863,11 @@ export function assertClaudeAgentContainerInspection(
   if (spec.provider !== "claude-code") throw isolationError();
   const names = isolationNames(spec.runId);
   assertClaudeContainerBaseline(container, spec.image, names.network, spec, claudeAgentLimits(spec));
-  const environment = (container.Config?.Env ?? []).filter((value) => value.startsWith("REEVO_"));
+  const environment = (container.Config?.Env ?? []).filter((value) => value.startsWith("WARDBY_"));
   if (
     environment.length !== 2 ||
-    !environment.includes(`REEVO_PROXY_URL=http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`) ||
-    !environment.includes(`REEVO_RUN_CAPABILITY=${expectedCapability}`)
+    !environment.includes(`WARDBY_PROXY_URL=http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`) ||
+    !environment.includes(`WARDBY_RUN_CAPABILITY=${expectedCapability}`)
   )
     throw isolationError();
   assertExactMountSet(container, names, [
@@ -883,7 +883,7 @@ export function assertClaudeToolRunnerContainerInspection(container: DockerConta
   if (spec.provider !== "claude-code" || !spec.toolImage) throw isolationError();
   const names = isolationNames(spec.runId);
   assertClaudeContainerBaseline(container, spec.toolImage, "none", spec, claudeToolLimits(spec));
-  if ((container.Config?.Env ?? []).some((value) => value.startsWith("REEVO_"))) throw isolationError();
+  if ((container.Config?.Env ?? []).some((value) => value.startsWith("WARDBY_"))) throw isolationError();
   if (Object.keys(container.NetworkSettings?.Networks ?? {}).join(",") !== "none") throw isolationError();
   assertExactMountSet(container, names, [
     { path: WORKER_PATHS.workspace, writable: true, subpath: "workspace" },

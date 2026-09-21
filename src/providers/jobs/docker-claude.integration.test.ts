@@ -14,12 +14,12 @@ import {
 import type { JobHandle, JobSpec } from "./types.js";
 
 const execute = promisify(execFile);
-const enabled = process.env.REEVO_CLAUDE_DOCKER_TEST === "1";
-const agentImage = process.env.REEVO_CLAUDE_WORKER_IMAGE ?? "";
-const toolImage = process.env.REEVO_CLAUDE_TOOL_RUNNER_IMAGE ?? "";
+const enabled = process.env.WARDBY_CLAUDE_DOCKER_TEST === "1";
+const agentImage = process.env.WARDBY_CLAUDE_WORKER_IMAGE ?? "";
+const toolImage = process.env.WARDBY_CLAUDE_TOOL_RUNNER_IMAGE ?? "";
 const token = `${process.pid}-${Date.now()}`;
 const runId = `claude-docker-smoke-${token}`;
-const proxy = `reevo-claude-job-proxy-${token}`;
+const proxy = `wardby-claude-job-proxy-${token}`;
 const capability = "rrp_0123456789abcdef";
 const names = isolationNames(runId);
 let root: string | undefined;
@@ -107,7 +107,7 @@ const http = require('node:http');
 const text = process.env.FAKE_RESULT;
 let turn = 0;
 function toolSse(id, name, input) { return [
-  { type: 'message_start', message: { id: 'msg_reevo_fixture', type: 'message', role: 'assistant', model: 'claude-sonnet-5', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 12, output_tokens: 0 } } },
+  { type: 'message_start', message: { id: 'msg_wardby_fixture', type: 'message', role: 'assistant', model: 'claude-sonnet-5', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 12, output_tokens: 0 } } },
   { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id, name, input: {} } },
   { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } },
   { type: 'content_block_stop', index: 0 },
@@ -125,17 +125,17 @@ http.createServer(async (request, response) => {
   if (request.method === 'POST' && request.url === '/v1/messages?beta=true') {
     if (body?.stream === false) {
       const structured = turn > 1;
-      const id = structured ? 'toolu_structured_docker' : 'toolu_reevo_docker';
-      const name = structured ? 'StructuredOutput' : 'mcp__reevo_tools__run_command';
+      const id = structured ? 'toolu_structured_docker' : 'toolu_wardby_docker';
+      const name = structured ? 'StructuredOutput' : 'mcp__wardby_tools__run_command';
       const input = structured ? JSON.parse(text) : { command: 'git status --short', timeout_ms: 1000 };
       return response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({
-        id: 'msg_reevo_fixture', type: 'message', role: 'assistant', model: 'claude-sonnet-5',
+        id: 'msg_wardby_fixture', type: 'message', role: 'assistant', model: 'claude-sonnet-5',
         content: [{ type: 'tool_use', id, name, input }], stop_reason: 'tool_use', stop_sequence: null,
         usage: { input_tokens: 12, output_tokens: 7 },
       }));
     }
     const payload = turn++ === 0
-      ? toolSse('toolu_reevo_docker', 'mcp__reevo_tools__run_command', { command: 'git status --short', timeout_ms: 1000 })
+      ? toolSse('toolu_wardby_docker', 'mcp__wardby_tools__run_command', { command: 'git status --short', timeout_ms: 1000 })
       : toolSse('toolu_structured_docker', 'StructuredOutput', JSON.parse(text));
     return response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' }).end(payload);
   }
@@ -158,7 +158,7 @@ describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance
   }, 30_000);
 
   it("runs the production agent and tool runner with only their reviewed capabilities", async () => {
-    root = await mkdtemp(join(tmpdir(), "reevo-claude-docker-"));
+    root = await mkdtemp(join(tmpdir(), "wardby-claude-docker-"));
     const workspace = join(root, "workspaces", runId, "workspace");
     const git = join(root, "workspaces", runId, "git");
     const input = join(root, "input.json");
@@ -172,9 +172,9 @@ describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance
         JSON.stringify({
           schemaVersion: 1,
           runId,
-          repository: "reevo/fixture",
+          repository: "wardby/fixture",
           baseRef: "main",
-          headRef: `reevo/run-${runId}`,
+          headRef: `wardby/run-${runId}`,
           task: "Return the required structured result without making changes.",
           model: "claude-sonnet-5",
           budgetUsd: 0.25,
@@ -208,7 +208,7 @@ describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance
       resolveCapability: async () => capability,
       isRunActive: async () => false,
       onProvisionFailure: async ({ keeperContainer }) => {
-        if (process.env.REEVO_CLAUDE_KEEPER_PROBE === "1") failedKeeperProbe = await keeperProbe(keeperContainer);
+        if (process.env.WARDBY_CLAUDE_KEEPER_PROBE === "1") failedKeeperProbe = await keeperProbe(keeperContainer);
       },
     });
     const spec: JobSpec = {
@@ -299,7 +299,7 @@ describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance
             message.content.some(
               (block) =>
                 block.type === "tool_result" &&
-                block.tool_use_id === "toolu_reevo_docker" &&
+                block.tool_use_id === "toolu_wardby_docker" &&
                 JSON.stringify(block.cache_control) === JSON.stringify({ type: "ephemeral" }),
             ),
         ),

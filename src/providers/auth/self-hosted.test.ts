@@ -7,7 +7,7 @@ import { IdentityService, DAY } from "../../mcp/auth/self-hosted/credentials.js"
 import { authCommand } from "../../mcp/auth/self-hosted/cli.js";
 import { PostgresRateLimiter } from "../../mcp/auth/self-hosted/rate-limit.js";
 
-const uri = "https://reevo.example/mcp";
+const uri = "https://wardby.example/mcp";
 const signingKey = "a1".repeat(32);
 const credentialHashKey = "b2".repeat(32);
 const db = new PrismaClient();

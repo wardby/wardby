@@ -102,7 +102,7 @@ describe("dispatchRun", () => {
       budgetUsd: 1.25,
       codingProfile: {
         provider: "codex",
-        repository: "openai/reevo",
+        repository: "openai/wardby",
         baseRef: "main",
         defaultTask: "Fix the failing tests",
         timeoutSec: 900,
@@ -122,9 +122,9 @@ describe("dispatchRun", () => {
       expect.objectContaining({
         runId: result?.run.id,
         task: "Fix the failing tests",
-        repository: "openai/reevo",
+        repository: "openai/wardby",
         baseRef: "main",
-        headRef: `reevo/run-${result?.run.id}`,
+        headRef: `wardby/run-${result?.run.id}`,
         model: "gpt-5.6-luna",
         timeoutSec: 900,
         budgetReservedUsd: 1.25,
@@ -139,7 +139,7 @@ describe("dispatchRun", () => {
       budgetUsd: 1.25,
       codingProfile: {
         provider: "codex",
-        repository: "openai/reevo",
+        repository: "openai/wardby",
         baseRef: "main",
         defaultTask: "Fix the failing tests",
         timeoutSec: 900,
@@ -174,7 +174,7 @@ describe("dispatchRun", () => {
       model: "claude-sonnet-5",
       codingProfile: {
         provider: "claude-code",
-        repository: "openai/reevo",
+        repository: "openai/wardby",
         baseRef: "main",
         defaultTask: "Fix the failing tests",
         timeoutSec: 900,
@@ -207,7 +207,7 @@ describe("dispatchRun", () => {
       model: "gpt-5.6-luna",
       codingProfile: {
         provider: "claude-code",
-        repository: "openai/reevo",
+        repository: "openai/wardby",
         baseRef: "main",
         defaultTask: "Fix the failing tests",
         timeoutSec: 900,
@@ -228,7 +228,7 @@ describe("dispatchRun", () => {
       budgetUsd: 1.25,
       codingProfile: {
         provider: "codex",
-        repository: "openai/reevo",
+        repository: "openai/wardby",
         baseRef: "main",
         defaultTask: "Fix the failing tests",
         timeoutSec: 900,
@@ -258,7 +258,7 @@ describe("dispatchRun", () => {
       kind: "coding",
       codingProfile: {
         provider: "codex",
-        repository: "openai/reevo",
+        repository: "openai/wardby",
         baseRef: "main",
         defaultTask: "Default task",
         timeoutSec: 900,
@@ -322,7 +322,7 @@ describe("dispatchRun", () => {
         budgetUsd: 1.25,
         codingProfile: {
           provider: "codex",
-          repository: "openai/reevo",
+          repository: "openai/wardby",
           baseRef: "main",
           defaultTask: "Follow up on review comments",
           timeoutSec: 900,
@@ -336,18 +336,18 @@ describe("dispatchRun", () => {
     function openPrCodingRun(runId: string, overrides: Record<string, any> = {}) {
       return {
         runId,
-        repository: "openai/reevo",
+        repository: "openai/wardby",
         baseRef: "main",
-        headRef: `reevo/run-${runId}`,
+        headRef: `wardby/run-${runId}`,
         rootCodingRunId: null,
         result: {
           schemaVersion: 1,
           outcome: "pull_request_opened",
-          repository: "openai/reevo",
+          repository: "openai/wardby",
           baseRef: "main",
-          headRef: `reevo/run-${runId}`,
+          headRef: `wardby/run-${runId}`,
           commitSha: "a".repeat(40),
-          pullRequestUrl: "https://github.com/openai/reevo/pull/22",
+          pullRequestUrl: "https://github.com/openai/wardby/pull/22",
           pullRequestNumber: 22,
           summary: "Opened the PR",
           tests: [],
@@ -372,7 +372,7 @@ describe("dispatchRun", () => {
         expect.objectContaining({
           runId: result?.run.id,
           baseRef: "main",
-          headRef: "reevo/run-root_run",
+          headRef: "wardby/run-root_run",
           rootCodingRunId: "root_run",
         }),
       );
@@ -382,7 +382,7 @@ describe("dispatchRun", () => {
       const agent = codingAgent();
       const state = fakeDb(agent, [
         openPrCodingRun("root_run"),
-        openPrCodingRun("round_2_run", { rootCodingRunId: "root_run", headRef: "reevo/run-root_run" }),
+        openPrCodingRun("round_2_run", { rootCodingRunId: "root_run", headRef: "wardby/run-root_run" }),
       ]);
 
       const result = await dispatchRun({
@@ -418,7 +418,7 @@ describe("dispatchRun", () => {
           result: {
             schemaVersion: 1,
             outcome: "no_changes",
-            repository: "openai/reevo",
+            repository: "openai/wardby",
             baseRef: "main",
             summary: "Nothing to do",
             tests: [],

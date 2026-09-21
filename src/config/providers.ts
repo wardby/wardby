@@ -154,7 +154,7 @@ export interface AuthConfig {
   issuer?: string;
   /** Delegating mode: JWKS endpoint for signature verification. */
   jwksUri?: string;
-  /** Both modes: the audience a token must carry to be accepted (reevo's canonical URI). */
+  /** Both modes: the audience a token must carry to be accepted (wardby's canonical URI). */
   audience?: string;
   /** Self-hosted mode: independent 32-byte hex keys. */
   signingKey?: string;

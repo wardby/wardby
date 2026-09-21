@@ -19,11 +19,11 @@ describe("Claude SDK configuration", () => {
   it("allows only the private socket relay and no Claude built-in tools", () => {
     const options = buildClaudeSdkOptions(config());
     expect(options).toMatchObject({
-      cwd: "/opt/reevo/empty-workspace",
+      cwd: "/opt/wardby/empty-workspace",
       maxTurns: 16,
       maxBudgetUsd: 1,
       tools: [],
-      allowedTools: ["mcp__reevo_tools__run_command"],
+      allowedTools: ["mcp__wardby_tools__run_command"],
       strictMcpConfig: true,
       settingSources: [],
       outputFormat: { type: "json_schema", schema: {} },
@@ -32,9 +32,9 @@ describe("Claude SDK configuration", () => {
       env: { ANTHROPIC_API_KEY: "private-run-capability" },
     });
     expect(options.mcpServers).toEqual({
-      reevo_tools: {
+      wardby_tools: {
         command: "node",
-        args: ["/opt/reevo/claude-coding-worker/tool-relay.js"],
+        args: ["/opt/wardby/claude-coding-worker/tool-relay.js"],
         env: { PATH: "/usr/bin:/bin" },
         timeout: 120_000,
         alwaysLoad: true,

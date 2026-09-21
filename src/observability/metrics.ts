@@ -25,7 +25,7 @@ function statusClass(status: number): StatusClass {
  * Labels are deliberately finite enums: run IDs, request IDs, models, reasons,
  * credentials, and untrusted input never enter the metrics registry.
  */
-export class ReevoMetrics implements CodingRunObserver {
+export class WardbyMetrics implements CodingRunObserver {
   readonly registry: Registry;
   private readonly lifecycleEvents: Counter<"stage">;
   private readonly terminalRuns: Counter<"outcome">;
@@ -44,77 +44,77 @@ export class ReevoMetrics implements CodingRunObserver {
 
   constructor(registry = new Registry()) {
     this.registry = registry;
-    collectDefaultMetrics({ register: registry, prefix: "reevo_nodejs_" });
+    collectDefaultMetrics({ register: registry, prefix: "wardby_nodejs_" });
 
     this.lifecycleEvents = new Counter({
-      name: "reevo_coding_lifecycle_events_total",
+      name: "wardby_coding_lifecycle_events_total",
       help: "Coding lifecycle events by finite stage.",
       labelNames: ["stage"],
       registers: [registry],
     });
     this.terminalRuns = new Counter({
-      name: "reevo_coding_runs_terminal_total",
+      name: "wardby_coding_runs_terminal_total",
       help: "Completed coding runs by terminal outcome.",
       labelNames: ["outcome"],
       registers: [registry],
     });
     this.activeJobs = new Gauge({
-      name: "reevo_coding_active_jobs",
+      name: "wardby_coding_active_jobs",
       help: "Coding jobs launched by this process that have not completed cleanup.",
       registers: [registry],
     });
     this.cleanupFailures = new Counter({
-      name: "reevo_coding_cleanup_failures_total",
+      name: "wardby_coding_cleanup_failures_total",
       help: "Coding cleanup attempts that failed.",
       registers: [registry],
     });
     this.budgetReserved = new Counter({
-      name: "reevo_coding_budget_reserved_usd_total",
+      name: "wardby_coding_budget_reserved_usd_total",
       help: "USD budget reserved for coding runs.",
       registers: [registry],
     });
     this.budgetActual = new Counter({
-      name: "reevo_coding_budget_actual_usd_total",
+      name: "wardby_coding_budget_actual_usd_total",
       help: "USD budget charged for coding runs.",
       registers: [registry],
     });
     this.runDuration = new Histogram({
-      name: "reevo_coding_run_duration_seconds",
+      name: "wardby_coding_run_duration_seconds",
       help: "Observed coding run duration in seconds.",
       buckets: [1, 10, 30, 60, 300, 900, 1800, 3600],
       registers: [registry],
     });
     this.proxyAuditEvents = new Counter({
-      name: "reevo_proxy_audit_events_total",
+      name: "wardby_proxy_audit_events_total",
       help: "Trusted coding proxy audit events by finite event type.",
       labelNames: ["event"],
       registers: [registry],
     });
     this.proxyRequests = new Counter({
-      name: "reevo_proxy_http_requests_total",
+      name: "wardby_proxy_http_requests_total",
       help: "Coding proxy HTTP requests by protocol and status class.",
       labelNames: ["protocol", "status_class"],
       registers: [registry],
     });
     this.proxyRequestDuration = new Histogram({
-      name: "reevo_proxy_http_request_duration_seconds",
+      name: "wardby_proxy_http_request_duration_seconds",
       help: "Coding proxy HTTP request duration by protocol and status class.",
       labelNames: ["protocol", "status_class"],
       buckets: [0.01, 0.05, 0.1, 0.5, 1, 5, 15, 60, 300],
       registers: [registry],
     });
     this.proxyBudgetReserved = new Counter({
-      name: "reevo_proxy_budget_reserved_usd_total",
+      name: "wardby_proxy_budget_reserved_usd_total",
       help: "USD budget reserved by trusted coding proxy requests.",
       registers: [registry],
     });
     this.proxyCost = new Counter({
-      name: "reevo_proxy_cost_usd_total",
+      name: "wardby_proxy_cost_usd_total",
       help: "USD cost reported by completed upstream proxy responses.",
       registers: [registry],
     });
     this.proxyTokens = new Counter({
-      name: "reevo_proxy_tokens_total",
+      name: "wardby_proxy_tokens_total",
       help: "Token usage reported by completed upstream proxy responses by token kind.",
       labelNames: ["kind"],
       registers: [registry],

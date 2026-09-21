@@ -108,7 +108,7 @@ ALTER TABLE "Agent" ADD CONSTRAINT "Agent_budgetGroupId_fkey" FOREIGN KEY ("budg
 
 ```bash
 npm run db:up
-docker exec -i local-postgres-1 psql -U reevo -d reevo < prisma/migrations/20260907020000_budget_groups/migration.sql
+docker exec -i local-postgres-1 psql -U wardby -d wardby < prisma/migrations/20260907020000_budget_groups/migration.sql
 npx prisma migrate resolve --applied 20260907020000_budget_groups
 npx prisma generate
 ```
@@ -116,13 +116,13 @@ npx prisma generate
 - [ ] **Step 6: Run the required drift check (CLAUDE.md)**
 
 ```bash
-docker exec local-postgres-1 psql -U reevo -d reevo -c "DROP DATABASE IF EXISTS reevo_shadow;" -c "CREATE DATABASE reevo_shadow;"
+docker exec local-postgres-1 psql -U wardby -d wardby -c "DROP DATABASE IF EXISTS wardby_shadow;" -c "CREATE DATABASE wardby_shadow;"
 npx prisma migrate diff \
   --from-migrations prisma/migrations \
   --to-schema-datamodel prisma/schema.prisma \
-  --shadow-database-url "postgresql://reevo:reevo@localhost:55432/reevo_shadow" \
+  --shadow-database-url "postgresql://wardby:wardby@localhost:55432/wardby_shadow" \
   --script
-docker exec local-postgres-1 psql -U reevo -d reevo -c "DROP DATABASE IF EXISTS reevo_shadow;"
+docker exec local-postgres-1 psql -U wardby -d wardby -c "DROP DATABASE IF EXISTS wardby_shadow;"
 ```
 
 Expected output: exactly `-- This is an empty migration.` If anything else prints, the schema and migration disagree — fix `schema.prisma` (usually a missing `@@unique`/relation annotation) before continuing, and re-run this step.
@@ -982,7 +982,7 @@ EOF
 **Interfaces:**
 
 - Consumes: `requireOwnedBudgetGroup`/`requireReadableBudgetGroup` (Task 4), `computeGroupSpend` (Task 2), `visibleToPrincipal`/`canRead` (existing, `src/mcp/auth/ownership.ts`), `textResult` (existing, `src/mcp/tools/text-result.ts`), `McpError` (existing, `src/mcp/errors.ts`).
-- Produces: `export function registerBudgetGroupTools(mcp: ReevoMcpServer): void`, called from `registerAllTools` in `mcp/index.ts`.
+- Produces: `export function registerBudgetGroupTools(mcp: WardbyMcpServer): void`, called from `registerAllTools` in `mcp/index.ts`.
 
 - [ ] **Step 1: Write `src/mcp/tools/budget-groups.ts`**
 
@@ -992,7 +992,7 @@ import { z } from "zod";
 import { computeGroupSpend } from "../../core/budget-groups.js";
 import { canRead, requireOwnedBudgetGroup, visibleToPrincipal } from "../auth/ownership.js";
 import { McpError } from "../errors.js";
-import type { ReevoMcpServer } from "../server.js";
+import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
 
 const MAX_GROUP_NAME_CHARS = 200;
@@ -1046,7 +1046,7 @@ const capSchemaProps = {
   warnThresholdRatio: { type: "number" },
 };
 
-export function registerBudgetGroupTools(mcp: ReevoMcpServer): void {
+export function registerBudgetGroupTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "create_budget_group",
     scope: "budget_groups:write",
@@ -1651,13 +1651,13 @@ EOF
 - [ ] **Step 1: Re-run the drift check** (schema/migrations must still agree after all six tasks)
 
 ```bash
-docker exec local-postgres-1 psql -U reevo -d reevo -c "DROP DATABASE IF EXISTS reevo_shadow;" -c "CREATE DATABASE reevo_shadow;"
+docker exec local-postgres-1 psql -U wardby -d wardby -c "DROP DATABASE IF EXISTS wardby_shadow;" -c "CREATE DATABASE wardby_shadow;"
 npx prisma migrate diff \
   --from-migrations prisma/migrations \
   --to-schema-datamodel prisma/schema.prisma \
-  --shadow-database-url "postgresql://reevo:reevo@localhost:55432/reevo_shadow" \
+  --shadow-database-url "postgresql://wardby:wardby@localhost:55432/wardby_shadow" \
   --script
-docker exec local-postgres-1 psql -U reevo -d reevo -c "DROP DATABASE IF EXISTS reevo_shadow;"
+docker exec local-postgres-1 psql -U wardby -d wardby -c "DROP DATABASE IF EXISTS wardby_shadow;"
 ```
 
 Expected: `-- This is an empty migration.`
@@ -1674,7 +1674,7 @@ npm run build
 
 Expected: all clean/passing, matching this repo's `.github/workflows/test.yml` gate.
 
-- [ ] **Step 3: Manual smoke test via the CLI or MCP tools (optional but recommended)** — create two agents in one budget group with a small `dailyBudgetUsd`, run both, and confirm the second run's engine call receives a visibly tightened `budgetUsd` (e.g. via `LOG_LEVEL=debug reevo run <agent-name>` and watching for the `budget-groups` warn log once past the group's `warnThresholdRatio`).
+- [ ] **Step 3: Manual smoke test via the CLI or MCP tools (optional but recommended)** — create two agents in one budget group with a small `dailyBudgetUsd`, run both, and confirm the second run's engine call receives a visibly tightened `budgetUsd` (e.g. via `LOG_LEVEL=debug wardby run <agent-name>` and watching for the `budget-groups` warn log once past the group's `warnThresholdRatio`).
 
 - [ ] **Step 4: Push**
 

@@ -132,9 +132,9 @@ resource "google_cloud_run_v2_service" "main" {
 
       # Must equal MCP_CANONICAL_URI - the app's OAuth resource-server
       # validation rejects startup otherwise. In delegating mode this is also
-      # the audience your IdP has to mint into `aud`; reevo accepts either
+      # the audience your IdP has to mint into `aud`; wardby accepts either
       # spelling of an origin (with or without the trailing slash), so copying
-      # the `resource` value straight out of reevo's own
+      # the `resource` value straight out of wardby's own
       # /.well-known/oauth-protected-resource is safe.
       env {
         name  = "AUTH_AUDIENCE"
@@ -150,7 +150,7 @@ resource "google_cloud_run_v2_service" "main" {
         }
       }
 
-      # Self-hosted mode only: these sign reevo's own OAuth tokens and hash
+      # Self-hosted mode only: these sign wardby's own OAuth tokens and hash
       # stored credentials (src/providers/auth/index.ts). Delegating mode
       # issues no tokens and stores no login keys, so they are neither
       # generated nor mounted.
@@ -223,7 +223,7 @@ resource "google_cloud_run_v2_service" "main" {
 
 # Without this the service 403s every caller, including the OAuth endpoints,
 # with nothing in the response pointing at IAM as the cause - the failure
-# looks like reevo rejecting the request. See var.allow_unauthenticated for
+# looks like wardby rejecting the request. See var.allow_unauthenticated for
 # why public invoker is the working default rather than a lax one.
 resource "google_cloud_run_v2_service_iam_member" "public_invoker" {
   count    = var.allow_unauthenticated ? 1 : 0

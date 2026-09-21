@@ -1,5 +1,5 @@
 /**
- * Budget guardrail — reevo-run's differentiator. Pure functions only: no
+ * Budget guardrail — wardby's differentiator. Pure functions only: no
  * network, no DB, so the math is unit-testable in isolation. The runner
  * composes these with a live `LlmProvider` for the pre-flight refuse and the
  * mid-stream cutoff.

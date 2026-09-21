@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="430" viewBox="0 0 1280 430" role="img" aria-labelledby="title desc">
-  <title id="title">Reevo Run agent workflow</title>
-  <desc id="desc">Five stages show a request moving from Claude or Codex through MCP, governed execution in Reevo Run, and an outcome controlled by review policy.</desc>
+  <title id="title">Wardby agent workflow</title>
+  <desc id="desc">Five stages show a request moving from Claude or Codex through MCP, governed execution in Wardby, and an outcome controlled by review policy.</desc>
   <defs>
     <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#f7faff"/>
@@ -58,7 +58,7 @@
     <circle cx="575" cy="142" r="17" fill="#ffffff" fill-opacity="0.20"/>
     <text x="575" y="148" text-anchor="middle" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="700">3</text>
     <text x="603" y="147" fill="#dceaff" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="700" letter-spacing="1.5">GOVERN</text>
-    <text x="570" y="190" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="700">Reevo Run</text>
+    <text x="570" y="190" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="700">Wardby</text>
     <text x="570" y="220" fill="#e7f0ff" font-family="Arial, Helvetica, sans-serif" font-size="14">Budget • secrets • owner</text>
     <text x="570" y="243" fill="#e7f0ff" font-family="Arial, Helvetica, sans-serif" font-size="14">Audit • cancellation</text>
   </g>

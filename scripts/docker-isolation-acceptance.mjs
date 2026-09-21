@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 
-const requestedImage = process.env.REEVO_WORKER_IMAGE ?? "reevo-coding-worker:task8";
+const requestedImage = process.env.WARDBY_WORKER_IMAGE ?? "wardby-coding-worker:task8";
 let image;
 try {
   image = execFileSync("docker", ["image", "inspect", "--format", "{{.Id}}", requestedImage], {
@@ -19,8 +19,8 @@ const result = spawnSync(
     cwd: new URL("..", import.meta.url),
     env: {
       ...process.env,
-      REEVO_DOCKER_ISOLATION_TEST: "1",
-      REEVO_WORKER_IMAGE: image,
+      WARDBY_DOCKER_ISOLATION_TEST: "1",
+      WARDBY_WORKER_IMAGE: image,
     },
     stdio: "inherit",
   },

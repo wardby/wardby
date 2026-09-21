@@ -1,5 +1,5 @@
 {
-  "name": "reevo-claude-coding-worker-runtime",
+  "name": "@wardby/claude-coding-worker-runtime",
   "private": true,
   "type": "module",
   "scripts": {

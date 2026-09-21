@@ -37,7 +37,7 @@ export const CLAUDE_CODE_ANTHROPIC_BETAS = [
 const MAX_UPSTREAM_JSON_BYTES = 16 * 1024 * 1024;
 const REQUEST_KEY_PATTERN = /^[\x21-\x7e]{1,200}$/;
 const APPROVED_ANTHROPIC_BETAS = new Set<string>(CLAUDE_CODE_ANTHROPIC_BETAS);
-const REEVO_COMMAND_TOOL = "mcp__reevo_tools__run_command";
+const WARDBY_COMMAND_TOOL = "mcp__wardby_tools__run_command";
 const STRUCTURED_OUTPUT_TOOL = "StructuredOutput";
 const MAX_COMMAND_BYTES = 16 * 1024;
 const MAX_TOOL_TEXT_BYTES = 256 * 1024;
@@ -206,7 +206,7 @@ function validateCommandTool(value: unknown): void {
   const tool = record(value, "tools_not_allowed");
   onlyKeys(tool, ["name", "description", "input_schema", "cache_control", "type"]);
   if (
-    tool.name !== REEVO_COMMAND_TOOL ||
+    tool.name !== WARDBY_COMMAND_TOOL ||
     typeof tool.description !== "string" ||
     tool.description.length > MAX_TOOL_TEXT_BYTES ||
     (tool.type !== undefined && tool.type !== "custom")
@@ -234,7 +234,7 @@ function validateStructuredOutputTool(value: unknown): void {
 
 function validateApprovedTool(value: unknown): void {
   const tool = record(value, "tools_not_allowed");
-  if (tool.name === REEVO_COMMAND_TOOL) return validateCommandTool(tool);
+  if (tool.name === WARDBY_COMMAND_TOOL) return validateCommandTool(tool);
   if (tool.name === STRUCTURED_OUTPUT_TOOL) return validateStructuredOutputTool(tool);
   throw new CodingProxyError(400, "tools_not_allowed");
 }
@@ -244,7 +244,7 @@ function validateToolUseBlock(value: Record<string, unknown>): void {
   if (typeof value.id !== "string" || value.id.length < 1 || value.id.length > 512) {
     throw new CodingProxyError(400, "unsupported_anthropic_feature");
   }
-  if (value.name === REEVO_COMMAND_TOOL) return validateCommandInput(value.input);
+  if (value.name === WARDBY_COMMAND_TOOL) return validateCommandInput(value.input);
   if (value.name === STRUCTURED_OUTPUT_TOOL) return void record(value.input, "unsupported_anthropic_feature");
   throw new CodingProxyError(400, "unsupported_anthropic_feature");
 }
@@ -574,7 +574,7 @@ export class CodingProxy {
         reason: "budget_exhausted",
         reservationUsd,
       });
-      throw new CodingProxyError(429, "reevo_budget_exhausted");
+      throw new CodingProxyError(429, "wardby_budget_exhausted");
     }
     if (reservation.outcome === "duplicate") {
       this.handleDuplicate(session, reservation.request, parsed.fingerprint);

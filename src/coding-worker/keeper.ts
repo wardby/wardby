@@ -1,7 +1,7 @@
 import { mkdir, chmod } from "node:fs/promises";
 
-export const STORAGE_ROOT = "/run/reevo/storage";
-export const STORAGE_READY_MESSAGE = "reevo_storage_ready";
+export const STORAGE_ROOT = "/run/wardby/storage";
+export const STORAGE_READY_MESSAGE = "wardby_storage_ready";
 const STORAGE_DIRECTORIES = ["workspace", "git", "input", "output", "tool"] as const;
 
 export async function prepareStorage(root = STORAGE_ROOT): Promise<void> {

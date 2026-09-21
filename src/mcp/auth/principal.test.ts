@@ -10,7 +10,7 @@ const databaseUrl = process.env.DATABASE_URL;
 
 if (!databaseUrl) {
   console.warn(
-    "[reevo-run tests] DATABASE_URL not set — skipping resolvePrincipal find-or-create tests " +
+    "[wardby tests] DATABASE_URL not set — skipping resolvePrincipal find-or-create tests " +
       "(Principal.subject upsert). Set DATABASE_URL before trusting an auth change based on a " +
       "green run that skipped it.",
   );

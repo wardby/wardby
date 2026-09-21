@@ -10,11 +10,11 @@ services:
       - no-new-privileges:true
     environment:
       OPENAI_API_KEY_FILE: /run/secrets/openai_api_key
-      REEVO_ABSOLUTE_MAX_USD: "0.02"
-      REEVO_EVIDENCE_PATH: /evidence/task0b-usage.jsonl
-      REEVO_MAX_OUTPUT_TOKENS: "128"
-      REEVO_MODEL: gpt-5.6-luna
-      REEVO_RUN_CAPABILITY: ${REEVO_RUN_CAPABILITY}
+      WARDBY_ABSOLUTE_MAX_USD: "0.02"
+      WARDBY_EVIDENCE_PATH: /evidence/task0b-usage.jsonl
+      WARDBY_MAX_OUTPUT_TOKENS: "128"
+      WARDBY_MODEL: gpt-5.6-luna
+      WARDBY_RUN_CAPABILITY: ${WARDBY_RUN_CAPABILITY}
     volumes:
       - ./task0b-proxy.mjs:/app/task0b-proxy.mjs:ro
       - ./task0b-metering.mjs:/app/task0b-metering.mjs:ro
@@ -45,10 +45,10 @@ services:
       proxy:
         condition: service_healthy
     environment:
-      REEVO_PROXY_URL: http://proxy:8080
-      REEVO_RUN_CAPABILITY: ${REEVO_RUN_CAPABILITY}
+      WARDBY_PROXY_URL: http://proxy:8080
+      WARDBY_RUN_CAPABILITY: ${WARDBY_RUN_CAPABILITY}
     tmpfs:
-      - /home/reevo:rw,noexec,nosuid,size=64m,uid=10001,gid=10001
+      - /home/wardby:rw,noexec,nosuid,size=64m,uid=10001,gid=10001
       - /tmp:rw,noexec,nosuid,size=64m,uid=10001,gid=10001
       - /workspace:rw,nosuid,size=64m,uid=10001,gid=10001
     networks:

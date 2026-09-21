@@ -13,7 +13,7 @@ const input: CodingTaskInput = {
   runId: "run_claude_123",
   repository: "openai/example",
   baseRef: "main",
-  headRef: "reevo/run-run_claude_123",
+  headRef: "wardby/run-run_claude_123",
   task: "Fix the failing test.",
   model: "claude-sonnet-5",
   budgetUsd: 1,
@@ -43,7 +43,7 @@ describe("runClaudeCodingWorker", () => {
     const progress = vi.fn();
     const result = await runClaudeCodingWorker({
       input,
-      proxyBaseUrl: "http://reevo-proxy:8787/",
+      proxyBaseUrl: "http://wardby-proxy:8787/",
       capability: "rrp_worker_capability",
       signal: new AbortController().signal,
       createQuery,
@@ -59,7 +59,7 @@ describe("runClaudeCodingWorker", () => {
       outputSchema: CLAUDE_OUTPUT_JSON_SCHEMA,
       developerInstructions: CLAUDE_WORKER_SECURITY_INSTRUCTIONS,
       environment: {
-        ANTHROPIC_BASE_URL: "http://reevo-proxy:8787",
+        ANTHROPIC_BASE_URL: "http://wardby-proxy:8787",
         ANTHROPIC_API_KEY: "rrp_worker_capability",
         DISABLE_UPDATES: "1",
       },
@@ -67,7 +67,7 @@ describe("runClaudeCodingWorker", () => {
     expect(config.relayEnvironment).not.toHaveProperty("ANTHROPIC_API_KEY");
     expect(config.prompt).toContain(input.task);
     expect(JSON.stringify(progress.mock.calls)).not.toContain(input.task);
-    expect(CLAUDE_WORKER_SECURITY_INSTRUCTIONS).toContain("reevo_tools MCP tool");
+    expect(CLAUDE_WORKER_SECURITY_INSTRUCTIONS).toContain("wardby_tools MCP tool");
   });
 
   it("maps only the SDK budget terminal result to a safe budget outcome", async () => {

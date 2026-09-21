@@ -6,7 +6,7 @@ import test from "node:test";
 import { MAX_OUTPUT_BYTES, runCommand, toolEnvironment } from "./command.mjs";
 
 test("runs commands in the supplied workspace with a scrubbed environment and bounded output", async () => {
-  const workspace = await mkdtemp(join(tmpdir(), "reevo-claude-tools-"));
+  const workspace = await mkdtemp(join(tmpdir(), "wardby-claude-tools-"));
   try {
     const env = toolEnvironment();
     assert.equal(env.ANTHROPIC_API_KEY, undefined);

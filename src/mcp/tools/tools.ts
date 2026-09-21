@@ -15,7 +15,7 @@ import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
 import { buildSharedDatastoreAccessor } from "../../core/datastores.js";
 import { MEMORY_TOOL_NAMES } from "../../core/memory-tools.js";
-import type { ReevoMcpServer } from "../server.js";
+import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import {
   assertCanMutate,
@@ -27,7 +27,7 @@ import {
 } from "../auth/ownership.js";
 import { textResult } from "./text-result.js";
 
-export function registerToolAuthoringTools(mcp: ReevoMcpServer): void {
+export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "create_tool",
     scope: "tools:write",

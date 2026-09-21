@@ -512,14 +512,14 @@ describe("delegate_to_<boundName> dispatch tool", () => {
           runId: "plan-run-1",
           repository: codingProfile.repository,
           baseRef: codingProfile.baseRef,
-          headRef: "reevo/run-plan-run-1",
+          headRef: "wardby/run-plan-run-1",
           rootCodingRunId: null,
           result: {
             schemaVersion: 1,
             outcome: "pull_request_opened",
             repository: codingProfile.repository,
             baseRef: codingProfile.baseRef,
-            headRef: "reevo/run-plan-run-1",
+            headRef: "wardby/run-plan-run-1",
             commitSha: "a".repeat(40),
             pullRequestUrl: `https://github.com/${codingProfile.repository}/pull/22`,
             pullRequestNumber: 22,
@@ -553,7 +553,7 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     expect(childRuns).toHaveLength(1);
     const childCodingRun = await (db as any).codingRun.findUnique({ where: { runId: childRuns[0].id } });
     // Same branch/PR the plan agent opened -- a DIFFERENT sub-agent continuing it (cross-role, allowed by design).
-    expect(childCodingRun).toMatchObject({ rootCodingRunId: "plan-run-1", headRef: "reevo/run-plan-run-1" });
+    expect(childCodingRun).toMatchObject({ rootCodingRunId: "plan-run-1", headRef: "wardby/run-plan-run-1" });
   });
 
   it("refuses a second delegate_to_* call in the same run, even to a different bound sub-agent", async () => {

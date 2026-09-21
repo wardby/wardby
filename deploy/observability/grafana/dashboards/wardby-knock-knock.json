@@ -1,7 +1,7 @@
 {
-  "uid": "reevo-knock-knock",
+  "uid": "wardby-knock-knock",
   "title": "Knock-Knock: Budget & Runs",
-  "tags": ["reevo", "budget", "runs", "local"],
+  "tags": ["wardby", "budget", "runs", "local"],
   "timezone": "browser",
   "schemaVersion": 41,
   "version": 1,
@@ -15,7 +15,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(reevo_proxy_audit_events_total{event=\"session.created\"}[24h])) or vector(0)"
+          "expr": "sum(increase(wardby_proxy_audit_events_total{event=\"session.created\"}[24h])) or vector(0)"
         }
       ],
       "fieldConfig": { "defaults": { "decimals": 0 }, "overrides": [] },
@@ -26,7 +26,7 @@
       "type": "stat",
       "title": "Reserved Budget (24h)",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "refId": "A", "expr": "sum(increase(reevo_proxy_budget_reserved_usd_total[24h])) or vector(0)" }],
+      "targets": [{ "refId": "A", "expr": "sum(increase(wardby_proxy_budget_reserved_usd_total[24h])) or vector(0)" }],
       "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
       "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 }
     },
@@ -35,7 +35,7 @@
       "type": "stat",
       "title": "Actual Spend (24h)",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "refId": "A", "expr": "sum(increase(reevo_proxy_cost_usd_total[24h])) or vector(0)" }],
+      "targets": [{ "refId": "A", "expr": "sum(increase(wardby_proxy_cost_usd_total[24h])) or vector(0)" }],
       "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
       "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 }
     },
@@ -47,7 +47,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "(sum(increase(reevo_proxy_cost_usd_total[24h])) or vector(0)) / clamp_min(sum(increase(reevo_proxy_budget_reserved_usd_total[24h])) or vector(0), 0.000001)"
+          "expr": "(sum(increase(wardby_proxy_cost_usd_total[24h])) or vector(0)) / clamp_min(sum(increase(wardby_proxy_budget_reserved_usd_total[24h])) or vector(0), 0.000001)"
         }
       ],
       "fieldConfig": { "defaults": { "unit": "percentunit", "decimals": 1 }, "overrides": [] },
@@ -61,12 +61,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(reevo_proxy_budget_reserved_usd_total[$__rate_interval])) or vector(0)",
+          "expr": "sum(increase(wardby_proxy_budget_reserved_usd_total[$__rate_interval])) or vector(0)",
           "legendFormat": "reserved"
         },
         {
           "refId": "B",
-          "expr": "sum(increase(reevo_proxy_cost_usd_total[$__rate_interval])) or vector(0)",
+          "expr": "sum(increase(wardby_proxy_cost_usd_total[$__rate_interval])) or vector(0)",
           "legendFormat": "actual"
         }
       ],
@@ -81,12 +81,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(reevo_proxy_audit_events_total{event=\"session.created\"}[$__rate_interval])) or vector(0)",
+          "expr": "sum(increase(wardby_proxy_audit_events_total{event=\"session.created\"}[$__rate_interval])) or vector(0)",
           "legendFormat": "runs created"
         },
         {
           "refId": "B",
-          "expr": "sum(increase(reevo_proxy_audit_events_total{event=\"response.completed\"}[$__rate_interval])) or vector(0)",
+          "expr": "sum(increase(wardby_proxy_audit_events_total{event=\"response.completed\"}[$__rate_interval])) or vector(0)",
           "legendFormat": "completed requests"
         }
       ],
