@@ -57,8 +57,8 @@ and Bedrock-Claude agents can all run side by side in one deployment.
 
 ## MCP server (Phase 4)
 
-`reevo mcp` exposes agents, tools, scheduling, runs, datastore, secrets, and
-webhooks as MCP tools — the primary way to author and operate agents, with
+`reevo mcp` exposes agents, tools, schedule management, runs, datastore,
+secrets, and webhooks as MCP tools — the primary way to author and operate agents, with
 the CLI retained only as the bootstrap/ops floor (`migrate`, `scheduler`,
 `run`, `runs`). Two transports:
 
@@ -69,6 +69,15 @@ the CLI retained only as the bootstrap/ops floor (`migrate`, `scheduler`,
   resource server. `AUTH_PROVIDER=delegating` (default) verifies tokens
   issued by an external IdP. `AUTH_PROVIDER=self-hosted` uses provisioned users,
   browser login and consent, public clients, and S256 PKCE.
+
+**A complete deployment runs more than `mcp`.** `reevo mcp` serves the MCP
+surface and launches the executor; the scheduler that fires due agents and
+the reconciler that recovers orphaned runs live in `reevo scheduler`. Run
+**`reevo serve`** to get all of it in one process — it is the container
+image's default command and what a single-container deployment (Cloud Run,
+a lone VM) should run. Alternatively run `reevo mcp` and `reevo scheduler`
+as two processes, as `deploy/production/compose.yml` does. Running `mcp`
+alone logs a warning at startup if schedules exist that nothing will fire.
 
 Long-running operations (`trigger_agent`) return a durable Task (the MCP
 Tasks extension) when the client supports it, falling back to a plain
