@@ -26,6 +26,7 @@ import { buildAuthProvider } from "../providers/auth/index.js";
 import type { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
 import { buildMcpServer, type ReevoMcpServer } from "./server.js";
 import type { McpProviders } from "./context.js";
+import { countUnattendedSchedules, unattendedSchedulesWarning } from "./unattended-schedules.js";
 import { runStdioServer } from "./transport/stdio.js";
 import { startHttpServer } from "./transport/streamable-http.js";
 import { resolvePrincipal } from "./auth/principal.js";
@@ -50,24 +51,11 @@ import { logger } from "../core/logger.js";
 const mcpLog = logger.child({ module: "mcp-index" });
 const SELF_HOSTED_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // hourly
 
-/**
- * `reevo mcp` serves the MCP surface and launches the executor, but the
- * scheduler and reconciler belong to `reevo scheduler` - a second process. A
- * deployment that runs only this one accepts schedules through set_schedule
- * and then never fires them: no error, no crash, `lastScheduledAt` simply
- * stays null. Nothing else surfaces that, so say it out loud at startup when
- * there is something that would have fired.
- */
+/** Says out loud at startup when enabled schedules exist that nothing in this process will fire (see ./unattended-schedules.ts). */
 async function warnIfNothingWillFireSchedules(): Promise<void> {
   try {
-    // Same predicate the scheduler uses to find candidates (core/scheduler.ts).
-    const scheduled = await prisma.agent.count({ where: { scheduleEnabled: true, schedule: { not: null } } });
-    if (scheduled === 0) return;
-    mcpLog.warn(
-      { scheduledAgents: scheduled },
-      `${scheduled} agent(s) have an enabled schedule, but this process does not run the scheduler. ` +
-        `Run "reevo scheduler" alongside it, or those schedules will never fire.`,
-    );
+    const message = unattendedSchedulesWarning(await countUnattendedSchedules(prisma));
+    if (message) mcpLog.warn(message);
   } catch (err) {
     // Advisory only - never let it stop the server coming up.
     mcpLog.debug({ err }, "could not check for unattended schedules");
@@ -141,6 +129,20 @@ export interface McpServerHandle {
   close(): Promise<void>;
 }
 
+export interface StartMcpOptions {
+  /**
+   * A pre-built provider set. `reevo serve` builds one and shares it, because
+   * DbosExecutor is a per-process singleton and two executors cannot coexist
+   * (dbos.ts launch()). Built internally when omitted.
+   */
+  providers?: McpProviders;
+  /**
+   * Set by a composition root that also runs the scheduler, so startup does
+   * not warn that enabled schedules will never fire.
+   */
+  schedulerAttached?: boolean;
+}
+
 /** Awaits `promise` (if any), logging and swallowing a rejection instead of propagating it. */
 async function closeQuietly(promise: Promise<void> | undefined, what: string): Promise<void> {
   try {
@@ -151,11 +153,11 @@ async function closeQuietly(promise: Promise<void> | undefined, what: string): P
 }
 
 /** The real CLI entry point: `reevo mcp`. Reads config from the environment, starts stdio or HTTP per MCP_TRANSPORT. */
-export async function startMcp(): Promise<McpServerHandle> {
+export async function startMcp(options: StartMcpOptions = {}): Promise<McpServerHandle> {
   const mcpConfig = loadMcpConfig();
-  const { providers } = buildMcpProviders();
+  const providers = options.providers ?? buildMcpProviders().providers;
   await providers.executor.launch?.();
-  await warnIfNothingWillFireSchedules();
+  if (!options.schedulerAttached) await warnIfNothingWillFireSchedules();
 
   if (mcpConfig.transport === "stdio") {
     const mcp = buildMcpServer({ providers, db: prisma, config: { canonicalUri: STDIO_PLACEHOLDER_URI } });
