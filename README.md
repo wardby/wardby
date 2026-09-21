@@ -1,118 +1,279 @@
-# reevo-run
+<div>
+  <img align="left" hspace="24" src="docs/assets/reevo-run-agent.png" alt="Reevo Run agent with scheduling, coding, and budget guardrails" width="280">
+  <h1>Reevo Run</h1>
+  <h3>Your agents. Your cloud. Your budget.</h3>
+  <p><strong>Most agent runners focus on helping a model complete a task. Reevo Run is the self-hosted control plane that decides whether the task should run, limits what it can access, and returns a reviewable outcome governed by explicit policy.</strong></p>
+  <p>Budget is enforced as admission control: spend is reserved before execution, so work that cannot fit the budget never starts.</p>
+  <p>
+    <a href="#why-reevo-run">Why Reevo Run</a> ·
+    <a href="#why-reevo-instead-of-another-agent-runner">Why it is different</a> ·
+    <a href="#a-full-cycle-agent-from-one-conversation">Full-cycle example</a> ·
+    <a href="#host-it-in-your-cloud">Deployments</a> ·
+    <a href="#bring-your-own-observability">Observability</a> ·
+    <a href="#quickstart">Quickstart</a> ·
+    <a href="#security-boundaries">Security</a>
+  </p>
+</div>
+<br clear="left">
 
-Schedule and run **budget-guarded LLM agents** — autonomous agents that run on a
-schedule or in response to events, with hard spend limits that stop _before_
-cost, and a sandboxed tool executor.
+<!-- GitHub does not expose live Actions badge images for private repositories. These capability badges link authenticated readers to the authoritative workflow. -->
 
-> Reevo runs your agents on a schedule, within a budget.
+[![Security CI](https://img.shields.io/badge/security%20CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)](https://github.com/chfields/reevo-run/actions/workflows/security.yml?query=branch%3Amain)
+[![Dependency audit](https://img.shields.io/badge/dependencies-audit%20policy-0f766e.svg)](https://github.com/chfields/reevo-run/actions/workflows/security.yml?query=branch%3Amain)
+[![Container scan](https://img.shields.io/badge/container%20images-Trivy%20CRITICAL%20gate-0f766e.svg)](https://github.com/chfields/reevo-run/actions/workflows/security.yml?query=branch%3Amain)
+[![SBOM](https://img.shields.io/badge/SBOM-SPDX%20JSON-0f766e.svg)](https://github.com/chfields/reevo-run/actions/workflows/security.yml?query=branch%3Amain)
+[![License](https://img.shields.io/badge/license-Apache--2.0-0f766e.svg)](LICENSE)
 
-## Who it's for
+> **Project status:** the control plane, scheduler, budget groups, MCP server,
+> native agents, isolated Codex and Claude Code workers, GitHub draft-PR flow,
+> and local observability stack are implemented and tested. Production
+> readiness and cloud deployment coverage are still being expanded.
 
-People who want to run a handful of scheduled Claude, Codex, or other LLM
-agents on their own box or VPS, with a hard spend cap they can trust, and
-without handing tool execution to an unsandboxed process.
+## Why Reevo Run
 
-## Status
+AI agents are easy to demo and harder to operate. Once an agent can spend
+money, use credentials, change a repository, or run without a person watching,
+teams need more than a prompt and a cron job.
 
-Working. The core engine, scheduler, budget groups, QuickJS tool sandbox,
-secrets, webhooks, MCP server (stdio and OAuth 2.1 HTTP), and containerized
-coding workers are implemented and tested.
+Reevo Run provides the control plane around the model:
 
-## Architecture at a glance
+| For engineering leaders                                                     | For developers                                                                             |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Put explicit cost, ownership, and approval boundaries around agent work.    | Create and manage agents from Claude or Codex through MCP.                                 |
+| Keep execution, data, and credentials in infrastructure your team controls. | Choose OpenAI, Anthropic, or Bedrock-backed models per agent.                              |
+| Turn one-off experiments into scheduled, observable operating processes.    | Attach scoped tools, secrets, schedules, memory, and sub-agents.                           |
+| Keep approval and action authority explicit for consequential outcomes.     | Run optional coding tasks in isolated Codex or Claude Code workers that produce draft PRs. |
 
-reevo-run is a **cloud-agnostic core** with swappable **provider seams**. The
-core never imports a cloud SDK; each external dependency sits behind an
-interface with a default (portable) adapter and optional native adapters.
+The result is not another autonomous black box. It is a way to make agent work
+repeatable, bounded, inspectable, and reviewable.
 
+## Why Reevo instead of another agent runner?
+
+Agent tools solve different layers of the problem. Reevo does not need to
+replace them: it provides the self-hosted operating boundary around agents and
+the work they perform.
+
+| Category                   | What it primarily helps you do                              | What Reevo adds                                                                            |
+| -------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| **Agent frameworks**       | Build reasoning loops, tool calls, and multi-agent logic.   | Persistent ownership, schedules, budgets, credentials, run history, and lifecycle control. |
+| **Coding agents**          | Plan, edit, and test code for an interactive task.          | Isolated managed workers, admission-time budgets, scoped access, and optional draft PRs.   |
+| **Hosted agent platforms** | Start quickly on infrastructure operated by another vendor. | A control plane, data, credentials, and execution boundary you can host in your own cloud. |
+| **Workflow orchestrators** | Make application jobs durable, retryable, and observable.   | Agent-specific policy, model usage, capabilities, budgets, and MCP-native operations.      |
+
+The distinction is control, not just execution. Reevo reserves spend before a
+run starts, grants only assigned capabilities, records what happened, and
+keeps downstream action authority separate from the worker that produced the
+result.
+
+## One control plane, the full lifecycle
+
+![Reevo Run workflow: ask in Claude or Codex, define an agent through MCP, govern it in Reevo Run, execute it in isolation, and apply review policy to its outcome](docs/assets/reevo-run-workflow.svg)
+
+Claude and Codex are the operator experience. Reevo Run is the durable system
+behind them: it stores agent definitions, triggers work, reserves budget,
+mediates tools and credentials, records outcomes, and exposes run state through
+MCP.
+
+## A full-cycle agent from one conversation
+
+Ask your MCP client:
+
+> Create a weekly dependency-maintenance agent for this repository. Use Claude
+> Code, put it in a $5 weekly budget group, run it Thursday at 2:00 AM, execute
+> the test suite, and open a draft pull request when a safe update is ready.
+> Never merge automatically.
+
+Claude or Codex can translate that request into Reevo MCP operations such as
+`create_budget_group`, `create_agent`, `attach_tool`, `trigger_agent`, and
+`get_run`. After that:
+
+1. The scheduler or an event creates an owned run.
+2. Reevo reserves budget and resolves only the capabilities assigned to that
+   agent.
+3. An isolated coding worker receives the task without receiving the GitHub App
+   credential or provider API key.
+4. The worker changes the checkout and runs its approved checks.
+5. Trusted finalization validates the diff, pushes a unique branch, and opens at
+   most one draft pull request.
+6. A person reviews and decides whether anything merges.
+
+The same agent can be updated, paused, triggered, inspected, or deleted from an
+MCP conversation. The CLI remains available as the bootstrap and operations
+floor.
+
+## Agent ecosystems you can compose
+
+Reevo provides lifecycle primitives rather than prescribing one fixed catalog.
+These are example systems a team can build and manage through MCP:
+
+| Agent system             | Typical cycle                                                      | Governed outcome                     |
+| ------------------------ | ------------------------------------------------------------------ | ------------------------------------ |
+| **Delivery pipeline**    | Work request → plan → implementation → tests → review              | Optional draft feature or bug-fix PR |
+| **Security maintenance** | Scheduled scan → assess → patch → verify                           | Report or optional remediation PR    |
+| **Architecture review**  | Inspect codebase → score risks → prioritize findings               | Architecture and risk report         |
+| **QA coverage**          | Map journeys → rank gaps → add tests → run suite                   | Coverage report or optional test PR  |
+| **System monitoring**    | Receive signal → investigate → correlate → escalate                | Actionable defect or incident report |
+| **Project tracking**     | Read delivery data → compare plan, cost, and progress → flag drift | Portfolio or program update          |
+
+Agents can stand alone or be connected as bounded sub-agents. Shared budget
+groups can cap the combined spend of an ecosystem, while each agent retains its
+own model, tools, schedule, and run history.
+
+## Host it in your cloud
+
+The core does not import a cloud SDK. Jobs, model access, email, secrets,
+authentication, and object storage sit behind provider interfaces so operators
+can choose the infrastructure boundary that fits their environment.
+
+| Target                               | Current support                                                                                                                                 |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Local Docker, VM, or on-premises** | Portable PostgreSQL and container workflow for development and self-hosting.                                                                    |
+| **Production container baseline**    | Separate runtime and migration images plus a Compose/Caddy reference boundary.                                                                  |
+| **GCP**                              | Terraform reference for the control plane on Cloud Run and Cloud SQL. Cloud-native coding jobs and production observability are follow-on work. |
+| **AWS**                              | The portable runtime and Bedrock model adapter are available; a native AWS deployment module is planned.                                        |
+| **Other clouds**                     | Run the production image and provide equivalent PostgreSQL, secrets, ingress, egress, and monitoring controls.                                  |
+
+Start with [deployment targets](deploy/README.md), the
+[portable production boundary](deploy/production/README.md), or the
+[GCP setup guide](deploy/gcp/SETUP.md). Reference deployments are examples,
+not a requirement to use one vendor.
+
+**A complete deployment runs more than `reevo mcp`.** `mcp` serves the MCP
+surface; the scheduler that fires due agents and the reconciler that recovers
+orphaned runs live in `reevo scheduler`. Run **`reevo serve`** to get all three
+in one process. It is the container image's default command and what a
+single-container deployment (Cloud Run, a lone VM) should run. Alternatively,
+run `mcp` and `scheduler` as two processes, as `deploy/production/compose.yml`
+does. Running `mcp` alone logs a startup warning if enabled schedules exist
+that nothing will fire.
+
+## Bring your own observability
+
+The coding proxy can expose standard Prometheus metrics at `/metrics` when
+`METRICS_BIND` is configured. Collection is pull-based: keep the endpoint on a
+private network and give only your chosen collector access to it.
+
+| Destination                      | Integration path                                                                                                                                                                                                                                  |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Local Prometheus and Grafana** | The included Compose profile provisions Prometheus, Grafana, and dashboards for requests, errors, latency, cost, budgets, runs, and actual spend.                                                                                                 |
+| **AWS CloudWatch**               | Configure the [CloudWatch Agent's Prometheus collector](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Agent-PrometheusEC2.html) to scrape Reevo over private EC2, ECS, or EKS networking and import selected metrics. |
+| **Google Cloud Monitoring**      | Configure the [Google Cloud Ops Agent Prometheus receiver](https://cloud.google.com/stackdriver/docs/managed-prometheus/setup-opsagent), or a Managed Service for Prometheus collector, to scrape the private endpoint.                           |
+| **Other monitoring platforms**   | Use any collector or hosted service that accepts the Prometheus exposition format.                                                                                                                                                                |
+
+Run the local proof without making a paid model request:
+
+```sh
+npm run observability:up
+npm run observability:smoke
+npm run observability:down
 ```
-src/
-  core/            cloud-agnostic domain: agents, tools, runner, scheduler,
-                   triggers, sandbox, secrets, webhooks
-  config/          provider selection from environment
-  providers/
-    jobs/          JobLauncher     — dispatch long-running work
-    email/         EmailProvider   — outbound + inbound mail
-    llm/           LlmProvider     — streaming chat + usage/budget
-    secrets/       SecretCipher    — encrypt-at-rest
-    auth/          AuthProvider    — OAuth 2.1 resource-server identity
-    storage/       BlobStore       — object storage
-  mcp/             MCP server front door (Phase 4) — peer to the CLI
-deploy/
-  local/           docker-compose (default target)
-  aws/             terraform (native cloud target)
-prisma/            schema + migrations (hand-written from spec)
+
+The included cloud deployments do not yet provision AWS or GCP collectors.
+Current metrics primarily cover the coding proxy; application/MCP metrics,
+production alerts, and SLOs remain Phase 7 work. See the
+[observability roadmap](docs/phase-7-production-readiness.md#workstream-5-observability-and-incident-response)
+for the current boundary and retention details.
+
+## Security boundaries
+
+- **Hard budget enforcement:** per-agent limits and shared daily, weekly, or
+  monthly budget groups stop additional model work when the cap is reached.
+- **Scoped capabilities:** tools, secrets, datastores, and sub-agents are
+  attached explicitly and checked against the authenticated owner.
+- **Sandboxed tools:** native agent tools execute inside a constrained QuickJS
+  environment with controlled fetch and secret bindings.
+- **Isolated coding workers:** Codex and Claude Code run in hardened containers
+  with resource limits, protected paths, bounded output, and reviewed network
+  access.
+- **Credential separation:** workers do not receive provider credentials or the
+  GitHub App private key; trusted components proxy model use and finalize Git.
+- **Explicit action authority:** the worker that produces an outcome does not
+  implicitly gain authority to apply it. Current coding finalization creates a
+  draft pull request and does not auto-merge it.
+- **Protected remote MCP:** HTTP transport is an OAuth 2.1 resource server;
+  local stdio mode trusts the local operator.
+- **Sanitized operations:** lifecycle events and metrics exclude prompts,
+  repository content, credentials, diffs, and raw worker output.
+
+Read the [runtime architecture](docs/architecture-runtime.md),
+[coding-worker isolation model](docs/coding-worker-isolation.md), and
+[security deployment guide](docs/security-deployment.md) before enabling a
+production repository.
+
+Review policy is designed to support designated agents as well as people.
+Agent approvals will be recorded as workflow evidence; operators will decide
+whether that evidence permits an automated action or still requires a person.
+
+## Quickstart
+
+Requirements: Node.js 22.12 or newer, Docker, and one supported model-provider
+credential.
+
+```sh
+git clone https://github.com/chfields/reevo-run.git
+cd reevo-run
+npm ci
+cp .env.example .env
 ```
 
-Providers are selected purely by environment variable — e.g.
-`JOB_LAUNCHER=local`, `EMAIL_PROVIDER=smtp`, `SECRET_CIPHER=app-key`. Swapping to
-a native cloud deployment is configuration, not a code change.
+Edit `.env` and set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`. Generate a local
+secret-encryption key with `openssl rand -hex 32` and use it as
+`SECRET_APP_KEY`. Then initialize the local database and start the stdio MCP
+server:
 
-The `llm/` provider is the one exception: it's not a single-adapter switch but
-a per-agent **model router**. An OpenAI adapter, a direct Anthropic (Claude)
-adapter, and a Bedrock-Claude adapter each register for the model names they
-own; whichever adapters have credentials present (`OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, `BEDROCK_REGION`/`AWS_REGION`) are enabled, and an agent's
-`model` field picks which adapter handles its calls — so OpenAI, direct-Claude,
-and Bedrock-Claude agents can all run side by side in one deployment.
+```sh
+npm run db:up
+npm run prisma:generate
+npm run prisma:migrate
+npm run cli -- mcp
+```
 
-## MCP server (Phase 4)
+Point Claude or Codex at `npm run cli -- mcp` with the repository as its working
+directory. The exact client configuration format differs, but both use Reevo's
+stdio transport locally. For shared or remote access, use Streamable HTTP with
+OAuth and the production boundary documented above.
 
-`reevo mcp` exposes agents, tools, schedule management, runs, datastore,
-secrets, and webhooks as MCP tools — the primary way to author and operate agents, with
-the CLI retained only as the bootstrap/ops floor (`migrate`, `scheduler`,
-`run`, `runs`). Two transports:
+Once connected, ask the client to list the available Reevo tools, create an
+agent with a small budget, trigger it, and inspect the run. Coding-agent setup
+additionally requires a dedicated GitHub App, immutable worker images, and the
+proxy boundary described in the [local coding smoke guide](docs/local-phase5-smoke.md).
 
-- **stdio** (`MCP_TRANSPORT=stdio`, default) — local, no OAuth; the operator
-  is trusted, and `LOCAL_PRINCIPAL` names the owner identity for anything
-  authored this way.
-- **Streamable HTTP** (`MCP_TRANSPORT=http`) — remote, always an OAuth 2.1
-  resource server. `AUTH_PROVIDER=delegating` (default) verifies tokens
-  issued by an external IdP. `AUTH_PROVIDER=self-hosted` uses provisioned users,
-  browser login and consent, public clients, and S256 PKCE.
+## What is implemented
 
-**A complete deployment runs more than `mcp`.** `reevo mcp` serves the MCP
-surface and launches the executor; the scheduler that fires due agents and
-the reconciler that recovers orphaned runs live in `reevo scheduler`. Run
-**`reevo serve`** to get all of it in one process — it is the container
-image's default command and what a single-container deployment (Cloud Run,
-a lone VM) should run. Alternatively run `reevo mcp` and `reevo scheduler`
-as two processes, as `deploy/production/compose.yml` does. Running `mcp`
-alone logs a warning at startup if schedules exist that nothing will fire.
+- MCP-first agent, tool, schedule, budget-group, secret, datastore, webhook,
+  run, and sub-agent management.
+- Scheduled and event-triggered native agents with OpenAI, direct Anthropic,
+  and Bedrock-Claude model routing.
+- Per-run budgets, shared budget groups, usage accounting, and cancellation.
+- QuickJS tool isolation with host allowlists and secret bindings.
+- Containerized Codex and Claude Code executors with trusted GitHub draft-PR
+  finalization.
+- In-process reconciliation and optional DBOS durable workflows.
+- Self-hosted or delegated OAuth for remote MCP access.
+- Prometheus metrics and provisioned Grafana dashboards for local operations.
+- Portable production images, a Compose/Caddy boundary, and a GCP control-plane
+  Terraform reference.
 
-Long-running operations (`trigger_agent`) return a durable Task (the MCP
-Tasks extension) when the client supports it, falling back to a plain
-`{runId}` polled via `get_run` otherwise — either way the same engine and
-budget guardrail run underneath. See `.env.example` for the full set of
-`MCP_*`/`AUTH_*`/`SECRET_*` configuration keys.
+This project is under active development. The
+[coding-agent release gate](docs/phase-5-release-gate.md) records tested live
+evidence; the [production-readiness roadmap](docs/phase-7-production-readiness.md)
+tracks remaining operational work without assuming one hosting provider.
 
-Use Node.js 22.12 or newer. See [security deployment and recovery](docs/security-deployment.md)
-for HTTP boundaries, self-hosted provisioning, credential
-invalidation, runtime/migration images, test prerequisites, and the remaining
-Prisma tooling advisory. Every legacy self-hosted credential must be reissued.
+## Repository map
 
-## Durable executor (Phase 6)
-
-`EXECUTOR=in-process` (default) provides durability with a heartbeat and a
-reconciler: a run whose process dies is reconciled to `lost`.
-
-`EXECUTOR=dbos` runs each native agent run as a [DBOS](https://docs.dbos.dev)
-durable workflow. Every LLM turn and tool call is a checkpointed step, so a
-run interrupted by a crash or redeploy resumes from its last completed step
-with no repeated spend for finished turns, and cancelling a run
-(`tasks/cancel`, `stop`) takes effect at the next step — the run lands
-`cancelled` with the caller's own reason. DBOS keeps its tables in the `dbos`
-schema of `DATABASE_URL` (override with `DBOS_SYSTEM_DATABASE_URL`).
-`DBOS_EXECUTOR_ID` is **required** and must be unique per running process
-(the scheduler and the MCP server need different values): a process re-drives
-every interrupted run its own id owns at startup, so two processes sharing an
-id each re-drive the other's live workflows. A stale run owned by an instance
-that never returns is adopted by whichever reconciler sees it first. The
-at-least-once window is one step: a turn that was mid-stream when the process
-died runs again on resume — and the partial spend of that interrupted step is
-not recorded, so a resumed run's `costUsd` can under-count what the provider
-actually charged.
+```text
+src/core/       Agents, runner, scheduler, triggers, budgets, and sandbox
+src/mcp/        MCP transports, authentication, and management tools
+src/providers/  Swappable model, job, VCS, email, auth, secret, and storage seams
+src/coding-worker/ and src/claude-coding-worker/
+                Isolated Codex and Claude Code execution
+deploy/         Local, production-reference, observability, and cloud deployment
+prisma/         Schema and reviewed migrations
+docs/           Architecture, security, operations, evidence, and roadmap
+```
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
-Built as an independent reimplementation; see [CLEANROOM.md](CLEANROOM.md).
+Apache License 2.0. See [LICENSE](LICENSE).
+
+Built as an independent reimplementation. See [CLEANROOM.md](CLEANROOM.md).

@@ -352,7 +352,21 @@ export function registerAgentTools(mcp: ReevoMcpServer): void {
     },
     handler: async (args: { id: string }, ctx) => {
       await requireOwnedAgent(ctx.db, args.id, ctx.principal.id);
-      await ctx.db.agent.delete({ where: { id: args.id } });
+      try {
+        await ctx.db.agent.delete({ where: { id: args.id } });
+      } catch (err) {
+        // Run.agentId has no onDelete rule, so Postgres refuses to delete an
+        // agent that has ever run. That is deliberate - runs are the cost and
+        // budget history - so say so instead of surfacing the FK violation.
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2003") {
+          throw new McpError(
+            409,
+            "Agent has run history, which is kept for cost and budget accounting, so it cannot be deleted. " +
+              "Use disable_schedule to stop it running.",
+          );
+        }
+        throw err;
+      }
       return textResult({ deleted: args.id });
     },
   });
