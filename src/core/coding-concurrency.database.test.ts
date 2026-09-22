@@ -234,6 +234,53 @@ describe.skipIf(!process.env.DATABASE_URL)("coding concurrency (PostgreSQL, glob
     await retire([...Object.values(ids), newer]);
   });
 
+  it("a new claim yields a freed slot to an older queued run (oldest first)", async () => {
+    const holder = id("fifo-holder");
+    const older = id("fifo-older");
+    const fresh = id("fifo-fresh");
+    // Older than anything else could be queued, so it is first in line globally.
+    await seed(older, { queuedAt: new Date("2000-01-01T00:00:00Z") });
+    await seed(holder, { status: "running", jobBackend: "docker" });
+    await seed(fresh);
+    // Cap full with the holder; then its slot frees without a drain having run.
+    const maxConcurrent = await activeSlotCount();
+    await db.run.update({ where: { id: holder }, data: { status: "succeeded", finishedAt: new Date() } });
+
+    const store = new PrismaContainerExecutionStore(db, { maxConcurrent });
+    await expect(store.claimProvisioning(fresh, "claim-fresh")).resolves.toBe("queued");
+    expect((await db.codingRun.findUniqueOrThrow({ where: { runId: fresh } })).queuedAt).toBeInstanceOf(Date);
+    await expect(store.claimProvisioning(older, "claim-older")).resolves.toBe("claimed");
+    expect((await db.run.findUniqueOrThrow({ where: { id: older } })).status).toBe("running");
+    // The slot is taken again, so the fresh run keeps waiting.
+    await expect(store.claimProvisioning(fresh, "claim-fresh-2")).resolves.toBe("queued");
+
+    await retire([holder, older, fresh]);
+  });
+
+  it("breaks a queuedAt tie by runId, in both claimProvisioning and drainCodingQueue", async () => {
+    const tiedAt = new Date("2000-01-01T00:00:00Z");
+    const first = id("tie-a");
+    const second = id("tie-b");
+    await seed(second, { queuedAt: tiedAt });
+    await seed(first, { queuedAt: tiedAt });
+    const maxConcurrent = (await activeSlotCount()) + 1;
+
+    const started: string[] = [];
+    const drained = await drainCodingQueue({
+      db,
+      executor: recordingExecutor(started),
+      maxConcurrent,
+      queueTimeoutSec: 365 * 24 * 3600 * 100,
+    });
+    expect(drained.started).toEqual([first]);
+
+    const store = new PrismaContainerExecutionStore(db, { maxConcurrent });
+    await expect(store.claimProvisioning(second, "claim-b")).resolves.toBe("queued");
+    await expect(store.claimProvisioning(first, "claim-a")).resolves.toBe("claimed");
+
+    await retire([first, second]);
+  });
+
   it("the reconciler leaves a queued pending coding run alone but still reaps an unqueued one", async () => {
     const longAgo = new Date(Date.now() - 10 * 60_000);
     const queuedRun = id("recon-queued");

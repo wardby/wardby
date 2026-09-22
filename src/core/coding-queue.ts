@@ -72,7 +72,8 @@ export async function drainCodingQueue(options: DrainCodingQueueOptions): Promis
 
   const next = await db.codingRun.findMany({
     where: { queuedAt: { not: null }, jobBackend: null, run: { status: "pending" } },
-    orderBy: { queuedAt: "asc" },
+    // runId breaks queuedAt ties, matching claimProvisioning's queue order.
+    orderBy: [{ queuedAt: "asc" }, { runId: "asc" }],
     take: free,
     select: { runId: true },
   });

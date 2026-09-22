@@ -74,9 +74,9 @@ export interface ContainerRunSnapshot {
 
 /**
  * claimed: this caller owns provisioning. unavailable: someone else does, or
- * the run is no longer active. queued: every concurrency slot is taken; the
- * run stays pending with CodingRun.queuedAt set until drainCodingQueue
- * starts it.
+ * the run is no longer active. queued: every concurrency slot is taken, or
+ * the free ones belong to older queued runs; the run stays pending with
+ * CodingRun.queuedAt set until drainCodingQueue starts it.
  */
 export type ProvisioningClaim = "claimed" | "unavailable" | "queued";
 
@@ -154,7 +154,27 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
           const active = await tx.codingRun.count({
             where: { jobBackend: { not: null }, run: { status: { in: ["pending", "running"] } } },
           });
-          if (active >= maxConcurrent) {
+          // Oldest first (spec §6): a free slot belongs to the queued runs
+          // ahead of this one, not to whichever claim reaches the lock first.
+          // Without this a fresh dispatch could take a slot freed with no
+          // immediate drain (stopped from another replica, say) and starve
+          // older queued runs into coding_queue_timeout. A run not yet queued
+          // is behind every queued run; queued runs order by (queuedAt,
+          // runId), the same order drainCodingQueue starts them in.
+          const self = await tx.codingRun.findUnique({ where: { runId }, select: { queuedAt: true } });
+          const selfQueuedAt = self?.queuedAt ?? null;
+          const queuedAhead = await tx.codingRun.count({
+            where: {
+              runId: { not: runId },
+              queuedAt: { not: null },
+              jobBackend: null,
+              run: { status: "pending" },
+              ...(selfQueuedAt
+                ? { OR: [{ queuedAt: { lt: selfQueuedAt } }, { queuedAt: selfQueuedAt, runId: { lt: runId } }] }
+                : {}),
+            },
+          });
+          if (active + queuedAhead >= maxConcurrent) {
             const queued = await tx.codingRun.updateMany({
               where: { runId, jobBackend: null, queuedAt: null, run: { status: "pending" } },
               data: { queuedAt: new Date() },
