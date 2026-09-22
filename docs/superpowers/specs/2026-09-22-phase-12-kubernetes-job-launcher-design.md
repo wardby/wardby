@@ -318,6 +318,8 @@ IDs the Docker launcher uses.
   integration)**.
 - Control-plane settings: `JOB_LAUNCHER=kubernetes`, namespace, cluster
   endpoint, digest-pinned images.
+- The Cloud Logging exclusion for worker, agent, and tool output, and the
+  opt-in restricted debug bucket (§8.1).
 - `SETUP.md` additions: building and pushing worker images to Artifact
   Registry, applying the GKE overlay, `wardby coding preflight`, the added
   cost (cluster fee plus pods; see the brief), and teardown order (namespace,
@@ -336,6 +338,58 @@ IDs the Docker launcher uses.
   from the persisted handle.
 - Kubernetes API errors during `remove` are retried idempotently; resources
   are found by run label, so partial cleanup converges.
+
+### 8.1 Raw logs and debugging
+
+Worker output is untrusted: it can contain repository contents, model output,
+and anything a malicious repository chooses to print. Two rules follow.
+
+**The control plane never reads raw pod output.** It has no `pods/log`
+permission (§7). Only fixed, worker-owned diagnostic codes reach run records,
+events, and `get_run`, exactly as with the Docker launcher. This keeps raw
+output out of the MCP-facing process, which any authorized MCP user can query.
+
+**Raw output is not retained by default.** On GKE, container output is sent
+to Cloud Logging unless something stops it. The `deploy/gcp` module adds a
+Cloud Logging **router exclusion filter** that discards entries from the
+coding namespace's `worker`, `agent`, and `tool` containers before they are
+stored (excluded entries are also not billed). It is a project-level router
+rule, so it applies regardless of cluster mode, including Autopilot
+**(verify the exact filter fields for GKE container logs)**.
+
+| Source                                  | Stored in Cloud Logging | Reason                                                           |
+| --------------------------------------- | ----------------------- | ---------------------------------------------------------------- |
+| Codex worker, Claude agent, Claude tool | No (excluded)           | Untrusted output                                                 |
+| Keeper                                  | Yes                     | Trusted; prints only its own status                              |
+| Coding proxy                            | Yes                     | Trusted; already sanitized (metadata only, no prompts or bodies) |
+| Control plane                           | Yes                     | Unchanged; already sanitized                                     |
+| Kubernetes / GKE system logs            | Yes                     | Scheduling, OOM kills, image pulls; not sensitive                |
+
+**How operators debug:**
+
+1. **While a pod exists:** `kubectl logs` with the operator's own cluster
+   credentials reads output directly from the node. The router exclusion does
+   not affect this path.
+2. **Debug window for failures:** `CODING_RETAIN_FAILED_SEC` (default `0`,
+   i.e. off) keeps a failed run's pods for that many seconds before `remove`,
+   so there is time to inspect them. The run's concurrency slot is released at
+   its terminal state as usual (§6); retained pods still count against the
+   namespace `ResourceQuota`, which bounds how much a burst of failures can
+   hold. The reconciler removes retained pods once the window ends, including
+   after a control-plane restart.
+3. **Opt-in debug routing:** a Terraform variable (e.g.
+   `coding_worker_logs = "debug"`, default `"drop"`) replaces the exclusion
+   with a sink routing worker, agent, and tool output to a **separate log
+   bucket with short retention (e.g. 3 days) and access restricted to
+   operators**, never the project's default bucket. Operators switch it back
+   when finished.
+
+**Trade-off, accepted deliberately:** once a pod is removed and no debug
+routing was on, its raw output is gone for good. This matches today's Docker
+behavior, where cleanup removes containers together with their bounded local
+logs. Other clusters (EKS, AKS, `kind`) have their own log pipelines; the
+deployment docs for each overlay must state where container output goes and
+how to exclude it.
 
 ## 9. Testing and acceptance
 
@@ -375,6 +429,11 @@ Autopilot mutations pass attestation; fork-bomb containment measured and
 recorded; more runs than the cap triggered, showing queueing with every run
 completing; clean teardown.
 
+**Logs (§8.1):** a unit test that the debug window keeps failed-run pods only
+for `CODING_RETAIN_FAILED_SEC` and that the reconciler removes them afterwards;
+on GKE, confirm a worker's output is absent from Cloud Logging by default and
+present only in the restricted bucket when debug routing is on.
+
 **Evidence** is recorded in a release-gate document modeled on
 `docs/phase-5-release-gate.md`. The Docker launcher and its tests are
 untouched and must keep passing.
@@ -390,3 +449,5 @@ untouched and must keep passing.
 6. Depth-1 clones against the finalizer's pre-push checks and
    revision-in-place.
 7. Final names for the new configuration keys and `CodingRun` columns.
+8. The exact Cloud Logging filter fields for GKE container logs, and how the
+   restricted debug bucket's access is granted.
