@@ -11,6 +11,20 @@ import { fetch as undiciFetch, getGlobalDispatcher, Response as UndiciResponse }
 import { installHttpRuntime } from "./http-runtime.js";
 
 const run = promisify(execFile);
+
+/**
+ * undici keeps an Agent's options under a module-private `Symbol("options")`,
+ * so there is no exported way to ask a dispatcher whether it may speak h2.
+ * Reading it is what makes these assertions discriminate: "the dispatcher did
+ * not change" is true even with no fix at all, because importing undici
+ * installs its own default Agent.
+ */
+function allowsH2(dispatcher: unknown): unknown {
+  if (dispatcher === null || typeof dispatcher !== "object") return undefined;
+  const key = Object.getOwnPropertySymbols(dispatcher).find((symbol) => symbol.description === "options");
+  const options = key ? (dispatcher as Record<symbol, unknown>)[key] : undefined;
+  return options && typeof options === "object" ? (options as Record<string, unknown>).allowH2 : undefined;
+}
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
@@ -105,11 +119,14 @@ describe("http runtime", () => {
     await expect(response.json()).resolves.toEqual(PAYLOAD);
   });
 
-  it("installs its dispatcher before the Kubernetes client, which then leaves it alone", () => {
+  it("installs its dispatcher before the Kubernetes client, which then leaves it h1-only", () => {
     // undici's lib/global.js installs its own h2-enabled default Agent only
     // when getGlobalDispatcher() is undefined, so landing first is the contract.
     expect(dispatcherBeforeKubernetesImport).toBeDefined();
     expect(dispatcherAfterKubernetesImport).toBe(dispatcherBeforeKubernetesImport);
+    // The half that actually discriminates: it is OUR agent, not undici's.
+    expect(allowsH2(dispatcherBeforeKubernetesImport)).toBe(false);
+    expect(allowsH2(dispatcherAfterKubernetesImport)).toBe(false);
   });
 
   it("leaves Node's own fetch stack in place instead of swapping the globals", () => {
@@ -144,7 +161,10 @@ describe("http runtime", () => {
         `const { getGlobalDispatcher } = await import("undici");`,
         `const before = getGlobalDispatcher();`,
         `await import("@kubernetes/client-node");`,
-        `process.stdout.write(JSON.stringify({ installed, kept: getGlobalDispatcher() === before }));`,
+        `const options = (d) => Object.getOwnPropertySymbols(d).find((s) => s.description === "options");`,
+        `const h2 = (d) => d[options(d)].allowH2;`,
+        `const kept = getGlobalDispatcher() === before && h2(getGlobalDispatcher()) === false;`,
+        `process.stdout.write(JSON.stringify({ installed, kept }));`,
       ].join("\n"),
       "utf8",
     );

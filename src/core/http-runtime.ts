@@ -52,6 +52,17 @@
  * undici 8, so undici sets its h2-enabled default Agent a moment before
  * `setGlobalDispatcher` replaces it; nothing issues a request in between.
  *
+ * KNOWN LIMITATION (ledgered, no runtime guard): landing first only settles the
+ * module-load race. A dependency that calls `setGlobalDispatcher` ACTIVELY,
+ * later in the process, would replace this Agent with an h2-enabled one and
+ * silently restore the corruption — the price of fixing this with a dispatcher
+ * instead of owning the fetch stack. Nothing in the runtime image does that
+ * today: the only other `setGlobalDispatcher` calls in the tree are undici
+ * copies bundled inside `@prisma/client/runtime/binary.*` (guarded by the same
+ * `=== undefined` check, and the binary engine is not the default) and
+ * `node-fetch-native` under the `prisma` CLI, which `deploy/Dockerfile:25`
+ * asserts is absent from the runtime image.
+ *
  * Restoring Node's OWN dispatcher instead is not possible, though not for the
  * reason one might guess: undici defines the legacy symbol `configurable: false`
  * but `writable: true`, so a plain assignment would be allowed and only
