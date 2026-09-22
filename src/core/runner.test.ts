@@ -1044,3 +1044,45 @@ describe("executeRun terminal-write races", () => {
     expect(result.finishedAt).not.toBeNull();
   });
 });
+
+describe("coding agents on a deployment without a container executor", () => {
+  const codingAgent: FakeAgent = {
+    id: "c1",
+    name: "coder",
+    systemPrompt: "sys",
+    model: "m",
+    budgetUsd: 1,
+    maxTurns: 3,
+    kind: "coding",
+  };
+  const providers = {
+    llm: noopLlm,
+    engine: fakeEngine({
+      status: "succeeded",
+      finalText: "",
+      turns: 0,
+      usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+    }),
+    datastore: fakeDatastore(),
+    secrets: noopSecretCipher,
+    memory: fakeMemory(),
+  };
+  // The message must name the real cause (no container executor configured)
+  // and the fix, not read as if Phase 5 were unbuilt.
+  const expectedCause = /container executor.*JOB_LAUNCHER=local/;
+
+  it("runAgent refuses up front, naming the missing executor", async () => {
+    const db = fakeDb([codingAgent]);
+    await expect(runAgent("coder", providers, db)).rejects.toThrow(expectedCause);
+  });
+
+  it("executeRun fails an existing coding run with the same explanation, spending nothing", async () => {
+    const db = fakeDb([codingAgent]);
+    const run = await db.run.create({ data: { agentId: "c1" } });
+    const result = await executeRun(run.id, providers, db);
+    expect(result.status).toBe("failed");
+    expect(result.error).toMatch(expectedCause);
+    expect(result.error).not.toMatch(/Phase 5/);
+    expect(Number(result.costUsd)).toBe(0);
+  });
+});
