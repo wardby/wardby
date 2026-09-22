@@ -721,6 +721,18 @@ export class GitVcsProvider implements VcsProvider {
     }
   }
 
+  /**
+   * Deliberately NOT windowed, unlike every other redaction caller: here
+   * `redactTokenShapedValues` is a DETECTOR, not a formatter — nothing from the
+   * config is ever emitted, only the fixed `vcs_git_config_unsafe` — so
+   * redacting a prefix would narrow a security predicate over an
+   * attacker-controlled file (a cloned repo's `.git/config`) to buy speed. The
+   * input is already bounded: the size check short-circuits above it, so
+   * redaction never sees more than 64 KiB, and with every pattern linear the
+   * worst adversarial 64 KiB shape measures 22 ms (it was 1.5 s while the JWT
+   * pattern was quadratic — that bug, not the breadth of this scan, was the
+   * problem).
+   */
   private async assertSafeLocalConfig(gitMetadataPath: string): Promise<void> {
     const config = await readFile(resolve(gitMetadataPath, "config"), "utf8");
     if (

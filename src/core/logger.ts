@@ -9,7 +9,17 @@
  * for the CLI's own output — see cli.ts's stdout/stderr split).
  */
 import pino from "pino";
-import { redactTokenShapedValues } from "../coding/protocol.js";
+import { redactAndTruncate } from "../coding/protocol.js";
+
+/**
+ * A serialized error's strings are unbounded — a stack, or a `body`/`stdout`
+ * an SDK attached as an own property — and redaction over megabytes on a
+ * single-threaded control plane is an event-loop stall. 16 KiB is far more than
+ * a log line should carry and comfortably above any real stack; anything past
+ * it is dropped rather than printed (`redactAndTruncate` redacts first, so the
+ * cut cannot expose the front of a credential).
+ */
+const MAX_LOGGED_STRING = 16 * 1024;
 
 /**
  * Redacting `err` serializer. pino's default one walks `cause` and folds it
@@ -21,7 +31,7 @@ import { redactTokenShapedValues } from "../coding/protocol.js";
  * `describeFailure` (both go through `redactTokenShapedValues`).
  */
 function redactDeep(value: unknown, depth = 0): unknown {
-  if (typeof value === "string") return redactTokenShapedValues(value);
+  if (typeof value === "string") return redactAndTruncate(value, MAX_LOGGED_STRING);
   if (depth > 4 || value === null || typeof value !== "object") return value;
   if (Array.isArray(value)) return value.map((item) => redactDeep(item, depth + 1));
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactDeep(item, depth + 1)]));
