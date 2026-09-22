@@ -16,7 +16,7 @@ import {
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { logger } from "../../core/logger.js";
-import { parseCodingAgentOutputJson, MAX_CODING_ARTIFACT_BYTES } from "../../coding/protocol.js";
+import { parseCodingAgentOutputJson, redactAndTruncate, MAX_CODING_ARTIFACT_BYTES } from "../../coding/protocol.js";
 import {
   assertDockerHostSupportsIsolation,
   assertClaudeAgentContainerInspection,
@@ -55,14 +55,29 @@ export interface DockerCommandRunner {
   run(args: readonly string[], options?: DockerCommandOptions): Promise<DockerCommandResult>;
 }
 
-/** Docker failures never include daemon output in their public message. */
+/**
+ * Docker failures never include daemon output in their public message -- that
+ * message reaches the agent owner. The operator still needs the reason, so the
+ * failing subcommand and a redacted, bounded slice of stderr ride along as the
+ * `cause`, which only the control-plane log walks (see describeFailure in
+ * ../executor/container.ts). Without it a provisioning failure is just
+ * `docker_command_failed:1`, which cost a live smoke two blind runs.
+ */
 export class DockerCommandError extends Error {
   constructor(
     public readonly exitCode: number | null,
     public readonly notFound = false,
     public readonly outputExceeded = false,
+    detail?: { subcommand?: string; stderr?: string },
   ) {
-    super(outputExceeded ? "docker_output_limit" : `docker_command_failed:${exitCode ?? "spawn"}`);
+    super(outputExceeded ? "docker_output_limit" : `docker_command_failed:${exitCode ?? "spawn"}`, {
+      cause:
+        detail === undefined
+          ? undefined
+          : new Error(
+              `docker ${detail.subcommand ?? "?"}: ${redactAndTruncate(detail.stderr?.trim() || "(no stderr)", 2_048)}`,
+            ),
+    });
   }
 }
 
@@ -137,7 +152,12 @@ export class NodeDockerCommandRunner implements DockerCommandRunner {
           stderr: Buffer.concat(stderr).toString("utf8"),
         };
         if (code !== 0) {
-          return rejectPromise(new DockerCommandError(code, isMissingDockerResource(result.stderr)));
+          return rejectPromise(
+            new DockerCommandError(code, isMissingDockerResource(result.stderr), false, {
+              subcommand: args[0],
+              stderr: result.stderr,
+            }),
+          );
         }
         resolvePromise(result);
       });
