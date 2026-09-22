@@ -120,6 +120,49 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
       await db.run.deleteMany({ where: { id: failedRunId } });
     }
   });
+
+  it("refuses to claim a run that is no longer pending/running, and leaves no claim behind", async () => {
+    const alreadyFailedRunId = `container-already-failed-${randomUUID()}`;
+    try {
+      await db.run.create({
+        data: {
+          id: alreadyFailedRunId,
+          agentId,
+          executionManaged: true,
+          status: "failed",
+          error: "some_other_failure",
+        },
+      });
+      await db.codingRun.create({
+        data: {
+          runId: alreadyFailedRunId,
+          task: "Fix it.",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${alreadyFailedRunId}`,
+          provider: "codex",
+          model: "gpt-5.6-luna",
+          timeoutSec: 900,
+          allowedEgress: [],
+          protectedPaths: ["CODEOWNERS"],
+          budgetReservedUsd: 1,
+        },
+      });
+
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.claimProvisioning(alreadyFailedRunId, "claim-late")).resolves.toBe("unavailable");
+
+      const coding = await db.codingRun.findUniqueOrThrow({ where: { runId: alreadyFailedRunId } });
+      expect(coding.jobBackend).toBeNull();
+      expect(coding.jobHandle).toBeNull();
+      const run = await db.run.findUniqueOrThrow({ where: { id: alreadyFailedRunId } });
+      expect(run.status).toBe("failed");
+      expect(run.error).toBe("some_other_failure");
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: alreadyFailedRunId } });
+      await db.run.deleteMany({ where: { id: alreadyFailedRunId } });
+    }
+  });
 });
 
 describe.skipIf(!process.env.DATABASE_URL)("coding concurrency cap (PostgreSQL)", () => {
