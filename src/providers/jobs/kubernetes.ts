@@ -45,12 +45,16 @@ import {
   buildRunPod,
   enforcementProbeScript,
   kubernetesRunNames,
+  kubernetesRunNamesForToken,
   runLabels,
   validateKubernetesSpec,
 } from "./kubernetes-isolation.js";
 import { safeExtract } from "./safe-extract.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
 import { replaceDirectoryFromStaging } from "./workspace-swap.js";
+
+/** The per-run object names, always derived through kubernetes-isolation's single naming source. */
+type RunNames = ReturnType<typeof kubernetesRunNamesForToken>;
 
 const BACKEND = "kubernetes";
 const RECORD_SCHEMA_VERSION = 1;
@@ -99,14 +103,6 @@ interface RunRecord {
   deadlineAt: number;
   phase: Phase;
   result?: JobResult;
-}
-
-interface RunNames {
-  token: string;
-  pod: string;
-  policy: string;
-  record: string;
-  secret: string;
 }
 
 export interface KubernetesClusterInfo {
@@ -181,11 +177,6 @@ function resultFor(phase: ResultPhase): JobResult {
     case "lost":
       return { exitCode: 1, reason: "lost" };
   }
-}
-
-function namesForToken(token: string): RunNames {
-  const base = `wardby-run-${token}`;
-  return { token, pod: base, policy: base, record: base, secret: `${base}-cap` };
 }
 
 function parseRecord(configMap: V1ConfigMap): RunRecord {
@@ -263,9 +254,9 @@ function observePod(
     };
   }
   if (pod.status?.phase === "Failed") return { phase: "failed", result: resultFor("failed") };
-  // A provisioning record is promoted only by the launch that owns it, after the gate opens.
-  if (record.phase === "provisioning") return undefined;
-  return record.phase === "active" ? undefined : { phase: "active" };
+  // Nothing to record: a provisioning record is promoted only by the launch that owns it (after the
+  // gate opens), and refresh() never calls this for a terminal one, so the phase is already right.
+  return undefined;
 }
 
 /** Collects at most `limit` bytes; anything more only sets `exceeded`. */
@@ -350,6 +341,21 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     this.enforcementTimeoutMs = options.enforcementTimeoutMs ?? DEFAULT_ENFORCEMENT_TIMEOUT_MS;
     this.createArchive = options.createArchive ?? hostTarArchive;
     this.warn = options.onWarning ?? ((message) => kubernetesLog.warn(message));
+  }
+
+  /**
+   * Every per-run object name derives from the run id, so the handle is known before any cluster call.
+   * The executor persists it first; a crash mid-launch then still has a handle to clean up with (the
+   * launcher itself has no `list` permission and so can never rediscover stray objects).
+   */
+  plannedHandle(spec: JobSpec): JobHandle | undefined {
+    try {
+      validateKubernetesSpec(spec);
+      return { backend: BACKEND, id: `${this.namespace}/${kubernetesRunNames(spec.runId).token}` };
+    } catch {
+      // An invalid spec has no handle; launch() rejects with the real reason.
+      return undefined;
+    }
   }
 
   async launch(spec: JobSpec): Promise<JobHandle> {
@@ -790,7 +796,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     if (handle.backend !== BACKEND || typeof handle.id !== "string") return undefined;
     const [namespace, token, ...rest] = handle.id.split("/");
     if (rest.length > 0 || namespace !== this.namespace || !token || !TOKEN.test(token)) return undefined;
-    return namesForToken(token);
+    return kubernetesRunNamesForToken(token);
   }
 
   private recordConfigMap(names: RunNames, record: RunRecord, resourceVersion?: string): V1ConfigMap {

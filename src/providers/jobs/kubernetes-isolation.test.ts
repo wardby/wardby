@@ -14,6 +14,7 @@ import {
   buildRunPod,
   isRegistryDigest,
   kubernetesRunNames,
+  kubernetesRunNamesForToken,
   runLabels,
   validateKubernetesSpec,
 } from "./kubernetes-isolation.js";
@@ -167,6 +168,20 @@ describe("buildRunPod", () => {
       "}",
     ].join("\n");
     expect(init.command).toEqual(["node", "-e", expectedScript]);
+  });
+
+  it("derives every per-run object name through one naming source", () => {
+    const names = kubernetesRunNames(spec.runId);
+    const { runSha, ...fromRunId } = names;
+    expect(runSha.startsWith(names.token)).toBe(true);
+    expect(kubernetesRunNamesForToken(names.token)).toEqual(fromRunId);
+    expect(fromRunId).toEqual({
+      token: names.token,
+      pod: `wardby-run-${names.token}`,
+      policy: `wardby-run-${names.token}`,
+      record: `wardby-run-${names.token}`,
+      secret: `wardby-run-${names.token}-cap`,
+    });
   });
 
   it("denies DNS and reaches the proxy only through a hostAlias", () => {

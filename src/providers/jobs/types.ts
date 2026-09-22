@@ -59,6 +59,13 @@ export interface JobResult {
  * - no operation implicitly relaunches a missing, stopped, or removed job.
  */
 export interface JobLauncher {
+  /**
+   * The handle `launch(spec)` will return, when a backend can derive it from the spec alone with no
+   * side effects. Callers persist it *before* launching, so a crash mid-launch still leaves a handle
+   * to stop and remove the run's resources with. `launch` must return an equal handle. Backends that
+   * cannot know the handle in advance omit this, and callers persist only after `launch` returns.
+   */
+  plannedHandle?: (spec: JobSpec) => JobHandle | undefined;
   launch: (spec: JobSpec) => Promise<JobHandle>;
   status: (handle: JobHandle) => Promise<JobStatus>;
   collect: (handle: JobHandle) => Promise<JobResult>;

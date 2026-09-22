@@ -39,7 +39,7 @@ export const PROXY_POD_LABEL = { "app.kubernetes.io/name": "wardby-coding-proxy"
 export const CLUSTER_DNS_NAMESPACE = "kube-system";
 export const CLUSTER_DNS_SERVICE = "kube-dns";
 /** Exit code of the enforcement probe when the connect succeeded (policy not yet enforced). */
-export const ENFORCEMENT_PROBE_CONNECTED = 3;
+const ENFORCEMENT_PROBE_CONNECTED = 3;
 const WORKER_SERVICE_ACCOUNT = "wardby-coding-worker";
 const RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/;
 
@@ -87,12 +87,19 @@ export interface KubernetesRunNames {
   secret: string;
 }
 
+/**
+ * The per-run object names for a run token. The only place the naming scheme lives: the launcher
+ * resolves a handle's token through this, so names can never drift between creation and cleanup.
+ */
+export function kubernetesRunNamesForToken(token: string): Omit<KubernetesRunNames, "runSha"> {
+  const base = `wardby-run-${token}`;
+  return { token, pod: base, policy: base, record: base, secret: `${base}-cap` };
+}
+
 export function kubernetesRunNames(runId: string): KubernetesRunNames {
   if (!RUN_ID.test(runId)) throw isolationError();
   const digest = sha256(runId);
-  const token = digest.slice(0, 20);
-  const base = `wardby-run-${token}`;
-  return { token, runSha: digest.slice(0, 40), pod: base, policy: base, record: base, secret: `${base}-cap` };
+  return { ...kubernetesRunNamesForToken(digest.slice(0, 20)), runSha: digest.slice(0, 40) };
 }
 
 export function runLabels(runId: string): Record<string, string> {

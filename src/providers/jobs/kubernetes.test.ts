@@ -275,6 +275,35 @@ describe("KubernetesJobLauncher", () => {
   });
 });
 
+describe("KubernetesJobLauncher planned handles", () => {
+  it("derives the handle launch will return, without touching the cluster", async () => {
+    const h = await harness();
+    const planned = h.launcher.plannedHandle(h.spec);
+    expect(planned).toEqual({ backend: "kubernetes", id: `wardby-coding/${h.names.token}` });
+    expect(h.api.objects.has(`configmap/wardby-coding/${h.names.record}`)).toBe(false);
+    expect(await h.launcher.launch(h.spec)).toEqual(planned);
+  });
+
+  it("has no planned handle for a spec launch would refuse", async () => {
+    const h = await harness();
+    expect(h.launcher.plannedHandle({ ...h.spec, provider: "claude-code", toolImage: IMAGE })).toBeUndefined();
+    expect(h.launcher.plannedHandle({ ...h.spec, runId: "../escape" })).toBeUndefined();
+  });
+
+  it("cleans the cluster through a handle persisted before launch (crash recovery)", async () => {
+    const h = await harness();
+    const planned = h.launcher.plannedHandle(h.spec)!;
+    await h.launcher.launch(h.spec);
+    // The caller only ever saw the planned handle, as after a crash between launch and the DB write.
+    await h.launcher.stop(planned, "coding_ambiguous_provisioning");
+    await h.launcher.collect(planned);
+    await h.launcher.remove(planned);
+    expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+    expect(h.api.objects.has(`networkpolicy/wardby-coding/${h.names.policy}`)).toBe(false);
+    expect(h.api.objects.has(`secret/wardby-coding/${h.names.secret}`)).toBe(false);
+  });
+});
+
 describe("KubernetesJobLauncher failure handling", () => {
   const stagingLeftovers = async (h: Awaited<ReturnType<typeof harness>>) =>
     (await readdir(join(h.workspaceRoot, h.spec.runId))).filter((name) => name.startsWith(".wardby-workspace-"));

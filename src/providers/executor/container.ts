@@ -531,7 +531,15 @@ export class ContainerExecutor implements Executor {
         const inputArtifact = await this.writeInput(run, deadlineAt);
         const beforeLaunch = await this.requireCurrent(runId);
         if (TERMINAL_STATUSES.has(beforeLaunch.status)) throw new Error("coding_run_no_longer_active");
-        handle = await this.options.jobs.launch(this.jobSpec(run, inputArtifact));
+        const spec = this.jobSpec(run, inputArtifact);
+        // Backends whose handle is derivable (Kubernetes) persist it first, so a crash between the
+        // launch and the write still leaves a handle `abandon()` can stop and remove the run with.
+        const planned = this.options.jobs.plannedHandle?.(spec);
+        if (planned) await this.options.store.persistHandle(runId, claimId!, planned);
+        handle = await this.options.jobs.launch(spec);
+        if (planned && (planned.backend !== handle.backend || planned.id !== handle.id)) {
+          throw new Error("coding_job_handle_mismatch");
+        }
         await this.options.store.persistHandle(runId, claimId!, handle);
         this.options.capabilities.delete(runId);
         this.emit({ stage: "launched", runId, jobId: handle.id, budgetReservedUsd: run.budgetUsd });

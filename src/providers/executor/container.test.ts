@@ -60,6 +60,8 @@ function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSn
 class FakeStore implements ContainerExecutionStore {
   completions: unknown[] = [];
   terminations: unknown[] = [];
+  /** Every handle written, in order, so tests can see whether one was stored before launching. */
+  persistedHandles: JobHandle[] = [];
   heartbeats = 0;
 
   constructor(public run: ContainerRunSnapshot) {}
@@ -81,9 +83,14 @@ class FakeStore implements ContainerExecutionStore {
 
   async persistHandle(_runId: string, claimId: string, handle: JobHandle): Promise<void> {
     if (this.run.status !== "pending" && this.run.status !== "running") throw new Error("not_active");
+    // Mirrors the real store: re-persisting the same handle is a no-op, even once the claim is gone.
+    if (this.run.jobHandle) {
+      if (JSON.stringify(this.run.jobHandle) !== JSON.stringify(handle)) throw new Error("conflict");
+      this.persistedHandles.push(structuredClone(handle));
+      return;
+    }
     if (this.run.provisioningClaim !== claimId) throw new Error("claim_conflict");
-    if (this.run.jobHandle && JSON.stringify(this.run.jobHandle) !== JSON.stringify(handle))
-      throw new Error("conflict");
+    this.persistedHandles.push(structuredClone(handle));
     this.run.jobHandle = structuredClone(handle);
     this.run.provisioningClaim = null;
     this.run.status = "running";
@@ -109,6 +116,12 @@ class FakeStore implements ContainerExecutionStore {
 
 class FakeJobs implements WorkspaceJobLauncher {
   readonly handle = { backend: "fake", id: "job-1" };
+  /** Set to mimic a backend (Kubernetes) whose handle is known before the cluster is touched. */
+  planned?: JobHandle;
+  /** Set to make launch() fail the way a crash-prone provisioning would. */
+  launchError?: Error;
+  /** Runs at the start of launch(), so a test can observe what was already persisted. */
+  onLaunch?: () => void;
   launches = 0;
   materializations = 0;
   removals = 0;
@@ -130,12 +143,17 @@ class FakeJobs implements WorkspaceJobLauncher {
 
   constructor(private readonly events: string[]) {}
 
+  plannedHandle(spec: JobSpec): JobHandle | undefined {
+    return this.planned ? { ...this.planned, id: `${this.planned.id}-${spec.runId}` } : undefined;
+  }
   async launch(spec: JobSpec): Promise<JobHandle> {
     this.launches += 1;
     this.lastSpec = spec;
     this.specs.push(spec);
     this.events.push("launch");
-    return this.handle;
+    this.onLaunch?.();
+    if (this.launchError) throw this.launchError;
+    return this.plannedHandle(spec) ?? this.handle;
   }
   async status(): Promise<JobStatus> {
     return this.statusValue;
@@ -588,6 +606,64 @@ describe("ContainerExecutor", () => {
     expect(created.vcs.prepared).toBe(0);
     expect(created.sessions.creates).toBe(0);
     expect(created.jobs.launches).toBe(0);
+  });
+
+  it("persists a derivable handle before launching, and again after, idempotently", async () => {
+    const created = await harness({ status: "pending" });
+    created.jobs.planned = { backend: "fake", id: "planned" };
+    let persistedWhenLaunchStarted: unknown;
+    created.jobs.onLaunch = () => void (persistedWhenLaunchStarted = created.store.run.jobHandle);
+    await created.executor.start("run-1");
+    // The cluster is only touched once a handle exists to clean it up with.
+    expect(persistedWhenLaunchStarted).toEqual({ backend: "fake", id: "planned-run-1" });
+    expect(created.store.persistedHandles).toEqual([
+      { backend: "fake", id: "planned-run-1" },
+      { backend: "fake", id: "planned-run-1" },
+    ]);
+    expect(created.store.run.jobHandle).toEqual({ backend: "fake", id: "planned-run-1" });
+  });
+
+  it("keeps a persisted handle when a derivable launch throws, so recovery can clean the backend up", async () => {
+    const created = await harness({ status: "pending" });
+    created.jobs.planned = { backend: "fake", id: "planned" };
+    created.jobs.launchError = new Error("kubernetes_pod_start_timeout");
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("failed");
+    const handle = created.store.run.jobHandle;
+    expect(handle).toEqual({ backend: "fake", id: "planned-run-1" });
+
+    // A replica that crashed instead of failing cleanly finds the handle and removes the run's objects.
+    const crashed = await harness({ jobHandle: handle, proxySessionId: "session-1" });
+    crashed.jobs.statusValue = { state: "running" };
+    await expect(crashed.executor.recover({ runId: "run-1", backend: "fake", id: "other" })).resolves.toEqual({
+      state: "lost",
+      reason: "coding_job_handle_mismatch",
+    });
+    expect(crashed.jobs.stops).toBe(1);
+    expect(crashed.jobs.removals).toBe(1);
+  });
+
+  it("without a planned handle (Docker) persists only after launch", async () => {
+    const created = await harness({ status: "pending" });
+    let persistedWhenLaunchStarted: unknown = "unset";
+    created.jobs.onLaunch = () => void (persistedWhenLaunchStarted = created.store.run.jobHandle);
+    await created.executor.start("run-1");
+    expect(created.jobs.plannedHandle(created.jobs.lastSpec!)).toBeUndefined();
+    expect(persistedWhenLaunchStarted).toBeNull();
+    expect(created.store.persistedHandles).toEqual([{ backend: "fake", id: "job-1" }]);
+  });
+
+  it("fails closed when a launch returns a handle other than the one already persisted", async () => {
+    const created = await harness({ status: "pending" });
+    created.jobs.planned = { backend: "fake", id: "planned" };
+    created.jobs.launch = async (spec) => {
+      created.jobs.launches += 1;
+      created.jobs.lastSpec = spec;
+      return { backend: "fake", id: "something-else" };
+    };
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("failed");
+    expect(created.store.terminations.at(-1)).toMatchObject({ status: "failed" });
   });
 
   it("never relaunches a stale provisioning claim during recovery", async () => {
