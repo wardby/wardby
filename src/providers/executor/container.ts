@@ -3,6 +3,7 @@ import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "@prisma/client";
 import { CodingProfileSchema } from "../../coding/profile.js";
+import { logger } from "../../core/logger.js";
 import { codingRunObserver, type CodingRunObserver } from "../../coding/observability.js";
 import {
   CODING_PROTOCOL_VERSION,
@@ -20,6 +21,8 @@ import type { ProxyProtocol } from "../coding-proxy/types.js";
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
 import type { PreparedWorkspace, VcsPrepareInput, VcsProvider } from "../vcs/types.js";
 import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
+
+const containerLog = logger.child({ module: "container-executor" });
 
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "refused", "lost", "budget_exhausted", "cancelled"]);
 const PROVISIONING_BACKEND = "provisioning";
@@ -947,6 +950,14 @@ export class ContainerExecutor implements Executor {
   private failure(error: unknown): { error: string; audit: CodingFailureAudit } {
     const category = failureCategory(error);
     const diagnosticId = `coding_diag_${randomUUID()}`;
+    // The persisted error is deliberately opaque (it reaches the agent owner),
+    // so the operator needs the real reason somewhere: the control-plane log,
+    // keyed by the same diagnostic id. Token-shaped values are redacted, and a
+    // cause chain is kept because the outer message is often just a wrapper.
+    containerLog.warn(
+      { diagnosticId, category, reason: describeFailure(error) },
+      "coding run failed; the persisted error is the diagnostic id only",
+    );
     return { error: `coding_failure_${category}:${diagnosticId}`, audit: { failureCategory: category, diagnosticId } };
   }
 
@@ -954,6 +965,15 @@ export class ContainerExecutor implements Executor {
     const startedAt = this.startedAt.get(runId);
     return startedAt === undefined ? undefined : Math.max(0, this.now().getTime() - startedAt);
   }
+}
+
+/** Operator-facing failure text: the message plus its cause chain, redacted. */
+export function describeFailure(error: unknown, depth = 0): string {
+  if (depth > 4) return "…";
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "unknown";
+  const redacted = redactTokenShapedValues(message).slice(0, 500);
+  const cause = error instanceof Error ? error.cause : undefined;
+  return cause === undefined || cause === null ? redacted : `${redacted} <- ${describeFailure(cause, depth + 1)}`;
 }
 
 function safeError(error: unknown): string {

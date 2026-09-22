@@ -541,8 +541,10 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
           ...init.headers,
         },
       });
-    } catch {
-      throw new Error("github_api_unavailable");
+    } catch (error) {
+      // Keep the cause: the operator log needs the transport reason (DNS,
+      // TLS, connect timeout); the message itself stays fixed and safe.
+      throw new Error("github_api_unavailable", { cause: error });
     }
     if (!expectedStatuses.includes(response.status)) throw safeApiError(response);
     return response;

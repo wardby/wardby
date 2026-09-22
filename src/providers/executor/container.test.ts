@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryCodingRunObserver } from "../../coding/observability.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "../jobs/types.js";
 import type {
@@ -14,12 +14,39 @@ import type {
 import {
   ContainerExecutor,
   RunCapabilityVault,
+  describeFailure,
   type CodingSessionController,
   type ContainerExecutionStore,
   type ContainerExecutorOptions,
   type ContainerRunSnapshot,
   type ProvisioningClaim,
 } from "./container.js";
+
+/**
+ * The executor's operator log, captured. The persisted run error is a bare
+ * diagnostic id by design, so this log line is the only place the real reason
+ * exists — which makes it worth asserting on.
+ */
+const logged = vi.hoisted(() => [] as { level: string; payload: Record<string, unknown>; message: string }[]);
+vi.mock("../../core/logger.js", () => {
+  const make = (): Record<string, unknown> => {
+    const at =
+      (level: string) =>
+      (payload: Record<string, unknown>, message?: string): void => {
+        logged.push({ level, payload, message: message ?? "" });
+      };
+    return {
+      child: () => make(),
+      trace: at("trace"),
+      debug: at("debug"),
+      info: at("info"),
+      warn: at("warn"),
+      error: at("error"),
+      fatal: at("fatal"),
+    };
+  };
+  return { logger: make() };
+});
 
 const IMAGE = `registry.example/worker@sha256:${"a".repeat(64)}`;
 const CLAUDE_IMAGE = `registry.example/claude-worker@sha256:${"b".repeat(64)}`;
@@ -319,6 +346,10 @@ async function harness(
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+beforeEach(() => {
+  logged.length = 0;
 });
 
 describe("ContainerExecutor", () => {
@@ -874,5 +905,50 @@ describe("jobSpec image selection", () => {
     const { executor, jobs } = await harness({ workerImage: null });
     await executor.start("run-1");
     expect(jobs.lastSpec?.image).toBe(IMAGE);
+  });
+});
+
+describe("failure diagnostics", () => {
+  it("logs the real reason and cause chain next to the diagnostic id the run persists", async () => {
+    const created = await harness();
+    const token = `ghp_${"a".repeat(36)}`;
+    created.vcs.prepareWorkspace = () => {
+      // The shape that hid this bug: an opaque outer message whose real cause
+      // (and a credential in it) only lives on `cause`.
+      throw new Error("github_api_unavailable", { cause: new Error(`fetch failed for ${token}`) });
+    };
+
+    await created.executor.start("run-1");
+
+    // Exactly the live symptom this bug produced: refused before launch.
+    expect(created.store.run.status).toBe("refused");
+    const persisted = (created.store.terminations[0] as { error: string }).error;
+    const diagnosticId = persisted.split(":")[1];
+    expect(diagnosticId).toMatch(/^coding_diag_/);
+
+    const warning = logged.find((entry) => entry.level === "warn" && entry.payload.diagnosticId === diagnosticId);
+    expect(warning, "the failure must be logged against the same diagnostic id").toBeDefined();
+    const reason = String(warning?.payload.reason);
+    expect(reason).toContain("github_api_unavailable");
+    expect(reason).toContain("fetch failed");
+    // The reason is an operator log line, not the agent-facing error: it may
+    // not carry a credential that happened to land in an error message.
+    expect(reason).not.toContain(token);
+    expect(reason).toContain("[REDACTED]");
+    expect(JSON.stringify(logged)).not.toContain(token);
+  });
+
+  it("describeFailure keeps the cause chain, redacts token-shaped values, and stops recursing", () => {
+    const token = `ghp_${"b".repeat(36)}`;
+    expect(describeFailure(new Error(`boom ${token}`))).toBe("boom [REDACTED]");
+    expect(describeFailure(new Error("outer", { cause: new Error("inner") }))).toBe("outer <- inner");
+    expect(describeFailure("plain string")).toBe("plain string");
+    expect(describeFailure({ not: "an error" })).toBe("unknown");
+
+    let deepest: Error = new Error("bottom");
+    for (let level = 0; level < 8; level += 1) deepest = new Error(`level${level}`, { cause: deepest });
+    const described = describeFailure(deepest);
+    expect(described.endsWith("…")).toBe(true);
+    expect(described.split(" <- ").length).toBe(6);
   });
 });
