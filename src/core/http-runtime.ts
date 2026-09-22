@@ -1,7 +1,7 @@
 /**
- * Process-wide HTTP runtime: wardby's `fetch` stack is userland undici's, not
- * Node's built-in one. Imported for its side effect, first, by every runtime
- * entry point.
+ * Process-wide HTTP runtime. One call, at bootstrap: it hands Node's built-in
+ * `fetch` a global dispatcher it can actually drive. Imported for its side
+ * effect, first, by every runtime entry point.
  *
  * WHY. `@kubernetes/client-node` 2 depends on userland `undici` 8. Merely
  * importing it (which `providers/executor/composition.ts` does unconditionally,
@@ -10,36 +10,55 @@
  * `Symbol.for("undici.globalDispatcher.2")` gets its `Agent`, and the legacy
  * `Symbol.for("undici.globalDispatcher.1")` gets a `Dispatcher1Wrapper` around
  * it. Node's built-in `fetch` (undici 7.x, `process.versions.undici`) reads that
- * legacy symbol and gets the wrapper — so every built-in `fetch` in the process
- * is then dispatched by undici 8.
+ * legacy symbol, so from then on every built-in `fetch` in the process is
+ * dispatched by undici 8 through that compatibility wrapper.
  *
- * That bridge is silently lossy over HTTP/2. undici 8 negotiates h2 via ALPN by
- * default while Node's built-in client offers http/1.1 only, so the connection
- * is upgraded underneath a fetch implementation that never asked for it, and
- * the wrapper's h2 response path never reaches the built-in handler's header and
- * content-encoding handling: the `Response` comes back with ZERO headers and an
- * undecompressed body. `response.json()` on any gzip response then throws
- * `Unexpected token '\x1f' ... is not valid JSON`. Plain HTTP/1.1 is unaffected,
- * which is why only real APIs break — every one wardby calls speaks h2: the
- * GitHub App client (`/repos/{owner}/{repo}/installation`, which refused every
- * coding run before launch), the Anthropic and OpenAI SDKs, the OIDC/JWKS
- * fetches, and anything else on global `fetch`.
+ * The wrapper is lossless over HTTP/1.1 and broken over HTTP/2, for one exact
+ * reason: `undici/lib/core/request.js:339` sets `controller.rawHeaders` to the
+ * flat raw header ARRAY on the h1 path but to the http2 headers OBJECT on the
+ * h2 path (`lib/dispatcher/client-h2.js:1449`), and
+ * `lib/dispatcher/dispatcher1-wrapper.js:25-31` forwards that value straight
+ * into the v1 `onHeaders(statusCode, rawHeaders, …)` contract. The built-in
+ * handler walks it by index; an object has no `length`; so it observes ZERO
+ * headers. Not just `content-encoding` (hence gzip bodies reaching
+ * `response.json()` as `Unexpected token '\x1f'`) — also `location`, so
+ * redirect following silently stops, plus `set-cookie`, `retry-after` and every
+ * rate-limit header. undici 8 offers h2 in ALPN by default and the built-in
+ * client never did, so the connection is upgraded underneath a fetch
+ * implementation that never asked for it. That is why only real APIs broke: the
+ * GitHub App client (refusing every coding run before launch), the
+ * OpenAI/Anthropic/Bedrock SDKs, and remote-JWKS verification in delegating auth
+ * mode. Plain h1 — every local test server — is unaffected.
  *
- * FIX. Own the stack instead of straddling it: use undici 8's own `fetch` (and
- * the classes it brand-checks against), which reads the `.2` symbol it also
- * sets, so dispatcher and client are the same implementation. Undoing the
- * poisoning is not an option — undici 8 defines the legacy symbol
- * non-configurable, so restoring Node's dispatcher afterwards throws
- * `TypeError: Cannot redefine property`.
+ * FIX. Keep the built-in `fetch` and give it a dispatcher that stays on the
+ * protocol it was written for: undici 8's own `Agent` with `allowH2: false`.
+ * The incompatibility is h2-only, and none of these calls ever negotiated h2
+ * before this branch, so disabling it costs nothing and restores the exact wire
+ * protocol the control plane had.
  *
- * This is `undici.install()` minus the globals wardby does not want replaced:
- * `install()` also swaps `WebSocket`/`CloseEvent`/`ErrorEvent`/`MessageEvent`/
- * `EventSource`, and nothing here uses those globals (the Kubernetes exec path
- * goes through `isomorphic-ws` → the `ws` package, the MCP SSE client through
- * the `eventsource` package), so replacing them would be blast radius without
- * benefit. The five installed below are one unit deliberately: `fetch` returns
- * undici's `Response`, so `Headers`/`Response`/`Request`/`FormData` have to be
- * undici's too or `instanceof` and brand checks straddle two implementations.
+ * WHY NOT replace the globals. Installing undici's `fetch`/`Headers`/`Response`/
+ * `Request`/`FormData` process-wide also works, but it swaps the classes under
+ * the MCP SDK, the OpenAI/Anthropic/Bedrock SDKs (all of which brand-check
+ * `Headers`/`Response`), `FormData`/`Blob` uploads, `AbortSignal` semantics and
+ * every cross-realm `instanceof` — real risk, for no gain over one dispatcher
+ * option. It would also move all control-plane egress to h2.
+ *
+ * ORDERING. undici's `lib/global.js` installs its own default `Agent` only when
+ * `getGlobalDispatcher() === undefined`, so this call has to land FIRST: after
+ * it, the Kubernetes client's later import finds a dispatcher already set and
+ * leaves it alone. (`http-runtime.test.ts` asserts exactly that — the dispatcher
+ * object is identical before and after importing `@kubernetes/client-node`.)
+ * Note this module's own `import { Agent } from "undici"` is what first loads
+ * undici 8, so undici sets its h2-enabled default Agent a moment before
+ * `setGlobalDispatcher` replaces it; nothing issues a request in between.
+ *
+ * Restoring Node's OWN dispatcher instead is not possible, though not for the
+ * reason one might guess: undici defines the legacy symbol `configurable: false`
+ * but `writable: true`, so a plain assignment would be allowed and only
+ * `Object.defineProperty` (what `setGlobalDispatcher` uses) throws
+ * `TypeError: Cannot redefine property`. The real blocker is that Node's
+ * internal dispatcher instance is not reachable from userland once it has been
+ * overwritten.
  *
  * WHERE. Imported from `env.ts` rather than from each entry point: `env.ts` is
  * already the documented single runtime load point, is already the first import
@@ -53,29 +72,20 @@
  * package.json`), never load the Kubernetes client, and have no `undici` to
  * import.
  */
-import {
-  fetch as undiciFetch,
-  FormData as UndiciFormData,
-  Headers as UndiciHeaders,
-  Request as UndiciRequest,
-  Response as UndiciResponse,
-} from "undici";
+import { Agent, setGlobalDispatcher } from "undici";
 
 const INSTALLED = Symbol.for("wardby.httpRuntime.installed");
 
 /**
- * Installs undici's fetch stack over the built-in globals. Idempotent: safe to
- * import or call repeatedly (module graphs are per-entry-point under tsx and
- * per-file under Vitest, so it is imported many times in one process).
+ * Pins the process's global HTTP dispatcher to an h1-only undici 8 Agent.
+ * Idempotent: safe to import or call repeatedly (module graphs are per-entry-
+ * point under tsx and per-file under Vitest, so it is imported many times in
+ * one process), and it never replaces a dispatcher it already installed.
  */
 export function installHttpRuntime(): void {
   const marker = globalThis as unknown as Record<symbol, boolean | undefined>;
   if (marker[INSTALLED] === true) return;
-  globalThis.fetch = undiciFetch as unknown as typeof globalThis.fetch;
-  globalThis.Headers = UndiciHeaders as unknown as typeof globalThis.Headers;
-  globalThis.Response = UndiciResponse as unknown as typeof globalThis.Response;
-  globalThis.Request = UndiciRequest as unknown as typeof globalThis.Request;
-  globalThis.FormData = UndiciFormData as unknown as typeof globalThis.FormData;
+  setGlobalDispatcher(new Agent({ allowH2: false }));
   marker[INSTALLED] = true;
 }
 
