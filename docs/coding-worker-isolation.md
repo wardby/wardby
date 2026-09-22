@@ -1,9 +1,11 @@
 # Coding Worker Isolation
 
-Date: 2026-09-07
+Date: 2026-09-07 (Docker isolation); Kubernetes launcher section added 2026-09-22
 
-Status: Tasks 8-10 complete; the routed container executor, Docker JobLauncher,
-and trusted VCS finalizer execute and attest this policy without weakening it.
+Status: Docker JobLauncher tasks 8-10 complete; the routed container executor,
+Docker JobLauncher, and trusted VCS finalizer execute and attest this policy
+without weakening it. The Kubernetes launcher (Phase 12 Plan 2a) is complete
+for Codex on `kind`; see its section below for status and known gaps.
 
 ## Security Boundary
 
@@ -124,12 +126,16 @@ For Claude Code, also set `CODING_CLAUDE_WORKER_IMAGE` and
 `VCS_WORK_ROOT`, `CODING_JOB_STATE_ROOT`, and `CODING_ARTIFACT_ROOT` must be
 trusted host-only directories. Resource limits are controlled by
 `CODING_CPUS`, `CODING_MEMORY_MB`, `CODING_PIDS`, and `CODING_DISK_MB`.
-`CODING_MAX_DISK_MB` (default `8192`, must be an integer between 64 and
-32768 and at least the effective `CODING_DISK_MB`) is the operator ceiling
-on the per-agent `workspaceDiskMb` coding-profile field described below —
-without it, any `agents:write` caller could size a run's workspace disk up
-to 32 GiB (Docker: a RAM-backed tmpfs; Kubernetes: an `emptyDir`), times
-`CODING_MAX_CONCURRENT`, on every run.
+`CODING_MAX_DISK_MB` (must be an integer between 64 and 32768 and at least
+the effective `CODING_DISK_MB`; **defaults to the effective `CODING_DISK_MB`
+itself**, not a larger number) is the operator ceiling on the per-agent
+`workspaceDiskMb` coding-profile field described below — without it, any
+`agents:write` caller could size a run's workspace disk up to 32 GiB
+(Docker: a RAM-backed tmpfs; Kubernetes: an `emptyDir`), times
+`CODING_MAX_CONCURRENT`, on every run. Defaulting the ceiling to the
+existing disk size means upgrading to this branch changes nothing for a
+deployment that doesn't set `CODING_MAX_DISK_MB`: `workspaceDiskMb` stays
+inert until an operator explicitly raises the ceiling above `CODING_DISK_MB`.
 
 A coding agent's profile carries an optional `workspaceDiskMb` (MiB; `null`
 means "use the deployment default `CODING_DISK_MB`"). It is snapshotted onto
@@ -288,10 +294,13 @@ One pod per run, built by the canonical, deny-by-default policy in
   `min(64, max(16, memoryMb/8))` MiB), matching Docker's bounded tmpfs mounts.
 - `dnsPolicy: None` with `dnsConfig.nameservers: ["127.0.0.1"]` — **no DNS is
   configured for worker/agent pods at all.** The proxy is reached by name
-  (`WARDBY_PROXY_URL=http://wardby-coding-proxy:8787`, the proxy checks the
-  `Host` header) only because the pod's `hostAliases` maps that hostname
-  directly to the proxy Service's ClusterIP — closing DNS as an
-  exfiltration channel without needing a resolver at all.
+  (`WARDBY_PROXY_URL=http://wardby-proxy:8787` — `CODING_PROXY_ALIAS` in
+  `docker-isolation.ts`, the same alias the Docker launcher uses; this is
+  distinct from the `KUBERNETES_PROXY_SERVICE` Kubernetes Service name,
+  `wardby-coding-proxy` by default — the proxy checks the `Host` header)
+  only because the pod's `hostAliases` maps `wardby-proxy` directly to the
+  proxy Service's ClusterIP — closing DNS as an exfiltration channel
+  without needing a resolver at all.
 - `activeDeadlineSeconds = spec.timeoutSec + POD_DEADLINE_GRACE_SECONDS`
   (300s) — a **backstop only**. The launcher enforces the real wall-clock
   deadline itself (`observePod` in `kubernetes.ts`); the extra 300s exists so
@@ -332,8 +341,24 @@ it_ (`kubernetes.ts`, `remove()`) — the contract is that a removed run is
 never relaunched, and the record is what a later `launch()` call for the
 same run ID checks. Nothing today garbage-collects old tombstones, so they
 accumulate — one small ConfigMap per run, forever — until a GC follow-up
-ships. On a busy cluster this is etcd growth to budget for operationally,
-not a correctness or security problem.
+ships. **A launch that fails during provisioning accumulates a record too**,
+not just a `remove()`d run's tombstone: the failure path writes `phase:
+"failed"` and the executor never calls `remove()` for a launch that threw,
+so every failed launch leaves a permanent record as well. On a busy cluster
+this is etcd growth to budget for operationally, not a correctness or
+security problem — see "Known gaps" below.
+
+**The executor persists a run's job handle before calling `jobs.launch()`,
+closing the crash window that would otherwise orphan a running pod.** The
+Kubernetes handle (`{ backend: "kubernetes", id: "<namespace>/<token>" }`)
+is fully derivable from the run ID alone, with no cluster call, so it can be
+(and is) written to the run record before the launcher ever creates
+anything. If the control plane crashes or is replaced mid-launch — after the
+pod has been attested and the worker gate has opened, but before the old
+code path would have recorded the handle — the run's handle is already on
+record, so restart reconciliation can find, stop, and clean up the pod,
+NetworkPolicy, and capability Secret through the normal `abandon()` path
+instead of leaking them permanently.
 
 ### Attestation — deny-by-default, fail closed
 
@@ -411,15 +436,33 @@ default 90,000ms):
 
 1. `namespace` — the configured namespace exists.
 2. `proxy-service` — the proxy Service exists and has a ClusterIP.
-3. `cluster-dns` — reads `kube-system/kube-dns`'s ClusterIP. **This check
-   (and the enforcement gate above) assume the cluster's DNS Service is
-   literally named `kube-dns` in `kube-system` with a real ClusterIP and
-   endpoints.** A cluster whose DNS service has a different name, or whose
-   DNS service has no endpoints (e.g. **GKE with Cloud DNS**, which doesn't
-   run kube-dns as pods), makes this check — and the `clusterDns` half of
-   the canary probe — vacuous: there's nothing there to actually be blocked
-   by a policy. On GKE the metadata-server probe (`169.254.169.254:80`) is
-   the enforcement witness instead.
+3. `cluster-dns` — reads `kube-system/kube-dns`'s ClusterIP **and requires
+   at least one ready endpoint behind it**, failing closed with
+   `kubernetes_isolation_unsupported:cluster-dns` if there is none. This
+   check (and the enforcement gate above, and the canary's `clusterDns`
+   probe) all use this same Service as their sole witness that a
+   NetworkPolicy is actually enforced: kube-dns backends are ordinary pods,
+   so only a NetworkPolicy can block a connection to them — but only if
+   something is actually listening. Without the endpoint check, a DNS
+   Service with no pod backends (e.g. **GKE with Cloud DNS**, which doesn't
+   run kube-dns as pods at all) would make every connection attempt fail
+   with "nothing there to connect to" regardless of whether any policy is
+   enforced, so the witness would read as "blocked" vacuously and the
+   enforcement gate would open before the CNI had actually programmed the
+   run's policy. Because both the preflight and the launcher's per-launch
+   enforcement gate (§ above) share this same witness read, this check
+   failing closed also blocks every `launch()` from proceeding on such a
+   cluster — **coding execution simply does not work there today**, rather
+   than silently running unpoliced. A cluster whose DNS Service has a
+   different name is affected the same way (`readService` returns nothing
+   → `kubernetes_cluster_dns_unavailable` / `:cluster-dns`). Getting coding
+   agents working on GKE-with-Cloud-DNS (or any endpoint-less-kube-dns
+   cluster) needs a follow-up: either an endpoint-backed alternative
+   witness (`default/kubernetes:443` is a candidate — it always has
+   backends and is already proven blocked under the run policy by the
+   real-cluster integration suite) or the metadata-server probe promoted
+   from a canary-only signal to the per-launch gate's own witness. See
+   "Known gaps" below.
 4. `worker-image` — `CODING_WORKER_IMAGE` is a registry digest.
 5. `canary` — creates a real run pod + NetworkPolicy from the same builders
    as a live run, running a script that waits for policy enforcement (as
@@ -443,9 +486,21 @@ NetworkPolicy behind.** If `createPod` never settles (rather than failing),
 the preflight's own timeout still fires and the caller sees `:timeout`, but
 cleanup for that pod/policy is deferred to whenever the stuck create call
 eventually resolves (`tracked`/`lateCleanup` in `kubernetes-preflight.ts`) —
-if it never does, the objects are never removed automatically. Operators
-should check for stray `wardby-run-preflight-*` pods/policies after a
-`:timeout` failure.
+if it never does, the objects are never removed automatically. **A canary
+pod and policy are not distinguishable by name from a real run's:** both are
+named `wardby-run-<runId's sha256 prefix>` (`kubernetesRunNames`,
+`kubernetes-isolation.ts:90-96`, used by the preflight at
+`kubernetes-preflight.ts:218,241`) and carry the same
+`wardby.io/component: coding-run` label as a live run
+(`kubernetes-isolation.ts:98-104,249`) — there is no
+`wardby-run-preflight-*` naming pattern. After a `:timeout` failure,
+operators should instead list every object with
+`wardby.io/component=coding-run` in the namespace and cross-reference
+against the run record ConfigMaps that legitimately exist (a stray canary
+object has no corresponding non-tombstoned run record, since preflight
+never creates one). Giving preflight objects a distinguishing label (e.g.
+`wardby.io/component: coding-preflight`) is a tracked follow-up — see
+"Known gaps" below — that would make this a direct label query instead.
 
 ### RBAC actually required
 
@@ -501,7 +556,7 @@ spec corrections below. A later milestone has the worker write a structured
 `diagnostic.json` instead, which the launcher will prefer once it exists —
 not implemented yet.
 
-### Known gaps
+### Known gaps / follow-up plan (Plan 2b)
 
 - **No gVisor / per-pod process (PID) limit on `kind`.** `kind` has no
   runtime-class sandboxing; `KUBERNETES_RUNTIME_CLASS` is unset in the local
@@ -533,6 +588,39 @@ not implemented yet.
   it. Every manifest instead sets its own `metadata.namespace` explicitly.
   Any overlay author copying this harness for another cluster must do the
   same.
+- **Per-run record ConfigMap GC is unimplemented.** Both `remove()`'s
+  deliberate tombstones and a failed launch's records (see above)
+  accumulate forever, one small ConfigMap per run, with nothing that ever
+  deletes them. Needed before a long-lived production deployment; not a
+  correctness or security issue, an operational one (etcd growth).
+- **A real, endpoint-guaranteed enforcement witness for GKE Autopilot.**
+  The `cluster-dns` preflight check now fails closed when `kube-dns` has no
+  ready endpoints (see "Preflight" above), which stops coding execution
+  from silently running unpoliced on such a cluster — but it does not make
+  coding execution _work_ there. GKE Autopilot with Cloud DNS needs an
+  alternative witness (`default/kubernetes:443`, or promoting the
+  metadata-server probe from canary-only to the per-launch gate) before
+  it can run coding agents at all. Tracked as a Plan 3 blocker.
+- **Autopilot attestation allowances are not yet modeled.** Attestation
+  compares the read-back pod annotations and resource quantities exactly;
+  GKE Autopilot is known to add its own annotations and to round
+  requests/limits, so as shipped, Autopilot will fail every attestation.
+  Plan 3 needs an explicit, narrow allowance list for whatever Autopilot is
+  confirmed to add/round, following the same "only what the platform is
+  known to do" discipline as the existing server-default normalization.
+- **A distinguishing label for preflight/canary objects.** Canary pods and
+  policies are currently named and labeled identically to real run objects
+  (`wardby.io/component: coding-run`), which is why the troubleshooting
+  guidance above can only recommend cross-referencing against run records
+  rather than a direct label query. Giving preflight objects their own
+  `wardby.io/component: coding-preflight` label would fix this and would
+  also let a future orphan reaper (the ConfigMap GC item above, extended to
+  pods) tell a canary apart from a live run.
+- **The real-cluster integration suite still uses the deprecated core/v1
+  `Endpoints` API** (`kubernetes.integration.test.ts`) rather than
+  `discovery.k8s.io/v1` `EndpointSlice`. `Endpoints` is deprecated, not yet
+  removed, and this is test-only code, but the migration is a tracked
+  follow-up rather than something to re-discover later.
 
 ### Troubleshooting: failure codes
 

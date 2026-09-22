@@ -75,15 +75,21 @@ schema in `schema.prisma` — the diff must be empty. Verify it before committin
 
 ```bash
 npm run db:up                       # local Postgres on :55432 (docker compose)
-docker exec local-postgres-1 psql -U wardby -d wardby \
+docker exec local-postgres-1 psql -U reevo -d reevo \
   -c "DROP DATABASE IF EXISTS wardby_shadow;" -c "CREATE DATABASE wardby_shadow;"
 npx prisma migrate diff \
   --from-migrations prisma/migrations \
   --to-schema-datamodel prisma/schema.prisma \
-  --shadow-database-url "postgresql://wardby:wardby@localhost:55432/wardby_shadow" \
+  --shadow-database-url "postgresql://reevo:reevo@localhost:55432/wardby_shadow" \
   --script
-docker exec local-postgres-1 psql -U wardby -d wardby -c "DROP DATABASE IF EXISTS wardby_shadow;"
+docker exec local-postgres-1 psql -U reevo -d reevo -c "DROP DATABASE IF EXISTS wardby_shadow;"
 ```
+
+(This repo's local `local-postgres-1` container still uses the pre-rename
+`reevo`/`reevo` role and database, not `wardby`/`wardby` — the role/db name
+was never migrated when the project renamed. If this fails with a role or
+database "does not exist" error, check the running container's
+`POSTGRES_USER`/`POSTGRES_DB` environment and use those instead.)
 
 **Clean = the output is `-- This is an empty migration.`** Any `CREATE`,
 `ALTER`, `DROP`, or index statement means the schema and migrations disagree —

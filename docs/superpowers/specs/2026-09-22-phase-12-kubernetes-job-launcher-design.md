@@ -55,9 +55,12 @@ failure mode a reviewer or a real cluster surfaced.
    per-run capability Secret; the deadline is also enforced by the pod's
    `activeDeadlineSeconds` as a backstop. No local state files, no
    in-process timers.
-4. **Proxy addressing (§5).** Workers keep `WARDBY_PROXY_URL=http://wardby-coding-proxy:8787`
-   (the proxy checks the `Host` header); the pod maps that hostname to the
-   proxy Service's ClusterIP with `hostAliases`, so no DNS is needed at all.
+4. **Proxy addressing (§5).** Workers keep `WARDBY_PROXY_URL=http://wardby-proxy:8787`
+   (`CODING_PROXY_ALIAS`, the same alias the Docker launcher uses — distinct
+   from the `KUBERNETES_PROXY_SERVICE` Kubernetes Service name,
+   `wardby-coding-proxy` by default; the proxy checks the `Host` header); the
+   pod maps that alias to the proxy Service's ClusterIP with `hostAliases`,
+   so no DNS is needed at all.
 5. **Start gate (§3).** The worker container's command is overridden to
    wait for a seeded marker file before importing the real entrypoint,
    rather than using a native sidecar — Kubernetes terminates sidecars when
@@ -139,6 +142,17 @@ real-cluster testing):**
     "canary fails when a policy is removed", and "the tool pod has no
     network" (moot until Claude Code's two-pod layout ships). Tracked as a
     Plan 2b follow-up alongside Claude Code support itself.
+14. **This corrections section itself had the proxy hostname wrong (final
+    review finding I4, 2026-09-22).** Correction 4 above and §5's body text
+    both originally repeated `WARDBY_PROXY_URL=http://wardby-coding-proxy:8787`
+    — the Kubernetes Service name (`KUBERNETES_PROXY_SERVICE`), not the
+    `hostAliases` alias the pod actually resolves. The real value is
+    `http://wardby-proxy:8787` (`CODING_PROXY_ALIAS`,
+    `kubernetes-isolation.ts:185,224`; `docker-isolation.ts:8`) — the same
+    alias the Docker launcher has always used. The implementation plan had
+    this right throughout; only this spec's corrections record (the
+    document meant to be authoritative about what shipped) was wrong, which
+    is corrected in place above and in §5.
 
 ## 1. Goal and non-goals
 
@@ -361,12 +375,14 @@ with `dnsConfig.nameservers: ["127.0.0.1"]` (a loopback address nothing
 listens on, so any resolution attempt fails), so there is no resolver
 configured at all — DNS is not merely blocked by the NetworkPolicy, it has
 nothing to reach. The proxy is still addressed by its Docker-launcher-era
-hostname (`WARDBY_PROXY_URL=http://wardby-coding-proxy:8787`; the proxy
-checks the `Host` header), which resolves without DNS because the pod's
-`hostAliases` maps that hostname directly to the proxy Service's ClusterIP
-(read once by the launcher before the pod is created). This closes DNS as
-an exfiltration channel and matches today's "no custom DNS" rule while
-letting the worker keep the same proxy URL Docker runs use.
+alias (`WARDBY_PROXY_URL=http://wardby-proxy:8787`, `CODING_PROXY_ALIAS`;
+distinct from `KUBERNETES_PROXY_SERVICE`, the Kubernetes Service name
+`wardby-coding-proxy`; the proxy checks the `Host` header), which resolves
+without DNS because the pod's `hostAliases` maps `wardby-proxy` directly to
+the proxy Service's ClusterIP (read once by the launcher before the pod is
+created). This closes DNS as an exfiltration channel and matches today's
+"no custom DNS" rule while letting the worker keep the same proxy URL
+Docker runs use.
 
 **Attestation, fail closed.**
 

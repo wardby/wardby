@@ -151,6 +151,17 @@ PROXY_DATABASE_URL="${PROXY_DATABASE_URL/@127.0.0.1:/@host.docker.internal:}"
 # piped straight into `kubectl apply -f -`; no secret value is ever passed
 # as a command-line argument (contrast the previous `--from-literal=...`,
 # which put every value in kubectl's argv for the life of the process).
+#
+# Each b64 call is computed into its own variable first, rather than inlined
+# as `$(b64 ...)` inside the printf argument list below: `set -e` does not
+# abort the script on a failing command substitution nested inside another
+# command's arguments, so an inlined, silently-failing `b64` would print an
+# empty Secret value instead of stopping the script. Assigning to a plain
+# variable makes the substitution its own command, which `set -e` does
+# abort on.
+DATABASE_URL_B64="$(b64 "$PROXY_DATABASE_URL")"
+OPENAI_API_KEY_B64="$(b64 "$OPENAI_API_KEY")"
+ANTHROPIC_API_KEY_B64="$(b64 "$ANTHROPIC_API_KEY")"
 {
   printf 'apiVersion: v1\n'
   printf 'kind: Secret\n'
@@ -159,11 +170,12 @@ PROXY_DATABASE_URL="${PROXY_DATABASE_URL/@127.0.0.1:/@host.docker.internal:}"
   printf '  name: wardby-coding-proxy-env\n'
   printf '  namespace: wardby-coding\n'
   printf 'data:\n'
-  printf '  DATABASE_URL: %s\n' "$(b64 "$PROXY_DATABASE_URL")"
-  printf '  OPENAI_API_KEY: %s\n' "$(b64 "$OPENAI_API_KEY")"
-  printf '  ANTHROPIC_API_KEY: %s\n' "$(b64 "$ANTHROPIC_API_KEY")"
+  printf '  DATABASE_URL: %s\n' "$DATABASE_URL_B64"
+  printf '  OPENAI_API_KEY: %s\n' "$OPENAI_API_KEY_B64"
+  printf '  ANTHROPIC_API_KEY: %s\n' "$ANTHROPIC_API_KEY_B64"
 } | kubectl --context "$KUBE_CONTEXT" apply -f -
-unset DATABASE_URL OPENAI_API_KEY ANTHROPIC_API_KEY PROXY_DATABASE_URL
+unset DATABASE_URL OPENAI_API_KEY ANTHROPIC_API_KEY PROXY_DATABASE_URL \
+  DATABASE_URL_B64 OPENAI_API_KEY_B64 ANTHROPIC_API_KEY_B64
 
 echo "==> 8/${TOTAL_STEPS} render and apply the manifests"
 kubectl kustomize "${MANIFEST_DIR}/manifests/overlays/kind" \
