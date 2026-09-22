@@ -1,7 +1,7 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { FakeKubernetesApi } from "./fake-kubernetes-api.js";
-import { KubernetesAlreadyExistsError, KubernetesConflictError } from "./kubernetes-api.js";
+import { KubernetesAlreadyExistsError, KubernetesConflictError, KubernetesNotFoundError } from "./kubernetes-api.js";
 
 describe("FakeKubernetesApi", () => {
   it("creates, reads, and conflict-checks ConfigMap replacement by resourceVersion", async () => {
@@ -28,6 +28,7 @@ describe("FakeKubernetesApi", () => {
 
   it("routes exec through a per-container handler and returns its exit code", async () => {
     const api = new FakeKubernetesApi();
+    await api.createPod("ns", { metadata: { name: "p" }, spec: { containers: [{ name: "keeper" }] } });
     api.onExec = async ({ container, command, stdout }) => {
       stdout?.end(`${container}:${command.join(" ")}`);
       return 0;
@@ -37,5 +38,16 @@ describe("FakeKubernetesApi", () => {
     out.on("data", (c: Buffer) => chunks.push(c));
     expect(await api.exec("ns", "p", "keeper", ["echo", "hi"], { stdout: out, timeoutMs: 1000 })).toBe(0);
     expect(Buffer.concat(chunks).toString()).toBe("keeper:echo hi");
+  });
+
+  it("rejects an exec into a missing pod or an unknown container", async () => {
+    const api = new FakeKubernetesApi();
+    await expect(api.exec("ns", "gone", "keeper", ["true"], { timeoutMs: 1000 })).rejects.toBeInstanceOf(
+      KubernetesNotFoundError,
+    );
+    await api.createPod("ns", { metadata: { name: "p" }, spec: { containers: [{ name: "keeper" }] } });
+    await expect(api.exec("ns", "p", "worker", ["true"], { timeoutMs: 1000 })).rejects.toBeInstanceOf(
+      KubernetesNotFoundError,
+    );
   });
 });

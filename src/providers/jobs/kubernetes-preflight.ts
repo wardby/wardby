@@ -295,7 +295,25 @@ async function runChecks(
 
   const clusterDnsIp = await runCheck("cluster-dns", async () => {
     const service = await api.readService(CLUSTER_DNS_NAMESPACE, CLUSTER_DNS_SERVICE);
-    return serviceClusterIp(service?.spec?.clusterIP, "cluster-dns");
+    const ip = serviceClusterIp(service?.spec?.clusterIP, "cluster-dns");
+    // The per-launch gate treats "cannot connect to this IP" as "policy is enforced". A Service with
+    // no ready backends (e.g. GKE Cloud DNS, where no kube-dns pods run) refuses every connection, so
+    // the gate would pass ~1s after pod start without any policy being programmed. Require a ready
+    // endpoint address, or fail closed: such a cluster needs a different enforcement witness.
+    // (EndpointSlice is the durable successor to the core/v1 Endpoints read here; migration is a follow-up.)
+    const endpoints = await api.readEndpoints(CLUSTER_DNS_NAMESPACE, CLUSTER_DNS_SERVICE);
+    const ready = (endpoints?.subsets ?? []).some((subset) =>
+      (subset.addresses ?? []).some((address) => typeof address.ip === "string" && isIP(address.ip) !== 0),
+    );
+    if (!ready) {
+      throw failure(
+        "cluster-dns",
+        new Error(
+          `${CLUSTER_DNS_NAMESPACE}/${CLUSTER_DNS_SERVICE} has no ready endpoint address, so it cannot witness NetworkPolicy enforcement; this cluster needs a different witness`,
+        ),
+      );
+    }
+    return ip;
   });
   passed.push("cluster-dns");
 

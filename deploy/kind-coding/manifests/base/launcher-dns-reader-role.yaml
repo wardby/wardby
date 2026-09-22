@@ -11,6 +11,9 @@ metadata:
   namespace: kube-system
 rules:
   - apiGroups: [""]
-    resources: ["services"]
+    # The endpoints read proves kube-dns has ready backends, so "cannot connect" really means
+    # "NetworkPolicy is enforced" rather than "nothing is listening". EndpointSlice is the durable
+    # successor to Endpoints; migrating is a follow-up and needs its own resourceNames grant.
+    resources: ["services", "endpoints"]
     resourceNames: ["kube-dns"]
     verbs: ["get"]

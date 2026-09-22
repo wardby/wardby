@@ -619,9 +619,33 @@ describe("KubernetesJobLauncher deadlines and launch races", () => {
     await seeding.parked;
     await h.launcher.stop(handle);
     seeding.release();
-    await expect(launching).rejects.toThrow("kubernetes_launch_superseded");
+    // The stop deletes the pod, so the parked seed exec fails on the way out; either way the gate stays shut.
+    await expect(launching).rejects.toThrow(/kubernetes_(seed_failed|launch_superseded)/);
     expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
     expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+    expect(await h.launcher.status(handle)).toEqual({ state: "stopped" });
+  });
+
+  it("refuses to open the gate when another replica finished the run during seeding", async () => {
+    const h = await harness();
+    const handle = { backend: "kubernetes", id: `wardby-coding/${h.names.token}` };
+    const seeding = parkExec(h, isWorkspaceSeed);
+    const launching = h.launcher.launch(h.spec);
+    await seeding.parked;
+    // Another replica records a terminal phase without touching the pod, so seeding still succeeds.
+    const record = h.api.objects.get(`configmap/wardby-coding/${h.names.record}`) as {
+      data: Record<string, string>;
+    };
+    const parsed = JSON.parse(record.data["record.json"]) as Record<string, unknown>;
+    h.api.put("configmap", "wardby-coding", {
+      metadata: { name: h.names.record },
+      data: {
+        "record.json": JSON.stringify({ ...parsed, phase: "stopped", result: { exitCode: 143, reason: "stopped" } }),
+      },
+    });
+    seeding.release();
+    await expect(launching).rejects.toThrow("kubernetes_launch_superseded");
+    expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
     expect(await h.launcher.status(handle)).toEqual({ state: "stopped" });
   });
 

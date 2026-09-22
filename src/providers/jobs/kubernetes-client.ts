@@ -10,6 +10,7 @@ import {
   KubeConfig,
   NetworkingV1Api,
   type V1ConfigMap,
+  type V1Endpoints,
   type V1NetworkPolicy,
   type V1Pod,
   type V1Secret,
@@ -160,6 +161,10 @@ export class ClientNodeKubernetesApi implements KubernetesApi {
 
   readService(namespace: string, name: string): Promise<V1Service | undefined> {
     return readOrUndefined(() => this.core.readNamespacedService({ namespace, name }));
+  }
+
+  readEndpoints(namespace: string, name: string): Promise<V1Endpoints | undefined> {
+    return readOrUndefined(() => this.core.readNamespacedEndpoints({ namespace, name }));
   }
 
   async readNamespace(name: string): Promise<boolean> {

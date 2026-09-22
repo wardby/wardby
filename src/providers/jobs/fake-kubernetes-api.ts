@@ -1,4 +1,4 @@
-import type { V1ConfigMap, V1NetworkPolicy, V1Pod, V1Secret, V1Service } from "@kubernetes/client-node";
+import type { V1ConfigMap, V1Endpoints, V1NetworkPolicy, V1Pod, V1Secret, V1Service } from "@kubernetes/client-node";
 import type { Readable, Writable } from "node:stream";
 import {
   KubernetesAlreadyExistsError,
@@ -17,7 +17,7 @@ export interface FakeExecCall {
   stdout?: Writable;
 }
 
-type Kind = "configmap" | "secret" | "pod" | "networkpolicy" | "service";
+type Kind = "configmap" | "secret" | "pod" | "networkpolicy" | "service" | "endpoints";
 type Obj = { metadata?: { name?: string; namespace?: string; resourceVersion?: string } };
 
 /** In-memory KubernetesApi for unit tests. Tests drive pod status and exec behavior directly. */
@@ -116,10 +116,22 @@ export class FakeKubernetesApi implements KubernetesApi {
   async readService(namespace: string, name: string) {
     return this.read<V1Service>("service", namespace, name);
   }
+  async readEndpoints(namespace: string, name: string) {
+    return this.read<V1Endpoints>("endpoints", namespace, name);
+  }
   async readNamespace(name: string) {
     return this.namespaces.has(name);
   }
   async exec(namespace: string, pod: string, container: string, command: string[], options: KubernetesExecOptions) {
+    // Like the real API: exec into a missing pod or an unknown container fails instead of succeeding
+    // silently, so no test can pass on behaviour a cluster would reject. (The adapter's timeoutMs is
+    // not modelled: tests drive slow execs through onExec directly.)
+    const target = this.read<V1Pod>("pod", namespace, pod);
+    if (!target) throw new KubernetesNotFoundError(this.key("pod", namespace, pod));
+    const containers = [...(target.spec?.containers ?? []), ...(target.spec?.initContainers ?? [])];
+    if (!containers.some((entry) => entry.name === container)) {
+      throw new KubernetesNotFoundError(`${this.key("pod", namespace, pod)}/${container}`);
+    }
     const call: FakeExecCall = { namespace, pod, container, command, stdin: options.stdin, stdout: options.stdout };
     this.execCalls.push(call);
     return this.onExec(call);

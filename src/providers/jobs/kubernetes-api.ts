@@ -3,7 +3,7 @@
  * so every launcher behavior is unit-tested against FakeKubernetesApi and
  * re-proven against a real cluster by kubernetes.integration.test.ts.
  */
-import type { V1ConfigMap, V1NetworkPolicy, V1Pod, V1Secret, V1Service } from "@kubernetes/client-node";
+import type { V1ConfigMap, V1Endpoints, V1NetworkPolicy, V1Pod, V1Secret, V1Service } from "@kubernetes/client-node";
 import type { Readable, Writable } from "node:stream";
 
 export class KubernetesNotFoundError extends Error {
@@ -49,6 +49,11 @@ export interface KubernetesApi {
   readNetworkPolicy(namespace: string, name: string): Promise<V1NetworkPolicy | undefined>;
   deleteNetworkPolicy(namespace: string, name: string): Promise<void>;
   readService(namespace: string, name: string): Promise<V1Service | undefined>;
+  /**
+   * Reads a Service's Endpoints by name. EndpointSlice is the durable successor to this core/v1
+   * resource (migrating to it is a follow-up); Endpoints is read by name so RBAC stays one object wide.
+   */
+  readEndpoints(namespace: string, name: string): Promise<V1Endpoints | undefined>;
   readNamespace(name: string): Promise<boolean>;
   /** Runs a command in a container; resolves with its exit code. Never uses a shell. */
   exec(

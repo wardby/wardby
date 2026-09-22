@@ -18,6 +18,10 @@ function cluster(canary: CanaryResult | "no-output") {
   const api = new FakeKubernetesApi();
   api.put("service", "wardby-coding", { metadata: { name: "wardby-coding-proxy" }, spec: { clusterIP: "10.96.0.50" } });
   api.put("service", "kube-system", { metadata: { name: "kube-dns" }, spec: { clusterIP: "10.96.0.10" } });
+  api.put("endpoints", "kube-system", {
+    metadata: { name: "kube-dns" },
+    subsets: [{ addresses: [{ ip: "10.244.0.2" }], ports: [{ port: 53, protocol: "UDP" }] }],
+  });
   const originalCreate = api.createPod.bind(api);
   api.createPod = async (ns, body: V1Pod) => {
     const created = await originalCreate(ns, body);
@@ -46,7 +50,7 @@ function cluster(canary: CanaryResult | "no-output") {
 const ok: CanaryResult = { dns: false, clusterDns: false, internet: false, metadata: false, proxy: true };
 
 function leftovers(api: FakeKubernetesApi): string[] {
-  return [...api.objects.keys()].filter((k) => !k.startsWith("service/"));
+  return [...api.objects.keys()].filter((k) => !k.startsWith("service/") && !k.startsWith("endpoints/"));
 }
 
 describe("kubernetesPreflight", () => {
@@ -239,6 +243,36 @@ describe("kubernetesPreflight", () => {
     );
     expect(api.deletedPods).toHaveLength(1);
   });
+  it("fails closed when kube-dns has no ready endpoint address to witness enforcement", async () => {
+    for (const withoutEndpoints of [
+      (api: FakeKubernetesApi) => api.objects.delete("endpoints/kube-system/kube-dns"),
+      (api: FakeKubernetesApi) => api.put("endpoints", "kube-system", { metadata: { name: "kube-dns" }, subsets: [] }),
+      (api: FakeKubernetesApi) =>
+        api.put("endpoints", "kube-system", {
+          metadata: { name: "kube-dns" },
+          // Only not-ready addresses: kube-dns exists but nothing is serving.
+          subsets: [{ notReadyAddresses: [{ ip: "10.244.0.2" }], ports: [{ port: 53 }] }],
+        }),
+    ]) {
+      const api = cluster(ok);
+      withoutEndpoints(api);
+      await expect(kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} })).rejects.toThrow(
+        "kubernetes_isolation_unsupported:cluster-dns",
+      );
+      // It fails before the canary runs, so nothing is created.
+      expect(api.deletedPods).toHaveLength(0);
+    }
+  });
+
+  it("explains that such a cluster needs a different enforcement witness", async () => {
+    const api = cluster(ok);
+    api.put("endpoints", "kube-system", { metadata: { name: "kube-dns" }, subsets: [] });
+    const error = await kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} }).catch(
+      (e: unknown) => e,
+    );
+    expect(describePreflightFailure(error)).toMatch(/no ready endpoint address.*different witness/);
+  });
+
   it("fails on a missing, headless, or unreadable kube-dns Service", async () => {
     const missing = cluster(ok);
     missing.objects.delete("service/kube-system/kube-dns");
