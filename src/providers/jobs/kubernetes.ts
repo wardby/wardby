@@ -298,11 +298,22 @@ export function hostTarArchive(directory: string): { stream: Readable; done: Pro
     // COPYFILE_DISABLE stops macOS tar from adding `._*` metadata entries.
     env: { PATH: "/usr/local/bin:/usr/bin:/bin", COPYFILE_DISABLE: "1" },
   });
+  // Take ownership of stdout immediately. A small tree archives in milliseconds, and when the child
+  // exits Node resume()s (discards) any stdout pipe nobody has consumed yet — which would silently
+  // drop the whole archive before the exec WebSocket connects. Piping into a PassThrough buffers it
+  // (with backpressure on tar) until the exec attaches.
+  const stream = new PassThrough();
+  child.stdout.pipe(stream);
+  child.stdout.once("error", (error) => stream.destroy(error));
   const done = new Promise<number>((resolvePromise) => {
     child.once("error", () => resolvePromise(-1));
     child.once("close", (code) => resolvePromise(code ?? -1));
   });
-  return { stream: child.stdout, done };
+  stream.once("close", () => {
+    // A seed that fails destroys this stream; don't leave tar blocked on a full pipe.
+    if (!stream.readableEnded && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  });
+  return { stream, done };
 }
 
 function errorWithCode(code: string, cause?: unknown): Error {

@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { jobLauncherContract } from "./contract-suite.js";
 import { FakeKubernetesApi } from "./fake-kubernetes-api.js";
 import { KubernetesConflictError } from "./kubernetes-api.js";
-import { KubernetesJobLauncher } from "./kubernetes.js";
+import { KubernetesJobLauncher, hostTarArchive } from "./kubernetes.js";
 import { kubernetesRunNames } from "./kubernetes-isolation.js";
 import type { JobHandle, JobSpec } from "./types.js";
 
@@ -925,5 +925,30 @@ describe("KubernetesJobLauncher pod start failures", () => {
     });
     const handle = await h.launcher.launch(h.spec);
     expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+  });
+});
+
+describe("hostTarArchive", () => {
+  it("keeps the archive readable after tar has already exited (no data lost before exec attaches)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wardby-k8s-archive-"));
+    roots.push(root);
+    await writeFile(join(root, "a.txt"), "hello");
+    const archive = hostTarArchive(root);
+    expect(await archive.done).toBe(0);
+    // Let the child's exit handling run before anything consumes the stream, as when exec is slow to connect.
+    await new Promise((r) => setTimeout(r, 50));
+    const names: string[] = [];
+    const extract = tar.extract();
+    extract.on("entry", (header, stream, next) => {
+      names.push(header.name);
+      stream.resume();
+      stream.on("end", next);
+    });
+    archive.stream.pipe(extract);
+    await new Promise<void>((r, j) => {
+      extract.on("finish", () => r());
+      extract.on("error", (error) => j(error));
+    });
+    expect(names).toContain("./a.txt");
   });
 });
