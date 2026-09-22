@@ -1,8 +1,8 @@
-import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Readable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 import tar from "tar-stream";
 import { afterEach, describe, expect, it } from "vitest";
 import { safeExtract } from "./safe-extract.js";
@@ -348,6 +348,48 @@ describe("safeExtract", () => {
       const dir = await root();
       const source = await archive([{ name: "../outside", body: "x" }]);
       await expect(safeExtract(source, dir, limits)).rejects.toThrow();
+      expect(source.destroyed).toBe(true);
+    });
+
+    it("rejects a phase-2a symlink-parent creation through a case-alias of an earlier symlink, leaving root's parent untouched", async () => {
+      // Fix round 3 (new Critical): reviewer's round2.mts scenario A. "A" is created by phase 2a first
+      // and physically resolves (via the chain d/s -> "..", A -> "d/s/..") one level above root. A later
+      // symlink "a/b/evil" then needs its parent "a/b" created — on a case-insensitive filesystem, "a" is
+      // the same entry as "A". The old `ensureDirectory` used `mkdir(recursive: true)` + path-based
+      // `chmod`, both of which follow an existing symlink transparently: mkdir silently created "b"
+      // *through* "A" outside root, and the ancestor chmod walk re-permissioned root's own parent
+      // directory (0700 -> 0755). The fixed, component-by-component `ensureDirectory` never creates or
+      // chmods anything it hasn't just `lstat`-verified itself to be a real, non-symlink directory, so on
+      // a case-insensitive filesystem this now rejects (extract_through_symlink) before ever touching
+      // anything outside root; on a case-sensitive filesystem it was already caught by phase 2b's
+      // physical walk (extract_symlink_escape). Either way, root's parent must be completely unchanged.
+      const outerParent = await mkdtemp(join(tmpdir(), "wardby-extract-outer-"));
+      roots.push(outerParent);
+      await chmod(outerParent, 0o700);
+      const targetRoot = join(outerParent, "root");
+      await mkdir(targetRoot);
+      const archived = await archive([
+        { name: "d/", type: "directory" },
+        { name: "d/s", type: "symlink", linkname: ".." },
+        { name: "A", type: "symlink", linkname: "d/s/.." },
+        { name: "a/b/evil", type: "symlink", linkname: "../x" },
+      ]);
+      await expect(safeExtract(archived, targetRoot, limits)).rejects.toThrow();
+      expect(await readdir(outerParent)).toEqual(["root"]);
+      expect((await stat(outerParent)).mode & 0o777).toBe(0o700);
+    });
+
+    it("rejects with extract_aborted and destroys the source when aborted mid-stream, after a first entry has partially written", async () => {
+      // Fix round 3 minor: the source stalls after delivering only part of a single file entry's
+      // declared body (so extraction is already mid-write into that entry's FileHandle) and never sends
+      // more data or ends; only the abort unblocks it.
+      const dir = await root();
+      const full = await toBuffer(await archive([{ name: "a", body: "z".repeat(900) }]));
+      const source = new PassThrough();
+      source.write(full.subarray(0, 600));
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 50);
+      await expect(safeExtract(source, dir, limits, { signal: controller.signal })).rejects.toThrow("extract_aborted");
       expect(source.destroyed).toBe(true);
     });
   });

@@ -17,6 +17,17 @@
  * physically escapes, or a symlink that collides case-insensitively with a
  * path phase 1 already created.
  *
+ * Directory creation in *either* phase never delegates to `mkdir`'s own
+ * `recursive: true` walk, and never `chmod`s a path it hasn't just verified
+ * itself: both of those follow an existing symlink transparently at the OS
+ * level, so a recursive mkdir (or a chmod) issued against a path whose
+ * middle component is a symlink — including one phase 2 created moments
+ * earlier for an *unrelated* entry, aliased case-insensitively — silently
+ * creates or re-permissions something outside root. `ensureDirectory` walks
+ * one component at a time instead, `lstat`-verifying each one is a real,
+ * non-symlink directory before creating the next component under it or
+ * `chmod`ing it.
+ *
  * Every await that isn't pure bookkeeping is raced against a `failed`
  * promise that's already wired to the extractor's and source's 'error'
  * events (and to `options.signal`) *before* any of those awaits happen, so a
@@ -162,24 +173,6 @@ export async function safeExtract(
     return Promise.race([operation, failed]);
   }
 
-  /**
-   * Recursively creates `dirPath` and force-`chmod`s every ancestor between it and `base` (inclusive of
-   * `dirPath`, exclusive of `base` itself) to 0o755. `mkdir`'s own `mode` is masked by the process
-   * umask, so without this an intermediate directory implicitly created for a nested entry (one with no
-   * preceding explicit directory entry of its own) could end up more restrictive than 0o755. Re-chmod'ing
-   * an already-0o755 ancestor is a harmless no-op, so this is safe to call unconditionally.
-   */
-  async function ensureDirectory(dirPath: string): Promise<void> {
-    await guard(mkdir(dirPath, { recursive: true, mode: 0o755 }));
-    let current = dirPath;
-    while (current !== base) {
-      await guard(chmod(current, 0o755));
-      const parent = dirname(current);
-      if (parent === current) break;
-      current = parent;
-    }
-  }
-
   // Created (and so subscribed to tar-stream's internal 'entry'/'close' events) before any `await`,
   // including the realpath below: tar-stream's async iterator only delivers an entry to listeners that
   // were attached before it was emitted, so creating this after an async gap can silently miss the very
@@ -189,6 +182,46 @@ export async function safeExtract(
 
   try {
     const rootReal = await guard(realpath(base));
+
+    /**
+     * Creates (if needed) and verifies every directory named by `segments`, one component at a time,
+     * starting from `rootReal`, and returns the resulting real path. For each component: `lstat` it; if
+     * it doesn't exist, `mkdir` just that one component (non-recursive — its parent was already verified
+     * real by the previous iteration), re-`lstat`ing on a raced `EEXIST`. Then — whether it already
+     * existed or was just created — `lstat` it again: if that's a symlink, `extract_through_symlink`
+     * (this is what stops phase 2a from creating or `chmod`ing through a symlink an *earlier* entry in
+     * this same extraction created, including one that's only a case-insensitive alias of the component
+     * being resolved); if it exists but isn't a directory at all, `extract_duplicate_entry` (preserves
+     * the existing "file blocking a nested path" behavior). Only once a component is freshly confirmed by
+     * `lstat` to be a real, non-symlink directory does it get `chmod`'d to 0o755 — never by a path that
+     * was merely assumed to still be what an earlier check saw.
+     */
+    async function ensureDirectory(segments: string[]): Promise<string> {
+      let current = rootReal;
+      for (const component of segments) {
+        const child = current === sep ? `${sep}${component}` : `${current}${sep}${component}`;
+        let exists = true;
+        try {
+          await guard(lstat(child));
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+          exists = false;
+        }
+        if (!exists) {
+          try {
+            await guard(mkdir(child, { mode: 0o755 }));
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+          }
+        }
+        const stats = await guard(lstat(child));
+        if (stats.isSymbolicLink()) fail("extract_through_symlink");
+        if (!stats.isDirectory()) fail("extract_duplicate_entry");
+        await guard(chmod(child, 0o755));
+        current = child;
+      }
+      return current;
+    }
 
     // Phase 1 (streaming): create directories and regular files; validate and record symlinks.
     for (;;) {
@@ -243,7 +276,7 @@ export async function safeExtract(
         case "directory": {
           entry.resume();
           try {
-            await ensureDirectory(target);
+            await ensureDirectory(segments);
           } catch (err) {
             throw mapError(err);
           }
@@ -254,8 +287,18 @@ export async function safeExtract(
           if (entry.destroyed) throw mapError(new Error("entry stream destroyed"));
           let fh: FileHandle;
           try {
-            await ensureDirectory(dirname(target));
-            fh = await guard(open(target, "wx", 0o644));
+            const parentReal = await ensureDirectory(segments.slice(0, -1));
+            const fileTarget = resolve(parentReal, segments[segments.length - 1]);
+            const openPromise = open(fileTarget, "wx", 0o644);
+            try {
+              fh = await guard(openPromise);
+            } catch (err) {
+              // If `failed` won the race, `open()` may still resolve later with a real handle that
+              // nothing else will ever close — close it then. Harmless (and a no-op) if `open()` itself
+              // is what rejected instead, since then it never produced a handle at all.
+              openPromise.then((handle) => handle.close().catch(() => undefined)).catch(() => undefined);
+              throw err;
+            }
           } catch (err) {
             throw mapError(err);
           }
@@ -291,12 +334,16 @@ export async function safeExtract(
       }
     }
 
-    // Phase 2a: materialize every recorded symlink, now that the real tree is final. A collision with
-    // something phase 1 already created — including a case-insensitive alias — surfaces here as EEXIST.
+    // Phase 2a: materialize every recorded symlink, now that the real tree is final. `ensureDirectory`
+    // rejects (extract_through_symlink) rather than create or chmod through a symlink an earlier
+    // iteration of this same loop created — including one that's merely a case-insensitive alias of the
+    // parent this symlink names — and a same-path collision with a phase-1-created path surfaces as
+    // EEXIST from `symlink()` itself, mapped to extract_duplicate_entry.
     for (const [path, link] of recordedSymlinks) {
-      const target = resolve(base, path);
+      const segments = path.split("/");
       try {
-        await ensureDirectory(dirname(target));
+        const parentReal = await ensureDirectory(segments.slice(0, -1));
+        const target = resolve(parentReal, segments[segments.length - 1]);
         await guard(createSymlink(link, target));
       } catch (err) {
         throw mapError(err);
