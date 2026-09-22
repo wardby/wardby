@@ -21,6 +21,7 @@ import {
   CODING_WORKER_GID,
   CODING_WORKER_UID,
   WORKER_STOP_GRACE_SECONDS,
+  isRepositoryDigest,
 } from "./docker-isolation.js";
 
 export const KUBERNETES_ISOLATION_ERROR = "kubernetes_isolation_unsupported";
@@ -33,7 +34,6 @@ export const STORAGE_ROOT = "/run/wardby/storage";
 export const KEEPER_SEEDED_MARKER = `${STORAGE_ROOT}/input/.seeded`;
 export const PROXY_POD_LABEL = { "app.kubernetes.io/name": "wardby-coding-proxy" } as const;
 const WORKER_SERVICE_ACCOUNT = "wardby-coding-worker";
-const REGISTRY_DIGEST = /^[a-z0-9][a-z0-9._/:-]*@sha256:[a-f0-9]{64}$/;
 const RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/;
 
 /** The worker waits for the launcher's seeded marker, then runs the image's normal entrypoint. */
@@ -82,8 +82,9 @@ export function runLabels(runId: string): Record<string, string> {
   };
 }
 
+/** Same grammar as Docker's repository digests; a cluster cannot pull a bare local image ID. */
 export function isRegistryDigest(image: string): boolean {
-  return REGISTRY_DIGEST.test(image);
+  return isRepositoryDigest(image);
 }
 
 function inRange(value: number, min: number, max: number, integer: boolean): boolean {

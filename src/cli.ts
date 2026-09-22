@@ -31,7 +31,7 @@ import {
 import { drainCodingQueue } from "./core/coding-queue.js";
 import { isImmutableDockerImage } from "./providers/jobs/docker-isolation.js";
 import { ClientNodeKubernetesApi } from "./providers/jobs/kubernetes-client.js";
-import { kubernetesPreflight } from "./providers/jobs/kubernetes-preflight.js";
+import { describePreflightFailure, kubernetesPreflight } from "./providers/jobs/kubernetes-preflight.js";
 import { RoutingLlmProvider, resolveLlmRegistrations } from "./providers/llm/index.js";
 import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/index.js";
 import type { Executor } from "./providers/executor/types.js";
@@ -437,12 +437,12 @@ async function codingOps(args: string[]): Promise<void> {
 
   if (operation === "preflight" && config.jobs === "kubernetes") {
     const kubernetes = loadKubernetesJobConfig();
-    const api = new ClientNodeKubernetesApi({ context: kubernetes.context });
     let checks: string[];
     try {
+      const api = new ClientNodeKubernetesApi({ context: kubernetes.context });
       checks = await kubernetesPreflight({ api, config: kubernetes, workerImage: container.workerImage });
     } catch (error) {
-      fail(`coding preflight failed: ${error instanceof Error ? error.message : "unknown error"}`);
+      fail(`coding preflight failed: ${describePreflightFailure(error)}`);
     }
     console.log(`coding preflight passed (${checks.join(", ")}) for ${container.workerImage}`);
     return;

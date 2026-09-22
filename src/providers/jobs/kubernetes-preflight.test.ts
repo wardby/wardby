@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { V1Pod } from "@kubernetes/client-node";
 import { FakeKubernetesApi } from "./fake-kubernetes-api.js";
-import { kubernetesPreflight, type CanaryResult } from "./kubernetes-preflight.js";
+import { describePreflightFailure, kubernetesPreflight, type CanaryResult } from "./kubernetes-preflight.js";
 
 const IMAGE = `localhost:5001/wardby-coding-worker@sha256:${"a".repeat(64)}`;
 const config = { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" };
@@ -9,6 +9,7 @@ const config = { namespace: "wardby-coding", proxyService: "wardby-coding-proxy"
 function cluster(canary: CanaryResult | "no-output") {
   const api = new FakeKubernetesApi();
   api.put("service", "wardby-coding", { metadata: { name: "wardby-coding-proxy" }, spec: { clusterIP: "10.96.0.50" } });
+  api.put("service", "kube-system", { metadata: { name: "kube-dns" }, spec: { clusterIP: "10.96.0.10" } });
   const originalCreate = api.createPod.bind(api);
   api.createPod = async (ns, body: V1Pod) => {
     const created = await originalCreate(ns, body);
@@ -34,7 +35,7 @@ function cluster(canary: CanaryResult | "no-output") {
   };
   return api;
 }
-const ok: CanaryResult = { dns: false, internet: false, metadata: false, proxy: true };
+const ok: CanaryResult = { dns: false, clusterDns: false, internet: false, metadata: false, proxy: true };
 
 function leftovers(api: FakeKubernetesApi): string[] {
   return [...api.objects.keys()].filter((k) => !k.startsWith("service/"));
@@ -46,6 +47,7 @@ describe("kubernetesPreflight", () => {
     expect(await kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} })).toEqual([
       "namespace",
       "proxy-service",
+      "cluster-dns",
       "worker-image",
       "canary",
     ]);
@@ -56,6 +58,7 @@ describe("kubernetesPreflight", () => {
     ["internet reachable", { ...ok, internet: true }],
     ["metadata reachable", { ...ok, metadata: true }],
     ["dns resolves", { ...ok, dns: true }],
+    ["cluster DNS reachable", { ...ok, clusterDns: true }],
     ["proxy unreachable", { ...ok, proxy: false }],
   ])("fails closed when %s", async (_label, result) => {
     await expect(
@@ -111,7 +114,10 @@ describe("kubernetesPreflight", () => {
     const containers = pod!.spec!.containers;
     expect(containers.map((c) => c.name)).toEqual(["worker"]);
     expect(containers[0].image).toBe(IMAGE);
-    expect(containers[0].env).toEqual([{ name: "WARDBY_CANARY_PROXY_IP", value: "10.96.0.50" }]);
+    expect(containers[0].env).toEqual([
+      { name: "WARDBY_CANARY_PROXY_IP", value: "10.96.0.50" },
+      { name: "WARDBY_CANARY_CLUSTER_DNS_IP", value: "10.96.0.10" },
+    ]);
     expect(containers[0].command!.slice(0, 2)).toEqual(["node", "-e"]);
     expect(containers[0].command![2]).toContain("wardbyCanary");
     expect(pod!.spec!.hostAliases).toEqual([{ ip: "10.96.0.50", hostnames: ["wardby-proxy"] }]);
@@ -119,7 +125,7 @@ describe("kubernetesPreflight", () => {
     expect(api.deletedPods).toEqual([{ name: pod!.metadata!.name, gracePeriodSeconds: 0 }]);
   });
 
-  it("times out, fails closed, and still deletes the canary pod and policy", async () => {
+  it("times out polling, fails closed, and still deletes the canary pod and policy", async () => {
     const api = cluster(ok);
     // A pod that never terminates: the plain fake create leaves it without a status.
     api.createPod = FakeKubernetesApi.prototype.createPod.bind(api);
@@ -137,7 +143,7 @@ describe("kubernetesPreflight", () => {
         },
         timeoutMs: 5_000,
       }),
-    ).rejects.toThrow("kubernetes_isolation_unsupported:canary");
+    ).rejects.toThrow("kubernetes_isolation_unsupported:timeout");
     expect(sleeps.every((ms) => ms === 500)).toBe(true);
     expect(sleeps.length).toBeGreaterThanOrEqual(9);
     expect(leftovers(api)).toEqual([]);
@@ -181,12 +187,12 @@ describe("kubernetesPreflight", () => {
     expect(leftovers(api)).toEqual([]);
   });
 
-  it("requires exactly the four expected booleans", async () => {
+  it("requires exactly the five expected booleans", async () => {
     for (const result of [
       { ...ok, extra: false },
-      { dns: false, internet: false, metadata: false },
+      { dns: false, internet: false, metadata: false, proxy: true },
       { ...ok, proxy: "true" },
-      { ...ok, dns: 0 },
+      { ...ok, clusterDns: 0 },
     ]) {
       const api = cluster(result as unknown as CanaryResult);
       await expect(kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} })).rejects.toThrow(
@@ -224,5 +230,161 @@ describe("kubernetesPreflight", () => {
       "kubernetes_isolation_unsupported:canary",
     );
     expect(api.deletedPods).toHaveLength(1);
+  });
+  it("fails on a missing, headless, or unreadable kube-dns Service", async () => {
+    const missing = cluster(ok);
+    missing.objects.delete("service/kube-system/kube-dns");
+    await expect(kubernetesPreflight({ api: missing, config, workerImage: IMAGE })).rejects.toThrow(
+      "kubernetes_isolation_unsupported:cluster-dns",
+    );
+    const headless = cluster(ok);
+    headless.put("service", "kube-system", { metadata: { name: "kube-dns" }, spec: { clusterIP: "None" } });
+    await expect(kubernetesPreflight({ api: headless, config, workerImage: IMAGE })).rejects.toThrow(
+      "kubernetes_isolation_unsupported:cluster-dns",
+    );
+    const forbidden = cluster(ok);
+    const readService = forbidden.readService.bind(forbidden);
+    forbidden.readService = async (ns, name) => {
+      if (ns === "kube-system") throw new Error("services is forbidden");
+      return readService(ns, name);
+    };
+    const error = await kubernetesPreflight({ api: forbidden, config, workerImage: IMAGE }).catch(
+      (e: unknown) => e as Error,
+    );
+    expect((error as Error).message).toBe("kubernetes_isolation_unsupported:cluster-dns");
+    expect(((error as Error).cause as Error).message).toBe("services is forbidden");
+    expect(leftovers(forbidden)).toEqual([]);
+  });
+
+  it("bounds the whole preflight: a hung API call fails with timeout", async () => {
+    const api = cluster(ok);
+    api.readNamespace = () => new Promise<boolean>(() => {});
+    await expect(kubernetesPreflight({ api, config, workerImage: IMAGE, timeoutMs: 20 })).rejects.toThrow(
+      "kubernetes_isolation_unsupported:timeout",
+    );
+    expect(leftovers(api)).toEqual([]);
+  });
+
+  it("times out on a createPod that never resolves and keeps the policy for the in-flight pod", async () => {
+    const api = cluster(ok);
+    api.createPod = () => new Promise(() => {});
+    await expect(
+      kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {}, timeoutMs: 20 }),
+    ).rejects.toThrow("kubernetes_isolation_unsupported:timeout");
+    // No pod exists; the deny policy stays until the hung create settles, so a late pod is never unpoliced.
+    expect(leftovers(api).filter((k) => k.startsWith("pod/"))).toEqual([]);
+    expect(leftovers(api).filter((k) => k.startsWith("networkpolicy/"))).toHaveLength(1);
+  });
+
+  it("deletes a pod created after the timeout, then its policy", async () => {
+    const api = cluster(ok);
+    const calls: string[] = [];
+    const create = api.createPod.bind(api);
+    let release!: () => void;
+    const gate = new Promise<void>((done) => (release = done));
+    api.createPod = async (ns, body) => {
+      await gate;
+      return create(ns, body);
+    };
+    const deletePod = api.deletePod.bind(api);
+    api.deletePod = async (ns, name, grace) => {
+      calls.push("pod");
+      return deletePod(ns, name, grace);
+    };
+    const deletePolicy = api.deleteNetworkPolicy.bind(api);
+    let policyDeleted!: () => void;
+    const policyGone = new Promise<void>((done) => (policyDeleted = done));
+    api.deleteNetworkPolicy = async (ns, name) => {
+      calls.push("policy");
+      await deletePolicy(ns, name);
+      policyDeleted();
+    };
+    await expect(
+      kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {}, timeoutMs: 20 }),
+    ).rejects.toThrow("kubernetes_isolation_unsupported:timeout");
+    expect(calls).toEqual([]);
+    release();
+    await policyGone;
+    expect(calls).toEqual(["pod", "policy"]);
+    expect(leftovers(api)).toEqual([]);
+  });
+
+  it("deletes the pod before the policy, and keeps the policy when the pod delete fails", async () => {
+    const ordered = cluster(ok);
+    const calls: string[] = [];
+    const deletePod = ordered.deletePod.bind(ordered);
+    ordered.deletePod = async (ns, name, grace) => {
+      await new Promise((done) => setTimeout(done, 5));
+      calls.push("pod");
+      return deletePod(ns, name, grace);
+    };
+    const deletePolicy = ordered.deleteNetworkPolicy.bind(ordered);
+    ordered.deleteNetworkPolicy = async (ns, name) => {
+      calls.push("policy");
+      return deletePolicy(ns, name);
+    };
+    await kubernetesPreflight({ api: ordered, config, workerImage: IMAGE, sleep: async () => {} });
+    expect(calls).toEqual(["pod", "policy"]);
+
+    const failing = cluster(ok);
+    failing.deletePod = async () => {
+      throw new Error("api down");
+    };
+    await expect(
+      kubernetesPreflight({ api: failing, config, workerImage: IMAGE, sleep: async () => {} }),
+    ).rejects.toThrow("kubernetes_isolation_unsupported:canary");
+    expect(leftovers(failing).filter((k) => k.startsWith("networkpolicy/"))).toHaveLength(1);
+  });
+
+  it("bounds cleanup: a hung pod delete fails the preflight instead of hanging it", async () => {
+    const api = cluster(ok);
+    api.deletePod = () => new Promise<void>(() => {});
+    await expect(
+      kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {}, cleanupTimeoutMs: 20 }),
+    ).rejects.toThrow("kubernetes_isolation_unsupported:canary");
+  });
+
+  it("a hung cleanup after a timeout still fails with timeout", async () => {
+    const api = cluster(ok);
+    api.readLogTail = () => new Promise<string>(() => {});
+    api.deletePod = () => new Promise<void>(() => {});
+    await expect(
+      kubernetesPreflight({
+        api,
+        config,
+        workerImage: IMAGE,
+        sleep: async () => {},
+        timeoutMs: 20,
+        cleanupTimeoutMs: 20,
+      }),
+    ).rejects.toThrow("kubernetes_isolation_unsupported:timeout");
+  });
+
+  it("describes failures for the CLI: API causes shown briefly, canary output never", async () => {
+    const forbidden = cluster(ok);
+    forbidden.readNamespace = async () => {
+      throw new Error("namespaces is forbidden: User cannot get\nsecond line");
+    };
+    const apiError = await kubernetesPreflight({ api: forbidden, config, workerImage: IMAGE }).catch((e: unknown) => e);
+    expect(describePreflightFailure(apiError)).toBe(
+      "kubernetes_isolation_unsupported:namespace (namespaces is forbidden: User cannot get)",
+    );
+
+    const leaky = cluster({ ...ok, internet: true });
+    const create = leaky.createPod.bind(leaky);
+    leaky.createPod = async (ns, body) => {
+      const created = await create(ns, body);
+      leaky.logs.set(`${ns}/${body.metadata!.name}/worker`, "secret-noise");
+      return created;
+    };
+    const canaryError = await kubernetesPreflight({
+      api: leaky,
+      config,
+      workerImage: IMAGE,
+      sleep: async () => {},
+    }).catch((e: unknown) => e);
+    expect(describePreflightFailure(canaryError)).toBe("kubernetes_isolation_unsupported:canary");
+
+    expect(describePreflightFailure(new Error("invalid kubeconfig"))).toBe("invalid kubeconfig");
   });
 });

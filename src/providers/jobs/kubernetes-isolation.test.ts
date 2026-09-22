@@ -68,6 +68,27 @@ describe("kubernetes run names and labels", () => {
   });
 });
 
+describe("isRegistryDigest", () => {
+  const digest = `@sha256:${"c".repeat(64)}`;
+  it.each([
+    `localhost:5001/wardby-coding-worker${digest}`,
+    `registry.example.com:443/a/b${digest}`,
+    `registry.example/wardby-worker${digest}`,
+  ])("accepts %s", (reference) => {
+    expect(isRegistryDigest(reference)).toBe(true);
+  });
+  it.each([
+    ["a bare local image ID", `sha256:${"c".repeat(64)}`],
+    ["a tag before the digest", `wardby-worker:dev${digest}`],
+    ["a tag after a registry port", `localhost:5001/wardby-coding-worker:dev${digest}`],
+    ["a port on a later component", `registry.example/team:5001/worker${digest}`],
+    ["a port-only first component", `:5001/wardby-worker${digest}`],
+    ["an empty path component", `localhost:5001//wardby-worker${digest}`],
+  ])("rejects %s", (_label, reference) => {
+    expect(isRegistryDigest(reference)).toBe(false);
+  });
+});
+
 describe("validateKubernetesSpec", () => {
   it("accepts a registry-digest Codex spec", () => {
     expect(() => validateKubernetesSpec(spec)).not.toThrow();
