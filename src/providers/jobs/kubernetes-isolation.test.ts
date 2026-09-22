@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { V1Pod } from "@kubernetes/client-node";
+import type { V1NetworkPolicy, V1Pod } from "@kubernetes/client-node";
+import { ObjectSerializer } from "@kubernetes/client-node/dist/serializer.js";
 import type { JobSpec } from "./types.js";
 import {
   KUBERNETES_ISOLATION_ERROR,
@@ -31,6 +32,26 @@ const pod = () => buildRunPod(spec, options);
 const worker = (p: V1Pod) => p.spec!.containers.find((c) => c.name === "worker")!;
 const keeper = (p: V1Pod) => p.spec!.containers.find((c) => c.name === "keeper")!;
 
+/** Rebuilds an object graph with every object's keys in reverse insertion order; array element order is untouched. */
+function shuffleKeys<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((item) => shuffleKeys(item)) as unknown as T;
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).map(([key, v]): [string, unknown] => [
+      key,
+      shuffleKeys(v),
+    ]);
+    entries.reverse();
+    return Object.fromEntries(entries) as T;
+  }
+  return value;
+}
+
+/** Round-trips a value through ObjectSerializer the way a real API read-back would, including its key reordering. */
+function apiRoundTrip<T>(value: T, type: string): T {
+  const serialized = ObjectSerializer.serialize(value, type) as unknown;
+  return ObjectSerializer.deserialize(JSON.parse(JSON.stringify(serialized)), type) as T;
+}
+
 describe("kubernetes run names and labels", () => {
   it("derives stable DNS-1123 names from the run ID hash", () => {
     const names = kubernetesRunNames(spec.runId);
@@ -61,6 +82,15 @@ describe("validateKubernetesSpec", () => {
     expect(() => validateKubernetesSpec({ ...spec, provider: "claude-code", toolImage: IMAGE })).toThrow(
       KUBERNETES_PROVIDER_UNSUPPORTED,
     );
+  });
+  it("rejects a cpus value that isn't a whole number of millicores", () => {
+    expect(() => validateKubernetesSpec({ ...spec, limits: { ...spec.limits, cpus: 0.0005 } })).toThrow(
+      KUBERNETES_ISOLATION_ERROR,
+    );
+  });
+  it("accepts cpus values that are already a whole number of millicores", () => {
+    expect(() => validateKubernetesSpec({ ...spec, limits: { ...spec.limits, cpus: 16.1 } })).not.toThrow();
+    expect(() => validateKubernetesSpec({ ...spec, limits: { ...spec.limits, cpus: 2.01 } })).not.toThrow();
   });
 });
 
@@ -167,15 +197,42 @@ describe("buildCapabilitySecret", () => {
 
 describe("assertRunPodMatches", () => {
   const expected = pod();
+  const DEFAULT_TOLERATION_1 = {
+    key: "node.kubernetes.io/not-ready",
+    operator: "Exists",
+    effect: "NoExecute",
+    tolerationSeconds: 300,
+  };
+  const DEFAULT_TOLERATION_2 = {
+    key: "node.kubernetes.io/unreachable",
+    operator: "Exists",
+    effect: "NoExecute",
+    tolerationSeconds: 300,
+  };
+  // Simulates everything the Kubernetes API server itself defaults or reorders on a real read-back.
   const withApiDefaults = (p: V1Pod): V1Pod => {
     const c = structuredClone(p);
-    c.spec!.schedulerName = "default-scheduler";
-    c.spec!.containers = c.spec!.containers.map((x) => ({
+    const s = c.spec!;
+    s.schedulerName = "default-scheduler";
+    s.nodeName = "node-1";
+    s.priority = 0;
+    s.preemptionPolicy = "PreemptLowerPriority";
+    s.serviceAccount = s.serviceAccountName;
+    s.tolerations = [DEFAULT_TOLERATION_1, DEFAULT_TOLERATION_2];
+    s.containers = s.containers.map((x) => ({
       ...x,
       terminationMessagePath: "/dev/termination-log",
+      terminationMessagePolicy: "File",
       imagePullPolicy: "IfNotPresent",
     }));
-    c.spec!.containers[1].resources = {
+    keeper(c).readinessProbe = {
+      ...keeper(c).readinessProbe,
+      timeoutSeconds: 1,
+      successThreshold: 1,
+      failureThreshold: 3,
+    };
+    keeper(c).volumeMounts = keeper(c).volumeMounts!.map((m) => ({ ...m, mountPropagation: "None" }));
+    worker(c).resources = {
       requests: { cpu: "1000m", memory: "2Gi" },
       limits: { cpu: "1000m", memory: "2Gi" },
     };
@@ -186,8 +243,25 @@ describe("assertRunPodMatches", () => {
     expect(() => assertRunPodMatches(withApiDefaults(expected), expected)).not.toThrow();
   });
 
+  it("accepts a real API round trip through ObjectSerializer", () => {
+    const roundTripped = apiRoundTrip(withApiDefaults(expected), "V1Pod");
+    expect(() => assertRunPodMatches(roundTripped, expected)).not.toThrow();
+  });
+
+  it("accepts a copy with every object's keys in a different order", () => {
+    expect(() => assertRunPodMatches(shuffleKeys(withApiDefaults(expected)), expected)).not.toThrow();
+  });
+
+  it("matches a read-back pod whose worker CPU is already normalized to millicores", () => {
+    const cpuSpec: JobSpec = { ...spec, limits: { ...spec.limits, cpus: 16.1 } };
+    const expectedCpuPod = buildRunPod(cpuSpec, options);
+    const actual = structuredClone(expectedCpuPod);
+    worker(actual).resources!.requests!.cpu = "16100m";
+    worker(actual).resources!.limits!.cpu = "16100m";
+    expect(() => assertRunPodMatches(actual, expectedCpuPod)).not.toThrow();
+  });
+
   const mutations: Array<[string, (p: V1Pod) => void]> = [
-    ["missing runtime class", (p) => void (p.spec!.runtimeClassName = "runc")],
     ["token mounted", (p) => void (p.spec!.automountServiceAccountToken = true)],
     ["host network", (p) => void (p.spec!.hostNetwork = true)],
     ["privileged worker", (p) => void (worker(p).securityContext!.privileged = true)],
@@ -203,18 +277,82 @@ describe("assertRunPodMatches", () => {
     ["different image", (p) => void (worker(p).image = `other@sha256:${"d".repeat(64)}`)],
     ["dns re-enabled", (p) => void (p.spec!.dnsPolicy = "ClusterFirst")],
     ["higher memory limit", (p) => void (worker(p).resources!.limits!.memory = "4096Mi")],
+    [
+      "lifecycle postStart exec hook",
+      (p) => void (worker(p).lifecycle = { postStart: { exec: { command: ["sh", "-c", "id"] } } }),
+    ],
+    ["livenessProbe added", (p) => void (worker(p).livenessProbe = { exec: { command: ["true"] } })],
+    ["startupProbe added", (p) => void (worker(p).startupProbe = { exec: { command: ["true"] } })],
+    [
+      "keeper readinessProbe swapped to link-local httpGet",
+      (p) =>
+        void (keeper(p).readinessProbe = {
+          httpGet: { path: "/", port: 80, host: "169.254.169.254" },
+          periodSeconds: 1,
+        }),
+    ],
+    ["pod appArmorProfile Unconfined", (p) => void (p.spec!.securityContext!.appArmorProfile = { type: "Unconfined" })],
+    [
+      "container appArmorProfile Unconfined",
+      (p) => void (worker(p).securityContext!.appArmorProfile = { type: "Unconfined" }),
+    ],
+    ["pod seLinuxOptions spc_t", (p) => void (p.spec!.securityContext!.seLinuxOptions = { type: "spc_t" })],
+    ["container seLinuxOptions spc_t", (p) => void (worker(p).securityContext!.seLinuxOptions = { type: "spc_t" })],
+    ["container procMount Unmasked", (p) => void (worker(p).securityContext!.procMount = "Unmasked")],
+    ["container runAsGroup 0", (p) => void (worker(p).securityContext!.runAsGroup = 0)],
+    ["pod supplementalGroups [0]", (p) => void (p.spec!.securityContext!.supplementalGroups = [0])],
+    ["tolerations non-default entry", (p) => void (p.spec!.tolerations = [{ operator: "Exists" }])],
+    ["nodeSelector added", (p) => void (p.spec!.nodeSelector = { disktype: "ssd" })],
+    ["affinity added", (p) => void (p.spec!.affinity = { nodeAffinity: {} })],
+    ["container resources.claims added", (p) => void (worker(p).resources!.claims = [{ name: "gpu" }])],
+    [
+      "volumeMount mountPropagation Bidirectional",
+      (p) => void (worker(p).volumeMounts![0].mountPropagation = "Bidirectional"),
+    ],
+    ["volumeMount subPathExpr added", (p) => void (worker(p).volumeMounts![0].subPathExpr = "$(POD_NAME)")],
+    ["terminationGracePeriodSeconds changed", (p) => void (p.spec!.terminationGracePeriodSeconds = 999)],
+    [
+      "container windowsOptions.hostProcess",
+      (p) => void (worker(p).securityContext!.windowsOptions = { hostProcess: true }),
+    ],
+    ["extra annotation added", (p) => void (p.metadata!.annotations = { ...p.metadata!.annotations, foo: "bar" })],
+    [
+      "legacy AppArmor annotation added",
+      (p) =>
+        void (p.metadata!.annotations = {
+          ...p.metadata!.annotations,
+          "container.apparmor.security.beta.kubernetes.io/worker": "unconfined",
+        }),
+    ],
+    [
+      "extra toleration beyond defaults",
+      (p) =>
+        void (p.spec!.tolerations = [
+          DEFAULT_TOLERATION_1,
+          DEFAULT_TOLERATION_2,
+          { key: "custom", operator: "Exists" },
+        ]),
+    ],
+    ["serviceAccount differs from serviceAccountName", (p) => void (p.spec!.serviceAccount = "attacker-sa")],
   ];
   it.each(mutations)("rejects %s", (_name, mutate) => {
     const actual = withApiDefaults(expected);
-    if (_name === "missing runtime class") {
-      const gv = buildRunPod(spec, { ...options, runtimeClassName: "gvisor" });
-      const a = withApiDefaults(gv);
-      mutate(a);
-      expect(() => assertRunPodMatches(a, gv)).toThrow(KUBERNETES_ISOLATION_ERROR);
-      return;
-    }
     mutate(actual);
     expect(() => assertRunPodMatches(actual, expected)).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
+  it("rejects a different runtime class", () => {
+    const gv = buildRunPod(spec, { ...options, runtimeClassName: "gvisor" });
+    const actual = withApiDefaults(gv);
+    actual.spec!.runtimeClassName = "runc";
+    expect(() => assertRunPodMatches(actual, gv)).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
+  it("rejects a missing runtime class", () => {
+    const gv = buildRunPod(spec, { ...options, runtimeClassName: "gvisor" });
+    const actual = withApiDefaults(gv);
+    delete actual.spec!.runtimeClassName;
+    expect(() => assertRunPodMatches(actual, gv)).toThrow(KUBERNETES_ISOLATION_ERROR);
   });
 });
 
@@ -225,5 +363,16 @@ describe("assertRunNetworkPolicyMatches", () => {
     actual.spec!.egress!.push({ to: [{ ipBlock: { cidr: "0.0.0.0/0" } }] });
     expect(() => assertRunNetworkPolicyMatches(actual, expected)).toThrow(KUBERNETES_ISOLATION_ERROR);
     expect(() => assertRunNetworkPolicyMatches(structuredClone(expected), expected)).not.toThrow();
+  });
+
+  it("accepts a real API round trip through ObjectSerializer", () => {
+    const expected = buildRunNetworkPolicy(spec, "wardby-coding");
+    const roundTripped = apiRoundTrip<V1NetworkPolicy>(expected, "V1NetworkPolicy");
+    expect(() => assertRunNetworkPolicyMatches(roundTripped, expected)).not.toThrow();
+  });
+
+  it("accepts a copy with every object's keys in a different order", () => {
+    const expected = buildRunNetworkPolicy(spec, "wardby-coding");
+    expect(() => assertRunNetworkPolicyMatches(shuffleKeys(structuredClone(expected)), expected)).not.toThrow();
   });
 });

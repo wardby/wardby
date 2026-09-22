@@ -5,7 +5,15 @@
  * before the worker is allowed to start (the seeded-marker gate).
  */
 import { createHash } from "node:crypto";
-import type { V1Container, V1NetworkPolicy, V1Pod, V1Secret } from "@kubernetes/client-node";
+import type {
+  V1Container,
+  V1NetworkPolicy,
+  V1Pod,
+  V1PodSpec,
+  V1Secret,
+  V1Toleration,
+  V1Volume,
+} from "@kubernetes/client-node";
 import type { JobSpec } from "./types.js";
 import {
   CODING_PROXY_ALIAS,
@@ -80,6 +88,12 @@ function inRange(value: number, min: number, max: number, integer: boolean): boo
   return Number.isFinite(value) && value >= min && value <= max && (!integer || Number.isInteger(value));
 }
 
+/** Kubernetes CPU requests/limits are always whole millicores; a fractional millicore can't be expressed. */
+function isWholeMillicores(cpus: number): boolean {
+  const millis = cpus * 1000;
+  return Math.abs(Math.round(millis) - millis) < 1e-9;
+}
+
 export function validateKubernetesSpec(spec: JobSpec): void {
   if (spec.kind !== "coding-agent" || !RUN_ID.test(spec.runId)) throw isolationError();
   if (spec.provider === "claude-code") throw new Error(KUBERNETES_PROVIDER_UNSUPPORTED);
@@ -88,6 +102,7 @@ export function validateKubernetesSpec(spec: JobSpec): void {
   const { cpus, memoryMb, pids, diskMb } = spec.limits;
   if (
     !inRange(cpus, 0.1, 32, false) ||
+    !isWholeMillicores(cpus) ||
     !inRange(memoryMb, 128, 65_536, true) ||
     !inRange(pids, 16, 4_096, true) ||
     !inRange(diskMb, 64, 32_768, true) ||
@@ -219,116 +234,172 @@ export function buildCapabilitySecret(spec: JobSpec, namespace: string, capabili
   };
 }
 
-/** Canonical CPU (millicores) and memory (bytes) so "1" == "1000m" and "2048Mi" == "2Gi". */
-function quantity(value: unknown): string {
-  const text = String(value);
-  const match = /^([0-9.]+)(m|Ki|Mi|Gi|Ti)?$/.exec(text);
+/**
+ * Deny-by-default attestation. Rather than allowlisting the fields we expect
+ * to see (which silently accepts anything the allowlist forgot — lifecycle
+ * hooks, probes that reach the node's link-local metadata endpoint,
+ * seLinuxOptions/appArmorProfile/procMount escapes, extra tolerations,
+ * stray annotations, ...), we deep-compare the *entire* spec, labels, and
+ * annotations, and only normalize the exact fields the Kubernetes API
+ * server itself is known to default or reorder on read-back. Every other
+ * field — every security-relevant one included — must match exactly.
+ */
+
+/** CPU quantities are always whole millicores; normalize "1", "1.0", and "1000m" to the same string. */
+function cpuMillicores(value: unknown): string {
+  const text = String(value).trim();
+  const milli = /^([0-9]*\.?[0-9]+)m$/.exec(text);
+  if (milli) return `${Math.round(Number(milli[1]))}m`;
+  const plain = /^([0-9]*\.?[0-9]+)$/.exec(text);
+  if (plain) return `${Math.round(Number(plain[1]) * 1000)}m`;
+  return text;
+}
+
+const MEMORY_BINARY_UNITS: Record<string, number> = {
+  Ki: 1024,
+  Mi: 1024 ** 2,
+  Gi: 1024 ** 3,
+  Ti: 1024 ** 4,
+  Pi: 1024 ** 5,
+  Ei: 1024 ** 6,
+};
+const MEMORY_DECIMAL_UNITS: Record<string, number> = { K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15, E: 1e18 };
+
+/** Memory quantities can use binary or decimal suffixes; normalize every form to a byte count. */
+function memoryBytes(value: unknown): string {
+  const text = String(value).trim();
+  const match = /^([0-9]*\.?[0-9]+)(Ki|Mi|Gi|Ti|Pi|Ei|K|M|G|T|P|E)?$/.exec(text);
   if (!match) return text;
   const amount = Number(match[1]);
   const unit = match[2];
-  if (unit === "m") return `${amount}m`;
-  if (unit === undefined && text.includes(".")) return `${amount * 1000}m`;
-  const factor = { Ki: 1024, Mi: 1024 ** 2, Gi: 1024 ** 3, Ti: 1024 ** 4 } as const;
-  if (unit) return String(amount * factor[unit as keyof typeof factor]);
-  return /^\d+$/.test(text) && Number(text) < 1024 ? `${amount * 1000}m` : text;
+  if (unit && unit in MEMORY_BINARY_UNITS) return String(Math.round(amount * MEMORY_BINARY_UNITS[unit]));
+  if (unit && unit in MEMORY_DECIMAL_UNITS) return String(Math.round(amount * MEMORY_DECIMAL_UNITS[unit]));
+  return String(Math.round(amount));
 }
 
-function resources(r: V1Container["resources"]) {
-  const pick = (m?: Record<string, unknown>) =>
-    Object.fromEntries(
-      Object.entries(m ?? {})
-        .map(([k, v]): [string, string] => [k, quantity(v)])
-        .sort(([a], [b]) => a.localeCompare(b)),
-    );
-  return { requests: pick(r?.requests), limits: pick(r?.limits) };
+interface DefaultToleration {
+  key: string;
+  operator: string;
+  effect: string;
+  tolerationSeconds: number;
 }
 
-/** The security-relevant view of a container; API-defaulted fields are deliberately excluded. */
-function containerProjection(c: V1Container) {
+/** The two node-health tolerations every pod gets by admission-time default; anything else must match exactly. */
+const DEFAULT_TOLERATIONS: readonly DefaultToleration[] = [
+  { key: "node.kubernetes.io/not-ready", operator: "Exists", effect: "NoExecute", tolerationSeconds: 300 },
+  { key: "node.kubernetes.io/unreachable", operator: "Exists", effect: "NoExecute", tolerationSeconds: 300 },
+];
+
+function isDefaultToleration(t: V1Toleration): boolean {
+  return DEFAULT_TOLERATIONS.some(
+    (d) =>
+      t.key === d.key &&
+      t.operator === d.operator &&
+      t.effect === d.effect &&
+      t.tolerationSeconds === d.tolerationSeconds,
+  );
+}
+
+function normalizeResources(r?: V1Container["resources"]): void {
+  if (!r) return;
+  if (r.requests) {
+    if (r.requests.cpu !== undefined) r.requests.cpu = cpuMillicores(r.requests.cpu);
+    if (r.requests.memory !== undefined) r.requests.memory = memoryBytes(r.requests.memory);
+  }
+  if (r.limits) {
+    if (r.limits.cpu !== undefined) r.limits.cpu = cpuMillicores(r.limits.cpu);
+    if (r.limits.memory !== undefined) r.limits.memory = memoryBytes(r.limits.memory);
+  }
+}
+
+function normalizeProbe(p?: V1Container["readinessProbe"]): void {
+  if (!p) return;
+  p.timeoutSeconds ??= 1;
+  p.successThreshold ??= 1;
+  p.failureThreshold ??= 3;
+  p.periodSeconds ??= 10;
+}
+
+function normalizeContainer(c: V1Container): void {
+  delete c.terminationMessagePath;
+  delete c.terminationMessagePolicy;
+  delete c.imagePullPolicy;
+  normalizeResources(c.resources);
+  normalizeProbe(c.readinessProbe);
+  normalizeProbe(c.livenessProbe);
+  normalizeProbe(c.startupProbe);
+  for (const mount of c.volumeMounts ?? []) {
+    if (mount.mountPropagation === "None") delete mount.mountPropagation;
+  }
+}
+
+function normalizeVolume(v: V1Volume): void {
+  if (v.emptyDir) {
+    if (v.emptyDir.medium === "") delete v.emptyDir.medium;
+    if (v.emptyDir.sizeLimit !== undefined) v.emptyDir.sizeLimit = memoryBytes(v.emptyDir.sizeLimit);
+  }
+}
+
+/**
+ * Applies only the normalizations the Kubernetes API server itself performs
+ * (defaulting or aliasing fields on write/read). Everything else in the
+ * spec — including every security-relevant field — is left untouched so
+ * the caller's deep-equality check sees it.
+ */
+function normalizeSpec(spec: V1PodSpec): void {
+  delete spec.schedulerName;
+  delete spec.nodeName;
+  delete spec.priority;
+  delete spec.preemptionPolicy;
+  if (spec.serviceAccount !== undefined) {
+    if (spec.serviceAccount !== spec.serviceAccountName) throw isolationError();
+    delete spec.serviceAccount;
+  }
+  if (spec.tolerations) {
+    const remaining = spec.tolerations.filter((t) => !isDefaultToleration(t));
+    if (remaining.length === 0) delete spec.tolerations;
+    else spec.tolerations = remaining;
+  }
+  for (const container of spec.containers) normalizeContainer(container);
+  for (const container of spec.initContainers ?? []) normalizeContainer(container);
+  for (const volume of spec.volumes ?? []) normalizeVolume(volume);
+}
+
+function normalizePod(pod: V1Pod): {
+  labels: Record<string, string>;
+  annotations: Record<string, string>;
+  spec: V1PodSpec;
+} {
+  if (!pod.spec) throw isolationError();
+  const spec = structuredClone(pod.spec);
+  normalizeSpec(spec);
   return {
-    name: c.name,
-    image: c.image,
-    command: c.command ?? null,
-    args: c.args ?? null,
-    env: c.env ?? [],
-    envFrom: c.envFrom ?? [],
-    ports: c.ports ?? [],
-    securityContext: {
-      allowPrivilegeEscalation: c.securityContext?.allowPrivilegeEscalation ?? null,
-      privileged: c.securityContext?.privileged ?? null,
-      readOnlyRootFilesystem: c.securityContext?.readOnlyRootFilesystem ?? null,
-      runAsNonRoot: c.securityContext?.runAsNonRoot ?? null,
-      capabilities: {
-        drop: c.securityContext?.capabilities?.drop ?? [],
-        add: c.securityContext?.capabilities?.add ?? [],
-      },
-      runAsUser: c.securityContext?.runAsUser ?? null,
-      seccompProfile: c.securityContext?.seccompProfile ?? null,
-    },
-    resources: resources(c.resources),
-    volumeMounts: (c.volumeMounts ?? []).map((m) => ({
-      name: m.name,
-      mountPath: m.mountPath,
-      subPath: m.subPath ?? null,
-      readOnly: m.readOnly ?? false,
-    })),
+    labels: pod.metadata?.labels ?? {},
+    annotations: pod.metadata?.annotations ?? {},
+    spec,
   };
 }
 
-function podProjection(p: V1Pod) {
-  const s = p.spec;
-  if (!s) throw isolationError();
-  return {
-    labels: p.metadata?.labels ?? {},
-    restartPolicy: s.restartPolicy,
-    automountServiceAccountToken: s.automountServiceAccountToken ?? true,
-    serviceAccountName: s.serviceAccountName,
-    enableServiceLinks: s.enableServiceLinks ?? true,
-    hostNetwork: s.hostNetwork ?? false,
-    hostPID: s.hostPID ?? false,
-    hostIPC: s.hostIPC ?? false,
-    shareProcessNamespace: s.shareProcessNamespace ?? false,
-    activeDeadlineSeconds: s.activeDeadlineSeconds ?? null,
-    dnsPolicy: s.dnsPolicy,
-    dnsConfig: s.dnsConfig ?? null,
-    hostAliases: s.hostAliases ?? [],
-    runtimeClassName: s.runtimeClassName ?? null,
-    securityContext: {
-      runAsNonRoot: s.securityContext?.runAsNonRoot ?? null,
-      runAsUser: s.securityContext?.runAsUser ?? null,
-      runAsGroup: s.securityContext?.runAsGroup ?? null,
-      fsGroup: s.securityContext?.fsGroup ?? null,
-      seccompProfile: s.securityContext?.seccompProfile ?? null,
-      sysctls: s.securityContext?.sysctls ?? [],
-    },
-    volumes: (s.volumes ?? []).map((v) => {
-      const { name, emptyDir, ...other } = v;
-      return {
-        name,
-        emptyDir: emptyDir ? { medium: emptyDir.medium ?? "", sizeLimit: quantity(emptyDir.sizeLimit) } : null,
-        other: Object.keys(other).sort(),
-      };
-    }),
-    initContainers: (s.initContainers ?? []).map(containerProjection),
-    ephemeralContainers: (s.ephemeralContainers ?? []).length,
-    containers: s.containers.map(containerProjection),
-  };
-}
-
-function sameJson(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+/** Recursively sorts object keys and drops `undefined` values so key order and API-omitted fields never matter; array order is preserved. */
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => canonical(item));
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v !== undefined)
+      .map(([key, v]): [string, unknown] => [key, canonical(v)])
+      .sort(([a], [b]) => a.localeCompare(b));
+    return Object.fromEntries(entries);
+  }
+  return value;
 }
 
 export function assertRunPodMatches(actual: V1Pod, expected: V1Pod): void {
-  if (!sameJson(podProjection(actual), podProjection(expected))) throw isolationError();
+  const a = canonical(normalizePod(actual));
+  const e = canonical(normalizePod(expected));
+  if (JSON.stringify(a) !== JSON.stringify(e)) throw isolationError();
 }
 
 export function assertRunNetworkPolicyMatches(actual: V1NetworkPolicy, expected: V1NetworkPolicy): void {
-  const view = (p: V1NetworkPolicy) => ({
-    podSelector: p.spec?.podSelector ?? null,
-    policyTypes: p.spec?.policyTypes ?? [],
-    ingress: p.spec?.ingress ?? [],
-    egress: p.spec?.egress ?? [],
-  });
-  if (!sameJson(view(actual), view(expected))) throw isolationError();
+  const view = (p: V1NetworkPolicy) => ({ labels: p.metadata?.labels ?? {}, spec: p.spec ?? {} });
+  if (JSON.stringify(canonical(view(actual))) !== JSON.stringify(canonical(view(expected)))) throw isolationError();
 }
