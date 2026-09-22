@@ -162,6 +162,16 @@ async function finishRun(db: RunnerDb, runId: string, data: Prisma.RunUpdateMany
   return db.run.findUniqueOrThrow({ where: { id: runId } });
 }
 
+/**
+ * Why a coding run cannot start in this process: runs reach the runner only
+ * when no container executor is composed in (JOB_LAUNCHER=local, e.g. every
+ * Cloud Run deployment today). Names the cause and the fix; the old wording
+ * ("requires the Phase 5 container executor") read as if Phase 5 were unbuilt.
+ */
+const CODING_EXECUTOR_NOT_CONFIGURED =
+  "Coding agents need a container executor, but this deployment runs with JOB_LAUNCHER=local. " +
+  "Set JOB_LAUNCHER=docker on a host with Docker to run them (see docs/coding-worker-isolation.md).";
+
 /** Persists a new pending Run for the named agent. Throws if the agent is unknown. */
 export async function createRun(db: RunnerDb, agentName: string, trigger: RunTrigger = "manual"): Promise<Run> {
   const agent = await db.agent.findUnique({ where: { name: agentName } });
@@ -169,7 +179,7 @@ export async function createRun(db: RunnerDb, agentName: string, trigger: RunTri
     throw new Error(`Unknown agent "${agentName}".`);
   }
   if (agent.kind === "coding") {
-    throw new Error("Coding agent execution requires the Phase 5 container executor.");
+    throw new Error(CODING_EXECUTOR_NOT_CONFIGURED);
   }
   return db.run.create({ data: { agentId: agent.id, trigger } });
 }
@@ -289,7 +299,7 @@ export async function executeRun(
   if (loaded.kind === "coding") {
     return finishRun(db, runId, {
       status: "failed",
-      error: "Coding agent execution requires the Phase 5 container executor.",
+      error: CODING_EXECUTOR_NOT_CONFIGURED,
       finishedAt: new Date(),
     });
   }
