@@ -505,6 +505,9 @@ async function listRuns(args: string[]): Promise<void> {
 async function scheduler(args: string[]): Promise<void> {
   const { values } = parseArgs({ args, options: { scope: { type: "string" } } });
   const scope = values.scope ?? "default";
+  // Parsed before anything starts, so a malformed CODING_MAX_CONCURRENT or
+  // CODING_QUEUE_TIMEOUT_SEC fails fast.
+  const concurrency = loadCodingConcurrencyConfig();
 
   const config = loadProviderConfig();
   const llm = buildLlmProvider();
@@ -516,7 +519,6 @@ async function scheduler(args: string[]): Promise<void> {
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig: config });
   await executor.launch?.();
   const reconciler = startReconciler({ db: prisma, executor });
-  const concurrency = loadCodingConcurrencyConfig();
   const sched = startScheduler({
     executor,
     db: prisma,

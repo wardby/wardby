@@ -128,14 +128,28 @@ trusted host-only directories. Resource limits are controlled by
 `CODING_MAX_CONCURRENT` (default `4`) caps coding runs that hold a slot at
 once, across every control-plane replica: the cap is enforced in Postgres
 inside the provisioning claim, so adding replicas never raises it. A run
-over the cap stays `pending` and `get_run` shows `codingQueuedAt`; it starts,
-oldest first, when a slot frees (immediately in the process whose run
-finished, or on the scheduler leader's next tick). A run still queued after
+over the cap stays `pending` and `get_run`/`list_runs` show `codingQueuedAt`;
+it starts, oldest first, when a slot frees (immediately in the process whose
+run finished, or on the scheduler leader's next tick). A newly dispatched run
+never takes a free slot ahead of an older queued run. A run still queued after
 `CODING_QUEUE_TIMEOUT_SEC` (default `3600`) fails with `coding_queue_timeout`.
 Slot usage is derived from run state, so a crashed replica cannot leak slots:
-its runs are reconciled to `lost`, which frees them. Clones are shallow
-(`--depth 1`); the worker never receives Git history and finalization needs
-only the base commit.
+its runs are reconciled to `lost`, which frees them.
+
+Operating the queue across replicas:
+
+- Every replica must set the same `CODING_MAX_CONCURRENT`. Each claim
+  enforces the value of the replica making it, so mismatched values make the
+  effective cap depend on which replica dispatched the run.
+- Draining on a timer and applying `CODING_QUEUE_TIMEOUT_SEC` need a
+  scheduler process (`wardby serve` or `wardby scheduler`). A process that
+  only serves MCP (`wardby mcp`) drains only when one of its own coding runs
+  finishes; without a scheduler somewhere, queued runs can wait indefinitely
+  and never time out.
+- Upgrade all replicas together. A replica running a version from before
+  the queue ignores the cap, and its reconciler reaps queued runs as `lost`. Clones are shallow
+  (`--depth 1`); the worker never receives Git history and finalization needs
+  only the base commit.
 
 The GitHub adapter requires `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`; the
 App installation is checked while preparing the workspace, before the

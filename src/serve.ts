@@ -47,10 +47,12 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
     );
   }
 
+  // Parsed before anything starts, so a malformed CODING_MAX_CONCURRENT or
+  // CODING_QUEUE_TIMEOUT_SEC fails fast instead of after HTTP is listening.
+  const concurrency = loadCodingConcurrencyConfig();
   const providers = options.providers ?? buildMcpProviders().providers;
   const mcp = await startMcp({ providers, schedulerAttached: true });
   const reconciler = startReconciler({ executor: providers.executor });
-  const concurrency = loadCodingConcurrencyConfig();
   const scheduler = startScheduler({
     executor: providers.executor,
     scope: options.scope,

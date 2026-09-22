@@ -20,7 +20,23 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         take: args.limit,
         orderBy: { startedAt: "desc" },
       });
-      return textResult(runs);
+      // Same rule as get_run: a pending coding run with queuedAt is waiting
+      // for a concurrency slot (CODING_MAX_CONCURRENT), not stuck.
+      const pendingIds = runs.filter((run) => run.status === "pending").map((run) => run.id);
+      const queued =
+        pendingIds.length > 0
+          ? await ctx.db.codingRun.findMany({
+              where: { runId: { in: pendingIds }, queuedAt: { not: null } },
+              select: { runId: true, queuedAt: true },
+            })
+          : [];
+      const queuedAtByRun = new Map(queued.map((row) => [row.runId, row.queuedAt?.toISOString()]));
+      return textResult(
+        runs.map((run) => {
+          const codingQueuedAt = queuedAtByRun.get(run.id);
+          return codingQueuedAt ? { ...run, codingQueuedAt } : run;
+        }),
+      );
     },
   });
 

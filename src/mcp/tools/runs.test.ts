@@ -49,6 +49,10 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[]) {
     },
     codingRun: {
       findUnique: async ({ where }: { where: { runId: string } }) => runRows.get(where.runId)?.codingRun ?? null,
+      findMany: async ({ where }: { where: { runId: { in: string[] }; queuedAt: { not: null } } }) =>
+        where.runId.in
+          .map((runId) => ({ runId, queuedAt: runRows.get(runId)?.codingRun?.queuedAt ?? null }))
+          .filter((row) => row.queuedAt !== null),
     },
   } as unknown as import("@prisma/client").PrismaClient;
 }
@@ -271,6 +275,44 @@ describe("run observability tools", () => {
     expect(result.isError).toBeFalsy();
     const body = parseText(result as never) as { id: string }[];
     expect(body.map((r) => r.id)).toEqual(["r2"]);
+    await client.close();
+  });
+
+  it("list_runs marks coding runs waiting for a concurrency slot with codingQueuedAt", async () => {
+    const queuedAt = new Date("2026-09-22T12:00:00.000Z");
+    const base = {
+      agentId: "a1",
+      trigger: "manual",
+      turns: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      costUsd: 0,
+      finalText: null,
+      error: null,
+      startedAt: queuedAt,
+      finishedAt: null,
+    };
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [
+        { ...base, id: "queued", status: "pending", codingRun: { result: null, queuedAt } },
+        { ...base, id: "unqueued", status: "pending", codingRun: { result: null, queuedAt: null } },
+        // A stale queuedAt on a run that already left pending is not shown.
+        { ...base, id: "failed", status: "failed", codingRun: { result: null, queuedAt } },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "list_runs", arguments: { agentId: "a1" } });
+    const body = parseText(result as never) as Array<{ id: string; codingQueuedAt?: string; codingRun?: unknown }>;
+    const byId = new Map(body.map((r) => [r.id, r]));
+    expect(byId.get("queued")?.codingQueuedAt).toBe("2026-09-22T12:00:00.000Z");
+    expect(byId.get("unqueued")).not.toHaveProperty("codingQueuedAt");
+    expect(byId.get("failed")).not.toHaveProperty("codingQueuedAt");
+    for (const row of body) expect(row).not.toHaveProperty("codingRun");
     await client.close();
   });
 

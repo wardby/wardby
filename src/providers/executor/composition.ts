@@ -9,6 +9,7 @@ import {
   type ProviderConfig,
 } from "../../config/providers.js";
 import { drainCodingQueue } from "../../core/coding-queue.js";
+import { logger } from "../../core/logger.js";
 import { EnvironmentCredentialResolver } from "../coding-proxy/environment-credentials.js";
 import { CodingProxy } from "../coding-proxy/proxy.js";
 import { PrismaProxyLedger } from "../coding-proxy/prisma-ledger.js";
@@ -17,6 +18,8 @@ import { buildVcsProvider } from "../vcs/index.js";
 import { ContainerExecutor, PrismaContainerExecutionStore, RunCapabilityVault } from "./container.js";
 import { PrismaExecutionKindResolver, RoutingExecutor } from "./routing.js";
 import type { Executor } from "./types.js";
+
+const compositionLog = logger.child({ module: "executor-composition" });
 
 export interface ConfiguredExecutorOptions {
   native: Executor;
@@ -81,7 +84,10 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
         executor: composed,
         maxConcurrent: concurrency.maxConcurrent,
         queueTimeoutSec: concurrency.queueTimeoutSec,
-      }).catch(() => undefined);
+      }).catch((err: unknown) => {
+        // Never throws: the next scheduler tick drains again.
+        compositionLog.warn({ err }, "coding queue drain after a released slot failed");
+      });
     },
   });
   const composed = new RoutingExecutor(new PrismaExecutionKindResolver(options.db), options.native, coding);
