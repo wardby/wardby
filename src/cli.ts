@@ -22,7 +22,8 @@ import { execFile as execFileCallback } from "node:child_process";
 import { parseArgs } from "node:util";
 import { promisify } from "node:util";
 import type { RunStatus } from "@prisma/client";
-import { loadContainerExecutorConfig, loadProviderConfig } from "./config/providers.js";
+import { loadCodingConcurrencyConfig, loadContainerExecutorConfig, loadProviderConfig } from "./config/providers.js";
+import { drainCodingQueue } from "./core/coding-queue.js";
 import { isImmutableDockerImage } from "./providers/jobs/docker-isolation.js";
 import { RoutingLlmProvider, resolveLlmRegistrations } from "./providers/llm/index.js";
 import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/index.js";
@@ -515,7 +516,15 @@ async function scheduler(args: string[]): Promise<void> {
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig: config });
   await executor.launch?.();
   const reconciler = startReconciler({ db: prisma, executor });
-  const sched = startScheduler({ executor, db: prisma, scope });
+  const concurrency = loadCodingConcurrencyConfig();
+  const sched = startScheduler({
+    executor,
+    db: prisma,
+    scope,
+    onLeaderTick: async () => {
+      await drainCodingQueue({ db: prisma, executor, ...concurrency });
+    },
+  });
 
   console.log(`wardby scheduler started (scope "${scope}"). Press Ctrl+C to stop.`);
 

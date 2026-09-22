@@ -325,6 +325,12 @@ export interface ContainerExecutorOptions {
   sleep?: (milliseconds: number) => Promise<void>;
   now?: () => Date;
   observer?: CodingRunObserver;
+  /**
+   * Called after a run this process executed reaches a terminal status,
+   * so a waiting run can take the freed concurrency slot right away rather
+   * than on the next scheduler tick. Never called for a run that was queued.
+   */
+  onSlotReleased?: () => void;
 }
 
 class PreflightError extends Error {}
@@ -384,7 +390,12 @@ export class ContainerExecutor implements Executor {
     if (current) return current;
     this.startedAt.set(runId, this.now().getTime());
     this.emit({ stage: "queued", runId });
-    const execution = this.execute(runId).finally(() => this.active.delete(runId));
+    const execution = this.execute(runId).finally(async () => {
+      this.active.delete(runId);
+      if (!this.options.onSlotReleased) return;
+      const after = await this.options.store.load(runId).catch(() => null);
+      if (after && TERMINAL_STATUSES.has(after.status)) this.options.onSlotReleased();
+    });
     this.active.set(runId, execution);
     return execution;
   }

@@ -16,6 +16,7 @@ import {
   RunCapabilityVault,
   type CodingSessionController,
   type ContainerExecutionStore,
+  type ContainerExecutorOptions,
   type ContainerRunSnapshot,
   type ProvisioningClaim,
 } from "./container.js";
@@ -260,6 +261,7 @@ async function harness(
   workerImage = IMAGE,
   observer = new InMemoryCodingRunObserver(),
   claude?: { workerImage: string; toolImage: string },
+  extra: Partial<ContainerExecutorOptions> = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "wardby-container-executor-"));
   roots.push(root);
@@ -288,6 +290,7 @@ async function harness(
     limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
     sleep: async () => {},
     observer,
+    ...extra,
   });
   return { executor, store, jobs, vcs, sessions, capabilities, events, observer };
 }
@@ -297,6 +300,26 @@ afterEach(async () => {
 });
 
 describe("ContainerExecutor", () => {
+  it("calls onSlotReleased once after a run reaches a terminal status, never for a queued run", async () => {
+    let releases = 0;
+    const onSlotReleased = () => {
+      releases += 1;
+    };
+    const finished = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, { onSlotReleased });
+    await finished.executor.start("run-1");
+    expect(["succeeded", "failed", "budget_exhausted"]).toContain(finished.store.run.status);
+    expect(releases).toBe(1);
+
+    releases = 0;
+    const queued = await harness({ status: "pending" }, IMAGE, new InMemoryCodingRunObserver(), undefined, {
+      onSlotReleased,
+    });
+    queued.store.slotsFull = true;
+    await queued.executor.start("run-1");
+    expect(queued.store.run.status).toBe("pending");
+    expect(releases).toBe(0);
+  });
+
   it("accepts a content-addressed local Docker image ID", async () => {
     await expect(harness({}, `sha256:${"a".repeat(64)}`)).resolves.toBeDefined();
   });

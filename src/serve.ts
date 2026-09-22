@@ -16,7 +16,9 @@
  * locks regardless (core/scheduler.ts); the reconciler is deliberately not
  * lease-gated and is safe under concurrency (core/reconciler.ts).
  */
-import { loadMcpConfig } from "./config/providers.js";
+import { loadCodingConcurrencyConfig, loadMcpConfig } from "./config/providers.js";
+import { drainCodingQueue } from "./core/coding-queue.js";
+import { prisma } from "./core/db.js";
 import { startReconciler } from "./core/reconciler.js";
 import { startScheduler } from "./core/scheduler.js";
 import type { McpProviders } from "./mcp/context.js";
@@ -48,7 +50,14 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
   const providers = options.providers ?? buildMcpProviders().providers;
   const mcp = await startMcp({ providers, schedulerAttached: true });
   const reconciler = startReconciler({ executor: providers.executor });
-  const scheduler = startScheduler({ executor: providers.executor, scope: options.scope });
+  const concurrency = loadCodingConcurrencyConfig();
+  const scheduler = startScheduler({
+    executor: providers.executor,
+    scope: options.scope,
+    onLeaderTick: async () => {
+      await drainCodingQueue({ db: prisma, executor: providers.executor, ...concurrency });
+    },
+  });
 
   return {
     isLeader: () => scheduler.isLeader(),

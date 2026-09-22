@@ -2,11 +2,13 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { PrismaClient } from "@prisma/client";
 import {
+  loadCodingConcurrencyConfig,
   loadContainerExecutorConfig,
   loadGitHubVcsConfig,
   loadProviderConfig,
   type ProviderConfig,
 } from "../../config/providers.js";
+import { drainCodingQueue } from "../../core/coding-queue.js";
 import { EnvironmentCredentialResolver } from "../coding-proxy/environment-credentials.js";
 import { CodingProxy } from "../coding-proxy/proxy.js";
 import { PrismaProxyLedger } from "../coding-proxy/prisma-ledger.js";
@@ -55,8 +57,12 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       return coding?.run.status === "running" && coding.jobBackend === handle.backend && coding.jobHandle === handle.id;
     },
   });
+  const concurrency = loadCodingConcurrencyConfig(env);
+  // The release hook needs the composed RoutingExecutor, which only exists
+  // after the ContainerExecutor it wraps is built. The closure reads
+  // `composed` only when a run finishes, which is after this function returns.
   const coding = new ContainerExecutor({
-    store: new PrismaContainerExecutionStore(options.db),
+    store: new PrismaContainerExecutionStore(options.db, { maxConcurrent: concurrency.maxConcurrent }),
     jobs,
     vcs,
     sessions,
@@ -69,6 +75,15 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     credentialRef: config.credentialRef,
     anthropicCredentialRef: config.anthropicCredentialRef,
     limits: { cpus: config.cpus, memoryMb: config.memoryMb, pids: config.pids, diskMb: config.diskMb },
+    onSlotReleased: () => {
+      void drainCodingQueue({
+        db: options.db,
+        executor: composed,
+        maxConcurrent: concurrency.maxConcurrent,
+        queueTimeoutSec: concurrency.queueTimeoutSec,
+      }).catch(() => undefined);
+    },
   });
-  return new RoutingExecutor(new PrismaExecutionKindResolver(options.db), options.native, coding);
+  const composed = new RoutingExecutor(new PrismaExecutionKindResolver(options.db), options.native, coding);
+  return composed;
 }
