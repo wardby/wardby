@@ -153,6 +153,7 @@ function fakeDb(
     agentSecret: { findFirst: (async () => null) as any },
     agentDatastore: { findFirst: (async () => null) as any },
     budgetGroup: { findUnique: (async () => null) as any },
+    task: { findFirst: (async () => null) as any },
     agentSubAgent: {
       findFirst: (async ({ where }: any) => edges.find((e) => e.parentAgentId === where.parentAgentId) ?? null) as any,
       findMany: (async ({ where }: any) => edges.filter((e) => e.parentAgentId === where.parentAgentId)) as any,
@@ -482,6 +483,62 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     // a long-running container crash mid-dispatch is exactly what the
     // reconciler exists for.
     expect(childRuns[0].executionManaged).toBe(true);
+  });
+
+  it("waits for a coding child that was queued (start resolved while still pending) and returns its terminal result", async () => {
+    const dispatcher: FakeAgent = {
+      id: "dispatcher-agent",
+      name: "knock-knock-delivery",
+      systemPrompt: "You classify and delegate.",
+      model: "m",
+      budgetUsd: 5,
+      maxTurns: 10,
+    };
+    const implementer: FakeAgent = {
+      id: "implement-agent",
+      name: "knock-knock-implement",
+      systemPrompt: "unused for coding agents",
+      model: "gpt-5.6-luna",
+      budgetUsd: 5,
+      maxTurns: 10,
+      kind: "coding",
+      codingProfile,
+    };
+    const db = fakeDb(
+      [dispatcher, implementer],
+      [{ parentAgentId: "dispatcher-agent", childAgentId: "implement-agent", boundName: "implement" }],
+    );
+    const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+    // Models ContainerExecutor.execute under a full concurrency cap:
+    // claimProvisioning returns "queued", so start() resolves at once with the
+    // child still pending; drainCodingQueue runs it to completion later.
+    const executor = {
+      async start(runId: string) {
+        setTimeout(() => {
+          void (db as any).run.update({
+            where: { id: runId },
+            data: { status: "succeeded", finalText: "Ran after queueing.", costUsd: 0.03, finishedAt: new Date() },
+          });
+        }, 50);
+      },
+      async stop() {},
+    };
+
+    const llm = scriptedLlm([
+      toolCall("delegate_to_implement", JSON.stringify({ task: "add the feature" })),
+      finalAnswer("done"),
+    ]);
+    const result = await executeRun(parentRun.id, providers(llm, executor), db);
+
+    expect(result.status).toBe("succeeded");
+    const toolContent = llm.calls[1].messages.find((m) => m.role === "tool")!.content;
+    // Tool results reach the model wrapped in an untrusted-content envelope.
+    const toolJson = toolContent.slice(toolContent.indexOf("{"), toolContent.lastIndexOf("}") + 1);
+    expect(JSON.parse(toolJson)).toMatchObject({
+      status: "succeeded",
+      finalText: "Ran after queueing.",
+      costUsd: 0.03,
+    });
   });
 
   it("revision-in-place: continuePriorRun threads through dispatchRun to the child's CodingRun, even to a different bound sub-agent", async () => {
