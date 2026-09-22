@@ -3,7 +3,7 @@
  *
  * The core imports only from here; it never references a concrete adapter or a
  * cloud SDK. Adapters live alongside each interface (e.g. `jobs/local.ts`,
- * `jobs/ecs-fargate.ts`) and are wired up from configuration.
+ * `jobs/kubernetes.ts`) and are wired up from configuration.
  */
 
 export * from "./jobs/types.js";

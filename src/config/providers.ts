@@ -7,7 +7,7 @@
  * adapters) is added once the adapters exist.
  */
 
-export type JobLauncherKind = "local" | "docker" | "ecs";
+export type JobLauncherKind = "local" | "docker" | "kubernetes";
 export type EmailProviderKind = "smtp" | "ses";
 export type SecretCipherKind = "app-key" | "kms";
 export type AuthProviderKind = "delegating" | "self-hosted";
@@ -131,6 +131,34 @@ export function loadCodingConcurrencyConfig(env: NodeJS.ProcessEnv = process.env
     maxConcurrent: optionalPositiveInteger(env.CODING_MAX_CONCURRENT, "CODING_MAX_CONCURRENT") ?? 4,
     queueTimeoutSec: optionalPositiveInteger(env.CODING_QUEUE_TIMEOUT_SEC, "CODING_QUEUE_TIMEOUT_SEC") ?? 3600,
   };
+}
+
+const DNS_1123_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+function dnsLabel(value: string | undefined, name: string, fallback: string): string {
+  if (value === undefined) return fallback;
+  if (!DNS_1123_LABEL.test(value)) throw new Error(`${name} must be a DNS-1123 label.`);
+  return value;
+}
+
+/** JOB_LAUNCHER=kubernetes: where coding-run pods go and how they reach the in-cluster proxy. */
+export interface KubernetesJobConfig {
+  namespace: string;
+  context?: string;
+  proxyService: string;
+  runtimeClassName?: string;
+}
+
+export function loadKubernetesJobConfig(env: NodeJS.ProcessEnv = process.env): KubernetesJobConfig {
+  const config: KubernetesJobConfig = {
+    namespace: dnsLabel(env.KUBERNETES_NAMESPACE, "KUBERNETES_NAMESPACE", "wardby-coding"),
+    proxyService: dnsLabel(env.KUBERNETES_PROXY_SERVICE, "KUBERNETES_PROXY_SERVICE", "wardby-coding-proxy"),
+  };
+  if (env.KUBERNETES_CONTEXT) config.context = env.KUBERNETES_CONTEXT;
+  if (env.KUBERNETES_RUNTIME_CLASS) {
+    config.runtimeClassName = dnsLabel(env.KUBERNETES_RUNTIME_CLASS, "KUBERNETES_RUNTIME_CLASS", "");
+  }
+  return config;
 }
 
 export interface McpConfig {

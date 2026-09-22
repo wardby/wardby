@@ -6,6 +6,7 @@ import {
   loadGitHubVcsConfig,
   loadDbosConfig,
   loadCodingConcurrencyConfig,
+  loadKubernetesJobConfig,
 } from "./providers.js";
 
 describe("provider config", () => {
@@ -177,6 +178,43 @@ describe("loadCodingConcurrencyConfig", () => {
   it("rejects a non-positive CODING_QUEUE_TIMEOUT_SEC", () => {
     expect(() => loadCodingConcurrencyConfig({ CODING_QUEUE_TIMEOUT_SEC: "0" })).toThrow(
       "CODING_QUEUE_TIMEOUT_SEC must be a positive integer.",
+    );
+  });
+});
+
+describe("loadKubernetesJobConfig", () => {
+  it("defaults to the wardby-coding namespace and proxy Service, with no context or runtime class", () => {
+    expect(loadKubernetesJobConfig({})).toEqual({
+      namespace: "wardby-coding",
+      proxyService: "wardby-coding-proxy",
+    });
+  });
+
+  it("reads every setting", () => {
+    expect(
+      loadKubernetesJobConfig({
+        KUBERNETES_NAMESPACE: "coding-staging",
+        KUBERNETES_CONTEXT: "kind-wardby",
+        KUBERNETES_PROXY_SERVICE: "proxy",
+        KUBERNETES_RUNTIME_CLASS: "gvisor",
+      }),
+    ).toEqual({
+      namespace: "coding-staging",
+      context: "kind-wardby",
+      proxyService: "proxy",
+      runtimeClassName: "gvisor",
+    });
+  });
+
+  it.each(["", "Upper", "under_score", "-leading", "x".repeat(64)])("rejects KUBERNETES_NAMESPACE=%j", (value) => {
+    expect(() => loadKubernetesJobConfig({ KUBERNETES_NAMESPACE: value })).toThrow(
+      "KUBERNETES_NAMESPACE must be a DNS-1123 label.",
+    );
+  });
+
+  it("rejects an invalid proxy Service name", () => {
+    expect(() => loadKubernetesJobConfig({ KUBERNETES_PROXY_SERVICE: "Bad_Name" })).toThrow(
+      "KUBERNETES_PROXY_SERVICE must be a DNS-1123 label.",
     );
   });
 });
