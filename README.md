@@ -275,6 +275,7 @@ docs/           Architecture, security, operations, evidence, and roadmap
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE) for the license terms and
+[NOTICE](NOTICE) for attribution.
 
 Built as an independent reimplementation. See [CLEANROOM.md](CLEANROOM.md).
