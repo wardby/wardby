@@ -14,6 +14,7 @@ import {
   parseCodingAgentOutputJson,
   parseCodingRunResultJson,
   parseCodingTaskInputJson,
+  redactTokenShapedValues,
 } from "./protocol.js";
 
 const input = {
@@ -229,5 +230,40 @@ describe("bounded duplicate-safe JSON parsing", () => {
 
   it("rejects excessive JSON nesting before schema validation", () => {
     expect(() => parseCodingAgentOutputJson(`${"[".repeat(65)}null${"]".repeat(65)}`)).toThrow(/nesting_limit/);
+  });
+});
+
+describe("redactTokenShapedValues", () => {
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+
+  it("redacts the credential shapes an operator log can pick up from a cause chain", () => {
+    // A JWT (delegating auth), a Google access token, an AWS secret in
+    // key=value form, and a PEM block — none of which the token patterns
+    // covered before.
+    expect(redactTokenShapedValues(`bearer token ${jwt} rejected`)).toBe("bearer token [REDACTED] rejected");
+    expect(redactTokenShapedValues(`ya29.${"a".repeat(40)}`)).toBe("[REDACTED]");
+    expect(redactTokenShapedValues('aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEX"')).toBe(
+      'aws_secret_access_key="[REDACTED]"',
+    );
+    expect(redactTokenShapedValues("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAK\n-----END RSA PRIVATE KEY-----")).toBe(
+      "[REDACTED]",
+    );
+  });
+
+  it("redacts a URL's userinfo even when the password is not token-shaped", () => {
+    expect(redactTokenShapedValues("clone https://git:hunter2@github.com/o/r failed")).toBe(
+      "clone https://[REDACTED]@github.com/o/r failed",
+    );
+    expect(redactTokenShapedValues(`fatal: https://x-access-token:ghs_${"a".repeat(36)}@github.com/o/r`)).toBe(
+      "fatal: https://[REDACTED]@github.com/o/r",
+    );
+  });
+
+  it("leaves ordinary text alone — a commit sha is not a secret", () => {
+    const sha = "a".repeat(40);
+    expect(redactTokenShapedValues(`checked out ${sha} from https://github.com/o/r`)).toBe(
+      `checked out ${sha} from https://github.com/o/r`,
+    );
+    expect(redactTokenShapedValues("npm test failed: 3 of 12 assertions")).toBe("npm test failed: 3 of 12 assertions");
   });
 });

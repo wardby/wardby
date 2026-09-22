@@ -297,10 +297,24 @@ const TOKEN_PATTERNS = [
   /(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/gi,
   /rrp_[A-Za-z0-9_-]{32,}/g,
   /rv[a-z]_[0-9a-f-]{36}\.[A-Za-z0-9_-]{20,}/gi,
+  // A JWT — an IdP access/ID token in delegating auth mode, and what a JWKS or
+  // token-exchange failure is most likely to quote back.
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)?/g,
+  // Google OAuth access tokens (workload identity, GCS, Vertex).
+  /\bya29\.[A-Za-z0-9._-]{10,}/g,
+  // An AWS secret access key only in key=value form: the bare 40-char shape is
+  // indistinguishable from a git commit sha and would redact half of every
+  // workspace error.
+  /(?<=(?:aws_)?secret_?access_?key["'\s]*[:=]["'\s]*)[A-Za-z0-9/+=]{16,}/gi,
+  /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----/g,
 ];
 
+/** Credentials in a URL's userinfo, where the password need not look like a token. */
+const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/gi;
+
 export function redactTokenShapedValues(value: string): string {
-  return TOKEN_PATTERNS.reduce((redacted, pattern) => redacted.replace(pattern, "[REDACTED]"), value);
+  const redacted = TOKEN_PATTERNS.reduce((text, pattern) => text.replace(pattern, "[REDACTED]"), value);
+  return redacted.replace(URL_CREDENTIALS, "$1[REDACTED]@");
 }
 
 function parseJsonWithoutDuplicateKeys(text: string): unknown {
