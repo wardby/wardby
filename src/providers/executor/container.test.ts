@@ -17,6 +17,7 @@ import {
   type CodingSessionController,
   type ContainerExecutionStore,
   type ContainerRunSnapshot,
+  type ProvisioningClaim,
 } from "./container.js";
 
 const IMAGE = `registry.example/worker@sha256:${"a".repeat(64)}`;
@@ -65,11 +66,15 @@ class FakeStore implements ContainerExecutionStore {
     return runId === this.run.runId ? structuredClone(this.run) : null;
   }
 
-  async claimProvisioning(_runId: string, claimId: string): Promise<boolean> {
-    if (this.run.jobHandle || this.run.provisioningClaim) return false;
+  /** When true, the next claims report every slot taken. */
+  slotsFull = false;
+
+  async claimProvisioning(_runId: string, claimId: string): Promise<ProvisioningClaim> {
+    if (this.run.jobHandle || this.run.provisioningClaim) return "unavailable";
+    if (this.slotsFull) return "queued";
     this.run.provisioningClaim = claimId;
     this.run.status = "running";
-    return true;
+    return "claimed";
   }
 
   async persistHandle(_runId: string, claimId: string, handle: JobHandle): Promise<void> {
@@ -512,6 +517,16 @@ describe("ContainerExecutor", () => {
     expect(created.sessions.creates).toBe(0);
     expect(created.jobs.launches).toBe(0);
     expect(created.store.run.status).toBe("running");
+  });
+
+  it("leaves a run pending, with no workspace, session, or job, when every slot is taken", async () => {
+    const created = await harness({ status: "pending" });
+    created.store.slotsFull = true;
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("pending");
+    expect(created.vcs.prepared).toBe(0);
+    expect(created.sessions.creates).toBe(0);
+    expect(created.jobs.launches).toBe(0);
   });
 
   it("never relaunches a stale provisioning claim during recovery", async () => {

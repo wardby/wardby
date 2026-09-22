@@ -23,6 +23,8 @@ import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedE
 
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "refused", "lost", "budget_exhausted", "cancelled"]);
 const PROVISIONING_BACKEND = "provisioning";
+/** Serializes concurrency-slot claims across replicas. Distinct from the OAuth client lock (7412901). */
+const CODING_SLOT_LOCK_SQL = "SELECT 1 AS locked FROM pg_advisory_xact_lock(7412902)";
 
 function proxyProtocol(provider: string): ProxyProtocol {
   if (provider === "codex") return "openai-responses";
@@ -59,9 +61,17 @@ export interface ContainerRunSnapshot {
   workerImage: string | null;
 }
 
+/**
+ * claimed: this caller owns provisioning. unavailable: someone else does, or
+ * the run is no longer active. queued: every concurrency slot is taken; the
+ * run stays pending with CodingRun.queuedAt set until drainCodingQueue
+ * starts it.
+ */
+export type ProvisioningClaim = "claimed" | "unavailable" | "queued";
+
 export interface ContainerExecutionStore {
   load(runId: string): Promise<ContainerRunSnapshot | null>;
-  claimProvisioning(runId: string, claimId: string): Promise<boolean>;
+  claimProvisioning(runId: string, claimId: string): Promise<ProvisioningClaim>;
   persistHandle(runId: string, claimId: string, handle: JobHandle): Promise<void>;
   heartbeat(runId: string): Promise<void>;
   complete(runId: string, status: "succeeded" | "budget_exhausted", result: CodingRunResult): Promise<void>;
@@ -79,7 +89,10 @@ export interface CodingFailureAudit {
 }
 
 export class PrismaContainerExecutionStore implements ContainerExecutionStore {
-  constructor(private readonly db: PrismaClient) {}
+  constructor(
+    private readonly db: PrismaClient,
+    private readonly options: { maxConcurrent?: number } = {},
+  ) {}
 
   async load(runId: string): Promise<ContainerRunSnapshot | null> {
     const row = await this.db.run.findUnique({
@@ -118,8 +131,29 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     };
   }
 
-  async claimProvisioning(runId: string, claimId: string): Promise<boolean> {
+  async claimProvisioning(runId: string, claimId: string): Promise<ProvisioningClaim> {
     return this.db.$transaction(async (tx) => {
+      const { maxConcurrent } = this.options;
+      if (maxConcurrent !== undefined) {
+        // Slot usage is derived from run state, never a separate counter: a
+        // run that finishes, fails, is stopped, or is reconciled to lost stops
+        // counting, so a crashed replica cannot leak a slot.
+        await tx.$queryRawUnsafe(CODING_SLOT_LOCK_SQL);
+        const active = await tx.codingRun.count({
+          where: { jobBackend: { not: null }, run: { status: { in: ["pending", "running"] } } },
+        });
+        if (active >= maxConcurrent) {
+          const queued = await tx.codingRun.updateMany({
+            where: { runId, jobBackend: null, queuedAt: null, run: { status: "pending" } },
+            data: { queuedAt: new Date() },
+          });
+          if (queued.count === 1) return "queued";
+          const alreadyQueued = await tx.codingRun.count({
+            where: { runId, jobBackend: null, queuedAt: { not: null }, run: { status: "pending" } },
+          });
+          return alreadyQueued === 1 ? "queued" : "unavailable";
+        }
+      }
       const claimed = await tx.codingRun.updateMany({
         where: {
           runId,
@@ -127,14 +161,14 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
           jobHandle: null,
           run: { status: { in: ["pending", "running"] } },
         },
-        data: { jobBackend: PROVISIONING_BACKEND, jobHandle: claimId },
+        data: { jobBackend: PROVISIONING_BACKEND, jobHandle: claimId, queuedAt: null },
       });
-      if (claimed.count === 0) return false;
+      if (claimed.count === 0) return "unavailable";
       await tx.run.update({
         where: { id: runId },
         data: { status: "running", heartbeatAt: new Date() },
       });
-      return true;
+      return "claimed";
     });
   }
 
@@ -404,7 +438,10 @@ export class ContainerExecutor implements Executor {
       if (!handle) {
         if (run.provisioningClaim) return;
         claimId = randomUUID();
-        if (!(await this.options.store.claimProvisioning(runId, claimId))) return;
+        // "queued": every slot is taken; the run stays pending and
+        // drainCodingQueue starts it when one frees. "unavailable": another
+        // process owns provisioning, or the run is no longer active.
+        if ((await this.options.store.claimProvisioning(runId, claimId)) !== "claimed") return;
       }
       try {
         workspace = await this.options.vcs.recoverWorkspace(prepared);

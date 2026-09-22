@@ -57,8 +57,8 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
       store.claimProvisioning(runId, "claim-a"),
       store.claimProvisioning(runId, "claim-b"),
     ]);
-    expect([first, second].filter(Boolean)).toHaveLength(1);
-    const winner = first ? "claim-a" : "claim-b";
+    expect([first, second].filter((o) => o === "claimed")).toHaveLength(1);
+    const winner = first === "claimed" ? "claim-a" : "claim-b";
     await expect(
       store.persistHandle(runId, winner === "claim-a" ? "claim-b" : "claim-a", { backend: "docker", id: "job-1" }),
     ).rejects.toThrow("coding_job_handle_conflict");
@@ -118,6 +118,70 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
     } finally {
       await db.codingRun.deleteMany({ where: { runId: failedRunId } });
       await db.run.deleteMany({ where: { id: failedRunId } });
+    }
+  });
+});
+
+describe.skipIf(!process.env.DATABASE_URL)("coding concurrency cap (PostgreSQL)", () => {
+  const capSuffix = randomUUID();
+  const capPrincipal = `cap-principal-${capSuffix}`;
+  const capAgent = `cap-agent-${capSuffix}`;
+  const runIds = [0, 1, 2, 3, 4].map((n) => `cap-run-${n}-${capSuffix}`);
+
+  afterAll(async () => {
+    await db.codingRun.deleteMany({ where: { runId: { in: runIds } } });
+    await db.run.deleteMany({ where: { id: { in: runIds } } });
+    await db.agent.deleteMany({ where: { id: capAgent } });
+    await db.principal.deleteMany({ where: { id: capPrincipal } });
+  });
+
+  it("admits exactly maxConcurrent of many racing claims and queues the rest", async () => {
+    // Isolate from other coding runs in the shared local database.
+    const otherActive = await db.codingRun.count({
+      where: { jobBackend: { not: null }, run: { status: { in: ["pending", "running"] } } },
+    });
+    const maxConcurrent = otherActive + 2;
+
+    await db.principal.create({ data: { id: capPrincipal, subject: capPrincipal } });
+    await db.agent.create({
+      data: {
+        id: capAgent,
+        name: capAgent,
+        systemPrompt: "code safely",
+        model: "gpt-5.6-luna",
+        budgetUsd: 1,
+        kind: "coding",
+        ownerId: capPrincipal,
+      },
+    });
+    for (const id of runIds) {
+      await db.run.create({ data: { id, agentId: capAgent, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId: id,
+          task: "Fix it.",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${id}`,
+          provider: "codex",
+          model: "gpt-5.6-luna",
+          timeoutSec: 900,
+          allowedEgress: [],
+          protectedPaths: ["CODEOWNERS"],
+          budgetReservedUsd: 1,
+        },
+      });
+    }
+
+    const store = new PrismaContainerExecutionStore(db, { maxConcurrent });
+    const outcomes = await Promise.all(runIds.map((id) => store.claimProvisioning(id, `claim-${id}`)));
+
+    expect(outcomes.filter((o) => o === "claimed")).toHaveLength(2);
+    expect(outcomes.filter((o) => o === "queued")).toHaveLength(3);
+    const rows = await db.codingRun.findMany({ where: { runId: { in: runIds } } });
+    for (const row of rows) {
+      if (row.jobBackend) expect(row.queuedAt).toBeNull();
+      else expect(row.queuedAt).toBeInstanceOf(Date);
     }
   });
 });
