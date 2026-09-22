@@ -143,10 +143,11 @@ describe("KubernetesJobLauncher", () => {
     expect(await h.api.readNetworkPolicy("wardby-coding", h.names.policy)).toBeDefined();
     expect(h.api.objects.has(`secret/wardby-coding/${h.names.secret}`)).toBe(true);
     const commands = h.api.execCalls.map((c) => c.command.join(" "));
-    expect(isEnforcementProbe(h.api.execCalls[0].command)).toBe(true);
-    expect(commands[1]).toContain("tar -C /run/wardby/storage/workspace");
-    expect(commands[2]).toContain("tar -C /run/wardby/storage/input");
-    expect(commands[3]).toContain("/run/wardby/storage/input/.seeded");
+    // Three consecutive "blocked" probes before anything is seeded.
+    expect(h.api.execCalls.slice(0, 3).every((c) => isEnforcementProbe(c.command))).toBe(true);
+    expect(commands[3]).toContain("tar -C /run/wardby/storage/workspace");
+    expect(commands[4]).toContain("tar -C /run/wardby/storage/input");
+    expect(commands[5]).toContain("/run/wardby/storage/input/.seeded");
     expect(h.api.execCalls.every((c) => c.container === "keeper")).toBe(true);
     expect(await h.launcher.status(handle)).toEqual({ state: "running" });
   });
@@ -709,23 +710,70 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
     return { launcher, sleeps };
   }
 
-  it("polls the keeper's cluster-DNS probe until blocked, then seeds and opens the gate", async () => {
+  /** Answers enforcement probes from `answers` in order (then 0), recording the exec order. */
+  function scriptProbe(h: Awaited<ReturnType<typeof harness>>, answers: number[]) {
+    const original = h.api.onExec;
+    h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? (answers.shift() ?? 0) : original(call));
+    return () =>
+      h.api.execCalls.map((c) => (isEnforcementProbe(c.command) ? "probe" : isMarker(c.command) ? "marker" : "seed"));
+  }
+
+  it("opens the gate only after three consecutive blocked probes (0, 3, 0, 0, 0)", async () => {
     const h = await harness();
     const { launcher, sleeps } = clockedLauncher(h);
-    let connected = 2;
+    const kinds = scriptProbe(h, [0, 3, 0, 0, 0]);
+    await launcher.launch(h.spec);
+    expect(kinds().slice(0, 5)).toEqual(["probe", "probe", "probe", "probe", "probe"]);
+    expect(kinds().indexOf("seed")).toBe(5);
+    expect(kinds().at(-1)).toBe("marker");
+    expect(sleeps.filter((ms) => ms === 500)).toHaveLength(4);
+  });
+
+  it("a connected probe resets the count: 0, 0, 3, 0, 0 does not open the gate", async () => {
+    const h = await harness();
+    const { launcher } = clockedLauncher(h);
+    const kinds = scriptProbe(h, [0, 0, 3, 0, 0, 0]);
+    await launcher.launch(h.spec);
+    // Two blocked, a reset, then three blocked: seeding starts only after the sixth probe.
+    expect(kinds().slice(0, 6)).toEqual(Array(6).fill("probe"));
+    expect(kinds().indexOf("seed")).toBe(6);
+
+    const g = await harness("run-reset-timeout");
+    const { launcher: bounded } = clockedLauncher(g);
+    // Never three in a row: the wall-clock bound still fails the launch.
+    const pattern = Array.from({ length: 100 }, (_, i) => (i % 3 === 2 ? 3 : 0));
+    const gKinds = scriptProbe(g, pattern);
+    await expect(bounded.launch(g.spec)).rejects.toThrow("kubernetes_policy_not_enforced");
+    expect(gKinds()).not.toContain("seed");
+    expect(gKinds()).not.toContain("marker");
+  });
+
+  it("fails provisioning when the probe exec throws, cleaning up without opening the gate", async () => {
+    const h = await harness();
+    const { launcher } = clockedLauncher(h);
     const original = h.api.onExec;
     h.api.onExec = async (call) => {
-      if (isEnforcementProbe(call.command)) return connected-- > 0 ? 3 : 0;
+      if (isEnforcementProbe(call.command)) throw new Error("exec_unavailable");
       return original(call);
     };
-    await launcher.launch(h.spec);
-    const kinds = h.api.execCalls.map((c) =>
-      isEnforcementProbe(c.command) ? "probe" : isMarker(c.command) ? "marker" : "seed",
-    );
-    expect(kinds.slice(0, 3)).toEqual(["probe", "probe", "probe"]);
-    expect(kinds.indexOf("seed")).toBe(3);
-    expect(kinds.at(-1)).toBe("marker");
-    expect(sleeps.filter((ms) => ms === 500)).toHaveLength(2);
+    await expect(launcher.launch(h.spec)).rejects.toThrow("exec_unavailable");
+    expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
+    expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+    expect(h.api.objects.has(`networkpolicy/wardby-coding/${h.names.policy}`)).toBe(false);
+    expect(h.api.objects.has(`secret/wardby-coding/${h.names.secret}`)).toBe(false);
+    const handle = { backend: "kubernetes", id: `wardby-coding/${h.names.token}` };
+    expect(await launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "kubernetes_provisioning_failed",
+    });
+  });
+
+  it("the probe uses a SYN-safe 3 s connect timeout", async () => {
+    const h = await harness();
+    await h.launcher.launch(h.spec);
+    const probe = h.api.execCalls.find((c) => isEnforcementProbe(c.command))!;
+    expect(probe.command[2]).toContain("timeout: 3000");
   });
 
   it("execs the probe in the keeper as an argv array with the validated IP literal, never a shell", async () => {

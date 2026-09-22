@@ -451,7 +451,8 @@ export function assertRunNetworkPolicyMatches(actual: V1NetworkPolicy, expected:
 
 /**
  * A `node -e` script (argv only, never a shell) that tries one TCP connect to
- * `<clusterDnsIp>:53` with a 1 s timeout: exits 0 when blocked (error or
+ * `<clusterDnsIp>:53` with a 3 s timeout (above Linux's 1 s initial SYN
+ * retransmission, so one dropped SYN on an allowed path still connects): exits 0 when blocked (error or
  * timeout) and ENFORCEMENT_PROBE_CONNECTED when it connects. The IP is
  * validated and embedded as a JSON string literal.
  */
@@ -460,7 +461,7 @@ export function enforcementProbeScript(clusterDnsIp: string): string {
   return [
     'const socket = require("node:net").connect({ host: ' +
       JSON.stringify(clusterDnsIp) +
-      ", port: 53, timeout: 1000 });",
+      ", port: 53, timeout: 3000 });",
     `socket.once("connect", () => { socket.destroy(); process.exit(${ENFORCEMENT_PROBE_CONNECTED}); });`,
     'socket.once("timeout", () => { socket.destroy(); process.exit(0); });',
     'socket.once("error", () => process.exit(0));',

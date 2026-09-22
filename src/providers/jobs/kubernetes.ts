@@ -64,7 +64,9 @@ const READY_POLL_MS = 250;
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const DEFAULT_ENFORCEMENT_TIMEOUT_MS = 30_000;
 const ENFORCEMENT_POLL_MS = 500;
-/** Bound for one enforcement probe exec (the probe itself gives up after 1 s). */
+/** Consecutive "blocked" probes required: one dropped SYN on an allowed path must not open the gate. */
+const ENFORCEMENT_BLOCKED_STREAK = 3;
+/** Bound for one enforcement probe exec (the probe itself gives up after 3 s). */
 const ENFORCEMENT_EXEC_TIMEOUT_MS = 10_000;
 /** Bound for small keeper commands (seeded marker, result artifact read). */
 const SHORT_EXEC_TIMEOUT_MS = 60_000;
@@ -469,16 +471,19 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
 
   /**
    * Waits until the run's NetworkPolicy is enforced on this pod: the keeper (same network namespace as
-   * the worker) must be unable to reach the cluster DNS Service. Anything but a clean "blocked" retries.
+   * the worker) must be unable to reach the cluster DNS Service on ENFORCEMENT_BLOCKED_STREAK consecutive
+   * probes, 500 ms apart. Anything but a clean "blocked" resets the streak; the wall-clock bound still applies.
    */
   private async waitForPolicyEnforcement(names: RunNames, cluster: KubernetesClusterInfo): Promise<void> {
     const command = ["node", "-e", enforcementProbeScript(cluster.clusterDnsIp)];
     const started = this.now();
+    let blocked = 0;
     for (;;) {
       const exitCode = await this.api.exec(this.namespace, names.pod, KEEPER_CONTAINER, command, {
         timeoutMs: ENFORCEMENT_EXEC_TIMEOUT_MS,
       });
-      if (exitCode === 0) return;
+      blocked = exitCode === 0 ? blocked + 1 : 0;
+      if (blocked >= ENFORCEMENT_BLOCKED_STREAK) return;
       if (this.now() - started >= this.enforcementTimeoutMs) throw new Error("kubernetes_policy_not_enforced");
       await this.sleep(ENFORCEMENT_POLL_MS);
     }
