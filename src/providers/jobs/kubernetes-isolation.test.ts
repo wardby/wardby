@@ -5,6 +5,8 @@ import type { JobSpec } from "./types.js";
 import {
   KUBERNETES_ISOLATION_ERROR,
   KUBERNETES_PROVIDER_UNSUPPORTED,
+  STORAGE_INIT_CONTAINER,
+  STORAGE_ROOT,
   assertRunNetworkPolicyMatches,
   assertRunPodMatches,
   buildCapabilitySecret,
@@ -31,6 +33,7 @@ const options = { namespace: "wardby-coding", proxyIp: "10.96.0.50" };
 const pod = () => buildRunPod(spec, options);
 const worker = (p: V1Pod) => p.spec!.containers.find((c) => c.name === "worker")!;
 const keeper = (p: V1Pod) => p.spec!.containers.find((c) => c.name === "keeper")!;
+const storageInit = (p: V1Pod) => p.spec!.initContainers!.find((c) => c.name === "storage-init")!;
 
 /** Rebuilds an object graph with every object's keys in reverse insertion order; array element order is untouched. */
 function shuffleKeys<T>(value: T): T {
@@ -133,7 +136,7 @@ describe("buildRunPod", () => {
       runAsGroup: 10001,
       seccompProfile: { type: "RuntimeDefault" },
     });
-    for (const c of pod().spec!.containers) {
+    for (const c of [...pod().spec!.containers, ...pod().spec!.initContainers!]) {
       expect(c.securityContext).toEqual({
         allowPrivilegeEscalation: false,
         privileged: false,
@@ -142,6 +145,24 @@ describe("buildRunPod", () => {
         capabilities: { drop: ["ALL"] },
       });
     }
+  });
+
+  it("creates the storage subdirectories in a minimal init container before any subPath mount", () => {
+    const s = pod().spec!;
+    expect(s.initContainers).toHaveLength(1);
+    const init = storageInit(pod());
+    expect(init.name).toBe(STORAGE_INIT_CONTAINER);
+    expect(init.image).toBe(IMAGE);
+    expect(init.volumeMounts).toEqual([{ name: "storage", mountPath: STORAGE_ROOT }]);
+    expect(init.env).toBeUndefined();
+    expect(init.resources).toEqual(keeper(pod()).resources);
+    expect(init.command?.slice(0, 2)).toEqual(["node", "-e"]);
+    const script = init.command![2];
+    for (const name of ["workspace", "input", "output"]) expect(script).toContain(`"${name}"`);
+    expect(script).toContain("mkdirSync");
+    expect(script).toContain("chmodSync");
+    expect(script).toContain("0o700");
+    expect(script).toContain(JSON.stringify(STORAGE_ROOT));
   });
 
   it("denies DNS and reaches the proxy only through a hostAlias", () => {
@@ -240,12 +261,14 @@ describe("assertRunPodMatches", () => {
     s.preemptionPolicy = "PreemptLowerPriority";
     s.serviceAccount = s.serviceAccountName;
     s.tolerations = [DEFAULT_TOLERATION_1, DEFAULT_TOLERATION_2];
-    s.containers = s.containers.map((x) => ({
+    const apiContainerDefaults = (x: NonNullable<typeof s.initContainers>[number]) => ({
       ...x,
       terminationMessagePath: "/dev/termination-log",
       terminationMessagePolicy: "File",
       imagePullPolicy: "IfNotPresent",
-    }));
+    });
+    s.containers = s.containers.map(apiContainerDefaults);
+    s.initContainers = s.initContainers!.map(apiContainerDefaults);
     keeper(c).readinessProbe = {
       ...keeper(c).readinessProbe,
       timeoutSeconds: 1,
@@ -309,6 +332,22 @@ describe("assertRunPodMatches", () => {
       (p) => void p.spec!.containers.push({ name: "mesh-proxy", image: "mesh@sha256:" + "c".repeat(64) }),
     ],
     ["init container", (p) => void (p.spec!.initContainers = [{ name: "init", image: IMAGE }])],
+    ["extra init container", (p) => void p.spec!.initContainers!.push({ name: "init", image: IMAGE })],
+    ["storage init removed", (p) => void delete p.spec!.initContainers],
+    [
+      "storage init as root",
+      (p) => void (storageInit(p).securityContext = { ...storageInit(p).securityContext, runAsUser: 0 }),
+    ],
+    [
+      "storage init with an extra mount",
+      (p) => void storageInit(p).volumeMounts!.push({ name: "tmp", mountPath: "/tmp" }),
+    ],
+    ["storage init with a different command", (p) => void (storageInit(p).command = ["sh", "-c", "id"])],
+    ["storage init with a different image", (p) => void (storageInit(p).image = `other@sha256:${"d".repeat(64)}`)],
+    [
+      "storage init with an added capability",
+      (p) => void (storageInit(p).securityContext!.capabilities = { drop: ["ALL"], add: ["CHOWN"] }),
+    ],
     ["hostPath volume", (p) => void p.spec!.volumes!.push({ name: "host", hostPath: { path: "/" } })],
     ["extra env", (p) => void worker(p).env!.push({ name: "EXTRA", value: "1" })],
     ["different image", (p) => void (worker(p).image = `other@sha256:${"d".repeat(64)}`)],

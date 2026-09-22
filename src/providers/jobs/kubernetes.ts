@@ -76,6 +76,7 @@ const FATAL_WAITING_REASONS = new Set([
   "InvalidImageName",
   "CreateContainerConfigError",
   "CreateContainerError",
+  "CrashLoopBackOff",
 ]);
 const CAPABILITY = /^rrp_[A-Za-z0-9_-]{16,512}$/;
 const TOKEN = /^[a-f0-9]{20}$/;
@@ -566,10 +567,19 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       const pod = await this.api.readPod(this.namespace, names.pod);
       if (!pod || pod.status?.phase === "Failed") throw new Error("kubernetes_pod_start_failed");
       const statuses = pod.status?.containerStatuses ?? [];
-      if (statuses.some((status) => FATAL_WAITING_REASONS.has(status.state?.waiting?.reason ?? ""))) {
+      const initStatuses = pod.status?.initContainerStatuses ?? [];
+      const keeper = statuses.find((status) => status.name === KEEPER_CONTAINER);
+      if (
+        [...initStatuses, ...statuses].some((status) =>
+          FATAL_WAITING_REASONS.has(status.state?.waiting?.reason ?? ""),
+        ) ||
+        // A failed init container (kubectl's Init:Error) or a keeper that already exited can never become ready.
+        initStatuses.some((status) => (status.state?.terminated?.exitCode ?? 0) !== 0) ||
+        keeper?.state?.terminated !== undefined
+      ) {
         throw new Error("kubernetes_pod_start_failed");
       }
-      if (statuses.find((status) => status.name === KEEPER_CONTAINER)?.ready === true) return;
+      if (keeper?.ready === true) return;
       if (this.now() - started >= this.readyTimeoutMs) throw new Error("kubernetes_pod_start_timeout");
       await this.sleep(READY_POLL_MS);
     }

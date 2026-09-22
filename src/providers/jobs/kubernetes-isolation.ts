@@ -30,6 +30,7 @@ export const KUBERNETES_PROVIDER_UNSUPPORTED = "kubernetes_provider_unsupported"
 /** Extra seconds past timeoutSec before Kubernetes kills the pod (keeper included). */
 export const POD_DEADLINE_GRACE_SECONDS = 300;
 export const KEEPER_CONTAINER = "keeper";
+export const STORAGE_INIT_CONTAINER = "storage-init";
 export const WORKER_CONTAINER = "worker";
 export const STORAGE_ROOT = "/run/wardby/storage";
 export const KEEPER_SEEDED_MARKER = `${STORAGE_ROOT}/input/.seeded`;
@@ -53,6 +54,20 @@ const WORKER_GATE = [
   "    setTimeout(wait, 250);",
   "  }",
   "})();",
+].join("\n");
+
+/**
+ * Creates the worker's subPath mount sources, owned by the run uid, before any regular container
+ * starts. Otherwise the kubelet creates them root-owned while setting up the worker's subPath mounts,
+ * and the keeper (uid 10001, no capabilities) can't chmod them. Idempotent; no shell.
+ */
+const STORAGE_INIT_SCRIPT = [
+  'const fs = require("node:fs");',
+  'for (const name of ["workspace", "input", "output"]) {',
+  `  const path = ${JSON.stringify(STORAGE_ROOT)} + "/" + name;`,
+  "  fs.mkdirSync(path, { recursive: true, mode: 0o700 });",
+  "  fs.chmodSync(path, 0o700);",
+  "}",
 ].join("\n");
 
 function isolationError(): Error {
@@ -145,6 +160,14 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
   validateKubernetesSpec(spec);
   const names = kubernetesRunNames(spec.runId);
   const scratchMb = Math.max(16, Math.min(64, Math.floor(spec.limits.memoryMb / 8)));
+  const storageInit: V1Container = {
+    name: STORAGE_INIT_CONTAINER,
+    image: spec.image,
+    command: ["node", "-e", STORAGE_INIT_SCRIPT],
+    securityContext: containerSecurity(),
+    resources: { requests: { cpu: "250m", memory: "128Mi" }, limits: { cpu: "250m", memory: "128Mi" } },
+    volumeMounts: [{ name: "storage", mountPath: STORAGE_ROOT }],
+  };
   const keeper: V1Container = {
     name: KEEPER_CONTAINER,
     image: spec.image,
@@ -212,6 +235,7 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
         { name: "tmp", emptyDir: { medium: "Memory", sizeLimit: `${scratchMb}Mi` } },
         { name: "home", emptyDir: { medium: "Memory", sizeLimit: `${scratchMb}Mi` } },
       ],
+      initContainers: [storageInit],
       containers: [keeper, worker],
     },
   };

@@ -847,3 +847,83 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
     expect(g.api.objects.has(`pod/wardby-coding/${g.names.pod}`)).toBe(false);
   });
 });
+
+describe("KubernetesJobLauncher pod start failures", () => {
+  const startWith = async (status: V1Pod["status"]) => {
+    const h = await harness();
+    h.api.createPod = async (ns, body) => {
+      const created = await FakeKubernetesApi.prototype.createPod.call(h.api, ns, body);
+      h.api.put("pod", ns, { ...created, status });
+      return created;
+    };
+    return h;
+  };
+  const init = (state: NonNullable<NonNullable<V1Pod["status"]>["initContainerStatuses"]>[number]["state"]) => ({
+    name: "storage-init",
+    ready: false,
+    image: IMAGE,
+    imageID: "",
+    restartCount: 0,
+    state,
+  });
+
+  it.each([
+    [
+      "a failed storage init container (Init:Error)",
+      { phase: "Pending", initContainerStatuses: [init({ terminated: { exitCode: 1, reason: "Error" } })] },
+    ],
+    [
+      "an init container in CrashLoopBackOff",
+      { phase: "Pending", initContainerStatuses: [init({ waiting: { reason: "CrashLoopBackOff" } })] },
+    ],
+    [
+      "an init container image pull failure",
+      { phase: "Pending", initContainerStatuses: [init({ waiting: { reason: "ErrImagePull" } })] },
+    ],
+    [
+      "a keeper that already exited",
+      {
+        phase: "Running",
+        initContainerStatuses: [init({ terminated: { exitCode: 0, reason: "Completed" } })],
+        containerStatuses: [
+          {
+            name: "keeper",
+            ready: false,
+            image: IMAGE,
+            imageID: IMAGE,
+            restartCount: 0,
+            state: { terminated: { exitCode: 1, reason: "Error" } },
+          },
+          { name: "worker", ready: true, image: IMAGE, imageID: IMAGE, restartCount: 0, state: { running: {} } },
+        ],
+      },
+    ],
+  ] as Array<[string, V1Pod["status"]]>)(
+    "fails fast on %s instead of waiting out the timeout",
+    async (_name, status) => {
+      const h = await startWith(status);
+      let polls = 0;
+      const read = h.api.readPod.bind(h.api);
+      h.api.readPod = async (ns, name) => {
+        polls += 1;
+        return read(ns, name);
+      };
+      await expect(h.launcher.launch(h.spec)).rejects.toThrow("kubernetes_pod_start_failed");
+      expect(polls).toBe(1);
+      expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+    },
+  );
+
+  it("proceeds past a successfully completed init container to a ready keeper", async () => {
+    const h = await startWith({
+      phase: "Running",
+      initContainerStatuses: [init({ terminated: { exitCode: 0, reason: "Completed" } })],
+      containerStatuses: [
+        { name: "keeper", ready: true, image: IMAGE, imageID: IMAGE, restartCount: 0, state: { running: {} } },
+        { name: "worker", ready: true, image: IMAGE, imageID: IMAGE, restartCount: 0, state: { running: {} } },
+      ],
+    });
+    const handle = await h.launcher.launch(h.spec);
+    expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+  });
+});
