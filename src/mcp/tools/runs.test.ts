@@ -25,7 +25,7 @@ interface FakeRunRow {
   error: string | null;
   startedAt: Date;
   finishedAt: Date | null;
-  codingRun?: { result: unknown; jobHandle?: string; protectedPaths?: string[] } | null;
+  codingRun?: { result: unknown; jobHandle?: string; protectedPaths?: string[]; queuedAt?: Date | null } | null;
 }
 
 function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[]) {
@@ -142,6 +142,40 @@ describe("run observability tools", () => {
 
     const result = await client.callTool({ name: "get_run", arguments: { runId: "r1" } });
     expect(result.isError).toBe(true);
+    await client.close();
+  });
+
+  it("get_run marks a coding run waiting for a concurrency slot with codingQueuedAt", async () => {
+    const queuedAt = new Date("2026-09-22T12:00:00.000Z");
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [
+        {
+          id: "r1",
+          agentId: "a1",
+          status: "pending",
+          trigger: "manual",
+          turns: 0,
+          tokensIn: 0,
+          tokensOut: 0,
+          costUsd: 0,
+          finalText: null,
+          error: null,
+          startedAt: queuedAt,
+          finishedAt: null,
+          codingRun: { result: null, queuedAt },
+        },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "get_run", arguments: { runId: "r1" } });
+    const body = parseText(result as never) as { status: string; codingQueuedAt?: string };
+    expect(body.status).toBe("pending");
+    expect(body.codingQueuedAt).toBe("2026-09-22T12:00:00.000Z");
     await client.close();
   });
 

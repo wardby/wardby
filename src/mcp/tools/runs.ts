@@ -32,9 +32,20 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       const run = await ctx.db.run.findUnique({ where: { id: args.runId } });
       if (!run) throw new McpError(404, `Run "${args.runId}" not found.`);
       await requireReadableAgent(ctx.db, run.agentId, ctx.principal.id);
-      const codingRun = await ctx.db.codingRun.findUnique({ where: { runId: run.id }, select: { result: true } });
+      const codingRun = await ctx.db.codingRun.findUnique({
+        where: { runId: run.id },
+        select: { result: true, queuedAt: true },
+      });
       const codingResult = publicCodingRunResult(codingRun?.result);
-      return textResult(codingResult ? { ...run, codingResult } : run);
+      // A pending coding run with queuedAt is waiting for a concurrency slot
+      // (CODING_MAX_CONCURRENT), not stuck.
+      const codingQueuedAt =
+        run.status === "pending" && codingRun?.queuedAt ? codingRun.queuedAt.toISOString() : undefined;
+      return textResult({
+        ...run,
+        ...(codingResult ? { codingResult } : {}),
+        ...(codingQueuedAt ? { codingQueuedAt } : {}),
+      });
     },
   });
 }
