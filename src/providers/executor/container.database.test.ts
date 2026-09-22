@@ -1,24 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PrismaContainerExecutionStore } from "./container.js";
 
 const db = new PrismaClient();
 const suffix = randomUUID();
 const principalId = `container-principal-${suffix}`;
 const agentId = `container-agent-${suffix}`;
-const runId = `container-run-${suffix}`;
 
+// Tests that create active (slot-holding) or queued coding runs live in
+// src/core/coding-concurrency.database.test.ts instead: they depend on
+// global slot/queue state and race each other across parallel test files.
 describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (PostgreSQL)", () => {
-  afterAll(async () => {
-    await db.codingRun.deleteMany({ where: { runId } });
-    await db.run.deleteMany({ where: { id: runId } });
-    await db.agent.deleteMany({ where: { id: agentId } });
-    await db.principal.deleteMany({ where: { id: principalId } });
-    await db.$disconnect();
-  });
-
-  it("admits one provisioning owner and atomically persists its handle and terminal result", async () => {
+  beforeAll(async () => {
     await db.principal.create({ data: { id: principalId, subject: principalId } });
     await db.agent.create({
       data: {
@@ -31,58 +25,12 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
         ownerId: principalId,
       },
     });
-    await db.run.create({ data: { id: runId, agentId, executionManaged: true } });
-    await db.codingRun.create({
-      data: {
-        runId,
-        task: "Fix it.",
-        repository: "openai/example",
-        baseRef: "main",
-        headRef: `wardby/run-${runId}`,
-        provider: "codex",
-        model: "gpt-5.6-luna",
-        timeoutSec: 900,
-        allowedEgress: [],
-        protectedPaths: ["CODEOWNERS"],
-        workerImage: `sha256:realdbtest${"0".repeat(50)}`,
-        budgetReservedUsd: 1,
-      },
-    });
+  });
 
-    const store = new PrismaContainerExecutionStore(db);
-    await expect(store.load(runId)).resolves.toMatchObject({
-      workerImage: `sha256:realdbtest${"0".repeat(50)}`,
-    });
-    const [first, second] = await Promise.all([
-      store.claimProvisioning(runId, "claim-a"),
-      store.claimProvisioning(runId, "claim-b"),
-    ]);
-    expect([first, second].filter((o) => o === "claimed")).toHaveLength(1);
-    const winner = first === "claimed" ? "claim-a" : "claim-b";
-    await expect(
-      store.persistHandle(runId, winner === "claim-a" ? "claim-b" : "claim-a", { backend: "docker", id: "job-1" }),
-    ).rejects.toThrow("coding_job_handle_conflict");
-    await store.persistHandle(runId, winner, { backend: "docker", id: "job-1" });
-    await expect(store.load(runId)).resolves.toMatchObject({
-      status: "running",
-      provisioningClaim: null,
-      jobHandle: { backend: "docker", id: "job-1" },
-    });
-
-    const result = {
-      schemaVersion: 1 as const,
-      outcome: "no_changes" as const,
-      repository: "openai/example",
-      baseRef: "main",
-      summary: "Nothing to change.",
-      tests: [],
-      usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
-    };
-    await store.complete(runId, "succeeded", result);
-    await store.complete(runId, "succeeded", result);
-    const terminal = await db.run.findUniqueOrThrow({ where: { id: runId }, include: { codingRun: true } });
-    expect(terminal.status).toBe("succeeded");
-    expect(terminal.codingRun?.result).toEqual(result);
+  afterAll(async () => {
+    await db.agent.deleteMany({ where: { id: agentId } });
+    await db.principal.deleteMany({ where: { id: principalId } });
+    await db.$disconnect();
   });
 
   it("persists a sanitized failure category and opaque diagnostic ID separately from the terminal state", async () => {
@@ -161,70 +109,6 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
     } finally {
       await db.codingRun.deleteMany({ where: { runId: alreadyFailedRunId } });
       await db.run.deleteMany({ where: { id: alreadyFailedRunId } });
-    }
-  });
-});
-
-describe.skipIf(!process.env.DATABASE_URL)("coding concurrency cap (PostgreSQL)", () => {
-  const capSuffix = randomUUID();
-  const capPrincipal = `cap-principal-${capSuffix}`;
-  const capAgent = `cap-agent-${capSuffix}`;
-  const runIds = [0, 1, 2, 3, 4].map((n) => `cap-run-${n}-${capSuffix}`);
-
-  afterAll(async () => {
-    await db.codingRun.deleteMany({ where: { runId: { in: runIds } } });
-    await db.run.deleteMany({ where: { id: { in: runIds } } });
-    await db.agent.deleteMany({ where: { id: capAgent } });
-    await db.principal.deleteMany({ where: { id: capPrincipal } });
-  });
-
-  it("admits exactly maxConcurrent of many racing claims and queues the rest", async () => {
-    // Isolate from other coding runs in the shared local database.
-    const otherActive = await db.codingRun.count({
-      where: { jobBackend: { not: null }, run: { status: { in: ["pending", "running"] } } },
-    });
-    const maxConcurrent = otherActive + 2;
-
-    await db.principal.create({ data: { id: capPrincipal, subject: capPrincipal } });
-    await db.agent.create({
-      data: {
-        id: capAgent,
-        name: capAgent,
-        systemPrompt: "code safely",
-        model: "gpt-5.6-luna",
-        budgetUsd: 1,
-        kind: "coding",
-        ownerId: capPrincipal,
-      },
-    });
-    for (const id of runIds) {
-      await db.run.create({ data: { id, agentId: capAgent, executionManaged: true } });
-      await db.codingRun.create({
-        data: {
-          runId: id,
-          task: "Fix it.",
-          repository: "openai/example",
-          baseRef: "main",
-          headRef: `wardby/run-${id}`,
-          provider: "codex",
-          model: "gpt-5.6-luna",
-          timeoutSec: 900,
-          allowedEgress: [],
-          protectedPaths: ["CODEOWNERS"],
-          budgetReservedUsd: 1,
-        },
-      });
-    }
-
-    const store = new PrismaContainerExecutionStore(db, { maxConcurrent });
-    const outcomes = await Promise.all(runIds.map((id) => store.claimProvisioning(id, `claim-${id}`)));
-
-    expect(outcomes.filter((o) => o === "claimed")).toHaveLength(2);
-    expect(outcomes.filter((o) => o === "queued")).toHaveLength(3);
-    const rows = await db.codingRun.findMany({ where: { runId: { in: runIds } } });
-    for (const row of rows) {
-      if (row.jobBackend) expect(row.queuedAt).toBeNull();
-      else expect(row.queuedAt).toBeInstanceOf(Date);
     }
   });
 });
