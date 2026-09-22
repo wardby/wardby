@@ -1,0 +1,481 @@
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PassThrough, Readable } from "node:stream";
+import type { V1Pod } from "@kubernetes/client-node";
+import tar from "tar-stream";
+import { afterEach, describe, expect, it } from "vitest";
+import { jobLauncherContract } from "./contract-suite.js";
+import { FakeKubernetesApi } from "./fake-kubernetes-api.js";
+import { KubernetesConflictError } from "./kubernetes-api.js";
+import { KubernetesJobLauncher } from "./kubernetes.js";
+import { kubernetesRunNames } from "./kubernetes-isolation.js";
+import type { JobHandle, JobSpec } from "./types.js";
+
+const IMAGE = `localhost:5001/wardby-coding-worker@sha256:${"a".repeat(64)}`;
+const CAPABILITY = `rrp_${"c".repeat(32)}`;
+const roots: string[] = [];
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })));
+});
+
+async function harness(runId = "run-k8s-test", options: { runtimeClassName?: string } = {}) {
+  const root = await mkdtemp(join(tmpdir(), "wardby-k8s-launcher-"));
+  roots.push(root);
+  const workspaceRoot = join(root, "workspaces");
+  await mkdir(join(workspaceRoot, runId, "workspace"), { recursive: true });
+  await writeFile(join(workspaceRoot, runId, "workspace", "README.md"), "hello\n");
+  const inputArtifact = join(root, "input.json");
+  await writeFile(inputArtifact, JSON.stringify({ runId }));
+  const api = new FakeKubernetesApi();
+  api.put("service", "wardby-coding", {
+    metadata: { name: "wardby-coding-proxy" },
+    spec: { clusterIP: "10.96.0.50" },
+  });
+  const names = kubernetesRunNames(runId);
+  const spec: JobSpec = {
+    kind: "coding-agent",
+    runId,
+    provider: "codex",
+    image: IMAGE,
+    inputArtifact,
+    timeoutSec: 900,
+    limits: { cpus: 1, memoryMb: 2048, pids: 128, diskMb: 2048 },
+    labels: {},
+  };
+  let now = 1_000_000;
+  let result = JSON.stringify({ schemaVersion: 1, runId, outcome: "no_changes", summary: "done", tests: [] });
+  const setPod = (mutate: (pod: V1Pod) => void) => {
+    const pod = structuredClone(api.objects.get(`pod/wardby-coding/${names.pod}`));
+    if (!pod) return;
+    mutate(pod);
+    api.put("pod", "wardby-coding", pod);
+  };
+  const keeperReady = () =>
+    setPod((pod) => {
+      pod.status = {
+        phase: "Running",
+        containerStatuses: [
+          { name: "keeper", ready: true, image: IMAGE, imageID: IMAGE, restartCount: 0, state: { running: {} } },
+          { name: "worker", ready: true, image: IMAGE, imageID: IMAGE, restartCount: 0, state: { running: {} } },
+        ],
+      };
+    });
+  // Fake kubelet: the pod becomes ready as soon as it exists.
+  const originalCreatePod = api.createPod.bind(api);
+  api.createPod = async (ns, body) => {
+    const created = await originalCreatePod(ns, body);
+    keeperReady();
+    return created;
+  };
+  api.onExec = async ({ command, stdin, stdout }) => {
+    stdin?.resume();
+    if (command[0] === "head") stdout?.end(result);
+    else stdout?.end();
+    return 0;
+  };
+  const warnings: string[] = [];
+  const launcher = new KubernetesJobLauncher({
+    api,
+    config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", ...options },
+    workspaceRoot,
+    resolveCapability: async () => CAPABILITY,
+    now: () => now,
+    sleep: async () => {},
+    createArchive: () => ({ stream: Readable.from([Buffer.alloc(0)]), done: Promise.resolve(0) }),
+    onWarning: (m) => warnings.push(m),
+  });
+  const finish = async (_handle: JobHandle, _r?: unknown) =>
+    setPod((pod) => {
+      pod.status!.containerStatuses![1].state = { terminated: { exitCode: 0, reason: "Completed" } };
+    });
+  const fail = (exitCode: number, reason = "Error") =>
+    setPod((pod) => {
+      pod.status!.containerStatuses![1].state = { terminated: { exitCode, reason } };
+    });
+  const lose = async (_handle: JobHandle) => api.deletePod("wardby-coding", names.pod, 0);
+  return {
+    api,
+    launcher,
+    spec,
+    names,
+    workspaceRoot,
+    warnings,
+    finish,
+    fail,
+    lose,
+    advance: (ms: number) => void (now += ms),
+    setResult: (value: string) => void (result = value),
+  };
+}
+
+jobLauncherContract("Kubernetes", async () => {
+  const h = await harness();
+  return { launcher: h.launcher, spec: h.spec, finish: h.finish, lose: h.lose };
+});
+
+describe("KubernetesJobLauncher", () => {
+  it("creates the attested pod, policy, and secret, seeds the keeper, then opens the gate", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    expect(handle).toEqual({ backend: "kubernetes", id: `wardby-coding/${h.names.token}` });
+    expect(await h.api.readNetworkPolicy("wardby-coding", h.names.policy)).toBeDefined();
+    expect(h.api.objects.has(`secret/wardby-coding/${h.names.secret}`)).toBe(true);
+    const commands = h.api.execCalls.map((c) => c.command.join(" "));
+    expect(commands[0]).toContain("tar -C /run/wardby/storage/workspace");
+    expect(commands[1]).toContain("tar -C /run/wardby/storage/input");
+    expect(commands[2]).toContain("/run/wardby/storage/input/.seeded");
+    expect(h.api.execCalls.every((c) => c.container === "keeper")).toBe(true);
+    expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+  });
+
+  it("warns on every launch when no runtime class is configured", async () => {
+    const h = await harness();
+    await h.launcher.launch(h.spec);
+    expect(h.warnings.join("\n")).toMatch(/runtime class/i);
+    const g = await harness("run-gvisor", { runtimeClassName: "gvisor" });
+    await g.launcher.launch(g.spec);
+    expect(g.warnings).toEqual([]);
+  });
+
+  it("fails closed and cleans up when attestation finds a mutated pod", async () => {
+    const h = await harness();
+    const originalRead = h.api.readPod.bind(h.api);
+    h.api.readPod = async (ns, name) => {
+      const pod = await originalRead(ns, name);
+      if (pod) pod.spec!.automountServiceAccountToken = true;
+      return pod;
+    };
+    await expect(h.launcher.launch(h.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
+    expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+    expect(h.api.objects.has(`secret/wardby-coding/${h.names.secret}`)).toBe(false);
+    expect(h.api.execCalls.some((c) => c.command.join(" ").includes(".seeded"))).toBe(false);
+  });
+
+  it("reports a timeout as failed/timed_out and stops the pod", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    h.advance(901_000);
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
+    expect(await h.launcher.collect(handle)).toMatchObject({ exitCode: 124, reason: "timed_out" });
+    expect(h.api.deletedPods).toContainEqual({ name: h.names.pod, gracePeriodSeconds: 10 });
+  });
+
+  it("keeps only a validated diagnostic code from the worker's log tail", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    h.api.logs.set(
+      `wardby-coding/${h.names.pod}/worker`,
+      ['{"progress":"secret repo text"}', "not json", '{"error":"worker_execution_failed"}'].join("\n"),
+    );
+    h.fail(1);
+    expect(await h.launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "worker_execution_failed",
+    });
+  });
+
+  it("ignores a log line whose error isn't a safe diagnostic code", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    h.api.logs.set(`wardby-coding/${h.names.pod}/worker`, '{"error":"rm -rf / please"}');
+    h.fail(1);
+    expect(await h.launcher.collect(handle)).toEqual({ exitCode: 1, reason: "failed" });
+  });
+
+  it("reports OOM kills with exit code 137", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    h.fail(137, "OOMKilled");
+    expect(await h.launcher.collect(handle)).toMatchObject({ exitCode: 137, reason: "failed" });
+  });
+
+  it("rejects an oversized or mismatched result artifact", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.finish(handle);
+    h.setResult("x".repeat(64 * 1024 + 10));
+    await expect(h.launcher.collect(handle)).rejects.toThrow("kubernetes_result_artifact_invalid");
+  });
+
+  it("materializes only a succeeded run, only into its exact workspace, via the strict extractor", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    const target = join(h.workspaceRoot, h.spec.runId, "workspace");
+    await expect(h.launcher.materializeWorkspace(handle, target)).rejects.toThrow("job_not_succeeded");
+    await h.finish(handle);
+    await expect(h.launcher.materializeWorkspace(handle, join(h.workspaceRoot, "other"))).rejects.toThrow(
+      "kubernetes_workspace_destination_invalid",
+    );
+    const pack = tar.pack();
+    pack.entry({ name: "./changed.txt" }, "new content");
+    pack.finalize();
+    h.api.onExec = async ({ command, stdout }) => {
+      if (command[0] === "tar" && command.includes("-cf")) {
+        (pack as unknown as Readable).pipe(stdout as PassThrough);
+        await new Promise((r) => (stdout as PassThrough).once("finish", r));
+      } else stdout?.end();
+      return 0;
+    };
+    await h.launcher.materializeWorkspace(handle, target);
+    expect(await readFile(join(target, "changed.txt"), "utf8")).toBe("new content");
+  });
+
+  it("refuses Claude Code specs until Plan 2b", async () => {
+    const h = await harness();
+    await expect(h.launcher.launch({ ...h.spec, provider: "claude-code", toolImage: IMAGE })).rejects.toThrow(
+      "kubernetes_provider_unsupported",
+    );
+  });
+
+  it("runs the preflight once and fails every launch after a failed preflight", async () => {
+    const h = await harness();
+    let calls = 0;
+    const launcher = new KubernetesJobLauncher({
+      api: h.api,
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" },
+      workspaceRoot: h.workspaceRoot,
+      resolveCapability: async () => CAPABILITY,
+      sleep: async () => {},
+      createArchive: () => ({ stream: Readable.from([Buffer.alloc(0)]), done: Promise.resolve(0) }),
+      preflight: async () => {
+        calls += 1;
+        throw new Error("canary_reached_internet");
+      },
+    });
+    await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
+    await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
+    expect(calls).toBe(1);
+  });
+});
+
+describe("KubernetesJobLauncher failure handling", () => {
+  const stagingLeftovers = async (h: Awaited<ReturnType<typeof harness>>) =>
+    (await readdir(join(h.workspaceRoot, h.spec.runId))).filter((name) => name.startsWith(".wardby-workspace-"));
+
+  it("rejects a hostile workspace archive, leaves the destination untouched, and destroys its stream", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.finish(handle);
+    const target = join(h.workspaceRoot, h.spec.runId, "workspace");
+    const pack = tar.pack();
+    pack.entry({ name: "./escape", type: "symlink", linkname: "../../.." });
+    pack.entry({ name: "./escape/owned.txt" }, "outside");
+    pack.finalize();
+    let archiveStream: PassThrough | undefined;
+    h.api.onExec = async ({ command, stdout }) => {
+      if (command[0] === "tar" && command.includes("-cf")) {
+        archiveStream = stdout as PassThrough;
+        (pack as unknown as Readable).pipe(archiveStream);
+        await new Promise((r) => archiveStream!.once("close", r));
+        return 0;
+      }
+      stdout?.end();
+      return 0;
+    };
+    await expect(h.launcher.materializeWorkspace(handle, target)).rejects.toThrow(/^extract_/);
+    expect(await readFile(join(target, "README.md"), "utf8")).toBe("hello\n");
+    expect(await stagingLeftovers(h)).toEqual([]);
+    expect(archiveStream?.destroyed).toBe(true);
+  });
+
+  it("fails materialization when the keeper's archive command fails, without swapping", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.finish(handle);
+    const target = join(h.workspaceRoot, h.spec.runId, "workspace");
+    h.api.onExec = async () => 2;
+    await expect(h.launcher.materializeWorkspace(handle, target)).rejects.toThrow(
+      "kubernetes_workspace_archive_failed",
+    );
+    expect(await readFile(join(target, "README.md"), "utf8")).toBe("hello\n");
+    expect(await stagingLeftovers(h)).toEqual([]);
+  });
+
+  it("destroys the exec output stream and cleans staging when exec rejects", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.finish(handle);
+    const target = join(h.workspaceRoot, h.spec.runId, "workspace");
+    let output: PassThrough | undefined;
+    h.api.onExec = async ({ stdout }) => {
+      output = stdout as PassThrough;
+      output.write(Buffer.alloc(10));
+      throw new Error("exec_timeout");
+    };
+    await expect(h.launcher.materializeWorkspace(handle, target)).rejects.toThrow("exec_timeout");
+    expect(output?.destroyed).toBe(true);
+    expect(await stagingLeftovers(h)).toEqual([]);
+  });
+
+  it("aborts a stalled workspace transfer at the run's time budget", async () => {
+    const h = await harness();
+    const spec = { ...h.spec, timeoutSec: 1 };
+    const handle = await h.launcher.launch(spec);
+    await h.finish(handle);
+    const target = join(h.workspaceRoot, h.spec.runId, "workspace");
+    let output: PassThrough | undefined;
+    h.api.onExec = async ({ stdout }) => {
+      output = stdout as PassThrough;
+      return new Promise<number>(() => undefined); // never finishes
+    };
+    await expect(h.launcher.materializeWorkspace(handle, target)).rejects.toThrow("extract_aborted");
+    expect(output?.destroyed).toBe(true);
+    expect(await stagingLeftovers(h)).toEqual([]);
+  });
+
+  it("fails provisioning with kubernetes_seed_failed, destroys the archive stream, and records the failure", async () => {
+    const h = await harness();
+    const archives: Readable[] = [];
+    const launcher = new KubernetesJobLauncher({
+      api: h.api,
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", runtimeClassName: "gvisor" },
+      workspaceRoot: h.workspaceRoot,
+      resolveCapability: async () => CAPABILITY,
+      sleep: async () => {},
+      createArchive: () => {
+        const stream = new PassThrough();
+        archives.push(stream);
+        return { stream, done: new Promise<number>(() => undefined) };
+      },
+    });
+    h.api.onExec = async () => {
+      throw new Error("exec_timeout");
+    };
+    await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_seed_failed");
+    expect(archives[0]?.destroyed).toBe(true);
+    expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+    expect(h.api.objects.has(`networkpolicy/wardby-coding/${h.names.policy}`)).toBe(false);
+    const handle = { backend: "kubernetes", id: `wardby-coding/${h.names.token}` };
+    expect(await launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "kubernetes_provisioning_failed",
+    });
+    expect(await launcher.launch(h.spec)).toEqual(handle);
+  });
+
+  it("rejects an invalid capability and a proxy Service without a ClusterIP", async () => {
+    const h = await harness();
+    const bad = new KubernetesJobLauncher({
+      api: h.api,
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" },
+      workspaceRoot: h.workspaceRoot,
+      resolveCapability: async () => "not-a-capability",
+      sleep: async () => {},
+    });
+    await expect(bad.launch(h.spec)).rejects.toThrow("kubernetes_capability_invalid");
+    const g = await harness("run-no-proxy");
+    g.api.put("service", "wardby-coding", { metadata: { name: "wardby-coding-proxy" }, spec: {} });
+    await expect(g.launcher.launch(g.spec)).rejects.toThrow("kubernetes_proxy_unavailable");
+  });
+
+  it("fails pod start on an image pull error and on a keeper that never becomes ready", async () => {
+    const h = await harness();
+    const originalCreatePod = h.api.createPod.bind(h.api);
+    h.api.createPod = async (ns, body) => {
+      const created = await originalCreatePod(ns, body);
+      h.api.put("pod", ns, {
+        ...created,
+        status: {
+          phase: "Pending",
+          containerStatuses: [
+            {
+              name: "keeper",
+              ready: false,
+              image: IMAGE,
+              imageID: "",
+              restartCount: 0,
+              state: { waiting: { reason: "ImagePullBackOff" } },
+            },
+          ],
+        },
+      });
+      return created;
+    };
+    await expect(h.launcher.launch(h.spec)).rejects.toThrow("kubernetes_pod_start_failed");
+
+    const g = await harness("run-slow");
+    const launcher = new KubernetesJobLauncher({
+      api: g.api,
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" },
+      workspaceRoot: g.workspaceRoot,
+      resolveCapability: async () => CAPABILITY,
+      sleep: async () => {},
+      readyTimeoutMs: 1_000,
+    });
+    g.api.createPod = async (ns, body) => FakeKubernetesApi.prototype.createPod.call(g.api, ns, body);
+    await expect(launcher.launch(g.spec)).rejects.toThrow("kubernetes_pod_start_timeout");
+  });
+
+  it("ignores any error reading the worker's log tail", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    h.api.readLogTail = async () => {
+      throw new Error("404 pod not found");
+    };
+    h.fail(3);
+    expect(await h.launcher.collect(handle)).toEqual({ exitCode: 3, reason: "failed" });
+  });
+
+  it("gives up with kubernetes_record_conflict after repeated write conflicts", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    h.fail(1);
+    let attempts = 0;
+    h.api.replaceConfigMap = async () => {
+      attempts += 1;
+      throw new KubernetesConflictError("stale");
+    };
+    await expect(h.launcher.status(handle)).rejects.toThrow("kubernetes_record_conflict");
+    expect(attempts).toBe(5);
+  });
+
+  it("never regresses a terminal record written concurrently by another replica", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    h.fail(1);
+    const original = h.api.replaceConfigMap.bind(h.api);
+    let raced = false;
+    h.api.replaceConfigMap = async (ns, name, body) => {
+      if (!raced) {
+        raced = true;
+        // Another replica stops the run between our read and our write.
+        const current = await h.api.readConfigMap(ns, name);
+        const record = JSON.parse(current!.data!["record.json"]) as Record<string, unknown>;
+        record.phase = "stopped";
+        record.result = { exitCode: 143, reason: "stopped" };
+        await original(ns, name, { ...current, data: { "record.json": JSON.stringify(record) } });
+      }
+      return original(ns, name, body);
+    };
+    expect(await h.launcher.status(handle)).toEqual({ state: "stopped" });
+    expect(await h.launcher.collect(handle)).toEqual({ exitCode: 143, reason: "stopped" });
+  });
+
+  it("treats handles for another backend, namespace, or malformed token as unknown", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    for (const bad of [
+      { ...handle, backend: "docker" },
+      { ...handle, id: `other-ns/${h.names.token}` },
+      { ...handle, id: "wardby-coding/../../etc" },
+    ]) {
+      await expect(h.launcher.status(bad)).rejects.toThrow("job_not_found");
+      await expect(h.launcher.stop(bad)).resolves.toBeUndefined();
+      await expect(h.launcher.remove(bad)).resolves.toBeUndefined();
+    }
+  });
+
+  it("removes the pod, policy, and secret but keeps the record as a tombstone", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.finish(handle);
+    await h.launcher.remove(handle);
+    expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+    expect(h.api.objects.has(`networkpolicy/wardby-coding/${h.names.policy}`)).toBe(false);
+    expect(h.api.objects.has(`secret/wardby-coding/${h.names.secret}`)).toBe(false);
+    expect(h.api.objects.has(`configmap/wardby-coding/${h.names.record}`)).toBe(true);
+  });
+});
