@@ -207,13 +207,15 @@ function observePod(
     if (record.phase === "provisioning" && now - record.createdAt < readyTimeoutMs) return undefined;
     return { phase: "lost", result: resultFor("lost") };
   }
+  const worker = pod.status?.containerStatuses?.find((status) => status.name === WORKER_CONTAINER);
+  const terminated = worker?.state?.terminated;
+  // A worker that exited 0 finished its work: a late observation must not turn that into a timeout
+  // (the pod's activeDeadlineSeconds grace keeps the keeper alive for collection).
+  if (terminated?.exitCode === 0) return { phase: "succeeded", result: resultFor("succeeded") };
   if (now >= record.deadlineAt || pod.status?.reason === "DeadlineExceeded") {
     return { phase: "failed", result: { exitCode: 124, reason: "timed_out" }, deleteGraceSeconds: STOP_GRACE_SECONDS };
   }
-  const worker = pod.status?.containerStatuses?.find((status) => status.name === WORKER_CONTAINER);
-  const terminated = worker?.state?.terminated;
   if (terminated) {
-    if (terminated.exitCode === 0) return { phase: "succeeded", result: resultFor("succeeded") };
     return {
       phase: "failed",
       result: {
@@ -324,11 +326,13 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     try {
       await this.provision(spec, names, record);
     } catch (error) {
-      await this.cleanupRun(names, 0);
+      // Record the failure before deleting the pod, so a replica that observes "no pod" in between
+      // can't record `lost` first and have this more specific outcome dropped.
       await this.updateRecord(names, () => ({
         phase: "failed",
         result: { exitCode: 1, reason: "failed", diagnostic: "kubernetes_provisioning_failed" },
       })).catch(() => undefined);
+      await this.cleanupRun(names, 0);
       throw error;
     }
     return structuredClone(handle);
@@ -421,6 +425,9 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
 
   private existingLaunch(record: RunRecord, specHash: string, handle: JobHandle): JobHandle {
     if (record.specHash !== specHash) throw new Error("job_spec_conflict");
+    // A still-`provisioning` record is not re-provisioned: another replica may legitimately be mid-launch.
+    // If that launch crashed instead, the run is left to the deadline — its pod never opens the gate and
+    // is bounded by timeoutSec + POD_DEADLINE_GRACE_SECONDS — and observation then records it timed out or lost.
     return structuredClone(handle);
   }
 
@@ -457,6 +464,9 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     const budget = this.transferBudgetMs(record);
     await this.seedDirectory(names, this.runWorkspace(spec.runId), WORKSPACE_STORAGE, budget);
     await this.seedInput(names, spec.inputArtifact, budget);
+    // Never open the gate for a run that was stopped (or otherwise finished) while it was being seeded.
+    const current = await this.readRecord(names);
+    if (!current || isTerminal(current.record.phase)) throw new Error("kubernetes_launch_superseded");
     const marker = await this.api.exec(
       this.namespace,
       names.pod,
@@ -479,8 +489,8 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   }
 
   private async waitForKeeper(names: RunNames): Promise<void> {
-    const attempts = Math.max(1, Math.ceil(this.readyTimeoutMs / READY_POLL_MS));
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const started = this.now();
+    for (;;) {
       const pod = await this.api.readPod(this.namespace, names.pod);
       if (!pod || pod.status?.phase === "Failed") throw new Error("kubernetes_pod_start_failed");
       const statuses = pod.status?.containerStatuses ?? [];
@@ -488,9 +498,9 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
         throw new Error("kubernetes_pod_start_failed");
       }
       if (statuses.find((status) => status.name === KEEPER_CONTAINER)?.ready === true) return;
+      if (this.now() - started >= this.readyTimeoutMs) throw new Error("kubernetes_pod_start_timeout");
       await this.sleep(READY_POLL_MS);
     }
-    throw new Error("kubernetes_pod_start_timeout");
   }
 
   private runWorkspace(runId: string): string {
@@ -504,18 +514,20 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     const metadata = await lstat(directory);
     if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error("kubernetes_seed_failed");
     const archive = this.createArchive(directory);
+    const archived = archive.done;
+    archived.catch(() => undefined);
     try {
-      const [extracted, archived] = await Promise.all([
-        this.api.exec(
-          this.namespace,
-          names.pod,
-          KEEPER_CONTAINER,
-          ["tar", "-C", destination, "--no-same-owner", "--no-same-permissions", "-xf", "-"],
-          { stdin: archive.stream, timeoutMs },
-        ),
-        archive.done,
-      ]);
-      if (extracted !== 0 || archived !== 0) throw new Error("kubernetes_seed_failed");
+      const extracted = await this.api.exec(
+        this.namespace,
+        names.pod,
+        KEEPER_CONTAINER,
+        ["tar", "-C", destination, "--no-same-owner", "--no-same-permissions", "-xf", "-"],
+        { stdin: archive.stream, timeoutMs },
+      );
+      // On a failed extract, the archive is destroyed (in the catch) before anything waits on it,
+      // so an archive nobody drains can't hang the launch.
+      if (extracted !== 0) throw new Error("kubernetes_seed_failed");
+      if ((await archived) !== 0) throw new Error("kubernetes_seed_failed");
     } catch (error) {
       archive.stream.destroy();
       if (error instanceof Error && error.message === "kubernetes_seed_failed") throw error;

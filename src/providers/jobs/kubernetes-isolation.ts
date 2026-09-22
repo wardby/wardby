@@ -25,6 +25,8 @@ import {
 
 export const KUBERNETES_ISOLATION_ERROR = "kubernetes_isolation_unsupported";
 export const KUBERNETES_PROVIDER_UNSUPPORTED = "kubernetes_provider_unsupported";
+/** Extra seconds past timeoutSec before Kubernetes kills the pod (keeper included). */
+export const POD_DEADLINE_GRACE_SECONDS = 300;
 export const KEEPER_CONTAINER = "keeper";
 export const WORKER_CONTAINER = "worker";
 export const STORAGE_ROOT = "/run/wardby/storage";
@@ -184,7 +186,8 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
       hostPID: false,
       hostIPC: false,
       shareProcessNamespace: false,
-      activeDeadlineSeconds: spec.timeoutSec,
+      // Backstop only: the launcher enforces the wall-clock deadline; the grace leaves a collection window.
+      activeDeadlineSeconds: spec.timeoutSec + POD_DEADLINE_GRACE_SECONDS,
       terminationGracePeriodSeconds: WORKER_STOP_GRACE_SECONDS,
       dnsPolicy: "None",
       dnsConfig: { nameservers: ["127.0.0.1"] },

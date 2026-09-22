@@ -149,6 +149,7 @@ describe("KubernetesJobLauncher", () => {
     await expect(h.launcher.launch(h.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
     expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
     expect(h.api.objects.has(`secret/wardby-coding/${h.names.secret}`)).toBe(false);
+    expect(h.api.objects.has(`networkpolicy/wardby-coding/${h.names.policy}`)).toBe(false);
     expect(h.api.execCalls.some((c) => c.command.join(" ").includes(".seeded"))).toBe(false);
   });
 
@@ -233,6 +234,7 @@ describe("KubernetesJobLauncher", () => {
     const h = await harness();
     let calls = 0;
     const launcher = new KubernetesJobLauncher({
+      onWarning: () => {},
       api: h.api,
       config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" },
       workspaceRoot: h.workspaceRoot,
@@ -359,6 +361,7 @@ describe("KubernetesJobLauncher failure handling", () => {
   it("rejects an invalid capability and a proxy Service without a ClusterIP", async () => {
     const h = await harness();
     const bad = new KubernetesJobLauncher({
+      onWarning: () => {},
       api: h.api,
       config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" },
       workspaceRoot: h.workspaceRoot,
@@ -397,12 +400,15 @@ describe("KubernetesJobLauncher failure handling", () => {
     await expect(h.launcher.launch(h.spec)).rejects.toThrow("kubernetes_pod_start_failed");
 
     const g = await harness("run-slow");
+    let clock = 0;
     const launcher = new KubernetesJobLauncher({
+      onWarning: () => {},
       api: g.api,
       config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" },
       workspaceRoot: g.workspaceRoot,
       resolveCapability: async () => CAPABILITY,
-      sleep: async () => {},
+      now: () => clock,
+      sleep: async (ms) => void (clock += ms),
       readyTimeoutMs: 1_000,
     });
     g.api.createPod = async (ns, body) => FakeKubernetesApi.prototype.createPod.call(g.api, ns, body);
@@ -477,5 +483,140 @@ describe("KubernetesJobLauncher failure handling", () => {
     expect(h.api.objects.has(`networkpolicy/wardby-coding/${h.names.policy}`)).toBe(false);
     expect(h.api.objects.has(`secret/wardby-coding/${h.names.secret}`)).toBe(false);
     expect(h.api.objects.has(`configmap/wardby-coding/${h.names.record}`)).toBe(true);
+  });
+});
+
+/** Parks the launch's exec for commands matching `match` until `release()` is called. */
+function parkExec(h: Awaited<ReturnType<typeof harness>>, match: (command: string[]) => boolean) {
+  let release!: () => void;
+  const released = new Promise<void>((r) => (release = r));
+  let reached!: () => void;
+  const parked = new Promise<void>((r) => (reached = r));
+  const original = h.api.onExec;
+  h.api.onExec = async (call) => {
+    if (match(call.command)) {
+      reached();
+      await released;
+    }
+    return original(call);
+  };
+  return { parked, release };
+}
+
+const isMarker = (command: string[]) => command[0] === "node";
+const isWorkspaceSeed = (command: string[]) => command.includes("/run/wardby/storage/workspace");
+
+describe("KubernetesJobLauncher deadlines and launch races", () => {
+  it("records a worker that exited 0 as succeeded even when observed after the deadline, keeping the pod", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.finish(handle);
+    h.advance(901_000);
+    expect(await h.launcher.status(handle)).toEqual({ state: "succeeded" });
+    expect(h.api.deletedPods).toEqual([]);
+    expect(await h.launcher.collect(handle)).toMatchObject({ exitCode: 0, reason: "completed" });
+  });
+
+  it("times out a still-running worker past the deadline and deletes its pod", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    h.advance(900_000);
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
+    expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+  });
+
+  it("reports a non-zero exit observed past the deadline as timed out", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    h.fail(2);
+    h.advance(901_000);
+    expect(await h.launcher.collect(handle)).toMatchObject({ exitCode: 124, reason: "timed_out" });
+  });
+
+  it("rejects a result artifact for another run", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.finish(handle);
+    h.setResult(
+      JSON.stringify({ schemaVersion: 1, runId: "someone-else", outcome: "no_changes", summary: "x", tests: [] }),
+    );
+    await expect(h.launcher.collect(handle)).rejects.toThrow("kubernetes_result_run_mismatch");
+  });
+
+  it("keeps a provisioning run pending while its pod exists or is young, and marks it lost once old", async () => {
+    const h = await harness();
+    const handle = { backend: "kubernetes", id: `wardby-coding/${h.names.token}` };
+    const gate = parkExec(h, isMarker);
+    const launching = h.launcher.launch(h.spec);
+    await gate.parked;
+    expect(await h.launcher.status(handle)).toEqual({ state: "pending" });
+    await h.lose(handle);
+    expect(await h.launcher.status(handle)).toEqual({ state: "pending" });
+    h.advance(120_000);
+    expect(await h.launcher.status(handle)).toEqual({ state: "lost" });
+    gate.release();
+    // The launch's own `active` write is dropped for the terminal record, and it deletes its pod.
+    expect(await launching).toEqual(handle);
+    expect(h.api.deletedPods.at(-1)).toEqual({ name: h.names.pod, gracePeriodSeconds: 0 });
+    expect(await h.launcher.status(handle)).toEqual({ state: "lost" });
+  });
+
+  it("times out a provisioning run past its deadline", async () => {
+    const h = await harness();
+    const handle = { backend: "kubernetes", id: `wardby-coding/${h.names.token}` };
+    const gate = parkExec(h, isMarker);
+    const launching = h.launcher.launch(h.spec);
+    await gate.parked;
+    h.advance(900_000);
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
+    gate.release();
+    await launching;
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
+  });
+
+  it("deletes its pod when the run is stopped after the gate opens but before it is marked active", async () => {
+    const h = await harness();
+    const handle = { backend: "kubernetes", id: `wardby-coding/${h.names.token}` };
+    const gate = parkExec(h, isMarker);
+    const launching = h.launcher.launch(h.spec);
+    await gate.parked;
+    await h.launcher.stop(handle);
+    gate.release();
+    expect(await launching).toEqual(handle);
+    expect(h.api.deletedPods).toContainEqual({ name: h.names.pod, gracePeriodSeconds: 0 });
+    expect(await h.launcher.status(handle)).toEqual({ state: "stopped" });
+  });
+
+  it("never opens the gate for a run stopped while it was being seeded", async () => {
+    const h = await harness();
+    const handle = { backend: "kubernetes", id: `wardby-coding/${h.names.token}` };
+    const seeding = parkExec(h, isWorkspaceSeed);
+    const launching = h.launcher.launch(h.spec);
+    await seeding.parked;
+    await h.launcher.stop(handle);
+    seeding.release();
+    await expect(launching).rejects.toThrow("kubernetes_launch_superseded");
+    expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
+    expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+    expect(await h.launcher.status(handle)).toEqual({ state: "stopped" });
+  });
+
+  it("fails seeding promptly when the extract exits non-zero without draining the archive", async () => {
+    const h = await harness();
+    const launcher = new KubernetesJobLauncher({
+      api: h.api,
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", runtimeClassName: "gvisor" },
+      workspaceRoot: h.workspaceRoot,
+      resolveCapability: async () => CAPABILITY,
+      sleep: async () => {},
+      createArchive: () => {
+        const stream = new PassThrough();
+        stream.write(Buffer.alloc(1024 * 1024));
+        // Resolves only once the archive is fully consumed, like a real `tar` blocked on a full pipe.
+        return { stream, done: new Promise<number>((r) => stream.once("end", () => r(0))) };
+      },
+    });
+    h.api.onExec = async () => 2;
+    await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_seed_failed");
   });
 });

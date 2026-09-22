@@ -102,7 +102,7 @@ describe("buildRunPod", () => {
     expect(s.enableServiceLinks).toBe(false);
     expect([s.hostNetwork, s.hostPID, s.hostIPC, s.shareProcessNamespace]).toEqual([false, false, false, false]);
     expect(s.restartPolicy).toBe("Never");
-    expect(s.activeDeadlineSeconds).toBe(900);
+    expect(s.activeDeadlineSeconds).toBe(1200);
   });
 
   it("runs every container non-root, read-only, with no privileges or capabilities", () => {
