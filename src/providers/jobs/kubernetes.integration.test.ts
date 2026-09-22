@@ -9,18 +9,21 @@
  * What this proves that FakeKubernetesApi cannot: the real API server's
  * defaulting round-trips through attestation unchanged; the NetworkPolicy
  * enforcement gate actually blocks the worker's egress until it opens; the
- * pod really is isolated (no DNS, no internet, no metadata endpoint, no direct
- * reach to the cluster DNS or API server ClusterIPs, only the proxy and only on
- * its own port); a failing worker yields the exact safe diagnostic it emits for
- * a deterministically-invalid input; stop/remove/relaunch behave against real
- * objects; the record survives removal as a tombstone.
+ * pod really is isolated (no DNS, no internet, no metadata endpoint, no
+ * reach to the cluster DNS or API server ClusterIPs, and no reach to the
+ * cluster DNS pod's own IP either — proving the block holds at the pod-IP
+ * level, not just via Service DNAT — while the proxy's own pod IP is
+ * reachable, proving the allow side isn't an artifact of routing through a
+ * Service either); a failing worker yields the exact safe diagnostic it
+ * emits for a deterministically-invalid input; stop/remove/relaunch behave
+ * against real objects; the record survives removal as a tombstone.
  */
 import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { ApiException, CoreV1Api, KubeConfig, NetworkingV1Api } from "@kubernetes/client-node";
+import { ApiException, CoreV1Api, KubeConfig, NetworkingV1Api, type V1Endpoints } from "@kubernetes/client-node";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadKubernetesJobConfig, type KubernetesJobConfig } from "../../config/providers.js";
 import type { KubernetesApi, KubernetesExecOptions } from "./kubernetes-api.js";
@@ -58,29 +61,52 @@ describe.skipIf(!requested)("KubernetesJobLauncher against a real cluster", () =
     let config: KubernetesJobConfig;
     let namespace: string;
     let rawApi: ClientNodeKubernetesApi;
+    let rawCore: CoreV1Api;
+    let rawNetworking: NetworkingV1Api;
     let cluster: KubernetesClusterInfo;
-    let proxyIp: string;
     let apiServerIp: string;
+    let dnsPodIp: string;
+    let proxyPodIp: string;
     const roots: string[] = [];
     const tracked: Array<{ launcher: KubernetesJobLauncher; handle: JobHandle; names: KubernetesRunNames }> = [];
+
+    /** The IP of one ready endpoint behind a Service, read via the legacy (still-served) Endpoints API. */
+    function readyEndpointIp(endpoints: V1Endpoints): string | undefined {
+      return endpoints.subsets?.flatMap((subset) => subset.addresses ?? []).find((address) => address.ip)?.ip;
+    }
 
     beforeAll(async () => {
       workerImage = process.env.CODING_WORKER_IMAGE!;
       config = loadKubernetesJobConfig(process.env);
       namespace = config.namespace;
       rawApi = new ClientNodeKubernetesApi({ context: config.context });
+      const kubeConfig = new KubeConfig();
+      kubeConfig.loadFromDefault();
+      if (config.context) kubeConfig.setCurrentContext(config.context);
+      rawCore = kubeConfig.makeApiClient(CoreV1Api);
+      rawNetworking = kubeConfig.makeApiClient(NetworkingV1Api);
+
       const result = await runKubernetesPreflight({ api: rawApi, config, workerImage });
       cluster = { clusterDnsIp: result.clusterDnsIp };
-      // Read once: the proxy's real ClusterIP (to probe a port it doesn't serve) and the API
-      // server's Service ClusterIP (the "default/kubernetes" Service every cluster provides).
-      const proxyService = await rawApi.readService(namespace, config.proxyService);
-      const proxyClusterIp = proxyService?.spec?.clusterIP;
-      if (!proxyClusterIp) throw new Error(`Service ${config.proxyService} has no ClusterIP`);
-      proxyIp = proxyClusterIp;
+
+      // The API server's Service ClusterIP (the "default/kubernetes" Service every cluster provides).
       const apiServerService = await rawApi.readService("default", "kubernetes");
       const apiServerClusterIp = apiServerService?.spec?.clusterIP;
       if (!apiServerClusterIp) throw new Error("Service default/kubernetes has no ClusterIP");
       apiServerIp = apiServerClusterIp;
+
+      // Real pod IPs (not Service ClusterIPs) for the two probes that must be non-vacuous: a
+      // connect to a ClusterIP with no matching Service port never reaches kube-proxy's DNAT table
+      // at all, so it fails whether or not any NetworkPolicy exists. Going straight to a pod IP
+      // that actually has a listener removes that ambiguity for both the blocked and allowed case.
+      const dnsEndpoints = await rawCore.readNamespacedEndpoints({ name: "kube-dns", namespace: "kube-system" });
+      const dnsIp = readyEndpointIp(dnsEndpoints);
+      if (!dnsIp) throw new Error("kube-system/kube-dns has no ready endpoint");
+      dnsPodIp = dnsIp;
+      const proxyEndpoints = await rawCore.readNamespacedEndpoints({ name: config.proxyService, namespace });
+      const proxyIp = readyEndpointIp(proxyEndpoints);
+      if (!proxyIp) throw new Error(`${namespace}/${config.proxyService} has no ready endpoint`);
+      proxyPodIp = proxyIp;
     }, 120_000);
 
     function statusCode(error: unknown): number | undefined {
@@ -95,7 +121,26 @@ describe.skipIf(!requested)("KubernetesJobLauncher against a real cluster", () =
       }
     }
 
+    /** Runs every delete even if earlier ones failed, so one non-404 error can't abort cleanup for later runs. */
+    async function deleteAllBestEffort(deletes: Array<() => Promise<void>>): Promise<void> {
+      const errors: unknown[] = [];
+      for (const del of deletes) {
+        try {
+          await del();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      if (errors.length > 0) {
+        throw new AggregateError(errors, `kubernetes integration test cleanup: ${errors.length} delete(s) failed`);
+      }
+    }
+
     afterAll(async () => {
+      await Promise.all(roots.map((r) => rm(r, { recursive: true, force: true })));
+      // beforeAll may have failed before any run was tracked (e.g. the preflight itself failed);
+      // nothing below is safe to touch in that case, and there is nothing to clean up either.
+      if (tracked.length === 0) return;
       // Best-effort graceful path first: let each run's own launcher stop/record it normally.
       for (const { launcher, handle } of tracked) {
         await launcher.stop(handle).catch(() => undefined);
@@ -105,18 +150,18 @@ describe.skipIf(!requested)("KubernetesJobLauncher against a real cluster", () =
       // before a handle's objects fully existed, a failed assertion that left objects behind, and
       // the record ConfigMap tombstone `remove()` intentionally leaves behind on success.
       // deleteConfigMap isn't part of the KubernetesApi seam, so this goes straight to the library.
-      const kubeConfig = new KubeConfig();
-      kubeConfig.loadFromDefault();
-      if (config.context) kubeConfig.setCurrentContext(config.context);
-      const core = kubeConfig.makeApiClient(CoreV1Api);
-      const networking = kubeConfig.makeApiClient(NetworkingV1Api);
+      const deletes: Array<() => Promise<void>> = [];
       for (const { names } of tracked) {
-        await ignoreNotFound(core.deleteNamespacedPod({ namespace, name: names.pod, gracePeriodSeconds: 0 }));
-        await ignoreNotFound(networking.deleteNamespacedNetworkPolicy({ namespace, name: names.policy }));
-        await ignoreNotFound(core.deleteNamespacedSecret({ namespace, name: names.secret }));
-        await ignoreNotFound(core.deleteNamespacedConfigMap({ namespace, name: names.record }));
+        deletes.push(() =>
+          ignoreNotFound(rawCore.deleteNamespacedPod({ namespace, name: names.pod, gracePeriodSeconds: 0 })),
+        );
+        deletes.push(() =>
+          ignoreNotFound(rawNetworking.deleteNamespacedNetworkPolicy({ namespace, name: names.policy })),
+        );
+        deletes.push(() => ignoreNotFound(rawCore.deleteNamespacedSecret({ namespace, name: names.secret })));
+        deletes.push(() => ignoreNotFound(rawCore.deleteNamespacedConfigMap({ namespace, name: names.record })));
       }
-      await Promise.all(roots.map((r) => rm(r, { recursive: true, force: true })));
+      await deleteAllBestEffort(deletes);
     });
 
     interface ExecRecord {
@@ -233,9 +278,13 @@ describe.skipIf(!requested)("KubernetesJobLauncher against a real cluster", () =
       // Isolation, observed from inside the pod: these probes run in the keeper, which shares the
       // worker's network namespace, so what the keeper can/can't reach is what the worker can/can't
       // reach. Beyond hostname-based DNS/internet/metadata checks, this also connects directly to
-      // the cluster DNS and API server ClusterIPs (bypassing DNS entirely) and to the proxy's
-      // ClusterIP on a port other than the one its NetworkPolicy egress rule allows, proving the
-      // policy blocks by IP, not just by name, and is scoped to a single port, not the whole proxy pod.
+      // the cluster DNS and API server ClusterIPs (bypassing DNS entirely), to the cluster DNS
+      // pod's own IP (bypassing the Service/DNAT path too — proving the block holds at the pod-IP
+      // level, which a NetworkPolicy actually operates on), and to the proxy's own pod IP (proving
+      // the allow side isn't an artifact of routing through its Service either). This intentionally
+      // does NOT attempt to prove per-port scoping on the proxy: a connect to its ClusterIP on an
+      // unmapped port has no kube-proxy DNAT rule and would fail whether or not any NetworkPolicy
+      // existed, so that check would be vacuous without a second port on the proxy's manifest.
       const probe = await keeperRun(names.pod, [
         "node",
         "-e",
@@ -250,7 +299,8 @@ describe.skipIf(!requested)("KubernetesJobLauncher against a real cluster", () =
           'internet:await tcp("1.1.1.1",443),metadata:await tcp("169.254.169.254",80),',
           `clusterDnsIp:await tcp(${JSON.stringify(cluster.clusterDnsIp)},53),`,
           `apiServerIp:await tcp(${JSON.stringify(apiServerIp)},443),`,
-          `proxyWrongPort:await tcp(${JSON.stringify(proxyIp)},8788),`,
+          `dnsPodIp:await tcp(${JSON.stringify(dnsPodIp)},53),`,
+          `proxyPodIp:await tcp(${JSON.stringify(proxyPodIp)},8787),`,
           'proxy:await tcp("wardby-proxy",8787)}))})()',
         ].join(""),
       ]);
@@ -264,7 +314,8 @@ describe.skipIf(!requested)("KubernetesJobLauncher against a real cluster", () =
         metadata: false,
         clusterDnsIp: false,
         apiServerIp: false,
-        proxyWrongPort: false,
+        dnsPodIp: false,
+        proxyPodIp: true,
         proxy: true,
       });
 

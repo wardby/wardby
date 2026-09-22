@@ -952,13 +952,29 @@ describe("hostTarArchive", () => {
     expect(names).toContain("./a.txt");
   });
 
-  it("swallows an error on the archive stream instead of throwing uncaught", async () => {
+  it("swallows an error on the archive stream instead of crashing the process", async () => {
     const root = await mkdtemp(join(tmpdir(), "wardby-k8s-archive-"));
     roots.push(root);
     const archive = hostTarArchive(root);
     await archive.done;
-    // The returned stream re-emits a child.stdout error via destroy(error); an EventEmitter throws
-    // synchronously on an "error" event with no listener, so this proves the listener is attached.
-    expect(() => archive.stream.destroy(new Error("simulated stdout error"))).not.toThrow();
+    // The returned stream re-emits a child.stdout error via destroy(error). Node emits an unhandled
+    // "error" event asynchronously (via process.nextTick), so wrapping destroy() in
+    // `expect(...).not.toThrow()` can't observe anything — it always passes, with or without a
+    // listener. Check the listener is really attached, then prove the process doesn't crash by
+    // watching for uncaughtException across a real tick.
+    expect(archive.stream.listenerCount("error")).toBeGreaterThan(0);
+    let crashed: unknown;
+    const onUncaughtException = (error: unknown) => {
+      crashed = error;
+    };
+    process.once("uncaughtException", onUncaughtException);
+    try {
+      archive.stream.destroy(new Error("simulated stdout error"));
+      // nextTick-scheduled emissions run before this, so a real crash would have already fired.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(crashed).toBeUndefined();
+    } finally {
+      process.removeListener("uncaughtException", onUncaughtException);
+    }
   });
 });
