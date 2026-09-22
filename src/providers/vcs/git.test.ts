@@ -211,6 +211,15 @@ describe("GitVcsProvider", () => {
     expect(github.tokenCalls).toBe(1);
   });
 
+  it("clones shallowly: depth 1, since the worker never sees history and finalization needs only baseCommit", async () => {
+    const { provider, git, input } = await harness();
+    await provider.prepareWorkspace(input);
+    const clone = git.calls.find((call) => call.args.includes("clone"))!;
+    const depthAt = clone.args.indexOf("--depth");
+    expect(depthAt).toBeGreaterThan(-1);
+    expect(clone.args[depthAt + 1]).toBe("1");
+  });
+
   it("commits with controlled settings, pushes once, and creates one typed draft PR result", async () => {
     const { provider, github, git, input } = await harness();
     const prepared = await provider.prepareWorkspace(input);

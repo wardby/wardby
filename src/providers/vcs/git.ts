@@ -302,6 +302,12 @@ export class GitVcsProvider implements VcsProvider {
             "--no-checkout",
             "--single-branch",
             "--no-tags",
+            // History is never needed: the worker gets no Git metadata, the
+            // finalizer compares only against baseCommit and the new commit's
+            // parent, and pushOnce compares SHAs. Depth 1 keeps large
+            // repositories' history off the control plane's disk.
+            "--depth",
+            "1",
             "--branch",
             cloneBranch,
             "--separate-git-dir",
