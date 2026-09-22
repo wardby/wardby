@@ -70,6 +70,7 @@ export interface ContainerRunSnapshot {
   proxySessionId: string | null;
   result: unknown;
   workerImage: string | null;
+  workspaceDiskMb: number | null;
 }
 
 /**
@@ -139,6 +140,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       proxySessionId: row.codingRun.proxySession?.id ?? null,
       result: row.codingRun.result,
       workerImage: row.codingRun.workerImage,
+      workspaceDiskMb: row.codingRun.workspaceDiskMb,
     };
   }
 
@@ -797,7 +799,7 @@ export class ContainerExecutor implements Executor {
       ...(provider === "claude-code" ? { toolImage: this.options.claudeToolRunnerImage } : {}),
       inputArtifact,
       timeoutSec: run.timeoutSec,
-      limits: { ...this.options.limits },
+      limits: { ...this.options.limits, ...(run.workspaceDiskMb ? { diskMb: run.workspaceDiskMb } : {}) },
       labels: {},
     };
   }

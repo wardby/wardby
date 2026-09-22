@@ -52,6 +52,7 @@ function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSn
     proxySessionId: null,
     result: null,
     workerImage: null,
+    workspaceDiskMb: null,
     ...overrides,
   };
 }
@@ -113,6 +114,7 @@ class FakeJobs implements WorkspaceJobLauncher {
   removals = 0;
   stops = 0;
   lastSpec?: JobSpec;
+  specs: JobSpec[] = [];
   statusValue: JobStatus = { state: "succeeded" };
   result: JobResult = {
     exitCode: 0,
@@ -131,6 +133,7 @@ class FakeJobs implements WorkspaceJobLauncher {
   async launch(spec: JobSpec): Promise<JobHandle> {
     this.launches += 1;
     this.lastSpec = spec;
+    this.specs.push(spec);
     this.events.push("launch");
     return this.handle;
   }
@@ -318,6 +321,18 @@ describe("ContainerExecutor", () => {
     await queued.executor.start("run-1");
     expect(queued.store.run.status).toBe("pending");
     expect(releases).toBe(0);
+  });
+
+  it("sizes the job's workspace from the run's per-agent workspaceDiskMb", async () => {
+    const created = await harness({ workspaceDiskMb: 8192 });
+    await created.executor.start("run-1");
+    expect(created.jobs.specs[0]?.limits.diskMb).toBe(8192);
+  });
+
+  it("falls back to the deployment's default disk size", async () => {
+    const created = await harness();
+    await created.executor.start("run-1");
+    expect(created.jobs.specs[0]?.limits.diskMb).toBe(512);
   });
 
   it("accepts a content-addressed local Docker image ID", async () => {

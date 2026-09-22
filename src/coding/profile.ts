@@ -102,6 +102,7 @@ const workerImageRefSchema = z
   .max(512)
   .refine(isImmutableDockerImage, "must be an immutable repository digest")
   .nullable();
+const workspaceDiskMbSchema = z.number().int().min(64).max(32_768).nullable();
 
 const codingProfileFields = {
   provider: z.enum(CODING_PROVIDERS),
@@ -113,6 +114,7 @@ const codingProfileFields = {
   toolchain: toolchainSchema,
   toolchainVersion: toolchainVersionSchema,
   workerImageRef: workerImageRefSchema,
+  workspaceDiskMb: workspaceDiskMbSchema,
   allowedEgress: z
     .array(egressHostSchema)
     .max(MAX_ALLOWED_EGRESS_HOSTS)
@@ -137,6 +139,7 @@ export const CodingProfileSchema = z
     toolchain: codingProfileFields.toolchain.default("node"),
     toolchainVersion: codingProfileFields.toolchainVersion.default(null),
     workerImageRef: codingProfileFields.workerImageRef.default(null),
+    workspaceDiskMb: codingProfileFields.workspaceDiskMb.default(null),
   })
   .strict();
 
@@ -153,6 +156,7 @@ export const CodingProfilePatchSchema = z
     toolchain: codingProfileFields.toolchain.optional(),
     toolchainVersion: codingProfileFields.toolchainVersion.optional(),
     workerImageRef: codingProfileFields.workerImageRef.optional(),
+    workspaceDiskMb: codingProfileFields.workspaceDiskMb.optional(),
   })
   .strict();
 

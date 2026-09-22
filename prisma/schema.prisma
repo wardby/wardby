@@ -336,6 +336,8 @@ model CodingAgentProfile {
   toolchain                String  @default("node")
   toolchainVersion         String?
   workerImageRef           String?
+  /// Per-agent workspace size in MiB; null = CODING_DISK_MB.
+  workspaceDiskMb          Int?
 }
 
 /// Phase 5: immutable dispatch inputs plus opaque execution/result state for
@@ -366,6 +368,8 @@ model CodingRun {
   /// taken (CODING_MAX_CONCURRENT), cleared when the run claims a slot. A
   /// pending run with queuedAt set is waiting, not orphaned.
   queuedAt          DateTime?
+  /// Per-agent workspace size in MiB; null = CODING_DISK_MB.
+  workspaceDiskMb   Int?
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt
   proxySession      CodingProxySession?

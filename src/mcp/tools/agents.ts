@@ -128,6 +128,7 @@ const profileJsonSchema = {
     toolchain: { type: "string", enum: ["node", "node-python"] },
     toolchainVersion: { type: ["string", "null"] },
     workerImageRef: { type: ["string", "null"] },
+    workspaceDiskMb: { type: ["integer", "null"], minimum: 64, maximum: 32768 },
   },
 };
 
@@ -170,6 +171,7 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
     toolchain: profile.toolchain,
     toolchainVersion: profile.toolchainVersion,
     workerImageRef: profile.workerImageRef,
+    workspaceDiskMb: profile.workspaceDiskMb,
   });
 }
 
