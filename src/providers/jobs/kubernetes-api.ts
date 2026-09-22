@@ -1,0 +1,69 @@
+/**
+ * The only surface KubernetesJobLauncher uses to reach a cluster. Kept narrow
+ * so every launcher behavior is unit-tested against FakeKubernetesApi and
+ * re-proven against a real cluster by kubernetes.integration.test.ts.
+ */
+import type { V1ConfigMap, V1NetworkPolicy, V1Pod, V1Secret, V1Service } from "@kubernetes/client-node";
+import type { Readable, Writable } from "node:stream";
+
+export class KubernetesNotFoundError extends Error {
+  constructor(message?: string) {
+    super(message);
+    this.name = "KubernetesNotFoundError";
+  }
+}
+
+/** Stale resourceVersion on replace. */
+export class KubernetesConflictError extends Error {
+  constructor(message?: string) {
+    super(message);
+    this.name = "KubernetesConflictError";
+  }
+}
+
+/** Create of an existing name. */
+export class KubernetesAlreadyExistsError extends Error {
+  constructor(message?: string) {
+    super(message);
+    this.name = "KubernetesAlreadyExistsError";
+  }
+}
+
+export interface KubernetesExecOptions {
+  stdin?: Readable;
+  stdout?: Writable;
+  timeoutMs: number;
+}
+
+/** Deletes are idempotent (a missing object is not an error). Reads return `undefined` for a missing object. */
+export interface KubernetesApi {
+  createConfigMap(namespace: string, body: V1ConfigMap): Promise<V1ConfigMap>;
+  readConfigMap(namespace: string, name: string): Promise<V1ConfigMap | undefined>;
+  replaceConfigMap(namespace: string, name: string, body: V1ConfigMap): Promise<V1ConfigMap>;
+  createSecret(namespace: string, body: V1Secret): Promise<V1Secret>;
+  deleteSecret(namespace: string, name: string): Promise<void>;
+  createPod(namespace: string, body: V1Pod): Promise<V1Pod>;
+  readPod(namespace: string, name: string): Promise<V1Pod | undefined>;
+  deletePod(namespace: string, name: string, gracePeriodSeconds: number): Promise<void>;
+  createNetworkPolicy(namespace: string, body: V1NetworkPolicy): Promise<V1NetworkPolicy>;
+  readNetworkPolicy(namespace: string, name: string): Promise<V1NetworkPolicy | undefined>;
+  deleteNetworkPolicy(namespace: string, name: string): Promise<void>;
+  readService(namespace: string, name: string): Promise<V1Service | undefined>;
+  readNamespace(name: string): Promise<boolean>;
+  /** Runs a command in a container; resolves with its exit code. Never uses a shell. */
+  exec(
+    namespace: string,
+    pod: string,
+    container: string,
+    command: string[],
+    options: KubernetesExecOptions,
+  ): Promise<number>;
+  /** Reads at most `limitBytes` of the last `tailLines` lines of a container's log. */
+  readLogTail(
+    namespace: string,
+    pod: string,
+    container: string,
+    tailLines: number,
+    limitBytes: number,
+  ): Promise<string>;
+}
