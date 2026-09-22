@@ -132,16 +132,14 @@ describe("safeExtract", () => {
     ).rejects.toThrow("extract_through_symlink");
   });
 
-  it("enforces the byte limit from the header's declared size, before draining the body", async () => {
-    // Fix round 1 (C3/I3): every entry's declared header.size is checked against maxBytes before its
-    // body is ever read, so this now rejects as extract_too_large rather than the streamed-count
-    // extract_size_limit path (which only exists as a defense-in-depth backstop; tar-stream truncates a
-    // file entry's stream to its declared size, so that path isn't reachable through a well-formed
-    // header).
+  it("enforces the byte limit while streaming", async () => {
+    // Fix round 1 (I3) added a header.size pre-check (before the body is ever drained) that runs ahead
+    // of this streamed per-chunk check for any entry with an honestly-reported size; both paths use the
+    // same extract_size_limit code, so this rejects with it either way.
     const dir = await root();
     await expect(
       safeExtract(await archive([{ name: "big", body: "x".repeat(2048) }]), dir, { maxBytes: 1024, maxEntries: 10 }),
-    ).rejects.toThrow("extract_too_large");
+    ).rejects.toThrow("extract_size_limit");
   });
 
   it("enforces the entry limit", async () => {
@@ -239,7 +237,7 @@ describe("safeExtract", () => {
       expect(await readlink(join(dir, "a/x"))).toBe("../missing");
     });
 
-    it("rejects a symlink entry whose declared body size exceeds maxBytes (extract_too_large)", async () => {
+    it("rejects a symlink entry whose declared body size exceeds maxBytes (extract_size_limit)", async () => {
       // I3: a symlink (or any non-file type) can still carry a body up to its declared header.size; the
       // old code drained it via resume() without ever counting it toward maxBytes.
       const bodySize = 4096;
@@ -259,7 +257,7 @@ describe("safeExtract", () => {
       const archived = Buffer.concat([header, body, endOfArchive]);
       const dir = await root();
       await expect(safeExtract(Readable.from([archived]), dir, { maxBytes: 1024, maxEntries: 10 })).rejects.toThrow(
-        "extract_too_large",
+        "extract_size_limit",
       );
     });
 
@@ -314,6 +312,22 @@ describe("safeExtract", () => {
         );
         expect((await stat(join(dir, "s"))).mode & 0o7777).toBe(0o755);
         expect((await stat(join(dir, "dd"))).mode & 0o7777).toBe(0o755);
+      } finally {
+        process.umask(originalUmask);
+      }
+    });
+
+    it("forces implicitly-created ancestor directories to 0755 regardless of umask", async () => {
+      // Fix round 2: "a/b/c.txt" has no preceding explicit directory entry for "a" or "a/b", so
+      // recursive mkdir creates both implicitly. mkdir's own `mode` is masked by the process umask, so
+      // without an explicit chmod pass over the newly-created ancestors, these could end up more
+      // restrictive than 0755.
+      const originalUmask = process.umask(0o077);
+      try {
+        const dir = await root();
+        await safeExtract(await archive([{ name: "a/b/c.txt", body: "x" }]), dir, limits);
+        expect((await stat(join(dir, "a"))).mode & 0o777).toBe(0o755);
+        expect((await stat(join(dir, "a/b"))).mode & 0o777).toBe(0o755);
       } finally {
         process.umask(originalUmask);
       }

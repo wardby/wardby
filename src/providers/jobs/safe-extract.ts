@@ -162,6 +162,24 @@ export async function safeExtract(
     return Promise.race([operation, failed]);
   }
 
+  /**
+   * Recursively creates `dirPath` and force-`chmod`s every ancestor between it and `base` (inclusive of
+   * `dirPath`, exclusive of `base` itself) to 0o755. `mkdir`'s own `mode` is masked by the process
+   * umask, so without this an intermediate directory implicitly created for a nested entry (one with no
+   * preceding explicit directory entry of its own) could end up more restrictive than 0o755. Re-chmod'ing
+   * an already-0o755 ancestor is a harmless no-op, so this is safe to call unconditionally.
+   */
+  async function ensureDirectory(dirPath: string): Promise<void> {
+    await guard(mkdir(dirPath, { recursive: true, mode: 0o755 }));
+    let current = dirPath;
+    while (current !== base) {
+      await guard(chmod(current, 0o755));
+      const parent = dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+  }
+
   // Created (and so subscribed to tar-stream's internal 'entry'/'close' events) before any `await`,
   // including the realpath below: tar-stream's async iterator only delivers an entry to listeners that
   // were attached before it was emitted, so creating this after an async gap can silently miss the very
@@ -217,7 +235,7 @@ export async function safeExtract(
       const declaredSize = header.size ?? 0;
       if (bytes + declaredSize > limits.maxBytes) {
         entry.resume();
-        fail("extract_too_large");
+        fail("extract_size_limit");
       }
       bytes += declaredSize;
 
@@ -225,8 +243,7 @@ export async function safeExtract(
         case "directory": {
           entry.resume();
           try {
-            await guard(mkdir(target, { recursive: true, mode: 0o755 }));
-            await guard(chmod(target, 0o755));
+            await ensureDirectory(target);
           } catch (err) {
             throw mapError(err);
           }
@@ -237,7 +254,7 @@ export async function safeExtract(
           if (entry.destroyed) throw mapError(new Error("entry stream destroyed"));
           let fh: FileHandle;
           try {
-            await guard(mkdir(dirname(target), { recursive: true, mode: 0o755 }));
+            await ensureDirectory(dirname(target));
             fh = await guard(open(target, "wx", 0o644));
           } catch (err) {
             throw mapError(err);
@@ -279,7 +296,7 @@ export async function safeExtract(
     for (const [path, link] of recordedSymlinks) {
       const target = resolve(base, path);
       try {
-        await guard(mkdir(dirname(target), { recursive: true, mode: 0o755 }));
+        await ensureDirectory(dirname(target));
         await guard(createSymlink(link, target));
       } catch (err) {
         throw mapError(err);
