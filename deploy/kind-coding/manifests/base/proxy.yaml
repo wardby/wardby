@@ -1,0 +1,128 @@
+# The trusted coding proxy: has the model-provider credentials and database
+# access; every coding-run worker reaches only this Service, never the
+# database or the internet directly. `image: wardby-runtime` is a
+# placeholder — up.sh substitutes the resolved runtime digest into the
+# rendered manifest on the fly, never into this tracked file.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-coding-proxy
+  namespace: wardby-coding
+  labels:
+    app.kubernetes.io/name: wardby-coding-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-coding-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wardby-coding-proxy
+    spec:
+      serviceAccountName: wardby-coding-proxy
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: proxy
+          image: wardby-runtime
+          command: ["node", "dist/coding-proxy/main.js"]
+          envFrom:
+            - secretRef:
+                name: wardby-coding-proxy-env
+          env:
+            - name: NODE_ENV
+              value: production
+          ports:
+            - containerPort: 8787
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          readinessProbe:
+            tcpSocket:
+              port: 8787
+            periodSeconds: 5
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wardby-coding-proxy
+  namespace: wardby-coding
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: wardby-coding-proxy
+  ports:
+    - port: 8787
+      targetPort: 8787
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-coding-proxy
+  namespace: wardby-coding
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-coding-proxy
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              wardby.io/component: coding-run
+      ports:
+        - protocol: TCP
+          port: 8787
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # HTTPS to the model providers — the whole internet minus RFC1918 /
+    # link-local / carrier-grade-NAT ranges (the database rule is
+    # per-environment; see overlays/kind/proxy-database-egress.yaml).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 100.64.0.0/10
+      ports:
+        - protocol: TCP
+          port: 443

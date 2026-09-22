@@ -3,13 +3,14 @@ import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "@prisma/client";
 import { CodingProfileSchema } from "../../coding/profile.js";
+import { logger } from "../../core/logger.js";
 import { codingRunObserver, type CodingRunObserver } from "../../coding/observability.js";
 import {
   CODING_PROTOCOL_VERSION,
   CodingRunResultSchema,
   CodingTaskInputSchema,
   parseCodingAgentOutputJson,
-  redactTokenShapedValues,
+  redactAndTruncate,
   type CodingAgentOutput,
   type CodingRunResult,
 } from "../../coding/protocol.js";
@@ -21,8 +22,23 @@ import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from
 import type { PreparedWorkspace, VcsPrepareInput, VcsProvider } from "../vcs/types.js";
 import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
 
+const containerLog = logger.child({ module: "container-executor" });
+
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "refused", "lost", "budget_exhausted", "cancelled"]);
 const PROVISIONING_BACKEND = "provisioning";
+/** Serializes concurrency-slot claims across replicas. Distinct from the OAuth client lock (7412901). */
+const CODING_SLOT_LOCK_SQL = "SELECT 1 AS locked FROM pg_advisory_xact_lock(7412902)";
+
+/**
+ * Private sentinel thrown inside claimProvisioning's $transaction callback
+ * when the Run has already left pending/running (e.g. drainCodingQueue
+ * committed a coding_queue_timeout failure between the CodingRun claim
+ * update and the Run status flip). Throwing aborts the whole transaction --
+ * including the CodingRun claim -- so the claim is never left behind on a
+ * run that just got revived as "running"; the catch outside the
+ * transaction turns it into a plain "unavailable" result.
+ */
+class RunNoLongerActiveError extends Error {}
 
 function proxyProtocol(provider: string): ProxyProtocol {
   if (provider === "codex") return "openai-responses";
@@ -57,11 +73,20 @@ export interface ContainerRunSnapshot {
   proxySessionId: string | null;
   result: unknown;
   workerImage: string | null;
+  workspaceDiskMb: number | null;
 }
+
+/**
+ * claimed: this caller owns provisioning. unavailable: someone else does, or
+ * the run is no longer active. queued: every concurrency slot is taken, or
+ * the free ones belong to older queued runs; the run stays pending with
+ * CodingRun.queuedAt set until drainCodingQueue starts it.
+ */
+export type ProvisioningClaim = "claimed" | "unavailable" | "queued";
 
 export interface ContainerExecutionStore {
   load(runId: string): Promise<ContainerRunSnapshot | null>;
-  claimProvisioning(runId: string, claimId: string): Promise<boolean>;
+  claimProvisioning(runId: string, claimId: string): Promise<ProvisioningClaim>;
   persistHandle(runId: string, claimId: string, handle: JobHandle): Promise<void>;
   heartbeat(runId: string): Promise<void>;
   complete(runId: string, status: "succeeded" | "budget_exhausted", result: CodingRunResult): Promise<void>;
@@ -79,7 +104,10 @@ export interface CodingFailureAudit {
 }
 
 export class PrismaContainerExecutionStore implements ContainerExecutionStore {
-  constructor(private readonly db: PrismaClient) {}
+  constructor(
+    private readonly db: PrismaClient,
+    private readonly options: { maxConcurrent?: number } = {},
+  ) {}
 
   async load(runId: string): Promise<ContainerRunSnapshot | null> {
     const row = await this.db.run.findUnique({
@@ -115,27 +143,81 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       proxySessionId: row.codingRun.proxySession?.id ?? null,
       result: row.codingRun.result,
       workerImage: row.codingRun.workerImage,
+      workspaceDiskMb: row.codingRun.workspaceDiskMb,
     };
   }
 
-  async claimProvisioning(runId: string, claimId: string): Promise<boolean> {
-    return this.db.$transaction(async (tx) => {
-      const claimed = await tx.codingRun.updateMany({
-        where: {
-          runId,
-          jobBackend: null,
-          jobHandle: null,
-          run: { status: { in: ["pending", "running"] } },
-        },
-        data: { jobBackend: PROVISIONING_BACKEND, jobHandle: claimId },
+  async claimProvisioning(runId: string, claimId: string): Promise<ProvisioningClaim> {
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const { maxConcurrent } = this.options;
+        if (maxConcurrent !== undefined) {
+          // Slot usage is derived from run state, never a separate counter: a
+          // run that finishes, fails, is stopped, or is reconciled to lost stops
+          // counting, so a crashed replica cannot leak a slot.
+          await tx.$queryRawUnsafe(CODING_SLOT_LOCK_SQL);
+          const active = await tx.codingRun.count({
+            where: { jobBackend: { not: null }, run: { status: { in: ["pending", "running"] } } },
+          });
+          // Oldest first (spec §6): a free slot belongs to the queued runs
+          // ahead of this one, not to whichever claim reaches the lock first.
+          // Without this a fresh dispatch could take a slot freed with no
+          // immediate drain (stopped from another replica, say) and starve
+          // older queued runs into coding_queue_timeout. A run not yet queued
+          // is behind every queued run; queued runs order by (queuedAt,
+          // runId), the same order drainCodingQueue starts them in.
+          const self = await tx.codingRun.findUnique({ where: { runId }, select: { queuedAt: true } });
+          const selfQueuedAt = self?.queuedAt ?? null;
+          const queuedAhead = await tx.codingRun.count({
+            where: {
+              runId: { not: runId },
+              queuedAt: { not: null },
+              jobBackend: null,
+              run: { status: "pending" },
+              ...(selfQueuedAt
+                ? { OR: [{ queuedAt: { lt: selfQueuedAt } }, { queuedAt: selfQueuedAt, runId: { lt: runId } }] }
+                : {}),
+            },
+          });
+          if (active + queuedAhead >= maxConcurrent) {
+            const queued = await tx.codingRun.updateMany({
+              where: { runId, jobBackend: null, queuedAt: null, run: { status: "pending" } },
+              data: { queuedAt: new Date() },
+            });
+            if (queued.count === 1) return "queued";
+            const alreadyQueued = await tx.codingRun.count({
+              where: { runId, jobBackend: null, queuedAt: { not: null }, run: { status: "pending" } },
+            });
+            return alreadyQueued === 1 ? "queued" : "unavailable";
+          }
+        }
+        const claimed = await tx.codingRun.updateMany({
+          where: {
+            runId,
+            jobBackend: null,
+            jobHandle: null,
+            run: { status: { in: ["pending", "running"] } },
+          },
+          data: { jobBackend: PROVISIONING_BACKEND, jobHandle: claimId, queuedAt: null },
+        });
+        if (claimed.count === 0) return "unavailable";
+        const started = await tx.run.updateMany({
+          where: { id: runId, status: { in: ["pending", "running"] } },
+          data: { status: "running", heartbeatAt: new Date() },
+        });
+        if (started.count === 0) {
+          // The Run left pending/running between the CodingRun claim above and
+          // here (e.g. drainCodingQueue's coding_queue_timeout failure landed
+          // mid-claim). Abort the whole transaction so the CodingRun claim
+          // rolls back too, rather than reviving a run that just failed.
+          throw new RunNoLongerActiveError();
+        }
+        return "claimed";
       });
-      if (claimed.count === 0) return false;
-      await tx.run.update({
-        where: { id: runId },
-        data: { status: "running", heartbeatAt: new Date() },
-      });
-      return true;
-    });
+    } catch (err) {
+      if (err instanceof RunNoLongerActiveError) return "unavailable";
+      throw err;
+    }
   }
 
   async persistHandle(runId: string, claimId: string, handle: JobHandle): Promise<void> {
@@ -263,11 +345,19 @@ export interface ContainerExecutorOptions {
   claudeToolRunnerImage?: string;
   anthropicCredentialRef?: string;
   limits: JobResourceLimits;
+  /** Operator ceiling (MiB) on CodingRun.workspaceDiskMb; see coding_workspace_disk_exceeds_limit in jobSpec. */
+  maxDiskMb: number;
   pollMinMs?: number;
   pollMaxMs?: number;
   sleep?: (milliseconds: number) => Promise<void>;
   now?: () => Date;
   observer?: CodingRunObserver;
+  /**
+   * Called after a run this process executed reaches a terminal status,
+   * so a waiting run can take the freed concurrency slot right away rather
+   * than on the next scheduler tick. Never called for a run that was queued.
+   */
+  onSlotReleased?: () => void;
 }
 
 class PreflightError extends Error {}
@@ -327,7 +417,12 @@ export class ContainerExecutor implements Executor {
     if (current) return current;
     this.startedAt.set(runId, this.now().getTime());
     this.emit({ stage: "queued", runId });
-    const execution = this.execute(runId).finally(() => this.active.delete(runId));
+    const execution = this.execute(runId).finally(async () => {
+      this.active.delete(runId);
+      if (!this.options.onSlotReleased) return;
+      const after = await this.options.store.load(runId).catch(() => null);
+      if (after && TERMINAL_STATUSES.has(after.status)) this.options.onSlotReleased();
+    });
     this.active.set(runId, execution);
     return execution;
   }
@@ -338,7 +433,7 @@ export class ContainerExecutor implements Executor {
     if (TERMINAL_STATUSES.has(run.status)) return this.cleanupTerminal(run);
     this.emit({ stage: "stopping", runId, jobId: run.jobHandle?.id });
     // Persist the cancellation fence first so a concurrent finisher cannot publish.
-    const failure = this.failure("cancelled");
+    const failure = this.failure("cancelled", { cancelled: true });
     await this.options.store.terminate(runId, "cancelled", failure.error, failure.audit);
     this.terminal(run, "cancelled", failure.audit);
     if (run.proxySessionId) await this.options.sessions.cancelSession(run.proxySessionId).catch(() => undefined);
@@ -404,7 +499,10 @@ export class ContainerExecutor implements Executor {
       if (!handle) {
         if (run.provisioningClaim) return;
         claimId = randomUUID();
-        if (!(await this.options.store.claimProvisioning(runId, claimId))) return;
+        // "queued": every slot is taken; the run stays pending and
+        // drainCodingQueue starts it when one frees. "unavailable": another
+        // process owns provisioning, or the run is no longer active.
+        if ((await this.options.store.claimProvisioning(runId, claimId)) !== "claimed") return;
       }
       try {
         workspace = await this.options.vcs.recoverWorkspace(prepared);
@@ -436,7 +534,15 @@ export class ContainerExecutor implements Executor {
         const inputArtifact = await this.writeInput(run, deadlineAt);
         const beforeLaunch = await this.requireCurrent(runId);
         if (TERMINAL_STATUSES.has(beforeLaunch.status)) throw new Error("coding_run_no_longer_active");
-        handle = await this.options.jobs.launch(this.jobSpec(run, inputArtifact));
+        const spec = this.jobSpec(run, inputArtifact);
+        // Backends whose handle is derivable (Kubernetes) persist it first, so a crash between the
+        // launch and the write still leaves a handle `abandon()` can stop and remove the run with.
+        const planned = this.options.jobs.plannedHandle?.(spec);
+        if (planned) await this.options.store.persistHandle(runId, claimId!, planned);
+        handle = await this.options.jobs.launch(spec);
+        if (planned && (planned.backend !== handle.backend || planned.id !== handle.id)) {
+          throw new Error("coding_job_handle_mismatch");
+        }
         await this.options.store.persistHandle(runId, claimId!, handle);
         this.options.capabilities.delete(runId);
         this.emit({ stage: "launched", runId, jobId: handle.id, budgetReservedUsd: run.budgetUsd });
@@ -698,6 +804,9 @@ export class ContainerExecutor implements Executor {
     if (provider === "claude-code" && (!run.workerImage || !this.options.claudeToolRunnerImage)) {
       throw new Error("coding_provider_not_configured:claude-code");
     }
+    if (run.workspaceDiskMb && run.workspaceDiskMb > this.options.maxDiskMb) {
+      throw new Error("coding_workspace_disk_exceeds_limit");
+    }
     return {
       kind: "coding-agent",
       runId: run.runId,
@@ -706,7 +815,7 @@ export class ContainerExecutor implements Executor {
       ...(provider === "claude-code" ? { toolImage: this.options.claudeToolRunnerImage } : {}),
       inputArtifact,
       timeoutSec: run.timeoutSec,
-      limits: { ...this.options.limits },
+      limits: { ...this.options.limits, ...(run.workspaceDiskMb ? { diskMb: run.workspaceDiskMb } : {}) },
       labels: {},
     };
   }
@@ -838,9 +947,25 @@ export class ContainerExecutor implements Executor {
     });
   }
 
-  private failure(error: unknown): { error: string; audit: CodingFailureAudit } {
+  /**
+   * `cancelled` is passed by the one caller that knows — stop(). It is never
+   * inferred from the message: `failureCategory` substring-matches, and
+   * "cancel"/"Canceled" is routine phrasing in gRPC, Kubernetes, Docker and
+   * aborted-HTTP errors ("rpc error: code = Canceled desc = context canceled"),
+   * so inferring it would silence exactly the genuine failures this log exists
+   * to surface.
+   */
+  private failure(error: unknown, options: { cancelled?: boolean } = {}): { error: string; audit: CodingFailureAudit } {
     const category = failureCategory(error);
     const diagnosticId = `coding_diag_${randomUUID()}`;
+    // The persisted error is deliberately opaque (it reaches the agent owner),
+    // so the operator needs the real reason somewhere: the control-plane log,
+    // keyed by the same diagnostic id. Token-shaped values are redacted, and a
+    // cause chain is kept because the outer message is often just a wrapper.
+    // A user asking to stop is not a failure, so it gets the same id at info.
+    const line = { diagnosticId, category, reason: describeFailure(error) };
+    if (options.cancelled === true) containerLog.info(line, "coding run cancelled; the persisted error is its id only");
+    else containerLog.warn(line, "coding run failed; the persisted error is the diagnostic id only");
     return { error: `coding_failure_${category}:${diagnosticId}`, audit: { failureCategory: category, diagnosticId } };
   }
 
@@ -850,11 +975,18 @@ export class ContainerExecutor implements Executor {
   }
 }
 
+/** Operator-facing failure text: the message plus its cause chain, redacted. */
+export function describeFailure(error: unknown, depth = 0): string {
+  if (depth > 4) return "…";
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "unknown";
+  const redacted = redactAndTruncate(message, 500);
+  const cause = error instanceof Error ? error.cause : undefined;
+  return cause === undefined || cause === null ? redacted : `${redacted} <- ${describeFailure(cause, depth + 1)}`;
+}
+
 function safeError(error: unknown): string {
   const message = error instanceof Error ? error.message : "unknown";
-  return `coding_executor:${redactTokenShapedValues(message)
-    .replace(/[^A-Za-z0-9_.:-]/g, "_")
-    .slice(0, 200)}`;
+  return `coding_executor:${redactAndTruncate(message, 200).replace(/[^A-Za-z0-9_.:-]/g, "_")}`;
 }
 
 function failureCategory(error: unknown): string {

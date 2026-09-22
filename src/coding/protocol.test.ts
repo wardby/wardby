@@ -14,6 +14,10 @@ import {
   parseCodingAgentOutputJson,
   parseCodingRunResultJson,
   parseCodingTaskInputJson,
+  MAX_REDACTED_SPAN,
+  TRAILING_ANCHORED_PATTERNS,
+  redactAndTruncate,
+  redactTokenShapedValues,
 } from "./protocol.js";
 
 const input = {
@@ -229,5 +233,130 @@ describe("bounded duplicate-safe JSON parsing", () => {
 
   it("rejects excessive JSON nesting before schema validation", () => {
     expect(() => parseCodingAgentOutputJson(`${"[".repeat(65)}null${"]".repeat(65)}`)).toThrow(/nesting_limit/);
+  });
+});
+
+describe("redactTokenShapedValues", () => {
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+
+  it("redacts the credential shapes an operator log can pick up from a cause chain", () => {
+    // A JWT (delegating auth), a Google access token, an AWS secret in
+    // key=value form, and a PEM block — none of which the token patterns
+    // covered before.
+    expect(redactTokenShapedValues(`bearer token ${jwt} rejected`)).toBe("bearer token [REDACTED] rejected");
+    expect(redactTokenShapedValues(`ya29.${"a".repeat(40)}`)).toBe("[REDACTED]");
+    expect(redactTokenShapedValues('aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEX"')).toBe(
+      'aws_secret_access_key="[REDACTED]"',
+    );
+    expect(redactTokenShapedValues("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAK\n-----END RSA PRIVATE KEY-----")).toBe(
+      "[REDACTED]",
+    );
+  });
+
+  it("redacts a URL's userinfo even when the password is not token-shaped", () => {
+    expect(redactTokenShapedValues("clone https://git:hunter2@github.com/o/r failed")).toBe(
+      "clone https://[REDACTED]@github.com/o/r failed",
+    );
+    expect(redactTokenShapedValues(`fatal: https://x-access-token:ghs_${"a".repeat(36)}@github.com/o/r`)).toBe(
+      "fatal: https://[REDACTED]@github.com/o/r",
+    );
+  });
+
+  it("scales linearly on adversarial input — redaction runs over untrusted git output", () => {
+    // Doubling the input must not much more than double the cost. This is the
+    // assertion that discriminates: a reintroduced quadratic is 100-300x, while
+    // a machine being slow shifts both halves equally and changes nothing. The
+    // shapes use SEPARATOR runs, not spaces — a space caps every in-class run
+    // at a few characters, which is why an earlier space-separated JWT case
+    // passed at 9.7 ms while that pattern was still quadratic (13.7 s on
+    // `"eyJ-".repeat(50_000)`).
+    const shapes = {
+      "lowercase run": (n: number) => "a".repeat(n),
+      whitespace: (n: number) => " ".repeat(n),
+      "base64 run": (n: number) => "aB9+/=".repeat(n / 6),
+      "jwt hyphen run": (n: number) => "eyJ-".repeat(n / 4),
+      "jwt token run": (n: number) => `eyJ${"a".repeat(20)}-`.repeat(n / 24),
+      "ya29 hyphen run": (n: number) => `ya29.${"a".repeat(20)}-`.repeat(n / 26),
+      "unterminated PEM blocks": (n: number) => "-----BEGIN PRIVATE KEY-----".repeat(n / 27),
+      "aws key body": (n: number) => `aws_secret_access_key="${"A".repeat(n)}`,
+    };
+    // Best-of-3: the cost is deterministic (sub-millisecond spread), so the
+    // minimum strips scheduler noise without making the ratio meaningless.
+    const cost = (input: string): number => {
+      let best = Infinity;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const startedAt = performance.now();
+        redactTokenShapedValues(input);
+        best = Math.min(best, performance.now() - startedAt);
+      }
+      return best;
+    };
+
+    for (const [shape, build] of Object.entries(shapes)) {
+      const half = cost(build(100_000));
+      const full = cost(build(200_000));
+      expect(full / Math.max(half, 0.5), `${shape} must scale linearly, not quadratically`).toBeLessThan(3);
+      // Absolute backstop, for the case where both halves are slow. Post-fix
+      // the binding shape costs ~68 ms, so this is ~7x headroom — enough for a
+      // reintroduced quadratic (orders of magnitude), not a tight budget.
+      expect(full, `${shape} must not stall the event loop`).toBeLessThan(500);
+    }
+  }, 60_000);
+
+  it("keeps every trailing-anchored pattern inside MAX_REDACTED_SPAN", () => {
+    // redactAndTruncate's window is only safe while a pattern that needs its
+    // trailing anchor (`@`, `-----END …`) cannot match a span longer than the
+    // margin. That coupling was documented and unenforced: raising a bound in
+    // protocol.ts must fail HERE rather than silently breaking the window.
+    const longest = (pattern: RegExp, build: (n: number) => string): number => {
+      // Grow each variable region until the pattern stops matching, then
+      // measure the real maximal match rather than trusting the literals.
+      let low = 1;
+      let high = 4 * MAX_REDACTED_SPAN;
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        if (new RegExp(pattern.source, pattern.flags).test(build(middle))) low = middle;
+        else high = middle - 1;
+      }
+      const match = new RegExp(pattern.source, pattern.flags).exec(build(low));
+      expect(match, "the constructed maximal candidate must still match").not.toBeNull();
+      return match?.[0].length ?? 0;
+    };
+
+    const { urlCredentials, pemPrivateKey } = TRAILING_ANCHORED_PATTERNS;
+    const urlSpan = longest(urlCredentials, (n) => `h${"t".repeat(n)}://${"u".repeat(n)}:${"p".repeat(n)}@host`);
+    const pemSpan = longest(
+      pemPrivateKey,
+      (n) =>
+        `-----BEGIN ${"A".repeat(Math.min(n, 32))} PRIVATE KEY-----${"x".repeat(n)}-----END ${"A".repeat(Math.min(n, 32))} PRIVATE KEY-----`,
+    );
+
+    expect(urlSpan).toBeLessThanOrEqual(MAX_REDACTED_SPAN);
+    expect(pemSpan).toBeLessThanOrEqual(MAX_REDACTED_SPAN);
+    // Pin the measured spans too: a change here is a deliberate decision, and
+    // it has to be re-checked against the window either way.
+    expect({ urlSpan, pemSpan }).toEqual({ urlSpan: 1061, pemSpan: 6262 });
+  });
+
+  it("redactAndTruncate keeps a credential that straddles the truncation point out of the output", () => {
+    const secret = `https://x-access-token:ghs_${"a".repeat(36)}@github.com/o/r`;
+    const noisy = `${"x".repeat(90)}${secret}${"y".repeat(200_000)}`;
+    const shown = redactAndTruncate(noisy, 100);
+    // Truncating first would have printed the front of the token; redacting
+    // first leaves only the (possibly clipped) replacement at the cut.
+    expect(shown).toHaveLength(100);
+    expect(shown.slice(90)).toBe("https://[R");
+    expect(shown).not.toContain("ghs_");
+    expect(shown).not.toContain("x-access-token");
+    // And with room to spare, the whole replacement survives.
+    expect(redactAndTruncate(`${"x".repeat(10)}${secret}`, 100)).toContain("https://[REDACTED]@github.com/o/r");
+  });
+
+  it("leaves ordinary text alone — a commit sha is not a secret", () => {
+    const sha = "a".repeat(40);
+    expect(redactTokenShapedValues(`checked out ${sha} from https://github.com/o/r`)).toBe(
+      `checked out ${sha} from https://github.com/o/r`,
+    );
+    expect(redactTokenShapedValues("npm test failed: 3 of 12 assertions")).toBe("npm test failed: 3 of 12 assertions");
   });
 });

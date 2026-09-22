@@ -1,0 +1,13 @@
+# Namespace-wide default deny: every pod in wardby-coding starts with no
+# ingress and no egress. Anything that needs to talk to something else
+# (the proxy, a coding-run pod) gets its own NetworkPolicy layered on top.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: wardby-coding
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

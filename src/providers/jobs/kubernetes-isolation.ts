@@ -1,0 +1,500 @@
+/**
+ * Canonical Kubernetes isolation policy for one Codex coding run, mirroring
+ * docker-isolation.ts. Nothing else constructs run pods or policies; the
+ * launcher reads every object back and attests it against these builders
+ * before the worker is allowed to start (the seeded-marker gate).
+ */
+import { createHash } from "node:crypto";
+import { isIP } from "node:net";
+import type {
+  V1Container,
+  V1NetworkPolicy,
+  V1Pod,
+  V1PodSpec,
+  V1Secret,
+  V1Toleration,
+  V1Volume,
+} from "@kubernetes/client-node";
+import type { JobSpec } from "./types.js";
+import {
+  CODING_PROXY_ALIAS,
+  CODING_PROXY_PORT,
+  CODING_WORKER_GID,
+  CODING_WORKER_UID,
+  WORKER_STOP_GRACE_SECONDS,
+  isRepositoryDigest,
+} from "./docker-isolation.js";
+
+export const KUBERNETES_ISOLATION_ERROR = "kubernetes_isolation_unsupported";
+export const KUBERNETES_PROVIDER_UNSUPPORTED = "kubernetes_provider_unsupported";
+/** Extra seconds past timeoutSec before Kubernetes kills the pod (keeper included). */
+export const POD_DEADLINE_GRACE_SECONDS = 300;
+export const KEEPER_CONTAINER = "keeper";
+export const STORAGE_INIT_CONTAINER = "storage-init";
+export const WORKER_CONTAINER = "worker";
+export const STORAGE_ROOT = "/run/wardby/storage";
+export const KEEPER_SEEDED_MARKER = `${STORAGE_ROOT}/input/.seeded`;
+export const PROXY_POD_LABEL = { "app.kubernetes.io/name": "wardby-coding-proxy" } as const;
+/** The cluster DNS Service: its ClusterIP is "another pod" that a run's policy must block. */
+export const CLUSTER_DNS_NAMESPACE = "kube-system";
+export const CLUSTER_DNS_SERVICE = "kube-dns";
+/** Exit code of the enforcement probe when the connect succeeded (policy not yet enforced). */
+const ENFORCEMENT_PROBE_CONNECTED = 3;
+const WORKER_SERVICE_ACCOUNT = "wardby-coding-worker";
+const RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/;
+
+/** The worker waits for the launcher's seeded marker, then runs the image's normal entrypoint. */
+const WORKER_GATE = [
+  'const fs = require("node:fs");',
+  'const marker = "/run/wardby/input/.seeded";',
+  "(function wait() {",
+  "  if (fs.existsSync(marker)) {",
+  '    import("/opt/wardby/coding-worker/main.js").catch(() => { process.exitCode = 1; });',
+  "  } else {",
+  "    setTimeout(wait, 250);",
+  "  }",
+  "})();",
+].join("\n");
+
+/**
+ * Creates the worker's subPath mount sources, owned by the run uid, before any regular container
+ * starts. Otherwise the kubelet creates them root-owned while setting up the worker's subPath mounts,
+ * and the keeper (uid 10001, no capabilities) can't chmod them. Idempotent; no shell.
+ */
+const STORAGE_INIT_SCRIPT = [
+  'const fs = require("node:fs");',
+  'for (const name of ["workspace", "input", "output"]) {',
+  `  const path = ${JSON.stringify(STORAGE_ROOT)} + "/" + name;`,
+  "  fs.mkdirSync(path, { recursive: true, mode: 0o700 });",
+  "  fs.chmodSync(path, 0o700);",
+  "}",
+].join("\n");
+
+function isolationError(): Error {
+  return new Error(KUBERNETES_ISOLATION_ERROR);
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+export interface KubernetesRunNames {
+  token: string;
+  runSha: string;
+  pod: string;
+  policy: string;
+  record: string;
+  secret: string;
+}
+
+/**
+ * The per-run object names for a run token. The only place the naming scheme lives: the launcher
+ * resolves a handle's token through this, so names can never drift between creation and cleanup.
+ */
+export function kubernetesRunNamesForToken(token: string): Omit<KubernetesRunNames, "runSha"> {
+  const base = `wardby-run-${token}`;
+  return { token, pod: base, policy: base, record: base, secret: `${base}-cap` };
+}
+
+export function kubernetesRunNames(runId: string): KubernetesRunNames {
+  if (!RUN_ID.test(runId)) throw isolationError();
+  const digest = sha256(runId);
+  return { ...kubernetesRunNamesForToken(digest.slice(0, 20)), runSha: digest.slice(0, 40) };
+}
+
+export function runLabels(runId: string): Record<string, string> {
+  return {
+    "app.kubernetes.io/managed-by": "wardby",
+    "wardby.io/component": "coding-run",
+    "wardby.io/run-sha256": kubernetesRunNames(runId).runSha,
+  };
+}
+
+/** Same grammar as Docker's repository digests; a cluster cannot pull a bare local image ID. */
+export function isRegistryDigest(image: string): boolean {
+  return isRepositoryDigest(image);
+}
+
+function inRange(value: number, min: number, max: number, integer: boolean): boolean {
+  return Number.isFinite(value) && value >= min && value <= max && (!integer || Number.isInteger(value));
+}
+
+/** Whether `value` is within floating-point rounding error of an integer. */
+function isNearInteger(value: number, tolerance = 1e-9): boolean {
+  return Math.abs(Math.round(value) - value) < tolerance;
+}
+
+/** Kubernetes CPU requests/limits are always whole millicores; a fractional millicore can't be expressed. */
+function isWholeMillicores(cpus: number): boolean {
+  return isNearInteger(cpus * 1000);
+}
+
+export function validateKubernetesSpec(spec: JobSpec): void {
+  if (spec.kind !== "coding-agent" || !RUN_ID.test(spec.runId)) throw isolationError();
+  if (spec.provider === "claude-code") throw new Error(KUBERNETES_PROVIDER_UNSUPPORTED);
+  if (spec.provider !== undefined && spec.provider !== "codex") throw isolationError();
+  if (spec.toolImage !== undefined || !isRegistryDigest(spec.image)) throw isolationError();
+  const { cpus, memoryMb, pids, diskMb } = spec.limits;
+  if (
+    !inRange(cpus, 0.1, 32, false) ||
+    !isWholeMillicores(cpus) ||
+    !inRange(memoryMb, 128, 65_536, true) ||
+    !inRange(pids, 16, 4_096, true) ||
+    !inRange(diskMb, 64, 32_768, true) ||
+    !inRange(spec.timeoutSec, 1, 86_400, true)
+  ) {
+    throw isolationError();
+  }
+}
+
+function containerSecurity() {
+  return {
+    allowPrivilegeEscalation: false,
+    privileged: false,
+    readOnlyRootFilesystem: true,
+    runAsNonRoot: true,
+    capabilities: { drop: ["ALL"] },
+  };
+}
+
+export interface RunPodOptions {
+  namespace: string;
+  proxyIp: string;
+  runtimeClassName?: string;
+}
+
+export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
+  validateKubernetesSpec(spec);
+  const names = kubernetesRunNames(spec.runId);
+  const scratchMb = Math.max(16, Math.min(64, Math.floor(spec.limits.memoryMb / 8)));
+  const storageInit: V1Container = {
+    name: STORAGE_INIT_CONTAINER,
+    image: spec.image,
+    command: ["node", "-e", STORAGE_INIT_SCRIPT],
+    securityContext: containerSecurity(),
+    resources: { requests: { cpu: "250m", memory: "128Mi" }, limits: { cpu: "250m", memory: "128Mi" } },
+    volumeMounts: [{ name: "storage", mountPath: STORAGE_ROOT }],
+  };
+  const keeper: V1Container = {
+    name: KEEPER_CONTAINER,
+    image: spec.image,
+    command: ["node", "/opt/wardby/coding-worker/keeper.js"],
+    securityContext: containerSecurity(),
+    resources: { requests: { cpu: "250m", memory: "128Mi" }, limits: { cpu: "250m", memory: "128Mi" } },
+    volumeMounts: [{ name: "storage", mountPath: STORAGE_ROOT }],
+    readinessProbe: { exec: { command: ["test", "-d", `${STORAGE_ROOT}/output`] }, periodSeconds: 1 },
+  };
+  const worker: V1Container = {
+    name: WORKER_CONTAINER,
+    image: spec.image,
+    command: ["node", "-e", WORKER_GATE],
+    env: [
+      { name: "WARDBY_PROXY_URL", value: `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}` },
+      { name: "WARDBY_RUN_CAPABILITY", valueFrom: { secretKeyRef: { name: names.secret, key: "capability" } } },
+    ],
+    securityContext: containerSecurity(),
+    resources: {
+      requests: { cpu: String(spec.limits.cpus), memory: `${spec.limits.memoryMb}Mi` },
+      limits: { cpu: String(spec.limits.cpus), memory: `${spec.limits.memoryMb}Mi` },
+    },
+    volumeMounts: [
+      { name: "storage", mountPath: "/workspace", subPath: "workspace" },
+      { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
+      { name: "storage", mountPath: "/run/wardby/output", subPath: "output" },
+      { name: "tmp", mountPath: "/tmp" },
+      { name: "home", mountPath: "/home/wardby" },
+    ],
+  };
+  return {
+    apiVersion: "v1",
+    kind: "Pod",
+    metadata: {
+      name: names.pod,
+      namespace: options.namespace,
+      labels: runLabels(spec.runId),
+      annotations: { "wardby.io/run-id": spec.runId },
+    },
+    spec: {
+      restartPolicy: "Never",
+      automountServiceAccountToken: false,
+      serviceAccountName: WORKER_SERVICE_ACCOUNT,
+      enableServiceLinks: false,
+      hostNetwork: false,
+      hostPID: false,
+      hostIPC: false,
+      shareProcessNamespace: false,
+      // Backstop only: the launcher enforces the wall-clock deadline; the grace leaves a collection window.
+      activeDeadlineSeconds: spec.timeoutSec + POD_DEADLINE_GRACE_SECONDS,
+      terminationGracePeriodSeconds: WORKER_STOP_GRACE_SECONDS,
+      dnsPolicy: "None",
+      dnsConfig: { nameservers: ["127.0.0.1"] },
+      hostAliases: [{ ip: options.proxyIp, hostnames: [CODING_PROXY_ALIAS] }],
+      ...(options.runtimeClassName ? { runtimeClassName: options.runtimeClassName } : {}),
+      securityContext: {
+        runAsNonRoot: true,
+        runAsUser: CODING_WORKER_UID,
+        runAsGroup: CODING_WORKER_GID,
+        fsGroup: CODING_WORKER_GID,
+        seccompProfile: { type: "RuntimeDefault" },
+      },
+      volumes: [
+        { name: "storage", emptyDir: { sizeLimit: `${spec.limits.diskMb}Mi` } },
+        { name: "tmp", emptyDir: { medium: "Memory", sizeLimit: `${scratchMb}Mi` } },
+        { name: "home", emptyDir: { medium: "Memory", sizeLimit: `${scratchMb}Mi` } },
+      ],
+      initContainers: [storageInit],
+      containers: [keeper, worker],
+    },
+  };
+}
+
+export function buildRunNetworkPolicy(spec: JobSpec, namespace: string): V1NetworkPolicy {
+  const names = kubernetesRunNames(spec.runId);
+  return {
+    apiVersion: "networking.k8s.io/v1",
+    kind: "NetworkPolicy",
+    metadata: { name: names.policy, namespace, labels: runLabels(spec.runId) },
+    spec: {
+      podSelector: { matchLabels: runLabels(spec.runId) },
+      policyTypes: ["Ingress", "Egress"],
+      ingress: [],
+      egress: [
+        {
+          to: [{ podSelector: { matchLabels: { ...PROXY_POD_LABEL } } }],
+          ports: [{ protocol: "TCP", port: CODING_PROXY_PORT }],
+        },
+      ],
+    },
+  };
+}
+
+export function buildCapabilitySecret(spec: JobSpec, namespace: string, capability: string): V1Secret {
+  const names = kubernetesRunNames(spec.runId);
+  return {
+    apiVersion: "v1",
+    kind: "Secret",
+    type: "Opaque",
+    metadata: { name: names.secret, namespace, labels: runLabels(spec.runId) },
+    stringData: { capability },
+  };
+}
+
+/**
+ * Deny-by-default attestation. Rather than allowlisting the fields we expect
+ * to see (which silently accepts anything the allowlist forgot — lifecycle
+ * hooks, probes that reach the node's link-local metadata endpoint,
+ * seLinuxOptions/appArmorProfile/procMount escapes, extra tolerations,
+ * stray annotations, ...), we deep-compare the *entire* spec, labels, and
+ * annotations, and only normalize the exact fields the Kubernetes API
+ * server itself is known to default or reorder on read-back. Every other
+ * field — every security-relevant one included — must match exactly.
+ */
+
+/**
+ * CPU quantities are always whole millicores; normalize "1", "1.0", and
+ * "1000m" to the same string. Rounding only absorbs float noise (the
+ * `isNearInteger` tolerance) — a value that's genuinely fractional at the
+ * millicore scale (e.g. "1000.4m", "0.9996") is not a legitimate Kubernetes
+ * quantity for something we build, so it's mapped to a sentinel that can
+ * never equal a real builder value, making the comparison fail closed
+ * instead of silently rounding two different resource requests together.
+ */
+function cpuMillicores(value: unknown): string {
+  const text = String(value).trim();
+  const milli = /^([0-9]*\.?[0-9]+)m$/.exec(text);
+  if (milli) {
+    const millis = Number(milli[1]);
+    return isNearInteger(millis) ? `${Math.round(millis)}m` : `invalid:${text}`;
+  }
+  const plain = /^([0-9]*\.?[0-9]+)$/.exec(text);
+  if (plain) {
+    const millis = Number(plain[1]) * 1000;
+    return isNearInteger(millis) ? `${Math.round(millis)}m` : `invalid:${text}`;
+  }
+  return text;
+}
+
+const MEMORY_BINARY_UNITS: Record<string, number> = {
+  Ki: 1024,
+  Mi: 1024 ** 2,
+  Gi: 1024 ** 3,
+  Ti: 1024 ** 4,
+  Pi: 1024 ** 5,
+  Ei: 1024 ** 6,
+};
+const MEMORY_DECIMAL_UNITS: Record<string, number> = { K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15, E: 1e18 };
+
+/** Memory quantities can use binary or decimal suffixes; normalize every form to a byte count, failing closed on a non-integer byte count (see `cpuMillicores`). */
+function memoryBytes(value: unknown): string {
+  const text = String(value).trim();
+  const match = /^([0-9]*\.?[0-9]+)(Ki|Mi|Gi|Ti|Pi|Ei|K|M|G|T|P|E)?$/.exec(text);
+  if (!match) return text;
+  const amount = Number(match[1]);
+  const unit = match[2];
+  let bytes: number;
+  if (unit && unit in MEMORY_BINARY_UNITS) bytes = amount * MEMORY_BINARY_UNITS[unit];
+  else if (unit && unit in MEMORY_DECIMAL_UNITS) bytes = amount * MEMORY_DECIMAL_UNITS[unit];
+  else bytes = amount;
+  return isNearInteger(bytes) ? String(Math.round(bytes)) : `invalid:${text}`;
+}
+
+interface DefaultToleration {
+  key: string;
+  operator: string;
+  effect: string;
+  tolerationSeconds: number;
+}
+
+/** The two node-health tolerations every pod gets by admission-time default; anything else must match exactly. */
+const DEFAULT_TOLERATIONS: readonly DefaultToleration[] = [
+  { key: "node.kubernetes.io/not-ready", operator: "Exists", effect: "NoExecute", tolerationSeconds: 300 },
+  { key: "node.kubernetes.io/unreachable", operator: "Exists", effect: "NoExecute", tolerationSeconds: 300 },
+];
+
+function isDefaultToleration(t: V1Toleration): boolean {
+  return DEFAULT_TOLERATIONS.some(
+    (d) =>
+      t.key === d.key &&
+      t.operator === d.operator &&
+      t.effect === d.effect &&
+      t.tolerationSeconds === d.tolerationSeconds,
+  );
+}
+
+function normalizeResources(r?: V1Container["resources"]): void {
+  if (!r) return;
+  if (r.requests) {
+    if (r.requests.cpu !== undefined) r.requests.cpu = cpuMillicores(r.requests.cpu);
+    if (r.requests.memory !== undefined) r.requests.memory = memoryBytes(r.requests.memory);
+  }
+  if (r.limits) {
+    if (r.limits.cpu !== undefined) r.limits.cpu = cpuMillicores(r.limits.cpu);
+    if (r.limits.memory !== undefined) r.limits.memory = memoryBytes(r.limits.memory);
+  }
+}
+
+function normalizeProbe(p?: V1Container["readinessProbe"]): void {
+  if (!p) return;
+  p.timeoutSeconds ??= 1;
+  p.successThreshold ??= 1;
+  p.failureThreshold ??= 3;
+  p.periodSeconds ??= 10;
+}
+
+function normalizeContainer(c: V1Container): void {
+  delete c.terminationMessagePath;
+  delete c.terminationMessagePolicy;
+  delete c.imagePullPolicy;
+  normalizeResources(c.resources);
+  normalizeProbe(c.readinessProbe);
+  normalizeProbe(c.livenessProbe);
+  normalizeProbe(c.startupProbe);
+  for (const mount of c.volumeMounts ?? []) {
+    if (mount.mountPropagation === "None") delete mount.mountPropagation;
+  }
+}
+
+function normalizeVolume(v: V1Volume): void {
+  if (v.emptyDir) {
+    if (v.emptyDir.medium === "") delete v.emptyDir.medium;
+    if (v.emptyDir.sizeLimit !== undefined) v.emptyDir.sizeLimit = memoryBytes(v.emptyDir.sizeLimit);
+  }
+}
+
+/**
+ * Applies only the normalizations the Kubernetes API server itself performs
+ * (defaulting or aliasing fields on write/read). Everything else in the
+ * spec — including every security-relevant field — is left untouched so
+ * the caller's deep-equality check sees it.
+ */
+function normalizeSpec(spec: V1PodSpec): void {
+  if (!Array.isArray(spec.containers)) throw isolationError();
+  delete spec.schedulerName;
+  delete spec.nodeName;
+  delete spec.priority;
+  delete spec.preemptionPolicy;
+  // Go's `omitempty` drops a plain bool at its zero value (false) on serialization, so a
+  // genuine API read-back never has these fields when they're false — only when true.
+  if (spec.hostNetwork === false) delete spec.hostNetwork;
+  if (spec.hostPID === false) delete spec.hostPID;
+  if (spec.hostIPC === false) delete spec.hostIPC;
+  if (spec.serviceAccount !== undefined) {
+    if (spec.serviceAccount !== spec.serviceAccountName) throw isolationError();
+    delete spec.serviceAccount;
+  }
+  if (spec.tolerations) {
+    const remaining = spec.tolerations.filter((t) => !isDefaultToleration(t));
+    if (remaining.length === 0) delete spec.tolerations;
+    else spec.tolerations = remaining;
+  }
+  for (const container of spec.containers) normalizeContainer(container);
+  for (const container of spec.initContainers ?? []) normalizeContainer(container);
+  for (const volume of spec.volumes ?? []) normalizeVolume(volume);
+}
+
+function normalizePod(pod: V1Pod): {
+  labels: Record<string, string>;
+  annotations: Record<string, string>;
+  spec: V1PodSpec;
+} {
+  if (!pod.spec) throw isolationError();
+  const spec = structuredClone(pod.spec);
+  normalizeSpec(spec);
+  return {
+    labels: pod.metadata?.labels ?? {},
+    annotations: pod.metadata?.annotations ?? {},
+    spec,
+  };
+}
+
+/** Recursively sorts object keys and drops `undefined` values so key order and API-omitted fields never matter; array order is preserved. */
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => canonical(item));
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v !== undefined)
+      .map(([key, v]): [string, unknown] => [key, canonical(v)])
+      .sort(([a], [b]) => a.localeCompare(b));
+    return Object.fromEntries(entries);
+  }
+  return value;
+}
+
+export function assertRunPodMatches(actual: V1Pod, expected: V1Pod): void {
+  const a = canonical(normalizePod(actual));
+  const e = canonical(normalizePod(expected));
+  if (JSON.stringify(a) !== JSON.stringify(e)) throw isolationError();
+}
+
+/** Go's `omitempty` drops an empty slice on serialization, so a genuine API read-back omits `ingress` when it's `[]` — only a populated ingress rule list survives. */
+function normalizeNetworkPolicySpec(spec: NonNullable<V1NetworkPolicy["spec"]>): void {
+  if (Array.isArray(spec.ingress) && spec.ingress.length === 0) delete spec.ingress;
+}
+
+export function assertRunNetworkPolicyMatches(actual: V1NetworkPolicy, expected: V1NetworkPolicy): void {
+  const view = (p: V1NetworkPolicy) => {
+    const spec = structuredClone(p.spec ?? {});
+    normalizeNetworkPolicySpec(spec);
+    return { labels: p.metadata?.labels ?? {}, spec };
+  };
+  if (JSON.stringify(canonical(view(actual))) !== JSON.stringify(canonical(view(expected)))) throw isolationError();
+}
+
+/**
+ * A `node -e` script (argv only, never a shell) that tries one TCP connect to
+ * `<clusterDnsIp>:53` with a 3 s timeout (above Linux's 1 s initial SYN
+ * retransmission, so one dropped SYN on an allowed path still connects): exits 0 when blocked (error or
+ * timeout) and ENFORCEMENT_PROBE_CONNECTED when it connects. The IP is
+ * validated and embedded as a JSON string literal.
+ */
+export function enforcementProbeScript(clusterDnsIp: string): string {
+  if (isIP(clusterDnsIp) === 0) throw isolationError();
+  return [
+    'const socket = require("node:net").connect({ host: ' +
+      JSON.stringify(clusterDnsIp) +
+      ", port: 53, timeout: 3000 });",
+    `socket.once("connect", () => { socket.destroy(); process.exit(${ENFORCEMENT_PROBE_CONNECTED}); });`,
+    'socket.once("timeout", () => { socket.destroy(); process.exit(0); });',
+    'socket.once("error", () => process.exit(0));',
+  ].join("\n");
+}

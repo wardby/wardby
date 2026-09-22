@@ -20,7 +20,23 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         take: args.limit,
         orderBy: { startedAt: "desc" },
       });
-      return textResult(runs);
+      // Same rule as get_run: a pending coding run with queuedAt is waiting
+      // for a concurrency slot (CODING_MAX_CONCURRENT), not stuck.
+      const pendingIds = runs.filter((run) => run.status === "pending").map((run) => run.id);
+      const queued =
+        pendingIds.length > 0
+          ? await ctx.db.codingRun.findMany({
+              where: { runId: { in: pendingIds }, queuedAt: { not: null } },
+              select: { runId: true, queuedAt: true },
+            })
+          : [];
+      const queuedAtByRun = new Map(queued.map((row) => [row.runId, row.queuedAt?.toISOString()]));
+      return textResult(
+        runs.map((run) => {
+          const codingQueuedAt = queuedAtByRun.get(run.id);
+          return codingQueuedAt ? { ...run, codingQueuedAt } : run;
+        }),
+      );
     },
   });
 
@@ -32,9 +48,20 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       const run = await ctx.db.run.findUnique({ where: { id: args.runId } });
       if (!run) throw new McpError(404, `Run "${args.runId}" not found.`);
       await requireReadableAgent(ctx.db, run.agentId, ctx.principal.id);
-      const codingRun = await ctx.db.codingRun.findUnique({ where: { runId: run.id }, select: { result: true } });
+      const codingRun = await ctx.db.codingRun.findUnique({
+        where: { runId: run.id },
+        select: { result: true, queuedAt: true },
+      });
       const codingResult = publicCodingRunResult(codingRun?.result);
-      return textResult(codingResult ? { ...run, codingResult } : run);
+      // A pending coding run with queuedAt is waiting for a concurrency slot
+      // (CODING_MAX_CONCURRENT), not stuck.
+      const codingQueuedAt =
+        run.status === "pending" && codingRun?.queuedAt ? codingRun.queuedAt.toISOString() : undefined;
+      return textResult({
+        ...run,
+        ...(codingResult ? { codingResult } : {}),
+        ...(codingQueuedAt ? { codingQueuedAt } : {}),
+      });
     },
   });
 }

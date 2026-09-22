@@ -19,6 +19,8 @@
  *  - `pending` past the timeout (the process died between `claimDueRun`
  *    committing the `Run` and the executor ever starting it — or the
  *    executor's `start()` call itself failed before persisting anything).
+ *    Queued coding runs (`CodingRun.queuedAt` set) are excluded; the coding
+ *    queue owns their timeout.
  *
  * The conditional `updateMany` (`WHERE ... AND status IN (...) AND ...`) is
  * what makes two concurrent reconcilers safe: whichever transaction's
@@ -52,7 +54,13 @@ export async function reconcileOnce(
         status: "running" as const,
         OR: [{ heartbeatAt: { lt: cutoff } }, { heartbeatAt: null, startedAt: { lt: cutoff } }],
       },
-      { status: "pending" as const, startedAt: { lt: cutoff } },
+      {
+        status: "pending" as const,
+        startedAt: { lt: cutoff },
+        // A coding run waiting for a concurrency slot is pending by design;
+        // drainCodingQueue times those out (coding_queue_timeout) instead.
+        OR: [{ codingRun: { is: null } }, { codingRun: { is: { queuedAt: null } } }],
+      },
     ],
   } satisfies Prisma.RunWhereInput;
   const candidates = await db.run.findMany({

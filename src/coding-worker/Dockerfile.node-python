@@ -3,7 +3,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip \
     && python3 -m pip install --no-cache-dir --break-system-packages pytest==8.3.4 ruff==0.16.7 \
     && apt-get purge -y --auto-remove python3-pip \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    # Most Python projects (and their own docs) say `python`, not `python3`.
+    # Without this alias a task that runs `python -m pytest` reports a failed
+    # command even when the suite is green -- observed in a live smoke run.
+    && ln -s /usr/bin/python3 /usr/bin/python
 RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/ssh \
     && test ! -e /usr/bin/curl \
@@ -15,7 +19,9 @@ RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/pip3 \
     && python3 -c "import pytest" \
     && python3 -m pytest --version \
-    && python3 -m ruff --version
+    && python3 -m ruff --version \
+    && python --version \
+    && python -m pytest --version
 USER 10001:10001
 ENV NODE_ENV=production HOME=/home/wardby
 WORKDIR /workspace

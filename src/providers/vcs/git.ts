@@ -3,7 +3,12 @@ import { lstat, mkdir, opendir, readFile, readlink, realpath, rm } from "node:fs
 import { isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Writable } from "node:stream";
-import { redactTokenShapedValues, normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
+import {
+  MAX_REDACTED_SPAN,
+  redactTokenShapedValues,
+  normalizeGitHubRepository,
+  normalizeGitRef,
+} from "../../coding/protocol.js";
 import { isSafeGitHubInstallationToken, type GitHubRepositoryAccess } from "./github.js";
 import type {
   FinalizeChangesDetails,
@@ -58,12 +63,18 @@ export class GitCommandError extends Error {
   }
 }
 
+const GIT_OUTPUT_DISPLAY_BYTES = 8 * 1024;
+
 export function redactGitOutput(value: string, secrets: readonly string[] = []): string {
-  let output = value;
+  // Only the first 8 KiB is ever kept, so redaction works on that plus one
+  // MAX_REDACTED_SPAN of margin rather than on all 2 MiB git may have produced
+  // (see redactAndTruncate: the margin is what keeps truncation safe). The rest
+  // is discarded here and never reaches a log or the database.
+  let output = value.slice(0, GIT_OUTPUT_DISPLAY_BYTES + MAX_REDACTED_SPAN);
   for (const secret of secrets) {
     if (secret) output = output.split(secret).join("[REDACTED]");
   }
-  return redactTokenShapedValues(output).slice(0, 8 * 1024);
+  return redactTokenShapedValues(output).slice(0, GIT_OUTPUT_DISPLAY_BYTES);
 }
 
 export interface NodeGitCommandRunnerOptions {
@@ -302,6 +313,12 @@ export class GitVcsProvider implements VcsProvider {
             "--no-checkout",
             "--single-branch",
             "--no-tags",
+            // History is never needed: the worker gets no Git metadata, the
+            // finalizer compares only against baseCommit and the new commit's
+            // parent, and pushOnce compares SHAs. Depth 1 keeps large
+            // repositories' history off the control plane's disk.
+            "--depth",
+            "1",
             "--branch",
             cloneBranch,
             "--separate-git-dir",
@@ -704,6 +721,18 @@ export class GitVcsProvider implements VcsProvider {
     }
   }
 
+  /**
+   * Deliberately NOT windowed, unlike every other redaction caller: here
+   * `redactTokenShapedValues` is a DETECTOR, not a formatter — nothing from the
+   * config is ever emitted, only the fixed `vcs_git_config_unsafe` — so
+   * redacting a prefix would narrow a security predicate over an
+   * attacker-controlled file (a cloned repo's `.git/config`) to buy speed. The
+   * input is already bounded: the size check short-circuits above it, so
+   * redaction never sees more than 64 KiB, and with every pattern linear the
+   * worst adversarial 64 KiB shape measures 22 ms (it was 1.5 s while the JWT
+   * pattern was quadratic — that bug, not the breadth of this scan, was the
+   * problem).
+   */
   private async assertSafeLocalConfig(gitMetadataPath: string): Promise<void> {
     const config = await readFile(resolve(gitMetadataPath, "config"), "utf8");
     if (

@@ -15,6 +15,7 @@ const ENV_KEYS = [
   "AUTH_SIGNING_KEY",
   "AUTH_CREDENTIAL_HASH_KEY",
   "SECRET_APP_KEY",
+  "CODING_MAX_CONCURRENT",
 ] as const;
 const saved: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 beforeEach(() => {
@@ -53,6 +54,12 @@ describe("startServe transport guard", () => {
   it("refuses stdio, whose stdout is the JSON-RPC wire", async () => {
     process.env.MCP_TRANSPORT = "stdio";
     await expect(startServe({ providers })).rejects.toThrow(/MCP_TRANSPORT=http/);
+  });
+
+  it("fails fast on a malformed coding concurrency setting, before MCP starts listening", async () => {
+    process.env.MCP_TRANSPORT = "http";
+    process.env.CODING_MAX_CONCURRENT = "four";
+    await expect(startServe({ providers })).rejects.toThrow(/CODING_MAX_CONCURRENT/);
   });
 });
 

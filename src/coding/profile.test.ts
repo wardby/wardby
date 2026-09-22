@@ -15,6 +15,7 @@ describe("CodingProfileSchema", () => {
       toolchain: "node",
       toolchainVersion: null,
       workerImageRef: null,
+      workspaceDiskMb: null,
     });
   });
 
@@ -63,6 +64,16 @@ describe("CodingProfileSchema", () => {
     });
     expect(parsed.allowedEgress).toEqual(["registry.npmjs.org"]);
     expect(parsed.protectedPaths).toEqual([".github/workflows/**", "CODEOWNERS"]);
+  });
+
+  it("accepts an optional per-agent workspace size between 64 MiB and 32 GiB", () => {
+    const base = { repository: "openai/example" };
+    expect(CodingProfileSchema.parse(base).workspaceDiskMb).toBeNull();
+    expect(CodingProfileSchema.parse({ ...base, workspaceDiskMb: 8192 }).workspaceDiskMb).toBe(8192);
+    for (const bad of [32, 64.5, 40_000]) {
+      expect(() => CodingProfileSchema.parse({ ...base, workspaceDiskMb: bad })).toThrow();
+    }
+    expect(CodingProfilePatchSchema.parse({ workspaceDiskMb: null })).toEqual({ workspaceDiskMb: null });
   });
 });
 

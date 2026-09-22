@@ -22,8 +22,16 @@ import { execFile as execFileCallback } from "node:child_process";
 import { parseArgs } from "node:util";
 import { promisify } from "node:util";
 import type { RunStatus } from "@prisma/client";
-import { loadContainerExecutorConfig, loadProviderConfig } from "./config/providers.js";
+import {
+  loadCodingConcurrencyConfig,
+  loadContainerExecutorConfig,
+  loadKubernetesJobConfig,
+  loadProviderConfig,
+} from "./config/providers.js";
+import { drainCodingQueue } from "./core/coding-queue.js";
 import { isImmutableDockerImage } from "./providers/jobs/docker-isolation.js";
+import { ClientNodeKubernetesApi } from "./providers/jobs/kubernetes-client.js";
+import { describePreflightFailure, kubernetesPreflight } from "./providers/jobs/kubernetes-preflight.js";
 import { RoutingLlmProvider, resolveLlmRegistrations } from "./providers/llm/index.js";
 import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/index.js";
 import type { Executor } from "./providers/executor/types.js";
@@ -417,10 +425,27 @@ function noopExecutor(): Executor {
 async function codingOps(args: string[]): Promise<void> {
   const [operation, ...rest] = args;
   const config = loadProviderConfig();
-  if (config.jobs !== "docker") fail("coding operations require JOB_LAUNCHER=docker.");
+  if (config.jobs !== "docker" && config.jobs !== "kubernetes") {
+    fail("coding operations require JOB_LAUNCHER=docker or kubernetes.");
+  }
   const container = loadContainerExecutorConfig();
-  if (!container.workerImage || !container.proxyContainer) {
+  if (config.jobs === "kubernetes") {
+    if (!container.workerImage) fail("CODING_WORKER_IMAGE is required when JOB_LAUNCHER=kubernetes.");
+  } else if (!container.workerImage || !container.proxyContainer) {
     fail("CODING_WORKER_IMAGE and CODING_PROXY_CONTAINER are required when JOB_LAUNCHER=docker.");
+  }
+
+  if (operation === "preflight" && config.jobs === "kubernetes") {
+    const kubernetes = loadKubernetesJobConfig();
+    let checks: string[];
+    try {
+      const api = new ClientNodeKubernetesApi({ context: kubernetes.context });
+      checks = await kubernetesPreflight({ api, config: kubernetes, workerImage: container.workerImage });
+    } catch (error) {
+      fail(`coding preflight failed: ${describePreflightFailure(error)}`);
+    }
+    console.log(`coding preflight passed (${checks.join(", ")}) for ${container.workerImage}`);
+    return;
   }
 
   if (operation === "preflight") {
@@ -504,6 +529,9 @@ async function listRuns(args: string[]): Promise<void> {
 async function scheduler(args: string[]): Promise<void> {
   const { values } = parseArgs({ args, options: { scope: { type: "string" } } });
   const scope = values.scope ?? "default";
+  // Parsed before anything starts, so a malformed CODING_MAX_CONCURRENT or
+  // CODING_QUEUE_TIMEOUT_SEC fails fast.
+  const concurrency = loadCodingConcurrencyConfig();
 
   const config = loadProviderConfig();
   const llm = buildLlmProvider();
@@ -515,7 +543,14 @@ async function scheduler(args: string[]): Promise<void> {
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig: config });
   await executor.launch?.();
   const reconciler = startReconciler({ db: prisma, executor });
-  const sched = startScheduler({ executor, db: prisma, scope });
+  const sched = startScheduler({
+    executor,
+    db: prisma,
+    scope,
+    onLeaderTick: async () => {
+      await drainCodingQueue({ db: prisma, executor, ...concurrency });
+    },
+  });
 
   console.log(`wardby scheduler started (scope "${scope}"). Press Ctrl+C to stop.`);
 
@@ -630,7 +665,7 @@ async function main(): Promise<void> {
           "  wardby tool list [--agent <name>]\n" +
           "  wardby run <name>\n" +
           "  wardby runs [--agent <name>] [--limit N] [--status <s>]\n" +
-          "  wardby coding preflight\n" +
+          "  wardby coding preflight   (JOB_LAUNCHER=docker or kubernetes)\n" +
           "  wardby coding cleanup --run-id <id>\n" +
           "  wardby scheduler [--scope default]\n" +
           "  wardby mcp   (MCP_TRANSPORT=stdio|http selects the transport)\n" +

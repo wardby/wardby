@@ -5,6 +5,8 @@ import {
   loadMcpConfig,
   loadGitHubVcsConfig,
   loadDbosConfig,
+  loadCodingConcurrencyConfig,
+  loadKubernetesJobConfig,
 } from "./providers.js";
 
 describe("provider config", () => {
@@ -98,6 +100,28 @@ describe("loadContainerExecutorConfig", () => {
     const config = loadContainerExecutorConfig({});
     expect(config.additionalWorkerImages).toEqual({});
   });
+
+  it("defaults CODING_MAX_DISK_MB to the effective CODING_DISK_MB and accepts an explicit value in bounds", () => {
+    expect(loadContainerExecutorConfig({}).maxDiskMb).toBe(loadContainerExecutorConfig({}).diskMb);
+    expect(loadContainerExecutorConfig({ CODING_DISK_MB: "4096" }).maxDiskMb).toBe(4096);
+    expect(loadContainerExecutorConfig({ CODING_MAX_DISK_MB: "16384" }).maxDiskMb).toBe(16384);
+  });
+
+  it.each(["63", "32769", "1.5", "nope"])("rejects CODING_MAX_DISK_MB out of the 64-32768 bounds (%s)", (value) => {
+    expect(() => loadContainerExecutorConfig({ CODING_MAX_DISK_MB: value })).toThrow(
+      "CODING_MAX_DISK_MB must be an integer between 64 and 32768",
+    );
+  });
+
+  it("rejects a CODING_MAX_DISK_MB below the effective CODING_DISK_MB", () => {
+    expect(() => loadContainerExecutorConfig({ CODING_DISK_MB: "4096", CODING_MAX_DISK_MB: "2048" })).toThrow(
+      "CODING_MAX_DISK_MB (2048) must be at least the effective CODING_DISK_MB (4096)",
+    );
+  });
+
+  it("accepts CODING_MAX_DISK_MB exactly equal to the effective CODING_DISK_MB", () => {
+    expect(loadContainerExecutorConfig({ CODING_DISK_MB: "4096", CODING_MAX_DISK_MB: "4096" }).maxDiskMb).toBe(4096);
+  });
 });
 
 describe("loadMcpConfig", () => {
@@ -152,5 +176,67 @@ describe("loadDbosConfig", () => {
 
   it("leaves systemDatabaseUrl undefined when neither variable is set", () => {
     expect(loadDbosConfig({}).systemDatabaseUrl).toBeUndefined();
+  });
+});
+
+describe("loadCodingConcurrencyConfig", () => {
+  it("defaults to 4 concurrent coding runs and a one-hour queue timeout", () => {
+    expect(loadCodingConcurrencyConfig({})).toEqual({ maxConcurrent: 4, queueTimeoutSec: 3600 });
+  });
+
+  it("reads both settings", () => {
+    expect(loadCodingConcurrencyConfig({ CODING_MAX_CONCURRENT: "12", CODING_QUEUE_TIMEOUT_SEC: "600" })).toEqual({
+      maxConcurrent: 12,
+      queueTimeoutSec: 600,
+    });
+  });
+
+  it.each(["0", "-1", "1.5", "many"])("rejects CODING_MAX_CONCURRENT=%s", (value) => {
+    expect(() => loadCodingConcurrencyConfig({ CODING_MAX_CONCURRENT: value })).toThrow(
+      "CODING_MAX_CONCURRENT must be a positive integer.",
+    );
+  });
+
+  it("rejects a non-positive CODING_QUEUE_TIMEOUT_SEC", () => {
+    expect(() => loadCodingConcurrencyConfig({ CODING_QUEUE_TIMEOUT_SEC: "0" })).toThrow(
+      "CODING_QUEUE_TIMEOUT_SEC must be a positive integer.",
+    );
+  });
+});
+
+describe("loadKubernetesJobConfig", () => {
+  it("defaults to the wardby-coding namespace and proxy Service, with no context or runtime class", () => {
+    expect(loadKubernetesJobConfig({})).toEqual({
+      namespace: "wardby-coding",
+      proxyService: "wardby-coding-proxy",
+    });
+  });
+
+  it("reads every setting", () => {
+    expect(
+      loadKubernetesJobConfig({
+        KUBERNETES_NAMESPACE: "coding-staging",
+        KUBERNETES_CONTEXT: "kind-wardby",
+        KUBERNETES_PROXY_SERVICE: "proxy",
+        KUBERNETES_RUNTIME_CLASS: "gvisor",
+      }),
+    ).toEqual({
+      namespace: "coding-staging",
+      context: "kind-wardby",
+      proxyService: "proxy",
+      runtimeClassName: "gvisor",
+    });
+  });
+
+  it.each(["", "Upper", "under_score", "-leading", "x".repeat(64)])("rejects KUBERNETES_NAMESPACE=%j", (value) => {
+    expect(() => loadKubernetesJobConfig({ KUBERNETES_NAMESPACE: value })).toThrow(
+      "KUBERNETES_NAMESPACE must be a DNS-1123 label.",
+    );
+  });
+
+  it("rejects an invalid proxy Service name", () => {
+    expect(() => loadKubernetesJobConfig({ KUBERNETES_PROXY_SERVICE: "Bad_Name" })).toThrow(
+      "KUBERNETES_PROXY_SERVICE must be a DNS-1123 label.",
+    );
   });
 });

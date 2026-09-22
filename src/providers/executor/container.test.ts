@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryCodingRunObserver } from "../../coding/observability.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "../jobs/types.js";
 import type {
@@ -14,10 +14,39 @@ import type {
 import {
   ContainerExecutor,
   RunCapabilityVault,
+  describeFailure,
   type CodingSessionController,
   type ContainerExecutionStore,
+  type ContainerExecutorOptions,
   type ContainerRunSnapshot,
+  type ProvisioningClaim,
 } from "./container.js";
+
+/**
+ * The executor's operator log, captured. The persisted run error is a bare
+ * diagnostic id by design, so this log line is the only place the real reason
+ * exists — which makes it worth asserting on.
+ */
+const logged = vi.hoisted(() => [] as { level: string; payload: Record<string, unknown>; message: string }[]);
+vi.mock("../../core/logger.js", () => {
+  const make = (): Record<string, unknown> => {
+    const at =
+      (level: string) =>
+      (payload: Record<string, unknown>, message?: string): void => {
+        logged.push({ level, payload, message: message ?? "" });
+      };
+    return {
+      child: () => make(),
+      trace: at("trace"),
+      debug: at("debug"),
+      info: at("info"),
+      warn: at("warn"),
+      error: at("error"),
+      fatal: at("fatal"),
+    };
+  };
+  return { logger: make() };
+});
 
 const IMAGE = `registry.example/worker@sha256:${"a".repeat(64)}`;
 const CLAUDE_IMAGE = `registry.example/claude-worker@sha256:${"b".repeat(64)}`;
@@ -50,6 +79,7 @@ function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSn
     proxySessionId: null,
     result: null,
     workerImage: null,
+    workspaceDiskMb: null,
     ...overrides,
   };
 }
@@ -57,6 +87,8 @@ function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSn
 class FakeStore implements ContainerExecutionStore {
   completions: unknown[] = [];
   terminations: unknown[] = [];
+  /** Every handle written, in order, so tests can see whether one was stored before launching. */
+  persistedHandles: JobHandle[] = [];
   heartbeats = 0;
 
   constructor(public run: ContainerRunSnapshot) {}
@@ -65,18 +97,27 @@ class FakeStore implements ContainerExecutionStore {
     return runId === this.run.runId ? structuredClone(this.run) : null;
   }
 
-  async claimProvisioning(_runId: string, claimId: string): Promise<boolean> {
-    if (this.run.jobHandle || this.run.provisioningClaim) return false;
+  /** When true, the next claims report every slot taken. */
+  slotsFull = false;
+
+  async claimProvisioning(_runId: string, claimId: string): Promise<ProvisioningClaim> {
+    if (this.run.jobHandle || this.run.provisioningClaim) return "unavailable";
+    if (this.slotsFull) return "queued";
     this.run.provisioningClaim = claimId;
     this.run.status = "running";
-    return true;
+    return "claimed";
   }
 
   async persistHandle(_runId: string, claimId: string, handle: JobHandle): Promise<void> {
     if (this.run.status !== "pending" && this.run.status !== "running") throw new Error("not_active");
+    // Mirrors the real store: re-persisting the same handle is a no-op, even once the claim is gone.
+    if (this.run.jobHandle) {
+      if (JSON.stringify(this.run.jobHandle) !== JSON.stringify(handle)) throw new Error("conflict");
+      this.persistedHandles.push(structuredClone(handle));
+      return;
+    }
     if (this.run.provisioningClaim !== claimId) throw new Error("claim_conflict");
-    if (this.run.jobHandle && JSON.stringify(this.run.jobHandle) !== JSON.stringify(handle))
-      throw new Error("conflict");
+    this.persistedHandles.push(structuredClone(handle));
     this.run.jobHandle = structuredClone(handle);
     this.run.provisioningClaim = null;
     this.run.status = "running";
@@ -102,11 +143,18 @@ class FakeStore implements ContainerExecutionStore {
 
 class FakeJobs implements WorkspaceJobLauncher {
   readonly handle = { backend: "fake", id: "job-1" };
+  /** Set to mimic a backend (Kubernetes) whose handle is known before the cluster is touched. */
+  planned?: JobHandle;
+  /** Set to make launch() fail the way a crash-prone provisioning would. */
+  launchError?: Error;
+  /** Runs at the start of launch(), so a test can observe what was already persisted. */
+  onLaunch?: () => void;
   launches = 0;
   materializations = 0;
   removals = 0;
   stops = 0;
   lastSpec?: JobSpec;
+  specs: JobSpec[] = [];
   statusValue: JobStatus = { state: "succeeded" };
   result: JobResult = {
     exitCode: 0,
@@ -122,11 +170,17 @@ class FakeJobs implements WorkspaceJobLauncher {
 
   constructor(private readonly events: string[]) {}
 
+  plannedHandle(spec: JobSpec): JobHandle | undefined {
+    return this.planned ? { ...this.planned, id: `${this.planned.id}-${spec.runId}` } : undefined;
+  }
   async launch(spec: JobSpec): Promise<JobHandle> {
     this.launches += 1;
     this.lastSpec = spec;
+    this.specs.push(spec);
     this.events.push("launch");
-    return this.handle;
+    this.onLaunch?.();
+    if (this.launchError) throw this.launchError;
+    return this.plannedHandle(spec) ?? this.handle;
   }
   async status(): Promise<JobStatus> {
     return this.statusValue;
@@ -255,6 +309,7 @@ async function harness(
   workerImage = IMAGE,
   observer = new InMemoryCodingRunObserver(),
   claude?: { workerImage: string; toolImage: string },
+  extra: Partial<ContainerExecutorOptions> = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "wardby-container-executor-"));
   roots.push(root);
@@ -281,8 +336,10 @@ async function harness(
         }
       : {}),
     limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
+    maxDiskMb: 8192,
     sleep: async () => {},
     observer,
+    ...extra,
   });
   return { executor, store, jobs, vcs, sessions, capabilities, events, observer };
 }
@@ -291,7 +348,65 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
+beforeEach(() => {
+  logged.length = 0;
+});
+
 describe("ContainerExecutor", () => {
+  it("calls onSlotReleased once after a run reaches a terminal status, never for a queued run", async () => {
+    let releases = 0;
+    const onSlotReleased = () => {
+      releases += 1;
+    };
+    const finished = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, { onSlotReleased });
+    await finished.executor.start("run-1");
+    expect(["succeeded", "failed", "budget_exhausted"]).toContain(finished.store.run.status);
+    expect(releases).toBe(1);
+
+    releases = 0;
+    const queued = await harness({ status: "pending" }, IMAGE, new InMemoryCodingRunObserver(), undefined, {
+      onSlotReleased,
+    });
+    queued.store.slotsFull = true;
+    await queued.executor.start("run-1");
+    expect(queued.store.run.status).toBe("pending");
+    expect(releases).toBe(0);
+  });
+
+  it("sizes the job's workspace from the run's per-agent workspaceDiskMb", async () => {
+    const created = await harness({ workspaceDiskMb: 8192 });
+    await created.executor.start("run-1");
+    expect(created.jobs.specs[0]?.limits.diskMb).toBe(8192);
+  });
+
+  it("falls back to the deployment's default disk size", async () => {
+    const created = await harness();
+    await created.executor.start("run-1");
+    expect(created.jobs.specs[0]?.limits.diskMb).toBe(512);
+  });
+
+  it("allows a workspaceDiskMb exactly at the operator's maxDiskMb ceiling", async () => {
+    const created = await harness({ workspaceDiskMb: 8192 }, IMAGE, new InMemoryCodingRunObserver(), undefined, {
+      maxDiskMb: 8192,
+    });
+    await created.executor.start("run-1");
+    expect(created.jobs.specs[0]?.limits.diskMb).toBe(8192);
+    expect(created.store.run.status).not.toBe("failed");
+  });
+
+  it("rejects a workspaceDiskMb over the operator's maxDiskMb ceiling as a normal failed run", async () => {
+    const created = await harness({ workspaceDiskMb: 8193 }, IMAGE, new InMemoryCodingRunObserver(), undefined, {
+      maxDiskMb: 8192,
+    });
+    await created.executor.start("run-1");
+    expect(created.jobs.launches).toBe(0);
+    expect(created.store.run.status).toBe("failed");
+    expect(created.store.run.result).toBeNull();
+    expect(created.store.terminations).toEqual([
+      expect.objectContaining({ status: "failed", error: expect.stringContaining("coding_failure_workspace:") }),
+    ]);
+  });
+
   it("accepts a content-addressed local Docker image ID", async () => {
     await expect(harness({}, `sha256:${"a".repeat(64)}`)).resolves.toBeDefined();
   });
@@ -514,6 +629,74 @@ describe("ContainerExecutor", () => {
     expect(created.store.run.status).toBe("running");
   });
 
+  it("leaves a run pending, with no workspace, session, or job, when every slot is taken", async () => {
+    const created = await harness({ status: "pending" });
+    created.store.slotsFull = true;
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("pending");
+    expect(created.vcs.prepared).toBe(0);
+    expect(created.sessions.creates).toBe(0);
+    expect(created.jobs.launches).toBe(0);
+  });
+
+  it("persists a derivable handle before launching, and again after, idempotently", async () => {
+    const created = await harness({ status: "pending" });
+    created.jobs.planned = { backend: "fake", id: "planned" };
+    let persistedWhenLaunchStarted: unknown;
+    created.jobs.onLaunch = () => void (persistedWhenLaunchStarted = created.store.run.jobHandle);
+    await created.executor.start("run-1");
+    // The cluster is only touched once a handle exists to clean it up with.
+    expect(persistedWhenLaunchStarted).toEqual({ backend: "fake", id: "planned-run-1" });
+    expect(created.store.persistedHandles).toEqual([
+      { backend: "fake", id: "planned-run-1" },
+      { backend: "fake", id: "planned-run-1" },
+    ]);
+    expect(created.store.run.jobHandle).toEqual({ backend: "fake", id: "planned-run-1" });
+  });
+
+  it("keeps a persisted handle when a derivable launch throws, so recovery can clean the backend up", async () => {
+    const created = await harness({ status: "pending" });
+    created.jobs.planned = { backend: "fake", id: "planned" };
+    created.jobs.launchError = new Error("kubernetes_pod_start_timeout");
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("failed");
+    const handle = created.store.run.jobHandle;
+    expect(handle).toEqual({ backend: "fake", id: "planned-run-1" });
+
+    // A replica that crashed instead of failing cleanly finds the handle and removes the run's objects.
+    const crashed = await harness({ jobHandle: handle, proxySessionId: "session-1" });
+    crashed.jobs.statusValue = { state: "running" };
+    await expect(crashed.executor.recover({ runId: "run-1", backend: "fake", id: "other" })).resolves.toEqual({
+      state: "lost",
+      reason: "coding_job_handle_mismatch",
+    });
+    expect(crashed.jobs.stops).toBe(1);
+    expect(crashed.jobs.removals).toBe(1);
+  });
+
+  it("without a planned handle (Docker) persists only after launch", async () => {
+    const created = await harness({ status: "pending" });
+    let persistedWhenLaunchStarted: unknown = "unset";
+    created.jobs.onLaunch = () => void (persistedWhenLaunchStarted = created.store.run.jobHandle);
+    await created.executor.start("run-1");
+    expect(created.jobs.plannedHandle(created.jobs.lastSpec!)).toBeUndefined();
+    expect(persistedWhenLaunchStarted).toBeNull();
+    expect(created.store.persistedHandles).toEqual([{ backend: "fake", id: "job-1" }]);
+  });
+
+  it("fails closed when a launch returns a handle other than the one already persisted", async () => {
+    const created = await harness({ status: "pending" });
+    created.jobs.planned = { backend: "fake", id: "planned" };
+    created.jobs.launch = async (spec) => {
+      created.jobs.launches += 1;
+      created.jobs.lastSpec = spec;
+      return { backend: "fake", id: "something-else" };
+    };
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("failed");
+    expect(created.store.terminations.at(-1)).toMatchObject({ status: "failed" });
+  });
+
   it("never relaunches a stale provisioning claim during recovery", async () => {
     const created = await harness({ provisioningClaim: "dead-process", proxySessionId: "session-1" });
     await expect(
@@ -582,6 +765,7 @@ describe("resolveCodingWorkerImage", () => {
       additionalWorkerImages: { "node-python": { "3.12": pythonImage } },
       credentialRef: "env:OPENAI_API_KEY",
       limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
+      maxDiskMb: 8192,
       sleep: async () => {},
     });
     expect(
@@ -646,6 +830,7 @@ describe("resolveCodingWorkerImage", () => {
       additionalWorkerImages: { "node-python": { "3.12": pythonImage } },
       credentialRef: "env:OPENAI_API_KEY",
       limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
+      maxDiskMb: 8192,
       sleep: async () => {},
     });
     expect(() =>
@@ -701,6 +886,7 @@ describe("resolveCodingWorkerImage", () => {
           additionalWorkerImages: { "node-python": { "3.12": "wardby-coding-worker:latest" } },
           credentialRef: "env:OPENAI_API_KEY",
           limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
+          maxDiskMb: 8192,
           sleep: async () => {},
         }),
     ).toThrow("coding_worker_image_invalid");
@@ -719,5 +905,86 @@ describe("jobSpec image selection", () => {
     const { executor, jobs } = await harness({ workerImage: null });
     await executor.start("run-1");
     expect(jobs.lastSpec?.image).toBe(IMAGE);
+  });
+});
+
+describe("failure diagnostics", () => {
+  it("logs the real reason and cause chain next to the diagnostic id the run persists", async () => {
+    const created = await harness();
+    const token = `ghp_${"a".repeat(36)}`;
+    created.vcs.prepareWorkspace = () => {
+      // The shape that hid this bug: an opaque outer message whose real cause
+      // (and a credential in it) only lives on `cause`.
+      throw new Error("github_api_unavailable", { cause: new Error(`fetch failed for ${token}`) });
+    };
+
+    await created.executor.start("run-1");
+
+    // Exactly the live symptom this bug produced: refused before launch.
+    expect(created.store.run.status).toBe("refused");
+    const persisted = (created.store.terminations[0] as { error: string }).error;
+    const diagnosticId = persisted.split(":")[1];
+    expect(diagnosticId).toMatch(/^coding_diag_/);
+
+    const warning = logged.find((entry) => entry.level === "warn" && entry.payload.diagnosticId === diagnosticId);
+    expect(warning, "the failure must be logged against the same diagnostic id").toBeDefined();
+    const reason = String(warning?.payload.reason);
+    expect(reason).toContain("github_api_unavailable");
+    expect(reason).toContain("fetch failed");
+    // The reason is an operator log line, not the agent-facing error: it may
+    // not carry a credential that happened to land in an error message.
+    expect(reason).not.toContain(token);
+    expect(reason).toContain("[REDACTED]");
+    expect(JSON.stringify(logged)).not.toContain(token);
+  });
+
+  it("does not raise operator signal when a run is cancelled on purpose", async () => {
+    const created = await harness();
+
+    await created.executor.stop("run-1");
+
+    expect(created.store.run.status).toBe("cancelled");
+    // A user asking to stop is not a failure: the diagnostic id is still
+    // logged (an operator may have to correlate it), but never at warn.
+    expect(logged.filter((entry) => entry.level === "warn")).toEqual([]);
+    const persisted = (created.store.terminations[0] as { error: string }).error;
+    const line = logged.find((entry) => entry.payload.diagnosticId === persisted.split(":")[1]);
+    expect(line?.level).toBe("info");
+    expect(line?.message).toContain("cancelled");
+  });
+
+  it.each([
+    "the request was canceled",
+    "session cancelled by upstream",
+    "rpc error: code = Canceled desc = context canceled",
+  ])("still warns for a genuine failure whose message merely says %j", async (message) => {
+    // "cancel" is routine phrasing for gRPC, Kubernetes, Docker and aborted
+    // HTTP, and failureCategory substring-matches it — so cancellation must
+    // come from the caller, never from the message, or these go silent.
+    const created = await harness();
+    created.vcs.prepareWorkspace = () => {
+      throw new Error(message);
+    };
+
+    await created.executor.start("run-1");
+
+    expect(created.store.run.status).toBe("refused");
+    const warning = logged.find((entry) => entry.level === "warn");
+    expect(String(warning?.payload.reason)).toContain(message);
+    expect(logged.filter((entry) => entry.level === "info")).toEqual([]);
+  });
+
+  it("describeFailure keeps the cause chain, redacts token-shaped values, and stops recursing", () => {
+    const token = `ghp_${"b".repeat(36)}`;
+    expect(describeFailure(new Error(`boom ${token}`))).toBe("boom [REDACTED]");
+    expect(describeFailure(new Error("outer", { cause: new Error("inner") }))).toBe("outer <- inner");
+    expect(describeFailure("plain string")).toBe("plain string");
+    expect(describeFailure({ not: "an error" })).toBe("unknown");
+
+    let deepest: Error = new Error("bottom");
+    for (let level = 0; level < 8; level += 1) deepest = new Error(`level${level}`, { cause: deepest });
+    const described = describeFailure(deepest);
+    expect(described.endsWith("…")).toBe(true);
+    expect(described.split(" <- ").length).toBe(6);
   });
 });

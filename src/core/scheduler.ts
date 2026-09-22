@@ -87,6 +87,12 @@ export interface SchedulerOptions {
   instanceId?: string;
   now?: () => Date;
   onLog?: (message: string) => void;
+  /**
+   * Awaited at the end of every tick on the lease holder only; used to drain
+   * the coding concurrency queue. Errors are logged, never thrown, so a
+   * failing hook cannot stop scheduled agents from firing.
+   */
+  onLeaderTick?: () => Promise<void>;
 }
 
 export interface SchedulerHandle {
@@ -127,6 +133,9 @@ export function startScheduler(options: SchedulerOptions): SchedulerHandle {
       } catch (err) {
         schedulerLog.error({ err, agentName: agent.name }, "error claiming a due run");
       }
+    }
+    if (options.onLeaderTick) {
+      await options.onLeaderTick().catch((err) => schedulerLog.error({ err }, "leader tick hook failed"));
     }
   }
 

@@ -21,7 +21,14 @@ export const WORKER_PATHS = {
 
 const LABEL_MANAGED = "io.wardby.managed=true";
 const LABEL_COMPONENT = "io.wardby.component=coding-worker";
-const IMMUTABLE_IMAGE = /^(?:sha256:[a-f0-9]{64}|[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64})$/;
+/**
+ * A digest-pinned repository reference. Only the first path component (the
+ * registry host) may carry a `:<port>`, and then a path must follow; tags
+ * (`repo:tag@sha256:…`) and empty components are rejected.
+ */
+const REPOSITORY_DIGEST =
+  /^[a-z0-9][a-z0-9._-]*(?::[0-9]{1,5}(?:\/[a-z0-9][a-z0-9._-]*)+|(?:\/[a-z0-9][a-z0-9._-]*)*)@sha256:[a-f0-9]{64}$/;
+const LOCAL_IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 const DOCKER_OBJECT = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
 
 export interface DockerIsolationNames {
@@ -188,9 +195,14 @@ function validateSpec(spec: JobSpec): void {
   assertIntegerRange(spec.timeoutSec, 1, 86_400);
 }
 
+/** A registry digest reference (`[host[:port]/]path@sha256:<64 hex>`); no local image IDs, no tags. */
+export function isRepositoryDigest(image: string): boolean {
+  return REPOSITORY_DIGEST.test(image);
+}
+
 /** Accepts a registry digest or Docker's content-addressed local image ID. */
 export function isImmutableDockerImage(image: string): boolean {
-  return IMMUTABLE_IMAGE.test(image);
+  return LOCAL_IMAGE_ID.test(image) || REPOSITORY_DIGEST.test(image);
 }
 
 function validateDockerObject(value: string): void {

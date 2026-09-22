@@ -1,0 +1,23 @@
+# Only the `kind` overlay needs this: the proxy reaches the local Postgres
+# published by deploy/local at host.docker.internal:55432 (the Docker host,
+# from inside the kind node). A real cloud target's database is reached
+# through its own private-network rule (e.g. Plan 3's GKE overlay to Cloud
+# SQL), not this ipBlock.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-coding-proxy-database
+  namespace: wardby-coding
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-coding-proxy
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 55432

@@ -31,6 +31,7 @@ import {
   type DockerHostInfo,
 } from "./docker-isolation.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
+import { replaceDirectoryFromStaging } from "./workspace-swap.js";
 
 const BACKEND = "docker";
 const STATE_SCHEMA_VERSION = 1;
@@ -38,7 +39,7 @@ const MAX_DOCKER_OUTPUT_BYTES = 1024 * 1024;
 const MAX_DOCKER_SEED_DIAGNOSTIC_BYTES = 4 * 1024;
 const MAX_WORKSPACE_ENTRIES = 100_000;
 const TERMINAL_PHASES = new Set<DockerJobRecord["phase"]>(["succeeded", "failed", "stopped", "lost", "removed"]);
-const SAFE_WORKER_DIAGNOSTIC = /^(?:worker_[a-z_]+|coding_[a-z_]+|wardby_[a-z_]+)$/;
+export const SAFE_WORKER_DIAGNOSTIC = /^(?:worker_[a-z_]+|coding_[a-z_]+|wardby_[a-z_]+)$/;
 const dockerLog = logger.child({ module: "docker-jobs" });
 export interface DockerCommandOptions {
   env?: Record<string, string>;
@@ -266,41 +267,19 @@ export class NodeDockerArtifactTransfer implements DockerArtifactTransfer {
   }
 
   async materializeDirectory(container: string, source: string, destination: string, maxBytes: number): Promise<void> {
-    const target = resolve(destination);
-    const parent = dirname(target);
-    const [parentReal, targetReal, targetStat] = await Promise.all([realpath(parent), realpath(target), lstat(target)]);
-    if (
-      !targetStat.isDirectory() ||
-      targetStat.isSymbolicLink() ||
-      targetReal !== resolve(parentReal, target.slice(parent.length + 1))
-    ) {
-      throw new Error("docker_workspace_destination_invalid");
-    }
-
-    const staging = await mkdtemp(join(parentReal, ".wardby-workspace-stage-"));
-    const backup = await mkdtemp(join(parentReal, ".wardby-workspace-backup-"));
-    await rm(backup, { recursive: true });
-    let targetMoved = false;
-    try {
-      await new NodeDockerCommandRunner({ dockerBinary: this.dockerBinary, homeDir: "/tmp", path: this.path }).run([
-        "container",
-        "cp",
-        `${container}:${source}/.`,
-        staging,
-      ]);
-      await validateMaterializedWorkspace(staging, maxBytes);
-      await rename(targetReal, backup);
-      targetMoved = true;
-      await rename(staging, targetReal);
-      targetMoved = false;
-      await rm(backup, { recursive: true, force: true });
-    } catch (error) {
-      if (targetMoved) await rename(backup, targetReal).catch(() => undefined);
-      throw error;
-    } finally {
-      await rm(staging, { recursive: true, force: true });
-      await rm(backup, { recursive: true, force: true });
-    }
+    await replaceDirectoryFromStaging(
+      destination,
+      maxBytes,
+      "docker_workspace_destination_invalid",
+      async (staging) => {
+        await new NodeDockerCommandRunner({ dockerBinary: this.dockerBinary, homeDir: "/tmp", path: this.path }).run([
+          "container",
+          "cp",
+          `${container}:${source}/.`,
+          staging,
+        ]);
+      },
+    );
   }
 }
 

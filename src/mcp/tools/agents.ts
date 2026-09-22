@@ -128,6 +128,13 @@ const profileJsonSchema = {
     toolchain: { type: "string", enum: ["node", "node-python"] },
     toolchainVersion: { type: ["string", "null"] },
     workerImageRef: { type: ["string", "null"] },
+    workspaceDiskMb: {
+      type: ["integer", "null"],
+      minimum: 64,
+      maximum: 32768,
+      description:
+        "Workspace disk size in MiB. Null uses the deployment default (CODING_DISK_MB), capped by the operator's CODING_MAX_DISK_MB.",
+    },
   },
 };
 
@@ -170,6 +177,7 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
     toolchain: profile.toolchain,
     toolchainVersion: profile.toolchainVersion,
     workerImageRef: profile.workerImageRef,
+    workspaceDiskMb: profile.workspaceDiskMb,
   });
 }
 

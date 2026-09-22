@@ -39,6 +39,8 @@ import {
 } from "./subagent-memory-tools.js";
 import { prisma as defaultDb } from "./db.js";
 import { logger } from "./logger.js";
+import { loadCodingConcurrencyConfig } from "../config/providers.js";
+import type { Executor } from "../providers/executor/types.js";
 
 const runnerLog = logger.child({ module: "runner" });
 
@@ -66,7 +68,10 @@ const runnerLog = logger.child({ module: "runner" });
  *   terminal — reusing proven infrastructure rather than re-implementing
  *   container dispatch. Marked `executionManaged: true` here (unlike the
  *   native path) since a long-running container crash mid-dispatch is
- *   exactly the case the reconciler exists for.
+ *   exactly the case the reconciler exists for. Under the coding
+ *   concurrency cap `Executor.start` can resolve with the child merely
+ *   queued (still pending), so the call then polls the child row until it
+ *   is terminal — see `waitForCodingChild`.
  */
 const DELEGATE_TOOL_PREFIX = "delegate_to_";
 
@@ -171,6 +176,79 @@ async function finishRun(db: RunnerDb, runId: string, data: Prisma.RunUpdateMany
 const CODING_EXECUTOR_NOT_CONFIGURED =
   "Coding agents need a container executor, but this deployment runs with JOB_LAUNCHER=local. " +
   "Set JOB_LAUNCHER=docker on a host with Docker to run them (see docs/coding-worker-isolation.md).";
+
+/**
+ * Slack past the child's own queue wait + container deadline before the
+ * parent gives up: the executor needs a moment after a deadline kill to
+ * write the terminal row, and the queue timeout only fires on a drain tick.
+ */
+export const CODING_CHILD_WAIT_GRACE_SEC = 60;
+
+export type CodingChildWaitOutcome =
+  { kind: "terminal"; run: Run } | { kind: "timed_out" } | { kind: "parent_cancelled" };
+
+export interface WaitForCodingChildOptions {
+  db: Pick<RunnerDb, "run" | "task">;
+  executor: Pick<Executor, "stop">;
+  childRunId: string;
+  parentRunId: string;
+  /** Give up after this long; the child is stopped so it never runs on detached. */
+  boundMs: number;
+  initialPollMs?: number;
+  maxPollMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * Polls a dispatched coding child until it reaches a terminal status. Needed
+ * because a queued child (every concurrency slot taken) makes Executor.start
+ * resolve while the run is still pending; drainCodingQueue runs it later.
+ *
+ * Parent cancellation is cooperative everywhere in the runner (DbosExecutor
+ * only interrupts at a step boundary, and this wait runs inside one tool
+ * step), so it is observed from the database instead: the parent Run left
+ * pending/running (reaped as lost, or finished elsewhere), or an MCP task
+ * for the parent run was cancelled. Either way, and on timeout, the child is
+ * stopped rather than left to spend on behalf of a parent that stopped
+ * waiting for it.
+ */
+export async function waitForCodingChild(options: WaitForCodingChildOptions): Promise<CodingChildWaitOutcome> {
+  const { db, executor, childRunId, parentRunId, boundMs } = options;
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const maxPollMs = options.maxPollMs ?? 5_000;
+  let pollMs = options.initialPollMs ?? 1_000;
+  const startedAt = now();
+
+  const stopChild = (reason: string) =>
+    executor.stop(childRunId, reason).catch((err: unknown) => {
+      runnerLog.warn({ err, childRunId, parentRunId }, "failed to stop coding sub-agent run");
+    });
+
+  for (;;) {
+    const child = await db.run.findUniqueOrThrow({ where: { id: childRunId } });
+    if (!DRIVABLE.includes(child.status as (typeof DRIVABLE)[number])) return { kind: "terminal", run: child };
+
+    const parent = await db.run.findUnique({ where: { id: parentRunId }, select: { status: true } });
+    const parentEnded = !parent || !DRIVABLE.includes(parent.status as (typeof DRIVABLE)[number]);
+    const parentTaskCancelled =
+      !parentEnded &&
+      (await db.task.findFirst({ where: { runId: parentRunId, status: "cancelled" }, select: { id: true } })) !== null;
+    if (parentEnded || parentTaskCancelled) {
+      await stopChild("parent run cancelled");
+      return { kind: "parent_cancelled" };
+    }
+
+    const remaining = boundMs - (now() - startedAt);
+    if (remaining <= 0) {
+      await stopChild("sub-agent wait timed out");
+      return { kind: "timed_out" };
+    }
+    await sleep(Math.min(pollMs, remaining));
+    pollMs = Math.min(pollMs * 2, maxPollMs);
+  }
+}
 
 /** Persists a new pending Run for the named agent. Throws if the agent is unknown. */
 export async function createRun(db: RunnerDb, agentName: string, trigger: RunTrigger = "manual"): Promise<Run> {
@@ -408,7 +486,35 @@ export async function executeRun(
           if (!dispatched) {
             return JSON.stringify({ error: "dispatch_failed", message: "The sub-agent run could not be created." });
           }
-          const childResult = await db.run.findUniqueOrThrow({ where: { id: dispatched.run.id } });
+          const childRunId = dispatched.run.id;
+          const codingRun = await db.codingRun.findUnique({
+            where: { runId: childRunId },
+            select: { timeoutSec: true },
+          });
+          const { queueTimeoutSec } = loadCodingConcurrencyConfig();
+          const waited = await waitForCodingChild({
+            db,
+            executor: providers.executor,
+            childRunId,
+            parentRunId: runId,
+            boundMs: (queueTimeoutSec + (codingRun?.timeoutSec ?? 0) + CODING_CHILD_WAIT_GRACE_SEC) * 1000,
+          });
+          if (waited.kind === "timed_out") {
+            return JSON.stringify({
+              error: "subagent_wait_timed_out",
+              runId: childRunId,
+              message:
+                "The coding sub-agent did not finish within its queue timeout plus run timeout; it was stopped and produced no result.",
+            });
+          }
+          if (waited.kind === "parent_cancelled") {
+            return JSON.stringify({
+              error: "parent_cancelled",
+              runId: childRunId,
+              message: "This run was cancelled while waiting for the coding sub-agent; the sub-agent was stopped.",
+            });
+          }
+          const childResult = waited.run;
           return JSON.stringify({
             status: childResult.status,
             finalText: childResult.finalText,

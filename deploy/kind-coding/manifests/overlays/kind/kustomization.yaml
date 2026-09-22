@@ -1,0 +1,3 @@
+resources:
+  - ../../base
+  - proxy-database-egress.yaml
