@@ -1,0 +1,13 @@
+# No top-level `namespace:` override here on purpose: kustomize's namespace
+# transformer forces metadata.namespace on *every* namespaced resource it
+# lists, including launcher-dns-reader-role.yaml's Role, which must stay in
+# kube-system. Every resource below sets its own metadata.namespace instead
+# (wardby-coding for six of them, kube-system for the DNS reader Role).
+resources:
+  - namespace.yaml
+  - service-accounts.yaml
+  - default-deny.yaml
+  - proxy.yaml
+  - launcher-role.yaml
+  - launcher-dns-reader-role.yaml
+  - quota.yaml

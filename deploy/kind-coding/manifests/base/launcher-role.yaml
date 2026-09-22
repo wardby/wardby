@@ -1,0 +1,34 @@
+# The Kubernetes launcher's own permissions in wardby-coding: only what
+# KubernetesApi (src/providers/jobs/kubernetes-api.ts) actually calls, and
+# nothing else — no get/list on secrets beyond a single named object, no
+# access to any other namespace. No RoleBinding is created here: the kind
+# control plane runs every command (including the preflight and up.sh)
+# against your own admin kubeconfig. Plan 3 binds this Role to the Cloud
+# Run service account's identity in the target namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: wardby-coding-launcher
+  namespace: wardby-coding
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "get", "update"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get"]

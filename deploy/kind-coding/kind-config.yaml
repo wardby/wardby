@@ -1,0 +1,12 @@
+# Local coding-run cluster. kindnet (kind's default network layer) enforces
+# NetworkPolicy through its bundled kube-network-policies controller in
+# current kind releases; `wardby coding preflight` proves it on every setup.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: wardby
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
+nodes:
+  - role: control-plane

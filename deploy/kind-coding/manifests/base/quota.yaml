@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: wardby-coding
+  namespace: wardby-coding
+spec:
+  hard:
+    pods: "20"
+    requests.cpu: "8"
+    requests.memory: 16Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    requests.ephemeral-storage: 64Gi
