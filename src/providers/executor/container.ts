@@ -433,7 +433,7 @@ export class ContainerExecutor implements Executor {
     if (TERMINAL_STATUSES.has(run.status)) return this.cleanupTerminal(run);
     this.emit({ stage: "stopping", runId, jobId: run.jobHandle?.id });
     // Persist the cancellation fence first so a concurrent finisher cannot publish.
-    const failure = this.failure("cancelled");
+    const failure = this.failure("cancelled", { cancelled: true });
     await this.options.store.terminate(runId, "cancelled", failure.error, failure.audit);
     this.terminal(run, "cancelled", failure.audit);
     if (run.proxySessionId) await this.options.sessions.cancelSession(run.proxySessionId).catch(() => undefined);
@@ -947,21 +947,24 @@ export class ContainerExecutor implements Executor {
     });
   }
 
-  private failure(error: unknown): { error: string; audit: CodingFailureAudit } {
+  /**
+   * `cancelled` is passed by the one caller that knows — stop(). It is never
+   * inferred from the message: `failureCategory` substring-matches, and
+   * "cancel"/"Canceled" is routine phrasing in gRPC, Kubernetes, Docker and
+   * aborted-HTTP errors ("rpc error: code = Canceled desc = context canceled"),
+   * so inferring it would silence exactly the genuine failures this log exists
+   * to surface.
+   */
+  private failure(error: unknown, options: { cancelled?: boolean } = {}): { error: string; audit: CodingFailureAudit } {
     const category = failureCategory(error);
     const diagnosticId = `coding_diag_${randomUUID()}`;
     // The persisted error is deliberately opaque (it reaches the agent owner),
     // so the operator needs the real reason somewhere: the control-plane log,
     // keyed by the same diagnostic id. Token-shaped values are redacted, and a
     // cause chain is kept because the outer message is often just a wrapper.
-    // A cancellation comes through here too (stop() fences the run with one),
-    // but a user asking to stop is not a failure and must not raise operator
-    // signal at warn — it gets the same id at info instead.
-    // (`failureCategory` only ever classifies an Error's message, so stop()'s
-    // bare "cancelled" string has to be matched directly.)
-    const cancelled = category === "cancelled" || error === "cancelled";
+    // A user asking to stop is not a failure, so it gets the same id at info.
     const line = { diagnosticId, category, reason: describeFailure(error) };
-    if (cancelled) containerLog.info(line, "coding run cancelled; the persisted error is its id only");
+    if (options.cancelled === true) containerLog.info(line, "coding run cancelled; the persisted error is its id only");
     else containerLog.warn(line, "coding run failed; the persisted error is the diagnostic id only");
     return { error: `coding_failure_${category}:${diagnosticId}`, audit: { failureCategory: category, diagnosticId } };
   }

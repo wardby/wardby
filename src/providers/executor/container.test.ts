@@ -953,6 +953,27 @@ describe("failure diagnostics", () => {
     expect(line?.message).toContain("cancelled");
   });
 
+  it.each([
+    "the request was canceled",
+    "session cancelled by upstream",
+    "rpc error: code = Canceled desc = context canceled",
+  ])("still warns for a genuine failure whose message merely says %j", async (message) => {
+    // "cancel" is routine phrasing for gRPC, Kubernetes, Docker and aborted
+    // HTTP, and failureCategory substring-matches it — so cancellation must
+    // come from the caller, never from the message, or these go silent.
+    const created = await harness();
+    created.vcs.prepareWorkspace = () => {
+      throw new Error(message);
+    };
+
+    await created.executor.start("run-1");
+
+    expect(created.store.run.status).toBe("refused");
+    const warning = logged.find((entry) => entry.level === "warn");
+    expect(String(warning?.payload.reason)).toContain(message);
+    expect(logged.filter((entry) => entry.level === "info")).toEqual([]);
+  });
+
   it("describeFailure keeps the cause chain, redacts token-shaped values, and stops recursing", () => {
     const token = `ghp_${"b".repeat(36)}`;
     expect(describeFailure(new Error(`boom ${token}`))).toBe("boom [REDACTED]");
