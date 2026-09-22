@@ -261,9 +261,25 @@ describe("assertRunPodMatches", () => {
     expect(() => assertRunPodMatches(actual, expectedCpuPod)).not.toThrow();
   });
 
+  it("accepts a pod with omitempty-dropped hostNetwork/hostPID/hostIPC", () => {
+    const actual = withApiDefaults(expected);
+    delete actual.spec!.hostNetwork;
+    delete actual.spec!.hostPID;
+    delete actual.spec!.hostIPC;
+    expect(() => assertRunPodMatches(actual, expected)).not.toThrow();
+  });
+
+  it("rejects a read-back pod whose spec.containers isn't an array", () => {
+    const actual = structuredClone(expected);
+    (actual.spec as unknown as Record<string, unknown>).containers = "not-an-array";
+    expect(() => assertRunPodMatches(actual, expected)).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
   const mutations: Array<[string, (p: V1Pod) => void]> = [
     ["token mounted", (p) => void (p.spec!.automountServiceAccountToken = true)],
     ["host network", (p) => void (p.spec!.hostNetwork = true)],
+    ["host PID", (p) => void (p.spec!.hostPID = true)],
+    ["host IPC", (p) => void (p.spec!.hostIPC = true)],
     ["privileged worker", (p) => void (worker(p).securityContext!.privileged = true)],
     ["added capability", (p) => void (worker(p).securityContext!.capabilities = { drop: ["ALL"], add: ["NET_RAW"] })],
     ["writable root", (p) => void (worker(p).securityContext!.readOnlyRootFilesystem = false)],
@@ -277,6 +293,18 @@ describe("assertRunPodMatches", () => {
     ["different image", (p) => void (worker(p).image = `other@sha256:${"d".repeat(64)}`)],
     ["dns re-enabled", (p) => void (p.spec!.dnsPolicy = "ClusterFirst")],
     ["higher memory limit", (p) => void (worker(p).resources!.limits!.memory = "4096Mi")],
+    [
+      "worker CPU request off by a fractional millicore (1000.4m)",
+      (p) => void (worker(p).resources!.requests!.cpu = "1000.4m"),
+    ],
+    [
+      "worker CPU request off by a fractional millicore (0.9996)",
+      (p) => void (worker(p).resources!.requests!.cpu = "0.9996"),
+    ],
+    [
+      "worker memory limit off by a fractional byte (2048.0000001Mi)",
+      (p) => void (worker(p).resources!.limits!.memory = "2048.0000001Mi"),
+    ],
     [
       "lifecycle postStart exec hook",
       (p) => void (worker(p).lifecycle = { postStart: { exec: { command: ["sh", "-c", "id"] } } }),
@@ -374,5 +402,19 @@ describe("assertRunNetworkPolicyMatches", () => {
   it("accepts a copy with every object's keys in a different order", () => {
     const expected = buildRunNetworkPolicy(spec, "wardby-coding");
     expect(() => assertRunNetworkPolicyMatches(shuffleKeys(structuredClone(expected)), expected)).not.toThrow();
+  });
+
+  it("accepts a policy with omitempty-dropped ingress", () => {
+    const expected = buildRunNetworkPolicy(spec, "wardby-coding");
+    const actual = structuredClone(expected);
+    delete actual.spec!.ingress;
+    expect(() => assertRunNetworkPolicyMatches(actual, expected)).not.toThrow();
+  });
+
+  it("rejects a policy that gained a non-empty ingress rule", () => {
+    const expected = buildRunNetworkPolicy(spec, "wardby-coding");
+    const actual = structuredClone(expected);
+    actual.spec!.ingress = [{ ports: [{ protocol: "TCP", port: 9999 }] }];
+    expect(() => assertRunNetworkPolicyMatches(actual, expected)).toThrow(KUBERNETES_ISOLATION_ERROR);
   });
 });

@@ -88,10 +88,14 @@ function inRange(value: number, min: number, max: number, integer: boolean): boo
   return Number.isFinite(value) && value >= min && value <= max && (!integer || Number.isInteger(value));
 }
 
+/** Whether `value` is within floating-point rounding error of an integer. */
+function isNearInteger(value: number, tolerance = 1e-9): boolean {
+  return Math.abs(Math.round(value) - value) < tolerance;
+}
+
 /** Kubernetes CPU requests/limits are always whole millicores; a fractional millicore can't be expressed. */
 function isWholeMillicores(cpus: number): boolean {
-  const millis = cpus * 1000;
-  return Math.abs(Math.round(millis) - millis) < 1e-9;
+  return isNearInteger(cpus * 1000);
 }
 
 export function validateKubernetesSpec(spec: JobSpec): void {
@@ -245,13 +249,27 @@ export function buildCapabilitySecret(spec: JobSpec, namespace: string, capabili
  * field — every security-relevant one included — must match exactly.
  */
 
-/** CPU quantities are always whole millicores; normalize "1", "1.0", and "1000m" to the same string. */
+/**
+ * CPU quantities are always whole millicores; normalize "1", "1.0", and
+ * "1000m" to the same string. Rounding only absorbs float noise (the
+ * `isNearInteger` tolerance) — a value that's genuinely fractional at the
+ * millicore scale (e.g. "1000.4m", "0.9996") is not a legitimate Kubernetes
+ * quantity for something we build, so it's mapped to a sentinel that can
+ * never equal a real builder value, making the comparison fail closed
+ * instead of silently rounding two different resource requests together.
+ */
 function cpuMillicores(value: unknown): string {
   const text = String(value).trim();
   const milli = /^([0-9]*\.?[0-9]+)m$/.exec(text);
-  if (milli) return `${Math.round(Number(milli[1]))}m`;
+  if (milli) {
+    const millis = Number(milli[1]);
+    return isNearInteger(millis) ? `${Math.round(millis)}m` : `invalid:${text}`;
+  }
   const plain = /^([0-9]*\.?[0-9]+)$/.exec(text);
-  if (plain) return `${Math.round(Number(plain[1]) * 1000)}m`;
+  if (plain) {
+    const millis = Number(plain[1]) * 1000;
+    return isNearInteger(millis) ? `${Math.round(millis)}m` : `invalid:${text}`;
+  }
   return text;
 }
 
@@ -265,16 +283,18 @@ const MEMORY_BINARY_UNITS: Record<string, number> = {
 };
 const MEMORY_DECIMAL_UNITS: Record<string, number> = { K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15, E: 1e18 };
 
-/** Memory quantities can use binary or decimal suffixes; normalize every form to a byte count. */
+/** Memory quantities can use binary or decimal suffixes; normalize every form to a byte count, failing closed on a non-integer byte count (see `cpuMillicores`). */
 function memoryBytes(value: unknown): string {
   const text = String(value).trim();
   const match = /^([0-9]*\.?[0-9]+)(Ki|Mi|Gi|Ti|Pi|Ei|K|M|G|T|P|E)?$/.exec(text);
   if (!match) return text;
   const amount = Number(match[1]);
   const unit = match[2];
-  if (unit && unit in MEMORY_BINARY_UNITS) return String(Math.round(amount * MEMORY_BINARY_UNITS[unit]));
-  if (unit && unit in MEMORY_DECIMAL_UNITS) return String(Math.round(amount * MEMORY_DECIMAL_UNITS[unit]));
-  return String(Math.round(amount));
+  let bytes: number;
+  if (unit && unit in MEMORY_BINARY_UNITS) bytes = amount * MEMORY_BINARY_UNITS[unit];
+  else if (unit && unit in MEMORY_DECIMAL_UNITS) bytes = amount * MEMORY_DECIMAL_UNITS[unit];
+  else bytes = amount;
+  return isNearInteger(bytes) ? String(Math.round(bytes)) : `invalid:${text}`;
 }
 
 interface DefaultToleration {
@@ -347,10 +367,16 @@ function normalizeVolume(v: V1Volume): void {
  * the caller's deep-equality check sees it.
  */
 function normalizeSpec(spec: V1PodSpec): void {
+  if (!Array.isArray(spec.containers)) throw isolationError();
   delete spec.schedulerName;
   delete spec.nodeName;
   delete spec.priority;
   delete spec.preemptionPolicy;
+  // Go's `omitempty` drops a plain bool at its zero value (false) on serialization, so a
+  // genuine API read-back never has these fields when they're false — only when true.
+  if (spec.hostNetwork === false) delete spec.hostNetwork;
+  if (spec.hostPID === false) delete spec.hostPID;
+  if (spec.hostIPC === false) delete spec.hostIPC;
   if (spec.serviceAccount !== undefined) {
     if (spec.serviceAccount !== spec.serviceAccountName) throw isolationError();
     delete spec.serviceAccount;
@@ -399,7 +425,16 @@ export function assertRunPodMatches(actual: V1Pod, expected: V1Pod): void {
   if (JSON.stringify(a) !== JSON.stringify(e)) throw isolationError();
 }
 
+/** Go's `omitempty` drops an empty slice on serialization, so a genuine API read-back omits `ingress` when it's `[]` — only a populated ingress rule list survives. */
+function normalizeNetworkPolicySpec(spec: NonNullable<V1NetworkPolicy["spec"]>): void {
+  if (Array.isArray(spec.ingress) && spec.ingress.length === 0) delete spec.ingress;
+}
+
 export function assertRunNetworkPolicyMatches(actual: V1NetworkPolicy, expected: V1NetworkPolicy): void {
-  const view = (p: V1NetworkPolicy) => ({ labels: p.metadata?.labels ?? {}, spec: p.spec ?? {} });
+  const view = (p: V1NetworkPolicy) => {
+    const spec = structuredClone(p.spec ?? {});
+    normalizeNetworkPolicySpec(spec);
+    return { labels: p.metadata?.labels ?? {}, spec };
+  };
   if (JSON.stringify(canonical(view(actual))) !== JSON.stringify(canonical(view(expected)))) throw isolationError();
 }
