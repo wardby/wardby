@@ -156,13 +156,17 @@ describe("buildRunPod", () => {
     expect(init.volumeMounts).toEqual([{ name: "storage", mountPath: STORAGE_ROOT }]);
     expect(init.env).toBeUndefined();
     expect(init.resources).toEqual(keeper(pod()).resources);
-    expect(init.command?.slice(0, 2)).toEqual(["node", "-e"]);
-    const script = init.command![2];
-    for (const name of ["workspace", "input", "output"]) expect(script).toContain(`"${name}"`);
-    expect(script).toContain("mkdirSync");
-    expect(script).toContain("chmodSync");
-    expect(script).toContain("0o700");
-    expect(script).toContain(JSON.stringify(STORAGE_ROOT));
+    // Exact match, not a substring check: any change to the script (a directory dropped, the
+    // mode loosened, mkdirSync/chmodSync reordered) must fail this test, not just a loose one.
+    const expectedScript = [
+      'const fs = require("node:fs");',
+      'for (const name of ["workspace", "input", "output"]) {',
+      `  const path = ${JSON.stringify(STORAGE_ROOT)} + "/" + name;`,
+      "  fs.mkdirSync(path, { recursive: true, mode: 0o700 });",
+      "  fs.chmodSync(path, 0o700);",
+      "}",
+    ].join("\n");
+    expect(init.command).toEqual(["node", "-e", expectedScript]);
   });
 
   it("denies DNS and reaches the proxy only through a hostAlias", () => {

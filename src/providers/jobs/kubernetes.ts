@@ -305,6 +305,10 @@ export function hostTarArchive(directory: string): { stream: Readable; done: Pro
   const stream = new PassThrough();
   child.stdout.pipe(stream);
   child.stdout.once("error", (error) => stream.destroy(error));
+  // Without a listener, an EventEmitter throws synchronously on an unhandled "error" event — and
+  // `destroy(error)` above emits exactly that on `stream`. The failure is still observable through
+  // `done` (the child's close/error handlers below) and through the exec/extract that reads `stream`.
+  stream.on("error", () => undefined);
   const done = new Promise<number>((resolvePromise) => {
     child.once("error", () => resolvePromise(-1));
     child.once("close", (code) => resolvePromise(code ?? -1));

@@ -951,4 +951,14 @@ describe("hostTarArchive", () => {
     });
     expect(names).toContain("./a.txt");
   });
+
+  it("swallows an error on the archive stream instead of throwing uncaught", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wardby-k8s-archive-"));
+    roots.push(root);
+    const archive = hostTarArchive(root);
+    await archive.done;
+    // The returned stream re-emits a child.stdout error via destroy(error); an EventEmitter throws
+    // synchronously on an "error" event with no listener, so this proves the listener is attached.
+    expect(() => archive.stream.destroy(new Error("simulated stdout error"))).not.toThrow();
+  });
 });
