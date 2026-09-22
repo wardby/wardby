@@ -24,6 +24,122 @@ this mirrors); `src/providers/executor/container.ts` (`ContainerExecutor`);
 
 ---
 
+## Corrections after implementation (2026-09-22)
+
+This section does not rewrite the history above — the body text below still
+describes the original design, edited only where it was factually wrong
+about what shipped. This section is the complete, dated list of every place
+implementation diverged from this design, and why, decided during
+implementation planning and code review (see the SDD ledger,
+`.superpowers/sdd/2026-09-22-phase-12-kubernetes-launcher-codex/progress.md`,
+for the full review trail behind each one). Five were binding corrections
+made before implementation started (global constraints); the rest were
+rulings made during implementation review, mostly in response to a real
+failure mode a reviewer or a real cluster surfaced.
+
+**Binding corrections made before implementation (Global Constraints):**
+
+1. **Diagnostics (§7, §8.1).** Replacing "no `pods/log`": the control plane
+   reads only a failed worker container's last 8 log lines (≤4096 bytes)
+   through the Kubernetes API and keeps only a code matching the existing
+   `SAFE_WORKER_DIAGNOSTIC` pattern; the raw text is never stored, logged,
+   or returned. A later milestone has the worker write `diagnostic.json`
+   instead, which the launcher will prefer once it exists (not yet).
+2. **Extractor symlink rule (§4).** In-tree symlinks are allowed (matching
+   today's `validateMaterializedWorkspace`, which already allows them for
+   the Docker launcher); the extractor rejects any entry whose path passes
+   through an already-extracted symlink, plus absolute paths, `..`, hard
+   links, and device/fifo/other special entries. Replaces "rejects
+   symlinks".
+3. **State (§3).** Job state lives in a per-run record ConfigMap and a
+   per-run capability Secret; the deadline is also enforced by the pod's
+   `activeDeadlineSeconds` as a backstop. No local state files, no
+   in-process timers.
+4. **Proxy addressing (§5).** Workers keep `WARDBY_PROXY_URL=http://wardby-coding-proxy:8787`
+   (the proxy checks the `Host` header); the pod maps that hostname to the
+   proxy Service's ClusterIP with `hostAliases`, so no DNS is needed at all.
+5. **Start gate (§3).** The worker container's command is overridden to
+   wait for a seeded marker file before importing the real entrypoint,
+   rather than using a native sidecar — Kubernetes terminates sidecars when
+   the pod's main container exits, which would kill the keeper before
+   result collection.
+
+**Corrections made during implementation review (code review findings and
+real-cluster testing):**
+
+6. **Attestation is deny-by-default, not an allowlist (§5).** An early
+   allowlist-based comparator was replaced with a full, canonical,
+   deep-equality comparison of the entire pod spec / NetworkPolicy spec,
+   labels, and annotations, because an allowlist silently accepts anything
+   it forgot to check — review found it missed lifecycle hooks, probes
+   whose `httpGet.host` could reach the node metadata endpoint, several
+   security-context fields, tolerations, and more. Only an explicit,
+   narrow list of server-side defaulting/serialization behaviors (Go
+   `omitempty` dropping zero-value fields, default tolerations, quantity
+   unit normalization, etc.) is normalized before comparing.
+7. **A `storage-init` init container was added to the pod (§3, §5).**
+   Real-cluster testing found every run failing
+   `kubernetes_pod_start_timeout`: kubelet creates a subPath mount's target
+   directory root-owned the first time it sets up the worker's volume
+   mounts, and the keeper (uid 10001, no Linux capabilities) cannot `chmod`
+   a directory it doesn't own. The init container pre-creates
+   `workspace`/`input`/`output` (uid 10001, mode 0700) before any regular
+   container starts, so kubelet finds them already owned. It is attested in
+   full like every other container.
+8. **The NetworkPolicy enforcement gate (§5) was added mid-implementation**
+   after real-cluster testing reproduced a startup race: CNIs (including
+   `kind`'s kindnet) program a new pod's NetworkPolicy a few seconds after
+   the pod starts, not atomically with pod creation, so a worker gate that
+   opened immediately after attestation could run briefly unpoliced. Both
+   the launcher (before opening the worker's start gate) and the preflight
+   canary (before running its probes) now wait for a TCP connect to the
+   cluster DNS Service's ClusterIP to be blocked on 3 consecutive attempts,
+   500ms apart, within a bounded timeout, before proceeding.
+9. **The canary gained a fifth probe, `clusterDns` (§5), during review**,
+   because the original DNS/internet/metadata/another-pod probe list, as
+   specified, could pass on a non-enforcing CNI: the DNS and internet/
+   metadata probes are unreachable regardless of policy enforcement on
+   `kind`/air-gapped/on-prem clusters, so an additive allow-DNS policy
+   would go undetected. `clusterDns` (a direct TCP connect to the kube-dns
+   Service's ClusterIP — kube-dns backends are ordinary pods, so only a
+   NetworkPolicy blocks it) is the design's "another pod" probe, and is
+   the one that actually proves enforcement.
+10. **RBAC (§7) is three roles, not the "pods (create, get, list, watch,
+    delete)" set originally sketched.** `list`/`watch` on pods were dropped
+    (the seam only ever addresses one named pod at a time; least privilege
+    beats an unused grant); `pods/log` was added (correction 1); a
+    `configmaps` grant was added (the per-run record); and the namespace
+    read the preflight needs is cluster-scoped (`get namespaces`, no
+    namespaced `Role` can grant it), so it is a separate `ClusterRole`
+    scoped to the one namespace by `resourceNames`, plus a `kube-system`
+    `Role` scoped to the `kube-dns` Service by `resourceNames` for
+    correction 9's probe. See `docs/coding-worker-isolation.md`'s
+    Kubernetes launcher section for the exact three roles and their verbs.
+11. **Per-run record ConfigMaps are never deleted, by design (§3, §7).**
+    `remove()` deletes the pod, NetworkPolicy, and capability Secret, but
+    intentionally rewrites the record to a `removed` tombstone instead of
+    deleting it, because the contract is that a removed run is never
+    relaunched and the record is what a later `launch()` call checks. This
+    was flagged as an open question during review: nothing garbage-collects
+    old tombstones today, so they accumulate — one small ConfigMap per run,
+    forever — and a GC follow-up is needed.
+12. **The `kind` harness's kustomize base has no top-level `namespace:`
+    override (§7).** Kustomize's namespace transformer forces
+    `metadata.namespace` onto every namespaced resource it lists, which
+    would relocate the `kube-system` DNS-reader `Role` (correction 10) into
+    the coding namespace and break it. Every manifest sets its own
+    `metadata.namespace` instead. Any future overlay (e.g. GKE, Plan 3)
+    reusing `manifests/base/` must do the same.
+13. **Spec §9's integration coverage is only partially implemented.** What
+    shipped on a real `kind` cluster: the contract suite against the real
+    API, the enforcement gate (correction 8) genuinely proven end to end,
+    and a full run lifecycle including correction 7's fix. Not yet
+    implemented, and out of this milestone's scope: the isolation
+    acceptance suite's OOM/disk-full/wall-clock containment assertions,
+    "canary fails when a policy is removed", and "the tool pod has no
+    network" (moot until Claude Code's two-pod layout ships). Tracked as a
+    Plan 2b follow-up alongside Claude Code support itself.
+
 ## 1. Goal and non-goals
 
 **Goal.** Run Codex and Claude Code coding agents on a hosted deployment, at
@@ -104,15 +220,29 @@ images for the Codex worker, Claude agent, Claude tool runner, and keeper.
 
 **Keeper placement.** An `emptyDir` volume belongs to one pod and cannot be
 mounted by another, so Docker's shared keeper volume does not map one-to-one.
-Rather than introduce persistent volume claims, **the keeper is a container
-inside the pod that owns the workspace.** Its role is unchanged: it holds the
-volume, is the target for streaming files in and out, and keeps running after
-the worker exits so results can be collected.
+Rather than introduce persistent volume claims, **the keeper is a regular
+container inside the pod that owns the workspace** — not an init container
+and not a native sidecar. Its role is unchanged: it holds the volume, is the
+target for streaming files in and out, and keeps running after the worker
+exits so results can be collected.
 
-**Codex: one pod, two containers** (`keeper`, `worker`), sharing one volume
-with today's four areas: `/workspace` read-write, input read-only, output
-read-write, and no Git metadata (it stays on the control plane). Egress is
-limited to the proxy.
+**Worker start gate.** A pod's containers all start together — Kubernetes
+has no "start this container after that one" — so the worker cannot simply
+be launched later the way Docker's is. A native sidecar container (`restartPolicy:
+Always` at the container level) cannot substitute: Kubernetes terminates
+sidecars when the pod's main container exits, which would kill the keeper
+before result collection. Instead the worker container's own command is
+overridden to wait for a seeded marker file
+(`/run/wardby/input/.seeded`) before importing the image's real entrypoint;
+the launcher writes that marker (through the keeper) only after the pod and
+its NetworkPolicy have been read back and attested against the canonical
+builders (§5), the policy has been observed enforced, and the workspace and
+input have been seeded. Until the marker exists, nothing untrusted runs.
+
+**Codex: one pod, two containers** (`keeper`, `worker`) plus one init
+container (`storage-init`, §5), sharing one volume with today's four areas:
+`/workspace` read-write, input read-only, output read-write, and no Git
+metadata (it stays on the control plane). Egress is limited to the proxy.
 
 **Claude Code: two pods**, preserving today's credential separation:
 
@@ -157,10 +287,15 @@ check needs more, deepen the clone just enough rather than drop the check.
 **Seeding (control plane → keeper).** The control plane creates a tar of the
 checked-out tree and streams it through the Kubernetes exec API into the
 keeper, which extracts it into `/workspace`. The input artifact goes into the
-read-only input area the same way. The keeper image is a small,
-digest-pinned trusted image whose only job is extracting and archiving.
-Streaming uses the official client (`@kubernetes/client-node`), with timeouts
-and cancellation tied to the run deadline.
+read-only input area the same way. The keeper runs the same digest-pinned
+worker image as the untrusted worker container (no separate keeper image is
+introduced — the trust boundary is the entrypoint the launcher chooses, not
+a distinct image: the keeper's command is `keeper.js`, a small extract/archive
+role, while the worker's is the coding agent's real entrypoint, exactly as
+the existing Docker launcher already does). Streaming uses the official
+client (`@kubernetes/client-node`), with timeouts bounded by the full run
+timeout rather than a shrinking remaining-deadline budget, because
+collection can legitimately happen after a run's own deadline has passed.
 
 **Collecting (keeper → control plane).**
 
@@ -168,10 +303,16 @@ and cancellation tied to the run deadline.
   fails the run.
 - Workspace (only for `changes_ready`, as today): the keeper streams a tar;
   the control plane extracts it with a **strict extractor** that rejects
-  absolute paths, `..` components, symlinks and hard links, device and other
-  special entries, and enforces byte and entry limits while streaming. Then
-  the existing `validateMaterializedWorkspace` runs unchanged (special files,
-  nested `.git`, escaping symlinks, size limits, protected paths).
+  absolute paths, `..` components, hard links, device and other
+  special entries, and enforces byte and entry limits while streaming.
+  **In-tree symlinks are allowed** (today's `validateMaterializedWorkspace`
+  already allows them for the Docker launcher, so refusing them here would
+  be a new, narrower restriction the extractor has no reason to introduce);
+  what the extractor rejects is any entry whose path passes through an
+  already-extracted symlink, plus the absolute/`..`/hard-link/special-entry
+  cases above. Then the existing `validateMaterializedWorkspace` runs
+  unchanged (special files, nested `.git`, escaping symlinks, size limits,
+  protected paths).
 
 **Limits.** A new per-agent volume size in the coding profile (default 2 GiB,
 today's `CODING_DISK_MB` default) bounds the workspace both ways. The existing
@@ -192,8 +333,14 @@ else constructs them.
 - `automountServiceAccountToken: false` and a dedicated service account with
   no RBAC permissions: workers cannot reach the Kubernetes API.
 - No host network, PID, or IPC; no host paths; `enableServiceLinks: false`.
-- CPU, memory, and ephemeral-storage requests equal to limits; the wall-clock
-  deadline is enforced by the launcher.
+- CPU and memory requests equal to limits. Disk is not expressed as an
+  `ephemeral-storage` resource request/limit; it is bounded by the storage
+  volume's `emptyDir.sizeLimit` (disk-backed, not `medium: Memory`), sized
+  from the per-agent `workspaceDiskMb`/`CODING_DISK_MB` limit. The wall-clock
+  deadline is enforced by the launcher (with `activeDeadlineSeconds` set to
+  `timeoutSec` plus a fixed grace period as a backstop only, so the keeper
+  survives long enough for result collection after a worker is killed at its
+  deadline).
 - `runtimeClassName: gvisor` **required on GKE**. On `kind` there is no
   gVisor; the launcher logs a loud "development cluster: no gVisor" warning
   and the deployment is treated as development-only.
@@ -209,22 +356,58 @@ else constructs them.
 | Claude workspace pod (tool + keeper) | None                                                                                      | Own agent pod, relay port only |
 | Proxy                                | Internet on 443 excluding private, loopback, link-local and metadata ranges; the database | Worker and agent pods          |
 
-**DNS is denied to worker and agent pods.** The launcher passes the proxy's
-address directly, closing DNS as an exfiltration channel and matching
-today's "no custom DNS" rule.
+**DNS is denied to worker and agent pods.** The pod sets `dnsPolicy: None`
+with `dnsConfig.nameservers: ["127.0.0.1"]` (a loopback address nothing
+listens on, so any resolution attempt fails), so there is no resolver
+configured at all — DNS is not merely blocked by the NetworkPolicy, it has
+nothing to reach. The proxy is still addressed by its Docker-launcher-era
+hostname (`WARDBY_PROXY_URL=http://wardby-coding-proxy:8787`; the proxy
+checks the `Host` header), which resolves without DNS because the pod's
+`hostAliases` maps that hostname directly to the proxy Service's ClusterIP
+(read once by the launcher before the pod is created). This closes DNS as
+an exfiltration channel and matches today's "no custom DNS" rule while
+letting the worker keep the same proxy URL Docker runs use.
 
 **Attestation, fail closed.**
 
-- _Before start:_ read back every created pod and policy and compare the
-  effective settings with the builder's output, including the runtime class
-  actually applied (Autopilot may mutate pods). Any mismatch fails the run
-  with the fixed code `kubernetes_isolation_unsupported`. No fallback to a
-  weaker profile, as today.
-- _Enforcement:_ the API cannot show whether network policies are enforced.
-  `wardby coding preflight`, and the launcher once at startup, run a
-  short-lived canary pod that attempts forbidden connections (internet,
-  metadata server, DNS, another pod) and requires every attempt to fail. If
-  any succeeds, coding execution stays disabled.
+- _Before start:_ read back every created pod and policy and compare them
+  against the builder's output with a **deny-by-default, canonical, full
+  comparison** of the entire spec, labels, and annotations (recursively
+  key-sorted for a stable comparison) — not an allowlist of fields expected
+  to matter. Only an explicit, narrow list of transformations the
+  Kubernetes API server itself is known to perform on write/read is
+  normalized first (dropped server-assigned fields; `omitempty`-dropped
+  zero-value booleans and empty slices; the two default node-health
+  tolerations; quantity-unit normalization; probe/container defaults),
+  including the runtime class actually applied (Autopilot may mutate pods).
+  Any other difference at all fails the run with the fixed code
+  `kubernetes_isolation_unsupported`. No fallback to a weaker profile, as
+  today. (An earlier allowlist-based comparator was replaced during
+  implementation review because an allowlist silently accepts anything it
+  forgot to check.)
+- _Enforcement:_ the API cannot show whether network policies are enforced,
+  and CNIs (including `kind`'s default kindnet) program a new pod's policy a
+  few seconds _after_ the pod starts, not atomically with pod creation — a
+  real, reproducible race found during implementation. Two mechanisms:
+  - `wardby coding preflight`'s five checks (namespace, proxy Service,
+    cluster DNS Service, worker image is a registry digest, and the canary)
+    build a real run pod and NetworkPolicy from the same builders as a live
+    run; the canary script first waits (up to 20s) for a TCP connect to the
+    cluster DNS Service's ClusterIP — an ordinary pod, so only the
+    NetworkPolicy can block it — to be blocked before running its actual
+    probes: in-pod DNS resolution, that same cluster-DNS connect, the
+    internet, and the metadata server must all fail, and a connect to the
+    proxy must succeed. Any other outcome fails closed. The whole preflight
+    is memoized per launcher process and a failure is sticky: once seen, it
+    is not retried without a new process.
+  - The launcher itself, on every launch (not just once at startup, and
+    always before the worker's start gate opens — see §3): execs into the
+    keeper to attempt the same cluster-DNS TCP connect, and requires three
+    consecutive blocked results 500ms apart (any success resets the count)
+    within a bounded timeout. Only then is the seeded marker written and the
+    worker allowed to start.
+    If enforcement is never observed, coding execution for that run (or, for
+    the preflight, the whole launcher) stays disabled.
 
 **Known gap.** Kubernetes has no per-pod process limit that Autopilot lets
 tenants set **(verify)**. gVisor is the mitigation; the adversarial suite
@@ -308,10 +491,21 @@ IDs the Docker launcher uses.
   addresses are not fixed) **(verify)**.
 - The control plane's service account gets only the cluster-level role needed
   to connect; namespace permissions come from the manifests' RBAC bound to
-  that identity. Permissions: pods (create, get, list, watch, delete),
-  `pods/exec`, secrets (per-run), and network policies, in the one
-  namespace. No `pods/log`: diagnostics stay fixed worker-owned codes, never
-  raw pod output (§8).
+  that identity, split across three roles (`deploy/kind-coding/manifests/base/`,
+  reused unbound by the GKE overlay): a namespace `Role`
+  (`wardby-coding-launcher`) granting pods create/get/delete (not list/watch
+  — the seam only ever addresses one named pod), `pods/exec` create/get,
+  **`pods/log` get**, secrets create/delete (not get — the seam only ever
+  writes or deletes the capability Secret, never reads one back), configmaps
+  create/get/update (the per-run record), and networkpolicies create/get/
+  delete; a `kube-system` `Role` (`wardby-coding-dns-reader`) granting `get`
+  on the `kube-dns` Service only; and a `ClusterRole`
+  (`wardby-coding-namespace-reader`) granting `get` on the one namespace by
+  `resourceNames` (the preflight's namespace check is a cluster-scoped read
+  that no namespaced `Role` can grant). **`pods/log` is required**, narrowly:
+  §8 replaces the original "no `pods/log`" design with reading only a
+  failed worker's last 8 log lines (≤4096 bytes) and keeping only a code
+  matching a fixed pattern — see the corrections below.
 - A Workload Identity binding so the proxy's Kubernetes service account
   reaches Cloud SQL through Google's connector and reads model API keys from
   Secret Manager **(verify the Autopilot-supported Secret Manager
@@ -344,10 +538,18 @@ IDs the Docker launcher uses.
 Worker output is untrusted: it can contain repository contents, model output,
 and anything a malicious repository chooses to print. Two rules follow.
 
-**The control plane never reads raw pod output.** It has no `pods/log`
-permission (§7). Only fixed, worker-owned diagnostic codes reach run records,
-events, and `get_run`, exactly as with the Docker launcher. This keeps raw
-output out of the MCP-facing process, which any authorized MCP user can query.
+**The control plane never stores or returns raw pod output**, even though it
+does hold `pods/log` (§7) — the original "no `pods/log` at all" design was
+replaced during implementation planning (binding correction, see below):
+on a failed run the launcher reads only that worker container's last 8 log
+lines (bounded to 4096 bytes) and keeps only a code matching the existing
+fixed `SAFE_WORKER_DIAGNOSTIC` pattern; the raw text itself is discarded in
+process and never stored, logged, or returned. Only that fixed,
+worker-owned diagnostic code reaches run records, events, and `get_run`,
+exactly as with the Docker launcher. This keeps raw output out of the
+MCP-facing process, which any authorized MCP user can query. (A later
+milestone has the worker write a structured `diagnostic.json` instead,
+which the launcher will prefer once it exists; not implemented yet.)
 
 **Raw output is not retained by default.** On GKE, container output is sent
 to Cloud Logging unless something stops it. The `deploy/gcp` module adds a
