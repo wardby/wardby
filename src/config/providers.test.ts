@@ -101,8 +101,9 @@ describe("loadContainerExecutorConfig", () => {
     expect(config.additionalWorkerImages).toEqual({});
   });
 
-  it("defaults CODING_MAX_DISK_MB to 8192 and accepts an explicit value within bounds", () => {
-    expect(loadContainerExecutorConfig({}).maxDiskMb).toBe(8192);
+  it("defaults CODING_MAX_DISK_MB to the effective CODING_DISK_MB and accepts an explicit value in bounds", () => {
+    expect(loadContainerExecutorConfig({}).maxDiskMb).toBe(loadContainerExecutorConfig({}).diskMb);
+    expect(loadContainerExecutorConfig({ CODING_DISK_MB: "4096" }).maxDiskMb).toBe(4096);
     expect(loadContainerExecutorConfig({ CODING_MAX_DISK_MB: "16384" }).maxDiskMb).toBe(16384);
   });
 

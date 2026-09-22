@@ -115,7 +115,9 @@ export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env
     additionalWorkerImages["node-python"] = { "3.12": env.CODING_WORKER_IMAGE_NODE_PYTHON_3_12 };
   }
   const diskMb = optionalPositiveInteger(env.CODING_DISK_MB, "CODING_DISK_MB") ?? 2048;
-  const maxDiskMb = optionalBoundedInteger(env.CODING_MAX_DISK_MB, "CODING_MAX_DISK_MB", 64, 32_768) ?? 8192;
+  // Defaults to the effective diskMb: raising the ceiling an agents:write caller can request is an
+  // explicit operator choice, so upgrading with an unchanged environment changes nothing.
+  const maxDiskMb = optionalBoundedInteger(env.CODING_MAX_DISK_MB, "CODING_MAX_DISK_MB", 64, 32_768) ?? diskMb;
   if (maxDiskMb < diskMb) {
     throw new Error(`CODING_MAX_DISK_MB (${maxDiskMb}) must be at least the effective CODING_DISK_MB (${diskMb}).`);
   }
