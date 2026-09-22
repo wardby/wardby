@@ -47,6 +47,13 @@ WORKDIR /workspace
 ENTRYPOINT ["node", "/opt/wardby/coding-worker/main.js"]
 ```
 
+Provide the command names your ecosystem's tooling and docs actually use.
+A worker only has what you install: Debian's `python3` package ships no
+`python`, so a task that runs `python -m pytest` — as most Python projects'
+own READMEs tell it to — reports a failed command even when the suite is
+green. `Dockerfile.node-python` symlinks `python` to `python3` for exactly
+that reason, and asserts both work.
+
 Build it, push it to your own registry, and note the resulting digest —
 `docker inspect --format '{{index .RepoDigests 0}}' <your-tag>` after a push,
 or read it straight from `docker buildx build --push`'s output.
