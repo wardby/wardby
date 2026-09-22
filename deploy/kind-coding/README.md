@@ -19,9 +19,10 @@ rules; those are Plan 3's GKE overlay, which reuses the same
 - The local Postgres from `npm run db:up` (`deploy/local/docker-compose.yml`)
   already running on `:55432`. Don't re-run `db:up` if it's already up — it
   recreates the container.
-- `.env.local` at the repo root with `DATABASE_URL`, `OPENAI_API_KEY`, and/or
-  `ANTHROPIC_API_KEY` set (same values `npm run coding:local:up` uses for the
-  Docker-launcher proxy).
+- `.env.local` at the repo root with `DATABASE_URL`, `OPENAI_API_KEY`, and
+  `ANTHROPIC_API_KEY` all set — `up.sh` requires all three, not "and/or"
+  (same values `npm run coding:local:up` uses for the Docker-launcher
+  proxy).
 
 ## Bring it up
 
@@ -29,33 +30,52 @@ rules; those are Plan 3's GKE overlay, which reuses the same
 bash deploy/kind-coding/up.sh
 ```
 
-This is idempotent — safe to re-run. In order, it:
+This is idempotent — safe to re-run (including to pick up new `.env.local`
+values: step 9 restarts the proxy). In order, it:
 
 1. Starts a local registry container (`kind-registry`) publishing
-   `localhost:5001`, if one isn't already running.
+   `localhost:5001`: `docker run`s a new one if none exists, `docker
+start`s it if it exists but is stopped, or leaves it alone if it's
+   already running.
 2. Creates the `kind` cluster (`kind-config.yaml`; cluster name `wardby`,
    context `kind-wardby`), if it doesn't already exist.
 3. Points every node's containerd at the registry and connects the registry
    to the cluster's Docker network, so `localhost:5001/...` image
    references resolve both from your shell (`docker push`) and from inside
-   the cluster (image pulls).
-4. Builds and pushes the coding-worker image (`src/coding-worker/Dockerfile`)
+   the cluster (image pulls). A "the endpoint already exists" error from
+   `docker network connect` is treated as already-done and ignored; any
+   other error fails the script.
+4. Applies kind's documented `local-registry-hosting` ConfigMap in
+   `kube-public` ([KEP-1755](https://kind.sigs.k8s.io/docs/user/local-registry/)),
+   so anything in-cluster that looks for it can find the registry.
+5. Builds and pushes the coding-worker image (`src/coding-worker/Dockerfile`)
    and the runtime image (`deploy/Dockerfile`, `runtime` target) to the
    registry, then resolves each one's pulled-by-digest reference.
-5. Verifies the worker image has `tar`, `head`, and `test` — the run pod's
+6. Verifies the worker image has `tar`, `head`, and `test` — the run pod's
    keeper (Task 5) depends on them for seeding and collecting the
    workspace.
-6. Applies the namespace, then creates the proxy's `wardby-coding-proxy-env`
-   Secret directly in the cluster from `.env.local`'s `DATABASE_URL`,
-   `OPENAI_API_KEY`, and `ANTHROPIC_API_KEY` — read into environment
-   variables and piped straight into `kubectl`, never printed, never written
-   to a tracked file. `DATABASE_URL`'s `localhost`/`127.0.0.1` host is
-   rewritten to `host.docker.internal` so the in-cluster proxy can reach the
-   Postgres published on your machine.
-7. Renders `manifests/overlays/kind` with `kubectl kustomize`, substitutes
+7. Applies the namespace, then creates or updates the proxy's
+   `wardby-coding-proxy-env` Secret directly in the cluster from
+   `.env.local`'s `DATABASE_URL`, `OPENAI_API_KEY`, and `ANTHROPIC_API_KEY`.
+   Each name is read out of `.env.local` on its own (the file is never
+   `source`d, so nothing else in it is ever exported); the Secret's YAML —
+   `data:` values base64-encoded with bash's own `printf` builtin, never an
+   external process — is assembled entirely in this script and piped
+   straight into `kubectl apply -f -`. No value is ever passed as a
+   command-line argument to `kubectl` or anything else (so nothing shows up
+   in `ps`'s view of any process's argv), echoed, or written to a tracked
+   file. `DATABASE_URL`'s `localhost`/`127.0.0.1` host is rewritten to
+   `host.docker.internal` so the in-cluster proxy can reach the Postgres
+   published on your machine.
+8. Renders `manifests/overlays/kind` with `kubectl kustomize`, substitutes
    the resolved runtime digest for the `wardby-runtime` placeholder image
-   name, applies it, and waits for the proxy's rollout.
-8. Prints the three lines below and the next command to run.
+   name, and applies it.
+9. Restarts the proxy Deployment (`kubectl rollout restart`) and waits for
+   the rollout, so a Secret updated in step 7 on a re-run (e.g. after you
+   changed a key in `.env.local`) actually reaches the running pod — a
+   Secret update alone doesn't restart pods that already read it via
+   `envFrom`.
+10. Prints the three lines below and the next command to run.
 
 Add the printed lines to `.env.local` — keep any previous Docker-launcher
 values (`CODING_PROXY_CONTAINER`, etc.) commented out rather than deleted,
@@ -104,15 +124,32 @@ _reachable_, `kind`'s default network layer (kindnet's bundled
 machine.** That's a real gap, not something to work around by editing the
 policy — stop and report it. The documented fallback is replacing kindnet
 with [Calico](https://docs.tigera.io/calico/latest/getting-started/kubernetes/kind),
-which does enforce `NetworkPolicy` everywhere:
+which does enforce `NetworkPolicy` everywhere. Verified against Calico's own
+kind quickstart (`docs.tigera.io/calico/latest/getting-started/kubernetes/kind`)
+on 2026-09-22 — re-check that page for the current release before following
+this, since the pinned version below will go stale:
 
-1. Recreate the cluster with `disableDefaultCNI: true` added to
-   `kind-config.yaml`'s `networking:` block (see the [kind
-   docs](https://kind.sigs.k8s.io/docs/user/configuration/#disable-default-cni)).
-2. Install Calico's kind-specific manifest, per [Calico's own
-   instructions](https://docs.tigera.io/calico/latest/getting-started/kubernetes/kind):
-   `kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/<version>/manifests/calico.yaml`
-   (pin an actual released version — don't track `master`).
+1. Recreate the cluster with `kind-config.yaml`'s `nodes:` block unchanged
+   but a `networking:` block added:
+   ```yaml
+   networking:
+     disableDefaultCNI: true
+     podSubnet: 192.168.0.0/16
+   ```
+   (`disableDefaultCNI` turns off kindnet; `podSubnet` is the range Calico's
+   own manifests below expect.) See also the [kind
+   docs](https://kind.sigs.k8s.io/docs/user/configuration/#disable-default-cni).
+2. Install Calico with its operator, per Calico's own kind instructions —
+   three manifests, applied with `kubectl create` (not `apply`; Calico's
+   docs note the CRD bundle can exceed `apply`'s request-size limit):
+   ```sh
+   kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/<version>/manifests/v1_crd_projectcalico_org.yaml
+   kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/<version>/manifests/tigera-operator.yaml
+   kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/<version>/manifests/custom-resources.yaml
+   ```
+   Pin `<version>` to an actual current release tag from Calico's releases
+   page — don't track `master`, and don't reuse whatever version this doc
+   happened to cite last.
 3. Re-run `bash deploy/kind-coding/up.sh` and `npm run cli -- coding preflight`.
 
 This is a cluster rebuild, and doing it changes what the harness is proving
@@ -121,14 +158,29 @@ deliberate, recorded decision rather than a silent workaround.
 
 ## RBAC notes
 
-Two `Role`s ship in `manifests/base/` with **no `RoleBinding`**:
-`launcher-role.yaml`'s `wardby-coding-launcher` (in `wardby-coding`) and
-`launcher-dns-reader-role.yaml`'s `wardby-coding-dns-reader` (in
-`kube-system`, scoped to `get` on the single named Service `kube-dns`).
-Neither is bound here because the `kind` control plane runs every command in
+Three roles ship in `manifests/base/` with **no binding**:
+
+- `launcher-role.yaml`'s Role `wardby-coding-launcher` (in `wardby-coding`)
+  — only the verbs `ClientNodeKubernetesApi`
+  (`src/providers/jobs/kubernetes-client.ts`) actually issues: no
+  `list`/`watch` on `pods` (the seam only ever creates, reads, or deletes
+  one named pod), no `get` on `secrets` (it only ever creates or deletes
+  one).
+- `launcher-dns-reader-role.yaml`'s Role `wardby-coding-dns-reader` (in
+  `kube-system`), scoped to `get` on the single named Service `kube-dns`.
+- `launcher-namespace-reader.yaml`'s **ClusterRole**
+  `wardby-coding-namespace-reader`, scoped to `get` on the single named
+  Namespace `wardby-coding`. This has to be a ClusterRole, not a Role: the
+  preflight's first check (`readNamespace` in
+  `src/providers/jobs/kubernetes-preflight.ts`) is a `get` on the
+  cluster-scoped `namespaces` resource, which no namespaced Role can ever
+  grant.
+
+None is bound here because the `kind` control plane runs every command in
 this harness — `up.sh`, `kubectl`, and `wardby coding preflight` — against
 your own admin kubeconfig, which already has full access. Plan 3's GKE
-overlay binds both Roles to the Cloud Run service account's identity, which
+overlay binds all three (the ClusterRole via a ClusterRoleBinding, the two
+Roles via RoleBindings) to the Cloud Run service account's identity, which
 is the actual least-privilege boundary in a real deployment.
 
 ## Tear it down

@@ -10,4 +10,5 @@ resources:
   - proxy.yaml
   - launcher-role.yaml
   - launcher-dns-reader-role.yaml
+  - launcher-namespace-reader.yaml
   - quota.yaml

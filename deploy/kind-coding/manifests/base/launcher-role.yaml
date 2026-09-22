@@ -1,10 +1,13 @@
-# The Kubernetes launcher's own permissions in wardby-coding: only what
-# KubernetesApi (src/providers/jobs/kubernetes-api.ts) actually calls, and
-# nothing else — no get/list on secrets beyond a single named object, no
-# access to any other namespace. No RoleBinding is created here: the kind
-# control plane runs every command (including the preflight and up.sh)
-# against your own admin kubeconfig. Plan 3 binds this Role to the Cloud
-# Run service account's identity in the target namespace.
+# The Kubernetes launcher's own permissions in wardby-coding: only the
+# verbs ClientNodeKubernetesApi (src/providers/jobs/kubernetes-client.ts)
+# actually issues, and nothing else — no list/watch on pods (the seam only
+# ever creates, reads, or deletes one named pod at a time; it never lists
+# or watches), no get on secrets (the seam only ever creates or deletes
+# them, never reads one back), no access to any other namespace. No
+# RoleBinding is created here: the kind control plane runs every command
+# (including the preflight and up.sh) against your own admin kubeconfig.
+# Plan 3 binds this Role to the Cloud Run service account's identity in
+# the target namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -13,7 +16,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["create", "get", "list", "watch", "delete"]
+    verbs: ["create", "get", "delete"]
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create", "get"]
@@ -22,7 +25,7 @@ rules:
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["create", "get", "delete"]
+    verbs: ["create", "delete"]
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create", "get", "update"]

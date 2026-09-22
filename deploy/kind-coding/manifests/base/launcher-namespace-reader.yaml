@@ -1,0 +1,17 @@
+# The preflight's first check (kubernetesPreflight's `namespace` check,
+# src/providers/jobs/kubernetes-preflight.ts) calls readNamespace, which is
+# `get` on the cluster-scoped `namespaces` resource — no namespaced Role can
+# grant that, only a ClusterRole. Scoped to the one namespace this harness
+# uses via `resourceNames`, so the launcher identity still can't read any
+# other namespace's existence. No ClusterRoleBinding here: the kind control
+# plane uses your admin kubeconfig; Plan 3 binds this ClusterRole (like the
+# two Roles) to the Cloud Run service account's identity.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: wardby-coding-namespace-reader
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["wardby-coding"]
+    verbs: ["get"]
