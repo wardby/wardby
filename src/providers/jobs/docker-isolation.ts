@@ -21,7 +21,13 @@ export const WORKER_PATHS = {
 
 const LABEL_MANAGED = "io.wardby.managed=true";
 const LABEL_COMPONENT = "io.wardby.component=coding-worker";
-const IMMUTABLE_IMAGE = /^(?:sha256:[a-f0-9]{64}|[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64})$/;
+/**
+ * A local image ID, or a digest-pinned repository reference. Only the first
+ * path component (the registry host) may carry a `:<port>`, and then a path
+ * must follow; tags (`repo:tag@sha256:…`) and empty components are rejected.
+ */
+const IMMUTABLE_IMAGE =
+  /^(?:sha256:[a-f0-9]{64}|[a-z0-9][a-z0-9._-]*(?::[0-9]{1,5}(?:\/[a-z0-9][a-z0-9._-]*)+|(?:\/[a-z0-9][a-z0-9._-]*)*)@sha256:[a-f0-9]{64})$/;
 const DOCKER_OBJECT = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
 
 export interface DockerIsolationNames {

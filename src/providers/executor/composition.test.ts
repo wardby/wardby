@@ -8,8 +8,8 @@ import type { Executor } from "./types.js";
 const native: Executor = { async start() {}, async stop() {} };
 // Construction never queries the database.
 const db = {} as unknown as PrismaClient;
-// No registry port: ContainerExecutor's shared image check (isImmutableDockerImage) rejects `host:port/`.
-const REGISTRY_IMAGE = `registry.example.test/wardby-coding-worker@sha256:${"a".repeat(64)}`;
+// The kind harness's local registry form (host with a port).
+const REGISTRY_IMAGE = `localhost:5001/wardby-coding-worker@sha256:${"a".repeat(64)}`;
 const LOCAL_IMAGE = `sha256:${"b".repeat(64)}`;
 const baseEnv = { GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "test-key" };
 

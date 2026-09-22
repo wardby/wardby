@@ -9,6 +9,7 @@ import {
   assertWorkerContainerInspection,
   buildDockerIsolationPlan,
   buildWorkerCreateArgs,
+  isImmutableDockerImage,
   isolationNames,
   WORKER_PATHS,
   type DockerContainerInspection,
@@ -294,5 +295,35 @@ describe("Docker isolation policy", () => {
       NetworkSettings: { Networks: { none: {} }, Ports: {} },
     };
     expect(() => assertClaudeToolRunnerContainerInspection(container, claude)).not.toThrow();
+  });
+});
+
+describe("isImmutableDockerImage", () => {
+  const digest = `@sha256:${"c".repeat(64)}`;
+
+  it.each([
+    `sha256:${"c".repeat(64)}`,
+    `wardby-worker${digest}`,
+    `registry.example/wardby-worker${digest}`,
+    `localhost:5001/wardby-coding-worker${digest}`,
+    `registry.example.com:443/a/b${digest}`,
+  ])("accepts digest-pinned reference %s", (reference) => {
+    expect(isImmutableDockerImage(reference)).toBe(true);
+  });
+
+  it.each([
+    ["a tag before the digest", `wardby-worker:dev${digest}`],
+    ["a tag with a numeric value and no path", `wardby-worker:5001${digest}`],
+    ["a tag after a registry port", `localhost:5001/wardby-coding-worker:dev${digest}`],
+    ["a port on a later path component", `registry.example/team:5001/worker${digest}`],
+    ["a port-only first component", `:5001/wardby-worker${digest}`],
+    ["an empty port", `localhost:/wardby-worker${digest}`],
+    ["a six-digit port", `localhost:500100/wardby-worker${digest}`],
+    ["an empty path component", `localhost:5001//wardby-worker${digest}`],
+    ["a trailing slash", `localhost:5001/wardby-worker/${digest}`],
+    ["a tag without a digest", "localhost:5001/wardby-worker:latest"],
+    ["a short digest", `localhost:5001/wardby-worker@sha256:${"c".repeat(63)}`],
+  ])("rejects %s", (_label, reference) => {
+    expect(isImmutableDockerImage(reference)).toBe(false);
   });
 });
