@@ -23,7 +23,7 @@ const queueLog = logger.child({ module: "coding-queue" });
 
 export const CODING_QUEUE_TIMEOUT_ERROR = "coding_queue_timeout";
 
-export type CodingQueueDb = Pick<PrismaClient, "run" | "codingRun">;
+export type CodingQueueDb = Pick<PrismaClient, "run" | "codingRun" | "$transaction">;
 
 export interface DrainCodingQueueOptions {
   db: CodingQueueDb;
@@ -49,14 +49,19 @@ export async function drainCodingQueue(options: DrainCodingQueueOptions): Promis
     select: { runId: true },
   });
   for (const { runId } of expired) {
-    const failed = await db.run.updateMany({
-      where: { id: runId, status: "pending" },
-      data: { status: "failed", error: CODING_QUEUE_TIMEOUT_ERROR, finishedAt: now },
+    // Both writes commit together: a run is only ever observed with
+    // status=failed/error=coding_queue_timeout and no matching
+    // failureCategory, never one without the other.
+    const didTimeOut = await db.$transaction(async (tx) => {
+      const failed = await tx.run.updateMany({
+        where: { id: runId, status: "pending" },
+        data: { status: "failed", error: CODING_QUEUE_TIMEOUT_ERROR, finishedAt: now },
+      });
+      if (failed.count !== 1) return false;
+      await tx.codingRun.update({ where: { runId }, data: { failureCategory: CODING_QUEUE_TIMEOUT_ERROR } });
+      return true;
     });
-    if (failed.count === 1) {
-      timedOut += 1;
-      await db.codingRun.update({ where: { runId }, data: { failureCategory: CODING_QUEUE_TIMEOUT_ERROR } });
-    }
+    if (didTimeOut) timedOut += 1;
   }
 
   const active = await db.codingRun.count({
@@ -72,8 +77,12 @@ export async function drainCodingQueue(options: DrainCodingQueueOptions): Promis
     select: { runId: true },
   });
   for (const { runId } of next) {
-    void executor
-      .start(runId)
+    // Promise.resolve().then(...) defers executor.start's call itself into
+    // the microtask queue, so even a synchronous throw from a misbehaving
+    // Executor implementation lands in this .catch instead of escaping
+    // drainCodingQueue's own call stack.
+    void Promise.resolve()
+      .then(() => executor.start(runId))
       .catch((err) =>
         markRunFailedFromExecutorError(db, runId, err).catch((err2) =>
           queueLog.error({ err: err2, runId }, "failed to persist queued-run start failure"),

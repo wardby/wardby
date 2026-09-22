@@ -49,12 +49,20 @@ async function seed(id: string, opts: { status?: "pending" | "running"; queuedAt
 
 describe.skipIf(!process.env.DATABASE_URL)("drainCodingQueue (PostgreSQL)", () => {
   const now = new Date();
-  let otherActive = 0;
 
-  beforeAll(async () => {
-    otherActive = await db.codingRun.count({
+  // Re-measured immediately before each drainCodingQueue call, rather than
+  // once in beforeAll, so a DB test file running in parallel that
+  // creates/finishes its own active coding runs between beforeAll and this
+  // test's turn can't skew maxConcurrent out from under us. By the time
+  // this is called, ids.active (this file's own running/jobBackend-set
+  // CodingRun) is already seeded and counted in the result.
+  async function activeSlotCount(): Promise<number> {
+    return db.codingRun.count({
       where: { jobBackend: { not: null }, run: { status: { in: ["pending", "running"] } } },
     });
+  }
+
+  beforeAll(async () => {
     await db.principal.create({ data: { id: principalId, subject: principalId } });
     await db.agent.create({
       data: {
@@ -83,16 +91,19 @@ describe.skipIf(!process.env.DATABASE_URL)("drainCodingQueue (PostgreSQL)", () =
 
   it("times out stale queued runs and starts the oldest into the free slots only", async () => {
     const started: string[] = [];
-    // One of our seeded runs holds a slot; leave room for exactly one more.
+    // ids.active already counts toward activeSlotCount(); +1 leaves room
+    // for exactly one more of this file's own queued runs to start,
+    // regardless of how many *other* active coding runs exist right now.
+    const active = await activeSlotCount();
     const result = await drainCodingQueue({
       db,
       executor: recordingExecutor(started),
-      maxConcurrent: otherActive + 2,
+      maxConcurrent: active + 1,
       queueTimeoutSec: 3600,
       now: () => now,
     });
 
-    expect(result.timedOut).toBe(1);
+    expect(result.timedOut).toBeGreaterThanOrEqual(1);
     const expired = await db.run.findUniqueOrThrow({ where: { id: ids.expired } });
     expect(expired.status).toBe("failed");
     expect(expired.error).toBe(CODING_QUEUE_TIMEOUT_ERROR);
@@ -100,20 +111,34 @@ describe.skipIf(!process.env.DATABASE_URL)("drainCodingQueue (PostgreSQL)", () =
       CODING_QUEUE_TIMEOUT_ERROR,
     );
 
-    expect(started).toEqual([ids.oldest]);
-    expect(result.started).toEqual([ids.oldest]);
+    expect(started).toContain(ids.oldest);
+    expect(started).not.toContain(ids.newer);
+    expect(result.started).toContain(ids.oldest);
+    expect(result.started).not.toContain(ids.newer);
   });
 
   it("starts nothing when every slot is taken", async () => {
     const started: string[] = [];
+    // No "+1" this time: every currently active slot (including
+    // ids.active) is already accounted for by maxConcurrent, so free <= 0.
+    const active = await activeSlotCount();
     const result = await drainCodingQueue({
       db,
       executor: recordingExecutor(started),
-      maxConcurrent: otherActive + 1,
+      maxConcurrent: active,
       queueTimeoutSec: 3600,
       now: () => now,
     });
-    expect(started).toEqual([]);
-    expect(result.started).toEqual([]);
+
+    expect(started).not.toContain(ids.oldest);
+    expect(started).not.toContain(ids.newer);
+    expect(result.started).not.toContain(ids.oldest);
+    expect(result.started).not.toContain(ids.newer);
+    // ids.expired was already failed by the previous test; a second drain
+    // must not re-process (or re-count) it.
+    expect(result.timedOut).toBe(0);
+    const expired = await db.run.findUniqueOrThrow({ where: { id: ids.expired } });
+    expect(expired.status).toBe("failed");
+    expect(expired.error).toBe(CODING_QUEUE_TIMEOUT_ERROR);
   });
 });
