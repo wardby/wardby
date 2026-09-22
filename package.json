@@ -23,6 +23,7 @@
     "cli": "tsx src/cli.ts",
     "test": "npm run build:vendor && vitest run",
     "test:contract": "vitest run --config vitest.contract.config.ts",
+    "test:kubernetes": "WARDBY_KUBERNETES_TEST=1 vitest run src/providers/jobs/kubernetes.integration.test.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "db:up": "docker compose -f deploy/local/docker-compose.yml up -d",
