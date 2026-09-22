@@ -116,6 +116,23 @@ export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env
   };
 }
 
+/**
+ * Caps coding runs holding a concurrency slot across every control-plane
+ * replica (enforced in Postgres, see PrismaContainerExecutionStore), and how
+ * long a run may wait for one before failing with coding_queue_timeout.
+ */
+export interface CodingConcurrencyConfig {
+  maxConcurrent: number;
+  queueTimeoutSec: number;
+}
+
+export function loadCodingConcurrencyConfig(env: NodeJS.ProcessEnv = process.env): CodingConcurrencyConfig {
+  return {
+    maxConcurrent: optionalPositiveInteger(env.CODING_MAX_CONCURRENT, "CODING_MAX_CONCURRENT") ?? 4,
+    queueTimeoutSec: optionalPositiveInteger(env.CODING_QUEUE_TIMEOUT_SEC, "CODING_QUEUE_TIMEOUT_SEC") ?? 3600,
+  };
+}
+
 export interface McpConfig {
   allowedOrigins?: string[];
   transport: "http" | "stdio";

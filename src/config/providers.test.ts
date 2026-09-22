@@ -5,6 +5,7 @@ import {
   loadMcpConfig,
   loadGitHubVcsConfig,
   loadDbosConfig,
+  loadCodingConcurrencyConfig,
 } from "./providers.js";
 
 describe("provider config", () => {
@@ -152,5 +153,30 @@ describe("loadDbosConfig", () => {
 
   it("leaves systemDatabaseUrl undefined when neither variable is set", () => {
     expect(loadDbosConfig({}).systemDatabaseUrl).toBeUndefined();
+  });
+});
+
+describe("loadCodingConcurrencyConfig", () => {
+  it("defaults to 4 concurrent coding runs and a one-hour queue timeout", () => {
+    expect(loadCodingConcurrencyConfig({})).toEqual({ maxConcurrent: 4, queueTimeoutSec: 3600 });
+  });
+
+  it("reads both settings", () => {
+    expect(loadCodingConcurrencyConfig({ CODING_MAX_CONCURRENT: "12", CODING_QUEUE_TIMEOUT_SEC: "600" })).toEqual({
+      maxConcurrent: 12,
+      queueTimeoutSec: 600,
+    });
+  });
+
+  it.each(["0", "-1", "1.5", "many"])("rejects CODING_MAX_CONCURRENT=%s", (value) => {
+    expect(() => loadCodingConcurrencyConfig({ CODING_MAX_CONCURRENT: value })).toThrow(
+      "CODING_MAX_CONCURRENT must be a positive integer.",
+    );
+  });
+
+  it("rejects a non-positive CODING_QUEUE_TIMEOUT_SEC", () => {
+    expect(() => loadCodingConcurrencyConfig({ CODING_QUEUE_TIMEOUT_SEC: "0" })).toThrow(
+      "CODING_QUEUE_TIMEOUT_SEC must be a positive integer.",
+    );
   });
 });
