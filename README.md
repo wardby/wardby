@@ -1,9 +1,10 @@
 <div>
   <img align="left" hspace="24" src="docs/assets/brand/wardby-mascot.png" alt="Wardby guardian robot protecting an agent budget" width="280">
-  <h1>Wardby <small><em>(pronounced “WARD-bee”)</em></small></h1>
+  <h3><big><big>Wardby</big></big> <small><em>(pronounced&nbsp;“WARD&#8209;bee”)</em></small></h3>
   <h3>Autonomous agents, bounded by design.</h3>
   <p><strong>Most agent runners focus on helping a model complete a task. Wardby is the self-hosted control plane that decides whether the task should run, limits what it can access, and returns a reviewable outcome governed by explicit policy.</strong></p>
-  <p>Budget is enforced as admission control: spend is reserved before execution, so work that cannot fit the budget never starts.</p>
+  <br clear="left">
+  <p><strong>Budgets are enforced before spend: every model request must fit within a hard run limit before it reaches the provider.</strong></p>
   <p>
     <a href="#why-wardby">Why Wardby</a> ·
     <a href="#why-wardby-instead-of-another-agent-runner">Why it is different</a> ·
