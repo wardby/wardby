@@ -87,7 +87,9 @@ async function harness(runId = "run-k8s-test", options: { runtimeClassName?: str
   });
   const finish = async (_handle: JobHandle, _r?: unknown) =>
     setPod((pod) => {
-      pod.status!.containerStatuses![1].state = { terminated: { exitCode: 0, reason: "Completed" } };
+      pod.status!.containerStatuses![1].state = {
+        terminated: { exitCode: 0, reason: "Completed", finishedAt: new Date(now) },
+      };
     });
   const fail = (exitCode: number, reason = "Error") =>
     setPod((pod) => {
@@ -105,6 +107,23 @@ async function harness(runId = "run-k8s-test", options: { runtimeClassName?: str
     fail,
     lose,
     advance: (ms: number) => void (now += ms),
+    /** Terminates the worker with exit 0 at `finishedAt` (ms), optionally on a pod being deleted or past DeadlineExceeded. */
+    exitZero: (finishedAt: number | undefined, pod: { deleting?: boolean; deadlineExceeded?: boolean } = {}) =>
+      setPod((p) => {
+        p.status!.containerStatuses![1].state = {
+          terminated: {
+            exitCode: 0,
+            reason: "Completed",
+            ...(finishedAt === undefined ? {} : { finishedAt: new Date(finishedAt) }),
+          },
+        };
+        if (pod.deleting) p.metadata!.deletionTimestamp = new Date(now);
+        if (pod.deadlineExceeded) {
+          p.status!.phase = "Failed";
+          p.status!.reason = "DeadlineExceeded";
+        }
+      }),
+    clock: () => now,
     setResult: (value: string) => void (result = value),
   };
 }
@@ -618,5 +637,45 @@ describe("KubernetesJobLauncher deadlines and launch races", () => {
     });
     h.api.onExec = async () => 2;
     await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_seed_failed");
+  });
+});
+
+describe("KubernetesJobLauncher exit-0 guard", () => {
+  it("does not count an exit 0 on a pod killed by DeadlineExceeded", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    h.exitZero(h.clock(), { deadlineExceeded: true });
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
+  });
+
+  it("does not count an exit 0 on a pod that is being deleted", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    h.exitZero(h.clock(), { deleting: true });
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    expect(await h.launcher.collect(handle)).toEqual({ exitCode: 1, reason: "failed" });
+  });
+
+  it("does not count an exit 0 without a finish time", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    h.exitZero(undefined);
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+  });
+
+  it("treats an exit 0 that finished 10s after the deadline as a timeout", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    h.exitZero(h.clock() + 900_000 + 10_000);
+    h.advance(911_000);
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed", reason: "timed_out" });
+  });
+
+  it("accepts an exit 0 that finished within the clock-skew allowance, observed later", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    h.exitZero(h.clock() + 900_000 + 4_000);
+    h.advance(950_000);
+    expect(await h.launcher.status(handle)).toEqual({ state: "succeeded" });
   });
 });

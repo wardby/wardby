@@ -196,6 +196,17 @@ interface PodObservation {
   deleteGraceSeconds?: number;
 }
 
+/** Slack for clock skew between the kubelet's finishedAt and the control plane's deadline. */
+const FINISHED_AT_SKEW_MS = 5_000;
+
+/** Whether a worker's exit 0 happened on a live pod, not past the deadline, with a parseable finish time. */
+function exitedCleanlyInTime(pod: V1Pod, finishedAt: Date | string | undefined, deadlineAt: number): boolean {
+  if (pod.status?.reason === "DeadlineExceeded" || pod.metadata?.deletionTimestamp) return false;
+  if (finishedAt === undefined || finishedAt === null) return false;
+  const finished = new Date(finishedAt).getTime();
+  return Number.isFinite(finished) && finished <= deadlineAt + FINISHED_AT_SKEW_MS;
+}
+
 /** Maps a pod read-back onto the next record state; `undefined` means "no change". Never called for terminal records. */
 function observePod(
   pod: V1Pod | undefined,
@@ -209,13 +220,18 @@ function observePod(
   }
   const worker = pod.status?.containerStatuses?.find((status) => status.name === WORKER_CONTAINER);
   const terminated = worker?.state?.terminated;
-  // A worker that exited 0 finished its work: a late observation must not turn that into a timeout
-  // (the pod's activeDeadlineSeconds grace keeps the keeper alive for collection).
-  if (terminated?.exitCode === 0) return { phase: "succeeded", result: resultFor("succeeded") };
+  // Exit 0 counts as success only if the worker finished on its own, before the deadline, on a live pod:
+  // a SIGTERM from the kubelet's deadline or a pod deletion can be trapped by the untrusted worker and
+  // turned into exit 0, and by then the keeper holding the result is gone too.
+  if (terminated?.exitCode === 0 && exitedCleanlyInTime(pod, terminated.finishedAt, record.deadlineAt)) {
+    return { phase: "succeeded", result: resultFor("succeeded") };
+  }
   if (now >= record.deadlineAt || pod.status?.reason === "DeadlineExceeded") {
     return { phase: "failed", result: { exitCode: 124, reason: "timed_out" }, deleteGraceSeconds: STOP_GRACE_SECONDS };
   }
   if (terminated) {
+    // An exit 0 that failed the guard above (pod being deleted, no usable finish time) is not a success.
+    if (terminated.exitCode === 0) return { phase: "failed", result: resultFor("failed") };
     return {
       phase: "failed",
       result: {
