@@ -291,6 +291,7 @@ async function harness(
         }
       : {}),
     limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
+    maxDiskMb: 8192,
     sleep: async () => {},
     observer,
     ...extra,
@@ -333,6 +334,28 @@ describe("ContainerExecutor", () => {
     const created = await harness();
     await created.executor.start("run-1");
     expect(created.jobs.specs[0]?.limits.diskMb).toBe(512);
+  });
+
+  it("allows a workspaceDiskMb exactly at the operator's maxDiskMb ceiling", async () => {
+    const created = await harness({ workspaceDiskMb: 8192 }, IMAGE, new InMemoryCodingRunObserver(), undefined, {
+      maxDiskMb: 8192,
+    });
+    await created.executor.start("run-1");
+    expect(created.jobs.specs[0]?.limits.diskMb).toBe(8192);
+    expect(created.store.run.status).not.toBe("failed");
+  });
+
+  it("rejects a workspaceDiskMb over the operator's maxDiskMb ceiling as a normal failed run", async () => {
+    const created = await harness({ workspaceDiskMb: 8193 }, IMAGE, new InMemoryCodingRunObserver(), undefined, {
+      maxDiskMb: 8192,
+    });
+    await created.executor.start("run-1");
+    expect(created.jobs.launches).toBe(0);
+    expect(created.store.run.status).toBe("failed");
+    expect(created.store.run.result).toBeNull();
+    expect(created.store.terminations).toEqual([
+      expect.objectContaining({ status: "failed", error: expect.stringContaining("coding_failure_workspace:") }),
+    ]);
   });
 
   it("accepts a content-addressed local Docker image ID", async () => {
@@ -635,6 +658,7 @@ describe("resolveCodingWorkerImage", () => {
       additionalWorkerImages: { "node-python": { "3.12": pythonImage } },
       credentialRef: "env:OPENAI_API_KEY",
       limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
+      maxDiskMb: 8192,
       sleep: async () => {},
     });
     expect(
@@ -699,6 +723,7 @@ describe("resolveCodingWorkerImage", () => {
       additionalWorkerImages: { "node-python": { "3.12": pythonImage } },
       credentialRef: "env:OPENAI_API_KEY",
       limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
+      maxDiskMb: 8192,
       sleep: async () => {},
     });
     expect(() =>
@@ -754,6 +779,7 @@ describe("resolveCodingWorkerImage", () => {
           additionalWorkerImages: { "node-python": { "3.12": "wardby-coding-worker:latest" } },
           credentialRef: "env:OPENAI_API_KEY",
           limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
+          maxDiskMb: 8192,
           sleep: async () => {},
         }),
     ).toThrow("coding_worker_image_invalid");

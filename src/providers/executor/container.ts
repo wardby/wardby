@@ -342,6 +342,8 @@ export interface ContainerExecutorOptions {
   claudeToolRunnerImage?: string;
   anthropicCredentialRef?: string;
   limits: JobResourceLimits;
+  /** Operator ceiling (MiB) on CodingRun.workspaceDiskMb; see coding_workspace_disk_exceeds_limit in jobSpec. */
+  maxDiskMb: number;
   pollMinMs?: number;
   pollMaxMs?: number;
   sleep?: (milliseconds: number) => Promise<void>;
@@ -790,6 +792,9 @@ export class ContainerExecutor implements Executor {
     const provider = run.provider === "claude-code" ? "claude-code" : "codex";
     if (provider === "claude-code" && (!run.workerImage || !this.options.claudeToolRunnerImage)) {
       throw new Error("coding_provider_not_configured:claude-code");
+    }
+    if (run.workspaceDiskMb && run.workspaceDiskMb > this.options.maxDiskMb) {
+      throw new Error("coding_workspace_disk_exceeds_limit");
     }
     return {
       kind: "coding-agent",

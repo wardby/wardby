@@ -84,6 +84,12 @@ export interface ContainerExecutorConfig {
   memoryMb: number;
   pids: number;
   diskMb: number;
+  /**
+   * Operator ceiling on the per-agent CodingProfile.workspaceDiskMb (Task 9):
+   * without it, any agents:write caller could size the RAM-backed Docker
+   * tmpfs (and keeper memory) up to 32 GiB per run, times CODING_MAX_CONCURRENT.
+   */
+  maxDiskMb: number;
   additionalWorkerImages: Record<string, Record<string, string>>;
 }
 
@@ -94,10 +100,24 @@ function optionalPositiveNumber(value: string | undefined, name: string, fallbac
   return parsed;
 }
 
+function optionalBoundedInteger(value: string | undefined, name: string, min: number, max: number): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}.`);
+  }
+  return parsed;
+}
+
 export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env): ContainerExecutorConfig {
   const additionalWorkerImages: Record<string, Record<string, string>> = {};
   if (env.CODING_WORKER_IMAGE_NODE_PYTHON_3_12) {
     additionalWorkerImages["node-python"] = { "3.12": env.CODING_WORKER_IMAGE_NODE_PYTHON_3_12 };
+  }
+  const diskMb = optionalPositiveInteger(env.CODING_DISK_MB, "CODING_DISK_MB") ?? 2048;
+  const maxDiskMb = optionalBoundedInteger(env.CODING_MAX_DISK_MB, "CODING_MAX_DISK_MB", 64, 32_768) ?? 8192;
+  if (maxDiskMb < diskMb) {
+    throw new Error(`CODING_MAX_DISK_MB (${maxDiskMb}) must be at least the effective CODING_DISK_MB (${diskMb}).`);
   }
   return {
     workerImage: env.CODING_WORKER_IMAGE,
@@ -111,7 +131,8 @@ export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env
     cpus: optionalPositiveNumber(env.CODING_CPUS, "CODING_CPUS", 1),
     memoryMb: optionalPositiveInteger(env.CODING_MEMORY_MB, "CODING_MEMORY_MB") ?? 2048,
     pids: optionalPositiveInteger(env.CODING_PIDS, "CODING_PIDS") ?? 128,
-    diskMb: optionalPositiveInteger(env.CODING_DISK_MB, "CODING_DISK_MB") ?? 2048,
+    diskMb,
+    maxDiskMb,
     additionalWorkerImages,
   };
 }

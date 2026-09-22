@@ -113,6 +113,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     credentialRef: config.credentialRef,
     anthropicCredentialRef: config.anthropicCredentialRef,
     limits: { cpus: config.cpus, memoryMb: config.memoryMb, pids: config.pids, diskMb: config.diskMb },
+    maxDiskMb: config.maxDiskMb,
     onSlotReleased: () => {
       void drainCodingQueue({
         db: options.db,

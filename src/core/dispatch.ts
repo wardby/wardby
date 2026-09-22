@@ -213,7 +213,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               workerImage,
               budgetReservedUsd: budgetUsd,
               rootCodingRunId,
-              workspaceDiskMb: agent.codingProfile.workspaceDiskMb ?? null,
+              workspaceDiskMb: agent.codingProfile.workspaceDiskMb,
             },
           });
         } else if (

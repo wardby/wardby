@@ -100,6 +100,27 @@ describe("loadContainerExecutorConfig", () => {
     const config = loadContainerExecutorConfig({});
     expect(config.additionalWorkerImages).toEqual({});
   });
+
+  it("defaults CODING_MAX_DISK_MB to 8192 and accepts an explicit value within bounds", () => {
+    expect(loadContainerExecutorConfig({}).maxDiskMb).toBe(8192);
+    expect(loadContainerExecutorConfig({ CODING_MAX_DISK_MB: "16384" }).maxDiskMb).toBe(16384);
+  });
+
+  it.each(["63", "32769", "1.5", "nope"])("rejects CODING_MAX_DISK_MB out of the 64-32768 bounds (%s)", (value) => {
+    expect(() => loadContainerExecutorConfig({ CODING_MAX_DISK_MB: value })).toThrow(
+      "CODING_MAX_DISK_MB must be an integer between 64 and 32768",
+    );
+  });
+
+  it("rejects a CODING_MAX_DISK_MB below the effective CODING_DISK_MB", () => {
+    expect(() => loadContainerExecutorConfig({ CODING_DISK_MB: "4096", CODING_MAX_DISK_MB: "2048" })).toThrow(
+      "CODING_MAX_DISK_MB (2048) must be at least the effective CODING_DISK_MB (4096)",
+    );
+  });
+
+  it("accepts CODING_MAX_DISK_MB exactly equal to the effective CODING_DISK_MB", () => {
+    expect(loadContainerExecutorConfig({ CODING_DISK_MB: "4096", CODING_MAX_DISK_MB: "4096" }).maxDiskMb).toBe(4096);
+  });
 });
 
 describe("loadMcpConfig", () => {
