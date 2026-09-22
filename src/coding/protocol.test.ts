@@ -14,6 +14,7 @@ import {
   parseCodingAgentOutputJson,
   parseCodingRunResultJson,
   parseCodingTaskInputJson,
+  redactAndTruncate,
   redactTokenShapedValues,
 } from "./protocol.js";
 
@@ -257,6 +258,41 @@ describe("redactTokenShapedValues", () => {
     expect(redactTokenShapedValues(`fatal: https://x-access-token:ghs_${"a".repeat(36)}@github.com/o/r`)).toBe(
       "fatal: https://[REDACTED]@github.com/o/r",
     );
+  });
+
+  it("stays fast on adversarial input — redaction runs over untrusted git output", () => {
+    // Each of these took ~20 s with an unbounded quantifier in the URL-userinfo
+    // or AWS-key pattern, on a single-threaded control plane that also runs the
+    // scheduler, reconciler and MCP transport. No URL and no secret is needed:
+    // one long run of the right character class is enough. 500 ms is ~40x the
+    // pre-fix stall and ~50x the post-fix cost, so it catches a reintroduction
+    // without flaking on a loaded machine.
+    const adversarial = {
+      "lowercase run": "a".repeat(200_000),
+      whitespace: " ".repeat(200_000),
+      "base64 run": "aB9+/=".repeat(33_000),
+      "jwt-shaped words": `eyJ${"a".repeat(30)} `.repeat(5_000),
+      "unterminated PEM blocks": "-----BEGIN PRIVATE KEY-----".repeat(7_000),
+    };
+    for (const [shape, input] of Object.entries(adversarial)) {
+      const startedAt = performance.now();
+      redactTokenShapedValues(input);
+      expect(performance.now() - startedAt, `${shape} must not stall the event loop`).toBeLessThan(500);
+    }
+  });
+
+  it("redactAndTruncate keeps a credential that straddles the truncation point out of the output", () => {
+    const secret = `https://x-access-token:ghs_${"a".repeat(36)}@github.com/o/r`;
+    const noisy = `${"x".repeat(90)}${secret}${"y".repeat(200_000)}`;
+    const shown = redactAndTruncate(noisy, 100);
+    // Truncating first would have printed the front of the token; redacting
+    // first leaves only the (possibly clipped) replacement at the cut.
+    expect(shown).toHaveLength(100);
+    expect(shown.slice(90)).toBe("https://[R");
+    expect(shown).not.toContain("ghs_");
+    expect(shown).not.toContain("x-access-token");
+    // And with room to spare, the whole replacement survives.
+    expect(redactAndTruncate(`${"x".repeat(10)}${secret}`, 100)).toContain("https://[REDACTED]@github.com/o/r");
   });
 
   it("leaves ordinary text alone — a commit sha is not a secret", () => {

@@ -10,7 +10,7 @@ import {
   CodingRunResultSchema,
   CodingTaskInputSchema,
   parseCodingAgentOutputJson,
-  redactTokenShapedValues,
+  redactAndTruncate,
   type CodingAgentOutput,
   type CodingRunResult,
 } from "../../coding/protocol.js";
@@ -976,16 +976,14 @@ export class ContainerExecutor implements Executor {
 export function describeFailure(error: unknown, depth = 0): string {
   if (depth > 4) return "…";
   const message = error instanceof Error ? error.message : typeof error === "string" ? error : "unknown";
-  const redacted = redactTokenShapedValues(message).slice(0, 500);
+  const redacted = redactAndTruncate(message, 500);
   const cause = error instanceof Error ? error.cause : undefined;
   return cause === undefined || cause === null ? redacted : `${redacted} <- ${describeFailure(cause, depth + 1)}`;
 }
 
 function safeError(error: unknown): string {
   const message = error instanceof Error ? error.message : "unknown";
-  return `coding_executor:${redactTokenShapedValues(message)
-    .replace(/[^A-Za-z0-9_.:-]/g, "_")
-    .slice(0, 200)}`;
+  return `coding_executor:${redactAndTruncate(message, 200).replace(/[^A-Za-z0-9_.:-]/g, "_")}`;
 }
 
 function failureCategory(error: unknown): string {

@@ -3,7 +3,12 @@ import { lstat, mkdir, opendir, readFile, readlink, realpath, rm } from "node:fs
 import { isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Writable } from "node:stream";
-import { redactTokenShapedValues, normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
+import {
+  MAX_REDACTED_SPAN,
+  redactTokenShapedValues,
+  normalizeGitHubRepository,
+  normalizeGitRef,
+} from "../../coding/protocol.js";
 import { isSafeGitHubInstallationToken, type GitHubRepositoryAccess } from "./github.js";
 import type {
   FinalizeChangesDetails,
@@ -58,12 +63,18 @@ export class GitCommandError extends Error {
   }
 }
 
+const GIT_OUTPUT_DISPLAY_BYTES = 8 * 1024;
+
 export function redactGitOutput(value: string, secrets: readonly string[] = []): string {
-  let output = value;
+  // Only the first 8 KiB is ever kept, so redaction works on that plus one
+  // MAX_REDACTED_SPAN of margin rather than on all 2 MiB git may have produced
+  // (see redactAndTruncate: the margin is what keeps truncation safe). The rest
+  // is discarded here and never reaches a log or the database.
+  let output = value.slice(0, GIT_OUTPUT_DISPLAY_BYTES + MAX_REDACTED_SPAN);
   for (const secret of secrets) {
     if (secret) output = output.split(secret).join("[REDACTED]");
   }
-  return redactTokenShapedValues(output).slice(0, 8 * 1024);
+  return redactTokenShapedValues(output).slice(0, GIT_OUTPUT_DISPLAY_BYTES);
 }
 
 export interface NodeGitCommandRunnerOptions {

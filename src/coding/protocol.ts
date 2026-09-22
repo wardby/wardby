@@ -298,23 +298,66 @@ const TOKEN_PATTERNS = [
   /rrp_[A-Za-z0-9_-]{32,}/g,
   /rv[a-z]_[0-9a-f-]{36}\.[A-Za-z0-9_-]{20,}/gi,
   // A JWT — an IdP access/ID token in delegating auth mode, and what a JWKS or
-  // token-exchange failure is most likely to quote back.
+  // token-exchange failure is most likely to quote back. Left open-ended
+  // deliberately: the `eyJ` prefix anchors the scan and nothing follows the last
+  // group, so there is no backtracking to blow up (measured linear on 200 KB of
+  // `eyJ…`-per-word input), and a bound would leave the tail of a long token
+  // visible.
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)?/g,
-  // Google OAuth access tokens (workload identity, GCS, Vertex).
+  // Google OAuth access tokens (workload identity, GCS, Vertex). Open-ended for
+  // the same reason.
   /\bya29\.[A-Za-z0-9._-]{10,}/g,
   // An AWS secret access key only in key=value form: the bare 40-char shape is
   // indistinguishable from a git commit sha and would redact half of every
-  // workspace error.
-  /(?<=(?:aws_)?secret_?access_?key["'\s]*[:=]["'\s]*)[A-Za-z0-9/+=]{16,}/gi,
-  /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----/g,
+  // workspace error. The separator runs are BOUNDED — as `["'\s]*` this was
+  // quadratic (21 s on 200 KB of spaces, because the lookbehind rescans the
+  // whole preceding whitespace run at every position).
+  /(?<=(?:aws_)?secret_?access_?key["'\s]{0,8}[:=]["'\s]{0,8})[A-Za-z0-9/+=]{16,4096}/gi,
+  // Bounded body: as `[\s\S]*?` every `-----BEGIN …` with no `END` after it
+  // scanned to end of input (131 ms per 200 KB, quadratic in the number of
+  // BEGINs). 6 KiB covers an RSA-4096 key.
+  /-----BEGIN (?:[A-Z ]{1,32} )?PRIVATE KEY-----[\s\S]{0,6144}?-----END (?:[A-Z ]{1,32} )?PRIVATE KEY-----/g,
 ];
 
-/** Credentials in a URL's userinfo, where the password need not look like a token. */
-const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/gi;
+/**
+ * Credentials in a URL's userinfo, where the password need not look like a
+ * token. Every run here is bounded: as `[a-z0-9+.-]*` the scheme alone made
+ * this quadratic — at every start position the engine consumed the whole
+ * remaining lowercase/digit run before failing on `://`, so 200 KB of plain
+ * lowercase text (no URL, no `@`, no `:` needed) took 20.5 s and stalled the
+ * single-threaded control plane. Bounded, the same input takes 18 ms.
+ */
+const URL_CREDENTIALS = /([a-z][a-z0-9+.-]{0,31}:\/\/)[^/\s:@]{1,512}:[^/\s@]{1,512}@/gi;
+
+/**
+ * The longest span any pattern that needs a trailing anchor can match — URL
+ * userinfo (~1 KiB) and a PEM block (~6.3 KiB). `redactAndTruncate` relies on
+ * it: see there.
+ */
+export const MAX_REDACTED_SPAN = 8 * 1024;
 
 export function redactTokenShapedValues(value: string): string {
   const redacted = TOKEN_PATTERNS.reduce((text, pattern) => text.replace(pattern, "[REDACTED]"), value);
   return redacted.replace(URL_CREDENTIALS, "$1[REDACTED]@");
+}
+
+/**
+ * Redact, then truncate to `limit` — for callers that keep only a prefix of a
+ * potentially huge string (git output is capped at 2 MiB, an error message is
+ * unbounded). Redacting first is the security-critical half: truncating first
+ * could cut a credential in two and log the front of it.
+ *
+ * Scanning megabytes to keep 8 KiB is wasted event-loop time, so redaction runs
+ * over `limit + MAX_REDACTED_SPAN` characters instead of the whole string. That
+ * is safe because a credential with any character inside `limit` lies entirely
+ * within that window: the two patterns that need a trailing anchor to match at
+ * all (URL userinfo, PEM) are bounded well under `MAX_REDACTED_SPAN`, and every
+ * open-ended pattern still matches — and so still redacts — the part of the
+ * secret that falls inside the window. Whatever lies beyond the window is
+ * dropped, not logged.
+ */
+export function redactAndTruncate(value: string, limit: number): string {
+  return redactTokenShapedValues(value.slice(0, limit + MAX_REDACTED_SPAN)).slice(0, limit);
 }
 
 function parseJsonWithoutDuplicateKeys(text: string): unknown {
