@@ -938,6 +938,21 @@ describe("failure diagnostics", () => {
     expect(JSON.stringify(logged)).not.toContain(token);
   });
 
+  it("does not raise operator signal when a run is cancelled on purpose", async () => {
+    const created = await harness();
+
+    await created.executor.stop("run-1");
+
+    expect(created.store.run.status).toBe("cancelled");
+    // A user asking to stop is not a failure: the diagnostic id is still
+    // logged (an operator may have to correlate it), but never at warn.
+    expect(logged.filter((entry) => entry.level === "warn")).toEqual([]);
+    const persisted = (created.store.terminations[0] as { error: string }).error;
+    const line = logged.find((entry) => entry.payload.diagnosticId === persisted.split(":")[1]);
+    expect(line?.level).toBe("info");
+    expect(line?.message).toContain("cancelled");
+  });
+
   it("describeFailure keeps the cause chain, redacts token-shaped values, and stops recursing", () => {
     const token = `ghp_${"b".repeat(36)}`;
     expect(describeFailure(new Error(`boom ${token}`))).toBe("boom [REDACTED]");

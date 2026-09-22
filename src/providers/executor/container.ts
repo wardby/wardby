@@ -954,10 +954,15 @@ export class ContainerExecutor implements Executor {
     // so the operator needs the real reason somewhere: the control-plane log,
     // keyed by the same diagnostic id. Token-shaped values are redacted, and a
     // cause chain is kept because the outer message is often just a wrapper.
-    containerLog.warn(
-      { diagnosticId, category, reason: describeFailure(error) },
-      "coding run failed; the persisted error is the diagnostic id only",
-    );
+    // A cancellation comes through here too (stop() fences the run with one),
+    // but a user asking to stop is not a failure and must not raise operator
+    // signal at warn — it gets the same id at info instead.
+    // (`failureCategory` only ever classifies an Error's message, so stop()'s
+    // bare "cancelled" string has to be matched directly.)
+    const cancelled = category === "cancelled" || error === "cancelled";
+    const line = { diagnosticId, category, reason: describeFailure(error) };
+    if (cancelled) containerLog.info(line, "coding run cancelled; the persisted error is its id only");
+    else containerLog.warn(line, "coding run failed; the persisted error is the diagnostic id only");
     return { error: `coding_failure_${category}:${diagnosticId}`, audit: { failureCategory: category, diagnosticId } };
   }
 
