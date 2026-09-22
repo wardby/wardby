@@ -18,7 +18,7 @@ import { DockerJobLauncher } from "../jobs/docker.js";
 import type { KubernetesApi } from "../jobs/kubernetes-api.js";
 import { ClientNodeKubernetesApi } from "../jobs/kubernetes-client.js";
 import { isRegistryDigest } from "../jobs/kubernetes-isolation.js";
-import { kubernetesPreflight } from "../jobs/kubernetes-preflight.js";
+import { runKubernetesPreflight } from "../jobs/kubernetes-preflight.js";
 import { KubernetesJobLauncher } from "../jobs/kubernetes.js";
 import type { WorkspaceJobLauncher } from "../jobs/types.js";
 import { buildVcsProvider } from "../vcs/index.js";
@@ -72,7 +72,8 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       workspaceRoot,
       resolveCapability: (runId) => capabilities.get(runId),
       preflight: async () => {
-        await kubernetesPreflight({ api, config: kubernetes, workerImage });
+        const { clusterDnsIp } = await runKubernetesPreflight({ api, config: kubernetes, workerImage });
+        return { clusterDnsIp };
       },
       onWarning: (message) => compositionLog.warn(message),
     });

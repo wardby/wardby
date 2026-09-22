@@ -15,6 +15,7 @@ import type { JobHandle, JobSpec } from "./types.js";
 const IMAGE = `localhost:5001/wardby-coding-worker@sha256:${"a".repeat(64)}`;
 const CAPABILITY = `rrp_${"c".repeat(32)}`;
 const roots: string[] = [];
+const isEnforcementProbe = (command: string[]) => command[0] === "node" && command[2].includes(", port: 53,");
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })));
 });
@@ -32,6 +33,7 @@ async function harness(runId = "run-k8s-test", options: { runtimeClassName?: str
     metadata: { name: "wardby-coding-proxy" },
     spec: { clusterIP: "10.96.0.50" },
   });
+  api.put("service", "kube-system", { metadata: { name: "kube-dns" }, spec: { clusterIP: "10.96.0.10" } });
   const names = kubernetesRunNames(runId);
   const spec: JobSpec = {
     kind: "coding-agent",
@@ -141,9 +143,10 @@ describe("KubernetesJobLauncher", () => {
     expect(await h.api.readNetworkPolicy("wardby-coding", h.names.policy)).toBeDefined();
     expect(h.api.objects.has(`secret/wardby-coding/${h.names.secret}`)).toBe(true);
     const commands = h.api.execCalls.map((c) => c.command.join(" "));
-    expect(commands[0]).toContain("tar -C /run/wardby/storage/workspace");
-    expect(commands[1]).toContain("tar -C /run/wardby/storage/input");
-    expect(commands[2]).toContain("/run/wardby/storage/input/.seeded");
+    expect(isEnforcementProbe(h.api.execCalls[0].command)).toBe(true);
+    expect(commands[1]).toContain("tar -C /run/wardby/storage/workspace");
+    expect(commands[2]).toContain("tar -C /run/wardby/storage/input");
+    expect(commands[3]).toContain("/run/wardby/storage/input/.seeded");
     expect(h.api.execCalls.every((c) => c.container === "keeper")).toBe(true);
     expect(await h.launcher.status(handle)).toEqual({ state: "running" });
   });
@@ -361,7 +364,8 @@ describe("KubernetesJobLauncher failure handling", () => {
         return { stream, done: new Promise<number>(() => undefined) };
       },
     });
-    h.api.onExec = async () => {
+    h.api.onExec = async ({ command }) => {
+      if (isEnforcementProbe(command)) return 0;
       throw new Error("exec_timeout");
     };
     await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_seed_failed");
@@ -522,7 +526,7 @@ function parkExec(h: Awaited<ReturnType<typeof harness>>, match: (command: strin
   return { parked, release };
 }
 
-const isMarker = (command: string[]) => command[0] === "node";
+const isMarker = (command: string[]) => command[0] === "node" && command[2].includes(".seeded");
 const isWorkspaceSeed = (command: string[]) => command.includes("/run/wardby/storage/workspace");
 
 describe("KubernetesJobLauncher deadlines and launch races", () => {
@@ -635,7 +639,7 @@ describe("KubernetesJobLauncher deadlines and launch races", () => {
         return { stream, done: new Promise<number>((r) => stream.once("end", () => r(0))) };
       },
     });
-    h.api.onExec = async () => 2;
+    h.api.onExec = async ({ command }) => (isEnforcementProbe(command) ? 0 : 2);
     await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_seed_failed");
   });
 });
@@ -677,5 +681,121 @@ describe("KubernetesJobLauncher exit-0 guard", () => {
     h.exitZero(h.clock() + 900_000 + 4_000);
     h.advance(950_000);
     expect(await h.launcher.status(handle)).toEqual({ state: "succeeded" });
+  });
+});
+
+describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
+  function clockedLauncher(
+    h: Awaited<ReturnType<typeof harness>>,
+    extra: { preflight?: () => Promise<{ clusterDnsIp: string }> } = {},
+  ) {
+    let clock = 0;
+    const sleeps: number[] = [];
+    const launcher = new KubernetesJobLauncher({
+      onWarning: () => {},
+      api: h.api,
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" },
+      workspaceRoot: h.workspaceRoot,
+      resolveCapability: async () => CAPABILITY,
+      now: () => clock,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        clock += ms;
+      },
+      createArchive: () => ({ stream: Readable.from([Buffer.alloc(0)]), done: Promise.resolve(0) }),
+      enforcementTimeoutMs: 5_000,
+      ...extra,
+    });
+    return { launcher, sleeps };
+  }
+
+  it("polls the keeper's cluster-DNS probe until blocked, then seeds and opens the gate", async () => {
+    const h = await harness();
+    const { launcher, sleeps } = clockedLauncher(h);
+    let connected = 2;
+    const original = h.api.onExec;
+    h.api.onExec = async (call) => {
+      if (isEnforcementProbe(call.command)) return connected-- > 0 ? 3 : 0;
+      return original(call);
+    };
+    await launcher.launch(h.spec);
+    const kinds = h.api.execCalls.map((c) =>
+      isEnforcementProbe(c.command) ? "probe" : isMarker(c.command) ? "marker" : "seed",
+    );
+    expect(kinds.slice(0, 3)).toEqual(["probe", "probe", "probe"]);
+    expect(kinds.indexOf("seed")).toBe(3);
+    expect(kinds.at(-1)).toBe("marker");
+    expect(sleeps.filter((ms) => ms === 500)).toHaveLength(2);
+  });
+
+  it("execs the probe in the keeper as an argv array with the validated IP literal, never a shell", async () => {
+    const h = await harness();
+    await h.launcher.launch(h.spec);
+    const probe = h.api.execCalls.find((c) => isEnforcementProbe(c.command))!;
+    expect(probe.container).toBe("keeper");
+    expect(probe.command).toHaveLength(3);
+    expect(probe.command.slice(0, 2)).toEqual(["node", "-e"]);
+    expect(probe.command[2]).toContain('host: "10.96.0.10", port: 53');
+    expect(probe.command.some((arg) => /^(\/bin\/)?(ba)?sh$/.test(arg))).toBe(false);
+  });
+
+  it("fails with kubernetes_policy_not_enforced when the probe never blocks, cleaning up without opening the gate", async () => {
+    const h = await harness();
+    const { launcher } = clockedLauncher(h);
+    const original = h.api.onExec;
+    h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? 3 : original(call));
+    await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_policy_not_enforced");
+    expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
+    expect(h.api.execCalls.every((c) => isEnforcementProbe(c.command))).toBe(true);
+    expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+    expect(h.api.objects.has(`networkpolicy/wardby-coding/${h.names.policy}`)).toBe(false);
+    expect(h.api.objects.has(`secret/wardby-coding/${h.names.secret}`)).toBe(false);
+    const handle = { backend: "kubernetes", id: `wardby-coding/${h.names.token}` };
+    expect(await launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "kubernetes_provisioning_failed",
+    });
+  });
+
+  it("treats any other probe exit code as not yet enforced", async () => {
+    const h = await harness();
+    const { launcher } = clockedLauncher(h);
+    const original = h.api.onExec;
+    h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? 127 : original(call));
+    await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_policy_not_enforced");
+  });
+
+  it("uses the preflight's cluster DNS IP without reading kube-dns itself", async () => {
+    const h = await harness();
+    const reads: string[] = [];
+    const readService = h.api.readService.bind(h.api);
+    h.api.readService = async (ns, name) => {
+      reads.push(`${ns}/${name}`);
+      return readService(ns, name);
+    };
+    const { launcher } = clockedLauncher(h, { preflight: async () => ({ clusterDnsIp: "10.96.0.99" }) });
+    await launcher.launch(h.spec);
+    const probe = h.api.execCalls.find((c) => isEnforcementProbe(c.command))!;
+    expect(probe.command[2]).toContain('host: "10.96.0.99"');
+    expect(reads).not.toContain("kube-system/kube-dns");
+  });
+
+  it("without a preflight, reads kube-dns once per launcher and fails closed when it is unusable", async () => {
+    const h = await harness("run-dns-a");
+    let dnsReads = 0;
+    const readService = h.api.readService.bind(h.api);
+    h.api.readService = async (ns, name) => {
+      if (ns === "kube-system") dnsReads += 1;
+      return readService(ns, name);
+    };
+    await h.launcher.launch(h.spec);
+    await h.launcher.launch({ ...h.spec }); // idempotent relaunch
+    expect(dnsReads).toBe(1);
+
+    const g = await harness("run-dns-b");
+    g.api.put("service", "kube-system", { metadata: { name: "kube-dns" }, spec: { clusterIP: "None" } });
+    await expect(g.launcher.launch(g.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
+    expect(g.api.objects.has(`pod/wardby-coding/${g.names.pod}`)).toBe(false);
   });
 });

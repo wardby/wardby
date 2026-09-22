@@ -1,7 +1,15 @@
+import { EventEmitter } from "node:events";
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import type { V1Pod } from "@kubernetes/client-node";
 import { FakeKubernetesApi } from "./fake-kubernetes-api.js";
-import { describePreflightFailure, kubernetesPreflight, type CanaryResult } from "./kubernetes-preflight.js";
+import {
+  CANARY_SCRIPT,
+  describePreflightFailure,
+  kubernetesPreflight,
+  runKubernetesPreflight,
+  type CanaryResult,
+} from "./kubernetes-preflight.js";
 
 const IMAGE = `localhost:5001/wardby-coding-worker@sha256:${"a".repeat(64)}`;
 const config = { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" };
@@ -386,5 +394,78 @@ describe("kubernetesPreflight", () => {
     expect(describePreflightFailure(canaryError)).toBe("kubernetes_isolation_unsupported:canary");
 
     expect(describePreflightFailure(new Error("invalid kubeconfig"))).toBe("invalid kubeconfig");
+  });
+});
+
+describe("runKubernetesPreflight", () => {
+  it("returns the passed checks and the validated kube-dns ClusterIP", async () => {
+    expect(
+      await runKubernetesPreflight({ api: cluster(ok), config, workerImage: IMAGE, sleep: async () => {} }),
+    ).toEqual({
+      checks: ["namespace", "proxy-service", "cluster-dns", "worker-image", "canary"],
+      clusterDnsIp: "10.96.0.10",
+    });
+  });
+});
+
+describe("CANARY_SCRIPT", () => {
+  /** Runs the real script against a fake `net`/`dns`; `reachable(host, attempt)` decides each connect. */
+  async function runCanaryScript(
+    reachable: (host: string, attempt: number) => boolean,
+    timers: { setTimeout: (wake: () => void, ms: number) => unknown; Date: { now: () => number } } = {
+      setTimeout,
+      Date,
+    },
+  ) {
+    const attempts = new Map<string, number>();
+    const net = {
+      connect({ host }: { host: string }) {
+        const socket = Object.assign(new EventEmitter(), { destroy() {} });
+        const attempt = (attempts.get(host) ?? 0) + 1;
+        attempts.set(host, attempt);
+        setImmediate(() => socket.emit(reachable(host, attempt) ? "connect" : "error", new Error("blocked")));
+        return socket;
+      },
+    };
+    const dns = { promises: { lookup: async () => Promise.reject(new Error("ENOTFOUND")) } };
+    const lines: string[] = [];
+    let done!: () => void;
+    const printed = new Promise<void>((r) => (done = r));
+    runInNewContext(CANARY_SCRIPT, {
+      require: (name: string) => (name === "node:net" ? net : dns),
+      process: { env: { WARDBY_CANARY_PROXY_IP: "10.96.0.50", WARDBY_CANARY_CLUSTER_DNS_IP: "10.96.0.10" } },
+      console: {
+        log: (line: string) => {
+          lines.push(line);
+          done();
+        },
+      },
+      ...timers,
+    });
+    await printed;
+    return { output: JSON.parse(lines[0]) as { wardbyCanary: CanaryResult }, attempts };
+  }
+
+  it("waits for cluster DNS to be blocked before probing, then reports all five", async () => {
+    // Policy programmed after two probes: early attempts connect, like a pod that starts before its policy.
+    const { output, attempts } = await runCanaryScript(
+      (host, attempt) => host === "10.96.0.50" || (host === "10.96.0.10" && attempt <= 2),
+    );
+    expect(output).toEqual({ wardbyCanary: ok });
+    expect(attempts.get("10.96.0.10")).toBe(4); // 2 connected + 1 blocked settle attempt + the real probe
+  });
+
+  it("reports clusterDns true when the policy is never enforced within the settle window", async () => {
+    let clock = 0;
+    const timers = {
+      setTimeout: (wake: () => void, ms: number) => {
+        clock += ms;
+        return setImmediate(wake);
+      },
+      Date: { now: () => clock },
+    };
+    const { output, attempts } = await runCanaryScript(() => true, timers);
+    expect(output.wardbyCanary.clusterDns).toBe(true);
+    expect(attempts.get("10.96.0.10")).toBe(41); // 40 settle attempts over 20 s, then the real probe
   });
 });

@@ -5,6 +5,7 @@
  * before the worker is allowed to start (the seeded-marker gate).
  */
 import { createHash } from "node:crypto";
+import { isIP } from "node:net";
 import type {
   V1Container,
   V1NetworkPolicy,
@@ -33,6 +34,11 @@ export const WORKER_CONTAINER = "worker";
 export const STORAGE_ROOT = "/run/wardby/storage";
 export const KEEPER_SEEDED_MARKER = `${STORAGE_ROOT}/input/.seeded`;
 export const PROXY_POD_LABEL = { "app.kubernetes.io/name": "wardby-coding-proxy" } as const;
+/** The cluster DNS Service: its ClusterIP is "another pod" that a run's policy must block. */
+export const CLUSTER_DNS_NAMESPACE = "kube-system";
+export const CLUSTER_DNS_SERVICE = "kube-dns";
+/** Exit code of the enforcement probe when the connect succeeded (policy not yet enforced). */
+export const ENFORCEMENT_PROBE_CONNECTED = 3;
 const WORKER_SERVICE_ACCOUNT = "wardby-coding-worker";
 const RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/;
 
@@ -441,4 +447,22 @@ export function assertRunNetworkPolicyMatches(actual: V1NetworkPolicy, expected:
     return { labels: p.metadata?.labels ?? {}, spec };
   };
   if (JSON.stringify(canonical(view(actual))) !== JSON.stringify(canonical(view(expected)))) throw isolationError();
+}
+
+/**
+ * A `node -e` script (argv only, never a shell) that tries one TCP connect to
+ * `<clusterDnsIp>:53` with a 1 s timeout: exits 0 when blocked (error or
+ * timeout) and ENFORCEMENT_PROBE_CONNECTED when it connects. The IP is
+ * validated and embedded as a JSON string literal.
+ */
+export function enforcementProbeScript(clusterDnsIp: string): string {
+  if (isIP(clusterDnsIp) === 0) throw isolationError();
+  return [
+    'const socket = require("node:net").connect({ host: ' +
+      JSON.stringify(clusterDnsIp) +
+      ", port: 53, timeout: 1000 });",
+    `socket.once("connect", () => { socket.destroy(); process.exit(${ENFORCEMENT_PROBE_CONNECTED}); });`,
+    'socket.once("timeout", () => { socket.destroy(); process.exit(0); });',
+    'socket.once("error", () => process.exit(0));',
+  ].join("\n");
 }

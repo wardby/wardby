@@ -11,9 +11,10 @@
  * Containers in a pod start together, so the worker cannot simply be started
  * later the way Docker's is. Instead its command waits for a seeded marker
  * the launcher writes through the keeper only after the pod and policy have
- * been read back and attested against the canonical builders and the
- * workspace and input have been seeded. Until that gate opens, nothing
- * untrusted runs.
+ * been read back and attested against the canonical builders, the pod's
+ * NetworkPolicy is observed to be enforced (CNIs program a new pod's policy
+ * a few seconds after it starts), and the workspace and input have been
+ * seeded. Until that gate opens, nothing untrusted runs.
  */
 import { spawn } from "node:child_process";
 import { copyFile, lstat, mkdtemp, rm } from "node:fs/promises";
@@ -22,6 +23,7 @@ import { join, resolve, sep } from "node:path";
 import { PassThrough, Writable, type Readable } from "node:stream";
 import { finished } from "node:stream/promises";
 import { createHash } from "node:crypto";
+import { isIP } from "node:net";
 import type { V1ConfigMap, V1Pod } from "@kubernetes/client-node";
 import type { KubernetesJobConfig } from "../../config/providers.js";
 import { logger } from "../../core/logger.js";
@@ -29,6 +31,8 @@ import { MAX_CODING_ARTIFACT_BYTES, parseCodingAgentOutputJson } from "../../cod
 import { SAFE_WORKER_DIAGNOSTIC } from "./docker.js";
 import { KubernetesAlreadyExistsError, KubernetesConflictError, type KubernetesApi } from "./kubernetes-api.js";
 import {
+  CLUSTER_DNS_NAMESPACE,
+  CLUSTER_DNS_SERVICE,
   KEEPER_CONTAINER,
   KEEPER_SEEDED_MARKER,
   KUBERNETES_ISOLATION_ERROR,
@@ -39,6 +43,7 @@ import {
   buildCapabilitySecret,
   buildRunNetworkPolicy,
   buildRunPod,
+  enforcementProbeScript,
   kubernetesRunNames,
   runLabels,
   validateKubernetesSpec,
@@ -57,6 +62,10 @@ const MAX_WORKSPACE_ENTRIES = 100_000;
 const MAX_RECORD_ATTEMPTS = 5;
 const READY_POLL_MS = 250;
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
+const DEFAULT_ENFORCEMENT_TIMEOUT_MS = 30_000;
+const ENFORCEMENT_POLL_MS = 500;
+/** Bound for one enforcement probe exec (the probe itself gives up after 1 s). */
+const ENFORCEMENT_EXEC_TIMEOUT_MS = 10_000;
 /** Bound for small keeper commands (seeded marker, result artifact read). */
 const SHORT_EXEC_TIMEOUT_MS = 60_000;
 const FATAL_WAITING_REASONS = new Set([
@@ -97,16 +106,26 @@ interface RunNames {
   secret: string;
 }
 
+export interface KubernetesClusterInfo {
+  /** The kube-dns ClusterIP: "another pod" a run's policy must block. */
+  clusterDnsIp: string;
+}
+
 export interface KubernetesJobLauncherOptions {
   api: KubernetesApi;
   config: KubernetesJobConfig;
   workspaceRoot: string; // same root the VCS provider prepares workspaces under
   resolveCapability: (runId: string) => Promise<string>;
-  /** Cluster preflight run once before the first launch; failure fails every launch (Task 6 supplies it). */
-  preflight?: () => Promise<void>;
+  /**
+   * Cluster preflight run once before the first launch; failure fails every launch. It may return the
+   * kube-dns ClusterIP it validated, which the enforcement gate probes; otherwise the launcher reads it once.
+   */
+  preflight?: () => Promise<KubernetesClusterInfo | void>;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
   readyTimeoutMs?: number; // default 120_000
+  /** How long to wait for the run's NetworkPolicy to be enforced before seeding. Default 30_000. */
+  enforcementTimeoutMs?: number;
   createArchive?: (directory: string) => { stream: Readable; done: Promise<number> }; // default: host `tar`
   onWarning?: (message: string) => void;
 }
@@ -298,7 +317,8 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   private readonly readyTimeoutMs: number;
   private readonly createArchive: (directory: string) => { stream: Readable; done: Promise<number> };
   private readonly warn: (message: string) => void;
-  private preflightResult?: Promise<void>;
+  private readonly enforcementTimeoutMs: number;
+  private preflightResult?: Promise<KubernetesClusterInfo>;
 
   constructor(private readonly options: KubernetesJobLauncherOptions) {
     this.api = options.api;
@@ -308,13 +328,14 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     this.now = options.now ?? Date.now;
     this.sleep = options.sleep ?? ((ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)));
     this.readyTimeoutMs = options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
+    this.enforcementTimeoutMs = options.enforcementTimeoutMs ?? DEFAULT_ENFORCEMENT_TIMEOUT_MS;
     this.createArchive = options.createArchive ?? hostTarArchive;
     this.warn = options.onWarning ?? ((message) => kubernetesLog.warn(message));
   }
 
   async launch(spec: JobSpec): Promise<JobHandle> {
     validateKubernetesSpec(spec);
-    await this.runPreflight();
+    const cluster = await this.runPreflight();
     const names = kubernetesRunNames(spec.runId);
     const handle: JobHandle = { backend: BACKEND, id: `${this.namespace}/${names.token}` };
     const specHash = stableSpecHash(spec);
@@ -340,7 +361,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       return this.existingLaunch(raced.record, specHash, handle);
     }
     try {
-      await this.provision(spec, names, record);
+      await this.provision(spec, names, record, cluster);
     } catch (error) {
       // Record the failure before deleting the pod, so a replica that observes "no pod" in between
       // can't record `lost` first and have this more specific outcome dropped.
@@ -428,15 +449,39 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   // -------------------------------------------------------------------------
   // Launch
 
-  private runPreflight(): Promise<void> {
+  /** Memoized: the preflight (or, without one, a single kube-dns read) runs once per launcher. */
+  private runPreflight(): Promise<KubernetesClusterInfo> {
     this.preflightResult ??= (async () => {
       try {
-        await this.options.preflight?.();
+        let clusterDnsIp = (await this.options.preflight?.())?.clusterDnsIp;
+        if (clusterDnsIp === undefined) {
+          const service = await this.api.readService(CLUSTER_DNS_NAMESPACE, CLUSTER_DNS_SERVICE);
+          clusterDnsIp = service?.spec?.clusterIP;
+        }
+        if (!clusterDnsIp || isIP(clusterDnsIp) === 0) throw new Error("kubernetes_cluster_dns_unavailable");
+        return { clusterDnsIp };
       } catch (error) {
         throw errorWithCode(KUBERNETES_ISOLATION_ERROR, error);
       }
     })();
     return this.preflightResult;
+  }
+
+  /**
+   * Waits until the run's NetworkPolicy is enforced on this pod: the keeper (same network namespace as
+   * the worker) must be unable to reach the cluster DNS Service. Anything but a clean "blocked" retries.
+   */
+  private async waitForPolicyEnforcement(names: RunNames, cluster: KubernetesClusterInfo): Promise<void> {
+    const command = ["node", "-e", enforcementProbeScript(cluster.clusterDnsIp)];
+    const started = this.now();
+    for (;;) {
+      const exitCode = await this.api.exec(this.namespace, names.pod, KEEPER_CONTAINER, command, {
+        timeoutMs: ENFORCEMENT_EXEC_TIMEOUT_MS,
+      });
+      if (exitCode === 0) return;
+      if (this.now() - started >= this.enforcementTimeoutMs) throw new Error("kubernetes_policy_not_enforced");
+      await this.sleep(ENFORCEMENT_POLL_MS);
+    }
   }
 
   private existingLaunch(record: RunRecord, specHash: string, handle: JobHandle): JobHandle {
@@ -447,7 +492,12 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     return structuredClone(handle);
   }
 
-  private async provision(spec: JobSpec, names: RunNames, record: RunRecord): Promise<void> {
+  private async provision(
+    spec: JobSpec,
+    names: RunNames,
+    record: RunRecord,
+    cluster: KubernetesClusterInfo,
+  ): Promise<void> {
     const { runtimeClassName, proxyService } = this.options.config;
     if (!runtimeClassName) {
       this.warn(
@@ -476,6 +526,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     if (!actualPod || !actualPolicy) throw new Error(KUBERNETES_ISOLATION_ERROR);
     assertRunPodMatches(actualPod, pod);
     assertRunNetworkPolicyMatches(actualPolicy, policy);
+    await this.waitForPolicyEnforcement(names, cluster);
 
     const budget = this.transferBudgetMs(record);
     await this.seedDirectory(names, this.runWorkspace(spec.runId), WORKSPACE_STORAGE, budget);

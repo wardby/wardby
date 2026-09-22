@@ -12,6 +12,8 @@ import { isIP } from "node:net";
 import type { KubernetesJobConfig } from "../../config/providers.js";
 import type { KubernetesApi } from "./kubernetes-api.js";
 import {
+  CLUSTER_DNS_NAMESPACE,
+  CLUSTER_DNS_SERVICE,
   KUBERNETES_ISOLATION_ERROR,
   WORKER_CONTAINER,
   buildRunNetworkPolicy,
@@ -40,8 +42,6 @@ export interface CanaryResult {
 
 const DEFAULT_TIMEOUT_MS = 90_000;
 const DEFAULT_CLEANUP_TIMEOUT_MS = 15_000;
-const CLUSTER_DNS_NAMESPACE = "kube-system";
-const CLUSTER_DNS_SERVICE = "kube-dns";
 const POLL_INTERVAL_MS = 500;
 const LOG_TAIL_LINES = 20;
 const LOG_LIMIT_BYTES = 4096;
@@ -53,6 +53,8 @@ const CANARY_KEYS = Object.keys(EXPECTED).sort();
  * Runs in the worker image under the run policy; prints exactly one `{"wardbyCanary":{...}}` line.
  * `dns` checks in-pod resolution; `clusterDns` checks the policy itself (a TCP connect to another
  * pod, the cluster DNS Service), which a namespace-wide allow-DNS policy would reopen.
+ * CNIs program a new pod's policy a few seconds after it starts, so the script first waits (up to
+ * 20 s) for the cluster DNS connect to be blocked; if it never is, `clusterDns` reports true.
  */
 export const CANARY_SCRIPT = [
   'const net = require("node:net");',
@@ -70,7 +72,15 @@ export const CANARY_SCRIPT = [
   "    });",
   '    socket.once("error", () => done(false));',
   "  });",
+  "const settle = async () => {",
+  "  const until = Date.now() + 20000;",
+  "  while (Date.now() < until) {",
+  "    if (!(await tcp(process.env.WARDBY_CANARY_CLUSTER_DNS_IP, 53))) return;",
+  "    await new Promise((wake) => setTimeout(wake, 500));",
+  "  }",
+  "};",
   "(async () => {",
+  "  await settle();",
   "  const wardbyCanary = {",
   '    dns: await dns.lookup("kubernetes.default.svc.cluster.local").then(',
   "      () => true,",
@@ -269,7 +279,7 @@ async function runChecks(
   passed: string[],
   timeoutMs: number,
   cleanupTimeoutMs: number,
-): Promise<void> {
+): Promise<string> {
   const { api, config, workerImage } = options;
 
   await runCheck("namespace", async () => {
@@ -294,13 +304,26 @@ async function runChecks(
 
   await runCanary(options, state, proxyIp, clusterDnsIp, timeoutMs, cleanupTimeoutMs);
   passed.push("canary");
+  return clusterDnsIp;
+}
+
+export interface KubernetesPreflightResult {
+  checks: string[];
+  /** The validated kube-dns ClusterIP; the launcher probes it to wait for each run's policy. */
+  clusterDnsIp: string;
+}
+
+/** Throws kubernetes_isolation_unsupported:<check> on the first failed check; returns the checks that passed. */
+export async function kubernetesPreflight(options: KubernetesPreflightOptions): Promise<string[]> {
+  return (await runKubernetesPreflight(options)).checks;
 }
 
 /**
  * Throws kubernetes_isolation_unsupported:<check> on the first failed check
- * (`:timeout` when the whole preflight exceeds `timeoutMs`); returns the checks that passed.
+ * (`:timeout` when the whole preflight exceeds `timeoutMs`); returns the checks that passed and
+ * the cluster DNS IP it validated.
  */
-export async function kubernetesPreflight(options: KubernetesPreflightOptions): Promise<string[]> {
+export async function runKubernetesPreflight(options: KubernetesPreflightOptions): Promise<KubernetesPreflightResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const cleanupTimeoutMs = options.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS;
   const state: CanaryState = { namespace: options.config.namespace, createInFlight: false, finished: false };
@@ -308,8 +331,11 @@ export async function kubernetesPreflight(options: KubernetesPreflightOptions): 
 
   let outcome: unknown;
   let failed = false;
+  let clusterDnsIp = "";
   try {
-    await within(runChecks(options, state, passed, timeoutMs, cleanupTimeoutMs), timeoutMs, () => failure("timeout"));
+    clusterDnsIp = await within(runChecks(options, state, passed, timeoutMs, cleanupTimeoutMs), timeoutMs, () =>
+      failure("timeout"),
+    );
   } catch (error) {
     failed = true;
     outcome = error;
@@ -329,7 +355,7 @@ export async function kubernetesPreflight(options: KubernetesPreflightOptions): 
     }
   }
   if (failed) throw outcome;
-  return passed;
+  return { checks: passed, clusterDnsIp };
 }
 
 function shortMessage(error: unknown): string {
