@@ -362,6 +362,10 @@ model CodingRun {
   diagnosticId      String?
   workerImage       String?
   budgetReservedUsd Decimal             @db.Decimal(10, 6)
+  /// Phase 12 concurrency queue: set when start() found every coding slot
+  /// taken (CODING_MAX_CONCURRENT), cleared when the run claims a slot. A
+  /// pending run with queuedAt set is waiting, not orphaned.
+  queuedAt          DateTime?
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt
   proxySession      CodingProxySession?
@@ -378,6 +382,7 @@ model CodingRun {
 
   @@index([jobBackend, jobHandle])
   @@index([failureCategory])
+  @@index([queuedAt])
   @@index([rootCodingRunId])
 }
 
