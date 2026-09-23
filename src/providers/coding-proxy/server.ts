@@ -131,7 +131,12 @@ export async function startCodingProxyServer(
         sendError(response, error.status, error instanceof CodingProxyError ? error.code : error.message);
         return;
       }
-      proxyLog.error({ event: "request.failed" }, "coding proxy request failed");
+      // The client (an untrusted worker) still gets only "internal_error";
+      // the operator needs the reason. This log is control-plane side and the
+      // serializer redacts token-shaped values -- without it an upstream
+      // failure is indistinguishable from any other 500 (cost a live smoke
+      // several blind runs).
+      proxyLog.error({ event: "request.failed", err: error }, "coding proxy request failed");
       sendError(response, 500, "internal_error");
     });
   });

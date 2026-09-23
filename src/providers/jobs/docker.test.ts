@@ -35,6 +35,38 @@ describe("Docker artifact transfer", () => {
   });
 });
 
+describe("DockerCommandError diagnostics", () => {
+  it("keeps the daemon's wording out of the public message but carries it as a cause", () => {
+    const error = new DockerCommandError(1, false, false, {
+      subcommand: "network",
+      stderr: "Error response from daemon: No such container: wardby-coding-proxy",
+    });
+
+    expect(error.message).toBe("docker_command_failed:1");
+    expect(String((error.cause as Error).message)).toBe(
+      "docker network: Error response from daemon: No such container: wardby-coding-proxy",
+    );
+  });
+
+  it("redacts token-shaped values in the cause and survives empty stderr", () => {
+    const withToken = new DockerCommandError(1, false, false, {
+      subcommand: "run",
+      stderr: "denied: authentication required, token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB",
+    });
+    const causeMessage = String((withToken.cause as Error).message);
+
+    expect(causeMessage).not.toContain("ghp_0123456789abcdefghijklmnopqrstuvwxyzAB");
+    expect(causeMessage).toContain("[REDACTED]");
+    expect(
+      String((new DockerCommandError(1, false, false, { subcommand: "rm", stderr: "" }).cause as Error).message),
+    ).toBe("docker rm: (no stderr)");
+  });
+
+  it("omits the cause entirely when no detail was captured", () => {
+    expect(new DockerCommandError(null).cause).toBeUndefined();
+  });
+});
+
 describe("Docker cleanup classification", () => {
   it("treats an already-disconnected network attachment as missing", () => {
     expect(isMissingDockerResource("container abc is not connected to network wardby-net-run")).toBe(true);
