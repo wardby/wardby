@@ -286,7 +286,8 @@ describe.skipIf(!requested)("KubernetesJobLauncher against a real cluster", () =
       // the API server's ClusterIP (bypassing DNS entirely) and the coding proxy's deny port — both
       // by the proxy's Service ClusterIP and by the proxy pod's own IP (bypassing the Service/DNAT
       // path too — proving the block holds at the pod-IP level, which a NetworkPolicy actually
-      // operates on) — while it can reach the proxy on 8787, by pod IP and by its Service DNS name,
+      // operates on) — while it can reach the proxy on 8787, by pod IP and by its `hostAliases`
+      // entry (which resolves to the Service ClusterIP, not DNS — see `dns: false` below),
       // proving the allow side isn't an artifact of routing through a Service either. The whole
       // witness, proven at the pod-IP level as well as through the Service: the same destination pod
       // is reachable on 8787 and not on 8788, which only a programmed, port-scoped NetworkPolicy can

@@ -1,7 +1,8 @@
 # Phase 12 — Kubernetes coding launcher: live evidence
 
-Date: 2026-09-22. Branch `phase-12-foundations`. What a real cluster actually
-proved, recorded so nobody has to take the plan's word for it. The launcher
+Dates: 2026-09-22 and 2026-09-23, on branch `spec/gke-autopilot`. What a real
+cluster actually proved, recorded so nobody has to take the plan's word for
+it. The launcher
 itself is documented in [coding-worker-isolation.md](coding-worker-isolation.md);
 the design and its post-implementation corrections are in
 `docs/superpowers/specs/2026-09-22-phase-12-kubernetes-job-launcher-design.md`.
@@ -65,7 +66,8 @@ create and version read both work as `ClientNodeKubernetesApi` expects. It
 asserts the enforcement gate ran, and that the pod cannot reach the API
 server's ClusterIP or the coding proxy's deny port — by the proxy's Service
 ClusterIP and by the proxy pod's own IP — while it can reach the proxy on
-`8787`, by pod IP and by its Service DNS name.
+`8787`, by pod IP and by its `hostAliases` entry, which resolves to the
+Service ClusterIP — there is no DNS involved on either path.
 
 ## Live smoke runs
 
@@ -118,20 +120,35 @@ tests. They are recorded because "the tests passed" would have been misleading.
 
 ## Known gaps
 
-Carried into the follow-up plan (Plan 2b), which gates Plan 3:
+Carried into the follow-up plan (Plan 2b), which gates production use on GKE,
+not this branch's work:
 
 - Per-run record ConfigMaps are kept as tombstones by design and never deleted;
   failed launches leave records too. Needs garbage collection; this also
-  applies to any managed cluster the launcher is pointed at, including the
-  Autopilot proof below.
-- Plan 2b's remaining items are not a gate on this work: nothing below
+  applies to any managed cluster the launcher is pointed at, including a
+  GKE Autopilot deployment.
+- Plan 2b's remaining items are not a gate on this work: nothing here
   depends on them, and the launcher's out-of-namespace dependency
   (kube-system) is removed here rather than deferred.
-- **The one residual way "blocked" is not conclusive.** The witness is now the
-  coding proxy's deny port: the gate counts a probe only when 8787 connects and
-  8788 does not, and both halves are measured from inside the pod in the same
-  exec. What that still cannot separate is a _drop_ from an _exhausted accept
-  backlog_. The probe runs in the keeper, which shares a network namespace with
+- **GKE Autopilot admission conformance is UNPROVEN.** The claim that
+  Autopilot's admission controller leaves wardby's run pod unmutated rests on
+  `src/providers/jobs/fixtures/gke-autopilot-dry-run.json`, which is explicitly
+  `"provisional": true` and self-declared as written from Google's own
+  Autopilot documentation, not captured from a real cluster. A later task
+  (`npm run capture:autopilot`) is expected to replace it with a real
+  server-side dry-run capture and flip that flag to `false`. Until then,
+  nothing in this document proves Autopilot conformance.
+- **The remaining speculative residual: "blocked" is not fully conclusive.**
+  Two other, non-speculative ways were found by live testing on the kind
+  cluster and closed: a refused (RST) deny port reading the same as a dropped
+  one, and a drop occurring at the destination proxy's ingress rather than at
+  the run pod's own egress policy (closed by adding a runtime check that the
+  proxy's own `NetworkPolicy` actually admits coding-run on 8788). The witness
+  is the coding proxy's deny port: the gate counts a probe only when 8787
+  connects and 8788 does not, and both halves are measured from inside the pod
+  in the same exec. What that still cannot separate is a _drop_ from an
+  _exhausted accept backlog_. The probe runs in the keeper, which shares a
+  network namespace with
   the untrusted worker, so code holding the deny port's accept queue full
   would make 8788 read as blocked while 8787 still connects — the proven
   outcome — without any policy being enforced. This is speculative, not a live

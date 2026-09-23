@@ -104,9 +104,9 @@ there: it exists so that a coding-run pod which can reach the proxy on 8787 but
 not on 8788 has proven its own NetworkPolicy is programmed _and_ port-scoped.
 The proxy's policy deliberately allows ingress on 8788 from coding-run pods, so
 the run pod's own egress policy is the only thing that can block it. This tree's
-`manifests/` are cluster-agnostic; `manifests/overlays/` now holds more than the
-`kind` target (see `overlays/gke-autopilot/`), and renaming the directory is a
-follow-up.
+`manifests/` are cluster-agnostic; `manifests/overlays/` today holds only the
+`kind` target, but a follow-up task is expected to add a second overlay for
+GKE Autopilot (`overlays/gke-autopilot/`) reusing the same `base/`.
 
 ## What the preflight proves — and what to do if it fails
 
