@@ -1,0 +1,8 @@
+# GKE Autopilot target for the cluster-agnostic manifests in ../../base.
+# No project, cluster, region, or registry path appears here: the runtime image
+# digest is substituted at apply time exactly as up.sh does for kind.
+resources:
+  - ../../base
+  - proxy-dns-egress.yaml
+  - throwaway-database.yaml
+  - proxy-database-egress.yaml

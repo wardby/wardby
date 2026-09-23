@@ -1,0 +1,30 @@
+# Autopilot has no kube-dns: Cloud DNS is the only provider since
+# 1.25.9-gke.400, and a pod resolves through the node-local metadata endpoint
+# at 169.254.169.254:53. The base policy excepts 169.254.0.0/16 from its
+# internet rule and otherwise only permits kube-dns pods, so without this rule
+# the proxy cannot resolve any model provider's hostname and every coding run
+# fails at the first API call. NetworkPolicies are additive, so this opens
+# exactly port 53 to exactly that address and widens nothing else.
+#
+# Coding-run pods are unaffected: their own policy permits exactly one
+# destination (the proxy on 8787) and their dnsPolicy is None.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-coding-proxy-dns
+  namespace: wardby-coding
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-coding-proxy
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.254/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
