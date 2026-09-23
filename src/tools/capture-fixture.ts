@@ -31,7 +31,7 @@ import type { KubernetesApi } from "../providers/jobs/kubernetes-api.js";
 import { buildRunPod, undoApiServerDefaults } from "../providers/jobs/kubernetes-isolation.js";
 import { readProxyWitness } from "../providers/jobs/kubernetes-witness.js";
 import { diffMutations, type DryRunFixture } from "../providers/jobs/kubernetes-dry-run-fixture.js";
-import { platformProfile, type KubernetesPlatform } from "../providers/jobs/kubernetes-platform.js";
+import { platformProfile, tolerationMatches, type KubernetesPlatform } from "../providers/jobs/kubernetes-platform.js";
 import type { JobSpec } from "../providers/jobs/types.js";
 
 export const CAPTURE_REFUSED = "capture_refused";
@@ -79,16 +79,48 @@ export function stripServerMetadata(pod: V1Pod): V1Pod {
 
 /**
  * Whether the cluster's answer actually looks like this platform's admission
- * chain: it must have stamped at least one annotation the profile names. A
- * platform with no annotation allowance (today only `generic`, which is refused
- * earlier) has no fingerprint to check, and this returns undefined rather than
+ * chain. Annotations are checked first — a stamped annotation matching the
+ * profile's prefixes is the strongest signal, because nothing else adds them.
+ * But annotations are not guaranteed: a real server-side dry run against GKE
+ * Autopilot 1.35.8-gke.1036000 (wardby-phase12 cluster, 2026-09-23) came back
+ * with NO autopilot.gke.io/* annotation at all on an already-conforming
+ * sandboxed pod, even though that prefix is Google's own documented signal.
+ * (dev.gvisor.* annotations DID show up on that same dry run, which is why
+ * they are also in the profile's allowance — but they are gVisor's, not
+ * Autopilot's, and a future non-Autopilot gVisor profile could share them, so
+ * they are not treated as an Autopilot fingerprint here.)
+ *
+ * The fallback is the honest signature for a sandboxed Autopilot pod instead:
+ * the gVisor nodeSelector together with the `sandbox.gke.io/runtime`
+ * toleration Autopilot's admission chain adds for a `runtimeClassName:
+ * gvisor` pod. Both are already profile data (`metadata.nodeSelector` /
+ * `metadata.tolerations`) — nothing about this platform is hardcoded here.
+ *
+ * A platform with no annotation allowance and no nodeSelector/toleration
+ * allowance either (today only `generic`, which is refused earlier) has no
+ * fingerprint to check at all, and this returns undefined rather than
  * inventing one.
  */
 export function platformFingerprint(platform: KubernetesPlatform, returned: V1Pod): string | undefined {
-  const prefixes = platformProfile(platform).metadata.podAnnotationKeyPrefixes;
-  if (prefixes.length === 0) return undefined;
+  const { podAnnotationKeyPrefixes, nodeSelector, tolerations } = platformProfile(platform).metadata;
   const annotations = Object.keys(returned.metadata?.annotations ?? {});
-  return annotations.find((key) => prefixes.some((prefix) => key.startsWith(prefix)));
+  const annotationMatch = annotations.find((key) => podAnnotationKeyPrefixes.some((prefix) => key.startsWith(prefix)));
+  if (annotationMatch !== undefined) return annotationMatch;
+
+  const nodeSelectorEntries = Object.entries(nodeSelector);
+  const nodeSelectorMatches =
+    nodeSelectorEntries.length > 0 &&
+    nodeSelectorEntries.every(([key, value]) => returned.spec?.nodeSelector?.[key] === value);
+  if (nodeSelectorMatches) {
+    const returnedTolerations = returned.spec?.tolerations ?? [];
+    const tolerationMatch = tolerations.find((allowed) =>
+      returnedTolerations.some((actual) => tolerationMatches(actual, allowed)),
+    );
+    if (tolerationMatch) {
+      return `nodeSelector ${JSON.stringify(nodeSelector)} + toleration ${tolerationMatch.key}=${String(tolerationMatch.value)}`;
+    }
+  }
+  return undefined;
 }
 
 export async function captureFixture(api: KubernetesApi, options: CaptureOptions): Promise<DryRunFixture> {
@@ -119,9 +151,12 @@ export async function captureFixture(api: KubernetesApi, options: CaptureOptions
 
   const fingerprint = platformFingerprint(platform, returned);
   if (fingerprint === undefined) {
-    const prefixes = platformProfile(platform).metadata.podAnnotationKeyPrefixes.join(", ");
+    const { podAnnotationKeyPrefixes, nodeSelector, tolerations } = platformProfile(platform).metadata;
+    const prefixes = podAnnotationKeyPrefixes.join(", ");
+    const tolerationKeys = tolerations.map((t) => t.key).join(", ");
     throw new CaptureRefusedError(
-      `the cluster did not answer like ${platform}: the dry-run response carries no annotation matching ${prefixes}. ` +
+      `the cluster did not answer like ${platform}: the dry-run response carries no annotation matching ${prefixes}, ` +
+        `and no nodeSelector matching ${JSON.stringify(nodeSelector)} combined with a toleration matching one of [${tolerationKeys}]. ` +
         `KUBERNETES_PLATFORM says what to capture, not what the cluster is — refusing to write a capture that would attest a platform this cluster may not be.`,
     );
   }

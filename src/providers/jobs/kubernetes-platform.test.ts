@@ -175,6 +175,7 @@ describe("normalizePlatformMetadata", () => {
     annotations: {
       "wardby.io/run-id": "run-1",
       "autopilot.gke.io/resource-adjustment": "{}",
+      "dev.gvisor.internal.seccomp.worker": "RuntimeDefault",
       "example.com/injected": "no",
     },
     spec: {
@@ -195,6 +196,8 @@ describe("normalizePlatformMetadata", () => {
     const after = view();
     normalizePlatformMetadata(autopilot, after);
     expect(after.labels).toEqual({ "app.kubernetes.io/managed-by": "wardby" });
+    // dev.gvisor.* (the seccomp/mount bookkeeping a real Autopilot dry run adds, measured
+    // 2026-09-23) is removed alongside autopilot.gke.io/*; an unrelated annotation is not.
     expect(after.annotations).toEqual({ "wardby.io/run-id": "run-1", "example.com/injected": "no" });
     expect(after.spec.nodeSelector).toBeUndefined();
     expect(after.spec.tolerations).toBeUndefined();
@@ -232,5 +235,29 @@ describe("normalizePlatformMetadata", () => {
     after.spec.nodeSelector = { "sandbox.gke.io/runtime": "none" };
     normalizePlatformMetadata(autopilot, after);
     expect(after.spec.nodeSelector).toEqual({ "sandbox.gke.io/runtime": "none" });
+  });
+
+  // Regression: a real server-side dry run against GKE Autopilot 1.35.8-gke.1036000
+  // (2026-09-23) adds this toleration alongside the gVisor one. Before this toleration was
+  // added to the profile's allowance, it survived normalization on the autopilot side and
+  // attestation failed a conforming, already-verified real pod.
+  it("removes the kubernetes.io/arch toleration Autopilot adds, under autopilot only", () => {
+    const archToleration = { key: "kubernetes.io/arch", operator: "Equal", value: "amd64", effect: "NoSchedule" };
+    const withArch = () => {
+      const built = view();
+      built.spec.tolerations = [...(built.spec.tolerations ?? []), archToleration];
+      return built;
+    };
+
+    const afterAutopilot = withArch();
+    normalizePlatformMetadata(autopilot, afterAutopilot);
+    expect(afterAutopilot.spec.tolerations).toBeUndefined();
+
+    // generic must stay exactly as strict as before: it forgives nothing, so the same
+    // toleration list survives normalization untouched (proving the fix is scoped to autopilot).
+    const beforeGeneric = withArch();
+    const afterGeneric = withArch();
+    normalizePlatformMetadata(generic, afterGeneric);
+    expect(afterGeneric).toEqual(beforeGeneric);
   });
 });

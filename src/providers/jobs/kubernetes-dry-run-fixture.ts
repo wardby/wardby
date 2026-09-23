@@ -32,6 +32,7 @@
  * launcher never asks a cluster what it is allowed to change.
  */
 import { readFileSync } from "node:fs";
+import { canonical } from "./kubernetes-isolation.js";
 import type { KubernetesPlatform } from "./kubernetes-platform.js";
 
 export interface PodMutation {
@@ -119,6 +120,15 @@ function escape(key: string): string {
  * anything else (including arrays) is replaced wholesale, which keeps a
  * toleration list or a container list readable as one op.
  *
+ * The equality check for that wholesale case goes through `canonical()` (recursive key
+ * sort), not a raw `JSON.stringify`: a captured pod's nested objects come back from a real
+ * API server with different key insertion order than `buildRunPod`'s own literals even when
+ * every value is identical, and a raw string compare would misread that as a genuine change —
+ * replacing an entire container or volume list with an opaque, unreviewable blob that a real
+ * platform rewrite could hide inside just as easily. `canonical()` makes the comparison see
+ * only actual value differences, while still emitting one "replace" op per array so the fixture
+ * stays readable.
+ *
  * Sorted by code point, not `localeCompare`: the result is committed to a file
  * and reviewed as a diff, so the order must not depend on the capturing
  * machine's locale (an ICU collation folds case together and orders
@@ -127,7 +137,9 @@ function escape(key: string): string {
 export function diffMutations(before: unknown, after: unknown, prefix = ""): PodMutation[] {
   const plain = (value: unknown) => value !== null && typeof value === "object" && !Array.isArray(value);
   if (!plain(before) || !plain(after)) {
-    return JSON.stringify(before) === JSON.stringify(after) ? [] : [{ op: "replace", path: prefix, value: after }];
+    return JSON.stringify(canonical(before)) === JSON.stringify(canonical(after))
+      ? []
+      : [{ op: "replace", path: prefix, value: after }];
   }
   const left = before as Record<string, unknown>;
   const right = after as Record<string, unknown>;

@@ -557,8 +557,20 @@ function normalizePod(
   return view;
 }
 
-/** Recursively sorts object keys and drops `undefined` values so key order and API-omitted fields never matter; array order is preserved. */
-function canonical(value: unknown): unknown {
+/**
+ * Recursively sorts object keys and drops `undefined` values so key order and API-omitted
+ * fields never matter; array order is preserved.
+ *
+ * Exported for kubernetes-dry-run-fixture.ts's `diffMutations`: a captured pod's nested objects
+ * (container resource requests, volume definitions, host aliases, ...) come back from a real
+ * cluster with different key insertion order than `buildRunPod`'s own object literals, even when
+ * every value is identical. Without canonicalizing first, `diffMutations`' array branch treats
+ * that key-order difference as a genuine change and replaces the WHOLE array (every container,
+ * every volume) with an opaque blob — exactly the failure mode its own doc comment warns a real
+ * platform rewrite could hide inside. `assertRunPodMatches` below is unaffected by this (it
+ * already canonicalizes before comparing); only the capture tool's mutation list was at risk.
+ */
+export function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((item) => canonical(item));
   if (value !== null && typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>)

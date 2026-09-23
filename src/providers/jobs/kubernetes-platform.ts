@@ -15,22 +15,18 @@
  * deep-compared by kubernetes-isolation.ts. The `generic` profile's lists are
  * empty, so it tolerates nothing beyond what shipped before profiles existed.
  *
- * PROVENANCE OF THE AUTOPILOT NUMBERS — read before trusting them. They are
- * DOCUMENTATION-SOURCED ONLY as of 2026-09-22, from Google's
- * autopilot-resource-requests, sandbox-pods, and autopilot-security pages.
- * They have NOT yet been confirmed against a real cluster. The dry-run capture
- * that will confirm them (src/tools/capture-autopilot-dry-run.ts, run with
- * `npm run capture:autopilot`) now exists, but it has not been run: no cluster
- * has been created yet, and its committed output —
- * fixtures/gke-autopilot-dry-run.json — is still marked `provisional: true`,
- * derived from the same documentation as the numbers here rather than from an
- * API server. Until that capture has run, treat every number and every injected
- * key below as an assumption. They fail closed if wrong — an unmodelled mutation
- * shows up as an unforgiven difference and fails attestation — but that is the
- * only reason it is safe to ship them unconfirmed, not a reason to stop
- * re-deriving them. Whoever runs the first real capture updates this paragraph
- * (kubernetes-autopilot-attestation.test.ts reports a named PENDING test until
- * they do).
+ * PROVENANCE OF THE AUTOPILOT NUMBERS. The resource band (`resources`, below)
+ * was originally DOCUMENTATION-SOURCED ONLY, from Google's
+ * autopilot-resource-requests and autopilot-security pages. It, and the
+ * `metadata` allowance, were both confirmed by a real server-side dry run
+ * against GKE Autopilot 1.35.8-gke.1036000 (wardby-phase12 cluster,
+ * 2026-09-23): a pod built with the numbers below came back with zero
+ * resource mutations, and the annotation-prefix, toleration and nodeSelector
+ * comments in `GKE_AUTOPILOT.metadata` cite exactly what that same dry run
+ * added. `fixtures/gke-autopilot-dry-run.json` now carries that capture with
+ * `provisional: false`; kubernetes-autopilot-attestation.test.ts's PENDING
+ * test names the state before a real capture existed, in case this ever
+ * regresses to a documentation-only fixture again.
  */
 import type { V1PodSpec, V1Toleration } from "@kubernetes/client-node";
 
@@ -148,12 +144,27 @@ const GKE_AUTOPILOT: KubernetesPlatformProfile = {
     explicitEphemeralStorage: true,
   },
   metadata: {
-    // autopilot.gke.io/* carries the resource-adjustment record and the warden version.
-    podAnnotationKeyPrefixes: ["autopilot.gke.io/"],
+    // autopilot.gke.io/* carries the resource-adjustment record and the warden version — that is
+    // Google's documented signal, but a real server-side dry run against GKE Autopilot
+    // 1.35.8-gke.1036000 (measured 2026-09-23, wardby-phase12 cluster) came back with NO
+    // autopilot.gke.io/* annotation of any kind on an already-conforming sandboxed pod. Kept here
+    // anyway (harmless if it never matches) in case a different Autopilot version reinstates it.
+    // dev.gvisor.* is what that same dry run actually added: one
+    // `dev.gvisor.internal.seccomp.<container>` annotation per container (recording gVisor's own
+    // RuntimeDefault seccomp default, since containerSecurity() only sets seccompProfile at the pod
+    // level) and one `dev.gvisor.spec.mount.<volume>.*` triple per Memory-medium emptyDir volume
+    // (recording gVisor's internal tmpfs translation of the "tmp"/"home" scratch volumes). Both are
+    // gVisor's own bookkeeping of what wardby already declared, not an admission rewrite.
+    podAnnotationKeyPrefixes: ["autopilot.gke.io/", "dev.gvisor."],
     podLabelKeyPrefixes: ["autopilot.gke.io/"],
-    // GKE adds the gVisor toleration itself for a pod with runtimeClassName: gvisor.
+    // GKE adds the gVisor toleration itself for a pod with runtimeClassName: gvisor, plus
+    // kubernetes.io/arch (also measured on the same real dry run, 2026-09-23): every Autopilot node
+    // pool tolerates architecture, so it stamps this on any pod without an explicit arch selector.
+    // Hardcoded to amd64 because that is what the current worker images and node pools are; if
+    // wardby ever runs on arm64 Autopilot nodes this needs a second capture and a second entry.
     tolerations: [
       { key: "sandbox.gke.io/runtime", operator: "Equal", value: GVISOR_RUNTIME_CLASS, effect: "NoSchedule" },
+      { key: "kubernetes.io/arch", operator: "Equal", value: "amd64", effect: "NoSchedule" },
     ],
     nodeSelector: { "sandbox.gke.io/runtime": GVISOR_RUNTIME_CLASS },
     // We set seccompProfile: RuntimeDefault ourselves, and the sandbox exemption only means Autopilot
@@ -279,7 +290,12 @@ export function describeMib(mib: number): string {
   return `${mib} MiB (${rendered} GiB)`;
 }
 
-function tolerationMatches(actual: V1Toleration, allowed: V1Toleration): boolean {
+/**
+ * Exported for src/tools/capture-fixture.ts: the fingerprint check that gates a capture needs to
+ * recognize the same "platform added this toleration" match the attestation comparison uses, so
+ * the two decisions cannot silently diverge.
+ */
+export function tolerationMatches(actual: V1Toleration, allowed: V1Toleration): boolean {
   return (
     actual.key === allowed.key &&
     actual.operator === allowed.operator &&

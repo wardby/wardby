@@ -60,6 +60,27 @@ describe("diffMutations", () => {
     // The locale-aware collation this deliberately avoids folds case together instead.
     expect([...paths].sort((x, y) => x.localeCompare(y))).not.toEqual(paths);
   });
+
+  // Regression measured on a real cluster: a captured pod's arrays (containers, volumes,
+  // hostAliases) come back from a real API server with nested objects in different KEY ORDER
+  // than buildRunPod's own literals (e.g. resources.requests as {cpu, ephemeral-storage, memory}
+  // instead of {cpu, memory, ephemeral-storage}) even when every value is identical. A raw
+  // `JSON.stringify` compare on the whole array treats that as a change and replaces the entire
+  // array with an opaque blob — exactly the failure mode this function's own doc comment warns a
+  // genuine platform rewrite could hide inside.
+  it("does not flag an array as changed when only nested key order differs", () => {
+    const before = { spec: { containers: [{ resources: { cpu: "1", memory: "2", ["ephemeral-storage"]: "3" } }] } };
+    const after = { spec: { containers: [{ resources: { ["ephemeral-storage"]: "3", cpu: "1", memory: "2" } }] } };
+    expect(diffMutations(before, after)).toEqual([]);
+  });
+
+  it("still flags an array as changed when a value inside it actually differs", () => {
+    const before = { spec: { containers: [{ resources: { cpu: "1" } }] } };
+    const after = { spec: { containers: [{ resources: { cpu: "2" } }] } };
+    expect(diffMutations(before, after)).toEqual([
+      { op: "replace", path: "/spec/containers", value: after.spec.containers },
+    ]);
+  });
 });
 
 describe("loadDryRunFixture", () => {
