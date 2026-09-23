@@ -36,6 +36,7 @@ try {
     "LICENSE",
     "NOTICE",
     "README.md",
+    "bin/wardby.js",
     "dist/wardby-bin.js",
     "dist/cli.js",
     "prisma/schema.prisma",

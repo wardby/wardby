@@ -45,3 +45,22 @@ Before production deployment, review [runtime architecture](architecture-runtime
 [security deployment guide](security-deployment.md). A self-hosted operator is
 responsible for equivalent edge, network, database, secret-management,
 monitoring, backup, and recovery controls in the selected platform.
+
+## npm releases
+
+The first public release reserves the package and must be published by an npm
+member of the `wardby` organization with publishing 2FA enabled:
+
+```sh
+npm login
+npm run test:package
+npm run build
+npm publish --access public
+```
+
+After `@wardby/cli` exists, configure its npm trusted publisher with GitHub
+organization `wardby`, repository `wardby`, and workflow filename
+`publish-npm.yml`; allow direct `npm publish`. Future versions are published by
+creating a GitHub Release whose tag exactly matches `v<package.json version>`.
+The workflow uses npm OIDC rather than a stored token. A public repository and
+public package receive npm provenance automatically.
