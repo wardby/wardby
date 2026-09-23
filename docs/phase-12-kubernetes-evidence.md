@@ -102,12 +102,17 @@ Carried into the follow-up plan (Plan 2b), which gates Plan 3:
   8788 does not, and both halves are measured from inside the pod in the same
   exec. What that still cannot separate is a _drop_ from an _exhausted accept
   backlog_. The probe runs in the keeper, which shares a network namespace with
-  the untrusted worker, so a worker holding the deny port's accept queue full
+  the untrusted worker, so code holding the deny port's accept queue full
   would make 8788 read as blocked while 8787 still connects — the proven
   outcome — without any policy being enforced. This is speculative, not a live
-  finding: it requires the policy to _already_ be unenforced (i.e. the attacker
-  already has the open network the gate exists to deny, so it buys reachability
-  it already has rather than obtaining it), and it requires out-racing an
+  finding. Nothing of the agent's runs before the gate opens -- the worker
+  container executes wardby's gate script until the marker appears -- so
+  attacker code at that moment means a hostile worker image
+  (`agents:admin`-gated) or a compromised base. It requires the policy to
+  _already_ be unenforced, so the network a fake would win is network the
+  attacker already has, though a faked proof does buy more than that: the gate
+  also withholds the seeded workspace and input, and the release itself. And it
+  requires out-racing an
   accept-and-close loop that holds no connection open, with no `CAP_NET_RAW`
   and no raw sockets in the pod. Closing it properly means evidence the deny
   port produced a distinguishable _response_, not merely silence — which a
