@@ -138,3 +138,42 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+---
+# The load balancer's health check, stated explicitly because both of GKE's
+# defaults are wrong for this server.
+#
+# GKE derives an HTTP check against "/" from the Service, and the readinessProbe
+# being a TCP one does not change that. Against this server that fails twice
+# over, and it was measured from inside the pod rather than reasoned about:
+#
+#   GET /                               Host: <pod ip>   -> 403
+#   GET /.well-known/oauth-protected-resource  Host: <pod ip>   -> 403
+#   GET /.well-known/oauth-protected-resource  Host: app...     -> 200
+#   GET /                               Host: app...     -> 404
+#
+# The 403 is the MCP transport's host check -- DNS-rebinding protection, which
+# refuses any request whose Host is not the canonical one. So the check needs
+# BOTH the canonical Host header and a path the server actually serves, and the
+# symptom of getting either wrong is a healthy pod behind a load balancer
+# answering "503 unconditional drop overload".
+#
+# The discovery document is the right probe target: it is unauthenticated by
+# design, it is cheap, and a 200 from it means the server is genuinely serving
+# rather than merely holding a socket open, which is all a TCP check would prove.
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: wardby-control-plane
+  namespace: wardby-coding
+spec:
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 8080
+        host: wardby-control-plane-hostname
+        requestPath: /.well-known/oauth-protected-resource
+  targetRef:
+    group: ""
+    kind: Service
+    name: wardby-control-plane
