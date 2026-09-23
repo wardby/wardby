@@ -55,3 +55,11 @@ output "kubectl_context_command" {
   description = "Fetches credentials and creates the kubectl context the launcher config names."
   value       = "gcloud container clusters get-credentials ${google_container_cluster.runs.name} --region ${var.region} --project ${var.project_id}"
 }
+
+output "project_id" {
+  value = var.project_id
+}
+
+output "region" {
+  value = var.region
+}
