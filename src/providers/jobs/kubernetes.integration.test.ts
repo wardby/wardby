@@ -87,7 +87,7 @@ describe.skipIf(!requested)("KubernetesJobLauncher against a real cluster", () =
       rawNetworking = kubeConfig.makeApiClient(NetworkingV1Api);
 
       const result = await runKubernetesPreflight({ api: rawApi, config, workerImage });
-      cluster = { clusterDnsIp: result.clusterDnsIp };
+      cluster = { proxyIp: result.proxyIp };
 
       // The API server's Service ClusterIP (the "default/kubernetes" Service every cluster provides).
       const apiServerService = await rawApi.readService("default", "kubernetes");
@@ -297,7 +297,7 @@ describe.skipIf(!requested)("KubernetesJobLauncher against a real cluster", () =
           'token:fs.existsSync("/var/run/secrets/kubernetes.io/serviceaccount/token"),',
           'dns:await dns.lookup("kubernetes.default.svc.cluster.local").then(()=>true,()=>false),',
           'internet:await tcp("1.1.1.1",443),metadata:await tcp("169.254.169.254",80),',
-          `clusterDnsIp:await tcp(${JSON.stringify(cluster.clusterDnsIp)},53),`,
+          `proxyDeny:await tcp(${JSON.stringify(cluster.proxyIp)},8788),`,
           `apiServerIp:await tcp(${JSON.stringify(apiServerIp)},443),`,
           `dnsPodIp:await tcp(${JSON.stringify(dnsPodIp)},53),`,
           `proxyPodIp:await tcp(${JSON.stringify(proxyPodIp)},8787),`,
@@ -312,7 +312,7 @@ describe.skipIf(!requested)("KubernetesJobLauncher against a real cluster", () =
         dns: false,
         internet: false,
         metadata: false,
-        clusterDnsIp: false,
+        proxyDeny: false,
         apiServerIp: false,
         dnsPodIp: false,
         proxyPodIp: true,

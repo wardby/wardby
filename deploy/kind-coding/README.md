@@ -96,21 +96,24 @@ npm run cli -- coding preflight
 Expected output:
 
 ```
-coding preflight passed (namespace, proxy-service, cluster-dns, worker-image, canary) for localhost:5001/wardby-coding-worker@sha256:...
+coding preflight passed (namespace, proxy-service, worker-image, canary) for localhost:5001/wardby-coding-worker@sha256:...
 ```
 
 ## What the preflight proves — and what to do if it fails
 
 `wardby coding preflight` (`src/providers/jobs/kubernetes-preflight.ts`) runs
-five checks in order: the namespace exists, the proxy Service exists, the
-cluster's `kube-dns` Service can be read (via
-`launcher-dns-reader-role.yaml`'s Role), the worker image is a registry
-digest, and — the check that matters most — a **canary** pod built from the
-same pod spec and `NetworkPolicy` a real coding run gets. The canary proves
-that from inside that policy: DNS resolution is blocked, a direct TCP
-connect to the cluster DNS Service's ClusterIP is blocked, the internet is
+four checks in order: the namespace exists, the proxy Service is a usable
+enforcement witness (it exists, has a ClusterIP, exposes both the proxy port
+`8787` and the deny port `8788`, and has a ready endpoint serving both), the
+worker image is a registry digest, and — the check that matters most — a
+**canary** pod built from the same pod spec and `NetworkPolicy` a real coding
+run gets. The canary proves that from inside that policy: DNS resolution is
+blocked, a TCP connect to the proxy's deny port is blocked, the internet is
 blocked, the cloud metadata address is blocked, and the coding proxy _is_
-reachable. If even one of those five conditions doesn't hold, the whole
+reachable on `8787`. Reaching `8787` while `8788` is blocked is what makes the
+result decisive: a policy denial drops rather than rejects, so "8788 did not
+answer" alone would also be what a dead proxy looks like. If even one of those
+five conditions doesn't hold, the whole
 point of running coding agents in Kubernetes — that a compromised or
 malicious agent can't exfiltrate data or reach the metadata server — doesn't
 hold either.
@@ -158,16 +161,17 @@ deliberate, recorded decision rather than a silent workaround.
 
 ## RBAC notes
 
-Three roles ship in `manifests/base/` with **no binding**:
+Two roles ship in `manifests/base/` with **no binding**:
 
 - `launcher-role.yaml`'s Role `wardby-coding-launcher` (in `wardby-coding`)
   — only the verbs `ClientNodeKubernetesApi`
   (`src/providers/jobs/kubernetes-client.ts`) actually issues: no
   `list`/`watch` on `pods` (the seam only ever creates, reads, or deletes
   one named pod), no `get` on `secrets` (it only ever creates or deletes
-  one).
-- `launcher-dns-reader-role.yaml`'s Role `wardby-coding-dns-reader` (in
-  `kube-system`), scoped to `get` on the single named Service `kube-dns`.
+  one). It also grants `get` on `endpoints`, scoped by `resourceNames` to the
+  single object `wardby-coding-proxy` — the enforcement witness read
+  (`src/providers/jobs/kubernetes-witness.ts`). Nothing in `kube-system` is
+  read any more.
 - `launcher-namespace-reader.yaml`'s **ClusterRole**
   `wardby-coding-namespace-reader`, scoped to `get` on the single named
   Namespace `wardby-coding`. This has to be a ClusterRole, not a Role: the

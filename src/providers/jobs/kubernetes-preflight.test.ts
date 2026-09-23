@@ -16,11 +16,27 @@ const config = { namespace: "wardby-coding", proxyService: "wardby-coding-proxy"
 
 function cluster(canary: CanaryResult | "no-output") {
   const api = new FakeKubernetesApi();
-  api.put("service", "wardby-coding", { metadata: { name: "wardby-coding-proxy" }, spec: { clusterIP: "10.96.0.50" } });
-  api.put("service", "kube-system", { metadata: { name: "kube-dns" }, spec: { clusterIP: "10.96.0.10" } });
-  api.put("endpoints", "kube-system", {
-    metadata: { name: "kube-dns" },
-    subsets: [{ addresses: [{ ip: "10.244.0.2" }], ports: [{ port: 53, protocol: "UDP" }] }],
+  api.put("service", "wardby-coding", {
+    metadata: { name: "wardby-coding-proxy" },
+    spec: {
+      clusterIP: "10.96.0.50",
+      ports: [
+        { name: "proxy", port: 8787, protocol: "TCP" },
+        { name: "deny", port: 8788, protocol: "TCP" },
+      ],
+    },
+  });
+  api.put("endpoints", "wardby-coding", {
+    metadata: { name: "wardby-coding-proxy" },
+    subsets: [
+      {
+        addresses: [{ ip: "10.244.0.5" }],
+        ports: [
+          { name: "proxy", port: 8787, protocol: "TCP" },
+          { name: "deny", port: 8788, protocol: "TCP" },
+        ],
+      },
+    ],
   });
   const originalCreate = api.createPod.bind(api);
   api.createPod = async (ns, body: V1Pod) => {
@@ -47,7 +63,7 @@ function cluster(canary: CanaryResult | "no-output") {
   };
   return api;
 }
-const ok: CanaryResult = { dns: false, clusterDns: false, internet: false, metadata: false, proxy: true };
+const ok: CanaryResult = { dns: false, proxyDeny: false, internet: false, metadata: false, proxy: true };
 
 function leftovers(api: FakeKubernetesApi): string[] {
   return [...api.objects.keys()].filter((k) => !k.startsWith("service/") && !k.startsWith("endpoints/"));
@@ -59,7 +75,6 @@ describe("kubernetesPreflight", () => {
     expect(await kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} })).toEqual([
       "namespace",
       "proxy-service",
-      "cluster-dns",
       "worker-image",
       "canary",
     ]);
@@ -70,7 +85,7 @@ describe("kubernetesPreflight", () => {
     ["internet reachable", { ...ok, internet: true }],
     ["metadata reachable", { ...ok, metadata: true }],
     ["dns resolves", { ...ok, dns: true }],
-    ["cluster DNS reachable", { ...ok, clusterDns: true }],
+    ["the proxy deny port reachable", { ...ok, proxyDeny: true }],
     ["proxy unreachable", { ...ok, proxy: false }],
   ])("fails closed when %s", async (_label, result) => {
     await expect(
@@ -126,10 +141,7 @@ describe("kubernetesPreflight", () => {
     const containers = pod!.spec!.containers;
     expect(containers.map((c) => c.name)).toEqual(["worker"]);
     expect(containers[0].image).toBe(IMAGE);
-    expect(containers[0].env).toEqual([
-      { name: "WARDBY_CANARY_PROXY_IP", value: "10.96.0.50" },
-      { name: "WARDBY_CANARY_CLUSTER_DNS_IP", value: "10.96.0.10" },
-    ]);
+    expect(containers[0].env).toEqual([{ name: "WARDBY_CANARY_PROXY_IP", value: "10.96.0.50" }]);
     expect(containers[0].command!.slice(0, 2)).toEqual(["node", "-e"]);
     expect(containers[0].command![2]).toContain("wardbyCanary");
     expect(pod!.spec!.hostAliases).toEqual([{ ip: "10.96.0.50", hostnames: ["wardby-proxy"] }]);
@@ -204,7 +216,7 @@ describe("kubernetesPreflight", () => {
       { ...ok, extra: false },
       { dns: false, internet: false, metadata: false, proxy: true },
       { ...ok, proxy: "true" },
-      { ...ok, clusterDns: 0 },
+      { ...ok, proxyDeny: 0 },
     ]) {
       const api = cluster(result as unknown as CanaryResult);
       await expect(kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} })).rejects.toThrow(
@@ -243,59 +255,31 @@ describe("kubernetesPreflight", () => {
     );
     expect(api.deletedPods).toHaveLength(1);
   });
-  it("fails closed when kube-dns has no ready endpoint address to witness enforcement", async () => {
-    for (const withoutEndpoints of [
-      (api: FakeKubernetesApi) => api.objects.delete("endpoints/kube-system/kube-dns"),
-      (api: FakeKubernetesApi) => api.put("endpoints", "kube-system", { metadata: { name: "kube-dns" }, subsets: [] }),
-      (api: FakeKubernetesApi) =>
-        api.put("endpoints", "kube-system", {
-          metadata: { name: "kube-dns" },
-          // Only not-ready addresses: kube-dns exists but nothing is serving.
-          subsets: [{ notReadyAddresses: [{ ip: "10.244.0.2" }], ports: [{ port: 53 }] }],
-        }),
-    ]) {
-      const api = cluster(ok);
-      withoutEndpoints(api);
-      await expect(kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} })).rejects.toThrow(
-        "kubernetes_isolation_unsupported:cluster-dns",
-      );
-      // It fails before the canary runs, so nothing is created.
-      expect(api.deletedPods).toHaveLength(0);
-    }
+  it("fails proxy-service when the Service does not expose the deny port", async () => {
+    const api = cluster(ok);
+    api.put("service", "wardby-coding", {
+      metadata: { name: "wardby-coding-proxy" },
+      spec: { clusterIP: "10.96.0.50", ports: [{ name: "proxy", port: 8787, protocol: "TCP" }] },
+    });
+    await expect(kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} })).rejects.toThrow(
+      "kubernetes_isolation_unsupported:proxy-service",
+    );
   });
 
-  it("explains that such a cluster needs a different enforcement witness", async () => {
+  it("names the reason the proxy witness is unusable", async () => {
     const api = cluster(ok);
-    api.put("endpoints", "kube-system", { metadata: { name: "kube-dns" }, subsets: [] });
+    api.put("endpoints", "wardby-coding", { metadata: { name: "wardby-coding-proxy" }, subsets: [] });
     const error = await kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} }).catch(
       (e: unknown) => e,
     );
-    expect(describePreflightFailure(error)).toMatch(/no ready endpoint address.*different witness/);
+    expect(describePreflightFailure(error)).toContain("has no ready endpoint address");
   });
 
-  it("fails on a missing, headless, or unreadable kube-dns Service", async () => {
-    const missing = cluster(ok);
-    missing.objects.delete("service/kube-system/kube-dns");
-    await expect(kubernetesPreflight({ api: missing, config, workerImage: IMAGE })).rejects.toThrow(
-      "kubernetes_isolation_unsupported:cluster-dns",
+  it("fails the canary when the deny port is reachable", async () => {
+    const api = cluster({ ...ok, proxyDeny: true });
+    await expect(kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} })).rejects.toThrow(
+      "kubernetes_isolation_unsupported:canary",
     );
-    const headless = cluster(ok);
-    headless.put("service", "kube-system", { metadata: { name: "kube-dns" }, spec: { clusterIP: "None" } });
-    await expect(kubernetesPreflight({ api: headless, config, workerImage: IMAGE })).rejects.toThrow(
-      "kubernetes_isolation_unsupported:cluster-dns",
-    );
-    const forbidden = cluster(ok);
-    const readService = forbidden.readService.bind(forbidden);
-    forbidden.readService = async (ns, name) => {
-      if (ns === "kube-system") throw new Error("services is forbidden");
-      return readService(ns, name);
-    };
-    const error = await kubernetesPreflight({ api: forbidden, config, workerImage: IMAGE }).catch(
-      (e: unknown) => e as Error,
-    );
-    expect((error as Error).message).toBe("kubernetes_isolation_unsupported:cluster-dns");
-    expect(((error as Error).cause as Error).message).toBe("services is forbidden");
-    expect(leftovers(forbidden)).toEqual([]);
   });
 
   it("bounds the whole preflight: a hung API call fails with timeout", async () => {
@@ -432,32 +416,32 @@ describe("kubernetesPreflight", () => {
 });
 
 describe("runKubernetesPreflight", () => {
-  it("returns the passed checks and the validated kube-dns ClusterIP", async () => {
+  it("returns the passed checks and the validated proxy ClusterIP", async () => {
     expect(
       await runKubernetesPreflight({ api: cluster(ok), config, workerImage: IMAGE, sleep: async () => {} }),
     ).toEqual({
-      checks: ["namespace", "proxy-service", "cluster-dns", "worker-image", "canary"],
-      clusterDnsIp: "10.96.0.10",
+      checks: ["namespace", "proxy-service", "worker-image", "canary"],
+      proxyIp: "10.96.0.50",
     });
   });
 });
 
 describe("CANARY_SCRIPT", () => {
-  /** Runs the real script against a fake `net`/`dns`; `reachable(host, attempt)` decides each connect. */
+  /** Runs the real script against a fake `net`/`dns`; `reachable(port, attempt)` decides each connect. */
   async function runCanaryScript(
-    reachable: (host: string, attempt: number) => boolean,
+    reachable: (port: number, attempt: number) => boolean,
     timers: { setTimeout: (wake: () => void, ms: number) => unknown; Date: { now: () => number } } = {
       setTimeout,
       Date,
     },
   ) {
-    const attempts = new Map<string, number>();
+    const attempts = new Map<number, number>();
     const net = {
-      connect({ host }: { host: string }) {
+      connect({ port }: { host: string; port: number }) {
         const socket = Object.assign(new EventEmitter(), { destroy() {} });
-        const attempt = (attempts.get(host) ?? 0) + 1;
-        attempts.set(host, attempt);
-        setImmediate(() => socket.emit(reachable(host, attempt) ? "connect" : "error", new Error("blocked")));
+        const attempt = (attempts.get(port) ?? 0) + 1;
+        attempts.set(port, attempt);
+        setImmediate(() => socket.emit(reachable(port, attempt) ? "connect" : "error", new Error("blocked")));
         return socket;
       },
     };
@@ -467,7 +451,7 @@ describe("CANARY_SCRIPT", () => {
     const printed = new Promise<void>((r) => (done = r));
     runInNewContext(CANARY_SCRIPT, {
       require: (name: string) => (name === "node:net" ? net : dns),
-      process: { env: { WARDBY_CANARY_PROXY_IP: "10.96.0.50", WARDBY_CANARY_CLUSTER_DNS_IP: "10.96.0.10" } },
+      process: { env: { WARDBY_CANARY_PROXY_IP: "10.96.0.50" } },
       console: {
         log: (line: string) => {
           lines.push(line);
@@ -480,16 +464,17 @@ describe("CANARY_SCRIPT", () => {
     return { output: JSON.parse(lines[0]) as { wardbyCanary: CanaryResult }, attempts };
   }
 
-  it("waits for cluster DNS to be blocked before probing, then reports all five", async () => {
+  it("waits for the deny port to be blocked before probing, then reports all five", async () => {
     // Policy programmed after two probes: early attempts connect, like a pod that starts before its policy.
     const { output, attempts } = await runCanaryScript(
-      (host, attempt) => host === "10.96.0.50" || (host === "10.96.0.10" && attempt <= 2),
+      (port, attempt) => port === 8787 || (port === 8788 && attempt <= 2),
     );
     expect(output).toEqual({ wardbyCanary: ok });
-    expect(attempts.get("10.96.0.10")).toBe(4); // 2 connected + 1 blocked settle attempt + the real probe
+    expect(attempts.get(8788)).toBe(4); // 2 connected + 1 blocked settle attempt + the real probe
+    expect(attempts.get(8787)).toBe(1); // the proxy port is probed once, and must still be reachable
   });
 
-  it("reports clusterDns true when the policy is never enforced within the settle window", async () => {
+  it("reports proxyDeny true when the policy is never enforced within the settle window", async () => {
     let clock = 0;
     const timers = {
       setTimeout: (wake: () => void, ms: number) => {
@@ -499,7 +484,7 @@ describe("CANARY_SCRIPT", () => {
       Date: { now: () => clock },
     };
     const { output, attempts } = await runCanaryScript(() => true, timers);
-    expect(output.wardbyCanary.clusterDns).toBe(true);
-    expect(attempts.get("10.96.0.10")).toBe(41); // 40 settle attempts over 20 s, then the real probe
+    expect(output.wardbyCanary.proxyDeny).toBe(true);
+    expect(attempts.get(8788)).toBe(41); // 40 settle attempts over 20 s, then the real probe
   });
 });

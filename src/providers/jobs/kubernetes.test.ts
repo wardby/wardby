@@ -15,7 +15,7 @@ import type { JobHandle, JobSpec } from "./types.js";
 const IMAGE = `localhost:5001/wardby-coding-worker@sha256:${"a".repeat(64)}`;
 const CAPABILITY = `rrp_${"c".repeat(32)}`;
 const roots: string[] = [];
-const isEnforcementProbe = (command: string[]) => command[0] === "node" && command[2].includes(", port: 53,");
+const isEnforcementProbe = (command: string[]) => command[0] === "node" && command[2].includes("await tcp(8788)");
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })));
 });
@@ -31,9 +31,26 @@ async function harness(runId = "run-k8s-test", options: { runtimeClassName?: str
   const api = new FakeKubernetesApi();
   api.put("service", "wardby-coding", {
     metadata: { name: "wardby-coding-proxy" },
-    spec: { clusterIP: "10.96.0.50" },
+    spec: {
+      clusterIP: "10.96.0.50",
+      ports: [
+        { name: "proxy", port: 8787, protocol: "TCP" },
+        { name: "deny", port: 8788, protocol: "TCP" },
+      ],
+    },
   });
-  api.put("service", "kube-system", { metadata: { name: "kube-dns" }, spec: { clusterIP: "10.96.0.10" } });
+  api.put("endpoints", "wardby-coding", {
+    metadata: { name: "wardby-coding-proxy" },
+    subsets: [
+      {
+        addresses: [{ ip: "10.244.0.5" }],
+        ports: [
+          { name: "proxy", port: 8787, protocol: "TCP" },
+          { name: "deny", port: 8788, protocol: "TCP" },
+        ],
+      },
+    ],
+  });
   const names = kubernetesRunNames(runId);
   const spec: JobSpec = {
     kind: "coding-agent",
@@ -424,7 +441,12 @@ describe("KubernetesJobLauncher failure handling", () => {
     await expect(bad.launch(h.spec)).rejects.toThrow("kubernetes_capability_invalid");
     const g = await harness("run-no-proxy");
     g.api.put("service", "wardby-coding", { metadata: { name: "wardby-coding-proxy" }, spec: {} });
-    await expect(g.launcher.launch(g.spec)).rejects.toThrow("kubernetes_proxy_unavailable");
+    // launch() routes every failure through runPreflight's errorWithCode, so the thrown message is
+    // always kubernetes_isolation_unsupported and the specific reason rides on `cause`.
+    await expect(g.launcher.launch(g.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
+    await expect(g.launcher.launch(g.spec)).rejects.toMatchObject({
+      cause: expect.objectContaining({ message: expect.stringContaining("kubernetes_proxy_witness_unusable") }),
+    });
   });
 
   it("fails pod start on an image pull error and on a keeper that never becomes ready", async () => {
@@ -741,7 +763,7 @@ describe("KubernetesJobLauncher exit-0 guard", () => {
 describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
   function clockedLauncher(
     h: Awaited<ReturnType<typeof harness>>,
-    extra: { preflight?: () => Promise<{ clusterDnsIp: string }> } = {},
+    extra: { preflight?: () => Promise<{ proxyIp: string }> } = {},
   ) {
     let clock = 0;
     const sleeps: number[] = [];
@@ -836,7 +858,8 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
     expect(probe.container).toBe("keeper");
     expect(probe.command).toHaveLength(3);
     expect(probe.command.slice(0, 2)).toEqual(["node", "-e"]);
-    expect(probe.command[2]).toContain('host: "10.96.0.10", port: 53');
+    expect(probe.command[2]).toContain('host: "10.96.0.50"');
+    expect(probe.command[2]).toContain("await tcp(8788)");
     expect(probe.command.some((arg) => /^(\/bin\/)?(ba)?sh$/.test(arg))).toBe(false);
   });
 
@@ -867,37 +890,58 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
     await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_policy_not_enforced");
   });
 
-  it("uses the preflight's cluster DNS IP without reading kube-dns itself", async () => {
+  it("probes the proxy ClusterIP it re-read for this launch, not a stale memoized one", async () => {
     const h = await harness();
-    const reads: string[] = [];
-    const readService = h.api.readService.bind(h.api);
-    h.api.readService = async (ns, name) => {
-      reads.push(`${ns}/${name}`);
-      return readService(ns, name);
-    };
-    const { launcher } = clockedLauncher(h, { preflight: async () => ({ clusterDnsIp: "10.96.0.99" }) });
+    const { launcher } = clockedLauncher(h, { preflight: async () => ({ proxyIp: "10.96.0.99" }) });
     await launcher.launch(h.spec);
     const probe = h.api.execCalls.find((c) => isEnforcementProbe(c.command))!;
-    expect(probe.command[2]).toContain('host: "10.96.0.99"');
-    expect(reads).not.toContain("kube-system/kube-dns");
+    expect(probe.command[2]).toContain('host: "10.96.0.50"');
+    expect(probe.command[2]).not.toContain("10.96.0.99");
   });
 
-  it("without a preflight, reads kube-dns once per launcher and fails closed when it is unusable", async () => {
-    const h = await harness("run-dns-a");
-    let dnsReads = 0;
-    const readService = h.api.readService.bind(h.api);
-    h.api.readService = async (ns, name) => {
-      if (ns === "kube-system") dnsReads += 1;
-      return readService(ns, name);
-    };
-    await h.launcher.launch(h.spec);
-    await h.launcher.launch({ ...h.spec }); // idempotent relaunch
-    expect(dnsReads).toBe(1);
-
-    const g = await harness("run-dns-b");
-    g.api.put("service", "kube-system", { metadata: { name: "kube-dns" }, spec: { clusterIP: "None" } });
+  it("without a preflight, fails closed when the proxy witness is unusable", async () => {
+    const g = await harness("run-witness-b");
+    g.api.put("service", "wardby-coding", {
+      metadata: { name: "wardby-coding-proxy" },
+      spec: { clusterIP: "None" },
+    });
     await expect(g.launcher.launch(g.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
     expect(g.api.objects.has(`pod/wardby-coding/${g.names.pod}`)).toBe(false);
+  });
+
+  it("reports an unavailable witness when the proxy port itself cannot be reached", async () => {
+    const h = await harness();
+    const { launcher } = clockedLauncher(h);
+    const original = h.api.onExec;
+    h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? 4 : original(call));
+    await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_policy_witness_unavailable");
+    expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
+  });
+
+  it("still reports not_enforced when the last probe found the deny port reachable", async () => {
+    const h = await harness();
+    const { launcher } = clockedLauncher(h);
+    const original = h.api.onExec;
+    let calls = 0;
+    h.api.onExec = async (call) => {
+      if (!isEnforcementProbe(call.command)) return original(call);
+      calls += 1;
+      // One unavailable probe early must not make the final verdict say "witness".
+      return calls === 1 ? 4 : 3;
+    };
+    await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_policy_not_enforced");
+  });
+
+  it("refuses to launch when the proxy Service has no ready endpoint on the deny port", async () => {
+    const h = await harness("run-no-deny-endpoint");
+    h.api.put("endpoints", "wardby-coding", {
+      metadata: { name: "wardby-coding-proxy" },
+      subsets: [{ addresses: [{ ip: "10.244.0.5" }], ports: [{ port: 8787, protocol: "TCP" }] }],
+    });
+    await expect(h.launcher.launch(h.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
+    await expect(h.launcher.launch(h.spec)).rejects.toMatchObject({
+      cause: expect.objectContaining({ message: expect.stringContaining("kubernetes_proxy_witness_unusable") }),
+    });
   });
 });
 

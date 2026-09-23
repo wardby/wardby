@@ -1,3 +1,4 @@
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import type { V1NetworkPolicy, V1Pod } from "@kubernetes/client-node";
 import { ObjectSerializer } from "@kubernetes/client-node/dist/serializer.js";
@@ -12,6 +13,7 @@ import {
   buildCapabilitySecret,
   buildRunNetworkPolicy,
   buildRunPod,
+  enforcementProbeScript,
   isRegistryDigest,
   kubernetesRunNames,
   kubernetesRunNamesForToken,
@@ -495,5 +497,50 @@ describe("assertRunNetworkPolicyMatches", () => {
     const actual = structuredClone(expected);
     actual.spec!.ingress = [{ ports: [{ protocol: "TCP", port: 9999 }] }];
     expect(() => assertRunNetworkPolicyMatches(actual, expected)).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+});
+
+describe("enforcementProbeScript", () => {
+  /** Drives the real script in a VM with a fake net, one outcome per port. */
+  async function runProbe(script: string, outcome: Record<number, "connect" | "timeout" | "error">): Promise<number> {
+    return new Promise((resolve) => {
+      runInNewContext(script, {
+        require: () => ({
+          connect: ({ port }: { port: number }) => {
+            const handlers: Record<string, () => void> = {};
+            setTimeout(() => handlers[outcome[port]]?.(), 0);
+            return {
+              once: (event: string, handler: () => void) => void (handlers[event] = handler),
+              destroy: () => {},
+            };
+          },
+        }),
+        process: { exit: (code: number) => resolve(code) },
+        setTimeout,
+      });
+    });
+  }
+
+  it("measures both proxy ports with a SYN-safe 3 s connect timeout", () => {
+    const script = enforcementProbeScript("10.96.0.50");
+    expect(script).toContain('host: "10.96.0.50"');
+    expect(script).toContain("timeout: 3000");
+    expect(script).toContain("await tcp(8787)");
+    expect(script).toContain("await tcp(8788)");
+    expect(script).not.toContain("port: 53");
+  });
+
+  it("rejects an address that is not an IP", () => {
+    expect(() => enforcementProbeScript("wardby-proxy")).toThrow(KUBERNETES_ISOLATION_ERROR);
+    expect(() => enforcementProbeScript('10.0.0.1"; require("child_process")')).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
+  it("exits 0 only when the proxy port connected and the deny port was blocked", async () => {
+    const script = enforcementProbeScript("10.96.0.50");
+    expect(await runProbe(script, { 8787: "connect", 8788: "timeout" })).toBe(0);
+    expect(await runProbe(script, { 8787: "connect", 8788: "connect" })).toBe(3);
+    // Nothing listening / no policy programmed at all: not evidence of anything.
+    expect(await runProbe(script, { 8787: "timeout", 8788: "timeout" })).toBe(4);
+    expect(await runProbe(script, { 8787: "error", 8788: "timeout" })).toBe(4);
   });
 });

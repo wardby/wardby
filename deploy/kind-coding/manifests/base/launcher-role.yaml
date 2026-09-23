@@ -35,3 +35,11 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get"]
+  - apiGroups: [""]
+    # The enforcement witness: readProxyWitness (src/providers/jobs/kubernetes-witness.ts) reads the
+    # proxy Service's Endpoints to prove the deny port is exposed with a ready backend before a run
+    # is gated on it. One object wide. EndpointSlice is the durable successor to Endpoints;
+    # migrating is a follow-up and needs its own resourceNames grant.
+    resources: ["endpoints"]
+    resourceNames: ["wardby-coding-proxy"]
+    verbs: ["get"]

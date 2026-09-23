@@ -18,6 +18,7 @@ import type {
 import type { JobSpec } from "./types.js";
 import {
   CODING_PROXY_ALIAS,
+  CODING_PROXY_DENY_PORT,
   CODING_PROXY_PORT,
   CODING_WORKER_GID,
   CODING_WORKER_UID,
@@ -35,11 +36,12 @@ export const WORKER_CONTAINER = "worker";
 export const STORAGE_ROOT = "/run/wardby/storage";
 export const KEEPER_SEEDED_MARKER = `${STORAGE_ROOT}/input/.seeded`;
 export const PROXY_POD_LABEL = { "app.kubernetes.io/name": "wardby-coding-proxy" } as const;
-/** The cluster DNS Service: its ClusterIP is "another pod" that a run's policy must block. */
-export const CLUSTER_DNS_NAMESPACE = "kube-system";
-export const CLUSTER_DNS_SERVICE = "kube-dns";
-/** Exit code of the enforcement probe when the connect succeeded (policy not yet enforced). */
-const ENFORCEMENT_PROBE_CONNECTED = 3;
+/** The probe proved enforcement: the proxy port connected and the deny port was blocked. */
+export const ENFORCEMENT_PROBE_PROVEN = 0;
+/** The deny port was reachable: no policy is blocking it, or the policy is not port-scoped. */
+export const ENFORCEMENT_PROBE_DENY_REACHABLE = 3;
+/** The proxy port itself was unreachable: nothing could be witnessed (proxy down, or only the namespace default-deny is programmed). */
+export const ENFORCEMENT_PROBE_PROXY_UNREACHABLE = 4;
 const WORKER_SERVICE_ACCOUNT = "wardby-coding-worker";
 const RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/;
 
@@ -481,20 +483,36 @@ export function assertRunNetworkPolicyMatches(actual: V1NetworkPolicy, expected:
 }
 
 /**
- * A `node -e` script (argv only, never a shell) that tries one TCP connect to
- * `<clusterDnsIp>:53` with a 3 s timeout (above Linux's 1 s initial SYN
- * retransmission, so one dropped SYN on an allowed path still connects): exits 0 when blocked (error or
- * timeout) and ENFORCEMENT_PROBE_CONNECTED when it connects. The IP is
- * validated and embedded as a JSON string literal.
+ * A `node -e` script (argv only, never a shell) that measures BOTH of the proxy's
+ * ports in one pass, with a 3 s connect timeout each (above Linux's 1 s initial
+ * SYN retransmission, so one dropped SYN on an allowed path still connects).
+ *
+ * Measuring both is what makes the result decisive. A NetworkPolicy denial drops
+ * the packet rather than rejecting it — GKE Dataplane V2, which Autopilot runs,
+ * always drops — so "the deny port did not answer" is equally consistent with
+ * "the proxy is gone and no policy exists at all". Requiring the proxy port to
+ * connect in the *same* probe turns "something is listening" from a control-plane
+ * inference into a fact this pod just observed.
+ *
+ * Exit codes are ENFORCEMENT_PROBE_PROVEN / _DENY_REACHABLE / _PROXY_UNREACHABLE.
+ * The IP is validated and embedded as a JSON string literal.
  */
-export function enforcementProbeScript(clusterDnsIp: string): string {
-  if (isIP(clusterDnsIp) === 0) throw isolationError();
+export function enforcementProbeScript(proxyIp: string): string {
+  if (isIP(proxyIp) === 0) throw isolationError();
   return [
-    'const socket = require("node:net").connect({ host: ' +
-      JSON.stringify(clusterDnsIp) +
-      ", port: 53, timeout: 3000 });",
-    `socket.once("connect", () => { socket.destroy(); process.exit(${ENFORCEMENT_PROBE_CONNECTED}); });`,
-    'socket.once("timeout", () => { socket.destroy(); process.exit(0); });',
-    'socket.once("error", () => process.exit(0));',
+    'const net = require("node:net");',
+    "const tcp = (port) =>",
+    "  new Promise((done) => {",
+    "    const socket = net.connect({ host: " + JSON.stringify(proxyIp) + ", port, timeout: 3000 });",
+    '    socket.once("connect", () => { socket.destroy(); done(true); });',
+    '    socket.once("timeout", () => { socket.destroy(); done(false); });',
+    '    socket.once("error", () => done(false));',
+    "  });",
+    "(async () => {",
+    `  const allowed = await tcp(${CODING_PROXY_PORT});`,
+    `  const denied = await tcp(${CODING_PROXY_DENY_PORT});`,
+    `  if (!allowed) process.exit(${ENFORCEMENT_PROBE_PROXY_UNREACHABLE});`,
+    `  process.exit(denied ? ${ENFORCEMENT_PROBE_DENY_REACHABLE} : ${ENFORCEMENT_PROBE_PROVEN});`,
+    "})();",
   ].join("\n");
 }

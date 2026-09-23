@@ -31,8 +31,7 @@ import { MAX_CODING_ARTIFACT_BYTES, parseCodingAgentOutputJson } from "../../cod
 import { SAFE_WORKER_DIAGNOSTIC } from "./docker.js";
 import { KubernetesAlreadyExistsError, KubernetesConflictError, type KubernetesApi } from "./kubernetes-api.js";
 import {
-  CLUSTER_DNS_NAMESPACE,
-  CLUSTER_DNS_SERVICE,
+  ENFORCEMENT_PROBE_PROXY_UNREACHABLE,
   KEEPER_CONTAINER,
   KEEPER_SEEDED_MARKER,
   KUBERNETES_ISOLATION_ERROR,
@@ -49,6 +48,7 @@ import {
   runLabels,
   validateKubernetesSpec,
 } from "./kubernetes-isolation.js";
+import { readProxyWitness } from "./kubernetes-witness.js";
 import { safeExtract } from "./safe-extract.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
 import { replaceDirectoryFromStaging } from "./workspace-swap.js";
@@ -68,9 +68,9 @@ const READY_POLL_MS = 250;
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const DEFAULT_ENFORCEMENT_TIMEOUT_MS = 30_000;
 const ENFORCEMENT_POLL_MS = 500;
-/** Consecutive "blocked" probes required: one dropped SYN on an allowed path must not open the gate. */
+/** Consecutive proven probes required (8787 reachable, 8788 blocked): one dropped SYN must not open the gate. */
 const ENFORCEMENT_BLOCKED_STREAK = 3;
-/** Bound for one enforcement probe exec (the probe itself gives up after 3 s). */
+/** Bound for one enforcement probe exec (the probe makes two sequential connects, so it gives up after at most 6 s). */
 const ENFORCEMENT_EXEC_TIMEOUT_MS = 10_000;
 /** Bound for small keeper commands (seeded marker, result artifact read). */
 const SHORT_EXEC_TIMEOUT_MS = 60_000;
@@ -106,8 +106,8 @@ interface RunRecord {
 }
 
 export interface KubernetesClusterInfo {
-  /** The kube-dns ClusterIP: "another pod" a run's policy must block. */
-  clusterDnsIp: string;
+  /** The proxy Service's ClusterIP: the enforcement witness's address (8787 reachable, 8788 not). */
+  proxyIp: string;
 }
 
 export interface KubernetesJobLauncherOptions {
@@ -117,7 +117,8 @@ export interface KubernetesJobLauncherOptions {
   resolveCapability: (runId: string) => Promise<string>;
   /**
    * Cluster preflight run once before the first launch; failure fails every launch. It may return the
-   * kube-dns ClusterIP it validated, which the enforcement gate probes; otherwise the launcher reads it once.
+   * proxy ClusterIP it validated; otherwise the launcher reads the proxy witness once itself. Either way
+   * the gate probes the address `provision` re-reads for that launch, not this memoized one.
    */
   preflight?: () => Promise<KubernetesClusterInfo | void>;
   now?: () => number;
@@ -360,7 +361,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
 
   async launch(spec: JobSpec): Promise<JobHandle> {
     validateKubernetesSpec(spec);
-    const cluster = await this.runPreflight();
+    await this.runPreflight();
     const names = kubernetesRunNames(spec.runId);
     const handle: JobHandle = { backend: BACKEND, id: `${this.namespace}/${names.token}` };
     const specHash = stableSpecHash(spec);
@@ -386,7 +387,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       return this.existingLaunch(raced.record, specHash, handle);
     }
     try {
-      await this.provision(spec, names, record, cluster);
+      await this.provision(spec, names, record);
     } catch (error) {
       // Record the failure before deleting the pod, so a replica that observes "no pod" in between
       // can't record `lost` first and have this more specific outcome dropped.
@@ -474,17 +475,17 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   // -------------------------------------------------------------------------
   // Launch
 
-  /** Memoized: the preflight (or, without one, a single kube-dns read) runs once per launcher. */
+  /** Memoized: the preflight (or, without one, a single proxy-witness read) runs once per launcher. */
   private runPreflight(): Promise<KubernetesClusterInfo> {
     this.preflightResult ??= (async () => {
       try {
-        let clusterDnsIp = (await this.options.preflight?.())?.clusterDnsIp;
-        if (clusterDnsIp === undefined) {
-          const service = await this.api.readService(CLUSTER_DNS_NAMESPACE, CLUSTER_DNS_SERVICE);
-          clusterDnsIp = service?.spec?.clusterIP;
+        const provided = (await this.options.preflight?.())?.proxyIp;
+        if (provided !== undefined) {
+          if (isIP(provided) === 0) throw new Error("kubernetes_proxy_unavailable");
+          return { proxyIp: provided };
         }
-        if (!clusterDnsIp || isIP(clusterDnsIp) === 0) throw new Error("kubernetes_cluster_dns_unavailable");
-        return { clusterDnsIp };
+        const witness = await readProxyWitness(this.api, this.namespace, this.options.config.proxyService);
+        return { proxyIp: witness.clusterIp };
       } catch (error) {
         throw errorWithCode(KUBERNETES_ISOLATION_ERROR, error);
       }
@@ -493,21 +494,34 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   }
 
   /**
-   * Waits until the run's NetworkPolicy is enforced on this pod: the keeper (same network namespace as
-   * the worker) must be unable to reach the cluster DNS Service on ENFORCEMENT_BLOCKED_STREAK consecutive
-   * probes, 500 ms apart. Anything but a clean "blocked" resets the streak; the wall-clock bound still applies.
+   * Waits until the run's NetworkPolicy is enforced on this pod: the keeper (same network namespace
+   * as the worker) must, on ENFORCEMENT_BLOCKED_STREAK consecutive probes 500 ms apart, reach the
+   * proxy on CODING_PROXY_PORT and fail to reach it on CODING_PROXY_DENY_PORT. Anything else resets
+   * the streak; the wall-clock bound still applies.
+   *
+   * The verdict at the bound is taken from the *last* probe, not from whether any probe was ever
+   * unavailable: an early blip while the pod's networking came up must not send an operator looking
+   * at the proxy when the real problem is an unenforced policy.
    */
-  private async waitForPolicyEnforcement(names: RunNames, cluster: KubernetesClusterInfo): Promise<void> {
-    const command = ["node", "-e", enforcementProbeScript(cluster.clusterDnsIp)];
+  private async waitForPolicyEnforcement(names: RunNames, proxyIp: string): Promise<void> {
+    const command = ["node", "-e", enforcementProbeScript(proxyIp)];
     const started = this.now();
     let blocked = 0;
     for (;;) {
+      // `exitCode` is this iteration's probe, and the bound below is only ever reached from here —
+      // so the verdict is always the *last* probe's, never a remembered earlier one.
       const exitCode = await this.api.exec(this.namespace, names.pod, KEEPER_CONTAINER, command, {
         timeoutMs: ENFORCEMENT_EXEC_TIMEOUT_MS,
       });
       blocked = exitCode === 0 ? blocked + 1 : 0;
       if (blocked >= ENFORCEMENT_BLOCKED_STREAK) return;
-      if (this.now() - started >= this.enforcementTimeoutMs) throw new Error("kubernetes_policy_not_enforced");
+      if (this.now() - started >= this.enforcementTimeoutMs) {
+        throw new Error(
+          exitCode === ENFORCEMENT_PROBE_PROXY_UNREACHABLE
+            ? "kubernetes_policy_witness_unavailable"
+            : "kubernetes_policy_not_enforced",
+        );
+      }
       await this.sleep(ENFORCEMENT_POLL_MS);
     }
   }
@@ -520,12 +534,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     return structuredClone(handle);
   }
 
-  private async provision(
-    spec: JobSpec,
-    names: RunNames,
-    record: RunRecord,
-    cluster: KubernetesClusterInfo,
-  ): Promise<void> {
+  private async provision(spec: JobSpec, names: RunNames, record: RunRecord): Promise<void> {
     const { runtimeClassName, proxyService } = this.options.config;
     if (!runtimeClassName) {
       this.warn(
@@ -534,9 +543,10 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     }
     const capability = await this.options.resolveCapability(spec.runId);
     if (!CAPABILITY.test(capability)) throw new Error("kubernetes_capability_invalid");
-    const service = await this.api.readService(this.namespace, proxyService);
-    const proxyIp = service?.spec?.clusterIP;
-    if (!proxyIp || proxyIp === "None") throw new Error("kubernetes_proxy_unavailable");
+    // Re-read (not just the ClusterIP): the gate below reads "deny port unreachable" as evidence,
+    // which is only meaningful against a Service that actually exposes it with a ready backend.
+    const witness = await readProxyWitness(this.api, this.namespace, proxyService);
+    const proxyIp = witness.clusterIp;
 
     const pod = buildRunPod(spec, { namespace: this.namespace, proxyIp, runtimeClassName });
     const policy = buildRunNetworkPolicy(spec, this.namespace);
@@ -554,7 +564,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     if (!actualPod || !actualPolicy) throw new Error(KUBERNETES_ISOLATION_ERROR);
     assertRunPodMatches(actualPod, pod);
     assertRunNetworkPolicyMatches(actualPolicy, policy);
-    await this.waitForPolicyEnforcement(names, cluster);
+    await this.waitForPolicyEnforcement(names, proxyIp);
 
     const budget = this.transferBudgetMs(record);
     await this.seedDirectory(names, this.runWorkspace(spec.runId), WORKSPACE_STORAGE, budget);

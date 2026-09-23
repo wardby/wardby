@@ -36,6 +36,21 @@ answers, and pins the vetted address into the socket lookup. Redirects are
 denied. Injected fetch implementations are a test seam and must not be used in
 production composition.
 
+The proxy also binds a second listener, the **deny port** (`8788`,
+`CODING_PROXY_DENY_PORT`), which serves nothing: it accepts a connection,
+sends no bytes and closes it immediately
+(`src/providers/coding-proxy/deny-port.ts`). It exists so a run pod can prove
+its own NetworkPolicy is enforced — see "The enforcement gate" below.
+
+The deny port ships to **every** deployment, not just Kubernetes:
+`startConfiguredCodingProxy` is the only proxy entry point, so a Docker
+deployment's proxy also binds `0.0.0.0:8788` (and refuses to start if it
+cannot). No host port is published for it, so there is no port conflict. In
+Docker mode a run container can reach it, since a Docker network has no
+port-level policy — that is harmless, because the listener accepts the
+connection, sends nothing and closes it. It is not a leak; it is a fact about
+reachability that the Kubernetes launcher turns into evidence.
+
 ## Container Policy
 
 `src/providers/jobs/docker-isolation.ts` is the canonical policy builder and
@@ -410,18 +425,38 @@ threatens every run, not just the harness: the worker gate could otherwise
 open on a pod whose isolation isn't active yet.
 
 The fix, before seeding or opening the worker gate: the launcher execs into
-the keeper (which shares the pod's network namespace with the worker) and
-attempts a TCP connect to the cluster DNS Service's ClusterIP on port 53 —
-kube-dns backends are ordinary pods, so only the run's NetworkPolicy can
-block this ("another pod", matching the design spec's attestation
-requirement). It requires **3 consecutive blocked results, 500ms apart**
-(any successful connect resets the streak — this guards against a single
-dropped SYN packet on an allowed path being misread as "policy enforced"),
-bounded by `enforcementTimeoutMs` (default 30,000ms — configurable via
+the keeper (which shares the pod's network namespace with the worker) one
+`node -e` probe that measures **both of the coding proxy's ports against the
+proxy Service's ClusterIP, in the same pass** — `8787` (the proxy itself, which
+the run policy permits) and `8788` (the deny port, which no run policy ever
+permits). Only the outcome **(8787 connected, 8788 blocked)** counts toward the
+streak.
+
+Both halves are required, and measuring only one port would be unsound. A
+NetworkPolicy denial **drops** the packet rather than rejecting it — GKE
+Dataplane V2 (Cilium), which Autopilot runs, always drops — so "8788 did not
+answer" on its own is equally consistent with "the proxy is gone and no policy
+exists at all", and a run would be released onto an unpoliced network.
+Requiring 8787 to connect in the _same_ exec turns "something is listening"
+from a control-plane inference (which is stale the moment it is read) into a
+fact this pod just observed, at the instant of the blocked observation. The
+proxy's own policy deliberately **allows** ingress on 8788 from run pods:
+ingress is enforced at the destination, so denying it there would make a run
+pod whose own egress policy was not yet programmed read as "blocked".
+
+It requires **3 consecutive proven results, 500ms apart** (anything else
+resets the streak — this guards against a single dropped SYN packet on an
+allowed path being misread as "policy enforced"), bounded by
+`enforcementTimeoutMs` (default 30,000ms — configurable via
 `KubernetesJobLauncherOptions.enforcementTimeoutMs`; a drop-style CNI can
-need close to this whole window). Failing to reach a blocked streak in time
-is `kubernetes_policy_not_enforced`. This wait happens inside the pod's
-overall ready-timeout window, not on top of it.
+need close to this whole window). Failing to reach a proven streak in time is
+`kubernetes_policy_not_enforced` — except when the _last_ probe could not
+reach 8787 at all, which proves nothing about any policy and is reported
+separately as `kubernetes_policy_witness_unavailable` (look at the proxy, not
+at the CNI). The verdict comes from the last probe, not from whether any probe
+was ever unavailable, so an early blip while the pod's networking came up does
+not misdirect the operator. This wait happens inside the pod's overall
+ready-timeout window, not on top of it.
 
 `wardby coding preflight`'s canary pod waits the same way before running its
 probes, for the same reason.
@@ -429,48 +464,31 @@ probes, for the same reason.
 ### Preflight
 
 `kubernetesPreflight` / `runKubernetesPreflight`
-(`src/providers/jobs/kubernetes-preflight.ts`) run **five checks in order**,
+(`src/providers/jobs/kubernetes-preflight.ts`) run **four checks in order**,
 each producing `kubernetes_isolation_unsupported:<check>` on failure (or
 `:timeout` if the whole preflight — cleanup included — exceeds `timeoutMs`,
 default 90,000ms):
 
 1. `namespace` — the configured namespace exists.
-2. `proxy-service` — the proxy Service exists and has a ClusterIP.
-3. `cluster-dns` — reads `kube-system/kube-dns`'s ClusterIP **and requires
-   at least one ready endpoint behind it**, failing closed with
-   `kubernetes_isolation_unsupported:cluster-dns` if there is none. This
-   check (and the enforcement gate above, and the canary's `clusterDns`
-   probe) all use this same Service as their sole witness that a
-   NetworkPolicy is actually enforced: kube-dns backends are ordinary pods,
-   so only a NetworkPolicy can block a connection to them — but only if
-   something is actually listening. Without the endpoint check, a DNS
-   Service with no pod backends (e.g. **GKE with Cloud DNS**, which doesn't
-   run kube-dns as pods at all) would make every connection attempt fail
-   with "nothing there to connect to" regardless of whether any policy is
-   enforced, so the witness would read as "blocked" vacuously and the
-   enforcement gate would open before the CNI had actually programmed the
-   run's policy. Because both the preflight and the launcher's per-launch
-   enforcement gate (§ above) share this same witness read, this check
-   failing closed also blocks every `launch()` from proceeding on such a
-   cluster — **coding execution simply does not work there today**, rather
-   than silently running unpoliced. A cluster whose DNS Service has a
-   different name is affected the same way (`readService` returns nothing
-   → `kubernetes_cluster_dns_unavailable` / `:cluster-dns`). Getting coding
-   agents working on GKE-with-Cloud-DNS (or any endpoint-less-kube-dns
-   cluster) needs a follow-up: either an endpoint-backed alternative
-   witness (`default/kubernetes:443` is a candidate — it always has
-   backends and is already proven blocked under the run policy by the
-   real-cluster integration suite) or the metadata-server probe promoted
-   from a canary-only signal to the per-launch gate's own witness. See
-   "Known gaps" below.
-4. `worker-image` — `CODING_WORKER_IMAGE` is a registry digest.
-5. `canary` — creates a real run pod + NetworkPolicy from the same builders
+2. `proxy-service` — the proxy Service exists, has a ClusterIP, **exposes both
+   the proxy port (8787) and the deny port (8788)**, and has at least one ready
+   endpoint serving both, failing closed with
+   `kubernetes_isolation_unsupported:proxy-service` otherwise. The deny port is
+   the enforcement witness: a second listener on the proxy
+   (`src/providers/coding-proxy/deny-port.ts`) that serves nothing and that no
+   run's NetworkPolicy ever permits. A run pod that reaches 8787 but not 8788
+   has proven its policy is both programmed and port-scoped. It replaces the old
+   `cluster-dns` witness, which does not exist on GKE Autopilot (Cloud DNS is the
+   only provider there, so no kube-dns pods run) and which made the launcher read
+   `kube-system`.
+3. `worker-image` — `CODING_WORKER_IMAGE` is a registry digest.
+4. `canary` — creates a real run pod + NetworkPolicy from the same builders
    as a live run, running a script that waits for policy enforcement (as
-   above) then attempts DNS resolution, a direct connect to the cluster DNS
-   ClusterIP, the internet (`1.1.1.1:443`), the metadata server, and the
-   proxy — requiring every one of the first four to fail and the proxy
-   connect to succeed. Any other outcome, or a canary pod that itself fails
-   to schedule/run, is `kubernetes_isolation_unsupported:canary`.
+   above) then attempts DNS resolution, a connect to the proxy's deny port,
+   the internet (`1.1.1.1:443`), the metadata server, and the proxy itself —
+   requiring every one of the first four to fail and the proxy connect to
+   succeed. Any other outcome, or a canary pod that itself fails to
+   schedule/run, is `kubernetes_isolation_unsupported:canary`.
 
 This whole preflight is **memoized per launcher instance and its failure is
 sticky**: `KubernetesJobLauncher.runPreflight()` caches the first call's
@@ -512,10 +530,11 @@ back):
 - Namespace `Role` **`wardby-coding-launcher`** (in the coding namespace):
   `pods` create/get/delete, `pods/exec` create/get, `pods/log` get,
   `secrets` create/delete, `configmaps` create/get/update, `networkpolicies`
-  create/get/delete, `services` get.
-- `kube-system` `Role` **`wardby-coding-dns-reader`**: `get` on `services`,
-  `resourceNames: ["kube-dns"]` — exactly the one read the `cluster-dns`
-  preflight check and the enforcement gate need.
+  create/get/delete, `services` get, and `endpoints` get scoped by
+  `resourceNames: ["wardby-coding-proxy"]` — the one read `readProxyWitness`
+  needs to prove the deny port is exposed with a ready backend. **Nothing in
+  `kube-system` any more:** the old `wardby-coding-dns-reader` Role is gone
+  with the `cluster-dns` check.
 - `ClusterRole` **`wardby-coding-namespace-reader`**: `get` on the
   cluster-scoped `namespaces` resource, `resourceNames: [<the namespace>]`.
   This one has to be cluster-scoped — no namespaced `Role` can grant `get`
@@ -525,7 +544,7 @@ back):
 
 (`deploy/kind-coding/` binds none of these to a service account — the local
 harness runs every command against your own admin kubeconfig. A production
-overlay, e.g. GKE, binds these three to the control plane's identity.)
+overlay, e.g. GKE, binds these two to the control plane's identity.)
 
 **Running the real-cluster integration suite needs more than this.**
 `npm run test:kubernetes` (`kubernetes.integration.test.ts`) uses a raw
@@ -538,7 +557,7 @@ intentionally never deletes that object (see "kept as tombstones" above), so
 `deleteConfigMap` isn't even part of the `KubernetesApi` seam; the test goes
 straight to the library. The committed `wardby-coding-launcher` Role grants
 neither verb. On `kind` this gap is invisible because the suite runs against
-the admin kubeconfig; a kubeconfig scoped to only the three launcher roles
+the admin kubeconfig; a kubeconfig scoped to only the two launcher roles
 above needs `get endpoints` (coding namespace and `kube-system`) and
 `delete configmaps` (coding namespace) added before the integration suite
 will pass against it.
@@ -583,24 +602,14 @@ not implemented yet.
   future GKE overlay): `deploy/kind-coding/manifests/base/kustomization.yaml`
   deliberately has **no top-level `namespace:` override**, because
   kustomize's namespace transformer would force `metadata.namespace` onto
-  every namespaced resource it lists — including the `kube-system`
-  DNS-reader `Role`, relocating it into the coding namespace and breaking
-  it. Every manifest instead sets its own `metadata.namespace` explicitly.
-  Any overlay author copying this harness for another cluster must do the
-  same.
+  every namespaced resource it lists. Every manifest instead sets its own
+  `metadata.namespace` explicitly. Any overlay author copying this harness for
+  another cluster must do the same.
 - **Per-run record ConfigMap GC is unimplemented.** Both `remove()`'s
   deliberate tombstones and a failed launch's records (see above)
   accumulate forever, one small ConfigMap per run, with nothing that ever
   deletes them. Needed before a long-lived production deployment; not a
   correctness or security issue, an operational one (etcd growth).
-- **A real, endpoint-guaranteed enforcement witness for GKE Autopilot.**
-  The `cluster-dns` preflight check now fails closed when `kube-dns` has no
-  ready endpoints (see "Preflight" above), which stops coding execution
-  from silently running unpoliced on such a cluster — but it does not make
-  coding execution _work_ there. GKE Autopilot with Cloud DNS needs an
-  alternative witness (`default/kubernetes:443`, or promoting the
-  metadata-server probe from canary-only to the per-launch gate) before
-  it can run coding agents at all. Tracked as a Plan 3 blocker.
 - **Autopilot attestation allowances are not yet modeled.** Attestation
   compares the read-back pod annotations and resource quantities exactly;
   GKE Autopilot is known to add its own annotations and to round
@@ -626,10 +635,11 @@ not implemented yet.
 
 | Code                                                                         | Meaning                                                                                                                                                                                                                       |
 | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `kubernetes_isolation_unsupported:<check>`                                   | A preflight check failed; `<check>` is one of `namespace`, `proxy-service`, `cluster-dns`, `worker-image`, `canary`. Sticky for the launcher's process lifetime once seen (see Preflight above).                              |
+| `kubernetes_isolation_unsupported:<check>`                                   | A preflight check failed; `<check>` is one of `namespace`, `proxy-service`, `worker-image`, `canary`. Sticky for the launcher's process lifetime once seen (see Preflight above).                                             |
 | `kubernetes_isolation_unsupported:timeout`                                   | The whole preflight (including cleanup) exceeded its timeout.                                                                                                                                                                 |
 | `kubernetes_isolation_unsupported`                                           | (No suffix) Attestation failure: the read-back pod or NetworkPolicy didn't canonically match the builder's output.                                                                                                            |
-| `kubernetes_policy_not_enforced`                                             | The run's NetworkPolicy wasn't observed blocked within `enforcementTimeoutMs`; the worker gate was never opened.                                                                                                              |
+| `kubernetes_policy_not_enforced`                                             | The run's NetworkPolicy wasn't observed enforced (8787 reachable, 8788 blocked) within `enforcementTimeoutMs`; the worker gate was never opened.                                                                              |
+| `kubernetes_policy_witness_unavailable`                                      | The last enforcement probe could not reach the proxy on 8787 at all, so nothing could be witnessed — the proxy or its Service is the thing to check, not the CNI. The worker gate was never opened.                           |
 | `kubernetes_pod_start_timeout`                                               | The keeper didn't become ready within `readyTimeoutMs` (default 120s). Historically caused by the subPath root-ownership issue the `storage-init` init container now fixes; if seen again, check init-container status first. |
 | `kubernetes_pod_start_failed`                                                | The pod (or its `storage-init` init container) failed outright rather than timing out.                                                                                                                                        |
 | `kubernetes_provider_unsupported`                                            | The job spec asked for `claude-code`, which this launcher doesn't implement.                                                                                                                                                  |
