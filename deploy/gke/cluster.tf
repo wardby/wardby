@@ -39,19 +39,20 @@ resource "google_container_cluster" "runs" {
 
   deletion_protection = var.cluster_deletion_protection
 
-  lifecycle {
-    ignore_changes = [
-      # Autopilot manages the master version through the release channel. Left
-      # unignored, every upgrade Google performs shows as drift and the next
-      # apply tries to pin the cluster back to whatever version it was created
-      # with.
-      min_master_version,
-      # The pod and services ranges are allocated by GKE at creation from the
-      # VPC. They are attributes of the cluster that exists, not inputs to it,
-      # and an apply that "corrects" them would replace the cluster.
-      ip_allocation_policy,
-    ]
-  }
+  # No lifecycle/ignore_changes block, deliberately.
+  #
+  # An earlier revision ignored min_master_version and ip_allocation_policy,
+  # claiming they prevented release-channel upgrades and GKE-assigned pod and
+  # service ranges from reading as drift. That was wrong, and removing them was
+  # verified: `terraform plan` reports "No changes" either way. ignore_changes
+  # only suppresses a diff for an attribute actually SET in config, and neither
+  # is set here -- GKE computes both, and an unset optional attribute produces
+  # no diff on its own.
+  #
+  # They were also a trap. Had anyone later added min_master_version or an
+  # ip_allocation_policy block, ignore_changes would have swallowed it silently,
+  # with nothing in the plan to show the setting was being discarded. An inert
+  # safeguard that disarms a future real one is worse than no safeguard.
 }
 
 # Holds the runtime, migration and coding-worker images. Images must be
