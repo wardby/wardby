@@ -205,6 +205,23 @@ spec:
               value: gke-autopilot
             - name: KUBERNETES_RUNTIME_CLASS
               value: gvisor
+            # The defaults (90s preflight, 120s ready) assume a cluster with a
+            # warm node pool. Autopilot provisions per pod, and a gVisor node
+            # takes roughly two minutes to appear from cold -- so on an idle
+            # cluster the preflight canary times out before it is ever
+            # scheduled, and the run fails with
+            # kubernetes_isolation_unsupported:timeout having never launched.
+            #
+            # That failure is doubly expensive because the launcher memoizes a
+            # failed preflight for the life of the process: one cold-start
+            # timeout makes every later run fail instantly until the control
+            # plane is restarted. Ten minutes is not a performance cost -- these
+            # are ceilings, not waits, and a warm cluster still proceeds in
+            # seconds.
+            - name: KUBERNETES_PREFLIGHT_TIMEOUT_MS
+              value: "600000"
+            - name: KUBERNETES_READY_TIMEOUT_MS
+              value: "600000"
             # A placeholder like the image fields above, and substituted the same
             # way: the worker image is a registry path, which is target identity
             # and never belongs in a tracked manifest. The Kubernetes launcher
