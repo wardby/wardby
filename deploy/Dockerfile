@@ -24,7 +24,7 @@ WORKDIR /app
 # machine, where git is simply present.
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates git && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
-RUN npm pkg delete devDependencies scripts \
+RUN npm pkg delete dependencies.prisma devDependencies scripts \
     && npm install --package-lock-only --omit=peer --ignore-scripts \
     && npm ci --omit=peer --ignore-scripts \
     && npm cache clean --force

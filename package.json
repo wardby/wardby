@@ -1,15 +1,41 @@
 {
   "name": "@wardby/cli",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "description": "Self-hosted control plane for budget-guarded AI agents.",
   "license": "Apache-2.0",
+  "homepage": "https://github.com/wardby/wardby#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wardby/wardby.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wardby/wardby/issues"
+  },
+  "keywords": [
+    "ai-agents",
+    "mcp",
+    "self-hosted",
+    "agent-governance",
+    "budget-control"
+  ],
   "type": "module",
   "engines": {
     "node": ">=24.0.0"
   },
   "bin": {
-    "wardby": "./dist/cli.js"
+    "wardby": "./dist/wardby-bin.js"
+  },
+  "files": [
+    ".env.example",
+    "NOTICE",
+    "deploy/local/docker-compose.yml",
+    "dist/",
+    "prisma/migrations/",
+    "prisma/schema.prisma",
+    "scripts/git-askpass.sh"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -20,9 +46,12 @@
     "build:vendor": "node scripts/build-sandbox-vendor.mjs",
     "build": "npm run build:vendor && tsc -p tsconfig.build.json",
     "prepare": "npm run build:vendor",
+    "prepack": "npm run build",
+    "postinstall": "prisma generate --schema prisma/schema.prisma",
     "cli": "tsx src/cli.ts",
     "capture:autopilot": "tsx src/tools/capture-autopilot-dry-run.ts",
     "test": "npm run build:vendor && vitest run",
+    "test:package": "node scripts/npm-package-acceptance.mjs",
     "test:contract": "vitest run --config vitest.contract.config.ts",
     "test:kubernetes": "WARDBY_KUBERNETES_TEST=1 vitest run src/providers/jobs/kubernetes.integration.test.ts",
     "prisma:generate": "prisma generate",
@@ -66,6 +95,7 @@
     "openai": "^4.67.0",
     "papaparse": "^5.7.0",
     "pino": "^9.14.0",
+    "prisma": "^6.19.3",
     "quickjs-emscripten": "^0.32.0",
     "tar-stream": "^3.2.1",
     "undici": "^8.7.0",
@@ -75,7 +105,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@openai/codex-sdk": "0.153.4",
-    "@types/node": "^22.0.0",
+    "@types/node": "^24.0.0",
     "@types/papaparse": "^5.5.2",
     "@types/tar-stream": "^3.1.4",
     "esbuild": "^0.28.2",
@@ -84,7 +114,6 @@
     "globals": "^17.12.0",
     "playwright": "^1.63.0",
     "prettier": "^3.9.6",
-    "prisma": "^6.19.3",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.69.0",
