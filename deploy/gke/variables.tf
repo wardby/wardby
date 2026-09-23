@@ -94,3 +94,37 @@ variable "backup_start_time" {
   type        = string
   default     = "08:00"
 }
+
+variable "cluster_name" {
+  description = "Name of the GKE Autopilot cluster coding runs execute in."
+  type        = string
+  default     = "wardby-coding"
+}
+
+variable "subnetwork" {
+  description = "Subnetwork for the cluster. Must be in var.network; \"default\" is the auto-created subnet a cluster lands on when none is given."
+  type        = string
+  default     = "default"
+}
+
+variable "release_channel" {
+  description = "GKE release channel: RAPID, REGULAR or STABLE. REGULAR is the default because gVisor and the Gateway API are long past canary, so RAPID buys nothing and costs predictability."
+  type        = string
+  default     = "REGULAR"
+}
+
+variable "cluster_deletion_protection" {
+  description = <<-EOT
+    Guard against deleting the cluster. Same trap as the database's flag: the
+    value is read from Terraform state, so it must be applied as false and THEN
+    destroyed.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "artifact_registry_name" {
+  description = "Artifact Registry repository holding the runtime, migration and coding-worker images."
+  type        = string
+  default     = "wardby"
+}

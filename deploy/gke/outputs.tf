@@ -36,3 +36,22 @@ output "database_password" {
   value       = random_password.db.result
   sensitive   = true
 }
+
+output "cluster_name" {
+  value = google_container_cluster.runs.name
+}
+
+output "cluster_endpoint" {
+  description = "API server endpoint. Note this is what the in-cluster control plane must be pointed at via KUBERNETES_SERVICE_HOST: on Dataplane V2 the kubernetes.default ClusterIP is unreachable through any NetworkPolicy ipBlock rule."
+  value       = google_container_cluster.runs.endpoint
+}
+
+output "artifact_registry_url" {
+  description = "Registry prefix for image references, e.g. <url>/coding-worker@sha256:..."
+  value       = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.images.repository_id}"
+}
+
+output "kubectl_context_command" {
+  description = "Fetches credentials and creates the kubectl context the launcher config names."
+  value       = "gcloud container clusters get-credentials ${google_container_cluster.runs.name} --region ${var.region} --project ${var.project_id}"
+}
