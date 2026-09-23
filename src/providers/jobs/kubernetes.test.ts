@@ -909,6 +909,24 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
     expect(g.api.objects.has(`pod/wardby-coding/${g.names.pod}`)).toBe(false);
   });
 
+  it("surfaces the witness failure unwrapped when a supplied preflight passed but the re-read fails", async () => {
+    const h = await harness("run-witness-reread");
+    // A supplied preflight skips the memoized witness read, so provision's own per-launch re-read is
+    // the first witness check of the launch — and it is NOT wrapped by runPreflight's errorWithCode,
+    // so the caller sees the witness code itself rather than kubernetes_isolation_unsupported.
+    const { launcher } = clockedLauncher(h, { preflight: async () => ({ proxyIp: "10.96.0.50" }) });
+    h.api.put("endpoints", "wardby-coding", {
+      metadata: { name: "wardby-coding-proxy" },
+      subsets: [{ addresses: [{ ip: "10.244.0.5" }], ports: [{ name: "proxy", port: 8787, protocol: "TCP" }] }],
+    });
+    await expect(launcher.launch(h.spec)).rejects.toThrow(
+      "kubernetes_proxy_witness_unusable: Service wardby-coding/wardby-coding-proxy has no ready endpoint serving port 8788",
+    );
+    // It fails closed before the pod exists, so nothing is ever probed or gated.
+    expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+    expect(h.api.execCalls.some((c) => isEnforcementProbe(c.command))).toBe(false);
+  });
+
   it("reports an unavailable witness when the proxy port itself cannot be reached", async () => {
     const h = await harness();
     const { launcher } = clockedLauncher(h);

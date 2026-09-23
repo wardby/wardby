@@ -97,9 +97,22 @@ Carried into the follow-up plan (Plan 2b), which gates Plan 3:
 
 - Per-run record ConfigMaps are kept as tombstones by design and never deleted;
   failed launches leave records too. Needs garbage collection.
-- The enforcement witness is the cluster's DNS service. Where that service has
-  no pod backends (GKE with Cloud DNS) the preflight now fails closed rather
-  than passing vacuously — such clusters need a different witness first.
+- **The one residual way "blocked" is not conclusive.** The witness is now the
+  coding proxy's deny port: the gate counts a probe only when 8787 connects and
+  8788 does not, and both halves are measured from inside the pod in the same
+  exec. What that still cannot separate is a _drop_ from an _exhausted accept
+  backlog_. The probe runs in the keeper, which shares a network namespace with
+  the untrusted worker, so a worker holding the deny port's accept queue full
+  would make 8788 read as blocked while 8787 still connects — the proven
+  outcome — without any policy being enforced. This is speculative, not a live
+  finding: it requires the policy to _already_ be unenforced (i.e. the attacker
+  already has the open network the gate exists to deny, so it buys reachability
+  it already has rather than obtaining it), and it requires out-racing an
+  accept-and-close loop that holds no connection open, with no `CAP_NET_RAW`
+  and no raw sockets in the pod. Closing it properly means evidence the deny
+  port produced a distinguishable _response_, not merely silence — which a
+  listener that serves nothing cannot give — so it is recorded here rather than
+  patched around.
 - Autopilot's admission mutations will fail deny-by-default attestation until
   the allowances are written.
 - Spec §9 integration coverage not yet built: the shared launcher contract
