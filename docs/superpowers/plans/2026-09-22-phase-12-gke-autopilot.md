@@ -25,7 +25,7 @@
 - **No new billable cloud resources except in Task 9**, which is explicitly approval-gated.
 - **Verification for every task:** `npm run typecheck`, `npm run lint`, `npm test`, `npm run format:check`. Tasks touching the `kind` harness additionally run `npm run test:kubernetes` (Task 8 onwards).
 - **Commit messages end with:**
-  `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>` and
+  a `Co-Authored-By:` trailer naming the model that actually did the work and
   `Claude-Session: https://claude.ai/code/session_0121bZNoqyDGneNVmc2fCds4`.
 
 ## Decisions this plan makes (the spec left these open)
