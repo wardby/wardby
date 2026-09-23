@@ -14,7 +14,11 @@
  * been read back and attested against the canonical builders, the pod's
  * NetworkPolicy is observed to be enforced (CNIs program a new pod's policy
  * a few seconds after it starts), and the workspace and input have been
- * seeded. Until that gate opens, nothing untrusted runs.
+ * seeded. Seeding is real wall-clock time bounded only by the run's own
+ * timeoutSec, so enforcement is re-probed one last time immediately before
+ * the marker write, with nothing else awaited in between — a NetworkPolicy
+ * landing after the first proof but before release must still be caught.
+ * Until that gate opens, nothing untrusted runs.
  */
 import { spawn } from "node:child_process";
 import { copyFile, lstat, mkdtemp, rm } from "node:fs/promises";
@@ -119,11 +123,63 @@ const ENFORCEMENT_PROBE_DID_NOT_RUN = {
     "interpreter, or an OOM-killed keeper). Nothing was measured, so this says nothing about the policy",
 };
 
-/** The gate's verdict, carrying the exit code and the address it probed. */
-function enforcementVerdict(exitCode: number, proxyIp: string): Error {
-  const { code, detail } = ENFORCEMENT_VERDICTS[exitCode] ?? ENFORCEMENT_PROBE_DID_NOT_RUN;
+/**
+ * Where in the launch a probe run happened: `initial` is the first proof, before anything is seeded.
+ * `pre_marker` is the re-confirmation run again immediately before the gate marker is written — the
+ * whole point of which is that seeding runs for real wall-clock time (up to the run's own timeoutSec)
+ * with nothing else re-checked in between, so a NetworkPolicy landing in that window must be caught
+ * here, not assumed still absent because it was absent at `initial`. The two stages use distinct error
+ * codes so an operator can tell "this run's policy was never enforced" apart from "it was enforced when
+ * first proven, but something reopened this pod's egress while the workspace was being seeded" — the
+ * second is the far more alarming one (active drift/compromise during a live launch), not just a bug hazard.
+ */
+type EnforcementStage = "initial" | "pre_marker";
+
+/** Same shape as ENFORCEMENT_VERDICTS/ENFORCEMENT_PROBE_DID_NOT_RUN, but for the `pre_marker` stage. */
+const ENFORCEMENT_VERDICTS_PRE_MARKER: Readonly<Record<number, { code: string; detail: string }>> = {
+  [ENFORCEMENT_PROBE_PROVEN]: {
+    code: "kubernetes_policy_enforcement_lost_before_marker",
+    detail:
+      `the policy was proven enforced earlier in this launch, but the re-probe run immediately before ` +
+      `opening the gate never reached ${ENFORCEMENT_BLOCKED_STREAK} consecutive proven probes within the ` +
+      "bound — enforcement held at the initial proof but is flapping now, immediately before release",
+  },
+  [ENFORCEMENT_PROBE_DENY_REACHABLE]: {
+    code: "kubernetes_policy_enforcement_lost_before_marker",
+    detail:
+      `the deny port ${CODING_PROXY_DENY_PORT} was proven blocked earlier in this launch, but the re-probe ` +
+      "run immediately before opening the gate found it reachable — a NetworkPolicy change during seeding " +
+      "(GitOps drift, a stale re-apply, anything else with NetworkPolicy write access in this namespace) " +
+      "silently reopened this run's egress; look at what changed policies in this namespace, not just the CNI",
+  },
+  [ENFORCEMENT_PROBE_PROXY_UNREACHABLE]: {
+    code: "kubernetes_policy_witness_unavailable_before_marker",
+    detail:
+      `the proxy port ${CODING_PROXY_PORT} could not be reached on the re-probe run immediately before ` +
+      "opening the gate, so enforcement could not be re-confirmed — look at the proxy pod and its Service",
+  },
+  [ENFORCEMENT_PROBE_DENY_REFUSED]: {
+    code: "kubernetes_policy_witness_unserved_before_marker",
+    detail:
+      `the deny port ${CODING_PROXY_DENY_PORT} answered with a refusal (RST) instead of being dropped on ` +
+      "the re-probe run immediately before opening the gate — the witness itself became unserved during seeding",
+  },
+};
+
+const ENFORCEMENT_PROBE_DID_NOT_RUN_PRE_MARKER = {
+  code: "kubernetes_policy_probe_unusable_before_marker",
+  detail:
+    "the re-probe run immediately before opening the gate exited with a code it never produces, so it did " +
+    "not run to completion. Nothing was measured, so this says nothing about whether the policy still holds",
+};
+
+/** The gate's verdict, carrying the exit code, the address it probed, and which stage produced it. */
+function enforcementVerdict(exitCode: number, proxyIp: string, stage: EnforcementStage): Error {
+  const table = stage === "initial" ? ENFORCEMENT_VERDICTS : ENFORCEMENT_VERDICTS_PRE_MARKER;
+  const fallback = stage === "initial" ? ENFORCEMENT_PROBE_DID_NOT_RUN : ENFORCEMENT_PROBE_DID_NOT_RUN_PRE_MARKER;
+  const { code, detail } = table[exitCode] ?? fallback;
   return new Error(`${code}: probing ${proxyIp}, the last probe exited ${exitCode}; ${detail}`, {
-    cause: { exitCode, address: proxyIp },
+    cause: { exitCode, address: proxyIp, stage },
   });
 }
 /** Bound for small keeper commands (seeded marker, result artifact read). */
@@ -562,8 +618,21 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
    * at the proxy when the real problem is an unenforced policy. The three non-proven outcomes stay
    * distinct because they send an operator to three different places: the CNI, the proxy pod, and
    * the deny listener.
+   *
+   * `stage` only changes which error codes a bound produces (see `EnforcementStage`); the probe
+   * machinery itself — the script, the streak, the poll interval, the wall-clock bound — is identical
+   * for the initial proof and for `provision`'s later re-confirmation immediately before the marker
+   * write. That re-confirmation deliberately requires the same full `ENFORCEMENT_BLOCKED_STREAK`
+   * consecutive proven probes, not a single one-shot probe: seeding (the window it's guarding) can run
+   * for real hours, so the few hundred extra milliseconds a streak costs in the common, still-enforced
+   * case is negligible, while a single probe could pass on a lucky sample the same way one dropped SYN
+   * must not open the gate at the initial proof either.
    */
-  private async waitForPolicyEnforcement(names: RunNames, proxyIp: string): Promise<void> {
+  private async waitForPolicyEnforcement(
+    names: RunNames,
+    proxyIp: string,
+    stage: EnforcementStage = "initial",
+  ): Promise<void> {
     const command = ["node", "-e", enforcementProbeScript(proxyIp)];
     const started = this.now();
     let blocked = 0;
@@ -576,7 +645,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       blocked = exitCode === 0 ? blocked + 1 : 0;
       if (blocked >= ENFORCEMENT_BLOCKED_STREAK) return;
       if (this.now() - started >= this.enforcementTimeoutMs) {
-        throw enforcementVerdict(exitCode, proxyIp);
+        throw enforcementVerdict(exitCode, proxyIp, stage);
       }
       await this.sleep(ENFORCEMENT_POLL_MS);
     }
@@ -628,6 +697,16 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     // Never open the gate for a run that was stopped (or otherwise finished) while it was being seeded.
     const current = await this.readRecord(names);
     if (!current || isTerminal(current.record.phase)) throw new Error("kubernetes_launch_superseded");
+    // Re-confirm enforcement one last time, with nothing else awaited between this and the marker
+    // write below: seeding above ran for real wall-clock time (bounded only by the run's own
+    // timeoutSec), and nothing since the initial proof re-checked anything. A NetworkPolicy landing
+    // in that window — GitOps drift, a stale re-apply, an unrelated future feature, anything else
+    // with NetworkPolicy write access in this namespace — would otherwise silently reopen this pod's
+    // egress at the exact moment the untrusted worker is released into it, and this launch would have
+    // no way to notice. Re-attesting the run's own NetworkPolicy object cannot catch this (policies
+    // are additive: a second policy under a different name is invisible to a comparison against the
+    // object this launch built); only re-probing the pod's actual, observed egress can.
+    await this.waitForPolicyEnforcement(names, proxyIp, "pre_marker");
     const marker = await this.api.exec(
       this.namespace,
       names.pod,

@@ -183,7 +183,10 @@ describe("KubernetesJobLauncher", () => {
     expect(h.api.execCalls.slice(0, 3).every((c) => isEnforcementProbe(c.command))).toBe(true);
     expect(commands[3]).toContain("tar -C /run/wardby/storage/workspace");
     expect(commands[4]).toContain("tar -C /run/wardby/storage/input");
-    expect(commands[5]).toContain("/run/wardby/storage/input/.seeded");
+    // Re-confirmed with another three consecutive blocked probes immediately before the marker write.
+    expect(h.api.execCalls.slice(5, 8).every((c) => isEnforcementProbe(c.command))).toBe(true);
+    expect(commands[8]).toContain("/run/wardby/storage/input/.seeded");
+    expect(h.api.execCalls).toHaveLength(9);
     expect(h.api.execCalls.every((c) => c.container === "keeper")).toBe(true);
     expect(await h.launcher.status(handle)).toEqual({ state: "running" });
   });
@@ -828,12 +831,21 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
   it("opens the gate only after three consecutive blocked probes (0, 3, 0, 0, 0)", async () => {
     const h = await harness();
     const { launcher, sleeps } = clockedLauncher(h);
+    // 5 answers for the initial proof; the pre-marker re-probe then draws from the same queue (empty,
+    // so it defaults to 0 every time — three clean consecutive proofs, same machinery, same script).
     const kinds = scriptProbe(h, [0, 3, 0, 0, 0]);
     await launcher.launch(h.spec);
     expect(kinds().slice(0, 5)).toEqual(["probe", "probe", "probe", "probe", "probe"]);
     expect(kinds().indexOf("seed")).toBe(5);
+    // Re-confirmed with another three consecutive blocked probes, strictly after seeding and strictly
+    // before the marker write — with nothing else in between.
+    expect(kinds().slice(7, 10)).toEqual(["probe", "probe", "probe"]);
+    expect(kinds()[10]).toBe("marker");
+    expect(kinds()).toHaveLength(11);
     expect(kinds().at(-1)).toBe("marker");
-    expect(sleeps.filter((ms) => ms === 500)).toHaveLength(4);
+    // 4 sleeps to reach the initial 3-streak (0,3,0,0,0), plus 2 more to reach the pre-marker 3-streak
+    // from a clean start (0,0,0 needs two 500 ms polls between the three probes).
+    expect(sleeps.filter((ms) => ms === 500)).toHaveLength(6);
   });
 
   it("a connected probe resets the count: 0, 0, 3, 0, 0 does not open the gate", async () => {
@@ -1040,6 +1052,85 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
       return calls === 1 ? 4 : 3;
     };
     await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_policy_not_enforced");
+  });
+
+  describe("re-confirmation immediately before the marker", () => {
+    /** Blocks the first N enforcement probes (the initial proof), then returns `after` for every probe past that. */
+    function proveThenChange(h: Awaited<ReturnType<typeof harness>>, provenCount: number, after: number) {
+      let probes = 0;
+      const original = h.api.onExec;
+      h.api.onExec = async (call) => {
+        if (!isEnforcementProbe(call.command)) return original(call);
+        probes += 1;
+        return probes <= provenCount ? 0 : after;
+      };
+    }
+
+    it("fails closed with a code distinct from the initial failure when enforcement is lost during seeding, and cleans up without opening the gate", async () => {
+      const h = await harness();
+      const { launcher } = clockedLauncher(h);
+      // The initial proof passes cleanly (3 consecutive blocked probes). Every probe after that —
+      // i.e. only the pre-marker re-probe, seeding never execs anything matching isEnforcementProbe —
+      // finds the deny port reachable, as if a permissive NetworkPolicy landed while the workspace
+      // was being seeded (the live-cluster attack this fix closes).
+      proveThenChange(h, 3, 3 /* ENFORCEMENT_PROBE_DENY_REACHABLE */);
+      const error = (await launcher.launch(h.spec).catch((e: unknown) => e)) as Error;
+      expect(error.message).toContain("kubernetes_policy_enforcement_lost_before_marker");
+      // Distinguishable from the code the initial proof would have produced for the same exit code.
+      expect(error.message).not.toContain("kubernetes_policy_not_enforced:");
+      // The marker gate must never be written on this path.
+      expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
+      // Cleanup ran exactly as any other provisioning failure: pod, policy, secret gone.
+      expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+      expect(h.api.objects.has(`networkpolicy/wardby-coding/${h.names.policy}`)).toBe(false);
+      expect(h.api.objects.has(`secret/wardby-coding/${h.names.secret}`)).toBe(false);
+      const handle = { backend: "kubernetes", id: `wardby-coding/${h.names.token}` };
+      expect(await launcher.collect(handle)).toEqual({
+        exitCode: 1,
+        reason: "failed",
+        diagnostic: "kubernetes_provisioning_failed",
+      });
+    });
+
+    it("distinguishes each pre-marker verdict from its initial-stage counterpart", async () => {
+      for (const [exitCode, initialCode, preMarkerCode] of [
+        [3, "kubernetes_policy_not_enforced", "kubernetes_policy_enforcement_lost_before_marker"],
+        [4, "kubernetes_policy_witness_unavailable", "kubernetes_policy_witness_unavailable_before_marker"],
+        [5, "kubernetes_policy_witness_unserved", "kubernetes_policy_witness_unserved_before_marker"],
+      ] as const) {
+        const h = await harness(`run-pre-marker-${exitCode}`);
+        const { launcher } = clockedLauncher(h);
+        proveThenChange(h, 3, exitCode);
+        const error = (await launcher.launch(h.spec).catch((e: unknown) => e)) as Error;
+        expect(error.message).toContain(preMarkerCode);
+        expect(error.message).not.toContain(`${initialCode}:`);
+        expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
+      }
+    });
+
+    it("still opens the gate when the re-probe cleanly re-proves enforcement (happy path)", async () => {
+      const h = await harness();
+      const handle = await h.launcher.launch(h.spec);
+      expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(true);
+      expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+    });
+
+    it("pins the ordering: the re-probe runs strictly after seeding and strictly before the marker, with nothing else exec'd in between", async () => {
+      const h = await harness();
+      await h.launcher.launch(h.spec);
+      const kinds = h.api.execCalls.map((c) =>
+        isEnforcementProbe(c.command) ? "probe" : isMarker(c.command) ? "marker" : "seed",
+      );
+      const lastSeed = kinds.lastIndexOf("seed");
+      const markerIndex = kinds.indexOf("marker");
+      expect(lastSeed).toBeGreaterThan(-1);
+      expect(markerIndex).toBe(kinds.length - 1);
+      // Everything strictly between the last seed exec and the marker exec is a probe — the
+      // re-confirmation — and nothing else runs in that window.
+      const between = kinds.slice(lastSeed + 1, markerIndex);
+      expect(between.length).toBeGreaterThan(0);
+      expect(between.every((kind) => kind === "probe")).toBe(true);
+    });
   });
 
   it("refuses to launch when the proxy Service has no ready endpoint on the deny port", async () => {
