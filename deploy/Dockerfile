@@ -30,7 +30,17 @@ RUN npm pkg delete devDependencies scripts \
     && npm cache clean --force
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build /app/dist ./dist
-RUN test ! -d node_modules/prisma && test ! -d node_modules/@prisma/config && test ! -d node_modules/deepmerge-ts
+# git.ts resolves this relative to its own module URL (dist/providers/vcs ->
+# ../../../scripts), and git runs it as GIT_ASKPASS to receive the GitHub App
+# token. Without it a coding run gets all the way through the agent's work --
+# paying for it -- and then cannot push: "cannot run
+# /app/scripts/git-askpass.sh: No such file or directory", followed by git
+# asking for a username on a terminal that does not exist. Measured on the first
+# hosted run that reached the push, 2026-09-23. Only this one script is copied:
+# everything else under scripts/ is development tooling that has no business in
+# a runtime image.
+COPY --from=build /app/scripts/git-askpass.sh ./scripts/git-askpass.sh
+RUN test -x scripts/git-askpass.sh && test ! -d node_modules/prisma && test ! -d node_modules/@prisma/config && test ! -d node_modules/deepmerge-ts
 USER node
 ENV NODE_ENV=production
 # The complete process: MCP + scheduler + reconciler. A deployment that
