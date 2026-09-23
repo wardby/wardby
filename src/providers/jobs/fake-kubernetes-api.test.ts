@@ -40,6 +40,13 @@ describe("FakeKubernetesApi", () => {
     expect(Buffer.concat(chunks).toString()).toBe("keeper:echo hi");
   });
 
+  it("stores nothing on a dry-run create", async () => {
+    const api = new FakeKubernetesApi();
+    const pod = { metadata: { name: "wardby-run-x" }, spec: { containers: [] } };
+    expect(await api.dryRunCreatePod("wardby-coding", pod)).toEqual(pod);
+    expect(await api.readPod("wardby-coding", "wardby-run-x")).toBeUndefined();
+  });
+
   it("rejects an exec into a missing pod or an unknown container", async () => {
     const api = new FakeKubernetesApi();
     await expect(api.exec("ns", "gone", "keeper", ["true"], { timeoutMs: 1000 })).rejects.toBeInstanceOf(

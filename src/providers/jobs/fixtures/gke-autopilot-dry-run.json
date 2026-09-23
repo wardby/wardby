@@ -1,0 +1,46 @@
+{
+  "capturedAt": "2026-09-22",
+  "platform": "gke-autopilot",
+  "provisional": true,
+  "source": "PROVISIONAL — written from Google's autopilot-resource-requests, sandbox-pods and autopilot-security documentation (checked 2026-09-22), not from a cluster. Task 9 of docs/superpowers/plans/2026-09-22-phase-12-gke-autopilot.md replaces this file with a real server-side dry-run capture via `npm run capture:autopilot`, which sets provisional to false.",
+  "notes": [
+    "No resource mutations are listed, and that is the claim this fixture exists to test: the builder already emits Autopilot-legal CPU, memory and ephemeral-storage, with limits equal to requests, so the admission controller has nothing left to rewrite.",
+    "The two node-health tolerations the API server defaults on every pod are normalized by kubernetes-isolation.ts itself, not by the platform profile, so they are listed here only because they arrive in the same array."
+  ],
+  "mutations": [
+    {
+      "op": "add",
+      "path": "/metadata/annotations/autopilot.gke.io~1resource-adjustment",
+      "value": "{\"input\":{\"containers\":[]},\"output\":{\"containers\":[]},\"modified\":false}"
+    },
+    {
+      "op": "add",
+      "path": "/metadata/annotations/autopilot.gke.io~1warden-version",
+      "value": "provisional"
+    },
+    {
+      "op": "add",
+      "path": "/spec/nodeSelector",
+      "value": { "sandbox.gke.io/runtime": "gvisor" }
+    },
+    {
+      "op": "add",
+      "path": "/spec/tolerations",
+      "value": [
+        { "key": "sandbox.gke.io/runtime", "operator": "Equal", "value": "gvisor", "effect": "NoSchedule" },
+        {
+          "key": "node.kubernetes.io/not-ready",
+          "operator": "Exists",
+          "effect": "NoExecute",
+          "tolerationSeconds": 300
+        },
+        {
+          "key": "node.kubernetes.io/unreachable",
+          "operator": "Exists",
+          "effect": "NoExecute",
+          "tolerationSeconds": 300
+        }
+      ]
+    }
+  ]
+}

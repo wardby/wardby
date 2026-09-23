@@ -18,13 +18,19 @@
  * PROVENANCE OF THE AUTOPILOT NUMBERS — read before trusting them. They are
  * DOCUMENTATION-SOURCED ONLY as of 2026-09-22, from Google's
  * autopilot-resource-requests, sandbox-pods, and autopilot-security pages.
- * They have NOT yet been confirmed against a real cluster: the dry-run capture
- * (src/tools/capture-autopilot-dry-run.ts) that will confirm them does not
- * exist yet. Until it has run, treat every number and every injected key below
- * as an assumption. They fail closed if wrong — an unmodelled mutation shows up
- * as an unforgiven difference and fails attestation — but that is the only
- * reason it is safe to ship them unconfirmed, not a reason to stop re-deriving
- * them. Whoever lands the capture tool updates this paragraph.
+ * They have NOT yet been confirmed against a real cluster. The dry-run capture
+ * that will confirm them (src/tools/capture-autopilot-dry-run.ts, run with
+ * `npm run capture:autopilot`) now exists, but it has not been run: no cluster
+ * has been created yet, and its committed output —
+ * fixtures/gke-autopilot-dry-run.json — is still marked `provisional: true`,
+ * derived from the same documentation as the numbers here rather than from an
+ * API server. Until that capture has run, treat every number and every injected
+ * key below as an assumption. They fail closed if wrong — an unmodelled mutation
+ * shows up as an unforgiven difference and fails attestation — but that is the
+ * only reason it is safe to ship them unconfirmed, not a reason to stop
+ * re-deriving them. Whoever runs the first real capture updates this paragraph
+ * (kubernetes-autopilot-attestation.test.ts reports a named PENDING test until
+ * they do).
  */
 import type { V1PodSpec, V1Toleration } from "@kubernetes/client-node";
 

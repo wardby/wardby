@@ -137,6 +137,12 @@ export class ClientNodeKubernetesApi implements KubernetesApi {
     return create(`pod/${namespace}/${body.metadata?.name}`, () => this.core.createNamespacedPod({ namespace, body }));
   }
 
+  dryRunCreatePod(namespace: string, body: V1Pod): Promise<V1Pod> {
+    return create(`pod/${namespace}/${body.metadata?.name}?dryRun`, () =>
+      this.core.createNamespacedPod({ namespace, body, dryRun: "All" }),
+    );
+  }
+
   readPod(namespace: string, name: string): Promise<V1Pod | undefined> {
     return readOrUndefined(() => this.core.readNamespacedPod({ namespace, name }));
   }

@@ -43,6 +43,12 @@ export interface KubernetesApi {
   createSecret(namespace: string, body: V1Secret): Promise<V1Secret>;
   deleteSecret(namespace: string, name: string): Promise<void>;
   createPod(namespace: string, body: V1Pod): Promise<V1Pod>;
+  /**
+   * Server-side dry-run create: the API server runs the whole admission chain and returns the
+   * mutated object without persisting anything. Used only by src/tools/capture-autopilot-dry-run.ts;
+   * never by the launcher, which must not let a cluster tell it what it is allowed to change.
+   */
+  dryRunCreatePod(namespace: string, body: V1Pod): Promise<V1Pod>;
   readPod(namespace: string, name: string): Promise<V1Pod | undefined>;
   deletePod(namespace: string, name: string, gracePeriodSeconds: number): Promise<void>;
   createNetworkPolicy(namespace: string, body: V1NetworkPolicy): Promise<V1NetworkPolicy>;

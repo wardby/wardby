@@ -97,6 +97,10 @@ export class FakeKubernetesApi implements KubernetesApi {
   async createPod(namespace: string, body: V1Pod) {
     return this.create("pod", namespace, body);
   }
+  /** Echoes the submitted pod without storing it: a dry run persists nothing. */
+  async dryRunCreatePod(_namespace: string, body: V1Pod) {
+    return structuredClone(body);
+  }
   async readPod(namespace: string, name: string) {
     return this.read<V1Pod>("pod", namespace, name);
   }

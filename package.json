@@ -21,6 +21,7 @@
     "build": "npm run build:vendor && tsc -p tsconfig.build.json",
     "prepare": "npm run build:vendor",
     "cli": "tsx src/cli.ts",
+    "capture:autopilot": "tsx src/tools/capture-autopilot-dry-run.ts",
     "test": "npm run build:vendor && vitest run",
     "test:contract": "vitest run --config vitest.contract.config.ts",
     "test:kubernetes": "WARDBY_KUBERNETES_TEST=1 vitest run src/providers/jobs/kubernetes.integration.test.ts",
