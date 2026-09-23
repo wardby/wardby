@@ -812,6 +812,12 @@ api.put("endpoints", "wardby-coding", {
 ```
 
 (c) Line ~427: `kubernetes_proxy_unavailable` becomes `kubernetes_proxy_witness_unusable`.
+NOTE: that string is the error's `cause`, not its message. `launch()` calls
+`runPreflight`, which wraps every failure through `errorWithCode`
+(`kubernetes.ts:315`), so the thrown message is always
+`kubernetes_isolation_unsupported` and the detail rides on `cause`. Assert it the
+way `kubernetes-preflight.test.ts` already does for API-error causes — never by
+unwrapping `runPreflight`, which would change error semantics for every caller.
 
 (d) `clockedLauncher`'s `extra` type (line ~744): `{ preflight?: () => Promise<{ proxyIp: string }> }`.
 
@@ -881,7 +887,10 @@ it("refuses to launch when the proxy Service has no ready endpoint on the deny p
     metadata: { name: "wardby-coding-proxy" },
     subsets: [{ addresses: [{ ip: "10.244.0.5" }], ports: [{ port: 8787, protocol: "TCP" }] }],
   });
-  await expect(h.launcher.launch(h.spec)).rejects.toThrow("kubernetes_proxy_witness_unusable");
+  await expect(h.launcher.launch(h.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
+  await expect(h.launcher.launch(h.spec)).rejects.toMatchObject({
+    cause: expect.objectContaining({ message: expect.stringContaining("kubernetes_proxy_witness_unusable") }),
+  });
 });
 ```
 
