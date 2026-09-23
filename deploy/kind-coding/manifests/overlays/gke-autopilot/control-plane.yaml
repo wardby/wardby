@@ -153,12 +153,12 @@ spec:
             # for the other, which is what keeps an unpublished deployment from
             # silently accepting tokens meant for a published one.
             - name: MCP_CANONICAL_URI
-              value: http://127.0.0.1:8080/mcp
+              value: https://wardby-control-plane-hostname/mcp
             # Must be byte-identical to MCP_CANONICAL_URI once normalized; the
             # server refuses to start otherwise, so the two can never drift into
             # a state where tokens are minted for an audience it won't accept.
             - name: AUTH_AUDIENCE
-              value: http://127.0.0.1:8080/mcp
+              value: https://wardby-control-plane-hostname/mcp
             # The API server, addressed by its ENDPOINT rather than by the
             # kubernetes.default ClusterIP the kubelet injects here by default.
             #
@@ -182,6 +182,15 @@ spec:
               value: wardby-apiserver-host
             - name: KUBERNETES_SERVICE_PORT
               value: "443"
+            # A hard global ceiling on registered OAuth clients. Dynamic client
+            # registration is unauthenticated by necessity -- it is how an MCP
+            # client bootstraps -- so anyone who can reach this endpoint can
+            # create rows here. The default is 1000; a deployment with a handful
+            # of real clients has no use for that headroom, and the only thing
+            # the spare 980 buys is a larger pile to clean up. When the cap is
+            # hit, registration fails until an operator prunes.
+            - name: AUTH_MAX_CLIENTS
+              value: "20"
             - name: JOB_LAUNCHER
               value: kubernetes
             # KUBERNETES_CONTEXT is deliberately unset: ClientNodeKubernetesApi
@@ -240,6 +249,13 @@ kind: Service
 metadata:
   name: wardby-control-plane
   namespace: wardby-coding
+  annotations:
+    # Container-native load balancing. The Gateway sends traffic straight to pod
+    # IPs through this NEG rather than hopping via kube-proxy, which is what makes
+    # the load balancer's health checks and the ingress NetworkPolicy in
+    # control-plane-gateway.yaml agree about which address they are talking to.
+    # Harmless when no Gateway exists.
+    cloud.google.com/neg: '{"ingress": true}'
 spec:
   type: ClusterIP
   selector:

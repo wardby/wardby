@@ -7,3 +7,4 @@ resources:
   - throwaway-database.yaml
   - proxy-database-egress.yaml
   - control-plane.yaml
+  - control-plane-gateway.yaml
