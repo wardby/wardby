@@ -45,9 +45,8 @@ import type { Executor } from "../providers/executor/types.js";
 const runnerLog = logger.child({ module: "runner" });
 
 /**
- * Sub-agent dispatch (see AgentSubAgent and
- * docs/private/2026-09-13-agent-subagent-design-and-plan.md §6). One
- * synthetic tool per declared child, named by the boundName it's attached
+ * Sub-agent dispatch uses one synthetic tool per declared child, named by the
+ * boundName it's attached
  * under. Synchronous only for v1: the parent's turn blocks until the child
  * run reaches a terminal state, and its result comes back as this tool
  * call's result. At most one dispatch is honored per run (see the

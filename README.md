@@ -171,9 +171,8 @@ npm run observability:down
 
 The included cloud deployments do not yet provision AWS or GCP collectors.
 Current metrics primarily cover the coding proxy; application/MCP metrics,
-production alerts, and SLOs remain Phase 7 work. See the
-[observability roadmap](docs/phase-7-production-readiness.md#workstream-5-observability-and-incident-response)
-for the current boundary and retention details.
+production alerts, and SLOs remain operator responsibilities. See the
+[observability guide](docs/observability.md) for boundaries and retention.
 
 ## Security boundaries
 
@@ -237,7 +236,7 @@ OAuth and the production boundary documented above.
 Once connected, ask the client to list the available Wardby tools, create an
 agent with a small budget, trigger it, and inspect the run. Coding-agent setup
 additionally requires a dedicated GitHub App, immutable worker images, and the
-proxy boundary described in the [local coding smoke guide](docs/local-phase5-smoke.md).
+proxy boundary described in the [local coding-agent setup guide](docs/coding-agent-setup.md).
 
 ## What is implemented
 
@@ -255,10 +254,9 @@ proxy boundary described in the [local coding smoke guide](docs/local-phase5-smo
 - Portable production images, a Compose/Caddy boundary, and a GCP control-plane
   Terraform reference.
 
-This project is under active development. The
-[coding-agent release gate](docs/phase-5-release-gate.md) records tested live
-evidence; the [production-readiness roadmap](docs/phase-7-production-readiness.md)
-tracks remaining operational work without assuming one hosting provider.
+This project is under active development. Run the
+[release verification](docs/release-verification.md) checks and review the
+[security deployment guide](docs/security-deployment.md) before production use.
 
 ## Repository map
 
@@ -270,12 +268,15 @@ src/coding-worker/ and src/claude-coding-worker/
                 Isolated Codex and Claude Code execution
 deploy/         Local, production-reference, observability, and cloud deployment
 prisma/         Schema and reviewed migrations
-docs/           Architecture, security, operations, evidence, and roadmap
+docs/           Architecture, security, setup, and operator guidance
 ```
 
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE) for the license terms and
 [NOTICE](NOTICE) for attribution.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute and [SECURITY.md](SECURITY.md)
+to report a vulnerability privately.
 
 Built as an independent reimplementation. See [CLEANROOM.md](CLEANROOM.md).

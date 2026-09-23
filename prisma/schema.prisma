@@ -374,7 +374,7 @@ model CodingRun {
   updatedAt         DateTime            @updatedAt
   proxySession      CodingProxySession?
 
-  /// Revision-in-place (see docs/private/2026-09-13-coding-pr-revision-in-place-design.md).
+  /// Revision-in-place for continuing an existing coding pull request.
   /// Points directly at the ROOT CodingRun that actually owns the branch/PR
   /// this run's headRef reuses -- never a chain to "whichever run
   /// immediately preceded this one." Deliberately not restricted to the

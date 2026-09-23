@@ -301,7 +301,7 @@ export class GitVcsProvider implements VcsProvider {
     // baseRef -- everything after this line (branch/checkout/reset, and
     // every check in finalizeChanges) is unchanged either way, since
     // baseCommit already means exactly what it needs to: "where this
-    // round started." See docs/private/2026-09-13-coding-pr-revision-in-place-design.md.
+    // round started."
     const cloneBranch = normalized.continuation ? normalized.headRef : normalized.baseRef;
 
     try {

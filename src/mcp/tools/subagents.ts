@@ -1,7 +1,6 @@
 /**
- * AgentSubAgent CRUD — agent-composition edges. See
- * docs/private/2026-09-13-agent-subagent-design-and-plan.md. Attach/detach
- * require ownership of both the parent and child agent (same convention as
+ * AgentSubAgent CRUD — agent-composition edges. Attach/detach require
+ * ownership of both the parent and child agent (same convention as
  * attach_tool requiring ownership of both the agent and the tool), and
  * attach rejects any edge that would create a cycle in the parent/child
  * graph (§7 of the design doc) — cycles are not something Postgres can

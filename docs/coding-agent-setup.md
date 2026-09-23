@@ -1,4 +1,4 @@
-# Local Phase 5 smoke setup
+# Local coding-agent setup
 
 This setup starts a dedicated, trusted coding proxy while keeping the coding
 worker untrusted and network-isolated. The proxy has the selected provider
@@ -65,22 +65,25 @@ The preflight checks that Docker can inspect the immutable worker image. A real
 run additionally verifies the proxy's isolated-network attachment immediately
 before launching the worker.
 
-Run the complete no-paid-service Claude gate before an opt-in live smoke:
+Run the no-paid-service verification gates before an opt-in live smoke:
 
 ```sh
+npm run verify:phase5
+npm run test:phase5:database
+npm run test:docker-isolation
+npm run test:docker-job
 npm run verify:claude-code
 ```
 
 The live smoke remains manual because it spends provider credit and can create
 a GitHub branch and draft pull request. Keep its budget deliberately small.
 
-After the smoke completes, record the run ID, terminal result, pull-request
-URL, and final cost in the release evidence. Close the fixture PR and delete
-its `wardby/run-*` branch. The worker's volume, artifact, and trusted checkout
-are already removed by terminal cleanup; do not retain them for debugging.
+After the smoke completes, verify the run ID, terminal result, pull-request
+URL, and final cost. Close the fixture PR and delete its `wardby/run-*` branch.
+The worker's volume, artifact, and trusted checkout should be removed by
+terminal cleanup; investigate any retained resource as a cleanup failure.
 
-See [Phase 5 release gate](phase-5-release-gate.md) for the repeatable
-automated checks, lifecycle audit fields, and incident cleanup procedure.
+See [release verification](release-verification.md) for the complete gate.
 
 ## Stop the setup
 

@@ -131,9 +131,8 @@ async function collectTreeRunIds(db: Pick<BudgetGroupsDb, "run">, rootRunId: str
 }
 
 /**
- * Real-time shared budget scope for a sub-agent dispatch (see
- * docs/private/2026-09-13-agent-subagent-design-and-plan.md §4): the whole
- * run tree rooted at `parentRunId`'s ultimate ancestor shares one ceiling —
+ * Real-time shared budget scope for a sub-agent dispatch: the whole run tree
+ * rooted at `parentRunId`'s ultimate ancestor shares one ceiling —
  * the root's own effective budget (its own budgetUsd, itself tightened by
  * its own BudgetGroup if any) minus everything every run in the tree has
  * spent so far. The root's ceiling is recomputed fresh here, not pinned
