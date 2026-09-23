@@ -432,6 +432,17 @@ the run policy permits) and `8788` (the deny port, which no run policy ever
 permits). Only the outcome **(8787 connected, 8788 blocked)** counts toward the
 streak.
 
+Stated exactly, that outcome proves: **the SYN to 8788 was dropped somewhere on
+the path, while the same destination answered on 8787.** That the drop was the
+_run pod's own egress policy_ does not follow from the measurement alone — it
+follows from the proxy admitting run pods on 8788 at its own ingress, so that no
+other hop is left to drop it. That precondition used to be asserted by manifest
+and checked nowhere, and was falsified on a live cluster: with the proxy's policy
+admitting 8787 only, a prober with no policy at all and full internet egress read
+**proven**, because the proxy's own ingress dropped the packet. The `proxy-service`
+preflight check now reads the proxy's NetworkPolicy and verifies that rule, so the
+attribution is checked rather than assumed.
+
 Both halves are required, and measuring only one port would be unsound. A
 NetworkPolicy denial **drops** the packet rather than rejecting it — GKE
 Dataplane V2 (Cilium), which Autopilot runs, always drops — so "8788 did not
@@ -442,7 +453,9 @@ from a control-plane inference (which is stale the moment it is read) into a
 fact this pod just observed, at the instant of the blocked observation. The
 proxy's own policy deliberately **allows** ingress on 8788 from run pods:
 ingress is enforced at the destination, so denying it there would make a run
-pod whose own egress policy was not yet programmed read as "blocked".
+pod whose own egress policy was not yet programmed read as "blocked" — which is
+precisely the live falsification above, and why that rule is now verified at
+preflight instead of trusted.
 
 **"Blocked" means a timeout specifically, not "did not connect".** Pairing the
 two ports only rules out "the whole proxy pod is dead"; it does not rule out
@@ -474,13 +487,21 @@ blip while the pod's networking came up does not misdirect the operator — and
 the three non-proven outcomes stay distinct, because each sends an operator
 somewhere different:
 
-| Last probe                                 | Verdict                                 | Where to look                            |
-| ------------------------------------------ | --------------------------------------- | ---------------------------------------- |
-| 8788 connected                             | `kubernetes_policy_not_enforced`        | the CNI: no policy, or not port-scoped   |
-| 8787 unreachable                           | `kubernetes_policy_witness_unavailable` | the proxy pod / its Service              |
-| 8788 refused                               | `kubernetes_policy_witness_unserved`    | the deny listener, or a reject-style CNI |
-| This wait happens inside the pod's overall |
-| ready-timeout window, not on top of it.    |
+| Last probe       | Verdict                                 | Where to look                            |
+| ---------------- | --------------------------------------- | ---------------------------------------- |
+| 8788 connected   | `kubernetes_policy_not_enforced`        | the CNI: no policy, or not port-scoped   |
+| 8787 unreachable | `kubernetes_policy_witness_unavailable` | the proxy pod / its Service              |
+| 8788 refused     | `kubernetes_policy_witness_unserved`    | the deny listener, or a reject-style CNI |
+
+Any other exit code means the probe never ran to completion (a crash, a missing
+interpreter, an OOM-killed keeper), so nothing was measured and nothing about
+the policy can be concluded: that is `kubernetes_policy_probe_unusable`, and it
+carries the observed exit code. Every one of these messages names the probed
+address and the exit code it saw, because an operator reads the error, not this
+page.
+
+This wait happens inside the pod's overall ready-timeout window, not on top of
+it.
 
 `wardby coding preflight`'s canary pod waits the same way before running its
 probes, for the same reason.
@@ -507,9 +528,14 @@ default 90,000ms):
    or the next `wardby coding preflight` invocation to discover it.
 2. `namespace` — the configured namespace exists.
 3. `proxy-service` — the proxy Service exists, has a ClusterIP, **exposes both
-   the proxy port (8787) and the deny port (8788)**, and has at least one ready
-   endpoint serving both, failing closed with
-   `kubernetes_isolation_unsupported:proxy-service` otherwise. The deny port is
+   the proxy port (8787) and the deny port (8788)** over TCP, has at least one
+   ready endpoint serving both, **and the proxy's own NetworkPolicy admits
+   `wardby.io/component: coding-run` on 8788** — failing closed with
+   `kubernetes_isolation_unsupported:proxy-service` otherwise. That last clause
+   is the attribution precondition: a dropped connect to 8788 only indicts the
+   run pod's own egress policy if no other hop would have dropped it, and
+   ingress is enforced at the destination, so without it deleting one line from
+   an overlay's proxy policy makes every run read as enforced. The deny port is
    the enforcement witness: a second listener on the proxy
    (`src/providers/coding-proxy/deny-port.ts`) that serves nothing and that no
    run's NetworkPolicy ever permits. A run pod that reaches 8787 but not 8788

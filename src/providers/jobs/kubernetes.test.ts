@@ -51,6 +51,24 @@ async function harness(runId = "run-k8s-test", options: { runtimeClassName?: str
       },
     ],
   });
+  // The attribution precondition the witness now verifies: the proxy admits run pods on the deny
+  // port at its own ingress, so the run pod's egress policy is the only thing that can drop it.
+  api.put("networkpolicy", "wardby-coding", {
+    metadata: { name: "wardby-coding-proxy" },
+    spec: {
+      podSelector: { matchLabels: { "app.kubernetes.io/name": "wardby-coding-proxy" } },
+      policyTypes: ["Ingress", "Egress"],
+      ingress: [
+        {
+          from: [{ podSelector: { matchLabels: { "wardby.io/component": "coding-run" } } }],
+          ports: [
+            { protocol: "TCP", port: 8787 },
+            { protocol: "TCP", port: 8788 },
+          ],
+        },
+      ],
+    },
+  });
   const names = kubernetesRunNames(runId);
   const spec: JobSpec = {
     kind: "coding-agent",
@@ -892,12 +910,15 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
     });
   });
 
-  it("treats any other probe exit code as not yet enforced", async () => {
+  it("treats any other probe exit code as not proven, and says the probe itself failed", async () => {
     const h = await harness();
     const { launcher } = clockedLauncher(h);
     const original = h.api.onExec;
     h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? 127 : original(call));
-    await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_policy_not_enforced");
+    // It still resets the streak and still fails closed; what changed is the attribution, since
+    // an exit code the probe never produces measured nothing and so indicts nothing.
+    await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_policy_probe_unusable");
+    expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
   });
 
   it("probes the proxy ClusterIP it re-read for this launch, not a stale memoized one", async () => {
@@ -956,6 +977,37 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
     await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_policy_witness_unserved");
     expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
     expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+  });
+
+  it("never blames the policy for a probe that did not run", async () => {
+    // A crash (1), a missing interpreter (127) or an OOM-killed keeper (137) measured nothing.
+    // Reporting those as kubernetes_policy_not_enforced sends an operator to the CNI over a
+    // failure that says nothing at all about the CNI.
+    for (const exitCode of [1, 126, 127, 137]) {
+      const h = await harness(`run-exit-${exitCode}`);
+      const { launcher } = clockedLauncher(h);
+      const original = h.api.onExec;
+      h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? exitCode : original(call));
+      const error = (await launcher.launch(h.spec).catch((e: unknown) => e)) as Error;
+      expect(error.message).toContain("kubernetes_policy_probe_unusable");
+      expect(error.message).not.toContain("kubernetes_policy_not_enforced");
+      expect(error.message).toContain(String(exitCode));
+    }
+  });
+
+  it("names both causes of a refused deny port, with the exit code and the probed address", async () => {
+    const h = await harness();
+    const { launcher } = clockedLauncher(h);
+    const original = h.api.onExec;
+    h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? 5 : original(call));
+    const error = (await launcher.launch(h.spec).catch((e: unknown) => e)) as Error;
+    expect(error.message).toContain("kubernetes_policy_witness_unserved");
+    // On a reject-style CNI EVERY run fails this way, so the message must not lead with the
+    // deny listener and leave the operator to find the other cause in the documentation.
+    expect(error.message).toMatch(/nothing is serving/i);
+    expect(error.message).toMatch(/reject/i);
+    expect(error.message).toContain("10.96.0.50");
+    expect(error.message).toContain("5");
   });
 
   it("keeps the three verdicts distinct: unserved is neither not_enforced nor witness_unavailable", async () => {

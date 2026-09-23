@@ -113,6 +113,13 @@ spec:
         # release a worker that in fact had full network access. Allowing it here
         # makes the run pod's own egress policy the only thing that can block it,
         # which is precisely what the gate measures. Nothing is served on this port.
+        #
+        # Do NOT drop this rule in an overlay. It is the gate's whole attribution: a
+        # live test with it removed had a prober holding no policy at all, with full
+        # internet egress, read PROVEN. It is no longer merely asserted here — the
+        # preflight's proxy-service check reads this policy back and fails closed
+        # (kubernetes_proxy_witness_unusable) if no rule admits coding-run on 8788 —
+        # but an overlay that removes it still breaks every run, loudly now.
         - protocol: TCP
           port: 8788
   egress:

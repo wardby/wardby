@@ -722,7 +722,9 @@ describe("enforcementProbeScript", () => {
     // Reproduced on a live cluster: a pod listening on 8787, nothing serving 8788, and NO
     // NetworkPolicy anywhere. Collapsing "error" and "timeout" into one false made that exit 0
     // while the prober had full internet egress. A prompt RST proves the SYN reached the
-    // destination host, on every dataplane — so only the timeout is evidence of a policy.
+    // destination host, on every dataplane — so only a timeout can be evidence of a policy.
+    // (A timeout says the packet was dropped on the path; that the run pod's OWN egress dropped it
+    // follows from the proxy admitting run pods on 8788, which readProxyWitness now verifies.)
     expect(await runProbe(script, { 8787: "connect", 8788: "error" })).toBe(5);
     // Whatever 8788 did, an unreachable 8787 still outranks it: nothing can be witnessed at all.
     expect(await runProbe(script, { 8787: "error", 8788: "error" })).toBe(4);
@@ -731,7 +733,7 @@ describe("enforcementProbeScript", () => {
 
   // The complete 3x3 contract, so no socket-outcome pair is left to inference.
   it.each([
-    ["connect", "timeout", 0, "proven: the only pair a programmed, port-scoped policy produces"],
+    ["connect", "timeout", 0, "proven: the SYN to 8788 was dropped while the same host answered on 8787"],
     ["connect", "connect", 3, "deny port reachable: no policy, or not port-scoped"],
     ["connect", "error", 5, "deny port refused: the packet arrived, so nothing is blocking it"],
     ["timeout", "timeout", 4, "proxy unreachable"],

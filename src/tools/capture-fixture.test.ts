@@ -149,6 +149,23 @@ function api(options: { admit?: (pod: V1Pod) => V1Pod; version?: string } = {}):
       },
     ],
   });
+  // The witness's attribution precondition: the proxy admits run pods on the deny port.
+  fake.put("networkpolicy", NAMESPACE, {
+    metadata: { name: SERVICE },
+    spec: {
+      podSelector: { matchLabels: { "app.kubernetes.io/name": "wardby-coding-proxy" } },
+      policyTypes: ["Ingress", "Egress"],
+      ingress: [
+        {
+          from: [{ podSelector: { matchLabels: { "wardby.io/component": "coding-run" } } }],
+          ports: [
+            { protocol: "TCP", port: 8787 },
+            { protocol: "TCP", port: 8788 },
+          ],
+        },
+      ],
+    },
+  });
   fake.apiServerVersion = options.version ?? "v1.33.4-gke.1000";
   if (options.admit) {
     const admit = options.admit;

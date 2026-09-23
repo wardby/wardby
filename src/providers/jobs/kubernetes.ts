@@ -28,10 +28,12 @@ import type { V1ConfigMap, V1Pod } from "@kubernetes/client-node";
 import type { KubernetesJobConfig } from "../../config/providers.js";
 import { logger } from "../../core/logger.js";
 import { MAX_CODING_ARTIFACT_BYTES, parseCodingAgentOutputJson } from "../../coding/protocol.js";
+import { CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "./docker-isolation.js";
 import { SAFE_WORKER_DIAGNOSTIC } from "./docker.js";
 import { KubernetesAlreadyExistsError, KubernetesConflictError, type KubernetesApi } from "./kubernetes-api.js";
 import {
   ENFORCEMENT_PROBE_DENY_REACHABLE,
+  ENFORCEMENT_PROBE_PROVEN,
   ENFORCEMENT_PROBE_DENY_REFUSED,
   ENFORCEMENT_PROBE_PROXY_UNREACHABLE,
   KEEPER_CONTAINER,
@@ -70,20 +72,60 @@ const READY_POLL_MS = 250;
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const DEFAULT_ENFORCEMENT_TIMEOUT_MS = 30_000;
 const ENFORCEMENT_POLL_MS = 500;
-/**
- * What the gate reports at its bound, by the last probe's exit code. Each names a different place
- * to look: the CNI never programmed the policy, the proxy pod is unreachable, or the deny port
- * answered with an RST and so is reachable-but-unserved (it proves nothing, whatever the CNI did).
- */
-const ENFORCEMENT_VERDICTS: Readonly<Record<number, string>> = {
-  [ENFORCEMENT_PROBE_DENY_REACHABLE]: "kubernetes_policy_not_enforced",
-  [ENFORCEMENT_PROBE_PROXY_UNREACHABLE]: "kubernetes_policy_witness_unavailable",
-  [ENFORCEMENT_PROBE_DENY_REFUSED]: "kubernetes_policy_witness_unserved",
-};
 /** Consecutive proven probes required (8787 reachable, 8788 blocked): one dropped SYN must not open the gate. */
 const ENFORCEMENT_BLOCKED_STREAK = 3;
 /** Bound for one enforcement probe exec (the probe makes two sequential connects, so it gives up after at most 6 s). */
 const ENFORCEMENT_EXEC_TIMEOUT_MS = 10_000;
+
+/**
+ * What the gate reports at its bound, by the last probe's exit code. Each names a different place
+ * to look, and each carries the reason in its own message rather than in the documentation: an
+ * operator reads the error, not this file.
+ *
+ * Anything not listed here is an exit code the probe never produces, so the probe did not run to
+ * completion (a crash, a missing interpreter, an OOM-killed keeper) and NOTHING was measured. That
+ * must not be reported as "the policy was not enforced": it says nothing whatever about the policy,
+ * and sending an operator to the CNI over a dead exec wastes the one clue they were given.
+ */
+const ENFORCEMENT_VERDICTS: Readonly<Record<number, { code: string; detail: string }>> = {
+  [ENFORCEMENT_PROBE_PROVEN]: {
+    code: "kubernetes_policy_not_enforced",
+    // Reaching the bound on a proven probe means the streak kept being broken: enforcement was
+    // observed, but never ENFORCEMENT_BLOCKED_STREAK times running, so it is not stable evidence.
+    detail: `the last probe was proven, but never ${ENFORCEMENT_BLOCKED_STREAK} consecutive times within the bound — enforcement is flapping rather than absent`,
+  },
+  [ENFORCEMENT_PROBE_DENY_REACHABLE]: {
+    code: "kubernetes_policy_not_enforced",
+    detail: `the deny port ${CODING_PROXY_DENY_PORT} accepted a connection, so no policy is blocking it (or the policy is not port-scoped) — look at the CNI`,
+  },
+  [ENFORCEMENT_PROBE_PROXY_UNREACHABLE]: {
+    code: "kubernetes_policy_witness_unavailable",
+    detail: `the proxy port ${CODING_PROXY_PORT} could not be reached, so nothing could be witnessed — look at the proxy pod and its Service, not the CNI`,
+  },
+  [ENFORCEMENT_PROBE_DENY_REFUSED]: {
+    code: "kubernetes_policy_witness_unserved",
+    detail:
+      `the deny port ${CODING_PROXY_DENY_PORT} answered with a refusal (RST) instead of being dropped. Two causes, ` +
+      "either of which voids the witness: nothing is serving the deny port, or this cluster's CNI rejects " +
+      "instead of dropping, in which case a genuine denial is indistinguishable from an unserved port and " +
+      "this cluster needs a different witness",
+  },
+};
+
+const ENFORCEMENT_PROBE_DID_NOT_RUN = {
+  code: "kubernetes_policy_probe_unusable",
+  detail:
+    "the probe exited with a code it never produces, so it did not run to completion (a crash, a missing " +
+    "interpreter, or an OOM-killed keeper). Nothing was measured, so this says nothing about the policy",
+};
+
+/** The gate's verdict, carrying the exit code and the address it probed. */
+function enforcementVerdict(exitCode: number, proxyIp: string): Error {
+  const { code, detail } = ENFORCEMENT_VERDICTS[exitCode] ?? ENFORCEMENT_PROBE_DID_NOT_RUN;
+  return new Error(`${code}: probing ${proxyIp}, the last probe exited ${exitCode}; ${detail}`, {
+    cause: { exitCode, address: proxyIp },
+  });
+}
 /** Bound for small keeper commands (seeded marker, result artifact read). */
 const SHORT_EXEC_TIMEOUT_MS = 60_000;
 const FATAL_WAITING_REASONS = new Set([
@@ -534,7 +576,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       blocked = exitCode === 0 ? blocked + 1 : 0;
       if (blocked >= ENFORCEMENT_BLOCKED_STREAK) return;
       if (this.now() - started >= this.enforcementTimeoutMs) {
-        throw new Error(ENFORCEMENT_VERDICTS[exitCode] ?? "kubernetes_policy_not_enforced");
+        throw enforcementVerdict(exitCode, proxyIp);
       }
       await this.sleep(ENFORCEMENT_POLL_MS);
     }

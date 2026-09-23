@@ -49,6 +49,11 @@ export const WORKER_CONTAINER = "worker";
 export const STORAGE_ROOT = "/run/wardby/storage";
 export const KEEPER_SEEDED_MARKER = `${STORAGE_ROOT}/input/.seeded`;
 export const PROXY_POD_LABEL = { "app.kubernetes.io/name": "wardby-coding-proxy" } as const;
+/**
+ * What every run pod carries and what the proxy's own ingress rule must admit on the deny port.
+ * Single source: `runLabels` stamps it, `readProxyWitness` checks the proxy admits it.
+ */
+export const RUN_COMPONENT_LABEL = { "wardby.io/component": "coding-run" } as const;
 /** The probe proved enforcement: the proxy port connected and the deny port was blocked. */
 export const ENFORCEMENT_PROBE_PROVEN = 0;
 /** The deny port was reachable: no policy is blocking it, or the policy is not port-scoped. */
@@ -125,7 +130,7 @@ export function kubernetesRunNames(runId: string): KubernetesRunNames {
 export function runLabels(runId: string): Record<string, string> {
   return {
     "app.kubernetes.io/managed-by": "wardby",
-    "wardby.io/component": "coding-run",
+    ...RUN_COMPONENT_LABEL,
     "wardby.io/run-sha256": kubernetesRunNames(runId).runSha,
   };
 }
@@ -617,7 +622,13 @@ export function assertRunNetworkPolicyMatches(actual: V1NetworkPolicy, expected:
  * ports come from the Service's numeric targetPort, not from anything actually
  * binding — so the distinction has to be made in the dataplane, here:
  *
- * - deny port **times out** → the packet was dropped → the only outcome that proves a policy.
+ * - deny port **times out** → the packet was dropped somewhere on the path → the only outcome
+ *   that can prove a policy. Note what it does NOT prove on its own: *which* hop dropped it. That
+ *   it was the run pod's own egress policy follows from the proxy admitting run pods on the deny
+ *   port at its own ingress, leaving no other hop that would drop it — a precondition the
+ *   preflight's `proxy-service` check now verifies (readProxyWitness), after a live cluster
+ *   falsified the assumption: with the drop moved to the destination, a prober holding no policy
+ *   at all and with full internet egress read PROVEN.
  * - deny port **refused** (RST / ECONNREFUSED) → the SYN reached the destination host, so
  *   nothing blocked the path. This holds on every dataplane, drop-based ones included, because
  *   a drop cannot produce an RST. Reported as ENFORCEMENT_PROBE_DENY_REFUSED, never as proven.

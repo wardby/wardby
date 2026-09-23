@@ -43,6 +43,24 @@ function cluster(canary: CanaryResult | "no-output") {
       },
     ],
   });
+  // The attribution precondition the witness now verifies: the proxy admits run pods on the deny
+  // port at its own ingress, so the run pod's egress policy is the only thing that can drop it.
+  api.put("networkpolicy", "wardby-coding", {
+    metadata: { name: "wardby-coding-proxy" },
+    spec: {
+      podSelector: { matchLabels: { "app.kubernetes.io/name": "wardby-coding-proxy" } },
+      policyTypes: ["Ingress", "Egress"],
+      ingress: [
+        {
+          from: [{ podSelector: { matchLabels: { "wardby.io/component": "coding-run" } } }],
+          ports: [
+            { protocol: "TCP", port: 8787 },
+            { protocol: "TCP", port: 8788 },
+          ],
+        },
+      ],
+    },
+  });
   const originalCreate = api.createPod.bind(api);
   api.createPod = async (ns, body: V1Pod) => {
     const created = await originalCreate(ns, body);
@@ -70,8 +88,13 @@ function cluster(canary: CanaryResult | "no-output") {
 }
 const ok: CanaryResult = { dns: false, proxyDeny: false, internet: false, metadata: false, proxy: true };
 
+/** The cluster's own fixtures (proxy Service, Endpoints and NetworkPolicy) are not leftovers. */
+const PROXY_FIXTURES = new Set(["networkpolicy/wardby-coding/wardby-coding-proxy"]);
+
 function leftovers(api: FakeKubernetesApi): string[] {
-  return [...api.objects.keys()].filter((k) => !k.startsWith("service/") && !k.startsWith("endpoints/"));
+  return [...api.objects.keys()].filter(
+    (k) => !k.startsWith("service/") && !k.startsWith("endpoints/") && !PROXY_FIXTURES.has(k),
+  );
 }
 
 describe("kubernetesPreflight", () => {
@@ -80,7 +103,12 @@ describe("kubernetesPreflight", () => {
     expect(
       await kubernetesPreflight({ api, config, workerImage: IMAGE, maxDiskMb: 2048, sleep: async () => {} }),
     ).toEqual(["platform", "namespace", "proxy-service", "worker-image", "canary"]);
-    expect([...api.objects.keys()].filter((k) => k.startsWith("pod/") || k.startsWith("networkpolicy/"))).toEqual([]);
+    // Only the canary's own objects must be gone; the proxy's policy is cluster furniture.
+    expect(
+      [...api.objects.keys()].filter(
+        (k) => (k.startsWith("pod/") || k.startsWith("networkpolicy/")) && !PROXY_FIXTURES.has(k),
+      ),
+    ).toEqual([]);
   });
 
   it("refuses an autopilot configuration without gvisor, before touching the cluster", async () => {
