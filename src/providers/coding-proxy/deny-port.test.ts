@@ -12,7 +12,7 @@ import { startDenyPortListener } from "./deny-port.js";
  */
 async function probe(port: number): Promise<{ connected: boolean; bytes: number; timedOut: boolean }> {
   return new Promise((resolve, reject) => {
-    const socket = connect({ host: "127.0.0.1", port, timeout: 300 });
+    const socket = connect({ host: "127.0.0.1", port, timeout: 2000 });
     let connected = false;
     let bytes = 0;
     let timedOut = false;
