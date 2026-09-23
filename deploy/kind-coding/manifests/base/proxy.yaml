@@ -38,7 +38,10 @@ spec:
             - name: NODE_ENV
               value: production
           ports:
-            - containerPort: 8787
+            - name: proxy
+              containerPort: 8787
+            - name: deny
+              containerPort: 8788
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -74,8 +77,12 @@ spec:
   selector:
     app.kubernetes.io/name: wardby-coding-proxy
   ports:
-    - port: 8787
+    - name: proxy
+      port: 8787
       targetPort: 8787
+    - name: deny
+      port: 8788
+      targetPort: 8788
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -97,6 +104,17 @@ spec:
       ports:
         - protocol: TCP
           port: 8787
+        # 8788 is the deny port (coding-proxy/deny-port.ts). It is allowed *here*,
+        # at the destination, on purpose. NetworkPolicy ingress is enforced on the
+        # receiving pod and a denial drops the packet, and this policy is programmed
+        # long before any run pod exists — so if 8788 were omitted, a connect from a
+        # run pod whose own egress policy had not been programmed yet would still be
+        # dropped, the enforcement probe would read "blocked", and the gate would
+        # release a worker that in fact had full network access. Allowing it here
+        # makes the run pod's own egress policy the only thing that can block it,
+        # which is precisely what the gate measures. Nothing is served on this port.
+        - protocol: TCP
+          port: 8788
   egress:
     # DNS
     - to:

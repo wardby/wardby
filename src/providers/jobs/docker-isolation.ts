@@ -7,6 +7,12 @@ export const CODING_WORKER_GID = 10001;
 const KEEPER_PIDS_LIMIT = 32;
 export const CODING_PROXY_ALIAS = "wardby-proxy";
 export const CODING_PROXY_PORT = 8787;
+/**
+ * The proxy's deny port. Nothing is served here (see coding-proxy/deny-port.ts);
+ * it is the enforcement witness — the one destination a run's NetworkPolicy must
+ * refuse while permitting CODING_PROXY_PORT on the same pod.
+ */
+export const CODING_PROXY_DENY_PORT = 8788;
 export const DOCKER_ISOLATION_ERROR = "docker_isolation_unsupported";
 export const WORKER_STOP_GRACE_SECONDS = 10;
 
