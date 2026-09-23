@@ -131,6 +131,7 @@ function api(options: { admit?: (pod: V1Pod) => V1Pod; version?: string } = {}):
     metadata: { name: SERVICE },
     spec: {
       clusterIP: CLUSTER_IP,
+      selector: { "app.kubernetes.io/name": "wardby-coding-proxy" },
       ports: [
         { port: 8787, protocol: "TCP" },
         { port: 8788, protocol: "TCP" },

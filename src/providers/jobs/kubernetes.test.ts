@@ -33,6 +33,7 @@ async function harness(runId = "run-k8s-test", options: { runtimeClassName?: str
     metadata: { name: "wardby-coding-proxy" },
     spec: {
       clusterIP: "10.96.0.50",
+      selector: { "app.kubernetes.io/name": "wardby-coding-proxy" },
       ports: [
         { name: "proxy", port: 8787, protocol: "TCP" },
         { name: "deny", port: 8788, protocol: "TCP" },
@@ -463,7 +464,10 @@ describe("KubernetesJobLauncher failure handling", () => {
     });
     await expect(bad.launch(h.spec)).rejects.toThrow("kubernetes_capability_invalid");
     const g = await harness("run-no-proxy");
-    g.api.put("service", "wardby-coding", { metadata: { name: "wardby-coding-proxy" }, spec: {} });
+    g.api.put("service", "wardby-coding", {
+      metadata: { name: "wardby-coding-proxy" },
+      spec: { selector: { "app.kubernetes.io/name": "wardby-coding-proxy" } },
+    });
     // launch() routes every failure through runPreflight's errorWithCode, so the thrown message is
     // always kubernetes_isolation_unsupported and the specific reason rides on `cause`.
     await expect(g.launcher.launch(g.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
@@ -934,7 +938,7 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
     const g = await harness("run-witness-b");
     g.api.put("service", "wardby-coding", {
       metadata: { name: "wardby-coding-proxy" },
-      spec: { clusterIP: "None" },
+      spec: { clusterIP: "None", selector: { "app.kubernetes.io/name": "wardby-coding-proxy" } },
     });
     await expect(g.launcher.launch(g.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
     expect(g.api.objects.has(`pod/wardby-coding/${g.names.pod}`)).toBe(false);

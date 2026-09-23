@@ -57,6 +57,30 @@ function isTcp(protocol: string | undefined): boolean {
   return protocol === undefined || protocol === "TCP";
 }
 
+/**
+ * Whether a NetworkPolicy's `ingress[]` section has any bearing on ingress traffic at all.
+ * Per `V1NetworkPolicySpec`'s generated docs: if `policyTypes` is absent it defaults based on the
+ * rules present, and "all policies (whether or not they contain an ingress section) are assumed to
+ * affect ingress" — so an absent list still counts. But an explicit list that omits `"Ingress"`
+ * (e.g. an egress-only `["Egress"]` policy) makes any `ingress[]` content inert: Kubernetes never
+ * consults it, so a rule that reads as "admits the deny port" there proves nothing about what is
+ * actually admitted.
+ */
+function affectsIngress(policyTypes: string[] | undefined): boolean {
+  return policyTypes === undefined || policyTypes.includes("Ingress");
+}
+
+/** Whether a Service selector requires every key/value in `labels` (extra keys on the selector are
+ * fine — they only narrow which pods it routes to further). Service selectors are plain label maps,
+ * not `LabelSelector` objects, so this is direct equality-per-key, not `selectsPodLabeled`'s
+ * matchLabels/matchExpressions shape. */
+function selectorRequires(
+  selector: { [key: string]: string } | undefined,
+  labels: Readonly<Record<string, string>>,
+): boolean {
+  return Object.entries(labels).every(([key, value]) => selector?.[key] === value);
+}
+
 /** A selector we can evaluate: plain matchLabels, no matchExpressions we would have to guess at. */
 function selectsPodLabeled(
   selector: { matchLabels?: { [key: string]: string }; matchExpressions?: unknown[] } | undefined,
@@ -121,6 +145,12 @@ async function assertDenyPortAdmitted(api: KubernetesApi, namespace: string, ser
         "without that rule the proxy's own ingress drops the probe and every run reads as enforced",
     );
   }
+  if (!affectsIngress(policy.spec?.policyTypes)) {
+    throw new ProxyWitnessError(
+      `${where} has policyTypes ${JSON.stringify(policy.spec?.policyTypes)} without "Ingress", so its ingress ` +
+        "rules are inert and prove nothing about what the proxy admits at its ingress",
+    );
+  }
   if (!selectsPodLabeled(policy.spec?.podSelector, PROXY_POD_LABEL)) {
     throw new ProxyWitnessError(
       `${where} does not select the proxy pods (${JSON.stringify(PROXY_POD_LABEL)}), so its rules govern nothing`,
@@ -143,6 +173,13 @@ export async function readProxyWitness(api: KubernetesApi, namespace: string, se
   const where = `Service ${namespace}/${service}`;
   const found = await api.readService(namespace, service);
   if (!found) throw new ProxyWitnessError(`${where} was not found`);
+  if (!selectorRequires(found.spec?.selector, PROXY_POD_LABEL)) {
+    throw new ProxyWitnessError(
+      `${where} has selector ${JSON.stringify(found.spec?.selector ?? {})}, which does not require ` +
+        `${JSON.stringify(PROXY_POD_LABEL)}; the endpoints it routes to are not provably the pods the checked ` +
+        "NetworkPolicy governs",
+    );
+  }
   const clusterIp = found.spec?.clusterIP;
   if (!clusterIp || clusterIp === "None" || isIP(clusterIp) === 0) {
     throw new ProxyWitnessError(`${where} has no usable ClusterIP`);

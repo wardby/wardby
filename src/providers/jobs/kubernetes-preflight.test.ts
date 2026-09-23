@@ -25,6 +25,7 @@ function cluster(canary: CanaryResult | "no-output") {
     metadata: { name: "wardby-coding-proxy" },
     spec: {
       clusterIP: "10.96.0.50",
+      selector: { "app.kubernetes.io/name": "wardby-coding-proxy" },
       ports: [
         { name: "proxy", port: 8787, protocol: "TCP" },
         { name: "deny", port: 8788, protocol: "TCP" },
@@ -216,7 +217,10 @@ describe("kubernetesPreflight", () => {
   it("rejects a headless or non-IP proxy Service address", async () => {
     for (const clusterIP of ["None", "", "wardby-proxy"]) {
       const api = cluster(ok);
-      api.put("service", "wardby-coding", { metadata: { name: "wardby-coding-proxy" }, spec: { clusterIP } });
+      api.put("service", "wardby-coding", {
+        metadata: { name: "wardby-coding-proxy" },
+        spec: { clusterIP, selector: { "app.kubernetes.io/name": "wardby-coding-proxy" } },
+      });
       await expect(kubernetesPreflight({ api, config, workerImage: IMAGE, maxDiskMb: 2048 })).rejects.toThrow(
         "kubernetes_isolation_unsupported:proxy-service",
       );
@@ -369,7 +373,11 @@ describe("kubernetesPreflight", () => {
     const api = cluster(ok);
     api.put("service", "wardby-coding", {
       metadata: { name: "wardby-coding-proxy" },
-      spec: { clusterIP: "10.96.0.50", ports: [{ name: "proxy", port: 8787, protocol: "TCP" }] },
+      spec: {
+        clusterIP: "10.96.0.50",
+        selector: { "app.kubernetes.io/name": "wardby-coding-proxy" },
+        ports: [{ name: "proxy", port: 8787, protocol: "TCP" }],
+      },
     });
     await expect(
       kubernetesPreflight({ api, config, workerImage: IMAGE, maxDiskMb: 2048, sleep: async () => {} }),

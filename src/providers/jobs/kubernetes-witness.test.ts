@@ -24,6 +24,8 @@ function api(
     withEndpoints?: boolean;
     ingress?: unknown[] | null;
     policyPodSelector?: Record<string, string>;
+    policyTypes?: string[] | null;
+    serviceSelector?: Record<string, string> | null;
   } = {},
 ): FakeKubernetesApi {
   const fake = new FakeKubernetesApi();
@@ -45,10 +47,13 @@ function api(
       },
     ],
     policyPodSelector = { "app.kubernetes.io/name": "wardby-coding-proxy" },
+    policyTypes = ["Ingress", "Egress"],
+    // The manifest's real value: the Service's selector is the same label the policy checks.
+    serviceSelector = { "app.kubernetes.io/name": "wardby-coding-proxy" },
   } = options;
   fake.put("service", NAMESPACE, {
     metadata: { name: SERVICE },
-    spec: { clusterIP, ports: ports.map(toPort) },
+    spec: { clusterIP, ports: ports.map(toPort), selector: serviceSelector ?? undefined },
   });
   if (withEndpoints) {
     fake.put("endpoints", NAMESPACE, {
@@ -65,7 +70,11 @@ function api(
   if (ingress !== null) {
     fake.put("networkpolicy", NAMESPACE, {
       metadata: { name: SERVICE },
-      spec: { podSelector: { matchLabels: policyPodSelector }, policyTypes: ["Ingress", "Egress"], ingress },
+      spec: {
+        podSelector: { matchLabels: policyPodSelector },
+        ...(policyTypes === null ? {} : { policyTypes }),
+        ingress,
+      },
     });
   }
   return fake;
@@ -232,6 +241,59 @@ describe("readProxyWitness: the proxy's own ingress rule (the attribution precon
   });
 });
 
+describe("readProxyWitness: policyTypes must actually cover Ingress", () => {
+  // Live falsification: an Egress-only policy whose ingress[] happens to list a rule admitting
+  // 8788 is inert — Kubernetes never consults ingress[] for a policy that doesn't list "Ingress"
+  // in policyTypes. The old code read only podSelector/ingress and never noticed.
+
+  it("refuses the live falsification: an Egress-only policy with an otherwise-admitting ingress[] rule", async () => {
+    await expect(readProxyWitness(api({ policyTypes: ["Egress"] }), NAMESPACE, SERVICE)).rejects.toThrow(
+      'kubernetes_proxy_witness_unusable: NetworkPolicy wardby-coding/wardby-coding-proxy has policyTypes ["Egress"] without "Ingress"',
+    );
+  });
+
+  it("accepts an explicit policyTypes that includes Ingress", async () => {
+    await expect(readProxyWitness(api({ policyTypes: ["Ingress"] }), NAMESPACE, SERVICE)).resolves.toBeDefined();
+    await expect(
+      readProxyWitness(api({ policyTypes: ["Ingress", "Egress"] }), NAMESPACE, SERVICE),
+    ).resolves.toBeDefined();
+  });
+
+  it("accepts an absent policyTypes: the API defaults it to Ingress-affecting regardless of content", async () => {
+    await expect(readProxyWitness(api({ policyTypes: null }), NAMESPACE, SERVICE)).resolves.toBeDefined();
+  });
+});
+
+describe("readProxyWitness: the Service's selector must require the checked policy's label", () => {
+  // Live falsification: giving the Service an unrelated selector while leaving the correctly-
+  // admitting NetworkPolicy alone. Nothing previously tied "the policy that admits 8788" to "the
+  // pods this Service actually routes traffic to".
+
+  it("refuses the live falsification: a Service selecting unrelated pods", async () => {
+    await expect(
+      readProxyWitness(api({ serviceSelector: { app: "totally-unrelated-pods" } }), NAMESPACE, SERVICE),
+    ).rejects.toThrow(
+      'kubernetes_proxy_witness_unusable: Service wardby-coding/wardby-coding-proxy has selector {"app":"totally-unrelated-pods"}, which does not require {"app.kubernetes.io/name":"wardby-coding-proxy"}',
+    );
+  });
+
+  it("refuses a Service with no selector at all", async () => {
+    await expect(readProxyWitness(api({ serviceSelector: null }), NAMESPACE, SERVICE)).rejects.toThrow(
+      PROXY_WITNESS_UNUSABLE,
+    );
+  });
+
+  it("accepts a Service selector with extra labels beyond PROXY_POD_LABEL", async () => {
+    await expect(
+      readProxyWitness(
+        api({ serviceSelector: { "app.kubernetes.io/name": "wardby-coding-proxy", extra: "label" } }),
+        NAMESPACE,
+        SERVICE,
+      ),
+    ).resolves.toBeDefined();
+  });
+});
+
 describe("readProxyWitness: the ingress rule survives a real API round trip", () => {
   it("reads the rule under @kubernetes/client-node's `_from` spelling, not just the manifest's `from`", async () => {
     // The wire field `from` deserializes to `_from` (it collides with a TS keyword), so a policy
@@ -256,5 +318,28 @@ describe("readProxyWitness: the ingress rule survives a real API round trip", ()
       ObjectSerializer.deserialize(JSON.parse(JSON.stringify(raw)), "V1NetworkPolicy"),
     );
     await expect(readProxyWitness(fake, NAMESPACE, SERVICE)).rejects.toThrow(PROXY_WITNESS_UNUSABLE);
+  });
+
+  it("reads policyTypes under its own spelling: unlike `from`, it is not renamed by the deserializer", async () => {
+    // Confirms the field this fix relies on survives the real client-node round trip under the
+    // plain name `policyTypes` (no `_`-prefixed alias, unlike `from`/`_from`), and that the
+    // Egress-only refusal still fires against the round-tripped object, not just a hand-built one.
+    const fake = api({ policyTypes: ["Egress"] });
+    const raw = fake.objects.get("networkpolicy/wardby-coding/wardby-coding-proxy");
+    const roundTripped = ObjectSerializer.deserialize(JSON.parse(JSON.stringify(raw)), "V1NetworkPolicy");
+    expect(roundTripped.spec.policyTypes).toEqual(["Egress"]);
+    fake.put("networkpolicy", NAMESPACE, roundTripped);
+    await expect(readProxyWitness(fake, NAMESPACE, SERVICE)).rejects.toThrow(
+      'has policyTypes ["Egress"] without "Ingress"',
+    );
+  });
+
+  it("reads the Service's selector under its own spelling: also not renamed by the deserializer", async () => {
+    const fake = api({ serviceSelector: { app: "totally-unrelated-pods" } });
+    const raw = fake.objects.get("service/wardby-coding/wardby-coding-proxy");
+    const roundTripped = ObjectSerializer.deserialize(JSON.parse(JSON.stringify(raw)), "V1Service");
+    expect(roundTripped.spec.selector).toEqual({ app: "totally-unrelated-pods" });
+    fake.put("service", NAMESPACE, roundTripped);
+    await expect(readProxyWitness(fake, NAMESPACE, SERVICE)).rejects.toThrow("does not require");
   });
 });
