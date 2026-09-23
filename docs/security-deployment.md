@@ -252,10 +252,12 @@ production; the launcher warns loudly when it is unset.
 
 **Before deploying this anywhere real**, read
 [phase-12-kubernetes-evidence.md](phase-12-kubernetes-evidence.md) § Known gaps.
-Per-run record ConfigMaps accumulate with no garbage collection, the enforcement
-witness is vacuous on clusters whose DNS service has no pod backends (the
-preflight fails closed rather than passing), and the spec's containment tests
-(OOM, disk-full, wall-clock) are not yet implemented.
+GKE Autopilot admission conformance is **unproven** — the committed fixture is
+marked provisional and was written from Google's documentation, not from a
+cluster. Per-run record ConfigMaps accumulate with no garbage collection. The
+enforcement proof and the release of the worker are two separate API calls, so a
+NetworkPolicy created in the ~100-200 ms between them is not seen. And the spec's
+containment tests (OOM, disk-full, wall-clock) are not yet implemented.
 
 ## Images and dependency exception
 
