@@ -6,6 +6,7 @@
  * code change. The `assembleProviders` factory (which constructs the concrete
  * adapters) is added once the adapters exist.
  */
+import { KUBERNETES_PLATFORMS, type KubernetesPlatform } from "../providers/jobs/kubernetes-platform.js";
 
 export type JobLauncherKind = "local" | "docker" | "kubernetes";
 export type EmailProviderKind = "smtp" | "ses";
@@ -164,23 +165,50 @@ function dnsLabel(value: string | undefined, name: string, fallback: string): st
   return value;
 }
 
-/** JOB_LAUNCHER=kubernetes: where coding-run pods go and how they reach the in-cluster proxy. */
+/** JOB_LAUNCHER=kubernetes: where coding-run pods go, how they reach the in-cluster proxy, and which platform's admission rules apply. */
 export interface KubernetesJobConfig {
   namespace: string;
   context?: string;
   proxyService: string;
   runtimeClassName?: string;
+  platform: KubernetesPlatform;
+  /**
+   * Bound for the whole cluster preflight (canary pod scheduling included) and for how long a
+   * launch waits for the keeper. Both default to the launcher's own values (90 s / 120 s), which
+   * a cold managed cluster scheduling a sandboxed pod and pulling an image routinely exceeds.
+   */
+  preflightTimeoutMs?: number;
+  readyTimeoutMs?: number;
 }
 
 export function loadKubernetesJobConfig(env: NodeJS.ProcessEnv = process.env): KubernetesJobConfig {
+  const platform = (env.KUBERNETES_PLATFORM ?? "generic") as KubernetesPlatform;
+  if (!KUBERNETES_PLATFORMS.includes(platform)) {
+    throw new Error(`KUBERNETES_PLATFORM must be one of: ${KUBERNETES_PLATFORMS.join(", ")}.`);
+  }
   const config: KubernetesJobConfig = {
     namespace: dnsLabel(env.KUBERNETES_NAMESPACE, "KUBERNETES_NAMESPACE", "wardby-coding"),
     proxyService: dnsLabel(env.KUBERNETES_PROXY_SERVICE, "KUBERNETES_PROXY_SERVICE", "wardby-coding-proxy"),
+    platform,
   };
   if (env.KUBERNETES_CONTEXT) config.context = env.KUBERNETES_CONTEXT;
   if (env.KUBERNETES_RUNTIME_CLASS) {
     config.runtimeClassName = dnsLabel(env.KUBERNETES_RUNTIME_CLASS, "KUBERNETES_RUNTIME_CLASS", "");
   }
+  const preflightTimeoutMs = optionalBoundedInteger(
+    env.KUBERNETES_PREFLIGHT_TIMEOUT_MS,
+    "KUBERNETES_PREFLIGHT_TIMEOUT_MS",
+    1_000,
+    900_000,
+  );
+  const readyTimeoutMs = optionalBoundedInteger(
+    env.KUBERNETES_READY_TIMEOUT_MS,
+    "KUBERNETES_READY_TIMEOUT_MS",
+    1_000,
+    900_000,
+  );
+  if (preflightTimeoutMs !== undefined) config.preflightTimeoutMs = preflightTimeoutMs;
+  if (readyTimeoutMs !== undefined) config.readyTimeoutMs = readyTimeoutMs;
   return config;
 }
 

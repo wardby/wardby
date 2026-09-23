@@ -1,7 +1,8 @@
 # Phase 12 — Kubernetes coding launcher: live evidence
 
-Date: 2026-09-22. Branch `phase-12-foundations`. What a real cluster actually
-proved, recorded so nobody has to take the plan's word for it. The launcher
+Dates: 2026-09-22 and 2026-09-23, on branch `spec/gke-autopilot`. What a real
+cluster actually proved, recorded so nobody has to take the plan's word for
+it. The launcher
 itself is documented in [coding-worker-isolation.md](coding-worker-isolation.md);
 the design and its post-implementation corrections are in
 `docs/superpowers/specs/2026-09-22-phase-12-kubernetes-job-launcher-design.md`.
@@ -21,26 +22,52 @@ the design and its post-implementation corrections are in
 `wardby coding preflight` passes all five checks against this cluster:
 
 ```
-coding preflight passed (namespace, proxy-service, cluster-dns, worker-image, canary)
+coding preflight passed (platform, namespace, proxy-service, worker-image, canary)
   for localhost:5001/wardby-coding-worker@sha256:f2d92d0f3871…
 ```
 
-The canary is a real run-shaped pod under the run NetworkPolicy. It proves the
-cluster blocks DNS, the internet, the cloud metadata endpoint and the cluster's
-own DNS service, and reaches only the proxy. It waits for policy enforcement
-before probing, because a CNI programs a new pod's rules seconds after the pod
-starts — without that wait the canary raced the CNI and passed on an unpoliced
-pod. The launcher performs the same wait before releasing any worker.
+`platform` refuses an unrunnable configuration (a `runtimeClassName`/
+`CODING_MAX_DISK_MB` the target platform can't satisfy) before any cluster
+call. `proxy-service` reads the coding proxy's own Service and Endpoints as
+the enforcement witness: it must expose both the proxy port `8787` and the
+deny port `8788`, with a ready endpoint serving both. The canary is a real
+run-shaped pod under the run NetworkPolicy; it proves the cluster blocks DNS,
+the internet, the cloud metadata endpoint, and **the proxy's own deny port**,
+while reaching the proxy itself — the witness moved off the cluster's DNS
+service and onto the coding proxy's own second port, since 8787-reachable +
+8788-blocked on the same pod is something only a programmed, port-scoped
+NetworkPolicy can produce. It waits for policy enforcement before probing,
+because a CNI programs a new pod's rules seconds after the pod starts —
+without that wait the canary raced the CNI and passed on an unpoliced pod.
+The launcher performs the same wait before releasing any worker.
+
+**What the canary does not prove.** It is a _reduced_ pod: `runCanary` builds it
+with `buildRunPod` and then drops the `keeper` container and replaces the
+worker's command, and it is never read back and attested — no
+`assertRunPodMatches` call exists on the canary path. So a green canary is
+evidence about the cluster's _network_ enforcement only. It is not evidence
+that the three-container run pod conforms to the platform's admission rules,
+nor that the platform leaves it unmutated: a canary can pass on a cluster where
+every real run pod is rewritten and fails attestation. On a platform with an
+ephemeral-storage ceiling the canary is also the _cheaper_ pod (it reserves
+less than `buildRunPod`'s pod-total guard charges it), so it cannot surface a
+ceiling problem either. The dry-run capture, not the canary, is what proves
+conformance.
 
 ## Integration suite
 
 `npm run test:kubernetes` (gated on `WARDBY_KUBERNETES_TEST=1` plus a context
-and a digest-pinned image; skipped by `npm test`) runs three tests against the
-live cluster in ~66 s, repeatedly, leaving no `wardby-run-*` objects behind. It
-proves an attested, isolated pod; a safe diagnostic from a failing worker;
-`stop`; and refusal of a conflicting relaunch. It asserts the enforcement gate
-ran, and that the pod cannot reach the cluster DNS pod or the API server while
-it can reach the proxy.
+and a digest-pinned image; skipped by `npm test`) runs four tests against the
+live cluster in ~66 s, repeatedly, leaving no `wardby-run-*` objects behind.
+It proves an
+attested, isolated pod; a safe diagnostic from a failing worker; `stop`;
+refusal of a conflicting relaunch; and that the real API server's dry-run
+create and version read both work as `ClientNodeKubernetesApi` expects. It
+asserts the enforcement gate ran, and that the pod cannot reach the API
+server's ClusterIP or the coding proxy's deny port — by the proxy's Service
+ClusterIP and by the proxy pod's own IP — while it can reach the proxy on
+`8787`, by pod IP and by its `hostAliases` entry, which resolves to the
+Service ClusterIP — there is no DNS involved on either path.
 
 ## Live smoke runs
 
@@ -63,6 +90,50 @@ green), and nothing else touched. Its assigned task had to be substituted at
 dispatch time — the slice named in the plan had already been implemented on
 `main` by an earlier test run — so an equivalently scoped missing piece was used
 instead.
+
+## GKE Autopilot with gVisor (Plan 3a)
+
+The goal of Plan 3a was one real coding run on GKE Autopilot under gVisor. It
+ran on **2026-09-23**.
+
+- Cluster `wardby-phase12`, project `onit-dashboard`, region `us-central1`,
+  Kubernetes server **v1.35.8-gke.1036000**, containerd 2.2.7, Dataplane V2.
+- `KUBERNETES_PLATFORM=gke-autopilot`, `KUBERNETES_RUNTIME_CLASS=gvisor`; the
+  pod bound to a gVisor sandbox node pool (`sandbox.gke.io/runtime=gvisor`).
+- Images in Artifact Registry (`us-central1-docker.pkg.dev/onit-dashboard/wardby`),
+  amd64, referenced by digest. Throwaway in-cluster Postgres; migrations applied
+  with `prisma migrate deploy` over a port-forward.
+- `coding preflight` passed all five checks (`platform`, `namespace`,
+  `proxy-service`, `worker-image`, `canary`) against this cluster, the canary
+  under gVisor.
+
+| Run      | `cmue7pkxm0002sq8orijzq6nl`                       |
+| -------- | ------------------------------------------------- |
+| Job      | `wardby-coding/f13db454886a2c284be6`              |
+| Task     | add a `joke_count` helper plus tests              |
+| Result   | succeeded, PR #33 on `chfields/knock-knock-jokes` |
+| Duration | 114.3 s                                           |
+| Cost     | $0.01084 (84,578 in / 1,933 out)                  |
+
+Two things a real Autopilot cluster falsified that no amount of local testing
+would have, both fixed on this branch:
+
+1. **Autopilot resolves DNS through NodeLocal DNSCache at `169.254.20.10`**, not
+   the metadata server. The proxy's egress policy allowed only
+   `169.254.169.254`, and every model call failed with `EAI_AGAIN`. The same
+   cluster also runs kube-dns with real backing pods, contradicting the design's
+   premise that GKE Cloud DNS leaves kube-dns without endpoints — which is why
+   the enforcement witness moved to the proxy's own deny port rather than being
+   repaired in place.
+2. **GKE stamps `topology.kubernetes.io/{region,zone}` onto the pod after
+   binding.** A server-side dry run is admission only and never schedules, so no
+   captured fixture can contain a post-binding mutation. The dry-run capture was
+   clean, the preflight canary passed, and the first real launch then failed
+   attestation with a bare `kubernetes_isolation_unsupported` — the comparator
+   working exactly as designed, on a mutation nothing upstream of it could see.
+   Fixed by allowing the `topology.kubernetes.io/` label prefix, and pinned by
+   tests rather than by the fixture. **A fixture is a lower bound on what a
+   platform mutates, never a complete list.**
 
 ## Bugs this evidence exists because of
 
@@ -93,15 +164,65 @@ tests. They are recorded because "the tests passed" would have been misleading.
 
 ## Known gaps
 
-Carried into the follow-up plan (Plan 2b), which gates Plan 3:
+Carried into the follow-up plan (Plan 2b), which gates production use on GKE,
+not this branch's work:
 
 - Per-run record ConfigMaps are kept as tombstones by design and never deleted;
-  failed launches leave records too. Needs garbage collection.
-- The enforcement witness is the cluster's DNS service. Where that service has
-  no pod backends (GKE with Cloud DNS) the preflight now fails closed rather
-  than passing vacuously — such clusters need a different witness first.
-- Autopilot's admission mutations will fail deny-by-default attestation until
-  the allowances are written.
+  failed launches leave records too. Needs garbage collection; this also
+  applies to any managed cluster the launcher is pointed at, including a
+  GKE Autopilot deployment.
+- Plan 2b's remaining items are not a gate on this work: nothing here
+  depends on them, and the launcher's out-of-namespace dependency
+  (kube-system) is removed here rather than deferred.
+- **GKE Autopilot admission conformance is UNPROVEN.** The claim that
+  Autopilot's admission controller leaves wardby's run pod unmutated rests on
+  `src/providers/jobs/fixtures/gke-autopilot-dry-run.json`, which is explicitly
+  `"provisional": true` and self-declared as written from Google's own
+  Autopilot documentation, not captured from a real cluster. A later task
+  (`npm run capture:autopilot`) is expected to replace it with a real
+  server-side dry-run capture and flip that flag to `false`. Until then,
+  nothing in this document proves Autopilot conformance.
+- **A ~100-200 ms window in which the proof can go stale.** Enforcement is
+  proved by probing, and the agent is released by writing a marker file. Those
+  are two separate API calls, so a NetworkPolicy created in between — by anyone
+  with policy-write access in the namespace, or by configuration drift — is not
+  seen. This was found by live testing and narrowed rather than eliminated: the
+  launcher originally proved enforcement, then seeded the workspace (up to the
+  run's whole `timeoutSec`, hours for a large repository), and only then
+  released, so the stale window was the entire seeding time. The re-probe
+  immediately before the marker (`fix round 5`) cuts it to the marker call's own
+  round trip plus this CNI's policy-programming lag: measured on kind at ~91 ms
+  to the marker write and ~181 ms to the injected policy actually taking effect.
+  Closing it completely would require the release to be part of the same atomic
+  proof, which the Kubernetes API does not offer. Anyone who can create a
+  NetworkPolicy in the namespace can already do considerably worse.
+- **The remaining speculative residual: "blocked" is not fully conclusive.**
+  Two other, non-speculative ways were found by live testing on the kind
+  cluster and closed: a refused (RST) deny port reading the same as a dropped
+  one, and a drop occurring at the destination proxy's ingress rather than at
+  the run pod's own egress policy (closed by adding a runtime check that the
+  proxy's own `NetworkPolicy` actually admits coding-run on 8788). The witness
+  is the coding proxy's deny port: the gate counts a probe only when 8787
+  connects and 8788 does not, and both halves are measured from inside the pod
+  in the same exec. What that still cannot separate is a _drop_ from an
+  _exhausted accept backlog_. The probe runs in the keeper, which shares a
+  network namespace with
+  the untrusted worker, so code holding the deny port's accept queue full
+  would make 8788 read as blocked while 8787 still connects — the proven
+  outcome — without any policy being enforced. This is speculative, not a live
+  finding. Nothing of the agent's runs before the gate opens -- the worker
+  container executes wardby's gate script until the marker appears -- so
+  attacker code at that moment means a hostile worker image
+  (`agents:admin`-gated) or a compromised base. It requires the policy to
+  _already_ be unenforced, so the network a fake would win is network the
+  attacker already has, though a faked proof does buy more than that: the gate
+  also withholds the seeded workspace and input, and the release itself. And it
+  requires out-racing an
+  accept-and-close loop that holds no connection open, with no `CAP_NET_RAW`
+  and no raw sockets in the pod. Closing it properly means evidence the deny
+  port produced a distinguishable _response_, not merely silence — which a
+  listener that serves nothing cannot give — so it is recorded here rather than
+  patched around.
 - Spec §9 integration coverage not yet built: the shared launcher contract
   against a real API, OOM / disk-full / wall-clock containment, canary failure
   when a policy is removed, and the tool pod's lack of network.

@@ -18,12 +18,26 @@ import type {
 import type { JobSpec } from "./types.js";
 import {
   CODING_PROXY_ALIAS,
+  CODING_PROXY_DENY_PORT,
   CODING_PROXY_PORT,
   CODING_WORKER_GID,
   CODING_WORKER_UID,
   WORKER_STOP_GRACE_SECONDS,
   isRepositoryDigest,
 } from "./docker-isolation.js";
+import {
+  GVISOR_RUNTIME_CLASS,
+  KubernetesPlatformError,
+  STORAGE_INIT_EPHEMERAL_MIB,
+  WORKER_EPHEMERAL_MIB,
+  conformResources,
+  describeMib,
+  normalizePlatformMetadata,
+  platformProfile,
+  podEphemeralStorageMib,
+  type KubernetesPlatform,
+  type KubernetesPlatformProfile,
+} from "./kubernetes-platform.js";
 
 export const KUBERNETES_ISOLATION_ERROR = "kubernetes_isolation_unsupported";
 export const KUBERNETES_PROVIDER_UNSUPPORTED = "kubernetes_provider_unsupported";
@@ -35,11 +49,22 @@ export const WORKER_CONTAINER = "worker";
 export const STORAGE_ROOT = "/run/wardby/storage";
 export const KEEPER_SEEDED_MARKER = `${STORAGE_ROOT}/input/.seeded`;
 export const PROXY_POD_LABEL = { "app.kubernetes.io/name": "wardby-coding-proxy" } as const;
-/** The cluster DNS Service: its ClusterIP is "another pod" that a run's policy must block. */
-export const CLUSTER_DNS_NAMESPACE = "kube-system";
-export const CLUSTER_DNS_SERVICE = "kube-dns";
-/** Exit code of the enforcement probe when the connect succeeded (policy not yet enforced). */
-const ENFORCEMENT_PROBE_CONNECTED = 3;
+/**
+ * What every run pod carries and what the proxy's own ingress rule must admit on the deny port.
+ * Single source: `runLabels` stamps it, `readProxyWitness` checks the proxy admits it.
+ */
+export const RUN_COMPONENT_LABEL = { "wardby.io/component": "coding-run" } as const;
+/** The probe proved enforcement: the proxy port connected and the deny port was blocked. */
+export const ENFORCEMENT_PROBE_PROVEN = 0;
+/** The deny port was reachable: no policy is blocking it, or the policy is not port-scoped. */
+export const ENFORCEMENT_PROBE_DENY_REACHABLE = 3;
+/** The proxy port itself was unreachable: nothing could be witnessed (proxy down, or only the namespace default-deny is programmed). */
+export const ENFORCEMENT_PROBE_PROXY_UNREACHABLE = 4;
+/**
+ * The deny port answered with an RST: the SYN reached the destination host, so nothing is
+ * blocking the path — the port is reachable-but-unserved and witnesses nothing.
+ */
+export const ENFORCEMENT_PROBE_DENY_REFUSED = 5;
 const WORKER_SERVICE_ACCOUNT = "wardby-coding-worker";
 const RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/;
 
@@ -105,7 +130,7 @@ export function kubernetesRunNames(runId: string): KubernetesRunNames {
 export function runLabels(runId: string): Record<string, string> {
   return {
     "app.kubernetes.io/managed-by": "wardby",
-    "wardby.io/component": "coding-run",
+    ...RUN_COMPONENT_LABEL,
     "wardby.io/run-sha256": kubernetesRunNames(runId).runSha,
   };
 }
@@ -161,18 +186,46 @@ export interface RunPodOptions {
   namespace: string;
   proxyIp: string;
   runtimeClassName?: string;
+  /** Which platform's admission rules the emitted resources must already satisfy. Default: "generic". */
+  platform?: KubernetesPlatform;
 }
 
 export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
   validateKubernetesSpec(spec);
+  const profile = platformProfile(options.platform ?? "generic");
+  // Symmetric with the ceiling check below: the builder is the one place that actually emits the
+  // pod, so a platform that requires gVisor must refuse to build one without it here too, not rely
+  // solely on composition/preflight having already checked. Otherwise buildRunPod(spec, { platform:
+  // "gke-autopilot" }) with no runtimeClassName would silently emit runtimeClassName: undefined.
+  if (profile.requiresGvisor && options.runtimeClassName !== GVISOR_RUNTIME_CLASS) {
+    throw new KubernetesPlatformError(
+      `platform ${profile.name} requires runtimeClassName=${GVISOR_RUNTIME_CLASS} (found ${options.runtimeClassName ?? "unset"})`,
+    );
+  }
+  // conformResources range-checks one container at a time; only this function sees every container,
+  // so the SUMMED pod total is checked here — before submission, so an over-large workspace fails
+  // closed rather than being rewritten by the platform (which attestation would then reject anyway).
+  const ceiling = profile.resources.ephemeralStorageCeilingMib;
+  const podEphemeral = podEphemeralStorageMib(spec.limits.diskMb);
+  if (ceiling !== undefined && podEphemeral > ceiling) {
+    throw new KubernetesPlatformError(
+      `a ${spec.limits.diskMb} MiB workspace needs ${podEphemeral} MiB of pod ephemeral storage, over the ${describeMib(ceiling)} ceiling of platform ${profile.name}`,
+    );
+  }
   const names = kubernetesRunNames(spec.runId);
   const scratchMb = Math.max(16, Math.min(64, Math.floor(spec.limits.memoryMb / 8)));
+  const sidecarCpuMillicores = 250;
+  const sidecarMemoryMib = 128;
   const storageInit: V1Container = {
     name: STORAGE_INIT_CONTAINER,
     image: spec.image,
     command: ["node", "-e", STORAGE_INIT_SCRIPT],
     securityContext: containerSecurity(),
-    resources: { requests: { cpu: "250m", memory: "128Mi" }, limits: { cpu: "250m", memory: "128Mi" } },
+    resources: conformResources(profile, {
+      cpuMillicores: sidecarCpuMillicores,
+      memoryMib: sidecarMemoryMib,
+      ephemeralStorageMib: STORAGE_INIT_EPHEMERAL_MIB,
+    }),
     volumeMounts: [{ name: "storage", mountPath: STORAGE_ROOT }],
   };
   const keeper: V1Container = {
@@ -180,7 +233,12 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
     image: spec.image,
     command: ["node", "/opt/wardby/coding-worker/keeper.js"],
     securityContext: containerSecurity(),
-    resources: { requests: { cpu: "250m", memory: "128Mi" }, limits: { cpu: "250m", memory: "128Mi" } },
+    resources: conformResources(profile, {
+      cpuMillicores: sidecarCpuMillicores,
+      memoryMib: sidecarMemoryMib,
+      // The keeper owns the storage volume: seeding and collection stream through it.
+      ephemeralStorageMib: spec.limits.diskMb,
+    }),
     volumeMounts: [{ name: "storage", mountPath: STORAGE_ROOT }],
     readinessProbe: { exec: { command: ["test", "-d", `${STORAGE_ROOT}/output`] }, periodSeconds: 1 },
   };
@@ -193,10 +251,11 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
       { name: "WARDBY_RUN_CAPABILITY", valueFrom: { secretKeyRef: { name: names.secret, key: "capability" } } },
     ],
     securityContext: containerSecurity(),
-    resources: {
-      requests: { cpu: String(spec.limits.cpus), memory: `${spec.limits.memoryMb}Mi` },
-      limits: { cpu: String(spec.limits.cpus), memory: `${spec.limits.memoryMb}Mi` },
-    },
+    resources: conformResources(profile, {
+      cpuMillicores: Math.round(spec.limits.cpus * 1000),
+      memoryMib: spec.limits.memoryMb,
+      ephemeralStorageMib: WORKER_EPHEMERAL_MIB,
+    }),
     volumeMounts: [
       { name: "storage", mountPath: "/workspace", subPath: "workspace" },
       { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
@@ -324,7 +383,11 @@ const MEMORY_BINARY_UNITS: Record<string, number> = {
 };
 const MEMORY_DECIMAL_UNITS: Record<string, number> = { K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15, E: 1e18 };
 
-/** Memory quantities can use binary or decimal suffixes; normalize every form to a byte count, failing closed on a non-integer byte count (see `cpuMillicores`). */
+/**
+ * Byte-denominated quantities (memory and ephemeral-storage) can use binary or
+ * decimal suffixes; normalize every form to a byte count, failing closed on a
+ * non-integer byte count (see `cpuMillicores`).
+ */
 function memoryBytes(value: unknown): string {
   const text = String(value).trim();
   const match = /^([0-9]*\.?[0-9]+)(Ki|Mi|Gi|Ti|Pi|Ei|K|M|G|T|P|E)?$/.exec(text);
@@ -361,15 +424,28 @@ function isDefaultToleration(t: V1Toleration): boolean {
   );
 }
 
+/**
+ * Normalizes only the *rendering* of a quantity, never its value: two spellings
+ * of the same number compare equal, two different numbers never do.
+ *
+ * `ephemeral-storage` is canonicalized for the same reason memory is, and the
+ * reason is not cosmetic. Go's `resource.Quantity` keeps the string it was
+ * parsed from and re-serializes it verbatim — but only while that cached string
+ * survives. Any mutation of the resource block drops it, and the value is then
+ * re-rendered in canonical binary form, so the `1024Mi` we submit comes back as
+ * `1Gi`. A platform whose admission controller rewrites resources by design
+ * (Autopilot's warden) would therefore fail attestation on a quantity that never
+ * actually changed, with nothing but `kubernetes_isolation_unsupported` to go on.
+ * Comparing byte counts removes that failure mode without losing any strictness:
+ * a genuinely different reservation is still a different number.
+ */
 function normalizeResources(r?: V1Container["resources"]): void {
   if (!r) return;
-  if (r.requests) {
-    if (r.requests.cpu !== undefined) r.requests.cpu = cpuMillicores(r.requests.cpu);
-    if (r.requests.memory !== undefined) r.requests.memory = memoryBytes(r.requests.memory);
-  }
-  if (r.limits) {
-    if (r.limits.cpu !== undefined) r.limits.cpu = cpuMillicores(r.limits.cpu);
-    if (r.limits.memory !== undefined) r.limits.memory = memoryBytes(r.limits.memory);
+  for (const bag of [r.requests, r.limits]) {
+    if (!bag) continue;
+    if (bag.cpu !== undefined) bag.cpu = cpuMillicores(bag.cpu);
+    if (bag.memory !== undefined) bag.memory = memoryBytes(bag.memory);
+    if (bag["ephemeral-storage"] !== undefined) bag["ephemeral-storage"] = memoryBytes(bag["ephemeral-storage"]);
   }
 }
 
@@ -432,23 +508,69 @@ function normalizeSpec(spec: V1PodSpec): void {
   for (const volume of spec.volumes ?? []) normalizeVolume(volume);
 }
 
-function normalizePod(pod: V1Pod): {
+/**
+ * A copy of `pod` with ONLY the API server's own defaulting and aliasing undone
+ * — the same `normalizeSpec` pass `assertRunPodMatches` runs, and nothing else.
+ *
+ * Exported for src/tools/capture-fixture.ts, which runs it over both the
+ * submitted and the returned pod before diffing them. Without it the diff is
+ * dominated by fields every API server fills in on every create
+ * (schedulerName, priority, terminationMessagePath on each container, probe
+ * defaults, `2048Mi` requantized to `2Gi`, ...); because the differ replaces
+ * arrays wholesale those collapse into opaque `replace /spec/containers`
+ * blobs, and a genuine platform rewrite *inside* a container would be
+ * indistinguishable from the noise.
+ *
+ * It deliberately does NOT apply `normalizePlatformMetadata`: that deletes
+ * exactly the platform-injected keys a capture exists to record. Fails closed
+ * (throws) on a spec the normalizer cannot make sense of.
+ */
+export function undoApiServerDefaults(pod: V1Pod): V1Pod {
+  if (!pod.spec) throw isolationError();
+  const spec = structuredClone(pod.spec);
+  normalizeSpec(spec);
+  return { ...structuredClone(pod), spec };
+}
+
+function normalizePod(
+  pod: V1Pod,
+  profile: KubernetesPlatformProfile,
+): {
   labels: Record<string, string>;
   annotations: Record<string, string>;
   spec: V1PodSpec;
 } {
   if (!pod.spec) throw isolationError();
+  // Every field the normalizer may touch must already be a copy: normalizePlatformMetadata
+  // mutates `view.spec` in place, and replaces the two bags with copies of its own.
   const spec = structuredClone(pod.spec);
   normalizeSpec(spec);
-  return {
-    labels: pod.metadata?.labels ?? {},
-    annotations: pod.metadata?.annotations ?? {},
+  const view = {
+    labels: structuredClone(pod.metadata?.labels ?? {}),
+    annotations: structuredClone(pod.metadata?.annotations ?? {}),
     spec,
   };
+  // Applied to BOTH operands, symmetrically: deletes only the keys the profile names,
+  // and the profile for "generic" names none. It never skips a field the comparison
+  // would otherwise see, so everything left is still deep-compared below.
+  normalizePlatformMetadata(profile, view);
+  return view;
 }
 
-/** Recursively sorts object keys and drops `undefined` values so key order and API-omitted fields never matter; array order is preserved. */
-function canonical(value: unknown): unknown {
+/**
+ * Recursively sorts object keys and drops `undefined` values so key order and API-omitted
+ * fields never matter; array order is preserved.
+ *
+ * Exported for kubernetes-dry-run-fixture.ts's `diffMutations`: a captured pod's nested objects
+ * (container resource requests, volume definitions, host aliases, ...) come back from a real
+ * cluster with different key insertion order than `buildRunPod`'s own object literals, even when
+ * every value is identical. Without canonicalizing first, `diffMutations`' array branch treats
+ * that key-order difference as a genuine change and replaces the WHOLE array (every container,
+ * every volume) with an opaque blob — exactly the failure mode its own doc comment warns a real
+ * platform rewrite could hide inside. `assertRunPodMatches` below is unaffected by this (it
+ * already canonicalizes before comparing); only the capture tool's mutation list was at risk.
+ */
+export function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((item) => canonical(item));
   if (value !== null && typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>)
@@ -460,9 +582,19 @@ function canonical(value: unknown): unknown {
   return value;
 }
 
-export function assertRunPodMatches(actual: V1Pod, expected: V1Pod): void {
-  const a = canonical(normalizePod(actual));
-  const e = canonical(normalizePod(expected));
+/**
+ * Deep-compares the pod the API server read back against the pod wardby built.
+ * ANY surviving difference fails the run closed.
+ *
+ * `platform` defaults to "generic" on purpose: a caller that forgets it gets the
+ * strictest behaviour, never the most permissive. A profile can only narrow what
+ * counts as an expected difference (by deleting named keys from both operands);
+ * it can never disable or short-circuit the comparison.
+ */
+export function assertRunPodMatches(actual: V1Pod, expected: V1Pod, platform: KubernetesPlatform = "generic"): void {
+  const profile = platformProfile(platform);
+  const a = canonical(normalizePod(actual, profile));
+  const e = canonical(normalizePod(expected, profile));
   if (JSON.stringify(a) !== JSON.stringify(e)) throw isolationError();
 }
 
@@ -481,20 +613,65 @@ export function assertRunNetworkPolicyMatches(actual: V1NetworkPolicy, expected:
 }
 
 /**
- * A `node -e` script (argv only, never a shell) that tries one TCP connect to
- * `<clusterDnsIp>:53` with a 3 s timeout (above Linux's 1 s initial SYN
- * retransmission, so one dropped SYN on an allowed path still connects): exits 0 when blocked (error or
- * timeout) and ENFORCEMENT_PROBE_CONNECTED when it connects. The IP is
- * validated and embedded as a JSON string literal.
+ * A `node -e` script (argv only, never a shell) that measures BOTH of the proxy's
+ * ports in one pass, with a 3 s connect timeout each (above Linux's 1 s initial
+ * SYN retransmission, so one dropped SYN on an allowed path still connects).
+ *
+ * Measuring both is what makes the result decisive. A NetworkPolicy denial drops
+ * the packet rather than rejecting it — GKE Dataplane V2, which Autopilot runs,
+ * always drops — so "the deny port did not answer" is equally consistent with
+ * "the proxy is gone and no policy exists at all". Requiring the proxy port to
+ * connect in the *same* probe turns "something is listening" from a control-plane
+ * inference into a fact this pod just observed.
+ *
+ * That pairing alone is still not enough, and this was reproduced on a live
+ * cluster: in a namespace with NO NetworkPolicy at all, against a pod listening
+ * on 8787 and serving nothing on 8788, a probe that collapsed `error` and
+ * `timeout` into one "not reachable" exited PROVEN while it had full internet
+ * egress. The pairing only rules out "the whole proxy pod is dead"; whenever the
+ * deny *listener specifically* is unserved, "blocked" and "nothing there" are
+ * the same observation. No control-plane read fixes this — Endpoints subset
+ * ports come from the Service's numeric targetPort, not from anything actually
+ * binding — so the distinction has to be made in the dataplane, here:
+ *
+ * - deny port **times out** → the packet was dropped somewhere on the path → the only outcome
+ *   that can prove a policy. Note what it does NOT prove on its own: *which* hop dropped it. That
+ *   it was the run pod's own egress policy follows from the proxy admitting run pods on the deny
+ *   port at its own ingress, leaving no other hop that would drop it — a precondition the
+ *   preflight's `proxy-service` check now verifies (readProxyWitness), after a live cluster
+ *   falsified the assumption: with the drop moved to the destination, a prober holding no policy
+ *   at all and with full internet egress read PROVEN.
+ * - deny port **refused** (RST / ECONNREFUSED) → the SYN reached the destination host, so
+ *   nothing blocked the path. This holds on every dataplane, drop-based ones included, because
+ *   a drop cannot produce an RST. Reported as ENFORCEMENT_PROBE_DENY_REFUSED, never as proven.
+ * - proxy port must still CONNECT for anything to count at all.
+ *
+ * Consequence, intended: on a **reject-style** CNI a genuine policy denial also arrives as an
+ * RST, so such a cluster now fails closed here rather than passing vacuously. Failing closed on
+ * a cluster whose refusals are ambiguous is the correct direction — a witness that cannot tell
+ * "denied" from "unserved" is not a witness — and such a cluster needs a different one.
+ *
+ * Exit codes are ENFORCEMENT_PROBE_PROVEN / _DENY_REACHABLE / _PROXY_UNREACHABLE / _DENY_REFUSED.
+ * The IP is validated and embedded as a JSON string literal.
  */
-export function enforcementProbeScript(clusterDnsIp: string): string {
-  if (isIP(clusterDnsIp) === 0) throw isolationError();
+export function enforcementProbeScript(proxyIp: string): string {
+  if (isIP(proxyIp) === 0) throw isolationError();
   return [
-    'const socket = require("node:net").connect({ host: ' +
-      JSON.stringify(clusterDnsIp) +
-      ", port: 53, timeout: 3000 });",
-    `socket.once("connect", () => { socket.destroy(); process.exit(${ENFORCEMENT_PROBE_CONNECTED}); });`,
-    'socket.once("timeout", () => { socket.destroy(); process.exit(0); });',
-    'socket.once("error", () => process.exit(0));',
+    'const net = require("node:net");',
+    "const tcp = (port) =>",
+    "  new Promise((done) => {",
+    "    const socket = net.connect({ host: " + JSON.stringify(proxyIp) + ", port, timeout: 3000 });",
+    '    socket.once("connect", () => { socket.destroy(); done("connect"); });',
+    '    socket.once("timeout", () => { socket.destroy(); done("timeout"); });',
+    '    socket.once("error", () => done("error"));',
+    "  });",
+    "(async () => {",
+    `  const allowed = await tcp(${CODING_PROXY_PORT});`,
+    `  const denied = await tcp(${CODING_PROXY_DENY_PORT});`,
+    `  if (allowed !== "connect") process.exit(${ENFORCEMENT_PROBE_PROXY_UNREACHABLE});`,
+    `  if (denied === "connect") process.exit(${ENFORCEMENT_PROBE_DENY_REACHABLE});`,
+    `  if (denied === "error") process.exit(${ENFORCEMENT_PROBE_DENY_REFUSED});`,
+    `  process.exit(${ENFORCEMENT_PROBE_PROVEN});`,
+    "})();",
   ].join("\n");
 }

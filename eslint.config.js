@@ -41,8 +41,10 @@ export default tseslint.config(
   {
     // CLI stdout/stderr is this file's actual UI, not server logging through
     // pino -- not the same category of "console usage" the no-console rule
-    // exists to catch.
-    files: ["src/cli.ts", "src/mcp/auth/self-hosted/cli.ts"],
+    // exists to catch. src/tools/* are the same category: one-shot developer
+    // commands an operator runs from a terminal (npm run capture:autopilot),
+    // never part of a serving process.
+    files: ["src/cli.ts", "src/mcp/auth/self-hosted/cli.ts", "src/tools/*.ts"],
     rules: { "no-console": "off" },
   },
   {

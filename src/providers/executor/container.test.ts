@@ -708,6 +708,36 @@ describe("ContainerExecutor", () => {
     expect(created.store.run.status).toBe("lost");
   });
 
+  // A launch is one long await: on a real cluster the pod cannot be scheduled until an
+  // autoscaler has built a node for it, which took ~2 minutes on GKE Autopilot's gVisor
+  // pool. The reconciler declares any run lost whose heartbeat is older than
+  // HEARTBEAT_TIMEOUT_MS, so without beating during the launch a perfectly healthy run is
+  // killed and its pod deleted underneath the launch that is still running (measured
+  // 2026-09-23: lost at 60s, then the interrupted launch failed 32s later). Counting beats
+  // only WHILE launch is in flight is the whole point — the poll loop afterwards beats
+  // either way, so a total count would pass with the bug present.
+  it("beats the heartbeat while a slow launch is provisioning", async () => {
+    const created = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, { heartbeatIntervalMs: 5 });
+    let beatsDuringLaunch = 0;
+    const inner = created.jobs.launch.bind(created.jobs);
+    created.jobs.launch = async (spec) => {
+      const before = created.store.heartbeats;
+      await new Promise((r) => setTimeout(r, 80));
+      beatsDuringLaunch = created.store.heartbeats - before;
+      return inner(spec);
+    };
+    await created.executor.start("run-1");
+    expect(beatsDuringLaunch).toBeGreaterThan(0);
+  });
+
+  it("stops beating once the launch returns, leaving the poll loop in charge", async () => {
+    const created = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, { heartbeatIntervalMs: 5 });
+    await created.executor.start("run-1");
+    const settled = created.store.heartbeats;
+    await new Promise((r) => setTimeout(r, 40));
+    expect(created.store.heartbeats).toBe(settled);
+  });
+
   it("recovers an active persisted job without relaunching it", async () => {
     const handle = { backend: "fake", id: "job-1" };
     const created = await harness({ jobHandle: handle, proxySessionId: "session-1" });

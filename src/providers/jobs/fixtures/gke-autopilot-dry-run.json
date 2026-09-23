@@ -1,0 +1,82 @@
+{
+  "capturedAt": "2026-09-23",
+  "platform": "gke-autopilot",
+  "provisional": false,
+  "source": "server-side dry run against a gke-autopilot cluster, API server v1.35.8-gke.1036000; the cluster answered with dev.gvisor.internal.seccomp.keeper",
+  "notes": [
+    "Captured by src/tools/capture-fixture.ts via `npm run capture:autopilot`. Every entry must have a matching allowance in kubernetes-platform.ts, or the attestation test fails.",
+    "Both the submitted and the returned pod were passed through kubernetes-isolation.ts's undoApiServerDefaults before being diffed, so what is listed here is what the PLATFORM changed, not what any API server defaults on any create."
+  ],
+  "mutations": [
+    {
+      "op": "add",
+      "path": "/metadata/annotations/dev.gvisor.internal.seccomp.keeper",
+      "value": "RuntimeDefault"
+    },
+    {
+      "op": "add",
+      "path": "/metadata/annotations/dev.gvisor.internal.seccomp.storage-init",
+      "value": "RuntimeDefault"
+    },
+    {
+      "op": "add",
+      "path": "/metadata/annotations/dev.gvisor.internal.seccomp.worker",
+      "value": "RuntimeDefault"
+    },
+    {
+      "op": "add",
+      "path": "/metadata/annotations/dev.gvisor.spec.mount.home.options",
+      "value": "rw,rprivate"
+    },
+    {
+      "op": "add",
+      "path": "/metadata/annotations/dev.gvisor.spec.mount.home.share",
+      "value": "container"
+    },
+    {
+      "op": "add",
+      "path": "/metadata/annotations/dev.gvisor.spec.mount.home.type",
+      "value": "tmpfs"
+    },
+    {
+      "op": "add",
+      "path": "/metadata/annotations/dev.gvisor.spec.mount.tmp.options",
+      "value": "rw,rprivate"
+    },
+    {
+      "op": "add",
+      "path": "/metadata/annotations/dev.gvisor.spec.mount.tmp.share",
+      "value": "container"
+    },
+    {
+      "op": "add",
+      "path": "/metadata/annotations/dev.gvisor.spec.mount.tmp.type",
+      "value": "tmpfs"
+    },
+    {
+      "op": "add",
+      "path": "/spec/nodeSelector",
+      "value": {
+        "sandbox.gke.io/runtime": "gvisor"
+      }
+    },
+    {
+      "op": "add",
+      "path": "/spec/tolerations",
+      "value": [
+        {
+          "effect": "NoSchedule",
+          "key": "sandbox.gke.io/runtime",
+          "operator": "Equal",
+          "value": "gvisor"
+        },
+        {
+          "effect": "NoSchedule",
+          "key": "kubernetes.io/arch",
+          "operator": "Equal",
+          "value": "amd64"
+        }
+      ]
+    }
+  ]
+}

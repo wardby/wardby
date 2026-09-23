@@ -18,6 +18,7 @@ import { DockerJobLauncher } from "../jobs/docker.js";
 import type { KubernetesApi } from "../jobs/kubernetes-api.js";
 import { ClientNodeKubernetesApi } from "../jobs/kubernetes-client.js";
 import { isRegistryDigest } from "../jobs/kubernetes-isolation.js";
+import { assertPlatformConfig, platformProfile } from "../jobs/kubernetes-platform.js";
 import { runKubernetesPreflight } from "../jobs/kubernetes-preflight.js";
 import { KubernetesJobLauncher } from "../jobs/kubernetes.js";
 import type { WorkspaceJobLauncher } from "../jobs/types.js";
@@ -64,6 +65,12 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       throw new Error("CODING_WORKER_IMAGE must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=kubernetes.");
     }
     const kubernetes = loadKubernetesJobConfig(env);
+    // The preflight only runs on the first launch; a configuration that cannot work should
+    // fail the process at start-up, not the first coding run an hour later.
+    assertPlatformConfig(platformProfile(kubernetes.platform), {
+      runtimeClassName: kubernetes.runtimeClassName,
+      maxDiskMb: config.maxDiskMb,
+    });
     const api = options.kubernetesApi ?? new ClientNodeKubernetesApi({ context: kubernetes.context });
     const workerImage = config.workerImage;
     jobs = new KubernetesJobLauncher({
@@ -71,9 +78,16 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       config: kubernetes,
       workspaceRoot,
       resolveCapability: (runId) => capabilities.get(runId),
+      readyTimeoutMs: kubernetes.readyTimeoutMs,
       preflight: async () => {
-        const { clusterDnsIp } = await runKubernetesPreflight({ api, config: kubernetes, workerImage });
-        return { clusterDnsIp };
+        const { proxyIp } = await runKubernetesPreflight({
+          api,
+          config: kubernetes,
+          workerImage,
+          maxDiskMb: config.maxDiskMb,
+          timeoutMs: kubernetes.preflightTimeoutMs,
+        });
+        return { proxyIp };
       },
       onWarning: (message) => compositionLog.warn(message),
     });

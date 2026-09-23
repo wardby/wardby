@@ -1,31 +1,33 @@
 /**
  * Fail-closed cluster preflight for JOB_LAUNCHER=kubernetes. Proves the
- * namespace and proxy Service exist, the worker image is a registry digest,
+ * namespace exists, the proxy Service is a usable enforcement witness (both
+ * ports exposed with a ready backend), the worker image is a registry digest,
  * and — with a canary pod built from the real run pod and run NetworkPolicy —
- * that DNS (in-pod resolution and a TCP connect to the kube-dns ClusterIP),
- * the internet, and the metadata server are unreachable while the proxy is
- * reachable. Any other state, error, or timeout fails the check; the whole
- * preflight, cleanup included, is bounded.
+ * that DNS, the internet, the metadata server and **the proxy's deny port**
+ * are unreachable while the proxy itself is reachable. Any other state, error,
+ * or timeout fails the check; the whole preflight, cleanup included, is bounded.
  */
 import { randomBytes } from "node:crypto";
-import { isIP } from "node:net";
 import type { KubernetesJobConfig } from "../../config/providers.js";
+import { CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "./docker-isolation.js";
 import type { KubernetesApi } from "./kubernetes-api.js";
 import {
-  CLUSTER_DNS_NAMESPACE,
-  CLUSTER_DNS_SERVICE,
   KUBERNETES_ISOLATION_ERROR,
   WORKER_CONTAINER,
   buildRunNetworkPolicy,
   buildRunPod,
   isRegistryDigest,
 } from "./kubernetes-isolation.js";
+import { KubernetesPlatformError, assertPlatformConfig, platformProfile } from "./kubernetes-platform.js";
+import { readProxyWitness } from "./kubernetes-witness.js";
 import type { JobSpec } from "./types.js";
 
 export interface KubernetesPreflightOptions {
   api: KubernetesApi;
   config: KubernetesJobConfig;
   workerImage: string; // registry digest
+  /** The effective CODING_MAX_DISK_MB; the platform check refuses a value the platform cannot run. */
+  maxDiskMb: number;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
   timeoutMs?: number; // default 90_000; bounds the whole preflight
@@ -34,7 +36,8 @@ export interface KubernetesPreflightOptions {
 
 export interface CanaryResult {
   dns: boolean;
-  clusterDns: boolean;
+  /** The proxy's deny port: reachable means the run policy is not being enforced. */
+  proxyDeny: boolean;
   internet: boolean;
   metadata: boolean;
   proxy: boolean;
@@ -46,15 +49,26 @@ const POLL_INTERVAL_MS = 500;
 const LOG_TAIL_LINES = 20;
 const LOG_LIMIT_BYTES = 4096;
 const CANARY_LINE_PREFIX = '{"wardbyCanary":';
-const EXPECTED: CanaryResult = { dns: false, clusterDns: false, internet: false, metadata: false, proxy: true };
+const EXPECTED: CanaryResult = { dns: false, proxyDeny: false, internet: false, metadata: false, proxy: true };
 const CANARY_KEYS = Object.keys(EXPECTED).sort();
 
 /**
  * Runs in the worker image under the run policy; prints exactly one `{"wardbyCanary":{...}}` line.
- * `dns` checks in-pod resolution; `clusterDns` checks the policy itself (a TCP connect to another
- * pod, the cluster DNS Service), which a namespace-wide allow-DNS policy would reopen.
+ * `dns` checks in-pod resolution; `proxyDeny` checks the policy itself — a TCP connect to the *same*
+ * proxy pod on a port no run policy permits, which a namespace-wide allow-all policy would reopen.
+ * Probing one destination on two ports is what makes the result decisive: `proxy` true with
+ * `proxyDeny` false can only mean a policy is enforced and port-scoped.
+ *
+ * `proxyDeny` is false for exactly one socket outcome: a **timeout**, i.e. the packet was dropped.
+ * A refusal (RST) is not a denial — it proves the SYN reached the destination host, so the deny
+ * port is merely unserved — and a connect obviously is not either. This mirrors the launch gate's
+ * probe (`enforcementProbeScript`), which had to make the same distinction after a live cluster
+ * with no NetworkPolicy at all passed a boolean version of this check; preflight and gate must
+ * agree on what counts as evidence, or one of them is vacuous. `internet`, `metadata` and `proxy`
+ * stay plain reachability, where "connected" is the only thing that matters.
+ *
  * CNIs program a new pod's policy a few seconds after it starts, so the script first waits (up to
- * 20 s) for the cluster DNS connect to be blocked; if it never is, `clusterDns` reports true.
+ * 20 s) for the deny-port connect to be *dropped*; if it never is, `proxyDeny` reports true.
  */
 export const CANARY_SCRIPT = [
   'const net = require("node:net");',
@@ -64,18 +78,22 @@ export const CANARY_SCRIPT = [
   "    const socket = net.connect({ host, port, timeout: 3000 });",
   '    socket.once("connect", () => {',
   "      socket.destroy();",
-  "      done(true);",
+  '      done("connect");',
   "    });",
   '    socket.once("timeout", () => {',
   "      socket.destroy();",
-  "      done(false);",
+  '      done("timeout");',
   "    });",
-  '    socket.once("error", () => done(false));',
+  '    socket.once("error", () => done("error"));',
   "  });",
+  "// Plain reachability, for the probes where only a completed connection matters.",
+  'const reachable = async (host, port) => (await tcp(host, port)) === "connect";',
+  "// Only a dropped packet is a policy denial: a refusal proves the SYN reached the host.",
+  'const dropped = async (host, port) => (await tcp(host, port)) === "timeout";',
   "const settle = async () => {",
   "  const until = Date.now() + 20000;",
   "  while (Date.now() < until) {",
-  "    if (!(await tcp(process.env.WARDBY_CANARY_CLUSTER_DNS_IP, 53))) return;",
+  `    if (await dropped(process.env.WARDBY_CANARY_PROXY_IP, ${CODING_PROXY_DENY_PORT})) return;`,
   "    await new Promise((wake) => setTimeout(wake, 500));",
   "  }",
   "};",
@@ -86,10 +104,10 @@ export const CANARY_SCRIPT = [
   "      () => true,",
   "      () => false,",
   "    ),",
-  "    clusterDns: await tcp(process.env.WARDBY_CANARY_CLUSTER_DNS_IP, 53),",
-  '    internet: await tcp("1.1.1.1", 443),',
-  '    metadata: await tcp("169.254.169.254", 80),',
-  "    proxy: await tcp(process.env.WARDBY_CANARY_PROXY_IP, 8787),",
+  `    proxyDeny: !(await dropped(process.env.WARDBY_CANARY_PROXY_IP, ${CODING_PROXY_DENY_PORT})),`,
+  '    internet: await reachable("1.1.1.1", 443),',
+  '    metadata: await reachable("169.254.169.254", 80),',
+  `    proxy: await reachable(process.env.WARDBY_CANARY_PROXY_IP, ${CODING_PROXY_PORT}),`,
   "  };",
   "  console.log(JSON.stringify({ wardbyCanary }));",
   "})();",
@@ -126,11 +144,6 @@ async function within<T>(action: Promise<T>, ms: number, onTimeout: () => Error)
   }
 }
 
-function serviceClusterIp(clusterIP: string | undefined, check: string): string {
-  if (!clusterIP || isIP(clusterIP) === 0) throw failure(check);
-  return clusterIP;
-}
-
 /** Parses only the fixed canary line and requires exactly the five booleans. */
 function parseCanary(log: string): CanaryResult | undefined {
   const lines = log
@@ -158,7 +171,7 @@ function canaryPasses(result: CanaryResult | undefined): boolean {
   return (
     result !== undefined &&
     result.dns === EXPECTED.dns &&
-    result.clusterDns === EXPECTED.clusterDns &&
+    result.proxyDeny === EXPECTED.proxyDeny &&
     result.internet === EXPECTED.internet &&
     result.metadata === EXPECTED.metadata &&
     result.proxy === EXPECTED.proxy
@@ -203,7 +216,6 @@ async function runCanary(
   options: KubernetesPreflightOptions,
   state: CanaryState,
   proxyIp: string,
-  clusterDnsIp: string,
   timeoutMs: number,
   cleanupTimeoutMs: number,
 ): Promise<void> {
@@ -224,14 +236,16 @@ async function runCanary(
     labels: {},
   };
   const { pod, policy } = await runCheck("canary", async () => {
-    const pod = buildRunPod(spec, { namespace, proxyIp, runtimeClassName: config.runtimeClassName });
+    const pod = buildRunPod(spec, {
+      namespace,
+      proxyIp,
+      runtimeClassName: config.runtimeClassName,
+      platform: config.platform,
+    });
     const podSpec = pod.spec!;
     const worker = podSpec.containers.find((container) => container.name === WORKER_CONTAINER);
     if (!worker) throw failure("canary");
-    worker.env = [
-      { name: "WARDBY_CANARY_PROXY_IP", value: proxyIp },
-      { name: "WARDBY_CANARY_CLUSTER_DNS_IP", value: clusterDnsIp },
-    ];
+    worker.env = [{ name: "WARDBY_CANARY_PROXY_IP", value: proxyIp }];
     worker.command = ["node", "-e", CANARY_SCRIPT];
     podSpec.containers = [worker];
     // The canary has no collection window: Kubernetes kills it at the preflight's own deadline.
@@ -282,53 +296,39 @@ async function runChecks(
 ): Promise<string> {
   const { api, config, workerImage } = options;
 
+  // Pure configuration, checked first: a deployment that cannot work is refused before
+  // a single API call, with a message naming the setting and the limit.
+  await runCheck("platform", async () => {
+    assertPlatformConfig(platformProfile(config.platform), {
+      runtimeClassName: config.runtimeClassName,
+      maxDiskMb: options.maxDiskMb,
+    });
+  });
+  passed.push("platform");
+
   await runCheck("namespace", async () => {
     if (!(await api.readNamespace(config.namespace))) throw failure("namespace");
   });
   passed.push("namespace");
 
   const proxyIp = await runCheck("proxy-service", async () => {
-    const service = await api.readService(config.namespace, config.proxyService);
-    return serviceClusterIp(service?.spec?.clusterIP, "proxy-service");
+    const witness = await readProxyWitness(api, config.namespace, config.proxyService);
+    return witness.clusterIp;
   });
   passed.push("proxy-service");
-
-  const clusterDnsIp = await runCheck("cluster-dns", async () => {
-    const service = await api.readService(CLUSTER_DNS_NAMESPACE, CLUSTER_DNS_SERVICE);
-    const ip = serviceClusterIp(service?.spec?.clusterIP, "cluster-dns");
-    // The per-launch gate treats "cannot connect to this IP" as "policy is enforced". A Service with
-    // no ready backends (e.g. GKE Cloud DNS, where no kube-dns pods run) refuses every connection, so
-    // the gate would pass ~1s after pod start without any policy being programmed. Require a ready
-    // endpoint address, or fail closed: such a cluster needs a different enforcement witness.
-    // (EndpointSlice is the durable successor to the core/v1 Endpoints read here; migration is a follow-up.)
-    const endpoints = await api.readEndpoints(CLUSTER_DNS_NAMESPACE, CLUSTER_DNS_SERVICE);
-    const ready = (endpoints?.subsets ?? []).some((subset) =>
-      (subset.addresses ?? []).some((address) => typeof address.ip === "string" && isIP(address.ip) !== 0),
-    );
-    if (!ready) {
-      throw failure(
-        "cluster-dns",
-        new Error(
-          `${CLUSTER_DNS_NAMESPACE}/${CLUSTER_DNS_SERVICE} has no ready endpoint address, so it cannot witness NetworkPolicy enforcement; this cluster needs a different witness`,
-        ),
-      );
-    }
-    return ip;
-  });
-  passed.push("cluster-dns");
 
   if (!isRegistryDigest(workerImage)) throw failure("worker-image");
   passed.push("worker-image");
 
-  await runCanary(options, state, proxyIp, clusterDnsIp, timeoutMs, cleanupTimeoutMs);
+  await runCanary(options, state, proxyIp, timeoutMs, cleanupTimeoutMs);
   passed.push("canary");
-  return clusterDnsIp;
+  return proxyIp;
 }
 
 export interface KubernetesPreflightResult {
   checks: string[];
-  /** The validated kube-dns ClusterIP; the launcher probes it to wait for each run's policy. */
-  clusterDnsIp: string;
+  /** The validated proxy Service ClusterIP; the launcher probes both of its ports to wait for each run's policy. */
+  proxyIp: string;
 }
 
 /** Throws kubernetes_isolation_unsupported:<check> on the first failed check; returns the checks that passed. */
@@ -339,7 +339,7 @@ export async function kubernetesPreflight(options: KubernetesPreflightOptions): 
 /**
  * Throws kubernetes_isolation_unsupported:<check> on the first failed check
  * (`:timeout` when the whole preflight exceeds `timeoutMs`); returns the checks that passed and
- * the cluster DNS IP it validated.
+ * the proxy ClusterIP it validated.
  */
 export async function runKubernetesPreflight(options: KubernetesPreflightOptions): Promise<KubernetesPreflightResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -349,9 +349,9 @@ export async function runKubernetesPreflight(options: KubernetesPreflightOptions
 
   let outcome: unknown;
   let failed = false;
-  let clusterDnsIp = "";
+  let proxyIp = "";
   try {
-    clusterDnsIp = await within(runChecks(options, state, passed, timeoutMs, cleanupTimeoutMs), timeoutMs, () =>
+    proxyIp = await within(runChecks(options, state, passed, timeoutMs, cleanupTimeoutMs), timeoutMs, () =>
       failure("timeout"),
     );
   } catch (error) {
@@ -373,12 +373,17 @@ export async function runKubernetesPreflight(options: KubernetesPreflightOptions
     }
   }
   if (failed) throw outcome;
-  return { checks: passed, clusterDnsIp };
+  return { checks: passed, proxyIp };
 }
 
 function shortMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const firstLine = message.split("\n", 1)[0].trim();
+  // A KubernetesPlatformError is single-line by construction and never carries canary output (it is
+  // thrown from pure configuration checks before any cluster call), so the 200-char cap that exists
+  // to keep arbitrary API-error text and canary noise out of an operator-facing line does not need to
+  // apply here — and truncating it cuts the remediation clause an operator needs most.
+  if (error instanceof KubernetesPlatformError) return firstLine || "unknown error";
   return firstLine.length > 200 ? `${firstLine.slice(0, 200)}…` : firstLine || "unknown error";
 }
 

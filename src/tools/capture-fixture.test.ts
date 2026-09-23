@@ -1,0 +1,382 @@
+/**
+ * The capture tool's decisions, unit-tested against FakeKubernetesApi.
+ *
+ * The centrepiece is `defaultedLikeAnApiServer`: a read-back carrying both the
+ * defaulting every API server performs on every create AND the four mutations
+ * Autopilot's admission chain is believed to add. A capture must record the
+ * second set and none of the first, or the committed fixture stops being
+ * reviewable — which is the only reason it is committed at all.
+ */
+import { describe, expect, it } from "vitest";
+import type { V1Pod } from "@kubernetes/client-node";
+import { FakeKubernetesApi } from "../providers/jobs/fake-kubernetes-api.js";
+import { assertRunPodMatches, buildRunPod } from "../providers/jobs/kubernetes-isolation.js";
+import { applyMutations, diffMutations } from "../providers/jobs/kubernetes-dry-run-fixture.js";
+import { CAPTURE_REFUSED, captureFixture, platformFingerprint, stripServerMetadata } from "./capture-fixture.js";
+import type { JobSpec } from "../providers/jobs/types.js";
+
+const NAMESPACE = "wardby-coding";
+const SERVICE = "wardby-coding-proxy";
+const CLUSTER_IP = "10.96.0.50";
+const IMAGE = `us-central1-docker.pkg.dev/example/wardby/coding-worker@sha256:${"a".repeat(64)}`;
+const ADJUSTMENT = '{"input":{"containers":[]},"output":{"containers":[]},"modified":false}';
+const GVISOR_TOLERATION = {
+  key: "sandbox.gke.io/runtime",
+  operator: "Equal",
+  value: "gvisor",
+  effect: "NoSchedule",
+};
+const NODE_HEALTH_TOLERATIONS = [
+  { key: "node.kubernetes.io/not-ready", operator: "Exists", effect: "NoExecute", tolerationSeconds: 300 },
+  { key: "node.kubernetes.io/unreachable", operator: "Exists", effect: "NoExecute", tolerationSeconds: 300 },
+];
+
+const options = {
+  namespace: NAMESPACE,
+  proxyService: SERVICE,
+  platform: "gke-autopilot" as const,
+  runtimeClassName: "gvisor",
+  workerImage: IMAGE,
+  now: new Date("2026-09-23T11:22:33.000Z"),
+};
+
+/** The pod the capture tool itself builds, rebuilt here so the test never trusts the tool's copy. */
+function submittedPod(): V1Pod {
+  const spec: JobSpec = {
+    kind: "coding-agent",
+    runId: "capture-dry-run",
+    provider: "codex",
+    image: IMAGE,
+    inputArtifact: "",
+    timeoutSec: 900,
+    limits: { cpus: 1, memoryMb: 2048, pids: 128, diskMb: 2048 },
+    labels: {},
+  };
+  return buildRunPod(spec, {
+    namespace: NAMESPACE,
+    proxyIp: CLUSTER_IP,
+    runtimeClassName: "gvisor",
+    platform: "gke-autopilot",
+  });
+}
+
+/** A quantity re-rendered in canonical binary form, as Go's resource.Quantity does after any mutation. */
+function requantize(bag: Record<string, string> | undefined): void {
+  if (!bag) return;
+  if (bag.cpu === "1000m") bag.cpu = "1";
+  for (const key of ["memory", "ephemeral-storage"]) {
+    const value = bag[key];
+    if (value === "2048Mi") bag[key] = "2Gi";
+    if (value === "1024Mi") bag[key] = "1Gi";
+  }
+}
+
+/**
+ * What a real GKE Autopilot API server would hand back: every create-time default
+ * it fills in, plus the platform's own four mutations. Deliberately verbose — the
+ * point of the test is that all of the first list is noise the capture must drop.
+ */
+function defaultedLikeAnApiServer(pod: V1Pod): V1Pod {
+  const out = structuredClone(pod);
+  // --- bookkeeping every create gets ---
+  out.metadata = {
+    ...out.metadata,
+    creationTimestamp: new Date("2026-09-23T11:22:33.000Z"),
+    uid: "8f6f0c62-0f2e-4a1a-9d2e-2b4b4f7c1a11",
+    resourceVersion: "123456",
+    generation: 1,
+    managedFields: [{ manager: "wardby", operation: "Update", apiVersion: "v1" }],
+  };
+  out.status = { phase: "Pending" };
+  // --- spec-level defaulting ---
+  const spec = out.spec!;
+  spec.schedulerName = "default-scheduler";
+  spec.priority = 0;
+  spec.preemptionPolicy = "PreemptLowerPriority";
+  spec.serviceAccount = spec.serviceAccountName;
+  // Go's omitempty drops these three at `false`.
+  delete spec.hostNetwork;
+  delete spec.hostPID;
+  delete spec.hostIPC;
+  for (const container of [...(spec.initContainers ?? []), ...spec.containers]) {
+    container.terminationMessagePath = "/dev/termination-log";
+    container.terminationMessagePolicy = "File";
+    container.imagePullPolicy = "IfNotPresent";
+    requantize(container.resources?.requests);
+    requantize(container.resources?.limits);
+    if (container.readinessProbe) {
+      container.readinessProbe.timeoutSeconds = 1;
+      container.readinessProbe.successThreshold = 1;
+      container.readinessProbe.failureThreshold = 3;
+    }
+  }
+  for (const volume of spec.volumes ?? []) {
+    if (volume.emptyDir?.sizeLimit === "2048Mi") volume.emptyDir.sizeLimit = "2Gi";
+  }
+  spec.tolerations = [...NODE_HEALTH_TOLERATIONS];
+  // --- and now the four things the PLATFORM actually did ---
+  out.metadata.annotations = {
+    ...out.metadata.annotations,
+    "autopilot.gke.io/resource-adjustment": ADJUSTMENT,
+    "autopilot.gke.io/warden-version": "1.2.3",
+  };
+  spec.nodeSelector = { "sandbox.gke.io/runtime": "gvisor" };
+  spec.tolerations = [GVISOR_TOLERATION, ...NODE_HEALTH_TOLERATIONS];
+  return out;
+}
+
+/**
+ * What GKE Autopilot 1.35.8-gke.1036000 actually handed back on a real server-side dry run
+ * against the wardby-phase12 cluster (2026-09-23): the usual API-server bookkeeping, NO
+ * autopilot.gke.io/* annotation at all, a dev.gvisor.* annotation per container/tmpfs-volume,
+ * the gVisor nodeSelector, and the gVisor + kubernetes.io/arch tolerations. Zero resource
+ * mutations — the builder's Autopilot-conformed CPU/memory/ephemeral-storage survived unchanged.
+ */
+function autopilot1358Response(pod: V1Pod): V1Pod {
+  const out = defaultedLikeAnApiServer(pod);
+  delete out.metadata!.annotations!["autopilot.gke.io/resource-adjustment"];
+  delete out.metadata!.annotations!["autopilot.gke.io/warden-version"];
+  out.metadata!.annotations = {
+    ...out.metadata!.annotations,
+    "dev.gvisor.internal.seccomp.keeper": "RuntimeDefault",
+    "dev.gvisor.internal.seccomp.storage-init": "RuntimeDefault",
+    "dev.gvisor.internal.seccomp.worker": "RuntimeDefault",
+    "dev.gvisor.spec.mount.tmp.type": "tmpfs",
+    "dev.gvisor.spec.mount.home.type": "tmpfs",
+  };
+  out.spec!.tolerations = [
+    GVISOR_TOLERATION,
+    { key: "kubernetes.io/arch", operator: "Equal", value: "amd64", effect: "NoSchedule" },
+    ...NODE_HEALTH_TOLERATIONS,
+  ];
+  return out;
+}
+
+function api(options: { admit?: (pod: V1Pod) => V1Pod; version?: string } = {}): FakeKubernetesApi {
+  const fake = new FakeKubernetesApi();
+  fake.put("service", NAMESPACE, {
+    metadata: { name: SERVICE },
+    spec: {
+      clusterIP: CLUSTER_IP,
+      selector: { "app.kubernetes.io/name": "wardby-coding-proxy" },
+      ports: [
+        { port: 8787, protocol: "TCP" },
+        { port: 8788, protocol: "TCP" },
+      ],
+    },
+  });
+  fake.put("endpoints", NAMESPACE, {
+    metadata: { name: SERVICE },
+    subsets: [
+      {
+        addresses: [{ ip: "10.244.0.5" }],
+        ports: [
+          { port: 8787, protocol: "TCP" },
+          { port: 8788, protocol: "TCP" },
+        ],
+      },
+    ],
+  });
+  // The witness's attribution precondition: the proxy admits run pods on the deny port.
+  fake.put("networkpolicy", NAMESPACE, {
+    metadata: { name: SERVICE },
+    spec: {
+      podSelector: { matchLabels: { "app.kubernetes.io/name": "wardby-coding-proxy" } },
+      policyTypes: ["Ingress", "Egress"],
+      ingress: [
+        {
+          from: [{ podSelector: { matchLabels: { "wardby.io/component": "coding-run" } } }],
+          ports: [
+            { protocol: "TCP", port: 8787 },
+            { protocol: "TCP", port: 8788 },
+          ],
+        },
+      ],
+    },
+  });
+  fake.apiServerVersion = options.version ?? "v1.33.4-gke.1000";
+  if (options.admit) {
+    const admit = options.admit;
+    fake.onDryRunCreatePod = async (_namespace, body) => admit(body);
+  }
+  return fake;
+}
+
+describe("captureFixture", () => {
+  it("records only the platform's mutations, not the API server's defaulting", async () => {
+    const fixture = await captureFixture(api({ admit: defaultedLikeAnApiServer }), options);
+    expect(fixture.mutations).toEqual([
+      { op: "add", path: "/metadata/annotations/autopilot.gke.io~1resource-adjustment", value: ADJUSTMENT },
+      { op: "add", path: "/metadata/annotations/autopilot.gke.io~1warden-version", value: "1.2.3" },
+      { op: "add", path: "/spec/nodeSelector", value: { "sandbox.gke.io/runtime": "gvisor" } },
+      { op: "add", path: "/spec/tolerations", value: [GVISOR_TOLERATION] },
+    ]);
+  });
+
+  it("without that pass the same read-back buries the platform in opaque array replacements", () => {
+    // The regression this exists to prevent: a naive diff of the raw pair. Every container's
+    // image, command, env, resources and securityContext collapses into one `replace` blob,
+    // and a genuine Autopilot rewrite *inside* a container would be invisible in it.
+    const naive = diffMutations(submittedPod(), defaultedLikeAnApiServer(submittedPod()));
+    expect(naive.map((mutation) => mutation.path)).toEqual(
+      expect.arrayContaining(["/spec/containers", "/spec/initContainers", "/spec/schedulerName"]),
+    );
+    expect(naive.length).toBeGreaterThan(4);
+  });
+
+  it("produces a mutation set the attestation comparator accepts", async () => {
+    const fixture = await captureFixture(api({ admit: defaultedLikeAnApiServer }), options);
+    const submitted = submittedPod();
+    expect(() =>
+      assertRunPodMatches(applyMutations(submitted, fixture.mutations), submitted, "gke-autopilot"),
+    ).not.toThrow();
+  });
+
+  it("stamps the API server version and the fingerprint it actually saw", async () => {
+    const fixture = await captureFixture(api({ admit: defaultedLikeAnApiServer }), options);
+    expect(fixture.provisional).toBe(false);
+    expect(fixture.source).not.toContain("PROVISIONAL");
+    expect(fixture.source).toContain("v1.33.4-gke.1000");
+    expect(fixture.source).toContain("autopilot.gke.io/resource-adjustment");
+    expect(fixture.capturedAt).toBe("2026-09-23");
+    expect(fixture.platform).toBe("gke-autopilot");
+  });
+
+  it("refuses to capture the generic platform, which forgives nothing", async () => {
+    await expect(captureFixture(api(), { ...options, platform: "generic" })).rejects.toThrow(CAPTURE_REFUSED);
+  });
+
+  it("refuses to write when the cluster did not answer like the platform", async () => {
+    // A cluster that is not Autopilot returns the pod essentially as submitted. Writing
+    // `provisional: false` from that would machine-author an attestation of a fact never checked.
+    await expect(captureFixture(api(), options)).rejects.toThrow(CAPTURE_REFUSED);
+    await expect(captureFixture(api(), options)).rejects.toThrow(/did not answer like gke-autopilot/);
+  });
+
+  it("refuses before submitting anything when the proxy witness is unusable", async () => {
+    const fake = new FakeKubernetesApi();
+    let submitted = false;
+    fake.onDryRunCreatePod = async (_namespace, body) => {
+      submitted = true;
+      return body;
+    };
+    await expect(captureFixture(fake, options)).rejects.toThrow("kubernetes_proxy_witness_unusable");
+    expect(submitted).toBe(false);
+  });
+
+  // Regression for both defects together: before the fingerprint fallback and the
+  // dev.gvisor./kubernetes.io/arch allowances existed, this exact real-cluster response made
+  // `npm run capture:autopilot` refuse with "the dry-run response carries no annotation matching
+  // autopilot.gke.io/", even though the pod really did come from GKE Autopilot.
+  it("accepts a real Autopilot 1.35.8-gke.1036000 response with no autopilot.gke.io/* annotation", async () => {
+    const fixture = await captureFixture(api({ admit: autopilot1358Response }), options);
+    expect(fixture.provisional).toBe(false);
+    expect(fixture.mutations).toEqual(
+      expect.arrayContaining([
+        { op: "add", path: "/spec/nodeSelector", value: { "sandbox.gke.io/runtime": "gvisor" } },
+        {
+          op: "add",
+          path: "/spec/tolerations",
+          value: [
+            GVISOR_TOLERATION,
+            { key: "kubernetes.io/arch", operator: "Equal", value: "amd64", effect: "NoSchedule" },
+          ],
+        },
+      ]),
+    );
+    expect(fixture.mutations.some((m) => m.path.startsWith("/metadata/annotations/autopilot.gke.io"))).toBe(false);
+    // And the recorded mutation set is exactly what the attestation comparator accepts.
+    const submitted = submittedPod();
+    expect(() =>
+      assertRunPodMatches(applyMutations(submitted, fixture.mutations), submitted, "gke-autopilot"),
+    ).not.toThrow();
+  });
+
+  it("never persists the pod it submits", async () => {
+    const fake = api({ admit: defaultedLikeAnApiServer });
+    await captureFixture(fake, options);
+    expect([...fake.objects.keys()].filter((key) => key.startsWith("pod/"))).toEqual([]);
+  });
+});
+
+describe("stripServerMetadata", () => {
+  it("drops create-time bookkeeping and status without touching the rest", () => {
+    const stripped = stripServerMetadata({
+      metadata: {
+        name: "wardby-run-x",
+        namespace: NAMESPACE,
+        creationTimestamp: new Date(0),
+        uid: "u",
+        resourceVersion: "1",
+        generation: 1,
+        managedFields: [{ manager: "kubelet" }],
+        annotations: { "autopilot.gke.io/warden-version": "1.2.3" },
+      },
+      spec: { containers: [] },
+      status: { phase: "Pending" },
+    });
+    expect(stripped.metadata).toEqual({
+      name: "wardby-run-x",
+      namespace: NAMESPACE,
+      annotations: { "autopilot.gke.io/warden-version": "1.2.3" },
+    });
+    expect(stripped.status).toBeUndefined();
+  });
+
+  it("copies rather than mutating the pod it was given", () => {
+    const pod: V1Pod = { metadata: { name: "p", uid: "u" }, spec: { containers: [] } };
+    stripServerMetadata(pod);
+    expect(pod.metadata?.uid).toBe("u");
+  });
+});
+
+describe("platformFingerprint", () => {
+  it("finds an annotation the profile names, and nothing else", () => {
+    const withAnnotation: V1Pod = { metadata: { annotations: { "autopilot.gke.io/warden-version": "1" } } };
+    expect(platformFingerprint("gke-autopilot", withAnnotation)).toBe("autopilot.gke.io/warden-version");
+    expect(platformFingerprint("gke-autopilot", { metadata: { annotations: { "wardby.io/run-id": "r" } } })).toBe(
+      undefined,
+    );
+    expect(platformFingerprint("gke-autopilot", {})).toBe(undefined);
+    // generic names no prefixes, so it has no fingerprint to claim.
+    expect(platformFingerprint("generic", withAnnotation)).toBe(undefined);
+  });
+
+  // Regression for the real cluster: a server-side dry run against GKE Autopilot
+  // 1.35.8-gke.1036000 (wardby-phase12, 2026-09-23) carried NO autopilot.gke.io/* annotation of
+  // any kind on an already-conforming sandboxed pod — annotations were the documented signal,
+  // but they were measured absent. Before this fallback existed, capture-fixture.ts refused every
+  // real capture against that cluster with "the dry-run response carries no annotation matching
+  // autopilot.gke.io/". The nodeSelector plus the gVisor toleration is the signature that DID
+  // survive, and it must be enough on its own.
+  it("falls back to the gVisor nodeSelector plus toleration when no annotation matches", () => {
+    const sandboxedNoAnnotations: V1Pod = {
+      metadata: { annotations: { "wardby.io/run-id": "r" } },
+      spec: {
+        containers: [],
+        nodeSelector: { "sandbox.gke.io/runtime": "gvisor" },
+        tolerations: [{ key: "sandbox.gke.io/runtime", operator: "Equal", value: "gvisor", effect: "NoSchedule" }],
+      },
+    };
+    expect(platformFingerprint("gke-autopilot", sandboxedNoAnnotations)).toBeDefined();
+  });
+
+  it("does not fall back on the nodeSelector alone, without the matching toleration", () => {
+    const selectorOnly: V1Pod = {
+      metadata: {},
+      spec: { containers: [], nodeSelector: { "sandbox.gke.io/runtime": "gvisor" } },
+    };
+    expect(platformFingerprint("gke-autopilot", selectorOnly)).toBeUndefined();
+  });
+
+  it("does not fall back on the toleration alone, without the matching nodeSelector", () => {
+    const tolerationOnly: V1Pod = {
+      metadata: {},
+      spec: {
+        containers: [],
+        tolerations: [{ key: "sandbox.gke.io/runtime", operator: "Equal", value: "gvisor", effect: "NoSchedule" }],
+      },
+    };
+    expect(platformFingerprint("gke-autopilot", tolerationOnly)).toBeUndefined();
+  });
+});

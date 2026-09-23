@@ -40,6 +40,44 @@ describe("FakeKubernetesApi", () => {
     expect(Buffer.concat(chunks).toString()).toBe("keeper:echo hi");
   });
 
+  it("stores nothing on a dry-run create", async () => {
+    const api = new FakeKubernetesApi();
+    const pod = { metadata: { name: "wardby-run-x" }, spec: { containers: [] } };
+    expect(await api.dryRunCreatePod("wardby-coding", pod)).toEqual(pod);
+    expect(await api.readPod("wardby-coding", "wardby-run-x")).toBeUndefined();
+  });
+
+  it("rejects a nameless dry-run create and one that collides, as the API server does", async () => {
+    const api = new FakeKubernetesApi();
+    await expect(api.dryRunCreatePod("wardby-coding", { spec: { containers: [] } })).rejects.toThrow(
+      "fake_name_required",
+    );
+    await api.createPod("wardby-coding", { metadata: { name: "taken" }, spec: { containers: [] } });
+    await expect(
+      api.dryRunCreatePod("wardby-coding", { metadata: { name: "taken" }, spec: { containers: [] } }),
+    ).rejects.toBeInstanceOf(KubernetesAlreadyExistsError);
+  });
+
+  it("routes a dry-run create through an overridable admission handler", async () => {
+    const api = new FakeKubernetesApi();
+    api.onDryRunCreatePod = async (_namespace, body) => ({
+      ...body,
+      metadata: { ...body.metadata, annotations: { "example.com/injected": "1" } },
+    });
+    const returned = await api.dryRunCreatePod("wardby-coding", {
+      metadata: { name: "wardby-run-x" },
+      spec: { containers: [] },
+    });
+    expect(returned.metadata?.annotations).toEqual({ "example.com/injected": "1" });
+    expect(await api.readPod("wardby-coding", "wardby-run-x")).toBeUndefined();
+  });
+
+  it("reports an API server version", async () => {
+    const api = new FakeKubernetesApi();
+    api.apiServerVersion = "v1.33.4-gke.1000";
+    expect(await api.readApiServerVersion()).toBe("v1.33.4-gke.1000");
+  });
+
   it("rejects an exec into a missing pod or an unknown container", async () => {
     const api = new FakeKubernetesApi();
     await expect(api.exec("ns", "gone", "keeper", ["true"], { timeoutMs: 1000 })).rejects.toBeInstanceOf(

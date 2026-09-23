@@ -9,6 +9,7 @@ import {
   Exec,
   KubeConfig,
   NetworkingV1Api,
+  VersionApi,
   type V1ConfigMap,
   type V1Endpoints,
   type V1NetworkPolicy,
@@ -98,6 +99,7 @@ export class ClientNodeKubernetesApi implements KubernetesApi {
   private readonly config: KubeConfig;
   private readonly core: CoreV1Api;
   private readonly networking: NetworkingV1Api;
+  private readonly version: VersionApi;
 
   constructor(options: ClientNodeKubernetesApiOptions = {}) {
     this.config = new KubeConfig();
@@ -105,6 +107,7 @@ export class ClientNodeKubernetesApi implements KubernetesApi {
     if (options.context) this.config.setCurrentContext(options.context);
     this.core = this.config.makeApiClient(CoreV1Api);
     this.networking = this.config.makeApiClient(NetworkingV1Api);
+    this.version = this.config.makeApiClient(VersionApi);
   }
 
   createConfigMap(namespace: string, body: V1ConfigMap): Promise<V1ConfigMap> {
@@ -137,6 +140,12 @@ export class ClientNodeKubernetesApi implements KubernetesApi {
     return create(`pod/${namespace}/${body.metadata?.name}`, () => this.core.createNamespacedPod({ namespace, body }));
   }
 
+  dryRunCreatePod(namespace: string, body: V1Pod): Promise<V1Pod> {
+    return create(`pod/${namespace}/${body.metadata?.name}?dryRun`, () =>
+      this.core.createNamespacedPod({ namespace, body, dryRun: "All" }),
+    );
+  }
+
   readPod(namespace: string, name: string): Promise<V1Pod | undefined> {
     return readOrUndefined(() => this.core.readNamespacedPod({ namespace, name }));
   }
@@ -165,6 +174,10 @@ export class ClientNodeKubernetesApi implements KubernetesApi {
 
   readEndpoints(namespace: string, name: string): Promise<V1Endpoints | undefined> {
     return readOrUndefined(() => this.core.readNamespacedEndpoints({ namespace, name }));
+  }
+
+  async readApiServerVersion(): Promise<string> {
+    return (await this.version.getCode()).gitVersion;
   }
 
   async readNamespace(name: string): Promise<boolean> {

@@ -1,0 +1,23 @@
+# The proxy's database reachability on this target: the in-cluster throwaway
+# database only. No instance, project, or region identity belongs in this
+# tracked file; a real deployment replaces this rule with one naming its own
+# managed database's address.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-coding-proxy-database
+  namespace: wardby-coding
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-coding-proxy
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wardby-throwaway-db
+      ports:
+        - protocol: TCP
+          port: 5432

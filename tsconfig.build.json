@@ -1,4 +1,6 @@
 {
   "extends": "./tsconfig.json",
-  "exclude": ["src/**/*.test.ts", "src/providers/jobs/contract-suite.ts"]
+  // src/tools/** are development commands, not product: capture-fixture.ts issues a pod
+  // create-verb call (with dryRun=All) and must not ship in the deployed artifact.
+  "exclude": ["src/**/*.test.ts", "src/providers/jobs/contract-suite.ts", "src/tools/**"]
 }

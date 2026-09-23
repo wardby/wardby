@@ -1,0 +1,56 @@
+# The proxy must be able to resolve the model providers' hostnames. The base
+# policy excepts 169.254.0.0/16 from its internet rule and otherwise permits
+# only kube-dns pods, so without this rule every coding run fails at its first
+# API call -- with an error that surfaces inside the run, not at deploy time.
+#
+# MEASURED on GKE Autopilot 1.35.8-gke.1036000 (us-central1, 2026-09-23), not
+# taken from documentation: a pod's /etc/resolv.conf names 169.254.20.10, the
+# NodeLocal DNSCache, NOT the metadata server at 169.254.169.254. An earlier
+# revision of this file allowed only the metadata address, and DNS failed with
+# EAI_AGAIN until this was corrected -- caught by the deploy-time resolution
+# check, which exists for exactly this reason. Both addresses are allowed
+# because the resolver path differs by cluster configuration and the cost of
+# permitting port 53 to a second link-local address is nil.
+#
+# The same cluster also runs kube-dns with real backing pods, so its ClusterIP
+# is allowed too: NodeLocal DNSCache forwards to it, and a cluster without the
+# cache resolves through it directly.
+#
+# NetworkPolicies are additive, so this opens exactly port 53 to exactly these
+# destinations and widens nothing else. Coding-run pods are unaffected: their
+# own policy permits one destination (the proxy on 8787) and their dnsPolicy is
+# None.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-coding-proxy-dns
+  namespace: wardby-coding
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-coding-proxy
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 169.254.20.10/32
+        - ipBlock:
+            cidr: 169.254.169.254/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

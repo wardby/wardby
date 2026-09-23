@@ -50,6 +50,22 @@ describe("buildConfiguredExecutor", () => {
     ).toThrow("CODING_WORKER_IMAGE must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=kubernetes.");
   });
 
+  it("refuses to compose a kubernetes launcher on gke-autopilot without gvisor", () => {
+    expect(() =>
+      buildConfiguredExecutor({
+        native,
+        db,
+        kubernetesApi: new FakeKubernetesApi(),
+        env: {
+          ...baseEnv,
+          JOB_LAUNCHER: "kubernetes",
+          KUBERNETES_PLATFORM: "gke-autopilot",
+          CODING_WORKER_IMAGE: REGISTRY_IMAGE,
+        },
+      }),
+    ).toThrow("requires KUBERNETES_RUNTIME_CLASS=gvisor (found unset)");
+  });
+
   it("builds a routing executor for Kubernetes without a proxy container or any cluster call", () => {
     const api = new FakeKubernetesApi();
     const executor = buildConfiguredExecutor({

@@ -1,3 +1,4 @@
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import type { V1NetworkPolicy, V1Pod } from "@kubernetes/client-node";
 import { ObjectSerializer } from "@kubernetes/client-node/dist/serializer.js";
@@ -12,12 +13,14 @@ import {
   buildCapabilitySecret,
   buildRunNetworkPolicy,
   buildRunPod,
+  enforcementProbeScript,
   isRegistryDigest,
   kubernetesRunNames,
   kubernetesRunNamesForToken,
   runLabels,
   validateKubernetesSpec,
 } from "./kubernetes-isolation.js";
+import { podEphemeralStorageMib } from "./kubernetes-platform.js";
 
 const IMAGE = `localhost:5001/wardby-coding-worker@sha256:${"a".repeat(64)}`;
 const spec: JobSpec = {
@@ -213,8 +216,8 @@ describe("buildRunPod", () => {
     const volumes = pod().spec!.volumes!;
     expect(volumes.find((v) => v.name === "storage")?.emptyDir).toEqual({ sizeLimit: "2048Mi" });
     expect(worker(pod()).resources).toEqual({
-      requests: { cpu: "1", memory: "2048Mi" },
-      limits: { cpu: "1", memory: "2048Mi" },
+      requests: { cpu: "1000m", memory: "2048Mi" },
+      limits: { cpu: "1000m", memory: "2048Mi" },
     });
   });
 
@@ -229,6 +232,199 @@ describe("buildRunPod", () => {
   it("adds the runtime class only when configured", () => {
     expect(pod().spec!.runtimeClassName).toBeUndefined();
     expect(buildRunPod(spec, { ...options, runtimeClassName: "gvisor" }).spec!.runtimeClassName).toBe("gvisor");
+  });
+});
+
+describe("buildRunPod under the gke-autopilot platform", () => {
+  const autopilotOptions = { ...options, platform: "gke-autopilot" as const, runtimeClassName: "gvisor" };
+  const autopilotPod = () => buildRunPod(spec, autopilotOptions);
+
+  it("emits Autopilot-legal resources for every container", () => {
+    const p = autopilotPod();
+    expect(worker(p).resources).toEqual({
+      requests: { cpu: "1000m", memory: "2048Mi", "ephemeral-storage": "1024Mi" },
+      limits: { cpu: "1000m", memory: "2048Mi", "ephemeral-storage": "1024Mi" },
+    });
+    // 250m with 128Mi is below Autopilot's 1 GiB-per-vCPU floor; memory rises rather than being rewritten.
+    expect(keeper(p).resources).toEqual({
+      requests: { cpu: "250m", memory: "256Mi", "ephemeral-storage": "2048Mi" },
+      limits: { cpu: "250m", memory: "256Mi", "ephemeral-storage": "2048Mi" },
+    });
+    expect(storageInit(p).resources).toEqual({
+      requests: { cpu: "250m", memory: "256Mi", "ephemeral-storage": "64Mi" },
+      limits: { cpu: "250m", memory: "256Mi", "ephemeral-storage": "64Mi" },
+    });
+  });
+
+  it("changes nothing but the resource blocks", () => {
+    const strip = (p: V1Pod) => {
+      const copy = structuredClone(p);
+      for (const c of [...copy.spec!.containers, ...(copy.spec!.initContainers ?? [])]) delete c.resources;
+      return copy;
+    };
+    expect(strip(autopilotPod())).toEqual(strip(buildRunPod(spec, { ...options, runtimeClassName: "gvisor" })));
+  });
+
+  it("still emits nothing extra under generic", () => {
+    expect(keeper(pod()).resources).toEqual({
+      requests: { cpu: "250m", memory: "128Mi" },
+      limits: { cpu: "250m", memory: "128Mi" },
+    });
+    expect(storageInit(pod()).resources).toEqual({
+      requests: { cpu: "250m", memory: "128Mi" },
+      limits: { cpu: "250m", memory: "128Mi" },
+    });
+  });
+
+  it("refuses to build a pod on gke-autopilot without runtimeClassName=gvisor", () => {
+    expect(() => buildRunPod(spec, { ...options, platform: "gke-autopilot" })).toThrow(
+      "kubernetes_platform_unconformable: platform gke-autopilot requires runtimeClassName=gvisor (found unset)",
+    );
+    expect(() => buildRunPod(spec, { ...options, platform: "gke-autopilot", runtimeClassName: "other" })).toThrow(
+      "kubernetes_platform_unconformable: platform gke-autopilot requires runtimeClassName=gvisor (found other)",
+    );
+  });
+
+  it("refuses a workspace that cannot fit the 10 GiB pod ephemeral-storage ceiling", () => {
+    const big: JobSpec = { ...spec, limits: { ...spec.limits, diskMb: 16_384 } };
+    expect(() => buildRunPod(big, autopilotOptions)).toThrow(
+      /kubernetes_platform_unconformable: a 16384 MiB workspace needs 17408 MiB of pod ephemeral storage, over the 10240 MiB \(10 GiB\) ceiling/,
+    );
+    expect(() => buildRunPod({ ...spec, limits: { ...spec.limits, diskMb: 9216 } }, autopilotOptions)).not.toThrow();
+  });
+
+  it("builds the same pod under generic regardless of the ceiling", () => {
+    const big: JobSpec = { ...spec, limits: { ...spec.limits, diskMb: 16_384 } };
+    expect(() => buildRunPod(big, options)).not.toThrow();
+  });
+
+  it("does not require gvisor under generic", () => {
+    expect(() => buildRunPod(spec, { ...options, platform: "generic" })).not.toThrow();
+    expect(buildRunPod(spec, { ...options, platform: "generic" }).spec!.runtimeClassName).toBeUndefined();
+  });
+
+  // The ceiling guard trusts podEphemeralStorageMib to predict what the pod will actually
+  // reserve. Recompute Kubernetes' own rule — max(sum(regular), max(init)) — from the built
+  // pod, so a fourth container or a changed constant makes the guard's under-count fail here
+  // rather than on a live cluster.
+  it.each([64, 512, 2048, 9216])("predicts the pod ephemeral total it actually emits (diskMb=%i)", (diskMb) => {
+    const p = buildRunPod({ ...spec, limits: { ...spec.limits, diskMb } }, autopilotOptions);
+    const mib = (c: { resources?: { requests?: Record<string, string> } }) => {
+      const value = c.resources!.requests!["ephemeral-storage"];
+      expect(value).toMatch(/^\d+Mi$/);
+      return Number.parseInt(value, 10);
+    };
+    const regular = p.spec!.containers.reduce((sum, c) => sum + mib(c), 0);
+    const init = (p.spec!.initContainers ?? []).reduce((max, c) => Math.max(max, mib(c)), 0);
+    expect(Math.max(regular, init)).toBe(podEphemeralStorageMib(diskMb));
+  });
+});
+
+describe("assertRunPodMatches with a platform profile", () => {
+  const autopilotOptions = { ...options, platform: "gke-autopilot" as const, runtimeClassName: "gvisor" };
+
+  it("forgives the Autopilot annotations, nodeSelector and toleration under gke-autopilot", () => {
+    const expected = buildRunPod(spec, autopilotOptions);
+    const actual = structuredClone(expected);
+    actual.metadata!.annotations!["autopilot.gke.io/resource-adjustment"] = "{}";
+    actual.spec!.nodeSelector = { "sandbox.gke.io/runtime": "gvisor" };
+    actual.spec!.tolerations = [
+      { key: "sandbox.gke.io/runtime", operator: "Equal", value: "gvisor", effect: "NoSchedule" },
+    ];
+    expect(() => assertRunPodMatches(actual, expected, "gke-autopilot")).not.toThrow();
+  });
+
+  // GKE stamps these from the node the pod bound to, so they appear only AFTER scheduling —
+  // a server-side dry run never sees them and no captured fixture can list them. A real
+  // Autopilot launch failed attestation on exactly this (2026-09-23) while every dry-run-based
+  // check passed, which is why this case is pinned by a test rather than by the fixture.
+  it("forgives the topology labels GKE adds after binding, which no dry run can capture", () => {
+    const expected = buildRunPod(spec, autopilotOptions);
+    const actual = structuredClone(expected);
+    actual.metadata!.labels!["topology.kubernetes.io/region"] = "us-central1";
+    actual.metadata!.labels!["topology.kubernetes.io/zone"] = "us-central1-f";
+    expect(() => assertRunPodMatches(actual, expected, "gke-autopilot")).not.toThrow();
+    expect(() => assertRunPodMatches(actual, expected, "generic")).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
+  it("still rejects a wardby label dropped behind the forgiven topology labels", () => {
+    const expected = buildRunPod(spec, autopilotOptions);
+    const actual = structuredClone(expected);
+    actual.metadata!.labels!["topology.kubernetes.io/zone"] = "us-central1-f";
+    delete actual.metadata!.labels!["wardby.io/component"];
+    expect(() => assertRunPodMatches(actual, expected, "gke-autopilot")).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
+  it("leaves both operands untouched, so the caller's pods keep their own metadata", () => {
+    const expected = buildRunPod(spec, autopilotOptions);
+    const actual = structuredClone(expected);
+    actual.metadata!.annotations!["autopilot.gke.io/resource-adjustment"] = "{}";
+    actual.spec!.nodeSelector = { "sandbox.gke.io/runtime": "gvisor" };
+    const actualBefore = structuredClone(actual);
+    const expectedBefore = structuredClone(expected);
+    assertRunPodMatches(actual, expected, "gke-autopilot");
+    expect(actual).toEqual(actualBefore);
+    expect(expected).toEqual(expectedBefore);
+  });
+
+  it("rejects those same additions under generic, including by default", () => {
+    const expected = buildRunPod(spec, autopilotOptions);
+    const actual = structuredClone(expected);
+    actual.spec!.nodeSelector = { "sandbox.gke.io/runtime": "gvisor" };
+    expect(() => assertRunPodMatches(actual, expected, "generic")).toThrow(KUBERNETES_ISOLATION_ERROR);
+    expect(() => assertRunPodMatches(actual, expected)).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
+  // Each case is layered on top of a forgiven Autopilot annotation, so it proves the
+  // allowance does not become a hiding place rather than merely that tampering fails.
+  it.each([
+    ["hostNetwork enabled", (p: V1Pod) => void (p.spec!.hostNetwork = true)],
+    ["service account token mounted", (p: V1Pod) => void (p.spec!.automountServiceAccountToken = true)],
+    ["writable root filesystem", (p: V1Pod) => void (worker(p).securityContext!.readOnlyRootFilesystem = false)],
+    ["worker command replaced", (p: V1Pod) => void (worker(p).command = ["node", "-e", "evil"])],
+    ["unrelated annotation added", (p: V1Pod) => void (p.metadata!.annotations!["example.com/x"] = "1")],
+    [
+      "worker ephemeral-storage limit raised",
+      (p: V1Pod) => void (worker(p).resources!.limits!["ephemeral-storage"] = "8192Mi"),
+    ],
+    ["runtime class removed", (p: V1Pod) => void (p.spec!.runtimeClassName = undefined)],
+    ["pod seccomp profile removed", (p: V1Pod) => void (p.spec!.securityContext!.seccompProfile = undefined)],
+    ["wardby component label changed", (p: V1Pod) => void (p.metadata!.labels!["wardby.io/component"] = "x")],
+    [
+      "allowed nodeSelector key with a different value",
+      (p: V1Pod) => void (p.spec!.nodeSelector = { "sandbox.gke.io/runtime": "runc" }),
+    ],
+    [
+      "unrelated toleration added",
+      (p: V1Pod) =>
+        void (p.spec!.tolerations = [{ key: "example.com/taint", operator: "Exists", effect: "NoSchedule" }]),
+    ],
+  ])("still rejects a security-relevant change under gke-autopilot: %s", (_name, tamper) => {
+    const expected = buildRunPod(spec, autopilotOptions);
+    const actual = structuredClone(expected);
+    actual.metadata!.annotations!["autopilot.gke.io/resource-adjustment"] = "{}";
+    tamper(actual);
+    expect(() => assertRunPodMatches(actual, expected, "gke-autopilot")).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
+  // Go's resource.Quantity re-renders in canonical binary form once the string it was
+  // parsed from is dropped, which is exactly what a resource-rewriting admission
+  // controller does. Same number, different spelling, must not fail the run.
+  it("accepts a re-rendered ephemeral-storage quantity but not a different one", () => {
+    const expected = buildRunPod(spec, autopilotOptions);
+    const respell = (value: string) => {
+      const actual = structuredClone(expected);
+      actual.metadata!.annotations!["autopilot.gke.io/resource-adjustment"] = "{}";
+      for (const bag of [worker(actual).resources!.requests!, worker(actual).resources!.limits!]) {
+        bag["ephemeral-storage"] = value;
+      }
+      return actual;
+    };
+    expect(worker(expected).resources!.limits!["ephemeral-storage"]).toBe("1024Mi");
+    expect(() => assertRunPodMatches(respell("1Gi"), expected, "gke-autopilot")).not.toThrow();
+    expect(() => assertRunPodMatches(respell("1073741824"), expected, "gke-autopilot")).not.toThrow();
+    expect(() => assertRunPodMatches(respell("8192Mi"), expected, "gke-autopilot")).toThrow(KUBERNETES_ISOLATION_ERROR);
+    expect(() => assertRunPodMatches(respell("1025Mi"), expected, "gke-autopilot")).toThrow(KUBERNETES_ISOLATION_ERROR);
   });
 });
 
@@ -495,5 +691,85 @@ describe("assertRunNetworkPolicyMatches", () => {
     const actual = structuredClone(expected);
     actual.spec!.ingress = [{ ports: [{ protocol: "TCP", port: 9999 }] }];
     expect(() => assertRunNetworkPolicyMatches(actual, expected)).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+});
+
+describe("enforcementProbeScript", () => {
+  /** Drives the real script in a VM with a fake net, one outcome per port. */
+  async function runProbe(script: string, outcome: Record<number, "connect" | "timeout" | "error">): Promise<number> {
+    return new Promise((resolve) => {
+      runInNewContext(script, {
+        require: () => ({
+          connect: ({ port }: { port: number }) => {
+            const handlers: Record<string, () => void> = {};
+            setTimeout(() => handlers[outcome[port]]?.(), 0);
+            return {
+              once: (event: string, handler: () => void) => void (handlers[event] = handler),
+              destroy: () => {},
+            };
+          },
+        }),
+        process: { exit: (code: number) => resolve(code) },
+        setTimeout,
+      });
+    });
+  }
+
+  it("measures both proxy ports with a SYN-safe 3 s connect timeout", () => {
+    const script = enforcementProbeScript("10.96.0.50");
+    expect(script).toContain('host: "10.96.0.50"');
+    expect(script).toContain("timeout: 3000");
+    expect(script).toContain("await tcp(8787)");
+    expect(script).toContain("await tcp(8788)");
+    expect(script).not.toContain("port: 53");
+  });
+
+  it("rejects an address that is not an IP", () => {
+    expect(() => enforcementProbeScript("wardby-proxy")).toThrow(KUBERNETES_ISOLATION_ERROR);
+    expect(() => enforcementProbeScript('10.0.0.1"; require("child_process")')).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
+  it("exits 0 only when the proxy port connected and the deny port was blocked", async () => {
+    const script = enforcementProbeScript("10.96.0.50");
+    expect(await runProbe(script, { 8787: "connect", 8788: "timeout" })).toBe(0);
+    expect(await runProbe(script, { 8787: "connect", 8788: "connect" })).toBe(3);
+    // Nothing listening / no policy programmed at all: not evidence of anything.
+    expect(await runProbe(script, { 8787: "timeout", 8788: "timeout" })).toBe(4);
+    expect(await runProbe(script, { 8787: "error", 8788: "timeout" })).toBe(4);
+  });
+
+  it("never reads a refused deny port as blocked: an RST proves the packet arrived", async () => {
+    const script = enforcementProbeScript("10.96.0.50");
+    // Reproduced on a live cluster: a pod listening on 8787, nothing serving 8788, and NO
+    // NetworkPolicy anywhere. Collapsing "error" and "timeout" into one false made that exit 0
+    // while the prober had full internet egress. A prompt RST proves the SYN reached the
+    // destination host, on every dataplane — so only a timeout can be evidence of a policy.
+    // (A timeout says the packet was dropped on the path; that the run pod's OWN egress dropped it
+    // follows from the proxy admitting run pods on 8788, which readProxyWitness now verifies.)
+    expect(await runProbe(script, { 8787: "connect", 8788: "error" })).toBe(5);
+    // Whatever 8788 did, an unreachable 8787 still outranks it: nothing can be witnessed at all.
+    expect(await runProbe(script, { 8787: "error", 8788: "error" })).toBe(4);
+    expect(await runProbe(script, { 8787: "timeout", 8788: "error" })).toBe(4);
+  });
+
+  // The complete 3x3 contract, so no socket-outcome pair is left to inference.
+  it.each([
+    ["connect", "timeout", 0, "proven: the SYN to 8788 was dropped while the same host answered on 8787"],
+    ["connect", "connect", 3, "deny port reachable: no policy, or not port-scoped"],
+    ["connect", "error", 5, "deny port refused: the packet arrived, so nothing is blocking it"],
+    ["timeout", "timeout", 4, "proxy unreachable"],
+    ["timeout", "connect", 4, "proxy unreachable outranks a reachable deny port"],
+    ["timeout", "error", 4, "proxy unreachable outranks a refused deny port"],
+    ["error", "timeout", 4, "proxy refused"],
+    ["error", "connect", 4, "proxy refused outranks a reachable deny port"],
+    ["error", "error", 4, "proxy refused outranks a refused deny port"],
+  ])("8787 %s + 8788 %s exits %i (%s)", async (proxy, deny, code) => {
+    const script = enforcementProbeScript("10.96.0.50");
+    expect(
+      await runProbe(script, {
+        8787: proxy as "connect" | "timeout" | "error",
+        8788: deny as "connect" | "timeout" | "error",
+      }),
+    ).toBe(code);
   });
 });

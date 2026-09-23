@@ -66,3 +66,28 @@ flowchart TB
   confirmed 2026-09-13: the `RunTrigger.webhook` fix required restarting
   `wardby mcp` only; the Prometheus/Grafana stack (PR #25) required
   rebuilding only the `coding-proxy` container, with no `wardby mcp` restart.
+
+## Where the worker actually runs
+
+The diagram above shows `JOB_LAUNCHER=docker`, which is what this host uses.
+The worker's execution backend is a seam (`WorkspaceJobLauncher`), and the
+choice does not change any boundary above — the worker still holds no
+credentials, still reaches only the proxy, and the proxy still owns the ledger.
+
+| `JOB_LAUNCHER` | Worker runs in                   | Isolation                                            |
+| -------------- | -------------------------------- | ---------------------------------------------------- |
+| `local`        | a child process on this host     | development only, no isolation                       |
+| `docker`       | a container on a per-run network | the diagram above                                    |
+| `kubernetes`   | a pod in a namespace             | per-run NetworkPolicy, attested pod, optional gVisor |
+
+Under `kubernetes` the shape is the same with different nouns: the per-run
+Docker network becomes a NetworkPolicy, the keeper and worker share a pod
+instead of a volume, and the proxy is a Service rather than a container name.
+Two things have no Docker equivalent. The pod read back from the API server is
+compared field by field against the pod wardby built, and any difference fails
+the run; and before the worker is released, the launcher proves the network
+policy is actually being enforced, because a cluster accepts a policy whether
+or not anything enforces it. See
+[coding-worker-isolation.md](coding-worker-isolation.md) for the mechanics and
+[phase-12-kubernetes-evidence.md](phase-12-kubernetes-evidence.md) for what a
+real cluster proved, including the bugs that only appeared there.

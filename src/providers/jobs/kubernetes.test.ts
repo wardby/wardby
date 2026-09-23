@@ -15,7 +15,7 @@ import type { JobHandle, JobSpec } from "./types.js";
 const IMAGE = `localhost:5001/wardby-coding-worker@sha256:${"a".repeat(64)}`;
 const CAPABILITY = `rrp_${"c".repeat(32)}`;
 const roots: string[] = [];
-const isEnforcementProbe = (command: string[]) => command[0] === "node" && command[2].includes(", port: 53,");
+const isEnforcementProbe = (command: string[]) => command[0] === "node" && command[2].includes("await tcp(8788)");
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })));
 });
@@ -31,9 +31,45 @@ async function harness(runId = "run-k8s-test", options: { runtimeClassName?: str
   const api = new FakeKubernetesApi();
   api.put("service", "wardby-coding", {
     metadata: { name: "wardby-coding-proxy" },
-    spec: { clusterIP: "10.96.0.50" },
+    spec: {
+      clusterIP: "10.96.0.50",
+      selector: { "app.kubernetes.io/name": "wardby-coding-proxy" },
+      ports: [
+        { name: "proxy", port: 8787, protocol: "TCP" },
+        { name: "deny", port: 8788, protocol: "TCP" },
+      ],
+    },
   });
-  api.put("service", "kube-system", { metadata: { name: "kube-dns" }, spec: { clusterIP: "10.96.0.10" } });
+  api.put("endpoints", "wardby-coding", {
+    metadata: { name: "wardby-coding-proxy" },
+    subsets: [
+      {
+        addresses: [{ ip: "10.244.0.5" }],
+        ports: [
+          { name: "proxy", port: 8787, protocol: "TCP" },
+          { name: "deny", port: 8788, protocol: "TCP" },
+        ],
+      },
+    ],
+  });
+  // The attribution precondition the witness now verifies: the proxy admits run pods on the deny
+  // port at its own ingress, so the run pod's egress policy is the only thing that can drop it.
+  api.put("networkpolicy", "wardby-coding", {
+    metadata: { name: "wardby-coding-proxy" },
+    spec: {
+      podSelector: { matchLabels: { "app.kubernetes.io/name": "wardby-coding-proxy" } },
+      policyTypes: ["Ingress", "Egress"],
+      ingress: [
+        {
+          from: [{ podSelector: { matchLabels: { "wardby.io/component": "coding-run" } } }],
+          ports: [
+            { protocol: "TCP", port: 8787 },
+            { protocol: "TCP", port: 8788 },
+          ],
+        },
+      ],
+    },
+  });
   const names = kubernetesRunNames(runId);
   const spec: JobSpec = {
     kind: "coding-agent",
@@ -79,7 +115,7 @@ async function harness(runId = "run-k8s-test", options: { runtimeClassName?: str
   const warnings: string[] = [];
   const launcher = new KubernetesJobLauncher({
     api,
-    config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", ...options },
+    config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic", ...options },
     workspaceRoot,
     resolveCapability: async () => CAPABILITY,
     now: () => now,
@@ -147,7 +183,10 @@ describe("KubernetesJobLauncher", () => {
     expect(h.api.execCalls.slice(0, 3).every((c) => isEnforcementProbe(c.command))).toBe(true);
     expect(commands[3]).toContain("tar -C /run/wardby/storage/workspace");
     expect(commands[4]).toContain("tar -C /run/wardby/storage/input");
-    expect(commands[5]).toContain("/run/wardby/storage/input/.seeded");
+    // Re-confirmed with another three consecutive blocked probes immediately before the marker write.
+    expect(h.api.execCalls.slice(5, 8).every((c) => isEnforcementProbe(c.command))).toBe(true);
+    expect(commands[8]).toContain("/run/wardby/storage/input/.seeded");
+    expect(h.api.execCalls).toHaveLength(9);
     expect(h.api.execCalls.every((c) => c.container === "keeper")).toBe(true);
     expect(await h.launcher.status(handle)).toEqual({ state: "running" });
   });
@@ -259,7 +298,7 @@ describe("KubernetesJobLauncher", () => {
     const launcher = new KubernetesJobLauncher({
       onWarning: () => {},
       api: h.api,
-      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" },
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
       workspaceRoot: h.workspaceRoot,
       resolveCapability: async () => CAPABILITY,
       sleep: async () => {},
@@ -384,7 +423,12 @@ describe("KubernetesJobLauncher failure handling", () => {
     const archives: Readable[] = [];
     const launcher = new KubernetesJobLauncher({
       api: h.api,
-      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", runtimeClassName: "gvisor" },
+      config: {
+        namespace: "wardby-coding",
+        proxyService: "wardby-coding-proxy",
+        runtimeClassName: "gvisor",
+        platform: "generic",
+      },
       workspaceRoot: h.workspaceRoot,
       resolveCapability: async () => CAPABILITY,
       sleep: async () => {},
@@ -416,15 +460,23 @@ describe("KubernetesJobLauncher failure handling", () => {
     const bad = new KubernetesJobLauncher({
       onWarning: () => {},
       api: h.api,
-      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" },
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
       workspaceRoot: h.workspaceRoot,
       resolveCapability: async () => "not-a-capability",
       sleep: async () => {},
     });
     await expect(bad.launch(h.spec)).rejects.toThrow("kubernetes_capability_invalid");
     const g = await harness("run-no-proxy");
-    g.api.put("service", "wardby-coding", { metadata: { name: "wardby-coding-proxy" }, spec: {} });
-    await expect(g.launcher.launch(g.spec)).rejects.toThrow("kubernetes_proxy_unavailable");
+    g.api.put("service", "wardby-coding", {
+      metadata: { name: "wardby-coding-proxy" },
+      spec: { selector: { "app.kubernetes.io/name": "wardby-coding-proxy" } },
+    });
+    // launch() routes every failure through runPreflight's errorWithCode, so the thrown message is
+    // always kubernetes_isolation_unsupported and the specific reason rides on `cause`.
+    await expect(g.launcher.launch(g.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
+    await expect(g.launcher.launch(g.spec)).rejects.toMatchObject({
+      cause: expect.objectContaining({ message: expect.stringContaining("kubernetes_proxy_witness_unusable") }),
+    });
   });
 
   it("fails pod start on an image pull error and on a keeper that never becomes ready", async () => {
@@ -457,7 +509,7 @@ describe("KubernetesJobLauncher failure handling", () => {
     const launcher = new KubernetesJobLauncher({
       onWarning: () => {},
       api: g.api,
-      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" },
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
       workspaceRoot: g.workspaceRoot,
       resolveCapability: async () => CAPABILITY,
       now: () => clock,
@@ -682,7 +734,12 @@ describe("KubernetesJobLauncher deadlines and launch races", () => {
     const h = await harness();
     const launcher = new KubernetesJobLauncher({
       api: h.api,
-      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", runtimeClassName: "gvisor" },
+      config: {
+        namespace: "wardby-coding",
+        proxyService: "wardby-coding-proxy",
+        runtimeClassName: "gvisor",
+        platform: "generic",
+      },
       workspaceRoot: h.workspaceRoot,
       resolveCapability: async () => CAPABILITY,
       sleep: async () => {},
@@ -741,14 +798,14 @@ describe("KubernetesJobLauncher exit-0 guard", () => {
 describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
   function clockedLauncher(
     h: Awaited<ReturnType<typeof harness>>,
-    extra: { preflight?: () => Promise<{ clusterDnsIp: string }> } = {},
+    extra: { preflight?: () => Promise<{ proxyIp: string }> } = {},
   ) {
     let clock = 0;
     const sleeps: number[] = [];
     const launcher = new KubernetesJobLauncher({
       onWarning: () => {},
       api: h.api,
-      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" },
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
       workspaceRoot: h.workspaceRoot,
       resolveCapability: async () => CAPABILITY,
       now: () => clock,
@@ -774,12 +831,21 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
   it("opens the gate only after three consecutive blocked probes (0, 3, 0, 0, 0)", async () => {
     const h = await harness();
     const { launcher, sleeps } = clockedLauncher(h);
+    // 5 answers for the initial proof; the pre-marker re-probe then draws from the same queue (empty,
+    // so it defaults to 0 every time — three clean consecutive proofs, same machinery, same script).
     const kinds = scriptProbe(h, [0, 3, 0, 0, 0]);
     await launcher.launch(h.spec);
     expect(kinds().slice(0, 5)).toEqual(["probe", "probe", "probe", "probe", "probe"]);
     expect(kinds().indexOf("seed")).toBe(5);
+    // Re-confirmed with another three consecutive blocked probes, strictly after seeding and strictly
+    // before the marker write — with nothing else in between.
+    expect(kinds().slice(7, 10)).toEqual(["probe", "probe", "probe"]);
+    expect(kinds()[10]).toBe("marker");
+    expect(kinds()).toHaveLength(11);
     expect(kinds().at(-1)).toBe("marker");
-    expect(sleeps.filter((ms) => ms === 500)).toHaveLength(4);
+    // 4 sleeps to reach the initial 3-streak (0,3,0,0,0), plus 2 more to reach the pre-marker 3-streak
+    // from a clean start (0,0,0 needs two 500 ms polls between the three probes).
+    expect(sleeps.filter((ms) => ms === 500)).toHaveLength(6);
   });
 
   it("a connected probe resets the count: 0, 0, 3, 0, 0 does not open the gate", async () => {
@@ -836,7 +902,8 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
     expect(probe.container).toBe("keeper");
     expect(probe.command).toHaveLength(3);
     expect(probe.command.slice(0, 2)).toEqual(["node", "-e"]);
-    expect(probe.command[2]).toContain('host: "10.96.0.10", port: 53');
+    expect(probe.command[2]).toContain('host: "10.96.0.50"');
+    expect(probe.command[2]).toContain("await tcp(8788)");
     expect(probe.command.some((arg) => /^(\/bin\/)?(ba)?sh$/.test(arg))).toBe(false);
   });
 
@@ -859,45 +926,223 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
     });
   });
 
-  it("treats any other probe exit code as not yet enforced", async () => {
+  it("treats any other probe exit code as not proven, and says the probe itself failed", async () => {
     const h = await harness();
     const { launcher } = clockedLauncher(h);
     const original = h.api.onExec;
     h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? 127 : original(call));
+    // It still resets the streak and still fails closed; what changed is the attribution, since
+    // an exit code the probe never produces measured nothing and so indicts nothing.
+    await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_policy_probe_unusable");
+    expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
+  });
+
+  it("probes the proxy ClusterIP it re-read for this launch, not a stale memoized one", async () => {
+    const h = await harness();
+    const { launcher } = clockedLauncher(h, { preflight: async () => ({ proxyIp: "10.96.0.99" }) });
+    await launcher.launch(h.spec);
+    const probe = h.api.execCalls.find((c) => isEnforcementProbe(c.command))!;
+    expect(probe.command[2]).toContain('host: "10.96.0.50"');
+    expect(probe.command[2]).not.toContain("10.96.0.99");
+  });
+
+  it("without a preflight, fails closed when the proxy witness is unusable", async () => {
+    const g = await harness("run-witness-b");
+    g.api.put("service", "wardby-coding", {
+      metadata: { name: "wardby-coding-proxy" },
+      spec: { clusterIP: "None", selector: { "app.kubernetes.io/name": "wardby-coding-proxy" } },
+    });
+    await expect(g.launcher.launch(g.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
+    expect(g.api.objects.has(`pod/wardby-coding/${g.names.pod}`)).toBe(false);
+  });
+
+  it("surfaces the witness failure unwrapped when a supplied preflight passed but the re-read fails", async () => {
+    const h = await harness("run-witness-reread");
+    // A supplied preflight skips the memoized witness read, so provision's own per-launch re-read is
+    // the first witness check of the launch — and it is NOT wrapped by runPreflight's errorWithCode,
+    // so the caller sees the witness code itself rather than kubernetes_isolation_unsupported.
+    const { launcher } = clockedLauncher(h, { preflight: async () => ({ proxyIp: "10.96.0.50" }) });
+    h.api.put("endpoints", "wardby-coding", {
+      metadata: { name: "wardby-coding-proxy" },
+      subsets: [{ addresses: [{ ip: "10.244.0.5" }], ports: [{ name: "proxy", port: 8787, protocol: "TCP" }] }],
+    });
+    await expect(launcher.launch(h.spec)).rejects.toThrow(
+      "kubernetes_proxy_witness_unusable: Service wardby-coding/wardby-coding-proxy has no ready endpoint serving port 8788",
+    );
+    // It fails closed before the pod exists, so nothing is ever probed or gated.
+    expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+    expect(h.api.execCalls.some((c) => isEnforcementProbe(c.command))).toBe(false);
+  });
+
+  it("reports an unavailable witness when the proxy port itself cannot be reached", async () => {
+    const h = await harness();
+    const { launcher } = clockedLauncher(h);
+    const original = h.api.onExec;
+    h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? 4 : original(call));
+    await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_policy_witness_unavailable");
+    expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
+  });
+
+  it("refuses to open the gate when the deny port is refused rather than dropped", async () => {
+    const h = await harness();
+    const { launcher } = clockedLauncher(h);
+    const original = h.api.onExec;
+    h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? 5 : original(call));
+    // The reviewer's live-cluster scenario end to end: 8787 connects, 8788 answers with an RST,
+    // and no policy exists anywhere. An RST proves the packet arrived, so this must never count.
+    await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_policy_witness_unserved");
+    expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
+    expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+  });
+
+  it("never blames the policy for a probe that did not run", async () => {
+    // A crash (1), a missing interpreter (127) or an OOM-killed keeper (137) measured nothing.
+    // Reporting those as kubernetes_policy_not_enforced sends an operator to the CNI over a
+    // failure that says nothing at all about the CNI.
+    for (const exitCode of [1, 126, 127, 137]) {
+      const h = await harness(`run-exit-${exitCode}`);
+      const { launcher } = clockedLauncher(h);
+      const original = h.api.onExec;
+      h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? exitCode : original(call));
+      const error = (await launcher.launch(h.spec).catch((e: unknown) => e)) as Error;
+      expect(error.message).toContain("kubernetes_policy_probe_unusable");
+      expect(error.message).not.toContain("kubernetes_policy_not_enforced");
+      expect(error.message).toContain(String(exitCode));
+    }
+  });
+
+  it("names both causes of a refused deny port, with the exit code and the probed address", async () => {
+    const h = await harness();
+    const { launcher } = clockedLauncher(h);
+    const original = h.api.onExec;
+    h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? 5 : original(call));
+    const error = (await launcher.launch(h.spec).catch((e: unknown) => e)) as Error;
+    expect(error.message).toContain("kubernetes_policy_witness_unserved");
+    // On a reject-style CNI EVERY run fails this way, so the message must not lead with the
+    // deny listener and leave the operator to find the other cause in the documentation.
+    expect(error.message).toMatch(/nothing is serving/i);
+    expect(error.message).toMatch(/reject/i);
+    expect(error.message).toContain("10.96.0.50");
+    expect(error.message).toContain("5");
+  });
+
+  it("keeps the three verdicts distinct: unserved is neither not_enforced nor witness_unavailable", async () => {
+    for (const [exitCode, verdict] of [
+      [3, "kubernetes_policy_not_enforced"],
+      [4, "kubernetes_policy_witness_unavailable"],
+      [5, "kubernetes_policy_witness_unserved"],
+    ] as const) {
+      const h = await harness(`run-verdict-${exitCode}`);
+      const { launcher } = clockedLauncher(h);
+      const original = h.api.onExec;
+      h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? exitCode : original(call));
+      await expect(launcher.launch(h.spec)).rejects.toThrow(verdict);
+    }
+  });
+
+  it("still reports not_enforced when the last probe found the deny port reachable", async () => {
+    const h = await harness();
+    const { launcher } = clockedLauncher(h);
+    const original = h.api.onExec;
+    let calls = 0;
+    h.api.onExec = async (call) => {
+      if (!isEnforcementProbe(call.command)) return original(call);
+      calls += 1;
+      // One unavailable probe early must not make the final verdict say "witness".
+      return calls === 1 ? 4 : 3;
+    };
     await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_policy_not_enforced");
   });
 
-  it("uses the preflight's cluster DNS IP without reading kube-dns itself", async () => {
-    const h = await harness();
-    const reads: string[] = [];
-    const readService = h.api.readService.bind(h.api);
-    h.api.readService = async (ns, name) => {
-      reads.push(`${ns}/${name}`);
-      return readService(ns, name);
-    };
-    const { launcher } = clockedLauncher(h, { preflight: async () => ({ clusterDnsIp: "10.96.0.99" }) });
-    await launcher.launch(h.spec);
-    const probe = h.api.execCalls.find((c) => isEnforcementProbe(c.command))!;
-    expect(probe.command[2]).toContain('host: "10.96.0.99"');
-    expect(reads).not.toContain("kube-system/kube-dns");
+  describe("re-confirmation immediately before the marker", () => {
+    /** Blocks the first N enforcement probes (the initial proof), then returns `after` for every probe past that. */
+    function proveThenChange(h: Awaited<ReturnType<typeof harness>>, provenCount: number, after: number) {
+      let probes = 0;
+      const original = h.api.onExec;
+      h.api.onExec = async (call) => {
+        if (!isEnforcementProbe(call.command)) return original(call);
+        probes += 1;
+        return probes <= provenCount ? 0 : after;
+      };
+    }
+
+    it("fails closed with a code distinct from the initial failure when enforcement is lost during seeding, and cleans up without opening the gate", async () => {
+      const h = await harness();
+      const { launcher } = clockedLauncher(h);
+      // The initial proof passes cleanly (3 consecutive blocked probes). Every probe after that —
+      // i.e. only the pre-marker re-probe, seeding never execs anything matching isEnforcementProbe —
+      // finds the deny port reachable, as if a permissive NetworkPolicy landed while the workspace
+      // was being seeded (the live-cluster attack this fix closes).
+      proveThenChange(h, 3, 3 /* ENFORCEMENT_PROBE_DENY_REACHABLE */);
+      const error = (await launcher.launch(h.spec).catch((e: unknown) => e)) as Error;
+      expect(error.message).toContain("kubernetes_policy_enforcement_lost_before_marker");
+      // Distinguishable from the code the initial proof would have produced for the same exit code.
+      expect(error.message).not.toContain("kubernetes_policy_not_enforced:");
+      // The marker gate must never be written on this path.
+      expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
+      // Cleanup ran exactly as any other provisioning failure: pod, policy, secret gone.
+      expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+      expect(h.api.objects.has(`networkpolicy/wardby-coding/${h.names.policy}`)).toBe(false);
+      expect(h.api.objects.has(`secret/wardby-coding/${h.names.secret}`)).toBe(false);
+      const handle = { backend: "kubernetes", id: `wardby-coding/${h.names.token}` };
+      expect(await launcher.collect(handle)).toEqual({
+        exitCode: 1,
+        reason: "failed",
+        diagnostic: "kubernetes_provisioning_failed",
+      });
+    });
+
+    it("distinguishes each pre-marker verdict from its initial-stage counterpart", async () => {
+      for (const [exitCode, initialCode, preMarkerCode] of [
+        [3, "kubernetes_policy_not_enforced", "kubernetes_policy_enforcement_lost_before_marker"],
+        [4, "kubernetes_policy_witness_unavailable", "kubernetes_policy_witness_unavailable_before_marker"],
+        [5, "kubernetes_policy_witness_unserved", "kubernetes_policy_witness_unserved_before_marker"],
+      ] as const) {
+        const h = await harness(`run-pre-marker-${exitCode}`);
+        const { launcher } = clockedLauncher(h);
+        proveThenChange(h, 3, exitCode);
+        const error = (await launcher.launch(h.spec).catch((e: unknown) => e)) as Error;
+        expect(error.message).toContain(preMarkerCode);
+        expect(error.message).not.toContain(`${initialCode}:`);
+        expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
+      }
+    });
+
+    it("still opens the gate when the re-probe cleanly re-proves enforcement (happy path)", async () => {
+      const h = await harness();
+      const handle = await h.launcher.launch(h.spec);
+      expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(true);
+      expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+    });
+
+    it("pins the ordering: the re-probe runs strictly after seeding and strictly before the marker, with nothing else exec'd in between", async () => {
+      const h = await harness();
+      await h.launcher.launch(h.spec);
+      const kinds = h.api.execCalls.map((c) =>
+        isEnforcementProbe(c.command) ? "probe" : isMarker(c.command) ? "marker" : "seed",
+      );
+      const lastSeed = kinds.lastIndexOf("seed");
+      const markerIndex = kinds.indexOf("marker");
+      expect(lastSeed).toBeGreaterThan(-1);
+      expect(markerIndex).toBe(kinds.length - 1);
+      // Everything strictly between the last seed exec and the marker exec is a probe — the
+      // re-confirmation — and nothing else runs in that window.
+      const between = kinds.slice(lastSeed + 1, markerIndex);
+      expect(between.length).toBeGreaterThan(0);
+      expect(between.every((kind) => kind === "probe")).toBe(true);
+    });
   });
 
-  it("without a preflight, reads kube-dns once per launcher and fails closed when it is unusable", async () => {
-    const h = await harness("run-dns-a");
-    let dnsReads = 0;
-    const readService = h.api.readService.bind(h.api);
-    h.api.readService = async (ns, name) => {
-      if (ns === "kube-system") dnsReads += 1;
-      return readService(ns, name);
-    };
-    await h.launcher.launch(h.spec);
-    await h.launcher.launch({ ...h.spec }); // idempotent relaunch
-    expect(dnsReads).toBe(1);
-
-    const g = await harness("run-dns-b");
-    g.api.put("service", "kube-system", { metadata: { name: "kube-dns" }, spec: { clusterIP: "None" } });
-    await expect(g.launcher.launch(g.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
-    expect(g.api.objects.has(`pod/wardby-coding/${g.names.pod}`)).toBe(false);
+  it("refuses to launch when the proxy Service has no ready endpoint on the deny port", async () => {
+    const h = await harness("run-no-deny-endpoint");
+    h.api.put("endpoints", "wardby-coding", {
+      metadata: { name: "wardby-coding-proxy" },
+      subsets: [{ addresses: [{ ip: "10.244.0.5" }], ports: [{ port: 8787, protocol: "TCP" }] }],
+    });
+    await expect(h.launcher.launch(h.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
+    await expect(h.launcher.launch(h.spec)).rejects.toMatchObject({
+      cause: expect.objectContaining({ message: expect.stringContaining("kubernetes_proxy_witness_unusable") }),
+    });
   });
 });
 
