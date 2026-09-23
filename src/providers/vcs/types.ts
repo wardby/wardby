@@ -5,9 +5,8 @@ export interface VcsPrepareInput {
   headRef: string;
   protectedPaths: string[];
   /**
-   * Revision-in-place (see
-   * docs/private/2026-09-13-coding-pr-revision-in-place-design.md): set
-   * when headRef is an EXISTING branch to continue rather than a fresh one
+   * Revision-in-place: set when headRef is an EXISTING branch to continue
+   * rather than a fresh one
    * to create off baseRef. `rootRunId` is the id of the run that originally
    * opened the PR headRef belongs to (used for PR lookup identity, since
    * GitHub's find-by-marker keys on that run's id, not this one's) -- the
@@ -85,7 +84,6 @@ export interface VcsProvider {
   cleanup(workspace: PreparedWorkspace): Promise<void>;
   /**
    * Best-effort "wardby is working on this" signal for a continuation
-   * (see docs/private/2026-09-13-coding-pr-revision-in-place-design.md) --
    * a no-op when `workspace.continuation` is unset, since a fresh run has
    * no PR to attach anything to until its one commit lands. Optional
    * because this is a GitHub-specific concept, not a universal VCS one --

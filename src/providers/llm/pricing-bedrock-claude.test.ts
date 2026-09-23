@@ -38,7 +38,7 @@ describe("bedrock-claude pricing", () => {
   });
 
   it("routes the agent-cron fleet's four Bedrock model IDs at their exact published rates (2026-09-08 production export, 81 agents)", () => {
-    // docs/private/2026-09-08-fleet-models-to-roster.md — keys must match
+    // Keys must match
     // agent.model verbatim; the Phase-9 importer's routability gate is an
     // exact-set membership test against bedrockClaudeSupportedModels().
     // Rates from platform.claude.com/docs/en/about-claude/pricing

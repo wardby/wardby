@@ -5,13 +5,12 @@ Deployment configuration for wardby, organized by target.
 - **`local/`** — docker-compose for local development (Postgres, the coding
   proxy). `npm run db:up` / `npm run coding:local:up`.
 - **`observability/`** — local Prometheus + Grafana stack (`npm run
-observability:up`), dev/local only. See `docs/phase-7-production-readiness.md`.
+observability:up`), dev/local only. See `docs/observability.md`.
 - **`aws/`** — placeholder for an AWS target (Fargate `JobLauncher`, per the
-  roadmap's Phase 5 follow-ons). Not yet built.
+  same isolation contract used by other coding-worker launchers). Not yet built.
 - **`gcp/`** — GCP production hosting via Terraform (the baseline IaC tool
   for every wardby cloud deployment, GCP included — this module is the
-  reference example future cloud targets, e.g. `aws/`, follow). Design:
-  `docs/superpowers/specs/2026-09-17-gcp-control-plane-hosting-design.md`.
+  reference example future cloud targets, e.g. `aws/`, follow).
 
   **First time against a real project?** See `gcp/SETUP.md` — project
   creation, billing, required APIs, domain verification, a Terraform state

@@ -244,8 +244,8 @@ trusted checkout. Restart reconciliation repeats that cleanup from the
 persisted job handle and marks ambiguous provisioning as `lost` instead of
 relaunching it.
 
-See [Phase 5 release gate](phase-5-release-gate.md) for the complete evidence
-set, live-fixture rules, supported scope, and incident procedure.
+See [release verification](release-verification.md) for automated gates and
+live-fixture rules.
 
 ## Kubernetes launcher (`JOB_LAUNCHER=kubernetes`)
 

@@ -28,9 +28,8 @@ export interface DispatchRunOptions {
   codingTask?: string;
   codingBaseRef?: string;
   /**
-   * Revision-in-place (see
-   * docs/private/2026-09-13-coding-pr-revision-in-place-design.md): the id
-   * of a prior CodingRun whose branch/PR this dispatch should push a new
+   * Revision-in-place: the id of a prior CodingRun whose branch/PR this
+   * dispatch should push a new
    * commit onto instead of opening a fresh branch. Resolved and verified
    * here against the database (same repository, and it actually reached a
    * PR-opening outcome) -- never trusted as a raw branch name, and

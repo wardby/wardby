@@ -1,10 +1,8 @@
 # One-time-per-image Prisma migration run against the live database, via
 # the Dockerfile's `migration` build target (deploy/Dockerfile:12-13) -
 # neither the runtime image nor anything else in this module ran
-# migrations before this resource existed. Found the hard way: a fresh
-# apply against onit-dashboard left every Prisma table missing
-# (2026-09-18) until migrations were run by hand through a Cloud SQL
-# proxy tunnel. See docs/superpowers/plans/2026-09-18-gcp-production-readiness.md.
+# migrations before this resource existed. Keeping migration execution in a
+# separate job also keeps Prisma tooling out of the request-serving image.
 resource "google_cloud_run_v2_job" "migrate" {
   name     = "${var.name_prefix}-migrate"
   project  = var.project_id

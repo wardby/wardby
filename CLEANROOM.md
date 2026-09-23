@@ -5,8 +5,8 @@ specifications. It is not derived from, and does not copy, any other codebase.
 
 ## Permitted inputs
 
-- The private behavioral specifications retained by the author (kept in
-  `docs/private/`, which is git-ignored and never published).
+- Private behavioral specifications retained by the author outside the public
+  repository.
 - Public standards, RFCs, and protocol documentation.
 - Public documentation for third-party libraries and cloud SDKs.
 
@@ -18,8 +18,8 @@ specifications. It is not derived from, and does not copy, any other codebase.
 
 ## Rules
 
-1. **Implement only from the spec.** During development, the specifications in
-   `docs/private/` and public references are the only permitted inputs. Do not
+1. **Implement only from the spec.** During development, the privately retained
+   specifications and public references are the only permitted inputs. Do not
    open, reference, or copy any other codebase.
 2. **Regenerate every artifact.** `prisma/schema.prisma` and all migrations are
    hand-written from the spec's data-model description — never copied. The same
@@ -31,16 +31,10 @@ specifications. It is not derived from, and does not copy, any other codebase.
    license and the Developer Certificate of Origin (see `CONTRIBUTING.md`); by
    signing off, contributors certify their work is their own and not copied.
 
-## Copyright & attribution — deferred
+## Copyright and attribution
 
-No copyright is asserted in this repository yet. The `LICENSE` file carries
-the Apache-2.0 text with a blank `[name of copyright owner]` placeholder, and
-there is intentionally **no `NOTICE` file**.
-
-Ownership of this work is unresolved pending a rights conversation with a prior
-employer. Until that is settled in writing, this repository asserts no
-copyright holder. When ownership is resolved, add the copyright line and a
-`NOTICE` file naming the agreed holder — do not assert one before then.
+The project is licensed under Apache License 2.0. The repository's `NOTICE`
+file records its copyright attribution.
 
 This charter is committed from the project's first commit as a record of the
 clean-room discipline under which wardby is built.

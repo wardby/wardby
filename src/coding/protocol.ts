@@ -172,9 +172,8 @@ export const CodingTaskInputSchema = z
     budgetUsd: z.number().finite().positive().max(MAX_COST_USD),
     deadlineAt: z.string().datetime({ offset: true }),
     /**
-     * Revision-in-place (see
-     * docs/private/2026-09-13-coding-pr-revision-in-place-design.md): set
-     * when this run pushes a new commit onto the branch/PR the named run
+     * Revision-in-place: set when this run pushes a new commit onto the
+     * branch/PR the named run
      * (the thread's ROOT CodingRun, always -- never a chain) originally
      * opened, instead of opening a fresh branch of its own. Resolved and
      * verified server-side (dispatch.ts) against the database; this schema

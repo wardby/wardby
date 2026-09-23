@@ -17,9 +17,7 @@ function claude(
   return { encoding: "o200k_base", inputPerMTok, outputPerMTok, cachedInputPerMTok, cacheWritePerMTok };
 }
 
-// agent-cron fleet roster (docs/private/2026-09-08-fleet-models-to-roster.md,
-// 2026-09-08 production export bundle, 81 agents / 4 distinct IDs). All four
-// are `us.` cross-region inference profiles (region us-east-1) — routability
+// These are `us.` cross-region inference profiles (region us-east-1) — routability
 // is keyed by model ID only; region is a separate adapter concern
 // (BEDROCK_REGION/AWS_REGION). Rates below are the exact published 5-minute
 // cache-TTL numbers (platform.claude.com/docs/en/about-claude/pricing,

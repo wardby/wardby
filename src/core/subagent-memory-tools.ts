@@ -1,7 +1,6 @@
 /**
- * Cross-agent memory reads for sub-agent dispatch (see AgentSubAgent and
- * docs/private/2026-09-13-agent-subagent-design-and-plan.md §5). Two
- * deliberately asymmetric built-ins, recognized by name and never
+ * Cross-agent memory reads for sub-agent dispatch. Two deliberately
+ * asymmetric built-ins, recognized by name and never
  * sandboxed, the same treatment memory-tools.ts gives the own-memory
  * built-ins:
  *

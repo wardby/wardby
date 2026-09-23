@@ -248,9 +248,8 @@ describe("redactTokenShapedValues", () => {
     expect(redactTokenShapedValues('aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEX"')).toBe(
       'aws_secret_access_key="[REDACTED]"',
     );
-    expect(redactTokenShapedValues("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAK\n-----END RSA PRIVATE KEY-----")).toBe(
-      "[REDACTED]",
-    );
+    const fakePrivateKey = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAK\n-----END RSA PRIVATE KEY-----"; // gitleaks:allow -- malformed test fixture
+    expect(redactTokenShapedValues(fakePrivateKey)).toBe("[REDACTED]");
   });
 
   it("redacts a URL's userinfo even when the password is not token-shaped", () => {
