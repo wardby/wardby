@@ -28,4 +28,16 @@ jobs:
           if (process.env.RELEASE_TAG !== `v${version}`)
           throw new Error(`release ${process.env.RELEASE_TAG} does not match v${version}`);'
       - run: npm run test:package
-      - run: npm publish --access public
+      # --provenance, not publishConfig.provenance: the latter applies
+      # everywhere and makes `npm publish` fail outside a supported CI, which
+      # would block a manual publish from a maintainer's machine. As a flag it
+      # applies only here, where id-token: write above makes the OIDC signature
+      # available.
+      #
+      # Provenance is what lets someone installing @wardby/cli verify the
+      # tarball was built from this repository at a commit they can read, rather
+      # than uploaded by whoever held a token. That matters more than usual for
+      # a tool people hand GitHub App keys, provider tokens and cluster access
+      # to. It requires a public repository, since the referenced commit has to
+      # be resolvable.
+      - run: npm publish --access public --provenance
