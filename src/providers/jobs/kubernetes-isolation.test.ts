@@ -20,6 +20,7 @@ import {
   runLabels,
   validateKubernetesSpec,
 } from "./kubernetes-isolation.js";
+import { podEphemeralStorageMib } from "./kubernetes-platform.js";
 
 const IMAGE = `localhost:5001/wardby-coding-worker@sha256:${"a".repeat(64)}`;
 const spec: JobSpec = {
@@ -287,6 +288,22 @@ describe("buildRunPod under the gke-autopilot platform", () => {
     const big: JobSpec = { ...spec, limits: { ...spec.limits, diskMb: 16_384 } };
     expect(() => buildRunPod(big, options)).not.toThrow();
   });
+
+  // The ceiling guard trusts podEphemeralStorageMib to predict what the pod will actually
+  // reserve. Recompute Kubernetes' own rule — max(sum(regular), max(init)) — from the built
+  // pod, so a fourth container or a changed constant makes the guard's under-count fail here
+  // rather than on a live cluster.
+  it.each([64, 512, 2048, 9216])("predicts the pod ephemeral total it actually emits (diskMb=%i)", (diskMb) => {
+    const p = buildRunPod({ ...spec, limits: { ...spec.limits, diskMb } }, autopilotOptions);
+    const mib = (c: { resources?: { requests?: Record<string, string> } }) => {
+      const value = c.resources!.requests!["ephemeral-storage"];
+      expect(value).toMatch(/^\d+Mi$/);
+      return Number.parseInt(value, 10);
+    };
+    const regular = p.spec!.containers.reduce((sum, c) => sum + mib(c), 0);
+    const init = (p.spec!.initContainers ?? []).reduce((max, c) => Math.max(max, mib(c)), 0);
+    expect(Math.max(regular, init)).toBe(podEphemeralStorageMib(diskMb));
+  });
 });
 
 describe("assertRunPodMatches with a platform profile", () => {
@@ -323,27 +340,56 @@ describe("assertRunPodMatches with a platform profile", () => {
     expect(() => assertRunPodMatches(actual, expected)).toThrow(KUBERNETES_ISOLATION_ERROR);
   });
 
-  it("still rejects a security-relevant change under gke-autopilot", () => {
-    const expected = buildRunPod(spec, autopilotOptions);
-    for (const tamper of [
-      (p: V1Pod) => void (p.spec!.hostNetwork = true),
-      (p: V1Pod) => void (p.spec!.automountServiceAccountToken = true),
-      (p: V1Pod) => void (worker(p).securityContext!.readOnlyRootFilesystem = false),
-      (p: V1Pod) => void (worker(p).command = ["node", "-e", "evil"]),
-      (p: V1Pod) => void (p.metadata!.annotations!["example.com/x"] = "1"),
+  // Each case is layered on top of a forgiven Autopilot annotation, so it proves the
+  // allowance does not become a hiding place rather than merely that tampering fails.
+  it.each([
+    ["hostNetwork enabled", (p: V1Pod) => void (p.spec!.hostNetwork = true)],
+    ["service account token mounted", (p: V1Pod) => void (p.spec!.automountServiceAccountToken = true)],
+    ["writable root filesystem", (p: V1Pod) => void (worker(p).securityContext!.readOnlyRootFilesystem = false)],
+    ["worker command replaced", (p: V1Pod) => void (worker(p).command = ["node", "-e", "evil"])],
+    ["unrelated annotation added", (p: V1Pod) => void (p.metadata!.annotations!["example.com/x"] = "1")],
+    [
+      "worker ephemeral-storage limit raised",
       (p: V1Pod) => void (worker(p).resources!.limits!["ephemeral-storage"] = "8192Mi"),
-      (p: V1Pod) => void (p.spec!.runtimeClassName = undefined),
-      (p: V1Pod) => void (p.spec!.securityContext!.seccompProfile = undefined),
-      (p: V1Pod) => void (p.metadata!.labels!["wardby.io/component"] = "not-a-coding-run"),
+    ],
+    ["runtime class removed", (p: V1Pod) => void (p.spec!.runtimeClassName = undefined)],
+    ["pod seccomp profile removed", (p: V1Pod) => void (p.spec!.securityContext!.seccompProfile = undefined)],
+    ["wardby component label changed", (p: V1Pod) => void (p.metadata!.labels!["wardby.io/component"] = "x")],
+    [
+      "allowed nodeSelector key with a different value",
       (p: V1Pod) => void (p.spec!.nodeSelector = { "sandbox.gke.io/runtime": "runc" }),
+    ],
+    [
+      "unrelated toleration added",
       (p: V1Pod) =>
         void (p.spec!.tolerations = [{ key: "example.com/taint", operator: "Exists", effect: "NoSchedule" }]),
-    ]) {
+    ],
+  ])("still rejects a security-relevant change under gke-autopilot: %s", (_name, tamper) => {
+    const expected = buildRunPod(spec, autopilotOptions);
+    const actual = structuredClone(expected);
+    actual.metadata!.annotations!["autopilot.gke.io/resource-adjustment"] = "{}";
+    tamper(actual);
+    expect(() => assertRunPodMatches(actual, expected, "gke-autopilot")).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
+  // Go's resource.Quantity re-renders in canonical binary form once the string it was
+  // parsed from is dropped, which is exactly what a resource-rewriting admission
+  // controller does. Same number, different spelling, must not fail the run.
+  it("accepts a re-rendered ephemeral-storage quantity but not a different one", () => {
+    const expected = buildRunPod(spec, autopilotOptions);
+    const respell = (value: string) => {
       const actual = structuredClone(expected);
       actual.metadata!.annotations!["autopilot.gke.io/resource-adjustment"] = "{}";
-      tamper(actual);
-      expect(() => assertRunPodMatches(actual, expected, "gke-autopilot")).toThrow(KUBERNETES_ISOLATION_ERROR);
-    }
+      for (const bag of [worker(actual).resources!.requests!, worker(actual).resources!.limits!]) {
+        bag["ephemeral-storage"] = value;
+      }
+      return actual;
+    };
+    expect(worker(expected).resources!.limits!["ephemeral-storage"]).toBe("1024Mi");
+    expect(() => assertRunPodMatches(respell("1Gi"), expected, "gke-autopilot")).not.toThrow();
+    expect(() => assertRunPodMatches(respell("1073741824"), expected, "gke-autopilot")).not.toThrow();
+    expect(() => assertRunPodMatches(respell("8192Mi"), expected, "gke-autopilot")).toThrow(KUBERNETES_ISOLATION_ERROR);
+    expect(() => assertRunPodMatches(respell("1025Mi"), expected, "gke-autopilot")).toThrow(KUBERNETES_ISOLATION_ERROR);
   });
 });
 

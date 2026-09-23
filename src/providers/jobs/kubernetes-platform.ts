@@ -260,6 +260,19 @@ export function podEphemeralStorageMib(diskMb: number): number {
   return diskMb + WORKER_EPHEMERAL_MIB;
 }
 
+/**
+ * Renders a MiB figure with its GiB equivalent, e.g. `10240 MiB (10 GiB)`. Both
+ * places that report the ephemeral-storage ceiling use this rather than writing
+ * the GiB figure out by hand, so a profile with a different ceiling cannot end
+ * up described by a parenthetical that was only ever true for Autopilot's.
+ */
+export function describeMib(mib: number): string {
+  const gib = mib / 1024;
+  // 3 decimals, not 2: a ceiling of 1025 MiB must not print as "(1 GiB)".
+  const rendered = Number.isInteger(gib) ? String(gib) : gib.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+  return `${mib} MiB (${rendered} GiB)`;
+}
+
 function tolerationMatches(actual: V1Toleration, allowed: V1Toleration): boolean {
   return (
     actual.key === allowed.key &&
@@ -285,6 +298,12 @@ function stripPrefixed(bag: Record<string, string>, prefixes: readonly string[])
  *
  * Every branch is gated on the profile naming something, so a profile with an
  * empty allowance — `generic` — provably leaves the view's contents alone.
+ *
+ * SYMMETRY CAVEAT — deleting from both sides forgives an *addition* only while
+ * the builder never emits an allowed key itself. If buildRunPod ever emitted,
+ * say, the gVisor nodeSelector, the deletion would land on the submitted side
+ * too and the platform *removing* it would become equally invisible. Anything
+ * named in an allowance list must therefore stay something wardby never sets.
  *
  * OWNERSHIP — this matters at the call site. `view.labels` and `view.annotations`
  * are REPLACED with copies before anything is deleted, so a caller that built the
@@ -342,7 +361,7 @@ export function assertPlatformConfig(profile: KubernetesPlatformProfile, config:
     const total = podEphemeralStorageMib(config.maxDiskMb);
     if (total > ceiling) {
       throw new KubernetesPlatformError(
-        `CODING_MAX_DISK_MB=${config.maxDiskMb} needs ${total} MiB of pod ephemeral storage, over the ${ceiling} MiB (10 GiB) ceiling of KUBERNETES_PLATFORM=${profile.name}; the worker container reserves ${WORKER_EPHEMERAL_MIB} MiB of that, so the largest workspace this platform can run is ${ceiling - WORKER_EPHEMERAL_MIB} MiB`,
+        `CODING_MAX_DISK_MB=${config.maxDiskMb} needs ${total} MiB of pod ephemeral storage, over the ${describeMib(ceiling)} ceiling of KUBERNETES_PLATFORM=${profile.name}; the worker container reserves ${WORKER_EPHEMERAL_MIB} MiB of that, so the largest workspace this platform can run is ${ceiling - WORKER_EPHEMERAL_MIB} MiB`,
       );
     }
   }

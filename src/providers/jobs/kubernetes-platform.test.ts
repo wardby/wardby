@@ -4,6 +4,7 @@ import {
   KUBERNETES_PLATFORM_ERROR,
   assertPlatformConfig,
   conformResources,
+  describeMib,
   normalizePlatformMetadata,
   platformProfile,
   podEphemeralStorageMib,
@@ -150,6 +151,21 @@ describe("assertPlatformConfig", () => {
     expect(() => assertPlatformConfig(autopilot, { runtimeClassName: "gvisor", maxDiskMb: 9217 })).toThrow(
       /CODING_MAX_DISK_MB=9217 needs 10241 MiB of pod ephemeral storage, over the 10240 MiB \(10 GiB\) ceiling/,
     );
+  });
+});
+
+describe("describeMib", () => {
+  // Both ephemeral-storage refusals render their ceiling through this, so the GiB figure
+  // tracks whatever the profile actually says rather than Autopilot's 10 GiB by hand.
+  it.each([
+    [10_240, "10240 MiB (10 GiB)"],
+    [1024, "1024 MiB (1 GiB)"],
+    [20_480, "20480 MiB (20 GiB)"],
+    [1536, "1536 MiB (1.5 GiB)"],
+    [512, "512 MiB (0.5 GiB)"],
+    [1025, "1025 MiB (1.001 GiB)"],
+  ])("renders %i MiB as %s", (mib, expected) => {
+    expect(describeMib(mib)).toBe(expected);
   });
 });
 

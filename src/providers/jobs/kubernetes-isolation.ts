@@ -30,6 +30,7 @@ import {
   STORAGE_INIT_EPHEMERAL_MIB,
   WORKER_EPHEMERAL_MIB,
   conformResources,
+  describeMib,
   normalizePlatformMetadata,
   platformProfile,
   podEphemeralStorageMib,
@@ -188,7 +189,7 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
   const podEphemeral = podEphemeralStorageMib(spec.limits.diskMb);
   if (ceiling !== undefined && podEphemeral > ceiling) {
     throw new KubernetesPlatformError(
-      `a ${spec.limits.diskMb} MiB workspace needs ${podEphemeral} MiB of pod ephemeral storage, over the ${ceiling} MiB (10 GiB) ceiling of platform ${profile.name}`,
+      `a ${spec.limits.diskMb} MiB workspace needs ${podEphemeral} MiB of pod ephemeral storage, over the ${describeMib(ceiling)} ceiling of platform ${profile.name}`,
     );
   }
   const names = kubernetesRunNames(spec.runId);
@@ -362,7 +363,11 @@ const MEMORY_BINARY_UNITS: Record<string, number> = {
 };
 const MEMORY_DECIMAL_UNITS: Record<string, number> = { K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15, E: 1e18 };
 
-/** Memory quantities can use binary or decimal suffixes; normalize every form to a byte count, failing closed on a non-integer byte count (see `cpuMillicores`). */
+/**
+ * Byte-denominated quantities (memory and ephemeral-storage) can use binary or
+ * decimal suffixes; normalize every form to a byte count, failing closed on a
+ * non-integer byte count (see `cpuMillicores`).
+ */
 function memoryBytes(value: unknown): string {
   const text = String(value).trim();
   const match = /^([0-9]*\.?[0-9]+)(Ki|Mi|Gi|Ti|Pi|Ei|K|M|G|T|P|E)?$/.exec(text);
@@ -399,15 +404,28 @@ function isDefaultToleration(t: V1Toleration): boolean {
   );
 }
 
+/**
+ * Normalizes only the *rendering* of a quantity, never its value: two spellings
+ * of the same number compare equal, two different numbers never do.
+ *
+ * `ephemeral-storage` is canonicalized for the same reason memory is, and the
+ * reason is not cosmetic. Go's `resource.Quantity` keeps the string it was
+ * parsed from and re-serializes it verbatim — but only while that cached string
+ * survives. Any mutation of the resource block drops it, and the value is then
+ * re-rendered in canonical binary form, so the `1024Mi` we submit comes back as
+ * `1Gi`. A platform whose admission controller rewrites resources by design
+ * (Autopilot's warden) would therefore fail attestation on a quantity that never
+ * actually changed, with nothing but `kubernetes_isolation_unsupported` to go on.
+ * Comparing byte counts removes that failure mode without losing any strictness:
+ * a genuinely different reservation is still a different number.
+ */
 function normalizeResources(r?: V1Container["resources"]): void {
   if (!r) return;
-  if (r.requests) {
-    if (r.requests.cpu !== undefined) r.requests.cpu = cpuMillicores(r.requests.cpu);
-    if (r.requests.memory !== undefined) r.requests.memory = memoryBytes(r.requests.memory);
-  }
-  if (r.limits) {
-    if (r.limits.cpu !== undefined) r.limits.cpu = cpuMillicores(r.limits.cpu);
-    if (r.limits.memory !== undefined) r.limits.memory = memoryBytes(r.limits.memory);
+  for (const bag of [r.requests, r.limits]) {
+    if (!bag) continue;
+    if (bag.cpu !== undefined) bag.cpu = cpuMillicores(bag.cpu);
+    if (bag.memory !== undefined) bag.memory = memoryBytes(bag.memory);
+    if (bag["ephemeral-storage"] !== undefined) bag["ephemeral-storage"] = memoryBytes(bag["ephemeral-storage"]);
   }
 }
 

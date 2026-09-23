@@ -32,6 +32,19 @@ before probing, because a CNI programs a new pod's rules seconds after the pod
 starts — without that wait the canary raced the CNI and passed on an unpoliced
 pod. The launcher performs the same wait before releasing any worker.
 
+**What the canary does not prove.** It is a _reduced_ pod: `runCanary` builds it
+with `buildRunPod` and then drops the `keeper` container and replaces the
+worker's command, and it is never read back and attested — no
+`assertRunPodMatches` call exists on the canary path. So a green canary is
+evidence about the cluster's _network_ enforcement only. It is not evidence
+that the three-container run pod conforms to the platform's admission rules,
+nor that the platform leaves it unmutated: a canary can pass on a cluster where
+every real run pod is rewritten and fails attestation. On a platform with an
+ephemeral-storage ceiling the canary is also the _cheaper_ pod (it reserves
+less than `buildRunPod`'s pod-total guard charges it), so it cannot surface a
+ceiling problem either. The dry-run capture, not the canary, is what proves
+conformance.
+
 ## Integration suite
 
 `npm run test:kubernetes` (gated on `WARDBY_KUBERNETES_TEST=1` plus a context
