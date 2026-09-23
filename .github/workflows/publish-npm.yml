@@ -1,0 +1,31 @@
+name: Publish npm package
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm ci
+      - name: Verify release tag matches the package version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: >-
+          node -e 'const { readFileSync } = require("node:fs");
+          const { version } = JSON.parse(readFileSync("package.json", "utf8"));
+          if (process.env.RELEASE_TAG !== `v${version}`)
+          throw new Error(`release ${process.env.RELEASE_TAG} does not match v${version}`);'
+      - run: npm run test:package
+      - run: npm publish --access public

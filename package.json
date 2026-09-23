@@ -23,11 +23,12 @@
     "node": ">=24.0.0"
   },
   "bin": {
-    "wardby": "./dist/wardby-bin.js"
+    "wardby": "bin/wardby.js"
   },
   "files": [
     ".env.example",
     "NOTICE",
+    "bin/",
     "deploy/local/docker-compose.yml",
     "dist/",
     "prisma/migrations/",
