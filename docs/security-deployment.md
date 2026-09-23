@@ -1,17 +1,14 @@
 # Security deployment and recovery
 
-Status: the secured self-hosted HTTP implementation was enabled on 2026-09-06
-after its database, HTTP, browser, migration, and review gates passed. SR-009 is
-accepted only for trusted build/migration tooling through 2026-10-06; deployment
-controls in this guide still apply.
+The secured self-hosted HTTP implementation is protected by database, HTTP,
+browser, migration, and review gates. SR-009 is accepted only for trusted
+build/migration tooling through 2026-10-06; deployment controls in this guide
+still apply.
 
 ## Supported runtime and delegated operation
 
-Use Node.js 22.19 or newer: undici 8, which the runtime installs to keep the
-Kubernetes client from breaking global `fetch`, requires it. Development pins
-Node 24 through `.nvmrc`, and the runtime image is built on Node 22. The earlier
-guidance here — a development machine on Node 20.11 and verification through an
-isolated Node 22 runtime — no longer applies.
+Use Node.js 24 or newer. Development pins Node 24 through `.nvmrc`, and the
+production runtime image is built on a pinned Node 24 base image.
 Stdio remains local and trusted, with `LOCAL_PRINCIPAL` as its owner identity.
 Delegated HTTP requires `AUTH_ISSUER`, `AUTH_JWKS_URI`, and `AUTH_AUDIENCE`.
 `MCP_CANONICAL_URI` and `AUTH_AUDIENCE` must be identical normalized HTTPS URLs.
@@ -250,14 +247,18 @@ has none, so that configuration is development-only and says so. Set
 `KUBERNETES_RUNTIME_CLASS` to the cluster's sandboxed runtime class in
 production; the launcher warns loudly when it is unset.
 
-**Before deploying this anywhere real**, read
-[phase-12-kubernetes-evidence.md](phase-12-kubernetes-evidence.md) § Known gaps.
-GKE Autopilot admission conformance is **unproven** — the committed fixture is
-marked provisional and was written from Google's documentation, not from a
-cluster. Per-run record ConfigMaps accumulate with no garbage collection. The
-enforcement proof and the release of the worker are two separate API calls, so a
-NetworkPolicy created in the ~100-200 ms between them is not seen. And the spec's
-containment tests (OOM, disk-full, wall-clock) are not yet implemented.
+The `gke-autopilot` platform profile contains narrow admission allowances
+captured from a real cluster and requires the `gvisor` runtime class. A dry-run
+capture cannot observe labels added after pod scheduling, so live-run behavior
+is pinned separately by tests. Run `wardby coding preflight` against every
+target cluster before accepting work; it fails closed when admission or network
+behavior differs from the reviewed profile.
+
+Before production deployment, review the
+[current Kubernetes limitations](coding-worker-isolation.md#known-limitations).
+Per-run record ConfigMaps currently require operator-managed garbage collection,
+Claude Code is not supported by the Kubernetes launcher, and the real-cluster
+suite does not yet cover every Docker containment scenario.
 
 ## Images and dependency exception
 

@@ -62,10 +62,8 @@ flowchart TB
   directly during a run, which `wardby mcp` reconciles back into the `Run`
   row once the container finishes (the "cap at the boundary, reconcile
   after" pattern for opaque agent runs).
-- **`wardby mcp` restarts don't affect observability, and vice versa** —
-  confirmed 2026-09-13: the `RunTrigger.webhook` fix required restarting
-  `wardby mcp` only; the Prometheus/Grafana stack (PR #25) required
-  rebuilding only the `coding-proxy` container, with no `wardby mcp` restart.
+- **`wardby mcp` restarts don't affect observability, and vice versa.** The
+  control plane and metrics stack can be deployed and restarted independently.
 
 ## Where the worker actually runs
 
@@ -89,5 +87,5 @@ the run; and before the worker is released, the launcher proves the network
 policy is actually being enforced, because a cluster accepts a policy whether
 or not anything enforces it. See
 [coding-worker-isolation.md](coding-worker-isolation.md) for the mechanics and
-[phase-12-kubernetes-evidence.md](phase-12-kubernetes-evidence.md) for what a
-real cluster proved, including the bugs that only appeared there.
+the [Kubernetes deployment guide](../deploy/kind-coding/README.md) for the local
+and GKE Autopilot overlays.

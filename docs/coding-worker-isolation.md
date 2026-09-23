@@ -1,11 +1,8 @@
 # Coding Worker Isolation
 
-Date: 2026-09-07 (Docker isolation); Kubernetes launcher section added 2026-09-22
-
-Status: Docker JobLauncher tasks 8-10 complete; the routed container executor,
-Docker JobLauncher, and trusted VCS finalizer execute and attest this policy
-without weakening it. The Kubernetes launcher (Phase 12 Plan 2a) is complete
-for Codex on `kind`; see its section below for status and known gaps.
+Wardby supports isolated Codex execution with Docker or Kubernetes and
+credential-separated Claude Code execution with Docker. Both launchers fail
+closed when the effective runtime does not match the reviewed policy.
 
 ## Security Boundary
 
@@ -164,8 +161,8 @@ an over-ceiling agent still pays for a clone before failing, and the failure
 reaches the run record only as the sanitized `coding_failure_workspace:<id>`
 (the same generic bucketing every workspace/git-related failure gets) — not
 a distinctly labeled "refused" outcome, and not currently logged anywhere
-more diagnosable on the control plane. This is a known rough edge (tracked
-as a follow-up), not a security gap: no run ever exceeds the ceiling, it
+more diagnosable on the control plane. This is a known rough edge, not a
+security gap: no run ever exceeds the ceiling, it
 just fails less legibly than it could.
 
 `CODING_MAX_CONCURRENT` (default `4`) caps coding runs that hold a slot at
@@ -258,7 +255,7 @@ is unchanged; only the container-orchestration seam is replaced. **This
 milestone is Codex only:** a Claude Code job spec is refused with
 `kubernetes_provider_unsupported` (`validateKubernetesSpec`,
 `src/providers/jobs/kubernetes-isolation.ts:127`); Claude Code on Kubernetes
-is Plan 2b.
+is not currently supported.
 
 ### Enabling it
 
@@ -289,9 +286,8 @@ One pod per run, built by the canonical, deny-by-default policy in
   creates a subPath mount's target directory root-owned the first time it
   sets up the worker's volume mounts, and the keeper (uid 10001, no Linux
   capabilities) cannot `chmod` a root-owned directory it doesn't own. This
-  was found the hard way: every real-cluster run failed
-  `kubernetes_pod_start_timeout` until the init container was added (see
-  Task 8 in the plan ledger). `keeper.js` itself is unchanged — Docker still
+  is required because otherwise a real-cluster run fails
+  `kubernetes_pod_start_timeout`. `keeper.js` itself is unchanged — Docker still
   shares it, and Docker's bind-mount-free volume never had this problem.
 - **`keeper`**: trusted, holds the one `storage` volume (an `emptyDir` sized
   `spec.limits.diskMb` MiB, **disk-backed**, not `medium: Memory`) open for
@@ -349,14 +345,14 @@ prefix>`, named `wardby-run-<token>` (`<token>` = first 20 hex chars of
   timers entirely: any control-plane replica can observe, collect, stop, or
   remove any run, and a restarted process loses nothing.
 
-**Record ConfigMaps are kept as tombstones by design, forever, today.**
+**Record ConfigMaps are retained as tombstones by design.**
 `remove()` deletes the pod, NetworkPolicy, and capability Secret, but
 deliberately _rewrites the record to `phase: "removed"` instead of deleting
 it_ (`kubernetes.ts`, `remove()`) — the contract is that a removed run is
 never relaunched, and the record is what a later `launch()` call for the
-same run ID checks. Nothing today garbage-collects old tombstones, so they
-accumulate — one small ConfigMap per run, forever — until a GC follow-up
-ships. **A launch that fails during provisioning accumulates a record too**,
+same run ID checks. Wardby does not yet garbage-collect old tombstones, so they
+accumulate until an operator removes them. **A launch that fails during
+provisioning accumulates a record too**,
 not just a `remove()`d run's tombstone: the failure path writes `phase:
 "failed"` and the executor never calls `remove()` for a launch that threw,
 so every failed launch leaves a permanent record as well. On a busy cluster
@@ -434,10 +430,8 @@ captured fixture as a lower bound on what a platform mutates.
 The Kubernetes API can create a NetworkPolicy object without that policy
 being enforced yet — CNIs (including `kind`'s default kindnet) program a new
 pod's policy a few seconds _after_ the pod starts, not atomically with pod
-creation. This was found as a real, reproducible race during Task 7/8 real
--cluster testing (a hand-applied identical pod passed once it had "settled"
-for ~5s, but a canary probing immediately after creation did not), and it
-threatens every run, not just the harness: the worker gate could otherwise
+creation. The delay is observable on real clusters and threatens every run,
+not just the harness: the worker gate could otherwise
 open on a pod whose isolation isn't active yet.
 
 The fix, before seeding or opening the worker gate: the launcher execs into
@@ -595,8 +589,8 @@ operators should instead list every object with
 against the run record ConfigMaps that legitimately exist (a stray canary
 object has no corresponding non-tombstoned run record, since preflight
 never creates one). Giving preflight objects a distinguishing label (e.g.
-`wardby.io/component: coding-preflight`) is a tracked follow-up — see
-"Known gaps" below — that would make this a direct label query instead.
+`wardby.io/component: coding-preflight`) would make this a direct label query;
+see "Known limitations" below.
 
 ### RBAC actually required
 
@@ -647,26 +641,21 @@ On a failed run, the launcher reads only the failed worker container's last
 (`pods/log`), and keeps only a code matching the existing
 `SAFE_WORKER_DIAGNOSTIC` pattern (imported from the Docker launcher) — the
 raw text itself is never stored, logged, or returned
-(`readWorkerDiagnostic`, `kubernetes.ts`). This is a deliberate, narrower
-replacement for the original design spec's "no `pods/log` at all"; see the
-spec corrections below. A later milestone has the worker write a structured
-`diagnostic.json` instead, which the launcher will prefer once it exists —
+(`readWorkerDiagnostic`, `kubernetes.ts`). Structured worker diagnostics are
 not implemented yet.
 
-### Known gaps / follow-up plan (Plan 2b)
+### Known limitations
 
 - **No gVisor / per-pod process (PID) limit on `kind`.** `kind` has no
   runtime-class sandboxing; `KUBERNETES_RUNTIME_CLASS` is unset in the local
   harness and the launcher logs `kubernetes_runtime_class_unset` once per
-  launch as a loud "development cluster" warning. GKE Autopilot's `gvisor`
-  runtime class (Plan 3) is the real mitigation.
+  launch as a loud "development cluster" warning. Use the GKE Autopilot
+  overlay with its required `gvisor` runtime class for production.
 - **Claude Code is not implemented on Kubernetes** — refused with
-  `kubernetes_provider_unsupported` (Plan 2b).
-- **Spec §9's integration coverage is only partially implemented.** What
-  Task 8 proved on a real `kind` cluster: the contract suite against the
-  real API, the enforcement gate genuinely gating (not just unit-tested),
-  and a full run lifecycle including the `storage-init` fix. **Not yet
-  implemented** (tracked as a Plan 2b follow-up): the isolation acceptance
+  `kubernetes_provider_unsupported`.
+- **The real-cluster integration coverage is partial.** It covers the contract
+  suite against the real API, the enforcement gate, and a full run lifecycle.
+  It does not yet cover the isolation acceptance
   suite's OOM/disk-full/wall-clock containment assertions, "canary fails
   when a policy is removed", and "the tool pod has no network" (moot for
   Codex's single-pod layout; relevant once Claude Code's two-pod layout
@@ -676,8 +665,8 @@ not implemented yet.
   documented, not a regression of this milestone.
 - **An over-ceiling `workspaceDiskMb` fails late and generically** — see
   "Control Plane Configuration" above.
-- **`kind` harness namespace quirk to preserve in any new overlay** (e.g. a
-  future GKE overlay): `deploy/kind-coding/manifests/base/kustomization.yaml`
+- **Namespace handling must remain explicit in every overlay.**
+  `deploy/kind-coding/manifests/base/kustomization.yaml`
   deliberately has **no top-level `namespace:` override**, because
   kustomize's namespace transformer would force `metadata.namespace` onto
   every namespaced resource it lists. Every manifest instead sets its own
@@ -685,16 +674,13 @@ not implemented yet.
   another cluster must do the same.
 - **Per-run record ConfigMap GC is unimplemented.** Both `remove()`'s
   deliberate tombstones and a failed launch's records (see above)
-  accumulate forever, one small ConfigMap per run, with nothing that ever
-  deletes them. Needed before a long-lived production deployment; not a
-  correctness or security issue, an operational one (etcd growth).
-- **Autopilot attestation allowances are not yet modeled.** Attestation
-  compares the read-back pod annotations and resource quantities exactly;
-  GKE Autopilot is known to add its own annotations and to round
-  requests/limits, so as shipped, Autopilot will fail every attestation.
-  Plan 3 needs an explicit, narrow allowance list for whatever Autopilot is
-  confirmed to add/round, following the same "only what the platform is
-  known to do" discipline as the existing server-default normalization.
+  accumulate, one small ConfigMap per run, with nothing that automatically
+  deletes them. Operators need a retention job for a long-lived deployment;
+  this is an operational concern rather than a correctness or security issue.
+- **Autopilot dry-run capture is a lower bound.** Admission dry runs cannot
+  observe topology labels added after pod scheduling. The reviewed platform
+  profile and tests include those known labels, but every target cluster must
+  still pass preflight before accepting work.
 - **A distinguishing label for preflight/canary objects.** Canary pods and
   policies are currently named and labeled identically to real run objects
   (`wardby.io/component: coding-run`), which is why the troubleshooting
@@ -707,7 +693,7 @@ not implemented yet.
   `Endpoints` API** (`kubernetes.integration.test.ts`) rather than
   `discovery.k8s.io/v1` `EndpointSlice`. `Endpoints` is deprecated, not yet
   removed, and this is test-only code, but the migration is a tracked
-  follow-up rather than something to re-discover later.
+  remaining compatibility task.
 
 ### Troubleshooting: failure codes
 

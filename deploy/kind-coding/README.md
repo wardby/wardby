@@ -7,10 +7,10 @@ coding proxy, and — most importantly — that `NetworkPolicy` is actually
 enforced, which is what makes a coding-run pod's isolation real instead of
 theoretical.
 
-**This is a local proof harness, not a production deployment.** It has no
-gVisor/runtime-class sandboxing and no cloud-provider Autopilot admission
-rules; those are Plan 3's GKE overlay, which reuses the same
-`manifests/base/` this harness uses.
+**The `kind` overlay is a local proof harness, not a production deployment.**
+It has no gVisor/runtime-class sandboxing. The `gke-autopilot` overlay reuses
+the same `manifests/base/` with the production runtime class, identity binding,
+gateway, and provider-specific network rules.
 
 ## Prerequisites
 
@@ -51,9 +51,8 @@ start`s it if it exists but is stopped, or leaves it alone if it's
 5. Builds and pushes the coding-worker image (`src/coding-worker/Dockerfile`)
    and the runtime image (`deploy/Dockerfile`, `runtime` target) to the
    registry, then resolves each one's pulled-by-digest reference.
-6. Verifies the worker image has `tar`, `head`, and `test` — the run pod's
-   keeper (Task 5) depends on them for seeding and collecting the
-   workspace.
+6. Verifies the worker image has `tar`, `head`, and `test`, which the run pod's
+   keeper uses to seed and collect the workspace.
 7. Applies the namespace, then creates or updates the proxy's
    `wardby-coding-proxy-env` Secret directly in the cluster from
    `.env.local`'s `DATABASE_URL`, `OPENAI_API_KEY`, and `ANTHROPIC_API_KEY`.
@@ -103,10 +102,9 @@ The proxy exposes a second port, **8788 — the deny port**. Nothing is served
 there: it exists so that a coding-run pod which can reach the proxy on 8787 but
 not on 8788 has proven its own NetworkPolicy is programmed _and_ port-scoped.
 The proxy's policy deliberately allows ingress on 8788 from coding-run pods, so
-the run pod's own egress policy is the only thing that can block it. This tree's
-`manifests/` are cluster-agnostic; `manifests/overlays/` today holds only the
-`kind` target, but a follow-up task is expected to add a second overlay for
-GKE Autopilot (`overlays/gke-autopilot/`) reusing the same `base/`.
+the run pod's own egress policy is the only thing that can block it. The shared
+resources live in `manifests/base/`; `manifests/overlays/kind/` provides the
+local harness and `manifests/overlays/gke-autopilot/` provides the GKE target.
 
 ## What the preflight proves — and what to do if it fails
 
@@ -140,8 +138,8 @@ policy — stop and report it. The documented fallback is replacing kindnet
 with [Calico](https://docs.tigera.io/calico/latest/getting-started/kubernetes/kind),
 which does enforce `NetworkPolicy` everywhere. Verified against Calico's own
 kind quickstart (`docs.tigera.io/calico/latest/getting-started/kubernetes/kind`)
-on 2026-09-22 — re-check that page for the current release before following
-this, since the pinned version below will go stale:
+in Calico's current documentation. Re-check that page before following this,
+since provider installation instructions change:
 
 1. Recreate the cluster with `kind-config.yaml`'s `nodes:` block unchanged
    but a `networking:` block added:
@@ -191,12 +189,11 @@ Two roles ship in `manifests/base/` with **no binding**:
   cluster-scoped `namespaces` resource, which no namespaced Role can ever
   grant.
 
-None is bound here because the `kind` control plane runs every command in
-this harness — `up.sh`, `kubectl`, and `wardby coding preflight` — against
-your own admin kubeconfig, which already has full access. Plan 3's GKE
-overlay binds all three (the ClusterRole via a ClusterRoleBinding, the two
-Roles via RoleBindings) to the Cloud Run service account's identity, which
-is the actual least-privilege boundary in a real deployment.
+None is bound in the `kind` overlay because the local harness runs `up.sh`,
+`kubectl`, and `wardby coding preflight` against your admin kubeconfig. The
+GKE overlay binds the ClusterRole with a ClusterRoleBinding and the Roles with
+RoleBindings to the Cloud Run service account's identity, which is the
+least-privilege boundary in that deployment.
 
 ## Tear it down
 
