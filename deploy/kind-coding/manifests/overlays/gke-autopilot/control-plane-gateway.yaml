@@ -1,0 +1,140 @@
+# Publishes the control plane's MCP endpoint on the internet, terminating TLS at
+# a Google-managed certificate.
+#
+# Everything here is additive to control-plane.yaml and separable from it: a
+# deployment that keeps the endpoint cluster-internal simply omits this file from
+# the kustomization, and nothing else changes except MCP_CANONICAL_URI.
+#
+# `wardby-control-plane-hostname` is a placeholder substituted at apply time, the
+# same way the image digests and the API server endpoint are. A hostname is
+# target identity and never belongs in a tracked manifest.
+#
+# WHAT THIS EXPOSES, stated plainly: an OAuth 2.1 authorization server with
+# dynamic client registration, plus the MCP endpoint itself. Anyone on the
+# internet can reach /register and /.well-known/*. That is the design -- it is
+# how an MCP client bootstraps -- but it is the reason the rate-limit policy
+# below is part of this file rather than a later improvement.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: wardby-control-plane
+  namespace: wardby-coding
+  annotations:
+    # The Certificate Manager map holding the Google-managed certificate for the
+    # hostname. Created out of band (it needs the DNS record to exist first, and
+    # a managed certificate cannot be expressed as a Kubernetes object here).
+    networking.gke.io/certmap: wardby-control-plane
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  # The reserved global address, by name. The type string is the bare
+  # `NamedAddress`, NOT the `networking.gke.io/NamedAddress` form the GKE docs
+  # use elsewhere and not the upstream `IPAddress`: this controller rejects both
+  # with GWCER106, and its message on the second attempt names the one it wants.
+  # Referring to the address by name rather than by literal IP also keeps the
+  # address itself the source of truth, so re-reserving it changes nothing here.
+  addresses:
+    - type: NamedAddress
+      value: wardby-control-plane
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: wardby-control-plane-hostname
+      # No certificateRefs: the certmap annotation above supplies the
+      # certificate. GKE accepts this; upstream Gateway API would want a Secret.
+      allowedRoutes:
+        namespaces:
+          from: Same
+    # Port 80 exists only to redirect. An MCP client that follows a bare
+    # http:// URL should land on the canonical https:// one rather than fail,
+    # and no traffic is ever served in the clear.
+    - name: http
+      protocol: HTTP
+      port: 80
+      hostname: wardby-control-plane-hostname
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: wardby-control-plane
+  namespace: wardby-coding
+spec:
+  parentRefs:
+    - name: wardby-control-plane
+      sectionName: https
+  hostnames:
+    - wardby-control-plane-hostname
+  rules:
+    # Everything on this host goes to the control plane: /mcp, the OAuth
+    # endpoints and the .well-known documents are all served by the same
+    # process, and splitting them here would only create a way for them to
+    # disagree about which origin they are on.
+    - backendRefs:
+        - name: wardby-control-plane
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: wardby-control-plane-redirect
+  namespace: wardby-coding
+spec:
+  parentRefs:
+    - name: wardby-control-plane
+      sectionName: http
+  hostnames:
+    - wardby-control-plane-hostname
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+---
+# Rate limiting at the edge. The application has a per-IP limiter, which a
+# caller spread across many addresses walks straight past -- the same reasoning
+# that put Cloud Armor in front of the Cloud Run deployment (deploy/gcp/edge.tf).
+# The limit is deliberately generous: MCP is a chatty protocol and this must not
+# throttle a legitimate client mid-session.
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: wardby-control-plane
+  namespace: wardby-coding
+spec:
+  default:
+    securityPolicy: wardby-control-plane
+  targetRef:
+    group: ""
+    kind: Service
+    name: wardby-control-plane
+---
+# The control plane's NetworkPolicy has NO ingress rules, so without this nothing
+# from the load balancer could reach it. These two ranges are Google's own: they
+# carry both the health checks and the proxied client traffic for a global
+# external Application Load Balancer. They are not user-controlled address space,
+# and they are the only source permitted -- the pod remains unreachable from
+# anything else in the cluster, exactly as before.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-control-plane-lb
+  namespace: wardby-coding
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-control-plane
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 130.211.0.0/22
+        - ipBlock:
+            cidr: 35.191.0.0/16
+      ports:
+        - protocol: TCP
+          port: 8080
