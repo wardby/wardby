@@ -6,8 +6,15 @@ control plane deployed by
 `deploy/kind-coding/manifests/overlays/gke-autopilot/`, replacing the throwaway
 `emptyDir` Postgres that overlay ships for smoke tests.
 
-Scope is deliberately narrow: this module creates the **database and its
-networking**, nothing else. The cluster itself is not yet in Terraform.
+It also describes the **cluster** those runs execute in and the **Artifact
+Registry** holding their images. The cluster resources were written against a
+live cluster and imported, so `terraform plan` against an untouched cluster is
+empty — the module reproduces what runs, rather than approximating it.
+
+What is still not in Terraform: the Kubernetes objects inside the cluster (the
+control plane Deployment, NetworkPolicies, Gateway). Those are kustomize
+manifests under `deploy/kind-coding/manifests/overlays/gke-autopilot/`, applied
+separately.
 
 ## Why not deploy/gcp
 
