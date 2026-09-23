@@ -5,7 +5,7 @@
   "source": "PROVISIONAL — written from Google's autopilot-resource-requests, sandbox-pods and autopilot-security documentation (checked 2026-09-22), not from a cluster. Task 9 of docs/superpowers/plans/2026-09-22-phase-12-gke-autopilot.md replaces this file with a real server-side dry-run capture via `npm run capture:autopilot`, which sets provisional to false.",
   "notes": [
     "No resource mutations are listed, and that is the claim this fixture exists to test: the builder already emits Autopilot-legal CPU, memory and ephemeral-storage, with limits equal to requests, so the admission controller has nothing left to rewrite.",
-    "The two node-health tolerations the API server defaults on every pod are normalized by kubernetes-isolation.ts itself, not by the platform profile, so they are listed here only because they arrive in the same array."
+    "The two node-health tolerations the API server defaults on every pod are normalized by kubernetes-isolation.ts itself, not by the platform profile, so they are listed here only because they arrive in the same array. A real capture will NOT list them: the capture tool runs undoApiServerDefaults over both pods before diffing, which removes them, leaving the gVisor toleration alone in this value."
   ],
   "mutations": [
     {

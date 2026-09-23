@@ -32,7 +32,11 @@ export class FakeKubernetesApi implements KubernetesApi {
     stdout?.end();
     return 0;
   };
+  /** The admission chain a dry-run create runs through. Default: echo the pod back unchanged. */
+  onDryRunCreatePod: (namespace: string, body: V1Pod) => Promise<V1Pod> = async (_namespace, body) => body;
   logs = new Map<string, string>();
+  /** What readApiServerVersion reports; tests that care about provenance set it. */
+  apiServerVersion = "v1.33.0";
   private version = 0;
 
   private key(kind: Kind, namespace: string, name: string): string {
@@ -97,9 +101,17 @@ export class FakeKubernetesApi implements KubernetesApi {
   async createPod(namespace: string, body: V1Pod) {
     return this.create("pod", namespace, body);
   }
-  /** Echoes the submitted pod without storing it: a dry run persists nothing. */
-  async dryRunCreatePod(_namespace: string, body: V1Pod) {
-    return structuredClone(body);
+  /**
+   * A dry-run create persists nothing, but it is still a create: the API server runs the same
+   * validation and name checks, so a nameless body and a colliding name both fail exactly as
+   * they would on a real create. Tests override `onDryRunCreatePod` to model an admission chain.
+   */
+  async dryRunCreatePod(namespace: string, body: V1Pod) {
+    const name = body.metadata?.name;
+    if (!name) throw new Error("fake_name_required");
+    const key = this.key("pod", namespace, name);
+    if (this.objects.has(key)) throw new KubernetesAlreadyExistsError(key);
+    return this.onDryRunCreatePod(namespace, structuredClone(body));
   }
   async readPod(namespace: string, name: string) {
     return this.read<V1Pod>("pod", namespace, name);
@@ -122,6 +134,9 @@ export class FakeKubernetesApi implements KubernetesApi {
   }
   async readEndpoints(namespace: string, name: string) {
     return this.read<V1Endpoints>("endpoints", namespace, name);
+  }
+  async readApiServerVersion() {
+    return this.apiServerVersion;
   }
   async readNamespace(name: string) {
     return this.namespaces.has(name);

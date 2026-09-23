@@ -25,6 +25,22 @@ describe("applyMutations", () => {
   it("throws on a path that does not resolve", () => {
     expect(() => applyMutations({ a: 1 }, [{ op: "replace", path: "/b/c", value: 2 }])).toThrow("dry_run_fixture_path");
   });
+
+  it("splices an array element on remove instead of leaving a null hole", () => {
+    expect(applyMutations({ list: ["a", "b", "c"] }, [{ op: "remove", path: "/list/1" }])).toEqual({
+      list: ["a", "c"],
+    });
+    // A hole would survive JSON as `null`, which a pod comparison would read as a list entry.
+    expect(JSON.stringify(applyMutations({ list: ["a", "b"] }, [{ op: "remove", path: "/list/0" }]))).toBe(
+      '{"list":["b"]}',
+    );
+  });
+
+  it("refuses an array remove whose index is out of range or not an index", () => {
+    for (const path of ["/list/2", "/list/-1", "/list/01", "/list/name"]) {
+      expect(() => applyMutations({ list: ["a", "b"] }, [{ op: "remove", path }])).toThrow("dry_run_fixture_path");
+    }
+  });
 });
 
 describe("diffMutations", () => {
@@ -36,6 +52,13 @@ describe("diffMutations", () => {
     };
     const mutations = diffMutations(before, after);
     expect(applyMutations(before, mutations)).toEqual(after);
+  });
+
+  it("orders paths by code point, so the committed file does not depend on the capturing machine's locale", () => {
+    const paths = diffMutations({}, { b: 1, A: 1, a: 1, B: 1, "-": 1 }).map((mutation) => mutation.path);
+    expect(paths).toEqual(["/-", "/A", "/B", "/a", "/b"]);
+    // The locale-aware collation this deliberately avoids folds case together instead.
+    expect([...paths].sort((x, y) => x.localeCompare(y))).not.toEqual(paths);
   });
 });
 

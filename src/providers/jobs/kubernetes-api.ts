@@ -69,6 +69,12 @@ export interface KubernetesApi {
     command: string[],
     options: KubernetesExecOptions,
   ): Promise<number>;
+  /**
+   * The API server's reported version (`gitVersion`, e.g. `v1.33.4-gke.1000`). Read-only and
+   * cluster-wide; used by src/tools/capture-fixture.ts to stamp a capture with the server that
+   * produced it, so a fixture cannot claim provenance it never recorded.
+   */
+  readApiServerVersion(): Promise<string>;
   /** Reads at most `limitBytes` of the last `tailLines` lines of a container's log. */
   readLogTail(
     namespace: string,

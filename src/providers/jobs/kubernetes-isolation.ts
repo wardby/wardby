@@ -498,6 +498,30 @@ function normalizeSpec(spec: V1PodSpec): void {
   for (const volume of spec.volumes ?? []) normalizeVolume(volume);
 }
 
+/**
+ * A copy of `pod` with ONLY the API server's own defaulting and aliasing undone
+ * — the same `normalizeSpec` pass `assertRunPodMatches` runs, and nothing else.
+ *
+ * Exported for src/tools/capture-fixture.ts, which runs it over both the
+ * submitted and the returned pod before diffing them. Without it the diff is
+ * dominated by fields every API server fills in on every create
+ * (schedulerName, priority, terminationMessagePath on each container, probe
+ * defaults, `2048Mi` requantized to `2Gi`, ...); because the differ replaces
+ * arrays wholesale those collapse into opaque `replace /spec/containers`
+ * blobs, and a genuine platform rewrite *inside* a container would be
+ * indistinguishable from the noise.
+ *
+ * It deliberately does NOT apply `normalizePlatformMetadata`: that deletes
+ * exactly the platform-injected keys a capture exists to record. Fails closed
+ * (throws) on a spec the normalizer cannot make sense of.
+ */
+export function undoApiServerDefaults(pod: V1Pod): V1Pod {
+  if (!pod.spec) throw isolationError();
+  const spec = structuredClone(pod.spec);
+  normalizeSpec(spec);
+  return { ...structuredClone(pod), spec };
+}
+
 function normalizePod(
   pod: V1Pod,
   profile: KubernetesPlatformProfile,

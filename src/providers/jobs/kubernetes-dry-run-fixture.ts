@@ -5,7 +5,24 @@
  * The fixture stores a *mutation list*, not a pair of whole pods, for two
  * reasons: a reviewer can read the entire set of differences the platform
  * introduces in a few lines, and the test rebuilds the submitted pod from the
- * live builder, so the fixture cannot quietly go stale against it.
+ * live builder rather than replaying a stored one, so the fixture can never
+ * carry a stale *pod*.
+ *
+ * That is a narrower guarantee than it sounds, and the difference matters.
+ * Because the attestation test derives BOTH operands from the same builder, it
+ * is structurally blind to a weakening of the builder itself: measured on this
+ * branch, setting `automountServiceAccountToken: true` or halving the worker's
+ * CPU leaves the whole suite green. Three other sabotages — dropping
+ * `runtimeClassName`, dropping the pod `seccompProfile`, `hostPID: true` — do
+ * fail it, but only incidentally: those exact fields appear in the "rejects one
+ * more mutation" tamper list, so a builder that already emits the tampered
+ * value turns that tamper into a no-op. That is luck, not coverage, and it is
+ * not a property to rely on.
+ *
+ * What this file guards is that the *platform's* mutation set is still exactly
+ * the set the profile forgives. The builder's own fields are guarded by
+ * kubernetes-isolation.test.ts and kubernetes-platform.test.ts, and must stay
+ * that way.
  *
  * `provisional` is true while the file is written from documentation rather
  * than captured from a cluster. The attestation suite names that state in its
@@ -60,7 +77,17 @@ function container(root: unknown, path: string[]): Bag {
   return node as Bag;
 }
 
-/** Returns a copy of `document` with every mutation applied in order. */
+/**
+ * Returns a copy of `document` with every mutation applied in order.
+ *
+ * `add` and `replace` assign at the pointer. `remove` deletes an object key,
+ * but SPLICES an array element: `delete array[2]` would leave a hole that
+ * serializes back as `null`, which would then be deep-compared against a real
+ * pod as a null list entry rather than as a removal. The differ only ever
+ * replaces arrays wholesale, so an array pointer can reach here only from a
+ * hand-written fixture entry — which is exactly when a silent `null` hole
+ * would be hardest to spot in review.
+ */
 export function applyMutations<T>(document: T, mutations: readonly PodMutation[]): T {
   const copy = structuredClone(document);
   for (const mutation of mutations) {
@@ -69,9 +96,16 @@ export function applyMutations<T>(document: T, mutations: readonly PodMutation[]
     // never throws in practice; it narrows the type without a non-null assertion.
     const key = path.pop();
     if (key === undefined) throw new Error(`dry_run_fixture_path: ${mutation.path}`);
-    const parent = container(copy, path) as Record<string, unknown>;
-    if (mutation.op === "remove") delete parent[key];
-    else parent[key] = structuredClone(mutation.value);
+    const parent = container(copy, path);
+    if (Array.isArray(parent) && mutation.op === "remove") {
+      const index = /^(0|[1-9][0-9]*)$/.test(key) ? Number(key) : -1;
+      if (index < 0 || index >= parent.length) throw new Error(`dry_run_fixture_path: ${mutation.path}`);
+      parent.splice(index, 1);
+      continue;
+    }
+    const bag = parent as Record<string, unknown>;
+    if (mutation.op === "remove") delete bag[key];
+    else bag[key] = structuredClone(mutation.value);
   }
   return copy;
 }
@@ -84,6 +118,11 @@ function escape(key: string): string {
  * The mutations that turn `before` into `after`. Objects are walked key by key;
  * anything else (including arrays) is replaced wholesale, which keeps a
  * toleration list or a container list readable as one op.
+ *
+ * Sorted by code point, not `localeCompare`: the result is committed to a file
+ * and reviewed as a diff, so the order must not depend on the capturing
+ * machine's locale (an ICU collation folds case together and orders
+ * `/spec/Foo` and `/spec/foo` by tie-break rules that differ between hosts).
  */
 export function diffMutations(before: unknown, after: unknown, prefix = ""): PodMutation[] {
   const plain = (value: unknown) => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -103,5 +142,5 @@ export function diffMutations(before: unknown, after: unknown, prefix = ""): Pod
       mutations.push(...diffMutations(left[key], right[key], path));
     }
   }
-  return mutations.sort((a, b) => a.path.localeCompare(b.path));
+  return mutations.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
