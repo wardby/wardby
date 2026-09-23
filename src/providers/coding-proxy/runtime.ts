@@ -1,6 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
 import { CODING_PROXY_ALIAS, CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "../jobs/docker-isolation.js";
-import { startDenyPortListener } from "./deny-port.js";
+import { startDenyPortListener, type DenyPortListenerHandle } from "./deny-port.js";
 import { EnvironmentCredentialResolver } from "./environment-credentials.js";
 import { CodingProxy } from "./proxy.js";
 import { PrismaProxyLedger } from "./prisma-ledger.js";
@@ -35,7 +35,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     expectedHost: `${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
     onRequest: options.onRequest,
   });
-  let deny;
+  let deny: DenyPortListenerHandle;
   try {
     deny = await (options.startDenyPort ?? startDenyPortListener)("0.0.0.0", CODING_PROXY_DENY_PORT);
   } catch (error) {

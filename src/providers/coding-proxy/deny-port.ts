@@ -14,6 +14,9 @@
  * to leak — only the fact that the TCP handshake completed.
  */
 import { createServer } from "node:net";
+import { logger } from "../../core/logger.js";
+
+const denyLog = logger.child({ module: "coding-proxy-deny-port" });
 
 export interface DenyPortListenerHandle {
   port: number;
@@ -23,14 +26,25 @@ export interface DenyPortListenerHandle {
 export async function startDenyPortListener(host: string, port: number): Promise<DenyPortListenerHandle> {
   const server = createServer({ pauseOnConnect: true }, (socket) => socket.destroy());
   await new Promise<void>((resolve, reject) => {
-    // Left registered after listen(): a later 'error' event on a net.Server with no listener
-    // crashes the process, and rejecting an already-settled promise is a no-op.
-    server.once("error", reject);
-    server.listen(port, host, resolve);
+    // Startup-only: removed the moment listen() succeeds, below, and replaced with a permanent
+    // handler — an 'error' event on a net.Server with no listener at all crashes the process.
+    const onStartupError = (error: Error) => reject(error);
+    server.once("error", onStartupError);
+    server.listen(port, host, () => {
+      server.removeListener("error", onStartupError);
+      resolve();
+    });
   });
   const address = server.address();
+  const resolvedPort = typeof address === "object" && address ? address.port : port;
+  // A later accept-level failure (EMFILE, ENFILE, ECONNABORTED, ...) must not crash the process
+  // and must not vanish silently either. These are server-level errors, not connection-level
+  // ones, so there is no peer to name here — only the error itself and the listener's own port.
+  server.on("error", (error) => {
+    denyLog.error({ err: error, port: resolvedPort }, "deny-port listener error");
+  });
   return {
-    port: typeof address === "object" && address ? address.port : port,
+    port: resolvedPort,
     close: () =>
       new Promise((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
