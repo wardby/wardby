@@ -31,6 +31,8 @@ import { MAX_CODING_ARTIFACT_BYTES, parseCodingAgentOutputJson } from "../../cod
 import { SAFE_WORKER_DIAGNOSTIC } from "./docker.js";
 import { KubernetesAlreadyExistsError, KubernetesConflictError, type KubernetesApi } from "./kubernetes-api.js";
 import {
+  ENFORCEMENT_PROBE_DENY_REACHABLE,
+  ENFORCEMENT_PROBE_DENY_REFUSED,
   ENFORCEMENT_PROBE_PROXY_UNREACHABLE,
   KEEPER_CONTAINER,
   KEEPER_SEEDED_MARKER,
@@ -68,6 +70,16 @@ const READY_POLL_MS = 250;
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const DEFAULT_ENFORCEMENT_TIMEOUT_MS = 30_000;
 const ENFORCEMENT_POLL_MS = 500;
+/**
+ * What the gate reports at its bound, by the last probe's exit code. Each names a different place
+ * to look: the CNI never programmed the policy, the proxy pod is unreachable, or the deny port
+ * answered with an RST and so is reachable-but-unserved (it proves nothing, whatever the CNI did).
+ */
+const ENFORCEMENT_VERDICTS: Readonly<Record<number, string>> = {
+  [ENFORCEMENT_PROBE_DENY_REACHABLE]: "kubernetes_policy_not_enforced",
+  [ENFORCEMENT_PROBE_PROXY_UNREACHABLE]: "kubernetes_policy_witness_unavailable",
+  [ENFORCEMENT_PROBE_DENY_REFUSED]: "kubernetes_policy_witness_unserved",
+};
 /** Consecutive proven probes required (8787 reachable, 8788 blocked): one dropped SYN must not open the gate. */
 const ENFORCEMENT_BLOCKED_STREAK = 3;
 /** Bound for one enforcement probe exec (the probe makes two sequential connects, so it gives up after at most 6 s). */
@@ -499,9 +511,15 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
    * proxy on CODING_PROXY_PORT and fail to reach it on CODING_PROXY_DENY_PORT. Anything else resets
    * the streak; the wall-clock bound still applies.
    *
+   * "Fail to reach" means the connect *timed out* — the packet was dropped. A refusal (RST) is not
+   * a denial: it proves the SYN reached the destination host, so the deny port is merely unserved
+   * and witnesses nothing. That is its own verdict, below.
+   *
    * The verdict at the bound is taken from the *last* probe, not from whether any probe was ever
    * unavailable: an early blip while the pod's networking came up must not send an operator looking
-   * at the proxy when the real problem is an unenforced policy.
+   * at the proxy when the real problem is an unenforced policy. The three non-proven outcomes stay
+   * distinct because they send an operator to three different places: the CNI, the proxy pod, and
+   * the deny listener.
    */
   private async waitForPolicyEnforcement(names: RunNames, proxyIp: string): Promise<void> {
     const command = ["node", "-e", enforcementProbeScript(proxyIp)];
@@ -516,11 +534,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       blocked = exitCode === 0 ? blocked + 1 : 0;
       if (blocked >= ENFORCEMENT_BLOCKED_STREAK) return;
       if (this.now() - started >= this.enforcementTimeoutMs) {
-        throw new Error(
-          exitCode === ENFORCEMENT_PROBE_PROXY_UNREACHABLE
-            ? "kubernetes_policy_witness_unavailable"
-            : "kubernetes_policy_not_enforced",
-        );
+        throw new Error(ENFORCEMENT_VERDICTS[exitCode] ?? "kubernetes_policy_not_enforced");
       }
       await this.sleep(ENFORCEMENT_POLL_MS);
     }

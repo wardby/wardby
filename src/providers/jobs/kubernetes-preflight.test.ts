@@ -531,13 +531,16 @@ describe("runKubernetesPreflight", () => {
 
 describe("CANARY_SCRIPT", () => {
   /**
-   * Runs the real script against a fake `net`/`dns`; `reachable(address, attempt)` decides each
+   * Runs the real script against a fake `net`/`dns`; `outcome(address, attempt)` decides each
    * connect, where `address` is `"<host>:<port>"`. Keying on both halves is deliberate: keying on
    * the port alone would let a script that probed the right port on the *wrong host* pass, and
    * keying on the host alone would let one that probed the wrong port on the right host pass.
+   *
+   * The outcome is the socket event itself, not a boolean, because `timeout` (dropped) and
+   * `error` (refused) are different evidence: only a drop can be a policy denial.
    */
   async function runCanaryScript(
-    reachable: (address: string, attempt: number) => boolean,
+    outcome: (address: string, attempt: number) => "connect" | "timeout" | "error",
     timers: { setTimeout: (wake: () => void, ms: number) => unknown; Date: { now: () => number } } = {
       setTimeout,
       Date,
@@ -550,7 +553,7 @@ describe("CANARY_SCRIPT", () => {
         const address = `${host}:${port}`;
         const attempt = (attempts.get(address) ?? 0) + 1;
         attempts.set(address, attempt);
-        setImmediate(() => socket.emit(reachable(address, attempt) ? "connect" : "error", new Error("blocked")));
+        setImmediate(() => socket.emit(outcome(address, attempt), new Error("blocked")));
         return socket;
       },
     };
@@ -575,8 +578,8 @@ describe("CANARY_SCRIPT", () => {
 
   it("waits for the deny port to be blocked before probing, then reports all five", async () => {
     // Policy programmed after two probes: early attempts connect, like a pod that starts before its policy.
-    const { output, attempts } = await runCanaryScript(
-      (address, attempt) => address === "10.96.0.50:8787" || (address === "10.96.0.50:8788" && attempt <= 2),
+    const { output, attempts } = await runCanaryScript((address, attempt) =>
+      address === "10.96.0.50:8787" || (address === "10.96.0.50:8788" && attempt <= 2) ? "connect" : "timeout",
     );
     expect(output).toEqual({ wardbyCanary: ok });
     expect(attempts.get("10.96.0.50:8788")).toBe(4); // 2 connected + 1 blocked settle attempt + the real probe
@@ -601,8 +604,30 @@ describe("CANARY_SCRIPT", () => {
       },
       Date: { now: () => clock },
     };
-    const { output, attempts } = await runCanaryScript(() => true, timers);
+    const { output, attempts } = await runCanaryScript(() => "connect", timers);
     expect(output.wardbyCanary.proxyDeny).toBe(true);
     expect(attempts.get("10.96.0.50:8788")).toBe(41); // 40 settle attempts over 20 s, then the real probe
+  });
+
+  it("reports proxyDeny true when the deny port is refused rather than dropped", async () => {
+    let clock = 0;
+    const timers = {
+      setTimeout: (wake: () => void, ms: number) => {
+        clock += ms;
+        return setImmediate(wake);
+      },
+      Date: { now: () => clock },
+    };
+    // The live-cluster scenario the gate's probe also had to be fixed for: 8787 serves, 8788 is
+    // reachable-but-unserved, no policy anywhere. A refusal proves the packet arrived, so it must
+    // never settle the wait or read as blocked — the preflight has to fail exactly as the gate does.
+    const { output, attempts } = await runCanaryScript(
+      (address) => (address === "10.96.0.50:8787" ? "connect" : address === "10.96.0.50:8788" ? "error" : "timeout"),
+      timers,
+    );
+    expect(output.wardbyCanary.proxyDeny).toBe(true);
+    expect(output.wardbyCanary.proxy).toBe(true);
+    // It never settles on a refusal: the full 20 s window is spent, then the real probe.
+    expect(attempts.get("10.96.0.50:8788")).toBe(41);
   });
 });

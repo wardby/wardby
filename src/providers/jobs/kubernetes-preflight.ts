@@ -58,8 +58,17 @@ const CANARY_KEYS = Object.keys(EXPECTED).sort();
  * proxy pod on a port no run policy permits, which a namespace-wide allow-all policy would reopen.
  * Probing one destination on two ports is what makes the result decisive: `proxy` true with
  * `proxyDeny` false can only mean a policy is enforced and port-scoped.
+ *
+ * `proxyDeny` is false for exactly one socket outcome: a **timeout**, i.e. the packet was dropped.
+ * A refusal (RST) is not a denial — it proves the SYN reached the destination host, so the deny
+ * port is merely unserved — and a connect obviously is not either. This mirrors the launch gate's
+ * probe (`enforcementProbeScript`), which had to make the same distinction after a live cluster
+ * with no NetworkPolicy at all passed a boolean version of this check; preflight and gate must
+ * agree on what counts as evidence, or one of them is vacuous. `internet`, `metadata` and `proxy`
+ * stay plain reachability, where "connected" is the only thing that matters.
+ *
  * CNIs program a new pod's policy a few seconds after it starts, so the script first waits (up to
- * 20 s) for the deny-port connect to be blocked; if it never is, `proxyDeny` reports true.
+ * 20 s) for the deny-port connect to be *dropped*; if it never is, `proxyDeny` reports true.
  */
 export const CANARY_SCRIPT = [
   'const net = require("node:net");',
@@ -69,18 +78,22 @@ export const CANARY_SCRIPT = [
   "    const socket = net.connect({ host, port, timeout: 3000 });",
   '    socket.once("connect", () => {',
   "      socket.destroy();",
-  "      done(true);",
+  '      done("connect");',
   "    });",
   '    socket.once("timeout", () => {',
   "      socket.destroy();",
-  "      done(false);",
+  '      done("timeout");',
   "    });",
-  '    socket.once("error", () => done(false));',
+  '    socket.once("error", () => done("error"));',
   "  });",
+  "// Plain reachability, for the probes where only a completed connection matters.",
+  'const reachable = async (host, port) => (await tcp(host, port)) === "connect";',
+  "// Only a dropped packet is a policy denial: a refusal proves the SYN reached the host.",
+  'const dropped = async (host, port) => (await tcp(host, port)) === "timeout";',
   "const settle = async () => {",
   "  const until = Date.now() + 20000;",
   "  while (Date.now() < until) {",
-  `    if (!(await tcp(process.env.WARDBY_CANARY_PROXY_IP, ${CODING_PROXY_DENY_PORT}))) return;`,
+  `    if (await dropped(process.env.WARDBY_CANARY_PROXY_IP, ${CODING_PROXY_DENY_PORT})) return;`,
   "    await new Promise((wake) => setTimeout(wake, 500));",
   "  }",
   "};",
@@ -91,10 +104,10 @@ export const CANARY_SCRIPT = [
   "      () => true,",
   "      () => false,",
   "    ),",
-  `    proxyDeny: await tcp(process.env.WARDBY_CANARY_PROXY_IP, ${CODING_PROXY_DENY_PORT}),`,
-  '    internet: await tcp("1.1.1.1", 443),',
-  '    metadata: await tcp("169.254.169.254", 80),',
-  `    proxy: await tcp(process.env.WARDBY_CANARY_PROXY_IP, ${CODING_PROXY_PORT}),`,
+  `    proxyDeny: !(await dropped(process.env.WARDBY_CANARY_PROXY_IP, ${CODING_PROXY_DENY_PORT})),`,
+  '    internet: await reachable("1.1.1.1", 443),',
+  '    metadata: await reachable("169.254.169.254", 80),',
+  `    proxy: await reachable(process.env.WARDBY_CANARY_PROXY_IP, ${CODING_PROXY_PORT}),`,
   "  };",
   "  console.log(JSON.stringify({ wardbyCanary }));",
   "})();",

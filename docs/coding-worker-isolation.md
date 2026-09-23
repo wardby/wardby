@@ -444,19 +444,43 @@ proxy's own policy deliberately **allows** ingress on 8788 from run pods:
 ingress is enforced at the destination, so denying it there would make a run
 pod whose own egress policy was not yet programmed read as "blocked".
 
+**"Blocked" means a timeout specifically, not "did not connect".** Pairing the
+two ports only rules out "the whole proxy pod is dead"; it does not rule out
+the deny _listener_ being unserved while the pod is otherwise healthy. This was
+reproduced on a live cluster: in a namespace with no NetworkPolicy at all,
+against a pod listening on 8787 and serving nothing on 8788, a probe that
+treated any failed connect as "blocked" exited **proven** while it had full
+internet egress. No control-plane read closes this — an Endpoints subset port is
+the Service's numeric `targetPort`, not evidence that anything is bound — so the
+probe distinguishes the two socket outcomes itself: a **timeout** means the
+packet was dropped (a policy), while a **refusal** (RST / `ECONNREFUSED`) proves
+the SYN reached the destination host, on every dataplane, since a drop cannot
+produce an RST. A refused deny port is therefore reachable-but-unserved and is
+reported as `kubernetes_policy_witness_unserved`, never as proven.
+
+The intended consequence: on a **reject-style** CNI a genuine policy denial also
+arrives as an RST, so such a cluster now fails closed here rather than passing
+vacuously. That is the correct direction — a witness that cannot tell "denied"
+from "unserved" is not a witness — and such a cluster needs a different one.
+
 It requires **3 consecutive proven results, 500ms apart** (anything else
 resets the streak — this guards against a single dropped SYN packet on an
 allowed path being misread as "policy enforced"), bounded by
 `enforcementTimeoutMs` (default 30,000ms — configurable via
 `KubernetesJobLauncherOptions.enforcementTimeoutMs`; a drop-style CNI can
-need close to this whole window). Failing to reach a proven streak in time is
-`kubernetes_policy_not_enforced` — except when the _last_ probe could not
-reach 8787 at all, which proves nothing about any policy and is reported
-separately as `kubernetes_policy_witness_unavailable` (look at the proxy, not
-at the CNI). The verdict comes from the last probe, not from whether any probe
-was ever unavailable, so an early blip while the pod's networking came up does
-not misdirect the operator. This wait happens inside the pod's overall
-ready-timeout window, not on top of it.
+need close to this whole window). The verdict at the bound comes from the
+_last_ probe — not from whether any probe was ever unavailable, so an early
+blip while the pod's networking came up does not misdirect the operator — and
+the three non-proven outcomes stay distinct, because each sends an operator
+somewhere different:
+
+| Last probe                                 | Verdict                                 | Where to look                            |
+| ------------------------------------------ | --------------------------------------- | ---------------------------------------- |
+| 8788 connected                             | `kubernetes_policy_not_enforced`        | the CNI: no policy, or not port-scoped   |
+| 8787 unreachable                           | `kubernetes_policy_witness_unavailable` | the proxy pod / its Service              |
+| 8788 refused                               | `kubernetes_policy_witness_unserved`    | the deny listener, or a reject-style CNI |
+| This wait happens inside the pod's overall |
+| ready-timeout window, not on top of it.    |
 
 `wardby coding preflight`'s canary pod waits the same way before running its
 probes, for the same reason.
@@ -652,6 +676,7 @@ not implemented yet.
 | `kubernetes_isolation_unsupported`                                           | (No suffix) Attestation failure: the read-back pod or NetworkPolicy didn't canonically match the builder's output.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `kubernetes_policy_not_enforced`                                             | The run's NetworkPolicy wasn't observed enforced (8787 reachable, 8788 blocked) within `enforcementTimeoutMs`; the worker gate was never opened.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `kubernetes_policy_witness_unavailable`                                      | The last enforcement probe could not reach the proxy on 8787 at all, so nothing could be witnessed — the proxy or its Service is the thing to check, not the CNI. The worker gate was never opened.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `kubernetes_policy_witness_unserved`                                         | The last enforcement probe was **refused** (RST) on 8788 rather than dropped. The packet reached the host, so nothing is blocking the path and the witness proves nothing — the deny listener is not serving, or the CNI rejects instead of dropping. Fails closed; the worker gate was never opened.                                                                                                                                                                                                                                                                                                                                                                                        |
 | `kubernetes_proxy_witness_unusable: <reason>`                                | The proxy Service is not a usable enforcement witness (missing, no ClusterIP, a required port not exposed as TCP, or no ready endpoint serving both 8787 and 8788). Seen **unwrapped** like this from `provision`'s per-launch re-read, which runs after an earlier witness check already passed -- a supplied `preflight`, or this launcher's own memoized read, the likelier production sighting being a proxy that degrades after that read succeeded; the launcher's own memoized read reports the same condition wrapped as `kubernetes_isolation_unsupported` (with this string on `cause`), and the preflight reports it as `:proxy-service`. Fails closed before the pod is created. |
 | `kubernetes_pod_start_timeout`                                               | The keeper didn't become ready within `readyTimeoutMs` (default 120s). Historically caused by the subPath root-ownership issue the `storage-init` init container now fixes; if seen again, check init-container status first.                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `kubernetes_pod_start_failed`                                                | The pod (or its `storage-init` init container) failed outright rather than timing out.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |

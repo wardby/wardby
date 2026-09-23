@@ -946,6 +946,32 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
     expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
   });
 
+  it("refuses to open the gate when the deny port is refused rather than dropped", async () => {
+    const h = await harness();
+    const { launcher } = clockedLauncher(h);
+    const original = h.api.onExec;
+    h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? 5 : original(call));
+    // The reviewer's live-cluster scenario end to end: 8787 connects, 8788 answers with an RST,
+    // and no policy exists anywhere. An RST proves the packet arrived, so this must never count.
+    await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_policy_witness_unserved");
+    expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
+    expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+  });
+
+  it("keeps the three verdicts distinct: unserved is neither not_enforced nor witness_unavailable", async () => {
+    for (const [exitCode, verdict] of [
+      [3, "kubernetes_policy_not_enforced"],
+      [4, "kubernetes_policy_witness_unavailable"],
+      [5, "kubernetes_policy_witness_unserved"],
+    ] as const) {
+      const h = await harness(`run-verdict-${exitCode}`);
+      const { launcher } = clockedLauncher(h);
+      const original = h.api.onExec;
+      h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? exitCode : original(call));
+      await expect(launcher.launch(h.spec)).rejects.toThrow(verdict);
+    }
+  });
+
   it("still reports not_enforced when the last probe found the deny port reachable", async () => {
     const h = await harness();
     const { launcher } = clockedLauncher(h);

@@ -55,6 +55,11 @@ export const ENFORCEMENT_PROBE_PROVEN = 0;
 export const ENFORCEMENT_PROBE_DENY_REACHABLE = 3;
 /** The proxy port itself was unreachable: nothing could be witnessed (proxy down, or only the namespace default-deny is programmed). */
 export const ENFORCEMENT_PROBE_PROXY_UNREACHABLE = 4;
+/**
+ * The deny port answered with an RST: the SYN reached the destination host, so nothing is
+ * blocking the path — the port is reachable-but-unserved and witnesses nothing.
+ */
+export const ENFORCEMENT_PROBE_DENY_REFUSED = 5;
 const WORKER_SERVICE_ACCOUNT = "wardby-coding-worker";
 const RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/;
 
@@ -602,7 +607,28 @@ export function assertRunNetworkPolicyMatches(actual: V1NetworkPolicy, expected:
  * connect in the *same* probe turns "something is listening" from a control-plane
  * inference into a fact this pod just observed.
  *
- * Exit codes are ENFORCEMENT_PROBE_PROVEN / _DENY_REACHABLE / _PROXY_UNREACHABLE.
+ * That pairing alone is still not enough, and this was reproduced on a live
+ * cluster: in a namespace with NO NetworkPolicy at all, against a pod listening
+ * on 8787 and serving nothing on 8788, a probe that collapsed `error` and
+ * `timeout` into one "not reachable" exited PROVEN while it had full internet
+ * egress. The pairing only rules out "the whole proxy pod is dead"; whenever the
+ * deny *listener specifically* is unserved, "blocked" and "nothing there" are
+ * the same observation. No control-plane read fixes this — Endpoints subset
+ * ports come from the Service's numeric targetPort, not from anything actually
+ * binding — so the distinction has to be made in the dataplane, here:
+ *
+ * - deny port **times out** → the packet was dropped → the only outcome that proves a policy.
+ * - deny port **refused** (RST / ECONNREFUSED) → the SYN reached the destination host, so
+ *   nothing blocked the path. This holds on every dataplane, drop-based ones included, because
+ *   a drop cannot produce an RST. Reported as ENFORCEMENT_PROBE_DENY_REFUSED, never as proven.
+ * - proxy port must still CONNECT for anything to count at all.
+ *
+ * Consequence, intended: on a **reject-style** CNI a genuine policy denial also arrives as an
+ * RST, so such a cluster now fails closed here rather than passing vacuously. Failing closed on
+ * a cluster whose refusals are ambiguous is the correct direction — a witness that cannot tell
+ * "denied" from "unserved" is not a witness — and such a cluster needs a different one.
+ *
+ * Exit codes are ENFORCEMENT_PROBE_PROVEN / _DENY_REACHABLE / _PROXY_UNREACHABLE / _DENY_REFUSED.
  * The IP is validated and embedded as a JSON string literal.
  */
 export function enforcementProbeScript(proxyIp: string): string {
@@ -612,15 +638,17 @@ export function enforcementProbeScript(proxyIp: string): string {
     "const tcp = (port) =>",
     "  new Promise((done) => {",
     "    const socket = net.connect({ host: " + JSON.stringify(proxyIp) + ", port, timeout: 3000 });",
-    '    socket.once("connect", () => { socket.destroy(); done(true); });',
-    '    socket.once("timeout", () => { socket.destroy(); done(false); });',
-    '    socket.once("error", () => done(false));',
+    '    socket.once("connect", () => { socket.destroy(); done("connect"); });',
+    '    socket.once("timeout", () => { socket.destroy(); done("timeout"); });',
+    '    socket.once("error", () => done("error"));',
     "  });",
     "(async () => {",
     `  const allowed = await tcp(${CODING_PROXY_PORT});`,
     `  const denied = await tcp(${CODING_PROXY_DENY_PORT});`,
-    `  if (!allowed) process.exit(${ENFORCEMENT_PROBE_PROXY_UNREACHABLE});`,
-    `  process.exit(denied ? ${ENFORCEMENT_PROBE_DENY_REACHABLE} : ${ENFORCEMENT_PROBE_PROVEN});`,
+    `  if (allowed !== "connect") process.exit(${ENFORCEMENT_PROBE_PROXY_UNREACHABLE});`,
+    `  if (denied === "connect") process.exit(${ENFORCEMENT_PROBE_DENY_REACHABLE});`,
+    `  if (denied === "error") process.exit(${ENFORCEMENT_PROBE_DENY_REFUSED});`,
+    `  process.exit(${ENFORCEMENT_PROBE_PROVEN});`,
     "})();",
   ].join("\n");
 }

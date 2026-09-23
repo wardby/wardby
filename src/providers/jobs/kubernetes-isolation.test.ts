@@ -716,4 +716,37 @@ describe("enforcementProbeScript", () => {
     expect(await runProbe(script, { 8787: "timeout", 8788: "timeout" })).toBe(4);
     expect(await runProbe(script, { 8787: "error", 8788: "timeout" })).toBe(4);
   });
+
+  it("never reads a refused deny port as blocked: an RST proves the packet arrived", async () => {
+    const script = enforcementProbeScript("10.96.0.50");
+    // Reproduced on a live cluster: a pod listening on 8787, nothing serving 8788, and NO
+    // NetworkPolicy anywhere. Collapsing "error" and "timeout" into one false made that exit 0
+    // while the prober had full internet egress. A prompt RST proves the SYN reached the
+    // destination host, on every dataplane — so only the timeout is evidence of a policy.
+    expect(await runProbe(script, { 8787: "connect", 8788: "error" })).toBe(5);
+    // Whatever 8788 did, an unreachable 8787 still outranks it: nothing can be witnessed at all.
+    expect(await runProbe(script, { 8787: "error", 8788: "error" })).toBe(4);
+    expect(await runProbe(script, { 8787: "timeout", 8788: "error" })).toBe(4);
+  });
+
+  // The complete 3x3 contract, so no socket-outcome pair is left to inference.
+  it.each([
+    ["connect", "timeout", 0, "proven: the only pair a programmed, port-scoped policy produces"],
+    ["connect", "connect", 3, "deny port reachable: no policy, or not port-scoped"],
+    ["connect", "error", 5, "deny port refused: the packet arrived, so nothing is blocking it"],
+    ["timeout", "timeout", 4, "proxy unreachable"],
+    ["timeout", "connect", 4, "proxy unreachable outranks a reachable deny port"],
+    ["timeout", "error", 4, "proxy unreachable outranks a refused deny port"],
+    ["error", "timeout", 4, "proxy refused"],
+    ["error", "connect", 4, "proxy refused outranks a reachable deny port"],
+    ["error", "error", 4, "proxy refused outranks a refused deny port"],
+  ])("8787 %s + 8788 %s exits %i (%s)", async (proxy, deny, code) => {
+    const script = enforcementProbeScript("10.96.0.50");
+    expect(
+      await runProbe(script, {
+        8787: proxy as "connect" | "timeout" | "error",
+        8788: deny as "connect" | "timeout" | "error",
+      }),
+    ).toBe(code);
+  });
 });
