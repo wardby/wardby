@@ -26,6 +26,7 @@ import {
   isRepositoryDigest,
 } from "./docker-isolation.js";
 import {
+  GVISOR_RUNTIME_CLASS,
   KubernetesPlatformError,
   STORAGE_INIT_EPHEMERAL_MIB,
   WORKER_EPHEMERAL_MIB,
@@ -182,6 +183,15 @@ export interface RunPodOptions {
 export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
   validateKubernetesSpec(spec);
   const profile = platformProfile(options.platform ?? "generic");
+  // Symmetric with the ceiling check below: the builder is the one place that actually emits the
+  // pod, so a platform that requires gVisor must refuse to build one without it here too, not rely
+  // solely on composition/preflight having already checked. Otherwise buildRunPod(spec, { platform:
+  // "gke-autopilot" }) with no runtimeClassName would silently emit runtimeClassName: undefined.
+  if (profile.requiresGvisor && options.runtimeClassName !== GVISOR_RUNTIME_CLASS) {
+    throw new KubernetesPlatformError(
+      `platform ${profile.name} requires runtimeClassName=${GVISOR_RUNTIME_CLASS} (found ${options.runtimeClassName ?? "unset"})`,
+    );
+  }
   // conformResources range-checks one container at a time; only this function sees every container,
   // so the SUMMED pod total is checked here — before submission, so an over-large workspace fails
   // closed rather than being rewritten by the platform (which attestation would then reject anyway).

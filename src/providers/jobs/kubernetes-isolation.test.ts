@@ -276,6 +276,15 @@ describe("buildRunPod under the gke-autopilot platform", () => {
     });
   });
 
+  it("refuses to build a pod on gke-autopilot without runtimeClassName=gvisor", () => {
+    expect(() => buildRunPod(spec, { ...options, platform: "gke-autopilot" })).toThrow(
+      "kubernetes_platform_unconformable: platform gke-autopilot requires runtimeClassName=gvisor (found unset)",
+    );
+    expect(() => buildRunPod(spec, { ...options, platform: "gke-autopilot", runtimeClassName: "other" })).toThrow(
+      "kubernetes_platform_unconformable: platform gke-autopilot requires runtimeClassName=gvisor (found other)",
+    );
+  });
+
   it("refuses a workspace that cannot fit the 10 GiB pod ephemeral-storage ceiling", () => {
     const big: JobSpec = { ...spec, limits: { ...spec.limits, diskMb: 16_384 } };
     expect(() => buildRunPod(big, autopilotOptions)).toThrow(
@@ -287,6 +296,11 @@ describe("buildRunPod under the gke-autopilot platform", () => {
   it("builds the same pod under generic regardless of the ceiling", () => {
     const big: JobSpec = { ...spec, limits: { ...spec.limits, diskMb: 16_384 } };
     expect(() => buildRunPod(big, options)).not.toThrow();
+  });
+
+  it("does not require gvisor under generic", () => {
+    expect(() => buildRunPod(spec, { ...options, platform: "generic" })).not.toThrow();
+    expect(buildRunPod(spec, { ...options, platform: "generic" }).spec!.runtimeClassName).toBeUndefined();
   });
 
   // The ceiling guard trusts podEphemeralStorageMib to predict what the pod will actually

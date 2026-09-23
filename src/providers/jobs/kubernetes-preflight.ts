@@ -18,7 +18,7 @@ import {
   buildRunPod,
   isRegistryDigest,
 } from "./kubernetes-isolation.js";
-import { assertPlatformConfig, platformProfile } from "./kubernetes-platform.js";
+import { KubernetesPlatformError, assertPlatformConfig, platformProfile } from "./kubernetes-platform.js";
 import { readProxyWitness } from "./kubernetes-witness.js";
 import type { JobSpec } from "./types.js";
 
@@ -366,6 +366,11 @@ export async function runKubernetesPreflight(options: KubernetesPreflightOptions
 function shortMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const firstLine = message.split("\n", 1)[0].trim();
+  // A KubernetesPlatformError is single-line by construction and never carries canary output (it is
+  // thrown from pure configuration checks before any cluster call), so the 200-char cap that exists
+  // to keep arbitrary API-error text and canary noise out of an operator-facing line does not need to
+  // apply here — and truncating it cuts the remediation clause an operator needs most.
+  if (error instanceof KubernetesPlatformError) return firstLine || "unknown error";
   return firstLine.length > 200 ? `${firstLine.slice(0, 200)}…` : firstLine || "unknown error";
 }
 

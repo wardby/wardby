@@ -86,9 +86,18 @@ describe("kubernetesPreflight", () => {
   it("refuses an autopilot configuration without gvisor, before touching the cluster", async () => {
     const api = cluster(ok);
     const reads: string[] = [];
+    // Records BOTH the check after "platform" in the list (proxy-service, via readService) and the
+    // check right before it would run if platform ran second (namespace, via readNamespace) — so this
+    // test proves platform runs first, not merely that it runs before whichever check happens to be
+    // wired to touch the cluster first.
     api.readService = async () => {
       reads.push("service");
       return undefined;
+    };
+    const readNamespace = api.readNamespace.bind(api);
+    api.readNamespace = async (name) => {
+      reads.push("namespace");
+      return readNamespace(name);
     };
     await expect(
       kubernetesPreflight({
@@ -111,18 +120,29 @@ describe("kubernetesPreflight", () => {
       sleep: async () => {},
     }).catch((e: unknown) => e);
     expect(describePreflightFailure(error)).toContain("over the 10240 MiB (10 GiB) ceiling");
+    // Not just the ceiling clause: the remediation that follows it (what the operator should actually
+    // do) must survive too, not be cut off by describePreflightFailure's general 200-char cause cap.
+    expect(describePreflightFailure(error)).toContain(
+      "the worker container reserves 1024 MiB of that, so the largest workspace this platform can run is 9216 MiB",
+    );
   });
 
-  it("reports platform first among the passing checks", async () => {
-    expect(
-      await kubernetesPreflight({
-        api: cluster(ok),
-        config,
+  it("passes the platform check silently before a later check fails, proving it truly runs first", async () => {
+    // A distinct proof from "passes every check on an enforcing cluster...": that test only shows
+    // platform is first among ALL-PASSING checks. This shows platform is evaluated and passed even
+    // on a run whose LATER check fails — a correctly-configured gke-autopilot deployment with a
+    // missing namespace fails with :namespace, never :platform, so platform cannot be silently
+    // skipped or reordered behind namespace without this test catching it.
+    const noNs = cluster(ok);
+    noNs.namespaces.clear();
+    await expect(
+      kubernetesPreflight({
+        api: noNs,
+        config: { ...config, platform: "gke-autopilot", runtimeClassName: "gvisor" },
         workerImage: IMAGE,
         maxDiskMb: 2048,
-        sleep: async () => {},
       }),
-    ).toEqual(["platform", "namespace", "proxy-service", "worker-image", "canary"]);
+    ).rejects.toThrow("kubernetes_isolation_unsupported:namespace");
   });
 
   it.each([
