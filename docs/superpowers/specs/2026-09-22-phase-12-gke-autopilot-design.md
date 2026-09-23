@@ -78,7 +78,10 @@ and nothing tells the operator.
 Where a request cannot be made to conform, the launch fails with a named error
 rather than being quietly adjusted. Requesting a 16 GiB workspace on Autopilot is
 the motivating case: Google rejects any pod over 10 GiB of ephemeral storage, so
-wardby refuses it itself, with a message naming the cap.
+wardby refuses it itself, with a message naming the cap. The workspace's share of
+that 10 GiB is smaller than the whole, because the pod's other containers reserve
+some of the same budget -- the implementation derives the exact ceiling from what
+it reserves rather than restating 10 GiB here.
 
 **Write the remainder down.** Whatever Autopilot still adds — labels, annotations,
 and any field its admission controller stamps on — is captured in a named platform
@@ -124,7 +127,8 @@ automatic seccomp profile, so the profile records how the field comes back.
 
 Under `gke-autopilot`, the preflight additionally refuses when:
 
-- `CODING_MAX_DISK_MB` exceeds the 10 GiB ephemeral-storage ceiling
+- `CODING_MAX_DISK_MB` exceeds the workspace's share of Autopilot's 10 GiB
+  ephemeral-storage ceiling, after the pod's other reservations
 - the configured runtime class is not `gvisor`
 - the proxy Service does not expose the deny port, or has no ready endpoint
 
