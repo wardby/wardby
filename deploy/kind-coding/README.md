@@ -96,27 +96,38 @@ npm run cli -- coding preflight
 Expected output:
 
 ```
-coding preflight passed (namespace, proxy-service, worker-image, canary) for localhost:5001/wardby-coding-worker@sha256:...
+coding preflight passed (platform, namespace, proxy-service, worker-image, canary) for localhost:5001/wardby-coding-worker@sha256:...
 ```
+
+The proxy exposes a second port, **8788 — the deny port**. Nothing is served
+there: it exists so that a coding-run pod which can reach the proxy on 8787 but
+not on 8788 has proven its own NetworkPolicy is programmed _and_ port-scoped.
+The proxy's policy deliberately allows ingress on 8788 from coding-run pods, so
+the run pod's own egress policy is the only thing that can block it. This tree's
+`manifests/` are cluster-agnostic; `manifests/overlays/` now holds more than the
+`kind` target (see `overlays/gke-autopilot/`), and renaming the directory is a
+follow-up.
 
 ## What the preflight proves — and what to do if it fails
 
 `wardby coding preflight` (`src/providers/jobs/kubernetes-preflight.ts`) runs
-four checks in order: the namespace exists, the proxy Service is a usable
-enforcement witness (it exists, has a ClusterIP, exposes both the proxy port
-`8787` and the deny port `8788`, and has a ready endpoint serving both), the
-worker image is a registry digest, and — the check that matters most — a
-**canary** pod built from the same pod spec and `NetworkPolicy` a real coding
-run gets. The canary proves that from inside that policy: DNS resolution is
-blocked, a TCP connect to the proxy's deny port is blocked, the internet is
-blocked, the cloud metadata address is blocked, and the coding proxy _is_
-reachable on `8787`. Reaching `8787` while `8788` is blocked is what makes the
-result decisive: a policy denial drops rather than rejects, so "8788 did not
-answer" alone would also be what a dead proxy looks like. If even one of those
-five conditions doesn't hold, the whole
-point of running coding agents in Kubernetes — that a compromised or
-malicious agent can't exfiltrate data or reach the metadata server — doesn't
-hold either.
+five checks in order: the platform configuration can actually run (the
+configured `runtimeClassName` and `CODING_MAX_DISK_MB` satisfy the target
+platform's requirements — refused before a single cluster call), the
+namespace exists, the proxy Service is a usable enforcement witness (it
+exists, has a ClusterIP, exposes both the proxy port `8787` and the deny port
+`8788`, and has a ready endpoint serving both), the worker image is a
+registry digest, and — the check that matters most — a **canary** pod built
+from the same pod spec and `NetworkPolicy` a real coding run gets. The canary
+proves that from inside that policy: DNS resolution is blocked, a TCP connect
+to the proxy's deny port is blocked, the internet is blocked, the cloud
+metadata address is blocked, and the coding proxy _is_ reachable on `8787`.
+Reaching `8787` while `8788` is blocked is what makes the result decisive: a
+policy denial drops rather than rejects, so "8788 did not answer" alone would
+also be what a dead proxy looks like. If even one of those five conditions
+doesn't hold, the whole point of running coding agents in Kubernetes — that a
+compromised or malicious agent can't exfiltrate data or reach the metadata
+server — doesn't hold either.
 
 A failure reports `kubernetes_isolation_unsupported:canary` (any of the five
 probes came back wrong) or `kubernetes_isolation_unsupported:timeout` (the
@@ -175,7 +186,7 @@ Two roles ship in `manifests/base/` with **no binding**:
 - `launcher-namespace-reader.yaml`'s **ClusterRole**
   `wardby-coding-namespace-reader`, scoped to `get` on the single named
   Namespace `wardby-coding`. This has to be a ClusterRole, not a Role: the
-  preflight's first check (`readNamespace` in
+  preflight's first check against the cluster (`readNamespace` in
   `src/providers/jobs/kubernetes-preflight.ts`) is a `get` on the
   cluster-scoped `namespaces` resource, which no namespaced Role can ever
   grant.

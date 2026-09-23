@@ -21,16 +21,24 @@ the design and its post-implementation corrections are in
 `wardby coding preflight` passes all five checks against this cluster:
 
 ```
-coding preflight passed (namespace, proxy-service, cluster-dns, worker-image, canary)
+coding preflight passed (platform, namespace, proxy-service, worker-image, canary)
   for localhost:5001/wardby-coding-worker@sha256:f2d92d0f3871…
 ```
 
-The canary is a real run-shaped pod under the run NetworkPolicy. It proves the
-cluster blocks DNS, the internet, the cloud metadata endpoint and the cluster's
-own DNS service, and reaches only the proxy. It waits for policy enforcement
-before probing, because a CNI programs a new pod's rules seconds after the pod
-starts — without that wait the canary raced the CNI and passed on an unpoliced
-pod. The launcher performs the same wait before releasing any worker.
+`platform` refuses an unrunnable configuration (a `runtimeClassName`/
+`CODING_MAX_DISK_MB` the target platform can't satisfy) before any cluster
+call. `proxy-service` reads the coding proxy's own Service and Endpoints as
+the enforcement witness: it must expose both the proxy port `8787` and the
+deny port `8788`, with a ready endpoint serving both. The canary is a real
+run-shaped pod under the run NetworkPolicy; it proves the cluster blocks DNS,
+the internet, the cloud metadata endpoint, and **the proxy's own deny port**,
+while reaching the proxy itself — the witness moved off the cluster's DNS
+service and onto the coding proxy's own second port, since 8787-reachable +
+8788-blocked on the same pod is something only a programmed, port-scoped
+NetworkPolicy can produce. It waits for policy enforcement before probing,
+because a CNI programs a new pod's rules seconds after the pod starts —
+without that wait the canary raced the CNI and passed on an unpoliced pod.
+The launcher performs the same wait before releasing any worker.
 
 **What the canary does not prove.** It is a _reduced_ pod: `runCanary` builds it
 with `buildRunPod` and then drops the `keeper` container and replaces the
@@ -48,12 +56,16 @@ conformance.
 ## Integration suite
 
 `npm run test:kubernetes` (gated on `WARDBY_KUBERNETES_TEST=1` plus a context
-and a digest-pinned image; skipped by `npm test`) runs three tests against the
-live cluster in ~66 s, repeatedly, leaving no `wardby-run-*` objects behind. It
-proves an attested, isolated pod; a safe diagnostic from a failing worker;
-`stop`; and refusal of a conflicting relaunch. It asserts the enforcement gate
-ran, and that the pod cannot reach the cluster DNS pod or the API server while
-it can reach the proxy.
+and a digest-pinned image; skipped by `npm test`) runs four tests against the
+live cluster in ~66 s, repeatedly, leaving no `wardby-run-*` objects behind.
+It proves an
+attested, isolated pod; a safe diagnostic from a failing worker; `stop`;
+refusal of a conflicting relaunch; and that the real API server's dry-run
+create and version read both work as `ClientNodeKubernetesApi` expects. It
+asserts the enforcement gate ran, and that the pod cannot reach the API
+server's ClusterIP or the coding proxy's deny port — by the proxy's Service
+ClusterIP and by the proxy pod's own IP — while it can reach the proxy on
+`8787`, by pod IP and by its Service DNS name.
 
 ## Live smoke runs
 
@@ -109,7 +121,12 @@ tests. They are recorded because "the tests passed" would have been misleading.
 Carried into the follow-up plan (Plan 2b), which gates Plan 3:
 
 - Per-run record ConfigMaps are kept as tombstones by design and never deleted;
-  failed launches leave records too. Needs garbage collection.
+  failed launches leave records too. Needs garbage collection; this also
+  applies to any managed cluster the launcher is pointed at, including the
+  Autopilot proof below.
+- Plan 2b's remaining items are not a gate on this work: nothing below
+  depends on them, and the launcher's out-of-namespace dependency
+  (kube-system) is removed here rather than deferred.
 - **The one residual way "blocked" is not conclusive.** The witness is now the
   coding proxy's deny port: the gate counts a probe only when 8787 connects and
   8788 does not, and both halves are measured from inside the pod in the same
@@ -131,8 +148,6 @@ Carried into the follow-up plan (Plan 2b), which gates Plan 3:
   port produced a distinguishable _response_, not merely silence — which a
   listener that serves nothing cannot give — so it is recorded here rather than
   patched around.
-- Autopilot's admission mutations will fail deny-by-default attestation until
-  the allowances are written.
 - Spec §9 integration coverage not yet built: the shared launcher contract
   against a real API, OOM / disk-full / wall-clock containment, canary failure
   when a policy is removed, and the tool pod's lack of network.
