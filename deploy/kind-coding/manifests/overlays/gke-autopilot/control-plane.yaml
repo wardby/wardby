@@ -307,11 +307,14 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # The throwaway database.
+    # The database. A CIDR rather than a pod selector because a managed instance
+    # is not in the cluster -- it sits on the VPC, reached over the private
+    # services access peering, so nothing in the namespace can select it.
+    # `wardby-database-cidr` is substituted at apply time like the other target
+    # identity in this file.
     - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: wardby-throwaway-db
+        - ipBlock:
+            cidr: wardby-database-cidr
       ports:
         - protocol: TCP
           port: 5432

@@ -41,6 +41,12 @@ variable "database_version" {
   default     = "POSTGRES_16"
 }
 
+variable "edition" {
+  description = "ENTERPRISE or ENTERPRISE_PLUS. Must be ENTERPRISE for any shared-core tier (db-f1-micro, db-g1-small) -- Cloud SQL defaults new instances to ENTERPRISE_PLUS, which refuses them at create time."
+  type        = string
+  default     = "ENTERPRISE"
+}
+
 variable "tier" {
   description = "Machine type. db-f1-micro is the cheapest Postgres tier and is adequate for a control plane whose write volume is one row per run; db-custom-<cpu>-<mb> for anything real."
   type        = string
