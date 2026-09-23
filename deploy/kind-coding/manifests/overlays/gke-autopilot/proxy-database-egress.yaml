@@ -1,7 +1,15 @@
-# The proxy's database reachability on this target: the in-cluster throwaway
-# database only. No instance, project, or region identity belongs in this
-# tracked file; a real deployment replaces this rule with one naming its own
-# managed database's address.
+# The proxy's database reachability on this target.
+#
+# The proxy needs the database as much as the control plane does: it validates
+# each run's capability token against it and records token usage and cost. A
+# deployment that repoints only the control plane fails at the first coding run,
+# not at deploy time.
+#
+# `wardby-database-cidr` is a placeholder substituted at apply time, like the
+# image digests and the hostname. A managed database's address is target
+# identity and never belongs in a tracked file. It is a CIDR rather than a pod
+# selector because Cloud SQL is not in the cluster: it lives on the VPC, reached
+# over the private services access peering, so no podSelector can name it.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -15,9 +23,8 @@ spec:
     - Egress
   egress:
     - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: wardby-throwaway-db
+        - ipBlock:
+            cidr: wardby-database-cidr
       ports:
         - protocol: TCP
           port: 5432

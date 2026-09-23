@@ -1,0 +1,26 @@
+# Copy to terraform.tfvars and fill in your own values, OR pass these as -var
+# flags / a different .tfvars file -- this module reads variables, it does not
+# assume this exact file exists. terraform.tfvars is gitignored; keep it that way.
+
+project_id = "your-project-id"
+region     = "us-central1"
+
+# MUST be the network your GKE cluster runs on. A cluster's network is fixed at
+# creation and VPC peering is not transitive, so an instance peered into a
+# different VPC is simply unreachable from the cluster -- with no error until a
+# query times out. Check with:
+#
+#   gcloud container clusters describe <cluster> --region <region> \
+#     --format='value(network)'
+#
+network = "default"
+
+# db-f1-micro is the cheapest Postgres tier and is adequate for a control plane
+# that writes a handful of rows per run. Size up with db-custom-<cpu>-<mb>.
+tier              = "db-f1-micro"
+availability_type = "ZONAL"
+disk_size_gb      = 10
+
+# Set false BEFORE you intend to destroy: the value is read from state, so
+# discovering it at destroy time costs an extra apply.
+deletion_protection = true
