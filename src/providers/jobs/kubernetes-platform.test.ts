@@ -59,14 +59,67 @@ describe("conformResources", () => {
   });
 
   it("emits limits equal to requests on every platform", () => {
-    const conformed = conformResources(autopilot, { cpuMillicores: 500, memoryMib: 512, ephemeralStorageMib: 1024 });
-    expect(conformed.limits).toEqual(conformed.requests);
+    for (const profile of [generic, autopilot]) {
+      const conformed = conformResources(profile, { cpuMillicores: 500, memoryMib: 512, ephemeralStorageMib: 1024 });
+      expect(conformed.limits).toEqual(conformed.requests);
+      // Separate objects, so a later caller mutating one cannot silently move the other.
+      expect(conformed.limits).not.toBe(conformed.requests);
+    }
   });
 
   it("refuses an Autopilot container with no ephemeral-storage request", () => {
     expect(() => conformResources(autopilot, { cpuMillicores: 500, memoryMib: 512 })).toThrow(
       KUBERNETES_PLATFORM_ERROR,
     );
+  });
+
+  it("drops a supplied ephemeral-storage request under generic, which never emits one", () => {
+    expect(conformResources(generic, { cpuMillicores: 500, memoryMib: 512, ephemeralStorageMib: 1024 })).toEqual({
+      requests: { cpu: "500m", memory: "512Mi" },
+      limits: { cpu: "500m", memory: "512Mi" },
+    });
+  });
+
+  it.each([
+    ["cpuMillicores", { cpuMillicores: 0, memoryMib: 512, ephemeralStorageMib: 64 }],
+    ["cpuMillicores", { cpuMillicores: -250, memoryMib: 512, ephemeralStorageMib: 64 }],
+    ["cpuMillicores", { cpuMillicores: Number.NaN, memoryMib: 512, ephemeralStorageMib: 64 }],
+    ["cpuMillicores", { cpuMillicores: Number.POSITIVE_INFINITY, memoryMib: 512, ephemeralStorageMib: 64 }],
+    ["memoryMib", { cpuMillicores: 500, memoryMib: 0, ephemeralStorageMib: 64 }],
+    ["memoryMib", { cpuMillicores: 500, memoryMib: -512, ephemeralStorageMib: 64 }],
+    ["memoryMib", { cpuMillicores: 500, memoryMib: Number.NaN, ephemeralStorageMib: 64 }],
+    ["ephemeralStorageMib", { cpuMillicores: 500, memoryMib: 512, ephemeralStorageMib: 0 }],
+    ["ephemeralStorageMib", { cpuMillicores: 500, memoryMib: 512, ephemeralStorageMib: -5 }],
+    ["ephemeralStorageMib", { cpuMillicores: 500, memoryMib: 512, ephemeralStorageMib: Number.NaN }],
+  ])("refuses a %s that is not a finite positive number, on every platform", (field, request) => {
+    for (const profile of [generic, autopilot]) {
+      expect(() => conformResources(profile, request)).toThrow(new RegExp(`${KUBERNETES_PLATFORM_ERROR}.*${field}=`));
+    }
+  });
+
+  it("refuses one container asking for more ephemeral storage than the whole pod may have", () => {
+    expect(() =>
+      conformResources(autopilot, { cpuMillicores: 500, memoryMib: 512, ephemeralStorageMib: 20_480 }),
+    ).toThrow(/20480 MiB, over the 10240 MiB ceiling for the whole pod/);
+    expect(() =>
+      conformResources(autopilot, { cpuMillicores: 500, memoryMib: 512, ephemeralStorageMib: 10_240 }),
+    ).not.toThrow();
+  });
+});
+
+describe("the profiles themselves", () => {
+  it("are frozen, so an allowance list cannot be widened at runtime", () => {
+    for (const profile of [generic, autopilot]) {
+      expect(Object.isFrozen(profile)).toBe(true);
+      expect(Object.isFrozen(profile.resources)).toBe(true);
+      expect(Object.isFrozen(profile.metadata)).toBe(true);
+      expect(Object.isFrozen(profile.metadata.tolerations)).toBe(true);
+      expect(Object.isFrozen(profile.metadata.nodeSelector)).toBe(true);
+      expect(Object.isFrozen(profile.metadata.podLabelKeyPrefixes)).toBe(true);
+      expect(Object.isFrozen(profile.metadata.podAnnotationKeyPrefixes)).toBe(true);
+    }
+    expect(() => (autopilot.metadata.podLabelKeyPrefixes as string[]).push("anything/")).toThrow(TypeError);
+    expect(() => (generic.metadata.podLabelKeyPrefixes as string[]).push("anything/")).toThrow(TypeError);
   });
 });
 
@@ -133,11 +186,29 @@ describe("normalizePlatformMetadata", () => {
 
   it("keeps a toleration whose value differs from the profile's", () => {
     const after = view();
+    // Both the named toleration and a look-alike with a different value, so a
+    // normalizer that did nothing at all would leave two and fail this test.
     after.spec.tolerations = [
+      { key: "sandbox.gke.io/runtime", operator: "Equal", value: "gvisor", effect: "NoSchedule" },
       { key: "sandbox.gke.io/runtime", operator: "Equal", value: "other", effect: "NoSchedule" },
     ];
     normalizePlatformMetadata(autopilot, after);
-    expect(after.spec.tolerations).toHaveLength(1);
+    expect(after.spec.tolerations).toEqual([
+      { key: "sandbox.gke.io/runtime", operator: "Equal", value: "other", effect: "NoSchedule" },
+    ]);
+  });
+
+  it("leaves the caller's own label and annotation objects untouched", () => {
+    // normalizePod hands over the live pod's metadata bags; deleting from them
+    // would edit the real V1Pod on both sides of the comparison.
+    const labels = { "app.kubernetes.io/managed-by": "wardby", "autopilot.gke.io/injected": "yes" };
+    const annotations = { "wardby.io/run-id": "run-1", "autopilot.gke.io/resource-adjustment": "{}" };
+    const normalized = { labels, annotations, spec: { containers: [] } as V1PodSpec };
+    normalizePlatformMetadata(autopilot, normalized);
+    expect(labels).toEqual({ "app.kubernetes.io/managed-by": "wardby", "autopilot.gke.io/injected": "yes" });
+    expect(annotations).toEqual({ "wardby.io/run-id": "run-1", "autopilot.gke.io/resource-adjustment": "{}" });
+    expect(normalized.labels).toEqual({ "app.kubernetes.io/managed-by": "wardby" });
+    expect(normalized.annotations).toEqual({ "wardby.io/run-id": "run-1" });
   });
 
   it("keeps a nodeSelector entry whose value differs from the profile's", () => {
