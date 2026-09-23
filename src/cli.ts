@@ -444,6 +444,7 @@ async function codingOps(args: string[]): Promise<void> {
         api,
         config: kubernetes,
         workerImage: container.workerImage,
+        maxDiskMb: container.maxDiskMb,
         timeoutMs: kubernetes.preflightTimeoutMs,
       });
     } catch (error) {

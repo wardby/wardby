@@ -18,6 +18,7 @@ import {
   buildRunPod,
   isRegistryDigest,
 } from "./kubernetes-isolation.js";
+import { assertPlatformConfig, platformProfile } from "./kubernetes-platform.js";
 import { readProxyWitness } from "./kubernetes-witness.js";
 import type { JobSpec } from "./types.js";
 
@@ -25,6 +26,8 @@ export interface KubernetesPreflightOptions {
   api: KubernetesApi;
   config: KubernetesJobConfig;
   workerImage: string; // registry digest
+  /** The effective CODING_MAX_DISK_MB; the platform check refuses a value the platform cannot run. */
+  maxDiskMb: number;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
   timeoutMs?: number; // default 90_000; bounds the whole preflight
@@ -279,6 +282,16 @@ async function runChecks(
   cleanupTimeoutMs: number,
 ): Promise<string> {
   const { api, config, workerImage } = options;
+
+  // Pure configuration, checked first: a deployment that cannot work is refused before
+  // a single API call, with a message naming the setting and the limit.
+  await runCheck("platform", async () => {
+    assertPlatformConfig(platformProfile(config.platform), {
+      runtimeClassName: config.runtimeClassName,
+      maxDiskMb: options.maxDiskMb,
+    });
+  });
+  passed.push("platform");
 
   await runCheck("namespace", async () => {
     if (!(await api.readNamespace(config.namespace))) throw failure("namespace");

@@ -86,7 +86,7 @@ describe.skipIf(!requested)("KubernetesJobLauncher against a real cluster", () =
       rawCore = kubeConfig.makeApiClient(CoreV1Api);
       rawNetworking = kubeConfig.makeApiClient(NetworkingV1Api);
 
-      const result = await runKubernetesPreflight({ api: rawApi, config, workerImage });
+      const result = await runKubernetesPreflight({ api: rawApi, config, workerImage, maxDiskMb: 2048 });
       cluster = { proxyIp: result.proxyIp };
 
       // The API server's Service ClusterIP (the "default/kubernetes" Service every cluster provides).

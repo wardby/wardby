@@ -77,13 +77,52 @@ function leftovers(api: FakeKubernetesApi): string[] {
 describe("kubernetesPreflight", () => {
   it("passes every check on an enforcing cluster and cleans up the canary", async () => {
     const api = cluster(ok);
-    expect(await kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} })).toEqual([
-      "namespace",
-      "proxy-service",
-      "worker-image",
-      "canary",
-    ]);
+    expect(
+      await kubernetesPreflight({ api, config, workerImage: IMAGE, maxDiskMb: 2048, sleep: async () => {} }),
+    ).toEqual(["platform", "namespace", "proxy-service", "worker-image", "canary"]);
     expect([...api.objects.keys()].filter((k) => k.startsWith("pod/") || k.startsWith("networkpolicy/"))).toEqual([]);
+  });
+
+  it("refuses an autopilot configuration without gvisor, before touching the cluster", async () => {
+    const api = cluster(ok);
+    const reads: string[] = [];
+    api.readService = async () => {
+      reads.push("service");
+      return undefined;
+    };
+    await expect(
+      kubernetesPreflight({
+        api,
+        config: { ...config, platform: "gke-autopilot" },
+        workerImage: IMAGE,
+        maxDiskMb: 2048,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow("kubernetes_isolation_unsupported:platform");
+    expect(reads).toEqual([]);
+  });
+
+  it("refuses a CODING_MAX_DISK_MB over the autopilot ceiling and names the cap", async () => {
+    const error = await kubernetesPreflight({
+      api: cluster(ok),
+      config: { ...config, platform: "gke-autopilot", runtimeClassName: "gvisor" },
+      workerImage: IMAGE,
+      maxDiskMb: 16_384,
+      sleep: async () => {},
+    }).catch((e: unknown) => e);
+    expect(describePreflightFailure(error)).toContain("over the 10240 MiB (10 GiB) ceiling");
+  });
+
+  it("reports platform first among the passing checks", async () => {
+    expect(
+      await kubernetesPreflight({
+        api: cluster(ok),
+        config,
+        workerImage: IMAGE,
+        maxDiskMb: 2048,
+        sleep: async () => {},
+      }),
+    ).toEqual(["platform", "namespace", "proxy-service", "worker-image", "canary"]);
   });
 
   it.each([
@@ -94,29 +133,35 @@ describe("kubernetesPreflight", () => {
     ["proxy unreachable", { ...ok, proxy: false }],
   ])("fails closed when %s", async (_label, result) => {
     await expect(
-      kubernetesPreflight({ api: cluster(result), config, workerImage: IMAGE, sleep: async () => {} }),
+      kubernetesPreflight({ api: cluster(result), config, workerImage: IMAGE, maxDiskMb: 2048, sleep: async () => {} }),
     ).rejects.toThrow("kubernetes_isolation_unsupported:canary");
   });
 
   it("fails when the canary prints nothing", async () => {
     await expect(
-      kubernetesPreflight({ api: cluster("no-output"), config, workerImage: IMAGE, sleep: async () => {} }),
+      kubernetesPreflight({
+        api: cluster("no-output"),
+        config,
+        workerImage: IMAGE,
+        maxDiskMb: 2048,
+        sleep: async () => {},
+      }),
     ).rejects.toThrow("kubernetes_isolation_unsupported:canary");
   });
 
   it("fails on a missing namespace, a missing proxy Service, or a local image ID", async () => {
     const noNs = cluster(ok);
     noNs.namespaces.clear();
-    await expect(kubernetesPreflight({ api: noNs, config, workerImage: IMAGE })).rejects.toThrow(
+    await expect(kubernetesPreflight({ api: noNs, config, workerImage: IMAGE, maxDiskMb: 2048 })).rejects.toThrow(
       "kubernetes_isolation_unsupported:namespace",
     );
     const noProxy = cluster(ok);
     noProxy.objects.delete("service/wardby-coding/wardby-coding-proxy");
-    await expect(kubernetesPreflight({ api: noProxy, config, workerImage: IMAGE })).rejects.toThrow(
+    await expect(kubernetesPreflight({ api: noProxy, config, workerImage: IMAGE, maxDiskMb: 2048 })).rejects.toThrow(
       "kubernetes_isolation_unsupported:proxy-service",
     );
     await expect(
-      kubernetesPreflight({ api: cluster(ok), config, workerImage: `sha256:${"b".repeat(64)}` }),
+      kubernetesPreflight({ api: cluster(ok), config, workerImage: `sha256:${"b".repeat(64)}`, maxDiskMb: 2048 }),
     ).rejects.toThrow("kubernetes_isolation_unsupported:worker-image");
   });
 
@@ -124,7 +169,7 @@ describe("kubernetesPreflight", () => {
     for (const clusterIP of ["None", "", "wardby-proxy"]) {
       const api = cluster(ok);
       api.put("service", "wardby-coding", { metadata: { name: "wardby-coding-proxy" }, spec: { clusterIP } });
-      await expect(kubernetesPreflight({ api, config, workerImage: IMAGE })).rejects.toThrow(
+      await expect(kubernetesPreflight({ api, config, workerImage: IMAGE, maxDiskMb: 2048 })).rejects.toThrow(
         "kubernetes_isolation_unsupported:proxy-service",
       );
     }
@@ -140,7 +185,14 @@ describe("kubernetesPreflight", () => {
       policyPresentAtPodCreate = [...api.objects.keys()].some((k) => k.startsWith("networkpolicy/"));
       return create(ns, body);
     };
-    await kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {}, timeoutMs: 30_000 });
+    await kubernetesPreflight({
+      api,
+      config,
+      workerImage: IMAGE,
+      maxDiskMb: 2048,
+      sleep: async () => {},
+      timeoutMs: 30_000,
+    });
     expect(policyPresentAtPodCreate).toBe(true);
     expect(pod!.metadata!.annotations!["wardby.io/run-id"]).toMatch(/^preflight-[0-9a-f]+$/);
     const containers = pod!.spec!.containers;
@@ -165,6 +217,7 @@ describe("kubernetesPreflight", () => {
         api,
         config,
         workerImage: IMAGE,
+        maxDiskMb: 2048,
         now: () => clock,
         sleep: async (ms) => {
           sleeps.push(ms);
@@ -190,18 +243,18 @@ describe("kubernetesPreflight", () => {
       api.put("pod", ns, stored);
       return created;
     };
-    await expect(kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} })).rejects.toThrow(
-      "kubernetes_isolation_unsupported:canary",
-    );
+    await expect(
+      kubernetesPreflight({ api, config, workerImage: IMAGE, maxDiskMb: 2048, sleep: async () => {} }),
+    ).rejects.toThrow("kubernetes_isolation_unsupported:canary");
     expect(leftovers(api)).toEqual([]);
   });
 
   it("fails closed when the canary pod disappears", async () => {
     const api = cluster(ok);
     api.createPod = async (ns, body) => ({ ...body, metadata: { ...body.metadata, namespace: ns } });
-    await expect(kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} })).rejects.toThrow(
-      "kubernetes_isolation_unsupported:canary",
-    );
+    await expect(
+      kubernetesPreflight({ api, config, workerImage: IMAGE, maxDiskMb: 2048, sleep: async () => {} }),
+    ).rejects.toThrow("kubernetes_isolation_unsupported:canary");
     expect(leftovers(api)).toEqual([]);
   });
 
@@ -210,9 +263,9 @@ describe("kubernetesPreflight", () => {
     api.createPod = async () => {
       throw new Error("forbidden");
     };
-    await expect(kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} })).rejects.toThrow(
-      "kubernetes_isolation_unsupported:canary",
-    );
+    await expect(
+      kubernetesPreflight({ api, config, workerImage: IMAGE, maxDiskMb: 2048, sleep: async () => {} }),
+    ).rejects.toThrow("kubernetes_isolation_unsupported:canary");
     expect(leftovers(api)).toEqual([]);
   });
 
@@ -224,9 +277,9 @@ describe("kubernetesPreflight", () => {
       { ...ok, proxyDeny: 0 },
     ]) {
       const api = cluster(result as unknown as CanaryResult);
-      await expect(kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} })).rejects.toThrow(
-        "kubernetes_isolation_unsupported:canary",
-      );
+      await expect(
+        kubernetesPreflight({ api, config, workerImage: IMAGE, maxDiskMb: 2048, sleep: async () => {} }),
+      ).rejects.toThrow("kubernetes_isolation_unsupported:canary");
     }
   });
 
@@ -241,9 +294,13 @@ describe("kubernetesPreflight", () => {
       );
       return created;
     };
-    const error = await kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} }).catch(
-      (e: unknown) => e as Error,
-    );
+    const error = await kubernetesPreflight({
+      api,
+      config,
+      workerImage: IMAGE,
+      maxDiskMb: 2048,
+      sleep: async () => {},
+    }).catch((e: unknown) => e as Error);
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toBe("kubernetes_isolation_unsupported:canary");
     expect(JSON.stringify(error, Object.getOwnPropertyNames(error))).not.toContain("noise");
@@ -255,9 +312,9 @@ describe("kubernetesPreflight", () => {
     api.deleteNetworkPolicy = async () => {
       throw new Error("api down");
     };
-    await expect(kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} })).rejects.toThrow(
-      "kubernetes_isolation_unsupported:canary",
-    );
+    await expect(
+      kubernetesPreflight({ api, config, workerImage: IMAGE, maxDiskMb: 2048, sleep: async () => {} }),
+    ).rejects.toThrow("kubernetes_isolation_unsupported:canary");
     expect(api.deletedPods).toHaveLength(1);
   });
   it("fails proxy-service when the Service does not expose the deny port", async () => {
@@ -266,33 +323,37 @@ describe("kubernetesPreflight", () => {
       metadata: { name: "wardby-coding-proxy" },
       spec: { clusterIP: "10.96.0.50", ports: [{ name: "proxy", port: 8787, protocol: "TCP" }] },
     });
-    await expect(kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} })).rejects.toThrow(
-      "kubernetes_isolation_unsupported:proxy-service",
-    );
+    await expect(
+      kubernetesPreflight({ api, config, workerImage: IMAGE, maxDiskMb: 2048, sleep: async () => {} }),
+    ).rejects.toThrow("kubernetes_isolation_unsupported:proxy-service");
   });
 
   it("names the reason the proxy witness is unusable", async () => {
     const api = cluster(ok);
     api.put("endpoints", "wardby-coding", { metadata: { name: "wardby-coding-proxy" }, subsets: [] });
-    const error = await kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} }).catch(
-      (e: unknown) => e,
-    );
+    const error = await kubernetesPreflight({
+      api,
+      config,
+      workerImage: IMAGE,
+      maxDiskMb: 2048,
+      sleep: async () => {},
+    }).catch((e: unknown) => e);
     expect(describePreflightFailure(error)).toContain("has no ready endpoint address");
   });
 
   it("fails the canary when the deny port is reachable", async () => {
     const api = cluster({ ...ok, proxyDeny: true });
-    await expect(kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {} })).rejects.toThrow(
-      "kubernetes_isolation_unsupported:canary",
-    );
+    await expect(
+      kubernetesPreflight({ api, config, workerImage: IMAGE, maxDiskMb: 2048, sleep: async () => {} }),
+    ).rejects.toThrow("kubernetes_isolation_unsupported:canary");
   });
 
   it("bounds the whole preflight: a hung API call fails with timeout", async () => {
     const api = cluster(ok);
     api.readNamespace = () => new Promise<boolean>(() => {});
-    await expect(kubernetesPreflight({ api, config, workerImage: IMAGE, timeoutMs: 20 })).rejects.toThrow(
-      "kubernetes_isolation_unsupported:timeout",
-    );
+    await expect(
+      kubernetesPreflight({ api, config, workerImage: IMAGE, maxDiskMb: 2048, timeoutMs: 20 }),
+    ).rejects.toThrow("kubernetes_isolation_unsupported:timeout");
     expect(leftovers(api)).toEqual([]);
   });
 
@@ -300,7 +361,7 @@ describe("kubernetesPreflight", () => {
     const api = cluster(ok);
     api.createPod = () => new Promise(() => {});
     await expect(
-      kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {}, timeoutMs: 20 }),
+      kubernetesPreflight({ api, config, workerImage: IMAGE, maxDiskMb: 2048, sleep: async () => {}, timeoutMs: 20 }),
     ).rejects.toThrow("kubernetes_isolation_unsupported:timeout");
     // No pod exists; the deny policy stays until the hung create settles, so a late pod is never unpoliced.
     expect(leftovers(api).filter((k) => k.startsWith("pod/"))).toEqual([]);
@@ -331,7 +392,7 @@ describe("kubernetesPreflight", () => {
       policyDeleted();
     };
     await expect(
-      kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {}, timeoutMs: 20 }),
+      kubernetesPreflight({ api, config, workerImage: IMAGE, maxDiskMb: 2048, sleep: async () => {}, timeoutMs: 20 }),
     ).rejects.toThrow("kubernetes_isolation_unsupported:timeout");
     expect(calls).toEqual([]);
     release();
@@ -354,7 +415,7 @@ describe("kubernetesPreflight", () => {
       calls.push("policy");
       return deletePolicy(ns, name);
     };
-    await kubernetesPreflight({ api: ordered, config, workerImage: IMAGE, sleep: async () => {} });
+    await kubernetesPreflight({ api: ordered, config, workerImage: IMAGE, maxDiskMb: 2048, sleep: async () => {} });
     expect(calls).toEqual(["pod", "policy"]);
 
     const failing = cluster(ok);
@@ -362,7 +423,7 @@ describe("kubernetesPreflight", () => {
       throw new Error("api down");
     };
     await expect(
-      kubernetesPreflight({ api: failing, config, workerImage: IMAGE, sleep: async () => {} }),
+      kubernetesPreflight({ api: failing, config, workerImage: IMAGE, maxDiskMb: 2048, sleep: async () => {} }),
     ).rejects.toThrow("kubernetes_isolation_unsupported:canary");
     expect(leftovers(failing).filter((k) => k.startsWith("networkpolicy/"))).toHaveLength(1);
   });
@@ -371,7 +432,14 @@ describe("kubernetesPreflight", () => {
     const api = cluster(ok);
     api.deletePod = () => new Promise<void>(() => {});
     await expect(
-      kubernetesPreflight({ api, config, workerImage: IMAGE, sleep: async () => {}, cleanupTimeoutMs: 20 }),
+      kubernetesPreflight({
+        api,
+        config,
+        workerImage: IMAGE,
+        maxDiskMb: 2048,
+        sleep: async () => {},
+        cleanupTimeoutMs: 20,
+      }),
     ).rejects.toThrow("kubernetes_isolation_unsupported:canary");
   });
 
@@ -384,6 +452,7 @@ describe("kubernetesPreflight", () => {
         api,
         config,
         workerImage: IMAGE,
+        maxDiskMb: 2048,
         sleep: async () => {},
         timeoutMs: 20,
         cleanupTimeoutMs: 20,
@@ -396,7 +465,9 @@ describe("kubernetesPreflight", () => {
     forbidden.readNamespace = async () => {
       throw new Error("namespaces is forbidden: User cannot get\nsecond line");
     };
-    const apiError = await kubernetesPreflight({ api: forbidden, config, workerImage: IMAGE }).catch((e: unknown) => e);
+    const apiError = await kubernetesPreflight({ api: forbidden, config, workerImage: IMAGE, maxDiskMb: 2048 }).catch(
+      (e: unknown) => e,
+    );
     expect(describePreflightFailure(apiError)).toBe(
       "kubernetes_isolation_unsupported:namespace (namespaces is forbidden: User cannot get)",
     );
@@ -412,6 +483,7 @@ describe("kubernetesPreflight", () => {
       api: leaky,
       config,
       workerImage: IMAGE,
+      maxDiskMb: 2048,
       sleep: async () => {},
     }).catch((e: unknown) => e);
     expect(describePreflightFailure(canaryError)).toBe("kubernetes_isolation_unsupported:canary");
@@ -423,9 +495,15 @@ describe("kubernetesPreflight", () => {
 describe("runKubernetesPreflight", () => {
   it("returns the passed checks and the validated proxy ClusterIP", async () => {
     expect(
-      await runKubernetesPreflight({ api: cluster(ok), config, workerImage: IMAGE, sleep: async () => {} }),
+      await runKubernetesPreflight({
+        api: cluster(ok),
+        config,
+        workerImage: IMAGE,
+        maxDiskMb: 2048,
+        sleep: async () => {},
+      }),
     ).toEqual({
-      checks: ["namespace", "proxy-service", "worker-image", "canary"],
+      checks: ["platform", "namespace", "proxy-service", "worker-image", "canary"],
       proxyIp: "10.96.0.50",
     });
   });

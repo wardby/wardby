@@ -464,13 +464,25 @@ probes, for the same reason.
 ### Preflight
 
 `kubernetesPreflight` / `runKubernetesPreflight`
-(`src/providers/jobs/kubernetes-preflight.ts`) run **four checks in order**,
+(`src/providers/jobs/kubernetes-preflight.ts`) run **five checks in order**,
 each producing `kubernetes_isolation_unsupported:<check>` on failure (or
 `:timeout` if the whole preflight — cleanup included — exceeds `timeoutMs`,
 default 90,000ms):
 
-1. `namespace` — the configured namespace exists.
-2. `proxy-service` — the proxy Service exists, has a ClusterIP, **exposes both
+1. `platform` — pure configuration, checked before any cluster API call:
+   `assertPlatformConfig` (`src/providers/jobs/kubernetes-platform.ts`) refuses
+   a deployment that cannot work under `KUBERNETES_PLATFORM`. Under
+   `gke-autopilot` this means `KUBERNETES_RUNTIME_CLASS` must be `gvisor`
+   (gVisor is mandatory there — an unset or different runtime class is refused,
+   not warned about), and the effective `CODING_MAX_DISK_MB` must leave room
+   for the worker container's 1 GiB reservation inside Autopilot's 10 GiB pod
+   ephemeral-storage ceiling. The same assertion runs again at process
+   start-up in `buildConfiguredExecutor`
+   (`src/providers/executor/composition.ts`), so an unrunnable configuration
+   fails the process immediately rather than waiting for the first coding run
+   or the next `wardby coding preflight` invocation to discover it.
+2. `namespace` — the configured namespace exists.
+3. `proxy-service` — the proxy Service exists, has a ClusterIP, **exposes both
    the proxy port (8787) and the deny port (8788)**, and has at least one ready
    endpoint serving both, failing closed with
    `kubernetes_isolation_unsupported:proxy-service` otherwise. The deny port is
@@ -481,8 +493,8 @@ default 90,000ms):
    `cluster-dns` witness, which does not exist on GKE Autopilot (Cloud DNS is the
    only provider there, so no kube-dns pods run) and which made the launcher read
    `kube-system`.
-3. `worker-image` — `CODING_WORKER_IMAGE` is a registry digest.
-4. `canary` — creates a real run pod + NetworkPolicy from the same builders
+4. `worker-image` — `CODING_WORKER_IMAGE` is a registry digest.
+5. `canary` — creates a real run pod + NetworkPolicy from the same builders
    as a live run, running a script that waits for policy enforcement (as
    above) then attempts DNS resolution, a connect to the proxy's deny port,
    the internet (`1.1.1.1:443`), the metadata server, and the proxy itself —
@@ -635,7 +647,7 @@ not implemented yet.
 
 | Code                                                                         | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `kubernetes_isolation_unsupported:<check>`                                   | A preflight check failed; `<check>` is one of `namespace`, `proxy-service`, `worker-image`, `canary`. Sticky for the launcher's process lifetime once seen (see Preflight above).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `kubernetes_isolation_unsupported:<check>`                                   | A preflight check failed; `<check>` is one of `platform`, `namespace`, `proxy-service`, `worker-image`, `canary`. Sticky for the launcher's process lifetime once seen (see Preflight above).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `kubernetes_isolation_unsupported:timeout`                                   | The whole preflight (including cleanup) exceeded its timeout.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `kubernetes_isolation_unsupported`                                           | (No suffix) Attestation failure: the read-back pod or NetworkPolicy didn't canonically match the builder's output.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `kubernetes_policy_not_enforced`                                             | The run's NetworkPolicy wasn't observed enforced (8787 reachable, 8788 blocked) within `enforcementTimeoutMs`; the worker gate was never opened.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
