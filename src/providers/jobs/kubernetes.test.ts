@@ -96,7 +96,7 @@ async function harness(runId = "run-k8s-test", options: { runtimeClassName?: str
   const warnings: string[] = [];
   const launcher = new KubernetesJobLauncher({
     api,
-    config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", ...options },
+    config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic", ...options },
     workspaceRoot,
     resolveCapability: async () => CAPABILITY,
     now: () => now,
@@ -276,7 +276,7 @@ describe("KubernetesJobLauncher", () => {
     const launcher = new KubernetesJobLauncher({
       onWarning: () => {},
       api: h.api,
-      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" },
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
       workspaceRoot: h.workspaceRoot,
       resolveCapability: async () => CAPABILITY,
       sleep: async () => {},
@@ -401,7 +401,12 @@ describe("KubernetesJobLauncher failure handling", () => {
     const archives: Readable[] = [];
     const launcher = new KubernetesJobLauncher({
       api: h.api,
-      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", runtimeClassName: "gvisor" },
+      config: {
+        namespace: "wardby-coding",
+        proxyService: "wardby-coding-proxy",
+        runtimeClassName: "gvisor",
+        platform: "generic",
+      },
       workspaceRoot: h.workspaceRoot,
       resolveCapability: async () => CAPABILITY,
       sleep: async () => {},
@@ -433,7 +438,7 @@ describe("KubernetesJobLauncher failure handling", () => {
     const bad = new KubernetesJobLauncher({
       onWarning: () => {},
       api: h.api,
-      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" },
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
       workspaceRoot: h.workspaceRoot,
       resolveCapability: async () => "not-a-capability",
       sleep: async () => {},
@@ -479,7 +484,7 @@ describe("KubernetesJobLauncher failure handling", () => {
     const launcher = new KubernetesJobLauncher({
       onWarning: () => {},
       api: g.api,
-      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" },
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
       workspaceRoot: g.workspaceRoot,
       resolveCapability: async () => CAPABILITY,
       now: () => clock,
@@ -704,7 +709,12 @@ describe("KubernetesJobLauncher deadlines and launch races", () => {
     const h = await harness();
     const launcher = new KubernetesJobLauncher({
       api: h.api,
-      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", runtimeClassName: "gvisor" },
+      config: {
+        namespace: "wardby-coding",
+        proxyService: "wardby-coding-proxy",
+        runtimeClassName: "gvisor",
+        platform: "generic",
+      },
       workspaceRoot: h.workspaceRoot,
       resolveCapability: async () => CAPABILITY,
       sleep: async () => {},
@@ -770,7 +780,7 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
     const launcher = new KubernetesJobLauncher({
       onWarning: () => {},
       api: h.api,
-      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" },
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
       workspaceRoot: h.workspaceRoot,
       resolveCapability: async () => CAPABILITY,
       now: () => clock,

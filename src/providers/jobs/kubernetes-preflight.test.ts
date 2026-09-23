@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import type { V1Pod } from "@kubernetes/client-node";
+import type { KubernetesJobConfig } from "../../config/providers.js";
 import { FakeKubernetesApi } from "./fake-kubernetes-api.js";
 import {
   CANARY_SCRIPT,
@@ -12,7 +13,11 @@ import {
 } from "./kubernetes-preflight.js";
 
 const IMAGE = `localhost:5001/wardby-coding-worker@sha256:${"a".repeat(64)}`;
-const config = { namespace: "wardby-coding", proxyService: "wardby-coding-proxy" };
+const config: KubernetesJobConfig = {
+  namespace: "wardby-coding",
+  proxyService: "wardby-coding-proxy",
+  platform: "generic",
+};
 
 function cluster(canary: CanaryResult | "no-output") {
   const api = new FakeKubernetesApi();

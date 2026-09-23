@@ -209,6 +209,7 @@ describe("loadKubernetesJobConfig", () => {
     expect(loadKubernetesJobConfig({})).toEqual({
       namespace: "wardby-coding",
       proxyService: "wardby-coding-proxy",
+      platform: "generic",
     });
   });
 
@@ -225,6 +226,7 @@ describe("loadKubernetesJobConfig", () => {
       context: "kind-wardby",
       proxyService: "proxy",
       runtimeClassName: "gvisor",
+      platform: "generic",
     });
   });
 
@@ -237,6 +239,35 @@ describe("loadKubernetesJobConfig", () => {
   it("rejects an invalid proxy Service name", () => {
     expect(() => loadKubernetesJobConfig({ KUBERNETES_PROXY_SERVICE: "Bad_Name" })).toThrow(
       "KUBERNETES_PROXY_SERVICE must be a DNS-1123 label.",
+    );
+  });
+
+  it("defaults to the generic platform and leaves the timeouts unset", () => {
+    const config = loadKubernetesJobConfig({});
+    expect(config.platform).toBe("generic");
+    expect(config.preflightTimeoutMs).toBeUndefined();
+    expect(config.readyTimeoutMs).toBeUndefined();
+  });
+
+  it("accepts gke-autopilot", () => {
+    expect(loadKubernetesJobConfig({ KUBERNETES_PLATFORM: "gke-autopilot" }).platform).toBe("gke-autopilot");
+  });
+
+  it("rejects an unknown platform", () => {
+    expect(() => loadKubernetesJobConfig({ KUBERNETES_PLATFORM: "eks" })).toThrow(
+      "KUBERNETES_PLATFORM must be one of: generic, gke-autopilot.",
+    );
+  });
+
+  it("reads the two cluster timeouts as bounded integers", () => {
+    const config = loadKubernetesJobConfig({
+      KUBERNETES_PREFLIGHT_TIMEOUT_MS: "600000",
+      KUBERNETES_READY_TIMEOUT_MS: "600000",
+    });
+    expect(config.preflightTimeoutMs).toBe(600_000);
+    expect(config.readyTimeoutMs).toBe(600_000);
+    expect(() => loadKubernetesJobConfig({ KUBERNETES_READY_TIMEOUT_MS: "10" })).toThrow(
+      "KUBERNETES_READY_TIMEOUT_MS must be an integer between 1000 and 900000.",
     );
   });
 });

@@ -440,7 +440,12 @@ async function codingOps(args: string[]): Promise<void> {
     let checks: string[];
     try {
       const api = new ClientNodeKubernetesApi({ context: kubernetes.context });
-      checks = await kubernetesPreflight({ api, config: kubernetes, workerImage: container.workerImage });
+      checks = await kubernetesPreflight({
+        api,
+        config: kubernetes,
+        workerImage: container.workerImage,
+        timeoutMs: kubernetes.preflightTimeoutMs,
+      });
     } catch (error) {
       fail(`coding preflight failed: ${describePreflightFailure(error)}`);
     }
