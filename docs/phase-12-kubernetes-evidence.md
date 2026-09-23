@@ -138,6 +138,20 @@ not this branch's work:
   (`npm run capture:autopilot`) is expected to replace it with a real
   server-side dry-run capture and flip that flag to `false`. Until then,
   nothing in this document proves Autopilot conformance.
+- **A ~100-200 ms window in which the proof can go stale.** Enforcement is
+  proved by probing, and the agent is released by writing a marker file. Those
+  are two separate API calls, so a NetworkPolicy created in between — by anyone
+  with policy-write access in the namespace, or by configuration drift — is not
+  seen. This was found by live testing and narrowed rather than eliminated: the
+  launcher originally proved enforcement, then seeded the workspace (up to the
+  run's whole `timeoutSec`, hours for a large repository), and only then
+  released, so the stale window was the entire seeding time. The re-probe
+  immediately before the marker (`fix round 5`) cuts it to the marker call's own
+  round trip plus this CNI's policy-programming lag: measured on kind at ~91 ms
+  to the marker write and ~181 ms to the injected policy actually taking effect.
+  Closing it completely would require the release to be part of the same atomic
+  proof, which the Kubernetes API does not offer. Anyone who can create a
+  NetworkPolicy in the namespace can already do considerably worse.
 - **The remaining speculative residual: "blocked" is not fully conclusive.**
   Two other, non-speculative ways were found by live testing on the kind
   cluster and closed: a refused (RST) deny port reading the same as a dropped
