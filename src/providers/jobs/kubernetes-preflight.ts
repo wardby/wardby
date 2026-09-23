@@ -220,7 +220,12 @@ async function runCanary(
     labels: {},
   };
   const { pod, policy } = await runCheck("canary", async () => {
-    const pod = buildRunPod(spec, { namespace, proxyIp, runtimeClassName: config.runtimeClassName });
+    const pod = buildRunPod(spec, {
+      namespace,
+      proxyIp,
+      runtimeClassName: config.runtimeClassName,
+      platform: config.platform,
+    });
     const podSpec = pod.spec!;
     const worker = podSpec.containers.find((container) => container.name === WORKER_CONTAINER);
     if (!worker) throw failure("canary");

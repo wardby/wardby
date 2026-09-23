@@ -25,6 +25,17 @@ import {
   WORKER_STOP_GRACE_SECONDS,
   isRepositoryDigest,
 } from "./docker-isolation.js";
+import {
+  KubernetesPlatformError,
+  STORAGE_INIT_EPHEMERAL_MIB,
+  WORKER_EPHEMERAL_MIB,
+  conformResources,
+  normalizePlatformMetadata,
+  platformProfile,
+  podEphemeralStorageMib,
+  type KubernetesPlatform,
+  type KubernetesPlatformProfile,
+} from "./kubernetes-platform.js";
 
 export const KUBERNETES_ISOLATION_ERROR = "kubernetes_isolation_unsupported";
 export const KUBERNETES_PROVIDER_UNSUPPORTED = "kubernetes_provider_unsupported";
@@ -163,18 +174,37 @@ export interface RunPodOptions {
   namespace: string;
   proxyIp: string;
   runtimeClassName?: string;
+  /** Which platform's admission rules the emitted resources must already satisfy. Default: "generic". */
+  platform?: KubernetesPlatform;
 }
 
 export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
   validateKubernetesSpec(spec);
+  const profile = platformProfile(options.platform ?? "generic");
+  // conformResources range-checks one container at a time; only this function sees every container,
+  // so the SUMMED pod total is checked here — before submission, so an over-large workspace fails
+  // closed rather than being rewritten by the platform (which attestation would then reject anyway).
+  const ceiling = profile.resources.ephemeralStorageCeilingMib;
+  const podEphemeral = podEphemeralStorageMib(spec.limits.diskMb);
+  if (ceiling !== undefined && podEphemeral > ceiling) {
+    throw new KubernetesPlatformError(
+      `a ${spec.limits.diskMb} MiB workspace needs ${podEphemeral} MiB of pod ephemeral storage, over the ${ceiling} MiB (10 GiB) ceiling of platform ${profile.name}`,
+    );
+  }
   const names = kubernetesRunNames(spec.runId);
   const scratchMb = Math.max(16, Math.min(64, Math.floor(spec.limits.memoryMb / 8)));
+  const sidecarCpuMillicores = 250;
+  const sidecarMemoryMib = 128;
   const storageInit: V1Container = {
     name: STORAGE_INIT_CONTAINER,
     image: spec.image,
     command: ["node", "-e", STORAGE_INIT_SCRIPT],
     securityContext: containerSecurity(),
-    resources: { requests: { cpu: "250m", memory: "128Mi" }, limits: { cpu: "250m", memory: "128Mi" } },
+    resources: conformResources(profile, {
+      cpuMillicores: sidecarCpuMillicores,
+      memoryMib: sidecarMemoryMib,
+      ephemeralStorageMib: STORAGE_INIT_EPHEMERAL_MIB,
+    }),
     volumeMounts: [{ name: "storage", mountPath: STORAGE_ROOT }],
   };
   const keeper: V1Container = {
@@ -182,7 +212,12 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
     image: spec.image,
     command: ["node", "/opt/wardby/coding-worker/keeper.js"],
     securityContext: containerSecurity(),
-    resources: { requests: { cpu: "250m", memory: "128Mi" }, limits: { cpu: "250m", memory: "128Mi" } },
+    resources: conformResources(profile, {
+      cpuMillicores: sidecarCpuMillicores,
+      memoryMib: sidecarMemoryMib,
+      // The keeper owns the storage volume: seeding and collection stream through it.
+      ephemeralStorageMib: spec.limits.diskMb,
+    }),
     volumeMounts: [{ name: "storage", mountPath: STORAGE_ROOT }],
     readinessProbe: { exec: { command: ["test", "-d", `${STORAGE_ROOT}/output`] }, periodSeconds: 1 },
   };
@@ -195,10 +230,11 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
       { name: "WARDBY_RUN_CAPABILITY", valueFrom: { secretKeyRef: { name: names.secret, key: "capability" } } },
     ],
     securityContext: containerSecurity(),
-    resources: {
-      requests: { cpu: String(spec.limits.cpus), memory: `${spec.limits.memoryMb}Mi` },
-      limits: { cpu: String(spec.limits.cpus), memory: `${spec.limits.memoryMb}Mi` },
-    },
+    resources: conformResources(profile, {
+      cpuMillicores: Math.round(spec.limits.cpus * 1000),
+      memoryMib: spec.limits.memoryMb,
+      ephemeralStorageMib: WORKER_EPHEMERAL_MIB,
+    }),
     volumeMounts: [
       { name: "storage", mountPath: "/workspace", subPath: "workspace" },
       { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
@@ -434,19 +470,29 @@ function normalizeSpec(spec: V1PodSpec): void {
   for (const volume of spec.volumes ?? []) normalizeVolume(volume);
 }
 
-function normalizePod(pod: V1Pod): {
+function normalizePod(
+  pod: V1Pod,
+  profile: KubernetesPlatformProfile,
+): {
   labels: Record<string, string>;
   annotations: Record<string, string>;
   spec: V1PodSpec;
 } {
   if (!pod.spec) throw isolationError();
+  // Every field the normalizer may touch must already be a copy: normalizePlatformMetadata
+  // mutates `view.spec` in place, and replaces the two bags with copies of its own.
   const spec = structuredClone(pod.spec);
   normalizeSpec(spec);
-  return {
-    labels: pod.metadata?.labels ?? {},
-    annotations: pod.metadata?.annotations ?? {},
+  const view = {
+    labels: structuredClone(pod.metadata?.labels ?? {}),
+    annotations: structuredClone(pod.metadata?.annotations ?? {}),
     spec,
   };
+  // Applied to BOTH operands, symmetrically: deletes only the keys the profile names,
+  // and the profile for "generic" names none. It never skips a field the comparison
+  // would otherwise see, so everything left is still deep-compared below.
+  normalizePlatformMetadata(profile, view);
+  return view;
 }
 
 /** Recursively sorts object keys and drops `undefined` values so key order and API-omitted fields never matter; array order is preserved. */
@@ -462,9 +508,19 @@ function canonical(value: unknown): unknown {
   return value;
 }
 
-export function assertRunPodMatches(actual: V1Pod, expected: V1Pod): void {
-  const a = canonical(normalizePod(actual));
-  const e = canonical(normalizePod(expected));
+/**
+ * Deep-compares the pod the API server read back against the pod wardby built.
+ * ANY surviving difference fails the run closed.
+ *
+ * `platform` defaults to "generic" on purpose: a caller that forgets it gets the
+ * strictest behaviour, never the most permissive. A profile can only narrow what
+ * counts as an expected difference (by deleting named keys from both operands);
+ * it can never disable or short-circuit the comparison.
+ */
+export function assertRunPodMatches(actual: V1Pod, expected: V1Pod, platform: KubernetesPlatform = "generic"): void {
+  const profile = platformProfile(platform);
+  const a = canonical(normalizePod(actual, profile));
+  const e = canonical(normalizePod(expected, profile));
   if (JSON.stringify(a) !== JSON.stringify(e)) throw isolationError();
 }
 

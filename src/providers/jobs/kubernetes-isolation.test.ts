@@ -215,8 +215,8 @@ describe("buildRunPod", () => {
     const volumes = pod().spec!.volumes!;
     expect(volumes.find((v) => v.name === "storage")?.emptyDir).toEqual({ sizeLimit: "2048Mi" });
     expect(worker(pod()).resources).toEqual({
-      requests: { cpu: "1", memory: "2048Mi" },
-      limits: { cpu: "1", memory: "2048Mi" },
+      requests: { cpu: "1000m", memory: "2048Mi" },
+      limits: { cpu: "1000m", memory: "2048Mi" },
     });
   });
 
@@ -231,6 +231,119 @@ describe("buildRunPod", () => {
   it("adds the runtime class only when configured", () => {
     expect(pod().spec!.runtimeClassName).toBeUndefined();
     expect(buildRunPod(spec, { ...options, runtimeClassName: "gvisor" }).spec!.runtimeClassName).toBe("gvisor");
+  });
+});
+
+describe("buildRunPod under the gke-autopilot platform", () => {
+  const autopilotOptions = { ...options, platform: "gke-autopilot" as const, runtimeClassName: "gvisor" };
+  const autopilotPod = () => buildRunPod(spec, autopilotOptions);
+
+  it("emits Autopilot-legal resources for every container", () => {
+    const p = autopilotPod();
+    expect(worker(p).resources).toEqual({
+      requests: { cpu: "1000m", memory: "2048Mi", "ephemeral-storage": "1024Mi" },
+      limits: { cpu: "1000m", memory: "2048Mi", "ephemeral-storage": "1024Mi" },
+    });
+    // 250m with 128Mi is below Autopilot's 1 GiB-per-vCPU floor; memory rises rather than being rewritten.
+    expect(keeper(p).resources).toEqual({
+      requests: { cpu: "250m", memory: "256Mi", "ephemeral-storage": "2048Mi" },
+      limits: { cpu: "250m", memory: "256Mi", "ephemeral-storage": "2048Mi" },
+    });
+    expect(storageInit(p).resources).toEqual({
+      requests: { cpu: "250m", memory: "256Mi", "ephemeral-storage": "64Mi" },
+      limits: { cpu: "250m", memory: "256Mi", "ephemeral-storage": "64Mi" },
+    });
+  });
+
+  it("changes nothing but the resource blocks", () => {
+    const strip = (p: V1Pod) => {
+      const copy = structuredClone(p);
+      for (const c of [...copy.spec!.containers, ...(copy.spec!.initContainers ?? [])]) delete c.resources;
+      return copy;
+    };
+    expect(strip(autopilotPod())).toEqual(strip(buildRunPod(spec, { ...options, runtimeClassName: "gvisor" })));
+  });
+
+  it("still emits nothing extra under generic", () => {
+    expect(keeper(pod()).resources).toEqual({
+      requests: { cpu: "250m", memory: "128Mi" },
+      limits: { cpu: "250m", memory: "128Mi" },
+    });
+    expect(storageInit(pod()).resources).toEqual({
+      requests: { cpu: "250m", memory: "128Mi" },
+      limits: { cpu: "250m", memory: "128Mi" },
+    });
+  });
+
+  it("refuses a workspace that cannot fit the 10 GiB pod ephemeral-storage ceiling", () => {
+    const big: JobSpec = { ...spec, limits: { ...spec.limits, diskMb: 16_384 } };
+    expect(() => buildRunPod(big, autopilotOptions)).toThrow(
+      /kubernetes_platform_unconformable: a 16384 MiB workspace needs 17408 MiB of pod ephemeral storage, over the 10240 MiB \(10 GiB\) ceiling/,
+    );
+    expect(() => buildRunPod({ ...spec, limits: { ...spec.limits, diskMb: 9216 } }, autopilotOptions)).not.toThrow();
+  });
+
+  it("builds the same pod under generic regardless of the ceiling", () => {
+    const big: JobSpec = { ...spec, limits: { ...spec.limits, diskMb: 16_384 } };
+    expect(() => buildRunPod(big, options)).not.toThrow();
+  });
+});
+
+describe("assertRunPodMatches with a platform profile", () => {
+  const autopilotOptions = { ...options, platform: "gke-autopilot" as const, runtimeClassName: "gvisor" };
+
+  it("forgives the Autopilot annotations, nodeSelector and toleration under gke-autopilot", () => {
+    const expected = buildRunPod(spec, autopilotOptions);
+    const actual = structuredClone(expected);
+    actual.metadata!.annotations!["autopilot.gke.io/resource-adjustment"] = "{}";
+    actual.spec!.nodeSelector = { "sandbox.gke.io/runtime": "gvisor" };
+    actual.spec!.tolerations = [
+      { key: "sandbox.gke.io/runtime", operator: "Equal", value: "gvisor", effect: "NoSchedule" },
+    ];
+    expect(() => assertRunPodMatches(actual, expected, "gke-autopilot")).not.toThrow();
+  });
+
+  it("leaves both operands untouched, so the caller's pods keep their own metadata", () => {
+    const expected = buildRunPod(spec, autopilotOptions);
+    const actual = structuredClone(expected);
+    actual.metadata!.annotations!["autopilot.gke.io/resource-adjustment"] = "{}";
+    actual.spec!.nodeSelector = { "sandbox.gke.io/runtime": "gvisor" };
+    const actualBefore = structuredClone(actual);
+    const expectedBefore = structuredClone(expected);
+    assertRunPodMatches(actual, expected, "gke-autopilot");
+    expect(actual).toEqual(actualBefore);
+    expect(expected).toEqual(expectedBefore);
+  });
+
+  it("rejects those same additions under generic, including by default", () => {
+    const expected = buildRunPod(spec, autopilotOptions);
+    const actual = structuredClone(expected);
+    actual.spec!.nodeSelector = { "sandbox.gke.io/runtime": "gvisor" };
+    expect(() => assertRunPodMatches(actual, expected, "generic")).toThrow(KUBERNETES_ISOLATION_ERROR);
+    expect(() => assertRunPodMatches(actual, expected)).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
+  it("still rejects a security-relevant change under gke-autopilot", () => {
+    const expected = buildRunPod(spec, autopilotOptions);
+    for (const tamper of [
+      (p: V1Pod) => void (p.spec!.hostNetwork = true),
+      (p: V1Pod) => void (p.spec!.automountServiceAccountToken = true),
+      (p: V1Pod) => void (worker(p).securityContext!.readOnlyRootFilesystem = false),
+      (p: V1Pod) => void (worker(p).command = ["node", "-e", "evil"]),
+      (p: V1Pod) => void (p.metadata!.annotations!["example.com/x"] = "1"),
+      (p: V1Pod) => void (worker(p).resources!.limits!["ephemeral-storage"] = "8192Mi"),
+      (p: V1Pod) => void (p.spec!.runtimeClassName = undefined),
+      (p: V1Pod) => void (p.spec!.securityContext!.seccompProfile = undefined),
+      (p: V1Pod) => void (p.metadata!.labels!["wardby.io/component"] = "not-a-coding-run"),
+      (p: V1Pod) => void (p.spec!.nodeSelector = { "sandbox.gke.io/runtime": "runc" }),
+      (p: V1Pod) =>
+        void (p.spec!.tolerations = [{ key: "example.com/taint", operator: "Exists", effect: "NoSchedule" }]),
+    ]) {
+      const actual = structuredClone(expected);
+      actual.metadata!.annotations!["autopilot.gke.io/resource-adjustment"] = "{}";
+      tamper(actual);
+      expect(() => assertRunPodMatches(actual, expected, "gke-autopilot")).toThrow(KUBERNETES_ISOLATION_ERROR);
+    }
   });
 });
 

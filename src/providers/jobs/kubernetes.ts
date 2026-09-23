@@ -535,7 +535,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   }
 
   private async provision(spec: JobSpec, names: RunNames, record: RunRecord): Promise<void> {
-    const { runtimeClassName, proxyService } = this.options.config;
+    const { runtimeClassName, proxyService, platform } = this.options.config;
     if (!runtimeClassName) {
       this.warn(
         "kubernetes_runtime_class_unset: no runtime class configured; coding pods run without gVisor (development clusters only)",
@@ -548,7 +548,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     const witness = await readProxyWitness(this.api, this.namespace, proxyService);
     const proxyIp = witness.clusterIp;
 
-    const pod = buildRunPod(spec, { namespace: this.namespace, proxyIp, runtimeClassName });
+    const pod = buildRunPod(spec, { namespace: this.namespace, proxyIp, runtimeClassName, platform });
     const policy = buildRunNetworkPolicy(spec, this.namespace);
     await this.createIfMissing(() =>
       this.api.createSecret(this.namespace, buildCapabilitySecret(spec, this.namespace, capability)),
@@ -562,7 +562,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       this.api.readNetworkPolicy(this.namespace, names.policy),
     ]);
     if (!actualPod || !actualPolicy) throw new Error(KUBERNETES_ISOLATION_ERROR);
-    assertRunPodMatches(actualPod, pod);
+    assertRunPodMatches(actualPod, pod, platform);
     assertRunNetworkPolicyMatches(actualPolicy, policy);
     await this.waitForPolicyEnforcement(names, proxyIp);
 
