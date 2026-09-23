@@ -91,6 +91,50 @@ dispatch time — the slice named in the plan had already been implemented on
 `main` by an earlier test run — so an equivalently scoped missing piece was used
 instead.
 
+## GKE Autopilot with gVisor (Plan 3a)
+
+The goal of Plan 3a was one real coding run on GKE Autopilot under gVisor. It
+ran on **2026-09-23**.
+
+- Cluster `wardby-phase12`, project `onit-dashboard`, region `us-central1`,
+  Kubernetes server **v1.35.8-gke.1036000**, containerd 2.2.7, Dataplane V2.
+- `KUBERNETES_PLATFORM=gke-autopilot`, `KUBERNETES_RUNTIME_CLASS=gvisor`; the
+  pod bound to a gVisor sandbox node pool (`sandbox.gke.io/runtime=gvisor`).
+- Images in Artifact Registry (`us-central1-docker.pkg.dev/onit-dashboard/wardby`),
+  amd64, referenced by digest. Throwaway in-cluster Postgres; migrations applied
+  with `prisma migrate deploy` over a port-forward.
+- `coding preflight` passed all five checks (`platform`, `namespace`,
+  `proxy-service`, `worker-image`, `canary`) against this cluster, the canary
+  under gVisor.
+
+| Run      | `cmue7pkxm0002sq8orijzq6nl`                       |
+| -------- | ------------------------------------------------- |
+| Job      | `wardby-coding/f13db454886a2c284be6`              |
+| Task     | add a `joke_count` helper plus tests              |
+| Result   | succeeded, PR #33 on `chfields/knock-knock-jokes` |
+| Duration | 114.3 s                                           |
+| Cost     | $0.01084 (84,578 in / 1,933 out)                  |
+
+Two things a real Autopilot cluster falsified that no amount of local testing
+would have, both fixed on this branch:
+
+1. **Autopilot resolves DNS through NodeLocal DNSCache at `169.254.20.10`**, not
+   the metadata server. The proxy's egress policy allowed only
+   `169.254.169.254`, and every model call failed with `EAI_AGAIN`. The same
+   cluster also runs kube-dns with real backing pods, contradicting the design's
+   premise that GKE Cloud DNS leaves kube-dns without endpoints — which is why
+   the enforcement witness moved to the proxy's own deny port rather than being
+   repaired in place.
+2. **GKE stamps `topology.kubernetes.io/{region,zone}` onto the pod after
+   binding.** A server-side dry run is admission only and never schedules, so no
+   captured fixture can contain a post-binding mutation. The dry-run capture was
+   clean, the preflight canary passed, and the first real launch then failed
+   attestation with a bare `kubernetes_isolation_unsupported` — the comparator
+   working exactly as designed, on a mutation nothing upstream of it could see.
+   Fixed by allowing the `topology.kubernetes.io/` label prefix, and pinned by
+   tests rather than by the fixture. **A fixture is a lower bound on what a
+   platform mutates, never a complete list.**
+
 ## Bugs this evidence exists because of
 
 Every one of these was invisible to the unit suite and to the fake-cluster

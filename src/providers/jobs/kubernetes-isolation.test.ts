@@ -334,6 +334,27 @@ describe("assertRunPodMatches with a platform profile", () => {
     expect(() => assertRunPodMatches(actual, expected, "gke-autopilot")).not.toThrow();
   });
 
+  // GKE stamps these from the node the pod bound to, so they appear only AFTER scheduling —
+  // a server-side dry run never sees them and no captured fixture can list them. A real
+  // Autopilot launch failed attestation on exactly this (2026-09-23) while every dry-run-based
+  // check passed, which is why this case is pinned by a test rather than by the fixture.
+  it("forgives the topology labels GKE adds after binding, which no dry run can capture", () => {
+    const expected = buildRunPod(spec, autopilotOptions);
+    const actual = structuredClone(expected);
+    actual.metadata!.labels!["topology.kubernetes.io/region"] = "us-central1";
+    actual.metadata!.labels!["topology.kubernetes.io/zone"] = "us-central1-f";
+    expect(() => assertRunPodMatches(actual, expected, "gke-autopilot")).not.toThrow();
+    expect(() => assertRunPodMatches(actual, expected, "generic")).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
+  it("still rejects a wardby label dropped behind the forgiven topology labels", () => {
+    const expected = buildRunPod(spec, autopilotOptions);
+    const actual = structuredClone(expected);
+    actual.metadata!.labels!["topology.kubernetes.io/zone"] = "us-central1-f";
+    delete actual.metadata!.labels!["wardby.io/component"];
+    expect(() => assertRunPodMatches(actual, expected, "gke-autopilot")).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
   it("leaves both operands untouched, so the caller's pods keep their own metadata", () => {
     const expected = buildRunPod(spec, autopilotOptions);
     const actual = structuredClone(expected);

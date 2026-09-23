@@ -11,6 +11,15 @@
  * same one an attacker with cluster access would subvert, so it can never be
  * allowed to bless itself at launch time.
  *
+ * KNOWN BLIND SPOT, measured rather than reasoned: a dry run is admission only.
+ * It never schedules, so nothing a platform stamps onto the pod AFTER binding
+ * can appear in a capture. GKE adds `topology.kubernetes.io/{region,zone}` from
+ * the node the pod landed on, and a real Autopilot launch on 2026-09-23 failed
+ * attestation on precisely that while every dry-run-derived check passed. Read
+ * a fixture as a lower bound on what a platform mutates, never a complete list;
+ * post-binding mutations are pinned by tests in kubernetes-isolation.test.ts
+ * and can only be found by attesting a pod that actually ran.
+ *
  * Separated from capture-autopilot-dry-run.ts — which is the environment, file
  * and terminal wiring — so every decision below is unit-testable against
  * FakeKubernetesApi. Two of those decisions carry the fixture's whole value:

@@ -156,7 +156,17 @@ const GKE_AUTOPILOT: KubernetesPlatformProfile = {
     // (recording gVisor's internal tmpfs translation of the "tmp"/"home" scratch volumes). Both are
     // gVisor's own bookkeeping of what wardby already declared, not an admission rewrite.
     podAnnotationKeyPrefixes: ["autopilot.gke.io/", "dev.gvisor."],
-    podLabelKeyPrefixes: ["autopilot.gke.io/"],
+    // topology.kubernetes.io/{region,zone} are stamped onto the pod by GKE *after binding*, from the
+    // node it landed on. That timing is the point: the dry-run capture tool never schedules anything,
+    // so no fixture can ever list this mutation, and the first thing that saw it was a real launch on
+    // Autopilot failing attestation with a bare kubernetes_isolation_unsupported (measured 2026-09-23,
+    // wardby-phase12). Treat the fixture as a lower bound on what a platform mutates, never a complete
+    // one. Forgiving an added label is safe for the reason in PlatformMetadataAllowance — wardby's own
+    // labels must still be present and unchanged, so the run NetworkPolicy still selects this pod —
+    // and an added label that made the pod match some *other*, more permissive policy would still not
+    // open the gate: the enforcement witness probes the real dataplane, and re-probes it immediately
+    // before the marker write.
+    podLabelKeyPrefixes: ["autopilot.gke.io/", "topology.kubernetes.io/"],
     // GKE adds the gVisor toleration itself for a pod with runtimeClassName: gvisor, plus
     // kubernetes.io/arch (also measured on the same real dry run, 2026-09-23): every Autopilot node
     // pool tolerates architecture, so it stamps this on any pod without an explicit arch selector.

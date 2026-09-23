@@ -413,6 +413,22 @@ write/read — never a loosening of what's compared:
 Any other difference — anything not on this list — fails the launch closed
 with `kubernetes_isolation_unsupported`. No fallback to a weaker profile.
 
+On top of that, a **platform profile** (`KUBERNETES_PLATFORM`) may forgive a
+named, narrow set of mutations its managed admission chain is known to make —
+for `gke-autopilot`: annotations under `autopilot.gke.io/` and `dev.gvisor.`,
+labels under `autopilot.gke.io/` and `topology.kubernetes.io/`, the gVisor
+`nodeSelector`, and two exact tolerations. A profile can only delete named keys
+from both operands before the comparison; it can never disable or short-circuit
+it, and `generic` (the default, and what an omitted argument selects) forgives
+nothing. Most of that list was captured from a real cluster with
+`npm run capture:autopilot`, which submits the pod with `dryRun=All`. That
+capture has a structural blind spot worth knowing: a dry run is admission only
+and never schedules, so anything the platform stamps on **after binding** —
+GKE's `topology.kubernetes.io/{region,zone}`, taken from the node the pod
+landed on — cannot appear in it. That case reached a live Autopilot launch with
+every dry-run-derived check passing, and is now pinned by tests. Treat a
+captured fixture as a lower bound on what a platform mutates.
+
 ### The enforcement gate
 
 The Kubernetes API can create a NetworkPolicy object without that policy
