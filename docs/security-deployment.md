@@ -7,8 +7,11 @@ controls in this guide still apply.
 
 ## Supported runtime and delegated operation
 
-Use Node.js 22.12 or newer. The development machine's Node 20.11 is below an
-existing dependency's minimum; verification uses an isolated Node 22 runtime.
+Use Node.js 22.19 or newer: undici 8, which the runtime installs to keep the
+Kubernetes client from breaking global `fetch`, requires it. Development pins
+Node 24 through `.nvmrc`, and the runtime image is built on Node 22. The earlier
+guidance here — a development machine on Node 20.11 and verification through an
+isolated Node 22 runtime — no longer applies.
 Stdio remains local and trusted, with `LOCAL_PRINCIPAL` as its owner identity.
 Delegated HTTP requires `AUTH_ISSUER`, `AUTH_JWKS_URI`, and `AUTH_AUDIENCE`.
 `MCP_CANONICAL_URI` and `AUTH_AUDIENCE` must be identical normalized HTTPS URLs.
@@ -210,6 +213,49 @@ Set a short database statement/lock timeout on the dedicated application role,
 bound connection pools and concurrent invocations, and review a cancellable
 database adapter or isolated worker if strict immediate termination is required.
 Do not claim these per-invocation caps establish a whole-process memory ceiling.
+
+## Coding runs on Kubernetes
+
+`JOB_LAUNCHER=kubernetes` runs each coding agent in its own pod instead of a
+container. The trust model is unchanged — the worker is untrusted, holds no
+provider credential, and may reach only the coding proxy — but a cluster
+enforces that differently from a Docker host, and two controls exist because a
+cluster's configuration cannot be taken on trust.
+
+**The pod is attested before the worker runs.** The pod and NetworkPolicy read
+back from the API server are compared field by field against what wardby built.
+Any difference fails the launch closed. This is what catches a mutating
+admission controller, or anyone with cluster access, weakening a pod's isolation
+between creation and start. Only an explicit list of known server defaults is
+normalized away; nothing else is tolerated.
+
+**Enforcement is proven, not assumed.** A cluster accepts a NetworkPolicy
+whether or not its CNI enforces one, and even where enforcement works it is
+programmed seconds after a pod starts. Before releasing the worker, the launcher
+connects from inside the pod to a destination that must be blocked and requires
+three consecutive refusals. A cluster that does not enforce policy, or has not
+yet programmed this pod's rules, never reaches the point of running agent code.
+The same check runs at startup against a throwaway canary pod, which also
+verifies the pod cannot reach DNS, the internet or the cloud metadata endpoint.
+
+**RBAC.** The control plane needs a namespace Role (`pods`, `pods/exec`,
+`pods/log`, `secrets`, `configmaps`, `networkpolicies`, `services`) and a
+ClusterRole granting `get` on the single namespace it runs in, because the
+preflight's namespace read is cluster-scoped. Workers get a dedicated
+ServiceAccount with no permissions and no mounted token. Reference manifests are
+in `deploy/kind-coding/manifests/`.
+
+**Sandboxing.** The spec requires gVisor on GKE; the reference `kind` harness
+has none, so that configuration is development-only and says so. Set
+`KUBERNETES_RUNTIME_CLASS` to the cluster's sandboxed runtime class in
+production; the launcher warns loudly when it is unset.
+
+**Before deploying this anywhere real**, read
+[phase-12-kubernetes-evidence.md](phase-12-kubernetes-evidence.md) § Known gaps.
+Per-run record ConfigMaps accumulate with no garbage collection, the enforcement
+witness is vacuous on clusters whose DNS service has no pod backends (the
+preflight fails closed rather than passing), and the spec's containment tests
+(OOM, disk-full, wall-clock) are not yet implemented.
 
 ## Images and dependency exception
 
