@@ -206,7 +206,7 @@ whether that evidence permits an automated action or still requires a person.
 
 ## Quickstart
 
-Requirements: Node.js 22.12 or newer, Docker, and one supported model-provider
+Requirements: Node.js 24 or newer, Docker, and one supported model-provider
 credential.
 
 ```sh

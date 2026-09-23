@@ -53,6 +53,7 @@ import { startServe } from "./serve.js";
 import { authCommand } from "./mcp/auth/self-hosted/cli.js";
 import { parseImportArgs } from "./import/cli-args.js";
 import { runImport } from "./import/index.js";
+import { CLI_USAGE } from "./cli-help.js";
 
 const cliLog = logger.child({ module: "cli" });
 
@@ -660,24 +661,7 @@ async function main(): Promise<void> {
     } else if (command === "import") {
       await importCommand(rest);
     } else {
-      fail(
-        "usage:\n" +
-          '  wardby agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule "<cron>"] [--timezone <tz>] [--max-turns <n>]\n' +
-          "  wardby agent list\n" +
-          '  wardby agent schedule <name> --cron "<expr>" [--timezone <tz>] [--disable]\n' +
-          "  wardby tool create --name <n> --description <d> --params <file> --code <file>\n" +
-          "  wardby tool attach <tool-name> <agent-name>\n" +
-          "  wardby tool detach <tool-name> <agent-name>\n" +
-          "  wardby tool list [--agent <name>]\n" +
-          "  wardby run <name>\n" +
-          "  wardby runs [--agent <name>] [--limit N] [--status <s>]\n" +
-          "  wardby coding preflight   (JOB_LAUNCHER=docker or kubernetes)\n" +
-          "  wardby coding cleanup --run-id <id>\n" +
-          "  wardby scheduler [--scope default]\n" +
-          "  wardby mcp   (MCP_TRANSPORT=stdio|http selects the transport)\n" +
-          "  wardby serve [--scope default]   (mcp + scheduler + reconciler in one process; http only)\n" +
-          "  wardby import <bundle-dir> --owner <subject> [--public] [--include-secrets --transfer-key <pem>] [--default-budget <usd>] [--dry-run] [--prefix <p>] [--on-conflict fail|skip|rename] [--allow-open-fetch]",
-      );
+      fail(CLI_USAGE);
     }
   } finally {
     await prisma.$disconnect();

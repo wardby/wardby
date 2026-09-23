@@ -274,7 +274,10 @@ dependencies and omits optional peers before installation. Merely running
 Audit the shipped subset with `npm audit --omit=peer`. A plain audit may still
 report intentionally omitted optional peers from the lockfile.
 
-SR-009 remains present in the trusted build/migration toolchain. On 2026-09-06,
+SR-009 remains present in the trusted build, npm installation, and migration
+toolchain. The published CLI includes Prisma so its install hook can generate a
+platform-appropriate client; do not treat the npm package dependency tree as the
+hardened production runtime. On 2026-09-06,
 6.19.3 was the newest published Prisma 6 release and still included vulnerable
 deepmerge-ts 7.1.5. The advisory fixes deepmerge-ts at 8.0.0; no compatible
 Prisma 6 release was available. Neither npm's suggested 6.12 downgrade nor an
@@ -282,8 +285,9 @@ unreviewed dependency-major override was applied. See the
 [advisory](https://github.com/advisories/GHSA-ggr8-5vv4-36mx).
 
 Accepted exception: the owner accepted this risk on **2026-09-06** for trusted
-build/migration jobs only, expiring **2026-10-06**. Do not load untrusted Prisma config or
-run migration tooling in a request handler. Recheck upstream by that date;
+generation/build/migration operations only, expiring **2026-10-06**. Do not load
+untrusted Prisma config or run migration tooling in a request handler. Recheck
+upstream by that date;
 otherwise plan a separately reviewed Prisma-major migration. CI deliberately
 allows only the exact `@prisma/config`, `deepmerge-ts`, and `prisma` chain for
 GHSA-ggr8-5vv4-36mx and fails for any other advisory or after expiration. Raw
