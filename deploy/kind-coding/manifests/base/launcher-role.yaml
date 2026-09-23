@@ -43,3 +43,31 @@ rules:
     resources: ["endpoints"]
     resourceNames: ["wardby-coding-proxy"]
     verbs: ["get"]
+---
+# The preflight's `namespace` check reads the namespace back to confirm it exists
+# and is the one configured, before any run object is created. A Namespace is a
+# CLUSTER-scoped object, so this cannot be a rule in the Role above — a namespaced
+# Role grants nothing on cluster-scoped resources, and RBAC accepts such a rule
+# silently while `kubectl auth can-i get namespaces` still answers no. Hence a
+# ClusterRole, held to a single object by resourceNames: it reads one namespace
+# and can never enumerate or read another.
+#
+# This exists because the Role was finally USED. Every rule above was derived by
+# reading the launcher's call sites; this one was missed because the preflight
+# reads the namespace and nothing in the launcher's own path does. It surfaced
+# the first time the control plane ran in-cluster under this Role instead of an
+# operator's admin kubeconfig (2026-09-23), as `namespaces "wardby-coding" is
+# forbidden` on a scheduled run. A Role that has never been exercised is a guess,
+# however carefully it was derived.
+#
+# The name is not namespaced, so a second wardby namespace in the same cluster
+# needs its own ClusterRole with its own resourceNames.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: wardby-coding-launcher-namespace
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["wardby-coding"]
+    verbs: ["get"]

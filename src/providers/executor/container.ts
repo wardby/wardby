@@ -21,6 +21,7 @@ import type { ProxyProtocol } from "../coding-proxy/types.js";
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
 import type { PreparedWorkspace, VcsPrepareInput, VcsProvider } from "../vcs/types.js";
 import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
+import { HEARTBEAT_TIMEOUT_MS } from "../../core/timing.js";
 
 const containerLog = logger.child({ module: "container-executor" });
 
@@ -349,6 +350,8 @@ export interface ContainerExecutorOptions {
   maxDiskMb: number;
   pollMinMs?: number;
   pollMaxMs?: number;
+  /** How often to beat the heartbeat during a long launch; defaults to a third of the reconciler's timeout. */
+  heartbeatIntervalMs?: number;
   sleep?: (milliseconds: number) => Promise<void>;
   now?: () => Date;
   observer?: CodingRunObserver;
@@ -539,7 +542,7 @@ export class ContainerExecutor implements Executor {
         // launch and the write still leaves a handle `abandon()` can stop and remove the run with.
         const planned = this.options.jobs.plannedHandle?.(spec);
         if (planned) await this.options.store.persistHandle(runId, claimId!, planned);
-        handle = await this.options.jobs.launch(spec);
+        handle = await this.whileHeartbeating(runId, () => this.options.jobs.launch(spec));
         if (planned && (planned.backend !== handle.backend || planned.id !== handle.id)) {
           throw new Error("coding_job_handle_mismatch");
         }
@@ -588,6 +591,43 @@ export class ContainerExecutor implements Executor {
         await this.options.vcs.notifyContinuationFinished?.(workspace, "failed", { agentName: run.agentName });
       }
       this.emit({ stage: "cleanup", runId, jobId: handle?.id, cleanupSucceeded: true });
+    }
+  }
+
+  /**
+   * Runs `work` while keeping the run's heartbeat fresh.
+   *
+   * `jobs.launch` is one long await that legitimately takes minutes on a real
+   * cluster — the pod cannot be scheduled until an autoscaler has created a node
+   * for it — and nothing inside it beats the heartbeat. Meanwhile the reconciler
+   * sweeps any run whose heartbeat is older than HEARTBEAT_TIMEOUT_MS and
+   * declares it lost, which deletes the job out from under the launch that is
+   * still running. The launch then fails on its own pod having vanished, so a
+   * single healthy run produces two failures and neither names the real cause.
+   *
+   * Measured on GKE Autopilot (2026-09-23): a scheduled run whose pod was
+   * waiting on a cold gVisor node pool was declared lost at exactly 60s, and the
+   * launch it had interrupted failed 32s later with
+   * `kubernetes_isolation_unsupported:timeout`. This never appeared on kind,
+   * where a pod is scheduled in seconds and the heartbeat gap stays well inside
+   * the timeout. The gap is what is wrong, not the timeout: a run that is
+   * provisioning IS alive, and the executor is the only thing that knows it.
+   *
+   * Failures to beat are swallowed on purpose. A missed beat costs at worst the
+   * recovery this exists to prevent, while throwing here would fail a launch
+   * that is otherwise healthy.
+   */
+  private async whileHeartbeating<T>(runId: string, work: () => Promise<T>): Promise<T> {
+    const interval = this.options.heartbeatIntervalMs ?? Math.floor(HEARTBEAT_TIMEOUT_MS / 3);
+    const timer = setInterval(() => {
+      void this.options.store.heartbeat(runId).catch(() => undefined);
+    }, interval);
+    // Never hold the process open for a heartbeat: shutdown should not wait on one.
+    timer.unref?.();
+    try {
+      return await work();
+    } finally {
+      clearInterval(timer);
     }
   }
 

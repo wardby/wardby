@@ -93,8 +93,10 @@ spec:
             medium: Memory
             sizeLimit: 16Mi
 ---
-# The proxy reaches the throwaway database; nothing else in the namespace may,
-# and the database itself gets no egress at all.
+# The proxy and the control plane reach the throwaway database; nothing else in
+# the namespace may, and the database itself gets no egress at all. A coding-run
+# pod is not on this list and never will be — its own policy permits exactly one
+# destination, and this is the other end of that guarantee.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -112,6 +114,9 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: wardby-coding-proxy
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wardby-control-plane
       ports:
         - protocol: TCP
           port: 5432

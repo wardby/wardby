@@ -6,3 +6,4 @@ resources:
   - proxy-dns-egress.yaml
   - throwaway-database.yaml
   - proxy-database-egress.yaml
+  - control-plane.yaml

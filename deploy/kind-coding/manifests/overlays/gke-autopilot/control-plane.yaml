@@ -1,0 +1,322 @@
+# The wardby control plane, running IN the cluster it launches coding runs into.
+#
+# Until now the control plane ran on an operator's laptop and reached the
+# cluster with an admin kubeconfig, which meant two things: the database had to
+# be tunnelled out with `kubectl port-forward`, and the launcher's own Role
+# (../../base/launcher-role.yaml) was never exercised — every API call carried
+# cluster-admin. Running here fixes both. The ServiceAccount below is bound to
+# that Role and nothing else, so a missing verb now fails a launch instead of
+# being masked by admin credentials.
+#
+# `image: wardby-runtime` and `image: wardby-migration` are placeholders, as in
+# ../../base/proxy.yaml: the apply step substitutes resolved digests into the
+# rendered manifest, never into this tracked file. No project, cluster, region
+# or registry path appears here.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wardby-control-plane
+  namespace: wardby-coding
+---
+# The only RoleBinding in this deployment. Note what it does NOT grant: no
+# cluster-scoped role, no access to any other namespace, and no permission the
+# launcher doesn't issue (launcher-role.yaml enumerates them, and deliberately
+# withholds list/watch on pods and get on secrets).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: wardby-control-plane-launcher
+  namespace: wardby-coding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: wardby-coding-launcher
+subjects:
+  - kind: ServiceAccount
+    name: wardby-control-plane
+    namespace: wardby-coding
+---
+# The one cluster-scoped grant, and it reads exactly one object: the namespace
+# this deployment runs in (see launcher-role.yaml for why a Role cannot express
+# it). resourceNames on the ClusterRole is what keeps a cluster-scoped binding
+# from becoming cluster-wide read access.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: wardby-control-plane-namespace
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: wardby-coding-launcher-namespace
+subjects:
+  - kind: ServiceAccount
+    name: wardby-control-plane
+    namespace: wardby-coding
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-control-plane
+  namespace: wardby-coding
+  labels:
+    app.kubernetes.io/name: wardby-control-plane
+spec:
+  # Exactly one. `serve` runs the scheduler and the reconciler, and a second
+  # replica would be a second scheduler: the launcher's idempotency fence makes
+  # a duplicate launch safe, but nothing here needs the availability.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-control-plane
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wardby-control-plane
+    spec:
+      serviceAccountName: wardby-control-plane
+      # TRUE here, and false on every other pod in this namespace. This is the
+      # one workload that talks to the Kubernetes API; the worker and the proxy
+      # get no token at all.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # `prisma migrate deploy`, every start. It is idempotent, so a restart
+        # costs nothing — and the throwaway database stores its data in an
+        # emptyDir, so a database pod that restarts comes back empty and this is
+        # what puts the schema back without an operator or a port-forward.
+        # Needs the migration image: the runtime stage deliberately has no
+        # prisma CLI (deploy/Dockerfile asserts its absence).
+        - name: migrate
+          image: wardby-migration
+          command: ["npm", "run", "prisma:migrate"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: wardby-control-plane-env
+                  key: DATABASE_URL
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+              ephemeral-storage: 2Gi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+              ephemeral-storage: 2Gi
+      containers:
+        - name: control-plane
+          image: wardby-runtime
+          # The image's default CMD: MCP + scheduler + reconciler in one process.
+          command: ["node", "dist/cli.js", "serve"]
+          envFrom:
+            - secretRef:
+                name: wardby-control-plane-env
+          env:
+            - name: NODE_ENV
+              value: production
+            # `serve` refuses any transport but http (src/serve.ts): in stdio
+            # mode stdout is the JSON-RPC wire. The endpoint is ClusterIP-only —
+            # nothing outside the cluster can reach it. An operator's MCP client
+            # gets a stdio process of its own instead:
+            #   kubectl exec -i -n wardby-coding deploy/wardby-control-plane \
+            #     -- env MCP_TRANSPORT=stdio node dist/cli.js mcp
+            # which authenticates as the operator's kubeconfig and shares this
+            # process's database.
+            - name: MCP_TRANSPORT
+              value: http
+            - name: MCP_HTTP_BIND
+              value: 0.0.0.0:8080
+            # The address this server calls itself, and the audience every token
+            # must carry. The server refuses a plain-HTTP canonical URI unless it
+            # is loopback, which is the correct description of this deployment:
+            # the MCP endpoint is NOT published. Nothing outside the pod may open
+            # a connection to it (see the NetworkPolicy below — no ingress rules
+            # at all), and operators reach MCP through `kubectl exec`, which
+            # never consults this value. The http server exists because `serve`
+            # requires one to host the scheduler and reconciler.
+            #
+            # Publishing the endpoint means REPLACING this with the public HTTPS
+            # URL, not adding to it: a token minted for one audience is refused
+            # for the other, which is what keeps an unpublished deployment from
+            # silently accepting tokens meant for a published one.
+            - name: MCP_CANONICAL_URI
+              value: http://127.0.0.1:8080/mcp
+            # Must be byte-identical to MCP_CANONICAL_URI once normalized; the
+            # server refuses to start otherwise, so the two can never drift into
+            # a state where tokens are minted for an audience it won't accept.
+            - name: AUTH_AUDIENCE
+              value: http://127.0.0.1:8080/mcp
+            # The API server, addressed by its ENDPOINT rather than by the
+            # kubernetes.default ClusterIP the kubelet injects here by default.
+            #
+            # This is not a preference, it is the only thing that works under a
+            # default-deny NetworkPolicy on GKE Dataplane V2, and it was measured
+            # (2026-09-23): from this pod, the endpoint IP connects on 443 while
+            # the ClusterIP times out — with an egress rule allowing 0.0.0.0/0,
+            # and still with an explicit rule for the Service CIDR. Dataplane V2
+            # is Cilium, which classifies the API server under its own identity,
+            # and ipBlock rules only ever match the `world` identity. Autopilot
+            # exposes no CiliumNetworkPolicy CRD to express an entity rule, so
+            # there is no CIDR that can reach the VIP. Reaching the endpoint
+            # directly is ordinary world traffic and the existing 443 rule covers
+            # it; the cluster CA validates the endpoint, which is exactly what
+            # kubectl does from outside.
+            #
+            # A placeholder, substituted at apply time like the image digests: an
+            # endpoint address is cluster identity and never belongs in a tracked
+            # manifest.
+            - name: KUBERNETES_SERVICE_HOST
+              value: wardby-apiserver-host
+            - name: KUBERNETES_SERVICE_PORT
+              value: "443"
+            - name: JOB_LAUNCHER
+              value: kubernetes
+            # KUBERNETES_CONTEXT is deliberately unset: ClientNodeKubernetesApi
+            # calls loadFromDefault(), which falls back to the mounted
+            # ServiceAccount token when there is no kubeconfig. Setting a context
+            # here would be a laptop's idea of the cluster it is already inside.
+            - name: KUBERNETES_NAMESPACE
+              value: wardby-coding
+            - name: KUBERNETES_PROXY_SERVICE
+              value: wardby-coding-proxy
+            - name: KUBERNETES_PLATFORM
+              value: gke-autopilot
+            - name: KUBERNETES_RUNTIME_CLASS
+              value: gvisor
+            # A placeholder like the image fields above, and substituted the same
+            # way: the worker image is a registry path, which is target identity
+            # and never belongs in a tracked manifest. The Kubernetes launcher
+            # refuses anything that is not a digest.
+            - name: CODING_WORKER_IMAGE
+              value: wardby-coding-worker-image
+          ports:
+            - name: mcp
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # Not scratch space: the coding executor clones each run's repository
+            # under tmpdir() (composition.ts defaults workspaceRoot to
+            # <tmp>/wardby-vcs) and builds the seed archive there, so this is the
+            # working set of every coding run.
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 1000m
+              memory: 2Gi
+              ephemeral-storage: 4Gi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+              ephemeral-storage: 4Gi
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            periodSeconds: 5
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 3Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wardby-control-plane
+  namespace: wardby-coding
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: wardby-control-plane
+  ports:
+    - name: mcp
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-control-plane
+  namespace: wardby-coding
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-control-plane
+  policyTypes:
+    - Ingress
+    - Egress
+  # No ingress rules: nothing in this namespace may open a connection to the
+  # control plane. `kubectl exec` is not affected — it arrives from the kubelet,
+  # not across the pod network — and neither is a port-forward, for the same
+  # reason. An external MCP endpoint would add an ingress rule here.
+  egress:
+    # DNS. Both link-local addresses for the reason documented in
+    # proxy-dns-egress.yaml: Autopilot resolves via NodeLocal DNSCache at
+    # 169.254.20.10, measured, not the metadata server.
+    - to:
+        - ipBlock:
+            cidr: 169.254.20.10/32
+        - ipBlock:
+            cidr: 169.254.169.254/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The throwaway database.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wardby-throwaway-db
+      ports:
+        - protocol: TCP
+          port: 5432
+    # HTTPS: the Kubernetes API server (its ClusterIP is a public-range address
+    # on GKE, and a public cluster's endpoint is a public IP either way) and
+    # github.com for cloning and opening pull requests. Same shape as the
+    # proxy's internet rule — the whole internet minus the private ranges.
+    #
+    # This is deliberately broader than the coding worker's egress, and the
+    # distinction is the point: the control plane is trusted code holding
+    # credentials, the worker is untrusted code that gets exactly one
+    # destination. Widening this does not widen that.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 100.64.0.0/10
+      ports:
+        - protocol: TCP
+          port: 443
