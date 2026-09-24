@@ -33,7 +33,7 @@ import type { KubernetesJobConfig } from "../../config/providers.js";
 import { logger } from "../../core/logger.js";
 import { MAX_CODING_ARTIFACT_BYTES, parseCodingAgentOutputJson } from "../../coding/protocol.js";
 import { CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "./docker-isolation.js";
-import { SAFE_WORKER_DIAGNOSTIC } from "./docker.js";
+import { parseWorkerDiagnosticLine, type WorkerDiagnostic } from "./docker.js";
 import { KubernetesAlreadyExistsError, KubernetesConflictError, type KubernetesApi } from "./kubernetes-api.js";
 import {
   ENFORCEMENT_PROBE_DENY_REACHABLE,
@@ -530,7 +530,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     let result = record.result ?? resultFor(phase);
     if (phase === "failed" && !result.diagnostic) {
       const diagnostic = await this.readWorkerDiagnostic(names);
-      if (diagnostic) result = { ...result, diagnostic };
+      if (diagnostic) result = { ...result, ...diagnostic };
     }
     if (phase === "succeeded" && !result.resultArtifact) {
       result = { ...result, resultArtifact: await this.readResultArtifact(names, record.runId) };
@@ -826,7 +826,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   }
 
   /** Reads only a fixed diagnostic code from a failed worker's bounded log tail; never keeps anything else. */
-  private async readWorkerDiagnostic(names: RunNames): Promise<string | undefined> {
+  private async readWorkerDiagnostic(names: RunNames): Promise<WorkerDiagnostic | undefined> {
     let raw: string;
     try {
       raw = await this.api.readLogTail(
@@ -841,12 +841,8 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       return undefined;
     }
     for (const line of raw.split("\n").reverse()) {
-      try {
-        const value = JSON.parse(line) as { error?: unknown } | null;
-        if (typeof value?.error === "string" && SAFE_WORKER_DIAGNOSTIC.test(value.error)) return value.error;
-      } catch {
-        // Worker output is untrusted; only one fixed JSON shape is recognized.
-      }
+      const diagnostic = parseWorkerDiagnosticLine(line);
+      if (diagnostic) return diagnostic;
     }
     return undefined;
   }

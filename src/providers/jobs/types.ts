@@ -44,6 +44,8 @@ export interface JobResult {
   resultArtifact?: string;
   /** Fixed worker-owned failure code; never raw container output. */
   diagnostic?: string;
+  /** Output-schema failure locations (`path:code`) that passed SAFE_CODING_OUTPUT_ISSUE; never values. */
+  diagnosticIssues?: string[];
 }
 
 /**

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readCodingInput, writeCodingOutputAtomic } from "../coding-worker/artifact.js";
-import { safeWorkerErrorCode } from "../coding-worker/errors.js";
+import { safeOutputIssues, safeWorkerErrorCode } from "../coding-worker/errors.js";
 import { runClaudeCodingWorker } from "./driver.js";
 import { createClaudeSdkQuery } from "./sdk.js";
 
@@ -37,6 +37,7 @@ try {
     : safeCode === "worker_failed"
       ? `worker_${stage}_failed`
       : safeCode;
-  process.stderr.write(`${JSON.stringify({ error: code })}\n`);
+  const issues = code === "coding_output_invalid" ? safeOutputIssues(error) : undefined;
+  process.stderr.write(`${JSON.stringify({ error: code, ...(issues ? { issues } : {}) })}\n`);
   process.exitCode = controller.signal.aborted ? 143 : 1;
 }

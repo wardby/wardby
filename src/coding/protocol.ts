@@ -8,6 +8,16 @@ export const MAX_CODING_TESTS = 64;
 export const MAX_CODING_TEST_COMMAND_BYTES = 2 * 1024;
 export const MAX_TAG_BYTES = 32;
 
+/**
+ * A worker's output-schema failure, reduced to where and how it failed, never
+ * what the model wrote: `<path>:<zod issue code>`, where the path is dot-joined
+ * schema keys and array indices (`$` for the root). Unrecognized keys the model
+ * invented are carried only as the `unrecognized_keys` code, never by name.
+ */
+export const MAX_CODING_OUTPUT_ISSUES = 8;
+export const SAFE_CODING_OUTPUT_ISSUE =
+  /^(?:\$|[a-z][A-Za-z]{0,31}(?:\.(?:[a-z][A-Za-z]{0,31}|\d{1,3})){0,7}):[a-z_]{1,32}$/;
+
 const MAX_REPOSITORY_INPUT_BYTES = 512;
 const MAX_REF_BYTES = 255;
 const MAX_MODEL_BYTES = 128;
