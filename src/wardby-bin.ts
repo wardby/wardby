@@ -13,12 +13,34 @@ function packageVersion(): string {
   return packageJson.version;
 }
 
-const command = process.argv[2];
+async function main(): Promise<void> {
+  const command = process.argv[2];
 
-if (command === undefined || command === "--help" || command === "-h") {
-  process.stdout.write(`${CLI_USAGE}\n`);
-} else if (command === "--version" || command === "-v") {
-  process.stdout.write(`${packageVersion()}\n`);
-} else {
-  await import("./cli.js");
+  if (command === undefined || command === "--help" || command === "-h") {
+    process.stdout.write(`${CLI_USAGE}\n`);
+  } else if (command === "--version" || command === "-v") {
+    process.stdout.write(`${packageVersion()}\n`);
+  } else if (command === "quickstart") {
+    const { quickstartCommand } = await import("./quickstart/index.js");
+    await quickstartCommand(process.argv.slice(3));
+  } else if (command === "doctor") {
+    const { doctorCommand } = await import("./quickstart/index.js");
+    await doctorCommand(process.argv.slice(3));
+  } else if (command === "status") {
+    const { statusCommand } = await import("./quickstart/index.js");
+    await statusCommand(process.argv.slice(3));
+  } else if (command === "logs") {
+    const { logsCommand } = await import("./quickstart/index.js");
+    await logsCommand(process.argv.slice(3));
+  } else if (command === "down") {
+    const { downCommand } = await import("./quickstart/index.js");
+    await downCommand(process.argv.slice(3));
+  } else {
+    await import("./cli.js");
+  }
 }
+
+main().catch((error: unknown) => {
+  console.error(`error: ${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 1;
+});

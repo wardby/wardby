@@ -192,7 +192,7 @@ Two roles ship in `manifests/base/` with **no binding**:
 None is bound in the `kind` overlay because the local harness runs `up.sh`,
 `kubectl`, and `wardby coding preflight` against your admin kubeconfig. The
 GKE overlay binds the ClusterRole with a ClusterRoleBinding and the Roles with
-RoleBindings to the Cloud Run service account's identity, which is the
+RoleBindings to the in-cluster control-plane ServiceAccount, which is the
 least-privilege boundary in that deployment.
 
 ## Tear it down
