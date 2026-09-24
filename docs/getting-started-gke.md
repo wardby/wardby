@@ -234,6 +234,13 @@ kubectl exec -n wardby-coding deploy/wardby-control-plane \
   node dist/cli.js auth user create --subject YOUR_SUBJECT
 ```
 
+The deployment helper configures Wardby's self-hosted authorization server by
+default. To use your organization's OAuth/OIDC provider instead, configure the
+control-plane secret for delegated authentication and follow
+[Bring your own identity provider](getting-started-identity-provider.md). In
+delegated mode, users and clients belong to the external provider and you do
+not create Wardby login credentials.
+
 Run the coding boundary preflight inside the configured control-plane pod:
 
 ```sh
