@@ -2,16 +2,17 @@
   <img align="left" hspace="24" src="https://raw.githubusercontent.com/wardby/wardby/main/docs/assets/brand/wardby-mascot.png" alt="Wardby guardian robot protecting an agent budget" width="280">
   <h3><big><big>Wardby</big></big> <small><em>(pronounced&nbsp;“WARD&#8209;bee”)</em></small></h3>
   <h3>Autonomous agents, bounded by design.</h3>
-  <p><strong>Most agent runners focus on helping a model complete a task. Wardby is the self-hosted control plane that decides whether the task should run, limits what it can access, and returns a reviewable outcome governed by explicit policy.</strong></p>
+  <p><strong>Agent runners help a model complete a task. Wardby is the self-hosted control plane that governs the work around it: whether it may run, what it may access, what it may spend, and what reviewable outcome it may produce.</strong></p>
   <br clear="left">
   <p><strong>Budgets are enforced before spend: every model request must fit within a hard run limit before it reaches the provider.</strong></p>
+  <p><strong>Bring your providers. Keep your infrastructure. Govern agents in one place.</strong></p>
   <p>
+    <a href="#get-started">Get started</a> ·
     <a href="#why-wardby">Why Wardby</a> ·
-    <a href="#why-wardby-instead-of-another-agent-runner">Why it is different</a> ·
+    <a href="#where-wardby-fits">Where it fits</a> ·
     <a href="#a-full-cycle-agent-from-one-conversation">Full-cycle example</a> ·
     <a href="#host-it-in-your-cloud">Deployments</a> ·
     <a href="#bring-your-own-observability">Observability</a> ·
-    <a href="#get-started">Get started</a> ·
     <a href="#security-boundaries">Security</a>
   </p>
 </div>
@@ -95,44 +96,80 @@ AI agents are easy to demo and harder to operate. Once an agent can spend
 money, use credentials, change a repository, or run without a person watching,
 teams need more than a prompt and a cron job.
 
+### One control plane instead of scattered automation
+
+Teams often begin with Claude Code or Codex on developer machines,
+repository-specific automation, and separate provider dashboards. As adoption
+grows, agent definitions, ownership, credentials, budgets, schedules, and run
+history become fragmented across tools and repositories.
+
+Wardby gives every Wardby-managed agent one durable operational identity: who
+owns it, why it exists, what it may access, when it runs, what it may spend,
+and what outcome it produced.
+
 Wardby provides the control plane around the model:
 
-| For engineering leaders                                                     | For developers                                                                             |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Put explicit cost, ownership, and approval boundaries around agent work.    | Create and manage agents from Claude or Codex through MCP.                                 |
-| Keep execution, data, and credentials in infrastructure your team controls. | Choose OpenAI, Anthropic, or Bedrock-backed models per agent.                              |
-| Turn one-off experiments into scheduled, observable operating processes.    | Attach scoped tools, secrets, schedules, memory, and sub-agents.                           |
-| Keep approval and action authority explicit for consequential outcomes.     | Run optional coding tasks in isolated Codex or Claude Code workers that produce draft PRs. |
+| For engineering leaders                                                      | For developers                                                                             |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Keep an inventory of owned agents, purposes, schedules, limits, and results. | Create and manage agents from Claude or Codex through MCP.                                 |
+| See reserved budget and actual usage across Wardby-managed agents.           | Choose OpenAI, Anthropic, or Bedrock-backed models per agent.                              |
+| Keep execution, data, and credentials in infrastructure your team controls.  | Switch approved models or builders without rewriting the governance contract.              |
+| Turn one-off experiments into scheduled, observable operating processes.     | Attach scoped tools, secrets, schedules, memory, and sub-agents.                           |
+| Keep approval and action authority explicit for consequential outcomes.      | Run optional coding tasks in isolated Codex or Claude Code workers that produce draft PRs. |
 
 The result is not another autonomous black box. It is a way to make agent work
 repeatable, bounded, inspectable, and reviewable.
 
-## Why Wardby instead of another agent runner?
+## Where Wardby fits
 
 Agent tools solve different layers of the problem. Wardby does not need to
 replace them: it provides the self-hosted operating boundary around agents and
 the work they perform.
 
-| Category                   | What it primarily helps you do                              | What Wardby adds                                                                           |
-| -------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| **Agent frameworks**       | Build reasoning loops, tool calls, and multi-agent logic.   | Persistent ownership, schedules, budgets, credentials, run history, and lifecycle control. |
-| **Coding agents**          | Plan, edit, and test code for an interactive task.          | Isolated managed workers, admission-time budgets, scoped access, and optional draft PRs.   |
-| **Hosted agent platforms** | Start quickly on infrastructure operated by another vendor. | A control plane, data, credentials, and execution boundary you can host in your own cloud. |
-| **Workflow orchestrators** | Make application jobs durable, retryable, and observable.   | Agent-specific policy, model usage, capabilities, budgets, and MCP-native operations.      |
+| Category                    | What it primarily helps you do                              | What Wardby adds                                                                           |
+| --------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| **Repository automation**   | Run jobs for one repository in response to delivery events. | One agent catalog, budget model, and policy boundary across repositories and triggers.     |
+| **Agent frameworks**        | Build reasoning loops, tool calls, and multi-agent logic.   | Persistent ownership, schedules, budgets, credentials, run history, and lifecycle control. |
+| **Coding agents**           | Plan, edit, and test code for an interactive task.          | Isolated managed workers, admission-time budgets, scoped access, and optional draft PRs.   |
+| **Provider dashboards**     | Report usage and cost within one model provider.            | Agent-owned budgets, capabilities, runs, and outcomes across approved providers.           |
+| **LLM gateways**            | Route model requests, manage keys, and enforce quotas.      | Budgets tied to named agents, owned runs, capabilities, schedules, and outcomes.           |
+| **Observability platforms** | Trace requests, evaluate quality, and explain cost.         | Admission and execution controls applied before work occurs, plus a durable agent catalog. |
+| **Vendor control planes**   | Govern agents inside one provider or cloud ecosystem.       | A self-hosted boundary spanning approved providers, builders, repositories, and clouds.    |
+| **Workflow orchestrators**  | Make application jobs durable, retryable, and observable.   | Agent-specific policy, model usage, capabilities, budgets, and MCP-native operations.      |
 
-The distinction is control, not just execution. Wardby reserves spend before a
-run starts, grants only assigned capabilities, records what happened, and
-keeps downstream action authority separate from the worker that produced the
-result.
+The distinction is governed work, not just model calls or execution. Rather
+than assembling a gateway, scheduler, agent catalog, budget service,
+capability registry, and run database, Wardby provides one operating boundary.
+It reserves spend before a run starts, grants only assigned capabilities,
+records what happened, and keeps downstream action authority separate from the
+worker that produced the result.
 
-## One control plane, the full lifecycle
+> **Scope:** Wardby's inventory and budget views cover work managed through
+> Wardby. Provider reconciliation and unmanaged-agent discovery are required
+> before those views can represent every AI agent or expense in an
+> organization.
+
+## One operational contract, the full lifecycle
 
 ![Wardby workflow: ask in Claude or Codex, define an agent through MCP, govern it in Wardby, execute it in isolation, and apply review policy to its outcome](https://raw.githubusercontent.com/wardby/wardby/main/docs/assets/wardby-workflow.svg)
 
-Claude and Codex are the operator experience. Wardby is the durable system
-behind them: it stores agent definitions, triggers work, reserves budget,
-mediates tools and credentials, records outcomes, and exposes run state through
-MCP.
+Claude and Codex are the operator experience. Wardby is the durable operating
+boundary between intent and agent execution: it stores agent definitions,
+triggers work, reserves budget, mediates tools and credentials, records
+outcomes, and exposes run state through MCP. Nothing runs until identity,
+policy, and available budget agree.
+
+### Governed shared state for agent teams
+
+Named Wardby datastores let related agents exchange persistent structured data
+without sharing an unrestricted database credential. Datastores are owned and
+attached to agents explicitly; each sandboxed tool can reach only approved
+bound names and key prefixes.
+
+A planner can publish a feature plan, a builder can record implementation
+state, and a reviewer or QA agent can add findings to the same governed
+workspace. Datastores provide bounded coordination state, not a replacement
+for authoritative source systems or searchable agent memory.
 
 ## A full-cycle agent from one conversation
 
@@ -159,12 +196,16 @@ Claude or Codex can translate that request into Wardby MCP operations such as
 
 The same agent can be updated, paused, triggered, inspected, or deleted from an
 MCP conversation. The CLI remains available as the bootstrap and operations
-floor.
+floor. The result is autonomy with a receipt: an owned run with bounded spend,
+assigned capabilities, durable status, and a reviewable outcome.
 
 ## Agent ecosystems you can compose
 
 Wardby provides lifecycle primitives rather than prescribing one fixed catalog.
 These are example systems a team can build and manage through MCP:
+
+**Builders can vary. The controls do not.** Each system inherits the same
+budget, capability, identity, evidence, and review contract.
 
 | Agent system             | Typical cycle                                                      | Governed outcome                     |
 | ------------------------ | ------------------------------------------------------------------ | ------------------------------------ |
@@ -181,9 +222,15 @@ own model, tools, schedule, and run history.
 
 ## Host it in your cloud
 
+**Bring your providers. Keep your infrastructure. Govern agents in one place.**
+
 The core does not import a cloud SDK. Jobs, model access, email, secrets,
 authentication, and object storage sit behind provider interfaces so operators
-can choose the infrastructure boundary that fits their environment.
+can choose the infrastructure boundary that fits their environment. Models,
+coding executors, cloud platforms, and observability systems can change
+independently instead of defining the agent architecture. This reduces
+control-plane lock-in without pretending that source control, model providers,
+or monitoring systems disappear.
 
 | Target                               | Current support                                                                                                  |
 | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
@@ -198,14 +245,10 @@ Start with [deployment targets](https://github.com/wardby/wardby/blob/main/deplo
 [GKE getting-started guide](https://github.com/wardby/wardby/blob/main/docs/getting-started-gke.md). Reference deployments are examples,
 not a requirement to use one vendor.
 
-**A complete deployment runs more than `wardby mcp`.** `mcp` serves the MCP
-surface; the scheduler that fires due agents and the reconciler that recovers
-orphaned runs live in `wardby scheduler`. Run **`wardby serve`** to get all three
-in one process. It is the container image's default command and what a
-single-container deployment (Cloud Run, a lone VM) should run. Alternatively,
-run `mcp` and `scheduler` as two processes, as `deploy/production/compose.yml`
-does. Running `mcp` alone logs a startup warning if enabled schedules exist
-that nothing will fire.
+For a single-container deployment, run **`wardby serve`** to start MCP, the
+scheduler, and reconciliation together. Split deployments can run `wardby mcp`
+and `wardby scheduler` separately; `mcp` alone does not fire schedules. See the
+deployment guides above for the complete process boundary.
 
 ## Bring your own observability
 
