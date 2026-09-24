@@ -2,7 +2,7 @@ import { defineConfig, configDefaults } from "vitest/config";
 
 export default defineConfig({
   test: {
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "deploy/**/*.test.mjs"],
     // Tests explicitly include .env.local; dotenv-flow normally omits it when
     // NODE_ENV=test. Shell/CI variables remain highest priority.
     setupFiles: ["./vitest.setup.ts"],

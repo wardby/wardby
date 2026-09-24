@@ -128,3 +128,9 @@ variable "artifact_registry_name" {
   type        = string
   default     = "wardby"
 }
+
+variable "secrets_deletion_protection" {
+  description = "Blocks terraform destroy of the Secret Manager secrets. Set false and apply before tearing down."
+  type        = bool
+  default     = true
+}
