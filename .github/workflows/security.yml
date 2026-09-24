@@ -3,6 +3,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # New CVEs are published against images that have not changed. Without a
+  # schedule, a quiet week leaves main's images unscanned against the current
+  # vulnerability database.
+  schedule:
+    - cron: "17 6 * * 1"
 permissions:
   contents: read
 jobs:
@@ -22,8 +27,10 @@ jobs:
       # Public deterministic fixture material for tests only; never a deployment key.
       SECRET_APP_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
@@ -40,7 +47,7 @@ jobs:
       - run: npm run test:package
       - run: node --expose-gc scripts/security-allocation-check.mjs
       - run: npm ls --all --json > dependency-tree.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dependency-tree
           path: dependency-tree.json
@@ -64,8 +71,10 @@ jobs:
             tag-suffix: driver
             kind: driver
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
@@ -76,7 +85,7 @@ jobs:
         run: npm run test:docker-isolation
         env:
           WARDBY_WORKER_IMAGE: wardby-coding-worker-node:${{ github.sha }}
-      - uses: anchore/sbom-action@v0.20.5
+      - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           image: wardby-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }}
           format: spdx-json
@@ -88,7 +97,7 @@ jobs:
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: coding-worker-sbom-${{ matrix.tag-suffix }}
@@ -98,8 +107,10 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
@@ -115,12 +126,12 @@ jobs:
           WARDBY_CLAUDE_TOOL_RUNNER_IMAGE: wardby-claude-tool-runner:${{ github.sha }}
           WARDBY_DOCKER_SEED_DEBUG: "1"
           WARDBY_CLAUDE_KEEPER_PROBE: "1"
-      - uses: anchore/sbom-action@v0.20.5
+      - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           image: wardby-claude-coding-worker:${{ github.sha }}
           format: spdx-json
           output-file: claude-coding-worker.spdx.json
-      - uses: anchore/sbom-action@v0.20.5
+      - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           image: wardby-claude-tool-runner:${{ github.sha }}
           format: spdx-json
@@ -139,7 +150,7 @@ jobs:
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: claude-worker-sboms
