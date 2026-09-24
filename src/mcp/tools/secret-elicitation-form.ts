@@ -28,7 +28,12 @@ function html(res: ServerResponse, status: number, body: string): void {
   );
   res.setHeader("cache-control", "no-store");
   res.setHeader("x-content-type-options", "nosniff");
-  res.setHeader("referrer-policy", "no-referrer");
+  // Not no-referrer: under it a browser sends `Origin: null` on this page's native
+  // form POST, even to the same origin, and the HTTP transport rejects that as
+  // invalid_origin. same-origin keeps the Origin and still sends nothing,
+  // token-bearing URL included, to any other site. (The login page solves the
+  // same problem with a fetch() instead; this page runs no script at all.)
+  res.setHeader("referrer-policy", "same-origin");
   res
     .writeHead(status, { "content-type": "text/html; charset=utf-8" })
     .end(
