@@ -84,7 +84,15 @@ and grants read access on each to a single Kubernetes service account,
 Google service account, no key. `up.sh` fills empty secrets through
 `seed-secrets.mjs` and syncs them into the cluster with External Secrets
 Operator, installed by Helm at the version pinned in `eso.env` and scoped to
-`wardby-coding` by `eso-values.yaml`.
+`wardby-coding` by `eso-values.yaml`. One cluster-wide permission remains: ESO's
+cert-controller keeps a ClusterRole that reads Secrets and can write only its
+own webhook certificate (`external-secrets-webhook`). The controller that writes
+wardby's Secrets is confined to `wardby-coding`.
+
+Before it deletes any hand-made Secret, `up.sh` proves External Secrets can
+really read Secret Manager with a throwaway ExternalSecret that reads one key
+(`deploy/kind-coding/manifests/overlays/gke-autopilot/secrets/canary.yaml`). If
+that read fails it stops, and the existing Secrets are left as they were.
 
 `verify-eso-kind.sh` proves the manifests, the scoping and the handover on a
 throwaway kind cluster. Run it after changing any of them or the chart version.
@@ -102,8 +110,12 @@ kubectl -n wardby-coding delete externalsecret wardby-control-plane-env --cascad
 `deploy/kind-coding/control-plane-secret.sh` with `KUBE_CONTEXT` set. It
 rebuilds only `wardby-control-plane-env`, from `.env.local`, and takes
 `DATABASE_URL` from the existing `wardby-coding-proxy-env` Secret, which must
-still exist. It does not rebuild `wardby-coding-proxy-env`. Re-running `up.sh`
-later hands the Secret back to ESO.
+still exist. It does not rebuild `wardby-coding-proxy-env`. If that Secret is gone as well,
+recreate it by hand with `DATABASE_URL`, `OPENAI_API_KEY` and
+`ANTHROPIC_API_KEY`, reading each value with
+`gcloud secrets versions access latest --secret <name>` and piping it into a
+Secret manifest over stdin, never with values on the command line. Re-running
+`up.sh` later hands the Secrets back to ESO.
 
 ## Teardown
 

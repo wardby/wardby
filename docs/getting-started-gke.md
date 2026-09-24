@@ -73,6 +73,7 @@ gcloud auth configure-docker YOUR_REGION-docker.pkg.dev
 gcloud services enable \
   artifactregistry.googleapis.com \
   certificatemanager.googleapis.com \
+  cloudresourcemanager.googleapis.com \
   compute.googleapis.com \
   container.googleapis.com \
   networksecurity.googleapis.com \
@@ -278,11 +279,8 @@ for them, then restart both Deployments. The names below assume the default
 `name_prefix` of `wardby`; substitute yours if you changed it.
 
 ```sh
-printf '%s' "$NEW_VALUE" | gcloud secrets versions add wardby-openai-api-key --data-file=-
-for es in wardby-coding-proxy-env wardby-control-plane-env; do
-  kubectl -n wardby-coding annotate externalsecret "$es" force-sync="$(date +%s)" --overwrite
-done
-kubectl -n wardby-coding wait externalsecret --all --for=condition=Ready --timeout=120s
+printf '%s' "$NEW_VALUE" | gcloud secrets versions add wardby-openai-api-key --project=YOUR_PROJECT_ID --data-file=-
+KUBE_CONTEXT="$(kubectl config current-context)" NAMESPACE=wardby-coding bash -c 'source deploy/gke/lib-secrets.sh && wait_external_secrets_synced 120s wardby-coding-proxy-env wardby-control-plane-env'
 kubectl -n wardby-coding rollout restart deploy/wardby-coding-proxy deploy/wardby-control-plane
 ```
 
@@ -297,7 +295,7 @@ collection options.
 
 ## 9. Teardown
 
-The cluster, Cloud SQL and the Secret Manager secrets use deletion protection. Disable both flags and
+The cluster, Cloud SQL and the Secret Manager secrets use deletion protection. Disable all three flags and
 apply that change before destroying:
 
 ```hcl
