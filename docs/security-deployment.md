@@ -1,9 +1,10 @@
 # Security deployment and recovery
 
 The secured self-hosted HTTP implementation is protected by database, HTTP,
-browser, migration, and review gates. SR-009 is accepted only for trusted
-build/migration tooling through 2026-10-06; deployment controls in this guide
-still apply.
+browser, migration, and review gates. SR-009 is removed from this repository,
+its CI, and its images by a reviewed dependency override; it is accepted only for
+`npm install @wardby/cli` consumers who have not applied the same override,
+through 2026-11-19. Deployment controls in this guide still apply.
 
 ## Supported runtime and delegated operation
 
@@ -274,24 +275,57 @@ dependencies and omits optional peers before installation. Merely running
 Audit the shipped subset with `npm audit --omit=peer`. A plain audit may still
 report intentionally omitted optional peers from the lockfile.
 
-SR-009 remains present in the trusted build, npm installation, and migration
-toolchain. The published CLI includes Prisma so its install hook can generate a
-platform-appropriate client; do not treat the npm package dependency tree as the
-hardened production runtime. On 2026-09-06,
-6.19.3 was the newest published Prisma 6 release and still included vulnerable
-deepmerge-ts 7.1.5. The advisory fixes deepmerge-ts at 8.0.0; no compatible
-Prisma 6 release was available. Neither npm's suggested 6.12 downgrade nor an
-unreviewed dependency-major override was applied. See the
-[advisory](https://github.com/advisories/GHSA-ggr8-5vv4-36mx).
+SR-009 is GHSA-ggr8-5vv4-36mx: `deepmerge-ts` below 8.0.0, reached through
+`prisma` -> `@prisma/config` -> `deepmerge-ts`. `@prisma/client` is not in that
+chain; only the Prisma CLI is. `@prisma/config` pins `deepmerge-ts` **exactly**
+(7.1.5) in both 6.19.3 and 7.10.0, so no `deepmerge-ts` patch can flow in by
+itself, and no Prisma 6 release since 6.19.3 (2026-04-01) has addressed it. See
+the [advisory](https://github.com/advisories/GHSA-ggr8-5vv4-36mx).
 
-Accepted exception: the owner accepted this risk on **2026-09-06** for trusted
-generation/build/migration operations only, expiring **2026-10-06**. Do not load
-untrusted Prisma config or run migration tooling in a request handler. Recheck
-upstream by that date;
-otherwise plan a separately reviewed Prisma-major migration. CI deliberately
-allows only the exact `@prisma/config`, `deepmerge-ts`, and `prisma` chain for
-GHSA-ggr8-5vv4-36mx and fails for any other advisory or after expiration. Raw
-`npm audit` remains nonzero, so the policy wrapper must stay in the security job.
+**Remediated here by override (2026-09-24).** `package.json` forces
+`deepmerge-ts` 8.0.2 under Prisma 6:
+
+```json
+"overrides": { "deepmerge-ts": "8.0.2" }
+```
+
+This is the dependency-major override the original acceptance declined to apply
+unreviewed. It was reviewed and tested before being applied: `@prisma/config`
+calls only `deepmerge()`, and the 8.0 breaking changes are two type renames and
+a behaviour change to `deepmergeInto`, which Prisma does not call. With the
+override, `prisma validate`, `generate` and `format`, the `migrate diff` drift
+check, the full test suite and the npm package acceptance test all pass, and raw
+`npm audit` reports zero vulnerabilities. The repository, CI, and the build and
+migration images are therefore clean.
+
+**CI enforces it.** `scripts/security-audit.mjs` no longer carries an exception
+for this advisory. With the override the audit is clean; if a lockfile change
+ever dropped the override, the advisory would reappear and the security job
+would fail. Both directions were verified.
+
+**What an override cannot reach.** npm honours `overrides` only in the root
+project and ignores them in dependencies, so the published package's own override
+has no effect on people who install it: `npm install @wardby/cli` still resolves
+`deepmerge-ts` 7.1.5 (verified). Installers can apply the same override in their
+own `package.json`; that yields zero vulnerabilities with a working CLI
+(verified).
+
+Accepted exception: re-accepted by the owner on **2026-09-24**, narrowed to
+consumer installs of the published package that have not applied the override,
+expiring **2026-11-19** — the end of Prisma 6 security support, per
+https://www.prisma.io/docs/orm/release-status. The acceptance deliberately does
+not outlive the Prisma major it covers. The original acceptance (2026-09-06,
+trusted generation/build/migration only, expiring 2026-10-06) is superseded.
+Do not load untrusted Prisma config or run migration tooling in a request
+handler.
+
+Retirement plan: Prisma 8 restructured its CLI and removes `deepmerge-ts`
+entirely (8.0.0-rc.15 resolves with none). If Prisma 8 is generally available by
+mid-October 2026, migrate 6 -> 8; otherwise migrate 6 -> 7, which is supported
+for 18 months after Prisma 8 ships. Either way, leave Prisma 6 before 2026-11-19.
+Note that Prisma's npm `latest` dist-tag currently points at a release candidate,
+so pin exact versions.
+
 Vitest and esbuild's additional development advisories were remediated by
 supported tooling updates.
 
