@@ -279,11 +279,13 @@ describe("redactTokenShapedValues", () => {
       "unterminated PEM blocks": (n: number) => "-----BEGIN PRIVATE KEY-----".repeat(n / 27),
       "aws key body": (n: number) => `aws_secret_access_key="${"A".repeat(n)}`,
     };
-    // Best-of-3: the cost is deterministic (sub-millisecond spread), so the
-    // minimum strips scheduler noise without making the ratio meaningless.
+    // Best-of-5 after one warm-up call: the cost is deterministic, so the
+    // minimum strips scheduler noise without making the ratio meaningless, and
+    // the warm-up keeps JIT compilation out of the first measurement.
     const cost = (input: string): number => {
+      redactTokenShapedValues(input);
       let best = Infinity;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
+      for (let attempt = 0; attempt < 5; attempt += 1) {
         const startedAt = performance.now();
         redactTokenShapedValues(input);
         best = Math.min(best, performance.now() - startedAt);
@@ -291,13 +293,31 @@ describe("redactTokenShapedValues", () => {
       return best;
     };
 
+    // A 4x step, not 2x. At 2x, linear scaling gives a ratio of 2 and quadratic
+    // gives 4, so any threshold between them has at most 1.5x headroom -- and the
+    // previous threshold of 3 flaked on GitHub's 2-vCPU runners at 3.26 and
+    // 3.79, failing `verify` on main while passing locally even under full CPU
+    // load. At 4x, linear gives 4 and quadratic 16, so a threshold of 8 has 2x
+    // margin on both sides.
+    //
+    // The floor is 5 ms rather than 0.5 ms for the same reason. The flaking
+    // shape runs in well under a millisecond, where a ratio measures scheduler
+    // noise, not the regex. A reintroduced quadratic is nowhere near the floor:
+    // at 100k characters it costs seconds (see above), so the floor only ever
+    // silences noise, never a regression.
+    const SCALE = 4;
+    const RATIO_LIMIT = 8;
+    const FLOOR_MS = 5;
     for (const [shape, build] of Object.entries(shapes)) {
       const half = cost(build(100_000));
-      const full = cost(build(200_000));
-      expect(full / Math.max(half, 0.5), `${shape} must scale linearly, not quadratically`).toBeLessThan(3);
-      // Absolute backstop, for the case where both halves are slow. Post-fix
-      // the binding shape costs ~68 ms, so this is ~7x headroom — enough for a
-      // reintroduced quadratic (orders of magnitude), not a tight budget.
+      const full = cost(build(100_000 * SCALE));
+      expect(full / Math.max(half, FLOOR_MS), `${shape} must scale linearly, not quadratically`).toBeLessThan(
+        RATIO_LIMIT,
+      );
+      // Absolute backstop, for the case where both measurements are slow. The
+      // binding shape costs ~68 ms at 200k, so ~136 ms at 400k: this is ~3.5x
+      // headroom -- enough for a reintroduced quadratic (orders of magnitude),
+      // not a tight budget.
       expect(full, `${shape} must not stall the event loop`).toBeLessThan(500);
     }
   }, 60_000);
