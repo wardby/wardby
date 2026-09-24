@@ -188,6 +188,106 @@
         transform: translateY(-1px);
       }
 
+      .topbar {
+        position: relative;
+        z-index: 2;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px 20px;
+        padding: 18px 0 0;
+      }
+      .wordmark {
+        color: var(--cream);
+        font-family: Futura, "Avenir Next", sans-serif;
+        font-size: 22px;
+        font-weight: 800;
+        letter-spacing: -0.03em;
+        text-decoration: none;
+      }
+      .wordmark small {
+        margin-left: 8px;
+        color: #9fb2c4;
+        font-family: "Avenir Next", Avenir, sans-serif;
+        font-size: 11px;
+        font-style: italic;
+        font-weight: 600;
+        letter-spacing: 0;
+      }
+      .topbar-links {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px 18px;
+      }
+      .topbar-links a {
+        color: #dce8f2;
+        font-size: 12px;
+        font-weight: 800;
+        text-decoration: none;
+      }
+      .topbar-links a:hover {
+        color: var(--mint);
+      }
+      .github-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .github-badge img {
+        display: block;
+        height: 22px;
+      }
+      .hero-status {
+        max-width: 900px;
+        margin: 18px 0 0;
+        color: #9fb2c4;
+        font-size: 12px;
+        line-height: 1.55;
+      }
+      .hero-status b {
+        color: #dce8f2;
+      }
+
+      .proof-section {
+        margin-top: 72px;
+      }
+      .proof-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+        margin-top: 26px;
+      }
+      .proof-card {
+        padding: 22px 24px;
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background: var(--white);
+        box-shadow: var(--shadow);
+      }
+      .proof-card h3 {
+        margin: 0 0 10px;
+        font-size: 17px;
+      }
+      .proof-card ul {
+        margin: 0;
+        padding-left: 18px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+      .proof-card li b {
+        color: var(--ink);
+      }
+      .proof-card a {
+        display: inline-block;
+        margin-top: 12px;
+        color: var(--mint-deep);
+        font-size: 12px;
+        font-weight: 800;
+      }
+
       main {
         padding: 55px 0 78px;
       }
@@ -1157,6 +1257,9 @@
         font-size: 10px;
         text-align: center;
       }
+      footer a {
+        color: inherit;
+      }
 
       @media (max-width: 1080px) {
         .flow-grid {
@@ -1279,6 +1382,12 @@
           grid-template-columns: 1fr;
           padding: 24px;
         }
+        .proof-grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .topbar-links .optional {
+          display: none;
+        }
         .quickstart {
           grid-template-columns: minmax(0, 1fr);
           padding: 24px;
@@ -1301,6 +1410,24 @@
   </head>
   <body>
     <header class="hero">
+      <nav class="shell topbar" aria-label="Wardby">
+        <a class="wordmark" href="#top" id="top">Wardby<small>pronounced “WARD-bee”</small></a>
+        <div class="topbar-links">
+          <a class="optional" href="#platform-title">Platform</a>
+          <a class="optional" href="#proof-title">Security</a>
+          <a href="#get-started">Get started</a>
+          <a class="github-badge" href="https://github.com/wardby/wardby" aria-label="Wardby on GitHub">
+            <img
+              src="https://img.shields.io/badge/GitHub-wardby%2Fwardby-181717?logo=github&amp;logoColor=white"
+              alt="GitHub: wardby/wardby"
+            />
+            <img
+              src="https://img.shields.io/github/stars/wardby/wardby?style=social"
+              alt="GitHub stars for wardby/wardby"
+            />
+          </a>
+        </div>
+      </nav>
       <div class="shell hero-inner">
         <img
           class="brand-mark"
@@ -1326,6 +1453,11 @@
             <a class="hero-action" href="#get-started">Run it locally</a>
             <a class="hero-action secondary" href="https://github.com/wardby/wardby">View on GitHub</a>
           </div>
+          <p class="hero-status">
+            <b>Project status:</b> the control plane, scheduler, budget groups, MCP server, native agents, isolated
+            Codex and Claude Code workers, GitHub draft-PR flow, and local observability stack are implemented and
+            tested. Production readiness and cloud deployment coverage are still being expanded.
+          </p>
         </div>
       </div>
     </header>
@@ -1343,7 +1475,7 @@
         <div class="path-selector" aria-label="Highlight a platform path">
           <button class="path-button active" data-select="all">Show the whole system</button>
           <button class="path-button" data-select="workbench">Claude Code or Codex</button>
-          <button class="path-button" data-select="ci">GitHub or Azure DevOps</button>
+          <button class="path-button" data-select="ci">CI &amp; webhooks</button>
           <button class="path-button" data-select="scheduled">Scheduled operations</button>
         </div>
 
@@ -1373,7 +1505,8 @@
                 <div>
                   <div class="card-title">Delivery events</div>
                   <div class="card-note">
-                    GitHub Actions or Azure Pipelines call approved agents on PR, merge, release, or manual dispatch.
+                    GitHub Actions, or any CI that can call a webhook, triggers approved agents on PR, comment, merge,
+                    or manual dispatch.
                   </div>
                 </div>
               </article>
@@ -1404,7 +1537,7 @@
                 <div class="core-sub">The durable operating boundary between intent and agent execution.</div>
                 <div class="core-grid">
                   <div class="core-module">
-                    <b>Agent catalog</b><span>Versioned definitions, prompts, tools, models, and schedules</span>
+                    <b>Agent catalog</b><span>Owned definitions, prompts, tools, models, and schedules</span>
                   </div>
                   <div class="core-module guard">
                     <b>Budget admission</b><span>Reserve spend before a request reaches the provider</span>
@@ -1414,13 +1547,13 @@
                     ><span>Scoped repositories, tools, secrets, datastores, networks, and principals</span>
                   </div>
                   <div class="core-module">
-                    <b>Triggers &amp; workflow</b><span>MCP, CI events, webhooks, schedules, approvals, retries</span>
+                    <b>Triggers &amp; workflow</b><span>MCP, CI events, webhooks, schedules, and retries</span>
                   </div>
                   <div class="core-module">
                     <b>Execution routing</b><span>Select the approved builder, model, and isolated runtime</span>
                   </div>
                   <div class="core-module">
-                    <b>Evidence &amp; metrics</b><span>Run history, actual cost, artifacts, logs, and outcomes</span>
+                    <b>Evidence &amp; metrics</b><span>Run history, actual cost, metrics, and outcomes</span>
                   </div>
                 </div>
                 <div class="core-status">
@@ -1587,8 +1720,11 @@
               <div class="guardrail-item">
                 <span class="check">ID</span>
                 <div>
-                  <b>Scoped identity</b
-                  ><span>Short-lived access only to the repositories and services the run needs.</span>
+                  <b>Credential separation</b
+                  ><span
+                    >Workers never receive provider keys or the GitHub App key; trusted components proxy models and
+                    finalize Git.</span
+                  >
                 </div>
               </div>
               <div class="guardrail-item">
@@ -1609,14 +1745,20 @@
                 <span class="check">✓</span>
                 <div>
                   <b>Explicit action authority</b
-                  ><span>Operators decide whether people or designated agents may approve consequential outcomes.</span>
+                  ><span
+                    >The worker that produces an outcome cannot apply it. Coding runs end in a draft PR; nothing
+                    auto-merges.</span
+                  >
                 </div>
               </div>
               <div class="guardrail-item">
                 <span class="check">≡</span>
                 <div>
                   <b>Durable evidence</b
-                  ><span>Inputs, decisions, cost, logs, artifacts, and final status remain reviewable.</span>
+                  ><span
+                    >Owned runs keep status, cost, capabilities, and outcomes reviewable; events and metrics exclude
+                    prompts and credentials.</span
+                  >
                 </div>
               </div>
             </div>
@@ -1628,9 +1770,10 @@
         <p class="section-kicker">03 / Centralized budget intelligence</p>
         <h2 class="section-title" id="budget-title">Know who spent it, why, and for which feature</h2>
         <p class="section-copy">
-          With a work-tracking connector, a feature key can travel with the request into Wardby. Every child agent and
-          model call inherits that context, so reserved budget and final agent expense can roll up to the owning
-          feature, epic, team, and portfolio. The example below shows the target Jira pattern.
+          Shipped today: hard per-run limits and shared daily, weekly, or monthly budget groups that stop additional
+          model work at the cap. Next, with a work-tracking connector, a feature key can travel with the request into
+          Wardby. Every child agent and model call inherits that context, so reserved budget and final agent expense can
+          roll up to the owning feature, epic, team, and portfolio. The example below shows the target Jira pattern.
         </p>
 
         <div class="budget-board">
@@ -1782,6 +1925,62 @@
         </div>
       </section>
 
+      <section class="proof-section" aria-labelledby="proof-title">
+        <p class="section-kicker">05 / Boundaries you can verify</p>
+        <h2 class="section-title" id="proof-title">Self-hosted, provider-neutral, and honest about scope</h2>
+        <p class="section-copy">
+          Wardby does not replace your agent frameworks, gateways, or observability tools. It is the operating boundary
+          around them, and it runs in infrastructure you control.
+        </p>
+        <div class="proof-grid">
+          <article class="proof-card">
+            <h3>Security boundaries</h3>
+            <ul>
+              <li>
+                <b>Sandboxed tools:</b> native tools run in constrained QuickJS with controlled fetch and secrets.
+              </li>
+              <li><b>Isolated coding workers:</b> hardened containers with resource limits and reviewed egress.</li>
+              <li>
+                <b>Protected remote MCP:</b> HTTP is an OAuth 2.1 resource server; stdio trusts the local operator.
+              </li>
+              <li><b>Sanitized operations:</b> events and metrics exclude prompts, code, diffs, and credentials.</li>
+            </ul>
+            <a href="https://github.com/wardby/wardby#security-boundaries">Security boundaries →</a>
+          </article>
+          <article class="proof-card">
+            <h3>Host it in your cloud</h3>
+            <ul>
+              <li><b>Local Docker, VM, or on-prem:</b> portable PostgreSQL and container workflow.</li>
+              <li><b>Production baseline:</b> separate runtime and migration images with a Compose/Caddy boundary.</li>
+              <li><b>GKE Autopilot:</b> supported reference with private Cloud SQL and isolated worker pods.</li>
+              <li><b>AWS and other clouds:</b> portable runtime and Bedrock adapter; native AWS module planned.</li>
+            </ul>
+            <a href="https://github.com/wardby/wardby#host-it-in-your-cloud">Deployment targets →</a>
+          </article>
+          <article class="proof-card">
+            <h3>Bring your own observability</h3>
+            <ul>
+              <li>Prometheus metrics on a private <code>/metrics</code> endpoint, pulled by your collector.</li>
+              <li>A local Prometheus and Grafana profile with cost, budget, and run dashboards.</li>
+              <li>Scrape into AWS CloudWatch, Google Cloud Monitoring, or any Prometheus-compatible platform.</li>
+            </ul>
+            <a href="https://github.com/wardby/wardby#bring-your-own-observability">Observability →</a>
+          </article>
+          <article class="proof-card">
+            <h3>Where Wardby fits</h3>
+            <ul>
+              <li>Repository automation, agent frameworks, and coding agents run the work.</li>
+              <li>Gateways and provider dashboards see model calls; observability tools trace them.</li>
+              <li>
+                Wardby adds owned agents, admission-time budgets, scoped capabilities, and run history across them.
+              </li>
+              <li>Budget views cover Wardby-managed work, not every AI expense in an organization.</li>
+            </ul>
+            <a href="https://github.com/wardby/wardby#where-wardby-fits">Full comparison →</a>
+          </article>
+        </div>
+      </section>
+
       <section class="quickstart" id="get-started" aria-labelledby="quickstart-title">
         <div>
           <p class="section-kicker">Run locally in five minutes</p>
@@ -1823,7 +2022,7 @@
     </main>
 
     <footer class="shell">
-      Wardby · autonomous agents, bounded by design ·
+      Wardby · autonomous agents, bounded by design · Apache License 2.0 ·
       <a href="https://github.com/wardby/wardby">open source on GitHub</a>
     </footer>
 
@@ -1836,7 +2035,7 @@
         all: "<b>The whole system:</b> conversations, delivery events, and schedules all use one catalog and one set of guardrails. Teams can change the model or builder without changing the governance contract.",
         workbench:
           "<b>Workbench path:</b> a developer asks Claude Code or Codex to create, configure, run, or inspect an agent through Wardby MCP. Wardby admits the run, selects an approved executor, and returns evidence and artifacts.",
-        ci: "<b>Delivery path:</b> GitHub Actions or Azure Pipelines invokes a named, versioned agent on an approved event. CI supplies the trigger; Wardby still owns identity, policy, budget, execution, and the result.",
+        ci: "<b>Delivery path:</b> GitHub Actions, or any CI that can call a webhook, invokes a named agent on an approved event. CI supplies the trigger; Wardby still owns identity, policy, budget, execution, and the result.",
         scheduled:
           "<b>Operations path:</b> schedules and production signals launch native agents for reviews, monitoring, and reporting. The same controls apply even when no developer is sitting at a terminal.",
       };
