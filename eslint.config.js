@@ -99,7 +99,7 @@ export default tseslint.config(
   {
     // Root config files and standalone ops scripts: non-type-checked rules,
     // no tsconfig project (they aren't part of tsconfig.json's `include`).
-    files: ["*.{js,mjs,ts}", "scripts/**/*.mjs"],
+    files: ["*.{js,mjs,ts}", "scripts/**/*.mjs", "deploy/**/*.mjs"],
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     languageOptions: { globals: globals.node },
   },
