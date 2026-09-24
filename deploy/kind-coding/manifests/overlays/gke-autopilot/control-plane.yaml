@@ -74,6 +74,9 @@ spec:
         app.kubernetes.io/name: wardby-control-plane
     spec:
       serviceAccountName: wardby-control-plane
+      # The 30s preStop drain below, plus time for the scheduler and reconciler
+      # to stop cleanly on SIGTERM.
+      terminationGracePeriodSeconds: 90
       # TRUE here, and false on every other pod in this namespace. This is the
       # one workload that talks to the Kubernetes API; the worker and the proxy
       # get no token at all.
@@ -252,10 +255,29 @@ spec:
               cpu: 1000m
               memory: 2Gi
               ephemeral-storage: 4Gi
+          # The same request the load balancer's health check makes
+          # (control-plane-gateway.yaml): the canonical Host, because the server
+          # refuses any other, and the discovery document, because a 200 from it
+          # means the server is serving rather than merely holding a socket open.
+          # GKE's NEG readiness gate then keeps the rollout from retiring the old
+          # pod until the load balancer itself sees this one as healthy.
           readinessProbe:
-            tcpSocket:
+            httpGet:
               port: 8080
+              path: /.well-known/oauth-protected-resource
+              httpHeaders:
+                - name: Host
+                  value: wardby-control-plane-hostname
             periodSeconds: 5
+          # A terminating pod leaves the load balancer's backends only after the
+          # endpoint change propagates, and until then the load balancer still
+          # sends it requests. Measured on 2026-09-24: without this, a restart
+          # answered 503 for several seconds after the old pod exited. Keep
+          # serving while the load balancer drains it, then shut down.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 30
       volumes:
         - name: tmp
           emptyDir:

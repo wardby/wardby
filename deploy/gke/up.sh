@@ -36,7 +36,7 @@ done
 TF_DIR="deploy/gke"
 OVERLAY="deploy/kind-coding/manifests/overlays/gke-autopilot"
 NAMESPACE="wardby-coding"
-TOTAL_STEPS=9
+TOTAL_STEPS=10
 
 : "${HOSTNAME:?set HOSTNAME to the hostname the MCP endpoint is published on (e.g. app.example.com)}"
 
@@ -139,6 +139,10 @@ if ! wait_external_secrets_synced 180s wardby-coding-proxy-env wardby-control-pl
 fi
 
 echo "==> 8/${TOTAL_STEPS} render and apply the overlay"
+# What is running now, recorded before it is replaced: rollback means going back
+# to exactly these digests (see the rollback note at the end).
+PREVIOUS_IMAGES="$(kubectl -n "$NAMESPACE" get deploy wardby-control-plane wardby-coding-proxy \
+  -o jsonpath='{range .items[*]}{.metadata.name}={.spec.template.spec.containers[0].image}{"\n"}{end}' 2>/dev/null || true)"
 # Every value below is target identity: it is substituted here and never
 # committed. The placeholders are the contract between this script and the
 # tracked manifests.
@@ -154,6 +158,29 @@ kubectl kustomize "$OVERLAY" \
 echo "==> 9/${TOTAL_STEPS} wait for rollouts"
 kubectl -n "$NAMESPACE" rollout status deploy/wardby-coding-proxy --timeout=300s
 kubectl -n "$NAMESPACE" rollout status deploy/wardby-control-plane --timeout=600s
+
+echo "==> 10/${TOTAL_STEPS} verify the public endpoint"
+# A finished rollout proves the pods are Ready, not that the load balancer routes
+# to them or that authentication is enforced. These are the same checks an
+# operator would run by hand, made to fail the deploy instead of scrolling past.
+# Retried because the load balancer can take a minute to converge on new pods.
+MCP_INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+expect_status() {
+  local want="$1" got="" i
+  shift
+  for i in $(seq 1 18); do
+    got="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$@" 2>/dev/null || true)"
+    [[ "$got" == "$want" ]] && return 0
+    sleep 10
+  done
+  echo "up.sh: expected HTTP ${want}, got ${got:-no response}: $*" >&2
+  return 1
+}
+expect_status 200 "https://${HOSTNAME}/.well-known/oauth-protected-resource"
+echo "    discovery answers 200"
+expect_status 401 -X POST "https://${HOSTNAME}/mcp" -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' -d "$MCP_INIT"
+echo "    unauthenticated MCP is refused with 401"
 
 cat <<EOF
 
@@ -175,7 +202,11 @@ Still manual, because neither belongs in a script:
         node dist/cli.js auth user create --subject <you>
     It is printed once and is a bearer credential valid for a year.
 
-Verify:
-  curl -sS -o /dev/null -w '%{http_code}\\n' https://${HOSTNAME}/.well-known/oauth-protected-resource   # 200
-  curl -sS -o /dev/null -w '%{http_code}\\n' -X POST https://${HOSTNAME}/mcp                            # 401
+Roll back (images are pinned by digest, so this is exactly what ran before):
+  kubectl -n ${NAMESPACE} rollout undo deploy/wardby-control-plane
+  kubectl -n ${NAMESPACE} rollout undo deploy/wardby-coding-proxy
+Images before this deploy:
+${PREVIOUS_IMAGES:-  (none: first deploy)}
+Migrations only go forward, so a rollback is safe only while the schema change it
+rolls back over was additive. See docs/getting-started-gke.md, "Roll back".
 EOF

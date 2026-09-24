@@ -232,11 +232,15 @@ kubectl -n wardby-coding describe gateway wardby-control-plane
 curl -sS -o /dev/null -w '%{http_code}\n' \
   https://wardby.example.com/.well-known/oauth-protected-resource
 curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
+  -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
   https://wardby.example.com/mcp
 ```
 
-The discovery request should return `200`; an unauthenticated MCP POST should
-return `401`.
+The discovery request should return `200`; an unauthenticated MCP
+`initialize` request should return `401`. Send the JSON body: without it the
+server answers `415`, because it checks the content type before the token.
 
 Create the first self-hosted login credential. It is printed once:
 
@@ -267,8 +271,28 @@ and [security deployment](security-deployment.md) checklists.
 ## 8. Operate and update
 
 Re-run `deploy/gke/up.sh` after a source or configuration change. It rebuilds
-images, pushes them, substitutes immutable digests, leaves Secret Manager values as they are, and
-waits for rollouts.
+images, pushes them, substitutes immutable digests, leaves Secret Manager values
+as they are, waits for rollouts, and then checks the public endpoint: discovery
+must answer `200` and an unauthenticated MCP request `401`, or the deploy fails.
+
+A control-plane restart does not drop requests. The pod keeps serving for 30
+seconds after it is told to stop, while the load balancer drains it, and a new
+pod only takes traffic once the load balancer's own health check passes.
+
+### Roll back
+
+Images are pinned by digest, so undoing a rollout restores exactly what ran
+before. `up.sh` prints the previous digests at the end of every deploy.
+
+```sh
+kubectl -n wardby-coding rollout undo deploy/wardby-control-plane
+kubectl -n wardby-coding rollout undo deploy/wardby-coding-proxy
+```
+
+Database migrations only go forward: a rollback does not undo a schema change.
+That is safe while every migration is additive (new tables, nullable columns,
+indexes), which is the rule for this repository. Secrets are not part of a
+rollout either; they come from Secret Manager whichever version is running.
 
 Useful diagnostics:
 
