@@ -6,8 +6,9 @@
 #   HOSTNAME=app.example.com deploy/gke/up.sh
 #
 # Idempotent: safe to re-run. Terraform converges, images are rebuilt and
-# re-pushed (digests change only if the source did), secrets are replaced, and
-# the overlay is re-applied.
+# re-pushed (digests change only if the source did), values already in Secret
+# Manager are left as they are and only empty secrets are seeded, and the
+# overlay is re-applied.
 #
 # This exists because the first GKE cluster was built interactively over several
 # hours, with corrections applied as things broke. That found eight
@@ -96,22 +97,39 @@ node deploy/gke/seed-secrets.mjs --project "$PROJECT_ID" --prefix "$SECRET_PREFI
   --context "$KUBE_CONTEXT" --namespace "$NAMESPACE" --tf-dir "$TF_DIR"
 
 echo "==> 6/${TOTAL_STEPS} External Secrets Operator ${ESO_CHART_VERSION}, scoped to ${NAMESPACE}"
+# The namespace first: the scoped chart creates its Role and RoleBinding in it.
+kubectl apply -f deploy/kind-coding/manifests/base/namespace.yaml >/dev/null
 helm upgrade --install external-secrets external-secrets --repo "$ESO_CHART_REPO" \
   --version "$ESO_CHART_VERSION" --kube-context "$KUBE_CONTEXT" \
   --namespace external-secrets --create-namespace \
   --values deploy/gke/eso-values.yaml --wait --timeout 10m >/dev/null
 
 echo "==> 7/${TOTAL_STEPS} sync the Secrets from Secret Manager"
-kubectl apply -f deploy/kind-coding/manifests/base/namespace.yaml >/dev/null
-kubectl kustomize deploy/kind-coding/manifests/overlays/gke-autopilot/secrets \
-  | sed -e "s|wardby-gcp-project|${PROJECT_ID}|g" \
-        -e "s|wardby-cluster-location|${REGION}|g" \
-        -e "s|wardby-cluster-name|${CLUSTER}|g" \
-        -e "s|wardby-secret-prefix|${SECRET_PREFIX}|g" \
-  | kubectl apply -f - >/dev/null
-# Safe only because step 5 succeeded: every value is already in Secret Manager.
-NAMESPACE="$NAMESPACE" release_unowned_secrets wardby-coding-proxy-env wardby-control-plane-env
-if ! NAMESPACE="$NAMESPACE" wait_external_secrets_ready 180s wardby-coding-proxy-env wardby-control-plane-env; then
+SECRETS_DIR="deploy/kind-coding/manifests/overlays/gke-autopilot/secrets"
+render_secrets() {
+  sed -e "s|wardby-gcp-project|${PROJECT_ID}|g" \
+      -e "s|wardby-cluster-location|${REGION}|g" \
+      -e "s|wardby-cluster-name|${CLUSTER}|g" \
+      -e "s|wardby-secret-prefix|${SECRET_PREFIX}|g" \
+      "${SECRETS_DIR}/$1"
+}
+export NAMESPACE
+# The order is what keeps the live Secrets safe. Nothing is deleted until a real
+# read from Secret Manager has succeeded, which only the real cluster can prove
+# (Workload Identity does not exist on kind).
+render_secrets store.yaml | kubectl apply -f - >/dev/null
+if ! render_secrets canary.yaml | run_secrets_canary 180s; then
+  echo "up.sh: External Secrets cannot read Secret Manager; the existing Secrets were not touched." >&2
+  exit 1
+fi
+# Before the real ExternalSecrets exist, so ESO creates both Secrets fresh
+# rather than adopting the hand-made ones and their old annotations. Safe
+# because step 5 put every value in Secret Manager and the canary read one.
+release_unowned_secrets wardby-coding-proxy-env wardby-control-plane-env
+render_secrets external-secrets.yaml | kubectl apply -f - >/dev/null
+# Forces a sync and waits for a fresh one, so a database-url version that
+# step 5 just added is in the Secret before step 8 rolls the Deployments.
+if ! wait_external_secrets_synced 180s wardby-coding-proxy-env wardby-control-plane-env; then
   echo "up.sh: the Secrets did not sync from Secret Manager; nothing else was applied." >&2
   exit 1
 fi

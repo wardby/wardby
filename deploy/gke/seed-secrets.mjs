@@ -35,6 +35,9 @@ export function generateHexKey() {
   return randomBytes(32).toString("hex");
 }
 
+// hasVersion counts enabled versions only, so a secret whose versions are all
+// disabled or destroyed counts as empty: with no cluster or .env.local source,
+// an auth key would then be regenerated (logged "from generated").
 export function decideSeed(entry, state) {
   if (entry.source === "terraform") {
     if (!state.terraform) return { action: "error", message: `${entry.id}: terraform output database_url is empty` };
@@ -67,7 +70,7 @@ function execCommand(cmd, args, { input } = {}) {
 async function must(exec, cmd, args, options) {
   const result = await exec(cmd, args, options);
   // stderr is safe to show: every command here receives secrets on stdin only.
-  if (result.code !== 0) throw new Error(`${cmd} ${args.slice(0, 3).join(" ")} failed: ${result.stderr.trim()}`);
+  if (result.code !== 0) throw new Error(`${cmd} ${args.slice(0, 4).join(" ")} failed: ${result.stderr.trim()}`);
   return result.stdout;
 }
 
