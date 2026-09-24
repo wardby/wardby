@@ -246,6 +246,12 @@ spec:
             # refuses anything that is not a digest.
             - name: CODING_WORKER_IMAGE
               value: wardby-coding-worker-image
+            # The node-python toolchain image (Python 3.12 with pytest and ruff),
+            # for coding agents whose profile sets toolchain "node-python" and
+            # toolchainVersion "3.12". Substituted the same way as the default
+            # worker image above.
+            - name: CODING_WORKER_IMAGE_NODE_PYTHON_3_12
+              value: wardby-coding-worker-image-node-python-3-12
           ports:
             - name: mcp
               containerPort: 8080
