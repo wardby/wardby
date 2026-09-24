@@ -10,5 +10,13 @@
  */
 import "./core/http-runtime.js";
 import dotenvFlow from "dotenv-flow";
+import { join, resolve } from "node:path";
 
-dotenvFlow.config();
+const projectDir = resolve(process.env.WARDBY_PROJECT_DIR || process.cwd());
+
+// A quickstart installation owns this directory, so load it before an
+// application's root env files. dotenv-flow never overwrites an existing
+// process variable, preserving explicit shell/container configuration as the
+// highest-priority source in either mode.
+dotenvFlow.config({ path: join(projectDir, ".wardby"), silent: true });
+dotenvFlow.config({ path: projectDir });

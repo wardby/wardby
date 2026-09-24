@@ -11,7 +11,7 @@
     <a href="#a-full-cycle-agent-from-one-conversation">Full-cycle example</a> ·
     <a href="#host-it-in-your-cloud">Deployments</a> ·
     <a href="#bring-your-own-observability">Observability</a> ·
-    <a href="#quickstart">Quickstart</a> ·
+    <a href="https://github.com/wardby/wardby/blob/main/docs/getting-started.md">Getting started</a> ·
     <a href="#security-boundaries">Security</a>
   </p>
 </div>
@@ -133,17 +133,17 @@ The core does not import a cloud SDK. Jobs, model access, email, secrets,
 authentication, and object storage sit behind provider interfaces so operators
 can choose the infrastructure boundary that fits their environment.
 
-| Target                               | Current support                                                                                                                                 |
-| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Local Docker, VM, or on-premises** | Portable PostgreSQL and container workflow for development and self-hosting.                                                                    |
-| **Production container baseline**    | Separate runtime and migration images plus a Compose/Caddy reference boundary.                                                                  |
-| **GCP**                              | Terraform reference for the control plane on Cloud Run and Cloud SQL. Cloud-native coding jobs and production observability are follow-on work. |
-| **AWS**                              | The portable runtime and Bedrock model adapter are available; a native AWS deployment module is planned.                                        |
-| **Other clouds**                     | Run the production image and provide equivalent PostgreSQL, secrets, ingress, egress, and monitoring controls.                                  |
+| Target                               | Current support                                                                                                  |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| **Local Docker, VM, or on-premises** | Portable PostgreSQL and container workflow for development and self-hosting.                                     |
+| **Production container baseline**    | Separate runtime and migration images plus a Compose/Caddy reference boundary.                                   |
+| **GKE Autopilot**                    | Supported GCP reference with private Cloud SQL, isolated Codex worker pods, HTTPS Gateway, and immutable images. |
+| **AWS**                              | The portable runtime and Bedrock model adapter are available; a native AWS deployment module is planned.         |
+| **Other clouds**                     | Run the production image and provide equivalent PostgreSQL, secrets, ingress, egress, and monitoring controls.   |
 
 Start with [deployment targets](https://github.com/wardby/wardby/blob/main/deploy/README.md), the
 [portable production boundary](https://github.com/wardby/wardby/blob/main/deploy/production/README.md), or the
-[GCP setup guide](https://github.com/wardby/wardby/blob/main/deploy/gcp/SETUP.md). Reference deployments are examples,
+[GKE getting-started guide](https://github.com/wardby/wardby/blob/main/docs/getting-started-gke.md). Reference deployments are examples,
 not a requirement to use one vendor.
 
 **A complete deployment runs more than `wardby mcp`.** `mcp` serves the MCP
@@ -217,33 +217,18 @@ Requirements: Node.js 24 or newer, Docker, and one supported model-provider
 credential.
 
 ```sh
-git clone https://github.com/wardby/wardby.git
-cd wardby
-npm ci
-cp .env.example .env
+npx --yes @wardby/cli@latest quickstart
 ```
 
-Edit `.env` and set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`. Generate a local
-secret-encryption key with `openssl rand -hex 32` and use it as
-`SECRET_APP_KEY`. Then initialize the local database and start the stdio MCP
-server:
+The guided command checks prerequisites, creates private project-local
+configuration, starts PostgreSQL in Docker, applies migrations, and offers to
+run a small agent with a `$1` maximum budget. It can also register Wardby as a
+local MCP server in Codex, Claude Code, or both.
 
-```sh
-npm run db:up
-npm run prisma:generate
-npm run prisma:migrate
-npm run cli -- mcp
-```
-
-Point Claude or Codex at `npm run cli -- mcp` with the repository as its working
-directory. The exact client configuration format differs, but both use Wardby's
-stdio transport locally. For shared or remote access, use Streamable HTTP with
-OAuth and the production boundary documented above.
-
-Once connected, ask the client to list the available Wardby tools, create an
-agent with a small budget, trigger it, and inspect the run. Coding-agent setup
-additionally requires a dedicated GitHub App, immutable worker images, and the
-proxy boundary described in the [local coding-agent setup guide](https://github.com/wardby/wardby/blob/main/docs/coding-agent-setup.md).
+Read the [Getting started guide](https://github.com/wardby/wardby/blob/main/docs/getting-started.md) for unattended setup,
+MCP usage, lifecycle commands, and the boundary between the native demo and
+isolated coding agents. For a shared cloud installation, follow the full
+[GKE getting-started guide](https://github.com/wardby/wardby/blob/main/docs/getting-started-gke.md).
 
 ### Installing from npm
 
@@ -278,8 +263,8 @@ retirement plan are in [SR-009](https://github.com/wardby/wardby/blob/main/docs/
 - In-process reconciliation and optional DBOS durable workflows.
 - Self-hosted or delegated OAuth for remote MCP access.
 - Prometheus metrics and provisioned Grafana dashboards for local operations.
-- Portable production images, a Compose/Caddy boundary, and a GCP control-plane
-  Terraform reference.
+- Portable production images, a Compose/Caddy boundary, and a GKE Autopilot
+  Terraform reference deployment.
 
 This project is under active development. Run the
 [release verification](https://github.com/wardby/wardby/blob/main/docs/release-verification.md) checks and review the
