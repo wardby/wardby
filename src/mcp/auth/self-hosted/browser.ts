@@ -3,6 +3,7 @@ import { randomUUID, randomBytes } from "node:crypto";
 import type { SelfHostedAuthProvider } from "../../../providers/auth/self-hosted.js";
 import { PostgresRateLimiter, RateLimitError } from "./rate-limit.js";
 import { logger } from "../../../core/logger.js";
+import { PAGE_STYLE } from "../../shared/page-style.js";
 
 const authLog = logger.child({ module: "self-hosted-oauth" });
 
@@ -38,14 +39,22 @@ function html(res: ServerResponse, content: string) {
   const nonce = randomBytes(18).toString("base64");
   res.setHeader(
     "content-security-policy",
-    `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
+    // style-src reuses the same per-request nonce as script-src rather than
+    // 'unsafe-inline', so the one inline <style> stays as tightly scoped as
+    // the inline <script>.
+    `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
   );
   res
     .writeHead(200, { "content-type": "text/html; charset=utf-8" })
     .end(
-      '<!doctype html><html lang="en"><meta charset="utf-8"><title>wardby authorization</title><body>' +
+      '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
+        '<title>wardby authorization</title><style nonce="' +
+        nonce +
+        '">' +
+        PAGE_STYLE +
+        '</style><body><div class="card"><div class="kicker">wardby</div>' +
         content +
-        '<p id="auth-error" role="alert"></p><noscript>JavaScript is required for secure form submission.</noscript><script nonce="' +
+        '<p id="auth-error" role="alert"></p></div><noscript>JavaScript is required for secure form submission.</noscript><script nonce="' +
         nonce +
         '">' +
         FORM_SCRIPT +
@@ -174,7 +183,7 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
           '<h1>Sign in to wardby</h1><form method="post" action="/login">' +
             hidden("interaction", interaction) +
             hidden("csrf", challenge) +
-            '<label>Login key <input type="password" name="login_key" required autocomplete="off"></label><button>Sign in</button></form>',
+            '<label>Login key<input type="password" name="login_key" required autocomplete="off"></label><button>Sign in</button></form>',
         );
         return true;
       }
@@ -224,7 +233,8 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
             '</p><form action="/consent" method="post">' +
             hidden("interaction", id) +
             hidden("csrf", challenge) +
-            '<button name="decision" value="approve">Approve</button><button name="decision" value="deny">Deny</button></form>',
+            '<div class="actions"><button name="decision" value="approve">Approve</button>' +
+            '<button name="decision" value="deny">Deny</button></div></form>',
         );
         return true;
       }
@@ -247,7 +257,10 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
         const challenge = await provider.sessions.challenge("logout", session.sessionId, "logout");
         html(
           res,
-          '<form action="/logout" method="post">' + hidden("csrf", challenge) + "<button>Sign out</button></form>",
+          "<h1>Sign out</h1>" +
+            '<form action="/logout" method="post">' +
+            hidden("csrf", challenge) +
+            "<button>Sign out</button></form>",
         );
         return true;
       }

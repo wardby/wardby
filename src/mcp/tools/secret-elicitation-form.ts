@@ -9,6 +9,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { PrismaClient } from "@prisma/client";
 import type { SecretCipher } from "../../providers/secrets/types.js";
 import { fulfillSecretElicitation, type SecretElicitationPayload } from "./secret-elicitation.js";
+import { PAGE_STYLE } from "../shared/page-style.js";
 
 /** The HTTP-transport route path this form is mounted at (see streamable-http.ts). */
 export const SECRET_ELICITATION_PATH = "/elicit/secret";
@@ -19,32 +20,6 @@ function escape(value: string): string {
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!,
   );
 }
-
-const STYLE = `
-:root { color-scheme: light dark; }
-* { box-sizing: border-box; }
-body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px;
-  background: #f5f5f7; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-.card { background: #fff; border-radius: 14px; box-shadow: 0 1px 3px rgba(0,0,0,.1), 0 8px 24px rgba(0,0,0,.08);
-  padding: 36px; max-width: 480px; width: 100%; }
-h1 { margin: 0 0 10px; font-size: 21px; }
-p { margin: 0 0 24px; color: #555; font-size: 14px; line-height: 1.5; }
-p strong { color: #111; }
-input[type=password] { display: block; width: 100%; padding: 16px 18px; font-size: 17px; letter-spacing: .02em;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; border: 1px solid #d1d1d6; border-radius: 10px;
-  margin-bottom: 18px; }
-input[type=password]:focus { outline: none; border-color: #0071e3; box-shadow: 0 0 0 3px rgba(0,113,227,.15); }
-button { width: 100%; padding: 15px; font-size: 15px; font-weight: 600; color: #fff; background: #0071e3;
-  border: none; border-radius: 10px; cursor: pointer; }
-button:hover { background: #0077ed; }
-@media (prefers-color-scheme: dark) {
-  body { background: #1c1c1e; }
-  .card { background: #2c2c2e; box-shadow: none; }
-  h1 { color: #f5f5f7; }
-  p { color: #a1a1a6; }
-  p strong { color: #f5f5f7; }
-  input[type=password] { background: #1c1c1e; border-color: #48484a; color: #f5f5f7; }
-}`;
 
 function html(res: ServerResponse, status: number, body: string): void {
   res.setHeader(
@@ -58,7 +33,7 @@ function html(res: ServerResponse, status: number, body: string): void {
     .writeHead(status, { "content-type": "text/html; charset=utf-8" })
     .end(
       `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">` +
-        `<title>wardby secret entry</title><style>${STYLE}</style><body><div class="card">${body}</div></body></html>`,
+        `<title>wardby secret entry</title><style>${PAGE_STYLE}</style><body><div class="card"><div class="kicker">wardby</div>${body}</div></body></html>`,
     );
 }
 
@@ -94,7 +69,8 @@ export async function handleSecretElicitationForm(
       res,
       200,
       `<h1>Enter secret value</h1><p>Name: <strong>${escape(payload.secretName)}</strong></p>` +
-        `<form method="post"><input type="password" name="value" autocomplete="off" required autofocus placeholder="Paste the value here">` +
+        `<form method="post"><label>Secret value` +
+        `<input type="password" name="value" autocomplete="off" required autofocus placeholder="Paste the value here"></label>` +
         `<button type="submit">Save</button></form>`,
     );
     return;
