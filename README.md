@@ -1,5 +1,5 @@
 <div>
-  <img align="left" hspace="24" src="docs/assets/brand/wardby-mascot.png" alt="Wardby guardian robot protecting an agent budget" width="280">
+  <img align="left" hspace="24" src="https://raw.githubusercontent.com/wardby/wardby/main/docs/assets/brand/wardby-mascot.png" alt="Wardby guardian robot protecting an agent budget" width="280">
   <h3><big><big>Wardby</big></big> <small><em>(pronounced&nbsp;“WARD&#8209;bee”)</em></small></h3>
   <h3>Autonomous agents, bounded by design.</h3>
   <p><strong>Most agent runners focus on helping a model complete a task. Wardby is the self-hosted control plane that decides whether the task should run, limits what it can access, and returns a reviewable outcome governed by explicit policy.</strong></p>
@@ -17,13 +17,20 @@
 </div>
 <br clear="left">
 
-<!-- GitHub does not expose live Actions badge images for private repositories. These capability badges link authenticated readers to the authoritative workflow. -->
+<!-- The first four badges are live: the npm version, Node floor and license are
+read from the published package, and the security badge shows the latest run of
+the security workflow on main. The last three are capability labels describing
+what that workflow enforces -- they are not status and never change colour.
+Every URL is absolute because npm renders this README too, and a relative path
+there resolves against npmjs.com instead of this repository. -->
 
-[![Security CI](https://img.shields.io/badge/security%20CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)](https://github.com/wardby/wardby/actions/workflows/security.yml?query=branch%3Amain)
+[![npm](https://img.shields.io/npm/v/@wardby/cli)](https://www.npmjs.com/package/@wardby/cli)
+[![Security checks](https://github.com/wardby/wardby/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/wardby/wardby/actions/workflows/security.yml?query=branch%3Amain)
+[![Node](https://img.shields.io/node/v/@wardby/cli)](https://www.npmjs.com/package/@wardby/cli)
+[![License](https://img.shields.io/npm/l/@wardby/cli)](https://github.com/wardby/wardby/blob/main/LICENSE)
 [![Dependency audit](https://img.shields.io/badge/dependencies-audit%20policy-0f766e.svg)](https://github.com/wardby/wardby/actions/workflows/security.yml?query=branch%3Amain)
 [![Container scan](https://img.shields.io/badge/container%20images-Trivy%20CRITICAL%20gate-0f766e.svg)](https://github.com/wardby/wardby/actions/workflows/security.yml?query=branch%3Amain)
 [![SBOM](https://img.shields.io/badge/SBOM-SPDX%20JSON-0f766e.svg)](https://github.com/wardby/wardby/actions/workflows/security.yml?query=branch%3Amain)
-[![License](https://img.shields.io/badge/license-Apache--2.0-0f766e.svg)](LICENSE)
 
 > **Project status:** the control plane, scheduler, budget groups, MCP server,
 > native agents, isolated Codex and Claude Code workers, GitHub draft-PR flow,
@@ -68,7 +75,7 @@ result.
 
 ## One control plane, the full lifecycle
 
-![Wardby workflow: ask in Claude or Codex, define an agent through MCP, govern it in Wardby, execute it in isolation, and apply review policy to its outcome](docs/assets/wardby-workflow.svg)
+![Wardby workflow: ask in Claude or Codex, define an agent through MCP, govern it in Wardby, execute it in isolation, and apply review policy to its outcome](https://raw.githubusercontent.com/wardby/wardby/main/docs/assets/wardby-workflow.svg)
 
 Claude and Codex are the operator experience. Wardby is the durable system
 behind them: it stores agent definitions, triggers work, reserves budget,
@@ -134,9 +141,9 @@ can choose the infrastructure boundary that fits their environment.
 | **AWS**                              | The portable runtime and Bedrock model adapter are available; a native AWS deployment module is planned.                                        |
 | **Other clouds**                     | Run the production image and provide equivalent PostgreSQL, secrets, ingress, egress, and monitoring controls.                                  |
 
-Start with [deployment targets](deploy/README.md), the
-[portable production boundary](deploy/production/README.md), or the
-[GCP setup guide](deploy/gcp/SETUP.md). Reference deployments are examples,
+Start with [deployment targets](https://github.com/wardby/wardby/blob/main/deploy/README.md), the
+[portable production boundary](https://github.com/wardby/wardby/blob/main/deploy/production/README.md), or the
+[GCP setup guide](https://github.com/wardby/wardby/blob/main/deploy/gcp/SETUP.md). Reference deployments are examples,
 not a requirement to use one vendor.
 
 **A complete deployment runs more than `wardby mcp`.** `mcp` serves the MCP
@@ -172,7 +179,7 @@ npm run observability:down
 The included cloud deployments do not yet provision AWS or GCP collectors.
 Current metrics primarily cover the coding proxy; application/MCP metrics,
 production alerts, and SLOs remain operator responsibilities. See the
-[observability guide](docs/observability.md) for boundaries and retention.
+[observability guide](https://github.com/wardby/wardby/blob/main/docs/observability.md) for boundaries and retention.
 
 ## Security boundaries
 
@@ -195,9 +202,9 @@ production alerts, and SLOs remain operator responsibilities. See the
 - **Sanitized operations:** lifecycle events and metrics exclude prompts,
   repository content, credentials, diffs, and raw worker output.
 
-Read the [runtime architecture](docs/architecture-runtime.md),
-[coding-worker isolation model](docs/coding-worker-isolation.md), and
-[security deployment guide](docs/security-deployment.md) before enabling a
+Read the [runtime architecture](https://github.com/wardby/wardby/blob/main/docs/architecture-runtime.md),
+[coding-worker isolation model](https://github.com/wardby/wardby/blob/main/docs/coding-worker-isolation.md), and
+[security deployment guide](https://github.com/wardby/wardby/blob/main/docs/security-deployment.md) before enabling a
 production repository.
 
 Review policy is designed to support designated agents as well as people.
@@ -236,7 +243,7 @@ OAuth and the production boundary documented above.
 Once connected, ask the client to list the available Wardby tools, create an
 agent with a small budget, trigger it, and inspect the run. Coding-agent setup
 additionally requires a dedicated GitHub App, immutable worker images, and the
-proxy boundary described in the [local coding-agent setup guide](docs/coding-agent-setup.md).
+proxy boundary described in the [local coding-agent setup guide](https://github.com/wardby/wardby/blob/main/docs/coding-agent-setup.md).
 
 ### Installing from npm
 
@@ -256,7 +263,7 @@ projects that install it — so add the same entry to your own `package.json`:
 ```
 
 That override is tested against Prisma 6 and the CLI; the reasoning and the
-retirement plan are in [SR-009](docs/security-deployment.md#images-and-dependency-exception).
+retirement plan are in [SR-009](https://github.com/wardby/wardby/blob/main/docs/security-deployment.md#images-and-dependency-exception).
 
 ## What is implemented
 
@@ -275,8 +282,8 @@ retirement plan are in [SR-009](docs/security-deployment.md#images-and-dependenc
   Terraform reference.
 
 This project is under active development. Run the
-[release verification](docs/release-verification.md) checks and review the
-[security deployment guide](docs/security-deployment.md) before production use.
+[release verification](https://github.com/wardby/wardby/blob/main/docs/release-verification.md) checks and review the
+[security deployment guide](https://github.com/wardby/wardby/blob/main/docs/security-deployment.md) before production use.
 
 ## Repository map
 
@@ -293,10 +300,10 @@ docs/           Architecture, security, setup, and operator guidance
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE) for the license terms and
-[NOTICE](NOTICE) for attribution.
+Apache License 2.0. See [LICENSE](https://github.com/wardby/wardby/blob/main/LICENSE) for the license terms and
+[NOTICE](https://github.com/wardby/wardby/blob/main/NOTICE) for attribution.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute and [SECURITY.md](SECURITY.md)
+See [CONTRIBUTING.md](https://github.com/wardby/wardby/blob/main/CONTRIBUTING.md) to contribute and [SECURITY.md](https://github.com/wardby/wardby/blob/main/SECURITY.md)
 to report a vulnerability privately.
 
-Built as an independent reimplementation. See [CLEANROOM.md](CLEANROOM.md).
+Built as an independent reimplementation. See [CLEANROOM.md](https://github.com/wardby/wardby/blob/main/CLEANROOM.md).
