@@ -11,7 +11,7 @@
     <a href="#a-full-cycle-agent-from-one-conversation">Full-cycle example</a> ·
     <a href="#host-it-in-your-cloud">Deployments</a> ·
     <a href="#bring-your-own-observability">Observability</a> ·
-    <a href="https://github.com/wardby/wardby/blob/main/docs/getting-started.md">Getting started</a> ·
+    <a href="#get-started">Get started</a> ·
     <a href="#security-boundaries">Security</a>
   </p>
 </div>
@@ -36,6 +36,58 @@ there resolves against npmjs.com instead of this repository. -->
 > native agents, isolated Codex and Claude Code workers, GitHub draft-PR flow,
 > and local observability stack are implemented and tested. Production
 > readiness and cloud deployment coverage are still being expanded.
+
+## Get started
+
+### Run locally in five minutes
+
+Requirements: Node.js 24 or newer, Docker, and an OpenAI or Anthropic API key.
+You do not need to clone Wardby or install PostgreSQL.
+
+1. From the project where you want to use Wardby, run:
+
+   ```sh
+   npx --yes @wardby/cli@latest quickstart
+   ```
+
+2. Follow the prompts to choose a provider, start PostgreSQL, create a `$1`
+   demo agent, and optionally connect Codex or Claude Code through MCP.
+
+3. Verify the installation:
+
+   ```sh
+   npx --yes @wardby/cli@latest doctor
+   ```
+
+Quickstart keeps credentials and local state under `.wardby/` in the current
+project. Read the [local getting-started guide](https://github.com/wardby/wardby/blob/main/docs/getting-started.md)
+for unattended setup, lifecycle commands, MCP configuration, and cleanup.
+
+### Develop Wardby from source
+
+Clone the repository only when you want to contribute to Wardby, inspect its
+deployment assets, or build images yourself:
+
+```sh
+git clone https://github.com/wardby/wardby.git
+cd wardby
+npm ci
+npm run build
+npm test
+```
+
+Continue with [CONTRIBUTING.md](https://github.com/wardby/wardby/blob/main/CONTRIBUTING.md)
+for the development database, migrations, required checks, and contribution
+expectations.
+
+### Deploy for a team
+
+- Follow the [GKE guide](https://github.com/wardby/wardby/blob/main/docs/getting-started-gke.md)
+  for the supported Google Cloud reference deployment.
+- Start from the [portable production boundary](https://github.com/wardby/wardby/blob/main/deploy/production/README.md)
+  for another cloud, VM, or container platform.
+- Follow [Bring your own identity provider](https://github.com/wardby/wardby/blob/main/docs/getting-started-identity-provider.md)
+  to protect remote MCP with your existing OAuth/OIDC provider.
 
 ## Why Wardby
 
@@ -211,26 +263,10 @@ Review policy is designed to support designated agents as well as people.
 Agent approvals will be recorded as workflow evidence; operators will decide
 whether that evidence permits an automated action or still requires a person.
 
-## Quickstart
+## Optional npm installation
 
-Requirements: Node.js 24 or newer, Docker, and one supported model-provider
-credential.
-
-```sh
-npx --yes @wardby/cli@latest quickstart
-```
-
-The guided command checks prerequisites, creates private project-local
-configuration, starts PostgreSQL in Docker, applies migrations, and offers to
-run a small agent with a `$1` maximum budget. It can also register Wardby as a
-local MCP server in Codex, Claude Code, or both.
-
-Read the [Getting started guide](https://github.com/wardby/wardby/blob/main/docs/getting-started.md) for unattended setup,
-MCP usage, lifecycle commands, and the boundary between the native demo and
-isolated coding agents. For a shared cloud installation, follow the full
-[GKE getting-started guide](https://github.com/wardby/wardby/blob/main/docs/getting-started-gke.md).
-
-### Installing from npm
+The `npx` quickstart above requires no installation. To pin Wardby as a local
+project dependency instead:
 
 ```sh
 npm install @wardby/cli

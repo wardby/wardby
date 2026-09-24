@@ -115,6 +115,7 @@ launcher. Run `wardby coding preflight` before enabling a production repository.
 
 - [Runtime architecture](architecture-runtime.md)
 - [Coding-agent setup](coding-agent-setup.md)
+- [Bring your own identity provider](getting-started-identity-provider.md)
 - [Observability](observability.md)
 - [GKE deployment](getting-started-gke.md)
 - [Security deployment guide](security-deployment.md)

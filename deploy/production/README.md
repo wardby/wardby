@@ -44,7 +44,8 @@ when enabling the coding executor.
    [deploy/Dockerfile](../Dockerfile). Push each under an immutable digest.
 2. Copy `production.env.example` to `.env.production`, replace all placeholders
    through the secret manager, and ensure `MCP_CANONICAL_URI` and
-   `AUTH_AUDIENCE` are exactly identical normalized HTTPS URLs.
+   `AUTH_AUDIENCE` are exactly identical normalized HTTPS URLs. For delegated
+   authentication, follow [Bring your own identity provider](../../docs/getting-started-identity-provider.md).
 3. Validate the rendered topology before starting it:
 
 ```sh
