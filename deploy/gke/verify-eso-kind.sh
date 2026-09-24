@@ -6,9 +6,15 @@
 #
 #   1. The two ExternalSecrets sync, with AUTH_PROVIDER merged in, after a
 #      pre-existing hand-made Secret is handed over by release_unowned_secrets.
-#   2. ESO does nothing outside wardby-coding.
-#   3. ESO's service account cannot write Secrets in another namespace.
-#   4. wait_external_secrets_ready fails with a readable reason for a key that
+#   2. release_unowned_secrets' delete + force-sync branch (the path a
+#      provider that does NOT auto-adopt unowned Secrets depends on) actually
+#      runs and recovers: an ownerReferences strip is used to force the
+#      Secret back into the unowned state release_unowned_secrets exists to
+#      handle, even on a chart/provider combination (like ESO's fake provider
+#      here) that otherwise adopts on its own before that branch is reached.
+#   3. ESO does nothing outside wardby-coding.
+#   4. ESO's service account cannot write Secrets in another namespace.
+#   5. wait_external_secrets_ready fails with a readable reason for a key that
 #      does not exist.
 #
 # Uses a private KUBECONFIG so this never touches the caller's current
@@ -83,21 +89,41 @@ decoded() { k -n "$NAMESPACE" get secret wardby-control-plane-env -o "jsonpath={
 [[ -z "$(decoded STALE)" ]] || fail "stale key survived the handover"
 echo "    ok"
 
-echo "==> 2. nothing syncs outside wardby-coding"
+echo "==> 2. release_unowned_secrets' delete + force-sync branch actually runs"
+# Check 1's fake provider adopted the Secret on its own, so the delete branch
+# in release_unowned_secrets was never exercised there (its owner lookup saw
+# a non-empty owner and skipped the delete). Force the Secret back into the
+# unowned state that branch exists to handle, then prove the branch runs and
+# recovers: the Secret must be deleted and recreated (new UID), re-owned by
+# the ExternalSecret, and carry the same synced values as before.
+OLD_UID="$(k -n "$NAMESPACE" get secret wardby-control-plane-env -o jsonpath='{.metadata.uid}')"
+k -n "$NAMESPACE" patch secret wardby-control-plane-env --type=json \
+  -p '[{"op":"remove","path":"/metadata/ownerReferences"}]' >/dev/null
+release_unowned_secrets wardby-control-plane-env
+wait_external_secrets_ready 120s wardby-control-plane-env || fail "ExternalSecret not Ready after re-release"
+NEW_UID="$(k -n "$NAMESPACE" get secret wardby-control-plane-env -o jsonpath='{.metadata.uid}')"
+[[ "$NEW_UID" != "$OLD_UID" ]] || fail "release_unowned_secrets did not delete+recreate the Secret (UID unchanged)"
+k -n "$NAMESPACE" get secret wardby-control-plane-env -o jsonpath='{.metadata.ownerReferences[*].kind}' \
+  | grep -q ExternalSecret || fail "Secret has no ExternalSecret owner after re-release"
+[[ "$(decoded AUTH_PROVIDER)" == "self-hosted" ]] || fail "AUTH_PROVIDER not merged after re-release"
+[[ "$(decoded SECRET_APP_KEY)" == "dummy-secret-app-key" ]] || fail "SECRET_APP_KEY not synced after re-release"
+echo "    ok"
+
+echo "==> 3. nothing syncs outside wardby-coding"
 fake_store other
 real_external_secrets other | k apply -f - >/dev/null
 sleep 20
 if k -n other get secret wardby-control-plane-env >/dev/null 2>&1; then fail "ESO wrote a Secret in namespace other"; fi
 echo "    ok"
 
-echo "==> 3. ESO cannot write Secrets elsewhere"
+echo "==> 4. ESO cannot write Secrets elsewhere"
 ESO_SA_NAME="$(k -n external-secrets get deploy external-secrets -o jsonpath='{.spec.template.spec.serviceAccountName}')"
 ESO_SA="system:serviceaccount:external-secrets:${ESO_SA_NAME}"
 [[ "$(k auth can-i create secrets -n other --as "$ESO_SA")" == "no" ]] || fail "ESO can create Secrets in other"
 [[ "$(k auth can-i create secrets -n "$NAMESPACE" --as "$ESO_SA")" == "yes" ]] || fail "ESO cannot create Secrets in wardby-coding"
 echo "    ok"
 
-echo "==> 4. a missing key fails the wait with a reason"
+echo "==> 5. a missing key fails the wait with a reason"
 cat <<EOF | k apply -f - >/dev/null
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
