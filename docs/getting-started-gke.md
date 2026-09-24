@@ -232,11 +232,15 @@ kubectl -n wardby-coding describe gateway wardby-control-plane
 curl -sS -o /dev/null -w '%{http_code}\n' \
   https://wardby.example.com/.well-known/oauth-protected-resource
 curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
+  -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
   https://wardby.example.com/mcp
 ```
 
-The discovery request should return `200`; an unauthenticated MCP POST should
-return `401`.
+The discovery request should return `200`; an unauthenticated MCP
+`initialize` request should return `401`. Send the JSON body: without it the
+server answers `415`, because it checks the content type before the token.
 
 Create the first self-hosted login credential. It is printed once:
 
