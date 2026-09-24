@@ -25,31 +25,19 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+source deploy/gke/eso.env
+source deploy/gke/lib-secrets.sh
+
+for tool in terraform gcloud kubectl docker helm node; do
+  command -v "$tool" >/dev/null || { echo "up.sh: ${tool} is required." >&2; exit 1; }
+done
+
 TF_DIR="deploy/gke"
 OVERLAY="deploy/kind-coding/manifests/overlays/gke-autopilot"
 NAMESPACE="wardby-coding"
-TOTAL_STEPS=8
+TOTAL_STEPS=9
 
 : "${HOSTNAME:?set HOSTNAME to the hostname the MCP endpoint is published on (e.g. app.example.com)}"
-
-# Reads one key out of .env.local through the project's own dotenv loader.
-#
-# NOT a grep: GITHUB_APP_PRIVATE_KEY is a quoted, genuinely multi-line PEM, and a
-# line-oriented extractor captures its BEGIN header and nothing else. That
-# produced a Secret the server accepted at startup and rejected on the first
-# coding run. Only the key's NAME is ever passed on a command line; the value
-# goes straight from node's stdout into a shell variable.
-env_b64() {
-  node -e '
-    const name = process.argv[1];
-    require("dotenv-flow").config({ silent: true });
-    const value = process.env[name];
-    if (!value) { console.error(`up.sh: ${name} must be set in .env.local.`); process.exit(1); }
-    process.stdout.write(Buffer.from(value, "utf8").toString("base64"));
-  ' "$1"
-}
-
-b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
 
 echo "==> 1/${TOTAL_STEPS} terraform: cluster, image registry, database"
 terraform -chdir="$TF_DIR" init -input=false >/dev/null
@@ -60,10 +48,11 @@ REGION="$(terraform -chdir="$TF_DIR" output -raw region 2>/dev/null || echo us-c
 CLUSTER="$(terraform -chdir="$TF_DIR" output -raw cluster_name)"
 REGISTRY="$(terraform -chdir="$TF_DIR" output -raw artifact_registry_url)"
 DB_IP="$(terraform -chdir="$TF_DIR" output -raw private_ip_address)"
+SECRET_PREFIX="$(terraform -chdir="$TF_DIR" output -raw secret_name_prefix)"
 
 echo "==> 2/${TOTAL_STEPS} kubectl context for ${CLUSTER}"
 gcloud container clusters get-credentials "$CLUSTER" --region "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1
-KUBE_CONTEXT="gke_${PROJECT_ID}_${REGION}_${CLUSTER}"
+export KUBE_CONTEXT="gke_${PROJECT_ID}_${REGION}_${CLUSTER}"
 kubectl config use-context "$KUBE_CONTEXT" >/dev/null
 
 # The API server by its ENDPOINT, not the kubernetes.default ClusterIP.
@@ -98,29 +87,36 @@ if ! docker run --rm --platform linux/amd64 --entrypoint sh "$WORKER_IMAGE" -c '
   exit 1
 fi
 
-echo "==> 5/${TOTAL_STEPS} namespace and the proxy's env Secret"
+echo "==> 5/${TOTAL_STEPS} seed Secret Manager"
+# Fills only empty secrets: from the live cluster (so existing keys carry over),
+# then .env.local, then -- for the two auth keys only -- a new random key. Values
+# go over stdin and are never printed. Stops before writing anything if a value
+# has no source.
+node deploy/gke/seed-secrets.mjs --project "$PROJECT_ID" --prefix "$SECRET_PREFIX" \
+  --context "$KUBE_CONTEXT" --namespace "$NAMESPACE" --tf-dir "$TF_DIR"
+
+echo "==> 6/${TOTAL_STEPS} External Secrets Operator ${ESO_CHART_VERSION}, scoped to ${NAMESPACE}"
+helm upgrade --install external-secrets external-secrets --repo "$ESO_CHART_REPO" \
+  --version "$ESO_CHART_VERSION" --kube-context "$KUBE_CONTEXT" \
+  --namespace external-secrets --create-namespace \
+  --values deploy/gke/eso-values.yaml --wait --timeout 10m >/dev/null
+
+echo "==> 7/${TOTAL_STEPS} sync the Secrets from Secret Manager"
 kubectl apply -f deploy/kind-coding/manifests/base/namespace.yaml >/dev/null
+kubectl kustomize deploy/kind-coding/manifests/overlays/gke-autopilot/secrets \
+  | sed -e "s|wardby-gcp-project|${PROJECT_ID}|g" \
+        -e "s|wardby-cluster-location|${REGION}|g" \
+        -e "s|wardby-cluster-name|${CLUSTER}|g" \
+        -e "s|wardby-secret-prefix|${SECRET_PREFIX}|g" \
+  | kubectl apply -f - >/dev/null
+# Safe only because step 5 succeeded: every value is already in Secret Manager.
+NAMESPACE="$NAMESPACE" release_unowned_secrets wardby-coding-proxy-env wardby-control-plane-env
+if ! NAMESPACE="$NAMESPACE" wait_external_secrets_ready 180s wardby-coding-proxy-env wardby-control-plane-env; then
+  echo "up.sh: the Secrets did not sync from Secret Manager; nothing else was applied." >&2
+  exit 1
+fi
 
-# Assembled with printf and piped into `kubectl apply`, never --from-literal:
-# an argument is visible in argv for the life of the process.
-DB_URL_B64="$(b64 "$(terraform -chdir="$TF_DIR" output -raw database_url)")"
-OPENAI_B64="$(env_b64 OPENAI_API_KEY)"
-ANTHROPIC_B64="$(env_b64 ANTHROPIC_API_KEY)"
-{
-  printf 'apiVersion: v1\nkind: Secret\ntype: Opaque\nmetadata:\n'
-  printf '  name: wardby-coding-proxy-env\n  namespace: %s\ndata:\n' "$NAMESPACE"
-  printf '  DATABASE_URL: %s\n' "$DB_URL_B64"
-  printf '  OPENAI_API_KEY: %s\n' "$OPENAI_B64"
-  printf '  ANTHROPIC_API_KEY: %s\n' "$ANTHROPIC_B64"
-} | kubectl apply -f - >/dev/null
-unset DB_URL_B64 OPENAI_B64 ANTHROPIC_B64
-
-echo "==> 6/${TOTAL_STEPS} the control plane's env Secret"
-# Reuses the committed script, which reads the database URL back out of the
-# proxy Secret written above and preserves any OAuth signing keys already issued.
-KUBE_CONTEXT="$KUBE_CONTEXT" NAMESPACE="$NAMESPACE" deploy/kind-coding/control-plane-secret.sh
-
-echo "==> 7/${TOTAL_STEPS} render and apply the overlay"
+echo "==> 8/${TOTAL_STEPS} render and apply the overlay"
 # Every value below is target identity: it is substituted here and never
 # committed. The placeholders are the contract between this script and the
 # tracked manifests.
@@ -133,7 +129,7 @@ kubectl kustomize "$OVERLAY" \
         -e "s|cidr: wardby-database-cidr|cidr: ${DB_IP}/32|g" \
   | kubectl apply -f - >/dev/null
 
-echo "==> 8/${TOTAL_STEPS} wait for rollouts"
+echo "==> 9/${TOTAL_STEPS} wait for rollouts"
 kubectl -n "$NAMESPACE" rollout status deploy/wardby-coding-proxy --timeout=300s
 kubectl -n "$NAMESPACE" rollout status deploy/wardby-control-plane --timeout=600s
 
@@ -144,6 +140,7 @@ Done. The control plane is running in ${CLUSTER}.
   MCP endpoint : https://${HOSTNAME}/mcp
   database     : ${DB_IP}:5432 (private IP, no public address)
   images       : ${REGISTRY}
+  secrets      : Secret Manager, prefix ${SECRET_PREFIX} (synced by External Secrets)
 
 Still manual, because neither belongs in a script:
 
