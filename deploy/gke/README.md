@@ -76,6 +76,24 @@ The namespace is default-deny. Both workloads need an egress rule to the
 instance's private address on 5432; the overlay's rules that select the
 throwaway database by pod label do not match a Cloud SQL address.
 
+## Secrets
+
+`secrets.tf` creates one Secret Manager secret per value, **with no versions**,
+and grants read access on each to a single Kubernetes service account,
+`wardby-coding/wardby-secrets-reader`, as a Workload Identity principal: no
+Google service account, no key. `up.sh` fills empty secrets through
+`seed-secrets.mjs` and syncs them into the cluster with External Secrets
+Operator, installed by Helm at the version pinned in `eso.env` and scoped to
+`wardby-coding` by `eso-values.yaml`.
+
+`verify-eso-kind.sh` proves the manifests, the scoping and the handover on a
+throwaway kind cluster. Run it after changing any of them or the chart version.
+
+If External Secrets is broken during an incident,
+`deploy/kind-coding/control-plane-secret.sh` (with `KUBE_CONTEXT` set) can
+still build both Secrets directly from `.env.local`. Delete the ExternalSecrets
+first, or ESO will reclaim the Secrets.
+
 ## Teardown
 
 Apply `deletion_protection = false` **first**, then destroy. The flag is read
