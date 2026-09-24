@@ -24,3 +24,7 @@ disk_size_gb      = 10
 # Set false BEFORE you intend to destroy: the value is read from state, so
 # discovering it at destroy time costs an extra apply.
 deletion_protection = true
+
+# Secret Manager secrets survive a cluster rebuild and are protected from
+# destroy. Set false and apply before `terraform destroy`, like the flags above.
+secrets_deletion_protection = true
