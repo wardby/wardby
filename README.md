@@ -159,6 +159,18 @@ triggers work, reserves budget, mediates tools and credentials, records
 outcomes, and exposes run state through MCP. Nothing runs until identity,
 policy, and available budget agree.
 
+### Governed shared state for agent teams
+
+Named Wardby datastores let related agents exchange persistent structured data
+without sharing an unrestricted database credential. Datastores are owned and
+attached to agents explicitly; each sandboxed tool can reach only approved
+bound names and key prefixes.
+
+A planner can publish a feature plan, a builder can record implementation
+state, and a reviewer or QA agent can add findings to the same governed
+workspace. Datastores provide bounded coordination state, not a replacement
+for authoritative source systems or searchable agent memory.
+
 ## A full-cycle agent from one conversation
 
 Ask your MCP client:
