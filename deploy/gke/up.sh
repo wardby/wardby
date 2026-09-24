@@ -163,7 +163,15 @@ echo "==> 10/${TOTAL_STEPS} verify the public endpoint"
 # A finished rollout proves the pods are Ready, not that the load balancer routes
 # to them or that authentication is enforced. These are the same checks an
 # operator would run by hand, made to fail the deploy instead of scrolling past.
-# Retried because the load balancer can take a minute to converge on new pods.
+#
+# Run only once every old control-plane pod is gone. While one is still draining
+# it answers for the new pod, and on 2026-09-24 a check made then passed and the
+# endpoint went down ~90s later. Then require a steady minute of 200s, not one.
+for i in $(seq 1 60); do
+  [[ -z "$(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=wardby-control-plane \
+    -o jsonpath='{.items[?(@.metadata.deletionTimestamp)].metadata.name}')" ]] && break
+  sleep 5
+done
 MCP_INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 expect_status() {
   local want="$1" got="" i
@@ -177,7 +185,15 @@ expect_status() {
   return 1
 }
 expect_status 200 "https://${HOSTNAME}/.well-known/oauth-protected-resource"
-echo "    discovery answers 200"
+for i in $(seq 1 12); do
+  got="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://${HOSTNAME}/.well-known/oauth-protected-resource" 2>/dev/null || true)"
+  if [[ "$got" != "200" ]]; then
+    echo "up.sh: discovery answered ${got:-no response} ${i} checks after it first answered 200; the endpoint is not stable." >&2
+    exit 1
+  fi
+  sleep 5
+done
+echo "    discovery answers 200, steadily for a minute"
 expect_status 401 -X POST "https://${HOSTNAME}/mcp" -H 'content-type: application/json' \
   -H 'accept: application/json, text/event-stream' -d "$MCP_INIT"
 echo "    unauthenticated MCP is refused with 401"

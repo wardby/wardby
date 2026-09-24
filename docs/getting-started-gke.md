@@ -275,9 +275,13 @@ images, pushes them, substitutes immutable digests, leaves Secret Manager values
 as they are, waits for rollouts, and then checks the public endpoint: discovery
 must answer `200` and an unauthenticated MCP request `401`, or the deploy fails.
 
-A control-plane restart does not drop requests. The pod keeps serving for 30
-seconds after it is told to stop, while the load balancer drains it, and a new
-pod only takes traffic once the load balancer's own health check passes.
+A control-plane restart is designed not to drop requests, at the cost of a
+slower rollout. A new pod must stay Ready for three minutes before the old one
+is retired, because the load balancer can take well over a minute to start
+routing to a new pod even after its health check passes; the old pod then keeps
+serving for 30 seconds while the load balancer drains it. `up.sh` checks the
+endpoint only after the old pod is gone, and requires a steady minute of
+successful responses.
 
 ### Roll back
 

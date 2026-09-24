@@ -65,6 +65,21 @@ spec:
   # replica would be a second scheduler: the launcher's idempotency fence makes
   # a duplicate launch safe, but nothing here needs the availability.
   replicas: 1
+  # Keep the old pod serving until the load balancer has accepted the new one.
+  #
+  # GKE's NEG readiness gate cannot do this here: the health check lives in a
+  # Gateway HealthCheckPolicy, which the NEG controller does not see, so it
+  # reports LoadBalancerNegWithoutHealthCheck and passes the gate at once. On
+  # 2026-09-24 the rollout then retired the old pod the moment the new one was
+  # Ready, and the load balancer answered 503 for ~90s until its own health
+  # check accepted the new pod. A new pod must now stay Ready this long before
+  # it counts as available, and maxUnavailable 0 keeps the old one until then.
+  minReadySeconds: 180
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: wardby-control-plane
@@ -259,8 +274,8 @@ spec:
           # (control-plane-gateway.yaml): the canonical Host, because the server
           # refuses any other, and the discovery document, because a 200 from it
           # means the server is serving rather than merely holding a socket open.
-          # GKE's NEG readiness gate then keeps the rollout from retiring the old
-          # pod until the load balancer itself sees this one as healthy.
+          # (Readiness alone does not keep the load balancer serving across a
+          # rollout; minReadySeconds above does.)
           readinessProbe:
             httpGet:
               port: 8080
