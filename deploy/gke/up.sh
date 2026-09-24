@@ -71,7 +71,8 @@ echo "==> 3/${TOTAL_STEPS} build and push images (linux/amd64)"
 docker build --platform linux/amd64 --target runtime -t "${REGISTRY}/runtime:latest" -f deploy/Dockerfile . >/dev/null
 docker build --platform linux/amd64 --target migration -t "${REGISTRY}/migration:latest" -f deploy/Dockerfile . >/dev/null
 docker build --platform linux/amd64 -t "${REGISTRY}/coding-worker:latest" -f src/coding-worker/Dockerfile . >/dev/null
-for img in runtime migration coding-worker; do docker push "${REGISTRY}/${img}:latest" >/dev/null; done
+docker build --platform linux/amd64 -t "${REGISTRY}/coding-worker-node-python:latest" -f src/coding-worker/Dockerfile.node-python . >/dev/null
+for img in runtime migration coding-worker coding-worker-node-python; do docker push "${REGISTRY}/${img}:latest" >/dev/null; done
 
 # Digests, not tags. The launcher refuses a tag, and a digest is the only
 # reference that still means the same bytes tomorrow.
@@ -79,12 +80,20 @@ digest_of() { docker inspect --format '{{index .RepoDigests 0}}' "${REGISTRY}/$1
 RUNTIME_IMAGE="$(digest_of runtime)"
 MIGRATION_IMAGE="$(digest_of migration)"
 WORKER_IMAGE="$(digest_of coding-worker)"
+WORKER_IMAGE_NODE_PYTHON="$(digest_of coding-worker-node-python)"
 
-echo "==> 4/${TOTAL_STEPS} verify the worker image has tar, head and test"
+echo "==> 4/${TOTAL_STEPS} verify the worker images have tar, head and test"
 # Seeding and collection shell out to these. Without them every launch hangs
 # until its deadline, with nothing naming the cause.
-if ! docker run --rm --platform linux/amd64 --entrypoint sh "$WORKER_IMAGE" -c 'command -v tar && command -v head && command -v test' >/dev/null; then
-  echo "up.sh: worker image is missing tar, head or test." >&2
+for image in "$WORKER_IMAGE" "$WORKER_IMAGE_NODE_PYTHON"; do
+  if ! docker run --rm --platform linux/amd64 --entrypoint sh "$image" -c 'command -v tar && command -v head && command -v test' >/dev/null; then
+    echo "up.sh: worker image ${image} is missing tar, head or test." >&2
+    exit 1
+  fi
+done
+# The node-python image exists to run a Python project's own checks.
+if ! docker run --rm --platform linux/amd64 --entrypoint sh "$WORKER_IMAGE_NODE_PYTHON" -c 'python --version && python -m pytest --version && python -m ruff --version' >/dev/null; then
+  echo "up.sh: the node-python worker image is missing python, pytest or ruff." >&2
   exit 1
 fi
 
@@ -149,7 +158,8 @@ PREVIOUS_IMAGES="$(kubectl -n "$NAMESPACE" get deploy wardby-control-plane wardb
 kubectl kustomize "$OVERLAY" \
   | sed -e "s|image: wardby-runtime|image: ${RUNTIME_IMAGE}|" \
         -e "s|image: wardby-migration|image: ${MIGRATION_IMAGE}|" \
-        -e "s|value: wardby-coding-worker-image|value: ${WORKER_IMAGE}|" \
+        -e "s|value: wardby-coding-worker-image-node-python-3-12$|value: ${WORKER_IMAGE_NODE_PYTHON}|" \
+        -e "s|value: wardby-coding-worker-image$|value: ${WORKER_IMAGE}|" \
         -e "s|value: wardby-apiserver-host|value: ${API_HOST}|" \
         -e "s|wardby-control-plane-hostname|${HOSTNAME}|g" \
         -e "s|cidr: wardby-database-cidr|cidr: ${DB_IP}/32|g" \
