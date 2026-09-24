@@ -1,0 +1,1860 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Wardby is the self-hosted control plane for governed AI agents: one catalog, hard budgets, scoped capabilities, and reviewable outcomes."
+    />
+    <title>Wardby for Your Engineering Team</title>
+    <style>
+      :root {
+        --navy-950: #06172f;
+        --navy-900: #092447;
+        --navy-800: #10345f;
+        --mint: #43e6b1;
+        --mint-deep: #15b982;
+        --cream: #fffaf0;
+        --paper: #f7f4ec;
+        --white: #ffffff;
+        --gold: #c9aa70;
+        --red: #e33d37;
+        --sky: #75d4ff;
+        --ink: #12243c;
+        --muted: #657287;
+        --line: #dce3e8;
+        --shadow: 0 24px 70px rgba(6, 23, 47, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at 12% 4%, rgba(67, 230, 177, 0.17), transparent 29rem),
+          radial-gradient(circle at 94% 15%, rgba(117, 212, 255, 0.14), transparent 34rem), var(--paper);
+        font-family: "Avenir Next", Avenir, "Trebuchet MS", sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      button {
+        font: inherit;
+      }
+      .shell {
+        width: min(1380px, calc(100% - 40px));
+        margin: 0 auto;
+      }
+
+      .hero {
+        position: relative;
+        overflow: hidden;
+        min-height: 440px;
+        color: var(--cream);
+        background: linear-gradient(120deg, rgba(6, 23, 47, 0.98), rgba(9, 36, 71, 0.94)), var(--navy-950);
+        border-bottom: 7px solid var(--mint);
+      }
+      .hero::before,
+      .hero::after {
+        content: "";
+        position: absolute;
+        border-radius: 50%;
+        pointer-events: none;
+      }
+      .hero::before {
+        width: 570px;
+        height: 570px;
+        right: -210px;
+        top: -280px;
+        border: 1px solid rgba(67, 230, 177, 0.22);
+        box-shadow:
+          0 0 0 70px rgba(67, 230, 177, 0.025),
+          0 0 0 145px rgba(67, 230, 177, 0.02);
+      }
+      .hero::after {
+        width: 250px;
+        height: 250px;
+        left: -130px;
+        bottom: -150px;
+        background: rgba(201, 170, 112, 0.12);
+      }
+
+      .hero-inner {
+        position: relative;
+        z-index: 1;
+        display: grid;
+        grid-template-columns: 235px minmax(0, 1fr);
+        gap: 42px;
+        align-items: center;
+        padding: 66px 0 58px;
+      }
+      .brand-mark {
+        width: 225px;
+        aspect-ratio: 1;
+        object-fit: contain;
+        filter: drop-shadow(0 16px 26px rgba(0, 0, 0, 0.3));
+        animation: mark-in 0.7s cubic-bezier(0.2, 0.75, 0.2, 1) both;
+      }
+      @keyframes mark-in {
+        from {
+          transform: translateY(18px) rotate(-4deg);
+        }
+        to {
+          transform: none;
+        }
+      }
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+        margin-bottom: 15px;
+        color: var(--mint);
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.17em;
+        text-transform: uppercase;
+      }
+      .eyebrow::before {
+        content: "";
+        width: 28px;
+        height: 2px;
+        background: currentColor;
+      }
+      h1 {
+        max-width: 980px;
+        margin: 0;
+        font-family: Futura, "Avenir Next", sans-serif;
+        font-size: clamp(40px, 5.4vw, 74px);
+        line-height: 0.98;
+        letter-spacing: -0.048em;
+        font-weight: 800;
+      }
+      .hero-copy {
+        max-width: 900px;
+        margin: 24px 0 0;
+        color: #dbe6f1;
+        font-size: clamp(16px, 1.7vw, 21px);
+        line-height: 1.55;
+      }
+      .hero-copy strong {
+        color: var(--white);
+      }
+      .hero-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 9px;
+        margin-top: 25px;
+      }
+      .hero-tag {
+        padding: 8px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.065);
+        color: #e8f1f8;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .hero-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 20px;
+      }
+      .hero-action {
+        display: inline-flex;
+        align-items: center;
+        min-height: 42px;
+        padding: 10px 16px;
+        color: var(--navy-950);
+        border: 1px solid var(--mint);
+        border-radius: 10px;
+        background: var(--mint);
+        font-size: 13px;
+        font-weight: 900;
+        text-decoration: none;
+      }
+      .hero-action.secondary {
+        color: var(--cream);
+        border-color: rgba(255, 255, 255, 0.3);
+        background: rgba(255, 255, 255, 0.07);
+      }
+      .hero-action:hover {
+        filter: brightness(1.06);
+        transform: translateY(-1px);
+      }
+
+      main {
+        padding: 55px 0 78px;
+      }
+      .section-kicker {
+        margin: 0 0 7px;
+        color: var(--mint-deep);
+        font-size: 11px;
+        font-weight: 900;
+        letter-spacing: 0.15em;
+        text-transform: uppercase;
+      }
+      .section-title {
+        margin: 0;
+        font-family: Futura, "Avenir Next", sans-serif;
+        font-size: clamp(28px, 3vw, 43px);
+        line-height: 1.08;
+        letter-spacing: -0.035em;
+      }
+      .section-copy {
+        max-width: 780px;
+        margin: 12px 0 0;
+        color: var(--muted);
+        font-size: 16px;
+        line-height: 1.58;
+      }
+
+      .path-selector {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 24px 0 20px;
+      }
+      .path-button {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 10px 15px;
+        color: var(--muted);
+        background: rgba(255, 255, 255, 0.75);
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 800;
+        transition: 160ms ease;
+      }
+      .path-button:hover {
+        border-color: var(--navy-800);
+        color: var(--navy-900);
+      }
+      .path-button.active {
+        color: var(--cream);
+        border-color: var(--navy-900);
+        background: var(--navy-900);
+        box-shadow: 0 7px 20px rgba(9, 36, 71, 0.2);
+      }
+
+      .architecture {
+        position: relative;
+        padding: 28px;
+        overflow: hidden;
+        border: 1px solid rgba(9, 36, 71, 0.14);
+        border-radius: 28px;
+        background: rgba(255, 255, 255, 0.9);
+        box-shadow: var(--shadow);
+      }
+      .architecture::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        opacity: 0.38;
+        background-image: radial-gradient(rgba(9, 36, 71, 0.14) 0.8px, transparent 0.8px);
+        background-size: 18px 18px;
+      }
+      .flow-grid {
+        position: relative;
+        z-index: 1;
+        display: grid;
+        grid-template-columns: 1.02fr 44px 1.5fr 44px 1.08fr;
+        gap: 13px;
+        align-items: stretch;
+      }
+      .flow-column {
+        display: flex;
+        min-width: 0;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .column-label {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 26px;
+        margin-bottom: 2px;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 900;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+      .step-number {
+        display: inline-grid;
+        place-items: center;
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        background: var(--navy-900);
+        color: var(--cream);
+        letter-spacing: 0;
+      }
+      .entry-card,
+      .builder-card {
+        position: relative;
+        display: grid;
+        grid-template-columns: 40px minmax(0, 1fr);
+        gap: 12px;
+        align-items: center;
+        min-height: 86px;
+        padding: 14px;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: var(--white);
+        transition: 180ms ease;
+      }
+      .entry-card.active-path,
+      .builder-card.active-path {
+        border-color: var(--mint-deep);
+        box-shadow:
+          0 0 0 3px rgba(67, 230, 177, 0.15),
+          0 12px 28px rgba(6, 23, 47, 0.1);
+        transform: translateY(-1px);
+      }
+      .entry-card.dimmed,
+      .builder-card.dimmed {
+        opacity: 0.42;
+        filter: saturate(0.55);
+      }
+      .card-icon {
+        display: grid;
+        place-items: center;
+        width: 40px;
+        height: 40px;
+        border-radius: 11px;
+        color: var(--navy-900);
+        background: var(--cream);
+        border: 1px solid #eadfca;
+        font-size: 12px;
+        font-weight: 900;
+      }
+      .entry-card[data-path="ci"] .card-icon {
+        color: #9f2924;
+        background: #fff0ed;
+        border-color: #f6cbc5;
+      }
+      .card-title {
+        font-size: 14px;
+        font-weight: 900;
+        line-height: 1.2;
+      }
+      .card-note {
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.35;
+      }
+      .mini-stack {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin-top: 7px;
+      }
+      .mini-pill {
+        padding: 3px 6px;
+        border-radius: 999px;
+        background: #edf4f8;
+        color: #43556b;
+        font-size: 9px;
+        font-weight: 800;
+      }
+
+      .flow-arrow {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 9px;
+        color: var(--navy-800);
+      }
+      .arrow-label {
+        writing-mode: vertical-rl;
+        transform: rotate(180deg);
+        color: var(--muted);
+        font-size: 9px;
+        font-weight: 900;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+      .arrow-line {
+        position: relative;
+        width: 28px;
+        height: 2px;
+        background: currentColor;
+      }
+      .arrow-line::after {
+        content: "";
+        position: absolute;
+        right: -1px;
+        top: -4px;
+        width: 8px;
+        height: 8px;
+        border-top: 2px solid currentColor;
+        border-right: 2px solid currentColor;
+        transform: rotate(45deg);
+      }
+
+      .wardby-core {
+        position: relative;
+        display: flex;
+        min-height: 374px;
+        flex-direction: column;
+        padding: 22px;
+        color: var(--cream);
+        border-radius: 22px;
+        background: linear-gradient(145deg, rgba(16, 52, 95, 0.98), rgba(6, 23, 47, 1));
+        box-shadow:
+          inset 0 0 0 1px rgba(255, 255, 255, 0.1),
+          0 20px 35px rgba(6, 23, 47, 0.22);
+        transition: 180ms ease;
+      }
+      .wardby-core.active-path {
+        box-shadow:
+          inset 0 0 0 2px var(--mint),
+          0 22px 48px rgba(6, 23, 47, 0.28);
+      }
+      .core-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .core-name {
+        font-family: Futura, "Avenir Next", sans-serif;
+        font-size: 24px;
+        font-weight: 800;
+        letter-spacing: -0.025em;
+      }
+      .core-badge {
+        padding: 5px 8px;
+        border: 1px solid rgba(67, 230, 177, 0.35);
+        border-radius: 999px;
+        color: var(--mint);
+        background: rgba(67, 230, 177, 0.08);
+        font-size: 9px;
+        font-weight: 900;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+      .core-sub {
+        margin-top: 6px;
+        color: #bbcad9;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      .core-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 9px;
+        margin-top: 18px;
+      }
+      .core-module {
+        min-height: 67px;
+        padding: 11px;
+        border: 1px solid rgba(255, 255, 255, 0.11);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.065);
+      }
+      .core-module b {
+        display: block;
+        color: var(--white);
+        font-size: 11px;
+      }
+      .core-module span {
+        display: block;
+        margin-top: 4px;
+        color: #aebfd0;
+        font-size: 9px;
+        line-height: 1.35;
+      }
+      .core-module.guard {
+        border-color: rgba(67, 230, 177, 0.36);
+        background: rgba(67, 230, 177, 0.09);
+      }
+      .core-module.guard b {
+        color: var(--mint);
+      }
+      .core-status {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: auto;
+        padding-top: 17px;
+        color: #d4e0eb;
+        font-size: 10px;
+        font-weight: 700;
+      }
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--mint);
+        box-shadow: 0 0 0 5px rgba(67, 230, 177, 0.1);
+      }
+
+      .builder-card {
+        min-height: 103px;
+      }
+      .builder-card .card-icon {
+        color: var(--mint-deep);
+        background: #ebfff8;
+        border-color: #baf3df;
+      }
+      .builder-card.native .card-icon {
+        color: #9f2924;
+        background: #fff0ed;
+        border-color: #f6cbc5;
+      }
+      .builder-card strong {
+        color: var(--navy-900);
+      }
+
+      .deployment-rail {
+        position: relative;
+        z-index: 1;
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        gap: 18px;
+        align-items: center;
+        margin-top: 22px;
+        padding: 16px 18px;
+        color: #d9e5ef;
+        border-radius: 17px;
+        background: var(--navy-950);
+      }
+      .deployment-rail b {
+        color: var(--white);
+        font-size: 12px;
+      }
+      .rail-line {
+        height: 1px;
+        background: linear-gradient(90deg, rgba(67, 230, 177, 0.1), var(--mint), rgba(67, 230, 177, 0.1));
+      }
+      .rail-chips {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 7px;
+      }
+      .rail-chip {
+        padding: 5px 8px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 7px;
+        font-size: 9px;
+        font-weight: 800;
+      }
+      .path-summary {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        margin-top: 16px;
+        padding: 13px 15px;
+        border: 1px solid #c8eede;
+        border-radius: 13px;
+        color: #17624b;
+        background: #effcf7;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .path-summary b {
+        color: #0c4937;
+      }
+
+      .harness-section {
+        margin-top: 72px;
+      }
+      .harness-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 315px;
+        gap: 24px;
+        margin-top: 25px;
+        align-items: start;
+      }
+      .agent-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 13px;
+      }
+      .agent-card {
+        position: relative;
+        min-height: 204px;
+        padding: 19px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.88);
+        box-shadow: 0 10px 30px rgba(6, 23, 47, 0.06);
+        transition:
+          transform 160ms ease,
+          box-shadow 160ms ease;
+      }
+      .agent-card:hover {
+        transform: translateY(-4px);
+        box-shadow: 0 18px 36px rgba(6, 23, 47, 0.11);
+      }
+      .agent-card::after {
+        content: attr(data-number);
+        position: absolute;
+        right: -5px;
+        bottom: -21px;
+        color: rgba(9, 36, 71, 0.045);
+        font:
+          900 94px/1 Futura,
+          sans-serif;
+      }
+      .agent-type {
+        color: var(--mint-deep);
+        font-size: 9px;
+        font-weight: 900;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+      .agent-card h3 {
+        margin: 9px 0 8px;
+        color: var(--navy-900);
+        font-size: 18px;
+        line-height: 1.15;
+      }
+      .agent-card p {
+        position: relative;
+        z-index: 1;
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .agent-flow {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin-top: 15px;
+      }
+      .agent-flow span {
+        padding: 4px 7px;
+        color: #385169;
+        border-radius: 999px;
+        background: #edf4f8;
+        font-size: 9px;
+        font-weight: 800;
+      }
+
+      .guardrail-panel {
+        position: sticky;
+        top: 20px;
+        padding: 23px;
+        color: var(--cream);
+        border-radius: 20px;
+        background: var(--navy-900);
+        box-shadow: var(--shadow);
+      }
+      .guardrail-panel .section-kicker {
+        color: var(--gold);
+      }
+      .guardrail-panel h3 {
+        margin: 5px 0 8px;
+        font-size: 22px;
+        line-height: 1.15;
+      }
+      .guardrail-panel > p {
+        margin: 0;
+        color: #b9c9d8;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .guardrail-list {
+        display: grid;
+        gap: 11px;
+        margin-top: 20px;
+      }
+      .guardrail-item {
+        display: grid;
+        grid-template-columns: 28px 1fr;
+        gap: 10px;
+        align-items: start;
+      }
+      .check {
+        display: grid;
+        place-items: center;
+        width: 28px;
+        height: 28px;
+        color: var(--navy-950);
+        border-radius: 8px;
+        background: var(--mint);
+        font-size: 13px;
+        font-weight: 900;
+      }
+      .guardrail-item b {
+        display: block;
+        color: var(--white);
+        font-size: 11px;
+      }
+      .guardrail-item span {
+        display: block;
+        margin-top: 3px;
+        color: #a9bdce;
+        font-size: 9px;
+        line-height: 1.4;
+      }
+
+      .budget-section {
+        margin-top: 72px;
+      }
+      .budget-board {
+        display: grid;
+        grid-template-columns: 330px minmax(0, 1fr);
+        gap: 18px;
+        margin-top: 25px;
+        padding: 18px;
+        border: 1px solid rgba(9, 36, 71, 0.14);
+        border-radius: 27px;
+        background: rgba(255, 255, 255, 0.9);
+        box-shadow: var(--shadow);
+      }
+      .budget-summary {
+        display: flex;
+        flex-direction: column;
+        padding: 23px;
+        color: var(--cream);
+        border-radius: 19px;
+        background: linear-gradient(155deg, var(--navy-800), var(--navy-950));
+      }
+      .budget-summary .section-kicker {
+        color: var(--gold);
+      }
+      .budget-summary h3 {
+        margin: 5px 0 4px;
+        font-size: 22px;
+        line-height: 1.12;
+      }
+      .budget-summary > p {
+        margin: 4px 0 0;
+        color: #afc1d1;
+        font-size: 11px;
+        line-height: 1.5;
+      }
+      .money-total {
+        margin-top: 22px;
+        font-family: Futura, "Avenir Next", sans-serif;
+        font-size: 38px;
+        font-weight: 800;
+        letter-spacing: -0.04em;
+      }
+      .money-label {
+        color: #a9bdce;
+        font-size: 10px;
+        font-weight: 700;
+      }
+      .portfolio-bar {
+        height: 9px;
+        margin-top: 13px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.12);
+      }
+      .portfolio-bar div {
+        width: 39.7%;
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, var(--mint), #81f2cc);
+      }
+      .money-stats {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 10px;
+        margin-top: 16px;
+      }
+      .money-stat {
+        padding: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.055);
+      }
+      .money-stat b {
+        display: block;
+        color: var(--white);
+        font-size: 13px;
+      }
+      .money-stat span {
+        display: block;
+        margin-top: 2px;
+        color: #9eb3c5;
+        font-size: 8px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .attribution-chain {
+        margin-top: 23px;
+        padding-top: 18px;
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
+      }
+      .chain-label {
+        color: var(--gold);
+        font-size: 9px;
+        font-weight: 900;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+      .chain {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 5px;
+        margin-top: 10px;
+      }
+      .chain span {
+        padding: 5px 7px;
+        color: #dce7ef;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 7px;
+        background: rgba(255, 255, 255, 0.05);
+        font-size: 8px;
+        font-weight: 800;
+      }
+      .chain i {
+        color: var(--mint);
+        font-size: 11px;
+        font-style: normal;
+      }
+      .mapping-note {
+        margin-top: auto;
+        padding-top: 18px;
+        color: #91a9bb;
+        font-size: 9px;
+        line-height: 1.45;
+      }
+
+      .budget-ledger {
+        min-width: 0;
+        padding: 8px 8px 5px;
+      }
+      .ledger-head {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+        margin: 3px 0 14px;
+      }
+      .ledger-title {
+        color: var(--navy-900);
+        font-size: 16px;
+        font-weight: 900;
+      }
+      .ledger-badge {
+        padding: 5px 8px;
+        color: #17624b;
+        border: 1px solid #bcebd9;
+        border-radius: 999px;
+        background: #effcf7;
+        font-size: 8px;
+        font-weight: 900;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .ledger-columns,
+      .ledger-row {
+        display: grid;
+        grid-template-columns: 104px minmax(190px, 1.4fr) 108px minmax(155px, 1fr) 82px;
+        gap: 12px;
+        align-items: center;
+      }
+      .ledger-columns {
+        padding: 0 13px 7px;
+        color: #7d8898;
+        font-size: 8px;
+        font-weight: 900;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+      }
+      .ledger-row {
+        min-height: 88px;
+        padding: 13px;
+        border-top: 1px solid #e5eaed;
+      }
+      .jira-key {
+        display: inline-flex;
+        width: max-content;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 8px;
+        color: #084d8f;
+        border: 1px solid #c7e0f4;
+        border-radius: 8px;
+        background: #edf7ff;
+        font-size: 10px;
+        font-weight: 900;
+      }
+      .jira-key::before {
+        content: "J";
+        display: grid;
+        place-items: center;
+        width: 15px;
+        height: 15px;
+        color: white;
+        border-radius: 4px;
+        background: #0875c9;
+        font-size: 8px;
+      }
+      .feature-name {
+        color: var(--navy-900);
+        font-size: 12px;
+        font-weight: 900;
+        line-height: 1.25;
+      }
+      .feature-owner {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 9px;
+      }
+      .avatar {
+        display: grid;
+        place-items: center;
+        width: 21px;
+        height: 21px;
+        color: var(--navy-900);
+        border-radius: 50%;
+        background: #dff9f0;
+        font-size: 7px;
+        font-weight: 900;
+      }
+      .budget-cell b {
+        display: block;
+        color: var(--navy-900);
+        font-size: 11px;
+      }
+      .budget-cell span {
+        display: block;
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 8px;
+      }
+      .small-bar {
+        height: 5px;
+        margin-top: 7px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: #e7ecef;
+      }
+      .small-bar div {
+        height: 100%;
+        border-radius: inherit;
+        background: var(--mint-deep);
+      }
+      .activity-cell {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+      .activity-cell span {
+        padding: 4px 6px;
+        color: #44586d;
+        border-radius: 999px;
+        background: #edf3f6;
+        font-size: 8px;
+        font-weight: 800;
+      }
+      .actual-cost {
+        color: var(--navy-900);
+        font-family: Futura, "Avenir Next", sans-serif;
+        font-size: 18px;
+        font-weight: 900;
+        text-align: right;
+      }
+      .actual-cost span {
+        display: block;
+        margin-top: 3px;
+        color: #16815e;
+        font:
+          800 8px/1.2 "Avenir Next",
+          sans-serif;
+        text-transform: uppercase;
+      }
+      .cost-flow {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 8px;
+        margin-top: 14px;
+      }
+      .cost-step {
+        position: relative;
+        padding: 11px;
+        color: #506075;
+        border: 1px solid #e0e6e9;
+        border-radius: 11px;
+        background: #f8faf9;
+        font-size: 9px;
+        line-height: 1.4;
+      }
+      .cost-step b {
+        display: block;
+        margin-bottom: 4px;
+        color: var(--navy-900);
+        font-size: 10px;
+      }
+      .cost-step:not(:last-child)::after {
+        content: "→";
+        position: absolute;
+        z-index: 2;
+        right: -11px;
+        top: 50%;
+        color: var(--mint-deep);
+        font-size: 14px;
+        font-weight: 900;
+        transform: translateY(-50%);
+      }
+      .ledger-footnote {
+        margin: 12px 2px 0;
+        color: #7a8797;
+        font-size: 8px;
+        line-height: 1.45;
+      }
+
+      .outcome-section {
+        display: grid;
+        grid-template-columns: 0.9fr 1.1fr;
+        gap: 28px;
+        align-items: center;
+        margin-top: 72px;
+        padding: 36px;
+        border-radius: 27px;
+        background: var(--cream);
+        border: 1px solid #e5dcc9;
+        box-shadow: 0 18px 52px rgba(6, 23, 47, 0.07);
+      }
+      .outcome-list {
+        display: grid;
+        gap: 10px;
+      }
+      .outcome {
+        display: grid;
+        grid-template-columns: 34px minmax(0, 1fr) auto;
+        gap: 11px;
+        align-items: center;
+        padding: 13px 14px;
+        border: 1px solid #e1e7e9;
+        border-radius: 13px;
+        background: var(--white);
+      }
+      .outcome-icon {
+        display: grid;
+        place-items: center;
+        width: 34px;
+        height: 34px;
+        color: var(--navy-900);
+        border-radius: 9px;
+        background: #ecf5f7;
+        font-size: 13px;
+        font-weight: 900;
+      }
+      .outcome b {
+        display: block;
+        font-size: 12px;
+      }
+      .outcome span {
+        display: block;
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 9px;
+      }
+      .outcome-state {
+        color: #107957;
+        font-size: 9px;
+        font-weight: 900;
+        text-transform: uppercase;
+        white-space: nowrap;
+      }
+
+      .quickstart {
+        display: grid;
+        grid-template-columns: minmax(0, 0.9fr) minmax(360px, 1.1fr);
+        gap: 30px;
+        align-items: center;
+        margin-top: 72px;
+        padding: 34px 36px;
+        color: var(--cream);
+        border-radius: 27px;
+        background: linear-gradient(135deg, var(--navy-900), var(--navy-950));
+        box-shadow: var(--shadow);
+      }
+      .quickstart .section-kicker {
+        color: var(--gold);
+      }
+      .quickstart .section-copy {
+        color: #b8c8d6;
+      }
+      .quickstart-command {
+        padding: 18px 20px;
+        overflow-x: auto;
+        border: 1px solid rgba(67, 230, 177, 0.3);
+        border-radius: 14px;
+        background: rgba(0, 0, 0, 0.24);
+        color: var(--mint);
+        font:
+          700 14px/1.5 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          Consolas,
+          monospace;
+        white-space: nowrap;
+      }
+      .quickstart-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 13px;
+      }
+      .quickstart-links a {
+        color: #dce8f2;
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .bottom-line {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 1px;
+        margin-top: 44px;
+        overflow: hidden;
+        color: var(--cream);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.18);
+        box-shadow: var(--shadow);
+      }
+      .bottom-cell {
+        padding: 22px;
+        background: var(--navy-950);
+      }
+      .bottom-cell b {
+        display: block;
+        color: var(--mint);
+        font-size: 12px;
+      }
+      .bottom-cell p {
+        margin: 7px 0 0;
+        color: #b5c6d5;
+        font-size: 11px;
+        line-height: 1.5;
+      }
+
+      footer {
+        padding: 0 0 45px;
+        color: #798596;
+        font-size: 10px;
+        text-align: center;
+      }
+
+      @media (max-width: 1080px) {
+        .flow-grid {
+          grid-template-columns: 1fr;
+        }
+        .flow-arrow {
+          min-height: 44px;
+          flex-direction: row;
+        }
+        .arrow-label {
+          writing-mode: initial;
+          transform: none;
+        }
+        .arrow-line {
+          transform: rotate(90deg);
+        }
+        .flow-column.entries,
+        .flow-column.builders {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .flow-column .column-label {
+          grid-column: 1 / -1;
+        }
+        .wardby-core {
+          min-height: unset;
+        }
+        .harness-layout {
+          grid-template-columns: 1fr;
+        }
+        .guardrail-panel {
+          position: static;
+        }
+        .budget-board {
+          grid-template-columns: 1fr;
+        }
+        .ledger-columns {
+          display: none;
+        }
+        .ledger-row {
+          grid-template-columns: 100px minmax(190px, 1.4fr) 100px minmax(145px, 1fr) 78px;
+        }
+      }
+
+      @media (max-width: 780px) {
+        .shell {
+          width: min(100% - 24px, 1380px);
+        }
+        .hero-inner {
+          grid-template-columns: 105px 1fr;
+          gap: 14px;
+          padding: 42px 0;
+        }
+        .brand-mark {
+          width: 105px;
+        }
+        .eyebrow {
+          font-size: 9px;
+        }
+        h1 {
+          font-size: clamp(34px, 10vw, 50px);
+        }
+        .hero-copy,
+        .hero-tags {
+          grid-column: 1 / -1;
+        }
+        main {
+          padding-top: 38px;
+        }
+        .architecture {
+          padding: 16px;
+          border-radius: 20px;
+        }
+        .flow-column.entries,
+        .flow-column.builders {
+          grid-template-columns: 1fr;
+        }
+        .core-grid {
+          grid-template-columns: 1fr;
+        }
+        .deployment-rail {
+          grid-template-columns: 1fr;
+        }
+        .rail-line {
+          display: none;
+        }
+        .rail-chips {
+          justify-content: flex-start;
+        }
+        .agent-grid {
+          grid-template-columns: 1fr;
+        }
+        .budget-board {
+          padding: 11px;
+        }
+        .budget-ledger {
+          padding: 4px;
+        }
+        .ledger-row {
+          grid-template-columns: 84px minmax(0, 1fr) 72px;
+          gap: 9px;
+        }
+        .ledger-row .budget-cell {
+          display: none;
+        }
+        .activity-cell {
+          display: none;
+        }
+        .cost-flow {
+          grid-template-columns: 1fr;
+        }
+        .cost-step:not(:last-child)::after {
+          content: "↓";
+          right: 50%;
+          top: auto;
+          bottom: -13px;
+          transform: translateX(50%);
+        }
+        .outcome-section {
+          grid-template-columns: 1fr;
+          padding: 24px;
+        }
+        .quickstart {
+          grid-template-columns: minmax(0, 1fr);
+          padding: 24px;
+        }
+        .bottom-line {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          animation: none !important;
+          transition: none !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="hero">
+      <div class="shell hero-inner">
+        <img
+          class="brand-mark"
+          src="assets/wardby-mascot-256.png"
+          alt="Wardby guardian robot carrying a budget shield"
+        />
+        <div>
+          <div class="eyebrow">Wardby for engineering teams</div>
+          <h1>Build an agent workforce. Keep control of the work.</h1>
+          <p class="hero-copy">
+            <strong>Agent runners help a model complete a task. Wardby governs the work around it.</strong> Use one
+            self-hosted control plane to decide whether an agent may run, what it may access, what it may spend, and
+            what reviewable outcome it may produce.
+          </p>
+          <div class="hero-tags">
+            <span class="hero-tag">OpenAI, Anthropic, or Bedrock</span>
+            <span class="hero-tag">Keep your infrastructure</span>
+            <span class="hero-tag">Budgets enforced before spend</span>
+            <span class="hero-tag">Explicit action authority</span>
+            <span class="hero-tag">One owned agent catalog</span>
+          </div>
+          <div class="hero-actions">
+            <a class="hero-action" href="#get-started">Run it locally</a>
+            <a class="hero-action secondary" href="https://github.com/wardby/wardby">View on GitHub</a>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section aria-labelledby="platform-title">
+        <p class="section-kicker">01 / The platform path</p>
+        <h2 class="section-title" id="platform-title">One MCP control plane from idea to governed execution</h2>
+        <p class="section-copy">
+          Your team can design and operate agents conversationally, trigger them from delivery systems, or run them on a
+          schedule. Every path passes through the same Wardby controls before a model, tool, repository, or dollar is
+          touched.
+        </p>
+
+        <div class="path-selector" aria-label="Highlight a platform path">
+          <button class="path-button active" data-select="all">Show the whole system</button>
+          <button class="path-button" data-select="workbench">Claude Code or Codex</button>
+          <button class="path-button" data-select="ci">GitHub or Azure DevOps</button>
+          <button class="path-button" data-select="scheduled">Scheduled operations</button>
+        </div>
+
+        <div class="architecture">
+          <div class="flow-grid">
+            <div class="flow-column entries">
+              <div class="column-label"><span>Ask or trigger</span><span class="step-number">1</span></div>
+
+              <article class="entry-card" data-path="workbench">
+                <div class="card-icon">CC</div>
+                <div>
+                  <div class="card-title">Claude Code</div>
+                  <div class="card-note">Build, configure, run, and inspect agents through MCP tools.</div>
+                </div>
+              </article>
+
+              <article class="entry-card" data-path="workbench">
+                <div class="card-icon">CX</div>
+                <div>
+                  <div class="card-title">Codex</div>
+                  <div class="card-note">Use the same governed catalog from a different coding workbench.</div>
+                </div>
+              </article>
+
+              <article class="entry-card" data-path="ci">
+                <div class="card-icon">CI</div>
+                <div>
+                  <div class="card-title">Delivery events</div>
+                  <div class="card-note">
+                    GitHub Actions or Azure Pipelines call approved agents on PR, merge, release, or manual dispatch.
+                  </div>
+                </div>
+              </article>
+
+              <article class="entry-card" data-path="scheduled">
+                <div class="card-icon">24h</div>
+                <div>
+                  <div class="card-title">Schedules &amp; signals</div>
+                  <div class="card-note">
+                    Recurring reviews, webhooks, metrics, incidents, and on-demand operations.
+                  </div>
+                </div>
+              </article>
+            </div>
+
+            <div class="flow-arrow" aria-hidden="true">
+              <span class="arrow-label">MCP / API / webhook</span>
+              <div class="arrow-line"></div>
+            </div>
+
+            <div class="flow-column">
+              <div class="column-label"><span>Govern and orchestrate</span><span class="step-number">2</span></div>
+              <div class="wardby-core active-path" data-core>
+                <div class="core-head">
+                  <div class="core-name">Wardby control plane</div>
+                  <span class="core-badge">Self-hosted</span>
+                </div>
+                <div class="core-sub">The durable operating boundary between intent and agent execution.</div>
+                <div class="core-grid">
+                  <div class="core-module">
+                    <b>Agent catalog</b><span>Versioned definitions, prompts, tools, models, and schedules</span>
+                  </div>
+                  <div class="core-module guard">
+                    <b>Budget admission</b><span>Reserve spend before a request reaches the provider</span>
+                  </div>
+                  <div class="core-module">
+                    <b>Policy &amp; identity</b
+                    ><span>Scoped repositories, tools, secrets, datastores, networks, and principals</span>
+                  </div>
+                  <div class="core-module">
+                    <b>Triggers &amp; workflow</b><span>MCP, CI events, webhooks, schedules, approvals, retries</span>
+                  </div>
+                  <div class="core-module">
+                    <b>Execution routing</b><span>Select the approved builder, model, and isolated runtime</span>
+                  </div>
+                  <div class="core-module">
+                    <b>Evidence &amp; metrics</b><span>Run history, actual cost, artifacts, logs, and outcomes</span>
+                  </div>
+                </div>
+                <div class="core-status">
+                  <div class="status-dot"></div>
+                  <span>Nothing runs until identity, policy, and available budget agree.</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="flow-arrow" aria-hidden="true">
+              <span class="arrow-label">approved run</span>
+              <div class="arrow-line"></div>
+            </div>
+
+            <div class="flow-column builders">
+              <div class="column-label"><span>Build or execute</span><span class="step-number">3</span></div>
+
+              <article class="builder-card" data-path="workbench ci">
+                <div class="card-icon">CX</div>
+                <div>
+                  <div class="card-title">Codex builder</div>
+                  <div class="card-note">
+                    Works in an isolated checkout and returns a reviewable patch or pull request.
+                  </div>
+                  <div class="mini-stack">
+                    <span class="mini-pill">code</span><span class="mini-pill">tests</span
+                    ><span class="mini-pill">PR</span>
+                  </div>
+                </div>
+              </article>
+
+              <article class="builder-card" data-path="workbench ci">
+                <div class="card-icon">CC</div>
+                <div>
+                  <div class="card-title">Claude builder</div>
+                  <div class="card-note">Uses the same bounded job contract with a separately reviewed driver.</div>
+                  <div class="mini-stack">
+                    <span class="mini-pill">code</span><span class="mini-pill">tests</span
+                    ><span class="mini-pill">PR</span>
+                  </div>
+                </div>
+              </article>
+
+              <article class="builder-card native" data-path="workbench ci scheduled">
+                <div class="card-icon">API</div>
+                <div>
+                  <div class="card-title">Native agent runtime</div>
+                  <div class="card-note">
+                    Runs analysis, reviews, monitoring, reporting, and tool workflows without changing code.
+                  </div>
+                  <div class="mini-stack">
+                    <span class="mini-pill">tools</span><span class="mini-pill">reports</span
+                    ><span class="mini-pill">actions</span>
+                  </div>
+                </div>
+              </article>
+            </div>
+          </div>
+
+          <div class="deployment-rail">
+            <b>Your infrastructure and boundaries</b>
+            <div class="rail-line"></div>
+            <div class="rail-chips">
+              <span class="rail-chip">Docker / VM / on-prem</span>
+              <span class="rail-chip">GKE reference</span>
+              <span class="rail-chip">AWS portable runtime</span>
+              <span class="rail-chip">Other container platforms</span>
+              <span class="rail-chip">PostgreSQL</span>
+            </div>
+          </div>
+
+          <div class="path-summary" aria-live="polite">
+            <span>●</span>
+            <div id="path-summary">
+              <b>The whole system:</b> conversations, delivery events, and schedules all use one catalog and one set of
+              guardrails. Teams can change the model or builder without changing the governance contract.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="harness-section" aria-labelledby="harness-title">
+        <p class="section-kicker">02 / The reusable harness</p>
+        <h2 class="section-title" id="harness-title">Six agent systems. One operational contract.</h2>
+        <p class="section-copy">
+          Your framework becomes a managed suite rather than six unrelated scripts. Each agent can use Codex, Claude, or
+          a native model flow while inheriting the same budgets, permissions, evidence, and operator-defined review
+          policy.
+        </p>
+
+        <div class="harness-layout">
+          <div class="agent-grid">
+            <article class="agent-card" data-number="01">
+              <div class="agent-type">Full-cycle builder</div>
+              <h3>Delivery Pipeline</h3>
+              <p>Turns an approved request into a plan, implementation, tests, review, and a draft pull request.</p>
+              <div class="agent-flow">
+                <span>Analyze</span><span>Design</span><span>Build</span><span>Test</span><span>Review</span>
+              </div>
+            </article>
+
+            <article class="agent-card" data-number="02">
+              <div class="agent-type">System reviewer</div>
+              <h3>Architecture Review</h3>
+              <p>
+                Examines the codebase for architecture, privacy, accessibility, reuse, coverage, and structural risk.
+              </p>
+              <div class="agent-flow"><span>Map</span><span>Score</span><span>Explain</span><span>Recommend</span></div>
+            </article>
+
+            <article class="agent-card" data-number="03">
+              <div class="agent-type">Maintenance builder</div>
+              <h3>Security Maintenance</h3>
+              <p>
+                Finds vulnerable components, separates safe fixes from breaking changes, verifies, and proposes a patch.
+              </p>
+              <div class="agent-flow"><span>Scan</span><span>Triage</span><span>Patch</span><span>Verify</span></div>
+            </article>
+
+            <article class="agent-card" data-number="04">
+              <div class="agent-type">Quality builder</div>
+              <h3>QA End to End</h3>
+              <p>
+                Maps customer journeys, ranks coverage gaps by risk, and incrementally builds the missing test suite.
+              </p>
+              <div class="agent-flow"><span>Discover</span><span>Rank</span><span>Write</span><span>Run</span></div>
+            </article>
+
+            <article class="agent-card" data-number="05">
+              <div class="agent-type">Operational agent</div>
+              <h3>System Monitoring</h3>
+              <p>
+                Turns production signals into a clear defect, evidence package, escalation, and approved follow-up work.
+              </p>
+              <div class="agent-flow">
+                <span>Observe</span><span>Correlate</span><span>Report</span><span>Escalate</span>
+              </div>
+            </article>
+
+            <article class="agent-card" data-number="06">
+              <div class="agent-type">Portfolio agent</div>
+              <h3>Project Tracking</h3>
+              <p>
+                Pulls actuals, budget, schedule, ownership, and progress into one live view with early drift detection.
+              </p>
+              <div class="agent-flow">
+                <span>Collect</span><span>Compare</span><span>Forecast</span><span>Alert</span>
+              </div>
+            </article>
+          </div>
+
+          <aside class="guardrail-panel">
+            <p class="section-kicker">Inherited by every agent</p>
+            <h3>The Wardby contract</h3>
+            <p>Builders can vary. The controls do not.</p>
+            <div class="guardrail-list">
+              <div class="guardrail-item">
+                <span class="check">$</span>
+                <div>
+                  <b>Hard run budgets</b
+                  ><span>Every model request must fit the run limit before it reaches the provider.</span>
+                </div>
+              </div>
+              <div class="guardrail-item">
+                <span class="check">ID</span>
+                <div>
+                  <b>Scoped identity</b
+                  ><span>Short-lived access only to the repositories and services the run needs.</span>
+                </div>
+              </div>
+              <div class="guardrail-item">
+                <span class="check">P</span>
+                <div>
+                  <b>Explicit policy</b
+                  ><span>Models, tools, egress, files, branches, and actions are reviewed capabilities.</span>
+                </div>
+              </div>
+              <div class="guardrail-item">
+                <span class="check">DB</span>
+                <div>
+                  <b>Governed shared state</b
+                  ><span>Agents exchange structured data only through attached datastore names and key prefixes.</span>
+                </div>
+              </div>
+              <div class="guardrail-item">
+                <span class="check">✓</span>
+                <div>
+                  <b>Explicit action authority</b
+                  ><span>Operators decide whether people or designated agents may approve consequential outcomes.</span>
+                </div>
+              </div>
+              <div class="guardrail-item">
+                <span class="check">≡</span>
+                <div>
+                  <b>Durable evidence</b
+                  ><span>Inputs, decisions, cost, logs, artifacts, and final status remain reviewable.</span>
+                </div>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="budget-section" aria-labelledby="budget-title">
+        <p class="section-kicker">03 / Centralized budget intelligence</p>
+        <h2 class="section-title" id="budget-title">Know who spent it, why, and for which feature</h2>
+        <p class="section-copy">
+          With a work-tracking connector, a feature key can travel with the request into Wardby. Every child agent and
+          model call inherits that context, so reserved budget and final agent expense can roll up to the owning
+          feature, epic, team, and portfolio. The example below shows the target Jira pattern.
+        </p>
+
+        <div class="budget-board">
+          <aside class="budget-summary">
+            <p class="section-kicker">Engineering agent portfolio</p>
+            <h3>September budget</h3>
+            <p>One view across builders, reviewers, scheduled agents, and teams.</p>
+            <div class="money-total">$4,960</div>
+            <div class="money-label">actual agent spend of $12,500 allocated</div>
+            <div class="portfolio-bar"><div></div></div>
+            <div class="money-stats">
+              <div class="money-stat"><b>$6,820</b><span>Reserved</span></div>
+              <div class="money-stat"><b>$7,540</b><span>Remaining</span></div>
+            </div>
+            <div class="attribution-chain">
+              <div class="chain-label">Attribution chain</div>
+              <div class="chain">
+                <span>Portfolio</span><i>›</i><span>Team</span><i>›</i><span>Jira epic</span><i>›</i><span>Feature</span
+                ><i>›</i><span>Run tree</span>
+              </div>
+            </div>
+            <div class="mapping-note">
+              A feature budget can be shared by a planner, Codex builder, Claude reviewer, QA agent, and follow-up run
+              without losing the parent cost relationship.
+            </div>
+          </aside>
+
+          <div class="budget-ledger">
+            <div class="ledger-head">
+              <div class="ledger-title">Agent expense by Jira feature and owner</div>
+              <span class="ledger-badge">Jira-linked integration pattern</span>
+            </div>
+            <div class="ledger-columns">
+              <span>Jira card</span><span>Feature / owner</span><span>Budget</span><span>Agent activity</span
+              ><span>Actual</span>
+            </div>
+
+            <div class="ledger-row">
+              <div><span class="jira-key">PAY-241</span></div>
+              <div>
+                <div class="feature-name">Payment retry recovery</div>
+                <div class="feature-owner"><span class="avatar">MC</span><span>Billing Platform · Maya C.</span></div>
+              </div>
+              <div class="budget-cell">
+                <b>$1,200</b><span>62% consumed</span>
+                <div class="small-bar"><div style="width: 62%"></div></div>
+              </div>
+              <div class="activity-cell">
+                <span>Planner</span><span>Codex build</span><span>Claude review</span><span>QA</span>
+              </div>
+              <div class="actual-cost">$744<span>18 runs</span></div>
+            </div>
+
+            <div class="ledger-row">
+              <div><span class="jira-key">MOB-118</span></div>
+              <div>
+                <div class="feature-name">Receipt capture refresh</div>
+                <div class="feature-owner"><span class="avatar">LO</span><span>Mobile · Liam O.</span></div>
+              </div>
+              <div class="budget-cell">
+                <b>$850</b><span>34% consumed</span>
+                <div class="small-bar"><div style="width: 34%"></div></div>
+              </div>
+              <div class="activity-cell"><span>Architecture</span><span>Claude build</span><span>E2E QA</span></div>
+              <div class="actual-cost">$289<span>9 runs</span></div>
+            </div>
+
+            <div class="ledger-row">
+              <div><span class="jira-key">SEC-092</span></div>
+              <div>
+                <div class="feature-name">Dependency hardening</div>
+                <div class="feature-owner">
+                  <span class="avatar">AR</span><span>Security Engineering · Ava R.</span>
+                </div>
+              </div>
+              <div class="budget-cell">
+                <b>$500</b><span>81% consumed</span>
+                <div class="small-bar"><div style="width: 81%"></div></div>
+              </div>
+              <div class="activity-cell"><span>Scanner</span><span>Codex patch</span><span>Verifier</span></div>
+              <div class="actual-cost">$405<span>27 runs</span></div>
+            </div>
+
+            <div class="cost-flow" aria-label="How Jira work maps to Wardby agent expense">
+              <div class="cost-step">
+                <b>1. Work is selected</b>A connector supplies the work key, feature, team, owner, and approved limit.
+              </div>
+              <div class="cost-step">
+                <b>2. Budget is reserved</b>Wardby admits only work that fits the feature and portfolio limits.
+              </div>
+              <div class="cost-step">
+                <b>3. Children inherit context</b>Every builder, reviewer, retry, and model call remains attached to the
+                parent feature.
+              </div>
+              <div class="cost-step">
+                <b>4. Actuals roll up</b>Final usage appears by run, feature, owner, team, and portfolio.
+              </div>
+            </div>
+            <p class="ledger-footnote">
+              <b>Scope:</b> this view attributes Wardby-managed agent and model expense. Labor, infrastructure, or other
+              delivery costs appear only when imported from their source systems. Jira integration is shown as the
+              target connector pattern, not as a claim that the connector is currently shipped.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="outcome-section" aria-labelledby="outcomes-title">
+        <div>
+          <p class="section-kicker">04 / What the team receives</p>
+          <h2 class="section-title" id="outcomes-title">Autonomy with a receipt</h2>
+          <p class="section-copy">
+            Wardby does not replace engineering judgment. It makes delegated work repeatable, bounded, and easy to
+            inspect, whether the result is code or an operational decision.
+          </p>
+        </div>
+        <div class="outcome-list">
+          <div class="outcome">
+            <span class="outcome-icon">PR</span>
+            <div>
+              <b>Optional reviewable code changes</b
+              ><span>Plan, patch, tests, evidence, and a draft pull request when the agent is authorized for code</span>
+            </div>
+            <span class="outcome-state">Review gate</span>
+          </div>
+          <div class="outcome">
+            <span class="outcome-icon">R</span>
+            <div>
+              <b>Architecture and security reports</b
+              ><span>Prioritized findings with context and remediation options</span>
+            </div>
+            <span class="outcome-state">Traceable</span>
+          </div>
+          <div class="outcome">
+            <span class="outcome-icon">!</span>
+            <div>
+              <b>Operational defect packages</b
+              ><span>Signal, diagnosis, impact, evidence, and proposed next action</span>
+            </div>
+            <span class="outcome-state">Escalated</span>
+          </div>
+          <div class="outcome">
+            <span class="outcome-icon">$</span>
+            <div>
+              <b>Budget and portfolio actuals</b><span>Reserved spend, final cost, run history, and program drift</span>
+            </div>
+            <span class="outcome-state">Measured</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="quickstart" id="get-started" aria-labelledby="quickstart-title">
+        <div>
+          <p class="section-kicker">Run locally in five minutes</p>
+          <h2 class="section-title" id="quickstart-title">Start without cloning Wardby</h2>
+          <p class="section-copy">
+            Bring Node.js 24, Docker, and an OpenAI or Anthropic API key. Quickstart launches PostgreSQL, creates a $1
+            demo agent, and can connect Claude Code or Codex through MCP.
+          </p>
+        </div>
+        <div>
+          <div class="quickstart-command">npx --yes @wardby/cli@latest quickstart</div>
+          <div class="quickstart-links">
+            <a href="https://github.com/wardby/wardby/blob/main/docs/getting-started.md">Local guide</a>
+            <a href="https://github.com/wardby/wardby/blob/main/docs/getting-started-gke.md">GKE guide</a>
+            <a href="https://github.com/wardby/wardby/blob/main/docs/getting-started-identity-provider.md"
+              >Identity provider guide</a
+            >
+          </div>
+        </div>
+      </section>
+
+      <div class="bottom-line" aria-label="Wardby value summary">
+        <div class="bottom-cell">
+          <b>For developers</b>
+          <p>
+            Use Claude Code or Codex to call capable agents without memorizing deployment, identity, and budget
+            mechanics.
+          </p>
+        </div>
+        <div class="bottom-cell">
+          <b>For engineering leaders</b>
+          <p>Scale repeatable agent workflows across teams while retaining cost, risk, and outcome visibility.</p>
+        </div>
+        <div class="bottom-cell">
+          <b>For the platform team</b>
+          <p>Run one self-hosted control plane across approved models, builders, CI systems, and cloud boundaries.</p>
+        </div>
+      </div>
+    </main>
+
+    <footer class="shell">
+      Wardby · autonomous agents, bounded by design ·
+      <a href="https://github.com/wardby/wardby">open source on GitHub</a>
+    </footer>
+
+    <script>
+      const buttons = [...document.querySelectorAll(".path-button")];
+      const pathCards = [...document.querySelectorAll("[data-path]")];
+      const core = document.querySelector("[data-core]");
+      const summary = document.getElementById("path-summary");
+      const messages = {
+        all: "<b>The whole system:</b> conversations, delivery events, and schedules all use one catalog and one set of guardrails. Teams can change the model or builder without changing the governance contract.",
+        workbench:
+          "<b>Workbench path:</b> a developer asks Claude Code or Codex to create, configure, run, or inspect an agent through Wardby MCP. Wardby admits the run, selects an approved executor, and returns evidence and artifacts.",
+        ci: "<b>Delivery path:</b> GitHub Actions or Azure Pipelines invokes a named, versioned agent on an approved event. CI supplies the trigger; Wardby still owns identity, policy, budget, execution, and the result.",
+        scheduled:
+          "<b>Operations path:</b> schedules and production signals launch native agents for reviews, monitoring, and reporting. The same controls apply even when no developer is sitting at a terminal.",
+      };
+
+      function selectPath(selected) {
+        buttons.forEach((button) => button.classList.toggle("active", button.dataset.select === selected));
+        pathCards.forEach((card) => {
+          const paths = card.dataset.path.split(" ");
+          const active = selected === "all" || paths.includes(selected);
+          card.classList.toggle("active-path", active);
+          card.classList.toggle("dimmed", !active);
+        });
+        core.classList.add("active-path");
+        summary.innerHTML = messages[selected];
+      }
+
+      buttons.forEach((button) => button.addEventListener("click", () => selectPath(button.dataset.select)));
+      selectPath("all");
+    </script>
+  </body>
+</html>
