@@ -1,0 +1,15 @@
+# Actions are pinned to full commit SHAs, so they never move on their own.
+# Dependabot updates the SHA and its version comment together, which keeps the
+# pins current without giving up what pinning buys.
+#
+# npm dependencies are deliberately not listed: they go through
+# scripts/security-audit.mjs and are upgraded by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
