@@ -130,6 +130,18 @@ describe("handleSecretElicitationForm", () => {
     expect(res.headers.get("content-security-policy")).toContain("script-src 'none'");
   });
 
+  it("uses a referrer policy under which the form's native POST keeps its Origin", async () => {
+    // Under no-referrer a browser sends `Origin: null` on a native form POST, even
+    // to the same origin, and the HTTP transport rejects that as invalid_origin.
+    const base = await startTestServer({
+      verify: async () => ({ ownerId: "p1", secretName: "API_KEY" }),
+      secrets: fakeCipher(),
+      db: fakeDb(),
+    });
+    const res = await fetch(`${base}/secret?t=whatever`);
+    expect(res.headers.get("referrer-policy")).toBe("same-origin");
+  });
+
   it("GET with an invalid/expired token shows an error instead of the form", async () => {
     const base = await startTestServer({
       verify: async () => {
