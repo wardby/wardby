@@ -19,8 +19,9 @@ use `deploy/gke` and the `gke-autopilot` Kubernetes overlay described here.
   access on the cluster's VPC.
 - Runtime, migration, and worker images are stored in Artifact Registry and
   deployed by immutable digest. Two worker images are published: the default
-  `node` toolchain and `node-python` 3.12 (with pytest and ruff), so coding
-  agents can set `toolchain: "node-python"` and `toolchainVersion: "3.12"`.
+  `node` toolchain and `node-python` (Debian's Python 3 with pytest and ruff).
+  Coding agents select the latter with `toolchain: "node-python"` and
+  `toolchainVersion: "3.12"`, the key it is registered under.
 - A global GKE Gateway terminates TLS with Certificate Manager and applies a
   Cloud Armor rate-limit policy.
 - Namespace RBAC and default-deny network policies constrain the launcher,
