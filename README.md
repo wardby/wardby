@@ -238,6 +238,26 @@ agent with a small budget, trigger it, and inspect the run. Coding-agent setup
 additionally requires a dedicated GitHub App, immutable worker images, and the
 proxy boundary described in the [local coding-agent setup guide](docs/coding-agent-setup.md).
 
+### Installing from npm
+
+```sh
+npm install @wardby/cli
+```
+
+`npm audit` will report a high-severity advisory in `deepmerge-ts`
+([GHSA-ggr8-5vv4-36mx](https://github.com/advisories/GHSA-ggr8-5vv4-36mx)). It
+is reached only through Prisma's CLI while it loads your own Prisma
+configuration, and Prisma has not patched it in the 6.x line. This repository
+clears it with an override, but npm does not apply a package's overrides to the
+projects that install it — so add the same entry to your own `package.json`:
+
+```json
+"overrides": { "deepmerge-ts": "8.0.2" }
+```
+
+That override is tested against Prisma 6 and the CLI; the reasoning and the
+retirement plan are in [SR-009](docs/security-deployment.md#images-and-dependency-exception).
+
 ## What is implemented
 
 - MCP-first agent, tool, schedule, budget-group, secret, datastore, webhook,
