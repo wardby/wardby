@@ -1198,8 +1198,10 @@
         color: #b8c8d6;
       }
       .quickstart-command {
-        padding: 18px 20px;
-        overflow-x: auto;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 12px 12px 20px;
         border: 1px solid rgba(67, 230, 177, 0.3);
         border-radius: 14px;
         background: rgba(0, 0, 0, 0.24);
@@ -1211,6 +1213,41 @@
           Consolas,
           monospace;
         white-space: nowrap;
+      }
+      .quickstart-command code {
+        flex: 1;
+        min-width: 0;
+        overflow-x: auto;
+        padding: 6px 0;
+        font: inherit;
+      }
+      .copy-button {
+        display: inline-grid;
+        flex: none;
+        place-items: center;
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        color: var(--mint);
+        border: 1px solid rgba(67, 230, 177, 0.3);
+        border-radius: 9px;
+        background: rgba(255, 255, 255, 0.05);
+        cursor: pointer;
+      }
+      .copy-button:hover,
+      .copy-button:focus-visible {
+        background: rgba(67, 230, 177, 0.14);
+      }
+      .copy-button svg {
+        width: 17px;
+        height: 17px;
+      }
+      .copy-button .icon-done,
+      .copy-button.copied .icon-copy {
+        display: none;
+      }
+      .copy-button.copied .icon-done {
+        display: block;
       }
       .quickstart-links {
         display: flex;
@@ -1996,7 +2033,36 @@
           </p>
         </div>
         <div>
-          <div class="quickstart-command">npx --yes @wardby/cli@latest quickstart</div>
+          <div class="quickstart-command">
+            <code id="quickstart-cmd">npx --yes @wardby/cli@latest quickstart</code>
+            <button class="copy-button" type="button" data-copy="quickstart-cmd" aria-label="Copy command" title="Copy">
+              <svg
+                class="icon-copy"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="9" y="9" width="13" height="13" rx="2" />
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+              </svg>
+              <svg
+                class="icon-done"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+            </button>
+          </div>
           <div class="quickstart-links">
             <a href="https://github.com/wardby/wardby/blob/main/docs/getting-started.md">Local guide</a>
             <a href="https://github.com/wardby/wardby/blob/main/docs/getting-started-gke.md">GKE guide</a>
@@ -2059,6 +2125,36 @@
 
       buttons.forEach((button) => button.addEventListener("click", () => selectPath(button.dataset.select)));
       selectPath("all");
+
+      // navigator.clipboard needs a secure context and can stay pending behind a
+      // permission prompt, so give it a moment and then fall back to a
+      // selection copy, which also covers a local file:// preview.
+      function selectionCopy(text) {
+        const area = Object.assign(document.createElement("textarea"), { value: text });
+        document.body.append(area);
+        area.select();
+        document.execCommand("copy");
+        area.remove();
+      }
+      document.querySelectorAll("[data-copy]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const text = document.getElementById(button.dataset.copy).textContent.trim();
+          try {
+            await Promise.race([
+              navigator.clipboard.writeText(text),
+              new Promise((_, reject) => setTimeout(() => reject(new Error("clipboard timeout")), 700)),
+            ]);
+          } catch {
+            selectionCopy(text);
+          }
+          button.classList.add("copied");
+          button.setAttribute("aria-label", "Copied");
+          setTimeout(() => {
+            button.classList.remove("copied");
+            button.setAttribute("aria-label", "Copy command");
+          }, 1600);
+        });
+      });
     </script>
   </body>
 </html>
