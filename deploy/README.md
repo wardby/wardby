@@ -8,11 +8,13 @@ Deployment configuration for wardby, organized by target.
 observability:up`), dev/local only. See `docs/observability.md`.
 - **`aws/`** — placeholder for an AWS target (Fargate `JobLauncher`, per the
   same isolation contract used by other coding-worker launchers). Not yet built.
-- **`gcp/`** — GCP production hosting via Terraform (the baseline IaC tool
-  for every wardby cloud deployment, GCP included — this module is the
-  reference example future cloud targets, e.g. `aws/`, follow).
+- **`gke/`** — the supported Google Cloud path: GKE Autopilot, private-IP Cloud
+  SQL, Artifact Registry, and the `gke-autopilot` Kubernetes overlay. Start with
+  the [full GKE guide](../docs/getting-started-gke.md).
+- **`gcp/`** — **deprecated** Cloud Run reference. It remains temporarily for
+  existing operators but should not be used for a new installation.
 
-  **First time against a real project?** See `gcp/SETUP.md` — project
+  **Maintaining an existing Cloud Run deployment?** See `gcp/SETUP.md` — project
   creation, billing, required APIs, domain verification, a Terraform state
   bucket, and building/pushing the container image all have to happen
   before `terraform apply` will succeed; none of it is scriptable from
@@ -28,16 +30,11 @@ observability:up`), dev/local only. See `docs/observability.md`.
      without copying this folder at all.
   4. `terraform init && terraform validate && terraform plan`
 
-  **Reusable two ways:** fork this whole folder into your own repo and edit
-  in place, or keep it as-is and point your own `.tfvars` at it — no
-  project-specific identity (project id, domain, resource names) is
-  hardcoded anywhere in the module; every such value is a variable.
-
   **Scope:** this module provisions the always-on control plane (Cloud Run
   service + Cloud SQL) only. The coding-worker `JobLauncher` (Cloud Run
   Jobs), the coding-proxy's VPC/firewall egress lockdown, a CI/CD deploy
-  pipeline, and Cloud-native observability are separate, not-yet-built
-  follow-on modules.
+  pipeline, and Cloud-native observability are not part of this deprecated
+  module.
 
 `deploy/Dockerfile` (top level) is the production application image,
 independent of target.

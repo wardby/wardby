@@ -1,3 +1,12 @@
+# Deprecated Cloud Run deployment
+
+The `deploy/gcp` Cloud Run deployment is deprecated and will be removed in a
+future release. Do not use it for a new installation. Follow the supported
+[GKE getting-started guide](../../docs/getting-started-gke.md) instead.
+
+The instructions below remain temporarily for operators maintaining an existing
+Cloud Run deployment.
+
 # One-time GCP project setup
 
 Prerequisites before `terraform plan`/`apply` will work against a real (even

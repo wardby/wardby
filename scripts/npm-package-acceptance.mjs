@@ -40,6 +40,7 @@ try {
     "dist/wardby-bin.js",
     "dist/cli.js",
     "prisma/schema.prisma",
+    "deploy/local/docker-compose.yml",
     "scripts/git-askpass.sh",
   ];
   for (const path of required) {
@@ -64,7 +65,7 @@ try {
   const binary = process.platform === "win32" ? "wardby.cmd" : "wardby";
   const executable = join(scratch, "node_modules", ".bin", binary);
   const help = run(executable, ["--help"], { cwd: installRoot });
-  if (!help.includes("wardby coding preflight") || !help.includes("--version")) {
+  if (!help.includes("wardby quickstart") || !help.includes("wardby doctor") || !help.includes("--version")) {
     throw new Error("installed wardby --help output is incomplete");
   }
   const version = run(executable, ["--version"], { cwd: installRoot }).trim();

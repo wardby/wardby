@@ -44,7 +44,13 @@ export default tseslint.config(
     // exists to catch. src/tools/* are the same category: one-shot developer
     // commands an operator runs from a terminal (npm run capture:autopilot),
     // never part of a serving process.
-    files: ["src/cli.ts", "src/mcp/auth/self-hosted/cli.ts", "src/tools/*.ts"],
+    files: [
+      "src/cli.ts",
+      "src/wardby-bin.ts",
+      "src/quickstart/*.ts",
+      "src/mcp/auth/self-hosted/cli.ts",
+      "src/tools/*.ts",
+    ],
     rules: { "no-console": "off" },
   },
   {

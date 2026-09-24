@@ -1,5 +1,10 @@
 # deploy/gke — managed Postgres for a GKE-hosted control plane
 
+For the complete path from an empty Google Cloud project through DNS, TLS,
+deployment, verification, and teardown, follow the
+[GKE getting-started guide](../../docs/getting-started-gke.md). This file covers
+the Terraform module's implementation details.
+
 Terraform for a Cloud SQL Postgres instance with **no public IP**, reachable
 from a GKE cluster over a VPC peering. It is the durable store behind the
 control plane deployed by
@@ -18,13 +23,11 @@ separately.
 
 ## Why not deploy/gcp
 
-`deploy/gcp` deploys the control plane to Cloud Run with a **public-IP** Cloud
-SQL instance, which Cloud Run reaches through the Cloud SQL connector. GKE pods
-cannot use that connector, and the alternatives — a public IP with authorized
-networks, or an Auth Proxy sidecar in every workload — are worse than a private
-address that both the control plane and the coding proxy dial directly. The two
-modules describe different architectures on purpose; neither is a variant of the
-other.
+`deploy/gcp` is the deprecated Cloud Run reference and should not be used for a
+new installation. It uses a public-IP Cloud SQL instance reached through the
+Cloud SQL connector. The supported GKE architecture instead uses a private
+address that both the control plane and coding proxy reach directly from the
+cluster VPC.
 
 ## The constraint to check first
 

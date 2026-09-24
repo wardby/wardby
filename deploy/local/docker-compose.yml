@@ -2,15 +2,15 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: wardby
-      POSTGRES_PASSWORD: wardby
-      POSTGRES_DB: wardby
+      POSTGRES_USER: ${WARDBY_POSTGRES_USER:-wardby}
+      POSTGRES_PASSWORD: ${WARDBY_POSTGRES_PASSWORD:-wardby}
+      POSTGRES_DB: ${WARDBY_POSTGRES_DB:-wardby}
     ports:
-      - "55432:5432"
+      - "${WARDBY_POSTGRES_PORT:-55432}:5432"
     volumes:
       - wardby-postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U wardby -d wardby"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 5s
       retries: 12

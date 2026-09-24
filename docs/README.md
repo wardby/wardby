@@ -1,5 +1,9 @@
 # Documentation
 
+- [Getting started](getting-started.md) runs Wardby locally from npm with
+  containerized PostgreSQL and a budgeted sample agent.
+- [Getting started on GKE](getting-started-gke.md) covers the supported Google
+  Cloud deployment from project setup through verification and teardown.
 - [Runtime architecture](architecture-runtime.md) explains the control-plane,
   provider, persistence, and execution boundaries.
 - [Coding-agent setup](coding-agent-setup.md) configures the local trusted proxy

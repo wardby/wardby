@@ -30,6 +30,13 @@ resource "google_container_cluster" "runs" {
     channel = var.release_channel
   }
 
+  # The public control-plane overlay uses Gateway and HTTPRoute resources.
+  # Managing the channel here keeps a brand-new cluster reproducible instead
+  # of requiring an out-of-band `gcloud container clusters update` step.
+  gateway_api_config {
+    channel = "CHANNEL_STANDARD"
+  }
+
   # Autopilot enables Workload Identity itself; naming it keeps the value in
   # code rather than as an implicit default, since anything that later
   # federates a Google service account depends on this pool existing.
