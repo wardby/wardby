@@ -273,18 +273,24 @@ terraform -chdir=deploy/gke plan
 
 ### Rotate a secret
 
-Add a version in Secret Manager, force a sync, then restart what reads it:
+Add a version in Secret Manager, force both ExternalSecrets to sync and wait
+for them, then restart both Deployments. The names below assume the default
+`name_prefix` of `wardby`; substitute yours if you changed it.
 
 ```sh
 printf '%s' "$NEW_VALUE" | gcloud secrets versions add wardby-openai-api-key --data-file=-
-kubectl -n wardby-coding annotate externalsecret wardby-control-plane-env \
-  force-sync="$(date +%s)" --overwrite
-kubectl -n wardby-coding rollout restart deploy/wardby-control-plane
+for es in wardby-coding-proxy-env wardby-control-plane-env; do
+  kubectl -n wardby-coding annotate externalsecret "$es" force-sync="$(date +%s)" --overwrite
+done
+kubectl -n wardby-coding wait externalsecret --all --for=condition=Ready --timeout=120s
+kubectl -n wardby-coding rollout restart deploy/wardby-coding-proxy deploy/wardby-control-plane
 ```
 
-Pods read their environment only at start, hence the restart. Do **not**
-rotate `SECRET_APP_KEY` this way: it encrypts credentials already stored in the
-database, and a new key leaves them unreadable.
+Pods read their environment only at start, hence the restart. The LLM API
+keys and the database URL are read by both Deployments; the other secrets only
+by the control plane. Do **not** rotate `SECRET_APP_KEY` this way: it encrypts
+credentials already stored in the database, and a new key leaves them
+unreadable.
 
 See [Observability](observability.md) for Prometheus, Grafana, and cloud metric
 collection options.

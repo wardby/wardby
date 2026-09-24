@@ -89,10 +89,14 @@ Operator, installed by Helm at the version pinned in `eso.env` and scoped to
 `verify-eso-kind.sh` proves the manifests, the scoping and the handover on a
 throwaway kind cluster. Run it after changing any of them or the chart version.
 
-If External Secrets is broken during an incident,
-`deploy/kind-coding/control-plane-secret.sh` (with `KUBE_CONTEXT` set) can
-still build both Secrets directly from `.env.local`. Delete the ExternalSecrets
-first, or ESO will reclaim the Secrets.
+If External Secrets is broken during an incident, the synced Secrets stay in
+place: ESO never deletes them on a sync error. If `wardby-control-plane-env`
+itself has to be rebuilt by hand, delete both ExternalSecrets first (or ESO
+will reclaim the Secret), then run
+`deploy/kind-coding/control-plane-secret.sh` with `KUBE_CONTEXT` set. It
+rebuilds only `wardby-control-plane-env`, from `.env.local`, and takes
+`DATABASE_URL` from the existing `wardby-coding-proxy-env` Secret, which must
+still exist. It does not rebuild `wardby-coding-proxy-env`.
 
 ## Teardown
 
