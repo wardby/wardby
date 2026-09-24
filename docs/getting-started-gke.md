@@ -35,6 +35,7 @@ Install and authenticate:
 - Terraform 1.10 or newer
 - Docker with `linux/amd64` build support
 - `kubectl`
+- Helm 3 or later (installs External Secrets Operator)
 - Node.js 24 and npm
 
 You also need:
@@ -72,9 +73,11 @@ gcloud auth configure-docker YOUR_REGION-docker.pkg.dev
 gcloud services enable \
   artifactregistry.googleapis.com \
   certificatemanager.googleapis.com \
+  cloudresourcemanager.googleapis.com \
   compute.googleapis.com \
   container.googleapis.com \
   networksecurity.googleapis.com \
+  secretmanager.googleapis.com \
   servicenetworking.googleapis.com \
   sqladmin.googleapis.com
 ```
@@ -92,7 +95,9 @@ be the network used by the cluster** because private-services peering is not
 transitive.
 
 Use a remote Terraform backend for shared or production deployments. A local
-state file contains the generated database password and must not be committed.
+state file contains the generated database password (until IAM
+database authentication replaces it) and must not be committed. It contains no
+other secret: Terraform creates the Secret Manager secrets empty.
 
 Review before applying:
 
@@ -137,9 +142,16 @@ Generate `SECRET_APP_KEY` with:
 openssl rand -hex 32
 ```
 
-The deployment scripts parse `.env.local` without sourcing it and pipe secrets
-to Kubernetes without putting secret values in process arguments. The database
-password remains in Terraform state, so protect the state backend accordingly.
+`.env.local` is only the **first-time source**. On its first run `up.sh`
+copies each value into Google Secret Manager, over stdin and never in a process
+argument, and External Secrets Operator syncs them into the cluster from then
+on. A value already in Secret Manager is never overwritten, so after the first
+deployment Secret Manager is the source of truth. You can then remove the
+production values from `.env.local`.
+
+Redeploying onto a cluster that already runs Wardby carries its existing
+`SECRET_APP_KEY` and login signing keys over, so stored credentials still
+decrypt and nobody has to sign in again.
 
 ## 5. Prepare the public edge
 
@@ -193,7 +205,7 @@ and [GKE Gateway guidance](https://cloud.google.com/kubernetes-engine/docs/how-t
 ## 6. Deploy Wardby
 
 The deployment script is idempotent. It converges Terraform, builds and pushes
-`linux/amd64` images, resolves immutable digests, creates Kubernetes secrets,
+`linux/amd64` images, resolves immutable digests, seeds Secret Manager and installs External Secrets Operator to sync it,
 renders the GKE overlay, and waits for the proxy and control plane:
 
 ```sh
@@ -255,7 +267,7 @@ and [security deployment](security-deployment.md) checklists.
 ## 8. Operate and update
 
 Re-run `deploy/gke/up.sh` after a source or configuration change. It rebuilds
-images, pushes them, substitutes immutable digests, replaces secrets, and
+images, pushes them, substitutes immutable digests, leaves Secret Manager values as they are, and
 waits for rollouts.
 
 Useful diagnostics:
@@ -267,17 +279,36 @@ kubectl -n wardby-coding logs deploy/wardby-coding-proxy
 terraform -chdir=deploy/gke plan
 ```
 
+### Rotate a secret
+
+Add a version in Secret Manager, force both ExternalSecrets to sync and wait
+for them, then restart both Deployments. The names below assume the default
+`name_prefix` of `wardby`; substitute yours if you changed it.
+
+```sh
+printf '%s' "$NEW_VALUE" | gcloud secrets versions add wardby-openai-api-key --project=YOUR_PROJECT_ID --data-file=-
+KUBE_CONTEXT="$(kubectl config current-context)" NAMESPACE=wardby-coding bash -c 'source deploy/gke/lib-secrets.sh && wait_external_secrets_synced 120s wardby-coding-proxy-env wardby-control-plane-env' && \
+kubectl -n wardby-coding rollout restart deploy/wardby-coding-proxy deploy/wardby-control-plane
+```
+
+Pods read their environment only at start, hence the restart. The LLM API
+keys and the database URL are read by both Deployments; the other secrets only
+by the control plane. Do **not** rotate `SECRET_APP_KEY` this way: it encrypts
+credentials already stored in the database, and a new key leaves them
+unreadable.
+
 See [Observability](observability.md) for Prometheus, Grafana, and cloud metric
 collection options.
 
 ## 9. Teardown
 
-Both the cluster and Cloud SQL use deletion protection. Disable both flags and
+The cluster, Cloud SQL and the Secret Manager secrets use deletion protection. Disable all three flags and
 apply that change before destroying:
 
 ```hcl
 deletion_protection         = false
 cluster_deletion_protection = false
+secrets_deletion_protection = false
 ```
 
 ```sh

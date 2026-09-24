@@ -1,0 +1,16 @@
+# Confines External Secrets Operator to the wardby-coding namespace.
+#
+# A default install can read and write Secrets in every namespace. With these
+# values the controller only reconciles wardby-coding, its RBAC is a Role there
+# rather than a ClusterRole, and it ignores every cluster-scoped and push
+# resource, so nothing outside the namespace can use it to write a Secret. The
+# cert-controller keeps a cluster-wide ClusterRole that reads Secrets and can
+# write only one, named external-secrets-webhook: its own webhook certificate.
+# The controller that writes wardby's Secrets is confined to wardby-coding.
+scopedNamespace: wardby-coding
+scopedRBAC: true
+processClusterStore: false
+processClusterExternalSecret: false
+processClusterPushSecret: false
+processClusterGenerator: false
+processPushSecret: false

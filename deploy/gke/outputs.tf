@@ -63,3 +63,8 @@ output "project_id" {
 output "region" {
   value = var.region
 }
+
+output "secret_name_prefix" {
+  description = "Prefix of the Secret Manager secret names; up.sh passes it to seed-secrets.mjs and the SecretStore manifests."
+  value       = var.name_prefix
+}
