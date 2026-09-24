@@ -91,12 +91,19 @@ throwaway kind cluster. Run it after changing any of them or the chart version.
 
 If External Secrets is broken during an incident, the synced Secrets stay in
 place: ESO never deletes them on a sync error. If `wardby-control-plane-env`
-itself has to be rebuilt by hand, delete both ExternalSecrets first (or ESO
-will reclaim the Secret), then run
+itself has to be rebuilt by hand, first detach it from ESO without deleting
+it:
+
+```sh
+kubectl -n wardby-coding delete externalsecret wardby-control-plane-env --cascade=orphan
+```
+
+(A plain delete would also delete the Secret, because ESO owns it.) Then run
 `deploy/kind-coding/control-plane-secret.sh` with `KUBE_CONTEXT` set. It
 rebuilds only `wardby-control-plane-env`, from `.env.local`, and takes
 `DATABASE_URL` from the existing `wardby-coding-proxy-env` Secret, which must
-still exist. It does not rebuild `wardby-coding-proxy-env`.
+still exist. It does not rebuild `wardby-coding-proxy-env`. Re-running `up.sh`
+later hands the Secret back to ESO.
 
 ## Teardown
 
