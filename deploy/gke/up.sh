@@ -124,9 +124,13 @@ if ! render_secrets canary.yaml | run_secrets_canary 180s; then
 fi
 # Before the real ExternalSecrets exist, so ESO creates both Secrets fresh
 # rather than adopting the hand-made ones and their old annotations. Safe
-# because step 5 put every value in Secret Manager and the canary read one.
+# because step 5 put every value in Secret Manager and the canary read every
+# key.
 release_unowned_secrets wardby-coding-proxy-env wardby-control-plane-env
-render_secrets external-secrets.yaml | kubectl apply -f - >/dev/null
+if ! render_secrets external-secrets.yaml | kubectl apply -f - >/dev/null; then
+  echo "up.sh: applying the ExternalSecrets failed after the hand-made Secrets were released; running pods are unaffected. Re-run up.sh to finish." >&2
+  exit 1
+fi
 # Forces a sync and waits for a fresh one, so a database-url version that
 # step 5 just added is in the Secret before step 8 rolls the Deployments.
 if ! wait_external_secrets_synced 180s wardby-coding-proxy-env wardby-control-plane-env; then
