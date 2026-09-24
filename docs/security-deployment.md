@@ -14,6 +14,9 @@ Stdio remains local and trusted, with `LOCAL_PRINCIPAL` as its owner identity.
 Delegated HTTP requires `AUTH_ISSUER`, `AUTH_JWKS_URI`, and `AUTH_AUDIENCE`.
 `MCP_CANONICAL_URI` and `AUTH_AUDIENCE` must be identical normalized HTTPS URLs.
 Only explicit loopback development may use HTTP.
+Follow [Bring your own identity provider](getting-started-identity-provider.md)
+for the complete audience, scope, client-registration, configuration, and
+verification procedure.
 
 Terminate TLS at the reverse proxy. Forward exactly the canonical Host,
 including a non-default port, and block direct access to the application port.
