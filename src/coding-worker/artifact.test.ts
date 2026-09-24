@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -53,6 +54,12 @@ describe("coding worker artifacts", () => {
     expect(await readBoundedRegularFile(exact, 16, "bounded_invalid")).toBe("y".repeat(16));
     await expect(readBoundedRegularFile(exact, 15, "bounded_invalid")).rejects.toThrow("bounded_invalid");
     await expect(readBoundedRegularFile(directory, 16, "bounded_invalid")).rejects.toThrow("bounded_invalid");
+  });
+
+  it.runIf(process.platform !== "win32")("refuses a FIFO without blocking on the open", async () => {
+    const fifo = join(await root(), "fifo");
+    execFileSync("mkfifo", [fifo]);
+    await expect(readBoundedRegularFile(fifo, 16, "bounded_invalid")).rejects.toThrow("bounded_invalid");
   });
 
   it("atomically writes a private, versioned result with no leftover temporary file", async () => {

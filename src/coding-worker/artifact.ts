@@ -7,27 +7,27 @@ import { MAX_CODING_ARTIFACT_BYTES, parseCodingTaskInputJson, type CodingAgentOu
  * Reads a regular file of at most `maxBytes`, refusing symlinks and anything
  * that is not a regular file.
  *
- * The checks run against the open handle, not the path. An lstat followed by a
- * readFile on the same path leaves a window in which the file can be swapped
- * for a symlink or a larger file; O_NOFOLLOW plus an fstat on the descriptor
- * closes it. The lstat is kept for platforms without O_NOFOLLOW.
+ * Every check runs against the open handle, never against the path before
+ * opening it: an lstat followed by a read of the same path leaves a window in
+ * which the file can be swapped for a symlink or a larger file. O_NOFOLLOW
+ * refuses a symlink at open time, O_NONBLOCK keeps a FIFO from hanging the
+ * open, and fstat on the descriptor checks what was actually opened. The lstat
+ * afterwards covers platforms without O_NOFOLLOW: it must be the same inode.
  */
 export async function readBoundedRegularFile(path: string, maxBytes: number, errorCode: string): Promise<string> {
-  const before = await lstat(path);
-  if (!before.isFile() || before.isSymbolicLink()) throw new Error(errorCode);
   let file;
   try {
-    file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   } catch (error) {
-    // ELOOP: the path became a symlink after the lstat above.
+    // ELOOP: the path is a symlink.
     if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new Error(errorCode, { cause: error });
     throw error;
   }
   try {
     const metadata = await file.stat();
-    if (!metadata.isFile() || metadata.size > maxBytes || metadata.ino !== before.ino || metadata.dev !== before.dev) {
-      throw new Error(errorCode);
-    }
+    if (!metadata.isFile() || metadata.size > maxBytes) throw new Error(errorCode);
+    const link = await lstat(path);
+    if (link.isSymbolicLink() || link.ino !== metadata.ino || link.dev !== metadata.dev) throw new Error(errorCode);
     const buffer = Buffer.alloc(maxBytes + 1);
     let length = 0;
     while (length < buffer.length) {
