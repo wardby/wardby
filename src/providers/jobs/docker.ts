@@ -18,7 +18,13 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { logger } from "../../core/logger.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import { readBoundedRegularFile } from "../../coding-worker/artifact.js";
-import { parseCodingAgentOutputJson, redactAndTruncate, MAX_CODING_ARTIFACT_BYTES } from "../../coding/protocol.js";
+import {
+  parseCodingAgentOutputJson,
+  redactAndTruncate,
+  MAX_CODING_ARTIFACT_BYTES,
+  MAX_CODING_OUTPUT_ISSUES,
+  SAFE_CODING_OUTPUT_ISSUE,
+} from "../../coding/protocol.js";
 import {
   assertDockerHostSupportsIsolation,
   assertClaudeAgentContainerInspection,
@@ -42,6 +48,36 @@ const MAX_DOCKER_SEED_DIAGNOSTIC_BYTES = 4 * 1024;
 const MAX_WORKSPACE_ENTRIES = 100_000;
 const TERMINAL_PHASES = new Set<DockerJobRecord["phase"]>(["succeeded", "failed", "stopped", "lost", "removed"]);
 export const SAFE_WORKER_DIAGNOSTIC = /^(?:worker_[a-z_]+|coding_[a-z_]+|wardby_[a-z_]+)$/;
+
+export interface WorkerDiagnostic {
+  diagnostic: string;
+  diagnosticIssues?: string[];
+}
+
+/**
+ * Worker output is untrusted: recognizes only the fixed `{"error": code}` line,
+ * plus an optional `issues` list whose every entry must pass the shared pattern.
+ * A list with any entry that does not is dropped whole rather than filtered, so
+ * a malformed worker cannot smuggle a partial value through.
+ */
+export function parseWorkerDiagnosticLine(line: string): WorkerDiagnostic | undefined {
+  let value: { error?: unknown; issues?: unknown } | null;
+  try {
+    value = JSON.parse(line) as { error?: unknown; issues?: unknown } | null;
+  } catch {
+    return undefined;
+  }
+  if (typeof value?.error !== "string" || !SAFE_WORKER_DIAGNOSTIC.test(value.error)) return undefined;
+  const issues = value.issues;
+  const safeIssues =
+    Array.isArray(issues) &&
+    issues.length > 0 &&
+    issues.length <= MAX_CODING_OUTPUT_ISSUES &&
+    issues.every((issue) => typeof issue === "string" && SAFE_CODING_OUTPUT_ISSUE.test(issue))
+      ? (issues as string[])
+      : undefined;
+  return { diagnostic: value.error, ...(safeIssues ? { diagnosticIssues: safeIssues } : {}) };
+}
 const dockerLog = logger.child({ module: "docker-jobs" });
 export interface DockerCommandOptions {
   env?: Record<string, string>;
@@ -539,7 +575,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
       if (current.phase === "failed" && !current.result.diagnostic) {
         const diagnostic = await this.readWorkerFailureDiagnostic(current);
         if (diagnostic) {
-          current.result = { ...current.result, diagnostic };
+          current.result = { ...current.result, ...diagnostic };
           await this.writeRecord(current);
         }
       }
@@ -909,17 +945,13 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     }
   }
 
-  private async readWorkerFailureDiagnostic(record: DockerJobRecord): Promise<string | undefined> {
+  private async readWorkerFailureDiagnostic(record: DockerJobRecord): Promise<WorkerDiagnostic | undefined> {
     try {
       const logs = await this.run(["container", "logs", "--tail", "8", record.handle.id]);
       const raw = `${logs.stdout}\n${logs.stderr}`;
       for (const line of raw.split("\n").reverse()) {
-        try {
-          const value = JSON.parse(line) as { error?: unknown };
-          if (typeof value.error === "string" && SAFE_WORKER_DIAGNOSTIC.test(value.error)) return value.error;
-        } catch {
-          // Worker output is untrusted; only parse one fixed JSON shape.
-        }
+        const diagnostic = parseWorkerDiagnosticLine(line);
+        if (diagnostic) return diagnostic;
       }
     } catch {
       // Diagnostics are optional and must never affect terminal cleanup.

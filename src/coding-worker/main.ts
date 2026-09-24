@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readCodingInput, writeCodingOutputAtomic } from "./artifact.js";
 import { runCodingWorker } from "./driver.js";
-import { safeWorkerErrorCode } from "./errors.js";
+import { safeOutputIssues, safeWorkerErrorCode } from "./errors.js";
 import { createCodexSdkClient } from "./sdk.js";
 
 const INPUT_PATH = "/run/wardby/input/input.json";
@@ -39,6 +39,7 @@ try {
     : safeCode === "worker_failed"
       ? `worker_${stage}_failed`
       : safeCode;
-  process.stderr.write(`${JSON.stringify({ error: code })}\n`);
+  const issues = code === "coding_output_invalid" ? safeOutputIssues(error) : undefined;
+  process.stderr.write(`${JSON.stringify({ error: code, ...(issues ? { issues } : {}) })}\n`);
   process.exitCode = controller.signal.aborted ? 143 : 1;
 }

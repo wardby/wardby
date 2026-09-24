@@ -698,7 +698,7 @@ export class ContainerExecutor implements Executor {
         const reason = collected?.diagnostic ?? collected?.reason ?? jobState;
         this.emit({ stage: "collected", runId: run.runId, jobId: handle.id });
         const status = jobState === "lost" ? "lost" : "failed";
-        const failure = this.failure(`job_${reason}`);
+        const failure = this.failure(`job_${reason}`, { issues: collected?.diagnosticIssues });
         await this.options.store.terminate(run.runId, status, failure.error, failure.audit);
         this.terminal(run, status, failure.audit);
         return;
@@ -996,7 +996,10 @@ export class ContainerExecutor implements Executor {
    * so inferring it would silence exactly the genuine failures this log exists
    * to surface.
    */
-  private failure(error: unknown, options: { cancelled?: boolean } = {}): { error: string; audit: CodingFailureAudit } {
+  private failure(
+    error: unknown,
+    options: { cancelled?: boolean; issues?: string[] } = {},
+  ): { error: string; audit: CodingFailureAudit } {
     const category = failureCategory(error);
     const diagnosticId = `coding_diag_${randomUUID()}`;
     // The persisted error is deliberately opaque (it reaches the agent owner),
@@ -1004,7 +1007,13 @@ export class ContainerExecutor implements Executor {
     // keyed by the same diagnostic id. Token-shaped values are redacted, and a
     // cause chain is kept because the outer message is often just a wrapper.
     // A user asking to stop is not a failure, so it gets the same id at info.
-    const line = { diagnosticId, category, reason: describeFailure(error) };
+    // `issues` names only which output-schema fields failed (see SAFE_CODING_OUTPUT_ISSUE).
+    const line = {
+      diagnosticId,
+      category,
+      reason: describeFailure(error),
+      ...(options.issues ? { issues: options.issues } : {}),
+    };
     if (options.cancelled === true) containerLog.info(line, "coding run cancelled; the persisted error is its id only");
     else containerLog.warn(line, "coding run failed; the persisted error is the diagnostic id only");
     return { error: `coding_failure_${category}:${diagnosticId}`, audit: { failureCategory: category, diagnosticId } };

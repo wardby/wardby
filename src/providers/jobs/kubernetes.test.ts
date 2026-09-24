@@ -239,6 +239,22 @@ describe("KubernetesJobLauncher", () => {
     });
   });
 
+  it("keeps output-schema issue locations alongside the diagnostic code", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    h.api.logs.set(
+      `wardby-coding/${h.names.pod}/worker`,
+      '{"error":"coding_output_invalid","issues":["tag:invalid_string","tests.0.command:custom"]}',
+    );
+    h.fail(1);
+    expect(await h.launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "coding_output_invalid",
+      diagnosticIssues: ["tag:invalid_string", "tests.0.command:custom"],
+    });
+  });
+
   it("ignores a log line whose error isn't a safe diagnostic code", async () => {
     const h = await harness();
     const handle = await h.launcher.launch(h.spec);

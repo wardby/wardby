@@ -14,6 +14,7 @@ import {
   type DockerCommandOptions,
   type DockerCommandResult,
   type DockerCommandRunner,
+  parseWorkerDiagnosticLine,
 } from "./docker.js";
 import { buildDockerIsolationPlan, WORKER_PATHS } from "./docker-isolation.js";
 import type { JobHandle, JobResult, JobSpec } from "./types.js";
@@ -710,5 +711,40 @@ describe("Docker workspace validation", () => {
     await rm(join(root, "escape"));
     await writeFile(join(root, "large.txt"), "123456");
     await expect(validateMaterializedWorkspace(root, 5)).rejects.toThrow("docker_workspace_size_limit");
+  });
+});
+
+describe("parseWorkerDiagnosticLine", () => {
+  it("keeps the fixed error code and safe output issues", () => {
+    expect(
+      parseWorkerDiagnosticLine(
+        JSON.stringify({ error: "coding_output_invalid", issues: ["tag:invalid_string", "$:unrecognized_keys"] }),
+      ),
+    ).toEqual({ diagnostic: "coding_output_invalid", diagnosticIssues: ["tag:invalid_string", "$:unrecognized_keys"] });
+    expect(parseWorkerDiagnosticLine(JSON.stringify({ error: "coding_turn_failed" }))).toEqual({
+      diagnostic: "coding_turn_failed",
+    });
+  });
+
+  it("drops the whole issues list when any entry is not a safe path and code", () => {
+    for (const issues of [
+      ["tag:invalid_string", "summary:sk-live-SECRET"],
+      ["tag:invalid_string", "Tag With Spaces:custom"],
+      ["tag:invalid_string", 7],
+      Array.from({ length: 9 }, () => "tag:invalid_string"),
+      [],
+      "tag:invalid_string",
+    ]) {
+      expect(parseWorkerDiagnosticLine(JSON.stringify({ error: "coding_output_invalid", issues }))).toEqual({
+        diagnostic: "coding_output_invalid",
+      });
+    }
+  });
+
+  it("ignores lines that are not the fixed worker shape", () => {
+    expect(parseWorkerDiagnosticLine("not json")).toBeUndefined();
+    expect(parseWorkerDiagnosticLine("null")).toBeUndefined();
+    expect(parseWorkerDiagnosticLine(JSON.stringify({ error: "provider said: sk-SECRET" }))).toBeUndefined();
+    expect(parseWorkerDiagnosticLine(JSON.stringify({ issues: ["tag:invalid_string"] }))).toBeUndefined();
   });
 });

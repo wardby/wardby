@@ -968,6 +968,29 @@ describe("failure diagnostics", () => {
     expect(JSON.stringify(logged)).not.toContain(token);
   });
 
+  it("logs which output-schema fields a failed worker rejected, next to the diagnostic id", async () => {
+    const created = await harness();
+    created.jobs.statusValue = { state: "failed" };
+    created.jobs.result = {
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "coding_output_invalid",
+      diagnosticIssues: ["tag:invalid_string", "tests.0.command:custom"],
+    };
+
+    await created.executor.start("run-1");
+
+    expect(created.store.run.status).toBe("failed");
+    const persisted = (created.store.terminations[0] as { error: string }).error;
+    // The persisted, agent-facing error stays opaque; only the operator log names the fields.
+    expect(persisted).not.toContain("tag");
+    const warning = logged.find(
+      (entry) => entry.level === "warn" && entry.payload.diagnosticId === persisted.split(":")[1],
+    );
+    expect(String(warning?.payload.reason)).toContain("job_coding_output_invalid");
+    expect(warning?.payload.issues).toEqual(["tag:invalid_string", "tests.0.command:custom"]);
+  });
+
   it("does not raise operator signal when a run is cancelled on purpose", async () => {
     const created = await harness();
 

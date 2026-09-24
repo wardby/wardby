@@ -1,3 +1,6 @@
+import { ZodError } from "zod";
+import { MAX_CODING_OUTPUT_ISSUES, SAFE_CODING_OUTPUT_ISSUE } from "../coding/protocol.js";
+
 const SAFE_WORKER_ERROR_CODES = new Set([
   "wardby_proxy_url_missing",
   "wardby_run_capability_missing",
@@ -13,6 +16,22 @@ const SAFE_WORKER_ERROR_CODES = new Set([
   "coding_output_invalid",
   "coding_output_run_mismatch",
 ]);
+
+/**
+ * For `coding_output_invalid`, where the model's final answer failed the output
+ * schema: the failing schema paths and issue codes, so the operator log can say
+ * which field was wrong without ever carrying the value. Undefined when the
+ * cause is not a schema failure.
+ */
+export function safeOutputIssues(error: unknown): string[] | undefined {
+  const cause = error instanceof Error ? error.cause : undefined;
+  if (!(cause instanceof ZodError)) return undefined;
+  const issues = cause.issues
+    .map((issue) => `${issue.path.length === 0 ? "$" : issue.path.join(".")}:${issue.code}`)
+    .filter((issue) => SAFE_CODING_OUTPUT_ISSUE.test(issue))
+    .slice(0, MAX_CODING_OUTPUT_ISSUES);
+  return issues.length > 0 ? issues : undefined;
+}
 
 export function safeWorkerErrorCode(error: unknown): string {
   if (!(error instanceof Error)) return "worker_failed";
