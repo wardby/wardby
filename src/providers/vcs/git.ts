@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { lstat, mkdir, opendir, readFile, readlink, realpath, rm } from "node:fs/promises";
 import { isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import type { Writable } from "node:stream";
 import {
   MAX_REDACTED_SPAN,
@@ -280,7 +281,7 @@ export class GitVcsProvider implements VcsProvider {
 
   async prepareWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace> {
     const normalized = this.validateInput(input);
-    await mkdir(this.rootDir, { recursive: true, mode: 0o700 });
+    await ensurePrivateDirectory(this.rootDir);
     await mkdir(resolve(this.rootDir, ".home"), { recursive: true, mode: 0o700 });
     const runRoot = resolve(this.rootDir, normalized.runId);
     if (!directChild(this.rootDir, runRoot)) throw new Error("vcs_workspace_path_invalid");

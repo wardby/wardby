@@ -2,7 +2,7 @@ import { lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readCodingInput, writeCodingOutputAtomic } from "./artifact.js";
+import { readBoundedRegularFile, readCodingInput, writeCodingOutputAtomic } from "./artifact.js";
 
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
@@ -44,6 +44,15 @@ describe("coding worker artifacts", () => {
     const oversized = join(directory, "oversized");
     await writeFile(oversized, "x".repeat(64 * 1024 + 1));
     await expect(readCodingInput(oversized)).rejects.toThrow("coding_input_invalid_file");
+  });
+
+  it("reads a file at exactly the limit and refuses anything that is not a regular file", async () => {
+    const directory = await root();
+    const exact = join(directory, "exact");
+    await writeFile(exact, "y".repeat(16));
+    expect(await readBoundedRegularFile(exact, 16, "bounded_invalid")).toBe("y".repeat(16));
+    await expect(readBoundedRegularFile(exact, 15, "bounded_invalid")).rejects.toThrow("bounded_invalid");
+    await expect(readBoundedRegularFile(directory, 16, "bounded_invalid")).rejects.toThrow("bounded_invalid");
   });
 
   it("atomically writes a private, versioned result with no leftover temporary file", async () => {

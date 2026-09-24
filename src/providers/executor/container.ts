@@ -4,6 +4,7 @@ import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "@prisma/client";
 import { CodingProfileSchema } from "../../coding/profile.js";
 import { logger } from "../../core/logger.js";
+import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import { codingRunObserver, type CodingRunObserver } from "../../coding/observability.js";
 import {
   CODING_PROTOCOL_VERSION,
@@ -867,7 +868,7 @@ export class ContainerExecutor implements Executor {
   }
 
   private async writeInput(run: ContainerRunSnapshot, deadlineAt: Date): Promise<string> {
-    await mkdir(this.artifactRoot, { recursive: true, mode: 0o700 });
+    await ensurePrivateDirectory(this.artifactRoot);
     const rootReal = await realpath(this.artifactRoot);
     const directory = resolve(rootReal, run.runId);
     if (!directory.startsWith(`${rootReal}${sep}`)) throw new Error("coding_artifact_path_invalid");

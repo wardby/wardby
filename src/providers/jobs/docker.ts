@@ -16,6 +16,8 @@ import {
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { logger } from "../../core/logger.js";
+import { ensurePrivateDirectory } from "../../core/private-directory.js";
+import { readBoundedRegularFile } from "../../coding-worker/artifact.js";
 import { parseCodingAgentOutputJson, redactAndTruncate, MAX_CODING_ARTIFACT_BYTES } from "../../coding/protocol.js";
 import {
   assertDockerHostSupportsIsolation,
@@ -599,7 +601,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
   }
 
   private async initialize(): Promise<void> {
-    await mkdir(this.stateRoot, { recursive: true, mode: 0o700 });
+    await ensurePrivateDirectory(this.stateRoot);
     await mkdir(join(this.stateRoot, ".home"), { recursive: true, mode: 0o700 });
     await realpath(this.stateRoot);
     const records = await this.allRecords();
@@ -895,12 +897,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     const target = join(staging, "result.json");
     try {
       await this.run(["container", "cp", `${this.keeperName(record)}:/run/wardby/storage/output/result.json`, target]);
-      const metadata = await lstat(target);
-      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_CODING_ARTIFACT_BYTES) {
-        throw new Error("docker_result_artifact_invalid");
-      }
-      const raw = await readFile(target, "utf8");
-      if (Buffer.byteLength(raw, "utf8") > MAX_CODING_ARTIFACT_BYTES) throw new Error("docker_result_artifact_invalid");
+      const raw = await readBoundedRegularFile(target, MAX_CODING_ARTIFACT_BYTES, "docker_result_artifact_invalid");
       const output = parseCodingAgentOutputJson(raw);
       if (output.runId !== record.runId) throw new Error("docker_result_run_mismatch");
       return JSON.stringify(output);
