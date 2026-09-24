@@ -177,5 +177,8 @@ Still manual, because neither belongs in a script:
 
 Verify:
   curl -sS -o /dev/null -w '%{http_code}\\n' https://${HOSTNAME}/.well-known/oauth-protected-resource   # 200
-  curl -sS -o /dev/null -w '%{http_code}\\n' -X POST https://${HOSTNAME}/mcp                            # 401
+  curl -sS -o /dev/null -w '%{http_code}\\n' -X POST https://${HOSTNAME}/mcp \\
+    -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \\
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'                          # 401
+  (Without the JSON body the server answers 415: it checks the content type before the token.)
 EOF
