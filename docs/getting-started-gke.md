@@ -323,12 +323,20 @@ has merged to `main`:
    IAM users, and no pod has a password `DATABASE_URL` in its effective env.
 2. Delete the `database-url` Secret Manager secret:
    `gcloud secrets delete <name_prefix>-database-url --quiet` — this module no
-   longer creates or reads it.
+   longer creates or reads it. Deleting it by hand first, before the next
+   step, is what lets Terraform drop it from state instead of trying to
+   destroy it.
 3. `terraform plan`: expect the generated password destroyed, the
    `database-url` secret and its IAM binding gone from state (already
    deleted by hand), the old password-login user forgotten (not destroyed),
    `connector_enforcement` moving to `REQUIRED`, and no other destroy. Review
-   the plan, then apply only once it matches that.
+   the plan, then apply only once it matches that. If apply still fails
+   trying to destroy the `database-url` secret, the secret wasn't actually
+   deleted in step 2 — delete it and re-apply. Never turn off
+   `secrets_deletion_protection` to get past that error: it unprotects every
+   other secret in the same set, including `SECRET_APP_KEY` and the auth
+   keys, and losing `SECRET_APP_KEY` makes every credential already stored
+   in the database unreadable.
 4. `deploy/gke/up.sh` — new ExternalSecrets carry no `DATABASE_URL`,
    NetworkPolicies no longer allow 5432, migrations, rollout, and the
    database and endpoint checks.

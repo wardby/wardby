@@ -56,8 +56,9 @@ terraform apply
 
 Terraform creates the instance, the database, and a Cloud SQL IAM database
 user per workload (`database-iam.tf`) — no password, and nothing resembling a
-connection string to hand to the cluster. See "Database login" below for what
-runs next.
+connection string to hand to the cluster. Migrations run as a separate
+`wardby-migrate` Job before the Deployments roll (`up.sh`), not as an
+initContainer on either one. See "Database login" below for what runs next.
 
 ## Egress
 
