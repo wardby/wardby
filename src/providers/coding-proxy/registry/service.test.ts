@@ -1,8 +1,13 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import type { RegistryAdapter, PackageMetadata } from "../../../coding/registry/types.js";
+import {
+  RegistryError,
+  type Integrity,
+  type RegistryAdapter,
+  type PackageMetadata,
+} from "../../../coding/registry/types.js";
 import { capabilityHash } from "../proxy.js";
-import { MemoryRegistryStore } from "./store.js";
+import { MemoryRegistryStore, type RegistryStore } from "./store.js";
 import { RegistryService } from "./service.js";
 
 const DAY = 86_400_000;
@@ -10,7 +15,10 @@ const NOW = new Date("2026-09-25T00:00:00Z");
 const tarball = new TextEncoder().encode("package bytes");
 const sha512 = createHash("sha512").update(tarball).digest("hex");
 
-function meta(name: string, versions: Record<string, { ageDays: number | null; deps?: string[] }>): PackageMetadata {
+function meta(
+  name: string,
+  versions: Record<string, { ageDays: number | null; deps?: string[]; integrity?: Integrity | null }>,
+): PackageMetadata {
   return {
     name,
     raw: null,
@@ -26,7 +34,7 @@ function meta(name: string, versions: Record<string, { ageDays: number | null; d
               filename: `${version}.tgz`,
               version,
               upstreamUrl: `https://upstream.test/${name}/${version}.tgz`,
-              integrity: { algorithm: "sha512", hex: sha512 },
+              integrity: info.integrity === undefined ? { algorithm: "sha512", hex: sha512 } : info.integrity,
               sizeBytes: tarball.byteLength,
               allowed: true,
             },
@@ -41,6 +49,11 @@ const catalog: Record<string, PackageMetadata> = {
   app: meta("app", { "1.0.0": { ageDays: 10, deps: ["dep"] }, "2.0.0": { ageDays: 1 } }),
   dep: meta("dep", { "1.0.0": { ageDays: 10 } }),
   stranger: meta("stranger", { "1.0.0": { ageDays: 10 } }),
+  // No published checksum (integrity: null) — used to prove the download
+  // stream's post-read `settled` guard matters: without it, a hash-mismatch
+  // branch can't be the thing masking a removed guard, because there is no
+  // hash check at all.
+  noint: meta("noint", { "1.0.0": { ageDays: 10, integrity: null } }),
 };
 
 const fakeAdapter: RegistryAdapter = {
@@ -63,29 +76,38 @@ const fakeAdapter: RegistryAdapter = {
   workerConfig: () => ({ env: {}, files: [] }),
 };
 
+type AdvisoryIndex = {
+  withheld: ReadonlyMap<string, readonly string[]>;
+  reported: ReadonlyMap<string, readonly string[]>;
+};
+
 function service(
   overrides: {
     upstreamBody?: Uint8Array;
     withheld?: string[];
     limits?: { maxFileBytes?: number; maxTotalBytes?: number; maxFiles?: number; idleTimeoutMs?: number };
     upstream?: (url: string, init?: { signal?: AbortSignal }) => Promise<Response>;
+    allowlist?: Record<string, string[]>;
+    audit?: () => Promise<AdvisoryIndex>;
   } = {},
 ) {
   const store = new MemoryRegistryStore();
   store.contexts.set(capabilityHash("rrg_token"), {
     runId: "run-1",
     deadlineAt: new Date(NOW.getTime() + DAY),
-    allowlist: { fake: ["app"] },
+    allowlist: overrides.allowlist ?? { fake: ["app"] },
     policy: {},
   });
   const registry = new RegistryService({
     adapters: new Map([["fake", fakeAdapter]]),
     store,
     audit: {
-      audit: async () => ({
-        withheld: new Map((overrides.withheld ?? []).map((v) => [v, ["GHSA-x"]])),
-        reported: new Map(),
-      }),
+      audit:
+        overrides.audit ??
+        (async () => ({
+          withheld: new Map((overrides.withheld ?? []).map((v) => [v, ["GHSA-x"]])),
+          reported: new Map(),
+        })),
     },
     upstream: overrides.upstream ?? (async () => new Response(overrides.upstreamBody ?? tarball)),
     proxyBase: "http://wardby-proxy:8787/registry/",
@@ -180,5 +202,117 @@ describe("RegistryService", () => {
     );
     expect(refused).toHaveLength(1);
     expect(store.fetches).toHaveLength(1);
+  });
+
+  it("never crashes the process when the fetch-record write fails during a fire-and-forget idle timeout", async () => {
+    // fail() is invoked fire-and-forget (`void fail(...)`) off the idle
+    // timer's setTimeout callback: nothing awaits its returned promise. If
+    // fail() let a rejected store.recordFetch() propagate, that would be an
+    // unhandled rejection — which terminates the whole process under Node
+    // 24, not just this request. This test only passes if fail() truly
+    // never rejects and still errors the stream instead of leaving the
+    // client hanging.
+    const inner = new MemoryRegistryStore();
+    inner.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { fake: ["app"] },
+      policy: {},
+    });
+    const store: RegistryStore = {
+      findRunByRegistryTokenHash: (hash, now) => inner.findRunByRegistryTokenHash(hash, now),
+      isAllowedDependency: (runId, ecosystem, name) => inner.isAllowedDependency(runId, ecosystem, name),
+      addAllowances: (runId, ecosystem, names) => inner.addAllowances(runId, ecosystem, names),
+      recordFetch: async () => {
+        throw new Error("simulated database error");
+      },
+      usage: (runId) => inner.usage(runId),
+      listFetches: (runId) => inner.listFetches(runId),
+    };
+    const hangingBody = new ReadableStream<Uint8Array>({
+      pull: () => new Promise<void>(() => {}), // never resolves
+    });
+    const registry = new RegistryService({
+      adapters: new Map([["fake", fakeAdapter]]),
+      store,
+      audit: { audit: async () => ({ withheld: new Map(), reported: new Map() }) },
+      upstream: async () => new Response(hangingBody),
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 5 },
+      now: () => NOW,
+    });
+    const response = await registry.handle(request("dl/app/1.0.0"));
+    if (!("stream" in response)) throw new Error("expected a stream");
+    await expect(new Response(response.stream).arrayBuffer()).rejects.toThrow();
+  });
+
+  it("guards the same race even with no integrity to check (a served row is never recorded after an idle failure)", async () => {
+    // With integrity set, a late `done` resolution after fail() runs still
+    // routes into the (already-idempotent) integrity-mismatch call to
+    // fail() — so that variant above can't actually prove the post-read
+    // `settled` guard matters. With `integrity: null` there is no hash
+    // check: without the guard, the late `done` would fall straight into
+    // the served branch and record a served row on top of the refused one.
+    const hangingBody = new ReadableStream<Uint8Array>({
+      pull: () => new Promise<void>(() => {}), // never resolves
+    });
+    const { registry, store } = service({
+      allowlist: { fake: ["noint"] },
+      limits: { idleTimeoutMs: 5 },
+      upstream: async () => new Response(hangingBody),
+    });
+    const response = await registry.handle(request("dl/noint/1.0.0"));
+    if (!("stream" in response)) throw new Error("expected a stream");
+    await expect(new Response(response.stream).arrayBuffer()).rejects.toThrow();
+    const refused = store.fetches.filter(
+      (fetch) => fetch.outcome === "refused" && fetch.reason === "wardby_download_idle",
+    );
+    expect(refused).toHaveLength(1);
+    expect(store.fetches.filter((fetch) => fetch.outcome === "served")).toHaveLength(0);
+    expect(store.fetches).toHaveLength(1);
+  });
+
+  it("records a refused row when a download exceeds the per-run file-count limit", async () => {
+    const { registry, store } = service({ limits: { maxFiles: 0 } });
+    const response = await registry.handle(request("dl/app/1.0.0"));
+    expect(response).toMatchObject({ status: 429 });
+    expect(store.fetches.at(-1)).toMatchObject({
+      name: "app",
+      version: "1.0.0",
+      outcome: "refused",
+      reason: "wardby_package_limit",
+    });
+  });
+
+  it("records a refused row when the vulnerability audit is unavailable", async () => {
+    const { registry, store } = service({
+      audit: async () => {
+        throw new RegistryError(503, "wardby_audit_unavailable", 'the vulnerability audit for "app" is unreachable');
+      },
+    });
+    const response = await registry.handle(request("app"));
+    expect(response).toMatchObject({ status: 503 });
+    expect(store.fetches.at(-1)).toMatchObject({ name: "app", outcome: "refused", reason: "wardby_audit_unavailable" });
+  });
+
+  it("enforces the per-run file limit across concurrent downloads via an in-flight reservation, not just a per-request snapshot", async () => {
+    // A store.usage() snapshot taken once per request would let all three
+    // downloads see the same "0 files served" baseline and all proceed,
+    // since none of them has recorded a served row yet. The in-process
+    // in-flight reservation must be what stops the third — before any of
+    // the three streams is even read.
+    const { registry, store } = service({ limits: { maxFiles: 2 } });
+    const [first, second, third] = await Promise.all([
+      registry.handle(request("dl/app/1.0.0")),
+      registry.handle(request("dl/app/1.0.0")),
+      registry.handle(request("dl/app/1.0.0")),
+    ]);
+    expect(first).toMatchObject({ status: 200 });
+    expect(second).toMatchObject({ status: 200 });
+    expect(third).toMatchObject({ status: 429 });
+    const refused = store.fetches.filter(
+      (fetch) => fetch.outcome === "refused" && fetch.reason === "wardby_package_limit",
+    );
+    expect(refused).toHaveLength(1);
   });
 });

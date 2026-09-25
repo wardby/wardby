@@ -61,6 +61,15 @@ export class RegistryService {
   private readonly metadataCache = new Map<string, { expires: number; meta: PackageMetadata }>();
   private readonly now: () => Date;
   private readonly metadataTtlMs: number;
+  /** Per-run in-flight download usage: files and bytes reserved by downloads
+   *  that are streaming right now but not yet recorded to the store. Without
+   *  this, `usage()` (which only counts already-served rows) is read once
+   *  per request, so concurrent downloads for the same run (e.g. npm's
+   *  parallel installs) count toward neither the file nor the byte limit
+   *  until each finishes, letting them overshoot both. This reservation is
+   *  in-process only — it holds per replica of the registry proxy, not
+   *  across replicas. */
+  private readonly inFlight = new Map<string, { files: number; bytes: number }>();
 
   constructor(
     private readonly options: {
@@ -98,7 +107,17 @@ export class RegistryService {
     const name = adapter.normalizeName(route.name);
     const root = await this.authorize(adapter, context, name);
     const meta = await this.metadata(adapter, name);
-    const keep = await this.keptVersions(adapter, context, meta, root);
+    let keep: Set<string>;
+    try {
+      keep = await this.keptVersions(adapter, context, meta, root);
+    } catch (error) {
+      // Every refusal gets a row, including one the run never chose: the
+      // audit being unreachable (fail-closed) still stops this request.
+      if (error instanceof RegistryError && error.code === "wardby_audit_unavailable") {
+        await this.refuse(context, adapter, name, "wardby_audit_unavailable");
+      }
+      throw error;
+    }
 
     if (route.kind === "metadata") {
       if (keep.size === 0) {
@@ -125,11 +144,8 @@ export class RegistryService {
         : (adapter.resolveFileMetadata?.(route, meta) ?? null);
     if (!file || !keep.has(file.version)) {
       await this.refuse(context, adapter, name, "wardby_version_filtered", file ?? undefined);
-      throw new RegistryError(
-        404,
-        "wardby_version_filtered",
-        `"${name}" ${route.kind === "download" ? route.version : ""} is not available to this run`,
-      );
+      const versionSuffix = route.kind === "download" ? ` ${route.version}` : "";
+      throw new RegistryError(404, "wardby_version_filtered", `"${name}"${versionSuffix} is not available to this run`);
     }
     if (!file.allowed) {
       await this.refuse(context, adapter, name, "wardby_file_not_allowed", file);
@@ -205,6 +221,42 @@ export class RegistryService {
     });
   }
 
+  private inFlightUsage(runId: string): { files: number; bytes: number } {
+    return this.inFlight.get(runId) ?? { files: 0, bytes: 0 };
+  }
+
+  /** Reserve one file slot for a download that is about to start, and its
+   *  declared size when known. An unknown size (`null`) reserves no bytes
+   *  up front; those are added incrementally as they stream, via
+   *  `trackStreamedBytes`. */
+  private reserveDownload(runId: string, sizeBytes: number | null): void {
+    const slot = this.inFlight.get(runId) ?? { files: 0, bytes: 0 };
+    slot.files += 1;
+    if (sizeBytes !== null) slot.bytes += sizeBytes;
+    this.inFlight.set(runId, slot);
+  }
+
+  /** Only called for downloads whose declared size was unknown at
+   *  reservation time; adds each chunk's bytes to the in-flight total as it
+   *  arrives, so the shared budget check sees them immediately. */
+  private trackStreamedBytes(runId: string, delta: number): void {
+    const slot = this.inFlight.get(runId);
+    if (slot) slot.bytes += delta;
+  }
+
+  /** Release a download's reservation on every exit path (served, failed,
+   *  cancelled, or refused before it ever reserved streaming). Undoes
+   *  exactly what was reserved: the declared size when known, or the bytes
+   *  actually streamed when it was not. */
+  private releaseDownload(runId: string, sizeBytes: number | null, streamedBytes: number): void {
+    const slot = this.inFlight.get(runId);
+    if (!slot) return;
+    slot.files = Math.max(0, slot.files - 1);
+    slot.bytes = Math.max(0, slot.bytes - (sizeBytes ?? streamedBytes));
+    if (slot.files === 0 && slot.bytes === 0) this.inFlight.delete(runId);
+    else this.inFlight.set(runId, slot);
+  }
+
   private async download(
     adapter: RegistryAdapter,
     context: RegistryRunContext,
@@ -214,20 +266,45 @@ export class RegistryService {
     signal: AbortSignal,
   ): Promise<RegistryResponse> {
     const { limits, store } = this.options;
-    const usage = await store.usage(context.runId);
-    if (usage.files >= limits.maxFiles)
+    const runId = context.runId;
+    const usage = await store.usage(runId);
+    const flight = this.inFlightUsage(runId);
+    if (usage.files + flight.files >= limits.maxFiles) {
+      await this.refuse(context, adapter, name, "wardby_package_limit", file);
       throw new RegistryError(429, "wardby_package_limit", "this run has reached its package file limit");
+    }
     if (file.sizeBytes !== null && file.sizeBytes > limits.maxFileBytes) {
       await this.refuse(context, adapter, name, "wardby_package_too_large", file);
       throw new RegistryError(413, "wardby_package_too_large", `"${file.filename}" exceeds the per-file size limit`);
     }
-    const upstream = await this.options.upstream(file.upstreamUrl, { signal });
-    if (!upstream.ok || !upstream.body)
+
+    // Reserve this download's slot before any further await, so a
+    // concurrent download for the same run (e.g. npm installing several
+    // dependencies in parallel) sees it immediately rather than racing past
+    // the same `usage()` snapshot. Released on every exit path below.
+    this.reserveDownload(runId, file.sizeBytes);
+    let bytes = 0;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      this.releaseDownload(runId, file.sizeBytes, bytes);
+    };
+
+    let upstream: Response;
+    try {
+      upstream = await this.options.upstream(file.upstreamUrl, { signal });
+    } catch (error) {
+      release();
+      throw error;
+    }
+    if (!upstream.ok || !upstream.body) {
+      release();
       throw new RegistryError(502, "wardby_upstream_error", `the registry returned ${upstream.status}`);
+    }
 
     const hash = file.integrity ? createHash(file.integrity.algorithm) : null;
     const buffered: Uint8Array[] = [];
-    let bytes = 0;
     let idle: NodeJS.Timeout | undefined;
     // Guards the race the controller flagged: the idle timer's fail() and a
     // pending reader.read() can both try to act on the same controller. Once
@@ -241,7 +318,6 @@ export class RegistryService {
     // Uint8Array chunks in practice, so name the type explicitly rather than
     // let `any` leak into every read below.
     const reader = (upstream.body as ReadableStream<Uint8Array>).getReader();
-    const remainingTotal = limits.maxTotalBytes - usage.bytes;
 
     const clearIdle = () => {
       clearTimeout(idle);
@@ -252,9 +328,18 @@ export class RegistryService {
       if (settled) return;
       settled = true;
       clearIdle();
+      release();
       await reader.cancel().catch(() => undefined);
-      await this.refuse(context, adapter, name, reason, file);
-      controller.error(new RegistryError(502, reason, `download of "${file.filename}" stopped: ${reason}`));
+      try {
+        await this.refuse(context, adapter, name, reason, file);
+      } catch {
+        // A failed record must never crash the process (this can run from a
+        // fire-and-forget `void fail(...)` off the idle timer, where an
+        // unhandled rejection would terminate the whole proxy) or block the
+        // client from seeing the stream error below.
+      } finally {
+        controller.error(new RegistryError(502, reason, `download of "${file.filename}" stopped: ${reason}`));
+      }
     };
 
     const stream = new ReadableStream<Uint8Array>({
@@ -277,6 +362,7 @@ export class RegistryService {
         if (outcome.done) {
           if (hash && hash.digest("hex") !== file.integrity!.hex) return fail(controller, "wardby_integrity_mismatch");
           settled = true;
+          release();
           await store.recordFetch({
             runId: context.runId,
             ecosystem: adapter.id,
@@ -301,8 +387,10 @@ export class RegistryService {
         }
         const { value } = outcome;
         bytes += value.byteLength;
+        if (file.sizeBytes === null) this.trackStreamedBytes(runId, value.byteLength);
         if (bytes > limits.maxFileBytes) return fail(controller, "wardby_package_too_large");
-        if (bytes > remainingTotal) return fail(controller, "wardby_package_limit");
+        if (usage.bytes + this.inFlightUsage(runId).bytes > limits.maxTotalBytes)
+          return fail(controller, "wardby_package_limit");
         hash?.update(value);
         if (adapter.dependenciesFromFile && bytes <= DEPENDENCY_BUFFER_LIMIT) buffered.push(value);
         controller.enqueue(value);
@@ -310,6 +398,7 @@ export class RegistryService {
       cancel: async () => {
         settled = true;
         clearIdle();
+        release();
         await reader.cancel().catch(() => undefined);
       },
     });
