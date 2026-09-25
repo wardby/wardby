@@ -134,3 +134,14 @@ variable "secrets_deletion_protection" {
   type        = bool
   default     = true
 }
+
+variable "connector_enforcement" {
+  description = "REQUIRED refuses connections that bypass the Cloud SQL Auth Proxy. Hold NOT_REQUIRED only while moving an existing deployment from password login to IAM login."
+  type        = string
+  default     = "REQUIRED"
+
+  validation {
+    condition     = contains(["REQUIRED", "NOT_REQUIRED"], var.connector_enforcement)
+    error_message = "connector_enforcement must be REQUIRED or NOT_REQUIRED."
+  }
+}

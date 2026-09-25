@@ -28,3 +28,7 @@ deletion_protection = true
 # Secret Manager secrets survive a cluster rebuild and are protected from
 # destroy. Set false and apply before `terraform destroy`, like the flags above.
 secrets_deletion_protection = true
+
+# Keep REQUIRED. Only while moving an existing deployment from password login
+# to IAM login (docs/getting-started-gke.md) set NOT_REQUIRED, then remove it.
+connector_enforcement = "REQUIRED"

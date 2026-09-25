@@ -72,6 +72,17 @@ resource "google_sql_database_instance" "main" {
     disk_size         = var.disk_size_gb
     disk_autoresize   = true
 
+    # Required for the IAM database users in database-iam.tf.
+    database_flags {
+      name  = "cloudsql.iam_authentication"
+      value = "on"
+    }
+
+    # REQUIRED refuses any connection that does not come through the Auth
+    # Proxy or a Cloud SQL connector, so a leaked password is useless on the
+    # network. See var.connector_enforcement for the cutover.
+    connector_enforcement = var.connector_enforcement
+
     ip_configuration {
       # No public IP at all. This is the whole point of the module: there is no
       # internet-facing surface to authorize, allowlist or forget about.
