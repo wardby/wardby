@@ -14,17 +14,19 @@ import { PrismaProxyLedger } from "../../src/providers/coding-proxy/prisma-ledge
 
 const GRANTS = readFileSync(new URL("./database-grants.sql", import.meta.url), "utf8");
 const suffix = randomUUID().slice(0, 8);
-const roles = { app: `t_app_${suffix}`, proxy: `t_proxy_${suffix}`, migrator: `t_migrator_${suffix}` };
-const groups = { app: `t_wardby_app_${suffix}`, proxy: `t_wardby_proxy_${suffix}` };
+const rolesFor = (s) => ({ app: `t_app_${s}`, proxy: `t_proxy_${s}`, migrator: `t_migrator_${s}` });
+const groupsFor = (s) => ({ app: `t_wardby_app_${s}`, proxy: `t_wardby_proxy_${s}` });
+const roles = rolesFor(suffix);
+const groups = groupsFor(suffix);
 const PASSWORD = "test-only-grants";
 
-function render(owner) {
+function render(owner, r = roles, g = groups) {
   return GRANTS.replaceAll("{{owner}}", owner)
-    .replaceAll("{{migrator}}", roles.migrator)
-    .replaceAll("{{app}}", roles.app)
-    .replaceAll("{{proxy}}", roles.proxy)
-    .replace(/\bwardby_app\b/g, groups.app)
-    .replace(/\bwardby_proxy\b/g, groups.proxy);
+    .replaceAll("{{migrator}}", r.migrator)
+    .replaceAll("{{app}}", r.app)
+    .replaceAll("{{proxy}}", r.proxy)
+    .replace(/\bwardby_app\b/g, g.app)
+    .replace(/\bwardby_proxy\b/g, g.proxy);
 }
 // Each statement in the SQL file ends with a "-- ;;" line (the file has a DO
 // block with inner semicolons, so splitting on ';' would break it).
@@ -123,6 +125,10 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
 
     await expect(proxy.$queryRawUnsafe(`SELECT "id" FROM "Agent" LIMIT 1`)).rejects.toThrow(/permission denied/);
     await expect(proxy.$queryRawUnsafe(`SELECT "agentId" FROM "Run" LIMIT 1`)).rejects.toThrow(/permission denied/);
+    // The ledger only ever writes these three columns; it may not read them back.
+    for (const column of ["tokensIn", "tokensOut", "costUsd"]) {
+      await expect(proxy.$queryRawUnsafe(`SELECT "${column}" FROM "Run" LIMIT 1`)).rejects.toThrow(/permission denied/);
+    }
   });
 
   it("lets the app read and write data but not change the schema", async () => {
@@ -133,6 +139,60 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
       /permission denied/,
     );
     await expect(app.$executeRawUnsafe(`TRUNCATE "CodingProxyRequest"`)).rejects.toThrow(/permission denied/);
+  });
+
+  it("keeps the app out of the migration history", async (ctx) => {
+    const [{ exists }] = await admin.$queryRawUnsafe(
+      `SELECT to_regclass('public."_prisma_migrations"') IS NOT NULL AS exists`,
+    );
+    if (!exists) ctx.skip();
+    const app = clientAs(roles.app);
+    clients.push(app);
+    // WHERE false: the privilege check still runs, and nothing is changed.
+    await expect(app.$executeRawUnsafe(`UPDATE "_prisma_migrations" SET "logs" = NULL WHERE false`)).rejects.toThrow(
+      /permission denied/,
+    );
+    await expect(app.$executeRawUnsafe(`DELETE FROM "_prisma_migrations" WHERE false`)).rejects.toThrow(
+      /permission denied/,
+    );
+  });
+
+  it("applies on an unmigrated database, skipping the grants on tables that do not exist yet", async () => {
+    // The real tables exist here and the names are unqualified, so a search_path
+    // trick cannot hide them. Instead the guarded names are renamed to tables
+    // that do not exist: the guard must skip them, and nothing may be granted.
+    const s = `${suffix}_m`;
+    const r = rolesFor(s);
+    const g = groupsFor(s);
+    const missing = `_missing_${suffix}`;
+    for (const role of Object.values(r)) await admin.$executeRawUnsafe(`CREATE ROLE "${role}" NOLOGIN`);
+    try {
+      const sql = render(owner, r, g)
+        .replace(/\bCodingProxySession\b/g, `CodingProxySession${missing}`)
+        .replace(/\bCodingProxyRequest\b/g, `CodingProxyRequest${missing}`)
+        .replace(/\bRun\b/g, `Run${missing}`)
+        .replace(/\b_prisma_migrations\b/g, `_prisma_migrations${missing}`);
+      expect(sql).not.toMatch(/"(CodingProxySession|CodingProxyRequest|Run|_prisma_migrations)"/);
+      for (const st of statements(sql)) await admin.$executeRawUnsafe(st);
+      const [{ tables, columns }] = await admin.$queryRawUnsafe(
+        `SELECT (SELECT count(*) FROM information_schema.role_table_grants WHERE grantee = $1)::int AS tables,
+                (SELECT count(*) FROM information_schema.role_column_grants WHERE grantee = $1)::int AS columns`,
+        g.proxy,
+      );
+      expect({ tables, columns }).toEqual({ tables: 0, columns: 0 });
+      // ...while the memberships, which the migrations need, were applied.
+      const [{ member }] = await admin.$queryRawUnsafe(
+        `SELECT pg_has_role($1, $2, 'MEMBER') AS member`,
+        r.migrator,
+        owner,
+      );
+      expect(member).toBe(true);
+    } finally {
+      for (const role of [...Object.values(r), ...Object.values(g)]) {
+        await admin.$executeRawUnsafe(`DROP OWNED BY "${role}"`);
+        await admin.$executeRawUnsafe(`DROP ROLE IF EXISTS "${role}"`);
+      }
+    }
   });
 
   it("makes every migrator session act as the owner, so new tables stay owned by it", async () => {

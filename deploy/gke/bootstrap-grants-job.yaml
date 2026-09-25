@@ -32,6 +32,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
+        # Keep this image digest in step with the other three Auth Proxy sidecars: control-plane.yaml, proxy-cloudsql.yaml and migrate/job.yaml (deploy/kind-coding/manifests/overlays/gke-autopilot).
         - name: cloud-sql-proxy
           image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.25.4@sha256:88501f0a695a586988add1b8a206fdf3f29f9a1a3deeb9b45ef2b1481ea6be83
           # A native sidecar: starts before psql, stops after it, and does not
@@ -72,7 +73,17 @@ spec:
       containers:
         - name: psql
           image: postgres:16-alpine@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
-          command: ["psql", "-v", "ON_ERROR_STOP=1", "-f", "/grants/database-grants.sql"]
+          # One transaction: a refused statement leaves nothing applied. The
+          # bootstrap's --check drops --single-transaction and points -f at
+          # /grants/check.sql (BEGIN, this file, ROLLBACK) instead; it matches
+          # whole lines, so keep one item per line.
+          command:
+            - psql
+            - -v
+            - ON_ERROR_STOP=1
+            - --single-transaction
+            - -f
+            - /grants/database-grants.sql
           env:
             # The Auth Proxy above, which encrypts to the instance itself.
             - name: PGHOST

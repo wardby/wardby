@@ -7,6 +7,7 @@
 #   deploy/gke/bootstrap-database-iam.sh                        # default
 #   <current password> | deploy/gke/bootstrap-database-iam.sh --password-from-stdin
 #   deploy/gke/bootstrap-database-iam.sh --force-rotate         # emergency only
+#   ... --check                                                  # dry run, any mode
 #
 # Default: sets a random owner password through the Cloud SQL Admin API (creating
 # the owner if it does not exist), uses it once, then resets it to another random
@@ -21,6 +22,13 @@
 # retiring the password first. --force-rotate (default mode only) overrides
 # that check -- an emergency measure that cuts off any pod still using the
 # password.
+#
+# The grants run in one transaction: a statement the database refuses leaves
+# nothing applied. --check runs them in a transaction that is then rolled back,
+# and reports success or the exact refusal while changing no grant. It needs a
+# password like any run: combine it with --password-from-stdin (the live path),
+# or in default mode it obeys the same refusal as a real run. On a live
+# deployment, run --check first, then the real run.
 #
 # No password or token is ever a process argument, printed, or written to a
 # file. The password reaches the cluster only as a Secret that exists for the
@@ -45,11 +53,13 @@ out() { terraform -chdir="$TF_DIR" output -raw "$1"; }
 
 FROM_STDIN=false
 FORCE_ROTATE=false
+CHECK=false
 for arg in "$@"; do
   case "$arg" in
     --password-from-stdin) FROM_STDIN=true ;;
     --force-rotate) FORCE_ROTATE=true ;;
-    *) echo "usage: $0 [--password-from-stdin | --force-rotate]" >&2; exit 2 ;;
+    --check) CHECK=true ;;
+    *) echo "usage: $0 [--password-from-stdin | --force-rotate] [--check]" >&2; exit 2 ;;
   esac
 done
 if $FROM_STDIN && $FORCE_ROTATE; then
@@ -143,6 +153,32 @@ render_grants() {
   printf '%s\n' "$rendered"
 }
 
+# The Job runs the grants file in one transaction. --check points psql at a
+# wrapper that runs the same file inside BEGIN ... ROLLBACK instead, without
+# --single-transaction (which would wrap the wrapper's own BEGIN). Refuses
+# output that is not exactly the mode asked for.
+CHECK_SQL=$'BEGIN;\n\\i /grants/database-grants.sql\nROLLBACK;\n'
+select_mode() {
+  local rendered
+  if $CHECK; then
+    rendered="$(sed -E \
+      -e '/^[[:space:]]*- --single-transaction$/d' \
+      -e 's#^([[:space:]]*- )/grants/database-grants\.sql$#\1/grants/check.sql#')"
+    if grep -Eq '^[[:space:]]*- (--single-transaction|/grants/database-grants\.sql)$' <<<"$rendered" ||
+      ! grep -Eq '^[[:space:]]*- /grants/check\.sql$' <<<"$rendered"; then
+      echo "bootstrap: could not switch the grants Job to --check." >&2
+      return 1
+    fi
+  else
+    rendered="$(cat)"
+    if ! grep -Eq '^[[:space:]]*- --single-transaction$' <<<"$rendered"; then
+      echo "bootstrap: the grants Job does not run in a single transaction." >&2
+      return 1
+    fi
+  fi
+  printf '%s\n' "$rendered"
+}
+
 # --- Cloud SQL Admin API -----------------------------------------------------
 
 # Calls the Admin API. The request body comes on stdin (curl --data-binary @-)
@@ -218,7 +254,9 @@ cleanup() {
       rc=1
     fi
   fi
-  k delete secret wardby-database-bootstrap --ignore-not-found >/dev/null 2>&1
+  if ! k delete secret wardby-database-bootstrap --ignore-not-found >/dev/null 2>&1; then
+    echo "bootstrap: WARNING: deleting Secret ${NAMESPACE}/wardby-database-bootstrap failed; it may still hold the ${OWNER} password (the live one, with --password-from-stdin). Delete it: kubectl -n ${NAMESPACE} delete secret wardby-database-bootstrap" >&2
+  fi
   k delete job "$JOB" --ignore-not-found >/dev/null 2>&1
   k delete configmap wardby-database-grants --ignore-not-found >/dev/null 2>&1
   PASSWORD=""
@@ -238,8 +276,9 @@ render <"$MIGRATE_DIR/migrator.yaml" | k apply -f - >/dev/null
 
 echo "==> grants"
 k delete job "$JOB" --ignore-not-found >/dev/null
+# check.sql is used only by --check; it holds no value, only the wrapper.
 render_grants | k create configmap wardby-database-grants --from-file=database-grants.sql=/dev/stdin \
-  --dry-run=client -o yaml | k apply -f - >/dev/null
+  --from-literal=check.sql="$CHECK_SQL" --dry-run=client -o yaml | k apply -f - >/dev/null
 
 if ! $FROM_STDIN; then
   PASSWORD="$(openssl rand -hex 24)"
@@ -258,7 +297,7 @@ k delete secret wardby-database-bootstrap --ignore-not-found >/dev/null
   printf '  password: %s\n' "$(printf '%s' "$PASSWORD" | base64 | tr -d '\n')"
 } | k create -f - >/dev/null
 
-render <deploy/gke/bootstrap-grants-job.yaml | k apply -f - >/dev/null
+render <deploy/gke/bootstrap-grants-job.yaml | select_mode | k apply -f - >/dev/null
 
 # The Job's activeDeadlineSeconds is 600; wait a little longer for it to be
 # marked Failed, and never forever.
@@ -272,11 +311,19 @@ while ((SECONDS < deadline)); do
   sleep 5
 done
 if [[ " $state " != *" Complete "* ]]; then
-  echo "bootstrap: the grants Job did not complete (${state:-timed out})." >&2
+  if $CHECK; then
+    echo "bootstrap: --check: the grants would NOT apply (${state:-timed out}); nothing was changed. The refusal is in the psql log below." >&2
+  else
+    echo "bootstrap: the grants Job did not complete (${state:-timed out}). The grants run in one transaction, so a refused statement applied none of them." >&2
+  fi
   echo "--- psql" >&2
   k logs "job/${JOB}" -c psql --tail=50 >&2 || true
   echo "--- cloud-sql-proxy (a Workload Identity or IAM problem shows here)" >&2
   k logs "job/${JOB}" -c cloud-sql-proxy --tail=50 >&2 || true
   exit 1
 fi
-echo "==> grants applied"
+if $CHECK; then
+  echo "==> --check: every grant applies; rolled back, nothing was changed"
+else
+  echo "==> grants applied"
+fi

@@ -9,6 +9,12 @@
 -- another table, deploy/gke/database-grants.database.test.mjs fails: extend
 -- wardby_proxy here and re-run the bootstrap. Each statement ends with a
 -- "-- ;;" line, which is how the test splits the file.
+--
+-- The bootstrap runs the whole file in one transaction: a refused statement
+-- leaves nothing applied. Order: group roles, then memberships, then
+-- privileges. Grants on named tables apply only once those tables exist, so the
+-- file also runs on a fresh, unmigrated database (for the migrator's
+-- membership); running it again after the migrations applies the rest.
 
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'wardby_app') THEN CREATE ROLE wardby_app NOLOGIN; END IF;
@@ -22,8 +28,13 @@ GRANT "{{owner}}" TO "{{migrator}}";
 -- ;;
 ALTER ROLE "{{migrator}}" SET role = '{{owner}}';
 -- ;;
+GRANT wardby_app TO "{{app}}";
+-- ;;
+GRANT wardby_proxy TO "{{proxy}}";
+-- ;;
 
--- The app: data, never schema.
+-- The app: data, never schema. The default privileges cover every table the
+-- migrator creates later, including on a database migrated after this ran.
 GRANT USAGE ON SCHEMA public TO wardby_app;
 -- ;;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO wardby_app;
@@ -40,12 +51,24 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "{{owner}}" IN SCHEMA public
 -- The coding proxy: its budget ledger only (src/providers/coding-proxy/prisma-ledger.ts).
 GRANT USAGE ON SCHEMA public TO wardby_proxy;
 -- ;;
-GRANT SELECT, INSERT, UPDATE ON "CodingProxySession", "CodingProxyRequest" TO wardby_proxy;
--- ;;
-GRANT UPDATE ("tokensIn", "tokensOut", "costUsd"), SELECT ("id") ON "Run" TO wardby_proxy;
--- ;;
 
-GRANT wardby_app TO "{{app}}";
--- ;;
-GRANT wardby_proxy TO "{{proxy}}";
+-- Grants on named tables, each only once its table exists (skipped on an
+-- unmigrated database; re-run the bootstrap after the migrations). The app
+-- loses the migration history the default privileges gave it: only the
+-- migrator, acting as the owner, has any business there.
+DO $$ BEGIN
+  IF to_regclass('public."CodingProxySession"') IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE ON public.%I TO wardby_proxy', 'CodingProxySession');
+  END IF;
+  IF to_regclass('public."CodingProxyRequest"') IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE ON public.%I TO wardby_proxy', 'CodingProxyRequest');
+  END IF;
+  IF to_regclass('public."Run"') IS NOT NULL THEN
+    EXECUTE format('GRANT UPDATE (%I, %I, %I), SELECT (%I) ON public.%I TO wardby_proxy',
+      'tokensIn', 'tokensOut', 'costUsd', 'id', 'Run');
+  END IF;
+  IF to_regclass('public."_prisma_migrations"') IS NOT NULL THEN
+    EXECUTE format('REVOKE ALL ON public.%I FROM wardby_app', '_prisma_migrations');
+  END IF;
+END $$;
 -- ;;
