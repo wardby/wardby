@@ -22,7 +22,13 @@ import {
   type QuickstartProvider,
   type QuickstartState,
 } from "./config.js";
-import { FETCH_NOTICE, migrateFailureReason, REGISTRY_FAILURE_MESSAGE, runPrismaMigrate } from "./migrate.js";
+import {
+  FETCH_NOTICE,
+  migrateFailureReason,
+  prismaMigrateInvocation,
+  REGISTRY_FAILURE_MESSAGE,
+  runPrismaMigrateInvocation,
+} from "./migrate.js";
 
 const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
 const composeFile = join(packageRoot, "deploy/local/docker-compose.yml");
@@ -239,8 +245,9 @@ async function chooseProvider(
 }
 
 function applyMigrations(paths: QuickstartPaths): void {
-  console.log(FETCH_NOTICE);
-  const result = runPrismaMigrate("deploy", runtimeEnv(paths), paths.projectDir);
+  const invocation = prismaMigrateInvocation("deploy", runtimeEnv(paths));
+  if (!invocation.local) console.log(FETCH_NOTICE);
+  const result = runPrismaMigrateInvocation(invocation, paths.projectDir);
   if (result.registryFailure) {
     const detail = /^npm (?:error|ERR!) code .*$/m.exec(result.stderr)?.[0] ?? result.stderr.trim().split("\n")[0];
     throw new Error(`${REGISTRY_FAILURE_MESSAGE}${detail ? ` (${detail})` : ""}`);
@@ -494,8 +501,9 @@ export async function doctorCommand(args: string[]): Promise<void> {
     const ps = runCompose(paths, state, ["ps", "--status", "running", "--quiet"]);
     checks.push(["PostgreSQL container", ps.status === 0 && ps.stdout.trim().length > 0]);
     checks.push(["Database connection", await databaseHealthy(paths)]);
-    console.log(FETCH_NOTICE);
-    const migrations = runPrismaMigrate("status", runtimeEnv(paths), paths.projectDir);
+    const invocation = prismaMigrateInvocation("status", runtimeEnv(paths));
+    if (!invocation.local) console.log(FETCH_NOTICE);
+    const migrations = runPrismaMigrateInvocation(invocation, paths.projectDir);
     checks.push([
       "Database migrations",
       migrations.status === 0,
