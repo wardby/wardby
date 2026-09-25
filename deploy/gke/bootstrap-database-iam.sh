@@ -6,6 +6,7 @@
 #
 #   deploy/gke/bootstrap-database-iam.sh                        # default
 #   <current password> | deploy/gke/bootstrap-database-iam.sh --password-from-stdin
+#   deploy/gke/bootstrap-database-iam.sh --force-rotate         # emergency only
 #
 # Default: sets a random owner password through the Cloud SQL Admin API (creating
 # the owner if it does not exist), uses it once, then resets it to another random
@@ -13,6 +14,13 @@
 # grant. --password-from-stdin: uses the given current password and leaves it
 # unchanged -- for moving a running deployment, whose pods still use it, to IAM
 # login.
+#
+# Default mode refuses while the Secret wardby-control-plane-env still has a
+# DATABASE_URL key: the running pods still log in with the owner password, and
+# changing it would cut them off. Use --password-from-stdin then, or finish
+# retiring the password first. --force-rotate (default mode only) overrides
+# that check -- an emergency measure that cuts off any pod still using the
+# password.
 #
 # No password or token is ever a process argument, printed, or written to a
 # file. The password reaches the cluster only as a Secret that exists for the
@@ -36,11 +44,18 @@ JOB="wardby-database-grants"
 out() { terraform -chdir="$TF_DIR" output -raw "$1"; }
 
 FROM_STDIN=false
-case "${1:-}" in
-  "") ;;
-  --password-from-stdin) FROM_STDIN=true ;;
-  *) echo "usage: $0 [--password-from-stdin]" >&2; exit 2 ;;
-esac
+FORCE_ROTATE=false
+for arg in "$@"; do
+  case "$arg" in
+    --password-from-stdin) FROM_STDIN=true ;;
+    --force-rotate) FORCE_ROTATE=true ;;
+    *) echo "usage: $0 [--password-from-stdin | --force-rotate]" >&2; exit 2 ;;
+  esac
+done
+if $FROM_STDIN && $FORCE_ROTATE; then
+  echo "bootstrap: --force-rotate applies only to the default mode; --password-from-stdin never changes the password." >&2
+  exit 2
+fi
 
 PROJECT_ID="$(out project_id)"
 REGION="$(out region)"
@@ -67,6 +82,24 @@ if $FROM_STDIN; then
     IFS= read -r PASSWORD || true
   fi
   [[ -n "$PASSWORD" ]] || { echo "bootstrap: no password on stdin." >&2; exit 1; }
+fi
+
+# Default mode changes the owner password. Refuse while the running pods still
+# log in with it. Only whether the DATABASE_URL key exists is read (its length
+# via wc -c), never its value. A missing Secret (fresh deployment) passes; any
+# other kubectl error stops the script.
+if ! $FROM_STDIN && ! $FORCE_ROTATE; then
+  url_bytes="$(k get secret wardby-control-plane-env --ignore-not-found -o jsonpath='{.data.DATABASE_URL}' | wc -c)"
+  if ((url_bytes > 0)); then
+    cat >&2 <<EOF
+bootstrap: refusing to change the ${OWNER} password: Secret wardby-control-plane-env
+still has a DATABASE_URL, so the running pods still log in with this password.
+Use --password-from-stdin with the current password, or finish retiring the
+password first. Pass --force-rotate only in an emergency, knowing it cuts off
+any pod still using the password.
+EOF
+    exit 1
+  fi
 fi
 
 # --- placeholders ------------------------------------------------------------
@@ -150,6 +183,7 @@ wait_for_operation() {
 # Sets the owner's password, creating the owner if it does not exist.
 set_owner_password() {
   local password="$1" response status operation
+  [[ -n "$password" ]] || { echo "bootstrap: refusing to set an empty password." >&2; return 1; }
   response="$(printf '{"name":"%s","password":"%s"}' "$OWNER" "$password" |
     sqladmin PUT "instances/${INSTANCE}/users?name=${OWNER}")" || return 1
   status="${response##*$'\n'}"
@@ -168,6 +202,9 @@ set_owner_password() {
 PASSWORD_SET=false
 cleanup() {
   local rc=$?
+  # A second signal must not cut cleanup short: it deletes the Secret and resets
+  # the password.
+  trap '' INT TERM HUP
   set +e
   k delete secret wardby-database-bootstrap --ignore-not-found >/dev/null 2>&1
   k delete job "$JOB" --ignore-not-found >/dev/null 2>&1
@@ -187,6 +224,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # --- run ---------------------------------------------------------------------
 
