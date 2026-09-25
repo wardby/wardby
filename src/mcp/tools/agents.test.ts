@@ -32,7 +32,6 @@ interface FakeCodingProfile {
   baseRef: string;
   defaultTask: string | null;
   timeoutSec: number;
-  allowedEgress: string[];
   protectedPaths: string[];
   toolchain?: "node" | "node-python";
   toolchainVersion?: string | null;
@@ -225,7 +224,6 @@ describe("agent CRUD tools", () => {
         codingProfile: {
           repository: "OpenAI/Example.git",
           baseRef: "refs/heads/main",
-          allowedEgress: ["Registry.NPMJS.org"],
         },
       },
     });
@@ -238,7 +236,6 @@ describe("agent CRUD tools", () => {
       repository: "openai/example",
       baseRef: "main",
       timeoutSec: 1800,
-      allowedEgress: ["registry.npmjs.org"],
     });
     await client.close();
   });
@@ -461,7 +458,6 @@ describe("agent CRUD tools", () => {
       baseRef: "main",
       defaultTask: "Keep dependencies current.",
       timeoutSec: 1800,
-      allowedEgress: [],
       protectedPaths: ["CODEOWNERS"],
     };
     const db = fakeDb([
@@ -513,7 +509,6 @@ describe("agent CRUD tools", () => {
       baseRef: "main",
       defaultTask: "Keep dependencies current.",
       timeoutSec: 1800,
-      allowedEgress: [],
       protectedPaths: ["CODEOWNERS"],
       toolchain: "node-python",
       toolchainVersion: "3.12",
@@ -560,7 +555,6 @@ describe("agent CRUD tools", () => {
       baseRef: "main",
       defaultTask: null,
       timeoutSec: 1800,
-      allowedEgress: [],
       protectedPaths: ["CODEOWNERS"],
     };
     const db = fakeDb([
@@ -681,7 +675,6 @@ describe("agent CRUD tools", () => {
           baseRef: "main",
           defaultTask: null,
           timeoutSec: 1800,
-          allowedEgress: [],
           protectedPaths: ["CODEOWNERS"],
         },
       },
@@ -720,7 +713,6 @@ describe("agent CRUD tools", () => {
           baseRef: "main",
           defaultTask: null,
           timeoutSec: 1800,
-          allowedEgress: [],
           protectedPaths: ["CODEOWNERS"],
         },
       },

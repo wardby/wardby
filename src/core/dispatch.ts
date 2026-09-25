@@ -241,7 +241,6 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               provider: agent.codingProfile.provider,
               model: input.model,
               timeoutSec: agent.codingProfile.timeoutSec,
-              allowedEgress: agent.codingProfile.allowedEgress as Prisma.InputJsonValue,
               protectedPaths: agent.codingProfile.protectedPaths as Prisma.InputJsonValue,
               collectExclude: agent.codingProfile.collectExclude as Prisma.InputJsonValue,
               workerImage,

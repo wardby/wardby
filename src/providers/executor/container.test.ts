@@ -67,7 +67,6 @@ function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSn
     provider: "codex",
     model: "gpt-5.6-luna",
     timeoutSec: 900,
-    allowedEgress: [],
     protectedPaths: [".github/workflows/**", "CODEOWNERS"],
     collectExclude: [],
     rootCodingRunId: null,

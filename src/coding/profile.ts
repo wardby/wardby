@@ -1,4 +1,3 @@
-import { isIP } from "node:net";
 import { z } from "zod";
 import { isImmutableDockerImage } from "../providers/jobs/docker-isolation.js";
 import { MAX_CODING_TASK_BYTES, normalizeGitHubRepository, normalizeGitRef } from "./protocol.js";
@@ -7,7 +6,6 @@ import { CODING_PROVIDERS } from "./provider.js";
 
 export const MIN_CODING_TIMEOUT_SEC = 60;
 export const MAX_CODING_TIMEOUT_SEC = 7200;
-export const MAX_ALLOWED_EGRESS_HOSTS = 64;
 export const MAX_PROTECTED_PATHS = 128;
 export const DEFAULT_PROTECTED_PATHS = [
   ".github/workflows/**",
@@ -16,7 +14,6 @@ export const DEFAULT_PROTECTED_PATHS = [
   "docs/CODEOWNERS",
 ] as const;
 
-const MAX_HOST_BYTES = 253;
 const MAX_PROTECTED_PATH_BYTES = 512;
 const INVALID_MULTILINE_CONTROL = /[\u0000\u000B\u000C\u000E-\u001F\u007F]/;
 const INVALID_SINGLE_LINE_CONTROL = /[\u0000-\u001F\u007F]/;
@@ -55,28 +52,6 @@ const defaultTaskSchema = z
   .refine((value) => !INVALID_MULTILINE_CONTROL.test(value), "must not contain control characters")
   .refine((value) => value.trim().length > 0, "must not be blank")
   .nullable();
-
-const egressHostSchema = z
-  .string()
-  .transform((value) => value.trim().toLowerCase())
-  .refine((value) => value.length > 0 && byteLength(value) <= MAX_HOST_BYTES, "must be a bounded hostname")
-  .refine((value) => !INVALID_SINGLE_LINE_CONTROL.test(value), "must not contain control characters")
-  .refine((value) => isIP(value) === 0, "IP addresses and CIDRs are not allowed")
-  .refine((value) => !/^\d+(?:\.\d+){3}$/.test(value), "IP-like hostnames are not allowed")
-  .refine(
-    (value) =>
-      !value.includes("://") &&
-      !value.includes("/") &&
-      !value.includes("@") &&
-      !value.includes(":") &&
-      !value.includes("*"),
-    "must be an exact hostname",
-  )
-  .refine((value) => value !== "localhost" && value.includes("."), "must be a fully qualified hostname")
-  .refine(
-    (value) => value.split(".").every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)),
-    "must be a valid ASCII hostname",
-  );
 
 const protectedPathSchema = z
   .string()
@@ -125,10 +100,6 @@ const codingProfileFields = {
   toolchainVersion: toolchainVersionSchema,
   workerImageRef: workerImageRefSchema,
   workspaceDiskMb: workspaceDiskMbSchema,
-  allowedEgress: z
-    .array(egressHostSchema)
-    .max(MAX_ALLOWED_EGRESS_HOSTS)
-    .transform((hosts) => [...new Set(hosts)]),
   protectedPaths: z
     .array(protectedPathSchema)
     .min(1)
@@ -148,7 +119,6 @@ export const CodingProfileSchema = z
     defaultTask: codingProfileFields.defaultTask.default(null),
     allowWebhookTaskOverride: codingProfileFields.allowWebhookTaskOverride.default(false),
     timeoutSec: codingProfileFields.timeoutSec.default(1800),
-    allowedEgress: codingProfileFields.allowedEgress.default([]),
     protectedPaths: codingProfileFields.protectedPaths.default([...DEFAULT_PROTECTED_PATHS]),
     collectExclude: codingProfileFields.collectExclude.default([]),
     toolchain: codingProfileFields.toolchain.default("node"),
@@ -166,7 +136,6 @@ export const CodingProfilePatchSchema = z
     defaultTask: codingProfileFields.defaultTask.optional(),
     allowWebhookTaskOverride: codingProfileFields.allowWebhookTaskOverride.optional(),
     timeoutSec: codingProfileFields.timeoutSec.optional(),
-    allowedEgress: codingProfileFields.allowedEgress.optional(),
     protectedPaths: codingProfileFields.protectedPaths.optional(),
     collectExclude: codingProfileFields.collectExclude.optional(),
     toolchain: codingProfileFields.toolchain.optional(),

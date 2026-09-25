@@ -339,7 +339,8 @@ model CodingAgentProfile {
   defaultTask              String?
   allowWebhookTaskOverride Boolean @default(false)
   timeoutSec               Int     @default(1800)
-  allowedEgress            Json
+  /// Unused; dropped after rollout (see the package-registry plan, Task 14).
+  allowedEgress            Json    @default("[]")
   protectedPaths           Json
   collectExclude           Json    @default("[]")
   toolchain                String  @default("node")
@@ -361,7 +362,8 @@ model CodingRun {
   provider          String
   model             String
   timeoutSec        Int
-  allowedEgress     Json
+  /// Unused; dropped after rollout (see the package-registry plan, Task 14).
+  allowedEgress     Json                @default("[]")
   protectedPaths    Json
   collectExclude    Json                @default("[]")
   jobBackend        String?

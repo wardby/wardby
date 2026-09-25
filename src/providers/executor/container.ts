@@ -63,7 +63,6 @@ export interface ContainerRunSnapshot {
   provider: string;
   model: string;
   timeoutSec: number;
-  allowedEgress: unknown;
   protectedPaths: unknown;
   /** Stored per-agent collection paths; see src/coding/collect-exclude.ts. */
   collectExclude: unknown;
@@ -133,7 +132,6 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       provider: row.codingRun.provider,
       model: row.codingRun.model,
       timeoutSec: row.codingRun.timeoutSec,
-      allowedEgress: row.codingRun.allowedEgress,
       protectedPaths: row.codingRun.protectedPaths,
       collectExclude: row.codingRun.collectExclude,
       rootCodingRunId: row.codingRun.rootCodingRunId,
@@ -652,7 +650,6 @@ export class ContainerExecutor implements Executor {
         baseRef: run.baseRef,
         defaultTask: null,
         timeoutSec: run.timeoutSec,
-        allowedEgress: run.allowedEgress,
         protectedPaths: run.protectedPaths,
       });
       const expectedHeadRunId = run.rootCodingRunId ?? run.runId;
