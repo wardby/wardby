@@ -80,7 +80,8 @@ resource "google_sql_database_instance" "main" {
 
     # REQUIRED refuses any connection that does not come through the Auth
     # Proxy or a Cloud SQL connector, so a leaked password is useless on the
-    # network. See var.connector_enforcement for the cutover.
+    # network. NOT_REQUIRED by default until the password login is retired;
+    # see var.connector_enforcement.
     connector_enforcement = var.connector_enforcement
 
     ip_configuration {

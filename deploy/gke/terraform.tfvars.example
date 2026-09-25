@@ -29,6 +29,8 @@ deletion_protection = true
 # destroy. Set false and apply before `terraform destroy`, like the flags above.
 secrets_deletion_protection = true
 
-# Keep REQUIRED. Only while moving an existing deployment from password login
-# to IAM login (docs/getting-started-gke.md) set NOT_REQUIRED, then remove it.
-connector_enforcement = "REQUIRED"
+# REQUIRED refuses connections that bypass the Cloud SQL Auth Proxy. It becomes
+# the default when the password login is retired (a follow-up change); until
+# then pods may still log in with the password, so the default is NOT_REQUIRED.
+# Set REQUIRED yourself on a deployment that never used password login.
+connector_enforcement = "NOT_REQUIRED"
