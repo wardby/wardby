@@ -226,6 +226,10 @@ gcloud compute addresses describe wardby-control-plane \
 Allow DNS and the managed certificate to converge before treating an HTTPS
 failure as an application failure.
 
+On a brand-new project the first `up.sh` stops at its migration step, and a
+later one at its database check, until the database grants are in place: see
+"Database login" below for the order.
+
 ### Database login
 
 Each workload authenticates to Cloud SQL as its own Google service account,
@@ -239,40 +243,68 @@ group role in `deploy/gke/database-grants.sql`:
 | Coding proxy  | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy`: only its budget ledger — `CodingProxySession`/`CodingProxyRequest`, plus update `tokensIn`, `tokensOut` and `costUsd` on `Run`, and read only its `id` |
 | Migrations    | `<name_prefix>-migrator` | `wardby-migrator`          | Acts as the table owner (`SET ROLE`), so `prisma migrate deploy` can alter and create tables                                                                           |
 
-Apply the grants once, after the first `up.sh` has created the namespace, and
-again whenever `database-grants.sql` changes:
+`deploy/gke/bootstrap-database-iam.sh` applies the grants as the built-in
+owner, from a short-lived Job inside the cluster. Run it whenever
+`database-grants.sql` changes, and as part of the orders below. The grants run
+in one transaction, so a statement the database refuses leaves nothing applied.
+
+While the pods can still log in with the owner password (Secret
+`wardby-control-plane-env` has a `DATABASE_URL` key, which is the case until the
+password login is retired), feed it that password without ever displaying it,
+straight from Secret Manager's `<name_prefix>-database-url`:
 
 ```sh
-deploy/gke/bootstrap-database-iam.sh
+gcloud secrets versions access latest --secret wardby-database-url \
+    --project=YOUR_PROJECT_ID \
+  | sed -n 's#.*://[^:]*:\([^@]*\)@.*#\1#p' \
+  | deploy/gke/bootstrap-database-iam.sh --password-from-stdin
 ```
 
-With no flags this sets a one-time password on the built-in owner through the
-Cloud SQL Admin API, applies the grants, and resets the password to a value
-nobody holds. It refuses to run this way while Secret
-`wardby-control-plane-env` still has a `DATABASE_URL` key: that means the
-running pods still log in with that password, and changing it under them would
-cut them off. `--force-rotate` overrides the refusal and is an emergency-only
-option — it does cut off any pod still using the password.
+(Substitute your `name_prefix` if you changed it from the default `wardby`.)
+`--password-from-stdin` uses that password once and never changes it. Add
+`--check` to the same command to run the grants in a transaction that is then
+rolled back: it reports success or the exact statement the database refused,
+and changes nothing.
 
-For an existing deployment still on password login, the cutover order is:
+With no flags the bootstrap instead sets a one-time password on the built-in
+owner through the Cloud SQL Admin API, applies the grants, and resets the
+password to a value nobody holds. It refuses to run this way while
+`wardby-control-plane-env` still has a `DATABASE_URL` key: the running pods
+still log in with that password, and changing it under them would cut them
+off. `--force-rotate` overrides the refusal and is an emergency-only option —
+it does cut off any pod still using the password.
 
-1. Set `connector_enforcement = "NOT_REQUIRED"` in `terraform.tfvars`, then
-   `terraform apply`.
-2. Feed the current password to the bootstrap without ever displaying it, for
-   example straight from Secret Manager:
+A brand-new project runs, in this order:
 
-   ```sh
-   gcloud secrets versions access latest --secret wardby-database-url \
-       --project=YOUR_PROJECT_ID \
-     | sed -n 's#.*://[^:]*:\([^@]*\)@.*#\1#p' \
-     | deploy/gke/bootstrap-database-iam.sh --password-from-stdin
-   ```
+1. `terraform apply` (or let `up.sh` do it) — creates the instance and the
+   three IAM database users.
+2. `deploy/gke/up.sh` — stops at the migration step. This is expected: the
+   migrator has no grants yet, and nothing else was rolled out.
+3. `bootstrap-database-iam.sh --password-from-stdin`, fed as above — gives the
+   migrator the owner's rights (and the app its default privileges) so the
+   migrations can run. Default mode refuses here, because the Secret already
+   holds a password `DATABASE_URL`.
+4. `deploy/gke/up.sh` — applies the migrations and rolls out, then stops at the
+   database check: the coding proxy's grants are on tables that did not exist
+   in step 3.
+5. `bootstrap-database-iam.sh --password-from-stdin` again — now that the
+   tables exist, also applies the coding proxy's ledger grants.
+6. `deploy/gke/up.sh` — rolls out again and passes every check.
 
-   (Substitute your `name_prefix` if you changed it from the default
-   `wardby`.) `--password-from-stdin` uses that password once and never
-   changes it.
+An existing deployment still on password login moves to IAM login with:
 
-3. Run `deploy/gke/up.sh`.
+1. `bootstrap-database-iam.sh --password-from-stdin --check` — proves every
+   grant applies on this instance, and changes nothing.
+2. The same command without `--check` — applies the grants. The running pods
+   are not disturbed: their password is unchanged.
+3. `deploy/gke/up.sh` — rolls out the password-less pods, then proves the
+   control plane and the coding proxy each read the database through their
+   own login before it finishes.
+
+`connector_enforcement` (the Cloud SQL instance setting) stays `NOT_REQUIRED`
+by default until the password login is retired, so pods that still use the
+password keep working. On a deployment that never used password login, you
+may set it to `REQUIRED` in `terraform.tfvars`.
 
 ## 7. Verify
 

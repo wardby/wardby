@@ -111,6 +111,7 @@ spec:
         # (migrate/), under its own identity, before this Deployment is
         # applied. This native sidecar is the Auth Proxy the control-plane
         # container logs in to Cloud SQL through.
+        # Keep this image digest in step with the other three Auth Proxy sidecars: proxy-cloudsql.yaml, migrate/job.yaml and deploy/gke/bootstrap-grants-job.yaml.
         - name: cloud-sql-proxy
           image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.25.4@sha256:88501f0a695a586988add1b8a206fdf3f29f9a1a3deeb9b45ef2b1481ea6be83
           # A native sidecar: starts before the app, stops after it, and does

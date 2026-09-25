@@ -1,6 +1,9 @@
-# Applied by deploy/gke/up.sh before the Deployments (and by the bootstrap for
-# its grants Job), not by the main overlay: a migration must succeed before new
-# code rolls out. Placeholders are substituted at apply time.
+# Not applied through kustomize, and not part of the main overlay: a migration
+# must succeed before new code rolls out. deploy/gke/up.sh substitutes the
+# placeholders and applies migrator.yaml, then job.yaml, directly (two applies,
+# so the Job's NetworkPolicy exists before its pod). deploy/gke/bootstrap-database-iam.sh
+# applies migrator.yaml and its own grants Job (deploy/gke/bootstrap-grants-job.yaml).
+# This file lists the two for `kubectl kustomize` renders and checks.
 resources:
   - migrator.yaml
   - job.yaml
