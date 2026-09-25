@@ -103,7 +103,8 @@ export type UpstreamFetch = (
 export interface WorkerConfigInput {
   /** e.g. "http://wardby-proxy:8787/registry/npm/" */
   registryUrl: string;
-  /** The run capability. Written only under cacheDir, never elsewhere. */
+  /** The derived registry-only token (`rrg_…`), never the run capability.
+   *  Written only under cacheDir, never elsewhere. */
   token: string;
   /** e.g. "/workspace/.cache/npm"; always inside a collection-excluded folder. */
   cacheDir: string;
