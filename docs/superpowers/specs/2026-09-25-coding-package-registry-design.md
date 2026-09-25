@@ -275,29 +275,207 @@ files there are left unchanged.
 
 ## 5. Ecosystem adapters
 
-The registry module defines one interface that each ecosystem implements:
+The registry is split into a **shared core** and one **adapter** per ecosystem.
+Everything security-relevant lives in the core, so a new adapter cannot weaken
+a safeguard by omission.
 
-- **Metadata:** fetch the upstream index or packument, filter versions (range,
-  release age, audit), rewrite download URLs to proxy routes.
-- **Dependencies:** extract dependency names from metadata (npm) or from served
-  files (PyPI).
-- **Downloads:** resolve a proxy download route to the upstream URL from the
-  proxy's own metadata copy, and supply the integrity check if one exists.
-- **Timestamps and audit:** the release-time source and the OSV ecosystem name.
-- **Worker configuration:** the environment variables or config files the
-  driver writes for that package manager.
-- **Collection:** additional folder names for the skip list.
+### What the core owns
 
-npm and PyPI are the first two adapters; allowlist ecosystem keys come from the
-registered set.
+- Authenticating the run capability and loading the run's session.
+- Checking the requested name against `RegistryAllowance` and growing it.
+- Filtering versions: allowlisted range (top-level entries only), minimum
+  release age (a `null` timestamp counts as too new), and the OSV audit.
+- Refusing any file an adapter marks `allowed: false`.
+- Resolving every download from the proxy's own metadata copy, never the
+  client's URL.
+- Streaming with backpressure, verifying integrity while streaming, and
+  enforcing the size, count and timeout limits.
+- Recording `RegistryFetch` rows and audit events, and producing the error
+  bodies.
+- Metadata caching.
 
-**Checklist for a new ecosystem** (known candidates: Composer/Packagist,
-RubyGems, Go modules): an adapter; its upstream hosts added to the registry
-allowlist; recorded upstream fixtures and a real-client integration test; a
-worker image with the language runtime; documentation of any safeguard it
-cannot enforce. Composer, for example, downloads from GitHub and GitLab archive
-hosts, often without a checksum, and needs `--no-plugins`/`--no-scripts`
-configured through `COMPOSER_HOME/config.json`.
+### What an adapter provides
+
+Adapters are pure translation between an ecosystem's protocol and the core's
+model. They never authenticate, filter, record, or stream.
+
+```ts
+/** "npm", "pypi", later "composer", "rubygems", "go". Used as the allowlist key,
+ *  the route segment (/registry/<id>/), and RegistryFetch.ecosystem. */
+export type EcosystemId = string;
+
+export interface RegistryAdapter {
+  readonly id: EcosystemId;
+  /** OSV ecosystem name, e.g. "npm", "PyPI", "Packagist", "RubyGems", "Go". */
+  readonly osvEcosystem: string;
+  /** Upstream hosts this adapter may reach; added to the pinned-fetch allowlist. */
+  readonly upstreamHosts: readonly string[];
+  /** Extra folder names skipped at collection, e.g. "vendor" for Composer. */
+  readonly collectExclude: readonly string[];
+
+  // --- Allowlist syntax -------------------------------------------------
+  /** Parse one allowlist entry in this ecosystem's syntax. Throws an
+   *  AllowlistEntryError with a user-facing message if it is invalid. */
+  parseAllowlistEntry(raw: string): AllowlistEntry;
+  /** Canonical name used for every comparison (npm: lower case;
+   *  PyPI: PEP 503 normalization). */
+  normalizeName(name: string): string;
+  /** Whether `version` satisfies `range` in this ecosystem's syntax
+   *  (npm semver ranges, PEP 440 specifiers). */
+  satisfies(version: string, range: string): boolean;
+
+  // --- Protocol ---------------------------------------------------------
+  /** Classify a request under /registry/<id>/, or null for 404. */
+  route(method: string, subpath: string, headers: Headers): RegistryRoute | null;
+  /** Fetch and parse upstream metadata for one package. */
+  fetchMetadata(name: string, upstream: UpstreamFetch): Promise<PackageMetadata>;
+  /** Build the client-facing metadata document containing only `keep`
+   *  versions, with every download link rewritten to a proxy route. */
+  renderMetadata(meta: PackageMetadata, keep: ReadonlySet<string>, proxyBase: string): RenderedDocument;
+  /** Map a download route to a file in metadata the proxy fetched itself.
+   *  Returns null if the route names no known file. */
+  resolveDownload(route: DownloadRoute, meta: PackageMetadata): FileRef | null;
+  /** For ecosystems whose indexes omit dependencies (PyPI): dependency
+   *  names read from a served file or its metadata file. Omitted when
+   *  VersionInfo.dependencies is already complete (npm). */
+  dependenciesFromFile?(route: DownloadRoute | FileMetadataRoute, body: Uint8Array): Promise<string[]>;
+
+  // --- Worker -----------------------------------------------------------
+  /** Environment variables and files the driver writes so the package
+   *  manager uses the proxy, authenticates, keeps caches under cacheDir,
+   *  and disables install-time code where the client allows it. */
+  workerConfig(input: WorkerConfigInput): WorkerConfig;
+}
+
+export interface AllowlistEntry {
+  /** Normalized name, or a scope prefix when `wildcard` is true ("@heroui/"). */
+  name: string;
+  wildcard: boolean;
+  /** Optional version range in this ecosystem's syntax. */
+  range?: string;
+}
+
+export interface PackageMetadata {
+  name: string;
+  /** Keyed by version string. */
+  versions: ReadonlyMap<string, VersionInfo>;
+  /** Adapter-private upstream document, used by renderMetadata and resolveDownload. */
+  raw: unknown;
+}
+
+export interface VersionInfo {
+  version: string;
+  /** Release time; null means unknown and is treated as too new. */
+  publishedAt: Date | null;
+  /** Dependency names (normalized). Empty when discovered from files instead. */
+  dependencies: readonly string[];
+  files: readonly FileRef[];
+}
+
+export interface FileRef {
+  filename: string;
+  version: string;
+  upstreamUrl: string;
+  /** Null when the ecosystem publishes no checksum (common for Composer archives). */
+  integrity: Integrity | null;
+  sizeBytes: number | null;
+  /** False for files the ecosystem's safeguards exclude, e.g. PyPI sdists. */
+  allowed: boolean;
+}
+
+export interface Integrity {
+  algorithm: "sha512" | "sha384" | "sha256" | "sha1";
+  /** Hex-encoded digest. */
+  hex: string;
+}
+
+export type RegistryRoute = MetadataRoute | DownloadRoute | FileMetadataRoute;
+export interface MetadataRoute {
+  kind: "metadata";
+  name: string;
+}
+export interface DownloadRoute {
+  kind: "download";
+  name: string;
+  version: string;
+  filename: string;
+}
+/** PEP 658 metadata file for one wheel. */
+export interface FileMetadataRoute {
+  kind: "file-metadata";
+  name: string;
+  filename: string;
+}
+
+export interface RenderedDocument {
+  contentType: string;
+  body: string;
+}
+
+/** The pinned upstream client: HTTPS only, adapter's upstreamHosts only,
+ *  no redirects, no private addresses. */
+export type UpstreamFetch = (url: string, init?: { accept?: string }) => Promise<Response>;
+
+export interface WorkerConfigInput {
+  /** e.g. "http://wardby-proxy:8787/registry/npm/" */
+  registryUrl: string;
+  /** The run capability. Written only under cacheDir, never elsewhere. */
+  capability: string;
+  /** e.g. "/workspace/.cache/npm"; always inside a collection-excluded folder. */
+  cacheDir: string;
+}
+
+export interface WorkerConfig {
+  env: Readonly<Record<string, string>>;
+  /** Files the driver writes before the agent starts; paths must be under cacheDir. */
+  files: readonly { path: string; content: string; mode: number }[];
+}
+```
+
+Adapters are registered in one map; the profile validator takes its allowlist
+keys from it, so adding an adapter needs no schema change:
+
+```ts
+export const REGISTRY_ADAPTERS: ReadonlyMap<EcosystemId, RegistryAdapter> = new Map(
+  [npmAdapter, pypiAdapter].map((adapter) => [adapter.id, adapter]),
+);
+```
+
+### How the two first adapters fill it in
+
+| Member           | npm                                                                                                                       | PyPI                                                                    |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `osvEcosystem`   | `npm`                                                                                                                     | `PyPI`                                                                  |
+| `upstreamHosts`  | `registry.npmjs.org`                                                                                                      | `pypi.org`, `files.pythonhosted.org`                                    |
+| `collectExclude` | `node_modules`                                                                                                            | `.venv`, `venv`, `__pycache__`                                          |
+| `publishedAt`    | packument `time[version]`                                                                                                 | file `upload-time` (earliest per version)                               |
+| `dependencies`   | from `dependencies`, `optionalDependencies`, `peerDependencies`                                                           | empty; `dependenciesFromFile` reads `Requires-Dist`                     |
+| `allowed: false` | never                                                                                                                     | sdists (wheels only)                                                    |
+| `integrity`      | `dist.integrity` (sha512) or `dist.shasum` (sha1)                                                                         | `hashes.sha256`                                                         |
+| `workerConfig`   | `npm_config_registry`, `npm_config_userconfig` (npmrc with `_authToken`), `npm_config_ignore_scripts`, `npm_config_cache` | `PIP_INDEX_URL`, `PIP_TRUSTED_HOST`, `PIP_ONLY_BINARY`, `PIP_CACHE_DIR` |
+
+The core's built-in collection skip list (section 4) is the union of every
+adapter's `collectExclude` plus the language-neutral cache folders.
+
+### Adding an ecosystem
+
+Known candidates are Composer/Packagist, RubyGems and Go modules. Adding one
+means:
+
+1. Implement `RegistryAdapter` and add it to `REGISTRY_ADAPTERS`. No schema
+   change is needed.
+2. Set `upstreamHosts` to the smallest set of hosts its downloads use.
+3. Mark `allowed: false` on file types that run code at install time where the
+   proxy can tell them apart, and use `workerConfig` to disable install-time code
+   where only the client can.
+4. Record upstream fixtures, and add a real-client integration test.
+5. Provide a worker image with the language runtime.
+6. Document every safeguard the ecosystem cannot enforce.
+
+For example, Composer downloads from GitHub and GitLab archive hosts, often
+with `integrity: null`, and needs `--no-plugins` and `--no-scripts` set through a
+`COMPOSER_HOME/config.json` file from `workerConfig`. Go fits most directly,
+because `GOPROXY` is designed for this kind of proxy.
 
 ## 6. Testing
 
