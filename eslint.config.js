@@ -78,7 +78,7 @@ export default tseslint.config(
     // CLI stdout, not server logging through pino -- plus
     // host-functions.test.ts's test that deliberately intercepts
     // console.log to verify secret redaction.
-    files: ["src/**/*.test.ts"],
+    files: ["src/**/*.test.ts", "src/**/*.test-support.ts"],
     rules: {
       "@typescript-eslint/consistent-type-imports": "off",
       "no-console": "off",
