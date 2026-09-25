@@ -13,6 +13,9 @@ metadata:
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 3600
+  # A Workload Identity or IAM misconfiguration keeps the cloud-sql-proxy sidecar
+  # from ever starting, which would otherwise leave the Job waiting forever.
+  activeDeadlineSeconds: 900
   template:
     metadata:
       labels:

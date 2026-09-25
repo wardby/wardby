@@ -36,7 +36,7 @@ done
 TF_DIR="deploy/gke"
 OVERLAY="deploy/kind-coding/manifests/overlays/gke-autopilot"
 NAMESPACE="wardby-coding"
-TOTAL_STEPS=10
+TOTAL_STEPS=11
 
 : "${HOSTNAME:?set HOSTNAME to the hostname the MCP endpoint is published on (e.g. app.example.com)}"
 
@@ -50,6 +50,37 @@ CLUSTER="$(terraform -chdir="$TF_DIR" output -raw cluster_name)"
 REGISTRY="$(terraform -chdir="$TF_DIR" output -raw artifact_registry_url)"
 DB_IP="$(terraform -chdir="$TF_DIR" output -raw private_ip_address)"
 SECRET_PREFIX="$(terraform -chdir="$TF_DIR" output -raw secret_name_prefix)"
+CONNECTION="$(terraform -chdir="$TF_DIR" output -raw instance_connection_name)"
+DB_NAME="$(terraform -chdir="$TF_DIR" output -raw database_name)"
+# postgresql://<IAM user, @ as %40>@127.0.0.1:5432/<database>: the Auth Proxy
+# sidecar logs in; no password anywhere.
+iam_url() { printf 'postgresql://%s@127.0.0.1:5432/%s' "$(terraform -chdir="$TF_DIR" output -raw "$1" | sed 's/@/%40/')" "$DB_NAME"; }
+APP_DATABASE_URL="$(iam_url app_database_user)"
+MIGRATOR_DATABASE_URL="$(iam_url migrator_database_user)"
+PROXY_DATABASE_URL="$(iam_url proxy_database_user)"
+iam_substitutions() {
+  sed -e "s|wardby-instance-connection-name|${CONNECTION}|g" \
+      -e "s|wardby-app-gsa-email|$(terraform -chdir="$TF_DIR" output -raw app_service_account)|g" \
+      -e "s|wardby-migrator-gsa-email|$(terraform -chdir="$TF_DIR" output -raw migrator_service_account)|g" \
+      -e "s|wardby-proxy-gsa-email|$(terraform -chdir="$TF_DIR" output -raw proxy_service_account)|g" \
+      -e "s|value: wardby-app-database-url|value: ${APP_DATABASE_URL}|g" \
+      -e "s|value: wardby-migrator-database-url|value: ${MIGRATOR_DATABASE_URL}|g" \
+      -e "s|value: wardby-proxy-database-url|value: ${PROXY_DATABASE_URL}|g"
+}
+# Belt and suspenders against the substitution list above going stale: every
+# rendered manifest must be free of the wardby-*-gsa-email / *-database-url /
+# instance-connection-name / migrate-job placeholders before it is applied.
+# wardby-migrator and wardby-migrate (bare) are real resource names and must
+# survive -- the patterns below only match the longer placeholder strings.
+assert_no_placeholders() {
+  local leftover
+  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job' || true)"
+  if [[ -n "$leftover" ]]; then
+    echo "up.sh: unresolved placeholder(s) in rendered manifest:" >&2
+    echo "$leftover" | sort -u >&2
+    exit 1
+  fi
+}
 
 echo "==> 2/${TOTAL_STEPS} kubectl context for ${CLUSTER}"
 gcloud container clusters get-credentials "$CLUSTER" --region "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1
@@ -141,13 +172,60 @@ if ! render_secrets external-secrets.yaml | kubectl apply -f - >/dev/null; then
   exit 1
 fi
 # Forces a sync and waits for a fresh one, so a database-url version that
-# step 5 just added is in the Secret before step 8 rolls the Deployments.
+# step 5 just added is in the Secret before step 9 rolls the Deployments.
 if ! wait_external_secrets_synced 180s wardby-coding-proxy-env wardby-control-plane-env; then
   echo "up.sh: the Secrets did not sync from Secret Manager; nothing else was applied." >&2
   exit 1
 fi
 
-echo "==> 8/${TOTAL_STEPS} render and apply the overlay"
+echo "==> 8/${TOTAL_STEPS} run migrations as wardby-migrator"
+# Before the Deployments, so a failed migration stops the deploy with the
+# running version untouched.
+MIGRATE_JOB="wardby-migrate-$(date +%s)"
+MIGRATE_MANIFEST="$(kubectl kustomize deploy/kind-coding/manifests/overlays/gke-autopilot/migrate \
+  | sed -e "s|image: wardby-migration|image: ${MIGRATION_IMAGE}|" \
+        -e "s|wardby-migrate-job|${MIGRATE_JOB}|g" \
+        -e "s|cidr: wardby-database-cidr|cidr: ${DB_IP}/32|g" \
+  | iam_substitutions)"
+assert_no_placeholders "$MIGRATE_MANIFEST"
+echo "$MIGRATE_MANIFEST" | kubectl apply -f - >/dev/null
+# A Workload Identity or IAM misconfiguration keeps the cloud-sql-proxy sidecar
+# from ever reaching Ready, in which case the migrate container never starts;
+# activeDeadlineSeconds: 900 on the Job (migrate/job.yaml) bounds that wait.
+migration_failed() {
+  echo "up.sh: migration Job ${MIGRATE_JOB} did not succeed:" >&2
+  local migrate_logs proxy_logs pod
+  migrate_logs="$(kubectl -n "$NAMESPACE" logs "job/${MIGRATE_JOB}" -c migrate --tail=40 2>/dev/null || true)"
+  proxy_logs="$(kubectl -n "$NAMESPACE" logs "job/${MIGRATE_JOB}" -c cloud-sql-proxy --tail=40 2>/dev/null || true)"
+  echo "--- migrate container logs ---" >&2
+  echo "${migrate_logs:-(no logs)}" >&2
+  echo "--- cloud-sql-proxy sidecar logs ---" >&2
+  echo "${proxy_logs:-(no logs)}" >&2
+  if [[ -z "$migrate_logs" && -z "$proxy_logs" ]]; then
+    echo "--- kubectl get events (no logs were available) ---" >&2
+    pod="$(kubectl -n "$NAMESPACE" get pods -l job-name="$MIGRATE_JOB" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    kubectl -n "$NAMESPACE" get events --field-selector "involvedObject.name=${pod:-$MIGRATE_JOB}" >&2 || true
+  fi
+  if echo "$migrate_logs" | grep -qi "permission denied"; then
+    echo "up.sh: the database grants look missing; run deploy/gke/bootstrap-database-iam.sh once." >&2
+  fi
+  exit 1
+}
+for i in $(seq 1 120); do
+  # Both fields in one call: succeeded, then the Failed condition's status
+  # (True for both backoffLimit exhaustion and activeDeadlineSeconds).
+  status="$(kubectl -n "$NAMESPACE" get job "$MIGRATE_JOB" -o jsonpath='{.status.succeeded} {.status.conditions[?(@.type=="Failed")].status}')"
+  succeeded="${status%% *}"
+  failed_condition="${status#* }"
+  [[ "$succeeded" == "1" ]] && break
+  if [[ "$failed_condition" == "True" ]] || [[ "$i" == "120" ]]; then
+    migration_failed
+  fi
+  sleep 5
+done
+echo "    migrations applied"
+
+echo "==> 9/${TOTAL_STEPS} render and apply the overlay"
 # What is running now, recorded before it is replaced: rollback means going back
 # to exactly these digests (see the rollback note at the end).
 PREVIOUS_IMAGES="$(kubectl -n "$NAMESPACE" get deploy wardby-control-plane wardby-coding-proxy \
@@ -155,7 +233,7 @@ PREVIOUS_IMAGES="$(kubectl -n "$NAMESPACE" get deploy wardby-control-plane wardb
 # Every value below is target identity: it is substituted here and never
 # committed. The placeholders are the contract between this script and the
 # tracked manifests.
-kubectl kustomize "$OVERLAY" \
+OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
   | sed -e "s|image: wardby-runtime|image: ${RUNTIME_IMAGE}|" \
         -e "s|image: wardby-migration|image: ${MIGRATION_IMAGE}|" \
         -e "s|value: wardby-coding-worker-image-node-python-3-12$|value: ${WORKER_IMAGE_NODE_PYTHON}|" \
@@ -163,13 +241,15 @@ kubectl kustomize "$OVERLAY" \
         -e "s|value: wardby-apiserver-host|value: ${API_HOST}|" \
         -e "s|wardby-control-plane-hostname|${HOSTNAME}|g" \
         -e "s|cidr: wardby-database-cidr|cidr: ${DB_IP}/32|g" \
-  | kubectl apply -f - >/dev/null
+  | iam_substitutions)"
+assert_no_placeholders "$OVERLAY_MANIFEST"
+echo "$OVERLAY_MANIFEST" | kubectl apply -f - >/dev/null
 
-echo "==> 9/${TOTAL_STEPS} wait for rollouts"
+echo "==> 10/${TOTAL_STEPS} wait for rollouts"
 kubectl -n "$NAMESPACE" rollout status deploy/wardby-coding-proxy --timeout=300s
 kubectl -n "$NAMESPACE" rollout status deploy/wardby-control-plane --timeout=600s
 
-echo "==> 10/${TOTAL_STEPS} verify the public endpoint"
+echo "==> 11/${TOTAL_STEPS} verify the public endpoint"
 # A finished rollout proves the pods are Ready, not that the load balancer routes
 # to them or that authentication is enforced. These are the same checks an
 # operator would run by hand, made to fail the deploy instead of scrolling past.
