@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type { AuthProvider, VerifiedToken } from "../../providers/auth/types.js";
 import { AudienceError } from "../../providers/auth/types.js";
-import { protectedResourceMetadata, authenticate, requireScope } from "./resource-server.js";
+import { protectedResourceMetadata, authenticate, requireScope, SCOPES_SUPPORTED } from "./resource-server.js";
 import { McpError } from "../errors.js";
 
 const CANONICAL_URI = "https://host/mcp";
@@ -40,6 +40,10 @@ describe("protectedResourceMetadata", () => {
     expect(meta.authorization_servers).toEqual(["https://idp.example.com"]);
     expect(meta.scopes_supported.length).toBeGreaterThan(0);
     expect(meta.bearer_methods_supported).toEqual(["header"]);
+  });
+
+  it("supports packages:approve", () => {
+    expect(SCOPES_SUPPORTED).toContain("packages:approve");
   });
 });
 

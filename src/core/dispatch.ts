@@ -243,6 +243,8 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               timeoutSec: agent.codingProfile.timeoutSec,
               protectedPaths: agent.codingProfile.protectedPaths as Prisma.InputJsonValue,
               collectExclude: agent.codingProfile.collectExclude as Prisma.InputJsonValue,
+              packageAllowlist: agent.codingProfile.packageAllowlist as Prisma.InputJsonValue,
+              packagePolicy: agent.codingProfile.packagePolicy as Prisma.InputJsonValue,
               workerImage,
               budgetReservedUsd: budgetUsd,
               rootCodingRunId,

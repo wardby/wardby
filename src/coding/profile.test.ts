@@ -16,7 +16,20 @@ describe("CodingProfileSchema", () => {
       workerImageRef: null,
       workspaceDiskMb: null,
       collectExclude: [],
+      packageAllowlist: {},
+      packagePolicy: {},
     });
+  });
+
+  it("validates package allowlists per ecosystem", () => {
+    const base = { repository: "openai/example" };
+    expect(
+      CodingProfileSchema.parse({ ...base, packageAllowlist: { npm: ["@heroui/*", "react@^19"], pypi: ["flask>=3"] } })
+        .packageAllowlist,
+    ).toEqual({ npm: ["@heroui/*", "react@^19"], pypi: ["flask>=3"] });
+    expect(() => CodingProfileSchema.parse({ ...base, packageAllowlist: { cargo: ["serde"] } })).toThrow();
+    expect(() => CodingProfileSchema.parse({ ...base, packageAllowlist: { npm: ["react@nope"] } })).toThrow();
+    expect(() => CodingProfileSchema.parse({ ...base, packagePolicy: { minReleaseAgeDays: 31 } })).toThrow();
   });
 
   it.each([

@@ -348,6 +348,8 @@ model CodingAgentProfile {
   workerImageRef           String?
   /// Per-agent workspace size in MiB; null = CODING_DISK_MB.
   workspaceDiskMb          Int?
+  packageAllowlist         Json    @default("{}")
+  packagePolicy            Json    @default("{}")
 }
 
 /// Phase 5: immutable dispatch inputs plus opaque execution/result state for
@@ -382,6 +384,8 @@ model CodingRun {
   queuedAt          DateTime?
   /// Per-agent workspace size in MiB; null = CODING_DISK_MB.
   workspaceDiskMb   Int?
+  packageAllowlist  Json                @default("{}")
+  packagePolicy     Json                @default("{}")
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt
   proxySession      CodingProxySession?
@@ -395,6 +399,9 @@ model CodingRun {
   rootCodingRunId String?
   rootCodingRun   CodingRun?  @relation("CodingRunContinuation", fields: [rootCodingRunId], references: [runId])
   continuations   CodingRun[] @relation("CodingRunContinuation")
+
+  registryAllowances RegistryAllowance[]
+  registryFetches    RegistryFetch[]
 
   @@index([jobBackend, jobHandle])
   @@index([failureCategory])
@@ -430,6 +437,9 @@ model CodingProxySession {
   createdAt      DateTime                 @default(now())
   updatedAt      DateTime                 @updatedAt
   requests       CodingProxyRequest[]
+  /// Hash of the derived registry-only token (see deriveRegistryToken); the
+  /// token itself is never persisted.
+  registryTokenHash String?               @unique
 
   @@index([deadlineAt])
 }
@@ -460,6 +470,43 @@ model CodingProxyRequest {
 
   @@unique([sessionId, requestKey])
   @@index([sessionId, status])
+}
+
+enum RegistryFetchOutcome {
+  served
+  refused
+}
+
+/// One package a run's profile has approved from a given ecosystem, resolved
+/// once at dispatch (see CodingRun.packageAllowlist) and used to gate every
+/// proxy fetch for the run's lifetime.
+model RegistryAllowance {
+  runId     String
+  ecosystem String
+  name      String
+  createdAt DateTime  @default(now())
+  run       CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
+
+  @@id([runId, ecosystem, name])
+}
+
+/// Audit ledger of every package fetch the registry proxy served or refused
+/// for a run.
+model RegistryFetch {
+  id        String               @id @default(cuid())
+  runId     String
+  ecosystem String
+  name      String
+  version   String?
+  filename  String?
+  integrity String?
+  sizeBytes Int?
+  outcome   RegistryFetchOutcome
+  reason    String?
+  createdAt DateTime             @default(now())
+  run       CodingRun            @relation(fields: [runId], references: [runId], onDelete: Cascade)
+
+  @@index([runId, createdAt])
 }
 
 /// Phase 2: single-row-per-scope lease so exactly one scheduler process

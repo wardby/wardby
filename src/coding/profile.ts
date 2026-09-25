@@ -3,6 +3,8 @@ import { isImmutableDockerImage } from "../providers/jobs/docker-isolation.js";
 import { MAX_CODING_TASK_BYTES, normalizeGitHubRepository, normalizeGitRef } from "./protocol.js";
 import { MAX_COLLECT_EXCLUDE_PATHS, validateCollectExcludePath } from "./collect-exclude.js";
 import { CODING_PROVIDERS } from "./provider.js";
+import { parseAllowlist, resolvePolicy } from "./registry/allowlist.js";
+import { REGISTRY_ADAPTERS } from "./registry/adapters.js";
 
 export const MIN_CODING_TIMEOUT_SEC = 60;
 export const MAX_CODING_TIMEOUT_SEC = 7200;
@@ -89,6 +91,29 @@ const workerImageRefSchema = z
   .nullable();
 const workspaceDiskMbSchema = z.number().int().min(64).max(32_768).nullable();
 
+const packageAllowlistSchema = z
+  .record(z.string(), z.array(z.string().min(1).max(256)).max(256))
+  .superRefine((value, ctx) => {
+    try {
+      parseAllowlist(value, REGISTRY_ADAPTERS);
+    } catch (error) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: error instanceof Error ? error.message : "invalid allowlist",
+      });
+    }
+  });
+const packagePolicySchema = z
+  .object({ minReleaseAgeDays: z.number().int().min(0).max(30).optional() })
+  .strict()
+  .superRefine((value, ctx) => {
+    try {
+      resolvePolicy(value);
+    } catch {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "invalid package policy" });
+    }
+  });
+
 const codingProfileFields = {
   provider: z.enum(CODING_PROVIDERS),
   repository: repositorySchema,
@@ -109,6 +134,8 @@ const codingProfileFields = {
     .array(collectExcludePathSchema)
     .max(MAX_COLLECT_EXCLUDE_PATHS)
     .transform((paths) => [...new Set(paths)]),
+  packageAllowlist: packageAllowlistSchema,
+  packagePolicy: packagePolicySchema,
 };
 
 export const CodingProfileSchema = z
@@ -125,6 +152,8 @@ export const CodingProfileSchema = z
     toolchainVersion: codingProfileFields.toolchainVersion.default(null),
     workerImageRef: codingProfileFields.workerImageRef.default(null),
     workspaceDiskMb: codingProfileFields.workspaceDiskMb.default(null),
+    packageAllowlist: codingProfileFields.packageAllowlist.default({}),
+    packagePolicy: codingProfileFields.packagePolicy.default({}),
   })
   .strict();
 
@@ -142,6 +171,8 @@ export const CodingProfilePatchSchema = z
     toolchainVersion: codingProfileFields.toolchainVersion.optional(),
     workerImageRef: codingProfileFields.workerImageRef.optional(),
     workspaceDiskMb: codingProfileFields.workspaceDiskMb.optional(),
+    packageAllowlist: codingProfileFields.packageAllowlist.optional(),
+    packagePolicy: codingProfileFields.packagePolicy.optional(),
   })
   .strict();
 

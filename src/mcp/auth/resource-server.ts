@@ -20,6 +20,8 @@ export const SCOPES_SUPPORTED = [
   "secrets:write",
   "webhooks:write",
   "budget_groups:write",
+  // Approve coding agents' package allowlists (see docs/coding-packages.md).
+  "packages:approve",
   // Reassigns an agent's owner regardless of who currently owns it (or
   // whether it's public) — a step above agents:write, which only ever lets
   // a caller act on agents they already own or that are unowned.
@@ -115,4 +117,4 @@ export function requireScope(ctx: McpRequestContext, canonicalUri: string, ...sc
   throw insufficientScope(scopes, protectedResourceMetadataUrl(canonicalUri));
 }
 
-export { McpError };
+export { McpError, insufficientScope };

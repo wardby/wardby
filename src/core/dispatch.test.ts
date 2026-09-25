@@ -199,6 +199,36 @@ describe("dispatchRun", () => {
     ]);
   });
 
+  it("copies the profile's packageAllowlist and packagePolicy onto the run at dispatch", async () => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      budgetUsd: 1.25,
+      codingProfile: {
+        provider: "codex",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        protectedPaths: [],
+        packageAllowlist: { npm: ["react"] },
+        packagePolicy: { minReleaseAgeDays: 7 },
+      },
+    };
+    const state = fakeDb(agent);
+    const executor: Executor = { async start() {}, async stop() {} };
+
+    const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+
+    expect(state.codingRuns).toEqual([
+      expect.objectContaining({
+        runId: result?.run.id,
+        packageAllowlist: { npm: ["react"] },
+        packagePolicy: { minReleaseAgeDays: 7 },
+      }),
+    ]);
+  });
+
   it("resolves and snapshots the worker image for a coding agent, once, immutably", async () => {
     const agent = {
       ...nativeAgent(),

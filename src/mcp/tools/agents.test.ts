@@ -655,6 +655,33 @@ describe("agent CRUD tools", () => {
     await client.close();
   });
 
+  it("changing packageAllowlist needs packages:approve or agents:admin", async () => {
+    for (const [scopes, allowed] of [
+      [["agents:write"], false],
+      [["agents:write", "packages:approve"], true],
+      [["agents:write", "agents:admin"], true],
+    ] as const) {
+      const db = fakeDb();
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", [...scopes]));
+      registerAgentTools(mcp);
+      const client = await connectClient(mcp);
+      const result = await client.callTool({
+        name: "create_agent",
+        arguments: {
+          name: "coder",
+          systemPrompt: "Make the requested change.",
+          model: "gpt-5.6-luna",
+          budgetUsd: 0.25,
+          kind: "coding",
+          codingProfile: { repository: "openai/example", packageAllowlist: { npm: ["react"] } },
+        },
+      });
+      expect(Boolean(result.isError)).toBe(!allowed);
+      await client.close();
+    }
+  });
+
   it("update_agent patching workerImageRef requires agents:admin, not just agents:write", async () => {
     const db = fakeDb([
       {
