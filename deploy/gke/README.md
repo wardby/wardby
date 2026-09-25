@@ -54,27 +54,19 @@ terraform init
 terraform apply
 ```
 
-Then hand the connection string to the cluster without it passing through a
-terminal:
-
-```bash
-terraform output -raw database_url    # pipe this into your secret tooling
-```
-
-`DATABASE_URL` is needed by **two** workloads — the control plane and the coding
-proxy. The proxy reads the database to validate a run's capability token and to
-record token usage and cost, so a deployment that updates only the control
-plane's secret fails at the first coding run, not at deploy time.
-
-The control plane's `migrate` initContainer runs `prisma migrate deploy` on
-every start, so pointing it at a fresh instance creates the schema with no extra
-step.
+Terraform creates the instance, the database, and a Cloud SQL IAM database
+user per workload (`database-iam.tf`) — no password, and nothing resembling a
+connection string to hand to the cluster. See "Database login" below for what
+runs next.
 
 ## Egress
 
 The namespace is default-deny. Both workloads need an egress rule to the
-instance's private address on 5432; the overlay's rules that select the
-throwaway database by pod label do not match a Cloud SQL address.
+instance's private address on 3307, the Cloud SQL Auth Proxy's port — the
+overlay's rules that select the throwaway database by pod label do not match
+a Cloud SQL address. `connector_enforcement = REQUIRED` (`cloudsql.tf`)
+refuses a plain Postgres (5432) connection anyway, so there is no rule for
+it.
 
 ## Secrets
 
@@ -106,16 +98,19 @@ it:
 kubectl -n wardby-coding delete externalsecret wardby-control-plane-env --cascade=orphan
 ```
 
-(A plain delete would also delete the Secret, because ESO owns it.) Then run
-`deploy/kind-coding/control-plane-secret.sh` with `KUBE_CONTEXT` set. It
-rebuilds only `wardby-control-plane-env`, from `.env.local`, and takes
-`DATABASE_URL` from the existing `wardby-coding-proxy-env` Secret, which must
-still exist. It does not rebuild `wardby-coding-proxy-env`. If that Secret is gone as well,
-recreate it by hand with `DATABASE_URL`, `OPENAI_API_KEY` and
-`ANTHROPIC_API_KEY`, reading each value with
+(A plain delete would also delete the Secret, because ESO owns it.) Then
+recreate it directly — `deploy/kind-coding/control-plane-secret.sh` is
+written for the password era and takes `DATABASE_URL` from the existing
+`wardby-coding-proxy-env` Secret, which no longer has one on this deployment;
+don't run it here. `DATABASE_URL` isn't a secret value on GKE at all: the
+Deployment's own manifest supplies it directly (`control-plane.yaml`), not
+the Secret, so a hand-rebuilt Secret needs none. Recreate the other seven
+keys (`secrets.tf`'s `secret_ids`, plus the constant `AUTH_PROVIDER:
+self-hosted` the ExternalSecret's template adds) by hand, reading each with
 `gcloud secrets versions access latest --secret <name>` and piping it into a
-Secret manifest over stdin, never with values on the command line. Re-running
-`up.sh` later hands the Secrets back to ESO.
+Secret manifest over stdin, never with values on the command line.
+`wardby-coding-proxy-env` needs only `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`
+the same way. Re-running `up.sh` later hands both Secrets back to ESO.
 
 ## Database login
 
@@ -141,41 +136,41 @@ statement the database refuses leaves nothing applied. Run it again whenever
 `database-grants.sql` changes. Grants on named tables apply only once the
 migrations have created them, which is why a brand-new project runs it twice.
 
-A brand-new project, in order (`docs/getting-started-gke.md`, "Database login",
-has the command that feeds the password):
+A brand-new project, in order:
 
 1. `terraform apply` — the instance and the three IAM database users.
-2. `up.sh` — stops at the migration step, as expected: the migrator has no
-   grants yet.
-3. `bootstrap-database-iam.sh --password-from-stdin`, fed the password from
-   Secret Manager's `<name_prefix>-database-url` exactly as for the cutover —
-   the migrator's grants. Default mode would refuse: the Secret already holds a
-   password `DATABASE_URL`.
-4. `up.sh` — migrations and rollout; its database check then stops it, because
-   the coding proxy's tables did not exist in step 3.
-5. `bootstrap-database-iam.sh --password-from-stdin` again — adds the coding
-   proxy's ledger grants, now that its tables exist.
-6. `up.sh` — passes every check.
+2. `bootstrap-database-iam.sh` (default mode) — creates the built-in owner
+   and applies the migrator's (and the app's) grants. The coding proxy's
+   ledger tables don't exist yet, so its grants are skipped: expected.
+3. `up.sh` — migrations and rollout; its database check then stops it,
+   because the coding proxy's grants are on tables that did not exist in
+   step 2.
+4. `bootstrap-database-iam.sh` again — adds the coding proxy's ledger
+   grants, now that its tables exist.
+5. `up.sh` — passes every check.
 
-An existing deployment: `bootstrap-database-iam.sh --password-from-stdin
---check` (every grant applies, then rolled back — the only way to know the
-instance accepts them), then the same without `--check`, then `up.sh`.
+Two bootstrap runs, not one: a grant on a named table can't apply before the
+migration that creates it has run. See `docs/getting-started-gke.md`,
+"Moving an older deployment", for the `--password-from-stdin` order that
+applies to a deployment still on password login.
 
 The bootstrap has two modes:
 
-- **Default (emergency admin access).** Sets a random password on the
+- **Default.** The normal path above, and for reapplying grants later (e.g.
+  after `database-grants.sql` changes). Sets a random password on the
   built-in owner through the Cloud SQL Admin API, creating the owner if it
   does not exist, uses it once for this run, and resets it to another random
   value that is never stored — on every exit, including a failed grant. It
   refuses to run this way while Secret `wardby-control-plane-env` still has a
-  `DATABASE_URL` key, since that means running pods still log in with the
-  current owner password and changing it would cut them off; `--force-rotate`
-  overrides that refusal and is for an emergency only, knowing it cuts those
-  pods off.
+  `DATABASE_URL` key, since that means an older, not-yet-migrated deployment
+  whose running pods still log in with the current owner password, and
+  changing it would cut them off; `--force-rotate` overrides that refusal
+  and is for an emergency only, knowing it cuts those pods off.
 - **`--password-from-stdin`.** Uses the password it is given and never
-  changes it. This is the path for moving a running deployment from password
-  login to IAM login: the owner password the pods already use also applies
-  the grants, so nothing already running is disturbed.
+  changes it. Only for moving an older deployment off password login: the
+  owner password the pods already use also applies the grants, so nothing
+  already running is disturbed. A brand-new deployment never has a password
+  to give it.
 
 Either mode takes `--check`: the grants run inside a transaction that is
 rolled back, and the bootstrap reports success or the exact refusal while
@@ -183,21 +178,21 @@ changing nothing. Run it before the real run on a live deployment.
 
 `connector_enforcement` (a Cloud SQL instance setting, `cloudsql.tf`) set to
 `REQUIRED` refuses any connection that does not come through the Auth Proxy
-or a Cloud SQL connector — so a leaked password is useless on the network. It
-defaults to `NOT_REQUIRED` for now, because pods may still log in with the
-password; it becomes the default when the password login is retired (a
-follow-up change). Set it to `REQUIRED` yourself on a deployment that never
-used password login.
+or a Cloud SQL connector — so a leaked password would be useless on the
+network anyway, and it is the default now that every workload connects
+through the Auth Proxy and no password login remains. Set it to
+`NOT_REQUIRED` only while moving an older deployment off password login.
 
 After the rollout, `up.sh` runs one query through the control plane's and the
 coding proxy's own database login, and fails the deploy if either cannot read
-the database — while the password login is still enabled, `kubectl rollout
-undo` then restores the previous version.
+the database. `kubectl rollout undo` then restores the previous images and
+pod templates, which also log in through IAM — there is no password path to
+fall back to.
 
 ## Teardown
 
 Apply `deletion_protection = false` **first**, then destroy. The flag is read
 from Terraform state, so leaving it true means an extra apply on an instance you
-are trying to remove. `google_sql_user` uses `deletion_policy = "ABANDON"`
-because Postgres refuses to drop a user that owns tables, which is exactly what
-the migrations create.
+are trying to remove. The three `google_sql_user.iam` users (`database-iam.tf`)
+use `deletion_policy = "ABANDON"`: once a user has been granted privileges,
+Postgres refuses to drop it, and destroy would fail partway through.
