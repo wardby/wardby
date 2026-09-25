@@ -8,15 +8,20 @@
 # that Role and nothing else, so a missing verb now fails a launch instead of
 # being masked by admin credentials.
 #
-# `image: wardby-runtime` and `image: wardby-migration` are placeholders, as in
-# ../../base/proxy.yaml: the apply step substitutes resolved digests into the
-# rendered manifest, never into this tracked file. No project, cluster, region
-# or registry path appears here.
+# `image: wardby-runtime` is a placeholder, as in ../../base/proxy.yaml: the
+# apply step substitutes resolved digests into the rendered manifest, never
+# into this tracked file. No project, cluster, region or registry path
+# appears here. (`wardby-migration` is still a placeholder, used by the
+# `wardby-migrate` Job in migrate/job.yaml, not by this Deployment.)
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: wardby-control-plane
   namespace: wardby-coding
+  annotations:
+    # Workload Identity: this pod's Google identity, whose Cloud SQL IAM user
+    # is the app's database login (deploy/gke/database-iam.tf).
+    iam.gke.io/gcp-service-account: wardby-app-gsa-email
 ---
 # The only RoleBinding in this deployment. Note what it does NOT grant: no
 # cluster-scoped role, no access to any other namespace, and no permission the
@@ -102,38 +107,47 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
-        # `prisma migrate deploy`, every start. It is idempotent, so a restart
-        # costs nothing — and the throwaway database stores its data in an
-        # emptyDir, so a database pod that restarts comes back empty and this is
-        # what puts the schema back without an operator or a port-forward.
-        # Needs the migration image: the runtime stage deliberately has no
-        # prisma CLI (deploy/Dockerfile asserts its absence).
-        - name: migrate
-          image: wardby-migration
-          command: ["npm", "run", "prisma:migrate"]
-          env:
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: wardby-control-plane-env
-                  key: DATABASE_URL
+        # Migrations no longer run here: they run as the `wardby-migrate` Job
+        # (migrate/), under its own identity, before this Deployment is
+        # applied. This native sidecar is the Auth Proxy the control-plane
+        # container logs in to Cloud SQL through.
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.25.4@sha256:88501f0a695a586988add1b8a206fdf3f29f9a1a3deeb9b45ef2b1481ea6be83
+          # A native sidecar: starts before the app, stops after it, and does
+          # not keep a Job from completing.
+          restartPolicy: Always
+          args:
+            - --auto-iam-authn
+            - --private-ip
+            - --address=127.0.0.1
+            - --port=5432
+            - --structured-logs
+            - --health-check
+            - --http-address=0.0.0.0
+            - --http-port=9090
+            - --exit-zero-on-sigterm
+            - wardby-instance-connection-name
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: 9090
+            periodSeconds: 2
+            failureThreshold: 60
           securityContext:
+            runAsNonRoot: true
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-          volumeMounts:
-            - name: tmp
-              mountPath: /tmp
           resources:
             requests:
-              cpu: 500m
-              memory: 1Gi
-              ephemeral-storage: 2Gi
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 100Mi
             limits:
-              cpu: 500m
-              memory: 1Gi
-              ephemeral-storage: 2Gi
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 100Mi
       containers:
         - name: control-plane
           image: wardby-runtime
@@ -143,6 +157,11 @@ spec:
             - secretRef:
                 name: wardby-control-plane-env
           env:
+            # Password-less: the Auth Proxy sidecar logs in as this pod's Google
+            # identity. Overrides DATABASE_URL from the Secret, which remains only
+            # so a rollback still works until the password is retired.
+            - name: DATABASE_URL
+              value: wardby-app-database-url
             - name: NODE_ENV
               value: production
             # `serve` refuses any transport but http (src/serve.ts): in stdio
@@ -377,7 +396,19 @@ spec:
             cidr: wardby-database-cidr
       ports:
         - protocol: TCP
-          port: 5432
+          port: 3307
+    # GKE metadata server: Workload Identity tokens for the Auth Proxy. Dataplane
+    # V2 serves it at 169.254.169.252:988 as well as 169.254.169.254:80.
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.254/32
+        - ipBlock:
+            cidr: 169.254.169.252/32
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 988
     # HTTPS: the Kubernetes API server (its ClusterIP is a public-range address
     # on GKE, and a public cluster's endpoint is a public IP either way) and
     # github.com for cloning and opening pull requests. Same shape as the

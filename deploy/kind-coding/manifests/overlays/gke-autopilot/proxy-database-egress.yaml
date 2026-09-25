@@ -10,6 +10,10 @@
 # identity and never belongs in a tracked file. It is a CIDR rather than a pod
 # selector because Cloud SQL is not in the cluster: it lives on the VPC, reached
 # over the private services access peering, so no podSelector can name it.
+#
+# The Auth Proxy sidecar (proxy-cloudsql.yaml) reaches the instance itself on
+# 3307, not Postgres's 5432: 5432 is only the loopback port it exposes to the
+# proxy container (--port=5432), never a port this policy needs to open.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -27,4 +31,16 @@ spec:
             cidr: wardby-database-cidr
       ports:
         - protocol: TCP
-          port: 5432
+          port: 3307
+    # GKE metadata server: Workload Identity tokens for the Auth Proxy. Dataplane
+    # V2 serves it at 169.254.169.252:988 as well as 169.254.169.254:80.
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.254/32
+        - ipBlock:
+            cidr: 169.254.169.252/32
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 988

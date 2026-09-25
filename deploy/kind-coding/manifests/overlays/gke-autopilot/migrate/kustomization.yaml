@@ -1,0 +1,6 @@
+# Applied by deploy/gke/up.sh before the Deployments (and by the bootstrap for
+# its grants Job), not by the main overlay: a migration must succeed before new
+# code rolls out. Placeholders are substituted at apply time.
+resources:
+  - migrator.yaml
+  - job.yaml
