@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { collectExclusions, type CollectExclusions } from "../../coding/collect-exclude.js";
 import { jobLauncherContract } from "./contract-suite.js";
 import {
   DockerCommandError,
@@ -105,10 +106,18 @@ function labels(args: readonly string[]): Record<string, string> {
 
 class NoopTransfer implements DockerArtifactTransfer {
   materializations = 0;
+  exclusions: CollectExclusions[] = [];
   async seedDirectory(): Promise<void> {}
   async seedInput(): Promise<void> {}
-  async materializeDirectory(): Promise<void> {
+  async materializeDirectory(
+    _container: string,
+    _source: string,
+    _destination: string,
+    _maxBytes: number,
+    exclusions: CollectExclusions,
+  ): Promise<void> {
     this.materializations += 1;
+    this.exclusions.push(exclusions);
   }
 }
 
@@ -541,6 +550,16 @@ describe("DockerJobLauncher", () => {
     );
     await created.launcher.materializeWorkspace(handle, join(created.runRoot, "workspace"));
     expect(created.transfer.materializations).toBe(1);
+  });
+
+  it("passes the job's collection exclusions to the workspace transfer", async () => {
+    const created = await harness("docker-collect-exclude", {
+      collectExclude: collectExclusions(["web/dist"]),
+    });
+    const handle = await created.launcher.launch(created.spec);
+    created.docker.finish();
+    await created.launcher.materializeWorkspace(handle, join(created.runRoot, "workspace"));
+    expect(created.transfer.exclusions).toEqual([collectExclusions(["web/dist"])]);
   });
 
   it("adds trusted resource labels without forwarding caller labels or artifacts", async () => {

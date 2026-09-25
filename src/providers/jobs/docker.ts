@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { normalizeCollectExclusions, type CollectExclusions } from "../../coding/collect-exclude.js";
+import { pruneCollectExcluded } from "./collect-prune.js";
 import { spawn } from "node:child_process";
 import {
   lstat,
@@ -206,7 +208,13 @@ export class NodeDockerCommandRunner implements DockerCommandRunner {
 export interface DockerArtifactTransfer {
   seedDirectory(sourceDirectory: string, container: string, destination: string): Promise<void>;
   seedInput(sourceFile: string, container: string): Promise<void>;
-  materializeDirectory(container: string, source: string, destination: string, maxBytes: number): Promise<void>;
+  materializeDirectory(
+    container: string,
+    source: string,
+    destination: string,
+    maxBytes: number,
+    exclusions: CollectExclusions,
+  ): Promise<void>;
 }
 
 export function dockerTransferEnvironment(path: string): NodeJS.ProcessEnv {
@@ -324,7 +332,13 @@ export class NodeDockerArtifactTransfer implements DockerArtifactTransfer {
     await docker.run(["container", "cp", sourceFile, `${container}:/run/wardby/storage/input/input.json`]);
   }
 
-  async materializeDirectory(container: string, source: string, destination: string, maxBytes: number): Promise<void> {
+  async materializeDirectory(
+    container: string,
+    source: string,
+    destination: string,
+    maxBytes: number,
+    exclusions: CollectExclusions,
+  ): Promise<void> {
     await replaceDirectoryFromStaging(
       destination,
       maxBytes,
@@ -336,6 +350,8 @@ export class NodeDockerArtifactTransfer implements DockerArtifactTransfer {
           `${container}:${source}/.`,
           staging,
         ]);
+        // Before replaceDirectoryFromStaging validates: excluded folders never count.
+        await pruneCollectExcluded(staging, exclusions);
       },
     );
   }
@@ -605,6 +621,8 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
         "/run/wardby/storage/workspace",
         expected,
         current.spec.limits.diskMb * 1024 * 1024,
+        // Names are always the current built-in list; only the paths come from the spec.
+        normalizeCollectExclusions(current.spec.collectExclude?.paths),
       );
     });
   }
