@@ -1,0 +1,125 @@
+# Applies deploy/gke/database-grants.sql as the built-in owner, from inside the
+# cluster (the instance has no public address). Created and deleted by
+# deploy/gke/bootstrap-database-iam.sh, which substitutes the placeholders and
+# supplies the ConfigMap `wardby-database-grants` and the short-lived Secret
+# `wardby-database-bootstrap`; never applied on its own.
+#
+# The `wardby-migrate` label puts the pod under the migrate NetworkPolicy
+# (overlays/gke-autopilot/migrate/migrator.yaml), and the `wardby-migrator`
+# service account gives the Auth Proxy an identity allowed to connect.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wardby-database-grants
+  namespace: wardby-coding
+  labels:
+    app.kubernetes.io/name: wardby-migrate
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wardby-migrate
+    spec:
+      serviceAccountName: wardby-migrator
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        # The alpine image's postgres user.
+        runAsUser: 70
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Keep this image digest in step with the other three Auth Proxy sidecars: control-plane.yaml, proxy-cloudsql.yaml and migrate/job.yaml (deploy/kind-coding/manifests/overlays/gke-autopilot).
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.25.4@sha256:88501f0a695a586988add1b8a206fdf3f29f9a1a3deeb9b45ef2b1481ea6be83
+          # A native sidecar: starts before psql, stops after it, and does not
+          # keep the Job from completing. No --auto-iam-authn: the owner logs
+          # in with its built-in password.
+          restartPolicy: Always
+          args:
+            - --private-ip
+            - --address=127.0.0.1
+            - --port=5432
+            - --structured-logs
+            - --health-check
+            - --http-address=0.0.0.0
+            - --http-port=9090
+            - --exit-zero-on-sigterm
+            - wardby-instance-connection-name
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: 9090
+            periodSeconds: 2
+            failureThreshold: 60
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 100Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 100Mi
+      containers:
+        - name: psql
+          image: postgres:16-alpine@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
+          # One transaction: a refused statement leaves nothing applied. The
+          # bootstrap's --check drops --single-transaction and points -f at
+          # /grants/check.sql (BEGIN, this file, ROLLBACK) instead; it matches
+          # whole lines, so keep one item per line.
+          command:
+            - psql
+            - -v
+            - ON_ERROR_STOP=1
+            - --single-transaction
+            - -f
+            - /grants/database-grants.sql
+          env:
+            # The Auth Proxy above, which encrypts to the instance itself.
+            - name: PGHOST
+              value: "127.0.0.1"
+            - name: PGPORT
+              value: "5432"
+            - name: PGSSLMODE
+              value: disable
+            - name: PGDATABASE
+              value: wardby-database-name
+            - name: PGUSER
+              value: wardby-owner-user
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: wardby-database-bootstrap
+                  key: password
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: grants
+              mountPath: /grants
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 50Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 50Mi
+      volumes:
+        - name: grants
+          configMap:
+            name: wardby-database-grants
