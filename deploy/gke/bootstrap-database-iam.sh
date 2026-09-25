@@ -244,18 +244,25 @@ wait_for_operation() {
   return 1
 }
 
-# Sets the owner's password, creating the owner if it does not exist.
+# Sets the owner's password, creating the owner if it does not exist. Whether
+# it exists is asked first (users.get): 200 updates it (PUT), 404 creates it
+# (POST), and any other answer stops without changing anything.
 set_owner_password() {
-  local password="$1" response status operation
+  local password="$1" response status method path operation
   [[ -n "$password" ]] || { echo "bootstrap: refusing to set an empty password." >&2; return 1; }
-  response="$(printf '{"name":"%s","password":"%s"}' "$OWNER" "$password" |
-    sqladmin PUT "instances/${INSTANCE}/users?name=${OWNER}")" || return 1
+  response="$(sqladmin GET "instances/${INSTANCE}/users/${OWNER}" </dev/null)" || return 1
   status="${response##*$'\n'}"
-  if [[ "$status" == 404 ]]; then
-    response="$(printf '{"name":"%s","password":"%s"}' "$OWNER" "$password" |
-      sqladmin POST "instances/${INSTANCE}/users")" || return 1
-    status="${response##*$'\n'}"
-  fi
+  case "$status" in
+    200) method=PUT path="instances/${INSTANCE}/users?name=${OWNER}" ;;
+    404) method=POST path="instances/${INSTANCE}/users" ;;
+    *)
+      echo "bootstrap: looking up the ${OWNER} user failed (HTTP ${status})." >&2
+      return 1
+      ;;
+  esac
+  response="$(printf '{"name":"%s","password":"%s"}' "$OWNER" "$password" |
+    sqladmin "$method" "$path")" || return 1
+  status="${response##*$'\n'}"
   [[ "$status" == 2?? ]] || { echo "bootstrap: setting the ${OWNER} password failed (HTTP ${status})." >&2; return 1; }
   operation="$(sed -n 's/^[[:space:]]*"name":[[:space:]]*"\([^"]*\)".*/\1/p' <<<"${response%$'\n'*}" | head -n 1)"
   wait_for_operation "$operation"
