@@ -65,12 +65,18 @@ if (brokenRuntime.some((message) => probe.output.includes(message))) {
   fail("installed Prisma runtime is incomplete", probe.output);
 }
 if (probe.status === 0) fail("agent list against an unreachable database unexpectedly succeeded");
-if (!/ECONNREFUSED|connect|reach/i.test(probe.output))
-  fail("unreachable database gave no connection error", probe.output);
+// Exactly Prisma's P1001 wording for this URL, not any line mentioning "connect".
+if (!probe.output.includes("Can't reach database server at 127.0.0.1:1")) {
+  fail("unreachable database did not give the expected connection error", probe.output);
+}
 if (probeSeconds > 20) fail(`unreachable database took ${probeSeconds}s to fail`);
 
 // The consumer tree must not carry the Prisma CLI or its dependencies.
-const tree = JSON.parse(run("npm", ["ls", "--all", "--json"]).stdout || "{}");
+// Both checks fail loudly on a failed or empty listing instead of passing on it.
+const ls = run("npm", ["ls", "--all", "--json"]);
+if (ls.status !== 0) fail("npm ls --all failed", ls.output);
+const tree = JSON.parse(ls.stdout);
+if (!tree.dependencies?.["@wardby/cli"]?.version) fail("npm ls does not list the installed @wardby/cli", ls.stdout);
 const found = new Set();
 (function walk(node) {
   for (const [name, child] of Object.entries(node.dependencies ?? {})) {
@@ -82,9 +88,14 @@ const found = new Set();
 })(tree);
 if (found.size > 0) fail(`installed tree contains ${[...found].join(", ")}`);
 for (const name of forbidden) {
-  const onDisk = run("find", ["node_modules", "-path", `*/node_modules/${name}/package.json`]).stdout.trim();
-  if (onDisk) fail(`installed tree contains ${name} on disk`, onDisk);
+  const search = run("find", ["./node_modules", "-path", `*/node_modules/${name}/package.json`]);
+  if (search.status !== 0) fail(`find over node_modules failed for ${name}`, search.output);
+  if (search.stdout.trim()) fail(`installed tree contains ${name} on disk`, search.stdout);
 }
+
+const control = run("find", ["./node_modules", "-path", "*/node_modules/@prisma/client/package.json"]);
+if (control.status !== 0 || !control.stdout.trim())
+  fail("find does not see @prisma/client; the tree check is blind", control.output);
 
 const auditRun = run("npm", ["audit", "--json"]);
 const audit = JSON.parse(auditRun.stdout || "{}");
@@ -119,7 +130,7 @@ console.log(
       probe.output
         .trim()
         .split("\n")
-        .find((line) => /ECONNREFUSED|connect|reach/i.test(line)),
+        .find((line) => line.includes("Can't reach database server")),
     ),
     forbiddenFound: [...found],
     audit: counts,

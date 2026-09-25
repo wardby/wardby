@@ -15,7 +15,12 @@ import { spawnSync } from "node:child_process";
 // SR-009 is resolved for consumers too: the published package no longer
 // depends on the Prisma CLI, so `npm install @wardby/cli` resolves neither
 // package. scripts/npm-package-acceptance.mjs audits that install and fails
-// on any high or critical advisory.
+// on any high or critical advisory. Not covered: `wardby quickstart`/`doctor`
+// fetch prisma@7.10.0 via npx onto the user's machine, which ignores our
+// overrides and has no lockfile, so that cached CLI still carries
+// deepmerge-ts 7.1.5 and mysql2 3.15.3. Low exploitability (it loads only our
+// own shipped config; Studio's MySQL path is unused), and it never enters the
+// installed package.
 const acceptedException = null;
 
 function auditPassesPolicy(output, status) {

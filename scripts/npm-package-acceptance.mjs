@@ -139,7 +139,9 @@ try {
     if (container.status !== 0 || !result) {
       throw new Error(`linux/amd64 consumer install failed:\n${output.trim()}`);
     }
-    console.log(JSON.stringify(JSON.parse(result[1]), null, 2));
+    const report = JSON.parse(result[1]);
+    if (report.arch !== "x86_64") throw new Error(`consumer install ran on ${report.arch}, not linux/amd64 (x86_64)`);
+    console.log(JSON.stringify(report, null, 2));
   } finally {
     await admin.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
     await admin.end();

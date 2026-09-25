@@ -302,6 +302,14 @@ requires `migrate status` to report the schema up to date. The acceptance test
 fails if any of those packages reappears or audit reports a high or critical
 advisory.
 
+**What the clean audit does not cover.** It covers `npm install @wardby/cli`.
+`wardby quickstart` and `wardby doctor` separately fetch `prisma@7.10.0` via
+npx onto the user's machine; npx ignores this package's `overrides` and has no
+lockfile, so that cached CLI still carries `deepmerge-ts` 7.1.5 and `mysql2`
+3.15.3. Exploitability is low -- the CLI only loads wardby's own shipped config
+and never takes Prisma Studio's MySQL path -- and that CLI never enters the
+installed package or the running server.
+
 **Development tree (repository, CI, build and migration images).** The Prisma
 CLI still carries two flagged packages, both forced to patched versions by
 `overrides` in `package.json`:

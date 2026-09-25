@@ -11,6 +11,20 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # test:package installs the packed tarball in a linux/amd64 container and
+    # runs quickstart's migrations and the CLI against a throwaway database it
+    # creates beside DATABASE_URL (reached from the container through
+    # host.docker.internal / host-gateway). A test-only service, as in
+    # security.yml -- nothing here deploys anything.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: wardby
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: package
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -30,6 +44,8 @@ jobs:
           if (process.env.RELEASE_TAG !== `v${version}`)
           throw new Error(`release ${process.env.RELEASE_TAG} does not match v${version}`);'
       - run: npm run test:package
+        env:
+          DATABASE_URL: postgresql://wardby:test-only@localhost:5432/package
       # --provenance, not publishConfig.provenance: the latter applies
       # everywhere and makes `npm publish` fail outside a supported CI, which
       # would block a manual publish from a maintainer's machine. As a flag it
