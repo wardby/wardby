@@ -16,6 +16,7 @@ describe("CodingProfileSchema", () => {
       toolchainVersion: null,
       workerImageRef: null,
       workspaceDiskMb: null,
+      collectExclude: [],
     });
   });
 
@@ -74,6 +75,17 @@ describe("CodingProfileSchema", () => {
       expect(() => CodingProfileSchema.parse({ ...base, workspaceDiskMb: bad })).toThrow();
     }
     expect(CodingProfilePatchSchema.parse({ workspaceDiskMb: null })).toEqual({ workspaceDiskMb: null });
+  });
+
+  it("accepts per-agent collection exclusions and rejects unsafe paths", () => {
+    const base = { repository: "openai/example" };
+    expect(CodingProfileSchema.parse({ ...base, collectExclude: ["web/dist", "web/dist"] }).collectExclude).toEqual([
+      "web/dist",
+    ]);
+    for (const bad of [["/abs"], ["a/*"], ["../x"], Array.from({ length: 65 }, (_, i) => `p${i}`)]) {
+      expect(() => CodingProfileSchema.parse({ ...base, collectExclude: bad })).toThrow();
+    }
+    expect(CodingProfilePatchSchema.parse({ collectExclude: [] })).toEqual({ collectExclude: [] });
   });
 });
 

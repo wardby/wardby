@@ -2,6 +2,7 @@ import { isIP } from "node:net";
 import { z } from "zod";
 import { isImmutableDockerImage } from "../providers/jobs/docker-isolation.js";
 import { MAX_CODING_TASK_BYTES, normalizeGitHubRepository, normalizeGitRef } from "./protocol.js";
+import { MAX_COLLECT_EXCLUDE_PATHS, validateCollectExcludePath } from "./collect-exclude.js";
 import { CODING_PROVIDERS } from "./provider.js";
 
 export const MIN_CODING_TIMEOUT_SEC = 60;
@@ -91,6 +92,15 @@ const protectedPathSchema = z
     "must not contain empty or traversal components",
   );
 
+const collectExcludePathSchema = z.string().transform((value, ctx) => {
+  try {
+    return validateCollectExcludePath(value);
+  } catch {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "must be a repository-relative path without wildcards" });
+    return z.NEVER;
+  }
+});
+
 const KNOWN_TOOLCHAINS = ["node", "node-python"] as const;
 
 const toolchainSchema = z.enum(KNOWN_TOOLCHAINS);
@@ -124,6 +134,10 @@ const codingProfileFields = {
     .min(1)
     .max(MAX_PROTECTED_PATHS)
     .transform((paths) => [...new Set(paths)]),
+  collectExclude: z
+    .array(collectExcludePathSchema)
+    .max(MAX_COLLECT_EXCLUDE_PATHS)
+    .transform((paths) => [...new Set(paths)]),
 };
 
 export const CodingProfileSchema = z
@@ -136,6 +150,7 @@ export const CodingProfileSchema = z
     timeoutSec: codingProfileFields.timeoutSec.default(1800),
     allowedEgress: codingProfileFields.allowedEgress.default([]),
     protectedPaths: codingProfileFields.protectedPaths.default([...DEFAULT_PROTECTED_PATHS]),
+    collectExclude: codingProfileFields.collectExclude.default([]),
     toolchain: codingProfileFields.toolchain.default("node"),
     toolchainVersion: codingProfileFields.toolchainVersion.default(null),
     workerImageRef: codingProfileFields.workerImageRef.default(null),
@@ -153,6 +168,7 @@ export const CodingProfilePatchSchema = z
     timeoutSec: codingProfileFields.timeoutSec.optional(),
     allowedEgress: codingProfileFields.allowedEgress.optional(),
     protectedPaths: codingProfileFields.protectedPaths.optional(),
+    collectExclude: codingProfileFields.collectExclude.optional(),
     toolchain: codingProfileFields.toolchain.optional(),
     toolchainVersion: codingProfileFields.toolchainVersion.optional(),
     workerImageRef: codingProfileFields.workerImageRef.optional(),
