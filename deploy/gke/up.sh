@@ -36,7 +36,7 @@ done
 TF_DIR="deploy/gke"
 OVERLAY="deploy/kind-coding/manifests/overlays/gke-autopilot"
 NAMESPACE="wardby-coding"
-TOTAL_STEPS=11
+TOTAL_STEPS=12
 
 : "${HOSTNAME:?set HOSTNAME to the hostname the MCP endpoint is published on (e.g. app.example.com)}"
 
@@ -253,7 +253,7 @@ migration_failed() {
     fi
   fi
   if echo "$migrate_logs" | grep -qi "permission denied"; then
-    echo "up.sh: the database grants look missing; run deploy/gke/bootstrap-database-iam.sh once." >&2
+    echo "up.sh: the database grants look missing; run deploy/gke/bootstrap-database-iam.sh (docs/getting-started-gke.md, \"Database login\")." >&2
   fi
   exit 1
 }
@@ -311,7 +311,64 @@ echo "==> 10/${TOTAL_STEPS} wait for rollouts"
 kubectl -n "$NAMESPACE" rollout status deploy/wardby-coding-proxy --timeout=300s
 kubectl -n "$NAMESPACE" rollout status deploy/wardby-control-plane --timeout=600s
 
-echo "==> 11/${TOTAL_STEPS} verify the public endpoint"
+echo "==> 11/${TOTAL_STEPS} prove the new pods can use the database"
+# A Ready pod has not necessarily touched the database: the control plane and
+# the coding proxy each run one query through their own Prisma client, Auth
+# Proxy sidecar and database role. The query runs in the container itself
+# (runtime image, WORKDIR /app, where require finds @prisma/client), with the
+# pod's own DATABASE_URL, which is never printed: only "... reads the
+# database" or the error message, with any connection URL in it masked.
+#
+# The pod is picked explicitly rather than via deploy/<name>: rollout status
+# has returned, so the only Running pods not being deleted belong to the new
+# ReplicaSet, while a draining old pod could otherwise be the one exec picks.
+new_pod() {
+  kubectl -n "$NAMESPACE" get pods -l "app.kubernetes.io/name=$1" \
+    -o jsonpath='{range .items[*]}{.metadata.name} {.status.phase} {.metadata.deletionTimestamp}{"\n"}{end}' \
+    | awk '$2 == "Running" && $3 == "" { print $1; exit }'
+}
+database_roundtrip() {
+  local app="$1" container="$2" table="$3" label="$4" pod out script
+  script='const { PrismaClient } = require("@prisma/client");
+const mask = (m) => String(m).replace(/postgres(ql)?:\/\/[^\s\x60\x27"]+/gi, "<database url>");
+setTimeout(() => { console.error("no answer from the database in 30s"); process.exit(1); }, 30000);
+new PrismaClient().$queryRawUnsafe(`SELECT 1 FROM "'"$table"'" LIMIT 1`).then(
+  () => process.exit(0),
+  (e) => { console.error(mask(e && e.message ? e.message : e)); process.exit(1); },
+);'
+  pod="$(new_pod "$app")"
+  if [[ -z "$pod" ]]; then
+    echo "up.sh: no running ${app} pod to check." >&2
+    return 1
+  fi
+  if out="$(kubectl -n "$NAMESPACE" exec "pod/${pod}" -c "$container" -- node --input-type=commonjs -e "$script" 2>&1)"; then
+    echo "    ${label} reads the database"
+    return 0
+  fi
+  echo "up.sh: the ${label} (pod ${pod}) cannot use the database:" >&2
+  echo "${out:-(no output)}" >&2
+  echo "--- cloud-sql-proxy sidecar, last 20 lines ---" >&2
+  kubectl -n "$NAMESPACE" logs "pod/${pod}" -c cloud-sql-proxy --tail=20 >&2 || true
+  return 1
+}
+DATABASE_OK=true
+database_roundtrip wardby-control-plane control-plane Agent "control plane" || DATABASE_OK=false
+database_roundtrip wardby-coding-proxy proxy CodingProxySession "coding proxy" || DATABASE_OK=false
+if ! $DATABASE_OK; then
+  cat >&2 <<EOF
+up.sh: the new pods cannot use the database. While the password login is still
+enabled, this restores the previous version:
+  kubectl -n ${NAMESPACE} rollout undo deploy/wardby-control-plane
+  kubectl -n ${NAMESPACE} rollout undo deploy/wardby-coding-proxy
+"permission denied" means the grants are missing or incomplete. On a fresh
+install the coding proxy's are expected to be missing until the bootstrap runs
+again after the first migrations: run deploy/gke/bootstrap-database-iam.sh
+--password-from-stdin, then up.sh (docs/getting-started-gke.md, "Database login").
+EOF
+  exit 1
+fi
+
+echo "==> 12/${TOTAL_STEPS} verify the public endpoint"
 # A finished rollout proves the pods are Ready, not that the load balancer routes
 # to them or that authentication is enforced. These are the same checks an
 # operator would run by hand, made to fail the deploy instead of scrolling past.
