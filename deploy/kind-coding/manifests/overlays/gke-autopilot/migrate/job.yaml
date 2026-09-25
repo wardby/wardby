@@ -1,0 +1,102 @@
+# The schema migration, run once before the control plane and coding proxy
+# roll out, under the `wardby-migrator` identity (migrator.yaml) instead of
+# the app's own. `wardby-migrate-job` is a placeholder: up.sh substitutes a
+# fresh `wardby-migrate-<unix time>` name on every apply, since a completed
+# Job's spec is immutable and a fixed name would collide on the next deploy.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wardby-migrate-job
+  namespace: wardby-coding
+  labels:
+    app.kubernetes.io/name: wardby-migrate
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  # A Workload Identity or IAM misconfiguration keeps the cloud-sql-proxy sidecar
+  # from ever starting, which would otherwise leave the Job waiting forever.
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wardby-migrate
+    spec:
+      serviceAccountName: wardby-migrator
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Keep this image digest in step with the other three Auth Proxy sidecars: ../control-plane.yaml, ../proxy-cloudsql.yaml and deploy/gke/bootstrap-grants-job.yaml.
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.25.4@sha256:88501f0a695a586988add1b8a206fdf3f29f9a1a3deeb9b45ef2b1481ea6be83
+          # A native sidecar: starts before the app, stops after it, and does
+          # not keep a Job from completing.
+          restartPolicy: Always
+          args:
+            - --auto-iam-authn
+            - --private-ip
+            - --address=127.0.0.1
+            - --port=5432
+            - --structured-logs
+            - --health-check
+            - --http-address=0.0.0.0
+            - --http-port=9090
+            - --exit-zero-on-sigterm
+            - wardby-instance-connection-name
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: 9090
+            periodSeconds: 2
+            failureThreshold: 60
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 100Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 100Mi
+      containers:
+        # `prisma migrate deploy`. Needs the migration image: the runtime
+        # stage deliberately has no prisma CLI (deploy/Dockerfile asserts its
+        # absence).
+        - name: migrate
+          image: wardby-migration
+          command: ["npm", "run", "prisma:migrate"]
+          env:
+            # Password-less: the Auth Proxy sidecar above logs in as this
+            # pod's Google identity (wardby-migrator).
+            - name: DATABASE_URL
+              value: wardby-migrator-database-url
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+              ephemeral-storage: 2Gi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+              ephemeral-storage: 2Gi
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 3Gi

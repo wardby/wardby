@@ -68,3 +68,32 @@ output "secret_name_prefix" {
   description = "Prefix of the Secret Manager secret names; up.sh passes it to seed-secrets.mjs and the SecretStore manifests."
   value       = var.name_prefix
 }
+
+output "instance_connection_name" {
+  description = "project:region:instance, for the Cloud SQL Auth Proxy."
+  value       = google_sql_database_instance.main.connection_name
+}
+
+output "app_service_account" {
+  value = google_service_account.database["app"].email
+}
+
+output "migrator_service_account" {
+  value = google_service_account.database["migrator"].email
+}
+
+output "proxy_service_account" {
+  value = google_service_account.database["proxy"].email
+}
+
+output "app_database_user" {
+  value = google_sql_user.iam["app"].name
+}
+
+output "migrator_database_user" {
+  value = google_sql_user.iam["migrator"].name
+}
+
+output "proxy_database_user" {
+  value = google_sql_user.iam["proxy"].name
+}

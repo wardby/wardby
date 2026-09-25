@@ -1,0 +1,63 @@
+# GKE only: the coding proxy logs in to Cloud SQL as its own Google identity,
+# whose database role reaches only the budget ledger (deploy/gke/database-grants.sql).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wardby-coding-proxy
+  namespace: wardby-coding
+  annotations:
+    iam.gke.io/gcp-service-account: wardby-proxy-gsa-email
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-coding-proxy
+  namespace: wardby-coding
+spec:
+  template:
+    spec:
+      initContainers:
+        # Keep this image digest in step with the other three Auth Proxy sidecars: control-plane.yaml, migrate/job.yaml and deploy/gke/bootstrap-grants-job.yaml.
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.25.4@sha256:88501f0a695a586988add1b8a206fdf3f29f9a1a3deeb9b45ef2b1481ea6be83
+          # A native sidecar: starts before the app, stops after it, and does
+          # not keep a Job from completing.
+          restartPolicy: Always
+          args:
+            - --auto-iam-authn
+            - --private-ip
+            - --address=127.0.0.1
+            - --port=5432
+            - --structured-logs
+            - --health-check
+            - --http-address=0.0.0.0
+            - --http-port=9090
+            - --exit-zero-on-sigterm
+            - wardby-instance-connection-name
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: 9090
+            periodSeconds: 2
+            failureThreshold: 60
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 100Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 100Mi
+      containers:
+        - name: proxy
+          env:
+            # Overrides DATABASE_URL from the Secret (kept for rollback until PR 2).
+            - name: DATABASE_URL
+              value: wardby-proxy-database-url
