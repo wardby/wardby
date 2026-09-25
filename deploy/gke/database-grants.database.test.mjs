@@ -2,6 +2,10 @@
 // proxy can do everything its ledger does and nothing else, the app can read
 // and write data but not change the schema, and the migrator acts as the owner.
 // Runs in CI (DATABASE_URL set); the test user must be able to create roles.
+// The test renders the script against per-run copies of the wardby_app /
+// wardby_proxy group roles (t_wardby_app_<suffix> / t_wardby_proxy_<suffix>),
+// so it never creates, drops, or otherwise touches the real group roles a
+// live bootstrap created, and concurrent runs of this suite don't collide.
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { PrismaClient } from "@prisma/client";
@@ -11,13 +15,16 @@ import { PrismaProxyLedger } from "../../src/providers/coding-proxy/prisma-ledge
 const GRANTS = readFileSync(new URL("./database-grants.sql", import.meta.url), "utf8");
 const suffix = randomUUID().slice(0, 8);
 const roles = { app: `t_app_${suffix}`, proxy: `t_proxy_${suffix}`, migrator: `t_migrator_${suffix}` };
+const groups = { app: `t_wardby_app_${suffix}`, proxy: `t_wardby_proxy_${suffix}` };
 const PASSWORD = "test-only-grants";
 
 function render(owner) {
   return GRANTS.replaceAll("{{owner}}", owner)
     .replaceAll("{{migrator}}", roles.migrator)
     .replaceAll("{{app}}", roles.app)
-    .replaceAll("{{proxy}}", roles.proxy);
+    .replaceAll("{{proxy}}", roles.proxy)
+    .replace(/\bwardby_app\b/g, groups.app)
+    .replace(/\bwardby_proxy\b/g, groups.proxy);
 }
 // Each statement in the SQL file ends with a "-- ;;" line (the file has a DO
 // block with inner semicolons, so splitting on ';' would break it).
@@ -57,7 +64,7 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
     await admin.codingRun.deleteMany({ where: { runId } });
     await admin.run.deleteMany({ where: { id: runId } });
     await admin.agent.deleteMany({ where: { id: agentId } });
-    for (const role of [...Object.values(roles), "wardby_app", "wardby_proxy"]) {
+    for (const role of [...Object.values(roles), ...Object.values(groups)]) {
       await admin.$executeRawUnsafe(`DROP OWNED BY "${role}"`);
       await admin.$executeRawUnsafe(`DROP ROLE IF EXISTS "${role}"`);
     }
