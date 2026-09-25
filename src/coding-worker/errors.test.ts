@@ -33,14 +33,14 @@ describe("safeOutputIssues", () => {
   it("names the failing schema paths and codes", () => {
     const error = outputFailure({
       ...valid,
-      tag: "Add 20 jokes",
+      summary: "   ",
       tests: [{ command: "python -m pytest\npython -m ruff check .", outcome: "passed" }],
     });
-    expect(safeOutputIssues(error)?.sort()).toEqual(["tag:invalid_string", "tests.0.command:custom"]);
+    expect(safeOutputIssues(error)?.sort()).toEqual(["summary:custom", "tests.0.command:custom"]);
   });
 
   it("never carries the model's values or invented key names", () => {
-    const error = outputFailure({ ...valid, summary: "", tag: "SECRET VALUE", SECRETKEY: "SECRET VALUE" });
+    const error = outputFailure({ ...valid, summary: "SECRET VALUE\u0000", SECRETKEY: "SECRET VALUE" });
     const issues = safeOutputIssues(error);
     expect(issues).toContain("$:unrecognized_keys");
     expect(JSON.stringify(issues)).not.toMatch(/SECRET/);

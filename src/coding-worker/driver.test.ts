@@ -210,6 +210,7 @@ describe("CODING_OUTPUT_JSON_SCHEMA", () => {
     // Getting this wrong (tag was once absent from "required") makes OpenAI reject every request
     // with an HTTP 400 before the model runs at all, regardless of whether a tag is even relevant.
     expect(CODING_OUTPUT_JSON_SCHEMA.required).toEqual(Object.keys(CODING_OUTPUT_JSON_SCHEMA.properties));
-    expect(CODING_OUTPUT_JSON_SCHEMA.properties.tag).toEqual({ type: ["string", "null"] });
+    expect(CODING_OUTPUT_JSON_SCHEMA.properties.tag).toMatchObject({ type: ["string", "null"] });
+    expect(CODING_OUTPUT_JSON_SCHEMA.properties.tag.description).toContain("32 characters");
   });
 });
