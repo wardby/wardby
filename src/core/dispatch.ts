@@ -76,10 +76,23 @@ export interface DispatchRunResult {
   task?: Task;
 }
 
-function isSerializationConflict(err: unknown): boolean {
+/**
+ * A PostgreSQL serialization failure (SQLSTATE 40001) in the Serializable
+ * persist transaction. On a model query Prisma reports it as P2034. On a raw
+ * statement ($queryRaw, e.g. the FOR UPDATE SKIP LOCKED below, or anything a
+ * beforePersist callback runs) it is P2010, and with the pg driver adapter
+ * (Prisma 7) the SQLSTATE sits at meta.driverAdapterError.cause.originalCode.
+ * Prisma 6's engine put it at meta.code; that shape is still accepted.
+ */
+export function isSerializationConflict(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
-  const candidate = err as { code?: unknown; meta?: { code?: unknown } };
-  return candidate.code === "P2034" || (candidate.code === "P2010" && candidate.meta?.code === "40001");
+  const candidate = err as {
+    code?: unknown;
+    meta?: { code?: unknown; driverAdapterError?: { cause?: { originalCode?: unknown } } };
+  };
+  if (candidate.code === "P2034") return true;
+  if (candidate.code !== "P2010") return false;
+  return candidate.meta?.driverAdapterError?.cause?.originalCode === "40001" || candidate.meta?.code === "40001";
 }
 
 /**
