@@ -26,6 +26,7 @@ export interface ProxySession {
   deadlineAt: Date;
   budgetUsd: number;
   status: ProxySessionStatus;
+  registryTokenHash?: string | null;
 }
 
 export interface ProxyRequest {
@@ -51,6 +52,7 @@ export interface CreateProxySessionInput {
   allowedModels: string[];
   deadlineAt: Date;
   budgetUsd: number;
+  registryTokenHash: string;
 }
 
 export interface ReserveProxyRequestInput {

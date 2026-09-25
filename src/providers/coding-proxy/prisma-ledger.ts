@@ -25,6 +25,7 @@ interface SessionRow {
   deadlineAt: Date;
   budgetUsd: unknown;
   status: string;
+  registryTokenHash: string | null;
 }
 
 interface RequestRow {
@@ -63,6 +64,7 @@ function sessionFromRow(row: SessionRow): ProxySession {
     deadlineAt: row.deadlineAt,
     budgetUsd: Number(row.budgetUsd),
     status: row.status as ProxySessionStatus,
+    registryTokenHash: row.registryTokenHash,
   };
 }
 
@@ -111,16 +113,16 @@ export class PrismaProxyLedger implements ProxyLedger {
     await this.db.$executeRaw`
       INSERT INTO "CodingProxySession"
         ("id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt",
-         "budgetUsd", "status", "createdAt", "updatedAt")
+         "budgetUsd", "status", "registryTokenHash", "createdAt", "updatedAt")
       VALUES
         (${input.id}, ${input.runId}, ${input.capabilityHash}, ${input.credentialRef}, ${input.protocol}, ${models}::jsonb,
-         ${input.deadlineAt}, ${input.budgetUsd}, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ${input.deadlineAt}, ${input.budgetUsd}, 'active', ${input.registryTokenHash}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `;
   }
 
   async findSessionByCapabilityHash(capabilityHash: string): Promise<ProxySession | null> {
     const rows = await this.db.$queryRaw<SessionRow[]>`
-      SELECT "id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt", "budgetUsd", "status"
+      SELECT "id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt", "budgetUsd", "status", "registryTokenHash"
       FROM "CodingProxySession" WHERE "capabilityHash" = ${capabilityHash}
     `;
     return rows[0] ? sessionFromRow(rows[0]) : null;

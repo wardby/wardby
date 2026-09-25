@@ -7,9 +7,11 @@ import {
   CodingProxyError,
   CLAUDE_CODE_ANTHROPIC_BETAS,
   PROXY_DEFAULT_MAX_OUTPUT_TOKENS,
+  capabilityHash,
   type CreatedCodingProxySession,
   type ProxyResponseSink,
 } from "./proxy.js";
+import { deriveRegistryToken } from "../../coding/registry/token.js";
 import type { ModelPricing } from "../llm/pricing.js";
 import type { ProxyAuditEvent, ProxyProtocol } from "./types.js";
 
@@ -165,6 +167,12 @@ describe("CodingProxy", () => {
       background: false,
     });
     expect(h.events.find((event) => event.type === "request.reserved")?.reservationUsd).toBeGreaterThan(0);
+  });
+
+  it("stores the hash of a registry-only token derived from each new capability", async () => {
+    const h = await harness();
+    const session = await h.ledger.findSessionByCapabilityHash(capabilityHash(h.session.capability));
+    expect(session?.registryTokenHash).toBe(capabilityHash(deriveRegistryToken(h.session.capability)));
   });
 
   it("rejects invalid capabilities and models without resolving credentials or calling upstream", async () => {
