@@ -676,6 +676,7 @@ export class ContainerExecutor implements Executor {
         baseRef: profile.baseRef,
         headRef: run.headRef,
         protectedPaths: profile.protectedPaths,
+        collectExclude: [...normalizeCollectExclusions(run.collectExclude).paths],
         continuation: run.rootCodingRunId ? { rootRunId: run.rootCodingRunId } : undefined,
       };
     } catch (error) {
@@ -906,12 +907,19 @@ export class ContainerExecutor implements Executor {
   private preflightForCleanup(run: ContainerRunSnapshot): VcsPrepareInput | null {
     if (!Array.isArray(run.protectedPaths) || !run.protectedPaths.every((path) => typeof path === "string"))
       return null;
+    let collectExclude: string[];
+    try {
+      collectExclude = [...normalizeCollectExclusions(run.collectExclude).paths];
+    } catch {
+      return null;
+    }
     return {
       runId: run.runId,
       repository: run.repository,
       baseRef: run.baseRef,
       headRef: run.headRef,
       protectedPaths: run.protectedPaths,
+      collectExclude,
       continuation: run.rootCodingRunId ? { rootRunId: run.rootCodingRunId } : undefined,
     };
   }

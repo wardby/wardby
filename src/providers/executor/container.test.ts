@@ -269,6 +269,7 @@ class FakeVcs implements VcsProvider {
     return {
       id: `vcs-${input.runId}`,
       ...input,
+      collectExclude: input.collectExclude ?? [],
       baseCommit: "a".repeat(40),
       workspacePath: join(this.root, input.runId, "workspace"),
       gitMetadataPath: join(this.root, input.runId, "git"),
