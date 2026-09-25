@@ -413,7 +413,7 @@ cat <<EOF
 Done. The control plane is running in ${CLUSTER}.
 
   MCP endpoint : https://${HOSTNAME}/mcp
-  database     : ${DB_IP}:5432 (private IP, no public address)
+  database     : ${DB_IP} (private IP, reached only through the Auth Proxy)
   images       : ${REGISTRY}
   secrets      : Secret Manager, prefix ${SECRET_PREFIX} (synced by External Secrets)
 
@@ -435,9 +435,7 @@ Images before this deploy:
 ${PREVIOUS_IMAGES:-  (none: first deploy)}
 Migrations only go forward, so a rollback is safe only while the schema change it
 rolls back over was additive. See docs/getting-started-gke.md, "Roll back".
-While the password login is still enabled, rollout undo restores service
-because port 5432 to the database stays open (control-plane.yaml,
-proxy-database-egress.yaml) alongside the Auth Proxy's 3307 -- but it only
-reverts the Deployments, not any NetworkPolicy: a change to the database
-egress rules themselves is not undone by rollout undo.
+rollout undo reverts only the Deployments' images and pod templates -- there is
+no password path to fall back to any more. It does not touch any NetworkPolicy:
+a change to the database egress rules themselves is not undone by rollout undo.
 EOF

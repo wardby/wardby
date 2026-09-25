@@ -9,19 +9,21 @@
 #   deploy/gke/bootstrap-database-iam.sh --force-rotate         # emergency only
 #   ... --check                                                  # dry run, any mode
 #
-# Default: sets a random owner password through the Cloud SQL Admin API (creating
-# the owner if it does not exist), uses it once, then resets it to another random
-# value that is never stored. The reset runs on every exit, including a failed
+# Default -- the path for a new deployment, and for reapplying grants on an
+# existing one (e.g. once the coding proxy's ledger table exists): sets a
+# random owner password through the Cloud SQL Admin API (creating the owner if
+# it does not exist), uses it once, then resets it to another random value
+# that is never stored. The reset runs on every exit, including a failed
 # grant. --password-from-stdin: uses the given current password and leaves it
-# unchanged -- for moving a running deployment, whose pods still use it, to IAM
-# login.
+# unchanged -- for moving an older deployment, whose pods still hold a
+# password DATABASE_URL, to IAM login.
 #
 # Default mode refuses while the Secret wardby-control-plane-env still has a
-# DATABASE_URL key: the running pods still log in with the owner password, and
-# changing it would cut them off. Use --password-from-stdin then, or finish
-# retiring the password first. --force-rotate (default mode only) overrides
-# that check -- an emergency measure that cuts off any pod still using the
-# password.
+# DATABASE_URL key: that means an older, not-yet-migrated deployment whose
+# pods still log in with the owner password, and changing it would cut them
+# off. Use --password-from-stdin to move that deployment to IAM login instead.
+# --force-rotate (default mode only) overrides that check -- an emergency
+# measure that cuts off any pod still using the password.
 #
 # The grants run in one transaction: a statement the database refuses leaves
 # nothing applied. --check runs them in a transaction that is then rolled back,
@@ -105,10 +107,10 @@ if ! $FROM_STDIN && ! $FORCE_ROTATE; then
   if ((url_bytes > 0)); then
     cat >&2 <<EOF
 bootstrap: refusing to change the ${OWNER} password: Secret wardby-control-plane-env
-still has a DATABASE_URL, so the running pods still log in with this password.
-Use --password-from-stdin with the current password, or finish retiring the
-password first. Pass --force-rotate only in an emergency, knowing it cuts off
-any pod still using the password.
+still has a DATABASE_URL, so this is an older deployment whose running pods
+still log in with this password. Use --password-from-stdin with the current
+password to move it to IAM login. Pass --force-rotate only in an emergency,
+knowing it cuts off any pod still using the password.
 EOF
     exit 1
   fi

@@ -58,6 +58,7 @@ spec:
       containers:
         - name: proxy
           env:
-            # Overrides DATABASE_URL from the Secret (kept for rollback until PR 2).
+            # This is the only source of DATABASE_URL -- the Secret
+            # (wardby-coding-proxy-env) no longer carries one.
             - name: DATABASE_URL
               value: wardby-proxy-database-url
