@@ -79,6 +79,7 @@ gcloud services enable \
   cloudresourcemanager.googleapis.com \
   compute.googleapis.com \
   container.googleapis.com \
+  iam.googleapis.com \
   networksecurity.googleapis.com \
   secretmanager.googleapis.com \
   servicenetworking.googleapis.com \
@@ -97,10 +98,10 @@ Set `project_id`, `region`, and the VPC/subnetwork. The selected network **must
 be the network used by the cluster** because private-services peering is not
 transitive.
 
-Use a remote Terraform backend for shared or production deployments. A local
-state file contains the generated database password (until IAM
-database authentication replaces it) and must not be committed. It contains no
-other secret: Terraform creates the Secret Manager secrets empty.
+Use a remote Terraform backend for shared or production deployments. Until the
+password is retired (a follow-up change), a local state file contains the
+generated database password; use a remote backend and protect it. It contains
+no other secret: Terraform creates the Secret Manager secrets empty.
 
 Review before applying:
 
@@ -225,6 +226,54 @@ gcloud compute addresses describe wardby-control-plane \
 Allow DNS and the managed certificate to converge before treating an HTTPS
 failure as an application failure.
 
+### Database login
+
+Each workload authenticates to Cloud SQL as its own Google service account,
+through the Cloud SQL Auth Proxy, via Workload Identity from one Kubernetes
+service account. What each may do inside the database comes from a `NOLOGIN`
+group role in `deploy/gke/database-grants.sql`:
+
+| Workload      | Google service account   | Kubernetes service account | May do                                                                                                       |
+| ------------- | ------------------------ | -------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Control plane | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app`: read/write every table                                                                         |
+| Coding proxy  | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy`: only its budget ledger — `CodingProxySession`/`CodingProxyRequest`, plus three `Run` columns |
+| Migrations    | `<name_prefix>-migrator` | `wardby-migrator`          | Acts as the table owner (`SET ROLE`), so `prisma migrate deploy` can alter and create tables                 |
+
+Apply the grants once, after the first `up.sh` has created the namespace, and
+again whenever `database-grants.sql` changes:
+
+```sh
+deploy/gke/bootstrap-database-iam.sh
+```
+
+With no flags this sets a one-time password on the built-in owner through the
+Cloud SQL Admin API, applies the grants, and resets the password to a value
+nobody holds. It refuses to run this way while Secret
+`wardby-control-plane-env` still has a `DATABASE_URL` key: that means the
+running pods still log in with that password, and changing it under them would
+cut them off. `--force-rotate` overrides the refusal and is an emergency-only
+option — it does cut off any pod still using the password.
+
+For an existing deployment still on password login, the cutover order is:
+
+1. Set `connector_enforcement = "NOT_REQUIRED"` in `terraform.tfvars`, then
+   `terraform apply`.
+2. Feed the current password to the bootstrap without ever displaying it, for
+   example straight from Secret Manager:
+
+   ```sh
+   gcloud secrets versions access latest --secret wardby-database-url \
+       --project=YOUR_PROJECT_ID \
+     | sed -n 's#.*://[^:]*:\([^@]*\)@.*#\1#p' \
+     | deploy/gke/bootstrap-database-iam.sh --password-from-stdin
+   ```
+
+   (Substitute your `name_prefix` if you changed it from the default
+   `wardby`.) `--password-from-stdin` uses that password once and never
+   changes it.
+
+3. Run `deploy/gke/up.sh`.
+
 ## 7. Verify
 
 ```sh
@@ -286,6 +335,11 @@ serving for 30 seconds while the load balancer drains it. `up.sh` checks the
 endpoint only after the old pod is gone, and requires a steady minute of
 successful responses.
 
+Migrations run as a `wardby-migrate-<unix time>` Job before the Deployments
+roll; if it fails, `up.sh` prints the `migrate` and `cloud-sql-proxy` container
+logs (and, if those are empty or the Job timed out, the Job's and pod's
+events), then stops.
+
 ### Roll back
 
 Images are pinned by digest, so undoing a rollout restores exactly what ran
@@ -295,6 +349,12 @@ before. `up.sh` prints the previous digests at the end of every deploy.
 kubectl -n wardby-coding rollout undo deploy/wardby-control-plane
 kubectl -n wardby-coding rollout undo deploy/wardby-coding-proxy
 ```
+
+While password login is still enabled (see "Database login" above), `rollout
+undo` restores service: port 5432 to the database stays open alongside the
+Auth Proxy's 3307, so a rolled-back pod that still expects a password can still
+log in. Once the password is retired, only the Auth Proxy path remains, and a
+rollback is safe only for a version that still speaks IAM login.
 
 Database migrations only go forward: a rollback does not undo a schema change.
 That is safe while every migration is additive (new tables, nullable columns,
