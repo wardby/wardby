@@ -38,11 +38,6 @@ resource "google_service_networking_connection" "private_vpc" {
   reserved_peering_ranges = [google_compute_global_address.private_ip.name]
 }
 
-resource "random_password" "db" {
-  length  = 32
-  special = false
-}
-
 resource "google_sql_database_instance" "main" {
   name             = "${var.name_prefix}-control-plane"
   project          = var.project_id
@@ -115,15 +110,21 @@ resource "google_sql_database" "app" {
   project  = var.project_id
 }
 
-resource "google_sql_user" "app" {
-  name     = var.database_user
-  instance = google_sql_database_instance.main.name
-  project  = var.project_id
-  password = random_password.db.result
+# The password-login user is gone from this module: every workload now
+# authenticates through database-iam.tf's IAM users. The built-in owner
+# (var.database_user) still exists and still owns every table -- it is
+# managed by bootstrap-database-iam.sh, which creates it on a new deployment
+# and sets its password through the Cloud SQL Admin API only when needed
+# (e.g. the one-off `--password-from-stdin` cutover), never storing it here
+# or anywhere else. `removed` (not a plain delete) tells Terraform to drop
+# this resource from state without touching the live user, matching the
+# `deletion_policy = "ABANDON"` this resource used to carry: once migrations
+# have created tables owned by this user, Postgres refuses to drop it, and a
+# destroy would fail partway through with objects already gone.
+removed {
+  from = google_sql_user.app
 
-  # ABANDON, for a reason learned the hard way in deploy/gcp (PR #42): once
-  # migrations have created tables owned by this user, Postgres refuses to drop
-  # it, and `terraform destroy` fails partway through with objects already gone.
-  # Abandoning the user leaves it on an instance that is being deleted anyway.
-  deletion_policy = "ABANDON"
+  lifecycle {
+    destroy = false
+  }
 }
