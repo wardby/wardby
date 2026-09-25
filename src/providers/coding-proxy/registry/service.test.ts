@@ -7,7 +7,7 @@ import {
   type PackageMetadata,
 } from "../../../coding/registry/types.js";
 import { capabilityHash } from "../proxy.js";
-import { MemoryRegistryStore, type RegistryStore } from "./store.js";
+import { MemoryRegistryStore, type RegistryFetchRecord, type RegistryStore } from "./store.js";
 import { RegistryService } from "./service.js";
 
 const DAY = 86_400_000;
@@ -314,5 +314,60 @@ describe("RegistryService", () => {
       (fetch) => fetch.outcome === "refused" && fetch.reason === "wardby_package_limit",
     );
     expect(refused).toHaveLength(1);
+  });
+
+  it("holds a download's reservation until its served record actually lands, not just until its bytes finish (round 2 ordering)", async () => {
+    // If release() ran before the served recordFetch resolved, there would
+    // be a window — between the release and the row actually landing in the
+    // store — where neither `inFlight` nor store.usage() counts this file,
+    // and a concurrent request could be admitted past maxFiles. Gating the
+    // served recordFetch call lets this test hold open exactly that window
+    // and prove nothing slips through it.
+    let releaseRecord: () => void = () => {};
+    const recordGate = new Promise<void>((resolve) => {
+      releaseRecord = resolve;
+    });
+    let recordCalled: () => void = () => {};
+    const recordCalledPromise = new Promise<void>((resolve) => {
+      recordCalled = resolve;
+    });
+    class GatedStore extends MemoryRegistryStore {
+      async recordFetch(record: RegistryFetchRecord): Promise<void> {
+        if (record.outcome === "served") {
+          recordCalled();
+          await recordGate;
+        }
+        return super.recordFetch(record);
+      }
+    }
+    const store = new GatedStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { fake: ["app"] },
+      policy: {},
+    });
+    const registry = new RegistryService({
+      adapters: new Map([["fake", fakeAdapter]]),
+      store,
+      audit: { audit: async () => ({ withheld: new Map(), reported: new Map() }) },
+      upstream: async () => new Response(tarball),
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 1, idleTimeoutMs: 1_000 },
+      now: () => NOW,
+    });
+
+    const responseA = await registry.handle(request("dl/app/1.0.0"));
+    if (!("stream" in responseA)) throw new Error("expected a stream");
+    const bodyAPromise = new Response(responseA.stream).arrayBuffer();
+
+    // Download A has read all of its bytes and is now blocked inside the
+    // gated served recordFetch call — release() has not run yet.
+    await recordCalledPromise;
+    const responseB = await registry.handle(request("dl/app/1.0.0"));
+    expect(responseB).toMatchObject({ status: 429 });
+
+    releaseRecord();
+    expect(new Uint8Array(await bodyAPromise)).toEqual(tarball);
   });
 });

@@ -362,27 +362,50 @@ export class RegistryService {
         if (outcome.done) {
           if (hash && hash.digest("hex") !== file.integrity!.hex) return fail(controller, "wardby_integrity_mismatch");
           settled = true;
-          release();
-          await store.recordFetch({
-            runId: context.runId,
-            ecosystem: adapter.id,
-            name,
-            version: file.version,
-            filename: file.filename,
-            integrity: file.integrity ? `${file.integrity.algorithm}:${file.integrity.hex}` : undefined,
-            sizeBytes: bytes,
-            outcome: "served",
-          });
-          if (adapter.dependenciesFromFile && buffered.length > 0) {
-            const body = Buffer.concat(buffered);
-            const names = await adapter.dependenciesFromFile(route, body).catch(() => []);
-            await store.addAllowances(
-              context.runId,
-              adapter.id,
-              names.map((dependency) => adapter.normalizeName(dependency)),
+          // Persist the served record (and the dependency allowances it
+          // grows) BEFORE releasing the in-flight reservation. Releasing
+          // first would open a window, between the release and the row
+          // actually landing in the store, where neither `inFlight` nor
+          // store.usage() counts this file — a concurrent request could be
+          // admitted past maxFiles/maxTotalBytes in that window, reopening
+          // the race the reservation exists to close. `release()` still
+          // runs unconditionally (finally), so a failed record never leaks
+          // the reservation; it errors the controller instead of closing it,
+          // the same way every other failure path here does.
+          try {
+            await store.recordFetch({
+              runId: context.runId,
+              ecosystem: adapter.id,
+              name,
+              version: file.version,
+              filename: file.filename,
+              integrity: file.integrity ? `${file.integrity.algorithm}:${file.integrity.hex}` : undefined,
+              sizeBytes: bytes,
+              outcome: "served",
+            });
+            if (adapter.dependenciesFromFile && buffered.length > 0) {
+              const body = Buffer.concat(buffered);
+              const names = await adapter.dependenciesFromFile(route, body).catch(() => []);
+              await store.addAllowances(
+                context.runId,
+                adapter.id,
+                names.map((dependency) => adapter.normalizeName(dependency)),
+              );
+            }
+            controller.close();
+          } catch (error) {
+            controller.error(
+              error instanceof RegistryError
+                ? error
+                : new RegistryError(
+                    502,
+                    "wardby_upstream_error",
+                    `failed to record the completed download of "${file.filename}"`,
+                  ),
             );
+          } finally {
+            release();
           }
-          controller.close();
           return;
         }
         const { value } = outcome;
