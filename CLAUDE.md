@@ -44,7 +44,7 @@ unconfirmed.
 
 ## Database / Prisma — STRICT
 
-PostgreSQL + Prisma 6. Migrations are the source of truth for the deployed
+PostgreSQL + Prisma 7. Migrations are the source of truth for the deployed
 schema; `prisma/schema.prisma` is the declarative model. **The two must never
 drift.** Follow these rules exactly — they are not optional.
 

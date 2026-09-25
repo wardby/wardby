@@ -1,10 +1,10 @@
 # Security deployment and recovery
 
 The secured self-hosted HTTP implementation is protected by database, HTTP,
-browser, migration, and review gates. SR-009 is resolved (2026-09-25): the
-published package no longer installs the Prisma CLI, so `npm install
-@wardby/cli` is audit-clean, and the repository's development tree is clean by
-reviewed overrides. Deployment controls in this guide still apply.
+browser, migration, and review gates. `npm install @wardby/cli` installs
+audit-clean: the published package no longer installs the Prisma CLI, and the
+repository's development tree is clean by reviewed overrides. Deployment
+controls in this guide still apply.
 
 ## Supported runtime and delegated operation
 
@@ -207,8 +207,9 @@ Public/non-owner tool listings expose only id/name/description; owners retain
 their source and schema. Private agents are indistinguishable from missing IDs.
 
 Cancellation stops bridge delivery, sleep timers, and in-flight network work.
-Prisma 6's query interface does not accept an AbortSignal: an already-dispatched
-database operation may finish after sandbox cancellation. Its returned data is
+Prisma's query interface does not accept an AbortSignal (still true on Prisma
+7's `pg` driver adapter): an already-dispatched database operation may finish
+after sandbox cancellation. Its returned data is
 bounded before entering Node, but cancellation is not a transaction rollback.
 Set a short database statement/lock timeout on the dedicated application role,
 bound connection pools and concurrent invocations, and review a cancellable
@@ -264,7 +265,7 @@ Per-run record ConfigMaps currently require operator-managed garbage collection,
 Claude Code is not supported by the Kubernetes launcher, and the real-cluster
 suite does not yet cover every Docker containment scenario.
 
-## Images and dependency exception
+## Images and dependencies
 
 ```sh
 docker build -f deploy/Dockerfile --target runtime -t wardby-runtime .
@@ -279,40 +280,9 @@ omits optional peers before installation: `@prisma/client` declares the CLI as
 an optional peer. The migration image keeps the full build tree -- the Prisma
 CLI and `prisma.config.ts`.
 
-### SR-009 (resolved 2026-09-25)
-
-SR-009 was GHSA-ggr8-5vv4-36mx: `deepmerge-ts` below 8.0.0, reached through
-`prisma` -> `@prisma/config` -> `deepmerge-ts`. See the
-[advisory](https://github.com/advisories/GHSA-ggr8-5vv4-36mx). It affected
-consumers because Prisma 6 needed the CLI at install time (`prisma generate`
-ran in `postinstall`), so `prisma` was a runtime dependency of `@wardby/cli`,
-and npm ignores a dependency's `overrides`.
-
-**Resolved by the Prisma 7 upgrade.** The client is now generated at build time
-and shipped compiled inside `dist/`; `prisma` is a devDependency and there is
-no `postinstall`. `wardby quickstart` and `wardby doctor` run the exact pinned
-CLI on demand (`npx --yes prisma@7.10.0 migrate deploy|status`) with a config
-file shipped in the package (`prisma/migrate.config.mjs`), with the database URL
-in the child's environment, never argv. Evidence, from `npm run test:package`
-(the packed tarball installed in a clean `linux/amd64` `node:24` container):
-`npm ls --all` has no `prisma`, `@prisma/config`, `deepmerge-ts` or `mysql2`,
-and `npm audit` for that install reports 0 vulnerabilities of any severity. The
-same test runs the quickstart migration path against a throwaway database and
-requires `migrate status` to report the schema up to date. The acceptance test
-fails if any of those packages reappears or audit reports a high or critical
-advisory.
-
-**What the clean audit does not cover.** It covers `npm install @wardby/cli`.
-`wardby quickstart` and `wardby doctor` separately fetch `prisma@7.10.0` via
-npx onto the user's machine; npx ignores this package's `overrides` and has no
-lockfile, so that cached CLI still carries `deepmerge-ts` 7.1.5 and `mysql2`
-3.15.3. Exploitability is low -- the CLI only loads wardby's own shipped config
-and never takes Prisma Studio's MySQL path -- and that CLI never enters the
-installed package or the running server.
-
 **Development tree (repository, CI, build and migration images).** The Prisma
-CLI still carries two flagged packages, both forced to patched versions by
-`overrides` in `package.json`:
+CLI (a devDependency since the Prisma 7 upgrade) still carries two flagged
+packages, both forced to patched versions by `overrides` in `package.json`:
 
 ```json
 "overrides": { "deepmerge-ts": "8.0.2", "mysql2": "3.24.4" }
