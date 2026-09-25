@@ -286,39 +286,35 @@ deployment.
 `REQUIRED`: it refuses any connection that does not come through the Auth
 Proxy or a Cloud SQL connector, and with port 5432 to the instance closed in
 every NetworkPolicy, there's no route left for a plain Postgres connection to
-even attempt. Set it to `NOT_REQUIRED` only while moving an older deployment
-off password login, below.
+even attempt. Leave it at the default; an older deployment still on password
+login moves off it on an earlier revision of this module, below.
 
 ### Moving an older deployment
 
 A deployment still on password login — from before this module retired it —
-moves over in two stages, because real pods are already serving traffic
+can't adopt this revision directly: this revision no longer syncs the
+password `DATABASE_URL`, closes port 5432 and refuses non-Auth-Proxy
+connections, which would cut off pods still logging in with the password.
+It moves over in stages, because real pods are already serving traffic
 throughout.
 
-**1. Adopt this module's Terraform without breaking password login yet.**
-Set `connector_enforcement = "NOT_REQUIRED"` in `terraform.tfvars`,
-overriding the new default, then `terraform apply`. That apply only forgets
-the old password-login user from state (`removed`, not destroyed, in
-`cloudsql.tf`) and changes nothing live.
-
-**2. Cut the running pods to IAM login, with the password still there as a
-fallback.** Feed the owner's current password without ever displaying it,
-straight from Secret Manager's `<name_prefix>-database-url` (this secret still
-exists on a deployment that hasn't retired the password yet):
-
-```sh
-gcloud secrets versions access latest --secret wardby-database-url \
-    --project=YOUR_PROJECT_ID \
-  | sed -n 's#.*://[^:]*:\([^@]*\)@.*#\1#p' \
-  | deploy/gke/bootstrap-database-iam.sh --password-from-stdin --check
-```
-
-(Substitute your `name_prefix` if you changed it from the default `wardby`.)
-`--check` proves every grant applies and changes nothing. The same command
-without `--check` applies them for real; the running pods are undisturbed,
-since their password is unchanged. Then `deploy/gke/up.sh` rolls out
-password-less pods and proves the control plane and the coding proxy each
-read the database through their own IAM login before it finishes.
+**1–2. Cut the running pods to IAM login, on the revision before this one.**
+Check out the revision of this module that added IAM login, before the
+password was retired: the merge of pull request #83 into `main`.
+`git log --oneline --first-parent main -- deploy/gke` lists the merges that
+changed this module, newest first; it's the one titled
+`Merge pull request #83 ...`, just below the merge that retired the password
+(`git log --oneline --merges --grep='#83' main` finds it directly). Then
+`git checkout <that commit>` and follow that revision's own
+`docs/getting-started-gke.md`, "Database login", and its order for "an
+existing deployment still on password login": `bootstrap-database-iam.sh
+--password-from-stdin --check`, the same without `--check`, then `up.sh`.
+That rolls out password-less pods while the password still works as a
+fallback, and proves the control plane and the coding proxy each read the
+database through their own IAM login. That revision's
+`connector_enforcement` default is still `NOT_REQUIRED`, so nothing that
+still uses the password is cut off. Then return to this revision
+(`git checkout main`) for the last stage.
 
 **3. Retire the password**, once every pod speaks IAM login and this change
 has merged to `main`:
@@ -330,10 +326,13 @@ has merged to `main`:
    longer creates or reads it. Deleting it by hand first, before the next
    step, is what lets Terraform drop it from state instead of trying to
    destroy it.
-3. `terraform plan`: expect the generated password destroyed, the
-   `database-url` secret and its IAM binding gone from state (already
-   deleted by hand), the old password-login user forgotten (not destroyed),
-   `connector_enforcement` moving to `REQUIRED`, and no other destroy. Review
+3. Remove any `connector_enforcement` line from `terraform.tfvars` (or set
+   it to `REQUIRED`), so the new default takes effect. Then `terraform plan`:
+   expect the generated password destroyed, the `database-url` secret and
+   its IAM binding gone from state (already deleted by hand), the old
+   password-login user forgotten (not destroyed), `connector_enforcement`
+   moving to `REQUIRED` on the instance (updated in place, not replaced),
+   and no other destroy. Review
    the plan, then apply only once it matches that. If apply still fails
    trying to destroy the `database-url` secret, the secret wasn't actually
    deleted in step 2 — delete it and re-apply. Never turn off

@@ -155,8 +155,9 @@ A brand-new project, in order:
 
 Two bootstrap runs, not one: a grant on a named table can't apply before the
 migration that creates it has run. See `docs/getting-started-gke.md`,
-"Moving an older deployment", for the `--password-from-stdin` order that
-applies to a deployment still on password login.
+"Moving an older deployment", for a deployment still on password login: it
+moves to IAM login with `--password-from-stdin` on the earlier revision of
+this module that added IAM login, then returns here to retire the password.
 
 The bootstrap has two modes:
 
@@ -184,8 +185,11 @@ changing nothing. Run it before the real run on a live deployment.
 `REQUIRED` refuses any connection that does not come through the Auth Proxy
 or a Cloud SQL connector — so a leaked password would be useless on the
 network anyway, and it is the default now that every workload connects
-through the Auth Proxy and no password login remains. Set it to
-`NOT_REQUIRED` only while moving an older deployment off password login.
+through the Auth Proxy and no password login remains. Leave it at the
+default: an older deployment still on password login moves off it on the
+earlier revision (whose default is still `NOT_REQUIRED`), and removes any
+`connector_enforcement` override from `terraform.tfvars` when it retires the
+password here.
 
 After the rollout, `up.sh` runs one query through the control plane's and the
 coding proxy's own database login, and fails the deploy if either cannot read
