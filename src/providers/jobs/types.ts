@@ -11,6 +11,8 @@ export interface JobResourceLimits {
   diskMb: number;
 }
 
+import type { CollectExclusions } from "../../coding/collect-exclude.js";
+
 export interface JobSpec {
   kind: "coding-agent";
   runId: string;
@@ -23,6 +25,8 @@ export interface JobSpec {
   timeoutSec: number;
   limits: JobResourceLimits;
   labels: Record<string, string>;
+  /** Workspace paths never collected; absent on legacy specs, which get the built-in names. */
+  collectExclude?: CollectExclusions;
 }
 
 /** Opaque provider reference. Callers persist both fields exactly as given. */

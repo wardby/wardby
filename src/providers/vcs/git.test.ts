@@ -21,6 +21,7 @@ import {
   type GitCommandRunner,
 } from "./git.js";
 import type { VcsPrepareInput } from "./types.js";
+import { collectExclusions, gitExcludePathspecs } from "../../coding/collect-exclude.js";
 
 const TOKEN = "ghs_abcdefghijklmnopqrstuvwxyz-1234567890.example";
 const BASE_SHA = "a".repeat(40);
@@ -294,6 +295,25 @@ describe("GitVcsProvider", () => {
     const prepared = await provider.prepareWorkspace(input);
     await mkdir(resolve(prepared.workspacePath, "vendor", ".git"), { recursive: true });
     await expect(provider.finalizeChanges(prepared)).rejects.toThrow("vcs_nested_repository");
+  });
+
+  it("stages with exclude pathspecs so excluded paths are neither added nor deleted", async () => {
+    const { provider, git, input } = await harness();
+    const prepared = await provider.prepareWorkspace({ ...input, collectExclude: ["web/dist"] });
+    await provider.finalizeChanges(prepared);
+    const add = git.calls.find((call) => call.args.includes("add"));
+    expect(add?.args.slice(add.args.indexOf("--"))).toEqual([
+      "--",
+      ":/",
+      ...gitExcludePathspecs(collectExclusions(["web/dist"])),
+    ]);
+  });
+
+  it("carries collectExclude through recovery and rejects a tampered handle", async () => {
+    const { provider, input } = await harness();
+    const prepared = await provider.prepareWorkspace({ ...input, collectExclude: ["web/dist"] });
+    await expect(provider.recoverWorkspace({ ...input, collectExclude: ["web/dist"] })).resolves.toEqual(prepared);
+    await expect(provider.finalizeChanges({ ...prepared, collectExclude: ["../escape"] })).rejects.toThrow();
   });
 
   it("rejects unexpected fetch or push remotes", async () => {

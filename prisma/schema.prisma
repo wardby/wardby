@@ -341,6 +341,7 @@ model CodingAgentProfile {
   timeoutSec               Int     @default(1800)
   allowedEgress            Json
   protectedPaths           Json
+  collectExclude           Json    @default("[]")
   toolchain                String  @default("node")
   toolchainVersion         String?
   workerImageRef           String?
@@ -362,6 +363,7 @@ model CodingRun {
   timeoutSec        Int
   allowedEgress     Json
   protectedPaths    Json
+  collectExclude    Json                @default("[]")
   jobBackend        String?
   jobHandle         String?
   result            Json?

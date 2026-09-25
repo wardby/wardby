@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { lstat, mkdir, opendir, readFile, readlink, realpath, rm } from "node:fs/promises";
 import { isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gitExcludePathspecs, normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import type { Writable } from "node:stream";
 import {
@@ -422,7 +423,15 @@ export class GitVcsProvider implements VcsProvider {
     await this.inspectWorkspace(prepared.workspacePath);
     await this.assertRemote(prepared);
     await this.assertSafeLocalConfig(prepared.gitMetadataPath);
-    await this.gitFor(prepared, ["add", "--all", "--", ":/"]);
+    // Excluded paths (src/coding/collect-exclude.ts) are never collected from the worker, so
+    // they are also neither added nor deleted here: tracked files under them stay untouched.
+    await this.gitFor(prepared, [
+      "add",
+      "--all",
+      "--",
+      ":/",
+      ...gitExcludePathspecs(normalizeCollectExclusions(prepared.collectExclude)),
+    ]);
     const changed = nullSeparated(
       (
         await this.gitFor(prepared, [
@@ -621,7 +630,8 @@ export class GitVcsProvider implements VcsProvider {
     }
     const protectedPaths = [...new Set(input.protectedPaths.map(validateProtectedPath))];
     if (protectedPaths.length === 0 || protectedPaths.length > 128) throw new Error("vcs_protected_paths_invalid");
-    return { runId: input.runId, repository, baseRef, headRef, protectedPaths, continuation };
+    const collectExclude = [...normalizeCollectExclusions(input.collectExclude ?? []).paths];
+    return { runId: input.runId, repository, baseRef, headRef, protectedPaths, collectExclude, continuation };
   }
 
   private expectedPaths(runId: string): { runRoot: string; workspacePath: string; gitMetadataPath: string } {
@@ -648,6 +658,8 @@ export class GitVcsProvider implements VcsProvider {
       workspace.gitMetadataPath !== expected.gitMetadataPath ||
       workspace.protectedPaths.length !== normalized.protectedPaths.length ||
       workspace.protectedPaths.some((path, index) => path !== normalized.protectedPaths[index]) ||
+      workspace.collectExclude.length !== normalized.collectExclude.length ||
+      workspace.collectExclude.some((path, index) => path !== normalized.collectExclude[index]) ||
       workspace.continuation?.rootRunId !== normalized.continuation?.rootRunId
     ) {
       throw new Error("vcs_workspace_handle_invalid");

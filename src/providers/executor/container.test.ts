@@ -69,6 +69,7 @@ function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSn
     timeoutSec: 900,
     allowedEgress: [],
     protectedPaths: [".github/workflows/**", "CODEOWNERS"],
+    collectExclude: [],
     rootCodingRunId: null,
     budgetUsd: 2,
     tokensIn: 0,
@@ -268,6 +269,7 @@ class FakeVcs implements VcsProvider {
     return {
       id: `vcs-${input.runId}`,
       ...input,
+      collectExclude: input.collectExclude ?? [],
       baseCommit: "a".repeat(40),
       workspacePath: join(this.root, input.runId, "workspace"),
       gitMetadataPath: join(this.root, input.runId, "git"),
@@ -935,6 +937,17 @@ describe("jobSpec image selection", () => {
     const { executor, jobs } = await harness({ workerImage: null });
     await executor.start("run-1");
     expect(jobs.lastSpec?.image).toBe(IMAGE);
+  });
+});
+
+describe("collection exclusions", () => {
+  it("passes the run's collection exclusions to the job spec", async () => {
+    const created = await harness({ collectExclude: ["web/dist"] });
+    await created.executor.start("run-1");
+    expect(created.jobs.lastSpec?.collectExclude).toEqual({
+      names: expect.arrayContaining(["node_modules", ".venv"]),
+      paths: ["web/dist"],
+    });
   });
 });
 

@@ -4,6 +4,8 @@ export interface VcsPrepareInput {
   baseRef: string;
   headRef: string;
   protectedPaths: string[];
+  /** Repository-relative paths never collected, in addition to the built-in names. */
+  collectExclude?: string[];
   /**
    * Revision-in-place: set when headRef is an EXISTING branch to continue
    * rather than a fresh one
@@ -37,6 +39,7 @@ export interface PreparedWorkspace {
   workspacePath: string;
   gitMetadataPath: string;
   protectedPaths: string[];
+  collectExclude: string[];
   continuation?: { rootRunId: string };
 }
 

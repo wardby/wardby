@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import type { V1Pod } from "@kubernetes/client-node";
 import tar from "tar-stream";
+import { collectExclusions, tarExcludeArgs } from "../../coding/collect-exclude.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { jobLauncherContract } from "./contract-suite.js";
 import { FakeKubernetesApi } from "./fake-kubernetes-api.js";
@@ -299,6 +300,59 @@ describe("KubernetesJobLauncher", () => {
     };
     await h.launcher.materializeWorkspace(handle, target);
     expect(await readFile(join(target, "changed.txt"), "utf8")).toBe("new content");
+  });
+
+  it("excludes dependency folders and per-agent paths from the keeper archive", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch({
+      ...h.spec,
+      collectExclude: { names: ["node_modules"], paths: ["web/dist"] },
+    });
+    await h.finish(handle);
+    const target = join(h.workspaceRoot, h.spec.runId, "workspace");
+    let archiveCommand: string[] = [];
+    h.api.onExec = async ({ command, stdout }) => {
+      if (command[0] === "tar" && command.includes("-cf")) {
+        archiveCommand = command;
+        const pack = tar.pack();
+        pack.entry({ name: "./kept.txt" }, "kept");
+        pack.finalize();
+        (pack as unknown as Readable).pipe(stdout as PassThrough);
+        await new Promise((r) => (stdout as PassThrough).once("finish", r));
+      } else stdout?.end();
+      return 0;
+    };
+    await h.launcher.materializeWorkspace(handle, target);
+    // Names always come from the current built-in list; only the paths come from the spec.
+    expect(archiveCommand).toEqual([
+      "tar",
+      "-C",
+      expect.any(String),
+      ...tarExcludeArgs(collectExclusions(["web/dist"])),
+      "-cf",
+      "-",
+      ".",
+    ]);
+  });
+
+  it("falls back to the built-in exclusions for a record launched without any", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.finish(handle);
+    let archiveCommand: string[] = [];
+    h.api.onExec = async ({ command, stdout }) => {
+      if (command[0] === "tar" && command.includes("-cf")) {
+        archiveCommand = command;
+        const pack = tar.pack();
+        pack.finalize();
+        (pack as unknown as Readable).pipe(stdout as PassThrough);
+        await new Promise((r) => (stdout as PassThrough).once("finish", r));
+      } else stdout?.end();
+      return 0;
+    };
+    await h.launcher.materializeWorkspace(handle, join(h.workspaceRoot, h.spec.runId, "workspace"));
+    expect(archiveCommand).toContain("--exclude=node_modules");
+    expect(archiveCommand).toContain("--exclude=.venv");
   });
 
   it("refuses Claude Code specs until Plan 2b", async () => {
