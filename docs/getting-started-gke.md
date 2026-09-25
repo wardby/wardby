@@ -227,10 +227,11 @@ gcloud compute addresses describe wardby-control-plane \
 Allow DNS and the managed certificate to converge before treating an HTTPS
 failure as an application failure.
 
-On a brand-new project, don't run `up.sh` first: `bootstrap-database-iam.sh`
-has to grant the migrator before any migration can run. See "Database login"
-below for the exact order, including the database check `up.sh` doesn't pass
-until a second bootstrap run has granted the coding proxy too.
+On a brand-new project, run `terraform apply` and then
+`bootstrap-database-iam.sh` before `up.sh`: the bootstrap has to grant the
+migrator before any migration can run. See "Database login" below for the
+exact order, including the database check `up.sh` doesn't pass until a second
+bootstrap run has granted the coding proxy too.
 
 ### Database login
 
@@ -258,11 +259,14 @@ ever stored, printed, or passed as a process argument.
 
 A brand-new project runs, in this order:
 
-1. `terraform apply` (or let `up.sh` do it) — creates the instance and the
-   three IAM database users.
-2. `deploy/gke/bootstrap-database-iam.sh` (default mode) — creates the owner
-   and applies the migrator's (and the app's) grants. The coding proxy's
-   ledger tables don't exist yet, so its grants are skipped: expected.
+1. `terraform -chdir=deploy/gke apply` — creates the cluster, the instance
+   and the three IAM database users. Run it yourself rather than through
+   `up.sh`, which would go on to the migrations before the migrator has its
+   grants.
+2. `deploy/gke/bootstrap-database-iam.sh` (default mode) — fetches the
+   cluster's kubectl credentials if you don't have them yet, creates the
+   owner, and applies the migrator's (and the app's) grants. The coding
+   proxy's ledger tables don't exist yet, so its grants are skipped: expected.
 3. `deploy/gke/up.sh` — applies the migrations and rolls out, then stops at
    the database check: the coding proxy's grants are on tables that did not
    exist in step 2.

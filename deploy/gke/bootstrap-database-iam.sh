@@ -37,7 +37,8 @@
 # length of the run.
 #
 # KUBE_CONTEXT overrides the kubectl context (default: the one
-# `gcloud container clusters get-credentials` creates for the Terraform cluster).
+# `gcloud container clusters get-credentials` creates for the Terraform cluster,
+# fetched here if it does not exist yet).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -81,7 +82,8 @@ MIGRATOR_GSA="$(out migrator_service_account)"
 MIGRATOR_USER="$(out migrator_database_user)"
 APP_USER="$(out app_database_user)"
 PROXY_USER="$(out proxy_database_user)"
-KUBE_CONTEXT="${KUBE_CONTEXT:-gke_${PROJECT_ID}_${REGION}_${CLUSTER}}"
+DEFAULT_KUBE_CONTEXT="gke_${PROJECT_ID}_${REGION}_${CLUSTER}"
+KUBE_CONTEXT="${KUBE_CONTEXT:-$DEFAULT_KUBE_CONTEXT}"
 # Every call is bounded, so an unresponsive API server cannot hang the script
 # (or its cleanup, which ignores signals) indefinitely.
 k() { kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=30s "$@"; }
@@ -96,6 +98,28 @@ if $FROM_STDIN; then
     IFS= read -r PASSWORD || true
   fi
   [[ -n "$PASSWORD" ]] || { echo "bootstrap: no password on stdin." >&2; exit 1; }
+fi
+
+# A new deployment runs this before up.sh ever has, so there may be no kubectl
+# context for the cluster yet: fetch it the way up.sh's step 2 does. Like
+# up.sh (which then switches to it explicitly), this accepts that
+# get-credentials also makes it the current context; it only happens when the
+# context did not exist. Nothing here reads stdin. The context list is read
+# into a variable first: grep -q on a pipe could end kubectl early, and
+# pipefail would count that as not found.
+has_context() {
+  local contexts
+  contexts="$(kubectl config get-contexts -o name </dev/null)" || return 1
+  grep -qxF "$KUBE_CONTEXT" <<<"$contexts"
+}
+if ! has_context; then
+  if [[ "$KUBE_CONTEXT" != "$DEFAULT_KUBE_CONTEXT" ]]; then
+    echo "bootstrap: kubectl context ${KUBE_CONTEXT} (from KUBE_CONTEXT) does not exist." >&2
+    exit 1
+  fi
+  echo "==> kubectl context for ${CLUSTER}"
+  gcloud container clusters get-credentials "$CLUSTER" --region "$REGION" --project "$PROJECT_ID" </dev/null >/dev/null
+  has_context || { echo "bootstrap: no kubectl context ${KUBE_CONTEXT} after get-credentials." >&2; exit 1; }
 fi
 
 # Default mode changes the owner password. Refuse while the running pods still

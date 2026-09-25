@@ -139,9 +139,12 @@ migrations have created them, which is why a brand-new project runs it twice.
 
 A brand-new project, in order:
 
-1. `terraform apply` — the instance and the three IAM database users.
-2. `bootstrap-database-iam.sh` (default mode) — creates the built-in owner
-   and applies the migrator's (and the app's) grants. The coding proxy's
+1. `terraform apply` — the instance and the three IAM database users. Run
+   it directly, not through `up.sh`: `up.sh` would go on to the migrations
+   before the migrator has its grants.
+2. `bootstrap-database-iam.sh` (default mode) — fetches the cluster's kubectl
+   credentials if they're missing, creates the built-in owner and applies the
+   migrator's (and the app's) grants. The coding proxy's
    ledger tables don't exist yet, so its grants are skipped: expected.
 3. `up.sh` — migrations and rollout; its database check then stops it,
    because the coding proxy's grants are on tables that did not exist in
