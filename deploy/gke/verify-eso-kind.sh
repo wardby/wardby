@@ -67,7 +67,7 @@ fake_store() {
   {
     printf 'apiVersion: external-secrets.io/v1\nkind: SecretStore\nmetadata:\n  name: gcp-secret-manager\n  namespace: %s\n' "$ns"
     printf 'spec:\n  provider:\n    fake:\n      data:\n'
-    for id in database-url openai-api-key anthropic-api-key secret-app-key github-app-id \
+    for id in openai-api-key anthropic-api-key secret-app-key github-app-id \
       github-app-private-key auth-signing-key auth-credential-hash-key; do
       printf '        - key: test-%s\n          value: dummy-%s\n' "$id" "$id"
     done
@@ -143,7 +143,7 @@ done
 [[ "$(uid_of wardby-control-plane-env)" != "$OLD_CP_UID" ]] || fail "control-plane Secret was not recreated (UID unchanged)"
 [[ "$(decoded wardby-control-plane-env AUTH_PROVIDER)" == "self-hosted" ]] || fail "AUTH_PROVIDER not merged"
 [[ "$(decoded wardby-control-plane-env SECRET_APP_KEY)" == "dummy-secret-app-key" ]] || fail "SECRET_APP_KEY not synced"
-[[ "$(decoded wardby-coding-proxy-env DATABASE_URL)" == "dummy-database-url" ]] || fail "DATABASE_URL not synced"
+[[ "$(decoded wardby-coding-proxy-env OPENAI_API_KEY)" == "dummy-openai-api-key" ]] || fail "OPENAI_API_KEY not synced"
 echo "    ok"
 
 echo "==> 3. release_unowned_secrets' delete + force-sync branch actually runs"

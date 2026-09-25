@@ -150,7 +150,7 @@ echo "==> 5/${TOTAL_STEPS} seed Secret Manager"
 # go over stdin and are never printed. Stops before writing anything if a value
 # has no source.
 node deploy/gke/seed-secrets.mjs --project "$PROJECT_ID" --prefix "$SECRET_PREFIX" \
-  --context "$KUBE_CONTEXT" --namespace "$NAMESPACE" --tf-dir "$TF_DIR"
+  --context "$KUBE_CONTEXT" --namespace "$NAMESPACE"
 
 echo "==> 6/${TOTAL_STEPS} External Secrets Operator ${ESO_CHART_VERSION}, scoped to ${NAMESPACE}"
 # The namespace first: the scoped chart creates its Role and RoleBinding in it.
@@ -187,8 +187,9 @@ if ! render_secrets external-secrets.yaml | kubectl apply -f - >/dev/null; then
   echo "up.sh: applying the ExternalSecrets failed after the hand-made Secrets were released; running pods are unaffected. Re-run up.sh to finish." >&2
   exit 1
 fi
-# Forces a sync and waits for a fresh one, so a database-url version that
-# step 5 just added is in the Secret before step 9 rolls the Deployments.
+# Forces a sync and waits for a fresh one, so a secret version that step 5
+# just added (e.g. a newly generated auth key) is in the Secret before step 9
+# rolls the Deployments.
 if ! wait_external_secrets_synced 180s wardby-coding-proxy-env wardby-control-plane-env; then
   echo "up.sh: the Secrets did not sync from Secret Manager; nothing else was applied." >&2
   exit 1

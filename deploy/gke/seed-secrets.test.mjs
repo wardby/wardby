@@ -46,24 +46,6 @@ describe("decideSeed", () => {
     expect(decision.action).toBe("error");
     expect(decision.message).toContain("GITHUB_APP_PRIVATE_KEY");
   });
-
-  it("adds database-url from Terraform only when it differs from the latest version", () => {
-    const db = entry("database-url");
-    expect(decideSeed(db, { hasVersion: true, latest: "u", terraform: "u", generate: never })).toEqual({
-      action: "keep",
-    });
-    expect(decideSeed(db, { hasVersion: true, latest: "old", terraform: "u", generate: never })).toEqual({
-      action: "add",
-      from: "terraform",
-      value: "u",
-    });
-    expect(decideSeed(db, { hasVersion: false, terraform: "u", generate: never })).toEqual({
-      action: "add",
-      from: "terraform",
-      value: "u",
-    });
-    expect(decideSeed(db, { hasVersion: false, terraform: "", generate: never }).action).toBe("error");
-  });
 });
 
 describe("generateHexKey", () => {
@@ -75,27 +57,24 @@ describe("generateHexKey", () => {
 });
 
 // A fake exec that answers the exact commands seed() issues and records them.
-function fakeExec({ versions = {}, cluster, terraform = "postgresql://db" }) {
+function fakeExec({ versions = {}, cluster }) {
   const calls = [];
   const exec = async (cmd, args, options = {}) => {
     calls.push({ cmd, args, input: options.input });
-    if (cmd === "terraform") return { code: 0, stdout: terraform, stderr: "" };
     if (cmd === "kubectl") {
       if (!cluster) return { code: 1, stdout: "", stderr: 'Error from server (NotFound): secrets "x" not found' };
       const data = Object.fromEntries(Object.entries(cluster).map(([k, v]) => [k, Buffer.from(v).toString("base64")]));
       return { code: 0, stdout: JSON.stringify({ data }), stderr: "" };
     }
-    const name = args[args.indexOf("versions") + 2] ?? args[args.indexOf("--secret") + 1];
+    const name = args[args.indexOf("versions") + 2];
     if (args.includes("list")) return { code: 0, stdout: versions[name] ? "1\n" : "", stderr: "" };
-    if (args.includes("access"))
-      return { code: 0, stdout: versions[args[args.indexOf("--secret") + 1]] ?? "", stderr: "" };
     if (args.includes("add")) return { code: 0, stdout: "", stderr: "" };
     throw new Error(`unexpected command ${cmd} ${args.join(" ")}`);
   };
   return { exec, calls };
 }
 
-const base = { project: "p", prefix: "wardby", context: "ctx", namespace: "wardby-coding", tfDir: "deploy/gke" };
+const base = { project: "p", prefix: "wardby", context: "ctx", namespace: "wardby-coding" };
 const fullEnv = {
   OPENAI_API_KEY: "sk-openai-secret",
   ANTHROPIC_API_KEY: "sk-ant-secret",
@@ -116,10 +95,10 @@ describe("seed", () => {
   it("never puts a secret value in a command's arguments", async () => {
     const { exec, calls } = fakeExec({ cluster: { AUTH_SIGNING_KEY: "b".repeat(64) } });
     await seed({ ...base, env: fullEnv, exec, generate: () => "c".repeat(64), log: () => {} });
-    const values = [...Object.values(fullEnv), "b".repeat(64), "c".repeat(64), "postgresql://db"];
+    const values = [...Object.values(fullEnv), "b".repeat(64), "c".repeat(64)];
     for (const call of calls) for (const value of values) expect(call.args.join(" ")).not.toContain(value);
     const added = calls.filter((c) => c.args.includes("add"));
-    expect(added).toHaveLength(8);
+    expect(added).toHaveLength(7);
     expect(added.every((c) => c.args.includes("--data-file=-") && typeof c.input === "string")).toBe(true);
   });
 
@@ -131,9 +110,7 @@ describe("seed", () => {
   });
 
   it("leaves secrets that already have versions alone", async () => {
-    const versions = Object.fromEntries(
-      SECRETS.map((s) => [`wardby-${s.id}`, s.id === "database-url" ? "postgresql://db" : "x"]),
-    );
+    const versions = Object.fromEntries(SECRETS.map((s) => [`wardby-${s.id}`, "x"]));
     const { exec, calls } = fakeExec({ versions });
     await seed({ ...base, env: {}, exec, generate: never, log: () => {} });
     expect(calls.some((c) => c.args.includes("add"))).toBe(false);
