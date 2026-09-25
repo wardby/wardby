@@ -70,7 +70,9 @@ MIGRATOR_USER="$(out migrator_database_user)"
 APP_USER="$(out app_database_user)"
 PROXY_USER="$(out proxy_database_user)"
 KUBE_CONTEXT="${KUBE_CONTEXT:-gke_${PROJECT_ID}_${REGION}_${CLUSTER}}"
-k() { kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" "$@"; }
+# Every call is bounded, so an unresponsive API server cannot hang the script
+# (or its cleanup, which ignores signals) indefinitely.
+k() { kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=30s "$@"; }
 
 # Read first, so nothing else on stdin can be mistaken for it.
 PASSWORD=""
@@ -202,13 +204,12 @@ set_owner_password() {
 PASSWORD_SET=false
 cleanup() {
   local rc=$?
-  # A second signal must not cut cleanup short: it deletes the Secret and resets
-  # the password.
+  # A second signal must not cut cleanup short: it resets the password and
+  # deletes the Secret.
   trap '' INT TERM HUP
   set +e
-  k delete secret wardby-database-bootstrap --ignore-not-found >/dev/null 2>&1
-  k delete job "$JOB" --ignore-not-found >/dev/null 2>&1
-  k delete configmap wardby-database-grants --ignore-not-found >/dev/null 2>&1
+  # The reset first: if the cluster calls below stall, all they leave behind is
+  # a Secret holding a password that no longer works.
   if $PASSWORD_SET; then
     if set_owner_password "$(openssl rand -hex 24)"; then
       echo "==> reset ${OWNER} to a password nobody holds"
@@ -217,6 +218,9 @@ cleanup() {
       rc=1
     fi
   fi
+  k delete secret wardby-database-bootstrap --ignore-not-found >/dev/null 2>&1
+  k delete job "$JOB" --ignore-not-found >/dev/null 2>&1
+  k delete configmap wardby-database-grants --ignore-not-found >/dev/null 2>&1
   PASSWORD=""
   unset PASSWORD
   exit "$rc"
