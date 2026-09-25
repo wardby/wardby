@@ -234,6 +234,9 @@ describe.skipIf(!databaseUrl)("claimDueRun (database)", () => {
     expect(runId).not.toBeNull();
     const run = await db.run.findUnique({ where: { id: runId! }, include: { codingRun: true } });
     expect(run?.executionManaged).toBe(true);
-    expect(run?.codingRun?.task).toBe("Update dependencies");
+    // The agent's own prompt ("sys") rides ahead of the default task; see composeCodingTask.
+    expect(run?.codingRun?.task).toBe(
+      "Standing instructions for this coding agent:\nsys\n\nRequest:\nUpdate dependencies",
+    );
   });
 });

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Executor } from "../providers/executor/types.js";
+import { MAX_CODING_TASK_BYTES } from "../coding/protocol.js";
 import { dispatchRun, type DispatchDb } from "./dispatch.js";
 
 function fakeDb(agent: Record<string, any>, seedCodingRuns: Record<string, any>[] = []) {
@@ -303,6 +304,54 @@ describe("dispatchRun", () => {
       runId: result?.run.id,
       task: "Fix the auth regression",
       baseRef: "release/2026.09",
+    });
+  });
+
+  describe("a coding agent's own instructions", () => {
+    function codingAgent(systemPrompt: string | null) {
+      return {
+        ...nativeAgent(),
+        kind: "coding",
+        systemPrompt,
+        codingProfile: {
+          provider: "codex",
+          repository: "openai/wardby",
+          baseRef: "main",
+          defaultTask: "Default task",
+          timeoutSec: 900,
+          allowedEgress: [],
+          protectedPaths: ["CODEOWNERS"],
+        },
+      };
+    }
+    const executor: Executor = { async start() {}, async stop() {} };
+
+    it("reach the worker ahead of the request, since the worker sees only the task text", async () => {
+      const agent = codingAgent("Run python -m pytest before finishing.");
+      const state = fakeDb(agent);
+      await dispatchRun({ db: state.db, executor, agentId: agent.id, codingTask: "Add 20 jokes" });
+
+      expect(state.codingRuns[0].task).toBe(
+        "Standing instructions for this coding agent:\nRun python -m pytest before finishing.\n\nRequest:\nAdd 20 jokes",
+      );
+    });
+
+    it("leave the task unchanged when the agent has none", async () => {
+      for (const systemPrompt of [null, "", "   "]) {
+        const agent = codingAgent(systemPrompt);
+        const state = fakeDb(agent);
+        await dispatchRun({ db: state.db, executor, agentId: agent.id, codingTask: "Add 20 jokes" });
+        expect(state.codingRuns[0].task).toBe("Add 20 jokes");
+      }
+    });
+
+    it("refuse a combination over the task limit instead of truncating either part", async () => {
+      const agent = codingAgent("x".repeat(MAX_CODING_TASK_BYTES - 10));
+      const state = fakeDb(agent);
+      await expect(
+        dispatchRun({ db: state.db, executor, agentId: agent.id, codingTask: "Add 20 jokes" }),
+      ).rejects.toThrow(/exceed the 16384-byte coding task limit/);
+      expect(state.codingRuns).toEqual([]);
     });
   });
 

@@ -5,6 +5,7 @@ import {
   CodingTaskInputSchema,
   normalizeGitHubRepository,
   publicCodingRunResult,
+  composeCodingTask,
 } from "../coding/protocol.js";
 import { assertCodingProviderModel } from "../coding/provider.js";
 import { logger } from "./logger.js";
@@ -146,8 +147,10 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
         if (agent.kind === "coding") {
           if (!agent.codingProfile) throw new Error(`Coding agent "${agent.id}" has no coding profile.`);
           assertCodingProviderModel(agent.codingProfile.provider, agent.model);
-          const task = options.codingTask ?? agent.codingProfile.defaultTask;
-          if (!task) throw new Error(`Coding agent "${agent.id}" requires a task.`);
+          const request = options.codingTask ?? agent.codingProfile.defaultTask;
+          if (!request) throw new Error(`Coding agent "${agent.id}" requires a task.`);
+          // The worker sees only the task text, so the agent's own instructions ride in it.
+          const task = composeCodingTask(agent.systemPrompt, request);
           const budgetUsd = options.budgetUsdOverride ?? Number(agent.budgetUsd);
 
           let baseRef = options.codingBaseRef ?? agent.codingProfile.baseRef;
