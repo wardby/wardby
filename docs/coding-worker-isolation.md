@@ -228,6 +228,15 @@ re-validates the tag independently. Linking an issue is not the tag's job: put
 a closing keyword such as `Resolves #37` in the task so the worker includes it
 in the summary, which becomes the pull request body.
 
+Some workspace folders are never collected from a run: `node_modules`, `.venv`,
+`venv`, `__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`, `.tox`,
+`.vite`, and `.cache`, at any depth, plus any repository-relative paths in the
+agent's `collectExclude` (for example `web/dist`). On Kubernetes the keeper's
+`tar` leaves them out, so they never leave the pod; on Docker they are removed
+from the staging copy before it is validated. They therefore never count toward
+the entry, size, symlink, or nested-repository checks, and Git staging excludes
+them too, so a tracked file under an excluded folder is left unchanged.
+
 Operator-only checks and cleanup remain available through the CLI:
 
 ```sh

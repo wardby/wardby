@@ -47,7 +47,7 @@ from taking part in workspace collection.
 | Where the allowlist lives | On the agent's coding profile.                                                                                       |
 | Who may change it         | New scope `packages:approve`, or `agents:admin`.                                                                     |
 | Safeguards                | Install scripts off; minimum release age; OSV vulnerability audit (fail closed); record and report.                  |
-| Collection skip rule      | Known dependency and cache folder names plus profile `collectExclude` globs, applied when the keeper builds the tar. |
+| Collection skip rule      | Known dependency and cache folder names plus profile `collectExclude` paths, applied when the keeper builds the tar. |
 | `allowedEgress`           | Removed: stored and validated but never enforced by any launcher, the proxy, or the worker.                          |
 
 ## 1. Configuration and data
@@ -68,9 +68,10 @@ from taking part in workspace collection.
 
 - **`packagePolicy`** — optional overrides. Initially `minReleaseAgeDays`
   (integer 0–30, default 3).
-- **`collectExclude`** — up to 64 relative globs skipped at collection, in
-  addition to the built-in list (section 4). No absolute paths, no `..`
-  segments.
+- **`collectExclude`** — up to 64 repository-relative paths (no wildcards)
+  skipped at collection, each with everything under it, in addition to the
+  built-in list (section 4). No absolute paths, no `..` segments. Literal
+  paths, because GNU tar and Git treat wildcards differently.
 
 ### Authorization
 
@@ -252,7 +253,7 @@ reason, for example:
 - Always, by folder name at any depth: `node_modules`, `.venv`, `venv`,
   `__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`, `.tox`, `.vite`,
   `.cache`.
-- The profile's `collectExclude` globs.
+- The profile's `collectExclude` paths (literal repository-relative paths; each excludes that path and everything under it).
 
 ### Where it is applied
 
@@ -260,10 +261,11 @@ reason, for example:
   so skipped folders never leave the pod and never reach `safeExtract`, the
   100,000-entry caps, the symlink and nested-repository checks, or the size
   limit.
-- **Docker:** `materializeWorkspace` currently uses `docker container cp` and
-  does not run `safeExtract`. It moves to the same keeper `tar` → `safeExtract`
-  path with the same exclusions, bringing Docker's checks level with
-  Kubernetes.
+- **Docker:** after `docker container cp` fills the staging copy, excluded
+  paths are removed from it (without following symlinks) before
+  `validateMaterializedWorkspace` runs. Moving Docker collection onto
+  `safeExtract` needs a streaming command runner and is left as a separate
+  hardening change.
 
 ### Commit
 
