@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "../../core/db.js";
 import { PostgresDatastore } from "./postgres.js";
 import { AppKeySecretCipher } from "../secrets/app-key.js";
 
@@ -15,7 +15,7 @@ if (!databaseUrl) {
 }
 
 describe.skipIf(!databaseUrl)("PostgresDatastore (database)", () => {
-  const prisma = new PrismaClient();
+  const prisma = createPrismaClient();
   const datastore = new PostgresDatastore(prisma);
   const agentIds: string[] = [];
 

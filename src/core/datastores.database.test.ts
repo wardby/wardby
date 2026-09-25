@@ -1,4 +1,5 @@
-import { PrismaClient, Prisma } from "@prisma/client";
+import { Prisma } from "#prisma";
+import { createPrismaClient } from "./db.js";
 import { afterAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 
@@ -10,7 +11,7 @@ import { randomUUID } from "node:crypto";
  * never proves the constraint actually exists in the deployed schema.
  */
 describe.skipIf(!process.env.DATABASE_URL)("AgentDatastore unique constraint (database)", () => {
-  const db = new PrismaClient();
+  const db = createPrismaClient();
   const agentId = "ads-agent-" + randomUUID();
   const dsA = "ads-ds-a-" + randomUUID();
   const dsB = "ads-ds-b-" + randomUUID();

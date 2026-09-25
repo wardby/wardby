@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { Prisma } from "@prisma/client";
+import { Prisma } from "#prisma";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
@@ -138,7 +138,7 @@ function fakeDb(
     ...transactionDb,
     $transaction: async <T>(callback: (tx: typeof transactionDb) => Promise<T>) => callback(transactionDb),
   };
-  return db as unknown as import("@prisma/client").PrismaClient;
+  return db as unknown as import("#prisma").PrismaClient;
 }
 
 function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {

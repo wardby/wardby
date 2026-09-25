@@ -7,7 +7,7 @@
  * Client since it never touches `contentTsv`.
  */
 
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import type { AgentMemorySearchHit, AgentMemoryStore } from "./types.js";
 import {
   MEMORY_CONTENT_MAX_BYTES,

@@ -1,4 +1,4 @@
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import type { Credentials } from "./credentials.js";
 export interface RateLimiter {
   check(bucket: string, identity: string, limit: number): Promise<void>;

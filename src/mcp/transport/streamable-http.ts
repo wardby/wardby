@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { randomUUID } from "node:crypto";
 import { createMcpHandler, type PerRequestResponseMode } from "@modelcontextprotocol/server";
 import { toNodeHandler, hostHeaderValidation } from "@modelcontextprotocol/node";
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import type { AuthProvider } from "../../providers/auth/types.js";
 import type { SelfHostedAuthProvider } from "../../providers/auth/self-hosted.js";
 import type { WardbyMcpServer } from "../server.js";

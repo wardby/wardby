@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
-import { Prisma } from "@prisma/client";
+import { Prisma } from "#prisma";
 import { buildMcpServer } from "../server.js";
 import { registerDatastoreTools } from "./datastore.js";
 import type { McpRequestContext } from "../context.js";
@@ -137,7 +137,7 @@ function fakeDb(agents: FakeAgentRow[]) {
         return { ...row, datastore: datastores.get(row.datastoreId) ?? null };
       },
     },
-  } as unknown as import("@prisma/client").PrismaClient;
+  } as unknown as import("#prisma").PrismaClient;
 }
 
 function fakeCtx(

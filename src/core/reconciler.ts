@@ -29,7 +29,7 @@
  * no-op, not a race.
  */
 
-import type { Prisma, PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import { HEARTBEAT_TIMEOUT_MS, RECONCILE_INTERVAL_MS } from "./timing.js";
 import { prisma as defaultDb } from "./db.js";

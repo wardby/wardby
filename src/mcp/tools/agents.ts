@@ -1,5 +1,5 @@
 /** Agent CRUD with scope checks in server.ts and ownership checks here. */
-import { Prisma, type CodingAgentProfile } from "@prisma/client";
+import { Prisma, type CodingAgentProfile } from "#prisma";
 import { z } from "zod";
 import { CodingProfilePatchSchema, CodingProfileSchema, type CodingProfile } from "../../coding/profile.js";
 import { codingProviderSupportsModel } from "../../coding/provider.js";

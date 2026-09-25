@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "../core/db.js";
 import { countUnattendedSchedules, unattendedSchedulesWarning } from "./unattended-schedules.js";
 
 describe("unattendedSchedulesWarning", () => {
@@ -14,7 +14,7 @@ describe("unattendedSchedulesWarning", () => {
 });
 
 describe.skipIf(!process.env.DATABASE_URL)("countUnattendedSchedules (database)", () => {
-  const db = new PrismaClient();
+  const db = createPrismaClient();
   const names: string[] = [];
   afterAll(async () => {
     await db.agent.deleteMany({ where: { name: { in: names } } });

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
-import { PrismaClient, type RunStatus } from "@prisma/client";
+import type { RunStatus } from "#prisma";
+import { createPrismaClient } from "../../core/db.js";
 import { createRunTask, getTask, cancelTask } from "./manager.js";
 
 // createRunTask/getTask/cancelTask read and write real Task + Run rows
@@ -19,7 +20,7 @@ if (!databaseUrl) {
 const TEST_PRINCIPAL_ID = "task-mgr-test-principal";
 
 describe.skipIf(!databaseUrl)("MCP task manager (database)", () => {
-  const db = new PrismaClient();
+  const db = createPrismaClient();
   const agentIds: string[] = [];
   const runIds: string[] = [];
   const taskIds: string[] = [];

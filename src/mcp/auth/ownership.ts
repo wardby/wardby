@@ -10,7 +10,7 @@
  * this module instead of re-deriving the null-handling itself, so changing
  * the policy again later is a change here, not an N-file sweep.
  */
-import type { PrismaClient, Tool } from "@prisma/client";
+import type { PrismaClient, Tool } from "#prisma";
 import { McpError } from "../errors.js";
 
 export function canRead(ownerId: string | null, principalId: string): boolean {

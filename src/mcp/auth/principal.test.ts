@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "../../core/db.js";
 import { resolvePrincipal } from "./principal.js";
 
 // Find-or-create semantics rely on a real unique-constraint upsert
@@ -17,7 +17,7 @@ if (!databaseUrl) {
 }
 
 describe.skipIf(!databaseUrl)("resolvePrincipal (database)", () => {
-  const db = new PrismaClient();
+  const db = createPrismaClient();
   const usedSubjects: string[] = [];
 
   function newSubject(): string {

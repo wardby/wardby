@@ -5,7 +5,7 @@
  * always carries an owner, so a deployment that later moves from stdio to
  * HTTP+OAuth doesn't orphan locally-authored agents.
  */
-import type { PrismaClient, Principal } from "@prisma/client";
+import type { PrismaClient, Principal } from "#prisma";
 import { requireSubject } from "../../providers/auth/subject.js";
 
 export async function resolvePrincipal(subject: string, db: PrismaClient): Promise<Principal> {

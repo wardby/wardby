@@ -4,8 +4,8 @@
  * from a validated bundle + reconciliation.
  */
 
-import type { PrismaClient } from "@prisma/client";
-import { Prisma } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
+import { Prisma } from "#prisma";
 import type { KeyObject } from "node:crypto";
 import type { Bundle } from "./bundle.js";
 import type { Reconciliation } from "./preflight.js";

@@ -89,7 +89,7 @@ function fakeDb(
     webhook: { findUnique: async ({ where }: { where: { id: string } }) => webhooks[where.id] ?? null },
     budgetGroup: { findUnique: async ({ where }: { where: { id: string } }) => budgetGroups[where.id] ?? null },
     tool: { findUnique: async ({ where }: { where: { id: string } }) => tools[where.id] ?? null },
-  } as unknown as import("@prisma/client").PrismaClient;
+  } as unknown as import("#prisma").PrismaClient;
 }
 
 describe("requireOwnedAgent", () => {

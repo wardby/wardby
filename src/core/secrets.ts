@@ -6,7 +6,7 @@
  * always resolve a name within one owner's (or, at get-time, one agent's)
  * scope, never globally.
  */
-import type { PrismaClient, Secret } from "@prisma/client";
+import type { PrismaClient, Secret } from "#prisma";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import { boundedString } from "../sandbox/bounded-json.js";
 

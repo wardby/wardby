@@ -1,4 +1,4 @@
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import { CODING_PROXY_ALIAS, CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "../jobs/docker-isolation.js";
 import { startDenyPortListener, type DenyPortListenerHandle } from "./deny-port.js";
 import { EnvironmentCredentialResolver } from "./environment-credentials.js";

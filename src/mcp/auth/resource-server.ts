@@ -4,7 +4,7 @@
  * AuthProvider (delegating | self-hosted) is active — both implement
  * verifyBearer, so this file never branches on auth mode.
  */
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import type { AuthProvider } from "../../providers/auth/types.js";
 import { resolvePrincipal } from "./principal.js";
 import { McpError, unauthorized, insufficientScope } from "../errors.js";

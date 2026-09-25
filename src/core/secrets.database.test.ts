@@ -1,9 +1,9 @@
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "./db.js";
 import { afterAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { buildSecretsAccessor } from "./secrets.js";
 describe.skipIf(!process.env.DATABASE_URL)("bounded legacy secret reads (database)", () => {
-  const db = new PrismaClient();
+  const db = createPrismaClient();
   const id = "secret-bound-" + randomUUID();
   afterAll(async () => {
     await db.agentSecret.deleteMany({ where: { agentId: id } });

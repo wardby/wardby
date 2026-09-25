@@ -1,7 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { requireSubject } from "./subject.js";
 import { resolvePrincipal } from "../../mcp/auth/principal.js";
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 
 it.each([undefined, null, 123, "", " \t\n", "a".repeat(513), "é".repeat(257)])(
   "rejects invalid subjects before database access: %j",

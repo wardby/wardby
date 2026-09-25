@@ -15,7 +15,7 @@
  * Expiry is swept lazily on every read and write via a `deleteMany` rather
  * than a timer, so an idle process holds no interval.
  */
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import { createSecret, type SecretMetadata } from "../../core/secrets.js";
 import type { SecretCipher } from "../../providers/secrets/types.js";
 

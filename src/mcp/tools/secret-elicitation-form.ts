@@ -6,7 +6,7 @@
  * CSP can forbid scripts outright rather than needing a nonce.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import type { SecretCipher } from "../../providers/secrets/types.js";
 import { fulfillSecretElicitation, type SecretElicitationPayload } from "./secret-elicitation.js";
 import { PAGE_STYLE } from "../shared/page-style.js";

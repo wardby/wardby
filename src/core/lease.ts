@@ -8,7 +8,7 @@
  * was — zero rows means someone else holds an unexpired lease.
  */
 
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 
 export type LeaseDb = Pick<PrismaClient, "$queryRaw">;
 

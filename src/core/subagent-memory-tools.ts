@@ -17,7 +17,7 @@
  * methods).
  */
 import { z } from "zod";
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import type { LoadedTool } from "../providers/engine/types.js";
 import type { AgentMemoryStore } from "../providers/memory/types.js";
 

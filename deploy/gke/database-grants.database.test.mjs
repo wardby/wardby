@@ -8,8 +8,8 @@
 // live bootstrap created, and concurrent runs of this suite don't collide.
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createPrismaClient } from "../../src/core/db.ts";
 import { PrismaProxyLedger } from "../../src/providers/coding-proxy/prisma-ledger.ts";
 
 const GRANTS = readFileSync(new URL("./database-grants.sql", import.meta.url), "utf8");
@@ -40,11 +40,11 @@ function clientAs(role) {
   const url = new URL(process.env.DATABASE_URL);
   url.username = role;
   url.password = PASSWORD;
-  return new PrismaClient({ datasources: { db: { url: url.toString() } } });
+  return createPrismaClient(url.toString());
 }
 
 describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", () => {
-  const admin = new PrismaClient();
+  const admin = createPrismaClient();
   let owner;
   const clients = [];
   const agentId = `grants-agent-${suffix}`;

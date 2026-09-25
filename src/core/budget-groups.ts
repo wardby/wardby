@@ -12,7 +12,7 @@
  * budget of 0, which the engine's turn-1 gate already refuses exactly
  * like any other zero/negative budget.
  */
-import type { Agent, BudgetGroup, PrismaClient } from "@prisma/client";
+import type { Agent, BudgetGroup, PrismaClient } from "#prisma";
 import { logger } from "./logger.js";
 
 const budgetGroupLog = logger.child({ module: "budget-groups" });

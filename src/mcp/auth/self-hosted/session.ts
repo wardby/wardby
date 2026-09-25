@@ -1,4 +1,4 @@
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import type { Credentials } from "./credentials.js";
 import { DAY, lockUser, type AuthDb } from "./credentials.js";
 

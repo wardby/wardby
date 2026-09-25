@@ -21,7 +21,7 @@ import { readFileSync } from "node:fs";
 import { execFile as execFileCallback } from "node:child_process";
 import { parseArgs } from "node:util";
 import { promisify } from "node:util";
-import type { RunStatus } from "@prisma/client";
+import type { RunStatus } from "#prisma";
 import {
   loadCodingConcurrencyConfig,
   loadContainerExecutorConfig,

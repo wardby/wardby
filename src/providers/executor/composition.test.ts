@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import { FakeKubernetesApi } from "../jobs/fake-kubernetes-api.js";
 import { buildConfiguredExecutor } from "./composition.js";
 import { RoutingExecutor } from "./routing.js";

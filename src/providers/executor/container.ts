@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import { CodingProfileSchema } from "../../coding/profile.js";
 import { logger } from "../../core/logger.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";

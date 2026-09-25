@@ -44,7 +44,7 @@ function fakeDb() {
         createdAt: new Date(),
       }),
     },
-  } as unknown as import("@prisma/client").PrismaClient;
+  } as unknown as import("#prisma").PrismaClient;
 }
 
 const fakeProviders = {
@@ -320,7 +320,7 @@ describe("startHttpServer (webhook ingress)", () => {
         findUnique: async ({ where }: { where: { id: string } }) => webhooks.get(where.id) ?? null,
       },
       agent: { findUnique: async () => null },
-    } as unknown as import("@prisma/client").PrismaClient;
+    } as unknown as import("#prisma").PrismaClient;
     const { id } = await createWebhook("a1", "p1", webhookDb);
 
     const mcp = buildMcpServer({ providers: fakeProviders, db: webhookDb, config: { canonicalUri: CANONICAL_URI } });

@@ -25,7 +25,7 @@ function fakeDb() {
         createdAt: new Date(),
       })),
     },
-  } as unknown as import("@prisma/client").PrismaClient;
+  } as unknown as import("#prisma").PrismaClient;
 }
 
 const fakeProviders = {} as unknown as import("../../providers/index.js").ProviderRegistry;

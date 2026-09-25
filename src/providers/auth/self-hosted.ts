@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { SignJWT, jwtVerify } from "jose";
 import { z } from "zod";
-import type { OAuthFamily, PrismaClient } from "@prisma/client";
+import type { OAuthFamily, PrismaClient } from "#prisma";
 import type { AuthProfile, AuthProvider, AuthTokens, VerifiedToken } from "./types.js";
 import { NotSupportedError } from "./types.js";
 import { requireSubject } from "./subject.js";

@@ -9,7 +9,7 @@
  * (attach/detach on an agent or tool you don't own) DO throw, same
  * convention as every other tool in this codebase.
  */
-import { Prisma, type Tool } from "@prisma/client";
+import { Prisma, type Tool } from "#prisma";
 import { deriveJsonSchema, validateParams } from "../../sandbox/zod-params.js";
 import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";

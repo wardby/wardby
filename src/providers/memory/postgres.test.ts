@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "../../core/db.js";
 import { PostgresAgentMemory } from "./postgres.js";
 import { MEMORY_CONTENT_MAX_BYTES, MEMORY_KEY_MAX_BYTES, MEMORY_MAX_KEYS_PER_AGENT } from "./types.js";
 
@@ -14,7 +14,7 @@ if (!databaseUrl) {
 }
 
 describe.skipIf(!databaseUrl)("PostgresAgentMemory (database)", () => {
-  const prisma = new PrismaClient();
+  const prisma = createPrismaClient();
   const memory = new PostgresAgentMemory(prisma);
   const agentIds: string[] = [];
 

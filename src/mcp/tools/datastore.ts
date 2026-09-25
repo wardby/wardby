@@ -1,4 +1,4 @@
-import { Prisma, type PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient } from "#prisma";
 import type { WardbyMcpServer } from "../server.js";
 import type { DatastoreValue } from "../../providers/index.js";
 import {

@@ -34,7 +34,7 @@ function fakeDb(agents: FakeAgentRow[]) {
     agent: {
       findUnique: async ({ where }: { where: { id: string } }) => rows.get(where.id) ?? null,
     },
-  } as unknown as import("@prisma/client").PrismaClient;
+  } as unknown as import("#prisma").PrismaClient;
 }
 
 function fakeCtx(

@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import type { Prisma, PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "#prisma";
 import { requireSubject } from "../../../providers/auth/subject.js";
 
 export type AuthDb = Prisma.TransactionClient;

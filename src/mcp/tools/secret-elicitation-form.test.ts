@@ -90,7 +90,7 @@ function fakeDb() {
         return { count };
       },
     },
-  } as unknown as import("@prisma/client").PrismaClient;
+  } as unknown as import("#prisma").PrismaClient;
 }
 
 let server: Server | undefined;
@@ -103,7 +103,7 @@ afterEach(async () => {
 async function startTestServer(deps: {
   verify: (token: string) => Promise<SecretElicitationPayload>;
   secrets: SecretCipher;
-  db: import("@prisma/client").PrismaClient;
+  db: import("#prisma").PrismaClient;
 }) {
   server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");

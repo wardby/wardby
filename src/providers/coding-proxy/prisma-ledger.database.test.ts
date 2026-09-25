@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "../../core/db.js";
 import { afterAll, describe, expect, it } from "vitest";
 import { PrismaProxyLedger } from "./prisma-ledger.js";
 
-const db = new PrismaClient();
+const db = createPrismaClient();
 const suffix = randomUUID();
 const agentId = `proxy-agent-${suffix}`;
 const runId = `proxy-run-${suffix}`;

@@ -253,10 +253,8 @@ function applyMigrations(paths: QuickstartPaths): void {
 }
 
 async function seedDemo(paths: QuickstartPaths, state: QuickstartState, budget: number): Promise<void> {
-  const previousDatabaseUrl = process.env.DATABASE_URL;
-  process.env.DATABASE_URL = readQuickstartEnv(paths).DATABASE_URL;
-  const { PrismaClient } = await import("@prisma/client");
-  const db = new PrismaClient();
+  const { createPrismaClient } = await import("../core/db.js");
+  const db = createPrismaClient(readQuickstartEnv(paths).DATABASE_URL);
   try {
     const existing = await db.agent.findUnique({ where: { name: DEMO_AGENT } });
     if (existing && existing.systemPrompt !== DEMO_PROMPT) {
@@ -282,8 +280,6 @@ async function seedDemo(paths: QuickstartPaths, state: QuickstartState, budget: 
     }
   } finally {
     await db.$disconnect();
-    if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
-    else process.env.DATABASE_URL = previousDatabaseUrl;
   }
 }
 
@@ -461,10 +457,8 @@ export async function quickstartCommand(args: string[]): Promise<void> {
 async function databaseHealthy(paths: QuickstartPaths): Promise<boolean> {
   const env = readQuickstartEnv(paths);
   if (!env.DATABASE_URL) return false;
-  const previous = process.env.DATABASE_URL;
-  process.env.DATABASE_URL = env.DATABASE_URL;
-  const { PrismaClient } = await import("@prisma/client");
-  const db = new PrismaClient();
+  const { createPrismaClient } = await import("../core/db.js");
+  const db = createPrismaClient(env.DATABASE_URL);
   try {
     await db.$queryRawUnsafe("SELECT 1");
     return true;
@@ -472,8 +466,6 @@ async function databaseHealthy(paths: QuickstartPaths): Promise<boolean> {
     return false;
   } finally {
     await db.$disconnect();
-    if (previous === undefined) delete process.env.DATABASE_URL;
-    else process.env.DATABASE_URL = previous;
   }
 }
 

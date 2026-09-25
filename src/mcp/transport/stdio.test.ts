@@ -4,7 +4,7 @@ import { buildMcpServer } from "../server.js";
 import { runStdioServer } from "./stdio.js";
 
 const fakeProviders = {} as unknown as import("../../providers/index.js").ProviderRegistry;
-const fakeDb = {} as unknown as import("@prisma/client").PrismaClient;
+const fakeDb = {} as unknown as import("#prisma").PrismaClient;
 
 describe("runStdioServer", () => {
   it("reads one JSON object per line and writes one JSON object per line", async () => {

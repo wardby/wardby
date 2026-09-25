@@ -92,7 +92,7 @@ function fakeDb() {
         return { count };
       },
     },
-  } as unknown as import("@prisma/client").PrismaClient;
+  } as unknown as import("#prisma").PrismaClient;
 }
 
 afterEach(() => {

@@ -1,4 +1,4 @@
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 
 /**
  * `wardby mcp` serves the MCP surface and launches the executor, but the

@@ -62,7 +62,7 @@ function fakeDb(agentsByGroup: Record<string, { id: string; name: string }[]> = 
     run: {
       findMany: async () => [],
     },
-  } as unknown as import("@prisma/client").PrismaClient;
+  } as unknown as import("#prisma").PrismaClient;
 }
 
 function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {

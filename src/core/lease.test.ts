@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "./db.js";
 import { tryAcquireLease } from "./lease.js";
 
 // The lease's whole point is atomic conditional-write semantics under
@@ -19,7 +19,7 @@ if (!databaseUrl) {
 }
 
 describe.skipIf(!databaseUrl)("tryAcquireLease (database)", () => {
-  const db = new PrismaClient();
+  const db = createPrismaClient();
   const usedScopes: string[] = [];
 
   function newScope(): string {

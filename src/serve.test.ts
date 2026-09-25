@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "./core/db.js";
 import type { Executor } from "./providers/executor/types.js";
 import type { McpProviders } from "./mcp/context.js";
 import { startServe } from "./serve.js";
@@ -64,7 +64,7 @@ describe("startServe transport guard", () => {
 });
 
 describe.skipIf(!process.env.DATABASE_URL)("startServe (database)", () => {
-  const db = new PrismaClient();
+  const db = createPrismaClient();
   const scope = "serve-test-" + randomUUID();
   afterAll(async () => {
     await db.schedulerLease.deleteMany({ where: { scope } });

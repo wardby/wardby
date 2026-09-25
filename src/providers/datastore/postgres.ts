@@ -2,7 +2,7 @@
  * Postgres-backed default Datastore adapter, via the `DatastoreEntry` table.
  */
 
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import type { Datastore, DatastoreSetOptions, DatastoreValue } from "./types.js";
 import type { SecretCipher } from "../secrets/types.js";
 import { boundedJson, boundedString } from "../../sandbox/bounded-json.js";

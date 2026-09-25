@@ -120,7 +120,7 @@ function fakeDb() {
         return { ...match, secret: secrets.get(match.secretId) };
       },
     },
-  } as unknown as import("@prisma/client").PrismaClient;
+  } as unknown as import("#prisma").PrismaClient;
 }
 
 describe("core/secrets", () => {

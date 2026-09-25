@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "../../core/db.js";
 import { decodeJwt, SignJWT } from "jose";
 import { SelfHostedAuthProvider } from "./self-hosted.js";
 import { IdentityService, DAY } from "../../mcp/auth/self-hosted/credentials.js";
@@ -10,7 +10,7 @@ import { PostgresRateLimiter } from "../../mcp/auth/self-hosted/rate-limit.js";
 const uri = "https://wardby.example/mcp";
 const signingKey = "a1".repeat(32);
 const credentialHashKey = "b2".repeat(32);
-const db = new PrismaClient();
+const db = createPrismaClient();
 const config = { canonicalUri: uri, signingKey, credentialHashKey };
 const provider = new SelfHostedAuthProvider(config, db);
 const identities = new IdentityService(db, credentialHashKey);

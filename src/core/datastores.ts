@@ -4,7 +4,7 @@
  * by a per-attachment `boundName` (sharedDatastore.get(boundName, key)) —
  * same boundName convention as AgentSecret.
  */
-import type { PrismaClient, Datastore as DatastoreRow } from "@prisma/client";
+import type { PrismaClient, Datastore as DatastoreRow } from "#prisma";
 import type { Datastore, DatastoreSetOptions, DatastoreValue } from "../providers/datastore/types.js";
 import { boundedString } from "../sandbox/bounded-json.js";
 

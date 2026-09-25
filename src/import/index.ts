@@ -3,7 +3,7 @@
  * renders the report, and (unless dry-run or fatal collision) creates entities.
  */
 
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import type { ConflictPolicy } from "./preflight.js";
 import { openBundle } from "./bundle.js";
 import { preflight } from "./preflight.js";

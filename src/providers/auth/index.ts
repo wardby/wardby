@@ -3,7 +3,7 @@
  * kind. Both adapters implement the same AuthProvider (incl. verifyBearer),
  * so the resource-server middleware and tool handlers never branch on mode.
  */
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import type { AuthProviderKind, AuthConfig } from "../../config/providers.js";
 import type { AuthProvider } from "./types.js";
 import { DelegatingAuthProvider } from "./delegating.js";
