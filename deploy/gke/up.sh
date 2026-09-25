@@ -50,31 +50,47 @@ CLUSTER="$(terraform -chdir="$TF_DIR" output -raw cluster_name)"
 REGISTRY="$(terraform -chdir="$TF_DIR" output -raw artifact_registry_url)"
 DB_IP="$(terraform -chdir="$TF_DIR" output -raw private_ip_address)"
 SECRET_PREFIX="$(terraform -chdir="$TF_DIR" output -raw secret_name_prefix)"
+# Every output the IAM wiring needs, read into its own top-level variable --
+# a plain VAR="$(terraform ... )" assignment is what set -e actually catches;
+# a terraform failure nested inside a sed/printf argument is not guaranteed
+# to abort the script at the point it happens.
 CONNECTION="$(terraform -chdir="$TF_DIR" output -raw instance_connection_name)"
 DB_NAME="$(terraform -chdir="$TF_DIR" output -raw database_name)"
+APP_SERVICE_ACCOUNT="$(terraform -chdir="$TF_DIR" output -raw app_service_account)"
+MIGRATOR_SERVICE_ACCOUNT="$(terraform -chdir="$TF_DIR" output -raw migrator_service_account)"
+PROXY_SERVICE_ACCOUNT="$(terraform -chdir="$TF_DIR" output -raw proxy_service_account)"
+APP_DATABASE_USER="$(terraform -chdir="$TF_DIR" output -raw app_database_user)"
+MIGRATOR_DATABASE_USER="$(terraform -chdir="$TF_DIR" output -raw migrator_database_user)"
+PROXY_DATABASE_USER="$(terraform -chdir="$TF_DIR" output -raw proxy_database_user)"
+for var in CONNECTION DB_NAME APP_SERVICE_ACCOUNT MIGRATOR_SERVICE_ACCOUNT \
+           PROXY_SERVICE_ACCOUNT APP_DATABASE_USER MIGRATOR_DATABASE_USER PROXY_DATABASE_USER; do
+  [[ -n "${!var}" ]] || { echo "up.sh: terraform output for ${var} came back empty; is ${TF_DIR} applied?" >&2; exit 1; }
+done
 # postgresql://<IAM user, @ as %40>@127.0.0.1:5432/<database>: the Auth Proxy
-# sidecar logs in; no password anywhere.
-iam_url() { printf 'postgresql://%s@127.0.0.1:5432/%s' "$(terraform -chdir="$TF_DIR" output -raw "$1" | sed 's/@/%40/')" "$DB_NAME"; }
-APP_DATABASE_URL="$(iam_url app_database_user)"
-MIGRATOR_DATABASE_URL="$(iam_url migrator_database_user)"
-PROXY_DATABASE_URL="$(iam_url proxy_database_user)"
+# sidecar logs in; no password anywhere. Built only from the already-read,
+# already-checked variables above -- no terraform call inside the helper.
+iam_url() { printf 'postgresql://%s@127.0.0.1:5432/%s' "$(printf '%s' "$1" | sed 's/@/%40/')" "$DB_NAME"; }
+APP_DATABASE_URL="$(iam_url "$APP_DATABASE_USER")"
+MIGRATOR_DATABASE_URL="$(iam_url "$MIGRATOR_DATABASE_USER")"
+PROXY_DATABASE_URL="$(iam_url "$PROXY_DATABASE_USER")"
 iam_substitutions() {
   sed -e "s|wardby-instance-connection-name|${CONNECTION}|g" \
-      -e "s|wardby-app-gsa-email|$(terraform -chdir="$TF_DIR" output -raw app_service_account)|g" \
-      -e "s|wardby-migrator-gsa-email|$(terraform -chdir="$TF_DIR" output -raw migrator_service_account)|g" \
-      -e "s|wardby-proxy-gsa-email|$(terraform -chdir="$TF_DIR" output -raw proxy_service_account)|g" \
+      -e "s|wardby-app-gsa-email|${APP_SERVICE_ACCOUNT}|g" \
+      -e "s|wardby-migrator-gsa-email|${MIGRATOR_SERVICE_ACCOUNT}|g" \
+      -e "s|wardby-proxy-gsa-email|${PROXY_SERVICE_ACCOUNT}|g" \
       -e "s|value: wardby-app-database-url|value: ${APP_DATABASE_URL}|g" \
       -e "s|value: wardby-migrator-database-url|value: ${MIGRATOR_DATABASE_URL}|g" \
       -e "s|value: wardby-proxy-database-url|value: ${PROXY_DATABASE_URL}|g"
 }
 # Belt and suspenders against the substitution list above going stale: every
 # rendered manifest must be free of the wardby-*-gsa-email / *-database-url /
-# instance-connection-name / migrate-job placeholders before it is applied.
-# wardby-migrator and wardby-migrate (bare) are real resource names and must
-# survive -- the patterns below only match the longer placeholder strings.
+# instance-connection-name / migrate-job / database-cidr placeholders before
+# it is applied. wardby-migrator and wardby-migrate (bare) are real resource
+# names and must survive -- the patterns below only match the longer
+# placeholder strings.
 assert_no_placeholders() {
   local leftover
-  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job' || true)"
+  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job|cidr: wardby-database-cidr' || true)"
   if [[ -n "$leftover" ]]; then
     echo "up.sh: unresolved placeholder(s) in rendered manifest:" >&2
     echo "$leftover" | sort -u >&2
@@ -181,47 +197,94 @@ fi
 echo "==> 8/${TOTAL_STEPS} run migrations as wardby-migrator"
 # Before the Deployments, so a failed migration stops the deploy with the
 # running version untouched.
-MIGRATE_JOB="wardby-migrate-$(date +%s)"
-MIGRATE_MANIFEST="$(kubectl kustomize deploy/kind-coding/manifests/overlays/gke-autopilot/migrate \
-  | sed -e "s|image: wardby-migration|image: ${MIGRATION_IMAGE}|" \
-        -e "s|wardby-migrate-job|${MIGRATE_JOB}|g" \
-        -e "s|cidr: wardby-database-cidr|cidr: ${DB_IP}/32|g" \
+#
+# Applied as two separate `kubectl apply` calls -- migrator.yaml (the
+# ServiceAccount and its NetworkPolicy) before job.yaml (the Job itself) --
+# rather than kubectl kustomize's combined multi-document output, so the
+# Job's pod can never be scheduled before its own NetworkPolicy exists.
+# migrate/kustomization.yaml does no transform beyond listing the two files
+# today, so substituting and applying them directly is equivalent to its
+# kustomize output.
+MIGRATOR_MANIFEST="$(sed -e "s|cidr: wardby-database-cidr|cidr: ${DB_IP}/32|g" \
+    deploy/kind-coding/manifests/overlays/gke-autopilot/migrate/migrator.yaml \
   | iam_substitutions)"
-assert_no_placeholders "$MIGRATE_MANIFEST"
-echo "$MIGRATE_MANIFEST" | kubectl apply -f - >/dev/null
-# A Workload Identity or IAM misconfiguration keeps the cloud-sql-proxy sidecar
-# from ever reaching Ready, in which case the migrate container never starts;
-# activeDeadlineSeconds: 900 on the Job (migrate/job.yaml) bounds that wait.
+assert_no_placeholders "$MIGRATOR_MANIFEST"
+echo "$MIGRATOR_MANIFEST" | kubectl apply -f - >/dev/null
+
+MIGRATE_JOB="wardby-migrate-$(date +%s)"
+JOB_MANIFEST="$(sed -e "s|image: wardby-migration|image: ${MIGRATION_IMAGE}|" \
+                     -e "s|wardby-migrate-job|${MIGRATE_JOB}|g" \
+    deploy/kind-coding/manifests/overlays/gke-autopilot/migrate/job.yaml \
+  | iam_substitutions)"
+assert_no_placeholders "$JOB_MANIFEST"
+echo "$JOB_MANIFEST" | kubectl apply -f - >/dev/null
+
+# reason ("" unless timed_out) is cosmetic; timed_out selects the message and
+# forces the events dump even when a log happened to come back non-empty.
 migration_failed() {
-  echo "up.sh: migration Job ${MIGRATE_JOB} did not succeed:" >&2
-  local migrate_logs proxy_logs pod
+  local reason="$1" timed_out="${2:-false}"
+  local migrate_logs proxy_logs proxy_prev_logs pod
+  if [[ "$timed_out" == "true" ]]; then
+    echo "up.sh: migration timed out: ${reason}." >&2
+  else
+    echo "up.sh: migration Job ${MIGRATE_JOB} did not succeed (${reason}):" >&2
+  fi
   migrate_logs="$(kubectl -n "$NAMESPACE" logs "job/${MIGRATE_JOB}" -c migrate --tail=40 2>/dev/null || true)"
   proxy_logs="$(kubectl -n "$NAMESPACE" logs "job/${MIGRATE_JOB}" -c cloud-sql-proxy --tail=40 2>/dev/null || true)"
+  # --previous: a crash-looping sidecar (e.g. bad IAM/Workload Identity setup)
+  # can already be on its second or later attempt by the time this runs, and
+  # the current attempt's logs alone would miss the actual error.
+  proxy_prev_logs="$(kubectl -n "$NAMESPACE" logs "job/${MIGRATE_JOB}" -c cloud-sql-proxy --previous --tail=40 2>/dev/null || true)"
   echo "--- migrate container logs ---" >&2
   echo "${migrate_logs:-(no logs)}" >&2
   echo "--- cloud-sql-proxy sidecar logs ---" >&2
   echo "${proxy_logs:-(no logs)}" >&2
-  if [[ -z "$migrate_logs" && -z "$proxy_logs" ]]; then
-    echo "--- kubectl get events (no logs were available) ---" >&2
+  if [[ -n "$proxy_prev_logs" ]]; then
+    echo "--- cloud-sql-proxy sidecar logs (--previous, crash-looping container) ---" >&2
+    echo "$proxy_prev_logs" >&2
+  fi
+  if [[ "$timed_out" == "true" || ( -z "$migrate_logs" && -z "$proxy_logs" ) ]]; then
+    echo "--- kubectl get events (job ${MIGRATE_JOB}) ---" >&2
+    kubectl -n "$NAMESPACE" get events --field-selector "involvedObject.name=${MIGRATE_JOB}" >&2 || true
     pod="$(kubectl -n "$NAMESPACE" get pods -l job-name="$MIGRATE_JOB" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-    kubectl -n "$NAMESPACE" get events --field-selector "involvedObject.name=${pod:-$MIGRATE_JOB}" >&2 || true
+    if [[ -n "$pod" ]]; then
+      echo "--- kubectl get events (pod ${pod}) ---" >&2
+      kubectl -n "$NAMESPACE" get events --field-selector "involvedObject.name=${pod}" >&2 || true
+    fi
   fi
   if echo "$migrate_logs" | grep -qi "permission denied"; then
     echo "up.sh: the database grants look missing; run deploy/gke/bootstrap-database-iam.sh once." >&2
   fi
   exit 1
 }
-for i in $(seq 1 120); do
-  # Both fields in one call: succeeded, then the Failed condition's status
-  # (True for both backoffLimit exhaustion and activeDeadlineSeconds).
-  status="$(kubectl -n "$NAMESPACE" get job "$MIGRATE_JOB" -o jsonpath='{.status.succeeded} {.status.conditions[?(@.type=="Failed")].status}')"
-  succeeded="${status%% *}"
-  failed_condition="${status#* }"
+# Budget (960s) deliberately exceeds the Job's own activeDeadlineSeconds
+# (900s, migrate/job.yaml): the Job's own deadline is meant to fire first, and
+# this loop finishing first would mean the Job is stuck without Kubernetes
+# itself having noticed.
+MIGRATE_POLL_INTERVAL=5
+MIGRATE_POLL_ITERATIONS=192 # 192 * 5s = 960s
+for i in $(seq 1 "$MIGRATE_POLL_ITERATIONS"); do
+  # succeeded, the Failed condition's status and its reason, '|'-delimited so
+  # an empty field (nothing has failed yet) doesn't shift the others -- IFS
+  # whitespace-splitting would. A single failed read retries rather than
+  # aborting: status stays "||" (all fields empty), which is indistinguishable
+  # from "still running" below, so the loop just tries again next iteration.
+  status="$(kubectl -n "$NAMESPACE" get job "$MIGRATE_JOB" -o \
+    jsonpath='{.status.succeeded}|{.status.conditions[?(@.type=="Failed")].status}|{.status.conditions[?(@.type=="Failed")].reason}' \
+    2>/dev/null)" || status="||"
+  IFS='|' read -r succeeded failed_condition failed_reason <<<"$status"
   [[ "$succeeded" == "1" ]] && break
-  if [[ "$failed_condition" == "True" ]] || [[ "$i" == "120" ]]; then
-    migration_failed
+  if [[ "$failed_condition" == "True" ]]; then
+    if [[ "$failed_reason" == "DeadlineExceeded" ]]; then
+      migration_failed "the Job's activeDeadlineSeconds (900s) was exceeded" true
+    else
+      migration_failed "Failed condition, reason ${failed_reason:-unknown}" false
+    fi
   fi
-  sleep 5
+  if [[ "$i" == "$MIGRATE_POLL_ITERATIONS" ]]; then
+    migration_failed "up.sh's own poll budget (${MIGRATE_POLL_ITERATIONS}x${MIGRATE_POLL_INTERVAL}s) ran out waiting for the Job" true
+  fi
+  sleep "$MIGRATE_POLL_INTERVAL"
 done
 echo "    migrations applied"
 
@@ -235,7 +298,6 @@ PREVIOUS_IMAGES="$(kubectl -n "$NAMESPACE" get deploy wardby-control-plane wardb
 # tracked manifests.
 OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
   | sed -e "s|image: wardby-runtime|image: ${RUNTIME_IMAGE}|" \
-        -e "s|image: wardby-migration|image: ${MIGRATION_IMAGE}|" \
         -e "s|value: wardby-coding-worker-image-node-python-3-12$|value: ${WORKER_IMAGE_NODE_PYTHON}|" \
         -e "s|value: wardby-coding-worker-image$|value: ${WORKER_IMAGE}|" \
         -e "s|value: wardby-apiserver-host|value: ${API_HOST}|" \
@@ -315,4 +377,9 @@ Images before this deploy:
 ${PREVIOUS_IMAGES:-  (none: first deploy)}
 Migrations only go forward, so a rollback is safe only while the schema change it
 rolls back over was additive. See docs/getting-started-gke.md, "Roll back".
+While the password login is still enabled, rollout undo restores service
+because port 5432 to the database stays open (control-plane.yaml,
+proxy-database-egress.yaml) alongside the Auth Proxy's 3307 -- but it only
+reverts the Deployments, not any NetworkPolicy: a change to the database
+egress rules themselves is not undone by rollout undo.
 EOF

@@ -390,13 +390,20 @@ spec:
     # is not in the cluster -- it sits on the VPC, reached over the private
     # services access peering, so nothing in the namespace can select it.
     # `wardby-database-cidr` is substituted at apply time like the other target
-    # identity in this file.
+    # identity in this file. 3307 is the Auth Proxy; 5432 is Postgres itself,
+    # kept open only for the cutover to IAM login -- a pod still running the
+    # old code with a password DATABASE_URL loses the database the moment this
+    # policy applies otherwise, while minReadySeconds above can keep such a pod
+    # as the only one serving. Removed when the password is retired (PR 2,
+    # with connector_enforcement=REQUIRED).
     - to:
         - ipBlock:
             cidr: wardby-database-cidr
       ports:
         - protocol: TCP
           port: 3307
+        - protocol: TCP
+          port: 5432
     # GKE metadata server: Workload Identity tokens for the Auth Proxy. Dataplane
     # V2 serves it at 169.254.169.252:988 as well as 169.254.169.254:80.
     - to:

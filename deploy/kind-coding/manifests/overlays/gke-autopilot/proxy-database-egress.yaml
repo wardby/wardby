@@ -12,8 +12,11 @@
 # over the private services access peering, so no podSelector can name it.
 #
 # The Auth Proxy sidecar (proxy-cloudsql.yaml) reaches the instance itself on
-# 3307, not Postgres's 5432: 5432 is only the loopback port it exposes to the
-# proxy container (--port=5432), never a port this policy needs to open.
+# 3307 -- that is what --port=5432 (its loopback listener) connects out on.
+# Port 5432 in the rule below is a *separate* thing: it is Postgres itself,
+# still open for pods that have not switched off the password login yet
+# during the cutover to IAM login. Remove it once the password is retired
+# (PR 2, with connector_enforcement=REQUIRED).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -32,6 +35,14 @@ spec:
       ports:
         - protocol: TCP
           port: 3307
+        # Password login, direct to Postgres, kept only for the cutover: a pod
+        # still running the old code with a password DATABASE_URL loses the
+        # database the moment this policy applies otherwise, while
+        # minReadySeconds (control-plane.yaml) can keep such a pod as the only
+        # one serving. Removed when the password is retired (PR 2, with
+        # connector_enforcement=REQUIRED).
+        - protocol: TCP
+          port: 5432
     # GKE metadata server: Workload Identity tokens for the Auth Proxy. Dataplane
     # V2 serves it at 169.254.169.252:988 as well as 169.254.169.254:80.
     - to:
