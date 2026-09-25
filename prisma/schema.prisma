@@ -43,11 +43,12 @@ model Agent {
   maxTurns Int         @default(10)
 
   // Phase 4: ownership. Null = public/unowned (pre-Phase-4 agents migrate this way).
-  ownerId    String?
-  owner      Principal?       @relation(fields: [ownerId], references: [id])
-  secrets    AgentSecret[]
-  datastores AgentDatastore[]
-  webhooks   Webhook[]
+  ownerId      String?
+  owner        Principal?        @relation(fields: [ownerId], references: [id])
+  secrets      AgentSecret[]
+  datastores   AgentDatastore[]
+  webhooks     Webhook[]
+  repositories AgentRepository[]
 
   // Phase 7: at most one budget group. Null = uncapped beyond its own budgetUsd.
   budgetGroupId String?
@@ -270,19 +271,20 @@ enum RunTrigger {
   scheduled
   webhook
   subagent
+  host_event
 }
 
 model Run {
-  id               String     @id @default(cuid())
-  agent            Agent      @relation(fields: [agentId], references: [id])
+  id               String        @id @default(cuid())
+  agent            Agent         @relation(fields: [agentId], references: [id])
   agentId          String
-  status           RunStatus  @default(pending)
-  trigger          RunTrigger @default(manual)
-  tokensIn         Int        @default(0)
-  tokensOut        Int        @default(0)
-  costUsd          Decimal    @default(0) @db.Decimal(10, 6)
+  status           RunStatus     @default(pending)
+  trigger          RunTrigger    @default(manual)
+  tokensIn         Int           @default(0)
+  tokensOut        Int           @default(0)
+  costUsd          Decimal       @default(0) @db.Decimal(10, 6)
   error            String?
-  startedAt        DateTime   @default(now())
+  startedAt        DateTime      @default(now())
   finishedAt       DateTime?
   /// Phase 2: beaten by the executor while running; a stale value past
   /// HEARTBEAT_TIMEOUT is how the reconciler finds an orphaned run.
@@ -295,15 +297,16 @@ model Run {
   /// Phase 4: EngineResult.turns, persisted for the same reason as
   /// finalText — MCP's list_runs/get_run need it and it was previously
   /// dropped after the engine returned.
-  turns            Int        @default(0)
+  turns            Int           @default(0)
   /// Detached executors are recovered by handle rather than inferred from trigger.
-  executionManaged Boolean    @default(false)
+  executionManaged Boolean       @default(false)
   /// Phase 6: which durable executor backend holds this run, if any
   /// ("dbos" = a DBOS workflow whose id equals this run's id). Null for
   /// in-process runs. The reconciler consults the backend before declaring a
   /// stale run lost, and can adopt one orphaned by a dead instance.
   executionBackend String?
   codingRun        CodingRun?
+  hostCheck        RunHostCheck?
 
   /// Un-phased: sub-agent dispatch (see AgentSubAgent). Null for a
   /// top-level run; set when this run was created by a parent run's
@@ -779,4 +782,49 @@ model AuthRateLimit {
   expiresAt DateTime
 
   @@index([expiresAt])
+}
+
+/// Which repositories on which code-review host a native agent may act on,
+/// and which host events trigger it. See
+/// docs/private/2026-09-25-code-review-host-design.md §4.1.
+model AgentRepository {
+  id         String   @id @default(cuid())
+  agentId    String
+  agent      Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  /// "github" today; validated in code so adding a host needs no enum migration.
+  provider   String
+  /// Canonical lower-case owner/name for the provider.
+  repository String
+  /// "read" or "write".
+  access     String
+  /// Subset of "pull_request", "mention".
+  triggers   String[] @default([])
+  /// Required when triggers contains "pull_request"; names the agent's check.
+  checkName  String?
+  createdAt  DateTime @default(now())
+
+  @@unique([agentId, provider, repository])
+  @@index([provider, repository])
+}
+
+/// The host check a run owns, so the review tool can complete it and the
+/// run finalizer can close it if the run ends without publishing.
+model RunHostCheck {
+  runId       String    @id
+  run         Run       @relation(fields: [runId], references: [id], onDelete: Cascade)
+  provider    String
+  repository  String
+  checkId     String
+  headSha     String
+  completedAt DateTime?
+}
+
+/// De-duplicates host webhook redeliveries; pruned after 7 days.
+model HostEventDelivery {
+  provider   String
+  deliveryId String
+  receivedAt DateTime @default(now())
+
+  @@id([provider, deliveryId])
+  @@index([receivedAt])
 }
