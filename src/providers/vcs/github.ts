@@ -284,13 +284,49 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
    * apparently isn't gated the same way a genuine issue comment might be.)
    */
   private async withChecksToken<T>(repository: string, action: (token: string) => Promise<T>): Promise<T> {
+    return this.withScopedToken(repository, { checks: "write" }, action);
+  }
+
+  /**
+   * Mints an installation token for exactly `permissions` on one repository,
+   * runs `action`, and always revokes. The building block for the
+   * code-review host (providers/review-host/github.ts), whose calls each
+   * request only what they need.
+   */
+  async withScopedToken<T>(
+    repository: string,
+    permissions: Record<string, "read" | "write">,
+    action: (token: string) => Promise<T>,
+  ): Promise<T> {
     const normalized = normalizeGitHubRepository(repository);
-    const token = await this.mintChecksToken(normalized);
+    const token = await this.mintScopedToken(
+      normalized,
+      permissions,
+      (name, level) => (name === "metadata" && level === "read") || permissions[name] === level,
+    );
     try {
       return await action(token);
     } finally {
       await this.revokeToken(token).catch(() => undefined);
     }
+  }
+
+  private identity?: Promise<{ id: number; slug: string }>;
+
+  /** The App's id and slug (its @-mention handle), read once with the App JWT. */
+  appIdentity(): Promise<{ id: number; slug: string }> {
+    this.identity ??= (async () => {
+      const response = await this.requestJson("/app", await this.appJwt());
+      const payload = record(await response.json());
+      if (typeof payload.slug !== "string" || !/^[a-z0-9-]{1,64}$/.test(payload.slug)) {
+        throw new Error("github_api_invalid_response");
+      }
+      return { id: positiveInteger(payload.id), slug: payload.slug };
+    })().catch((err: unknown) => {
+      this.identity = undefined;
+      throw err;
+    });
+    return this.identity;
   }
 
   async upsertContinuationStatusComment(input: ContinuationStatusCommentInput): Promise<void> {
@@ -464,14 +500,6 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     );
   }
 
-  private async mintChecksToken(repository: string): Promise<string> {
-    return this.mintScopedToken(
-      repository,
-      { checks: "write" },
-      (name, level) => (name === "checks" && level === "write") || (name === "metadata" && level === "read"),
-    );
-  }
-
   /**
    * Shared installation-token mint: requests exactly `permissions`, then
    * verifies the response granted exactly that (no more, no less, modulo
@@ -490,15 +518,21 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     const installationResponse = await this.requestJson(
       `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/installation`,
       appJwt,
+      {},
+      [200, 404],
     );
+    if (installationResponse.status === 404) throw new Error("github_app_not_installed");
     const installation = record(await installationResponse.json());
     const installationId = positiveInteger(installation.id);
     const tokenResponse = await this.requestJson(
       `/app/installations/${installationId}/access_tokens`,
       appJwt,
       { method: "POST", body: JSON.stringify({ repositories: [name], permissions }) },
-      [201],
+      [201, 422],
     );
+    // 422: the installation has not granted a requested permission (e.g. a
+    // new permission the owner has not accepted yet).
+    if (tokenResponse.status === 422) throw new Error("github_installation_token_scope_invalid");
     const payload = record(await tokenResponse.json());
     const grantedPermissions = record(payload.permissions);
     const repositories = Array.isArray(payload.repositories) ? payload.repositories.map(record) : [];
@@ -623,7 +657,8 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     return null;
   }
 
-  private async requestJson(
+  /** Public for the code-review host, which issues its own REST calls with tokens minted here. */
+  async requestJson(
     path: string,
     bearer: string,
     init: RequestInit = {},

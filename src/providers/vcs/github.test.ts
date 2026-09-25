@@ -612,6 +612,56 @@ describe("GitHubAppClient", () => {
         }),
     ).toThrow("github_api_version_invalid");
   });
+
+  it("mints exactly the requested permission set for withScopedToken and always revokes", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url.endsWith("/repos/openai/example/installation")) return json({ id: 42 });
+      if (url.endsWith("/app/installations/42/access_tokens")) {
+        return tokenResponse({ permissions: { contents: "read", pull_requests: "read", metadata: "read" } });
+      }
+      if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+      throw new Error(`unexpected request ${url}`);
+    }) as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+
+    await expect(
+      client.withScopedToken("openai/example", { contents: "read", pull_requests: "read" }, async () => {
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+    expect(JSON.parse(bodyText(calls[1].init?.body))).toEqual({
+      repositories: ["example"],
+      permissions: { contents: "read", pull_requests: "read" },
+    });
+    expect(calls.at(-1)?.init?.method).toBe("DELETE");
+  });
+
+  it("reports an uninstalled repository and an ungrantable permission distinctly", async () => {
+    const notInstalled = vi.fn(async () => json({ message: "Not Found" }, 404)) as unknown as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, notInstalled, () => NOW);
+    await expect(client.withScopedToken("openai/example", { checks: "write" }, async () => 1)).rejects.toThrow(
+      "github_app_not_installed",
+    );
+
+    const ungrantable = vi.fn(async (input: string) =>
+      String(input).endsWith("/installation") ? json({ id: 42 }) : json({ message: "Unprocessable" }, 422),
+    ) as unknown as typeof fetch;
+    const client2 = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, ungrantable, () => NOW);
+    await expect(client2.withScopedToken("openai/example", { issues: "write" }, async () => 1)).rejects.toThrow(
+      "github_installation_token_scope_invalid",
+    );
+  });
+
+  it("reads and caches the App identity", async () => {
+    const fetchMock = vi.fn(async () => json({ id: 777, slug: "wardby" })) as unknown as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+    await expect(client.appIdentity()).resolves.toEqual({ id: 777, slug: "wardby" });
+    await client.appIdentity();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("pullRequestBody packages section", () => {
