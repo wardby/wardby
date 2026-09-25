@@ -5,8 +5,10 @@
  * recognising a serialization failure still fires.
  *
  * Every row this file creates starts with PREFIX, so beforeAll/afterAll can
- * clear leftovers of an aborted earlier run. None of these rows are coding
- * runs, so nothing here perturbs coding-concurrency.database.test.ts.
+ * clear leftovers of an aborted earlier run. The only coding data is one
+ * CodingAgentProfile (the P2014 test), never a CodingRun, so nothing here
+ * perturbs the global slot/queue state coding-concurrency.database.test.ts
+ * depends on.
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -97,12 +99,16 @@ async function callTool(name: string, args: Record<string, unknown>, database: P
 
 /**
  * `db`, except that inside every interactive transaction the first
- * `tx.agent.findUnique` runs `interleave` (on a separate connection) right
- * after it returns. That places a concurrent committed write between the
- * transaction's read and its write -- a genuine, deterministic
- * serialization conflict inside the handler's own Serializable transaction.
+ * `tx.<model>.<method>` call (default `tx.agent.findUnique`) runs `interleave`
+ * (on a separate connection) right after it returns. That places a concurrent
+ * committed write at a chosen point inside the transaction -- a genuine,
+ * deterministic serialization conflict inside the code under test's own
+ * Serializable transaction.
  */
-function interleavedDb(interleave: () => Promise<unknown>): PrismaClient {
+function interleavedDb(
+  interleave: () => Promise<unknown>,
+  at: { model: "agent" | "run"; method: string } = { model: "agent", method: "findUnique" },
+): PrismaClient {
   let fired = false;
   const bind = (target: object, prop: string | symbol) => {
     const value: unknown = Reflect.get(target, prop);
@@ -113,20 +119,21 @@ function interleavedDb(interleave: () => Promise<unknown>): PrismaClient {
       if (prop !== "$transaction") return bind(target, prop);
       return (fn: (tx: Prisma.TransactionClient) => Promise<unknown>, options?: object) =>
         target.$transaction(async (tx) => {
-          const agent = new Proxy(tx.agent, {
-            get(delegate, p) {
-              if (p !== "findUnique") return bind(delegate, p);
-              return async (args: Prisma.AgentFindUniqueArgs) => {
-                const row = await delegate.findUnique(args);
+          const delegate = new Proxy(tx[at.model], {
+            get(real, p) {
+              const method = bind(real, p);
+              if (p !== at.method || typeof method !== "function") return method;
+              return async (...args: unknown[]) => {
+                const result: unknown = await (method as (...a: unknown[]) => Promise<unknown>)(...args);
                 if (!fired) {
                   fired = true;
                   await interleave();
                 }
-                return row;
+                return result;
               };
             },
           });
-          return fn(new Proxy(tx, { get: (t, p) => (p === "agent" ? agent : bind(t, p)) }));
+          return fn(new Proxy(tx, { get: (t, p) => (p === at.model ? delegate : bind(t, p)) }));
         }, options);
     },
   });
@@ -230,6 +237,83 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
       expect(err.code).toBe("P2010");
       expect(isSerializationConflict(err)).toBe(true);
       expect(await db.run.count({ where: { agentId } })).toBe(0);
+    });
+
+    it("retries a serialization failure raised at COMMIT (write skew)", async () => {
+      const agentId = await createAgent("skew-a");
+      const otherId = await createAgent("skew-b");
+      // T1 (dispatchRun's transaction) reads A and B and writes A. Right after
+      // its last statement (run.create), T2 reads A, writes B and commits.
+      // No T1 statement fails: PostgreSQL detects the read/write cycle and
+      // rejects T1 at COMMIT with 40001.
+      let t2Commits = 0;
+      const skewed = interleavedDb(
+        async () => {
+          await db.$transaction(
+            async (t2) => {
+              await t2.agent.findUnique({ where: { id: agentId } });
+              await t2.agent.update({ where: { id: otherId }, data: { systemPrompt: "t2" } });
+            },
+            { isolationLevel: "Serializable" },
+          );
+          t2Commits += 1;
+        },
+        { model: "run", method: "create" },
+      );
+      let attempts = 0;
+      const result = await dispatchRun({
+        db: skewed,
+        executor: noopExecutor,
+        agentId,
+        beforePersist: async (tx) => {
+          attempts += 1;
+          await tx.agent.findUnique({ where: { id: otherId } });
+          await tx.agent.update({ where: { id: agentId }, data: { systemPrompt: `t1-${attempts}` } });
+          return true;
+        },
+      });
+      expect(t2Commits).toBe(1);
+      expect(attempts).toBe(2);
+      expect(result?.run.agentId).toBe(agentId);
+      expect(await db.run.count({ where: { agentId } })).toBe(1);
+    });
+
+    it("retries a deadlock (40P01) on a raw statement", async () => {
+      const agentId = await createAgent("deadlock-a");
+      const otherId = await createAgent("deadlock-b");
+      let attempts = 0;
+      let t2: Promise<unknown> | undefined;
+      const result = await dispatchRun({
+        db,
+        executor: noopExecutor,
+        agentId,
+        beforePersist: async (tx) => {
+          attempts += 1;
+          if (attempts === 1) {
+            // T2 locks B; T1 locks A then waits on B; 200 ms later T2 waits
+            // on A. T1 started waiting first, so its deadlock_timeout (1 s by
+            // default) fires first and PostgreSQL aborts T1 with 40P01.
+            let lockedB!: () => void;
+            const bLocked = new Promise<void>((resolve) => (lockedB = resolve));
+            let openGate!: () => void;
+            const gate = new Promise<void>((resolve) => (openGate = resolve));
+            t2 = db.$transaction(async (other) => {
+              await other.$executeRaw`UPDATE "Agent" SET "systemPrompt" = 't2' WHERE "id" = ${otherId}`;
+              lockedB();
+              await gate;
+              await other.$executeRaw`UPDATE "Agent" SET "systemPrompt" = 't2' WHERE "id" = ${agentId}`;
+            });
+            await bLocked;
+            await tx.$queryRaw`UPDATE "Agent" SET "systemPrompt" = 't1' WHERE "id" = ${agentId} RETURNING "id"`;
+            setTimeout(openGate, 200);
+            await tx.$queryRaw`UPDATE "Agent" SET "systemPrompt" = 't1' WHERE "id" = ${otherId} RETURNING "id"`;
+          }
+          return true;
+        },
+      });
+      await t2;
+      expect(attempts).toBe(2);
+      expect(result?.run.agentId).toBe(agentId);
     });
 
     it("does not retry a raw-query failure that is not a serialization conflict", async () => {

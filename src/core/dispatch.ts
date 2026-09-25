@@ -76,23 +76,41 @@ export interface DispatchRunResult {
   task?: Task;
 }
 
+/** SQLSTATEs worth retrying the persist transaction for: serialization failure, deadlock. */
+const RETRYABLE_SQLSTATES = new Set(["40001", "40P01"]);
+
 /**
- * A PostgreSQL serialization failure (SQLSTATE 40001) in the Serializable
- * persist transaction. On a model query Prisma reports it as P2034. On a raw
- * statement ($queryRaw, e.g. the FOR UPDATE SKIP LOCKED below, or anything a
- * beforePersist callback runs) it is P2010, and with the pg driver adapter
- * (Prisma 7) the SQLSTATE sits at meta.driverAdapterError.cause.originalCode.
- * Prisma 6's engine put it at meta.code; that shape is still accepted.
+ * A transient transaction conflict in the Serializable persist transaction:
+ * a serialization failure (40001) or a deadlock (40P01). It arrives in one of
+ * three shapes:
+ * - on a model statement: P2034;
+ * - on a raw statement ($queryRaw, e.g. the FOR UPDATE SKIP LOCKED below, or
+ *   anything a beforePersist callback runs): P2010, with the SQLSTATE at
+ *   meta.driverAdapterError.cause.originalCode under the pg driver adapter
+ *   (Prisma 7) -- Prisma 6's engine put 40001 at meta.code, still accepted;
+ * - at COMMIT (e.g. SSI write skew): an unwrapped DriverAdapterError, no
+ *   code or meta, with the SQLSTATE at cause.originalCode.
+ *
+ * @internal Exported only for the real-PostgreSQL tests.
  */
 export function isSerializationConflict(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const candidate = err as {
+    name?: unknown;
     code?: unknown;
+    cause?: { originalCode?: unknown };
     meta?: { code?: unknown; driverAdapterError?: { cause?: { originalCode?: unknown } } };
   };
   if (candidate.code === "P2034") return true;
-  if (candidate.code !== "P2010") return false;
-  return candidate.meta?.driverAdapterError?.cause?.originalCode === "40001" || candidate.meta?.code === "40001";
+  if (candidate.code === "P2010") {
+    const sqlState = candidate.meta?.driverAdapterError?.cause?.originalCode;
+    return (typeof sqlState === "string" && RETRYABLE_SQLSTATES.has(sqlState)) || candidate.meta?.code === "40001";
+  }
+  if (candidate.name === "DriverAdapterError") {
+    const sqlState = candidate.cause?.originalCode;
+    return typeof sqlState === "string" && RETRYABLE_SQLSTATES.has(sqlState);
+  }
+  return false;
 }
 
 /**
