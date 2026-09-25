@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
+import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { CodingProfileSchema } from "../../coding/profile.js";
 import { logger } from "../../core/logger.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
@@ -64,6 +65,8 @@ export interface ContainerRunSnapshot {
   timeoutSec: number;
   allowedEgress: unknown;
   protectedPaths: unknown;
+  /** Stored per-agent collection paths; see src/coding/collect-exclude.ts. */
+  collectExclude: unknown;
   /** Revision-in-place: set when this run continues another run's branch/PR. See preflight(). */
   rootCodingRunId: string | null;
   budgetUsd: number;
@@ -132,6 +135,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       timeoutSec: row.codingRun.timeoutSec,
       allowedEgress: row.codingRun.allowedEgress,
       protectedPaths: row.codingRun.protectedPaths,
+      collectExclude: row.codingRun.collectExclude,
       rootCodingRunId: row.codingRun.rootCodingRunId,
       budgetUsd: Number(row.codingRun.budgetReservedUsd),
       tokensIn: row.tokensIn,
@@ -858,6 +862,7 @@ export class ContainerExecutor implements Executor {
       timeoutSec: run.timeoutSec,
       limits: { ...this.options.limits, ...(run.workspaceDiskMb ? { diskMb: run.workspaceDiskMb } : {}) },
       labels: {},
+      collectExclude: normalizeCollectExclusions(run.collectExclude),
     };
   }
 

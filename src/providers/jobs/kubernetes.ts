@@ -60,6 +60,12 @@ import { readProxyWitness } from "./kubernetes-witness.js";
 import { safeExtract } from "./safe-extract.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
 import { replaceDirectoryFromStaging } from "./workspace-swap.js";
+import {
+  collectExclusions,
+  normalizeCollectExclusions,
+  tarExcludeArgs,
+  type CollectExclusions,
+} from "../../coding/collect-exclude.js";
 
 /** The per-run object names, always derived through kubernetes-isolation's single naming source. */
 type RunNames = ReturnType<typeof kubernetesRunNamesForToken>;
@@ -213,6 +219,8 @@ interface RunRecord {
   deadlineAt: number;
   phase: Phase;
   result?: JobResult;
+  /** Collection exclusions from the spec; absent on records from before they existed. */
+  collectExclude?: CollectExclusions;
 }
 
 export interface KubernetesClusterInfo {
@@ -486,6 +494,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       createdAt,
       deadlineAt: createdAt + spec.timeoutSec * 1000,
       phase: "provisioning",
+      collectExclude: spec.collectExclude ?? collectExclusions([]),
     };
     try {
       // The record is the idempotency fence before any other cluster side effect.
@@ -557,7 +566,14 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     }
     const maxBytes = record.diskMb * 1024 * 1024;
     await replaceDirectoryFromStaging(expected, maxBytes, "kubernetes_workspace_destination_invalid", (staging) =>
-      this.extractWorkspace(names, staging, maxBytes, this.transferBudgetMs(record)),
+      this.extractWorkspace(
+        names,
+        staging,
+        maxBytes,
+        this.transferBudgetMs(record),
+        // Names are always the current built-in list; only the paths come from the record.
+        normalizeCollectExclusions(record.collectExclude?.paths),
+      ),
     );
   }
 
@@ -881,9 +897,16 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
    * Streams the keeper's workspace through the strict extractor into `staging`.
    * The transfer is bounded by `timeoutMs` (see transferBudgetMs): on expiry the
    * extraction is aborted. On any failure the output stream this method created
-   * is destroyed, since the exec's own timeout does not end it.
+   * is destroyed, since the exec's own timeout does not end it. Excluded dependency
+   * and cache paths never leave the pod (see src/coding/collect-exclude.ts).
    */
-  private async extractWorkspace(names: RunNames, staging: string, maxBytes: number, timeoutMs: number) {
+  private async extractWorkspace(
+    names: RunNames,
+    staging: string,
+    maxBytes: number,
+    timeoutMs: number,
+    exclusions: CollectExclusions,
+  ) {
     const output = new PassThrough();
     // Errors are surfaced through the exec/extraction promises; never let a late destroy() crash the process.
     output.on("error", () => undefined);
@@ -899,10 +922,13 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       },
     );
     const execution = this.api
-      .exec(this.namespace, names.pod, KEEPER_CONTAINER, ["tar", "-C", WORKSPACE_STORAGE, "-cf", "-", "."], {
-        stdout: output,
-        timeoutMs,
-      })
+      .exec(
+        this.namespace,
+        names.pod,
+        KEEPER_CONTAINER,
+        ["tar", "-C", WORKSPACE_STORAGE, ...tarExcludeArgs(exclusions), "-cf", "-", "."],
+        { stdout: output, timeoutMs },
+      )
       .then((exitCode) => {
         if (exitCode !== 0) throw new Error("kubernetes_workspace_archive_failed");
         if (!output.writableEnded) output.end();
