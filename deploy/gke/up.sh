@@ -357,14 +357,17 @@ database_roundtrip wardby-control-plane control-plane Agent "control plane" || D
 database_roundtrip wardby-coding-proxy proxy CodingProxySession "coding proxy" || DATABASE_OK=false
 if ! $DATABASE_OK; then
   cat >&2 <<EOF
-up.sh: the new pods cannot use the database. While the password login is still
-enabled, this restores the previous version:
+up.sh: the new pods cannot use the database.
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-control-plane
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-coding-proxy
+restores the previous images and pod templates, which also log in through
+IAM -- there is no password login to restore.
 "permission denied" means the grants are missing or incomplete. On a fresh
 install the coding proxy's are expected to be missing until the bootstrap runs
 again after the first migrations: run deploy/gke/bootstrap-database-iam.sh
---password-from-stdin, then up.sh (docs/getting-started-gke.md, "Database login").
+(default mode), then up.sh again (docs/getting-started-gke.md, "Database
+login"). --password-from-stdin is only for a deployment still on password
+login.
 EOF
   exit 1
 fi
