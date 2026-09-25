@@ -23,6 +23,13 @@ describe("commentableLines", () => {
   it("returns nothing for an empty or missing patch", () => {
     expect(commentableLines("").right.size).toBe(0);
   });
+
+  it("ignores trailing newline in patch", () => {
+    const result1 = commentableLines(PATCH);
+    const result2 = commentableLines(PATCH + "\n");
+    expect([...result2.right].sort((a, b) => a - b)).toEqual([...result1.right].sort((a, b) => a - b));
+    expect([...result2.left].sort((a, b) => a - b)).toEqual([...result1.left].sort((a, b) => a - b));
+  });
 });
 
 describe("partitionComments", () => {

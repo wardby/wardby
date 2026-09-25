@@ -15,6 +15,7 @@ export function commentableLines(patch: string): { right: Set<number>; left: Set
   let newLine = 0;
   let inHunk = false;
   for (const raw of patch.split("\n")) {
+    if (!raw) continue; // Skip empty segments from trailing newlines
     const header = HUNK_HEADER.exec(raw);
     if (header) {
       oldLine = Number(header[1]);

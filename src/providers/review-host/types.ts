@@ -112,7 +112,8 @@ export interface CommentInput {
 }
 
 export interface CommentRef {
-  kind: "issue_comment" | "review_comment";
+  /** "conversation" = a top-level comment on an issue/PR conversation; "inline" = a comment on a diff line (review thread). */
+  kind: "conversation" | "inline";
   id: string;
 }
 
@@ -147,7 +148,8 @@ export interface CodeReviewHost {
   listFiles(repository: string, ref: string | undefined, pathPrefix?: string): Promise<FileListView>;
   publishReview(repository: string, input: PublishReviewInput): Promise<PublishReviewResult>;
   comment(repository: string, input: CommentInput): Promise<{ url: string }>;
-  addReaction(repository: string, target: CommentRef, reaction: "eyes"): Promise<void>;
+  /** Marks a comment as picked up (GitHub: a 👀 reaction); a host without reactions may do nothing. */
+  acknowledge(repository: string, target: CommentRef): Promise<void>;
   startCheck(repository: string, input: StartCheckInput): Promise<{ checkId: string }>;
   completeCheck(repository: string, input: CompleteCheckInput): Promise<void>;
 }
