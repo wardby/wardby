@@ -126,11 +126,11 @@ Proxy sidecar (`--private-ip`, listening on `127.0.0.1:5432`, dialing out to
 the instance on 3307), which is what actually holds the IAM credential; the
 application code just connects to localhost.
 
-| Identity      | Google service account   | Kubernetes service account | Database role                                                                           |
-| ------------- | ------------------------ | -------------------------- | --------------------------------------------------------------------------------------- |
-| Control plane | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app` — read/write every table                                                   |
-| Coding proxy  | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy` — only `CodingProxySession`/`CodingProxyRequest` and three `Run` columns |
-| Migrations    | `<name_prefix>-migrator` | `wardby-migrator`          | `SET ROLE` to the built-in owner, so migrations can alter and create tables             |
+| Identity      | Google service account   | Kubernetes service account | Database role                                                                                                                                       |
+| ------------- | ------------------------ | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Control plane | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app` — read/write every table                                                                                                               |
+| Coding proxy  | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy` — only `CodingProxySession`/`CodingProxyRequest`, plus update `tokensIn`, `tokensOut` and `costUsd` on `Run`, and read only its `id` |
+| Migrations    | `<name_prefix>-migrator` | `wardby-migrator`          | `SET ROLE` to the built-in owner, so migrations can alter and create tables                                                                         |
 
 `database-grants.sql` grants each privilege set to a `NOLOGIN` group role
 (`wardby_app`, `wardby_proxy`) rather than to the IAM users directly, then
