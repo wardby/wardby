@@ -316,9 +316,11 @@ echo "==> 11/${TOTAL_STEPS} prove the new pods can use the database"
 # A Ready pod has not necessarily touched the database: the control plane and
 # the coding proxy each run one query through their own Prisma client, Auth
 # Proxy sidecar and database role. The query runs in the container itself
-# (runtime image, WORKDIR /app, where require finds @prisma/client), with the
-# pod's own DATABASE_URL, which is never printed: only "... reads the
-# database" or the error message, with any connection URL in it masked.
+# (runtime image, WORKDIR /app), through the image's own client factory,
+# dist/core/db.js (the generated client in dist/generated/prisma plus the pg
+# driver adapter -- the same code path the app uses), with the pod's own
+# DATABASE_URL, which is never printed: only "... reads the database" or the
+# error message, with any connection URL in it masked.
 #
 # The pod is picked explicitly rather than via deploy/<name>: rollout status
 # has returned, so the only Running pods not being deleted belong to the new
@@ -330,13 +332,14 @@ new_pod() {
 }
 database_roundtrip() {
   local app="$1" container="$2" table="$3" label="$4" pod out script
-  script='const { PrismaClient } = require("@prisma/client");
-const mask = (m) => String(m).replace(/postgres(ql)?:\/\/[^\s\x60\x27"]+/gi, "<database url>");
+  script='const mask = (m) => String(m).replace(/postgres(ql)?:\/\/[^\s\x60\x27"]+/gi, "<database url>");
 setTimeout(() => { console.error("no answer from the database in 30s"); process.exit(1); }, 30000);
-new PrismaClient().$queryRawUnsafe(`SELECT 1 FROM "'"$table"'" LIMIT 1`).then(
-  () => process.exit(0),
-  (e) => { console.error(mask(e && e.message ? e.message : e)); process.exit(1); },
-);'
+import("/app/dist/core/db.js")
+  .then(({ createPrismaClient }) => createPrismaClient().$queryRawUnsafe(`SELECT 1 FROM "'"$table"'" LIMIT 1`))
+  .then(
+    () => process.exit(0),
+    (e) => { console.error(mask(e && e.message ? e.message : e)); process.exit(1); },
+  );'
   pod="$(new_pod "$app")"
   if [[ -z "$pod" ]]; then
     echo "up.sh: no running ${app} pod to check." >&2

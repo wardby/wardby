@@ -2,21 +2,20 @@ import { spawnSync } from "node:child_process";
 
 // No accepted exceptions. Any advisory fails CI.
 //
-// SR-009 (GHSA-ggr8-5vv4-36mx, deepmerge-ts via prisma -> @prisma/config) used
-// to be allowlisted here. It is now removed from this repository's tree by the
-// `overrides` entry in package.json, which forces deepmerge-ts 8.0.2 under
-// Prisma 6 -- reviewed and tested 2026-09-24 against validate, generate,
-// format, the migration drift check and the full suite.
+// The Prisma CLI (a devDependency since Prisma 7) pins two flagged packages
+// exactly; `overrides` in package.json forces patched versions, reviewed and
+// tested against generate, validate, the migration drift check and the
+// migration image (docs/security-deployment.md, SR-009):
+// - deepmerge-ts 8.0.2 (GHSA-ggr8-5vv4-36mx, via @prisma/config), 2026-09-24;
+// - mysql2 3.24.4 (GHSA-3f6p-5ww8-9rcr, GHSA-rgwj-5xj2-c3m3; Prisma Studio's
+//   MySQL executor only), 2026-09-25.
+// No allowlist entry backs them up on purpose: if a lockfile change ever
+// dropped an override, the advisory would reappear here and fail the job.
 //
-// The exception was deleted rather than left in place on purpose. With the
-// override, audit is clean and the exception is never consulted, so it had
-// become dead code -- and a dead allowlist entry is a trap: if a lockfile
-// change ever dropped the override, it would silently re-permit the advisory.
-// Removing it makes the override load-bearing, enforced here.
-//
-// SR-009 still applies to people who `npm install @wardby/cli` (npm ignores a
-// dependency's overrides), which this job cannot audit. See
-// docs/security-deployment.md.
+// SR-009 is resolved for consumers too: the published package no longer
+// depends on the Prisma CLI, so `npm install @wardby/cli` resolves neither
+// package. scripts/npm-package-acceptance.mjs audits that install and fails
+// on any high or critical advisory.
 const acceptedException = null;
 
 function auditPassesPolicy(output, status) {
