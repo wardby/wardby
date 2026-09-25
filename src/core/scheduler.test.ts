@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "./db.js";
 import type { Executor } from "../providers/executor/types.js";
 import { findDueCandidates, claimDueRun, markRunFailedFromExecutorError, type SchedulerDb } from "./scheduler.js";
 
@@ -150,7 +150,7 @@ if (!databaseUrl) {
 }
 
 describe.skipIf(!databaseUrl)("claimDueRun (database)", () => {
-  const db = new PrismaClient();
+  const db = createPrismaClient();
   const createdAgentIds: string[] = [];
 
   afterAll(async () => {

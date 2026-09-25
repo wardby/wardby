@@ -14,7 +14,7 @@
  */
 
 import { DBOS, Error as DbosErrors } from "@dbos-inc/dbos-sdk";
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import type { ProviderRegistry } from "../index.js";
 import type { DbosConfig } from "../../config/providers.js";
 import type { StepRunner } from "../engine/types.js";

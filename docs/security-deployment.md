@@ -1,10 +1,10 @@
 # Security deployment and recovery
 
 The secured self-hosted HTTP implementation is protected by database, HTTP,
-browser, migration, and review gates. SR-009 is removed from this repository,
-its CI, and its images by a reviewed dependency override; it is accepted only for
-`npm install @wardby/cli` consumers who have not applied the same override,
-through 2026-11-19. Deployment controls in this guide still apply.
+browser, migration, and review gates. `npm install @wardby/cli` installs
+audit-clean: the published package no longer installs the Prisma CLI, and the
+repository's development tree is clean by reviewed overrides. Deployment
+controls in this guide still apply.
 
 ## Supported runtime and delegated operation
 
@@ -207,8 +207,9 @@ Public/non-owner tool listings expose only id/name/description; owners retain
 their source and schema. Private agents are indistinguishable from missing IDs.
 
 Cancellation stops bridge delivery, sleep timers, and in-flight network work.
-Prisma 6's query interface does not accept an AbortSignal: an already-dispatched
-database operation may finish after sandbox cancellation. Its returned data is
+Prisma's query interface does not accept an AbortSignal (still true on Prisma
+7's `pg` driver adapter): an already-dispatched database operation may finish
+after sandbox cancellation. Its returned data is
 bounded before entering Node, but cancellation is not a transaction rollback.
 Set a short database statement/lock timeout on the dedicated application role,
 bound connection pools and concurrent invocations, and review a cancellable
@@ -264,70 +265,48 @@ Per-run record ConfigMaps currently require operator-managed garbage collection,
 Claude Code is not supported by the Kubernetes launcher, and the real-cluster
 suite does not yet cover every Docker containment scenario.
 
-## Images and dependency exception
+## Images and dependencies
 
 ```sh
 docker build -f deploy/Dockerfile --target runtime -t wardby-runtime .
 docker build -f deploy/Dockerfile --target migration -t wardby-migration .
 ```
 
-The runtime runs as uid 1000 and contains the generated Prisma client, but no
-Prisma CLI, `@prisma/config`, or `deepmerge-ts`. Its manifest drops development
-dependencies and omits optional peers before installation. Merely running
-`npm ci --omit=dev` is insufficient: Prisma client can pull the CLI as a peer.
-Audit the shipped subset with `npm audit --omit=peer`. A plain audit may still
-report intentionally omitted optional peers from the lockfile.
+The runtime runs as uid 1000 and contains the generated Prisma client (compiled
+into `dist/generated/prisma`) with `@prisma/client`'s runtime and the `pg`
+driver adapter, but no Prisma CLI, `@prisma/config`, `deepmerge-ts` or `mysql2`
+(the image build asserts this). Its manifest drops development dependencies and
+omits optional peers before installation: `@prisma/client` declares the CLI as
+an optional peer. The migration image keeps the full build tree -- the Prisma
+CLI and `prisma.config.ts`.
 
-SR-009 is GHSA-ggr8-5vv4-36mx: `deepmerge-ts` below 8.0.0, reached through
-`prisma` -> `@prisma/config` -> `deepmerge-ts`. `@prisma/client` is not in that
-chain; only the Prisma CLI is. `@prisma/config` pins `deepmerge-ts` **exactly**
-(7.1.5) in both 6.19.3 and 7.10.0, so no `deepmerge-ts` patch can flow in by
-itself, and no Prisma 6 release since 6.19.3 (2026-04-01) has addressed it. See
-the [advisory](https://github.com/advisories/GHSA-ggr8-5vv4-36mx).
-
-**Remediated here by override (2026-09-24).** `package.json` forces
-`deepmerge-ts` 8.0.2 under Prisma 6:
+**Development tree (repository, CI, build and migration images).** The Prisma
+CLI (a devDependency since the Prisma 7 upgrade) still carries two flagged
+packages, both forced to patched versions by `overrides` in `package.json`:
 
 ```json
-"overrides": { "deepmerge-ts": "8.0.2" }
+"overrides": { "deepmerge-ts": "8.0.2", "mysql2": "3.24.4" }
 ```
 
-This is the dependency-major override the original acceptance declined to apply
-unreviewed. It was reviewed and tested before being applied: `@prisma/config`
-calls only `deepmerge()`, and the 8.0 breaking changes are two type renames and
-a behaviour change to `deepmergeInto`, which Prisma does not call. With the
-override, `prisma validate`, `generate` and `format`, the `migrate diff` drift
-check, the full test suite and the npm package acceptance test all pass, and raw
-`npm audit` reports zero vulnerabilities. The repository, CI, and the build and
-migration images are therefore clean.
+- `deepmerge-ts`: `@prisma/config` 7.10.0 still pins 7.1.5 exactly. The 8.x
+  override was reviewed on 2026-09-24 (`@prisma/config` calls only
+  `deepmerge()`; the 8.0 breaking changes are two type renames and
+  `deepmergeInto`, which Prisma does not call) and remains in place.
+- `mysql2` (GHSA-3f6p-5ww8-9rcr, GHSA-rgwj-5xj2-c3m3, high): `prisma` 7.10.0
+  pins 3.15.3 exactly; it is used only by Prisma Studio's MySQL executor
+  (`createPool` from `mysql2/promise`), never by wardby, which is
+  PostgreSQL-only. 3.24.4 is the same major. Verified 2026-09-25 with the
+  override: `prisma generate`, `prisma validate`, the `migrate diff` drift
+  check, the migration image's `migrate deploy`, and `createPool` loading from
+  the CLI's own resolution.
 
-**CI enforces it.** `scripts/security-audit.mjs` no longer carries an exception
-for this advisory. With the override the audit is clean; if a lockfile change
-ever dropped the override, the advisory would reappear and the security job
-would fail. Both directions were verified.
+`scripts/security-audit.mjs` carries no exceptions: with the overrides the full
+and production audits are clean, and if a lockfile change ever dropped one, the
+advisory would reappear and the security job would fail.
 
-**What an override cannot reach.** npm honours `overrides` only in the root
-project and ignores them in dependencies, so the published package's own override
-has no effect on people who install it: `npm install @wardby/cli` still resolves
-`deepmerge-ts` 7.1.5 (verified). Installers can apply the same override in their
-own `package.json`; that yields zero vulnerabilities with a working CLI
-(verified).
-
-Accepted exception: re-accepted by the owner on **2026-09-24**, narrowed to
-consumer installs of the published package that have not applied the override,
-expiring **2026-11-19** — the end of Prisma 6 security support, per
-https://www.prisma.io/docs/orm/release-status. The acceptance deliberately does
-not outlive the Prisma major it covers. The original acceptance (2026-09-06,
-trusted generation/build/migration only, expiring 2026-10-06) is superseded.
-Do not load untrusted Prisma config or run migration tooling in a request
-handler.
-
-Retirement plan: Prisma 8 restructured its CLI and removes `deepmerge-ts`
-entirely (8.0.0-rc.15 resolves with none). If Prisma 8 is generally available by
-mid-October 2026, migrate 6 -> 8; otherwise migrate 6 -> 7, which is supported
-for 18 months after Prisma 8 ships. Either way, leave Prisma 6 before 2026-11-19.
-Note that Prisma's npm `latest` dist-tag currently points at a release candidate,
-so pin exact versions.
+Prisma's npm `latest` dist-tag currently points at an 8.0 release candidate, so
+pin exact versions (the build hides the CLI's update banner, which recommends
+it).
 
 Vitest and esbuild's additional development advisories were remediated by
 supported tooling updates.

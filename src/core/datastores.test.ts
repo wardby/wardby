@@ -63,7 +63,7 @@ function fakeDb() {
       findFirst: async ({ where }: { where: { agentId: string; boundName: string } }) =>
         agentDatastores.find((a) => a.agentId === where.agentId && a.boundName === where.boundName) ?? null,
     },
-  } as unknown as import("@prisma/client").PrismaClient;
+  } as unknown as import("#prisma").PrismaClient;
 }
 
 function fakeDatastoreProvider(): Datastore {

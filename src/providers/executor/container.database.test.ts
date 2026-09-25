@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "../../core/db.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PrismaContainerExecutionStore } from "./container.js";
 
-const db = new PrismaClient();
+const db = createPrismaClient();
 const suffix = randomUUID();
 const principalId = `container-principal-${suffix}`;
 const agentId = `container-agent-${suffix}`;

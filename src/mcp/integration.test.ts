@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, it } from "vitest";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "#prisma";
+import { createPrismaClient } from "../core/db.js";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer, type WardbyMcpServer } from "./server.js";
@@ -630,7 +631,7 @@ describe("MCP integration (all tool modules, in-memory)", () => {
 });
 
 describe.skipIf(!process.env.DATABASE_URL)("MCP integration: both AUTH_PROVIDER adapters (database)", () => {
-  const db = new PrismaClient();
+  const db = createPrismaClient();
   const clientIds: string[] = [];
 
   afterAll(async () => {

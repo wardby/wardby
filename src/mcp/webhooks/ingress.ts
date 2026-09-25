@@ -4,7 +4,7 @@
  * route in streamable-http.ts, matching the design's "route is
  * unauthenticated by OAuth" invariant.
  */
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import type { Executor } from "../../providers/executor/types.js";
 import { resolveWebhookRun } from "../../core/webhooks.js";
 import { CodingTaskOverrideSchema } from "../../coding/protocol.js";

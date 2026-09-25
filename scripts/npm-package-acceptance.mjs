@@ -1,11 +1,29 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import dotenvFlow from "dotenv-flow";
+import pg from "pg";
 
 const projectRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const packageJson = JSON.parse(readFileSync(join(projectRoot, "package.json"), "utf8"));
+// The database the consumer install runs against. The URL is only used to
+// create and drop one throwaway database (wardby_package_<random>) beside it;
+// it is never printed. WARDBY_PACKAGE_TEST_DATABASE_URL wins, then the shell's
+// DATABASE_URL, then the same env files the test suite loads.
+function testDatabaseUrl() {
+  const fromFiles = dotenvFlow.parse(
+    [".env", ".env.local", ".env.test", ".env.test.local"]
+      .map((file) => join(projectRoot, file))
+      .filter((file) => existsSync(file)),
+  );
+  const url = process.env.WARDBY_PACKAGE_TEST_DATABASE_URL || process.env.DATABASE_URL || fromFiles.DATABASE_URL;
+  if (!url) throw new Error("package acceptance needs a PostgreSQL URL (DATABASE_URL) to create a throwaway database");
+  return url;
+}
+
 const scratch = mkdtempSync(join(tmpdir(), "wardby-package-"));
 const npmEnv = {
   ...process.env,
@@ -40,6 +58,9 @@ try {
     "dist/wardby-bin.js",
     "dist/cli.js",
     "prisma/schema.prisma",
+    "prisma/migrate.config.mjs",
+    "dist/generated/prisma/client.js",
+    "dist/quickstart/migrate.js",
     "deploy/local/docker-compose.yml",
     "scripts/git-askpass.sh",
   ];
@@ -54,40 +75,76 @@ try {
     }
   }
 
-  const installRoot = scratch;
-  writeFileSync(join(scratch, "package.json"), JSON.stringify({ private: true }));
-  const tarball = join(scratch, packed.filename);
-  run("npm", ["install", "--no-audit", "--no-fund", "--package-lock=false", tarball], {
-    cwd: scratch,
-    env: npmEnv,
+  // Consumer install + run, inside a clean linux/amd64 container: portability
+  // is proven on the platform the images and most servers use, not on the
+  // machine that built the tarball. Same pinned node image as deploy/Dockerfile.
+  const nodeImage = /^FROM (\S+)/m.exec(readFileSync(join(projectRoot, "deploy/Dockerfile"), "utf8"))?.[1];
+  if (!nodeImage) throw new Error("could not read the node base image from deploy/Dockerfile");
+  // Tagged through a one-line build rather than `docker run <image@digest>`:
+  // Docker Desktop's containerd store refuses to run a digest-pinned reference
+  // for a non-native platform ("cannot overwrite digest"), while builds of the
+  // same pinned FROM work.
+  const consumerImage = "wardby-package-acceptance-node:local";
+  run("docker", ["build", "--quiet", "--platform", "linux/amd64", "--tag", consumerImage, "-"], {
+    input: `FROM ${nodeImage}\n`,
+    stdio: ["pipe", "pipe", "pipe"],
   });
 
-  const binary = process.platform === "win32" ? "wardby.cmd" : "wardby";
-  const executable = join(scratch, "node_modules", ".bin", binary);
-  const help = run(executable, ["--help"], { cwd: installRoot });
-  if (!help.includes("wardby quickstart") || !help.includes("wardby doctor") || !help.includes("--version")) {
-    throw new Error("installed wardby --help output is incomplete");
-  }
-  const version = run(executable, ["--version"], { cwd: installRoot }).trim();
-  if (version !== packageJson.version) {
-    throw new Error(`installed version ${version} does not match package ${packageJson.version}`);
-  }
-
-  const runtimeProbe = spawnSync(executable, ["agent", "list"], {
-    cwd: installRoot,
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      DATABASE_URL: "postgresql://wardby:wardby@127.0.0.1:1/wardby?connect_timeout=1",
-    },
-  });
-  const runtimeOutput = `${runtimeProbe.stdout ?? ""}\n${runtimeProbe.stderr ?? ""}`;
-  const prismaInitializationErrors = [
-    "@prisma/client did not initialize yet",
-    "Cannot find module '.prisma/client/default'",
-  ];
-  if (prismaInitializationErrors.some((message) => runtimeOutput.includes(message))) {
-    throw new Error(`installed Prisma runtime is incomplete:\n${runtimeOutput.trim()}`);
+  const adminUrl = testDatabaseUrl();
+  const databaseName = `wardby_package_${randomBytes(4).toString("hex")}`;
+  const admin = new pg.Client({ connectionString: adminUrl });
+  await admin.connect();
+  try {
+    await admin.query(`CREATE DATABASE "${databaseName}"`);
+    const containerUrl = new URL(adminUrl);
+    containerUrl.pathname = `/${databaseName}`;
+    if (["localhost", "127.0.0.1", "[::1]"].includes(containerUrl.hostname)) {
+      containerUrl.hostname = "host.docker.internal";
+    }
+    // The URL reaches the container through the environment (`-e DATABASE_URL`
+    // with no value copies it from docker's own env), never through argv.
+    const container = spawnSync(
+      "docker",
+      [
+        "run",
+        "--rm",
+        "--platform",
+        "linux/amd64",
+        "--add-host",
+        "host.docker.internal:host-gateway",
+        "-e",
+        "DATABASE_URL",
+        "-v",
+        `${scratch}:/pkg:ro`,
+        "-v",
+        `${join(projectRoot, "scripts/npm-package-acceptance-harness.mjs")}:/harness.mjs:ro`,
+        consumerImage,
+        "node",
+        "/harness.mjs",
+        `/pkg/${packed.filename}`,
+        packageJson.version,
+      ],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, DATABASE_URL: containerUrl.toString() },
+        timeout: 15 * 60_000,
+      },
+    );
+    const output = `${container.stdout ?? ""}\n${container.stderr ?? ""}`.replace(
+      /postgres(ql)?:\/\/[^\s`'"]+/gi,
+      "<database url>",
+    );
+    const result = /^ACCEPTANCE RESULT (.*)$/m.exec(output);
+    if (container.status !== 0 || !result) {
+      throw new Error(`linux/amd64 consumer install failed:\n${output.trim()}`);
+    }
+    const report = JSON.parse(result[1]);
+    if (report.arch !== "x86_64") throw new Error(`consumer install ran on ${report.arch}, not linux/amd64 (x86_64)`);
+    console.log(JSON.stringify(report, null, 2));
+  } finally {
+    await admin.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+    await admin.end();
   }
 
   console.log(`package acceptance passed for ${packed.filename} (${packed.size} bytes)`);

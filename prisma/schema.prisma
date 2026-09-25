@@ -2,13 +2,21 @@
 // schema. Targets PostgreSQL even for the laptop demo; "portable" means any
 // Postgres (see deploy/local/docker-compose.yml), not a cloud dependency.
 
+// Generated into src/generated/prisma (gitignored; `npm run build` and
+// `prepare` regenerate it) and imported everywhere as "#prisma" (package.json
+// "imports"). Pure TS + wasm query compiler: no native engine, so the built
+// client is portable across platforms.
 generator client {
-  provider = "prisma-client-js"
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "esm"
+  runtime      = "nodejs"
 }
 
+// The connection URL lives in prisma.config.ts (CLI) and src/core/db.ts
+// (runtime, through @prisma/adapter-pg).
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 model Agent {

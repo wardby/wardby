@@ -3,7 +3,7 @@ import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { buildMcpServer } from "../server.js";
 import { startHttpServer, type HttpServerHandle } from "./streamable-http.js";
 import type { AuthProvider } from "../../providers/auth/types.js";
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import type { McpProviders } from "../context.js";
 
 let server: HttpServerHandle;

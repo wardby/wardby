@@ -9,7 +9,7 @@
  * is always 32 bytes, so there's no length-mismatch case to special-case).
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import type { AgentKind, CodingAgentProfile, PrismaClient, Webhook } from "@prisma/client";
+import type { AgentKind, CodingAgentProfile, PrismaClient, Webhook } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import { dispatchRun } from "./dispatch.js";
 

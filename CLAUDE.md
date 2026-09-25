@@ -44,7 +44,7 @@ unconfirmed.
 
 ## Database / Prisma — STRICT
 
-PostgreSQL + Prisma 6. Migrations are the source of truth for the deployed
+PostgreSQL + Prisma 7. Migrations are the source of truth for the deployed
 schema; `prisma/schema.prisma` is the declarative model. **The two must never
 drift.** Follow these rules exactly — they are not optional.
 
@@ -75,21 +75,23 @@ schema in `schema.prisma` — the diff must be empty. Verify it before committin
 
 ```bash
 npm run db:up                       # local Postgres on :55432 (docker compose)
-docker exec local-postgres-1 psql -U reevo -d reevo \
+docker exec local-postgres-1 psql -U wardby -d wardby \
   -c "DROP DATABASE IF EXISTS wardby_shadow;" -c "CREATE DATABASE wardby_shadow;"
-npx prisma migrate diff \
+SHADOW_DATABASE_URL="postgresql://wardby:wardby@localhost:55432/wardby_shadow" \
+  npx prisma migrate diff \
   --from-migrations prisma/migrations \
-  --to-schema-datamodel prisma/schema.prisma \
-  --shadow-database-url "postgresql://reevo:reevo@localhost:55432/wardby_shadow" \
-  --script
-docker exec local-postgres-1 psql -U reevo -d reevo -c "DROP DATABASE IF EXISTS wardby_shadow;"
+  --to-schema prisma/schema.prisma \
+  --script --exit-code
+docker exec local-postgres-1 psql -U wardby -d wardby -c "DROP DATABASE IF EXISTS wardby_shadow;"
 ```
 
-(This repo's local `local-postgres-1` container still uses the pre-rename
-`reevo`/`reevo` role and database, not `wardby`/`wardby` — the role/db name
-was never migrated when the project renamed. If this fails with a role or
-database "does not exist" error, check the running container's
-`POSTGRES_USER`/`POSTGRES_DB` environment and use those instead.)
+(Prisma 7 form: the shadow database URL is read from `SHADOW_DATABASE_URL` in
+`prisma.config.ts` — there is no `--shadow-database-url` flag any more — and
+`--to-schema-datamodel` became `--to-schema`. `--exit-code` makes a non-empty
+diff exit 2. The local `local-postgres-1` container's role and database are
+`wardby`/`wardby`. If this fails with a role or database "does not exist"
+error, check the running container's `POSTGRES_USER`/`POSTGRES_DB` environment
+and use those instead.)
 
 **Clean = the output is `-- This is an empty migration.`** Any `CREATE`,
 `ALTER`, `DROP`, or index statement means the schema and migrations disagree —

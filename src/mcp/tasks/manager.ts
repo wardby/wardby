@@ -10,7 +10,7 @@
  * cancellation is cooperative and eventually consistent, per the
  * extension's own spec language).
  */
-import type { PrismaClient, RunStatus, Task } from "@prisma/client";
+import type { PrismaClient, RunStatus, Task } from "#prisma";
 import { INTERNAL_ERROR } from "@modelcontextprotocol/server";
 import { publicCodingRunResult } from "../../coding/protocol.js";
 

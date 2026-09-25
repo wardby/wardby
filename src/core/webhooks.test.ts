@@ -80,7 +80,7 @@ function fakeDb(agents: FakeAgentRow[] = []) {
     $queryRaw: async () => [],
   };
   db.$transaction = async (fn: (tx: any) => unknown) => fn(db);
-  return db as import("@prisma/client").PrismaClient;
+  return db as import("#prisma").PrismaClient;
 }
 
 describe("core/webhooks", () => {

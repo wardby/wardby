@@ -1,6 +1,13 @@
 import { defineConfig, configDefaults } from "vitest/config";
 
+// "#prisma" (package.json "imports") points at dist/ by default; tests run
+// from source, so resolve its "wardby-source" condition (src/generated/prisma).
+// The rest is Vitest's own default for Vite 6+ (Vite's server conditions minus
+// "module"), which a user-set list replaces rather than extends.
+const sourceConditions = ["wardby-source", "node", "development|production"];
+
 export default defineConfig({
+  ssr: { resolve: { conditions: sourceConditions } },
   test: {
     include: ["src/**/*.test.ts", "deploy/**/*.test.mjs"],
     // Tests explicitly include .env.local; dotenv-flow normally omits it when

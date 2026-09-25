@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "../../../core/db.js";
 import { SelfHostedAuthProvider } from "../../../providers/auth/self-hosted.js";
 import { IdentityService } from "./credentials.js";
 import { startHttpServer, type HttpServerHandle } from "../../transport/streamable-http.js";
@@ -12,7 +12,7 @@ import type { McpProviders } from "../../context.js";
 // bodies that always carry `resource`, with client_id as the only client
 // authentication. wardby's browser.test.ts refresh omits `resource`.
 describe.skipIf(!process.env.DATABASE_URL)("self-hosted token refresh, MCP SDK shape (database)", () => {
-  const db = new PrismaClient();
+  const db = createPrismaClient();
   const subject = "refresh-" + randomUUID();
   const clients: string[] = [];
   let server: HttpServerHandle | undefined;

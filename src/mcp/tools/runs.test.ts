@@ -54,7 +54,7 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[]) {
           .map((runId) => ({ runId, queuedAt: runRows.get(runId)?.codingRun?.queuedAt ?? null }))
           .filter((row) => row.queuedAt !== null),
     },
-  } as unknown as import("@prisma/client").PrismaClient;
+  } as unknown as import("#prisma").PrismaClient;
 }
 
 function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {

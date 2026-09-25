@@ -1,4 +1,4 @@
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import type { ProviderRegistry } from "../index.js";
 import { loadDbosConfig, type ProviderConfig } from "../../config/providers.js";
 import { prisma as defaultDb } from "../../core/db.js";

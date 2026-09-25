@@ -43,3 +43,6 @@ tfplan
 *.tfplan
 *.tfvars.json
 !*.tfvars.example
+
+# generated Prisma client (npm run build / prepare: prisma generate)
+src/generated/

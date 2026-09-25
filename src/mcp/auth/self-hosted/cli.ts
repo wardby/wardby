@@ -1,5 +1,5 @@
 import { parseArgs } from "node:util";
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import { IdentityService } from "./credentials.js";
 
 export async function authCommand(

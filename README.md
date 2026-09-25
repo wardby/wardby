@@ -315,19 +315,15 @@ project dependency instead:
 npm install @wardby/cli
 ```
 
-`npm audit` will report a high-severity advisory in `deepmerge-ts`
-([GHSA-ggr8-5vv4-36mx](https://github.com/advisories/GHSA-ggr8-5vv4-36mx)). It
-is reached only through Prisma's CLI while it loads your own Prisma
-configuration, and Prisma has not patched it in the 6.x line. This repository
-clears it with an override, but npm does not apply a package's overrides to the
-projects that install it — so add the same entry to your own `package.json`:
+That install is audit-clean: the published package carries no Prisma CLI,
+`@prisma/config`, `deepmerge-ts`, or `mysql2`, so `npm audit` reports nothing
+and no `overrides` entry is needed in your own `package.json`.
 
-```json
-"overrides": { "deepmerge-ts": "8.0.2" }
-```
-
-That override is tested against Prisma 6 and the CLI; the reasoning and the
-retirement plan are in [SR-009](https://github.com/wardby/wardby/blob/main/docs/security-deployment.md#images-and-dependency-exception).
+`wardby quickstart` and `wardby doctor` separately fetch the pinned Prisma CLI
+(`prisma@7.10.0`) on demand via `npx` to run migrations, so the machine running
+them needs npm registry access at that moment. See
+[Images and dependencies](https://github.com/wardby/wardby/blob/main/docs/security-deployment.md#images-and-dependencies)
+for the repository's own dependency-override policy.
 
 ## What is implemented
 

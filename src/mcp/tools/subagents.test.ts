@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
-import { Prisma } from "@prisma/client";
+import { Prisma } from "#prisma";
 import { buildMcpServer } from "../server.js";
 import { registerSubAgentTools } from "./subagents.js";
 import type { McpRequestContext } from "../context.js";
@@ -84,7 +84,7 @@ function fakeDb(agents: FakeAgentRow[]) {
         return { count: before - kept.length };
       },
     },
-  } as unknown as import("@prisma/client").PrismaClient;
+  } as unknown as import("#prisma").PrismaClient;
 }
 
 function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {

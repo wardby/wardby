@@ -7,7 +7,7 @@
  * registry also carries jobs/email/auth/storage seams no Phase 4 tool
  * needs and this plan never builds real adapters for.
  */
-import type { Principal, PrismaClient } from "@prisma/client";
+import type { Principal, PrismaClient } from "#prisma";
 import type { RequestStateAccessor } from "@modelcontextprotocol/server";
 import type { ProviderRegistry } from "../providers/index.js";
 

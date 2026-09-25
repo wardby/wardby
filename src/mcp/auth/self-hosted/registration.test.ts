@@ -1,14 +1,14 @@
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "../../../core/db.js";
 import { SelfHostedAuthProvider } from "../../../providers/auth/self-hosted.js";
 import { startHttpServer, type HttpServerHandle } from "../../transport/streamable-http.js";
 import { buildMcpServer } from "../../server.js";
 import type { McpProviders } from "../../context.js";
 
 describe.skipIf(!process.env.DATABASE_URL)("self-hosted dynamic client registration (database)", () => {
-  const db = new PrismaClient();
+  const db = createPrismaClient();
   const clients: string[] = [];
   let server: HttpServerHandle | undefined;
   let origin = "";

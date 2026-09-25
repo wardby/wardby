@@ -6,7 +6,7 @@ import { TASKS_EXTENSION_ID } from "./capabilities.js";
 import type { McpRequestContext } from "./context.js";
 
 const fakeProviders = {} as unknown as import("../providers/index.js").ProviderRegistry;
-const fakeDb = {} as unknown as import("@prisma/client").PrismaClient;
+const fakeDb = {} as unknown as import("#prisma").PrismaClient;
 
 function fakeCtx(scopes: string[] = []): McpRequestContext {
   return {
@@ -39,7 +39,7 @@ function fakeDbWithAgents(agents: FakeAgentRow[]) {
         return agents.filter((a) => a.ownerId === where.ownerId);
       },
     },
-  } as unknown as import("@prisma/client").PrismaClient;
+  } as unknown as import("#prisma").PrismaClient;
 }
 
 /** Connects a real Client to a factory-built McpServer over an in-memory transport pair. */

@@ -76,7 +76,8 @@ docker compose --env-file deploy/production/.env.production \
   connection from outside the private network fails.
 - Verify HTTPS, HTTP redirect, canonical Host rejection, origin rejection, and
   the full OAuth flow against the production-like staging hostname.
-- Confirm the runtime image contains neither Prisma CLI, `@prisma/config`, nor
-  `deepmerge-ts`; retain the image SBOM and scan reports with the release.
+- Confirm the runtime image contains none of the Prisma CLI, `@prisma/config`,
+  `deepmerge-ts`, or `mysql2`; retain the image SBOM and scan reports with the
+  release.
 - Record the firewall/egress policy, secret-injection mechanism, image digests,
   and owning operator in the launch evidence.

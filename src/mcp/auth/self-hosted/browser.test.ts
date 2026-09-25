@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { afterAll, describe, expect, it } from "vitest";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "../../../core/db.js";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { SelfHostedAuthProvider } from "../../../providers/auth/self-hosted.js";
 import { IdentityService } from "./credentials.js";
@@ -11,7 +11,7 @@ import type { McpProviders } from "../../context.js";
 import { chromium } from "playwright";
 
 describe.skipIf(!process.env.DATABASE_URL)("browser HTTP OAuth flow (database)", () => {
-  const db = new PrismaClient();
+  const db = createPrismaClient();
   const subjects: string[] = [];
   const clients: string[] = [];
   let server: HttpServerHandle | undefined;

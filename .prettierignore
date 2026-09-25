@@ -1,5 +1,6 @@
 dist
 node_modules
 src/sandbox/generated
+src/generated
 coverage
 package-lock.json

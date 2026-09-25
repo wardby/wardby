@@ -6,7 +6,7 @@
  * graph (§7 of the design doc) — cycles are not something Postgres can
  * enforce natively.
  */
-import { Prisma, type PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient } from "#prisma";
 import { requireOwnedAgent } from "../auth/ownership.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";

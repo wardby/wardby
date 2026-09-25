@@ -28,7 +28,7 @@ function fakeDb() {
         return row;
       },
     },
-  } as unknown as import("@prisma/client").PrismaClient;
+  } as unknown as import("#prisma").PrismaClient;
 }
 
 describe("createStdioSecretElicitationHost", () => {

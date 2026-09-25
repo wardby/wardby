@@ -3,7 +3,7 @@
  * Proves end-to-end create against Postgres.
  */
 import { describe, it, expect, afterAll } from "vitest";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "../core/db.js";
 import {
   randomUUID,
   generateKeyPairSync,
@@ -58,7 +58,7 @@ function seal(plaintext: string, name: string, recipientPub: KeyObject): Transfe
 }
 
 describe.skipIf(!process.env.DATABASE_URL)("createFromBundle (database)", () => {
-  const db = new PrismaClient();
+  const db = createPrismaClient();
   const testId = randomUUID().slice(0, 8);
   const agentName = `test-agent-${testId}`;
   const toolName = `test-tool-${testId}`;

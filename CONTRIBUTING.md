@@ -10,6 +10,11 @@ portable deployment enhancements.
 3. Copy `.env.example` to `.env` and use test-only credentials.
 4. Start PostgreSQL with `npm run db:up` and apply migrations with
    `npm run prisma:migrate`.
+5. `npm ci` already generated the Prisma client (the `prepare` script) into
+   `src/generated/prisma`, which is git-ignored. Regenerate it with
+   `npm run prisma:generate` after any `prisma/schema.prisma` change, before
+   `npm run typecheck` or `npm test`: both fail if the client is missing or
+   stale.
 
 Before opening a pull request, run:
 

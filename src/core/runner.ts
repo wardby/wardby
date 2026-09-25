@@ -18,7 +18,7 @@
  */
 
 import { z } from "zod";
-import type { Prisma, PrismaClient, Run, RunTrigger } from "@prisma/client";
+import type { Prisma, PrismaClient, Run, RunTrigger } from "#prisma";
 import type { ProviderRegistry } from "../providers/index.js";
 import type { LoadedTool } from "../providers/engine/types.js";
 import { runStepInline, type StepRunner } from "../providers/engine/types.js";

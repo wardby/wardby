@@ -8,7 +8,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { Agent } from "@prisma/client";
+import type { Agent } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import { dueWindow } from "./cron.js";
 import { dispatchRun, type DispatchDb } from "./dispatch.js";

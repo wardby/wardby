@@ -108,7 +108,7 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
   return {
     ...transactionDb,
     $transaction: async <T>(callback: (tx: typeof transactionDb) => Promise<T>) => callback(transactionDb),
-  } as unknown as import("@prisma/client").PrismaClient;
+  } as unknown as import("#prisma").PrismaClient;
 }
 
 function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {

@@ -32,7 +32,7 @@ import {
   type InputRequiredResult,
 } from "@modelcontextprotocol/server";
 import { randomBytes } from "node:crypto";
-import type { Agent, PrismaClient, Principal } from "@prisma/client";
+import type { Agent, PrismaClient, Principal } from "#prisma";
 import type { McpRequestContext, McpProviders } from "./context.js";
 import { requireScope } from "./auth/resource-server.js";
 import { McpError } from "./errors.js";

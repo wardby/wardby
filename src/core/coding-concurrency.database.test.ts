@@ -9,14 +9,14 @@
  * queued coding runs to any other database test file.
  */
 import { randomUUID } from "node:crypto";
-import { PrismaClient } from "@prisma/client";
+import { createPrismaClient } from "./db.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Executor } from "../providers/executor/types.js";
 import { PrismaContainerExecutionStore } from "../providers/executor/container.js";
 import { CODING_QUEUE_TIMEOUT_ERROR, drainCodingQueue } from "./coding-queue.js";
 import { reconcileOnce } from "./reconciler.js";
 
-const db = new PrismaClient();
+const db = createPrismaClient();
 /** Every row this file creates starts with this, so beforeAll can clear leftovers of an aborted earlier run. */
 const PREFIX = "ccq-";
 const suffix = randomUUID();

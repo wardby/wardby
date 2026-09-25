@@ -19,6 +19,12 @@
     "budget-control"
   ],
   "type": "module",
+  "imports": {
+    "#prisma": {
+      "wardby-source": "./src/generated/prisma/client.ts",
+      "default": "./dist/generated/prisma/client.js"
+    }
+  },
   "engines": {
     "node": ">=24.0.0"
   },
@@ -32,6 +38,7 @@
     "deploy/local/docker-compose.yml",
     "dist/",
     "prisma/migrations/",
+    "prisma/migrate.config.mjs",
     "prisma/schema.prisma",
     "scripts/git-askpass.sh"
   ],
@@ -45,17 +52,16 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "build:vendor": "node scripts/build-sandbox-vendor.mjs",
-    "build": "npm run build:vendor && tsc -p tsconfig.build.json",
-    "prepare": "npm run build:vendor",
+    "build": "npm run build:vendor && PRISMA_HIDE_UPDATE_MESSAGE=1 prisma generate && tsc -p tsconfig.build.json",
+    "prepare": "npm run build:vendor && PRISMA_HIDE_UPDATE_MESSAGE=1 prisma generate",
     "prepack": "npm run build",
-    "postinstall": "prisma generate --schema prisma/schema.prisma",
-    "cli": "tsx src/cli.ts",
-    "capture:autopilot": "tsx src/tools/capture-autopilot-dry-run.ts",
+    "cli": "tsx --conditions=wardby-source src/cli.ts",
+    "capture:autopilot": "tsx --conditions=wardby-source src/tools/capture-autopilot-dry-run.ts",
     "test": "npm run build:vendor && vitest run",
     "test:package": "node scripts/npm-package-acceptance.mjs",
     "test:contract": "vitest run --config vitest.contract.config.ts",
     "test:kubernetes": "WARDBY_KUBERNETES_TEST=1 vitest run src/providers/jobs/kubernetes.integration.test.ts",
-    "prisma:generate": "prisma generate",
+    "prisma:generate": "PRISMA_HIDE_UPDATE_MESSAGE=1 prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "db:up": "docker compose -f deploy/local/docker-compose.yml up -d",
     "db:down": "docker compose -f deploy/local/docker-compose.yml down",
@@ -85,7 +91,8 @@
     "@modelcontextprotocol/client": "^2.0.0",
     "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
-    "@prisma/client": "^6.19.3",
+    "@prisma/adapter-pg": "7.10.0",
+    "@prisma/client": "7.10.0",
     "@prometheus-io/client": "^0.16.1",
     "croner": "^10.0.1",
     "dotenv-flow": "^4.1.0",
@@ -95,8 +102,8 @@
     "node-html-parser": "^9.0.3",
     "openai": "^4.67.0",
     "papaparse": "^5.7.0",
+    "pg": "8.23.0",
     "pino": "^9.14.0",
-    "prisma": "^6.19.3",
     "quickjs-emscripten": "^0.32.0",
     "tar-stream": "^3.2.1",
     "undici": "^8.7.0",
@@ -108,6 +115,7 @@
     "@openai/codex-sdk": "0.153.4",
     "@types/node": "^24.0.0",
     "@types/papaparse": "^5.5.2",
+    "@types/pg": "8.23.1",
     "@types/tar-stream": "^3.1.4",
     "esbuild": "^0.28.2",
     "eslint": "^10.10.0",
@@ -115,12 +123,14 @@
     "globals": "^17.12.0",
     "playwright": "^1.63.0",
     "prettier": "^3.9.6",
+    "prisma": "7.10.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.69.0",
     "vitest": "^4.1.11"
   },
   "overrides": {
-    "deepmerge-ts": "8.0.2"
+    "deepmerge-ts": "8.0.2",
+    "mysql2": "3.24.4"
   }
 }

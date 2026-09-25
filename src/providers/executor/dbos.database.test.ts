@@ -1,4 +1,5 @@
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "#prisma";
+import { createPrismaClient } from "../../core/db.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import type { LlmProvider, LlmRequest, LlmStreamEvent } from "../llm/types.js";
@@ -68,7 +69,7 @@ function fakeDatastore(): Datastore {
 const fakeCipher: SecretCipher = { keyId: () => "t", encrypt: async (s) => s, decrypt: async (s) => s };
 
 describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
-  const db = new PrismaClient();
+  const db = createPrismaClient();
   const suffix = randomUUID();
   const agentId = `dbos-agent-${suffix}`;
   const executorId = `test-${suffix}`;

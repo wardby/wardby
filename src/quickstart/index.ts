@@ -1,5 +1,4 @@
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
-import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -23,13 +22,18 @@ import {
   type QuickstartProvider,
   type QuickstartState,
 } from "./config.js";
+import {
+  FETCH_NOTICE,
+  migrateFailureReason,
+  prismaMigrateInvocation,
+  REGISTRY_FAILURE_MESSAGE,
+  runPrismaMigrateInvocation,
+} from "./migrate.js";
 
 const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
 const composeFile = join(packageRoot, "deploy/local/docker-compose.yml");
-const schemaFile = join(packageRoot, "prisma/schema.prisma");
 const wardbyBin = join(packageRoot, "bin/wardby.js");
 const packageJson = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")) as { version: string };
-const require = createRequire(import.meta.url);
 const DEMO_AGENT = "hello-wardby";
 const DEMO_PROMPT =
   "You are the Wardby quickstart agent. Reply with a short greeting, then explain in one sentence that Wardby admitted this run against an explicit maximum budget. Do not call tools.";
@@ -240,23 +244,20 @@ async function chooseProvider(
   throw new Error(`Unknown provider selection "${answer}".`);
 }
 
-function prismaCliPath(): string {
-  return require.resolve("prisma/build/index.js");
-}
-
 function applyMigrations(paths: QuickstartPaths): void {
-  const result = runCommand(process.execPath, [prismaCliPath(), "migrate", "deploy", "--schema", schemaFile], {
-    cwd: paths.projectDir,
-    env: runtimeEnv(paths),
-  });
+  const invocation = prismaMigrateInvocation("deploy", runtimeEnv(paths));
+  if (!invocation.local) console.log(FETCH_NOTICE);
+  const result = runPrismaMigrateInvocation(invocation, paths.projectDir);
+  if (result.registryFailure) {
+    const detail = /^npm (?:error|ERR!) code .*$/m.exec(result.stderr)?.[0] ?? result.stderr.trim().split("\n")[0];
+    throw new Error(`${REGISTRY_FAILURE_MESSAGE}${detail ? ` (${detail})` : ""}`);
+  }
   if (result.status !== 0) commandFailure("Database migration", result);
 }
 
 async function seedDemo(paths: QuickstartPaths, state: QuickstartState, budget: number): Promise<void> {
-  const previousDatabaseUrl = process.env.DATABASE_URL;
-  process.env.DATABASE_URL = readQuickstartEnv(paths).DATABASE_URL;
-  const { PrismaClient } = await import("@prisma/client");
-  const db = new PrismaClient();
+  const { createPrismaClient } = await import("../core/db.js");
+  const db = createPrismaClient(readQuickstartEnv(paths).DATABASE_URL);
   try {
     const existing = await db.agent.findUnique({ where: { name: DEMO_AGENT } });
     if (existing && existing.systemPrompt !== DEMO_PROMPT) {
@@ -282,8 +283,6 @@ async function seedDemo(paths: QuickstartPaths, state: QuickstartState, budget: 
     }
   } finally {
     await db.$disconnect();
-    if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
-    else process.env.DATABASE_URL = previousDatabaseUrl;
   }
 }
 
@@ -461,10 +460,8 @@ export async function quickstartCommand(args: string[]): Promise<void> {
 async function databaseHealthy(paths: QuickstartPaths): Promise<boolean> {
   const env = readQuickstartEnv(paths);
   if (!env.DATABASE_URL) return false;
-  const previous = process.env.DATABASE_URL;
-  process.env.DATABASE_URL = env.DATABASE_URL;
-  const { PrismaClient } = await import("@prisma/client");
-  const db = new PrismaClient();
+  const { createPrismaClient } = await import("../core/db.js");
+  const db = createPrismaClient(env.DATABASE_URL);
   try {
     await db.$queryRawUnsafe("SELECT 1");
     return true;
@@ -472,8 +469,6 @@ async function databaseHealthy(paths: QuickstartPaths): Promise<boolean> {
     return false;
   } finally {
     await db.$disconnect();
-    if (previous === undefined) delete process.env.DATABASE_URL;
-    else process.env.DATABASE_URL = previous;
   }
 }
 
@@ -506,11 +501,14 @@ export async function doctorCommand(args: string[]): Promise<void> {
     const ps = runCompose(paths, state, ["ps", "--status", "running", "--quiet"]);
     checks.push(["PostgreSQL container", ps.status === 0 && ps.stdout.trim().length > 0]);
     checks.push(["Database connection", await databaseHealthy(paths)]);
-    const migrations = runCommand(process.execPath, [prismaCliPath(), "migrate", "status", "--schema", schemaFile], {
-      cwd: paths.projectDir,
-      env: runtimeEnv(paths),
-    });
-    checks.push(["Database migrations", migrations.status === 0]);
+    const invocation = prismaMigrateInvocation("status", runtimeEnv(paths));
+    if (!invocation.local) console.log(FETCH_NOTICE);
+    const migrations = runPrismaMigrateInvocation(invocation, paths.projectDir);
+    checks.push([
+      "Database migrations",
+      migrations.status === 0,
+      migrations.status === 0 ? undefined : migrateFailureReason(migrations),
+    ]);
   }
 
   let failed = false;

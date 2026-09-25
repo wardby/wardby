@@ -14,6 +14,7 @@ export default tseslint.config(
       "**/dist/**",
       "**/node_modules/**",
       "src/sandbox/generated/**",
+      "src/generated/**",
       "**/coverage/**",
       "spikes/**",
       ".claude/**",

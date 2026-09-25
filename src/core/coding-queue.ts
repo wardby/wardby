@@ -14,7 +14,7 @@
  * Called on the scheduler leader's tick and immediately in any process
  * whose coding run just finished (ContainerExecutor onSlotReleased).
  */
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import { markRunFailedFromExecutorError } from "./dispatch.js";
 import { logger } from "./logger.js";

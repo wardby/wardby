@@ -6,9 +6,14 @@ RUN npm ci --ignore-scripts
 COPY prisma ./prisma
 COPY scripts ./scripts
 COPY src ./src
-COPY tsconfig.json tsconfig.build.json ./
-RUN npm run prisma:generate && npm run build
+COPY tsconfig.json tsconfig.build.json prisma.config.ts ./
+# build runs prisma generate (into src/generated/prisma) before tsc, so the
+# client ships compiled inside dist/generated/prisma.
+RUN npm run build
 
+# The migration image keeps the full build tree: the Prisma CLI (a
+# devDependency) and prisma.config.ts, which Prisma 7 needs for the schema,
+# migrations path and DATABASE_URL.
 FROM build AS migration
 CMD ["npm", "run", "prisma:migrate"]
 
@@ -28,7 +33,9 @@ RUN npm pkg delete dependencies.prisma devDependencies scripts \
     && npm install --package-lock-only --omit=peer --ignore-scripts \
     && npm ci --omit=peer --ignore-scripts \
     && npm cache clean --force
-COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
+# The generated Prisma client is part of dist/ (dist/generated/prisma, reached
+# through package.json's "#prisma" import); only @prisma/client's runtime and
+# the pg adapter come from node_modules.
 COPY --from=build /app/dist ./dist
 # git.ts resolves this relative to its own module URL (dist/providers/vcs ->
 # ../../../scripts), and git runs it as GIT_ASKPASS to receive the GitHub App
@@ -40,7 +47,8 @@ COPY --from=build /app/dist ./dist
 # everything else under scripts/ is development tooling that has no business in
 # a runtime image.
 COPY --from=build /app/scripts/git-askpass.sh ./scripts/git-askpass.sh
-RUN test -x scripts/git-askpass.sh && test ! -d node_modules/prisma && test ! -d node_modules/@prisma/config && test ! -d node_modules/deepmerge-ts
+RUN test -x scripts/git-askpass.sh && test ! -d node_modules/prisma && test ! -d node_modules/@prisma/config && test ! -d node_modules/deepmerge-ts && test ! -d node_modules/mysql2 \
+    && test -f dist/generated/prisma/client.js && test -d node_modules/@prisma/adapter-pg
 USER node
 ENV NODE_ENV=production
 # The complete process: MCP + scheduler + reconciler. A deployment that

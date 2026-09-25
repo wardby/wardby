@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { Prisma } from "#prisma";
 import { validateCronExpression } from "../../core/cron.js";
 import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
