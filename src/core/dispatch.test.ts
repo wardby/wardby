@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Executor } from "../providers/executor/types.js";
 import { MAX_CODING_TASK_BYTES } from "../coding/protocol.js";
-import { dispatchRun, type DispatchDb } from "./dispatch.js";
+import { dispatchRun, isSerializationConflict, type DispatchDb } from "./dispatch.js";
 
 function fakeDb(agent: Record<string, any>, seedCodingRuns: Record<string, any>[] = []) {
   let transactionActive = false;
@@ -551,5 +551,35 @@ describe("dispatchRun", () => {
         }),
       ).rejects.toThrow(/Coding overrides cannot be supplied/);
     });
+  });
+});
+
+describe("isSerializationConflict", () => {
+  const adapterP2010 = (originalCode: string) => ({
+    code: "P2010",
+    meta: { driverAdapterError: { cause: { originalCode } } },
+  });
+
+  it.each([
+    ["P2034", { code: "P2034" }],
+    ["P2010 wrapping a 40001 serialization failure", adapterP2010("40001")],
+    ["P2010 wrapping a 40P01 deadlock", adapterP2010("40P01")],
+    ["legacy P2010 with meta.code 40001", { code: "P2010", meta: { code: "40001" } }],
+    ["commit-time DriverAdapterError 40001", { name: "DriverAdapterError", cause: { originalCode: "40001" } }],
+    ["commit-time DriverAdapterError 40P01", { name: "DriverAdapterError", cause: { originalCode: "40P01" } }],
+  ])("retries %s", (_label, err) => {
+    expect(isSerializationConflict(err)).toBe(true);
+  });
+
+  it.each([
+    ["null", null],
+    ["a string", "40001"],
+    ["a unique violation", { code: "P2002" }],
+    ["P2010 for another SQLSTATE", adapterP2010("23505")],
+    ["P2010 without adapter details", { code: "P2010", meta: {} }],
+    ["DriverAdapterError for another SQLSTATE", { name: "DriverAdapterError", cause: { originalCode: "23505" } }],
+    ["another error carrying 40001", { name: "Error", cause: { originalCode: "40001" } }],
+  ])("does not retry %s", (_label, err) => {
+    expect(isSerializationConflict(err)).toBe(false);
   });
 });
