@@ -150,7 +150,7 @@ echo "==> 5/${TOTAL_STEPS} seed Secret Manager"
 # go over stdin and are never printed. Stops before writing anything if a value
 # has no source.
 node deploy/gke/seed-secrets.mjs --project "$PROJECT_ID" --prefix "$SECRET_PREFIX" \
-  --context "$KUBE_CONTEXT" --namespace "$NAMESPACE" --tf-dir "$TF_DIR"
+  --context "$KUBE_CONTEXT" --namespace "$NAMESPACE"
 
 echo "==> 6/${TOTAL_STEPS} External Secrets Operator ${ESO_CHART_VERSION}, scoped to ${NAMESPACE}"
 # The namespace first: the scoped chart creates its Role and RoleBinding in it.
@@ -187,8 +187,9 @@ if ! render_secrets external-secrets.yaml | kubectl apply -f - >/dev/null; then
   echo "up.sh: applying the ExternalSecrets failed after the hand-made Secrets were released; running pods are unaffected. Re-run up.sh to finish." >&2
   exit 1
 fi
-# Forces a sync and waits for a fresh one, so a database-url version that
-# step 5 just added is in the Secret before step 9 rolls the Deployments.
+# Forces a sync and waits for a fresh one, so a secret version that step 5
+# just added (e.g. a newly generated auth key) is in the Secret before step 9
+# rolls the Deployments.
 if ! wait_external_secrets_synced 180s wardby-coding-proxy-env wardby-control-plane-env; then
   echo "up.sh: the Secrets did not sync from Secret Manager; nothing else was applied." >&2
   exit 1
@@ -356,14 +357,18 @@ database_roundtrip wardby-control-plane control-plane Agent "control plane" || D
 database_roundtrip wardby-coding-proxy proxy CodingProxySession "coding proxy" || DATABASE_OK=false
 if ! $DATABASE_OK; then
   cat >&2 <<EOF
-up.sh: the new pods cannot use the database. While the password login is still
-enabled, this restores the previous version:
+up.sh: the new pods cannot use the database.
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-control-plane
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-coding-proxy
+restores the previous images and pod templates (any revision since the IAM
+cutover), which also log in through IAM -- there is no password login to
+restore.
 "permission denied" means the grants are missing or incomplete. On a fresh
 install the coding proxy's are expected to be missing until the bootstrap runs
 again after the first migrations: run deploy/gke/bootstrap-database-iam.sh
---password-from-stdin, then up.sh (docs/getting-started-gke.md, "Database login").
+(default mode), then up.sh again (docs/getting-started-gke.md, "Database
+login"). --password-from-stdin is only for a deployment still on password
+login.
 EOF
   exit 1
 fi
@@ -412,7 +417,7 @@ cat <<EOF
 Done. The control plane is running in ${CLUSTER}.
 
   MCP endpoint : https://${HOSTNAME}/mcp
-  database     : ${DB_IP}:5432 (private IP, no public address)
+  database     : ${DB_IP} (private IP, reached only through the Auth Proxy)
   images       : ${REGISTRY}
   secrets      : Secret Manager, prefix ${SECRET_PREFIX} (synced by External Secrets)
 
@@ -434,9 +439,7 @@ Images before this deploy:
 ${PREVIOUS_IMAGES:-  (none: first deploy)}
 Migrations only go forward, so a rollback is safe only while the schema change it
 rolls back over was additive. See docs/getting-started-gke.md, "Roll back".
-While the password login is still enabled, rollout undo restores service
-because port 5432 to the database stays open (control-plane.yaml,
-proxy-database-egress.yaml) alongside the Auth Proxy's 3307 -- but it only
-reverts the Deployments, not any NetworkPolicy: a change to the database
-egress rules themselves is not undone by rollout undo.
+rollout undo reverts only the Deployments' images and pod templates -- there is
+no password path to fall back to any more. It does not touch any NetworkPolicy:
+a change to the database egress rules themselves is not undone by rollout undo.
 EOF

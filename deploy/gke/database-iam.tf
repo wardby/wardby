@@ -54,7 +54,8 @@ resource "google_sql_user" "iam" {
   name = trimsuffix(google_service_account.database[each.key].email, ".gserviceaccount.com")
   type = "CLOUD_IAM_SERVICE_ACCOUNT"
 
-  # Same reason as google_sql_user.app: once it has been granted privileges,
-  # Postgres refuses to drop it, and destroy would fail halfway.
+  # Same reason the built-in owner is handled with a `removed` block in
+  # cloudsql.tf: once a user has been granted privileges, Postgres refuses to
+  # drop it, and destroy would fail halfway.
   deletion_policy = "ABANDON"
 }

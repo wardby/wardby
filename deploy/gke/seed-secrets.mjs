@@ -8,8 +8,7 @@
 // source of truth once seeded. An empty secret is filled from, in order, the live
 // cluster's wardby-control-plane-env Secret (so today's SECRET_APP_KEY and auth
 // keys carry over), .env.local, or -- for the two auth keys only -- a new random
-// key. database-url is the exception: Terraform output is its source, and a new
-// version is added only when it changed.
+// key.
 //
 // Values travel over stdin and stdout only, never in a process argument, and are
 // never printed. Every decision is made before anything is written, so a missing
@@ -19,7 +18,6 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 export const SECRETS = [
-  { id: "database-url", env: "DATABASE_URL", source: "terraform" },
   { id: "openai-api-key", env: "OPENAI_API_KEY", source: "carry" },
   { id: "anthropic-api-key", env: "ANTHROPIC_API_KEY", source: "carry" },
   { id: "secret-app-key", env: "SECRET_APP_KEY", source: "carry" },
@@ -39,11 +37,6 @@ export function generateHexKey() {
 // disabled or destroyed counts as empty: with no cluster or .env.local source,
 // an auth key would then be regenerated (logged "from generated").
 export function decideSeed(entry, state) {
-  if (entry.source === "terraform") {
-    if (!state.terraform) return { action: "error", message: `${entry.id}: terraform output database_url is empty` };
-    if (state.hasVersion && state.latest === state.terraform) return { action: "keep" };
-    return { action: "add", from: "terraform", value: state.terraform };
-  }
   if (state.hasVersion) return { action: "keep" };
   if (state.cluster) return { action: "add", from: "cluster", value: state.cluster };
   if (state.env) return { action: "add", from: ".env.local", value: state.env };
@@ -99,14 +92,12 @@ export async function seed({
   prefix,
   context,
   namespace,
-  tfDir,
   env,
   exec = execCommand,
   generate = generateHexKey,
   log = console.log,
 }) {
   const cluster = await clusterValues(exec, { context, namespace });
-  const terraform = await must(exec, "terraform", [`-chdir=${tfDir}`, "output", "-raw", "database_url"]);
 
   const plan = [];
   for (const entry of SECRETS) {
@@ -122,22 +113,8 @@ export async function seed({
       "--format=value(name)",
     ]);
     const hasVersion = listed.trim() !== "";
-    const latest =
-      entry.source === "terraform" && hasVersion
-        ? await must(exec, "gcloud", [
-            "secrets",
-            "versions",
-            "access",
-            "latest",
-            "--secret",
-            name,
-            `--project=${project}`,
-          ])
-        : undefined;
     const decision = decideSeed(entry, {
       hasVersion,
-      latest,
-      terraform,
       cluster: cluster[entry.env],
       env: env[entry.env],
       generate,
@@ -163,7 +140,7 @@ export async function seed({
 function parseArgs(argv) {
   const options = {};
   for (let i = 0; i < argv.length; i += 2) options[argv[i].replace(/^--/, "")] = argv[i + 1];
-  for (const key of ["project", "prefix", "context", "namespace", "tf-dir"]) {
+  for (const key of ["project", "prefix", "context", "namespace"]) {
     if (!options[key]) throw new Error(`seed-secrets: --${key} is required`);
   }
   return options;
@@ -175,7 +152,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const { default: dotenvFlow } = await import("dotenv-flow");
     // This dotenv-flow version has no `processEnv` config option, so
     // `.config()` would merge .env.local straight into process.env -- an
-    // operator's shell DATABASE_URL could then be mistaken for a source.
+    // operator's shell OPENAI_API_KEY could then be mistaken for a source.
     // parse()+listFiles() reads the files without touching process.env.
     const env = dotenvFlow.parse(dotenvFlow.listFiles({}));
     await seed({
@@ -183,7 +160,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       prefix: options.prefix,
       context: options.context,
       namespace: options.namespace,
-      tfDir: options["tf-dir"],
       env,
     });
   } catch (error) {

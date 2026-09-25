@@ -18,6 +18,9 @@
 #      ExternalSecret that already exists (an interrupted earlier run) runs
 #      and recovers: an ownerReferences strip forces the Secret back into the
 #      unowned state.
+#   3b. A key removed from an ExternalSecret (DATABASE_URL, as the password
+#      retirement does) is removed from its Secret on the next sync, which
+#      updates the Secret in place.
 #   4. ESO does nothing outside wardby-coding.
 #   5. ESO's service account cannot write Secrets in another namespace.
 #   6. wait_external_secrets_synced fails with a readable reason for a key
@@ -61,14 +64,16 @@ helm upgrade --install external-secrets external-secrets --repo "$ESO_CHART_REPO
   --namespace external-secrets --create-namespace \
   --values deploy/gke/eso-values.yaml --wait --timeout 5m >/dev/null
 
-# A fake store holding a dummy value for every key the real manifests reference.
+# A fake store holding a dummy value for every key the real manifests
+# reference, plus any extra secret ids given after the namespace.
 fake_store() {
   local ns="$1"
+  shift
   {
     printf 'apiVersion: external-secrets.io/v1\nkind: SecretStore\nmetadata:\n  name: gcp-secret-manager\n  namespace: %s\n' "$ns"
     printf 'spec:\n  provider:\n    fake:\n      data:\n'
-    for id in database-url openai-api-key anthropic-api-key secret-app-key github-app-id \
-      github-app-private-key auth-signing-key auth-credential-hash-key; do
+    for id in openai-api-key anthropic-api-key secret-app-key github-app-id \
+      github-app-private-key auth-signing-key auth-credential-hash-key "$@"; do
       printf '        - key: test-%s\n          value: dummy-%s\n' "$id" "$id"
     done
   } | k apply -f - >/dev/null
@@ -143,7 +148,7 @@ done
 [[ "$(uid_of wardby-control-plane-env)" != "$OLD_CP_UID" ]] || fail "control-plane Secret was not recreated (UID unchanged)"
 [[ "$(decoded wardby-control-plane-env AUTH_PROVIDER)" == "self-hosted" ]] || fail "AUTH_PROVIDER not merged"
 [[ "$(decoded wardby-control-plane-env SECRET_APP_KEY)" == "dummy-secret-app-key" ]] || fail "SECRET_APP_KEY not synced"
-[[ "$(decoded wardby-coding-proxy-env DATABASE_URL)" == "dummy-database-url" ]] || fail "DATABASE_URL not synced"
+[[ "$(decoded wardby-coding-proxy-env OPENAI_API_KEY)" == "dummy-openai-api-key" ]] || fail "OPENAI_API_KEY not synced"
 echo "    ok"
 
 echo "==> 3. release_unowned_secrets' delete + force-sync branch actually runs"
@@ -163,6 +168,51 @@ k -n "$NAMESPACE" get secret wardby-control-plane-env -o jsonpath='{.metadata.ow
   | grep -q ExternalSecret || fail "Secret has no ExternalSecret owner after re-release"
 [[ "$(decoded wardby-control-plane-env AUTH_PROVIDER)" == "self-hosted" ]] || fail "AUTH_PROVIDER not merged after re-release"
 [[ "$(decoded wardby-control-plane-env SECRET_APP_KEY)" == "dummy-secret-app-key" ]] || fail "SECRET_APP_KEY not synced after re-release"
+echo "    ok"
+
+echo "==> 3b. a key removed from an ExternalSecret leaves its Secret"
+# The retirement of the database password depends on this: the earlier
+# revision's ExternalSecrets synced a DATABASE_URL key; applying this
+# revision's (which have none) over them, as up.sh does, must drop the key
+# from each ESO-owned Secret, or bootstrap-database-iam.sh's default mode
+# keeps refusing. The earlier manifests are the committed ones plus a
+# DATABASE_URL entry at the top of each spec.data list, read from a store
+# that still holds a database-url secret.
+with_database_url() {
+  awk '{ print } $0 == "  data:" {
+    print "    - secretKey: DATABASE_URL"
+    print "      remoteRef:"
+    print "        key: test-database-url"
+  }'
+}
+fake_store "$NAMESPACE" database-url
+real_external_secrets "$NAMESPACE" | with_database_url | k apply -f - >/dev/null
+wait_external_secrets_synced 120s wardby-coding-proxy-env wardby-control-plane-env \
+  || fail "ExternalSecrets with DATABASE_URL did not sync"
+for name in wardby-coding-proxy-env wardby-control-plane-env; do
+  [[ "$(decoded "$name" DATABASE_URL)" == "dummy-database-url" ]] || fail "setup: ${name} did not get DATABASE_URL"
+done
+OLD_UID="$(uid_of wardby-control-plane-env)"
+real_external_secrets "$NAMESPACE" | k apply -f - >/dev/null
+release_unowned_secrets wardby-coding-proxy-env wardby-control-plane-env
+wait_external_secrets_synced 120s wardby-coding-proxy-env wardby-control-plane-env \
+  || fail "ExternalSecrets without DATABASE_URL did not sync"
+for name in wardby-coding-proxy-env wardby-control-plane-env; do
+  [[ "$(k -n "$NAMESPACE" get externalsecret "$name" -o jsonpath='{.spec.data[*].secretKey}')" != *DATABASE_URL* ]] \
+    || fail "setup: ${name}'s ExternalSecret still lists DATABASE_URL after the apply"
+  # The Secret's data key names only, never a value. Read into a variable
+  # first: grep -q on a pipe can end kubectl early, and pipefail would then
+  # turn a match into a pass.
+  keys="$(k -n "$NAMESPACE" get secret "$name" -o go-template='{{range $k, $v := .data}}{{$k}}{{"\n"}}{{end}}')"
+  [[ -n "$keys" ]] || fail "could not read ${name}'s keys"
+  if grep -qx DATABASE_URL <<<"$keys"; then
+    fail "ESO kept the removed DATABASE_URL key in ${name} (keys: $(tr '\n' ' ' <<<"$keys"))"
+  fi
+done
+[[ "$(uid_of wardby-control-plane-env)" == "$OLD_UID" ]] || fail "control-plane Secret was recreated rather than updated"
+[[ "$(decoded wardby-control-plane-env AUTH_PROVIDER)" == "self-hosted" ]] || fail "AUTH_PROVIDER lost after the key removal"
+[[ "$(decoded wardby-control-plane-env SECRET_APP_KEY)" == "dummy-secret-app-key" ]] || fail "SECRET_APP_KEY lost after the key removal"
+[[ "$(decoded wardby-coding-proxy-env OPENAI_API_KEY)" == "dummy-openai-api-key" ]] || fail "OPENAI_API_KEY lost after the key removal"
 echo "    ok"
 
 echo "==> 4. nothing syncs outside wardby-coding"

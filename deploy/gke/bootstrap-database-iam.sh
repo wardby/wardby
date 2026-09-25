@@ -9,19 +9,21 @@
 #   deploy/gke/bootstrap-database-iam.sh --force-rotate         # emergency only
 #   ... --check                                                  # dry run, any mode
 #
-# Default: sets a random owner password through the Cloud SQL Admin API (creating
-# the owner if it does not exist), uses it once, then resets it to another random
-# value that is never stored. The reset runs on every exit, including a failed
+# Default -- the path for a new deployment, and for reapplying grants on an
+# existing one (e.g. once the coding proxy's ledger table exists): sets a
+# random owner password through the Cloud SQL Admin API (creating the owner if
+# it does not exist), uses it once, then resets it to another random value
+# that is never stored. The reset runs on every exit, including a failed
 # grant. --password-from-stdin: uses the given current password and leaves it
-# unchanged -- for moving a running deployment, whose pods still use it, to IAM
-# login.
+# unchanged -- for moving an older deployment, whose pods still hold a
+# password DATABASE_URL, to IAM login.
 #
 # Default mode refuses while the Secret wardby-control-plane-env still has a
-# DATABASE_URL key: the running pods still log in with the owner password, and
-# changing it would cut them off. Use --password-from-stdin then, or finish
-# retiring the password first. --force-rotate (default mode only) overrides
-# that check -- an emergency measure that cuts off any pod still using the
-# password.
+# DATABASE_URL key: that means an older, not-yet-migrated deployment whose
+# pods still log in with the owner password, and changing it would cut them
+# off. Use --password-from-stdin to move that deployment to IAM login instead.
+# --force-rotate (default mode only) overrides that check -- an emergency
+# measure that cuts off any pod still using the password.
 #
 # The grants run in one transaction: a statement the database refuses leaves
 # nothing applied. --check runs them in a transaction that is then rolled back,
@@ -35,7 +37,8 @@
 # length of the run.
 #
 # KUBE_CONTEXT overrides the kubectl context (default: the one
-# `gcloud container clusters get-credentials` creates for the Terraform cluster).
+# `gcloud container clusters get-credentials` creates for the Terraform cluster,
+# fetched here if it does not exist yet).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -79,7 +82,8 @@ MIGRATOR_GSA="$(out migrator_service_account)"
 MIGRATOR_USER="$(out migrator_database_user)"
 APP_USER="$(out app_database_user)"
 PROXY_USER="$(out proxy_database_user)"
-KUBE_CONTEXT="${KUBE_CONTEXT:-gke_${PROJECT_ID}_${REGION}_${CLUSTER}}"
+DEFAULT_KUBE_CONTEXT="gke_${PROJECT_ID}_${REGION}_${CLUSTER}"
+KUBE_CONTEXT="${KUBE_CONTEXT:-$DEFAULT_KUBE_CONTEXT}"
 # Every call is bounded, so an unresponsive API server cannot hang the script
 # (or its cleanup, which ignores signals) indefinitely.
 k() { kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=30s "$@"; }
@@ -96,6 +100,28 @@ if $FROM_STDIN; then
   [[ -n "$PASSWORD" ]] || { echo "bootstrap: no password on stdin." >&2; exit 1; }
 fi
 
+# A new deployment runs this before up.sh ever has, so there may be no kubectl
+# context for the cluster yet: fetch it the way up.sh's step 2 does. Like
+# up.sh (which then switches to it explicitly), this accepts that
+# get-credentials also makes it the current context; it only happens when the
+# context did not exist. Nothing here reads stdin. The context list is read
+# into a variable first: grep -q on a pipe could end kubectl early, and
+# pipefail would count that as not found.
+has_context() {
+  local contexts
+  contexts="$(kubectl config get-contexts -o name </dev/null)" || return 1
+  grep -qxF "$KUBE_CONTEXT" <<<"$contexts"
+}
+if ! has_context; then
+  if [[ "$KUBE_CONTEXT" != "$DEFAULT_KUBE_CONTEXT" ]]; then
+    echo "bootstrap: kubectl context ${KUBE_CONTEXT} (from KUBE_CONTEXT) does not exist." >&2
+    exit 1
+  fi
+  echo "==> kubectl context for ${CLUSTER}"
+  gcloud container clusters get-credentials "$CLUSTER" --region "$REGION" --project "$PROJECT_ID" </dev/null >/dev/null
+  has_context || { echo "bootstrap: no kubectl context ${KUBE_CONTEXT} after get-credentials." >&2; exit 1; }
+fi
+
 # Default mode changes the owner password. Refuse while the running pods still
 # log in with it. Only whether the DATABASE_URL key exists is read (its length
 # via wc -c), never its value. A missing Secret (fresh deployment) passes; any
@@ -105,10 +131,10 @@ if ! $FROM_STDIN && ! $FORCE_ROTATE; then
   if ((url_bytes > 0)); then
     cat >&2 <<EOF
 bootstrap: refusing to change the ${OWNER} password: Secret wardby-control-plane-env
-still has a DATABASE_URL, so the running pods still log in with this password.
-Use --password-from-stdin with the current password, or finish retiring the
-password first. Pass --force-rotate only in an emergency, knowing it cuts off
-any pod still using the password.
+still has a DATABASE_URL, so this is an older deployment whose running pods
+still log in with this password. Use --password-from-stdin with the current
+password to move it to IAM login. Pass --force-rotate only in an emergency,
+knowing it cuts off any pod still using the password.
 EOF
     exit 1
   fi
@@ -218,18 +244,25 @@ wait_for_operation() {
   return 1
 }
 
-# Sets the owner's password, creating the owner if it does not exist.
+# Sets the owner's password, creating the owner if it does not exist. Whether
+# it exists is asked first (users.get): 200 updates it (PUT), 404 creates it
+# (POST), and any other answer stops without changing anything.
 set_owner_password() {
-  local password="$1" response status operation
+  local password="$1" response status method path operation
   [[ -n "$password" ]] || { echo "bootstrap: refusing to set an empty password." >&2; return 1; }
-  response="$(printf '{"name":"%s","password":"%s"}' "$OWNER" "$password" |
-    sqladmin PUT "instances/${INSTANCE}/users?name=${OWNER}")" || return 1
+  response="$(sqladmin GET "instances/${INSTANCE}/users/${OWNER}" </dev/null)" || return 1
   status="${response##*$'\n'}"
-  if [[ "$status" == 404 ]]; then
-    response="$(printf '{"name":"%s","password":"%s"}' "$OWNER" "$password" |
-      sqladmin POST "instances/${INSTANCE}/users")" || return 1
-    status="${response##*$'\n'}"
-  fi
+  case "$status" in
+    200) method=PUT path="instances/${INSTANCE}/users?name=${OWNER}" ;;
+    404) method=POST path="instances/${INSTANCE}/users" ;;
+    *)
+      echo "bootstrap: looking up the ${OWNER} user failed (HTTP ${status})." >&2
+      return 1
+      ;;
+  esac
+  response="$(printf '{"name":"%s","password":"%s"}' "$OWNER" "$password" |
+    sqladmin "$method" "$path")" || return 1
+  status="${response##*$'\n'}"
   [[ "$status" == 2?? ]] || { echo "bootstrap: setting the ${OWNER} password failed (HTTP ${status})." >&2; return 1; }
   operation="$(sed -n 's/^[[:space:]]*"name":[[:space:]]*"\([^"]*\)".*/\1/p' <<<"${response%$'\n'*}" | head -n 1)"
   wait_for_operation "$operation"

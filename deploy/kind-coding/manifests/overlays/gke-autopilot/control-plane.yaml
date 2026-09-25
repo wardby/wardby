@@ -159,8 +159,8 @@ spec:
                 name: wardby-control-plane-env
           env:
             # Password-less: the Auth Proxy sidecar logs in as this pod's Google
-            # identity. Overrides DATABASE_URL from the Secret, which remains only
-            # so a rollback still works until the password is retired.
+            # identity. This is the only source of DATABASE_URL -- the Secret
+            # (wardby-control-plane-env) no longer carries one.
             - name: DATABASE_URL
               value: wardby-app-database-url
             - name: NODE_ENV
@@ -391,20 +391,16 @@ spec:
     # is not in the cluster -- it sits on the VPC, reached over the private
     # services access peering, so nothing in the namespace can select it.
     # `wardby-database-cidr` is substituted at apply time like the other target
-    # identity in this file. 3307 is the Auth Proxy; 5432 is Postgres itself,
-    # kept open only for the cutover to IAM login -- a pod still running the
-    # old code with a password DATABASE_URL loses the database the moment this
-    # policy applies otherwise, while minReadySeconds above can keep such a pod
-    # as the only one serving. Removed when the password is retired (PR 2,
-    # with connector_enforcement=REQUIRED).
+    # identity in this file. 3307 (the Auth Proxy) is the only way to it: the
+    # instance's connector_enforcement=REQUIRED (deploy/gke/cloudsql.tf) refuses
+    # any connection that does not come through the Auth Proxy, so there is
+    # nothing plain Postgres (5432) would still be good for.
     - to:
         - ipBlock:
             cidr: wardby-database-cidr
       ports:
         - protocol: TCP
           port: 3307
-        - protocol: TCP
-          port: 5432
     # GKE metadata server: Workload Identity tokens for the Auth Proxy. Dataplane
     # V2 serves it at 169.254.169.252:988 as well as 169.254.169.254:80.
     - to:

@@ -5,8 +5,19 @@
 # pass values through `secret_data`; this module deliberately does not.
 
 locals {
+  # "database-url" is deliberately not in this set: the password login it
+  # backed is retired, and this module no longer creates or reads it.
+  # Dropping a key out of this set makes Terraform plan to DESTROY that
+  # secret and its IAM binding -- and on a deployment that still has it,
+  # secrets_deletion_protection makes that destroy fail. An existing
+  # deployment deletes the secret with gcloud FIRST, before applying this
+  # change, so a subsequent refresh finds it already gone and drops both
+  # resources from state instead of trying to destroy them. Do NOT turn off
+  # secrets_deletion_protection to get past the error instead -- that
+  # unprotects every other secret in this set too, including
+  # SECRET_APP_KEY and the auth keys. See the guide (getting-started-gke.md)
+  # for the exact gcloud command.
   secret_ids = toset([
-    "database-url",
     "openai-api-key",
     "anthropic-api-key",
     "secret-app-key",

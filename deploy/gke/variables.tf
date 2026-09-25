@@ -136,9 +136,9 @@ variable "secrets_deletion_protection" {
 }
 
 variable "connector_enforcement" {
-  description = "REQUIRED refuses connections that bypass the Cloud SQL Auth Proxy. It becomes the default when the password login is retired (a follow-up change); until then the default is NOT_REQUIRED, so pods still logging in with the password keep working. Set REQUIRED yourself on a deployment that never used password login."
+  description = "REQUIRED refuses connections that bypass the Cloud SQL Auth Proxy. NOT_REQUIRED only while moving an older deployment from password login."
   type        = string
-  default     = "NOT_REQUIRED"
+  default     = "REQUIRED"
 
   validation {
     condition     = contains(["REQUIRED", "NOT_REQUIRED"], var.connector_enforcement)
