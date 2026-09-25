@@ -136,7 +136,9 @@ export function migrateFailureReason(result: MigrateResult): string {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
-  const line = lines.find((candidate) => /^Error\b|P\d{4}/.test(candidate)) ?? lines[0] ?? "no output";
+  // A line that starts with "Error", or that carries a Prisma error code anywhere.
+  const line =
+    lines.find((candidate) => candidate.startsWith("Error") || /\bP\d{4}\b/.test(candidate)) ?? lines[0] ?? "no output";
   return line.replace(/postgres(ql)?:\/\/[^\s`'"]+/gi, "<database url>");
 }
 
