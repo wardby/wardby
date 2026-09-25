@@ -213,6 +213,21 @@ enabled on that coding profile. Coding results returned through `get_run` and
 `tasks/get` are validated, redacted summaries/tests only; job handles and
 execution policy stay internal.
 
+The worker receives only its task text, so a coding agent's own `systemPrompt`
+is placed ahead of the request at dispatch ("Standing instructions for this
+coding agent: … Request: …") and stored with the run. A blank prompt leaves
+the task unchanged; a combination over the 16 KiB task limit is refused rather
+than truncated.
+
+The worker's result may carry an optional `tag`, shown as `[tag]` in the pull
+request title: at most 32 characters of letters, digits, `.`, `_`, `/`, and
+`-`, starting with a letter or digit. The output schema describes that rule to
+the model, and a tag that breaks it is normalized to a lowercase slug (or
+dropped) instead of failing an otherwise finished run. GitHub finalization
+re-validates the tag independently. Linking an issue is not the tag's job: put
+a closing keyword such as `Resolves #37` in the task so the worker includes it
+in the summary, which becomes the pull request body.
+
 Operator-only checks and cleanup remain available through the CLI:
 
 ```sh
@@ -641,8 +656,11 @@ On a failed run, the launcher reads only the failed worker container's last
 (`pods/log`), and keeps only a code matching the existing
 `SAFE_WORKER_DIAGNOSTIC` pattern (imported from the Docker launcher) — the
 raw text itself is never stored, logged, or returned
-(`readWorkerDiagnostic`, `kubernetes.ts`). Structured worker diagnostics are
-not implemented yet.
+(`readWorkerDiagnostic`, `kubernetes.ts`). For `coding_output_invalid`, the
+same line may also carry `issues`: up to 8 `path:code` entries (for example
+`tag:invalid_string`) naming which output-schema fields failed, never their
+values. The list is kept only when every entry matches
+`SAFE_CODING_OUTPUT_ISSUE`, and the executor logs it next to the diagnostic id.
 
 ### Known limitations
 

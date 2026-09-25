@@ -23,7 +23,11 @@ export const CODING_OUTPUT_JSON_SCHEMA = {
     runId: { type: "string" },
     outcome: { type: "string", enum: ["changes_ready", "no_changes", "budget_exhausted"] },
     summary: { type: "string" },
-    tag: { type: ["string", "null"] },
+    tag: {
+      type: ["string", "null"],
+      description:
+        "Optional short label shown in the pull request title, such as a ticket id. At most 32 characters: letters, digits, '.', '_', '/', '-', starting with a letter or digit, with no spaces. Example: \"add-jokes\". Use null when there is no natural label.",
+    },
     tests: {
       type: "array",
       maxItems: 64,

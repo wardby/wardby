@@ -3,6 +3,7 @@ import {
   CODING_PROTOCOL_VERSION,
   CodingAgentOutputSchema,
   CodingRunResultSchema,
+  normalizeCodingTag,
   CodingTaskInputSchema,
   MAX_CODING_ARTIFACT_BYTES,
   MAX_CODING_SUMMARY_BYTES,
@@ -162,12 +163,29 @@ describe("CodingAgentOutputSchema", () => {
     expect(CodingAgentOutputSchema.parse({ ...output, tag: "JIRA-123" }).tag).toBe("JIRA-123");
   });
 
-  it.each(["JIRA 123", "tag]evil", "tag[evil", "tag evil", "x".repeat(33)])(
-    "rejects an unsafe or oversized tag %s",
-    (tag) => {
-      expect(() => CodingAgentOutputSchema.parse({ ...output, tag })).toThrow();
-    },
-  );
+  it.each([
+    ["JIRA 123", "jira-123"],
+    ["tag]evil", "tag-evil"],
+    ["tag[evil", "tag-evil"],
+    ["Add 20 new jokes", "add-20-new-jokes"],
+    ["feat: jokes!", "feat-jokes"],
+    ["-leading punctuation-", "leading-punctuation"],
+    ["x".repeat(33), "x".repeat(32)],
+    ["add twenty new knock-knock jokes for issue 37", "add-twenty-new-knock-knock-jokes"],
+  ])("normalizes a model-written tag %j to %j instead of failing the run", (tag, expected) => {
+    expect(CodingAgentOutputSchema.parse({ ...output, tag }).tag).toBe(expected);
+  });
+
+  it.each(["!!!", "   ", "", 42, {}])("drops a tag %j with nothing usable left", (tag) => {
+    expect(CodingAgentOutputSchema.parse({ ...output, tag }).tag).toBeUndefined();
+  });
+
+  it("keeps an already valid tag exactly", () => {
+    expect(normalizeCodingTag("JIRA-123")).toBe("JIRA-123");
+    expect(normalizeCodingTag("deps/bump_v1.2")).toBe("deps/bump_v1.2");
+    expect(normalizeCodingTag(null)).toBeNull();
+    expect(normalizeCodingTag(undefined)).toBeUndefined();
+  });
 
   it("redacts a token-shaped tag", () => {
     expect(CodingAgentOutputSchema.parse({ ...output, tag: `ghp_${"a".repeat(20)}` }).tag).toBe("[REDACTED]");
@@ -181,6 +199,10 @@ describe("CodingAgentOutputSchema", () => {
 });
 
 describe("CodingRunResultSchema", () => {
+  it("still rejects an unsafe tag in a persisted result, which only trusted code writes", () => {
+    expect(() => CodingRunResultSchema.parse({ ...result, tag: "Add 20 jokes" })).toThrow();
+  });
+
   it("binds PR URL, repository, number, and fields to the PR outcome", () => {
     expect(CodingRunResultSchema.parse(result)).toMatchObject({ commitSha: "a".repeat(40) });
     expect(() =>

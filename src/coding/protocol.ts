@@ -131,6 +131,26 @@ export const CodingBaseRefSchema = z.string().refine(isGitRef, "must be a safe b
 
 export const CodingTaskOverrideSchema = boundedText(MAX_CODING_TASK_BYTES);
 
+/**
+ * A coding worker receives only its task text, so a coding agent's own
+ * instructions (its systemPrompt) travel inside that text, ahead of the
+ * request. Blank instructions leave the task unchanged. The combination must
+ * still fit MAX_CODING_TASK_BYTES; exceeding it is an error naming both parts
+ * rather than a silent truncation of either.
+ */
+export function composeCodingTask(instructions: string | null | undefined, task: string): string {
+  const standing = instructions?.trim();
+  if (!standing) return task;
+  const composed = `Standing instructions for this coding agent:\n${standing}\n\nRequest:\n${task}`;
+  if (byteLength(composed) > MAX_CODING_TASK_BYTES) {
+    throw new Error(
+      `The coding agent's instructions (${byteLength(standing)} bytes) plus this task (${byteLength(task)} bytes) ` +
+        `exceed the ${MAX_CODING_TASK_BYTES}-byte coding task limit; shorten one of them.`,
+    );
+  }
+  return composed;
+}
+
 const runIdSchema = boundedText(MAX_RUN_ID_BYTES, true).refine(
   (value) => /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value),
   "must be an opaque identifier",
@@ -149,6 +169,29 @@ const usageSchema = z
   })
   .strict();
 
+const SAFE_TAG = new RegExp(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,${MAX_TAG_BYTES - 1}}$`);
+
+/**
+ * The tag only labels a pull request title, so a model's malformed tag must not
+ * sink an otherwise finished run. A tag that already passes is kept as-is; any
+ * other string becomes a lowercase slug (runs of disallowed characters to "-",
+ * no leading or trailing punctuation, at most MAX_TAG_BYTES), and one with
+ * nothing usable left, or a non-string, becomes null. GitHub finalization still
+ * re-validates whatever survives.
+ */
+export function normalizeCodingTag(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return value;
+  if (typeof value !== "string") return null;
+  if (SAFE_TAG.test(value)) return value;
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9._/-]+/g, "-")
+    .replace(/^[^a-z0-9]+/, "")
+    .slice(0, MAX_TAG_BYTES)
+    .replace(/[^a-z0-9]+$/, "");
+  return SAFE_TAG.test(slug) ? slug : null;
+}
+
 /**
  * A short, caller-visible reference (e.g. a ticket ID) surfaced in the PR title. Never free text.
  * Accepts null as well as undefined: OpenAI's strict Structured Outputs mode requires every
@@ -158,7 +201,7 @@ const usageSchema = z
  */
 const tagSchema = z
   .string()
-  .regex(new RegExp(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,${MAX_TAG_BYTES - 1}}$`), "must be a short, safe tag")
+  .regex(SAFE_TAG, "must be a short, safe tag")
   .nullable()
   .optional()
   .transform((value) => value ?? undefined);
@@ -210,7 +253,8 @@ export const CodingAgentOutputSchema = z
     outcome: z.enum(["changes_ready", "no_changes", "budget_exhausted"]),
     summary: boundedText(MAX_CODING_SUMMARY_BYTES),
     tests: z.array(testResultSchema).max(MAX_CODING_TESTS),
-    tag: tagSchema,
+    // Model-written, so normalized rather than rejected; see normalizeCodingTag.
+    tag: z.preprocess(normalizeCodingTag, tagSchema),
   })
   .strict()
   .transform((value) => ({
