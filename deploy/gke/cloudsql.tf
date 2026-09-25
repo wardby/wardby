@@ -74,8 +74,9 @@ resource "google_sql_database_instance" "main" {
     }
 
     # REQUIRED refuses any connection that does not come through the Auth
-    # Proxy or a Cloud SQL connector, so a leaked password is useless on the
-    # network. NOT_REQUIRED by default until the password login is retired;
+    # Proxy or a Cloud SQL connector -- the default now that every workload
+    # connects through the Auth Proxy and no password login remains.
+    # NOT_REQUIRED only while moving an older deployment off password login;
     # see var.connector_enforcement.
     connector_enforcement = var.connector_enforcement
 
@@ -121,6 +122,14 @@ resource "google_sql_database" "app" {
 # `deletion_policy = "ABANDON"` this resource used to carry: once migrations
 # have created tables owned by this user, Postgres refuses to drop it, and a
 # destroy would fail partway through with objects already gone.
+#
+# This block itself can be deleted once every deployment of this module has
+# applied it (the resource is then gone from every state, so there is
+# nothing left to tell Terraform to remove). Until then, keep the `random`
+# provider declared in versions.tf even though nothing here references it
+# any more -- state still holds a stale random_password.db from before this
+# change on deployments that haven't applied it yet, and Terraform refuses
+# to refresh/plan against a resource type whose provider isn't declared.
 removed {
   from = google_sql_user.app
 
