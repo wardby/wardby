@@ -360,8 +360,9 @@ if ! $DATABASE_OK; then
 up.sh: the new pods cannot use the database.
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-control-plane
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-coding-proxy
-restores the previous images and pod templates, which also log in through
-IAM -- there is no password login to restore.
+restores the previous images and pod templates (any revision since the IAM
+cutover), which also log in through IAM -- there is no password login to
+restore.
 "permission denied" means the grants are missing or incomplete. On a fresh
 install the coding proxy's are expected to be missing until the bootstrap runs
 again after the first migrations: run deploy/gke/bootstrap-database-iam.sh

@@ -105,9 +105,9 @@ written for the password era and takes `DATABASE_URL` from the existing
 `wardby-coding-proxy-env` Secret, which no longer has one on this deployment;
 don't run it here. `DATABASE_URL` isn't a secret value on GKE at all: the
 Deployment's own manifest supplies it directly (`control-plane.yaml`), not
-the Secret, so a hand-rebuilt Secret needs none. Recreate the other seven
-keys (`secrets.tf`'s `secret_ids`, plus the constant `AUTH_PROVIDER:
-self-hosted` the ExternalSecret's template adds) by hand, reading each with
+the Secret, so a hand-rebuilt Secret needs none. Recreate the seven
+`secret_ids` keys (`secrets.tf`) plus `AUTH_PROVIDER` (the constant
+`self-hosted` the ExternalSecret's template adds) by hand, reading each with
 `gcloud secrets versions access latest --secret <name>` and piping it into a
 Secret manifest over stdin, never with values on the command line.
 `wardby-coding-proxy-env` needs only `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`
@@ -194,8 +194,8 @@ password here.
 After the rollout, `up.sh` runs one query through the control plane's and the
 coding proxy's own database login, and fails the deploy if either cannot read
 the database. `kubectl rollout undo` then restores the previous images and
-pod templates, which also log in through IAM — there is no password path to
-fall back to.
+pod templates (any revision since the IAM cutover), which also log in through
+IAM — there is no password path to fall back to.
 
 ## Teardown
 

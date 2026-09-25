@@ -76,8 +76,9 @@ resource "google_sql_database_instance" "main" {
     # REQUIRED refuses any connection that does not come through the Auth
     # Proxy or a Cloud SQL connector -- the default now that every workload
     # connects through the Auth Proxy and no password login remains.
-    # NOT_REQUIRED only while moving an older deployment off password login;
-    # see var.connector_enforcement.
+    # An older deployment still on password login moves off it on the earlier
+    # revision of this module whose default is still NOT_REQUIRED; see
+    # var.connector_enforcement and docs/getting-started-gke.md.
     connector_enforcement = var.connector_enforcement
 
     ip_configuration {
@@ -128,8 +129,10 @@ resource "google_sql_database" "app" {
 # nothing left to tell Terraform to remove). Until then, keep the `random`
 # provider declared in versions.tf even though nothing here references it
 # any more -- state still holds a stale random_password.db from before this
-# change on deployments that haven't applied it yet, and Terraform refuses
-# to refresh/plan against a resource type whose provider isn't declared.
+# change on deployments that haven't applied it yet, and Terraform needs
+# that provider to plan its destruction. Terraform can often infer
+# hashicorp/random from the state alone, but keeping it declared (and
+# version-pinned) is the cautious choice.
 removed {
   from = google_sql_user.app
 
