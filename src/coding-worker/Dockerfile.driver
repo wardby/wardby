@@ -25,3 +25,11 @@ WORKDIR /opt/wardby
 COPY --from=worker-dependencies /worker/node_modules ./node_modules
 COPY --from=build /build/dist/coding-worker ./coding-worker
 COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
+# The driver's registry-mode setup (driver.js -> coding/registry/worker-config.js)
+# and its adapters. Their third-party imports are in src/coding-worker/package.json.
+COPY --from=build /build/dist/coding/registry ./coding/registry
+# Fail the build, not every run, when a module the worker imports is missing:
+# driver-v4 shipped without coding/registry and every run exited at startup
+# with ERR_MODULE_NOT_FOUND before the model was called. main.js runs on
+# import, so this loads everything it imports rather than main.js itself.
+RUN node --input-type=module -e 'await Promise.all(["driver", "sdk", "artifact", "errors"].map((name) => import(`/opt/wardby/coding-worker/${name}.js`)))'
