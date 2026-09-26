@@ -1,4 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import type { RepoAccessDecision, RepoAccessGate } from "../../core/repo-access.js";
+import type { HostPermission } from "../../providers/review-host/types.js";
 import { Prisma } from "#prisma";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
@@ -7,7 +9,19 @@ import { registerAgentTools } from "./agents.js";
 import type { McpRequestContext } from "../context.js";
 
 const CANONICAL_URI = "https://host/mcp";
-const fakeProviders = {} as unknown as import("../../providers/index.js").ProviderRegistry;
+/** A gate whose linked identity (for every principal) has `level` on every repository. */
+function gateAt(level: HostPermission | "unlinked") {
+  const rank = ["none", "read", "triage", "write", "maintain", "admin"];
+  const authorizePrincipal = vi.fn(async (input: { required: HostPermission }): Promise<RepoAccessDecision> => {
+    if (level === "unlinked") return { ok: false, reason: "identity_not_linked" };
+    return rank.indexOf(level) >= rank.indexOf(input.required)
+      ? { ok: true, level }
+      : { ok: false, reason: "insufficient_permission", level };
+  });
+  const gate: RepoAccessGate = { authorizePrincipal, authorizeUse: vi.fn(), authorizeHostUser: vi.fn() };
+  return { gate, authorizePrincipal };
+}
+const fakeProviders = { repoAccess: gateAt("admin").gate } as unknown as import("../context.js").McpProviders;
 
 interface FakeAgentRow {
   id: string;
@@ -25,6 +39,13 @@ interface FakeAgentRow {
   codingProfile: FakeCodingProfile | null;
   budgetGroupId: string | null;
   effort?: string | null;
+}
+
+interface FakeLink {
+  agentId: string;
+  repository: string;
+  authorizedVia: string | null;
+  authorizedById?: string | null;
 }
 
 interface FakeCodingProfile {
@@ -46,6 +67,7 @@ function fakeDb(
   seed: FakeAgentSeed[] = [],
   budgetGroups: { id: string; ownerId: string | null }[] = [],
   principals: string[] = [],
+  links: FakeLink[] = [],
 ) {
   const principalIds = new Set(principals);
   const rows = new Map(
@@ -112,7 +134,8 @@ function fakeDb(
           ...agentData,
           codingProfile: codingProfile?.delete
             ? null
-            : (codingProfile?.create ?? codingProfile?.update ?? row.codingProfile),
+            : (codingProfile?.create ??
+              (codingProfile?.update ? { ...row.codingProfile!, ...codingProfile.update } : row.codingProfile)),
         };
         rows.set(where.id, updated);
         return updated;
@@ -133,6 +156,44 @@ function fakeDb(
       findUnique: async ({ where }: { where: { id: string } }) =>
         principalIds.has(where.id) ? { id: where.id, subject: where.id, createdAt: new Date() } : null,
     },
+    agentRepository: {
+      findMany: async ({ where }: { where: { agentId: string; authorizedVia?: { in: string[] } } }) =>
+        links.filter(
+          (l) =>
+            l.agentId === where.agentId &&
+            (!where.authorizedVia || where.authorizedVia.in.includes(l.authorizedVia ?? "")),
+        ),
+      updateMany: async ({
+        where,
+        data,
+      }: {
+        where: { agentId: string; authorizedVia: { in: string[] } };
+        data: Partial<FakeLink>;
+      }) => {
+        const hit = links.filter(
+          (l) => l.agentId === where.agentId && where.authorizedVia.in.includes(l.authorizedVia ?? ""),
+        );
+        for (const l of hit) Object.assign(l, data);
+        return { count: hit.length };
+      },
+    },
+    codingAgentProfile: {
+      updateMany: async ({
+        where,
+        data,
+      }: {
+        where: { agentId: string; repositoryAuthorizedVia: { in: string[] } };
+        data: Record<string, unknown>;
+      }) => {
+        const row = rows.get(where.agentId);
+        const profile = row?.codingProfile as Record<string, unknown> | null | undefined;
+        if (!row || !profile || !where.repositoryAuthorizedVia.in.includes(String(profile.repositoryAuthorizedVia))) {
+          return { count: 0 };
+        }
+        rows.set(where.agentId, { ...row, codingProfile: { ...profile, ...data } as never });
+        return { count: 1 };
+      },
+    },
   };
   const db = {
     ...transactionDb,
@@ -149,13 +210,14 @@ function fakeCtx(
   principalId: string,
   scopes: string[],
   roles: string[] = [],
+  providers = fakeProviders,
 ): McpRequestContext {
   return {
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
     roles,
     canonicalUri: CANONICAL_URI,
-    providers: fakeProviders,
+    providers,
     db,
     clientSupportsTasks: false,
     mcpReq: { requestState: () => undefined },
@@ -1402,5 +1464,363 @@ describe("agent CRUD tools", () => {
       expect(JSON.stringify(result)).toMatch(/only valid for native agents/);
       await client.close();
     });
+  });
+});
+
+describe("coding repository authorization (H5-1/C3-2)", () => {
+  const text = (result: { content: unknown }) => (result.content as { text: string }[])[0].text;
+  const createCoding = (extra: Record<string, unknown> = {}) => ({
+    name: "create_agent",
+    arguments: {
+      name: "coder",
+      systemPrompt: "x",
+      model: "gpt-5.6-luna",
+      budgetUsd: 0.25,
+      kind: "coding",
+      codingProfile: { repository: "OpenAI/Example" },
+      ...extra,
+    },
+  });
+  const seeded = (ownerId: string | null = "p1") =>
+    fakeDb([
+      {
+        id: "a1",
+        name: "coder",
+        systemPrompt: "x",
+        model: "gpt-5.6-luna",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId,
+        tools: [],
+        kind: "coding",
+        codingProfile: {
+          provider: "codex",
+          repository: "openai/example",
+          baseRef: "main",
+          defaultTask: null,
+          timeoutSec: 1800,
+          protectedPaths: [".github/workflows/**"],
+          repositoryAuthorizedVia: "grandfathered",
+          repositoryAuthorizedById: null,
+        } as never,
+      },
+    ]);
+  async function connect(
+    db: ReturnType<typeof fakeDb>,
+    gate: RepoAccessGate,
+    opts: { roles?: string[]; scopes?: string[] } = {},
+  ) {
+    const providers = { repoAccess: gate } as unknown as import("../context.js").McpProviders;
+    const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", opts.scopes ?? ["agents:write"], opts.roles ?? [], providers));
+    registerAgentTools(mcp);
+    return connectClient(mcp);
+  }
+
+  it("create_agent checks the caller's GitHub access at write and stamps the profile", async () => {
+    const { gate, authorizePrincipal } = gateAt("write");
+    const client = await connect(fakeDb(), gate);
+    const result = await client.callTool(createCoding());
+    expect(result.isError).toBeFalsy();
+    expect(authorizePrincipal).toHaveBeenCalledWith({
+      principalId: "p1",
+      provider: "github",
+      repository: "openai/example",
+      required: "write",
+      fresh: true,
+    });
+    expect(JSON.parse(text(result)).codingProfile).toMatchObject({
+      repository: "openai/example",
+      repositoryAuthorizedVia: "host_permission",
+      repositoryAuthorizedById: "p1",
+    });
+    await client.close();
+  });
+
+  it("create_agent refuses a caller without a linked account or with only read or triage", async () => {
+    for (const level of ["unlinked", "read", "triage"] as const) {
+      const db = fakeDb();
+      const client = await connect(db, gateAt(level).gate);
+      const result = await client.callTool(createCoding());
+      expect(result.isError, level).toBe(true);
+      expect(text(result)).toMatch(level === "unlinked" ? /link_host_account/ : /needs write/);
+      expect((await db.agent.findMany({})).length).toBe(0);
+      await client.close();
+    }
+  });
+
+  it("repositoryAdminOverride records an admin approval, and is refused for a member", async () => {
+    const admin = gateAt("none");
+    const asAdmin = await connect(fakeDb(), admin.gate, {
+      roles: ["admin"],
+      scopes: ["agents:write", "agents:admin"],
+    });
+    const approved = await asAdmin.callTool(createCoding({ repositoryAdminOverride: true }));
+    expect(approved.isError).toBeFalsy();
+    expect(JSON.parse(text(approved)).codingProfile).toMatchObject({
+      repositoryAuthorizedVia: "admin",
+      repositoryAuthorizedById: "p1",
+    });
+    expect(admin.authorizePrincipal).not.toHaveBeenCalled();
+    await asAdmin.close();
+
+    const member = await connect(fakeDb(), gateAt("admin").gate, { scopes: ["agents:write", "agents:admin"] });
+    const refused = await member.callTool(createCoding({ repositoryAdminOverride: true }));
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toMatch(/requires a role/);
+    await member.close();
+  });
+
+  it("update_agent without a repository change makes no GitHub call and keeps the stamp", async () => {
+    const { gate, authorizePrincipal } = gateAt("none");
+    const client = await connect(seeded(), gate);
+    const result = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", systemPrompt: "y", codingProfile: { timeoutSec: 900, repository: "OpenAI/Example" } },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(authorizePrincipal).not.toHaveBeenCalled();
+    expect(JSON.parse(text(result)).codingProfile).toMatchObject({
+      timeoutSec: 900,
+      repositoryAuthorizedVia: "grandfathered",
+    });
+    await client.close();
+  });
+
+  it("update_agent re-authorizes a changed repository, and refuses it without access", async () => {
+    const denied = gateAt("read");
+    const db = seeded();
+    const refusedClient = await connect(db, denied.gate);
+    const refused = await refusedClient.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { repository: "openai/other" } },
+    });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toMatch(/needs write/);
+    expect(
+      ((await db.agent.findUnique({ where: { id: "a1" } })) as { codingProfile?: unknown } | null)?.codingProfile,
+    ).toMatchObject({
+      repository: "openai/example",
+    });
+    await refusedClient.close();
+
+    const allowed = gateAt("write");
+    const client = await connect(db, allowed.gate);
+    const changed = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { repository: "openai/other" } },
+    });
+    expect(changed.isError).toBeFalsy();
+    expect(allowed.authorizePrincipal).toHaveBeenCalledWith(expect.objectContaining({ repository: "openai/other" }));
+    expect(JSON.parse(text(changed)).codingProfile).toMatchObject({
+      repository: "openai/other",
+      repositoryAuthorizedVia: "host_permission",
+      repositoryAuthorizedById: "p1",
+    });
+    await client.close();
+  });
+
+  it("update_agent refuses to give a public (owner-less) agent a repository", async () => {
+    const { gate, authorizePrincipal } = gateAt("admin");
+    const client = await connect(seeded(null), gate, { roles: ["admin"], scopes: ["agents:write", "agents:admin"] });
+    for (const extra of [{}, { repositoryAdminOverride: true }]) {
+      const result = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile: { repository: "openai/other" }, ...extra },
+      });
+      expect(result.isError).toBe(true);
+      expect(text(result)).toMatch(/without an owner/);
+    }
+    expect(authorizePrincipal).not.toHaveBeenCalled();
+    await client.close();
+  });
+
+  it("update_agent turning a native agent into a coding one checks its repository", async () => {
+    const db = fakeDb([
+      {
+        id: "a1",
+        name: "agent",
+        systemPrompt: "x",
+        model: "gpt-5.6-luna",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId: "p1",
+        tools: [],
+      },
+    ]);
+    const client = await connect(db, gateAt("unlinked").gate);
+    const result = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", kind: "coding", codingProfile: { repository: "openai/example" } },
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/link_host_account/);
+    await client.close();
+  });
+});
+
+describe("make_owner and repository approvals (I-1)", () => {
+  const text = (result: { content: unknown }) => (result.content as { text: string }[])[0].text;
+  const agent = (ownerId: string | null, via: string) => ({
+    id: "a1",
+    name: "coder",
+    systemPrompt: "x",
+    model: "gpt-5.6-luna",
+    budgetUsd: 1,
+    maxTurns: 10,
+    schedule: null,
+    timezone: "UTC",
+    ownerId,
+    tools: [],
+    kind: "coding" as const,
+    codingProfile: {
+      provider: "codex",
+      repository: "openai/example",
+      baseRef: "main",
+      defaultTask: null,
+      timeoutSec: 1800,
+      protectedPaths: ["CODEOWNERS"],
+      repositoryAuthorizedVia: via,
+      repositoryAuthorizedById: "approver",
+    } as never,
+  });
+  async function makeOwner(ownerId: string | null, newOwner: string | null, links: FakeLink[]) {
+    const db = fakeDb([agent(ownerId, "admin")], [], ["new-owner", "owner-1"], links);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"], ["admin"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const result = await client.callTool({ name: "make_owner", arguments: { agentId: "a1", ownerId: newOwner } });
+    await client.close();
+    const row = (await db.agent.findUnique({ where: { id: "a1" } })) as unknown as {
+      codingProfile: Record<string, unknown>;
+    };
+    return { result, profile: row.codingProfile };
+  }
+
+  it("moving an agent to a different owner turns admin/grandfathered approvals into checks of the new owner's access", async () => {
+    const links: FakeLink[] = [
+      { agentId: "a1", repository: "bot/repo", authorizedVia: "admin", authorizedById: "approver" },
+      { agentId: "a1", repository: "old/repo", authorizedVia: "grandfathered" },
+      { agentId: "a1", repository: "mine/repo", authorizedVia: "host_permission", authorizedById: "owner-1" },
+    ];
+    const { result, profile } = await makeOwner("owner-1", "new-owner", links);
+    expect(result.isError).toBeFalsy();
+    expect(links.map((l) => l.authorizedVia)).toEqual(["host_permission", "host_permission", "host_permission"]);
+    expect(links[0].authorizedById).toBeNull();
+    expect(links[2].authorizedById).toBe("owner-1");
+    expect(profile).toMatchObject({ repositoryAuthorizedVia: "host_permission", repositoryAuthorizedById: null });
+    expect(JSON.parse(text(result)).repositoryApprovalsRevoked).toEqual(["bot/repo", "old/repo", "openai/example"]);
+  });
+
+  it("releasing an owned agent to public also revokes them (no laundering through a public agent)", async () => {
+    const links: FakeLink[] = [{ agentId: "a1", repository: "bot/repo", authorizedVia: "admin" }];
+    await makeOwner("owner-1", null, links);
+    expect(links[0].authorizedVia).toBe("host_permission");
+  });
+
+  it("keeps approvals when a public agent gets its first owner, and when the owner is unchanged", async () => {
+    for (const [from, to] of [
+      [null, "new-owner"],
+      ["owner-1", "owner-1"],
+    ] as const) {
+      const links: FakeLink[] = [{ agentId: "a1", repository: "bot/repo", authorizedVia: "admin" }];
+      const { result, profile } = await makeOwner(from, to, links);
+      expect(result.isError).toBeFalsy();
+      expect(links[0].authorizedVia).toBe("admin");
+      expect(profile.repositoryAuthorizedVia).toBe("admin");
+      expect(JSON.parse(text(result)).repositoryApprovalsRevoked).toEqual([]);
+    }
+  });
+});
+
+describe("update_agent admin override on someone else's agent (M-3) and override: false (M-6)", () => {
+  const text = (result: { content: unknown }) => (result.content as { text: string }[])[0].text;
+  const seed = () =>
+    fakeDb([
+      {
+        id: "a1",
+        name: "coder",
+        systemPrompt: "x",
+        model: "gpt-5.6-luna",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId: "someone-else",
+        tools: [],
+        kind: "coding",
+        codingProfile: {
+          provider: "codex",
+          repository: "openai/example",
+          baseRef: "main",
+          defaultTask: null,
+          timeoutSec: 1800,
+          protectedPaths: ["CODEOWNERS"],
+          repositoryAuthorizedVia: "host_permission",
+        } as never,
+      },
+    ]);
+  async function as(principal: string, roles: string[], db = seed()) {
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, principal, ["agents:write", "agents:admin"], roles));
+    registerAgentTools(mcp);
+    return connectClient(mcp);
+  }
+
+  it("lets an admin change only the repository of an agent they don't own, recorded as their approval", async () => {
+    const client = await as("admin-1", ["admin"]);
+    const ok = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { repository: "bot/repo" }, repositoryAdminOverride: true },
+    });
+    expect(ok.isError).toBeFalsy();
+    expect(JSON.parse(text(ok)).codingProfile).toMatchObject({
+      repository: "bot/repo",
+      repositoryAuthorizedVia: "admin",
+      repositoryAuthorizedById: "admin-1",
+    });
+    const more = await client.callTool({
+      name: "update_agent",
+      arguments: {
+        id: "a1",
+        systemPrompt: "y",
+        codingProfile: { repository: "bot/other" },
+        repositoryAdminOverride: true,
+      },
+    });
+    expect(more.isError).toBe(true);
+    expect(text(more)).toMatch(/only codingProfile.repository/);
+    await client.close();
+  });
+
+  it("refuses a member using the override on someone else's agent", async () => {
+    const client = await as("p1", []);
+    const result = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { repository: "bot/repo" }, repositoryAdminOverride: true },
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/requires a role/);
+    await client.close();
+  });
+
+  it("treats repositoryAdminOverride: false as absent (no 400) on update and create", async () => {
+    const client = await as("someone-else", []);
+    const result = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", systemPrompt: "y", repositoryAdminOverride: false },
+    });
+    expect(result.isError).toBeFalsy();
+    const created = await client.callTool({
+      name: "create_agent",
+      arguments: { name: "n", systemPrompt: "x", model: "gpt-4o", budgetUsd: 1, repositoryAdminOverride: false },
+    });
+    expect(created.isError).toBeFalsy();
+    await client.close();
   });
 });

@@ -81,6 +81,27 @@ export function loadGitHubEventConfig(env: NodeJS.ProcessEnv = process.env): { w
   return { webhookSecret: secret || undefined };
 }
 
+/**
+ * The GitHub App's OAuth client credentials, for linking a principal's GitHub
+ * identity (link_host_account). Unset = linking is disabled; repository
+ * authorization is still enforced (only admin approvals and existing
+ * authorizations then work).
+ */
+export function loadGitHubUserAuthConfig(env: NodeJS.ProcessEnv = process.env): {
+  clientId?: string;
+  clientSecret?: string;
+} {
+  const clientId = env.GITHUB_APP_CLIENT_ID?.trim() || undefined;
+  const clientSecret = env.GITHUB_APP_CLIENT_SECRET?.trim() || undefined;
+  if (Boolean(clientId) !== Boolean(clientSecret)) {
+    throw new Error("Set both GITHUB_APP_CLIENT_ID and GITHUB_APP_CLIENT_SECRET, or neither.");
+  }
+  if (clientId !== undefined && !/^[A-Za-z0-9.]{1,64}$/.test(clientId)) {
+    throw new Error("GITHUB_APP_CLIENT_ID is not a valid GitHub App client ID.");
+  }
+  return { clientId, clientSecret };
+}
+
 export interface ContainerExecutorConfig {
   workerImage?: string;
   claudeWorkerImage?: string;

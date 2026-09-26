@@ -55,6 +55,13 @@ describe("supported scopes", () => {
     expect(PRIVILEGED_SCOPES).not.toContain("memory:write");
   });
 
+  it("registers the host account tools with non-privileged scopes (linking is self-service)", () => {
+    const tools = requiredScopes();
+    expect(tools.get("link_host_account")).toEqual(["agents:write"]);
+    expect(tools.get("get_host_account")).toEqual(["agents:read"]);
+    expect(tools.get("unlink_host_account")).toEqual(["agents:write"]);
+  });
+
   it("every scope a tool requires is advertised (no tool is unreachable)", () => {
     for (const [name, scopes] of requiredScopes())
       for (const scope of scopes) expect(SCOPES_SUPPORTED, `${name} needs ${scope}`).toContain(scope);

@@ -22,6 +22,8 @@ import {
   type CompleteCheckInput,
   type FileListView,
   type FileReadResult,
+  type HostPermission,
+  type HostUser,
   type PublishReviewInput,
   type PublishReviewResult,
   type PullRequestFileView,
@@ -39,6 +41,25 @@ const VENDORED = /(^|\/)(node_modules|dist|\.venv)\//;
 const CHECK_TEXT_LIMIT = 65_535;
 const COMMENT_WRITE = { issues: "write", pull_requests: "write" } as const;
 const REVIEW_WRITE = { pull_requests: "write", checks: "write" } as const;
+/** Always implicitly granted to an installation token; enough for the collaborator-permission endpoint. */
+const METADATA_READ = { metadata: "read" } as const;
+const GITHUB_USER_ID = /^[1-9]\d{0,19}$/;
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+/** Highest first: user.permissions booleans, which (unlike the legacy field) keep maintain and triage apart. */
+const PERMISSION_FLAGS: ReadonlyArray<readonly [flag: string, level: HostPermission]> = [
+  ["admin", "admin"],
+  ["maintain", "maintain"],
+  ["push", "write"],
+  ["triage", "triage"],
+  ["pull", "read"],
+];
+const LEGACY_PERMISSIONS: Readonly<Record<string, HostPermission>> = {
+  admin: "admin",
+  maintain: "maintain",
+  write: "write",
+  triage: "triage",
+  read: "read",
+};
 const CHECK_TITLES = { APPROVE: "Approved", CHANGES_REQUESTED: "Changes requested", COMMENT: "Comments" } as const;
 
 type Json = Record<string, unknown>;
@@ -76,6 +97,14 @@ export function toReviewHostError(err: unknown): ReviewHostError {
     return new ReviewHostError("host_api_error", message);
   }
   return new ReviewHostError("host_api_error", "github_request_failed");
+}
+
+/** Ranks a collaborator-permission answer: user.permissions first, then the legacy permission field. */
+function permissionLevel(answer: Json): HostPermission {
+  const user = answer.user && typeof answer.user === "object" ? (answer.user as Json) : null;
+  const flags = user?.permissions && typeof user.permissions === "object" ? (user.permissions as Json) : null;
+  if (flags) return PERMISSION_FLAGS.find(([flag]) => flags[flag] === true)?.[1] ?? "none";
+  return typeof answer.permission === "string" ? (LEGACY_PERMISSIONS[answer.permission] ?? "none") : "none";
 }
 
 /** True only for a comment the wardby App itself wrote; anyone can type a marker into a comment. */
@@ -127,6 +156,36 @@ export class GitHubReviewHost implements CodeReviewHost {
     } catch (err) {
       throw toReviewHostError(err);
     }
+  }
+
+  async repositoryPermission(repository: string, user: HostUser): Promise<{ level: HostPermission; login: string }> {
+    if (!GITHUB_USER_ID.test(user.id) || !GITHUB_LOGIN.test(user.login)) {
+      throw new ReviewHostError("host_api_error", "host_user_invalid");
+    }
+    const base = repoPath(repository);
+    return this.withToken(repository, METADATA_READ, async (get) => {
+      // Null = GitHub answered for no one (404) or for a different account: never trust it.
+      const ask = async (login: string): Promise<HostPermission | null> => {
+        const response = await get(`${base}/collaborators/${encodeURIComponent(login)}/permission`, {}, [200, 404]);
+        if (response.status === 404) return null;
+        const answer = record(await response.json());
+        const answeredFor = answer.user && typeof answer.user === "object" ? (answer.user as Json).id : undefined;
+        if (!Number.isSafeInteger(answeredFor) || String(answeredFor) !== user.id) return null;
+        return permissionLevel(answer);
+      };
+      const level = await ask(user.login);
+      if (level !== null) return { level, login: user.login };
+      // The login may have been renamed (or recycled): resolve the account by id and retry once.
+      const response = await get(`/user/${user.id}`, {}, [200, 404]);
+      if (response.status === 404) return { level: "none", login: user.login };
+      const current = record(await response.json());
+      const login = current.login;
+      if (String(current.id) !== user.id || typeof login !== "string" || !GITHUB_LOGIN.test(login)) {
+        return { level: "none", login: user.login };
+      }
+      if (login.toLowerCase() === user.login.toLowerCase()) return { level: "none", login };
+      return { level: (await ask(login)) ?? "none", login };
+    });
   }
 
   async pullRequestHead(repository: string, prNumber: number): Promise<PullRequestHead> {

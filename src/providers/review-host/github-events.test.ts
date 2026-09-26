@@ -62,7 +62,7 @@ describe("normalizeGitHubEvent", () => {
       action: "created",
       repository,
       issue: { number: 7, pull_request: { url: "x" } },
-      comment: { id: 4, body, author_association: association, user: { login: "chfields", type } },
+      comment: { id: 4, body, author_association: association, user: { id: 1001, login: "chfields", type } },
     });
     expect(normalizeGitHubEvent("issue_comment", comment("@wardby review"), APP)).toEqual({
       kind: "mention",
@@ -73,6 +73,7 @@ describe("normalizeGitHubEvent", () => {
       comment: { kind: "conversation", id: "4" },
       body: "@wardby review",
       author: "chfields",
+      authorId: "1001",
     });
     expect(normalizeGitHubEvent("issue_comment", comment("no mention"), APP)).toBeNull();
     expect(normalizeGitHubEvent("issue_comment", comment("email me@wardby.com"), APP)).toBeNull();
@@ -87,7 +88,7 @@ describe("normalizeGitHubEvent", () => {
         id: 88,
         body: "@wardby is this safe?",
         author_association: "COLLABORATOR",
-        user: { login: "dev", type: "User" },
+        user: { id: 2002, login: "dev", type: "User" },
       },
     };
     expect(normalizeGitHubEvent("pull_request_review_comment", reviewComment, APP)).toMatchObject({
@@ -103,7 +104,12 @@ describe("normalizeGitHubEvent", () => {
       action: "created",
       repository,
       issue: { number: 3, title: "Add a joke", body: "Please add one about cats." },
-      comment: { id: 4, body: "@wardby take this", author_association: "MEMBER", user: { login: "dev", type: "User" } },
+      comment: {
+        id: 4,
+        body: "@wardby take this",
+        author_association: "MEMBER",
+        user: { id: 2002, login: "dev", type: "User" },
+      },
     };
     expect(normalizeGitHubEvent("issue_comment", onIssue, APP)).toEqual({
       kind: "mention",
@@ -114,13 +120,19 @@ describe("normalizeGitHubEvent", () => {
       comment: { kind: "conversation", id: "4" },
       body: "@wardby take this",
       author: "dev",
+      authorId: "2002",
       subject: { title: "Add a joke", body: "Please add one about cats." },
     });
     const inline = {
       action: "created",
       repository,
       pull_request: { number: 7, title: "Cats", body: null },
-      comment: { id: 88, body: "@wardby why?", author_association: "OWNER", user: { login: "dev", type: "User" } },
+      comment: {
+        id: 88,
+        body: "@wardby why?",
+        author_association: "OWNER",
+        user: { id: 2002, login: "dev", type: "User" },
+      },
     };
     expect(normalizeGitHubEvent("pull_request_review_comment", inline, APP)).toMatchObject({
       subject: { title: "Cats", body: "" },
@@ -138,7 +150,7 @@ describe("normalizeGitHubEvent", () => {
         id: 4,
         body: "@wardby fix it",
         author_association: "OWNER",
-        user: { login: "dev", type: "User" },
+        user: { id: 2002, login: "dev", type: "User" },
       };
       const pr = { number: 7, title: "T", body: prBody, user: prAuthor };
       return event === "issue_comment"
@@ -228,7 +240,7 @@ describe("normalizeGitHubEvent", () => {
         title,
         body,
         author_association: extra.association ?? "OWNER",
-        user: { login: "chfields", type: extra.type ?? "User" },
+        user: { id: 1001, login: "chfields", type: extra.type ?? "User" },
       },
       sender: { login: extra.sender ?? "chfields", type: extra.type ?? "User" },
       ...(extra.changes ? { changes: extra.changes } : {}),
@@ -244,6 +256,7 @@ describe("normalizeGitHubEvent", () => {
         comment: { kind: "subject", id: "12" },
         body: "@wardby please add a joke",
         author: "chfields",
+        authorId: "1001",
         subject: { title: "Jokes", body: "@wardby please add a joke" },
       });
       expect(normalizeGitHubEvent("issues", issue("opened", "@wardby add a joke", null), APP)).toMatchObject({
@@ -280,6 +293,24 @@ describe("normalizeGitHubEvent", () => {
       const bySomeoneElse = issue("edited", "J", "@wardby hi", { changes: { body: { from: "hi" } }, sender: "other" });
       expect(normalizeGitHubEvent("issues", bySomeoneElse, APP)).toBeNull();
     });
+  });
+
+  it("drops a mention whose author has no positive integer id (H5-3: permission is checked by id)", () => {
+    const comment = (user: Record<string, unknown>) => ({
+      action: "created",
+      repository,
+      issue: { number: 7 },
+      comment: {
+        id: 4,
+        body: "@wardby hi",
+        author_association: "OWNER",
+        user: { login: "chfields", type: "User", ...user },
+      },
+    });
+    for (const id of [undefined, 0, -1, "1001", 1.5]) {
+      expect(normalizeGitHubEvent("issue_comment", comment({ id }), APP)).toBeNull();
+    }
+    expect(normalizeGitHubEvent("issue_comment", comment({ id: 1001 }), APP)).toMatchObject({ authorId: "1001" });
   });
 
   it("ignores unknown events and malformed payloads", () => {

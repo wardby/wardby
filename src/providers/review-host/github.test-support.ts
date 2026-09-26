@@ -16,6 +16,7 @@ export interface Call {
   path: string;
   body: unknown;
   accept: string | null;
+  authorization: string | null;
 }
 
 export type Handler = (call: Call) => Response | undefined;
@@ -38,6 +39,7 @@ export function fakeGitHub(handler: Handler): { client: GitHubAppClient; calls: 
     const method = init?.method ?? "GET";
     const body = typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : undefined;
     const accept = new Headers(init?.headers).get("accept");
+    const authorization = new Headers(init?.headers).get("authorization");
     if (path === "/app" && method === "GET") return json({ id: APP_ID, slug: "wardby" });
     if (path.endsWith("/installation") && method === "GET") return json({ id: 42 });
     if (path === "/app/installations/42/access_tokens") {
@@ -54,7 +56,7 @@ export function fakeGitHub(handler: Handler): { client: GitHubAppClient; calls: 
       );
     }
     if (path === "/installation/token" && method === "DELETE") return new Response(null, { status: 204 });
-    const call = { method, path, body, accept };
+    const call = { method, path, body, accept, authorization };
     calls.push(call);
     const response = handler(call);
     if (!response) throw new Error(`unexpected ${method} ${path}`);

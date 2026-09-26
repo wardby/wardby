@@ -404,3 +404,123 @@ describe("GitHubReviewHost writes", () => {
     expect((calls[1].body as { output: { text: string } }).output.text.length).toBe(65_535);
   });
 });
+
+describe("GitHubReviewHost.repositoryPermission", () => {
+  const PERM = `${BASE}/collaborators/octo/permission`;
+  const answer = (permission: string, perms: Record<string, boolean> | undefined, id = 42, extra = {}) =>
+    json({
+      permission,
+      role_name: permission,
+      user: { id, login: "octo", type: "User", ...(perms ? { permissions: perms } : {}) },
+      ...extra,
+    });
+  const bools = (on: string[]) =>
+    Object.fromEntries(["admin", "maintain", "push", "triage", "pull"].map((k) => [k, on.includes(k)]));
+
+  it("asks for a metadata-only token and ranks from user.permissions", async () => {
+    const { client, calls, grants } = fakeGitHub(({ method, path }) =>
+      method === "GET" && path === PERM ? answer("write", bools(["push", "triage", "pull"])) : undefined,
+    );
+    await expect(new GitHubReviewHost(client).repositoryPermission(REPO, { id: "42", login: "octo" })).resolves.toEqual(
+      { level: "write", login: "octo" },
+    );
+    expect(grants).toEqual([{ metadata: "read" }]);
+    expect(calls.map((c) => c.path)).toEqual([PERM]);
+  });
+
+  it.each([
+    [["admin", "maintain", "push", "triage", "pull"], "admin"],
+    [["maintain", "push", "triage", "pull"], "maintain"],
+    [["triage", "pull"], "triage"],
+    [["pull"], "read"],
+    [[], "none"],
+  ])("maps user.permissions %j to %s (legacy permission is ignored when booleans are present)", async (on, level) => {
+    // The legacy field folds maintain into write and triage into read; the booleans don't.
+    const { client } = fakeGitHub(({ path }) => (path === PERM ? answer("read", bools(on)) : undefined));
+    expect((await new GitHubReviewHost(client).repositoryPermission(REPO, { id: "42", login: "octo" })).level).toBe(
+      level,
+    );
+  });
+
+  it("ranks a custom role by its booleans, and falls back to the legacy permission without them", async () => {
+    const custom = fakeGitHub(({ path }) =>
+      path === PERM ? answer("write", bools(["push", "triage", "pull"]), 42, { role_name: "release-bot" }) : undefined,
+    );
+    expect(
+      (await new GitHubReviewHost(custom.client).repositoryPermission(REPO, { id: "42", login: "octo" })).level,
+    ).toBe("write");
+    for (const [legacy, level] of [
+      ["admin", "admin"],
+      ["write", "write"],
+      ["read", "read"],
+      ["none", "none"],
+      ["weird", "none"],
+    ]) {
+      const { client } = fakeGitHub(({ path }) => (path === PERM ? answer(legacy, undefined) : undefined));
+      expect((await new GitHubReviewHost(client).repositoryPermission(REPO, { id: "42", login: "octo" })).level).toBe(
+        level,
+      );
+    }
+  });
+
+  it("treats a 404 as none when the login still belongs to the same user", async () => {
+    const { client, calls } = fakeGitHub(({ path }) => {
+      if (path === PERM) return json({ message: "Not Found" }, 404);
+      if (path === "/user/42") return json({ id: 42, login: "octo", type: "User" });
+      return undefined;
+    });
+    await expect(new GitHubReviewHost(client).repositoryPermission(REPO, { id: "42", login: "octo" })).resolves.toEqual(
+      { level: "none", login: "octo" },
+    );
+    expect(calls.map((c) => c.path)).toEqual([PERM, "/user/42"]);
+  });
+
+  it("re-resolves a renamed user by id and retries once, returning the new login", async () => {
+    const { client, calls } = fakeGitHub(({ path }) => {
+      if (path === PERM) return json({ message: "Not Found" }, 404);
+      if (path === "/user/42") return json({ id: 42, login: "octo-renamed", type: "User" });
+      if (path === `${BASE}/collaborators/octo-renamed/permission`)
+        return json({ permission: "admin", user: { id: 42, login: "octo-renamed", permissions: bools(["admin"]) } });
+      return undefined;
+    });
+    await expect(new GitHubReviewHost(client).repositoryPermission(REPO, { id: "42", login: "octo" })).resolves.toEqual(
+      { level: "admin", login: "octo-renamed" },
+    );
+    expect(calls).toHaveLength(3);
+  });
+
+  it("never trusts an answer for a different user id: re-resolves, and fails closed if it still differs", async () => {
+    // The login was recycled by another account: the answer is about someone else.
+    const { client } = fakeGitHub(({ path }) => {
+      if (path === PERM) return answer("admin", bools(["admin"]), 999);
+      if (path === "/user/42") return json({ id: 42, login: "octo", type: "User" });
+      return undefined;
+    });
+    await expect(new GitHubReviewHost(client).repositoryPermission(REPO, { id: "42", login: "octo" })).resolves.toEqual(
+      { level: "none", login: "octo" },
+    );
+  });
+
+  it("is none when the user account no longer exists, and an API error is a ReviewHostError", async () => {
+    const gone = fakeGitHub(({ path }) => {
+      if (path === PERM) return json({}, 404);
+      if (path === "/user/42") return json({}, 404);
+      return undefined;
+    });
+    expect(
+      (await new GitHubReviewHost(gone.client).repositoryPermission(REPO, { id: "42", login: "octo" })).level,
+    ).toBe("none");
+    const broken = fakeGitHub(({ path }) => (path === PERM ? json({}, 500) : undefined));
+    await expect(
+      new GitHubReviewHost(broken.client).repositoryPermission(REPO, { id: "42", login: "octo" }),
+    ).rejects.toMatchObject({ name: "ReviewHostError", code: "host_api_error" });
+  });
+
+  it("refuses a malformed user id or login without calling GitHub", async () => {
+    const { client, calls } = fakeGitHub(() => undefined);
+    const host = new GitHubReviewHost(client);
+    await expect(host.repositoryPermission(REPO, { id: "abc", login: "octo" })).rejects.toThrow();
+    await expect(host.repositoryPermission(REPO, { id: "42", login: "../../x" })).rejects.toThrow();
+    expect(calls).toHaveLength(0);
+  });
+});
