@@ -12,6 +12,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { AgentKind, CodingAgentProfile, PrismaClient, Webhook } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import { dispatchRun } from "./dispatch.js";
+import { atLeast, effectiveAccess } from "./grants.js";
 
 export type WebhookMetadata = Pick<Webhook, "id" | "agentId" | "status" | "ownerId" | "createdAt" | "lastFiredAt">;
 
@@ -50,8 +51,19 @@ export async function createWebhook(
   return { id: webhook.id, secret };
 }
 
-export async function listWebhooks(ownerId: string, db: PrismaClient): Promise<WebhookMetadata[]> {
-  const webhooks = await db.webhook.findMany({ where: { ownerId } });
+/**
+ * Webhooks the principal created, plus every webhook on an agent it owns
+ * (the agent owner must be able to see standing triggers others hold on
+ * its agent). `all` (the stdio operator) lists every webhook.
+ */
+export async function listWebhooks(
+  principalId: string,
+  db: PrismaClient,
+  opts: { all?: boolean } = {},
+): Promise<WebhookMetadata[]> {
+  const webhooks = await db.webhook.findMany({
+    where: opts.all ? {} : { OR: [{ ownerId: principalId }, { agent: { ownerId: principalId } }] },
+  });
   return webhooks.map(({ id, agentId, status, ownerId: owner, createdAt, lastFiredAt }) => ({
     id,
     agentId,
@@ -105,6 +117,9 @@ export async function resolveWebhookRun(
     // to modify a real repository.
     codingTask: agent.kind === "coding" ? codingTask : undefined,
     taskOverride: agent.kind === "native" ? codingTask : undefined,
+    // The webhook is its creator's standing trigger: its runs are visible to
+    // the creator (and the agent owner), like a trigger_agent call.
+    triggeredById: webhook.ownerId,
     beforePersist: async (tx, currentAgent) => {
       const current = await tx.webhook.findUnique({ where: { id } });
       if (!current) {
@@ -120,6 +135,16 @@ export async function resolveWebhookRun(
         return false;
       }
       if (codingTask !== undefined && !taskAllowed(currentAgent.kind, currentAgent.codingProfile)) {
+        rejected = "disabled";
+        return false;
+      }
+      // The creator must still be allowed to trigger the agent (resource-
+      // sharing grants spec §3.10): its owner, or a holder of execute. Read
+      // through tx, so a revoke or make_owner takes effect on the next fire.
+      // A webhook on a formerly public agent keeps firing through the
+      // migration's everyone-execute grant.
+      const creatorAccess = await effectiveAccess(tx, "agent", currentAgent, current.ownerId);
+      if (!atLeast("agent", creatorAccess, "execute")) {
         rejected = "disabled";
         return false;
       }

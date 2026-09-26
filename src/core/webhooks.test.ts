@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { Executor } from "../providers/executor/types.js";
 import { createWebhook, listWebhooks, deleteWebhook, resolveWebhookRun } from "./webhooks.js";
+import { fakeResourceGrants, type FakeGrantSeed } from "./grants.test-support.js";
 
 const executor: Executor = { async start() {}, async stop() {} };
 
@@ -18,9 +19,11 @@ interface FakeAgentRow {
   name: string;
   kind?: "native" | "coding";
   codingProfile?: Record<string, unknown> | null;
+  /** Defaults to "p1", the creator most tests use. */
+  ownerId?: string | null;
 }
 
-function fakeDb(agents: FakeAgentRow[] = []) {
+function fakeDb(agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
   const webhooks = new Map<string, FakeWebhookRow>();
   const agentsById = new Map(agents.map((a) => [a.id, a]));
   const runs = new Map<string, any>();
@@ -42,8 +45,10 @@ function fakeDb(agents: FakeAgentRow[] = []) {
         return row;
       },
       findUnique: async ({ where }: { where: { id: string } }) => webhooks.get(where.id) ?? null,
-      findMany: async ({ where }: { where: { ownerId: string } }) =>
-        [...webhooks.values()].filter((w) => w.ownerId === where.ownerId),
+      findMany: async ({ where }: { where: { OR: [{ ownerId: string }, { agent: { ownerId: string } }] } }) =>
+        [...webhooks.values()].filter(
+          (w) => w.ownerId === where.OR[0].ownerId || agentsById.get(w.agentId)?.ownerId === where.OR[1].agent.ownerId,
+        ),
       delete: async ({ where }: { where: { id: string } }) => {
         const row = webhooks.get(where.id);
         webhooks.delete(where.id);
@@ -60,7 +65,9 @@ function fakeDb(agents: FakeAgentRow[] = []) {
     agent: {
       findUnique: async ({ where }: { where: { id?: string; name?: string } }) => {
         const row = where.id ? agentsById.get(where.id) : agents.find((a) => a.name === where.name);
-        if (row) return { kind: "native", codingProfile: null, budgetUsd: 1, model: "gpt-5.6-luna", ...row };
+        if (row) {
+          return { kind: "native", codingProfile: null, budgetUsd: 1, model: "gpt-5.6-luna", ownerId: "p1", ...row };
+        }
         return null;
       },
     },
@@ -78,6 +85,8 @@ function fakeDb(agents: FakeAgentRow[] = []) {
       create: async ({ data }: any) => ({ id: "task_1", createdAt: new Date(), updatedAt: new Date(), ...data }),
     },
     $queryRaw: async () => [],
+    resourceGrant: fakeResourceGrants(grants),
+    runs,
   };
   db.$transaction = async (fn: (tx: any) => unknown) => fn(db);
   return db as import("#prisma").PrismaClient;
@@ -174,6 +183,39 @@ describe("core/webhooks", () => {
     const run = await db.run.findUnique({ where: { id: result.runId } });
     expect((run as any)?.taskOverride).toBe("plan this feature");
     expect((run as any)?.trigger).toBe("webhook");
+  });
+
+  it("records the webhook's creator as the run's triggeredById", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter" }]);
+    const { id, secret } = await createWebhook("a1", "p1", db);
+    const result = await resolveWebhookRun(id, secret, db, executor);
+    expect(result.ok).toBe(true);
+    const run = (db as any).runs.get(result.ok ? result.runId : "");
+    expect(run.triggeredById).toBe("p1");
+  });
+
+  it("refuses to fire once its creator no longer holds execute on the agent (revoked or transferred)", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "owner" }]);
+    const { id, secret } = await createWebhook("a1", "former-grantee", db);
+    const result = await resolveWebhookRun(id, secret, db, executor);
+    expect(result).toEqual({ ok: false, reason: "disabled" });
+    expect((db as any).runs.size).toBe(0);
+  });
+
+  it("fires for a creator who still holds execute, and for everyone-execute on an owner-less agent", async () => {
+    const granted = fakeDb(
+      [{ id: "a1", name: "greeter", ownerId: "owner" }],
+      [{ resourceType: "agent", resourceId: "a1", principalId: "grantee", level: "execute" }],
+    );
+    const hook = await createWebhook("a1", "grantee", granted);
+    expect((await resolveWebhookRun(hook.id, hook.secret, granted, executor)).ok).toBe(true);
+
+    const legacy = fakeDb(
+      [{ id: "a1", name: "greeter", ownerId: null }],
+      [{ resourceType: "agent", resourceId: "a1", granteeKind: "everyone", level: "execute" }],
+    );
+    const old = await createWebhook("a1", "anyone", legacy);
+    expect((await resolveWebhookRun(old.id, old.secret, legacy, executor)).ok).toBe(true);
   });
 
   it("deleteWebhook removes it from listWebhooks", async () => {

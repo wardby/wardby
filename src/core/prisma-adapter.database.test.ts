@@ -51,6 +51,7 @@ async function cleanupByPrefix(): Promise<void> {
   await db.datastoreEntry.deleteMany({ where: { datastore: { name: where } } });
   await db.datastore.deleteMany({ where: { name: where } });
   await db.secret.deleteMany({ where: { name: where } });
+  await db.resourceGrant.deleteMany({ where: { resourceId: where } });
   await db.agent.deleteMany({ where: agentWhere });
   await db.principal.deleteMany({ where: { id: where } });
 }
@@ -620,15 +621,36 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
       expect(row.allowedHosts).toEqual(["concurrent.example"]);
     });
 
-    it("update_tool and a concurrent attach_tool onto a public agent cannot both commit", async () => {
+    it("update_tool and a concurrent attach_tool onto another owner's agent cannot both commit", async () => {
       // The security property update_tool's cross-owner check depends on:
       // update_tool reads the tool's attachments and writes the Tool row,
       // attach_tool reads the Tool row and writes an attachment. Under
       // Serializable one of them must abort, so new code never reaches an
-      // agent that was attached between the check and the write.
-      const publicAgentId = id("update-vs-attach-public");
+      // agent that was attached between the check and the write. The tool's
+      // owner holds write on another owner's agent (a grant), so it may
+      // attach its own tool there.
+      const otherOwner = id("update-vs-attach-owner");
+      await db.principal.create({ data: { id: otherOwner, subject: otherOwner } });
+      const publicAgentId = id("update-vs-attach-shared");
       await db.agent.create({
-        data: { id: publicAgentId, name: publicAgentId, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: null },
+        data: {
+          id: publicAgentId,
+          name: publicAgentId,
+          systemPrompt: "t",
+          model: "t",
+          budgetUsd: 1,
+          ownerId: otherOwner,
+        },
+      });
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "agent",
+          resourceId: publicAgentId,
+          granteeKind: "principal",
+          granteePrincipalId: principalId,
+          granteeKey: `principal:${principalId}`,
+          level: "write",
+        },
       });
       const tool = await db.tool.create({
         data: {
@@ -642,7 +664,7 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
         },
       });
       // Right after update_tool's transaction lists the tool's attachments
-      // (and finds none), the owner attaches it to a public agent on a
+      // (and finds none), the owner attaches it to the shared agent on a
       // separate connection, and that commits first.
       const conflicted = interleavedDb(() => callHandler("attach_tool", { agentId: publicAgentId, toolId: tool.id }), {
         model: "agentTool",

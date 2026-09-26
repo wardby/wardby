@@ -5,12 +5,15 @@
  * the link's access on the repository (write for a write link, read for a
  * read link), or a wardby admin must approve it explicitly (adminOverride).
  * The authorization is stamped on the link and re-checked whenever the link
- * is used (core/repo-access.ts). Public (owner-less) agents can't be linked.
+ * is used (core/repo-access.ts). A repository is an owner binding (resource-
+ * sharing grants spec §3.4.3): link/unlink are the agent owner's alone (or
+ * an admin's explicit approval), whatever grants others hold on the agent,
+ * and owner-less agents can't be linked.
  * See docs/private/2026-09-26-repo-access-authorization-spec-and-plan.md.
  */
 import { Prisma, type PrismaClient } from "#prisma";
 import { normalizeGitHubRepository } from "../../coding/protocol.js";
-import { requireOwnedAgent, requireReadableAgent } from "../auth/ownership.js";
+import { requireAgentAccess, requireBindingOwner } from "../auth/access.js";
 import { authorizeRepositoryForSet } from "../auth/repo-authorization.js";
 import { requireScope } from "../auth/resource-server.js";
 import { McpError } from "../errors.js";
@@ -106,7 +109,8 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
         agent = await ctx.db.agent.findUnique({ where: { id: args.agentId } });
         if (!agent) throw new McpError(404, `Agent "${args.agentId}" not found.`);
       } else {
-        agent = await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+        agent = (await requireAgentAccess(ctx, args.agentId, "read")).agent;
+        requireBindingOwner(ctx, agent);
       }
       if (agent.kind !== "native") {
         throw new McpError(
@@ -176,7 +180,8 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       required: ["agentId", "repository"],
     },
     handler: async (args: { agentId: string; provider?: string; repository: string }, ctx) => {
-      await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+      const { agent } = await requireAgentAccess(ctx, args.agentId, "read");
+      requireBindingOwner(ctx, agent);
       const provider = args.provider ?? "github";
       const repository = normalizeRepository(provider, args.repository);
       const { count } = await ctx.db.agentRepository.deleteMany({
@@ -196,7 +201,7 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       required: ["agentId"],
     },
     handler: async (args: { agentId: string }, ctx) => {
-      await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
+      await requireAgentAccess(ctx, args.agentId, "read");
       const links = await ctx.db.agentRepository.findMany({
         where: { agentId: args.agentId },
         orderBy: { createdAt: "asc" },

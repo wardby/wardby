@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import { registerSecretsTools } from "./secrets.js";
 import type { McpRequestContext } from "../context.js";
+import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 import type { SecretCipher } from "../../providers/secrets/types.js";
 
 const CANONICAL_URI = "https://host/mcp";
@@ -36,7 +37,7 @@ interface FakeAgentRow {
   ownerId: string | null;
 }
 
-function fakeDb(agents: FakeAgentRow[] = []) {
+function fakeDb(agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
   const secrets = new Map<string, FakeSecretRow>();
   const agentRows = new Map(agents.map((a) => [a.id, a]));
   const agentSecrets: { agentId: string; secretId: string }[] = [];
@@ -47,6 +48,8 @@ function fakeDb(agents: FakeAgentRow[] = []) {
   let counter = 0;
 
   return {
+    resourceGrant: fakeResourceGrants(grants),
+    agentSecretRows: agentSecrets,
     secret: {
       create: async ({ data }: { data: Partial<FakeSecretRow> & { name: string } }) => {
         const now = new Date();
@@ -175,8 +178,10 @@ function fakeCtx(
   cipher: SecretCipher,
   principalId: string,
   scopes: string[],
+  extra: Partial<McpRequestContext> = {},
 ): McpRequestContext {
   return {
+    ...extra,
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
     canonicalUri: CANONICAL_URI,
@@ -295,6 +300,66 @@ describe("secrets tools", () => {
     await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-live-abc123" } });
     const result = await client.callTool({ name: "attach_secret", arguments: { agentId: "a1", name: "API_KEY" } });
     expect(result.isError).toBe(true);
+    await client.close();
+  });
+
+  it("A2/S2-2: a write-grantee, the stdio operator and anyone on an owner-less agent can't bind a secret", async () => {
+    const db = fakeDb(
+      [
+        { id: "a-shared", ownerId: "owner" },
+        { id: "a-ownerless", ownerId: null },
+      ],
+      [
+        { resourceType: "agent", resourceId: "a-shared", principalId: "p1", level: "write" },
+        { resourceType: "agent", resourceId: "a-ownerless", granteeKind: "everyone", level: "execute" },
+      ],
+    );
+    const cipher = fakeCipher();
+    const mcp = buildMcpServer({
+      providers: { secrets: cipher } as never,
+      db,
+      config: { canonicalUri: CANONICAL_URI },
+    });
+    registerSecretsTools(mcp, {
+      buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
+      protocolElicitation: false,
+    });
+    const client = await connectClient(mcp);
+    for (const extra of [{}, { operator: true }]) {
+      mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"], extra));
+      await client.callTool({ name: "create_secret", arguments: { name: "API_KEY", value: "sk-live-abc123" } });
+      for (const agentId of ["a-shared", "a-ownerless"]) {
+        const result = await client.callTool({ name: "attach_secret", arguments: { agentId, name: "API_KEY" } });
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result)).toMatch(/owner/);
+      }
+    }
+    expect((db as unknown as { agentSecretRows: unknown[] }).agentSecretRows).toEqual([]);
+    await client.close();
+  });
+
+  it("the agent owner can detach a secret binding another owner's secret left on the agent", async () => {
+    const db = fakeDb([{ id: "a1", ownerId: "p1" }]);
+    (db as unknown as { agentSecretRows: unknown[] }).agentSecretRows.push({
+      agentId: "a1",
+      secretId: "foreign",
+      boundName: "TOKEN",
+    });
+    const cipher = fakeCipher();
+    const mcp = buildMcpServer({
+      providers: { secrets: cipher } as never,
+      db,
+      config: { canonicalUri: CANONICAL_URI },
+    });
+    mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
+    registerSecretsTools(mcp, {
+      buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
+      protocolElicitation: false,
+    });
+    const client = await connectClient(mcp);
+    const result = await client.callTool({ name: "detach_secret", arguments: { agentId: "a1", name: "TOKEN" } });
+    expect(result.isError).toBeFalsy();
+    expect((db as unknown as { agentSecretRows: unknown[] }).agentSecretRows).toEqual([]);
     await client.close();
   });
 

@@ -53,13 +53,27 @@ export async function detachDatastore(agentId: string, boundName: string, db: Pr
   await db.agentDatastore.deleteMany({ where: { agentId, boundName } });
 }
 
+/**
+ * Owner rule (resource-sharing grants spec §3.4.1): a binding resolves only
+ * while the datastore's owner is the agent's CURRENT owner, both non-null.
+ * A cross-owner binding (written before that rule, or left behind by
+ * make_owner) and every binding on an owner-less agent resolve like an
+ * unattached boundName, so one owner's store never reaches another owner's
+ * agent (A2/S2-2, R2-1).
+ */
 async function resolveDatastoreId(
   agentId: string,
   boundName: string,
   db: Pick<PrismaClient, "agentDatastore">,
 ): Promise<string | undefined> {
-  const attachment = await db.agentDatastore.findFirst({ where: { agentId, boundName } });
-  return attachment?.datastoreId;
+  const attachment = await db.agentDatastore.findFirst({
+    where: { agentId, boundName },
+    include: { datastore: { select: { ownerId: true } }, agent: { select: { ownerId: true } } },
+  });
+  if (!attachment) return undefined;
+  const owner = attachment.agent.ownerId;
+  if (owner === null || attachment.datastore.ownerId !== owner) return undefined;
+  return attachment.datastoreId;
 }
 
 /**

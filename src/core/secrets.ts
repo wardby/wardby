@@ -93,6 +93,12 @@ export async function deleteSecret(secretId: string, db: PrismaClient): Promise<
  * decrypted, never the agent's whole attached set eagerly — a lookup
  * that returns nothing (unattached name) is indistinguishable from one
  * that was never created, both `undefined`.
+ *
+ * Owner rule (resource-sharing grants spec §3.4.1): a binding resolves only
+ * while the secret's owner is the agent's CURRENT owner, both non-null. A
+ * binding written before that rule, left behind by make_owner, or on an
+ * owner-less agent behaves exactly like an unattached name, so one owner's
+ * secret never reaches another owner's agent (A2/S2-2, R2-1).
  */
 export function buildSecretsAccessor(
   agentId: string,
@@ -103,10 +109,13 @@ export function buildSecretsAccessor(
     async get(name: string): Promise<string | undefined> {
       boundedString(name, 1024);
       if (db.$queryRaw) {
+        // NULL-safe: "=" is never true when either owner is NULL.
         const rows = await db.$queryRaw<{ ciphertext: string | null }[]>`
           SELECT CASE WHEN octet_length(s."ciphertext") <= 262144 THEN s."ciphertext" ELSE NULL END AS "ciphertext"
-          FROM "Secret" s JOIN "AgentSecret" a ON a."secretId" = s."id"
-          WHERE a."agentId" = ${agentId} AND a."boundName" = ${name} LIMIT 1`;
+          FROM "Secret" s
+          JOIN "AgentSecret" a ON a."secretId" = s."id"
+          JOIN "Agent" g ON g."id" = a."agentId"
+          WHERE a."agentId" = ${agentId} AND a."boundName" = ${name} AND s."ownerId" = g."ownerId" LIMIT 1`;
         if (!rows.length) return undefined;
         if (rows[0].ciphertext === null) throw new Error("secret_value_limit");
         return cipher.decrypt(rows[0].ciphertext);
@@ -114,9 +123,11 @@ export function buildSecretsAccessor(
       // Lightweight provider doubles use the same post-read bound; production Prisma filters in SQL.
       const attachment = await db.agentSecret.findFirst({
         where: { agentId, boundName: name },
-        include: { secret: true },
+        include: { secret: true, agent: { select: { ownerId: true } } },
       });
       if (!attachment) return undefined;
+      const owner = attachment.agent.ownerId;
+      if (owner === null || attachment.secret.ownerId !== owner) return undefined;
       boundedString(attachment.secret.ciphertext, 256 * 1024);
       return cipher.decrypt(attachment.secret.ciphertext);
     },

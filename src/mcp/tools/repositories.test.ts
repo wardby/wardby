@@ -7,6 +7,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import { registerRepositoryTools } from "./repositories.js";
 import type { McpRequestContext } from "../context.js";
+import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 
 const CANONICAL_URI = "https://host/mcp";
 
@@ -31,12 +32,17 @@ interface FakeRepositoryRow {
   authorizedAt?: Date | null;
 }
 
-function fakeDb(agents: FakeAgentRow[], repositories: FakeRepositoryRow[] = [], opts: { failUpsertWith?: Error } = {}) {
+function fakeDb(
+  agents: FakeAgentRow[],
+  repositories: FakeRepositoryRow[] = [],
+  opts: { failUpsertWith?: Error; grants?: FakeGrantSeed[] } = {},
+) {
   const agentRows = new Map(agents.map((a) => [a.id, a]));
   const rows: FakeRepositoryRow[] = [...repositories];
   let nextId = rows.length + 1;
 
   const db = {
+    resourceGrant: fakeResourceGrants(opts.grants ?? []),
     agent: {
       findUnique: async ({ where }: { where: { id: string } }) => agentRows.get(where.id) ?? null,
     },
@@ -147,9 +153,15 @@ function setup(
   agents: FakeAgentRow[],
   principalId: string,
   repositories: FakeRepositoryRow[] = [],
-  opts: { gate?: RepoAccessGate | null; roles?: string[]; scopes?: string[]; failUpsertWith?: Error } = {},
+  opts: {
+    gate?: RepoAccessGate | null;
+    roles?: string[];
+    scopes?: string[];
+    failUpsertWith?: Error;
+    grants?: FakeGrantSeed[];
+  } = {},
 ) {
-  const db = fakeDb(agents, repositories, { failUpsertWith: opts.failUpsertWith });
+  const db = fakeDb(agents, repositories, { failUpsertWith: opts.failUpsertWith, grants: opts.grants });
   const mcp = buildMcpServer({ providers: {} as never, db, config: { canonicalUri: CANONICAL_URI } });
   mcp.setFixedContext(fakeCtx(db, principalId, opts.scopes ?? ["agents:read", "agents:write"], opts));
   registerRepositoryTools(mcp);
@@ -336,8 +348,47 @@ describe("repository tools", () => {
       arguments: { agentId: "a1", repository: "openai/example", access: "write" },
     });
     expect(result.isError).toBeTruthy();
-    expect(errorText(result as never)).toContain("not owned by the caller");
+    expect(errorText(result as never)).toContain("not found");
     await client.close();
+  });
+
+  it("repositories are owner bindings: a write-grantee can't link or unlink, a read-grantee can list", async () => {
+    const agent: FakeAgentRow = { id: "a1", name: "reviewer", ownerId: "owner", kind: "native" };
+    const existing: FakeRepositoryRow = {
+      id: "repo1",
+      agentId: "a1",
+      provider: "github",
+      repository: "openai/example",
+      access: "write",
+      triggers: [],
+      checkName: null,
+      createdAt: new Date(),
+    };
+    const writer = setup([agent], "writer", [existing], {
+      grants: [{ resourceType: "agent", resourceId: "a1", principalId: "writer", level: "write" }],
+    });
+    const client = await connectClient(writer.mcp);
+    const linked = await client.callTool({
+      name: "link_repository",
+      arguments: { agentId: "a1", repository: "openai/other", access: "write" },
+    });
+    expect(linked.isError).toBeTruthy();
+    expect(errorText(linked as never)).toMatch(/owner/);
+    const unlinked = await client.callTool({
+      name: "unlink_repository",
+      arguments: { agentId: "a1", repository: "openai/example" },
+    });
+    expect(unlinked.isError).toBeTruthy();
+    await client.close();
+
+    const reader = setup([agent], "reader", [existing], {
+      grants: [{ resourceType: "agent", resourceId: "a1", principalId: "reader", level: "read" }],
+    });
+    const readerClient = await connectClient(reader.mcp);
+    const listed = await readerClient.callTool({ name: "list_repositories", arguments: { agentId: "a1" } });
+    expect(listed.isError).toBeFalsy();
+    expect((parseText(listed as never) as { repositories: unknown[] }).repositories).toHaveLength(1);
+    await readerClient.close();
   });
 
   it("unlinks and lists", async () => {
@@ -439,12 +490,13 @@ describe("link_repository authorization (H5-1)", () => {
       gate,
       roles: ["admin"],
       scopes: ["agents:read", "agents:write", "agents:admin"],
+      grants: [{ resourceType: "agent", resourceId: "a1", granteeKind: "everyone", level: "execute" }],
     });
     const client = await connectClient(mcp);
     for (const extra of [{}, { adminOverride: true }]) {
       const result = await client.callTool(link(extra));
       expect(result.isError).toBeTruthy();
-      expect(errorText(result as never)).toMatch(/without an owner/);
+      expect(errorText(result as never)).toMatch(/no owner|without an owner/);
     }
     expect(authorizePrincipal).not.toHaveBeenCalled();
     await client.close();
@@ -562,7 +614,8 @@ describe("link_repository admin override on someone else's agent (M-3)", () => {
     const c2 = await connectClient(admin.mcp);
     const noOverride = await c2.callTool({ ...call, arguments: { ...call.arguments, adminOverride: undefined } });
     expect(noOverride.isError).toBeTruthy();
-    expect(errorText(noOverride as never)).toContain("not owned by the caller");
+    // Admins get no implicit access to others' agents: the agent is hidden.
+    expect(errorText(noOverride as never)).toContain("not found");
     await c2.close();
   });
 });

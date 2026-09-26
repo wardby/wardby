@@ -1,13 +1,8 @@
 import { Prisma, type PrismaClient } from "#prisma";
 import type { WardbyMcpServer } from "../server.js";
 import type { DatastoreValue } from "../../providers/index.js";
-import {
-  requireOwnedAgent,
-  requireReadableAgent,
-  requireOwnedDatastore,
-  canRead,
-  assertCanMutate,
-} from "../auth/ownership.js";
+import { requireOwnedDatastore, canRead, assertCanMutate } from "../auth/ownership.js";
+import { requireAgentAccess, requireBindingOwner } from "../auth/access.js";
 import {
   createDatastore,
   listDatastores,
@@ -21,13 +16,10 @@ import { textResult } from "./text-result.js";
 
 /**
  * A `boundName` names an *attachment* (agentId, boundName) -> Datastore.
- * requireOwnedAgent/requireReadableAgent only check the agent's own
- * ownership — for a public (null-owner) agent that's readable/mutable by
- * anyone, so gating solely on the agent would let a principal who attaches
- * their own private Datastore to a public agent inadvertently expose that
- * Datastore's full read/write access to every other principal, with no
- * sandbox mediation. So every boundName branch additionally checks the
- * underlying Datastore's own ownership. When no attachment exists under
+ * Agent data (the private store and bound stores) is owner-only (resource-
+ * sharing grants spec §3.4.6), and a binding only resolves while the
+ * datastore's owner is the agent's owner (core/datastores.ts). These checks
+ * on the underlying Datastore's own ownership stay as defence in depth. When no attachment exists under
  * that boundName, this resolves to `undefined` and callers fall through to
  * today's unchanged behavior (miss for reads, throw for writes) — this
  * check only ever narrows access when an attachment IS found, it never
@@ -129,8 +121,15 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
       required: ["agentId", "datastoreId"],
     },
     handler: async (args: { agentId: string; datastoreId: string; boundName?: string }, ctx) => {
-      await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+      // A binding hands the datastore to every tool the agent's owner lets
+      // read it: strictly the agent owner's own datastore on the owner's
+      // own agent (A2/S2-2). Not even the stdio operator crosses owners.
+      const { agent } = await requireAgentAccess(ctx, args.agentId, "read");
+      requireBindingOwner(ctx, agent);
       const datastore = await requireOwnedDatastore(ctx.db, args.datastoreId, ctx.principal.id);
+      if (datastore.ownerId !== agent.ownerId) {
+        throw new McpError(403, "Only a datastore owned by the agent's owner can be attached to it.");
+      }
       const boundName = args.boundName ?? datastore.name;
       try {
         await attachDatastore(args.agentId, args.datastoreId, ctx.db, boundName);
@@ -153,8 +152,10 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
       required: ["agentId", "boundName"],
     },
     handler: async (args: { agentId: string; boundName: string }, ctx) => {
-      await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
-      await requireMutableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id);
+      // The agent's owner may remove any binding from it, including one to
+      // another owner's datastore left behind by a transfer.
+      const { agent } = await requireAgentAccess(ctx, args.agentId, "read");
+      requireBindingOwner(ctx, agent);
       await detachDatastore(args.agentId, args.boundName, ctx.db);
       return textResult({ detached: true });
     },
@@ -169,7 +170,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
       required: ["agentId", "key"],
     },
     handler: async (args: { agentId: string; key: string; boundName?: string }, ctx) => {
-      await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
+      await requireAgentAccess(ctx, args.agentId, "owner");
       if (args.boundName) {
         await requireReadableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id);
         const accessor = buildSharedDatastoreAccessor(args.agentId, ctx.providers.datastore, ctx.db);
@@ -190,7 +191,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
       required: ["agentId"],
     },
     handler: async (args: { agentId: string; prefix?: string; boundName?: string }, ctx) => {
-      await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
+      await requireAgentAccess(ctx, args.agentId, "owner");
       if (args.boundName) {
         await requireReadableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id);
         const accessor = buildSharedDatastoreAccessor(args.agentId, ctx.providers.datastore, ctx.db);
@@ -222,7 +223,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
       args: { agentId: string; key: string; value: DatastoreValue; pii?: boolean; boundName?: string },
       ctx,
     ) => {
-      await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+      await requireAgentAccess(ctx, args.agentId, "owner");
       if (args.boundName) {
         await requireMutableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id);
         const accessor = buildSharedDatastoreAccessor(args.agentId, ctx.providers.datastore, ctx.db);
@@ -243,7 +244,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
       required: ["agentId", "key"],
     },
     handler: async (args: { agentId: string; key: string; boundName?: string }, ctx) => {
-      await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+      await requireAgentAccess(ctx, args.agentId, "owner");
       if (args.boundName) {
         await requireMutableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id);
         const accessor = buildSharedDatastoreAccessor(args.agentId, ctx.providers.datastore, ctx.db);

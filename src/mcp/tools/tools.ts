@@ -26,28 +26,42 @@ import {
 import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import {
-  assertCanMutate,
-  requireOwnedAgent,
   requireOwnedTool,
-  requireReadableAgent,
   requireStrictlyOwnedTool,
   assertStrictlyOwnedTool,
   visibleToPrincipal,
   canRead,
 } from "../auth/ownership.js";
+import { agentAccessResolver, assertAgentAccess, requireAgentAccess } from "../auth/access.js";
+import { atLeast } from "../../core/grants.js";
+import type { McpRequestContext } from "../context.js";
 import { textResult } from "./text-result.js";
 
 /**
- * Names the agents the caller can read (its own and public ones) and only
- * counts the rest, so a refusal never reveals another principal's agent
- * names or ids.
+ * Names the agents the caller can read (its own and ones granted to it)
+ * and only counts the rest, so a refusal never reveals another principal's
+ * agent names or ids.
  */
-function describeAgents(agents: AttachedAgent[], principalId: string): string {
-  const readable = agents.filter((agent) => canRead(agent.ownerId, principalId));
+async function describeAgents(agents: AttachedAgent[], ctx: McpRequestContext): Promise<string> {
+  const accessOf = await agentAccessResolver(ctx);
+  const readable = agents.filter((agent) => atLeast("agent", accessOf(agent), "read"));
   const hidden = agents.length - readable.length;
   const parts = readable.map((agent) => `"${agent.name}" (${agent.id})`);
   if (hidden > 0) parts.push(`${hidden} agent(s) owned by other principals`);
   return parts.join(", ");
+}
+
+/**
+ * A tool row as a caller who doesn't own it may see it: name and
+ * description, never code or paramsZod (A7). `public` tells an owner-less
+ * tool apart from the caller's own same-named one (names are unique per
+ * owner, not globally). Shared by list_tools and get_agent.
+ */
+export function projectTool(tool: Tool, principalId: string) {
+  if (tool.ownerId !== null && tool.ownerId === principalId) return tool;
+  return tool.ownerId === null
+    ? { id: tool.id, name: tool.name, description: tool.description, public: true }
+    : { id: tool.id, name: tool.name, description: tool.description, public: false, ownerIsCaller: false };
 }
 
 /** Refuses a name one of the runner's built-ins would shadow (see core/tool-names.ts). */
@@ -101,7 +115,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
     name: "update_tool",
     scope: "tools:write",
     description:
-      "Replaces a tool's description, paramsZod and/or code in place (its name can't change: agents' prompts call it by name). Owner-only: public tools can't be changed over MCP. Refused while the tool is attached to any agent you don't own, including public agents, since the change would reach another owner's agent; detach it there first or create a new tool. Runs already started keep the version they loaded for their whole lifetime; the next run picks up the new one.",
+      "Replaces a tool's description, paramsZod and/or code in place (its name can't change: agents' prompts call it by name). Owner-only: public tools can't be changed over MCP. Refused while the tool is attached to any agent you don't own, including owner-less ones and agents shared with you, since the change would reach another owner's agent; detach it there first or create a new tool. Runs already started keep the version they loaded for their whole lifetime; the next run picks up the new one.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -125,7 +139,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
       if (!prepared.ok) {
         return textResult({ ok: false, errorKind: prepared.errorKind, errorMessage: prepared.errorMessage });
       }
-      // Any attachment to an agent the caller doesn't own (a public agent
+      // Any attachment to an agent the caller doesn't own (an owner-less one
       // included) blocks every field; see core/tool-admin.ts for why, and
       // for the Serializable transaction that keeps a concurrent attach from
       // landing between the check and the write.
@@ -138,7 +152,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
         if (err instanceof ToolAttachedError) {
           throw new McpError(
             409,
-            `Tool "${args.toolId}" is attached to agents you don't own: ${describeAgents(err.agents, ctx.principal.id)}. Detach it from those agents first (or ask their owners to), or create a new tool instead.`,
+            `Tool "${args.toolId}" is attached to agents you don't own: ${await describeAgents(err.agents, ctx)}. Detach it from those agents first (or ask their owners to), or create a new tool instead.`,
           );
         }
         throw err;
@@ -150,7 +164,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
     name: "delete_tool",
     scope: "tools:write",
     description:
-      "Deletes a tool you own. Refused while it is attached to any agent; pass detach: true to detach it from your own agents first. It is never detached from another owner's or a public agent -- use detach_tool for a public agent, or ask the other owner. Past runs are unaffected, and a run already under way keeps the version it loaded.",
+      "Deletes a tool you own. Refused while it is attached to any agent; pass detach: true to detach it from your own agents first. It is never detached from an agent you don't own -- use detach_tool where you hold write on the agent, or ask its owner. Past runs are unaffected, and a run already under way keeps the version it loaded.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -166,14 +180,14 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
         return textResult({ deleted: args.toolId, detachedFrom });
       } catch (err) {
         if (!(err instanceof ToolAttachedError)) throw err;
-        const agents = describeAgents(err.agents, ctx.principal.id);
+        const agents = await describeAgents(err.agents, ctx);
         switch (err.reason) {
           // Public agents are included: pulling a tool from a shared agent
           // should be an explicit detach_tool.
           case "other_owners":
             throw new McpError(
               409,
-              `Tool "${args.toolId}" is still attached to ${agents}. Only your own agents can be detached here; detach it from public agents with detach_tool, or ask the other owners to.`,
+              `Tool "${args.toolId}" is still attached to ${agents}. Only your own agents can be detached here; use detach_tool where you hold write on the agent, or ask the other owners to.`,
             );
           case "needs_detach":
             throw new McpError(
@@ -251,6 +265,8 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "attach_tool",
     scope: "tools:write",
+    description:
+      "Attaches a tool to an agent (needs write on the agent). The four capability fields (allowedSecrets, allowedDatastorePrefixes, allowedHosts, allowedSharedDatastorePrefixes) are the agent owner's to grant: anyone else passing one gets 403, and their attachment runs with none until the owner re-runs attach_tool with the capabilities. When the owner grants an attachment it had not granted before (someone else attached it, or the agent changed owner), every capability not passed is reset to empty, so state each one you want. Granting capabilities to a tool someone else owns vouches for code you can't read (only its owner sees it); the tool's owner can't change it while it's attached to your agent, and detaching drops your grant.",
     inputSchema: {
       type: "object",
       properties: {
@@ -290,22 +306,48 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
       if (!patch.success) {
         throw new McpError(400, `Invalid tool capabilities: ${patch.error.issues.map((i) => i.message).join("; ")}`);
       }
+      const capabilitiesPassed = Object.values(patch.data).some((value) => value !== undefined);
       await ctx.db.$transaction(
         async (tx) => {
-          const agent = await tx.agent.findUnique({ where: { id: args.agentId } });
-          if (!agent) throw new McpError(404, `Agent "${args.agentId}" not found.`);
-          assertCanMutate(agent.ownerId, ctx.principal.id, `Agent "${args.agentId}" is not owned by the caller.`);
+          const { agent } = await assertAgentAccess(
+            ctx,
+            await tx.agent.findUnique({ where: { id: args.agentId } }),
+            args.agentId,
+            "write",
+            tx,
+          );
           if (agent.kind === "coding") {
             throw new McpError(400, "Native sandbox tools cannot be attached to coding agents.");
           }
-          const tool = await requireOwnedTool(tx, args.toolId, ctx.principal.id);
+          // Capabilities carry the owner's consent (resource-sharing grants
+          // spec §3.4.2). Strict ownership: neither a write-grantee nor the
+          // stdio operator may hand the owner's secrets, datastores or
+          // network to code on the agent.
+          const isOwner = agent.ownerId !== null && agent.ownerId === ctx.principal.id;
+          if (capabilitiesPassed && !isOwner) {
+            throw new McpError(
+              403,
+              "Only the agent's owner can grant capabilities to an attachment; ask them to re-run attach_tool with the capabilities.",
+            );
+          }
+          const existing = await tx.agentTool.findUnique({
+            where: { agentId_toolId: { agentId: args.agentId, toolId: args.toolId } },
+          });
+          // Creating an attachment needs a tool the caller may attach (Phase
+          // 1: its own or an owner-less one). Re-attaching an existing one
+          // only changes its capabilities: that is how the agent's owner
+          // grants them to a write-grantee's tool, or re-grants them after a
+          // make_owner transfer, so the tool check does not apply.
+          const tool = existing
+            ? await tx.tool.findUniqueOrThrow({ where: { id: args.toolId } })
+            : await requireOwnedTool(tx, args.toolId, ctx.principal.id);
           // The runtime dispatches by name, and names are only unique per
           // owner: a second same-named tool on one agent would be a
           // duplicate tool name to the model and silently shadow one of them.
           const clash = await findSameNamedAttachedTool(tx, args.agentId, tool);
           if (clash) {
-            // Anyone can attach their own tool to a public agent, so the
-            // clashing tool may be another principal's private one: name its
+            // The clashing tool may be another principal's private one (a
+            // write-grantee's, or one left from before a transfer): name its
             // id only when the caller could read it anyway.
             const which = canRead(clash.ownerId, ctx.principal.id)
               ? ` (${clash.id})`
@@ -315,26 +357,35 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
               `Agent "${args.agentId}" already has a different tool named "${tool.name}" attached${which}; detach it first.`,
             );
           }
+          // Re-granting an attachment this owner never vouched for: what is
+          // not restated is reset, never silently adopted.
+          const keepUnstated = existing?.capabilitiesGrantedById === agent.ownerId;
+          const field = <K extends keyof typeof patch.data>(key: K, empty: NonNullable<(typeof patch.data)[K]>) =>
+            patch.data[key] !== undefined ? { [key]: patch.data[key] } : keepUnstated ? {} : { [key]: empty };
+          const ownerGrant = isOwner
+            ? {
+                ...field("allowedSecrets", []),
+                ...field("allowedDatastorePrefixes", []),
+                ...field("allowedHosts", []),
+                ...field("allowedSharedDatastorePrefixes", {}),
+                capabilitiesGrantedById: agent.ownerId,
+              }
+            : {};
           await tx.agentTool.upsert({
             where: { agentId_toolId: { agentId: args.agentId, toolId: args.toolId } },
             create: {
               agentId: args.agentId,
               toolId: args.toolId,
-              allowedSecrets: patch.data.allowedSecrets ?? [],
-              allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes ?? [],
-              allowedHosts: patch.data.allowedHosts ?? [],
-              allowedSharedDatastorePrefixes: patch.data.allowedSharedDatastorePrefixes ?? {},
+              allowedSecrets: (isOwner && patch.data.allowedSecrets) || [],
+              allowedDatastorePrefixes: (isOwner && patch.data.allowedDatastorePrefixes) || [],
+              allowedHosts: (isOwner && patch.data.allowedHosts) || [],
+              allowedSharedDatastorePrefixes: (isOwner && patch.data.allowedSharedDatastorePrefixes) || {},
+              attachedById: ctx.principal.id,
+              capabilitiesGrantedById: isOwner ? agent.ownerId : null,
             },
-            update: {
-              ...(patch.data.allowedSecrets !== undefined ? { allowedSecrets: patch.data.allowedSecrets } : {}),
-              ...(patch.data.allowedDatastorePrefixes !== undefined
-                ? { allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes }
-                : {}),
-              ...(patch.data.allowedHosts !== undefined ? { allowedHosts: patch.data.allowedHosts } : {}),
-              ...(patch.data.allowedSharedDatastorePrefixes !== undefined
-                ? { allowedSharedDatastorePrefixes: patch.data.allowedSharedDatastorePrefixes }
-                : {}),
-            },
+            // A non-owner's re-attach leaves an existing attachment's
+            // capabilities and consent stamp untouched.
+            update: ownerGrant,
           });
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -352,8 +403,9 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
       required: ["agentId", "toolId"],
     },
     handler: async (args: { agentId: string; toolId: string }, ctx) => {
-      await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
-      await requireOwnedTool(ctx.db, args.toolId, ctx.principal.id);
+      // Write on the agent is enough, whoever owns the tool: an agent's
+      // owner (or write-grantee) can always pull a tool off it.
+      await requireAgentAccess(ctx, args.agentId, "write");
       await ctx.db.agentTool.deleteMany({ where: { agentId: args.agentId, toolId: args.toolId } });
       return textResult({ detached: true });
     },
@@ -364,19 +416,16 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
     scope: "tools:write",
     inputSchema: { type: "object", properties: { agentId: { type: "string" } } },
     handler: async (args: { agentId?: string }, ctx) => {
-      const project = (tool: Tool) =>
-        tool.ownerId === ctx.principal.id
-          ? tool
-          : // `public` tells a public tool apart from the caller's own
-            // same-named one: names are unique per owner, not globally.
-            { id: tool.id, name: tool.name, description: tool.description, public: true };
+      const project = (tool: Tool) => projectTool(tool, ctx.principal.id);
       if (args.agentId) {
-        await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
+        const { access } = await requireAgentAccess(ctx, args.agentId, "read");
         const rows = await ctx.db.agentTool.findMany({ where: { agentId: args.agentId }, include: { tool: true } });
+        // The agent's owner sees every tool on it (projected: code only for
+        // the tool's own owner); anyone else only tools they could see anyway.
         return textResult(
           rows
             .map((r) => r.tool)
-            .filter((tool) => canRead(tool.ownerId, ctx.principal.id))
+            .filter((tool) => access === "owner" || canRead(tool.ownerId, ctx.principal.id))
             .map(project),
         );
       }

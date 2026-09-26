@@ -174,9 +174,12 @@ requires more than owning the agent:
   `update_agent` then accepts only `codingProfile.repository`. Without the
   flag, admins go through the GitHub check like anyone else, on their own
   agents only.
-- **Public (owner-less) agents can't hold a repository at all.** Anyone can
-  edit a public agent, so a repository on one would belong to everyone. An
-  admin assigns an owner first (`make_owner`).
+- **Owner-less agents can't hold a repository at all.** There is no owner
+  whose GitHub access can be checked. An admin assigns an owner first
+  (`make_owner`, or `wardby grants adopt-public`).
+- **A repository is the owner's binding.** Principals the agent is shared
+  with (`grant_access`) can't link, unlink or change its repository, even at
+  `write`.
 
 The authorization is stamped on the link (`authorizedVia`: `host_permission`,
 `admin`, or `grandfathered`) and **checked again every time it is used**: on
@@ -192,10 +195,10 @@ limit) is retried once first and then refused as "access check unavailable"
 `repository_access_unavailable`). Admin-approved and grandfathered
 authorizations are not re-checked while the agent keeps its owner; revoke them
 by unlinking or changing the repository. **`make_owner` to a different owner
-(or back to public) turns them into ordinary checks of the next owner's own
-GitHub access** — an approval never travels with the agent — and lists the
-affected repositories in its result (`repositoryApprovalsRevoked`). A public
-agent getting its first owner keeps them. Links and coding profiles that
+turns them into ordinary checks of the next owner's own GitHub access** — an
+approval never travels with the agent — and lists the affected repositories in
+its result (`repositoryApprovalsRevoked`). An owner-less agent getting its
+first owner keeps them. Links and coding profiles that
 existed before this was enforced were stamped `grandfathered` by the migration
 and keep working.
 

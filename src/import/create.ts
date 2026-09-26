@@ -20,11 +20,17 @@ import { PostgresDatastore } from "../providers/datastore/postgres.js";
 import type { DatastoreValue } from "../providers/datastore/types.js";
 import { decryptTransferEnvelope } from "../providers/secrets/transfer-envelope.js";
 import { mapBudget } from "./budgets.js";
+import { EVERYONE_KEY, everyoneGrantData } from "../core/grants.js";
 
 export interface CreateOptions {
   db: PrismaClient;
   cipher: SecretCipher;
+  /** Owner of the imported tools, secrets, datastores, webhooks and budget groups; null in --public mode. */
   ownerId: string | null;
+  /** Owner of the imported agents (defaults to ownerId): never null for a real import. */
+  agentOwnerId?: string | null;
+  /** --public: share each imported agent with everyone at execute. */
+  publicAgents?: boolean;
   defaultBudget: string;
   secretMode: "references" | "envelope";
   transferPrivateKey?: KeyObject;
@@ -49,6 +55,7 @@ export async function createFromBundle(
   opts: CreateOptions,
 ): Promise<ImportResult> {
   const { db, cipher, ownerId, secretMode, transferPrivateKey, allowOpenFetch } = opts;
+  const agentOwnerId = opts.agentOwnerId === undefined ? ownerId : opts.agentOwnerId;
   const warnings: string[] = [];
   const webhookSecrets: { agentName: string; secret: string }[] = [];
   const pendingSecretReentry: string[] = [];
@@ -111,6 +118,9 @@ export async function createFromBundle(
 
   // Step 2: Agents
   const agentIdMap = new Map<string, string>();
+  // Agents this import owns (created now, or already the import owner's):
+  // only their attachments are stamped with the owner's consent below.
+  const ownedAgentIds = new Set<string>();
   for (const a of bundle.readAgents()) {
     if (agentSkipped(a.name)) continue;
 
@@ -126,11 +136,27 @@ export async function createFromBundle(
         timezone: a.timezone,
         maxTurns: a.maxTurns,
         scheduleEnabled,
-        ownerId,
+        ownerId: agentOwnerId,
       },
       update: {},
     });
     agentIdMap.set(a.name, agent.id);
+    if (agentOwnerId !== null && agent.ownerId === agentOwnerId) {
+      ownedAgentIds.add(agent.id);
+      if (opts.publicAgents) {
+        await db.resourceGrant.upsert({
+          where: {
+            resourceType_resourceId_granteeKey: {
+              resourceType: "agent",
+              resourceId: agent.id,
+              granteeKey: EVERYONE_KEY,
+            },
+          },
+          create: everyoneGrantData("agent", agent.id, "execute", "import"),
+          update: {},
+        });
+      }
+    }
     agentsCreated++;
   }
 
@@ -177,6 +203,16 @@ export async function createFromBundle(
     }
 
     const caps = capsPatch.data;
+    // The importing operator is trusted with the database, so on an agent
+    // this import owns it grants the bundle's capabilities in the owner's
+    // name (the runner honours them only with that stamp). An existing
+    // agent owned by someone else keeps an unstamped, inert attachment.
+    const consent = ownedAgentIds.has(agentId) ? agentOwnerId : null;
+    if (consent === null) {
+      warnings.push(
+        `agent-tool ${at.agentName}/${at.toolName}: attached without capabilities in force — the agent belongs to another owner, who must re-grant them with attach_tool`,
+      );
+    }
     await db.agentTool.upsert({
       where: { agentId_toolId: { agentId, toolId } },
       create: {
@@ -186,12 +222,15 @@ export async function createFromBundle(
         allowedDatastorePrefixes: caps.allowedDatastorePrefixes ?? [],
         allowedHosts: caps.allowedHosts ?? [],
         allowedSharedDatastorePrefixes: caps.allowedSharedDatastorePrefixes ?? {},
+        attachedById: agentOwnerId,
+        capabilitiesGrantedById: consent,
       },
       update: {
         allowedSecrets: caps.allowedSecrets ?? [],
         allowedDatastorePrefixes: caps.allowedDatastorePrefixes ?? [],
         allowedHosts: caps.allowedHosts ?? [],
         allowedSharedDatastorePrefixes: caps.allowedSharedDatastorePrefixes ?? {},
+        capabilitiesGrantedById: consent,
       },
     });
   }

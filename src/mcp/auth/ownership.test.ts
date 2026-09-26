@@ -5,8 +5,6 @@ import {
   canMutate,
   assertCanMutate,
   visibleToPrincipal,
-  requireOwnedAgent,
-  requireReadableAgent,
   requireOwnedTask,
   requireOwnedSecret,
   requireOwnedWebhook,
@@ -93,39 +91,9 @@ function fakeDb(
   } as unknown as import("#prisma").PrismaClient;
 }
 
-describe("requireOwnedAgent", () => {
-  it("returns the agent for its owner", async () => {
-    const db = fakeDb({ a1: { id: "a1", ownerId: "p1" } });
-    await expect(requireOwnedAgent(db, "a1", "p1")).resolves.toMatchObject({ id: "a1" });
-  });
-  it("404s for a missing agent", async () => {
-    const db = fakeDb({});
-    await expect(requireOwnedAgent(db, "missing", "p1")).rejects.toMatchObject({ httpStatus: 404 });
-  });
-  it("returns a public (null-owner) agent for any principal — public rows are mutable by anyone", async () => {
-    const db = fakeDb({ a1: { id: "a1", ownerId: null } });
-    await expect(requireOwnedAgent(db, "a1", "anyone")).resolves.toMatchObject({ id: "a1" });
-  });
-  it("403s for a different owner", async () => {
-    const db = fakeDb({ a1: { id: "a1", ownerId: "owner-1" } });
-    await expect(requireOwnedAgent(db, "a1", "p1")).rejects.toMatchObject({ httpStatus: 403 });
-  });
-});
-
-describe("requireReadableAgent", () => {
-  it("returns the agent for its owner", async () => {
-    const db = fakeDb({ a1: { id: "a1", ownerId: "p1" } });
-    await expect(requireReadableAgent(db, "a1", "p1")).resolves.toMatchObject({ id: "a1" });
-  });
-  it("returns a public (null-owner) agent for any principal", async () => {
-    const db = fakeDb({ a1: { id: "a1", ownerId: null } });
-    await expect(requireReadableAgent(db, "a1", "anyone")).resolves.toMatchObject({ id: "a1" });
-  });
-  it("404s (not 403) for a different owner's private agent", async () => {
-    const db = fakeDb({ a1: { id: "a1", ownerId: "owner-1" } });
-    await expect(requireReadableAgent(db, "a1", "p1")).rejects.toMatchObject({ httpStatus: 404 });
-  });
-});
+// Agents no longer use this module's owner-or-public rule: their access
+// checks (owner, missing, owner-less, other owner) are covered in
+// access.test.ts under the grants model.
 
 describe("requireOwnedTask", () => {
   it("returns the task for the triggering principal", async () => {

@@ -5,6 +5,7 @@ import { buildMcpServer } from "../server.js";
 import { registerToolAuthoringTools } from "./tools.js";
 import type { McpRequestContext } from "../context.js";
 import { Prisma } from "#prisma";
+import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 
 const CANONICAL_URI = "https://host/mcp";
 const fakeProviders = {
@@ -27,7 +28,7 @@ interface FakeAgentRow {
   kind?: "native" | "coding";
 }
 
-function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
+function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
   const toolRows = new Map(tools.map((t) => [t.id, t]));
   const agentRows = new Map(agents.map((a) => [a.id, a]));
   const attachments: {
@@ -36,11 +37,14 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
     allowedSecrets?: string[];
     allowedDatastorePrefixes?: string[];
     allowedHosts?: string[];
+    attachedById?: string | null;
+    capabilitiesGrantedById?: string | null;
   }[] = [];
   let counter = toolRows.size;
   const isolationLevels: unknown[] = [];
 
   const transactionDb = {
+    resourceGrant: fakeResourceGrants(grants),
     tool: {
       create: async ({ data }: { data: Partial<FakeToolRow> & { name: string } }) => {
         // Mirrors Tool's unique index, so a duplicate surfaces as the same
@@ -65,6 +69,11 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
         return row;
       },
       findUnique: async ({ where }: { where: { id: string } }) => toolRows.get(where.id) ?? null,
+      findUniqueOrThrow: async ({ where }: { where: { id: string } }) => {
+        const row = toolRows.get(where.id);
+        if (!row) throw new Error(`no tool ${where.id}`);
+        return row;
+      },
       update: async ({ where, data }: { where: { id: string }; data: Partial<FakeToolRow> }) => {
         const row = { ...toolRows.get(where.id)!, ...data };
         toolRows.set(where.id, row);
@@ -93,6 +102,10 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
       findUnique: async ({ where }: { where: { id: string } }) => agentRows.get(where.id) ?? null,
     },
     agentTool: {
+      findUnique: async ({ where }: { where: { agentId_toolId: { agentId: string; toolId: string } } }) =>
+        attachments.find(
+          (a) => a.agentId === where.agentId_toolId.agentId && a.toolId === where.agentId_toolId.toolId,
+        ) ?? null,
       create: async ({ data }: { data: { agentId: string; toolId: string } }) => {
         attachments.push(data);
         return data;
@@ -179,8 +192,14 @@ function isolationLevelsOf(db: import("#prisma").PrismaClient): unknown[] {
   return (db as unknown as { isolationLevels: unknown[] }).isolationLevels;
 }
 
-function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {
+function fakeCtx(
+  db: ReturnType<typeof fakeDb>,
+  principalId: string,
+  scopes: string[],
+  extra: Partial<McpRequestContext> = {},
+): McpRequestContext {
   return {
+    ...extra,
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
     canonicalUri: CANONICAL_URI,
@@ -199,6 +218,13 @@ async function connectClient(mcp: ReturnType<typeof buildMcpServer>) {
   await client.connect(clientTransport);
   return client;
 }
+
+const EVERYONE_EXECUTE = (agentId: string): FakeGrantSeed => ({
+  resourceType: "agent",
+  resourceId: agentId,
+  granteeKind: "everyone",
+  level: "execute",
+});
 
 function parseText(result: { content: { text: string }[] }): unknown {
   return JSON.parse(result.content[0].text);
@@ -241,7 +267,8 @@ describe("tool authoring tools", () => {
       code: `source${i}`,
       ownerId,
     }));
-    const db = fakeDb(tools, [{ id: "a", ownerId: null }]);
+    // An owner-less agent is readable through the migration's everyone grant.
+    const db = fakeDb(tools, [{ id: "a", ownerId: null }], [EVERYONE_EXECUTE("a")]);
     for (const tool of tools) await db.agentTool.create({ data: { agentId: "a", toolId: tool.id } });
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
@@ -548,8 +575,9 @@ describe("tool authoring tools", () => {
       code: "",
       ownerId,
     });
-    // p2 attached its private foo to a public agent; p1 now tries its own foo.
-    const db = fakeDb([tool("mine", "p1"), tool("p2-private-tool", "p2")], [{ id: "a-public", ownerId: null }]);
+    // p2's private foo is attached to p1's agent (left over from a transfer,
+    // or attached by a write-grantee); p1 now tries its own foo.
+    const db = fakeDb([tool("mine", "p1"), tool("p2-private-tool", "p2")], [{ id: "a-public", ownerId: "p1" }]);
     await db.agentTool.create({ data: { agentId: "a-public", toolId: "p2-private-tool" } });
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
@@ -726,6 +754,215 @@ describe("tool authoring tools", () => {
     await client.close();
   });
 
+  describe("attach_tool / detach_tool / list_tools under grants", () => {
+    const toolRow = (id: string, ownerId: string | null, name = id): FakeToolRow => ({
+      id,
+      name,
+      description: `${id} description`,
+      paramsZod: "z.object({})",
+      jsonSchema: {},
+      code: `${id} source`,
+      ownerId,
+    });
+    const grant = (principalId: string, level: string): FakeGrantSeed => ({
+      resourceType: "agent",
+      resourceId: "a1",
+      principalId,
+      level,
+    });
+
+    async function as(
+      principalId: string,
+      tools: FakeToolRow[],
+      grants: FakeGrantSeed[],
+      extra: Partial<McpRequestContext> = {},
+    ) {
+      const db = fakeDb(tools, [{ id: "a1", name: "agent", ownerId: "owner" }], grants);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, principalId, ["tools:write"], extra));
+      registerToolAuthoringTools(mcp);
+      return { db, client: await connectClient(mcp) };
+    }
+    const errorOf = (result: unknown) => (result as { content: { text: string }[] }).content[0].text;
+
+    it("A2/S2-2: write-grantee cannot grant capabilities", async () => {
+      const { db, client } = await as("writer", [toolRow("w-tool", "writer")], [grant("writer", "write")]);
+      for (const caps of [
+        { allowedSecrets: ["OWNER_TOKEN"] },
+        { allowedHosts: ["attacker.example"] },
+        { allowedDatastorePrefixes: [""] },
+        { allowedSharedDatastorePrefixes: { kb: [""] } },
+      ]) {
+        const refused = await client.callTool({
+          name: "attach_tool",
+          arguments: { agentId: "a1", toolId: "w-tool", ...caps },
+        });
+        expect(refused.isError).toBe(true);
+        expect(errorOf(refused)).toMatch(/only the agent's owner can grant capabilities/i);
+      }
+      expect(await db.agentTool.findMany({ where: { agentId: "a1" } })).toEqual([]);
+
+      // Without capabilities the attachment is created deny-by-default and unstamped.
+      const ok = await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "w-tool" } });
+      expect(ok.isError).toBeFalsy();
+      const [row] = await db.agentTool.findMany({ where: { agentId: "a1" } });
+      expect(row).toMatchObject({
+        allowedSecrets: [],
+        allowedDatastorePrefixes: [],
+        allowedHosts: [],
+        allowedSharedDatastorePrefixes: {},
+        attachedById: "writer",
+        capabilitiesGrantedById: null,
+      });
+      await client.close();
+    });
+
+    it("a write-grantee re-attaching leaves an owner-granted attachment's capabilities and stamp untouched", async () => {
+      const { db, client } = await as("writer", [toolRow("t", null)], [grant("writer", "write")]);
+      await db.agentTool.create({
+        data: {
+          agentId: "a1",
+          toolId: "t",
+          allowedSecrets: ["KEY"],
+          attachedById: "owner",
+          capabilitiesGrantedById: "owner",
+        } as never,
+      });
+      const ok = await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "t" } });
+      expect(ok.isError).toBeFalsy();
+      const [row] = await db.agentTool.findMany({ where: { agentId: "a1" } });
+      expect(row).toMatchObject({ allowedSecrets: ["KEY"], capabilitiesGrantedById: "owner", attachedById: "owner" });
+      await client.close();
+    });
+
+    it("the owner's attach stamps its consent and who attached", async () => {
+      const { db, client } = await as("owner", [toolRow("t", "owner")], []);
+      const ok = await client.callTool({
+        name: "attach_tool",
+        arguments: { agentId: "a1", toolId: "t", allowedSecrets: ["KEY"] },
+      });
+      expect(ok.isError).toBeFalsy();
+      const [row] = await db.agentTool.findMany({ where: { agentId: "a1" } });
+      expect(row).toMatchObject({ allowedSecrets: ["KEY"], attachedById: "owner", capabilitiesGrantedById: "owner" });
+      await client.close();
+    });
+
+    it("the owner re-granting an unstamped attachment must restate every capability (unstated ones reset)", async () => {
+      const { db, client } = await as("owner", [toolRow("t", "writer")], []);
+      await db.agentTool.create({
+        data: {
+          agentId: "a1",
+          toolId: "t",
+          allowedSecrets: ["SET_BY_SOMEONE_ELSE"],
+          allowedHosts: ["someone.example"],
+          attachedById: "writer",
+          capabilitiesGrantedById: null,
+        } as never,
+      });
+      const ok = await client.callTool({
+        name: "attach_tool",
+        arguments: { agentId: "a1", toolId: "t", allowedHosts: ["api.example.com"] },
+      });
+      expect(ok.isError).toBeFalsy();
+      const [row] = await db.agentTool.findMany({ where: { agentId: "a1" } });
+      expect(row).toMatchObject({
+        allowedSecrets: [],
+        allowedDatastorePrefixes: [],
+        allowedHosts: ["api.example.com"],
+        allowedSharedDatastorePrefixes: {},
+        attachedById: "writer",
+        capabilitiesGrantedById: "owner",
+      });
+      await client.close();
+    });
+
+    it("execute and read grantees can't attach (403); strangers get 404", async () => {
+      for (const [principal, grants, status] of [
+        ["runner", [grant("runner", "execute")], /403|needs write/],
+        ["reader", [grant("reader", "read")], /needs write/],
+        ["stranger", [], /not found/],
+      ] as const) {
+        const { db, client } = await as(principal, [toolRow("t", principal)], [...grants]);
+        const refused = await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "t" } });
+        expect(refused.isError).toBe(true);
+        expect(errorOf(refused)).toMatch(status);
+        expect(await db.agentTool.findMany({ where: { agentId: "a1" } })).toEqual([]);
+        await client.close();
+      }
+    });
+
+    it("the stdio operator can attach to an agent it doesn't own, but can't grant capabilities there", async () => {
+      const { db, client } = await as("local", [toolRow("t", "local")], [], { operator: true });
+      const refused = await client.callTool({
+        name: "attach_tool",
+        arguments: { agentId: "a1", toolId: "t", allowedSecrets: ["OPERATOR_SECRET"] },
+      });
+      expect(refused.isError).toBe(true);
+      const ok = await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "t" } });
+      expect(ok.isError).toBeFalsy();
+      const [row] = await db.agentTool.findMany({ where: { agentId: "a1" } });
+      expect(row).toMatchObject({ allowedSecrets: [], capabilitiesGrantedById: null });
+      await client.close();
+    });
+
+    it("the agent owner can detach any tool from their agent, including another principal's private one", async () => {
+      const { db, client } = await as("owner", [toolRow("w-tool", "writer")], []);
+      await db.agentTool.create({ data: { agentId: "a1", toolId: "w-tool" } });
+      const ok = await client.callTool({ name: "detach_tool", arguments: { agentId: "a1", toolId: "w-tool" } });
+      expect(ok.isError).toBeFalsy();
+      expect(await db.agentTool.findMany({ where: { agentId: "a1" } })).toEqual([]);
+      await client.close();
+    });
+
+    it("detach_tool needs write on the agent", async () => {
+      const writer = await as("writer", [toolRow("t", "owner")], [grant("writer", "write")]);
+      await writer.db.agentTool.create({ data: { agentId: "a1", toolId: "t" } });
+      expect(
+        (await writer.client.callTool({ name: "detach_tool", arguments: { agentId: "a1", toolId: "t" } })).isError,
+      ).toBeFalsy();
+      await writer.client.close();
+
+      const runner = await as("runner", [toolRow("t", "owner")], [grant("runner", "execute")]);
+      await runner.db.agentTool.create({ data: { agentId: "a1", toolId: "t" } });
+      const refused = await runner.client.callTool({ name: "detach_tool", arguments: { agentId: "a1", toolId: "t" } });
+      expect(refused.isError).toBe(true);
+      expect(await runner.db.agentTool.findMany({ where: { agentId: "a1" } })).toHaveLength(1);
+      await runner.client.close();
+    });
+
+    it("list_tools shows the agent owner a foreign attached tool projected, never its code", async () => {
+      const { db, client } = await as("owner", [toolRow("mine", "owner"), toolRow("w-tool", "writer")], []);
+      await db.agentTool.create({ data: { agentId: "a1", toolId: "mine" } });
+      await db.agentTool.create({ data: { agentId: "a1", toolId: "w-tool" } });
+      const listed = parseText(
+        (await client.callTool({ name: "list_tools", arguments: { agentId: "a1" } })) as never,
+      ) as Record<string, unknown>[];
+      expect(listed.map((t) => t.id)).toEqual(["mine", "w-tool"]);
+      expect(listed[0].code).toBe("mine source");
+      expect(listed[1]).toEqual({
+        id: "w-tool",
+        name: "w-tool",
+        description: "w-tool description",
+        public: false,
+        ownerIsCaller: false,
+      });
+      await client.close();
+    });
+
+    it("list_tools needs read on the agent", async () => {
+      const reader = await as("reader", [toolRow("t", null)], [grant("reader", "read")]);
+      await reader.db.agentTool.create({ data: { agentId: "a1", toolId: "t" } });
+      const ok = await reader.client.callTool({ name: "list_tools", arguments: { agentId: "a1" } });
+      expect(ok.isError).toBeFalsy();
+      await reader.client.close();
+
+      const stranger = await as("stranger", [toolRow("t", null)], []);
+      const refused = await stranger.client.callTool({ name: "list_tools", arguments: { agentId: "a1" } });
+      expect(errorOf(refused)).toMatch(/not found/);
+      await stranger.client.close();
+    });
+  });
+
   describe("update_tool", () => {
     const owned = (overrides: Partial<FakeToolRow> = {}): FakeToolRow => ({
       id: "t1",
@@ -739,7 +976,11 @@ describe("tool authoring tools", () => {
     });
 
     async function setup(tools: FakeToolRow[], agents: FakeAgentRow[] = [], principal = "p1") {
-      const db = fakeDb(tools, agents);
+      const db = fakeDb(
+        tools,
+        agents,
+        agents.filter((a) => a.ownerId === null).map((a) => EVERYONE_EXECUTE(a.id)),
+      );
       const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
       mcp.setFixedContext(fakeCtx(db, principal, ["tools:write"]));
       registerToolAuthoringTools(mcp);
@@ -876,7 +1117,11 @@ describe("tool authoring tools", () => {
     });
 
     async function setup(tools: FakeToolRow[], agents: FakeAgentRow[] = [], principal = "p1") {
-      const db = fakeDb(tools, agents);
+      const db = fakeDb(
+        tools,
+        agents,
+        agents.filter((a) => a.ownerId === null).map((a) => EVERYONE_EXECUTE(a.id)),
+      );
       const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
       mcp.setFixedContext(fakeCtx(db, principal, ["tools:write"]));
       registerToolAuthoringTools(mcp);

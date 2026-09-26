@@ -30,8 +30,8 @@ export async function authorizeRepositoryForSet(
   if (!input.ownerId) {
     throw new McpError(
       400,
-      "owner_required: agents without an owner can't be given a repository, because anyone can edit a public agent. " +
-        "An admin can assign an owner with make_owner first.",
+      "owner_required: agents without an owner can't be given a repository, because an owner-less agent has no owner " +
+        "whose GitHub access can be checked. An admin can assign an owner with make_owner first.",
     );
   }
   const stamp = (authorizedVia: AuthorizedVia): RepositoryAuthorization => ({

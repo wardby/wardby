@@ -42,7 +42,10 @@ model Agent {
   tools    AgentTool[]
   maxTurns Int         @default(10)
 
-  // Phase 4: ownership. Null = public/unowned (pre-Phase-4 agents migrate this way).
+  // Phase 4: ownership. Null = owner-less, a transition state only: access
+  // then comes from ResourceGrant rows alone (the migration gives everyone
+  // execute), and `wardby grants adopt-public` assigns an owner. See
+  // ResourceGrant.
   ownerId      String?
   owner        Principal?        @relation(fields: [ownerId], references: [id])
   secrets      AgentSecret[]
@@ -162,7 +165,8 @@ model Tool {
   updatedAt   DateTime    @updatedAt
   agents      AgentTool[]
 
-  // Phase 4: ownership. Null = public/unowned.
+  // Phase 4: ownership. Null = owner-less (a transition state; tool grants
+  // arrive in the resource-sharing grants Phase 2, see ResourceGrant).
   ownerId String?
   owner   Principal? @relation(fields: [ownerId], references: [id])
 
@@ -187,6 +191,17 @@ model AgentTool {
   allowedDatastorePrefixes       Json @default("[]")
   allowedHosts                   Json @default("[]")
   allowedSharedDatastorePrefixes Json @default("{}")
+
+  /// Who created the attachment. Audit only: plain text, no FK (same
+  /// convention as AgentRepository.authorizedById).
+  attachedById            String?
+  /// The principal whose consent the four capability fields above carry.
+  /// The runner honours them only while this equals the agent's CURRENT
+  /// ownerId (resource-sharing grants spec §3.4.2): a write-grantee's
+  /// attachment, a make_owner transfer, or a pre-grants row nobody vouched
+  /// for runs with no secrets, no datastore and no fetch until the owner
+  /// re-grants with attach_tool. Plain text, no FK.
+  capabilitiesGrantedById String?
 
   @@id([agentId, toolId])
 }
@@ -342,6 +357,14 @@ model Run {
   /// loaded systemPrompt at run time so the stable prefix stays
   /// prompt-cache-eligible across dispatches.
   taskOverride            String?
+  /// The principal the run is visible to besides the agent's owner
+  /// (resource-sharing grants spec §3.5): the trigger_agent caller, a
+  /// webhook's creator, or a sub-agent's parent run's triggerer. Null for
+  /// scheduled, host-event and CLI runs, which only the owner sees. Plain
+  /// text, no FK.
+  triggeredById           String?
+
+  @@index([agentId, triggeredById])
 }
 
 /// Phase 5: owner-configured coding behavior. Runtime credentials and opaque
@@ -613,6 +636,43 @@ model Principal {
 
   hostIdentities           HostIdentity[]
   hostIdentityLinkRequests HostIdentityLinkRequest[]
+  grants                   ResourceGrant[]
+}
+
+/// Explicit sharing of one resource with one grantee (docs/private/
+/// 2026-09-26-resource-sharing-grants-spec-and-plan.md). Polymorphic on
+/// (resourceType, resourceId) -- no FK to the resource, so every resource
+/// delete path removes its grants in the same transaction. Levels are
+/// ordered per type and validated in code (core/grants.ts), like
+/// AgentRepository.provider, so a new type or level needs no enum migration.
+model ResourceGrant {
+  id                 String     @id @default(cuid())
+  /// "agent" | "tool" | "budget_group" (later "secret" | "datastore").
+  resourceType       String
+  resourceId         String
+  /// "principal" | "everyone" (later "group").
+  granteeKind        String
+  granteePrincipalId String?
+  granteePrincipal   Principal? @relation(fields: [granteePrincipalId], references: [id], onDelete: Cascade)
+  /// Normalised grantee identity for uniqueness: "principal:<id>", "everyone"
+  /// (later "group:<id>"). Needed because NULL granteePrincipalId values are
+  /// distinct in a unique index. Shape enforced by a hand-written CHECK
+  /// (ResourceGrant_grantee_shape, not representable here).
+  granteeKey         String
+  /// Per-type ordered level (core/grants.ts LEVELS).
+  level              String
+  /// "owner" (grant_access), "migration_public", "implied_attachment",
+  /// "import", "operator". Audit only.
+  source             String     @default("owner")
+  /// Principal who created/last changed it. Audit only: plain text, no FK
+  /// (same convention as AgentRepository.authorizedById).
+  grantedById        String?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  @@unique([resourceType, resourceId, granteeKey])
+  @@index([granteeKey, resourceType])
+  @@index([granteePrincipalId])
 }
 
 /// Phase 4: durable handle backing both a triggered run and (reserved,

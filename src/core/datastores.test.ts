@@ -23,7 +23,10 @@ interface FakeAgentDatastoreRow {
   boundName: string;
 }
 
-function fakeDb() {
+/** Every agent these tests use is owned by p1 unless a test says otherwise. */
+const DEFAULT_AGENT_OWNERS: Record<string, string | null> = { "agent-1": "p1", "agent-A": "p1", "agent-B": "p1" };
+
+function fakeDb(agentOwners: Record<string, string | null> = DEFAULT_AGENT_OWNERS) {
   const datastores = new Map<string, FakeDatastoreRow>();
   const agentDatastores: FakeAgentDatastoreRow[] = [];
   let counter = 0;
@@ -60,8 +63,15 @@ function fakeDb() {
         agentDatastores.push(...kept);
         return { count: before - kept.length };
       },
-      findFirst: async ({ where }: { where: { agentId: string; boundName: string } }) =>
-        agentDatastores.find((a) => a.agentId === where.agentId && a.boundName === where.boundName) ?? null,
+      findFirst: async ({ where }: { where: { agentId: string; boundName: string } }) => {
+        const row = agentDatastores.find((a) => a.agentId === where.agentId && a.boundName === where.boundName);
+        if (!row) return null;
+        return {
+          ...row,
+          datastore: { ownerId: datastores.get(row.datastoreId)?.ownerId ?? null },
+          agent: { ownerId: agentOwners[row.agentId] ?? null },
+        };
+      },
     },
   } as unknown as import("#prisma").PrismaClient;
 }
@@ -133,6 +143,36 @@ describe("core/datastores", () => {
 
     const accessor = buildSharedDatastoreAccessor("agent-1", provider, db);
     expect(await accessor.get("shared-kb", "k1")).toBeUndefined();
+  });
+
+  it("A2/S2-2: cross-owner binding is inert at run time (get/list/set/delete)", async () => {
+    // p2's datastore bound to p1's agent (a pre-fix row, or one make_owner
+    // left behind): behaves exactly like an unattached boundName.
+    const db = fakeDb({ "agent-1": "p1", "agent-2": "p2" });
+    const provider = fakeDatastoreProvider();
+    const foreign = await createDatastore("foreign", "p2", db);
+    await attachDatastore("agent-2", foreign.id, db, "kb");
+    await buildSharedDatastoreAccessor("agent-2", provider, db).set("kb", "k", "secret");
+    await attachDatastore("agent-1", foreign.id, db, "kb");
+
+    const accessor = buildSharedDatastoreAccessor("agent-1", provider, db);
+    expect(await accessor.get("kb", "k")).toBeUndefined();
+    expect(await accessor.list("kb")).toEqual([]);
+    await expect(accessor.set("kb", "k", "overwrite")).rejects.toThrow("datastore_not_bound");
+    await accessor.delete("kb", "k");
+    expect(await buildSharedDatastoreAccessor("agent-2", provider, db).get("kb", "k")).toBe("secret");
+  });
+
+  it("an owner-less agent resolves no datastore, not even an owner-less one", async () => {
+    const db = fakeDb({ "agent-1": null });
+    const provider = fakeDatastoreProvider();
+    const owned = await createDatastore("owned", "p1", db);
+    const ownerless = await db.datastore.create({ data: { name: "legacy", ownerId: null } });
+    await attachDatastore("agent-1", owned.id, db, "owned");
+    await attachDatastore("agent-1", ownerless.id, db, "legacy");
+    const accessor = buildSharedDatastoreAccessor("agent-1", provider, db);
+    await expect(accessor.set("owned", "k", "v")).rejects.toThrow("datastore_not_bound");
+    await expect(accessor.set("legacy", "k", "v")).rejects.toThrow("datastore_not_bound");
   });
 
   it("buildSharedDatastoreAccessor().set() throws datastore_not_bound for an unattached boundName", async () => {

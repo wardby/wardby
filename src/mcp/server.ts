@@ -37,7 +37,8 @@ import type { McpRequestContext, McpProviders } from "./context.js";
 import { requireScope } from "./auth/resource-server.js";
 import { McpError, mapPrismaError } from "./errors.js";
 import { TASKS_EXTENSION_ID, clientSupportsTasks } from "./capabilities.js";
-import { visibleToPrincipal } from "./auth/ownership.js";
+import { readableAgentsWhere } from "./auth/access.js";
+import { grantedIds } from "../core/grants.js";
 import { logger } from "../core/logger.js";
 
 export interface ToolSpec<Args = Record<string, unknown>> {
@@ -298,12 +299,16 @@ export function buildMcpServer(opts: BuildMcpServerOptions): WardbyMcpServer {
     // resolves it per-dispatch from the SDK's own per-call ServerContext,
     // not at factory time) — stdio's fixedContext IS set by now
     // (mcp/index.ts calls setFixedContext before serveStdio ever invokes
-    // this factory), so stdio sees every agent it owns plus public ones;
-    // HTTP conservatively falls back to public-only until this factory can
-    // see request-scoped identity. A DB hiccup here must not break tool
-    // registration — this is a discoverability nicety, not core function.
+    // this factory), so stdio sees every agent it can read;
+    // HTTP conservatively falls back to agents shared with everyone (a
+    // grant of at least read) until this factory can see request-scoped
+    // identity; stdio sees what its principal can read (the operator: all).
+    // A DB hiccup here must not break tool registration — this is a
+    // discoverability nicety, not core function.
     try {
-      const where = fixedContext ? visibleToPrincipal(fixedContext.principal.id) : { ownerId: null };
+      const where = fixedContext
+        ? await readableAgentsWhere(fixedContext, opts.db)
+        : { id: { in: await grantedIds(opts.db, "agent", null, "read") } };
       const agents = await opts.db.agent.findMany({ where });
       for (const agent of agents) {
         mcpServer.registerPrompt(

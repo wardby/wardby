@@ -1,6 +1,12 @@
-/** Operator inspection of agent memory, mirroring the Datastore MCP tools (`./datastore.ts`). */
+/**
+ * Operator inspection of agent memory, mirroring the Datastore MCP tools
+ * (`./datastore.ts`). Memory is agent *data*, written by every triggerer's
+ * runs, so every tool here is owner-only whatever the grants (resource-
+ * sharing grants spec §3.4.6): showing it at read or execute would leak one
+ * triggerer's run output to another (A6 through memory).
+ */
 import type { WardbyMcpServer } from "../server.js";
-import { requireOwnedAgent, requireReadableAgent } from "../auth/ownership.js";
+import { requireAgentAccess } from "../auth/access.js";
 import { textResult } from "./text-result.js";
 
 export function registerMemoryTools(mcp: WardbyMcpServer): void {
@@ -13,7 +19,7 @@ export function registerMemoryTools(mcp: WardbyMcpServer): void {
       required: ["agentId", "key"],
     },
     handler: async (args: { agentId: string; key: string }, ctx) => {
-      await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
+      await requireAgentAccess(ctx, args.agentId, "owner");
       const content = await ctx.providers.memory.get(args.agentId, args.key);
       return textResult({ content: content ?? null });
     },
@@ -28,7 +34,7 @@ export function registerMemoryTools(mcp: WardbyMcpServer): void {
       required: ["agentId"],
     },
     handler: async (args: { agentId: string }, ctx) => {
-      await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
+      await requireAgentAccess(ctx, args.agentId, "owner");
       const keys = await ctx.providers.memory.list(args.agentId);
       return textResult(keys);
     },
@@ -43,7 +49,7 @@ export function registerMemoryTools(mcp: WardbyMcpServer): void {
       required: ["agentId", "key", "content"],
     },
     handler: async (args: { agentId: string; key: string; content: string }, ctx) => {
-      await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+      await requireAgentAccess(ctx, args.agentId, "owner");
       await ctx.providers.memory.set(args.agentId, args.key, args.content);
       return textResult({ ok: true });
     },
@@ -58,7 +64,7 @@ export function registerMemoryTools(mcp: WardbyMcpServer): void {
       required: ["agentId", "key"],
     },
     handler: async (args: { agentId: string; key: string }, ctx) => {
-      await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+      await requireAgentAccess(ctx, args.agentId, "owner");
       await ctx.providers.memory.delete(args.agentId, args.key);
       return textResult({ ok: true });
     },

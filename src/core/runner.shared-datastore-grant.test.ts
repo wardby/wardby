@@ -99,6 +99,10 @@ function buildCombinedDb(
       findMany: async () => [],
     },
     agentTool: {
+      findUnique: async ({ where }: any) =>
+        attachments.find(
+          (a) => a.agentId === where.agentId_toolId.agentId && a.toolId === where.agentId_toolId.toolId,
+        ) ?? null,
       upsert: async ({ where, create, update }: any) => {
         const idx = attachments.findIndex(
           (a) => a.agentId === where.agentId_toolId.agentId && a.toolId === where.agentId_toolId.toolId,
@@ -120,8 +124,12 @@ function buildCombinedDb(
       findFirst: async () => null,
     },
     agentDatastore: {
-      findFirst: async ({ where }: any) =>
-        agentDatastores.find((d) => d.agentId === where.agentId && d.boundName === where.boundName) ?? null,
+      // The datastore in this fixture is the agent owner's own.
+      findFirst: async ({ where }: any) => {
+        const row = agentDatastores.find((d) => d.agentId === where.agentId && d.boundName === where.boundName);
+        const ownerId = agents.get(where.agentId)?.ownerId ?? null;
+        return row ? { ...row, datastore: { ownerId }, agent: { ownerId } } : null;
+      },
     },
     budgetGroup: {
       findUnique: async () => null,

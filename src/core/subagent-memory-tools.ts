@@ -4,9 +4,9 @@
  * sandboxed, the same treatment memory-tools.ts gives the own-memory
  * built-ins:
  *
- * - subagent_memory_get: a parent can always read a declared child's
- *   memory. The AgentSubAgent edge itself is the grant -- no reference
- *   needed each time.
+ * - subagent_memory_get: a parent can read a declared child's memory when
+ *   both have the same owner. The AgentSubAgent edge itself is the grant --
+ *   no reference needed each time; a cross-owner edge never carries it.
  * - parent_memory_get: a child can read a specific key of its dispatching
  *   parent's memory ONLY when that exact run was handed a grant for that
  *   key at dispatch time (Run.grantedParentMemoryKeys) -- never a standing
@@ -50,7 +50,7 @@ export const PARENT_MEMORY_GET_TOOL: LoadedTool = {
 const SubAgentGetArgs = z.object({ boundName: z.string(), key: z.string() }).strict();
 const ParentGetArgs = z.object({ key: z.string() }).strict();
 
-type SubAgentMemoryDb = Pick<PrismaClient, "agentSubAgent" | "run">;
+type SubAgentMemoryDb = Pick<PrismaClient, "agentSubAgent" | "run" | "agent">;
 
 function zodErrorResult(err: z.ZodError): string {
   return JSON.stringify({
@@ -89,6 +89,19 @@ export async function handleSubAgentMemoryGet(
     return JSON.stringify({
       error: "no_such_subagent",
       message: `No sub-agent is bound to name "${args.boundName}".`,
+    });
+  }
+  // Memory inspection is owner-level (resource-sharing grants spec §3.4.4):
+  // an edge to another owner's child carries execute, never its memory.
+  // Owners are read live, so a make_owner transfer takes effect at once.
+  const [parent, child] = await Promise.all([
+    db.agent.findUnique({ where: { id: callingAgentId }, select: { ownerId: true } }),
+    db.agent.findUnique({ where: { id: edge.childAgentId }, select: { ownerId: true } }),
+  ]);
+  if (!parent || !child || (parent.ownerId ?? null) !== (child.ownerId ?? null)) {
+    return JSON.stringify({
+      error: "subagent_not_authorized",
+      message: `The "${args.boundName}" sub-agent belongs to another owner; its memory is not readable from here.`,
     });
   }
   const content = await memory.get(edge.childAgentId, args.key);

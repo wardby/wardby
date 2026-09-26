@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import { registerRunTools } from "./runs.js";
 import type { McpRequestContext } from "../context.js";
+import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 
 const CANONICAL_URI = "https://host/mcp";
 const fakeProviders = {} as unknown as import("../../providers/index.js").ProviderRegistry;
@@ -25,6 +26,7 @@ interface FakeRunRow {
   error: string | null;
   startedAt: Date;
   finishedAt: Date | null;
+  triggeredById?: string | null;
   codingRun?: {
     result: unknown;
     jobHandle?: string;
@@ -46,7 +48,7 @@ interface FakeRunRow {
   approvedVersions?: number;
 }
 
-function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[]) {
+function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSeed[] = []) {
   const agentRows = new Map(agents.map((a) => [a.id, a]));
   const runRows = new Map(runs.map((r) => [r.id, r]));
   const publicRun = (run: FakeRunRow | undefined) => {
@@ -55,14 +57,20 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[]) {
     return row;
   };
   return {
+    resourceGrant: fakeResourceGrants(grants),
     agent: {
       findUnique: async ({ where }: { where: { id: string } }) => agentRows.get(where.id) ?? null,
     },
     run: {
       findUnique: async ({ where }: { where: { id: string } }) => publicRun(runRows.get(where.id)),
-      findMany: async ({ where }: { where: { agentId: string; status?: string } }) =>
+      findMany: async ({ where }: { where: { agentId: string; status?: string; triggeredById?: string } }) =>
         [...runRows.values()]
-          .filter((r) => r.agentId === where.agentId && (!where.status || r.status === where.status))
+          .filter(
+            (r) =>
+              r.agentId === where.agentId &&
+              (!where.status || r.status === where.status) &&
+              (where.triggeredById === undefined || (r.triggeredById ?? null) === where.triggeredById),
+          )
           .map((r) => publicRun(r)),
     },
     codingRun: {
@@ -510,37 +518,80 @@ describe("run observability tools", () => {
     await client.close();
   });
 
-  it("get_run and list_runs on a public (ownerId: null) agent are readable by any principal", async () => {
+  describe("A6: others' runs hidden", () => {
     const now = new Date();
-    const db = fakeDb(
-      [{ id: "a1", ownerId: null }],
-      [
-        {
-          id: "r1",
-          agentId: "a1",
-          status: "succeeded",
-          trigger: "manual",
-          turns: 1,
-          tokensIn: 1,
-          tokensOut: 1,
-          costUsd: 0,
-          finalText: "x",
-          error: null,
-          startedAt: now,
-          finishedAt: now,
-        },
-      ],
-    );
-    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "anyone", ["agents:read"]));
-    registerRunTools(mcp);
-    const client = await connectClient(mcp);
+    const run = (id: string, triggeredById: string | null): FakeRunRow => ({
+      id,
+      agentId: "a1",
+      status: "succeeded",
+      trigger: "manual",
+      turns: 1,
+      tokensIn: 1,
+      tokensOut: 1,
+      costUsd: 0,
+      finalText: `answer for ${triggeredById ?? "schedule"}`,
+      error: null,
+      startedAt: now,
+      finishedAt: now,
+      triggeredById,
+    });
+    const runs = [run("r-alice", "alice"), run("r-bob", "bob"), run("r-sched", null)];
 
-    const getResult = await client.callTool({ name: "get_run", arguments: { runId: "r1" } });
-    expect(getResult.isError).toBeFalsy();
+    async function as(principalId: string, agent: FakeAgentRow, grants: FakeGrantSeed[], operator = false) {
+      const db = fakeDb([agent], runs, grants);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext({ ...fakeCtx(db, principalId, ["agents:read"]), operator });
+      registerRunTools(mcp);
+      return connectClient(mcp);
+    }
+    const listIds = async (client: Awaited<ReturnType<typeof as>>) =>
+      (
+        parseText((await client.callTool({ name: "list_runs", arguments: { agentId: "a1" } })) as never) as {
+          id: string;
+        }[]
+      )
+        .map((r) => r.id)
+        .sort();
 
-    const listResult = await client.callTool({ name: "list_runs", arguments: { agentId: "a1" } });
-    expect(listResult.isError).toBeFalsy();
-    await client.close();
+    it("A6: others' runs hidden -- an execute-grantee sees only the runs it triggered", async () => {
+      const client = await as("alice", { id: "a1", ownerId: "owner" }, [
+        { resourceType: "agent", resourceId: "a1", principalId: "alice", level: "execute" },
+      ]);
+      expect(await listIds(client)).toEqual(["r-alice"]);
+      expect((await client.callTool({ name: "get_run", arguments: { runId: "r-alice" } })).isError).toBeFalsy();
+      for (const runId of ["r-bob", "r-sched"]) {
+        const hidden = await client.callTool({ name: "get_run", arguments: { runId } });
+        expect(hidden.isError).toBe(true);
+        expect(JSON.stringify(hidden)).toContain("not found");
+        expect(JSON.stringify(hidden)).not.toContain("answer for");
+      }
+      await client.close();
+    });
+
+    it("A6: others' runs hidden on a formerly public agent (everyone-execute)", async () => {
+      const client = await as("alice", { id: "a1", ownerId: null }, [
+        { resourceType: "agent", resourceId: "a1", granteeKind: "everyone", level: "execute" },
+      ]);
+      expect(await listIds(client)).toEqual(["r-alice"]);
+      expect((await client.callTool({ name: "get_run", arguments: { runId: "r-bob" } })).isError).toBe(true);
+      await client.close();
+    });
+
+    it("the agent owner and the stdio operator see every run", async () => {
+      const owner = await as("owner", { id: "a1", ownerId: "owner" }, []);
+      expect(await listIds(owner)).toEqual(["r-alice", "r-bob", "r-sched"]);
+      expect((await owner.callTool({ name: "get_run", arguments: { runId: "r-bob" } })).isError).toBeFalsy();
+      await owner.close();
+      const operator = await as("local", { id: "a1", ownerId: "owner" }, [], true);
+      expect(await listIds(operator)).toEqual(["r-alice", "r-bob", "r-sched"]);
+      await operator.close();
+    });
+
+    it("a triggerer whose grant was revoked can still get its own run, but not list", async () => {
+      const client = await as("alice", { id: "a1", ownerId: "owner" }, []);
+      expect((await client.callTool({ name: "get_run", arguments: { runId: "r-alice" } })).isError).toBeFalsy();
+      expect((await client.callTool({ name: "list_runs", arguments: { agentId: "a1" } })).isError).toBe(true);
+      await client.close();
+    });
   });
 });

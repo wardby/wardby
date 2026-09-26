@@ -26,6 +26,7 @@ import {
   loadCodingConcurrencyConfig,
   loadContainerExecutorConfig,
   loadKubernetesJobConfig,
+  loadMcpConfig,
   loadProviderConfig,
 } from "./config/providers.js";
 import { drainCodingQueue } from "./core/coding-queue.js";
@@ -70,6 +71,8 @@ import { startMcp } from "./mcp/index.js";
 import { startServe } from "./serve.js";
 import { authCommand } from "./mcp/auth/self-hosted/cli.js";
 import { hostAccountCommand } from "./mcp/auth/host-account-cli.js";
+import { grantsCommand, resolveCliAgentOwner } from "./mcp/auth/grants-cli.js";
+import { everyoneGrantData } from "./core/grants.js";
 import { parseImportArgs } from "./import/cli-args.js";
 import { runImport } from "./import/index.js";
 import { CLI_USAGE } from "./cli-help.js";
@@ -143,6 +146,8 @@ async function agentCreate(args: string[]): Promise<void> {
       "max-turns": { type: "string" },
       "memory-enabled": { type: "boolean" },
       effort: { type: "string" },
+      owner: { type: "string" },
+      public: { type: "boolean" },
     },
   });
 
@@ -179,18 +184,33 @@ async function agentCreate(args: string[]): Promise<void> {
     }
   }
 
-  const agent = await prisma.agent.create({
-    data: {
-      name: values.name,
-      model: values.model,
-      systemPrompt: values.prompt,
-      budgetUsd,
-      schedule: values.schedule ?? null,
-      timezone,
-      maxTurns,
-      memoryEnabled: values["memory-enabled"] ?? false,
-      effort: values.effort ?? null,
-    },
+  // Owned by --owner or the local operator; never owner-less (resource-
+  // sharing grants spec §3.8). --public shares it with everyone at execute.
+  let ownerId: string;
+  try {
+    ownerId = await resolveCliAgentOwner(prisma, values.owner, loadMcpConfig().localPrincipal);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+  const agent = await prisma.$transaction(async (tx) => {
+    const created = await tx.agent.create({
+      data: {
+        name: values.name!,
+        model: values.model!,
+        systemPrompt: values.prompt!,
+        budgetUsd,
+        schedule: values.schedule ?? null,
+        timezone,
+        maxTurns,
+        memoryEnabled: values["memory-enabled"] ?? false,
+        effort: values.effort ?? null,
+        ownerId: ownerId!,
+      },
+    });
+    if (values.public) {
+      await tx.resourceGrant.create({ data: everyoneGrantData("agent", created.id, "execute", "operator") });
+    }
+    return created;
   });
   console.log(agent.id);
 }
@@ -321,6 +341,10 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
     fail(`invalid tool capabilities: ${patch.error.issues.map((i) => i.message).join("; ")}`);
   }
 
+  // The operator is trusted with the database, so it grants these
+  // capabilities in the agent owner's name: the runner honours them only
+  // with the owner's consent stamp (resource-sharing grants spec §3.4.2).
+  // An owner-less agent has no owner to stamp: its capabilities stay inert.
   await prisma.agentTool.upsert({
     where: { agentId_toolId: { agentId: agent.id, toolId: tool.id } },
     create: {
@@ -330,8 +354,10 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
       allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes ?? [],
       allowedHosts: patch.data.allowedHosts ?? [],
       allowedSharedDatastorePrefixes: patch.data.allowedSharedDatastorePrefixes ?? {},
+      capabilitiesGrantedById: agent.ownerId,
     },
     update: {
+      capabilitiesGrantedById: agent.ownerId,
       ...(patch.data.allowedSecrets !== undefined ? { allowedSecrets: patch.data.allowedSecrets } : {}),
       ...(patch.data.allowedDatastorePrefixes !== undefined
         ? { allowedDatastorePrefixes: patch.data.allowedDatastorePrefixes }
@@ -804,6 +830,8 @@ async function main(): Promise<void> {
     if (command === "auth" && rest[0] === "host-account") {
       // Both auth modes: keyed on Principal, not the self-hosted AuthUser.
       await hostAccountCommand(rest.slice(1), prisma);
+    } else if (command === "grants") {
+      await grantsCommand(rest, prisma);
     } else if (command === "auth") {
       await authCommand(rest, prisma, process.env.AUTH_CREDENTIAL_HASH_KEY ?? "");
     } else if (command === "agent" && rest[0] === "create") {

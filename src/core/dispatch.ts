@@ -19,7 +19,7 @@ export type DispatchDb = Pick<
 
 export type DispatchTx = Pick<
   Prisma.TransactionClient,
-  "agent" | "run" | "runHostCheck" | "codingRun" | "task" | "webhook" | "$queryRaw"
+  "agent" | "run" | "runHostCheck" | "codingRun" | "task" | "webhook" | "resourceGrant" | "$queryRaw"
 >;
 
 type DispatchAgent = Prisma.AgentGetPayload<{ include: { codingProfile: true } }>;
@@ -52,6 +52,13 @@ export interface DispatchRunOptions {
    * can observe them (e.g. RunHostCheck, see core/host-events.ts).
    */
   afterPersist?: (tx: DispatchTx, run: Run) => Promise<void>;
+  /**
+   * Who the run is visible to besides the agent owner (Run.triggeredById,
+   * resource-sharing grants spec §3.5): the trigger_agent caller, a
+   * webhook's creator, a sub-agent's parent triggerer. Omit/null for
+   * scheduled and host-event runs, which only the owner sees.
+   */
+  triggeredById?: string | null;
   /** Sub-agent dispatch (see AgentSubAgent): links this run into a run tree. */
   parentRunId?: string;
   grantedParentMemoryKeys?: string[];
@@ -181,6 +188,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             parentRunId: options.parentRunId,
             grantedParentMemoryKeys: options.grantedParentMemoryKeys ?? [],
             taskOverride: options.taskOverride,
+            triggeredById: options.triggeredById ?? null,
           },
         });
 

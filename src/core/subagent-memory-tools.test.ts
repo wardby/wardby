@@ -39,9 +39,15 @@ interface FakeRun {
   grantedParentMemoryKeys: string[];
 }
 
-function fakeDb(edges: FakeEdge[], runs: FakeRun[]) {
+function fakeDb(edges: FakeEdge[], runs: FakeRun[], owners: Record<string, string | null> = {}) {
   const runsById = new Map(runs.map((r) => [r.id, r]));
   return {
+    // Every agent is owned by "p1" unless a test says otherwise.
+    agent: {
+      findUnique: async ({ where }: { where: { id: string } }) => ({
+        ownerId: where.id in owners ? owners[where.id] : "p1",
+      }),
+    },
     agentSubAgent: {
       findUnique: async ({
         where,
@@ -71,6 +77,19 @@ describe("SUBAGENT_MEMORY_TOOL_NAMES / defs", () => {
 });
 
 describe("handleSubAgentMemoryGet", () => {
+  it("N1: refuses a child owned by someone else (memory is owner-level)", async () => {
+    const db = fakeDb([{ parentAgentId: "root-agent", boundName: "planner", childAgentId: "child-agent" }], [], {
+      "child-agent": "p2",
+    });
+    const result = await handleSubAgentMemoryGet(
+      JSON.stringify({ boundName: "planner", key: "secret-plan" }),
+      "root-agent",
+      db,
+      fakeMemory(),
+    );
+    expect(JSON.parse(result)).toMatchObject({ error: "subagent_not_authorized" });
+  });
+
   it("reads the bound child's memory when the AgentSubAgent edge exists", async () => {
     const db = fakeDb([{ parentAgentId: "root-agent", boundName: "planner", childAgentId: "child-agent" }], []);
     const result = await handleSubAgentMemoryGet(

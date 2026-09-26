@@ -20,6 +20,7 @@ vi.mock("./create.js", () => ({
 
 vi.mock("../config/providers.js", () => ({
   loadProviderConfig: vi.fn(() => ({ secrets: "app-key" })),
+  loadMcpConfig: vi.fn((env: NodeJS.ProcessEnv) => ({ localPrincipal: env.LOCAL_PRINCIPAL ?? "local" })),
 }));
 
 vi.mock("../providers/secrets/index.js", () => ({
@@ -133,8 +134,58 @@ describe("runImport", () => {
     await expect(runImport({ owner: null, isPublic: false } as any)).rejects.toThrow(/owner|public/i);
   });
 
-  it("errors when both --owner and --public are given", async () => {
-    await expect(runImport({ owner: "sub-1", isPublic: true } as any)).rejects.toThrow(/owner|public/i);
+  describe("--public (resource-sharing grants: owned + everyone-execute)", () => {
+    const db = () =>
+      ({
+        agent: { findMany: vi.fn(async () => []), upsert: vi.fn() },
+        tool: { findMany: vi.fn(async () => []) },
+        secret: { findMany: vi.fn(async () => []) },
+        budgetGroup: { findMany: vi.fn(async () => []) },
+        principal: {
+          upsert: vi.fn(async ({ where }: { where: { subject: string } }) => ({
+            id: `principal-${where.subject}`,
+            subject: where.subject,
+          })),
+        },
+      }) as any;
+    const base = {
+      dir: "",
+      includeSecrets: false,
+      dryRun: false,
+      prefix: "imported-",
+      onConflict: "fail" as const,
+      allowOpenFetch: false,
+    };
+
+    it("--public alone: agents owned by the importing operator (LOCAL_PRINCIPAL), shared with everyone", async () => {
+      vi.mocked(createFromBundle).mockClear();
+      await runImport({ ...base, dir, owner: null, isPublic: true, db: db(), env: { LOCAL_PRINCIPAL: "operator" } });
+      expect(createFromBundle).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ ownerId: null, agentOwnerId: "principal-operator", publicAgents: true }),
+      );
+    });
+
+    it("--owner with --public: agents owned by --owner, shared with everyone", async () => {
+      vi.mocked(createFromBundle).mockClear();
+      await runImport({ ...base, dir, owner: "sub-1", isPublic: true, db: db(), env: {} });
+      expect(createFromBundle).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ agentOwnerId: "principal-sub-1", publicAgents: true }),
+      );
+    });
+
+    it("--owner alone: private, as before", async () => {
+      vi.mocked(createFromBundle).mockClear();
+      await runImport({ ...base, dir, owner: "sub-1", isPublic: false, db: db(), env: {} });
+      expect(createFromBundle).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ ownerId: "principal-sub-1", agentOwnerId: "principal-sub-1", publicAgents: false }),
+      );
+    });
   });
 
   it("envelope bundle without --include-secrets uses references mode", async () => {

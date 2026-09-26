@@ -43,7 +43,10 @@ interface FakeAgentSecretRow {
   boundName: string;
 }
 
-function fakeDb() {
+/** Every agent these tests use is owned by p1 unless a test says otherwise. */
+const DEFAULT_AGENT_OWNERS: Record<string, string | null> = { "agent-1": "p1", "agent-A": "p1", "agent-B": "p1" };
+
+function fakeDb(agentOwners: Record<string, string | null> = DEFAULT_AGENT_OWNERS) {
   const secrets = new Map<string, FakeSecretRow>();
   const agentSecrets: FakeAgentSecretRow[] = [];
   let counter = 0;
@@ -121,7 +124,11 @@ function fakeDb() {
       findFirst: async ({ where }: { where: { agentId: string; boundName: string } }) => {
         const match = agentSecrets.find((a) => a.agentId === where.agentId && a.boundName === where.boundName);
         if (!match) return null;
-        return { ...match, secret: secrets.get(match.secretId) };
+        return {
+          ...match,
+          secret: secrets.get(match.secretId),
+          agent: { ownerId: agentOwners[match.agentId] ?? null },
+        };
       },
     },
   } as unknown as import("#prisma").PrismaClient;
@@ -251,6 +258,24 @@ describe("core/secrets", () => {
     const accessor = buildSecretsAccessor("agent-1", cipher, db);
     expect(await accessor.get("jira")).toBe("jc");
     expect(await accessor.get("bitbucket")).toBe("ba");
+  });
+
+  it("A2/S2-2: cross-owner binding is inert at run time (Prisma fallback)", async () => {
+    // A row written before the fix (or left behind by make_owner): p2's
+    // secret bound to p1's agent. It must resolve like an unattached name.
+    const db = fakeDb({ "agent-1": "p1" });
+    const cipher = fakeCipher();
+    await createSecret("TOKEN", "p2-secret", "p2", cipher, db);
+    await attachSecret("agent-1", "TOKEN", "p2", db);
+    expect(await buildSecretsAccessor("agent-1", cipher, db).get("TOKEN")).toBeUndefined();
+  });
+
+  it("an owner-less agent resolves no owned secret (Prisma fallback)", async () => {
+    const db = fakeDb({ "agent-1": null });
+    const cipher = fakeCipher();
+    await createSecret("TOKEN", "p1-secret", "p1", cipher, db);
+    await attachSecret("agent-1", "TOKEN", "p1", db);
+    expect(await buildSecretsAccessor("agent-1", cipher, db).get("TOKEN")).toBeUndefined();
   });
 
   it("attachSecret defaults boundName to the secret name", async () => {

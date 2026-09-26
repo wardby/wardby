@@ -52,6 +52,7 @@ import { registerSchedulingTools } from "./tools/scheduling.js";
 import { registerRunTools } from "./tools/runs.js";
 import { registerDatastoreTools } from "./tools/datastore.js";
 import { registerSubAgentTools } from "./tools/subagents.js";
+import { registerGrantTools } from "./tools/grants.js";
 import { registerRepositoryTools } from "./tools/repositories.js";
 import { registerHostAccountTools } from "./tools/host-accounts.js";
 import { registerMemoryTools } from "./tools/memory.js";
@@ -92,6 +93,9 @@ export function localOperatorContext(
     principal,
     scopes: new Set(SCOPES_SUPPORTED),
     roles: [...ROLE_NAMES],
+    // Full access to every resource (resource-sharing grants spec §3.9),
+    // but never past the binding rules.
+    operator: true,
     canonicalUri: STDIO_PLACEHOLDER_URI,
     providers,
     db,
@@ -116,6 +120,7 @@ export function registerAllTools(
   registerRunTools(mcp);
   registerDatastoreTools(mcp);
   registerSubAgentTools(mcp);
+  registerGrantTools(mcp);
   registerRepositoryTools(mcp);
   registerHostAccountTools(mcp);
   registerMemoryTools(mcp);

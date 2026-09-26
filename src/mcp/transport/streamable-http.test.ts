@@ -277,7 +277,16 @@ describe("startHttpServer (webhook ingress)", () => {
       agent: {
         findUnique: async ({ where }: { where: { id?: string; name?: string } }) =>
           where.id === "a1" || where.name === "greeter"
-            ? { id: "a1", name: "greeter", kind: "native", codingProfile: null, budgetUsd: 1, model: "m" }
+            ? // Owned by the webhook's creator, so the fire-time creator check passes.
+              {
+                id: "a1",
+                name: "greeter",
+                kind: "native",
+                codingProfile: null,
+                budgetUsd: 1,
+                model: "m",
+                ownerId: "p1",
+              }
             : null,
       },
       run: {

@@ -7,6 +7,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import { registerAgentTools } from "./agents.js";
 import type { McpRequestContext } from "../context.js";
+import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 
 const CANONICAL_URI = "https://host/mcp";
 /** A gate whose linked identity (for every principal) has `level` on every repository. */
@@ -68,6 +69,7 @@ function fakeDb(
   budgetGroups: { id: string; ownerId: string | null }[] = [],
   principals: string[] = [],
   links: FakeLink[] = [],
+  grants: FakeGrantSeed[] = [],
 ) {
   const principalIds = new Set(principals);
   const rows = new Map(
@@ -85,6 +87,12 @@ function fakeDb(
   const groupsById = new Map(budgetGroups.map((g) => [g.id, g]));
   let counter = rows.size;
   const transactionDb = {
+    resourceGrant: fakeResourceGrants(grants),
+    // make_owner's binding cleanup; these fixtures hold no such rows.
+    agentSecret: { findMany: async () => [], deleteMany: async () => ({ count: 0 }) },
+    agentDatastore: { findMany: async () => [], deleteMany: async () => ({ count: 0 }) },
+    agentSubAgent: { findMany: async () => [], deleteMany: async () => ({ count: 0 }) },
+    webhook: { findMany: async () => [] },
     agent: {
       create: async ({
         data,
@@ -112,10 +120,13 @@ function fakeDb(
         return row;
       },
       findUnique: async ({ where }: { where: { id: string } }) => rows.get(where.id) ?? null,
-      findMany: async ({ where }: { where?: { OR?: { ownerId: string | null }[] } } = {}) => {
+      // Mirrors readableAgentsWhere: own rows, or ids granted to the caller.
+      findMany: async ({ where }: { where?: { OR?: ({ ownerId: string } | { id: { in: string[] } })[] } } = {}) => {
         const all = [...rows.values()];
         if (!where?.OR) return all;
-        return all.filter((r) => where.OR!.some((cond) => r.ownerId === cond.ownerId));
+        return all.filter((r) =>
+          where.OR!.some((cond) => ("ownerId" in cond ? r.ownerId === cond.ownerId : cond.id.in.includes(r.id))),
+        );
       },
       update: async ({
         where,
@@ -148,6 +159,8 @@ function fakeDb(
     },
     agentTool: {
       count: async ({ where }: { where: { agentId: string } }) => rows.get(where.agentId)?.tools.length ?? 0,
+      findMany: async ({ where }: { where: { agentId: string } }) =>
+        (rows.get(where.agentId)?.tools ?? []) as { capabilitiesGrantedById?: string | null; tool: { id: string } }[],
     },
     budgetGroup: {
       findUnique: async ({ where }: { where: { id: string } }) => groupsById.get(where.id) ?? null,
@@ -933,7 +946,8 @@ describe("agent CRUD tools", () => {
 
     const result = await client.callTool({ name: "update_agent", arguments: { id: "a1", systemPrompt: "hacked" } });
     expect(result.isError).toBe(true);
-    expect((result.content as { text: string }[])[0].text).toMatch(/owned|forbidden/i);
+    // Another owner's agent is hidden, not merely forbidden.
+    expect((result.content as { text: string }[])[0].text).toMatch(/not found/i);
     await client.close();
   });
 
@@ -1117,7 +1131,7 @@ describe("agent CRUD tools", () => {
     await client.close();
   });
 
-  it("make_owner with ownerId: null releases an owned agent back to public", async () => {
+  it("make_owner refuses ownerId: null (sharing is done with grants, not owner-less agents)", async () => {
     const db = fakeDb([
       {
         id: "a1",
@@ -1138,9 +1152,9 @@ describe("agent CRUD tools", () => {
     const client = await connectClient(mcp);
 
     const result = await client.callTool({ name: "make_owner", arguments: { agentId: "a1", ownerId: null } });
-    expect(result.isError).toBeFalsy();
-    const body = JSON.parse((result.content as { text: string }[])[0].text) as { ownerId: string | null };
-    expect(body.ownerId).toBeNull();
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0].text).toMatch(/grant_access/);
+    expect((await db.agent.findUnique({ where: { id: "a1" } }))?.ownerId).toBe("owner-1");
     await client.close();
   });
 
@@ -1217,23 +1231,88 @@ describe("agent CRUD tools", () => {
     await client.close();
   });
 
-  it("list_agents returns caller's own agents plus public (null-owner) ones, not other owners'", async () => {
+  it("list_agents returns the caller's own agents plus agents granted to it, with the access held", async () => {
+    const db = fakeDb(
+      [
+        {
+          id: "a1",
+          name: "mine",
+          systemPrompt: "x",
+          model: "m",
+          budgetUsd: 1,
+          maxTurns: 10,
+          schedule: null,
+          timezone: "UTC",
+          ownerId: "p1",
+          tools: [],
+        },
+        {
+          id: "a2",
+          name: "public",
+          systemPrompt: "x",
+          model: "m",
+          budgetUsd: 1,
+          maxTurns: 10,
+          schedule: null,
+          timezone: "UTC",
+          ownerId: null,
+          tools: [],
+        },
+        {
+          id: "a3",
+          name: "someone-elses",
+          systemPrompt: "x",
+          model: "m",
+          budgetUsd: 1,
+          maxTurns: 10,
+          schedule: null,
+          timezone: "UTC",
+          ownerId: "p2",
+          tools: [],
+        },
+        {
+          id: "a4",
+          name: "shared-with-me",
+          systemPrompt: "x",
+          model: "m",
+          budgetUsd: 1,
+          maxTurns: 10,
+          schedule: null,
+          timezone: "UTC",
+          ownerId: "p2",
+          tools: [],
+        },
+      ],
+      [],
+      [],
+      [],
+      [
+        // The migration's grant for a formerly public agent, and a direct share.
+        { resourceType: "agent", resourceId: "a2", granteeKind: "everyone", level: "execute" },
+        { resourceType: "agent", resourceId: "a4", principalId: "p1", level: "write" },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "list_agents", arguments: {} });
+    expect(result.isError).toBeFalsy();
+    const list = JSON.parse((result.content as { text: string }[])[0].text) as { name: string; access: string }[];
+    expect(Object.fromEntries(list.map((a) => [a.name, a.access]))).toEqual({
+      mine: "owner",
+      public: "execute",
+      "shared-with-me": "write",
+    });
+    await client.close();
+  });
+
+  it("an owner-less agent with no grant is invisible (no more implicit public)", async () => {
     const db = fakeDb([
       {
         id: "a1",
-        name: "mine",
-        systemPrompt: "x",
-        model: "m",
-        budgetUsd: 1,
-        maxTurns: 10,
-        schedule: null,
-        timezone: "UTC",
-        ownerId: "p1",
-        tools: [],
-      },
-      {
-        id: "a2",
-        name: "public",
+        name: "orphan",
         systemPrompt: "x",
         model: "m",
         budgetUsd: 1,
@@ -1243,29 +1322,15 @@ describe("agent CRUD tools", () => {
         ownerId: null,
         tools: [],
       },
-      {
-        id: "a3",
-        name: "someone-elses",
-        systemPrompt: "x",
-        model: "m",
-        budgetUsd: 1,
-        maxTurns: 10,
-        schedule: null,
-        timezone: "UTC",
-        ownerId: "p2",
-        tools: [],
-      },
     ]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
-
-    const result = await client.callTool({ name: "list_agents", arguments: {} });
-    expect(result.isError).toBeFalsy();
-    const list = JSON.parse((result.content as { text: string }[])[0].text) as { name: string }[];
-    const names = list.map((a) => a.name).sort();
-    expect(names).toEqual(["mine", "public"]);
+    const listed = await client.callTool({ name: "list_agents", arguments: {} });
+    expect(JSON.parse((listed.content as { text: string }[])[0].text)).toEqual([]);
+    const got = await client.callTool({ name: "get_agent", arguments: { id: "a1" } });
+    expect(got.isError).toBe(true);
     await client.close();
   });
 
@@ -1467,6 +1532,227 @@ describe("agent CRUD tools", () => {
   });
 });
 
+describe("agent tools under grants", () => {
+  const text = (result: { content: unknown }) => (result.content as { text: string }[])[0].text;
+  const base = (extra: Partial<FakeAgentSeed> = {}): FakeAgentSeed => ({
+    id: "a1",
+    name: "shared",
+    systemPrompt: "x",
+    model: "gpt-5.6-luna",
+    budgetUsd: 1,
+    maxTurns: 10,
+    schedule: null,
+    timezone: "UTC",
+    ownerId: "owner",
+    tools: [],
+    ...extra,
+  });
+  const grant = (level: string): FakeGrantSeed => ({
+    resourceType: "agent",
+    resourceId: "a1",
+    principalId: "g",
+    level,
+  });
+  async function as(
+    principalId: string,
+    seed: FakeAgentSeed,
+    grants: FakeGrantSeed[],
+    scopes = ["agents:write", "agents:read"],
+  ) {
+    const db = fakeDb([seed], [], [], [], grants);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, principalId, scopes));
+    registerAgentTools(mcp);
+    return { db, client: await connectClient(mcp) };
+  }
+
+  it("update_agent: a write-grantee edits the prompt; execute and read grantees get 403", async () => {
+    const writer = await as("g", base(), [grant("write")]);
+    const ok = await writer.client.callTool({ name: "update_agent", arguments: { id: "a1", systemPrompt: "new" } });
+    expect(ok.isError).toBeFalsy();
+    expect((await writer.db.agent.findUnique({ where: { id: "a1" } }))?.systemPrompt).toBe("new");
+    await writer.client.close();
+    for (const level of ["execute", "read"]) {
+      const other = await as("g", base(), [grant(level)]);
+      const refused = await other.client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", systemPrompt: "no" },
+      });
+      expect(refused.isError).toBe(true);
+      expect(text(refused)).toMatch(/needs write access; you have/);
+      await other.client.close();
+    }
+  });
+
+  it("update_agent: a write-grantee can't set a repository or turn the agent into a coding one (a binding)", async () => {
+    const coder = base({
+      kind: "coding",
+      codingProfile: {
+        provider: "codex",
+        repository: "o/r",
+        baseRef: "main",
+        defaultTask: null,
+        timeoutSec: 1800,
+        protectedPaths: ["CODEOWNERS"],
+      },
+    });
+    const writer = await as("g", coder, [grant("write")]);
+    const refused = await writer.client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { repository: "attacker/repo" } },
+    });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toMatch(/owner/);
+    // I1: the whole coding profile is the owner's, not just the repository.
+    for (const codingProfile of [
+      { baseRef: "develop" },
+      { defaultTask: "push to main" },
+      { allowWebhookTaskOverride: true },
+      { protectedPaths: ["nothing/**"] },
+      { collectExclude: ["x"] },
+      { timeoutSec: 7200 },
+      { toolchain: "node-python" },
+      { workspaceDiskMb: 4096 },
+    ]) {
+      const refusedField = await writer.client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile },
+      });
+      expect(refusedField.isError, JSON.stringify(codingProfile)).toBe(true);
+      expect(text(refusedField)).toMatch(/owner/);
+    }
+    // Leaving coding (dropping the repository binding) is owner-only too (M6).
+    const toNative = await writer.client.callTool({ name: "update_agent", arguments: { id: "a1", kind: "native" } });
+    expect(toNative.isError).toBe(true);
+    expect((await writer.db.agent.findUnique({ where: { id: "a1" } }))?.kind).toBe("coding");
+    await writer.client.close();
+
+    const nativeWriter = await as("g", base(), [grant("write")]);
+    const toCoding = await nativeWriter.client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", kind: "coding", codingProfile: { repository: "attacker/repo" } },
+    });
+    expect(toCoding.isError).toBe(true);
+    expect(text(toCoding)).toMatch(/owner/);
+    await nativeWriter.client.close();
+  });
+
+  it("I1: budgetGroupId is owner-only; write covers name, prompt, model, budget amount, turns, effort, memory and schedule", async () => {
+    const writer = await as("g", base(), [grant("write")]);
+    for (const budgetGroupId of ["g-mine", null]) {
+      const refused = await writer.client.callTool({ name: "update_agent", arguments: { id: "a1", budgetGroupId } });
+      expect(refused.isError).toBe(true);
+      expect(text(refused)).toMatch(/owner/);
+    }
+    const ok = await writer.client.callTool({
+      name: "update_agent",
+      arguments: {
+        id: "a1",
+        name: "renamed",
+        systemPrompt: "p",
+        model: "gpt-5.6-luna",
+        budgetUsd: 2,
+        maxTurns: 3,
+        memoryEnabled: true,
+        schedule: "0 * * * *",
+        timezone: "UTC",
+        scheduleEnabled: true,
+      },
+    });
+    expect(ok.isError).toBeFalsy();
+    await writer.client.close();
+  });
+
+  it("M8: the stdio operator can't edit another owner's coding profile either", async () => {
+    const coder = base({
+      kind: "coding",
+      codingProfile: {
+        provider: "codex",
+        repository: "o/r",
+        baseRef: "main",
+        defaultTask: null,
+        timeoutSec: 1800,
+        protectedPaths: ["CODEOWNERS"],
+      },
+    });
+    const db = fakeDb([coder]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext({ ...fakeCtx(db, "local", ["agents:write", "agents:read"]), operator: true });
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const refused = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { protectedPaths: ["x/**"] } },
+    });
+    expect(refused.isError).toBe(true);
+    const ok = await client.callTool({ name: "update_agent", arguments: { id: "a1", systemPrompt: "fixed" } });
+    expect(ok.isError).toBeFalsy();
+    await client.close();
+  });
+
+  it("A7: get_agent hides non-owned tool code", async () => {
+    const attachment = (id: string, ownerId: string | null) => ({
+      agentId: "a1",
+      toolId: id,
+      allowedSecrets: ["KEY"],
+      allowedDatastorePrefixes: [],
+      allowedHosts: [],
+      allowedSharedDatastorePrefixes: {},
+      tool: {
+        id,
+        name: id,
+        description: `${id} description`,
+        paramsZod: `${id} schema`,
+        jsonSchema: {},
+        code: `${id} SECRET SOURCE`,
+        ownerId,
+      },
+    });
+    const seed = base({ tools: [attachment("owner-tool", "owner"), attachment("g-tool", "g")] });
+    const reader = await as("g", seed, [grant("read")]);
+    const body = JSON.parse(text(await reader.client.callTool({ name: "get_agent", arguments: { id: "a1" } }))) as {
+      access: string;
+      tools: { allowedSecrets: string[]; tool: Record<string, unknown> }[];
+    };
+    expect(body.access).toBe("read");
+    const [ownerTool, ownTool] = body.tools;
+    expect(ownerTool.tool).toEqual({
+      id: "owner-tool",
+      name: "owner-tool",
+      description: "owner-tool description",
+      public: false,
+      ownerIsCaller: false,
+    });
+    expect(JSON.stringify(body)).not.toContain("owner-tool SECRET SOURCE");
+    expect(JSON.stringify(body)).not.toContain("owner-tool schema");
+    // The caller's own tool keeps its code; attachment capabilities stay visible (config).
+    expect(ownTool.tool.code).toBe("g-tool SECRET SOURCE");
+    expect(ownerTool.allowedSecrets).toEqual(["KEY"]);
+    await reader.client.close();
+
+    const owner = await as("owner", seed, []);
+    const ownerView = JSON.parse(text(await owner.client.callTool({ name: "get_agent", arguments: { id: "a1" } })));
+    expect(ownerView.access).toBe("owner");
+    expect(JSON.stringify(ownerView)).toContain("owner-tool SECRET SOURCE");
+    expect(JSON.stringify(ownerView)).not.toContain("g-tool SECRET SOURCE");
+    await owner.client.close();
+  });
+
+  it("delete_agent is owner-only, and removes the agent's grants with it", async () => {
+    const writer = await as("g", base(), [grant("write")]);
+    const refused = await writer.client.callTool({ name: "delete_agent", arguments: { id: "a1" } });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toMatch(/owner/);
+    await writer.client.close();
+
+    const owner = await as("owner", base(), [grant("write")]);
+    const ok = await owner.client.callTool({ name: "delete_agent", arguments: { id: "a1" } });
+    expect(ok.isError).toBeFalsy();
+    expect(await owner.db.resourceGrant.count({ where: { resourceId: "a1" } })).toBe(0);
+    await owner.client.close();
+  });
+});
+
 describe("coding repository authorization (H5-1/C3-2)", () => {
   const text = (result: { content: unknown }) => (result.content as { text: string }[])[0].text;
   const createCoding = (extra: Record<string, unknown> = {}) => ({
@@ -1631,7 +1917,8 @@ describe("coding repository authorization (H5-1/C3-2)", () => {
         arguments: { id: "a1", codingProfile: { repository: "openai/other" }, ...extra },
       });
       expect(result.isError).toBe(true);
-      expect(text(result)).toMatch(/without an owner/);
+      // Hidden without a grant; with the admin override, refused for having no owner.
+      expect(text(result)).toMatch(/without an owner|not found/);
     }
     expect(authorizePrincipal).not.toHaveBeenCalled();
     await client.close();
@@ -1717,10 +2004,11 @@ describe("make_owner and repository approvals (I-1)", () => {
     expect(JSON.parse(text(result)).repositoryApprovalsRevoked).toEqual(["bot/repo", "old/repo", "openai/example"]);
   });
 
-  it("releasing an owned agent to public also revokes them (no laundering through a public agent)", async () => {
+  it("can't release an owned agent to owner-less at all, so approvals can't be laundered through one", async () => {
     const links: FakeLink[] = [{ agentId: "a1", repository: "bot/repo", authorizedVia: "admin" }];
-    await makeOwner("owner-1", null, links);
-    expect(links[0].authorizedVia).toBe("host_permission");
+    const { result } = await makeOwner("owner-1", null, links);
+    expect(result.isError).toBe(true);
+    expect(links[0].authorizedVia).toBe("admin");
   });
 
   it("keeps approvals when a public agent gets its first owner, and when the owner is unchanged", async () => {

@@ -53,7 +53,8 @@ function fakeDb(agents: FakeAgentRow[]) {
     agent: {
       findUnique: async ({ where }: { where: { id?: string; name?: string } }) => {
         const row = where.id ? agentsById.get(where.id) : agents.find((a) => a.name === where.name);
-        if (row) return { kind: "native", codingProfile: null, budgetUsd: 1, model: "m", ...row };
+        // Owned by "p1", the creator every test uses, so the fire-time creator check passes.
+        if (row) return { kind: "native", codingProfile: null, budgetUsd: 1, model: "m", ownerId: "p1", ...row };
         return null;
       },
     },

@@ -6,6 +6,7 @@ import { buildMcpServer } from "../server.js";
 import { registerDatastoreTools } from "./datastore.js";
 import type { McpRequestContext } from "../context.js";
 import type { DatastoreValue } from "../../providers/index.js";
+import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 
 const CANONICAL_URI = "https://host/mcp";
 
@@ -60,12 +61,13 @@ function fakeDatastore() {
   };
 }
 
-function fakeDb(agents: FakeAgentRow[]) {
+function fakeDb(agents: FakeAgentRow[], grants: FakeGrantSeed[] = []) {
   const rows = new Map(agents.map((a) => [a.id, a]));
   const datastores = new Map<string, FakeDatastoreRow>();
   const agentDatastores: FakeAgentDatastoreRow[] = [];
   let counter = 0;
   return {
+    resourceGrant: fakeResourceGrants(grants),
     agent: {
       findUnique: async ({ where }: { where: { id: string } }) => rows.get(where.id) ?? null,
     },
@@ -129,12 +131,15 @@ function fakeDb(agents: FakeAgentRow[]) {
         include,
       }: {
         where: { agentId: string; boundName: string };
-        include?: { datastore?: boolean };
+        include?: { datastore?: unknown; agent?: unknown };
       }) => {
         const row = agentDatastores.find((a) => a.agentId === where.agentId && a.boundName === where.boundName);
         if (!row) return null;
-        if (!include?.datastore) return row;
-        return { ...row, datastore: datastores.get(row.datastoreId) ?? null };
+        return {
+          ...row,
+          ...(include?.datastore ? { datastore: datastores.get(row.datastoreId) ?? null } : {}),
+          ...(include?.agent ? { agent: { ownerId: rows.get(row.agentId)?.ownerId ?? null } } : {}),
+        };
       },
     },
   } as unknown as import("#prisma").PrismaClient;
@@ -145,8 +150,10 @@ function fakeCtx(
   datastore: ReturnType<typeof fakeDatastore>,
   principalId: string,
   scopes: string[],
+  extra: Partial<McpRequestContext> = {},
 ): McpRequestContext {
   return {
+    ...extra,
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
     canonicalUri: CANONICAL_URI,
@@ -240,28 +247,60 @@ describe("datastore tools", () => {
     await client.close();
   });
 
-  it("a public (ownerId: null) agent's datastore is readable and writable by any principal", async () => {
-    const db = fakeDb([{ id: "a1", ownerId: null }]);
+  it("an owner-less agent's datastore is no longer readable or writable by anyone over HTTP, even with everyone-execute", async () => {
+    const db = fakeDb(
+      [{ id: "a1", ownerId: null }],
+      [{ resourceType: "agent", resourceId: "a1", granteeKind: "everyone", level: "execute" }],
+    );
     const datastore = fakeDatastore();
     const mcp = buildMcpServer({ providers: { datastore } as never, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, datastore, "anyone", ["agents:read", "datastore:write"]));
     registerDatastoreTools(mcp);
     const client = await connectClient(mcp);
 
-    const getResult = await client.callTool({ name: "datastore_get", arguments: { agentId: "a1", key: "k1" } });
-    expect(getResult.isError).toBeFalsy();
+    for (const [name, args] of [
+      ["datastore_get", { agentId: "a1", key: "k1" }],
+      ["datastore_list", { agentId: "a1" }],
+      ["datastore_set", { agentId: "a1", key: "k1", value: "v1" }],
+      ["datastore_delete", { agentId: "a1", key: "k1" }],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: args });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toMatch(/owner/);
+    }
+    await client.close();
+  });
 
-    const listResult = await client.callTool({ name: "datastore_list", arguments: { agentId: "a1" } });
-    expect(listResult.isError).toBeFalsy();
+  it("agent data is owner-only: a write-grantee can't read or write the agent's datastore", async () => {
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [{ resourceType: "agent", resourceId: "a1", principalId: "writer", level: "write" }],
+    );
+    const datastore = fakeDatastore();
+    await datastore.set("a1", "k1", "owner's data");
+    const mcp = buildMcpServer({ providers: { datastore } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, datastore, "writer", ["agents:read", "datastore:write"]));
+    registerDatastoreTools(mcp);
+    const client = await connectClient(mcp);
+    const get = await client.callTool({ name: "datastore_get", arguments: { agentId: "a1", key: "k1" } });
+    expect(get.isError).toBe(true);
+    expect(JSON.stringify(get)).not.toContain("owner's data");
+    const set = await client.callTool({ name: "datastore_set", arguments: { agentId: "a1", key: "k1", value: "x" } });
+    expect(set.isError).toBe(true);
+    expect(await datastore.get("a1", "k1")).toBe("owner's data");
+    await client.close();
+  });
 
-    const setResult = await client.callTool({
-      name: "datastore_set",
-      arguments: { agentId: "a1", key: "k1", value: "v1" },
-    });
-    expect(setResult.isError).toBeFalsy();
-
-    const deleteResult = await client.callTool({ name: "datastore_delete", arguments: { agentId: "a1", key: "k1" } });
-    expect(deleteResult.isError).toBeFalsy();
+  it("the stdio operator can inspect any agent's data", async () => {
+    const db = fakeDb([{ id: "a1", ownerId: "p1" }]);
+    const datastore = fakeDatastore();
+    await datastore.set("a1", "k1", "v");
+    const mcp = buildMcpServer({ providers: { datastore } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, datastore, "local", ["agents:read", "datastore:write"], { operator: true }));
+    registerDatastoreTools(mcp);
+    const client = await connectClient(mcp);
+    const get = await client.callTool({ name: "datastore_get", arguments: { agentId: "a1", key: "k1" } });
+    expect(parseText(get as never)).toEqual({ value: "v" });
     await client.close();
   });
 
@@ -486,12 +525,65 @@ describe("shared datastore tools", () => {
     await client.close();
   });
 
-  it("attaching a caller's own datastore to a PUBLIC agent does not expose it to other principals", async () => {
-    const db = fakeDb([{ id: "a1", ownerId: null }]);
+  it("A2/S2-2: a caller's datastore can't be bound to an agent it doesn't own (owner-less, granted, or operator)", async () => {
+    const db = fakeDb(
+      [
+        { id: "a-ownerless", ownerId: null },
+        { id: "a-shared", ownerId: "owner" },
+      ],
+      [
+        { resourceType: "agent", resourceId: "a-ownerless", granteeKind: "everyone", level: "execute" },
+        { resourceType: "agent", resourceId: "a-shared", principalId: "p1", level: "write" },
+      ],
+    );
     const datastore = fakeDatastore();
     const mcp = buildMcpServer({ providers: { datastore } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, datastore, "p1", ["agents:read", "datastore:write"]));
+    registerDatastoreTools(mcp);
+    const client = await connectClient(mcp);
+    const created = await client.callTool({ name: "create_datastore", arguments: { name: "p1-secret-kb" } });
+    const { id: datastoreId } = parseText(created as never) as { id: string };
+    for (const agentId of ["a-ownerless", "a-shared"]) {
+      const attached = await client.callTool({
+        name: "attach_datastore",
+        arguments: { agentId, datastoreId, boundName: "kb" },
+      });
+      expect(attached.isError).toBe(true);
+      expect(JSON.stringify(attached)).toMatch(/owner/);
+    }
 
-    // "p1" owns a private datastore and attaches it to the public agent "a1".
+    // Not even the stdio operator, for its own datastore on someone else's agent.
+    mcp.setFixedContext(fakeCtx(db, datastore, "p1", ["agents:read", "datastore:write"], { operator: true }));
+    const operator = await client.callTool({
+      name: "attach_datastore",
+      arguments: { agentId: "a-shared", datastoreId, boundName: "kb" },
+    });
+    expect(operator.isError).toBe(true);
+    await client.close();
+  });
+
+  it("the agent's owner can detach a binding to another owner's datastore (left behind by a transfer)", async () => {
+    const db = fakeDb([{ id: "a1", ownerId: "p1" }]);
+    const datastore = fakeDatastore();
+    const foreign = await db.datastore.create({ data: { name: "foreign", ownerId: "p2" } });
+    await db.agentDatastore.create({ data: { agentId: "a1", datastoreId: foreign.id, boundName: "kb" } });
+    const mcp = buildMcpServer({ providers: { datastore } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, datastore, "p1", ["agents:read", "datastore:write"]));
+    registerDatastoreTools(mcp);
+    const client = await connectClient(mcp);
+    const detached = await client.callTool({ name: "detach_datastore", arguments: { agentId: "a1", boundName: "kb" } });
+    expect(detached.isError).toBeFalsy();
+    expect(await db.agentDatastore.findFirst({ where: { agentId: "a1", boundName: "kb" } })).toBeNull();
+    await client.close();
+  });
+
+  it("a write-grantee can't read, write or detach the owner's bound datastore", async () => {
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [{ resourceType: "agent", resourceId: "a1", principalId: "someone-else", level: "write" }],
+    );
+    const datastore = fakeDatastore();
+    const mcp = buildMcpServer({ providers: { datastore } as never, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, datastore, "p1", ["agents:read", "datastore:write"]));
     registerDatastoreTools(mcp);
     const client = await connectClient(mcp);
@@ -503,53 +595,23 @@ describe("shared datastore tools", () => {
       arguments: { agentId: "a1", datastoreId, boundName: "kb" },
     });
     expect(attached.isError).toBeFalsy();
-
-    const ownSet = await client.callTool({
+    await client.callTool({
       name: "datastore_set",
       arguments: { agentId: "a1", key: "k1", value: "v1", boundName: "kb" },
     });
-    expect(ownSet.isError).toBeFalsy();
-    const ownGet = await client.callTool({
-      name: "datastore_get",
-      arguments: { agentId: "a1", key: "k1", boundName: "kb" },
-    });
-    expect(parseText(ownGet as never)).toEqual({ value: "v1" });
 
-    // A different principal can read/write the PUBLIC agent itself, but must
-    // not gain access to p1's private datastore just because it's attached.
     mcp.setFixedContext(fakeCtx(db, datastore, "someone-else", ["agents:read", "datastore:write"]));
-    const otherGet = await client.callTool({
-      name: "datastore_get",
-      arguments: { agentId: "a1", key: "k1", boundName: "kb" },
-    });
-    expect(otherGet.isError).toBe(true);
+    for (const [name, args] of [
+      ["datastore_get", { agentId: "a1", key: "k1", boundName: "kb" }],
+      ["datastore_list", { agentId: "a1", boundName: "kb" }],
+      ["datastore_set", { agentId: "a1", key: "k2", value: "hijacked", boundName: "kb" }],
+      ["datastore_delete", { agentId: "a1", key: "k1", boundName: "kb" }],
+      ["detach_datastore", { agentId: "a1", boundName: "kb" }],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: args });
+      expect(result.isError).toBe(true);
+    }
 
-    const otherList = await client.callTool({
-      name: "datastore_list",
-      arguments: { agentId: "a1", boundName: "kb" },
-    });
-    expect(otherList.isError).toBe(true);
-
-    const otherSet = await client.callTool({
-      name: "datastore_set",
-      arguments: { agentId: "a1", key: "k2", value: "hijacked", boundName: "kb" },
-    });
-    expect(otherSet.isError).toBe(true);
-
-    const otherDelete = await client.callTool({
-      name: "datastore_delete",
-      arguments: { agentId: "a1", key: "k1", boundName: "kb" },
-    });
-    expect(otherDelete.isError).toBe(true);
-
-    const otherDetach = await client.callTool({
-      name: "detach_datastore",
-      arguments: { agentId: "a1", boundName: "kb" },
-    });
-    expect(otherDetach.isError).toBe(true);
-
-    // p1's own access still works, and the value was never touched by the
-    // other principal's rejected calls.
     mcp.setFixedContext(fakeCtx(db, datastore, "p1", ["agents:read", "datastore:write"]));
     const ownGetAfter = await client.callTool({
       name: "datastore_get",
@@ -560,7 +622,7 @@ describe("shared datastore tools", () => {
   });
 
   it("a boundName with no attachment behaves exactly as before the fix (miss for reads, throw for writes)", async () => {
-    const db = fakeDb([{ id: "a1", ownerId: null }]);
+    const db = fakeDb([{ id: "a1", ownerId: "someone" }]);
     const datastore = fakeDatastore();
     const mcp = buildMcpServer({ providers: { datastore } as never, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, datastore, "someone", ["agents:read", "datastore:write"]));

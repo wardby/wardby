@@ -38,6 +38,14 @@ export interface McpRequestContext {
    */
   roles?: readonly string[];
   /**
+   * The stdio local operator (set only by index.ts localOperatorContext):
+   * owner of every resource for access checks, unfiltered listings. Depends
+   * on the transport, never on the principal, so an HTTP caller whose
+   * subject equals LOCAL_PRINCIPAL never gets it (A10). It never bypasses
+   * the binding rules (auth/access.ts requireBindingOwner).
+   */
+  operator?: boolean;
+  /**
    * The server's resource identifier, for tool handlers that need a
    * field-level scope step-up beyond the tool's own declared scope (e.g.
    * requiring agents:admin only when a mutation touches workerImageRef).
