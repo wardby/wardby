@@ -794,4 +794,107 @@ describe("tool authoring tools", () => {
       await client.close();
     });
   });
+
+  describe("delete_tool", () => {
+    const tool = (ownerId: string | null = "p1"): FakeToolRow => ({
+      id: "t1",
+      name: "greet",
+      description: "x",
+      paramsZod: "z.object({})",
+      jsonSchema: {},
+      code: "",
+      ownerId,
+    });
+
+    async function setup(tools: FakeToolRow[], agents: FakeAgentRow[] = [], principal = "p1") {
+      const db = fakeDb(tools, agents);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, principal, ["tools:write"]));
+      registerToolAuthoringTools(mcp);
+      return { db, client: await connectClient(mcp) };
+    }
+    const errorText = (result: unknown) => (result as { content: { text: string }[] }).content[0].text;
+
+    it("deletes an unattached tool", async () => {
+      const { db, client } = await setup([tool()]);
+      const result = await client.callTool({ name: "delete_tool", arguments: { toolId: "t1" } });
+      expect(result.isError).toBeFalsy();
+      expect(parseText(result as never)).toEqual({ deleted: "t1", detachedFrom: [] });
+      expect(await db.tool.findUnique({ where: { id: "t1" } })).toBeNull();
+      await client.close();
+    });
+
+    it("refuses while attached to the caller's own agent unless detach is passed, with a hint", async () => {
+      const { db, client } = await setup([tool()], [{ id: "a1", name: "mine", ownerId: "p1" }]);
+      await db.agentTool.create({ data: { agentId: "a1", toolId: "t1" } });
+
+      const refused = await client.callTool({ name: "delete_tool", arguments: { toolId: "t1" } });
+      expect(refused.isError).toBe(true);
+      expect(errorText(refused)).toContain('"mine" (a1)');
+      expect(errorText(refused)).toContain("detach: true");
+      expect(await db.tool.findUnique({ where: { id: "t1" } })).not.toBeNull();
+
+      const deleted = await client.callTool({ name: "delete_tool", arguments: { toolId: "t1", detach: true } });
+      expect(deleted.isError).toBeFalsy();
+      expect(parseText(deleted as never)).toEqual({ deleted: "t1", detachedFrom: ["a1"] });
+      expect(await db.tool.findUnique({ where: { id: "t1" } })).toBeNull();
+      expect(await db.agentTool.findMany({ where: { agentId: "a1" } })).toEqual([]);
+      await client.close();
+    });
+
+    it("never auto-detaches from another principal's or a public agent, and then detaches nothing", async () => {
+      const { db, client } = await setup(
+        [tool()],
+        [
+          { id: "a-mine", name: "mine", ownerId: "p1" },
+          { id: "a-public", name: "shared-bot", ownerId: null },
+          { id: "a-theirs", name: "secret-project", ownerId: "p2" },
+        ],
+      );
+      for (const agentId of ["a-mine", "a-public", "a-theirs"]) {
+        await db.agentTool.create({ data: { agentId, toolId: "t1" } });
+      }
+      const result = await client.callTool({ name: "delete_tool", arguments: { toolId: "t1", detach: true } });
+      expect(result.isError).toBe(true);
+      const text = errorText(result);
+      expect(text).toContain('"shared-bot" (a-public)');
+      expect(text).toContain("1 agent(s) owned by other principals");
+      expect(text).not.toContain("secret-project");
+      expect(text).not.toContain('"mine"');
+      expect(await db.tool.findUnique({ where: { id: "t1" } })).not.toBeNull();
+      // Nothing was detached -- not even the caller's own agent.
+      expect(await db.agentTool.findMany({ where: { agentId: "a-mine" } })).toHaveLength(1);
+      await client.close();
+    });
+
+    it("hides another principal's tool as not found and refuses a public tool with 403", async () => {
+      const others = await setup([tool("p2")]);
+      const hidden = await others.client.callTool({ name: "delete_tool", arguments: { toolId: "t1" } });
+      expect(hidden.isError).toBe(true);
+      expect(errorText(hidden)).toMatch(/not found/);
+      expect(await others.db.tool.findUnique({ where: { id: "t1" } })).not.toBeNull();
+      await others.client.close();
+
+      const publicTool = await setup([tool(null)]);
+      const refused = await publicTool.client.callTool({ name: "delete_tool", arguments: { toolId: "t1" } });
+      expect(refused.isError).toBe(true);
+      expect(errorText(refused)).toMatch(/public/i);
+      expect(await publicTool.db.tool.findUnique({ where: { id: "t1" } })).not.toBeNull();
+      await publicTool.client.close();
+    });
+
+    it("maps an attachment that raced in after the check (the RESTRICT FK's P2003) to the same 409", async () => {
+      const { db, client } = await setup([tool()], [{ id: "a1", name: "mine", ownerId: "p1" }]);
+      await db.agentTool.create({ data: { agentId: "a1", toolId: "t1" } });
+      // The attachment is invisible to the check but still blocks the delete.
+      const realFindMany = db.agentTool.findMany.bind(db.agentTool);
+      (db.agentTool as { findMany: unknown }).findMany = async (args: { where: { toolId?: string } }) =>
+        args.where.toolId ? [] : realFindMany(args as never);
+      const result = await client.callTool({ name: "delete_tool", arguments: { toolId: "t1" } });
+      expect(result.isError).toBe(true);
+      expect(errorText(result)).toMatch(/still attached/);
+      expect(errorText(result)).not.toContain("Foreign key");
+      await client.close();
+    });
+  });
 });

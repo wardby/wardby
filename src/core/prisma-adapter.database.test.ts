@@ -24,6 +24,7 @@ import type { WardbyMcpServer } from "../mcp/server.js";
 import { registerAgentTools } from "../mcp/tools/agents.js";
 import { registerBudgetGroupTools } from "../mcp/tools/budget-groups.js";
 import { registerDatastoreTools } from "../mcp/tools/datastore.js";
+import { registerRunTools } from "../mcp/tools/runs.js";
 import { registerSchedulingTools } from "../mcp/tools/scheduling.js";
 import { registerSubAgentTools } from "../mcp/tools/subagents.js";
 import { registerToolAuthoringTools } from "../mcp/tools/tools.js";
@@ -78,6 +79,7 @@ function mcpHandlers(): Map<string, Handler> {
   registerAgentTools(mcp);
   registerBudgetGroupTools(mcp);
   registerDatastoreTools(mcp);
+  registerRunTools(mcp);
   registerSchedulingTools(mcp);
   registerSubAgentTools(mcp);
   registerToolAuthoringTools(mcp);
@@ -155,6 +157,36 @@ function interleavedDb(
             },
           });
           return fn(new Proxy(tx, { get: (t, p) => (p === at.model ? delegate : bind(t, p)) }));
+        }, options);
+    },
+  });
+}
+
+/**
+ * `db`, except that inside every interactive transaction a tool's attachment
+ * listing (`tx.agentTool.findMany` filtered by toolId) comes back empty -- a
+ * deterministic stand-in for an attachment that commits after the check has
+ * read, so the write that follows meets the real foreign key.
+ */
+function attachmentsHiddenDb(): PrismaClient {
+  const bind = (target: object, prop: string | symbol) => {
+    const value: unknown = Reflect.get(target, prop);
+    return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+  };
+  return new Proxy(db, {
+    get(target, prop) {
+      if (prop !== "$transaction") return bind(target, prop);
+      return (fn: (tx: Prisma.TransactionClient) => Promise<unknown>, options?: object) =>
+        target.$transaction(async (tx) => {
+          const agentTool = new Proxy(tx.agentTool, {
+            get(real, p) {
+              const method = bind(real, p);
+              if (p !== "findMany" || typeof method !== "function") return method;
+              return async (args: { where?: { toolId?: unknown } }) =>
+                args.where?.toolId !== undefined ? [] : (method as (a: unknown) => Promise<unknown>)(args);
+            },
+          });
+          return fn(new Proxy(tx, { get: (t, p) => (p === "agentTool" ? agentTool : bind(t, p)) }));
         }, options);
     },
   });
@@ -463,6 +495,52 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
       const err = await mcpError(callTool("create_tool", args, db, otherPrincipalId));
       expect(err.httpStatus).toBe(409);
       expect(err.message).toBe(`A tool named "${name}" already exists for your principal.`);
+    });
+  });
+
+  describe("delete_tool", () => {
+    async function ownedTool(name: string) {
+      return db.tool.create({
+        data: {
+          id: id(name),
+          name: id(name),
+          description: "t",
+          paramsZod: "z.object({})",
+          jsonSchema: {},
+          code: "return 1;",
+          ownerId: principalId,
+        },
+      });
+    }
+
+    it("a past run of an agent that used the tool still returns from get_run after the delete", async () => {
+      const agentId = await createAgent("delete-tool-history");
+      const tool = await ownedTool("delete-tool-history");
+      await db.agentTool.create({ data: { agentId, toolId: tool.id } });
+      const run = await db.run.create({ data: { agentId, status: "succeeded", finalText: "used the tool" } });
+
+      const deleted = await callTool("delete_tool", { toolId: tool.id, detach: true });
+      expect(JSON.parse((deleted as { content: { text: string }[] }).content[0].text)).toEqual({
+        deleted: tool.id,
+        detachedFrom: [agentId],
+      });
+      expect(await db.tool.count({ where: { id: tool.id } })).toBe(0);
+
+      const got = (await callTool("get_run", { runId: run.id })) as { content: { text: string }[] };
+      expect(JSON.parse(got.content[0].text)).toMatchObject({ id: run.id, finalText: "used the tool" });
+    });
+
+    it("an attachment the check didn't see still blocks the delete, as a 409 rather than a raw P2003", async () => {
+      const agentId = await createAgent("delete-tool-race");
+      const tool = await ownedTool("delete-tool-race");
+      await db.agentTool.create({ data: { agentId, toolId: tool.id } });
+
+      const err = await mcpError(callTool("delete_tool", { toolId: tool.id }, attachmentsHiddenDb()));
+      expect(err.httpStatus).toBe(409);
+      expect(err.message).toContain("still attached");
+      expect(await db.tool.count({ where: { id: tool.id } })).toBe(1);
+      // Pins the error the handler branches on, through the real adapter.
+      expect((await knownError(db.tool.delete({ where: { id: tool.id } }))).code).toBe("P2003");
     });
   });
 

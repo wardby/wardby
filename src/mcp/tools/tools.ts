@@ -168,6 +168,64 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
   });
 
   mcp.registerTool({
+    name: "delete_tool",
+    scope: "tools:write",
+    description:
+      "Deletes a tool you own. Refused while it is attached to any agent; pass detach: true to detach it from your own agents first. It is never detached from another owner's or a public agent -- use detach_tool for a public agent, or ask the other owner. Past runs are unaffected, and a run already under way keeps the version it loaded.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { toolId: { type: "string" }, detach: { type: "boolean" } },
+      required: ["toolId"],
+    },
+    handler: async (args: { toolId: string; detach?: boolean }, ctx) => {
+      const stillAttached = (agents: AttachedAgent[], hint: string) =>
+        new McpError(
+          409,
+          `Tool "${args.toolId}" is still attached to ${describeAgents(agents, ctx.principal.id)}.${hint}`,
+        );
+      try {
+        const detachedFrom = await ctx.db.$transaction(
+          async (tx) => {
+            await requireStrictlyOwnedTool(tx, args.toolId, ctx.principal.id);
+            const agents = await attachedAgents(tx, args.toolId);
+            const own = agents.filter((agent) => agent.ownerId === ctx.principal.id);
+            const others = agents.filter((agent) => agent.ownerId !== ctx.principal.id);
+            // Checked before any detach, so a refusal leaves every
+            // attachment in place. Public agents are included: pulling a
+            // tool from a shared agent should be an explicit detach_tool.
+            if (others.length > 0) {
+              throw stillAttached(
+                others,
+                " Only your own agents can be detached here; detach it from public agents with detach_tool, or ask the other owners to.",
+              );
+            }
+            if (own.length > 0 && args.detach !== true) {
+              throw stillAttached(own, " Pass detach: true to detach it from these agents and delete it.");
+            }
+            if (own.length > 0) {
+              await tx.agentTool.deleteMany({
+                where: { toolId: args.toolId, agentId: { in: own.map((agent) => agent.id) } },
+              });
+            }
+            await tx.tool.delete({ where: { id: args.toolId } });
+            return own.map((agent) => agent.id);
+          },
+          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+        );
+        return textResult({ deleted: args.toolId, detachedFrom });
+      } catch (err) {
+        // AgentTool.toolId is ON DELETE RESTRICT: an attachment that raced in
+        // past the check above still stops the delete, as P2003.
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2003") {
+          throw new McpError(409, `Tool "${args.toolId}" is still attached to an agent; nothing was deleted.`);
+        }
+        throw err;
+      }
+    },
+  });
+
+  mcp.registerTool({
     name: "dry_run_tool",
     scope: "tools:write",
     description:
