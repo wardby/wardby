@@ -321,6 +321,8 @@ one of them finishes:
 | `REGISTRY_MAX_METADATA_MB`     | 64      | Largest metadata or OSV response the proxy reads.             |
 | `REGISTRY_MAX_GRAPH_PACKAGES`  | 3000    | Packages the on-demand graph walk may expand in one run.      |
 | `REGISTRY_GRAPH_TIMEOUT_MS`    | 180000  | Time allowed for one on-demand graph walk.                    |
+| `REGISTRY_DB_POOL_MAX`         | 3       | Database connections for the registry's own pool.             |
+| `CODING_PROXY_DB_POOL_MAX`     | 5       | Database connections for the budget ledger (model requests).  |
 | `REGISTRY_PLAN_MAX_ENTRIES`    | 5000    | Entries a lockfile plan (`POST /-/plan`) may have.            |
 | `REGISTRY_PLAN_TIMEOUT_MS`     | 120000  | Time allowed for one lockfile plan.                           |
 | `REGISTRY_PLAN_MAX_PER_RUN`    | 20      | Lockfile plans one run may make.                              |

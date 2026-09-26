@@ -68,9 +68,18 @@ class MissingUrlAdapter extends PrismaPg {
  * The one way wardby builds a Prisma client. `url` defaults to DATABASE_URL
  * as read at call time.
  */
-export function createPrismaClient(url: string | undefined = process.env.DATABASE_URL): PrismaClient {
+/** `poolMax` overrides the pool size for a caller that sizes its own pools
+ *  (the coding proxy keeps its ledger and its package registry apart). */
+export function createPrismaClient(
+  url: string | undefined = process.env.DATABASE_URL,
+  options: { poolMax?: number } = {},
+): PrismaClient {
   const adapter = url
-    ? new PrismaPg({ connectionString: url, ...poolSettings(url) })
+    ? new PrismaPg({
+        connectionString: url,
+        ...poolSettings(url),
+        ...(options.poolMax !== undefined ? { max: options.poolMax } : {}),
+      })
     : new MissingUrlAdapter({ connectionString: "" });
   return new PrismaClient({ adapter });
 }

@@ -147,3 +147,19 @@ describe("createRegistryUpstream", () => {
     expect(new Headers(calls[1].init.headers).get("accept-encoding")).toBe("gzip");
   });
 });
+
+describe("configured coding proxy runtime: database pools", () => {
+  it("gives the package registry its own client, so registry traffic cannot starve the ledger's pool", async () => {
+    const handle: CodingProxyServerHandle = { port: CODING_PROXY_PORT, close: async () => {} };
+    const startServer = vi.fn(async () => handle);
+    const startDenyPort = vi.fn(async () => ({ port: CODING_PROXY_DENY_PORT, close: async () => {} }));
+    const db = { name: "ledger" } as unknown as PrismaClient;
+    const registryDb = { name: "registry" } as unknown as PrismaClient;
+
+    await startConfiguredCodingProxy({ db, registryDb, env: {}, startServer, startDenyPort });
+
+    const calls = startServer.mock.calls as unknown as [unknown, { registry: RegistryService }][];
+    const registry = calls[0][1].registry as unknown as { options: { store: { db: unknown } } };
+    expect(registry.options.store.db).toBe(registryDb);
+  });
+});

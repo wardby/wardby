@@ -15,6 +15,12 @@ import type {
 export type PrismaProxyLedgerDb = Pick<PrismaClient, "$transaction" | "$queryRaw" | "$executeRaw">;
 type PrismaProxyLedgerTx = Pick<Prisma.TransactionClient, "$queryRaw" | "$executeRaw">;
 
+/** How long a ledger transaction waits for a pool connection (Prisma's
+ *  default is 2 s). A model request fails outright when this runs out, so it
+ *  gets more room than the default; its pool is also kept apart from the
+ *  package registry's (coding-proxy/main.ts). */
+export const LEDGER_TRANSACTION_MAX_WAIT_MS = 5_000;
+
 interface SessionRow {
   id: string;
   runId: string;
@@ -108,6 +114,10 @@ async function requestById(db: PrismaProxyLedgerTx | PrismaProxyLedgerDb, id: st
 export class PrismaProxyLedger implements ProxyLedger {
   constructor(private readonly db: PrismaProxyLedgerDb) {}
 
+  private transaction<T>(fn: (tx: PrismaProxyLedgerTx) => Promise<T>): Promise<T> {
+    return this.db.$transaction(fn, { maxWait: LEDGER_TRANSACTION_MAX_WAIT_MS });
+  }
+
   async createSession(input: CreateProxySessionInput): Promise<void> {
     const models = JSON.stringify(input.allowedModels);
     await this.db.$executeRaw`
@@ -129,7 +139,7 @@ export class PrismaProxyLedger implements ProxyLedger {
   }
 
   async reserve(input: ReserveProxyRequestInput): Promise<ReserveProxyRequestResult> {
-    return this.db.$transaction(async (tx) => {
+    return this.transaction(async (tx) => {
       const sessions = await tx.$queryRaw<SessionRow[]>`
           SELECT "id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt", "budgetUsd", "status"
           FROM "CodingProxySession" WHERE "id" = ${input.sessionId} FOR UPDATE
@@ -189,7 +199,7 @@ export class PrismaProxyLedger implements ProxyLedger {
     actualCostUsd: number,
     upstreamStatus: number,
   ): Promise<ProxyRequest> {
-    return this.db.$transaction(async (tx) => {
+    return this.transaction(async (tx) => {
       const initial = await requestById(tx, requestId);
       if (!initial) throw new Error("unknown_proxy_request");
       await tx.$queryRaw<{ id: string }[]>`
