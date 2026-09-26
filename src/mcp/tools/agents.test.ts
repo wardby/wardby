@@ -41,6 +41,13 @@ interface FakeAgentRow {
   effort?: string | null;
 }
 
+interface FakeLink {
+  agentId: string;
+  repository: string;
+  authorizedVia: string | null;
+  authorizedById?: string | null;
+}
+
 interface FakeCodingProfile {
   provider: "codex" | "claude-code";
   repository: string;
@@ -60,6 +67,7 @@ function fakeDb(
   seed: FakeAgentSeed[] = [],
   budgetGroups: { id: string; ownerId: string | null }[] = [],
   principals: string[] = [],
+  links: FakeLink[] = [],
 ) {
   const principalIds = new Set(principals);
   const rows = new Map(
@@ -147,6 +155,44 @@ function fakeDb(
     principal: {
       findUnique: async ({ where }: { where: { id: string } }) =>
         principalIds.has(where.id) ? { id: where.id, subject: where.id, createdAt: new Date() } : null,
+    },
+    agentRepository: {
+      findMany: async ({ where }: { where: { agentId: string; authorizedVia?: { in: string[] } } }) =>
+        links.filter(
+          (l) =>
+            l.agentId === where.agentId &&
+            (!where.authorizedVia || where.authorizedVia.in.includes(l.authorizedVia ?? "")),
+        ),
+      updateMany: async ({
+        where,
+        data,
+      }: {
+        where: { agentId: string; authorizedVia: { in: string[] } };
+        data: Partial<FakeLink>;
+      }) => {
+        const hit = links.filter(
+          (l) => l.agentId === where.agentId && where.authorizedVia.in.includes(l.authorizedVia ?? ""),
+        );
+        for (const l of hit) Object.assign(l, data);
+        return { count: hit.length };
+      },
+    },
+    codingAgentProfile: {
+      updateMany: async ({
+        where,
+        data,
+      }: {
+        where: { agentId: string; repositoryAuthorizedVia: { in: string[] } };
+        data: Record<string, unknown>;
+      }) => {
+        const row = rows.get(where.agentId);
+        const profile = row?.codingProfile as Record<string, unknown> | null | undefined;
+        if (!row || !profile || !where.repositoryAuthorizedVia.in.includes(String(profile.repositoryAuthorizedVia))) {
+          return { count: 0 };
+        }
+        rows.set(where.agentId, { ...row, codingProfile: { ...profile, ...data } as never });
+        return { count: 1 };
+      },
     },
   };
   const db = {
@@ -1613,6 +1659,168 @@ describe("coding repository authorization (H5-1/C3-2)", () => {
     });
     expect(result.isError).toBe(true);
     expect(text(result)).toMatch(/link_host_account/);
+    await client.close();
+  });
+});
+
+describe("make_owner and repository approvals (I-1)", () => {
+  const text = (result: { content: unknown }) => (result.content as { text: string }[])[0].text;
+  const agent = (ownerId: string | null, via: string) => ({
+    id: "a1",
+    name: "coder",
+    systemPrompt: "x",
+    model: "gpt-5.6-luna",
+    budgetUsd: 1,
+    maxTurns: 10,
+    schedule: null,
+    timezone: "UTC",
+    ownerId,
+    tools: [],
+    kind: "coding" as const,
+    codingProfile: {
+      provider: "codex",
+      repository: "openai/example",
+      baseRef: "main",
+      defaultTask: null,
+      timeoutSec: 1800,
+      protectedPaths: ["CODEOWNERS"],
+      repositoryAuthorizedVia: via,
+      repositoryAuthorizedById: "approver",
+    } as never,
+  });
+  async function makeOwner(ownerId: string | null, newOwner: string | null, links: FakeLink[]) {
+    const db = fakeDb([agent(ownerId, "admin")], [], ["new-owner", "owner-1"], links);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"], ["admin"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const result = await client.callTool({ name: "make_owner", arguments: { agentId: "a1", ownerId: newOwner } });
+    await client.close();
+    const row = (await db.agent.findUnique({ where: { id: "a1" } })) as unknown as {
+      codingProfile: Record<string, unknown>;
+    };
+    return { result, profile: row.codingProfile };
+  }
+
+  it("moving an agent to a different owner turns admin/grandfathered approvals into checks of the new owner's access", async () => {
+    const links: FakeLink[] = [
+      { agentId: "a1", repository: "bot/repo", authorizedVia: "admin", authorizedById: "approver" },
+      { agentId: "a1", repository: "old/repo", authorizedVia: "grandfathered" },
+      { agentId: "a1", repository: "mine/repo", authorizedVia: "host_permission", authorizedById: "owner-1" },
+    ];
+    const { result, profile } = await makeOwner("owner-1", "new-owner", links);
+    expect(result.isError).toBeFalsy();
+    expect(links.map((l) => l.authorizedVia)).toEqual(["host_permission", "host_permission", "host_permission"]);
+    expect(links[0].authorizedById).toBeNull();
+    expect(links[2].authorizedById).toBe("owner-1");
+    expect(profile).toMatchObject({ repositoryAuthorizedVia: "host_permission", repositoryAuthorizedById: null });
+    expect(JSON.parse(text(result)).repositoryApprovalsRevoked).toEqual(["bot/repo", "old/repo", "openai/example"]);
+  });
+
+  it("releasing an owned agent to public also revokes them (no laundering through a public agent)", async () => {
+    const links: FakeLink[] = [{ agentId: "a1", repository: "bot/repo", authorizedVia: "admin" }];
+    await makeOwner("owner-1", null, links);
+    expect(links[0].authorizedVia).toBe("host_permission");
+  });
+
+  it("keeps approvals when a public agent gets its first owner, and when the owner is unchanged", async () => {
+    for (const [from, to] of [
+      [null, "new-owner"],
+      ["owner-1", "owner-1"],
+    ] as const) {
+      const links: FakeLink[] = [{ agentId: "a1", repository: "bot/repo", authorizedVia: "admin" }];
+      const { result, profile } = await makeOwner(from, to, links);
+      expect(result.isError).toBeFalsy();
+      expect(links[0].authorizedVia).toBe("admin");
+      expect(profile.repositoryAuthorizedVia).toBe("admin");
+      expect(JSON.parse(text(result)).repositoryApprovalsRevoked).toEqual([]);
+    }
+  });
+});
+
+describe("update_agent admin override on someone else's agent (M-3) and override: false (M-6)", () => {
+  const text = (result: { content: unknown }) => (result.content as { text: string }[])[0].text;
+  const seed = () =>
+    fakeDb([
+      {
+        id: "a1",
+        name: "coder",
+        systemPrompt: "x",
+        model: "gpt-5.6-luna",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId: "someone-else",
+        tools: [],
+        kind: "coding",
+        codingProfile: {
+          provider: "codex",
+          repository: "openai/example",
+          baseRef: "main",
+          defaultTask: null,
+          timeoutSec: 1800,
+          protectedPaths: ["CODEOWNERS"],
+          repositoryAuthorizedVia: "host_permission",
+        } as never,
+      },
+    ]);
+  async function as(principal: string, roles: string[], db = seed()) {
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, principal, ["agents:write", "agents:admin"], roles));
+    registerAgentTools(mcp);
+    return connectClient(mcp);
+  }
+
+  it("lets an admin change only the repository of an agent they don't own, recorded as their approval", async () => {
+    const client = await as("admin-1", ["admin"]);
+    const ok = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { repository: "bot/repo" }, repositoryAdminOverride: true },
+    });
+    expect(ok.isError).toBeFalsy();
+    expect(JSON.parse(text(ok)).codingProfile).toMatchObject({
+      repository: "bot/repo",
+      repositoryAuthorizedVia: "admin",
+      repositoryAuthorizedById: "admin-1",
+    });
+    const more = await client.callTool({
+      name: "update_agent",
+      arguments: {
+        id: "a1",
+        systemPrompt: "y",
+        codingProfile: { repository: "bot/other" },
+        repositoryAdminOverride: true,
+      },
+    });
+    expect(more.isError).toBe(true);
+    expect(text(more)).toMatch(/only codingProfile.repository/);
+    await client.close();
+  });
+
+  it("refuses a member using the override on someone else's agent", async () => {
+    const client = await as("p1", []);
+    const result = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { repository: "bot/repo" }, repositoryAdminOverride: true },
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/requires a role/);
+    await client.close();
+  });
+
+  it("treats repositoryAdminOverride: false as absent (no 400) on update and create", async () => {
+    const client = await as("someone-else", []);
+    const result = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", systemPrompt: "y", repositoryAdminOverride: false },
+    });
+    expect(result.isError).toBeFalsy();
+    const created = await client.callTool({
+      name: "create_agent",
+      arguments: { name: "n", systemPrompt: "x", model: "gpt-4o", budgetUsd: 1, repositoryAdminOverride: false },
+    });
+    expect(created.isError).toBeFalsy();
     await client.close();
   });
 });

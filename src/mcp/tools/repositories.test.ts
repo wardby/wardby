@@ -525,3 +525,44 @@ describe("link_repository check names (H5-2)", () => {
     await client.close();
   });
 });
+
+describe("link_repository admin override on someone else's agent (M-3)", () => {
+  const OTHERS: FakeRepositoryRow[] = [];
+  const agent: FakeAgentRow = { id: "a1", name: "reviewer", ownerId: "someone-else", kind: "native" };
+  const call = {
+    name: "link_repository",
+    arguments: { agentId: "a1", repository: "bot/repo", access: "write", adminOverride: true },
+  };
+  const ADMIN_SCOPES = ["agents:read", "agents:write", "agents:admin"];
+
+  it("lets an admin approve a repository for an agent they don't own, recording the approver", async () => {
+    const { gate, authorizePrincipal } = gateAt("none");
+    const { mcp } = setup([agent], "admin-1", OTHERS, { gate, roles: ["admin"], scopes: ADMIN_SCOPES });
+    const client = await connectClient(mcp);
+    const result = await client.callTool(call);
+    expect(result.isError).toBeFalsy();
+    expect((parseText(result as never) as { link: FakeRepositoryRow }).link).toMatchObject({
+      agentId: "a1",
+      authorizedVia: "admin",
+      authorizedById: "admin-1",
+    });
+    expect(authorizePrincipal).not.toHaveBeenCalled();
+    await client.close();
+  });
+
+  it("refuses a member, even holding the agents:admin scope, and an admin without the override", async () => {
+    const member = setup([agent], "p1", [], { scopes: ADMIN_SCOPES });
+    const c1 = await connectClient(member.mcp);
+    const refused = await c1.callTool(call);
+    expect(refused.isError).toBeTruthy();
+    expect(errorText(refused as never)).toMatch(/requires a role/);
+    await c1.close();
+
+    const admin = setup([agent], "admin-1", [], { roles: ["admin"], scopes: ADMIN_SCOPES });
+    const c2 = await connectClient(admin.mcp);
+    const noOverride = await c2.callTool({ ...call, arguments: { ...call.arguments, adminOverride: undefined } });
+    expect(noOverride.isError).toBeTruthy();
+    expect(errorText(noOverride as never)).toContain("not owned by the caller");
+    await c2.close();
+  });
+});

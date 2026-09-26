@@ -8,6 +8,7 @@ import { modelSupportedEfforts } from "../../providers/llm/routing.js";
 import { LLM_EFFORT_LEVELS, isLlmEffort } from "../../providers/llm/types.js";
 import {
   assertCanMutate,
+  canMutate,
   canRead,
   requireOwnedAgent,
   requireReadableBudgetGroup,
@@ -129,7 +130,7 @@ type UpdateAgentArgs = z.infer<typeof UpdateAgentSchema>;
 const REPOSITORY_ADMIN_OVERRIDE = {
   type: "boolean",
   description:
-    "Admins only (agents:admin with the admin role): approve codingProfile.repository without checking GitHub access, recorded as an admin approval.",
+    "Admins only (agents:admin with the admin role): approve codingProfile.repository without checking GitHub access, recorded as an admin approval. On an agent the admin doesn't own, only codingProfile.repository may change.",
 };
 
 /** The profile columns a repository authorization is stamped into. */
@@ -291,7 +292,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id);
       }
       const { codingProfile, repositoryAdminOverride, ...agentData } = args;
-      if (repositoryAdminOverride !== undefined && !codingProfile) {
+      if (repositoryAdminOverride === true && !codingProfile) {
         throw new McpError(400, "repositoryAdminOverride only applies with a codingProfile repository.");
       }
       // The creator is the owner, so it's the creator's GitHub access that counts.
@@ -301,7 +302,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             provider: "github",
             repository: codingProfile.repository,
             kind: "coding",
-            adminOverride: repositoryAdminOverride,
+            adminOverride: repositoryAdminOverride === true,
           })
         : null;
       const agent = await ctx.db.agent.create({
@@ -359,7 +360,26 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       // coding agent) is re-authorized; other edits keep the existing stamp.
       const before = await ctx.db.agent.findUnique({ where: { id: args.id }, include: { codingProfile: true } });
       if (!before) throw new McpError(404, `Agent "${args.id}" not found.`);
-      assertCanMutate(before.ownerId, ctx.principal.id, `Agent "${args.id}" is not owned by the caller.`);
+      // An admin may approve a repository (repositoryAdminOverride) on an agent
+      // they don't own, but change nothing else on it.
+      const adminEdit = args.repositoryAdminOverride === true && !canMutate(before.ownerId, ctx.principal.id);
+      if (adminEdit) {
+        requireScope(ctx, ctx.canonicalUri, "agents:admin");
+        const { id: _id, repositoryAdminOverride: _flag, codingProfile, ...others } = args;
+        const profileKeys = Object.keys(codingProfile ?? {});
+        if (
+          Object.values(others).some((v) => v !== undefined) ||
+          profileKeys.length !== 1 ||
+          profileKeys[0] !== "repository"
+        ) {
+          throw new McpError(
+            403,
+            "On an agent you don't own, an admin may change only codingProfile.repository (with repositoryAdminOverride).",
+          );
+        }
+      } else {
+        assertCanMutate(before.ownerId, ctx.principal.id, `Agent "${args.id}" is not owned by the caller.`);
+      }
       const repositoryAfter = (kind: string, profile: { repository: string } | null | undefined) =>
         kind === "coding" ? (args.codingProfile?.repository ?? profile?.repository ?? null) : null;
       const plannedRepository = repositoryAfter(args.kind ?? before.kind, before.codingProfile);
@@ -374,10 +394,10 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
               provider: "github",
               repository: plannedRepository,
               kind: "coding",
-              adminOverride: args.repositoryAdminOverride,
+              adminOverride: args.repositoryAdminOverride === true,
             })
           : null;
-      if (args.repositoryAdminOverride !== undefined && !authorization) {
+      if (args.repositoryAdminOverride === true && !authorization) {
         throw new McpError(400, "repositoryAdminOverride only applies when the coding repository changes.");
       }
 
@@ -385,7 +405,9 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         async (tx) => {
           const existing = await tx.agent.findUnique({ where: { id: args.id }, include: { codingProfile: true } });
           if (!existing) throw new McpError(404, `Agent "${args.id}" not found.`);
-          assertCanMutate(existing.ownerId, ctx.principal.id, `Agent "${args.id}" is not owned by the caller.`);
+          if (!adminEdit) {
+            assertCanMutate(existing.ownerId, ctx.principal.id, `Agent "${args.id}" is not owned by the caller.`);
+          }
           if (
             existing.ownerId !== before.ownerId ||
             (repositoryChanges(existing) &&
@@ -541,14 +563,46 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       required: ["agentId", "ownerId"],
     },
     handler: async (args: { agentId: string; ownerId: string | null }, ctx) => {
-      const agent = await ctx.db.agent.findUnique({ where: { id: args.agentId } });
-      if (!agent) throw new McpError(404, `Agent "${args.agentId}" not found.`);
       if (args.ownerId !== null) {
         const principal = await ctx.db.principal.findUnique({ where: { id: args.ownerId } });
         if (!principal) throw new McpError(400, `Principal "${args.ownerId}" not found.`);
       }
-      const updated = await ctx.db.agent.update({ where: { id: args.agentId }, data: { ownerId: args.ownerId } });
-      return textResult(updated);
+      const result = await ctx.db.$transaction(
+        async (tx) => {
+          const agent = await tx.agent.findUnique({ where: { id: args.agentId }, include: { codingProfile: true } });
+          if (!agent) throw new McpError(404, `Agent "${args.agentId}" not found.`);
+          // Admin and grandfathered repository approvals were granted to the
+          // agent under its current owner. Moving it away from that owner (to
+          // someone else, or to public) turns them into ordinary checks of the
+          // next owner's own GitHub access, so an approval never travels with
+          // the agent. A public agent getting its first owner keeps them: that
+          // is the pre-upgrade step for public agents with repositories.
+          const revoked: string[] = [];
+          if (agent.ownerId !== null && agent.ownerId !== args.ownerId) {
+            const approved = { in: ["admin", "grandfathered"] };
+            const reset = { authorizedVia: "host_permission", authorizedById: null, authorizedAt: new Date() };
+            const links = await tx.agentRepository.findMany({
+              where: { agentId: agent.id, authorizedVia: approved },
+              orderBy: { repository: "asc" },
+            });
+            await tx.agentRepository.updateMany({ where: { agentId: agent.id, authorizedVia: approved }, data: reset });
+            revoked.push(...links.map((l) => l.repository));
+            const profile = await tx.codingAgentProfile.updateMany({
+              where: { agentId: agent.id, repositoryAuthorizedVia: approved },
+              data: {
+                repositoryAuthorizedVia: reset.authorizedVia,
+                repositoryAuthorizedById: null,
+                repositoryAuthorizedAt: reset.authorizedAt,
+              },
+            });
+            if (profile.count > 0 && agent.codingProfile) revoked.push(agent.codingProfile.repository);
+          }
+          const updated = await tx.agent.update({ where: { id: args.agentId }, data: { ownerId: args.ownerId } });
+          return { ...updated, repositoryApprovalsRevoked: revoked };
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+      return textResult(result);
     },
   });
 }

@@ -12,6 +12,7 @@ import { Prisma, type PrismaClient } from "#prisma";
 import { normalizeGitHubRepository } from "../../coding/protocol.js";
 import { requireOwnedAgent, requireReadableAgent } from "../auth/ownership.js";
 import { authorizeRepositoryForSet } from "../auth/repo-authorization.js";
+import { requireScope } from "../auth/resource-server.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
@@ -90,13 +91,23 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
         adminOverride: {
           type: "boolean",
           description:
-            "Admins only (agents:admin with the admin role): approve this link without checking GitHub access, recorded as an admin approval.",
+            "Admins only (agents:admin with the admin role): approve this link without checking GitHub access, recorded as an admin approval. Allowed on any agent that has an owner, not only the admin's own.",
         },
       },
       required: ["agentId", "repository", "access"],
     },
     handler: async (args: LinkArgs, ctx) => {
-      const agent = await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+      // An admin approving a repository explicitly may do it on any agent
+      // (the role already allows reassigning any agent with make_owner);
+      // everyone else, admins included, links only agents they own.
+      let agent;
+      if (args.adminOverride === true) {
+        requireScope(ctx, ctx.canonicalUri, "agents:admin");
+        agent = await ctx.db.agent.findUnique({ where: { id: args.agentId } });
+        if (!agent) throw new McpError(404, `Agent "${args.agentId}" not found.`);
+      } else {
+        agent = await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+      }
       if (agent.kind !== "native") {
         throw new McpError(
           400,
@@ -125,7 +136,7 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
         provider,
         repository,
         kind: args.access,
-        adminOverride: args.adminOverride,
+        adminOverride: args.adminOverride === true,
       });
       let link;
       try {
