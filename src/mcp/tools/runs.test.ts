@@ -25,7 +25,14 @@ interface FakeRunRow {
   error: string | null;
   startedAt: Date;
   finishedAt: Date | null;
-  codingRun?: { result: unknown; jobHandle?: string; protectedPaths?: string[]; queuedAt?: Date | null } | null;
+  codingRun?: {
+    result: unknown;
+    jobHandle?: string;
+    protectedPaths?: string[];
+    queuedAt?: Date | null;
+    failureCategory?: string | null;
+    diagnosticId?: string | null;
+  } | null;
   registryFetches?: Array<{
     ecosystem: string;
     name: string;
@@ -198,6 +205,39 @@ describe("run observability tools", () => {
     await client.close();
   });
 
+  it("get_run returns a failed coding run's failureCategory and diagnosticId", async () => {
+    const now = new Date();
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [
+        {
+          id: "r1",
+          agentId: "a1",
+          status: "failed",
+          trigger: "manual",
+          turns: 0,
+          tokensIn: 0,
+          tokensOut: 0,
+          costUsd: 0,
+          finalText: null,
+          error: "coding_failure_github:coding_diag_1234",
+          startedAt: now,
+          finishedAt: now,
+          codingRun: { result: null, failureCategory: "github", diagnosticId: "coding_diag_1234" },
+        },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "get_run", arguments: { runId: "r1" } });
+    const body = parseText(result as never) as Record<string, unknown>;
+    expect(body).toMatchObject({ status: "failed", failureCategory: "github", diagnosticId: "coding_diag_1234" });
+    await client.close();
+  });
+
   it("get_run projects only the validated coding result", async () => {
     const now = new Date();
     const db = fakeDb(
@@ -242,6 +282,9 @@ describe("run observability tools", () => {
     expect(body).not.toHaveProperty("codingRun");
     expect(body).not.toHaveProperty("jobHandle");
     expect(body).not.toHaveProperty("protectedPaths");
+    // A successful run has no failure diagnostics to report.
+    expect(body).not.toHaveProperty("failureCategory");
+    expect(body).not.toHaveProperty("diagnosticId");
     expect(body).toMatchObject({ codingResult: { outcome: "no_changes", summary: "No changes; [REDACTED]" } });
     await client.close();
   });

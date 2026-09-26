@@ -1084,7 +1084,23 @@ function safeError(error: unknown): string {
   return `coding_executor:${redactAndTruncate(message, 200).replace(/[^A-Za-z0-9_.:-]/g, "_")}`;
 }
 
+/**
+ * Error-code prefixes that name their category outright, checked before the
+ * substring heuristics below. Those heuristics filed every `github_*` error
+ * (a failed PR lookup or create after the push, a token mint) under
+ * "workspace" because "github" contains "git".
+ */
+const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: string]> = [
+  ["github_", "github"],
+  ["vcs_", "workspace"],
+  ["git_", "workspace"],
+];
+
 function failureCategory(error: unknown): string {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  for (const [prefix, category] of CATEGORY_BY_PREFIX) {
+    if (raw.startsWith(prefix)) return category;
+  }
   const message = safeError(error);
   if (message.includes("preflight") || message.includes("ownership") || message.includes("image")) return "preflight";
   if (message.includes("budget")) return "budget";
