@@ -31,6 +31,7 @@ import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
 import { buildSharedDatastoreAccessor, scopeSharedDatastoreAccessor } from "./datastores.js";
 import { effectiveBudgetForRun } from "./budget-groups.js";
 import { dispatchRun } from "./dispatch.js";
+import { canDelegate } from "./grants.js";
 import { MEMORY_TOOL_DEFS, MEMORY_TOOL_NAMES, handleMemoryTool } from "./memory-tools.js";
 import { DELEGATE_TOOL_PREFIX, duplicateToolNames } from "./tool-names.js";
 import {
@@ -139,6 +140,7 @@ export type RunnerDb = Pick<
   | "agentDatastore"
   | "budgetGroup"
   | "agentSubAgent"
+  | "resourceGrant"
   | "codingRun"
   | "task"
   | "webhook"
@@ -435,18 +437,26 @@ export async function executeRun(
         ...subAgentEdges.map((edge): LoadedTool => delegateToolDef(edge.boundName)),
         ...(repositoryLinks.length > 0 ? REVIEW_HOST_TOOL_DEFS : []),
       ],
+      // An attachment's four capability fields are honoured only when the
+      // agent's CURRENT owner granted them (resource-sharing grants spec
+      // §3.4.2): a write-grantee's attachment, a make_owner transfer and a
+      // pre-grants row nobody vouched for all run with no secrets, no
+      // datastore and no fetch until the owner re-grants with attach_tool.
       toolsByName: Object.fromEntries(
-        attached.map((attachment) => [
-          attachment.tool.name,
-          {
-            code: attachment.tool.code,
-            paramsZod: attachment.tool.paramsZod,
-            allowedSecrets: asStringArray(attachment.allowedSecrets),
-            allowedDatastorePrefixes: asStringArray(attachment.allowedDatastorePrefixes),
-            allowedHosts: asStringArray(attachment.allowedHosts),
-            allowedSharedDatastorePrefixes: asPrefixMap(attachment.allowedSharedDatastorePrefixes),
-          },
-        ]),
+        attached.map((attachment) => {
+          const consented = agent.ownerId !== null && attachment.capabilitiesGrantedById === agent.ownerId;
+          return [
+            attachment.tool.name,
+            {
+              code: attachment.tool.code,
+              paramsZod: attachment.tool.paramsZod,
+              allowedSecrets: consented ? asStringArray(attachment.allowedSecrets) : [],
+              allowedDatastorePrefixes: consented ? asStringArray(attachment.allowedDatastorePrefixes) : [],
+              allowedHosts: consented ? asStringArray(attachment.allowedHosts) : [],
+              allowedSharedDatastorePrefixes: consented ? asPrefixMap(attachment.allowedSharedDatastorePrefixes) : {},
+            },
+          ];
+        }),
       ),
     };
   });
@@ -569,10 +579,50 @@ export async function executeRun(
           throw err;
         }
 
-        const childAgent = await db.agent.findUniqueOrThrow({
-          where: { id: edge.childAgentId },
-          select: { id: true, kind: true, budgetGroupId: true, budgetUsd: true },
-        });
+        // Owners are re-read live on every delegation (resource-sharing
+        // grants spec §3.4.4, N1): the child must have the parent's current
+        // owner, or that owner must still hold execute on the child. A
+        // revoked grant or a make_owner transfer stops the very next call.
+        const [parentNow, childAgent] = await Promise.all([
+          db.agent.findUnique({ where: { id: loaded.agentId }, select: { ownerId: true } }),
+          db.agent.findUniqueOrThrow({
+            where: { id: edge.childAgentId },
+            select: {
+              id: true,
+              kind: true,
+              budgetGroupId: true,
+              budgetUsd: true,
+              ownerId: true,
+              codingProfile: { select: { allowWebhookTaskOverride: true } },
+            },
+          }),
+        ]);
+        const parentOwnerId = parentNow?.ownerId ?? null;
+        const childOwnerId = childAgent.ownerId ?? null;
+        if (
+          !parentNow ||
+          !(await canDelegate(db, { ownerId: parentOwnerId }, { id: childAgent.id, ownerId: childOwnerId }))
+        ) {
+          return JSON.stringify({
+            error: "subagent_not_authorized",
+            message: `The "${boundName}" sub-agent belongs to another owner who has not given this agent's owner execute access to it.`,
+          });
+        }
+        if (parentOwnerId !== childOwnerId) {
+          // Across owners the edge carries execute and nothing more: no
+          // model-chosen memory grant, no continuation of another run's PR,
+          // and no coding task text unless the child's owner opted in to
+          // non-owner task text (allowWebhookTaskOverride).
+          const refusal =
+            (args.grantParentMemoryKeys?.length ?? 0) > 0
+              ? "grantParentMemoryKeys is only allowed when the sub-agent has the same owner."
+              : args.continuePriorRun !== undefined
+                ? "continuePriorRun is only allowed when the sub-agent has the same owner."
+                : childAgent.kind === "coding" && !childAgent.codingProfile?.allowWebhookTaskOverride
+                  ? "This coding sub-agent belongs to another owner and does not accept task text from others (allowWebhookTaskOverride)."
+                  : null;
+          if (refusal) return JSON.stringify({ error: "cross_owner_not_allowed", message: refusal });
+        }
 
         if (args.continuePriorRun !== undefined && childAgent.kind !== "coding") {
           return JSON.stringify({
@@ -606,6 +656,9 @@ export async function executeRun(
             codingTask: args.task,
             continuesCodingRunId: args.continuePriorRun,
             parentRunId: runId,
+            // The child's result flows back into this run, which the
+            // triggerer sees, so the child is visible to them too.
+            triggeredById: existingRun.triggeredById,
             budgetUsdOverride: effectiveBudgetUsd,
             awaitExecution: true,
           });
@@ -660,6 +713,7 @@ export async function executeRun(
             parentRunId: runId,
             grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [],
             taskOverride,
+            triggeredById: existingRun.triggeredById,
           },
         });
         const childResult = await executeRun(childRun.id, providers, db);

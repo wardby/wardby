@@ -22,7 +22,11 @@ interface FakeAgent {
   budgetGroupId?: string | null;
   memoryEnabled?: boolean;
   effort?: string | null;
+  /** Defaults to FAKE_OWNER: the capability tests below are about scoping, not consent. */
+  ownerId?: string | null;
 }
+
+const FAKE_OWNER = "p1";
 
 interface FakeTool {
   id: string;
@@ -40,12 +44,16 @@ interface FakeAttachment {
   allowedDatastorePrefixes?: string[];
   allowedHosts?: string[];
   allowedSharedDatastorePrefixes?: Record<string, string[]>;
+  /** Defaults to the agent's owner (consented); pass null or another id to test the consent gate. */
+  capabilitiesGrantedById?: string | null;
 }
 
 interface FakeAgentDatastore {
   agentId: string;
   boundName: string;
   datastoreId: string;
+  /** Defaults to the agent's owner. */
+  ownerId?: string | null;
 }
 
 interface FakeBudgetGroup {
@@ -66,8 +74,10 @@ function fakeDb(
   priorRuns: { agentId: string; costUsd: number; startedAt: Date }[] = [],
   agentDatastores: FakeAgentDatastore[] = [],
 ): RunnerDb {
+  for (const agent of agents) if (agent.ownerId === undefined) agent.ownerId = FAKE_OWNER;
   const byName = new Map(agents.map((a) => [a.name, a]));
   const byId = new Map(agents.map((a) => [a.id, a]));
+  const ownerOf = (agentId: string) => byId.get(agentId)?.ownerId ?? null;
   const toolsById = new Map(tools.map((t) => [t.id, t]));
   const groupsById = new Map(budgetGroups.map((g) => [g.id, g]));
   const runs = new Map<string, any>();
@@ -124,18 +134,33 @@ function fakeDb(
       findMany: (async ({ where }: any) =>
         attachments
           .filter((a) => a.agentId === where.agentId)
-          .map((a) => ({ ...a, tool: toolsById.get(a.toolId) }))) as any,
+          .map((a) => ({
+            capabilitiesGrantedById: ownerOf(a.agentId),
+            ...a,
+            tool: toolsById.get(a.toolId),
+          }))) as any,
     },
     agentSecret: {
       findFirst: (async ({ where }: any) => {
         const row = secretsData.find((s) => s.agentId === where.agentId && s.boundName === where.boundName);
-        return row ? { secret: { ciphertext: row.value } } : null;
+        return row
+          ? {
+              secret: { ciphertext: row.value, ownerId: ownerOf(row.agentId) },
+              agent: { ownerId: ownerOf(row.agentId) },
+            }
+          : null;
       }) as any,
     },
     agentDatastore: {
       findFirst: (async ({ where }: any) => {
         const row = agentDatastores.find((d) => d.agentId === where.agentId && d.boundName === where.boundName);
-        return row ? { ...row } : null;
+        return row
+          ? {
+              ...row,
+              datastore: { ownerId: row.ownerId === undefined ? ownerOf(row.agentId) : row.ownerId },
+              agent: { ownerId: ownerOf(row.agentId) },
+            }
+          : null;
       }) as any,
     },
     budgetGroup: {
@@ -942,6 +967,83 @@ describe("runAgent", () => {
 
     const blocked = JSON.parse(await captured!.runSandboxTool("read_secret", JSON.stringify({ name: "BLOCKED" })));
     expect(blocked).toBeNull();
+  });
+
+  describe("attachment capabilities need the agent owner's consent (A2/S2-2, R2-1)", () => {
+    const secretTool: FakeTool = {
+      id: "t1",
+      name: "read_secret",
+      description: "x",
+      paramsZod: "z.object({ name: z.string() })",
+      jsonSchema: {},
+      code: "const v = await secrets.get(params.name); return v === undefined ? null : v;",
+    };
+    const capabilities = {
+      allowedSecrets: ["TOKEN"],
+      allowedDatastorePrefixes: ["k"],
+      allowedHosts: ["example.com"],
+      allowedSharedDatastorePrefixes: { kb: ["k"] },
+    };
+
+    async function loadedTool(ownerId: string | null, capabilitiesGrantedById: string | null) {
+      const db = fakeDb(
+        [{ id: "a1", name: "consent", systemPrompt: "s", model: "m", budgetUsd: 10, maxTurns: 10, ownerId }],
+        [secretTool],
+        [{ agentId: "a1", toolId: "t1", ...capabilities, capabilitiesGrantedById }],
+        [{ agentId: "a1", boundName: "TOKEN", value: "owner-secret" }],
+      );
+      const run = await db.run.create({ data: { agentId: "a1" } });
+      let pinned: any;
+      const step: StepRunner = async (name, fn) => {
+        const value = await fn();
+        if (name === "load") pinned = value;
+        return value;
+      };
+      let captured: EngineRunContext | undefined;
+      const engine = fakeEngine(
+        { status: "succeeded", finalText: "", turns: 1, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } },
+        (ctx) => {
+          captured = ctx;
+        },
+      );
+      await executeRun(
+        run.id,
+        { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: fakeCipher(), memory: fakeMemory() },
+        db,
+        undefined,
+        step,
+      );
+      const secret = JSON.parse(await captured!.runSandboxTool("read_secret", JSON.stringify({ name: "TOKEN" })));
+      return { tool: pinned.toolsByName.read_secret, secret };
+    }
+
+    it("stamped by the current owner: capabilities are honoured", async () => {
+      const { tool, secret } = await loadedTool("p1", "p1");
+      expect(tool).toMatchObject(capabilities);
+      expect(secret).toBe("owner-secret");
+    });
+
+    it("A2/S2-2: unstamped (a write-grantee's attachment or a pre-grants row): all four are empty", async () => {
+      const { tool, secret } = await loadedTool("p1", null);
+      expect(tool).toMatchObject({
+        allowedSecrets: [],
+        allowedDatastorePrefixes: [],
+        allowedHosts: [],
+        allowedSharedDatastorePrefixes: {},
+      });
+      expect(secret).toBeNull();
+    });
+
+    it("R2-1: stamped by a previous owner (make_owner transfer): all four are empty", async () => {
+      const { tool, secret } = await loadedTool("p2", "p1");
+      expect(tool).toMatchObject({ allowedSecrets: [], allowedHosts: [], allowedSharedDatastorePrefixes: {} });
+      expect(secret).toBeNull();
+    });
+
+    it("owner-less agent: all four are empty whatever the stamp", async () => {
+      const { tool } = await loadedTool(null, null);
+      expect(tool).toMatchObject({ allowedSecrets: [], allowedDatastorePrefixes: [], allowedHosts: [] });
+    });
   });
 
   it("pins agent fields, tools, and effective budget in a 'load' step so a replay sees first-run values", async () => {

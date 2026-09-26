@@ -29,11 +29,11 @@ function matches(row: FakeGrantRow, where: Where): boolean {
   return Object.entries(where).every(([field, condition]) => {
     if (field === "OR") return (condition as Where[]).some((w) => matches(row, w));
     const value = (row as unknown as Record<string, unknown>)[field];
-    if (condition !== null && typeof condition === "object" && "in" in (condition)) {
+    if (condition !== null && typeof condition === "object" && "in" in condition) {
       return ((condition as { in: unknown[] }).in ?? []).includes(value);
     }
-    if (condition !== null && typeof condition === "object" && "not" in (condition)) {
-      return value !== (condition).not;
+    if (condition !== null && typeof condition === "object" && "not" in condition) {
+      return value !== condition.not;
     }
     return value === condition;
   });

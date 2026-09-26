@@ -296,6 +296,10 @@ function buildFakeDb() {
       },
       findMany: async ({ where }: { where: { agentId: string } }) =>
         agentTools.filter((a) => a.agentId === where.agentId).map((a) => ({ ...a, tool: tools.get(a.toolId) })),
+      findUnique: async ({ where }: { where: { agentId_toolId: { agentId: string; toolId: string } } }) =>
+        agentTools.find(
+          (a) => a.agentId === where.agentId_toolId.agentId && a.toolId === where.agentId_toolId.toolId,
+        ) ?? null,
       // attach_tool's same-name guard: this fixture never attaches two
       // same-named tools to one agent.
       findFirst: async () => null,
@@ -359,7 +363,13 @@ function buildFakeDb() {
       deleteMany: async () => ({ count: 0 }),
       findFirst: async ({ where }: { where: { agentId: string; boundName: string } }) => {
         const match = agentSecrets.find((a) => a.agentId === where.agentId && a.boundName === where.boundName);
-        return match ? { ...match, secret: secrets.get(match.secretId) } : null;
+        return match
+          ? {
+              ...match,
+              secret: secrets.get(match.secretId),
+              agent: { ownerId: agents.get(match.agentId)?.ownerId ?? null },
+            }
+          : null;
       },
     },
     webhook: {

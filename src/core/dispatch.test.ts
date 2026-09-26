@@ -96,6 +96,14 @@ describe("dispatchRun", () => {
     expect(start).toHaveBeenCalledWith(result?.run.id);
   });
 
+  it("persists triggeredById on the run, and null when the caller gives none", async () => {
+    const executor: Executor = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    const state = fakeDb(nativeAgent());
+    await dispatchRun({ db: state.db, executor, agentId: "agent_1", triggeredById: "p-trigger" });
+    await dispatchRun({ db: state.db, executor, agentId: "agent_1", trigger: "scheduled" });
+    expect(state.runs.map((run) => run.triggeredById)).toEqual(["p-trigger", null]);
+  });
+
   it("no longer writes allowedEgress onto the coding run", async () => {
     const agent = {
       ...nativeAgent(),
