@@ -1,5 +1,23 @@
 import { describe, it, expect } from "vitest";
-import { anthropicSupportedModels, anthropicPriceUsd, getAnthropicPricing } from "./pricing-anthropic.js";
+import {
+  anthropicSupportedEfforts,
+  anthropicSupportedModels,
+  anthropicPriceUsd,
+  getAnthropicPricing,
+} from "./pricing-anthropic.js";
+
+describe("anthropic effort support", () => {
+  it("accepts every level on the 5-series models", () => {
+    for (const m of ["claude-opus-5", "claude-sonnet-5", "claude-fable-5"]) {
+      expect(anthropicSupportedEfforts(m)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    }
+  });
+
+  it("accepts no effort on Haiku 4.5 or an unknown model", () => {
+    expect(anthropicSupportedEfforts("claude-haiku-4-5")).toEqual([]);
+    expect(anthropicSupportedEfforts("claude-unknown")).toEqual([]);
+  });
+});
 
 describe("anthropic pricing", () => {
   it("lists the Claude roster with o200k_base encoding", () => {

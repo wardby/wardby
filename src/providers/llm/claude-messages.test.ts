@@ -133,3 +133,31 @@ describe("estimateClaudeTokens", () => {
     expect(withTools).toBeGreaterThan(withoutTools);
   });
 });
+
+describe("toClaudeRequest effort", () => {
+  const simple: LlmRequest = {
+    model: "claude-sonnet-5",
+    messages: [
+      { role: "system", content: "sys" },
+      { role: "user", content: "hi" },
+    ],
+  };
+
+  it("emits output_config.effort when the request sets an effort", () => {
+    const r = toClaudeRequest({ ...simple, effort: "low" }, 1024);
+    expect(r.output_config).toEqual({ effort: "low" });
+    expect(withCacheBreakpoints(r).output_config).toEqual({ effort: "low" });
+  });
+
+  it("leaves the body exactly as before when effort is unset", () => {
+    const r = withCacheBreakpoints(toClaudeRequest(simple, 1024));
+    expect(JSON.stringify(r)).toBe(
+      JSON.stringify({
+        system: [{ type: "text", text: "sys", cache_control: { type: "ephemeral" } }],
+        messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }] }],
+        max_tokens: 1024,
+      }),
+    );
+    expect("output_config" in r).toBe(false);
+  });
+});

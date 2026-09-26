@@ -6,7 +6,7 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { ClaudeLlmProvider } from "./claude-provider.js";
-import { anthropicPriceUsd, getAnthropicPricing } from "./pricing-anthropic.js";
+import { anthropicPriceUsd, anthropicSupportedEfforts, getAnthropicPricing } from "./pricing-anthropic.js";
 
 export { anthropicSupportedModels } from "./pricing-anthropic.js";
 
@@ -19,6 +19,10 @@ export class AnthropicLlmProvider extends ClaudeLlmProvider {
     if (!client && !apiKey) {
       throw new Error("ANTHROPIC_API_KEY is not set — required by the Anthropic LlmProvider adapter.");
     }
-    super(client ?? new Anthropic({ apiKey }), { getPricing: getAnthropicPricing, priceUsd: anthropicPriceUsd });
+    super(client ?? new Anthropic({ apiKey }), {
+      getPricing: getAnthropicPricing,
+      priceUsd: anthropicPriceUsd,
+      supportedEfforts: anthropicSupportedEfforts,
+    });
   }
 }

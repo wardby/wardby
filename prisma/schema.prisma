@@ -60,6 +60,11 @@ model Agent {
   /// created for it.
   memoryEnabled Boolean @default(false)
 
+  /// Un-phased: reasoning effort for native agents (low, medium, high,
+  /// xhigh, max). Validated against the model in code, not a DB enum.
+  /// Null = the provider's default.
+  effort String?
+
   /// Un-phased: sub-agent composition edges (see AgentSubAgent below). An
   /// agent can be a parent (has children it can delegate to) and/or a
   /// child (is delegated to by others) independently.

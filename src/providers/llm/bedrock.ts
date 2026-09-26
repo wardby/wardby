@@ -12,7 +12,11 @@
  */
 import { AnthropicBedrock } from "@anthropic-ai/bedrock-sdk";
 import { ClaudeLlmProvider } from "./claude-provider.js";
-import { bedrockClaudePriceUsd, getBedrockClaudePricing } from "./pricing-bedrock-claude.js";
+import {
+  bedrockClaudePriceUsd,
+  bedrockClaudeSupportedEfforts,
+  getBedrockClaudePricing,
+} from "./pricing-bedrock-claude.js";
 
 export { bedrockClaudeSupportedModels } from "./pricing-bedrock-claude.js";
 
@@ -31,6 +35,7 @@ export class BedrockClaudeLlmProvider extends ClaudeLlmProvider {
     super(client ?? new AnthropicBedrock({ awsRegion: region }), {
       getPricing: getBedrockClaudePricing,
       priceUsd: bedrockClaudePriceUsd,
+      supportedEfforts: bedrockClaudeSupportedEfforts,
     });
   }
 }

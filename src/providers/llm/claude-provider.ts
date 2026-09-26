@@ -5,7 +5,7 @@
  * stays exactly what each concrete adapter (anthropic.ts, bedrock.ts) has in
  * common, and nothing more.
  */
-import type { LlmMessage, LlmProvider, LlmRequest, LlmStreamEvent, LlmToolDef } from "./types.js";
+import type { LlmEffort, LlmMessage, LlmProvider, LlmRequest, LlmStreamEvent, LlmToolDef } from "./types.js";
 import {
   toClaudeRequest,
   withCacheBreakpoints,
@@ -31,6 +31,8 @@ export interface ClaudePricingModule {
   /** Must throw on an unknown model — fail-closed, never price at zero. */
   getPricing(model: string): ModelPricing;
   priceUsd(model: string, usage: UsageTokens): number;
+  /** Effort levels the model accepts; empty = never send an effort. */
+  supportedEfforts(model: string): readonly LlmEffort[];
 }
 
 // Anthropic's own guidance: don't lowball max_tokens — hitting the cap
@@ -51,7 +53,11 @@ export class ClaudeLlmProvider implements LlmProvider {
   ) {}
 
   async *stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<LlmStreamEvent> {
-    const claudeReq = withCacheBreakpoints(toClaudeRequest(req, DEFAULT_MAX_TOKENS));
+    // Defence in depth behind config-time validation: a level the model
+    // doesn't accept would fail the whole call, so it is dropped here.
+    const { effort, ...rest } = req;
+    const accepted = effort && this.pricing.supportedEfforts(req.model).includes(effort);
+    const claudeReq = withCacheBreakpoints(toClaudeRequest(accepted ? { ...rest, effort } : rest, DEFAULT_MAX_TOKENS));
     const raw = this.client.messages.stream(
       { model: req.model, ...claudeReq },
       { signal },

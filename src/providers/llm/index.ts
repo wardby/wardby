@@ -6,5 +6,5 @@ export { BedrockClaudeLlmProvider, bedrockCredentialsPresent, bedrockClaudeSuppo
 export { ClaudeLlmProvider, type ClaudeMessagesClient, type ClaudePricingModule } from "./claude-provider.js";
 export { openaiCredentialsPresent } from "./openai.js";
 export { supportedModels as openaiSupportedModels } from "./pricing.js";
-export { RoutingLlmProvider, type LlmRegistration } from "./routing.js";
+export { RoutingLlmProvider, modelAcceptsEffort, modelSupportedEfforts, type LlmRegistration } from "./routing.js";
 export { resolveLlmRegistrations, type LlmRegistrationResult } from "./registration.js";
