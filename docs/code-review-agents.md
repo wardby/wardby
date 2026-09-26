@@ -21,6 +21,12 @@ Once an agent is linked to a repository with the `pull_request` trigger:
   rather than posted again.
 - The check completes as `success` (APPROVE), `failure`
   (CHANGES_REQUESTED), or `neutral` (COMMENT).
+- On a later review, the agent sees its own unresolved inline threads and
+  can **resolve the ones the new head fixes**, so fixed findings collapse on
+  the PR page. Only threads that agent started are resolved; people's
+  threads and other agents' threads are never touched. A thread it is unsure
+  about stays open. This needs **Contents: Read and write** on the App (see
+  below); without it the review still publishes and the threads stay open.
 - Clicking **Re-run** on the check re-requests it and starts a fresh review
   against the PR's current head. **Re-run all checks** (a check-suite
   re-request) is not handled — use the check's own **Re-run**, or comment
@@ -250,12 +256,19 @@ with:
   comment, Check run, and Issues (needed for mentions in a newly opened or
   edited issue; without it only comment mentions are seen).
 - **Repository permissions**:
+
   | Permission    | Access         |
   | ------------- | -------------- |
   | Contents      | Read           |
   | Pull requests | Read and write |
   | Checks        | Read and write |
   | Issues        | Read and write |
+
+  To let review agents resolve their own fixed threads, set **Contents** to
+  **Read and write**: GitHub gates resolving a review thread on that
+  permission, although it changes no repository content. wardby asks for it
+  only for the resolve call itself. An App that also opens coding pull
+  requests already has it.
 
 If you change these permissions on an App that is already installed, every
 installation must explicitly accept the new permission set before the App's
@@ -380,7 +393,8 @@ A linked agent gets these built-in tools automatically — they are not
 attached like ordinary tools, and never expose a token, check id, or
 internal marker to the model:
 
-- `repo_pr_read` — a pull request's metadata and per-file diff patches.
+- `repo_pr_read` — a pull request's metadata, per-file diff patches, and
+  the agent's own unresolved inline threads (`openThreads`).
 - `repo_read_file` / `repo_list_files` — read a file or list a directory at
   a ref.
 - `repo_publish_review` — publish inline comments, a summary, and the check
@@ -392,6 +406,9 @@ internal marker to the model:
   summary but no check, so an agent can never put a passing verdict on a PR
   it was not asked to review. If the run's check could not be started when it
   was dispatched, the review is published without a check; use **Re-run**.
+  `resolveThreadIds` resolves the listed `openThreads` after the review is
+  published; each id is re-checked against the agent's own open threads on
+  that PR, and the result lists `resolvedThreadIds` and `skippedThreadIds`.
 - `repo_comment` — post or reply to a conversation or inline-review comment.
 
 Every call names the `repository` explicitly; it must resolve to one of the

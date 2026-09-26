@@ -8,6 +8,8 @@ import type { GitHubAppClient } from "../vcs/github.js";
 import { normalizeGitHubRepository } from "../../coding/protocol.js";
 import { partitionComments } from "./diff-lines.js";
 import {
+  findingMarker,
+  hasFindingMarker,
   hasReviewMarker,
   parseReviewMarker,
   renderInlineComment,
@@ -30,6 +32,7 @@ import {
   type PullRequestFileView,
   type PullRequestHead,
   type PullRequestView,
+  type ReviewThreadView,
   type StartCheckInput,
 } from "./types.js";
 
@@ -139,6 +142,60 @@ function fileView(raw: Json): PullRequestFileView & { fullPatch: string | undefi
   };
 }
 
+type GraphQl = (query: string, variables: Record<string, unknown>) => Promise<Json>;
+
+const THREADS_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100) {
+        nodes { id isResolved isOutdated path line comments(first: 1) { nodes { body author { __typename login } } } }
+      }
+    }
+  }
+}`;
+const RESOLVE_MUTATION = `mutation($threadId: ID!) {
+  resolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } }
+}`;
+/** resolveReviewThread is gated on Contents write for App tokens, although it changes no content. */
+const RESOLVE_WRITE = { contents: "write", pull_requests: "write" } as const;
+const MAX_THREAD_BODY = 1000;
+
+/**
+ * The agent's own unresolved threads: the first comment was written by this
+ * App (a Bot author with the App's login) and carries the agent's finding
+ * marker. Anyone can type a marker; only the App can be a Bot with its login.
+ */
+async function ownOpenThreads(
+  graphql: GraphQl,
+  repository: string,
+  prNumber: number,
+  agentMarker: string,
+  slug: string,
+): Promise<ReviewThreadView[]> {
+  const [owner, name] = normalizeGitHubRepository(repository).split("/");
+  const data = await graphql(THREADS_QUERY, { owner, name, number: prNumber });
+  const threads = record(record(record(data.repository).pullRequest).reviewThreads);
+  const nodes = list(threads.nodes ?? []);
+  const marker = findingMarker(agentMarker);
+  const out: ReviewThreadView[] = [];
+  for (const node of nodes) {
+    if (node.isResolved !== false || typeof node.id !== "string") continue;
+    const first = list(record(node.comments).nodes ?? [])[0];
+    const author = first && first.author && typeof first.author === "object" ? (first.author as Json) : null;
+    if (author?.__typename !== "Bot" || (author.login !== slug && author.login !== `${slug}[bot]`)) continue;
+    if (typeof first.body !== "string" || !hasFindingMarker(first.body, agentMarker)) continue;
+    const outdated = node.isOutdated === true;
+    out.push({
+      id: node.id,
+      path: str(node.path),
+      line: !outdated && typeof node.line === "number" ? node.line : null,
+      outdated,
+      body: first.body.replace(marker, "").trim().slice(0, MAX_THREAD_BODY),
+    });
+  }
+  return out;
+}
+
 export class GitHubReviewHost implements CodeReviewHost {
   readonly provider = "github" as const;
 
@@ -148,11 +205,17 @@ export class GitHubReviewHost implements CodeReviewHost {
   protected async withToken<T>(
     repository: string,
     permissions: Record<string, "read" | "write">,
-    action: (get: (path: string, init?: RequestInit, expected?: number[]) => Promise<Response>) => Promise<T>,
+    action: (
+      get: (path: string, init?: RequestInit, expected?: number[]) => Promise<Response>,
+      graphql: GraphQl,
+    ) => Promise<T>,
   ): Promise<T> {
     try {
       return await this.client.withScopedToken(repository, permissions, (token) =>
-        action((path, init, expected) => this.client.requestJson(path, token, init, expected)),
+        action(
+          (path, init, expected) => this.client.requestJson(path, token, init, expected),
+          (query, variables) => this.client.graphql(token, query, variables),
+        ),
       );
     } catch (err) {
       throw toReviewHostError(err);
@@ -214,7 +277,7 @@ export class GitHubReviewHost implements CodeReviewHost {
     opts: { sinceSha?: string; maxPatchChars: number; agentMarker: string },
   ): Promise<PullRequestView> {
     const base = repoPath(repository);
-    return this.withToken(repository, READ, async (get) => {
+    return this.withToken(repository, READ, async (get, graphql) => {
       const pr = record(await (await get(`${base}/pulls/${prNumber}`)).json());
       const { headSha, isFork, state } = this.head(repository, pr);
 
@@ -276,6 +339,9 @@ export class GitHubReviewHost implements CodeReviewHost {
         if (comments.length < 100) break;
       }
 
+      const { slug } = await this.client.appIdentity();
+      const openThreads = await ownOpenThreads(graphql, repository, prNumber, opts.agentMarker, slug);
+
       const user = pr.user && typeof pr.user === "object" ? record(pr.user) : null;
       return {
         number: num(pr.number),
@@ -294,6 +360,7 @@ export class GitHubReviewHost implements CodeReviewHost {
         comparedFrom,
         baseMergedSince,
         files,
+        openThreads,
       };
     });
   }
@@ -368,6 +435,49 @@ export class GitHubReviewHost implements CodeReviewHost {
   }
 
   async publishReview(repository: string, input: PublishReviewInput): Promise<PublishReviewResult> {
+    const published = await this.publishOnly(repository, input);
+    if (!published.published) return published;
+    const requested = [...new Set(input.resolveThreadIds ?? [])];
+    if (requested.length === 0) return published;
+    return { ...published, ...(await this.resolveOwnThreads(repository, input, requested)) };
+  }
+
+  /**
+   * Resolves the requested threads that are still this agent's own open
+   * threads on the PR, each with its own GraphQL call; everything else is
+   * skipped. Never throws: the review is already published, so a refusal
+   * (for example an App without Contents write) only skips.
+   */
+  private async resolveOwnThreads(
+    repository: string,
+    input: PublishReviewInput,
+    requested: string[],
+  ): Promise<{ resolvedThreadIds: string[]; skippedThreadIds: string[] }> {
+    const resolvedThreadIds: string[] = [];
+    try {
+      const { slug } = await this.client.appIdentity();
+      await this.withToken(repository, RESOLVE_WRITE, async (_get, graphql) => {
+        const own = new Set(
+          (await ownOpenThreads(graphql, repository, input.prNumber, input.agentMarker, slug)).map((t) => t.id),
+        );
+        for (const threadId of requested) {
+          if (!own.has(threadId)) continue;
+          try {
+            await graphql(RESOLVE_MUTATION, { threadId });
+            resolvedThreadIds.push(threadId);
+          } catch {
+            // Skipped below; the thread stays open.
+          }
+        }
+      });
+    } catch {
+      // Listing or the token failed: every requested thread is skipped.
+    }
+    const resolved = new Set(resolvedThreadIds);
+    return { resolvedThreadIds, skippedThreadIds: requested.filter((id) => !resolved.has(id)) };
+  }
+
+  private async publishOnly(repository: string, input: PublishReviewInput): Promise<PublishReviewResult> {
     const base = repoPath(repository);
     return this.withToken(repository, REVIEW_WRITE, async (get) => {
       const pr = record(await (await get(`${base}/pulls/${input.prNumber}`)).json());
@@ -409,7 +519,7 @@ export class GitHubReviewHost implements CodeReviewHost {
                     path: c.path,
                     line: c.line,
                     side: c.side,
-                    body: renderInlineComment(c),
+                    body: renderInlineComment(c, input.agentMarker),
                   })),
                 }),
               },
@@ -482,6 +592,8 @@ export class GitHubReviewHost implements CodeReviewHost {
         checkConclusion: conclusion,
         inlineCount: inline.length,
         outsideDiffCount: outside.length,
+        resolvedThreadIds: [],
+        skippedThreadIds: [],
       };
     });
   }
