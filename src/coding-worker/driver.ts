@@ -1,4 +1,7 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { CODING_PROTOCOL_VERSION, parseCodingAgentOutputJson, type CodingAgentOutput } from "../coding/protocol.js";
+import { registryWorkerSetup } from "../coding/registry/worker-config.js";
 import { safeWorkerErrorCode } from "./errors.js";
 import type { WorkerEvent, WorkerProgressEvent, WorkerRunOptions } from "./types.js";
 
@@ -91,11 +94,20 @@ function workerEnvironment(): Record<string, string> {
 }
 
 export async function runCodingWorker(options: WorkerRunOptions): Promise<CodingAgentOutput> {
+  const registry = registryWorkerSetup({
+    proxyBaseUrl: options.proxyBaseUrl,
+    capability: options.capability,
+    cacheRoot: `${options.workspace}/.cache`,
+  });
+  for (const file of registry.files) {
+    await mkdir(dirname(file.path), { recursive: true });
+    await writeFile(file.path, file.content, { mode: file.mode });
+  }
   const client = options.createClient({
     proxyBaseUrl: options.proxyBaseUrl,
     capability: options.capability,
     developerInstructions: WORKER_SECURITY_INSTRUCTIONS,
-    environment: workerEnvironment(),
+    environment: { ...workerEnvironment(), ...registry.env },
   });
   const thread = client.startThread({
     model: options.input.model,
