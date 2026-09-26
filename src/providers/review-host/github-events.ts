@@ -50,9 +50,12 @@ function subjectOf(item: Json | null): { title: string; body: string } | undefin
 
 /**
  * The run that opened this PR. Only a PR the App itself authored counts:
- * anyone can write the marker into their own PR's description.
+ * anyone can write the marker into their own PR's description. Only an open
+ * PR counts too: a merged or closed PR's branch is stale (a squash merge leaves
+ * its commits behind), so a follow-up there starts from the default branch.
  */
 function priorRunIdOf(pr: Json | null, slug: string): string | undefined {
+  if (pr?.state !== "open") return undefined;
   const author = obj(pr?.user);
   if (author?.type !== "Bot" || typeof author.login !== "string") return undefined;
   if (author.login.toLowerCase() !== `${slug}[bot]`.toLowerCase()) return undefined;

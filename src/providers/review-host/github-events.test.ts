@@ -152,7 +152,7 @@ describe("normalizeGitHubEvent", () => {
         author_association: "OWNER",
         user: { id: 2002, login: "dev", type: "User" },
       };
-      const pr = { number: 7, title: "T", body: prBody, user: prAuthor };
+      const pr = { number: 7, title: "T", body: prBody, user: prAuthor, state: "open" };
       return event === "issue_comment"
         ? { action: "created", repository, issue: { ...pr, pull_request: {} }, comment }
         : { action: "created", repository, pull_request: pr, comment };
@@ -202,6 +202,25 @@ describe("normalizeGitHubEvent", () => {
           APP,
         ),
       ).toMatchObject({ priorRunId: "r1" });
+    });
+
+    it("only continues a PR that is still open", () => {
+      // A merged or closed PR's branch is stale (a squash merge leaves its commits
+      // behind), so a follow-up there starts fresh instead of reusing that branch.
+      for (const event of ["issue_comment", "pull_request_review_comment"] as const) {
+        for (const merged of [true, false]) {
+          const payload = onPr("<!-- wardby:r1 -->\nbody", event);
+          const pr = (event === "issue_comment" ? payload.issue : payload.pull_request) as Record<string, unknown>;
+          pr.state = "closed";
+          if (merged) pr.merged_at = "2026-09-26T18:07:55Z";
+          const result = normalizeGitHubEvent(event, payload, APP);
+          expect(result).toMatchObject({ kind: "mention", number: 7 });
+          expect(result).not.toHaveProperty("priorRunId");
+        }
+        const missing = onPr("<!-- wardby:r1 -->\nbody", event);
+        delete ((event === "issue_comment" ? missing.issue : missing.pull_request) as { state?: unknown }).state;
+        expect(normalizeGitHubEvent(event, missing, APP)).not.toHaveProperty("priorRunId");
+      }
     });
 
     it("accepts the legacy marker", () => {
