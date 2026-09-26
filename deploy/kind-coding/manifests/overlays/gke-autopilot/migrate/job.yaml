@@ -68,12 +68,16 @@ spec:
               memory: 128Mi
               ephemeral-storage: 100Mi
       containers:
-        # `prisma migrate deploy`. Needs the migration image: the runtime
+        # `prisma migrate deploy`, then DBOS's own migration of its `dbos`
+        # schema for the control plane's durable executor (EXECUTOR=dbos).
+        # Both run here, as the migrator, because the app's role may not
+        # create or alter a schema: deploy/gke/database-grants.sql gives it
+        # data access to `dbos` only. Needs the migration image: the runtime
         # stage deliberately has no prisma CLI (deploy/Dockerfile asserts its
-        # absence).
+        # absence). `&&`: a failed Prisma migration stops the Job there.
         - name: migrate
           image: wardby-migration
-          command: ["npm", "run", "prisma:migrate"]
+          command: ["sh", "-c", "npm run prisma:migrate && npm run dbos:migrate"]
           env:
             # Password-less: the Auth Proxy sidecar above logs in as this
             # pod's Google identity (wardby-migrator).

@@ -22,6 +22,7 @@ import type { Prisma, PrismaClient, Run, RunTrigger } from "#prisma";
 import type { ProviderRegistry } from "../providers/index.js";
 import type { LoadedTool } from "../providers/engine/types.js";
 import { runStepInline, type StepRunner } from "../providers/engine/types.js";
+import { isLlmEffort } from "../providers/llm/types.js";
 import { validateParams } from "../sandbox/zod-params.js";
 import { runInSandbox } from "../sandbox/run-in-sandbox.js";
 import { asStringArray, asPrefixMap } from "../sandbox/tool-capabilities.js";
@@ -387,6 +388,9 @@ export async function executeRun(
         model: agent.model,
         budgetUsd: effectiveBudgetUsd,
         maxTurns: agent.maxTurns,
+        // Only when set, so an unset agent's pinned step result is unchanged.
+        // A stored value outside the known levels is ignored, not sent.
+        ...(isLlmEffort(agent.effort) ? { effort: agent.effort } : {}),
       },
       // jsonSchema was derived and validated when the tool was created and
       // cached on the row; MCP update_tool re-derives it whenever paramsZod

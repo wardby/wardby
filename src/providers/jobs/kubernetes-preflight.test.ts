@@ -256,6 +256,26 @@ describe("kubernetesPreflight", () => {
     expect(pod!.spec!.hostAliases).toEqual([{ ip: "10.96.0.50", hostnames: ["wardby-proxy"] }]);
     expect(pod!.spec!.activeDeadlineSeconds).toBe(30);
     expect(api.deletedPods).toEqual([{ name: pod!.metadata!.name, gracePeriodSeconds: 0 }]);
+    expect(pod!.spec).not.toHaveProperty("priorityClassName");
+  });
+
+  it("gives the canary the run pods' priority class, so a missing class fails the preflight", async () => {
+    const api = cluster(ok);
+    let pod: V1Pod | undefined;
+    const create = api.createPod.bind(api);
+    api.createPod = async (ns, body) => {
+      pod = structuredClone(body);
+      return create(ns, body);
+    };
+    await kubernetesPreflight({
+      api,
+      config: { ...config, priorityClassName: "wardby-coding-run" },
+      workerImage: IMAGE,
+      maxDiskMb: 2048,
+      sleep: async () => {},
+      timeoutMs: 30_000,
+    });
+    expect(pod!.spec!.priorityClassName).toBe("wardby-coding-run");
   });
 
   it("times out polling, fails closed, and still deletes the canary pod and policy", async () => {

@@ -11,6 +11,7 @@ controls in this guide still apply.
 Use Node.js 24 or newer. Development pins Node 24 through `.nvmrc`, and the
 production runtime image is built on a pinned Node 24 base image.
 Stdio remains local and trusted, with `LOCAL_PRINCIPAL` as its owner identity.
+It holds every scope and every role.
 Delegated HTTP requires `AUTH_ISSUER`, `AUTH_JWKS_URI`, and `AUTH_AUDIENCE`.
 `MCP_CANONICAL_URI` and `AUTH_AUDIENCE` must be identical normalized HTTPS URLs.
 Only explicit loopback development may use HTTP.
@@ -44,7 +45,10 @@ Use the same database and credential hash key for provisioning and the server:
 
 ```sh
 node dist/cli.js auth user create --subject user-identifier
+node dist/cli.js auth user create --subject operator-identifier --role admin
 node dist/cli.js auth user list
+node dist/cli.js auth user grant --subject user-identifier --role package-approver
+node dist/cli.js auth user grant --subject user-identifier --revoke-role package-approver
 node dist/cli.js auth key create --subject user-identifier
 node dist/cli.js auth key list --subject user-identifier
 node dist/cli.js auth key revoke PUBLIC-KEY-ID
@@ -58,8 +62,99 @@ revoke the old public key ID. Revocation also revokes the user's existing
 sessions and OAuth families. Disable is terminal through the CLI; reactivation
 requires a separately reviewed operator workflow.
 
+The CLI rejects any flag a command does not take, for example
+`auth key create --role admin`. It also rejects any unknown role name.
+`auth user grant` changes only an existing user and never creates one. Both
+`--role` and `--revoke-role` can be repeated.
+
+## Roles and privileged operations
+
+Scopes and roles do different jobs:
+
+- **Scopes delegate.** A token's scopes are what the user let a client do on
+  their behalf. A user may consent to any supported scope, and issuing a token
+  never depends on roles.
+- **Roles authorize.** A user has a set of roles. With no roles, the user is a
+  member:
+
+| Role               | Grants                                                          |
+| ------------------ | --------------------------------------------------------------- |
+| `admin`            | `agents:admin` and `packages:approve`                           |
+| `package-approver` | `packages:approve`                                              |
+| (none)             | nothing privileged; every other scope works as the token allows |
+
+Three operations are privileged:
+
+- `make_owner`, which reassigns any agent's owner, including another
+  principal's private agent;
+- setting a BYO `workerImageRef`;
+- approving coding agents' package allowlists or policy.
+
+Each needs **both** its scope on the token **and** a role that grants that
+permission:
+
+- `make_owner` and `workerImageRef` need `agents:admin`.
+- Package approval needs `packages:approve`, or `agents:admin`.
+
+In practice:
+
+- an `admin` can do all three;
+- a `package-approver` can approve packages only;
+- a member can do none of them.
+
+Callers who fail the check get `403`:
+
+- A caller whose token holds the scope but whose roles don't grant it gets a
+  "requires a role" error. Authorizing again for more scopes can't fix this;
+  an operator has to grant a role.
+- A caller who has a role granting the permission but whose token lacks the
+  scope gets the usual `insufficient_scope` challenge, naming the scope to
+  request. For package approval, that is the alternative their role grants.
+
+Roles are read from the database on every request and are never cached.
+
+**Any role change signs the user out.** This applies to both `--role` and
+`--revoke-role`. In the same transaction, `auth user grant` revokes all of the
+user's:
+
+- OAuth grant families and refresh tokens;
+- browser sessions;
+- unexchanged authorization codes.
+
+Every client must sign in and authorize again. The user sees the scopes afresh
+under their new roles. This has two consequences:
+
+- A token minted under the old roles can never regain that reach if a role is
+  granted again later.
+- A grant the user consented to while a privileged scope was inert (for
+  example, an MCP client that requested every scope) never silently gains
+  privileged reach through a promotion.
+
+A change that leaves the roles as they were, such as revoking a role the user
+doesn't hold, revokes nothing.
+
+The other scopes are not privileged, but they are not strictly per-tenant
+either. They are ownership-checked on every call, but public (unowned) agents
+and repository links still let them reach resources other principals attached
+there. The security review tracks this separately.
+
+**Upgrading:** every existing self-hosted user starts with no roles, including
+the operator. After deploying, grant yourself the admin role, then reconnect
+your MCP client:
+
+```sh
+node dist/cli.js auth user grant --subject YOUR_SUBJECT --role admin
+```
+
+In delegated mode, roles come from a signed access-token claim that you map
+with `AUTH_ROLE_CLAIM` and `AUTH_ROLE_MAP`. See
+[Bring your own identity provider](getting-started-identity-provider.md#wardby-roles).
+If you leave them unset, nobody has a role and the privileged operations are
+refused over HTTP.
+
 The browser login uses a single-use, cookie-bound challenge. Consent displays
-the client, canonical resource, and exact supported scopes. Session tokens are
+the client, the canonical resource, and exactly the scopes approval issues: the
+supported part of the request, fixed when the authorization request is created. Session tokens are
 server-side hashes, with a 12-hour idle and 30-day absolute lifetime; HTTPS uses
 `__Host-` cookies with Secure, HttpOnly, Path=/, and SameSite=Lax. Loopback-only
 HTTP development uses explicitly named development cookies without Secure.
@@ -129,13 +224,25 @@ recovery, auth identity derivation, CSRF, transactions, and SSRF before rollout.
 ## Durable executor
 
 `EXECUTOR=dbos` tables live outside Prisma's migration chain: DBOS creates and
-migrates its own `dbos` schema at `launch()`, so the database role used by the
-server needs `CREATE` on that schema (not just the application schema Prisma
-manages). `DBOS_EXECUTOR_ID` is required and must be unique per running
-_process_ — two processes sharing an id each believe they own the other's
-in-flight runs and re-drive them at launch, so the scheduler and the MCP
-server must be given different values. There is deliberately no default:
-`EXECUTOR=dbos` refuses to start without one.
+migrates its own `dbos` schema (`DBOS_SCHEMA`) at `launch()`. On a fresh
+schema that starts with `CREATE SCHEMA IF NOT EXISTS`, which Postgres checks
+against `CREATE` on the _database_ even when the schema already exists, so a
+server role limited to data access cannot launch DBOS on its own. Either give
+the server's role that privilege, or migrate the schema out of band as a
+privileged role with `npm run dbos:migrate` (`dbos schema "$DATABASE_URL"`)
+and grant the server's role `USAGE` on the schema plus `SELECT`, `INSERT`,
+`UPDATE` and `DELETE` on its tables, with default privileges for tables a
+later SDK version adds. Once the schema is current, `launch()` changes
+nothing. The GKE module does the latter (`deploy/gke/database-grants.sql`).
+
+`DBOS_EXECUTOR_ID` must be unique per running _process_ — two processes
+sharing an id each believe they own the other's in-flight runs and re-drive
+them at launch. Left unset, each process generates a random one, which is the
+safe default: a process that replaces a dead one does not need its id,
+because the reconciler adopts any live workflow whose run's heartbeat has gone
+stale, whichever executor id owns it. Set a fixed id only for a single,
+long-lived process that should re-drive its own runs at launch rather than
+after the heartbeat timeout.
 
 **New data at rest.** Durable execution checkpoints every step's result into
 `dbos.operation_outputs`: each turn's assistant text, every tool call's
@@ -168,7 +275,8 @@ reconciled to `lost` once its heartbeat times out, because no executor is left
 to recover it, and nothing else in the deployment depends on the `dbos`
 schema. The return trip is the part to know about: those workflows are still
 PENDING in the `dbos` schema, and re-enabling `EXECUTOR=dbos` with the same
-executor id re-drives them at launch. They no longer re-spend — `executeRun`
+executor id re-drives them at launch. (With a random per-process id, nothing
+re-drives them: they stay PENDING until pruned.) They no longer re-spend — `executeRun`
 short-circuits on any run whose row is already terminal, so a re-driven
 workflow whose run was reaped as `lost` does no work and leaves the row
 `lost` — but the workflows do wake up and run to completion in DBOS's own
@@ -198,9 +306,16 @@ and pins the validated DNS result to the connection while retaining Host and
 TLS verification. Cross-origin redirects remove credentials, including custom
 API-key headers; forwarding a request body across origins is rejected.
 
-`WARDBY_FETCH_ALLOWED_HOSTS` accepts exact normalized hosts only. Private-host
-allowlisting intentionally bypasses destination isolation for those hosts.
-Separately deny metadata/private egress at the container/VPC/firewall layer.
+Every resolved address must be global. A tool's own `allowedHosts` only
+narrows egress; it never opens a private, loopback or link-local destination.
+Only the operator's `WARDBY_FETCH_ALLOWED_HOSTS` (exact normalized hosts) can,
+and a non-wildcard tool must list the host too. Cloud metadata endpoints
+(`169.254.169.254`, `169.254.169.252`, `169.254.170.2`, `169.254.170.23`,
+`100.100.100.200`, `fd00:ec2::254`, `fd00:ec2::23`, `fd20:ce::254`, their
+mapped/NAT64/6to4 IPv6 forms, `metadata.google.internal`, `metadata`) are
+always blocked, even if listed.
+The network layer cannot back this up for the control plane on GKE, because
+Workload Identity needs the metadata server.
 Sandbox code can explicitly log secrets it has been given; log size limits do
 not provide automatic redaction. Keep tool-authoring privileges restricted.
 Public/non-owner tool listings expose only id/name/description; owners retain

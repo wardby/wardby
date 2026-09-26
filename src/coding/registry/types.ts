@@ -147,6 +147,9 @@ export interface RegistryAdapter {
    *  ecosystems whose indexes omit dependencies (PyPI), where such a walk
    *  would only make upstream calls and find nothing. */
   readonly dependenciesInMetadata: boolean;
+  /** Lockfile names this ecosystem's client writes, and a rewrite of the proxy download URLs it records in one back to
+   *  public URLs, applied before the workspace is collected (lockfiles.ts). Omitted when the client records none. */
+  readonly lockfiles?: { names: readonly string[]; normalize(content: string, registryUrl: string): string };
 
   // --- Allowlist syntax -------------------------------------------------
   /** Parse one allowlist entry in this ecosystem's syntax. Throws an

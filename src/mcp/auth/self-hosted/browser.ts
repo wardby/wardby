@@ -220,7 +220,7 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
       }
       if (req.method === "GET" && url.pathname === "/consent") {
         const id = url.searchParams.get("interaction") ?? "";
-        const { interaction, challenge } = await provider.consentPage(cookies.get(sessionName) ?? "", id);
+        const { interaction, challenge, scopes } = await provider.consentPage(cookies.get(sessionName) ?? "", id);
         const name = (interaction.client.metadata as { client_name: string }).client_name;
         html(
           res,
@@ -229,7 +229,7 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
             "</h1><p>Resource: " +
             escape(interaction.resource) +
             "</p><p>Scopes: " +
-            escape(interaction.requestedScope) +
+            escape(scopes.length ? scopes.join(" ") : "(none)") +
             '</p><form action="/consent" method="post">' +
             hidden("interaction", id) +
             hidden("csrf", challenge) +

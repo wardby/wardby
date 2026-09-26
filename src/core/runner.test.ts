@@ -21,6 +21,7 @@ interface FakeAgent {
   kind?: "native" | "coding";
   budgetGroupId?: string | null;
   memoryEnabled?: boolean;
+  effort?: string | null;
 }
 
 interface FakeTool {
@@ -416,6 +417,32 @@ describe("runAgent", () => {
 
     expect(captured?.agent).toEqual({ systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 7 });
     expect(captured?.tools).toEqual([]);
+  });
+
+  it.each([
+    { stored: "low", expected: "low" },
+    { stored: null, expected: undefined },
+    { stored: "extreme", expected: undefined },
+  ])("pins the agent's effort ($stored) into the engine context", async ({ stored, expected }) => {
+    const db = fakeDb([
+      { id: "a1", name: "solo", systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 7, effort: stored },
+    ]);
+    let captured: EngineRunContext | undefined;
+    const engine = fakeEngine(
+      { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.001 } },
+      (ctx) => {
+        captured = ctx;
+      },
+    );
+
+    await runAgent(
+      "solo",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+      db,
+    );
+
+    expect(captured?.agent.effort).toBe(expected);
+    expect("effort" in captured!.agent).toBe(expected !== undefined);
   });
 
   it("loads attached tools' cached JSON Schema for the engine (not re-derived per run)", async () => {

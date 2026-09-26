@@ -192,7 +192,11 @@ because some objects depend on it". Recover with
 
 By default the module deploys `auth_provider = "self-hosted"`: wardby acts as
 its own OAuth authorization server, and you create accounts with
-`wardby auth user create`, which hands back a login key. That needs no external
+`wardby auth user create`, which hands back a login key. Add `--role admin` for
+an operator account. Only users with a role that grants them can use the
+privileged operations, such as
+`make_owner`, BYO `workerImageRef`, and package approval (see
+`docs/security-deployment.md`, "Roles and privileged operations"). That needs no external
 identity system, which makes it the fastest way to get a deployment running —
 but most deployments will want to front an IdP they already run:
 
@@ -200,7 +204,15 @@ but most deployments will want to front an IdP they already run:
 auth_provider = "delegating"
 auth_issuer   = "https://login.example.com/realms/prod"
 auth_jwks_uri = "https://login.example.com/realms/prod/protocol/openid-connect/certs"
+# Optional: which IdP roles/groups become wardby roles (both or neither).
+auth_role_claim = "realm_access.roles"
+auth_role_map   = "wardby-admin=admin,wardby-packages=package-approver"
 ```
+
+Without `auth_role_claim`/`auth_role_map`, no caller holds a wardby role, so
+`make_owner`, BYO `workerImageRef` and package approval are refused. Matching is
+exact and case-sensitive. Map only IdP values that users can't assign
+themselves. See `docs/getting-started-identity-provider.md`, "Wardby roles".
 
 In this mode wardby only _verifies_ tokens — it never issues them — and there is
 no local user administration at all: a `Principal` row is created from the

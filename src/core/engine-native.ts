@@ -250,7 +250,12 @@ export class NativeEngine implements Engine {
 
     try {
       for await (const event of ctx.providers.llm.stream(
-        { model: ctx.agent.model, messages, tools: tools.length > 0 ? tools : undefined },
+        {
+          model: ctx.agent.model,
+          messages,
+          tools: tools.length > 0 ? tools : undefined,
+          ...(ctx.agent.effort ? { effort: ctx.agent.effort } : {}),
+        },
         controller.signal,
       )) {
         if (event.type === "text") {

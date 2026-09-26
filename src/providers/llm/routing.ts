@@ -4,7 +4,26 @@
  * selection (Agent.model) selects the provider too — GPT and Claude agents
  * run in one deployment. Unknown model / duplicate registration fail closed.
  */
-import type { LlmMessage, LlmProvider, LlmRequest, LlmStreamEvent, LlmToolDef } from "./types.js";
+import type { LlmEffort, LlmMessage, LlmProvider, LlmRequest, LlmStreamEvent, LlmToolDef } from "./types.js";
+import { anthropicSupportedEfforts } from "./pricing-anthropic.js";
+import { bedrockClaudeSupportedEfforts } from "./pricing-bedrock-claude.js";
+
+/**
+ * Effort levels `model` accepts, whichever provider owns it — for config-time
+ * validation, so it needs no credentials. Each provider's own table is the
+ * source of truth. OpenAI models accept none: the Chat Completions
+ * `reasoning_effort` parameter is documented for o-series models only, and
+ * none is on the roster.
+ */
+export function modelSupportedEfforts(model: string): readonly LlmEffort[] {
+  const direct = anthropicSupportedEfforts(model);
+  if (direct.length > 0) return direct;
+  return bedrockClaudeSupportedEfforts(model);
+}
+
+export function modelAcceptsEffort(model: string, effort: LlmEffort): boolean {
+  return modelSupportedEfforts(model).includes(effort);
+}
 
 export interface LlmRegistration {
   provider: LlmProvider;

@@ -60,6 +60,11 @@ model Agent {
   /// created for it.
   memoryEnabled Boolean @default(false)
 
+  /// Un-phased: reasoning effort for native agents (low, medium, high,
+  /// xhigh, max). Validated against the model in code, not a DB enum.
+  /// Null = the provider's default.
+  effort String?
+
   /// Un-phased: sub-agent composition edges (see AgentSubAgent below). An
   /// agent can be a parent (has children it can delegate to) and/or a
   /// child (is delegated to by others) independently.
@@ -680,6 +685,11 @@ model AuthUser {
   principal   Principal                @relation(fields: [principalId], references: [id])
   displayName String?
   status      String                   @default("enabled")
+  /// wardby roles (src/mcp/auth/resource-server.ts ROLE_PERMISSIONS: admin,
+  /// package-approver), set with `wardby auth user grant`. Empty = member.
+  /// A privileged operation needs its scope on the token AND a role here
+  /// that grants it; unknown values grant nothing.
+  roles       String[]                 @default([])
   createdAt   DateTime                 @default(now())
   updatedAt   DateTime                 @updatedAt
   loginKeys   AuthLoginKey[]

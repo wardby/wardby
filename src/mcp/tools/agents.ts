@@ -4,6 +4,8 @@ import { z } from "zod";
 import { CodingProfilePatchSchema, CodingProfileSchema, type CodingProfile } from "../../coding/profile.js";
 import { codingProviderSupportsModel } from "../../coding/provider.js";
 import { validateCronExpression } from "../../core/cron.js";
+import { modelSupportedEfforts } from "../../providers/llm/routing.js";
+import { LLM_EFFORT_LEVELS, isLlmEffort } from "../../providers/llm/types.js";
 import {
   assertCanMutate,
   canRead,
@@ -11,7 +13,7 @@ import {
   requireReadableBudgetGroup,
   visibleToPrincipal,
 } from "../auth/ownership.js";
-import { insufficientScope, protectedResourceMetadataUrl, requireScope } from "../auth/resource-server.js";
+import { requireAnyScope, requireScope } from "../auth/resource-server.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
@@ -27,8 +29,7 @@ function requireWorkerImageRefScope(ctx: McpRequestContext): void {
 
 /** Package allowlists widen what a run may download, so they need their own approval. */
 function requirePackageApproval(ctx: McpRequestContext): void {
-  if (ctx.scopes.has("packages:approve") || ctx.scopes.has("agents:admin")) return;
-  throw insufficientScope(["packages:approve"], protectedResourceMetadataUrl(ctx.canonicalUri));
+  requireAnyScope(ctx, ctx.canonicalUri, "packages:approve", "agents:admin");
 }
 
 const MAX_AGENT_NAME_CHARS = 200;
@@ -48,6 +49,7 @@ const agentFields = {
   kind: z.enum(["native", "coding"]),
   budgetGroupId: z.string().min(1).max(128),
   memoryEnabled: z.boolean(),
+  effort: z.enum(LLM_EFFORT_LEVELS),
 };
 
 const CreateAgentSchema = z
@@ -63,6 +65,7 @@ const CreateAgentSchema = z
     kind: agentFields.kind.default("native"),
     budgetGroupId: agentFields.budgetGroupId.optional(),
     memoryEnabled: agentFields.memoryEnabled.default(false),
+    effort: agentFields.effort.optional(),
     codingProfile: CodingProfileSchema.optional(),
   })
   .strict()
@@ -112,6 +115,7 @@ const UpdateAgentSchema = z
     kind: agentFields.kind.optional(),
     budgetGroupId: agentFields.budgetGroupId.nullable().optional(),
     memoryEnabled: agentFields.memoryEnabled.optional(),
+    effort: agentFields.effort.nullable().optional(),
     codingProfile: CodingProfilePatchSchema.optional(),
   })
   .strict();
@@ -180,6 +184,27 @@ function validateSchedule(schedule: string | null | undefined, timezone: string)
   }
 }
 
+/**
+ * Effort only drives the native engine, and only on a model that accepts the
+ * level; reject rather than store a setting that would silently do nothing.
+ */
+function validateEffort(kind: "native" | "coding", model: string, effort: string | null | undefined): void {
+  if (effort == null) return;
+  if (kind !== "native") {
+    throw new McpError(400, "effort is only valid for native agents; coding agents do not use it.");
+  }
+  const accepted = modelSupportedEfforts(model);
+  if (!isLlmEffort(effort) || !accepted.includes(effort)) {
+    throw new McpError(
+      400,
+      `Model "${model}" does not accept effort "${effort}". ` +
+        (accepted.length > 0
+          ? `Accepted levels: ${accepted.join(", ")}.`
+          : "It accepts no effort setting; leave effort unset (or null)."),
+    );
+  }
+}
+
 function storedProfile(profile: CodingAgentProfile): CodingProfile {
   return CodingProfileSchema.parse({
     provider: profile.provider,
@@ -218,6 +243,11 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         kind: { type: "string", enum: ["native", "coding"] },
         budgetGroupId: { type: "string" },
         memoryEnabled: { type: "boolean" },
+        effort: {
+          type: "string",
+          enum: [...LLM_EFFORT_LEVELS],
+          description: "Reasoning effort for native agents. Unset uses the provider default.",
+        },
         codingProfile: { ...profileJsonSchema, required: ["repository"] },
       },
       required: ["name", "systemPrompt", "model", "budgetUsd"],
@@ -233,6 +263,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       )
         requirePackageApproval(ctx);
       validateSchedule(args.schedule, args.timezone ?? "UTC");
+      validateEffort(args.kind, args.model, args.effort);
       if (args.budgetGroupId) {
         await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id);
       }
@@ -268,6 +299,11 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         kind: { type: "string", enum: ["native", "coding"] },
         budgetGroupId: { type: ["string", "null"] },
         memoryEnabled: { type: "boolean" },
+        effort: {
+          type: ["string", "null"],
+          enum: [...LLM_EFFORT_LEVELS, null],
+          description: "Reasoning effort for native agents. Null clears it back to the provider default.",
+        },
         codingProfile: profileJsonSchema,
       },
       required: ["id"],
@@ -290,6 +326,11 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           if (nextKind === "native" && args.codingProfile) {
             throw new McpError(400, "A coding profile is only valid for coding agents.");
           }
+          validateEffort(
+            nextKind,
+            args.model ?? existing.model,
+            args.effort !== undefined ? args.effort : existing.effort,
+          );
 
           let nextProfile: CodingProfile | null = null;
           if (nextKind === "coding") {

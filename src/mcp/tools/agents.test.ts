@@ -24,6 +24,7 @@ interface FakeAgentRow {
   kind: "native" | "coding";
   codingProfile: FakeCodingProfile | null;
   budgetGroupId: string | null;
+  effort?: string | null;
 }
 
 interface FakeCodingProfile {
@@ -140,10 +141,19 @@ function fakeDb(
   return db as unknown as import("#prisma").PrismaClient;
 }
 
-function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {
+// Callers default to NO roles (a member), as production does: a privileged
+// field accidentally gated by scope alone then fails these tests. Tests of a
+// privileged operation's scope gate pass ["admin"] explicitly.
+function fakeCtx(
+  db: ReturnType<typeof fakeDb>,
+  principalId: string,
+  scopes: string[],
+  roles: string[] = [],
+): McpRequestContext {
   return {
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
+    roles,
     canonicalUri: CANONICAL_URI,
     providers: fakeProviders,
     db,
@@ -609,7 +619,7 @@ describe("agent CRUD tools", () => {
   it("create_agent with a workerImageRef requires agents:admin, not just agents:write", async () => {
     const db = fakeDb();
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 
@@ -626,14 +636,14 @@ describe("agent CRUD tools", () => {
     });
 
     expect(result.isError).toBe(true);
-    expect((result.content as { text: string }[])[0].text).toMatch(/scope/i);
+    expect((result.content as { text: string }[])[0].text).toMatch(/Insufficient scope/);
     await client.close();
   });
 
   it("create_agent with a workerImageRef succeeds when the caller also holds agents:admin", async () => {
     const db = fakeDb();
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:admin"]));
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:admin"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 
@@ -663,7 +673,7 @@ describe("agent CRUD tools", () => {
     ] as const) {
       const db = fakeDb();
       const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-      mcp.setFixedContext(fakeCtx(db, "p1", [...scopes]));
+      mcp.setFixedContext(fakeCtx(db, "p1", [...scopes], ["admin"]));
       registerAgentTools(mcp);
       const client = await connectClient(mcp);
       const result = await client.callTool({
@@ -711,7 +721,7 @@ describe("agent CRUD tools", () => {
   ] as const)("update_agent changing packageAllowlist with %j allowed=%s", async (scopes, allowed) => {
     const db = fakeDb([codingAgentSeed()]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", [...scopes]));
+    mcp.setFixedContext(fakeCtx(db, "p1", [...scopes], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
     const result = await client.callTool({
@@ -789,7 +799,7 @@ describe("agent CRUD tools", () => {
       },
     ]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 
@@ -798,7 +808,7 @@ describe("agent CRUD tools", () => {
       arguments: { id: "a1", codingProfile: { workerImageRef: VALID_WORKER_IMAGE_REF } },
     });
     expect(result.isError).toBe(true);
-    expect((result.content as { text: string }[])[0].text).toMatch(/scope/i);
+    expect((result.content as { text: string }[])[0].text).toMatch(/Insufficient scope/);
     await client.close();
   });
 
@@ -926,6 +936,65 @@ describe("agent CRUD tools", () => {
     await client.close();
   });
 
+  describe("privileged operations by role (the token also carries every privileged scope)", () => {
+    const text = (result: { content: unknown }) => (result.content as { text: string }[])[0].text;
+    const ALL = ["agents:write", "agents:admin", "packages:approve"];
+    async function as(roles: string[], scopes = ALL) {
+      const db = fakeDb([codingAgentSeed()], [], ["new-owner"]);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", scopes, roles));
+      registerAgentTools(mcp);
+      return connectClient(mcp);
+    }
+    const ops = {
+      make_owner: { name: "make_owner", arguments: { agentId: "a1", ownerId: "new-owner" } },
+      workerImageRef: {
+        name: "create_agent",
+        arguments: {
+          name: "byo-coder",
+          systemPrompt: "x",
+          model: "gpt-5.6-luna",
+          budgetUsd: 0.25,
+          kind: "coding",
+          codingProfile: { repository: "openai/example", workerImageRef: VALID_WORKER_IMAGE_REF },
+        },
+      },
+      packages: {
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile: { packageAllowlist: { npm: ["react"] } } },
+      },
+    } as const;
+
+    it.each([
+      [[], { make_owner: false, workerImageRef: false, packages: false }],
+      [["package-approver"], { make_owner: false, workerImageRef: false, packages: true }],
+      [["admin"], { make_owner: true, workerImageRef: true, packages: true }],
+    ] as const)("roles %j", async (roles, allowed) => {
+      for (const [op, call] of Object.entries(ops) as [keyof typeof ops, (typeof ops)[keyof typeof ops]][]) {
+        const client = await as([...roles]);
+        const result = await client.callTool(call);
+        expect(Boolean(result.isError), `${op} for ${JSON.stringify(roles)}`).toBe(!allowed[op]);
+        if (!allowed[op]) expect(text(result)).toMatch(/requires a role that grants it/);
+        await client.close();
+      }
+    });
+
+    it("package-approver still needs packages:approve on the token", async () => {
+      const client = await as(["package-approver"], ["agents:write"]);
+      const result = await client.callTool(ops.packages);
+      expect(result.isError).toBe(true);
+      expect(text(result)).toMatch(/Insufficient scope/);
+      await client.close();
+    });
+
+    it("non-privileged edits still work for a member", async () => {
+      const client = await as([], ["agents:write"]);
+      const result = await client.callTool({ name: "update_agent", arguments: { id: "a1", systemPrompt: "y" } });
+      expect(result.isError).toBeFalsy();
+      await client.close();
+    });
+  });
+
   it("make_owner reassigns an already-owned agent to a different principal, with agents:admin", async () => {
     const db = fakeDb(
       [
@@ -946,7 +1015,7 @@ describe("agent CRUD tools", () => {
       ["new-owner"],
     );
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"]));
+    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 
@@ -977,7 +1046,7 @@ describe("agent CRUD tools", () => {
       ["new-owner"],
     );
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"]));
+    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 
@@ -1002,7 +1071,7 @@ describe("agent CRUD tools", () => {
       },
     ]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"]));
+    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 
@@ -1033,20 +1102,20 @@ describe("agent CRUD tools", () => {
       ["p1"],
     );
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 
     const result = await client.callTool({ name: "make_owner", arguments: { agentId: "a1", ownerId: "p1" } });
     expect(result.isError).toBe(true);
-    expect((result.content as { text: string }[])[0].text).toMatch(/scope/i);
+    expect((result.content as { text: string }[])[0].text).toMatch(/Insufficient scope/);
     await client.close();
   });
 
   it("make_owner 404s for a missing agent", async () => {
     const db = fakeDb([], [], ["new-owner"]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"]));
+    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 
@@ -1074,7 +1143,7 @@ describe("agent CRUD tools", () => {
       },
     ]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"]));
+    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 
@@ -1201,5 +1270,137 @@ describe("agent CRUD tools", () => {
     const body = JSON.parse((result.content as { text: string }[])[0].text) as { budgetGroupId: string | null };
     expect(body.budgetGroupId).toBeNull();
     await client.close();
+  });
+
+  describe("effort", () => {
+    async function setup(seed: FakeAgentSeed[] = []) {
+      const db = fakeDb(seed);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+      registerAgentTools(mcp);
+      return connectClient(mcp);
+    }
+    const nativeSeed = (effort: string | null): FakeAgentSeed => ({
+      id: "a1",
+      name: "reviewer",
+      systemPrompt: "s",
+      model: "claude-sonnet-5",
+      budgetUsd: 1,
+      maxTurns: 10,
+      schedule: null,
+      timezone: "UTC",
+      ownerId: "p1",
+      tools: [],
+      effort,
+    });
+    const body = (result: Awaited<ReturnType<Client["callTool"]>>) =>
+      JSON.parse((result.content as { text: string }[])[0].text);
+    const base = { name: "reviewer", systemPrompt: "s", budgetUsd: 1 };
+
+    it("create_agent stores an effort the model accepts, and defaults to unset", async () => {
+      const client = await setup();
+      const set = await client.callTool({
+        name: "create_agent",
+        arguments: { ...base, model: "claude-sonnet-5", effort: "low" },
+      });
+      expect(set.isError).toBeFalsy();
+      expect(body(set).effort).toBe("low");
+      const unset = await client.callTool({
+        name: "create_agent",
+        arguments: { ...base, name: "other", model: "claude-sonnet-5" },
+      });
+      expect(body(unset).effort).toBeUndefined();
+      await client.close();
+    });
+
+    it.each([
+      { model: "claude-haiku-4-5", effort: "low" },
+      { model: "gpt-4o", effort: "high" },
+    ])("create_agent rejects effort $effort on $model", async ({ model, effort }) => {
+      const client = await setup();
+      const result = await client.callTool({ name: "create_agent", arguments: { ...base, model, effort } });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toContain(`Model \\"${model}\\" does not accept effort \\"${effort}\\"`);
+      await client.close();
+    });
+
+    it("create_agent rejects an unknown effort level", async () => {
+      const client = await setup();
+      const result = await client.callTool({
+        name: "create_agent",
+        arguments: { ...base, model: "claude-sonnet-5", effort: "extreme" },
+      });
+      expect(result.isError).toBe(true);
+      await client.close();
+    });
+
+    it("create_agent rejects effort on a coding agent", async () => {
+      const client = await setup();
+      const result = await client.callTool({
+        name: "create_agent",
+        arguments: {
+          ...base,
+          model: "claude-sonnet-5",
+          effort: "low",
+          kind: "coding",
+          codingProfile: { provider: "claude-code", repository: "your-org/your-repo" },
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toMatch(/only valid for native agents/);
+      await client.close();
+    });
+
+    it("update_agent sets and clears effort", async () => {
+      const client = await setup([nativeSeed(null)]);
+      const set = await client.callTool({ name: "update_agent", arguments: { id: "a1", effort: "xhigh" } });
+      expect(set.isError).toBeFalsy();
+      expect(body(set).effort).toBe("xhigh");
+      const cleared = await client.callTool({ name: "update_agent", arguments: { id: "a1", effort: null } });
+      expect(cleared.isError).toBeFalsy();
+      expect(body(cleared).effort).toBeNull();
+      await client.close();
+    });
+
+    it("update_agent rejects a level the agent's model does not accept", async () => {
+      const client = await setup([{ ...nativeSeed(null), model: "claude-haiku-4-5" }]);
+      const result = await client.callTool({ name: "update_agent", arguments: { id: "a1", effort: "low" } });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toContain('Model \\"claude-haiku-4-5\\" does not accept effort \\"low\\"');
+      await client.close();
+    });
+
+    it("update_agent re-validates an existing effort when the model changes", async () => {
+      const client = await setup([nativeSeed("medium")]);
+      const rejected = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", model: "claude-haiku-4-5" },
+      });
+      expect(rejected.isError).toBe(true);
+      expect(JSON.stringify(rejected)).toContain('does not accept effort \\"medium\\"');
+
+      const allowed = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", model: "claude-haiku-4-5", effort: null },
+      });
+      expect(allowed.isError).toBeFalsy();
+      expect(body(allowed)).toMatchObject({ model: "claude-haiku-4-5", effort: null });
+      await client.close();
+    });
+
+    it("update_agent rejects effort on a coding agent, including a native agent becoming coding", async () => {
+      const client = await setup([nativeSeed("low")]);
+      const result = await client.callTool({
+        name: "update_agent",
+        arguments: {
+          id: "a1",
+          kind: "coding",
+          codingProfile: { provider: "claude-code", repository: "your-org/your-repo" },
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toMatch(/only valid for native agents/);
+      await client.close();
+    });
   });
 });

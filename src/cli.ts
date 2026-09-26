@@ -2,7 +2,7 @@
 /**
  * Minimal CLI.
  *
- *   wardby agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule "<cron>"] [--timezone <tz>] [--memory-enabled]
+ *   wardby agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule "<cron>"] [--timezone <tz>] [--memory-enabled] [--effort <level>]
  *   wardby agent list
  *   wardby agent schedule <name> --cron "<expr>" [--timezone <tz>] [--disable]
  *   wardby run <name>
@@ -32,7 +32,12 @@ import { drainCodingQueue } from "./core/coding-queue.js";
 import { isImmutableDockerImage } from "./providers/jobs/docker-isolation.js";
 import { ClientNodeKubernetesApi } from "./providers/jobs/kubernetes-client.js";
 import { describePreflightFailure, kubernetesPreflight } from "./providers/jobs/kubernetes-preflight.js";
-import { RoutingLlmProvider, resolveLlmRegistrations } from "./providers/llm/index.js";
+import {
+  RoutingLlmProvider,
+  isLlmEffort,
+  modelSupportedEfforts,
+  resolveLlmRegistrations,
+} from "./providers/llm/index.js";
 import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/index.js";
 import type { Executor } from "./providers/executor/types.js";
 import { PostgresDatastore } from "./providers/datastore/index.js";
@@ -135,6 +140,7 @@ async function agentCreate(args: string[]): Promise<void> {
       timezone: { type: "string" },
       "max-turns": { type: "string" },
       "memory-enabled": { type: "boolean" },
+      effort: { type: "string" },
     },
   });
 
@@ -161,6 +167,16 @@ async function agentCreate(args: string[]): Promise<void> {
     }
   }
 
+  if (values.effort !== undefined) {
+    const accepted = modelSupportedEfforts(values.model);
+    if (!isLlmEffort(values.effort) || !accepted.includes(values.effort)) {
+      fail(
+        `model "${values.model}" does not accept --effort "${values.effort}"` +
+          (accepted.length > 0 ? ` (accepted: ${accepted.join(", ")}).` : " (it accepts no effort setting)."),
+      );
+    }
+  }
+
   const agent = await prisma.agent.create({
     data: {
       name: values.name,
@@ -171,6 +187,7 @@ async function agentCreate(args: string[]): Promise<void> {
       timezone,
       maxTurns,
       memoryEnabled: values["memory-enabled"] ?? false,
+      effort: values.effort ?? null,
     },
   });
   console.log(agent.id);
@@ -691,14 +708,11 @@ async function scheduler(args: string[]): Promise<void> {
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
   const memory = buildMemory();
-  const nativeExecutor = buildExecutor(
-    config,
-    { llm, engine, datastore, secrets, memory, reviewHosts: buildReviewHosts() },
-    prisma,
-  );
+  const reviewHosts = buildReviewHosts();
+  const nativeExecutor = buildExecutor(config, { llm, engine, datastore, secrets, memory, reviewHosts }, prisma);
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig: config });
   await executor.launch?.();
-  const reconciler = startReconciler({ db: prisma, executor });
+  const reconciler = startReconciler({ db: prisma, executor, reviewHosts });
   const sched = startScheduler({
     executor,
     db: prisma,

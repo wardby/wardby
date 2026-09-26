@@ -426,6 +426,28 @@ describe("tool authoring tools", () => {
     await client.close();
   });
 
+  it("dry_run_tool cannot reach the metadata server by listing it in allowedHosts (S2-1)", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "dry_run_tool",
+      arguments: {
+        paramsZod: "z.object({})",
+        code: "return await fetch('http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token', { headers: { 'Metadata-Flavor': 'Google' } });",
+        sampleArgs: {},
+        allowedHosts: ["169.254.169.254"],
+      },
+    });
+    const body = parseText(result as never) as { result: { ok: boolean; errorMessage?: string } };
+    expect(body.result.ok).toBe(false);
+    expect(body.result.errorMessage).toContain("fetch_destination_blocked");
+    await client.close();
+  });
+
   it("dry_run_tool rejects a malformed allowedHosts entry", async () => {
     const db = fakeDb();
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });

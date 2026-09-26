@@ -26,6 +26,9 @@ use `deploy/gke` and the `gke-autopilot` Kubernetes overlay described here.
   Cloud Armor rate-limit policy.
 - Namespace RBAC and default-deny network policies constrain the launcher,
   proxy, control plane, and worker pods.
+- Native runs use the durable executor (`EXECUTOR=dbos`), so a run survives
+  the control-plane pod being preempted or rescheduled. See "Durable executor"
+  below.
 
 Claude Code's two-container executor is currently Docker-only; the Kubernetes
 launcher accepts Codex coding workers.
@@ -242,9 +245,9 @@ group role in `deploy/gke/database-grants.sql`:
 
 | Workload      | Google service account   | Kubernetes service account | May do                                                                                                                                                                 |
 | ------------- | ------------------------ | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Control plane | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app`: read/write every table                                                                                                                                   |
+| Control plane | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app`: read/write every table, including the durable executor's in schema `dbos`; never change a schema                                                         |
 | Coding proxy  | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy`: only its budget ledger — `CodingProxySession`/`CodingProxyRequest`, plus update `tokensIn`, `tokensOut` and `costUsd` on `Run`, and read only its `id` |
-| Migrations    | `<name_prefix>-migrator` | `wardby-migrator`          | Acts as the table owner (`SET ROLE`), so `prisma migrate deploy` can alter and create tables                                                                           |
+| Migrations    | `<name_prefix>-migrator` | `wardby-migrator`          | Acts as the table owner (`SET ROLE`), so `prisma migrate deploy` and `dbos schema` can alter and create tables                                                         |
 
 `deploy/gke/bootstrap-database-iam.sh` applies the grants as the built-in
 owner, from a short-lived Job inside the cluster. Run it whenever
@@ -371,12 +374,27 @@ The discovery request should return `200`; an unauthenticated MCP
 `initialize` request should return `401`. Send the JSON body: without it the
 server answers `415`, because it checks the content type before the token.
 
-Create the first self-hosted login credential. It is printed once:
+Create the first self-hosted login credential. It is printed once.
+`--role admin` makes this operator account an admin. Only admins can use all
+the privileged operations: `make_owner`, BYO `workerImageRef`, and package
+approval. A `package-approver` can approve packages only. Users created
+without `--role` have no roles. See
+[roles and privileged operations](security-deployment.md#roles-and-privileged-operations).
 
 ```sh
 kubectl exec -n wardby-coding deploy/wardby-control-plane \
   -c control-plane -- \
-  node dist/cli.js auth user create --subject YOUR_SUBJECT
+  node dist/cli.js auth user create --subject YOUR_SUBJECT --role admin
+```
+
+When you upgrade a deployment created before roles existed, every existing
+user has no roles, including you. Grant the admin role to yourself, then
+reconnect your MCP client:
+
+```sh
+kubectl exec -n wardby-coding deploy/wardby-control-plane \
+  -c control-plane -- \
+  node dist/cli.js auth user grant --subject YOUR_SUBJECT --role admin
 ```
 
 The deployment helper configures Wardby's self-hosted authorization server by
@@ -416,6 +434,75 @@ Migrations run as a `wardby-migrate-<unix time>` Job before the Deployments
 roll; if it fails, `up.sh` prints the `migrate` and `cloud-sql-proxy` container
 logs (and, if those are empty or the Job timed out, the Job's and pod's
 events), then stops.
+
+### Durable executor
+
+The control plane runs native runs on the durable executor (`EXECUTOR=dbos`):
+each LLM turn and tool call is checkpointed in Postgres, in schema `dbos`. If
+the control-plane pod is preempted, evicted or rescheduled, its replacement
+picks each interrupted run up from its last completed step once the run's
+heartbeat times out (about a minute after the replacement is running). Only
+the step that was in flight runs again. Coding runs are Kubernetes Jobs and are unaffected.
+
+- **Schema.** The migration Job creates and migrates `dbos` as the migrator
+  (`npm run dbos:migrate`) after the Prisma migrations, so it always runs
+  before the control plane starts. The control plane's role only reads and
+  writes it: `database-grants.sql` grants `wardby_app` `USAGE` on the schema,
+  `SELECT`/`INSERT`/`UPDATE`/`DELETE` on its tables, and the same through the
+  owner's default privileges for tables a later DBOS version adds.
+- **Executor id.** `DBOS_EXECUTOR_ID` is left unset, so every process gets a
+  random one. A replacement pod does not need the old pod's id: the
+  reconciler adopts any interrupted run, whichever process started it. This is
+  also what makes the overlapping rolling update safe.
+- **Version.** `up.sh` sets `DBOS__APPVERSION` to the runtime image digest. A
+  run resumes only under the version that started it: across a pod move, or an
+  `up.sh` re-run whose source did not change, runs continue. When you deploy
+  new code, runs still in flight as the old pod stops are marked `lost`, the
+  same as without the durable executor. Deploy between runs if that matters.
+- **Data at rest and retention.** `dbos.operation_outputs` holds every step's
+  output — prompts, model responses and full tool results — with no retention
+  limit. Pruning finished workflows is the operator's job; see
+  [Durable executor](security-deployment.md#durable-executor) for what is
+  stored and how to prune it with `DBOS.deleteWorkflow`.
+
+**Enabling it on an existing deployment.** The grants changed, so apply them
+before deploying: run `deploy/gke/bootstrap-database-iam.sh --check`, then
+`deploy/gke/bootstrap-database-iam.sh`, then `deploy/gke/up.sh`. Without the
+grants the new control-plane pod crash-loops with "permission denied" while
+the old one keeps serving, and `up.sh` stops at the rollout. On a brand-new
+project the order under "Database login" already covers it.
+
+**Switching back** to the in-process executor: set `EXECUTOR` to `in-process`
+in `deploy/kind-coding/manifests/overlays/gke-autopilot/control-plane.yaml`
+and re-run `up.sh`. Runs in flight at that moment end `lost`.
+
+### Pod priority and headroom
+
+The GKE overlay defines three PriorityClasses so that, when a node runs short,
+the scheduler evicts the cheapest pods first instead of an arbitrary one:
+
+| Class                  | Value   | Used by                                  | Preempts others |
+| ---------------------- | ------- | ---------------------------------------- | --------------- |
+| `wardby-control-plane` | 1000000 | control plane and coding proxy           | yes             |
+| `wardby-coding-run`    | 1000    | coding-run pods and the preflight canary | no              |
+| `wardby-headroom`      | -10     | the `wardby-headroom` placeholder        | no              |
+
+Coding runs get their class through `KUBERNETES_RUN_PRIORITY_CLASS` on the
+control plane. GKE's own `system-*` classes still outrank all three: priority
+decides who is evicted first, not whether anything can be.
+
+`wardby-headroom` is a one-replica Deployment of the `pause` image that
+reserves spare capacity, preferably on the control plane's node. A
+higher-priority pod that cannot fit takes that capacity by evicting the
+placeholder rather than a Wardby pod, and Autopilot then provisions a node for
+the placeholder. Autopilot bills for its requests (250m CPU and 512 MiB of
+memory), and it counts against the `wardby-coding` ResourceQuota. To disable
+it, set `replicas: 0` in
+`deploy/kind-coding/manifests/overlays/gke-autopilot/priority.yaml` and re-run
+`up.sh`; raise its requests to reserve more.
+
+A PriorityClass's value and preemption policy cannot be changed in place:
+delete the class and re-run `up.sh` to change them.
 
 ### Roll back
 

@@ -27,17 +27,71 @@
  * UPDATE commits first flips the row out of the matched status, so the
  * second one's WHERE simply matches zero rows — double-reconcile is a
  * no-op, not a race.
+ *
+ * Each pass also completes review-host checks left "in progress" by a run
+ * that ended without reaching `executeRun`'s own finalizer (reaped here as
+ * `lost`, failed to start, failed while loading, ...). One sweep covers all
+ * of those paths instead of patching each.
  */
 
 import type { Prisma, PrismaClient } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
+import type { ReviewHostProvider, ReviewHostRegistry } from "../providers/review-host/types.js";
 import { HEARTBEAT_TIMEOUT_MS, RECONCILE_INTERVAL_MS } from "./timing.js";
 import { prisma as defaultDb } from "./db.js";
 import { logger } from "./logger.js";
+import { closeOpenHostCheck } from "./review-host-checks.js";
 
 const reconcilerLog = logger.child({ module: "reconciler" });
 
-export type ReconcilerDb = Pick<PrismaClient, "run">;
+export type ReconcilerDb = Pick<PrismaClient, "run" | "runHostCheck">;
+
+/**
+ * How long after a run finishes before its still-open check counts as
+ * orphaned: long enough that the sweep never races `executeRun`'s own
+ * `closeOpenHostCheck` for a run that just ended.
+ */
+export const ORPHANED_CHECK_GRACE_MS = 60_000;
+/** Upper bound on checks completed per pass, so a backlog drains over several passes. */
+export const ORPHANED_CHECK_BATCH = 50;
+/** How long after a run finishes the sweep keeps trying to complete its check. */
+export const ORPHANED_CHECK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Completes (neutral) open host checks whose run reached a terminal status
+ * at least ORPHANED_CHECK_GRACE_MS and at most ORPHANED_CHECK_MAX_AGE_MS
+ * ago. Newest-finished first, so old checks the host keeps refusing cannot
+ * starve newer ones. A check the host still refuses after the max age (the
+ * check was deleted, the App was uninstalled, ...) is left as it is rather
+ * than retried forever; its Re-run button still works. Never queries when
+ * no host is configured. `closeOpenHostCheck` is best-effort and never throws.
+ */
+export async function closeOrphanedHostChecks(
+  db: Pick<PrismaClient, "runHostCheck">,
+  hosts: ReviewHostRegistry | undefined,
+  now: Date = new Date(),
+): Promise<void> {
+  const providers = Object.keys(hosts ?? {}) as ReviewHostProvider[];
+  if (!hosts || providers.length === 0) return;
+  const orphans = await db.runHostCheck.findMany({
+    where: {
+      completedAt: null,
+      // A check for a provider that isn't configured could never be completed; keep it out of the batch.
+      provider: { in: providers },
+      run: {
+        status: { notIn: ["pending", "running"] },
+        finishedAt: {
+          lte: new Date(now.getTime() - ORPHANED_CHECK_GRACE_MS),
+          gte: new Date(now.getTime() - ORPHANED_CHECK_MAX_AGE_MS),
+        },
+      },
+    },
+    select: { run: { select: { id: true, status: true } } },
+    orderBy: { run: { finishedAt: "desc" } },
+    take: ORPHANED_CHECK_BATCH,
+  });
+  for (const { run } of orphans) await closeOpenHostCheck(db, run, hosts);
+}
 
 /** Runs one reconciliation pass. Returns the number of runs marked `lost`. */
 export async function reconcileOnce(
@@ -45,6 +99,7 @@ export async function reconcileOnce(
   now: Date = new Date(),
   heartbeatTimeoutMs: number = HEARTBEAT_TIMEOUT_MS,
   executor?: Executor,
+  reviewHosts?: ReviewHostRegistry,
 ): Promise<number> {
   const cutoff = new Date(now.getTime() - heartbeatTimeoutMs);
   const stale = {
@@ -139,6 +194,7 @@ export async function reconcileOnce(
     });
     lost += result.count;
   }
+  await closeOrphanedHostChecks(db, reviewHosts, now);
   return lost;
 }
 
@@ -147,6 +203,8 @@ export interface ReconcilerOptions {
   intervalMs?: number;
   heartbeatTimeoutMs?: number;
   executor?: Executor;
+  /** Hosts used to complete checks orphaned by runs that ended abnormally; none configured = no sweep. */
+  reviewHosts?: ReviewHostRegistry;
 }
 
 export interface ReconcilerHandle {
@@ -159,7 +217,7 @@ export function startReconciler(options: ReconcilerOptions = {}): ReconcilerHand
   const heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT_MS;
 
   const timer = setInterval(() => {
-    reconcileOnce(db, new Date(), heartbeatTimeoutMs, options.executor).catch((err) => {
+    reconcileOnce(db, new Date(), heartbeatTimeoutMs, options.executor, options.reviewHosts).catch((err) => {
       reconcilerLog.error({ err }, "reconcile pass failed");
     });
   }, intervalMs);

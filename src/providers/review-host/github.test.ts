@@ -36,6 +36,7 @@ describe("GitHubReviewHost reads", () => {
       isFork: false,
       lastReviewedSha: OLD_SHA,
       comparedFrom: null,
+      baseMergedSince: false,
     });
     expect(view.files[0]).toMatchObject({ patch: PATCH, patchTruncated: false });
     expect(view.files[1]).toMatchObject({ patch: PATCH.slice(0, 5), patchTruncated: true });
@@ -61,11 +62,12 @@ describe("GitHubReviewHost reads", () => {
   });
 
   it("uses the compare API when sinceSha is an ancestor of the head", async () => {
-    const { client } = fakeGitHub(({ path }) => {
+    const { client, calls } = fakeGitHub(({ path }) => {
       if (path === `${BASE}/pulls/7`) return json(PR);
       if (path === `${BASE}/compare/${OLD_SHA}...${SHA}`) {
         return json({
           status: "ahead",
+          commits: [{ sha: SHA, parents: [{ sha: OLD_SHA }] }],
           files: [{ filename: "c.py", status: "modified", additions: 1, deletions: 0, patch: PATCH }],
         });
       }
@@ -78,7 +80,47 @@ describe("GitHubReviewHost reads", () => {
       agentMarker: "agent1",
     });
     expect(view.comparedFrom).toBe(OLD_SHA);
+    expect(view.baseMergedSince).toBe(false);
     expect(view.files.map((f) => f.filename)).toEqual(["c.py"]);
+    expect(view.files[0].patch).toBe(PATCH);
+    expect(calls.some((c) => c.path.startsWith(`${BASE}/pulls/7/files`))).toBe(false);
+  });
+
+  it("falls back to the PR's own diff, limited to files changed since, when the base was merged in", async () => {
+    const PR_PATCH = "@@ -1 +1,2 @@\n one\n+pr change";
+    const { client } = fakeGitHub(({ path }) => {
+      if (path === `${BASE}/pulls/7`) return json(PR);
+      if (path === `${BASE}/compare/${OLD_SHA}...${SHA}`) {
+        return json({
+          status: "ahead",
+          commits: [
+            { sha: "m".repeat(40), parents: [{ sha: "a".repeat(40) }] },
+            { sha: SHA, parents: [{ sha: OLD_SHA }, { sha: "m".repeat(40) }] },
+          ],
+          files: [
+            // c.py: touched by the PR and by main; main.py: only brought in from main.
+            { filename: "c.py", status: "modified", additions: 3, deletions: 0, patch: PATCH },
+            { filename: "main.py", status: "modified", additions: 9, deletions: 0, patch: PATCH },
+          ],
+        });
+      }
+      if (path.startsWith(`${BASE}/pulls/7/files`)) {
+        return json([
+          { filename: "c.py", status: "modified", additions: 1, deletions: 0, patch: PR_PATCH },
+          { filename: "untouched-since.py", status: "added", additions: 1, deletions: 0, patch: PR_PATCH },
+        ]);
+      }
+      if (path.startsWith(`${BASE}/issues/7/comments`)) return json([]);
+      return undefined;
+    });
+    const view = await new GitHubReviewHost(client).readPullRequest(REPO, 7, {
+      sinceSha: OLD_SHA,
+      maxPatchChars: 60_000,
+      agentMarker: "agent1",
+    });
+    expect(view.comparedFrom).toBe(OLD_SHA);
+    expect(view.baseMergedSince).toBe(true);
+    expect(view.files.map((f) => [f.filename, f.patch])).toEqual([["c.py", PR_PATCH]]);
   });
 
   it("flags a fork PR", async () => {

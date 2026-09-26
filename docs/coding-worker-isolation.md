@@ -296,12 +296,13 @@ digest** (`repo@sha256:<64 hex>` — a bare `sha256:` local image ID is
 rejected; a cluster cannot pull it). Kubernetes-specific settings
 (`src/config/providers.ts`, `loadKubernetesJobConfig`):
 
-| Variable                   | Default                                         | Meaning                                                                                                                                                          |
-| -------------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `KUBERNETES_NAMESPACE`     | `wardby-coding`                                 | The one namespace holding the proxy and every per-run object.                                                                                                    |
-| `KUBERNETES_PROXY_SERVICE` | `wardby-coding-proxy`                           | The proxy's Service name; its ClusterIP is what `hostAliases` points runs at.                                                                                    |
-| `KUBERNETES_CONTEXT`       | (unset → in-cluster/default kubeconfig context) | Which kubeconfig context `ClientNodeKubernetesApi` connects with.                                                                                                |
-| `KUBERNETES_RUNTIME_CLASS` | (unset)                                         | e.g. `gvisor` on GKE. Unset means pods run without a sandboxing runtime class — logged once per launch as `kubernetes_runtime_class_unset` and development-only. |
+| Variable                        | Default                                         | Meaning                                                                                                                                                                                                                 |
+| ------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `KUBERNETES_NAMESPACE`          | `wardby-coding`                                 | The one namespace holding the proxy and every per-run object.                                                                                                                                                           |
+| `KUBERNETES_PROXY_SERVICE`      | `wardby-coding-proxy`                           | The proxy's Service name; its ClusterIP is what `hostAliases` points runs at.                                                                                                                                           |
+| `KUBERNETES_CONTEXT`            | (unset → in-cluster/default kubeconfig context) | Which kubeconfig context `ClientNodeKubernetesApi` connects with.                                                                                                                                                       |
+| `KUBERNETES_RUNTIME_CLASS`      | (unset)                                         | e.g. `gvisor` on GKE. Unset means pods run without a sandboxing runtime class — logged once per launch as `kubernetes_runtime_class_unset` and development-only.                                                        |
+| `KUBERNETES_RUN_PRIORITY_CLASS` | (unset)                                         | PriorityClass for run pods and the preflight canary, e.g. `wardby-coding-run` in the GKE overlay. Must be an existing class and a DNS-1123 subdomain; `system-` classes are refused. Unset means no class (priority 0). |
 
 The `CODING_CPUS` / `CODING_MEMORY_MB` / `CODING_PIDS` / `CODING_DISK_MB` /
 `CODING_MAX_DISK_MB` settings above apply identically; the per-agent

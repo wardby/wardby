@@ -240,6 +240,9 @@ async function runCanary(
       namespace,
       proxyIp,
       runtimeClassName: config.runtimeClassName,
+      // The canary carries the class too, so a class missing from the cluster fails the
+      // preflight rather than the first real run.
+      priorityClassName: config.priorityClassName,
       platform: config.platform,
     });
     const podSpec = pod.spec!;

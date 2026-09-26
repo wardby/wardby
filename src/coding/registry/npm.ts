@@ -6,6 +6,7 @@
  * the sandboxed worker to use the proxy with install-time scripts disabled.
  */
 import semver from "semver";
+import { npmLockfiles } from "./npm-lockfile.js";
 import {
   AllowlistEntryError,
   RegistryError,
@@ -144,6 +145,7 @@ export const npmAdapter: RegistryAdapter = {
   upstreamHosts: ["registry.npmjs.org"],
   collectExclude: ["node_modules"],
   dependenciesInMetadata: true,
+  lockfiles: npmLockfiles,
 
   parseAllowlistEntry(raw: string): AllowlistEntry {
     const value = raw.trim();

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  loadAuthConfig,
   loadContainerExecutorConfig,
   loadProviderConfig,
   loadMcpConfig,
@@ -260,6 +261,33 @@ describe("loadKubernetesJobConfig", () => {
     );
   });
 
+  it("leaves the run pods' priority class unset by default", () => {
+    expect(loadKubernetesJobConfig({})).not.toHaveProperty("priorityClassName");
+    expect(loadKubernetesJobConfig({ KUBERNETES_RUN_PRIORITY_CLASS: "" })).not.toHaveProperty("priorityClassName");
+  });
+
+  it.each(["wardby-coding-run", "coding.runs", "a"])("reads KUBERNETES_RUN_PRIORITY_CLASS=%j", (value) => {
+    expect(loadKubernetesJobConfig({ KUBERNETES_RUN_PRIORITY_CLASS: value }).priorityClassName).toBe(value);
+  });
+
+  it.each(["Upper", "under_score", "-leading", "trailing-", "a..b", ".a", "x".repeat(254)])(
+    "rejects KUBERNETES_RUN_PRIORITY_CLASS=%j",
+    (value) => {
+      expect(() => loadKubernetesJobConfig({ KUBERNETES_RUN_PRIORITY_CLASS: value })).toThrow(
+        "KUBERNETES_RUN_PRIORITY_CLASS must be a DNS-1123 subdomain.",
+      );
+    },
+  );
+
+  it.each(["system-cluster-critical", "system-node-critical"])(
+    "refuses to run untrusted coding pods at the reserved class %j",
+    (value) => {
+      expect(() => loadKubernetesJobConfig({ KUBERNETES_RUN_PRIORITY_CLASS: value })).toThrow(
+        "KUBERNETES_RUN_PRIORITY_CLASS must not name a system- priority class.",
+      );
+    },
+  );
+
   it("reads the two cluster timeouts as bounded integers", () => {
     const config = loadKubernetesJobConfig({
       KUBERNETES_PREFLIGHT_TIMEOUT_MS: "600000",
@@ -292,5 +320,20 @@ describe("loadGitHubEventConfig", () => {
       "GITHUB_APP_WEBHOOK_SECRET must be at least 20 characters.",
     );
     expect(() => loadGitHubEventConfig({ GITHUB_APP_WEBHOOK_SECRET: ` ${VALID.slice(0, 19)} ` })).toThrow();
+  });
+});
+
+describe("loadAuthConfig role mapping", () => {
+  it("reads AUTH_ROLE_CLAIM / AUTH_ROLE_MAP, treating blanks as unset", () => {
+    expect(
+      loadAuthConfig({ AUTH_ROLE_CLAIM: "realm_access.roles", AUTH_ROLE_MAP: "wardby-admin=admin" }),
+    ).toMatchObject({ roleClaim: "realm_access.roles", roleMap: "wardby-admin=admin" });
+    expect(loadAuthConfig({ AUTH_ROLE_CLAIM: "  groups \n", AUTH_ROLE_MAP: " a=admin " })).toMatchObject({
+      roleClaim: "groups",
+      roleMap: "a=admin",
+    });
+    const blank = loadAuthConfig({ AUTH_ROLE_CLAIM: "  ", AUTH_ROLE_MAP: "" });
+    expect(blank.roleClaim).toBeUndefined();
+    expect(blank.roleMap).toBeUndefined();
   });
 });

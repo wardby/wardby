@@ -1,6 +1,13 @@
 FROM ghcr.io/wardby/wardby/wardby-coding-worker-driver@sha256:ca767ea9c4dbf72e9aadcb767608876ea150fcd3271b05b3337939e6c7c0842f AS runtime
+# python3-venv (ensurepip plus the bundled pip wheel) stays installed: in
+# registry mode (docs/coding-packages.md) the agent installs packages with
+# `python -m venv --system-site-packages .venv && .venv/bin/python -m pip
+# install ...`, and pip in that venv reaches only the proxy's registry via the
+# PIP_* environment the driver sets. The system pip is still removed:
+# Debian's system Python refuses `pip install` outside a venv (PEP 668), and
+# the root filesystem is read-only at run time anyway.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-pip \
+    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv \
     && python3 -m pip install --no-cache-dir --break-system-packages pytest==8.3.4 ruff==0.16.7 \
     && apt-get purge -y --auto-remove python3-pip \
     && rm -rf /var/lib/apt/lists/* \
@@ -21,7 +28,13 @@ RUN test ! -e /usr/bin/docker \
     && python3 -m pytest --version \
     && python3 -m ruff --version \
     && python --version \
-    && python -m pytest --version
+    && python -m pytest --version \
+    # A registry-mode venv must be creatable offline, carry pip, and still see
+    # the preinstalled pytest/ruff through --system-site-packages.
+    && python -m venv --system-site-packages /tmp/venv-check \
+    && /tmp/venv-check/bin/python -m pip --version \
+    && /tmp/venv-check/bin/python -m pytest --version \
+    && rm -rf /tmp/venv-check
 USER 10001:10001
 ENV NODE_ENV=production HOME=/home/wardby
 WORKDIR /workspace

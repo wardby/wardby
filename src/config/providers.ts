@@ -168,6 +168,8 @@ export function loadCodingConcurrencyConfig(env: NodeJS.ProcessEnv = process.env
 
 const DNS_1123_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
+const DNS_1123_SUBDOMAIN = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/;
+
 function dnsLabel(value: string | undefined, name: string, fallback: string): string {
   if (value === undefined) return fallback;
   if (!DNS_1123_LABEL.test(value)) throw new Error(`${name} must be a DNS-1123 label.`);
@@ -180,6 +182,11 @@ export interface KubernetesJobConfig {
   context?: string;
   proxyService: string;
   runtimeClassName?: string;
+  /**
+   * PriorityClass for coding-run pods (and the preflight canary). Unset = no class, the pod
+   * spec exactly as before. The class must exist in the cluster, or every create is refused.
+   */
+  priorityClassName?: string;
   platform: KubernetesPlatform;
   /**
    * Bound for the whole cluster preflight (canary pod scheduling included) and for how long a
@@ -203,6 +210,18 @@ export function loadKubernetesJobConfig(env: NodeJS.ProcessEnv = process.env): K
   if (env.KUBERNETES_CONTEXT) config.context = env.KUBERNETES_CONTEXT;
   if (env.KUBERNETES_RUNTIME_CLASS) {
     config.runtimeClassName = dnsLabel(env.KUBERNETES_RUNTIME_CLASS, "KUBERNETES_RUNTIME_CLASS", "");
+  }
+  if (env.KUBERNETES_RUN_PRIORITY_CLASS) {
+    const name = env.KUBERNETES_RUN_PRIORITY_CLASS;
+    if (!DNS_1123_SUBDOMAIN.test(name)) {
+      throw new Error("KUBERNETES_RUN_PRIORITY_CLASS must be a DNS-1123 subdomain.");
+    }
+    // The system- classes are the cluster's own critical tier: an untrusted coding pod there
+    // would preempt the control plane and kube-system workloads instead of yielding to them.
+    if (name.startsWith("system-")) {
+      throw new Error("KUBERNETES_RUN_PRIORITY_CLASS must not name a system- priority class.");
+    }
+    config.priorityClassName = name;
   }
   const preflightTimeoutMs = optionalBoundedInteger(
     env.KUBERNETES_PREFLIGHT_TIMEOUT_MS,
@@ -259,6 +278,10 @@ export interface AuthConfig {
   issuer?: string;
   /** Delegating mode: JWKS endpoint for signature verification. */
   jwksUri?: string;
+  /** Delegating mode: access-token claim carrying the IdP's roles/groups (AUTH_ROLE_CLAIM). */
+  roleClaim?: string;
+  /** Delegating mode: `idpValue=wardbyRole,...` (AUTH_ROLE_MAP). */
+  roleMap?: string;
   /** Both modes: the audience a token must carry to be accepted (wardby's canonical URI). */
   audience?: string;
   /** Self-hosted mode: independent 32-byte hex keys. */
@@ -272,6 +295,8 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig
   return {
     issuer: env.AUTH_ISSUER,
     jwksUri: env.AUTH_JWKS_URI,
+    roleClaim: env.AUTH_ROLE_CLAIM?.trim() || undefined,
+    roleMap: env.AUTH_ROLE_MAP?.trim() || undefined,
     audience: env.AUTH_AUDIENCE,
     signingKey: env.AUTH_SIGNING_KEY,
     credentialHashKey: env.AUTH_CREDENTIAL_HASH_KEY,

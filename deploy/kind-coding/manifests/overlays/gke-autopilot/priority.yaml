@@ -1,0 +1,117 @@
+# Pod priority for this deployment. Without a PriorityClass every pod here runs
+# at priority 0, so when a higher-priority pod (GKE's own kube-system add-ons
+# run at system-cluster-critical) cannot fit on a node, kube-scheduler may
+# preempt whichever wardby pod happens to be there -- the single control-plane
+# replica included, and with it every run it is executing in-process.
+#
+# Priority decides who is evicted FIRST; it is not immunity. system-* classes
+# still outrank all three classes below. What protects the control plane is
+# that, on its node, there is always something cheaper to evict: the headroom
+# placeholder at the end of this file.
+#
+# PriorityClasses are cluster-scoped, and `value` and `preemptionPolicy` are
+# immutable: changing either means deleting and re-creating the class.
+
+# The control plane and the coding proxy. Above every coding run and the
+# headroom, and allowed to preempt them to get scheduled again.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: wardby-control-plane
+value: 1000000
+globalDefault: false
+description: wardby control plane and coding proxy.
+---
+# Coding-run pods, selected by the launcher's KUBERNETES_RUN_PRIORITY_CLASS
+# (control-plane.yaml). preemptionPolicy Never: a run waits for capacity
+# (Autopilot provisions it) rather than evicting anything to get it.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: wardby-coding-run
+value: 1000
+preemptionPolicy: Never
+globalDefault: false
+description: wardby coding-run pods; wait for capacity, never preempt.
+---
+# Below the default priority of 0, so every other pod in the cluster evicts the
+# headroom before anything else.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: wardby-headroom
+value: -10
+preemptionPolicy: Never
+globalDefault: false
+description: wardby headroom placeholder; the first pod evicted when a node is short.
+---
+# Headroom placeholder. It reserves spare capacity -- next to the control
+# plane where it can -- that a higher-priority pod (a system add-on scaling up,
+# a rescheduled wardby pod) takes first: the scheduler evicts this pod instead
+# of wardby. Autopilot then provisions capacity for the evicted placeholder,
+# and it comes back when that capacity exists.
+#
+# It is not free: on Autopilot you pay for a pod's requests, so this costs
+# 250m CPU and 512Mi of memory for as long as it runs, and it counts against
+# the namespace's ResourceQuota (../../base/quota.yaml). Raise the requests to
+# reserve more. To disable it, set replicas to 0.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-headroom
+  namespace: wardby-coding
+  labels:
+    app.kubernetes.io/name: wardby-headroom
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-headroom
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wardby-headroom
+    spec:
+      priorityClassName: wardby-headroom
+      # Nothing to clean up: give the preempting pod the capacity at once.
+      terminationGracePeriodSeconds: 0
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # Headroom only helps on the node that runs out, and the pod worth
+      # protecting is the control plane.
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: wardby-control-plane
+      securityContext:
+        runAsNonRoot: true
+        # The pause image's own user.
+        runAsUser: 65535
+        runAsGroup: 65535
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10.1@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # requests == limits: Autopilot sets limits to requests anyway, and
+          # the namespace ResourceQuota refuses a pod without cpu/memory limits.
+          # 1 vCPU : 2 GiB is inside Autopilot's allowed CPU:memory ratio.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+              ephemeral-storage: 100Mi
+            limits:
+              cpu: 250m
+              memory: 512Mi
+              ephemeral-storage: 100Mi

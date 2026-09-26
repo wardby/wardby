@@ -63,6 +63,7 @@
     "test:kubernetes": "WARDBY_KUBERNETES_TEST=1 vitest run src/providers/jobs/kubernetes.integration.test.ts",
     "prisma:generate": "PRISMA_HIDE_UPDATE_MESSAGE=1 prisma generate",
     "prisma:migrate": "prisma migrate deploy",
+    "dbos:migrate": "dbos schema \"$DATABASE_URL\"",
     "db:up": "docker compose -f deploy/local/docker-compose.yml up -d",
     "db:down": "docker compose -f deploy/local/docker-compose.yml down",
     "coding:local:up": "docker compose --env-file .env.local -f deploy/local/docker-compose.yml -f deploy/local/docker-compose.phase5.yml up --build -d coding-proxy",
