@@ -22,6 +22,7 @@ interface FakeToolRow {
 }
 interface FakeAgentRow {
   id: string;
+  name?: string;
   ownerId: string | null;
   kind?: "native" | "coding";
 }
@@ -63,6 +64,24 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
         return row;
       },
       findUnique: async ({ where }: { where: { id: string } }) => toolRows.get(where.id) ?? null,
+      update: async ({ where, data }: { where: { id: string }; data: Partial<FakeToolRow> }) => {
+        const row = { ...toolRows.get(where.id)!, ...data };
+        toolRows.set(where.id, row);
+        return row;
+      },
+      delete: async ({ where }: { where: { id: string } }) => {
+        // Mirrors AgentTool.toolId's ON DELETE RESTRICT.
+        if (attachments.some((a) => a.toolId === where.id)) {
+          throw new Prisma.PrismaClientKnownRequestError("Foreign key constraint violated", {
+            code: "P2003",
+            clientVersion: "test",
+            meta: { modelName: "Tool" },
+          });
+        }
+        const row = toolRows.get(where.id)!;
+        toolRows.delete(where.id);
+        return row;
+      },
       findMany: async ({ where }: { where?: { OR?: { ownerId: string | null }[] } } = {}) => {
         const all = [...toolRows.values()];
         if (!where?.OR) return all;
@@ -104,15 +123,30 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
         attachments[idx] = { ...attachments[idx], ...update };
         return attachments[idx];
       },
-      deleteMany: async ({ where }: { where: { agentId: string; toolId: string } }) => {
+      deleteMany: async ({ where }: { where: { agentId: string | { in: string[] }; toolId: string } }) => {
+        const matchesAgent = (agentId: string) =>
+          typeof where.agentId === "string" ? agentId === where.agentId : where.agentId.in.includes(agentId);
         const before = attachments.length;
-        const kept = attachments.filter((a) => !(a.agentId === where.agentId && a.toolId === where.toolId));
+        const kept = attachments.filter((a) => !(matchesAgent(a.agentId) && a.toolId === where.toolId));
         attachments.length = 0;
         attachments.push(...kept);
         return { count: before - kept.length };
       },
-      findMany: async ({ where }: { where: { agentId: string } }) =>
-        attachments.filter((a) => a.agentId === where.agentId).map((a) => ({ ...a, tool: toolRows.get(a.toolId) })),
+      findMany: async ({ where }: { where: { agentId?: string; toolId?: string } }) =>
+        attachments
+          .filter(
+            (a) =>
+              (where.agentId === undefined || a.agentId === where.agentId) &&
+              (where.toolId === undefined || a.toolId === where.toolId),
+          )
+          .map((a) => {
+            const agent = agentRows.get(a.agentId);
+            return {
+              ...a,
+              tool: toolRows.get(a.toolId),
+              agent: { id: a.agentId, name: agent?.name ?? a.agentId, ownerId: agent?.ownerId ?? null },
+            };
+          }),
       findFirst: async ({ where }: { where: { agentId: string; toolId: { not: string }; tool: { name: string } } }) => {
         const hit = attachments.find(
           (a) =>
@@ -627,5 +661,137 @@ describe("tool authoring tools", () => {
     const rows = await db.agentTool.findMany({ where: { agentId: "a1" } });
     expect(rows[0]).toMatchObject({ allowedSecrets: ["API_KEY"], allowedHosts: ["api.example.com"] });
     await client.close();
+  });
+
+  describe("update_tool", () => {
+    const owned = (overrides: Partial<FakeToolRow> = {}): FakeToolRow => ({
+      id: "t1",
+      name: "greet",
+      description: "old description",
+      paramsZod: "z.object({})",
+      jsonSchema: { old: true },
+      code: "return 'old';",
+      ownerId: "p1",
+      ...overrides,
+    });
+
+    async function setup(tools: FakeToolRow[], agents: FakeAgentRow[] = [], principal = "p1") {
+      const db = fakeDb(tools, agents);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, principal, ["tools:write"]));
+      registerToolAuthoringTools(mcp);
+      return { db, client: await connectClient(mcp) };
+    }
+
+    it("lets the owner replace code, description and paramsZod, re-deriving the cached jsonSchema", async () => {
+      const { db, client } = await setup([owned()], [{ id: "a1", name: "mine", ownerId: "p1" }]);
+      // Attached to the caller's own agent: not a cross-owner attachment.
+      await db.agentTool.create({ data: { agentId: "a1", toolId: "t1" } });
+
+      const result = await client.callTool({
+        name: "update_tool",
+        arguments: {
+          toolId: "t1",
+          code: "return 'new';",
+          description: "new description",
+          paramsZod: "z.object({ who: z.string() })",
+        },
+      });
+      expect(result.isError).toBeFalsy();
+      const body = parseText(result as never) as FakeToolRow;
+      expect(body).toMatchObject({ id: "t1", name: "greet", code: "return 'new';", description: "new description" });
+      expect(JSON.stringify(body.jsonSchema)).toContain("who");
+      expect((await db.tool.findUnique({ where: { id: "t1" } }))?.code).toBe("return 'new';");
+      await client.close();
+    });
+
+    it("returns {ok:false} for an invalid paramsZod and leaves the row unchanged", async () => {
+      const { db, client } = await setup([owned()]);
+      const result = await client.callTool({
+        name: "update_tool",
+        arguments: { toolId: "t1", paramsZod: "not valid zod {{{", code: "return 'new';" },
+      });
+      expect(result.isError).toBeFalsy();
+      const body = parseText(result as never) as { ok: boolean; errorMessage?: string };
+      expect(body.ok).toBe(false);
+      expect(body.errorMessage).toBeTruthy();
+      expect(await db.tool.findUnique({ where: { id: "t1" } })).toMatchObject({
+        code: "return 'old';",
+        paramsZod: "z.object({})",
+        jsonSchema: { old: true },
+      });
+      await client.close();
+    });
+
+    it("requires at least one field to change", async () => {
+      const { client } = await setup([owned()]);
+      const result = await client.callTool({ name: "update_tool", arguments: { toolId: "t1" } });
+      expect(result.isError).toBe(true);
+      expect((result.content as { text: string }[])[0].text).toMatch(/at least one/i);
+      await client.close();
+    });
+
+    it("rejects `name` (a rename would silently break every attached agent's prompt)", async () => {
+      const { db, client } = await setup([owned()]);
+      const result = await client.callTool({ name: "update_tool", arguments: { toolId: "t1", name: "renamed" } });
+      expect(result.isError).toBe(true);
+      expect((await db.tool.findUnique({ where: { id: "t1" } }))?.name).toBe("greet");
+      await client.close();
+    });
+
+    it("hides another principal's tool as not found", async () => {
+      const { db, client } = await setup([owned({ ownerId: "p2" })]);
+      const result = await client.callTool({ name: "update_tool", arguments: { toolId: "t1", code: "return 1;" } });
+      expect(result.isError).toBe(true);
+      expect((result.content as { text: string }[])[0].text).toMatch(/not found/);
+      expect((await db.tool.findUnique({ where: { id: "t1" } }))?.code).toBe("return 'old';");
+      await client.close();
+    });
+
+    it("refuses a public (null-owner) tool with 403, whoever asks", async () => {
+      const { db, client } = await setup([owned({ ownerId: null })]);
+      const result = await client.callTool({ name: "update_tool", arguments: { toolId: "t1", code: "return 1;" } });
+      expect(result.isError).toBe(true);
+      expect((result.content as { text: string }[])[0].text).toMatch(/public/i);
+      expect((await db.tool.findUnique({ where: { id: "t1" } }))?.code).toBe("return 'old';");
+      await client.close();
+    });
+
+    it("refuses while attached to another principal's agent, naming only agents the caller can read", async () => {
+      const { db, client } = await setup(
+        [owned()],
+        [
+          { id: "a-mine", name: "mine", ownerId: "p1" },
+          { id: "a-public", name: "shared-bot", ownerId: null },
+          { id: "a-theirs", name: "secret-project", ownerId: "p2" },
+        ],
+      );
+      for (const agentId of ["a-mine", "a-public", "a-theirs"]) {
+        await db.agentTool.create({ data: { agentId, toolId: "t1" } });
+      }
+      const result = await client.callTool({
+        name: "update_tool",
+        arguments: { toolId: "t1", description: "even a description" },
+      });
+      expect(result.isError).toBe(true);
+      const text = (result.content as { text: string }[])[0].text;
+      expect(text).toContain('"shared-bot" (a-public)');
+      expect(text).toContain("1 agent(s) owned by other principals");
+      expect(text).not.toContain("secret-project");
+      expect(text).not.toContain("a-theirs");
+      expect(text).not.toContain('"mine"');
+      expect((await db.tool.findUnique({ where: { id: "t1" } }))?.description).toBe("old description");
+      await client.close();
+    });
+
+    it("refuses while attached to a public agent", async () => {
+      const { db, client } = await setup([owned()], [{ id: "a-public", name: "shared-bot", ownerId: null }]);
+      await db.agentTool.create({ data: { agentId: "a-public", toolId: "t1" } });
+      const result = await client.callTool({ name: "update_tool", arguments: { toolId: "t1", code: "return 1;" } });
+      expect(result.isError).toBe(true);
+      expect((result.content as { text: string }[])[0].text).toContain('"shared-bot" (a-public)');
+      expect((await db.tool.findUnique({ where: { id: "t1" } }))?.code).toBe("return 'old';");
+      await client.close();
+    });
   });
 });

@@ -966,6 +966,56 @@ describe("runAgent", () => {
   });
 });
 
+describe("update_tool semantics: a run pins the tool version its load step saw", () => {
+  it("a replayed run keeps the code it loaded; a new run picks up the updated code", async () => {
+    const tool: FakeTool = {
+      id: "t1",
+      name: "version",
+      description: "d",
+      paramsZod: "z.object({})",
+      jsonSchema: { type: "object", properties: {} },
+      code: "return 'v1';",
+    };
+    const agent = { id: "a1", name: "pinned-tool", systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 3 };
+    const db = fakeDb([agent], [tool], [{ agentId: "a1", toolId: "t1" }]);
+
+    // A DBOS-style step runner: a recorded step is replayed, never re-run.
+    const record = new Map<string, unknown>();
+    const step: StepRunner = async (name, fn) => {
+      if (record.has(name)) return record.get(name) as never;
+      const value = await fn();
+      record.set(name, JSON.parse(JSON.stringify(value)));
+      return value;
+    };
+    const seen: string[] = [];
+    const engine: Engine = {
+      async run(ctx: EngineRunContext) {
+        seen.push(JSON.parse(await ctx.runSandboxTool("version", "{}")) as string);
+        return { status: "succeeded", finalText: "", turns: 1, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } };
+      },
+    };
+    const providers = {
+      llm: noopLlm,
+      engine,
+      datastore: fakeDatastore(),
+      secrets: noopSecretCipher,
+      memory: fakeMemory(),
+    };
+
+    const first = await db.run.create({ data: { agentId: "a1" } });
+    await executeRun(first.id, providers, db, undefined, step);
+    tool.code = "return 'v2';"; // what update_tool writes
+    // The same run resumed after a crash replays its recorded load step.
+    await db.run.update({ where: { id: first.id }, data: { status: "running", finishedAt: null } });
+    await executeRun(first.id, providers, db, undefined, step);
+    // A new run loads afresh.
+    const second = await db.run.create({ data: { agentId: "a1" } });
+    await executeRun(second.id, providers, db);
+
+    expect(seen).toEqual(["v1", "v1", "v2"]);
+  });
+});
+
 describe("executeRun terminal-write races", () => {
   const noTools: FakeTool[] = [];
 

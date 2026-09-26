@@ -147,7 +147,8 @@ model Tool {
   /// and cached here — re-deriving it on every run would spin a fresh QuickJS
   /// runtime and evaluate the whole vendored zod bundle per attached tool,
   /// before the first LLM call, on every single run. Safe to cache because
-  /// there's no "update tool" path — paramsZod can't change without a new row.
+  /// every write of paramsZod (create, and MCP update_tool) re-derives it in
+  /// the same write. A run pins the version its load step read.
   jsonSchema  Json
   /// Tool body source; run inside the sandbox with the validated params.
   code        String

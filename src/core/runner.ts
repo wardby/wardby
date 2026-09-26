@@ -352,9 +352,12 @@ export async function executeRun(
         budgetUsd: effectiveBudgetUsd,
         maxTurns: agent.maxTurns,
       },
-      // jsonSchema was derived and validated once at `wardby tool create`
-      // time (cli.ts) and cached on the row — there's no "update tool"
-      // path, so it can't go stale. Re-deriving it here on every run would
+      // jsonSchema was derived and validated when the tool was created and
+      // cached on the row; MCP update_tool re-derives it whenever paramsZod
+      // changes, so it can't go stale. Everything read here -- code, schema,
+      // grants -- is pinned for this run's lifetime (replays included) by
+      // this load step, so an update reaches the next run, never one
+      // already under way. Re-deriving it here on every run would
       // spin a fresh QuickJS runtime and evaluate the whole vendored zod
       // bundle per attached tool, before the first LLM call, on every run.
       // The memory built-ins (recognized by name in runSandboxTool below,

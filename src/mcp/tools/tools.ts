@@ -22,10 +22,35 @@ import {
   requireOwnedAgent,
   requireOwnedTool,
   requireReadableAgent,
+  requireStrictlyOwnedTool,
   visibleToPrincipal,
   canRead,
 } from "../auth/ownership.js";
 import { textResult } from "./text-result.js";
+
+type AttachedAgent = { id: string; name: string; ownerId: string | null };
+
+/** The agents `toolId` is attached to, read inside the caller's transaction. */
+async function attachedAgents(tx: Pick<Prisma.TransactionClient, "agentTool">, toolId: string) {
+  const rows = await tx.agentTool.findMany({
+    where: { toolId },
+    select: { agent: { select: { id: true, name: true, ownerId: true } } },
+  });
+  return rows.map((row): AttachedAgent => row.agent);
+}
+
+/**
+ * Names the agents the caller can read (its own and public ones) and only
+ * counts the rest, so a refusal never reveals another principal's agent
+ * names or ids.
+ */
+function describeAgents(agents: AttachedAgent[], principalId: string): string {
+  const readable = agents.filter((agent) => canRead(agent.ownerId, principalId));
+  const hidden = agents.length - readable.length;
+  const parts = readable.map((agent) => `"${agent.name}" (${agent.id})`);
+  if (hidden > 0) parts.push(`${hidden} agent(s) owned by other principals`);
+  return parts.join(", ");
+}
 
 /** Refuses a name one of the runner's built-ins would shadow (see core/tool-names.ts). */
 function assertToolNameAllowed(name: string): void {
@@ -71,6 +96,74 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
         }
         throw err;
       }
+    },
+  });
+
+  mcp.registerTool({
+    name: "update_tool",
+    scope: "tools:write",
+    description:
+      "Replaces a tool's description, paramsZod and/or code in place (its name can't change: agents' prompts call it by name). Owner-only: public tools can't be changed over MCP. Refused while the tool is attached to any agent you don't own, including public agents, since the change would reach another owner's agent; detach it there first or create a new tool. Runs already started keep the version they loaded for their whole lifetime; the next run picks up the new one.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        toolId: { type: "string" },
+        description: { type: "string" },
+        paramsZod: { type: "string" },
+        code: { type: "string" },
+      },
+      required: ["toolId"],
+    },
+    handler: async (args: { toolId: string; description?: string; paramsZod?: string; code?: string }, ctx) => {
+      if (args.description === undefined && args.paramsZod === undefined && args.code === undefined) {
+        throw new McpError(400, "update_tool needs at least one of description, paramsZod or code.");
+      }
+      // Checked once up front so a non-owner never gets as far as a sandbox
+      // compile, and again (with the attachments) inside the transaction.
+      await requireStrictlyOwnedTool(ctx.db, args.toolId, ctx.principal.id);
+      // Same derivation as create_tool: the cached jsonSchema must never go
+      // stale against paramsZod (see Tool.jsonSchema). Done before the
+      // transaction so a QuickJS compile never holds it open.
+      let jsonSchema: object | undefined;
+      if (args.paramsZod !== undefined) {
+        const schemaResult = await deriveJsonSchema(args.paramsZod);
+        if (!schemaResult.ok) {
+          return textResult({ ok: false, errorKind: schemaResult.errorKind, errorMessage: schemaResult.errorMessage });
+        }
+        jsonSchema = schemaResult.value as object;
+      }
+      const tool = await ctx.db.$transaction(
+        async (tx) => {
+          await requireStrictlyOwnedTool(tx, args.toolId, ctx.principal.id);
+          // An attachment's grants (secrets, hosts, datastore prefixes) hand
+          // whatever code this row holds to that agent's owner's resources,
+          // and the description reaches that owner's model context -- so any
+          // cross-owner attachment (a public agent included) blocks every
+          // field. Serializable, like attach_tool's own transaction, so a
+          // concurrent cross-owner attach can't land between this check and
+          // the write.
+          const crossOwner = (await attachedAgents(tx, args.toolId)).filter(
+            (agent) => agent.ownerId !== ctx.principal.id,
+          );
+          if (crossOwner.length > 0) {
+            throw new McpError(
+              409,
+              `Tool "${args.toolId}" is attached to agents you don't own: ${describeAgents(crossOwner, ctx.principal.id)}. Detach it from those agents first (or ask their owners to), or create a new tool instead.`,
+            );
+          }
+          return tx.tool.update({
+            where: { id: args.toolId },
+            data: {
+              ...(args.description !== undefined ? { description: args.description } : {}),
+              ...(args.code !== undefined ? { code: args.code } : {}),
+              ...(args.paramsZod !== undefined ? { paramsZod: args.paramsZod, jsonSchema } : {}),
+            },
+          });
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+      return textResult(tool);
     },
   });
 
