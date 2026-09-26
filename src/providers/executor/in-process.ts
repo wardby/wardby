@@ -6,15 +6,14 @@
  * `running` forever.
  */
 
-import type { ProviderRegistry } from "../index.js";
-import { executeRun, type RunnerDb } from "../../core/runner.js";
+import { executeRun, type NativeRunProviders, type RunnerDb } from "../../core/runner.js";
 import { prisma as defaultDb } from "../../core/db.js";
 import { HEARTBEAT_INTERVAL_MS } from "../../core/timing.js";
 import type { Executor } from "./types.js";
 
 export class InProcessExecutor implements Executor {
   constructor(
-    private readonly providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory">,
+    private readonly providers: NativeRunProviders,
     private readonly db: RunnerDb = defaultDb,
     private readonly heartbeatIntervalMs: number = HEARTBEAT_INTERVAL_MS,
   ) {}

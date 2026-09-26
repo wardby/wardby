@@ -72,6 +72,15 @@ export function loadGitHubVcsConfig(env: NodeJS.ProcessEnv = process.env): GitHu
   };
 }
 
+/** GitHub App webhook settings for the code-review host ingress; unset = ingress disabled. */
+export function loadGitHubEventConfig(env: NodeJS.ProcessEnv = process.env): { webhookSecret?: string } {
+  const secret = env.GITHUB_APP_WEBHOOK_SECRET?.trim();
+  if (secret !== undefined && secret !== "" && secret.length < 20) {
+    throw new Error("GITHUB_APP_WEBHOOK_SECRET must be at least 20 characters.");
+  }
+  return { webhookSecret: secret || undefined };
+}
+
 export interface ContainerExecutorConfig {
   workerImage?: string;
   claudeWorkerImage?: string;

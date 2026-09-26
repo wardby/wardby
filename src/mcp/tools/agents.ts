@@ -367,7 +367,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
     handler: async (args: { id: string }, ctx) => {
       const agent = await ctx.db.agent.findUnique({
         where: { id: args.id },
-        include: { tools: { include: { tool: true } }, codingProfile: true },
+        include: { tools: { include: { tool: true } }, codingProfile: true, repositories: true },
       });
       if (!agent || !canRead(agent.ownerId, ctx.principal.id)) {
         throw new McpError(404, `Agent "${args.id}" not found.`);
