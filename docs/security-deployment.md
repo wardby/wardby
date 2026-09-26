@@ -310,16 +310,15 @@ packages, both forced to patched versions by `overrides` in `package.json`:
 ```
 
 - `deepmerge-ts`: `@prisma/config` 7.10.0 still pins 7.1.5 exactly. The 8.x
-  override was reviewed on 2026-09-24 (`@prisma/config` calls only
-  `deepmerge()`; the 8.0 breaking changes are two type renames and
-  `deepmergeInto`, which Prisma does not call) and remains in place.
+  override is safe because `@prisma/config` calls only `deepmerge()`; the 8.0
+  breaking changes are two type renames and `deepmergeInto`, which Prisma does
+  not call.
 - `mysql2` (GHSA-3f6p-5ww8-9rcr, GHSA-rgwj-5xj2-c3m3, high): `prisma` 7.10.0
   pins 3.15.3 exactly; it is used only by Prisma Studio's MySQL executor
   (`createPool` from `mysql2/promise`), never by wardby, which is
-  PostgreSQL-only. 3.24.4 is the same major. Verified 2026-09-25 with the
-  override: `prisma generate`, `prisma validate`, the `migrate diff` drift
-  check, the migration image's `migrate deploy`, and `createPool` loading from
-  the CLI's own resolution.
+  PostgreSQL-only. 3.24.4 is the same major. After changing either override,
+  re-run `prisma generate`, `prisma validate`, the `migrate diff` drift check,
+  and the migration image's `migrate deploy`.
 
 `scripts/security-audit.mjs` carries no exceptions: with the overrides the full
 and production audits are clean, and if a lockfile change ever dropped one, the
