@@ -58,7 +58,7 @@ export function fakeGitHub(handler: Handler): { client: GitHubAppClient; calls: 
     if (path === "/installation/token" && method === "DELETE") return new Response(null, { status: 204 });
     const call = { method, path, body, accept, authorization };
     calls.push(call);
-    const response = handler(call);
+    const response = handler(call) ?? (method === "POST" && path === "/graphql" ? noThreads() : undefined);
     if (!response) throw new Error(`unexpected ${method} ${path}`);
     return response;
   }) as unknown as typeof fetch;
@@ -66,6 +66,11 @@ export function fakeGitHub(handler: Handler): { client: GitHubAppClient; calls: 
     .privateKey.export({ type: "pkcs1", format: "pem" })
     .toString();
   return { client: new GitHubAppClient({ appId: "123", privateKey }, fetchMock, () => NOW), calls, grants };
+}
+
+/** A GraphQL answer with no review threads: the default for tests that do not exercise threads. */
+export function noThreads(): Response {
+  return json({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } });
 }
 
 export const REPO = "chfields/knock-knock-jokes";

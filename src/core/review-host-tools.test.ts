@@ -27,6 +27,8 @@ function fakeHost(): CodeReviewHost {
       checkConclusion: "success" as const,
       inlineCount: 0,
       outsideDiffCount: 0,
+      resolvedThreadIds: [],
+      skippedThreadIds: [],
     })),
     comment: vi.fn(async () => ({ url: "https://x/c", id: "1" })),
     editComment: vi.fn(async () => undefined),
@@ -118,6 +120,34 @@ describe("handleReviewHostTool", () => {
       checkId: "11",
     });
     expect(c.markRunCheckCompleted).toHaveBeenCalledOnce();
+  });
+
+  it("passes resolveThreadIds through, and rejects malformed ids", async () => {
+    const c = ctx();
+    const args = {
+      repository: WRITE.repository,
+      prNumber: 7,
+      headSha: SHA,
+      verdict: "APPROVE",
+      summary: "ok",
+      body: "fine",
+    };
+    await handleReviewHostTool(
+      "repo_publish_review",
+      JSON.stringify({ ...args, resolveThreadIds: ["PRRT_kwDOabc", "PRRT_x-y="] }),
+      c,
+    );
+    expect(vi.mocked(c.hosts.github!.publishReview).mock.calls[0][1].resolveThreadIds).toEqual([
+      "PRRT_kwDOabc",
+      "PRRT_x-y=",
+    ]);
+    await handleReviewHostTool("repo_publish_review", JSON.stringify({ ...args, resolveThreadIds: [] }), c);
+    expect(vi.mocked(c.hosts.github!.publishReview).mock.calls[1][1]).not.toHaveProperty("resolveThreadIds");
+    const bad = JSON.parse(
+      await handleReviewHostTool("repo_publish_review", JSON.stringify({ ...args, resolveThreadIds: ["../../x"] }), c),
+    );
+    expect(bad).toMatchObject({ error: "invalid_arguments" });
+    expect(c.hosts.github!.publishReview).toHaveBeenCalledTimes(2);
   });
 
   it("publishes with neither a check name nor a check id when the link has no check name and the run no check", async () => {

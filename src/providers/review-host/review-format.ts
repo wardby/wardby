@@ -38,8 +38,20 @@ const BADGES: Record<ReviewVerdict, string> = {
   COMMENT: "💬 **Comments**",
 };
 
-export function renderInlineComment(comment: InlineComment): string {
-  return `**[${comment.severity}]** ${comment.body}`;
+const FINDING_PREFIX = "<!-- wardby:finding:";
+
+/** Tags an inline comment with the agent that wrote it, so only that agent resolves its thread. */
+export function findingMarker(agentMarker: string): string {
+  assertMarker(agentMarker);
+  return `${FINDING_PREFIX}${agentMarker} -->`;
+}
+
+export function hasFindingMarker(body: string, agentMarker: string): boolean {
+  return body.includes(findingMarker(agentMarker));
+}
+
+export function renderInlineComment(comment: InlineComment, agentMarker: string): string {
+  return `**[${comment.severity}]** ${comment.body}\n\n${findingMarker(agentMarker)}`;
 }
 
 export function renderSummaryComment(input: {

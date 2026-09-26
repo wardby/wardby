@@ -23,6 +23,18 @@ export interface PullRequestFileView {
   patchTruncated: boolean;
 }
 
+/** One of this agent's own review threads that is still unresolved. */
+export interface ReviewThreadView {
+  /** Opaque host id; pass it back in PublishReviewInput.resolveThreadIds. */
+  id: string;
+  path: string;
+  /** The line in the current head, or null when the thread is outdated (its line no longer exists). */
+  line: number | null;
+  outdated: boolean;
+  /** The finding as posted, without its marker, capped at 1,000 characters. */
+  body: string;
+}
+
 export interface PullRequestView {
   number: number;
   title: string;
@@ -47,6 +59,8 @@ export interface PullRequestView {
    */
   baseMergedSince: boolean;
   files: PullRequestFileView[];
+  /** This agent's own unresolved review threads on the PR (the first 100 threads are searched). */
+  openThreads: ReviewThreadView[];
 }
 
 export interface PullRequestHead {
@@ -100,6 +114,11 @@ export interface PublishReviewInput {
   checkName?: string;
   /** The run's own in-progress check, when the control plane started one. */
   checkId?: string;
+  /**
+   * Threads to resolve because this head fixes them. Only this agent's own
+   * unresolved threads on this PR are resolved; any other id is skipped.
+   */
+  resolveThreadIds?: string[];
 }
 
 export type PublishReviewResult =
@@ -113,6 +132,9 @@ export type PublishReviewResult =
       checkConclusion: CheckConclusion;
       inlineCount: number;
       outsideDiffCount: number;
+      resolvedThreadIds: string[];
+      /** Requested ids that were not resolved: not this agent's open thread on this PR, or the host refused. */
+      skippedThreadIds: string[];
     }
   | { published: false; reason: "stale_head"; currentHeadSha: string };
 
