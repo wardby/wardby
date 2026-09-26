@@ -55,10 +55,22 @@ export interface FileRef {
   publishedAt: Date | null;
 }
 
+/** One declared dependency edge: the package it installs and the range
+ *  it asks for, in the ecosystem's syntax. `"*"` means any version (also
+ *  used for a spec that is not a range, such as a dist-tag). */
+export interface DependencySpec {
+  name: string;
+  range: string;
+}
+
 export interface VersionInfo {
   version: string;
   /** Dependency names (normalized). Empty when discovered from files instead. */
   dependencies: readonly string[];
+  /** The same dependencies with their declared ranges, for the range-aware
+   *  graph walk. Adapters with `dependenciesInMetadata` set should fill it;
+   *  when omitted, each name counts as `"*"`. */
+  dependencySpecs?: readonly DependencySpec[];
   files: readonly FileRef[];
 }
 
@@ -127,6 +139,14 @@ export interface RegistryAdapter {
   readonly upstreamHosts: readonly string[];
   /** Extra folder names skipped at collection, e.g. "vendor" for Composer. */
   readonly collectExclude: readonly string[];
+  /** Whether fetchMetadata's VersionInfo.dependencies is complete (npm's
+   *  packuments carry every version's dependencies). When true, the core
+   *  may resolve a run's approved dependency graph from metadata alone,
+   *  on demand, before refusing a name (a lockfile install requests
+   *  tarballs without first requesting each parent's metadata). False for
+   *  ecosystems whose indexes omit dependencies (PyPI), where such a walk
+   *  would only make upstream calls and find nothing. */
+  readonly dependenciesInMetadata: boolean;
   /** Lockfile names this ecosystem's client writes, and a rewrite of the proxy download URLs it records in one back to
    *  public URLs, applied before the workspace is collected (lockfiles.ts). Omitted when the client records none. */
   readonly lockfiles?: { names: readonly string[]; normalize(content: string, registryUrl: string): string };

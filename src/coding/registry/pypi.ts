@@ -89,6 +89,7 @@ export const pypiAdapter: RegistryAdapter = {
   osvEcosystem: "PyPI",
   upstreamHosts: ["pypi.org", "files.pythonhosted.org"],
   collectExclude: [".venv", "venv", "__pycache__"],
+  dependenciesInMetadata: false,
 
   parseAllowlistEntry(raw) {
     const match = raw.trim().match(ENTRY);

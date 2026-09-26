@@ -1,7 +1,8 @@
 /**
  * npm registry adapter: parses npm allowlist syntax and semver ranges,
- * routes proxy requests against the npm HTTP protocol (packuments and
- * `-/tarball/<name>/<version>` downloads), and configures npm/npmrc for
+ * routes proxy requests against the npm HTTP protocol (packuments,
+ * `-/tarball/<name>/<version>` downloads, and the standard
+ * `<name>/-/<unscoped>-<version>.tgz` path lockfiles record), and configures npm/npmrc for
  * the sandboxed worker to use the proxy with install-time scripts disabled.
  */
 import semver from "semver";
@@ -10,6 +11,7 @@ import {
   AllowlistEntryError,
   RegistryError,
   type AllowlistEntry,
+  type DependencySpec,
   type DownloadRoute,
   type FileRef,
   type Integrity,
@@ -84,6 +86,54 @@ function integrityOf(dist: { integrity?: string; shasum?: string }): Integrity |
   return null;
 }
 
+/** The registry package each dependency entry installs, and the range it
+ *  asks for. An alias (`"string-width-cjs": "npm:string-width@^4"`)
+ *  installs the package it names, under the alias's own range, not its
+ *  key, so the target is what the run is allowed. A spec
+ *  that isn't fetched from the registry at all (`file:`, `link:`, a path,
+ *  `git`/`git+…`, an `http(s):` tarball, `github:`/`user/repo` shorthands,
+ *  `workspace:`) contributes nothing: every such spec contains a `:` or a
+ *  `/`, which no semver range or dist-tag does. This is the single place
+ *  both the metadata path and the graph walk get dependency names from. */
+export function registryDependencies(deps: Record<string, string> | undefined): DependencySpec[] {
+  const specs: DependencySpec[] = [];
+  for (const [key, rawSpec] of Object.entries(deps ?? {})) {
+    const spec = typeof rawSpec === "string" ? rawSpec.trim() : "";
+    if (spec.startsWith("npm:")) {
+      const target = spec.slice("npm:".length);
+      const at = target.indexOf("@", 1);
+      const name = at > 0 ? target.slice(0, at) : target;
+      if (NAME.test(name)) specs.push({ name, range: rangeOf(at > 0 ? target.slice(at + 1) : "") });
+      continue;
+    }
+    if (/[:/]/.test(spec)) continue;
+    specs.push({ name: key, range: rangeOf(spec) });
+  }
+  return specs;
+}
+
+/** A declared semver range as written, or `"*"` for anything that is not
+ *  a valid range (a dist-tag such as `latest`, an empty spec): npm
+ *  resolves those to some published version, so every kept version counts. */
+function rangeOf(spec: string): string {
+  return spec !== "" && semver.validRange(spec) ? spec : "*";
+}
+
+/** Maps `<name>/-/<unscoped>-<version>.tgz` (already percent-decoded) to
+ *  the same download route as `-/tarball/<name>/<version>`, or null. The
+ *  filename must name this exact package (case-sensitive, as npm names
+ *  are) and an exact semver version, so it can never smuggle a path
+ *  separator or `..` through: neither can appear in a valid version. */
+function standardTarball(name: string, filename: string): DownloadRoute | null {
+  if (!NAME.test(name)) return null;
+  const unscoped = name.slice(name.indexOf("/") + 1);
+  const prefix = `${unscoped}-`;
+  if (!filename.startsWith(prefix) || !filename.endsWith(".tgz")) return null;
+  const version = filename.slice(prefix.length, -".tgz".length);
+  if (semver.valid(version) !== version) return null;
+  return { kind: "download", name, version, filename: `${version}.tgz` };
+}
+
 function validName(name: string): string {
   if (!NAME.test(name)) throw new AllowlistEntryError(`"${name}" is not a valid npm package name`);
   return name;
@@ -94,6 +144,7 @@ export const npmAdapter: RegistryAdapter = {
   osvEcosystem: "npm",
   upstreamHosts: ["registry.npmjs.org"],
   collectExclude: ["node_modules"],
+  dependenciesInMetadata: true,
   lockfiles: npmLockfiles,
 
   parseAllowlistEntry(raw: string): AllowlistEntry {
@@ -122,6 +173,12 @@ export const npmAdapter: RegistryAdapter = {
   route(method, subpath): RegistryRoute | null {
     if (method !== "GET" && method !== "HEAD") return null;
     const tarball = subpath.match(/^-\/tarball\/([^/]+)\/([^/]+)$/);
+    // The standard upstream tarball path, `<name>/-/<unscoped>-<version>.tgz`,
+    // which a lockfile's `resolved` URLs point at once npm rewrites their
+    // host to the configured registry (replace-registry-host). The name is
+    // one segment (`react`, `@scope%2fpkg`) or a literal scope plus name
+    // (`@scope/pkg`); the filename is one raw segment.
+    const standard = subpath.match(/^((?:@[^/]+\/)?[^/]+)\/-\/([^/]+)$/);
     try {
       if (tarball) {
         const name = decodeURIComponent(tarball[1]);
@@ -129,6 +186,7 @@ export const npmAdapter: RegistryAdapter = {
         if (!NAME.test(name) || !semver.valid(version)) return null;
         return { kind: "download", name, version, filename: `${version}.tgz` };
       }
+      if (standard) return standardTarball(decodeURIComponent(standard[1]), decodeURIComponent(standard[2]));
       const name = decodeURIComponent(subpath);
       return NAME.test(name) ? { kind: "metadata", name } : null;
     } catch {
@@ -148,13 +206,10 @@ export const npmAdapter: RegistryAdapter = {
       raw.versions[version] = abbreviated(info);
       if (doc.time?.[version]) raw.time![version] = doc.time[version];
       const published = doc.time?.[version];
-      const dependencies = [
-        ...new Set(
-          [info.dependencies, info.optionalDependencies, info.peerDependencies].flatMap((deps) =>
-            Object.keys(deps ?? {}),
-          ),
-        ),
-      ];
+      const dependencySpecs = [info.dependencies, info.optionalDependencies, info.peerDependencies].flatMap((deps) =>
+        registryDependencies(deps),
+      );
+      const dependencies = [...new Set(dependencySpecs.map((spec) => spec.name))];
       const file: FileRef = {
         filename: `${version}.tgz`,
         version,
@@ -167,6 +222,7 @@ export const npmAdapter: RegistryAdapter = {
       versions.set(version, {
         version,
         dependencies,
+        dependencySpecs,
         files: [file],
       });
     }

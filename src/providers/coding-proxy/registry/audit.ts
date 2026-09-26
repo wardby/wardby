@@ -125,10 +125,18 @@ function indexOf(advisories: readonly Advisory[], adapter: AuditAdapter): Adviso
 
 const EMPTY_INDEX: AdvisoryIndex = { withheld: () => [], reported: () => [] };
 
+export const DEFAULT_AUDIT_CACHE_ENTRIES = 5000;
+
 export class OsvAudit {
+  /** Advisories per package, least recently used first. Bounded to
+   *  `maxEntries`; expired entries are dropped on access and before any
+   *  live entry is evicted. A failed query is never cached. */
   private readonly cache = new Map<string, { expires: number; advisories: Advisory[] }>();
+  /** Single-flight: concurrent audits of one package share one OSV query. */
+  private readonly loads = new Map<string, Promise<Advisory[]>>();
   private readonly now: () => number;
   private readonly ttlMs: number;
+  private readonly maxEntries: number;
   private readonly fetch: UpstreamFetch;
 
   constructor(
@@ -137,6 +145,8 @@ export class OsvAudit {
       failOpen: boolean;
       now?: () => number;
       ttlMs?: number;
+      /** Packages kept in the advisory cache (default 5000). */
+      maxEntries?: number;
       /** Timeout for one OSV request, body included (default 30 s). */
       timeoutMs?: number;
       /** Largest OSV response read (default 64 MiB). */
@@ -145,6 +155,7 @@ export class OsvAudit {
   ) {
     this.now = options.now ?? Date.now;
     this.ttlMs = options.ttlMs ?? 3_600_000;
+    this.maxEntries = options.maxEntries ?? DEFAULT_AUDIT_CACHE_ENTRIES;
     // Every OSV request is bounded in time and size; any failure, including
     // these, makes the audit unavailable (fail closed unless configured open).
     this.fetch = boundedMetadataFetch(options.fetch, {
@@ -157,10 +168,25 @@ export class OsvAudit {
     const wanted = adapter.normalizeName(name);
     const key = `${adapter.osvEcosystem}:${wanted}`;
     const cached = this.cache.get(key);
-    if (cached && cached.expires > this.now()) return indexOf(cached.advisories, adapter);
-    let vulns: OsvVuln[];
+    if (cached) {
+      this.cache.delete(key);
+      if (cached.expires > this.now()) {
+        this.cache.set(key, cached); // most recently used
+        return indexOf(cached.advisories, adapter);
+      }
+    }
+    let load = this.loads.get(key);
+    if (!load) {
+      load = this.load(adapter, name, wanted)
+        .then((advisories) => {
+          this.remember(key, advisories);
+          return advisories;
+        })
+        .finally(() => this.loads.delete(key));
+      this.loads.set(key, load);
+    }
     try {
-      vulns = await this.query(adapter.osvEcosystem, name);
+      return indexOf(await load, adapter);
     } catch {
       if (this.options.failOpen) return EMPTY_INDEX;
       throw new RegistryError(
@@ -169,6 +195,22 @@ export class OsvAudit {
         `the vulnerability audit for "${name}" could not reach OSV; try again later`,
       );
     }
+  }
+
+  private remember(key: string, advisories: Advisory[]): void {
+    const now = this.now();
+    for (const [cachedKey, entry] of this.cache) if (entry.expires <= now) this.cache.delete(cachedKey);
+    this.cache.delete(key);
+    while (this.cache.size >= this.maxEntries) {
+      const oldest = this.cache.keys().next();
+      if (oldest.done) break;
+      this.cache.delete(oldest.value);
+    }
+    this.cache.set(key, { expires: now + this.ttlMs, advisories });
+  }
+
+  private async load(adapter: AuditAdapter, name: string, wanted: string): Promise<Advisory[]> {
+    const vulns = await this.query(adapter.osvEcosystem, name);
     const advisories: Advisory[] = [];
     for (const vuln of vulns) {
       const affected = (vuln.affected ?? []).filter(
@@ -181,8 +223,7 @@ export class OsvAudit {
       const severity = vuln.database_specific?.severity?.toUpperCase() ?? "";
       advisories.push({ id: vuln.id, blocking: BLOCKING.has(severity), affected });
     }
-    this.cache.set(key, { expires: this.now() + this.ttlMs, advisories });
-    return indexOf(advisories, adapter);
+    return advisories;
   }
 
   private async query(ecosystem: string, name: string): Promise<OsvVuln[]> {

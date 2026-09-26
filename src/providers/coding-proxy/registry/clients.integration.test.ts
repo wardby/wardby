@@ -232,8 +232,113 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
     expect(served[0]).toMatchObject({ ecosystem: "npm", name: "left-pad", version: "1.3.0" });
   });
 
+  it("installs from a committed package-lock.json with npm ci (tarballs only, graph resolved on demand)", async () => {
+    // The lockfile's `resolved` URLs point at registry.npmjs.org; npm's
+    // default replace-registry-host rewrites them to the proxy's standard
+    // `<name>/-/<unscoped>-<version>.tgz` path, and with a complete
+    // lockfile npm requests no metadata at all. Only the root is
+    // allowlisted, so the child's tarball is allowed only because the
+    // proxy resolves the approved graph (root -> child) on demand.
+    const fixtureDir = new URL("./fixtures/npm-lockfile/", import.meta.url);
+    const lock = JSON.parse(await readFile(new URL("package-lock.json", fixtureDir), "utf8"));
+    const routes = new Map<string, () => Response>();
+    const published = "2020-01-01T00:00:00.000Z";
+    for (const [key, entry] of Object.entries(lock.packages as Record<string, Record<string, unknown>>)) {
+      if (!key) continue;
+      const name = key.slice("node_modules/".length);
+      const version = entry.version as string;
+      const resolved = entry.resolved as string;
+      const bytes = await readFile(new URL(`${name}-${version}.tgz`, fixtureDir));
+      routes.set(resolved, () => new Response(bytes));
+      routes.set(`https://registry.npmjs.org/${name}`, () =>
+        Response.json({
+          name,
+          "dist-tags": { latest: version },
+          time: { [version]: published },
+          versions: {
+            [version]: {
+              name,
+              version,
+              dependencies: entry.dependencies,
+              dist: { tarball: resolved, integrity: entry.integrity },
+            },
+          },
+        }),
+      );
+    }
+    const {
+      server,
+      store,
+      token,
+      registryUrl: registryUrlFor,
+    } = await startTestRegistry({ npm: ["wardby-lock-root"] }, routes);
+    cleanups.push(() => server.close());
+
+    const cacheDir = await tmpDir("wardby-npm-cache-lock-");
+    const projectDir = await tmpDir("wardby-npm-proj-lock-");
+    cleanups.push(() => rm(cacheDir, { recursive: true, force: true }));
+    cleanups.push(() => rm(projectDir, { recursive: true, force: true }));
+    for (const file of ["package.json", "package-lock.json"])
+      await writeFile(join(projectDir, file), await readFile(new URL(file, fixtureDir)));
+
+    const registryUrl = registryUrlFor("npm");
+    const config = npmAdapter.workerConfig({ registryUrl, token, cacheDir });
+    const npmrcPath = config.files[0].path;
+    for (const file of config.files) await writeFile(file.path, file.content, { mode: file.mode });
+
+    const result = await run(
+      "npm",
+      [
+        "ci",
+        "--registry",
+        registryUrl,
+        "--userconfig",
+        npmrcPath,
+        "--cache",
+        join(cacheDir, "cache"),
+        "--ignore-scripts",
+        "--no-audit",
+        "--no-fund",
+      ],
+      // The worker's own env (update notifier off), so npm makes no request
+      // of its own and every refusal below would be the install's.
+      { cwd: projectDir, env: { ...process.env, ...config.env } },
+    );
+    expect(result.code, `npm stderr:\n${result.stderr}`).toBe(0);
+
+    for (const name of ["wardby-lock-root", "wardby-lock-child"]) {
+      const installed = JSON.parse(await readFile(join(projectDir, "node_modules", name, "package.json"), "utf8"));
+      expect(installed).toMatchObject({ name, version: "1.0.0" });
+    }
+    const fetches = await store.listFetches("client-integration-run");
+    expect(fetches.filter((fetch) => fetch.outcome === "refused")).toEqual([]);
+    expect(
+      fetches
+        .filter((fetch) => fetch.outcome === "served")
+        .map((fetch) => fetch.name)
+        .sort(),
+    ).toEqual(["wardby-lock-child", "wardby-lock-root"]);
+    expect(await store.isAllowedDependency("client-integration-run", "npm", "wardby-lock-child")).toBe(true);
+  });
+
   it("refuses a package not on the allowlist and surfaces the reason to npm", async () => {
-    const { server, token, registryUrl: registryUrlFor } = await startTestRegistry({ npm: ["left-pad"] }, new Map());
+    // The root's metadata must be reachable: before refusing, the proxy
+    // resolves the approved graph from it, and an unreadable graph is
+    // answered "unavailable, try again" (502), never "not allowed". The
+    // fixture's dependencies are dropped so the graph is just the root.
+    const npmDoc = JSON.parse(
+      await readFile(new URL("../../../coding/registry/fixtures/npm-left-pad.json", import.meta.url), "utf8"),
+    );
+    for (const version of Object.values(npmDoc.versions as Record<string, { dependencies?: unknown }>))
+      delete version.dependencies;
+    const {
+      server,
+      token,
+      registryUrl: registryUrlFor,
+    } = await startTestRegistry(
+      { npm: ["left-pad"] },
+      new Map([["https://registry.npmjs.org/left-pad", () => Response.json(npmDoc)]]),
+    );
     cleanups.push(() => server.close());
 
     const cacheDir = await tmpDir("wardby-npm-cache-denied-");

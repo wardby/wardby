@@ -285,6 +285,7 @@ describe("coding proxy registry routing", () => {
       osvEcosystem: "npm",
       upstreamHosts: ["upstream.test"],
       collectExclude: [],
+      dependenciesInMetadata: true,
       parseAllowlistEntry: (raw) => ({ name: raw, wildcard: false }),
       normalizeName: (name) => name,
       satisfies: () => true,
