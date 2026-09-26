@@ -78,8 +78,21 @@ export interface PackageMetadata {
   name: string;
   /** Keyed by version string. */
   versions: ReadonlyMap<string, VersionInfo>;
-  /** Adapter-private upstream document, used by renderMetadata and resolveDownload. */
-  raw: unknown;
+  /** Adapter-private data renderMetadata (and resolveFileMetadata) read:
+   *  never the upstream document itself, only what those need of it.
+   *  `undefined` when the adapter supports metadata without render data
+   *  (`fetchMetadata` without `render`) and it was fetched that way. */
+  raw?: unknown;
+  /** Approximate bytes this object retains, for the metadata cache's byte
+   *  budget. The core estimates it when an adapter leaves it out. */
+  approxBytes?: number;
+}
+
+export interface FetchMetadataOptions {
+  /** Also keep what renderMetadata needs. Without it, an adapter may omit
+   *  `raw` (npm does), since the graph walk, the version filter and
+   *  downloads read only `versions`. */
+  render?: boolean;
 }
 
 export interface MetadataRoute {
@@ -173,8 +186,10 @@ export interface RegistryAdapter {
    *  400 `wardby_bad_request` RegistryError for a malformed path (bad
    *  percent-encoding or an invalid package name); the core records it. */
   route(method: string, subpath: string, headers: Headers): RegistryRoute | null;
-  /** Fetch and parse upstream metadata for one package. */
-  fetchMetadata(name: string, upstream: UpstreamFetch): Promise<PackageMetadata>;
+  /** Fetch and parse upstream metadata for one package, keeping only the
+   *  fields the proxy reads: nothing returned may reference the parsed
+   *  upstream document, which can be tens of MB. */
+  fetchMetadata(name: string, upstream: UpstreamFetch, options?: FetchMetadataOptions): Promise<PackageMetadata>;
   /** Build the client-facing metadata document containing only `keep`
    *  versions and, of their files, only the filenames in `keptFiles` (the
    *  core's per-file release-age filter), with every download link
