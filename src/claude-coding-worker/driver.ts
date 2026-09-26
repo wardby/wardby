@@ -1,12 +1,9 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
 import {
   CODING_PROTOCOL_VERSION,
   parseCodingAgentOutputJson,
   type CodingAgentOutput,
   type CodingTaskInput,
 } from "../coding/protocol.js";
-import { registryWorkerSetup } from "../coding/registry/worker-config.js";
 import { safeWorkerErrorCode } from "../coding-worker/errors.js";
 import type { WorkerProgressEvent } from "../coding-worker/types.js";
 
@@ -73,8 +70,6 @@ export interface ClaudeWorkerRunOptions {
   signal: AbortSignal;
   createQuery: ClaudeQueryFactory;
   onProgress?: (event: WorkerProgressEvent) => void;
-  /** Root directory for registry cache files (npmrc, pip cache, ...). Defaults to "/workspace/.cache". */
-  cacheRoot?: string;
 }
 
 function boundedPrompt(task: string, runId: string): string {
@@ -119,21 +114,14 @@ function budgetExhausted(input: CodingTaskInput): CodingAgentOutput {
 }
 
 export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Promise<CodingAgentOutput> {
-  const registry = registryWorkerSetup({
-    proxyBaseUrl: options.proxyBaseUrl,
-    capability: options.capability,
-    cacheRoot: options.cacheRoot ?? "/workspace/.cache",
-  });
-  for (const file of registry.files) {
-    await mkdir(dirname(file.path), { recursive: true });
-    await writeFile(file.path, file.content, { mode: file.mode });
-  }
   const stream = options.createQuery({
     prompt: boundedPrompt(options.input.task, options.input.runId),
     model: options.input.model,
     budgetUsd: options.input.budgetUsd,
     signal: options.signal,
-    environment: { ...agentEnvironment(options.proxyBaseUrl, options.capability), ...registry.env },
+    // Package registry settings are not applied here: Claude Code runs commands in the
+    // network-less tool runner, so registry mode is Codex-only for now.
+    environment: agentEnvironment(options.proxyBaseUrl, options.capability),
     relayEnvironment: relayEnvironment(),
     outputSchema: CLAUDE_OUTPUT_JSON_SCHEMA,
     developerInstructions: CLAUDE_WORKER_SECURITY_INSTRUCTIONS,
