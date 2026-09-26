@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { MemoryProxyLedger } from "./memory-ledger.js";
 import { CodingProxy, type CreatedCodingProxySession } from "./proxy.js";
-import type { RegistryRequest, RegistryResponse } from "./registry/service.js";
+import type { RegistryAdapter } from "../../coding/registry/types.js";
+import { capabilityHash } from "./proxy.js";
+import { RegistryService, type RegistryRequest, type RegistryResponse } from "./registry/service.js";
+import { MemoryRegistryStore } from "./registry/store.js";
 import { startCodingProxyServer, type CodingProxyServerHandle } from "./server.js";
 
 /** A minimal CodingProxy wired only well enough to start the HTTP server;
@@ -273,5 +276,119 @@ describe("coding proxy registry routing", () => {
       })(),
     ).rejects.toThrow();
     await server.close();
+  });
+
+  describe("with the real registry service", () => {
+    const NOW = new Date("2026-09-25T00:00:00Z");
+    const adapter: RegistryAdapter = {
+      id: "npm",
+      osvEcosystem: "npm",
+      upstreamHosts: ["upstream.test"],
+      collectExclude: [],
+      parseAllowlistEntry: (raw) => ({ name: raw, wildcard: false }),
+      normalizeName: (name) => name,
+      satisfies: () => true,
+      compareVersions: (a, b) => a.localeCompare(b),
+      route: (_method, subpath) => {
+        const download = subpath.match(/^-\/tarball\/([^/]+)\/([^/]+)$/);
+        return download
+          ? { kind: "download", name: download[1], version: download[2], filename: `${download[2]}.tgz` }
+          : { kind: "metadata", name: subpath };
+      },
+      fetchMetadata: async (name) => ({
+        name,
+        raw: null,
+        versions: new Map([
+          [
+            "1.0.0",
+            {
+              version: "1.0.0",
+              dependencies: [],
+              files: [
+                {
+                  filename: "1.0.0.tgz",
+                  version: "1.0.0",
+                  upstreamUrl: `https://upstream.test/${name}.tgz`,
+                  integrity: null,
+                  sizeBytes: null,
+                  allowed: true,
+                  publishedAt: new Date("2026-01-01T00:00:00Z"),
+                },
+              ],
+            },
+          ],
+        ]),
+      }),
+      renderMetadata: () => ({ contentType: "application/json", body: "{}" }),
+      resolveDownload: (route, meta) => meta.versions.get(route.version)?.files[0] ?? null,
+      workerConfig: () => ({ env: {}, files: [] }),
+    };
+
+    async function start() {
+      const store = new MemoryRegistryStore();
+      store.contexts.set(capabilityHash("rrg_token"), {
+        runId: "run-1",
+        deadlineAt: new Date(NOW.getTime() + 86_400_000),
+        allowlist: { npm: ["react"] },
+        policy: {},
+      });
+      let upstreamCalls = 0;
+      let cancelled: () => void = () => {};
+      const upstreamCancelled = new Promise<void>((resolve) => {
+        cancelled = resolve;
+      });
+      const registry = new RegistryService({
+        adapters: new Map([["npm", adapter]]),
+        store,
+        audit: { audit: async () => ({ withheld: () => [], reported: () => [] }) },
+        upstream: async () => {
+          upstreamCalls += 1;
+          // One chunk, then a stall: only a cancel ends it.
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(new Uint8Array(64 * 1024));
+              },
+              cancel: () => cancelled(),
+            }),
+          );
+        },
+        proxyBase: "http://wardby-proxy:8787/registry/",
+        limits: { maxFileBytes: 10_000_000, maxTotalBytes: 20_000_000, maxFiles: 1, idleTimeoutMs: 60_000 },
+        now: () => NOW,
+      });
+      const server = await startCodingProxyServer(fakeProxy(), { host: "127.0.0.1", port: 0, registry });
+      const url = `http://127.0.0.1:${server.port}/registry/npm/-/tarball/react/1.0.0`;
+      return { server, store, url, upstreamCancelled, upstreamCalls: () => upstreamCalls };
+    }
+
+    const auth = { authorization: "Bearer rrg_token" };
+
+    it("HEAD starts no download and leaves the run's only file slot free", async () => {
+      const { server, store, url, upstreamCalls } = await start();
+      const head = await fetch(url, { method: "HEAD", headers: auth });
+      expect(head.status).toBe(200);
+      expect(upstreamCalls()).toBe(0);
+      expect(store.fetches).toEqual([]);
+      await server.close();
+    });
+
+    it("a client that disconnects mid-stream cancels the download and releases its reservation", async () => {
+      const { server, store, url, upstreamCancelled } = await start();
+      const client = new AbortController();
+      const response = await fetch(url, { headers: auth, signal: client.signal });
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      await reader.read();
+      client.abort();
+      await upstreamCancelled;
+      expect(store.fetches.filter((fetch) => fetch.outcome === "served")).toEqual([]);
+      // maxFiles is 1: a leaked reservation would make this a 429.
+      const again = new AbortController();
+      const second = await fetch(url, { headers: auth, signal: again.signal });
+      expect(second.status).toBe(200);
+      again.abort();
+      await server.close();
+    });
   });
 });

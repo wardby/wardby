@@ -49,6 +49,10 @@ export interface RegistryRequest {
   signal: AbortSignal;
 }
 
+function contentTypeOf(route: DownloadRoute | FileMetadataRoute): string {
+  return route.kind === "file-metadata" ? "text/plain" : "application/octet-stream";
+}
+
 export function errorResponse(error: RegistryError): RegistryResponse {
   return {
     status: error.status,
@@ -158,6 +162,9 @@ export class RegistryService {
         `"${file.filename}" is a source distribution; only wheels are allowed`,
       );
     }
+    // HEAD answers from metadata alone: no upstream download, no
+    // reservation, nothing recorded as served.
+    if (request.method === "HEAD") return { status: 200, contentType: contentTypeOf(route), body: "" };
     return this.download(adapter, context, name, route, file, request.signal);
   }
 
@@ -351,6 +358,17 @@ export class RegistryService {
       }
     };
 
+    // The client went away (its request signal aborted the upstream read):
+    // release the reservation and record nothing, since nothing was served
+    // and nothing was refused.
+    const abandon = (controller: ReadableStreamDefaultController<Uint8Array>) => {
+      if (settled) return;
+      settled = true;
+      clearIdle();
+      release();
+      controller.error(new RegistryError(499, "client_disconnected", "the client disconnected"));
+    };
+
     const stream = new ReadableStream<Uint8Array>({
       pull: async (controller) => {
         if (settled) return;
@@ -367,7 +385,7 @@ export class RegistryService {
         // record on top of that already-settled outcome.
         if (settled) return;
         clearIdle();
-        if (!outcome.ok) return fail(controller, "wardby_upstream_error");
+        if (!outcome.ok) return signal.aborted ? abandon(controller) : fail(controller, "wardby_upstream_error");
         if (outcome.done) {
           if (hash && hash.digest("hex") !== file.integrity!.hex) return fail(controller, "wardby_integrity_mismatch");
           settled = true;
@@ -434,7 +452,6 @@ export class RegistryService {
         await reader.cancel().catch(() => undefined);
       },
     });
-    const contentType = route.kind === "file-metadata" ? "text/plain" : "application/octet-stream";
-    return { status: 200, contentType, stream };
+    return { status: 200, contentType: contentTypeOf(route), stream };
   }
 }

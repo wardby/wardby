@@ -376,6 +376,77 @@ describe("RegistryService", () => {
   });
 });
 
+describe("RegistryService reservations on HEAD and client abort", () => {
+  it("answers HEAD from metadata without fetching the file, reserving, or recording", async () => {
+    const urls: string[] = [];
+    const { registry, store } = service({
+      limits: { maxFiles: 1 },
+      upstream: async (url) => {
+        urls.push(url);
+        return new Response(tarball);
+      },
+    });
+    const head = await registry.handle({ ...request("dl/app/1.0.0"), method: "HEAD" });
+    expect(head).toMatchObject({ status: 200, body: "" });
+    expect(urls).toEqual([]);
+    expect(store.fetches).toEqual([]);
+    // In-flight usage is back at zero: the only file slot is still free.
+    const get = await registry.handle(request("dl/app/1.0.0"));
+    if (!("stream" in get)) throw new Error("expected a stream");
+    await new Response(get.stream).arrayBuffer();
+    expect(store.fetches.map((fetch) => fetch.outcome)).toEqual(["served"]);
+  });
+
+  it("releases the reservation and records nothing when the client aborts mid-stream", async () => {
+    const { registry, store } = service({
+      limits: { maxFiles: 1 },
+      upstream: async (_url, init) => {
+        // First chunk now, then hang until the client's signal aborts.
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(tarball.subarray(0, 4));
+            init?.signal?.addEventListener("abort", () => controller.error(new Error("aborted")));
+          },
+        });
+        return new Response(body);
+      },
+    });
+    const client = new AbortController();
+    const response = await registry.handle({ ...request("dl/app/1.0.0"), signal: client.signal });
+    if (!("stream" in response)) throw new Error("expected a stream");
+    const reader = response.stream.getReader();
+    await reader.read();
+    const pending = reader.read();
+    client.abort();
+    await expect(pending).rejects.toThrow();
+    expect(store.fetches).toEqual([]);
+    const next = await registry.handle(request("dl/app/1.0.0"));
+    expect(next).toMatchObject({ status: 200 });
+    if ("stream" in next) await next.stream.cancel();
+  });
+
+  it("releases the reservation when the consumer cancels the stream", async () => {
+    const { registry, store } = service({
+      limits: { maxFiles: 1 },
+      upstream: async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(tarball.subarray(0, 4));
+            },
+          }),
+        ),
+    });
+    const response = await registry.handle(request("dl/app/1.0.0"));
+    if (!("stream" in response)) throw new Error("expected a stream");
+    const reader = response.stream.getReader();
+    await reader.read();
+    await reader.cancel();
+    expect(store.fetches).toEqual([]);
+    await expect(registry.handle(request("dl/app/1.0.0"))).resolves.toMatchObject({ status: 200 });
+  });
+});
+
 describe("RegistryService with the npm adapter: names are case-exact", () => {
   const old = new Date(NOW.getTime() - 30 * DAY).toISOString();
   const packument = (name: string, dependencies: Record<string, string> = {}) => ({

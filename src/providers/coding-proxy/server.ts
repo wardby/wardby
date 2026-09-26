@@ -1,5 +1,5 @@
 import { createServer, type ServerResponse } from "node:http";
-import { Readable } from "node:stream";
+import { pipeline, Readable } from "node:stream";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { HTTP_LIMITS, HttpBoundaryError, readBody } from "../../mcp/transport/http-limits.js";
 import { logger } from "../../core/logger.js";
@@ -123,12 +123,18 @@ export async function startCodingProxyServer(
           return;
         }
         if (request.method === "HEAD") {
+          // The registry answers HEAD without starting a download; cancel
+          // defensively anyway so a stream can never hold a reservation.
+          void result.stream.cancel().catch(() => undefined);
           response.end();
           return;
         }
-        Readable.fromWeb(result.stream as WebReadableStream)
-          .on("error", () => response.destroy())
-          .pipe(response);
+        // pipeline (not .pipe) destroys the source when the client
+        // disconnects or the response errors, which cancels the web stream
+        // so the registry releases the run's in-flight reservation.
+        pipeline(Readable.fromWeb(result.stream as WebReadableStream), response, (error) => {
+          if (error && !response.destroyed) response.destroy();
+        });
         return;
       }
       if (request.method === "HEAD" && request.url === "/api/hello") {
