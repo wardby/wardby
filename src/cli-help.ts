@@ -10,6 +10,8 @@ export const CLI_USAGE = `usage:
   wardby tool create --name <n> --description <d> --params <file> --code <file>
   wardby tool attach <tool-name|tool-id> <agent-name>
   wardby tool detach <tool-name|tool-id> <agent-name>
+  wardby tool update <tool-name|tool-id> [--description <d>] [--params <file>] [--code <file>]
+  wardby tool delete <tool-name|tool-id> [--detach]
   wardby tool list [--agent <name>]
   wardby run <name>
   wardby runs [--agent <name>] [--limit N] [--status <s>]
