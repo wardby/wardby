@@ -12,19 +12,40 @@ export const UNTRUSTED_TOOL_OUTPUT_TAG = "untrusted_tool_output";
 export const UNTRUSTED_CONTEXT_TAG = "untrusted_context";
 export const RUN_TASK_TAG = "run_task";
 
+/** Invisible characters (zero-width, bidi controls, soft hyphen, variation selectors, tag characters, ...). */
+const IGNORABLE = "\\p{Default_Ignorable_Code_Point}";
+/** "<" and its common lookalikes: fullwidth, small, angle brackets, single guillemet. */
+const BRACKET = "[<\\uFF1C\\uFE64\\u2329\\u3008\\u27E8\\u2039]";
+/** Between the bracket and the name: whitespace, invisibles, and any number of slashes, backslashes or slash lookalikes. */
+const LEAD = `[\\s${IGNORABLE}/\\\\\\uFF0F\\u2215\\u2044\\u29F8]*`;
+/** Between "run" and "task": whitespace, invisibles, "_", "-" and their dash/fullwidth lookalikes. */
+const JOIN = `[\\s${IGNORABLE}_\\-\\u2010-\\u2015\\uFF3F\\uFF0D]*`;
+
+/** One ASCII letter or its fullwidth form (the `i` flag covers either case). */
+const letter = (ch: string): string => `[${ch}${String.fromCharCode(0xff41 + ch.charCodeAt(0) - 0x61)}]`;
+/** A word whose letters may be separated by invisible characters. */
+const word = (w: string): string => [...w].map(letter).join(`[${IGNORABLE}]*`);
+
 /**
- * A "<" (or a common Unicode lookalike: fullwidth, small, angle brackets,
- * single guillemet), then optional whitespace, invisible characters, and a
- * "/", then the start of any of our tag names — i.e. anything that could be
- * read as opening or closing one of the fences, in any case. Only the
- * bracket is replaced, with "&lt;", so the rest of the text is unchanged.
+ * A bracket that could be read as opening or closing one of the fences: a
+ * "<" or lookalike, then LEAD, then the start of a fence name ("untrusted…"
+ * or "run_task" / "run-task" / "run task"), in any case, with invisible
+ * characters or fullwidth letters allowed inside the name. Only the bracket
+ * is replaced, with "&lt;", so the rest of the text is unchanged.
+ *
+ * Linear time (I-1): every starred class is followed by a letter it cannot
+ * contain, so it has exactly one way to match, and a failed attempt at one
+ * bracket gives back each character at most once. Homoglyphs from other
+ * scripts inside the name (a Cyrillic "е") are not caught.
  */
-const FENCE_TAG_LIKE =
-  /[<\uFF1C\uFE64\u2329\u3008\u27E8\u2039][\s\u200B-\u200D\u2060\uFEFF]*(\/?[\s\u200B-\u200D\u2060\uFEFF]*(?:untrusted|run_task))/giu;
+const FENCE_TAG_LIKE = new RegExp(
+  `${BRACKET}(?=${LEAD}(?:${word("untrusted")}|${word("run")}${JOIN}${word("task")}))`,
+  "giu",
+);
 
 /** Makes every fence-like tag in `content` inert. Idempotent. */
 export function neutraliseWrapperTags(content: string): string {
-  return content.replace(FENCE_TAG_LIKE, "&lt;$1");
+  return content.replace(FENCE_TAG_LIKE, "&lt;");
 }
 
 /** `content` between `<tag>` and `</tag>`, unable to close or reopen either fence itself. */

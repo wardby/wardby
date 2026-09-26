@@ -105,7 +105,17 @@ PR description:
 - The description and the comment are each capped at 8,000 characters.
 - Text inside either fence that imitates one of these tags (for example a
   description containing `</untrusted_context>`) has its `<` escaped to
-  `&lt;`, so it cannot end the fence early.
+  `&lt;`, so it cannot end the fence early. This also covers lookalike
+  brackets and slashes, invisible characters, and fullwidth letters inside
+  the tag name.
+- Known limit: the agent reads the untrusted context, so it can still be
+  talked into passing that text on. If the mention agent delegates to a
+  sub-agent, the `task` it writes becomes the sub-agent's run task, which
+  sits in the sub-agent's system prompt. It is fenced by `<run_task>` tags
+  and labelled as untrusted there, but it is system-role text, one model hop
+  from the outsider who wrote the issue. Give sub-agents that a mention
+  agent can reach only the tools and access you would give that outsider's
+  text.
 
 ## Fork pull requests are skipped
 
