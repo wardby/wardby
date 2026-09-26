@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import type { GitHubAppClient } from "../vcs/github.js";
 import { GitHubReviewHost } from "./github.js";
-import { fakeGitHub, json, OLD_SHA, PATCH, PR, REPO, SHA } from "./github.test-support.js";
+import { BY_APP, fakeGitHub, json, OLD_SHA, PATCH, PR, REPO, SHA } from "./github.test-support.js";
 import { reviewMarker } from "./review-format.js";
 
 const BASE = "/repos/chfields/knock-knock-jokes";
@@ -19,8 +19,8 @@ describe("GitHubReviewHost reads", () => {
       }
       if (path.startsWith(`${BASE}/issues/7/comments`)) {
         return json([
-          { id: 1, body: `${reviewMarker("other", OLD_SHA)}\nnot mine` },
-          { id: 2, body: `${reviewMarker("agent1", OLD_SHA)}\nmine` },
+          { id: 1, body: `${reviewMarker("other", OLD_SHA)}\nnot mine`, ...BY_APP },
+          { id: 2, body: `${reviewMarker("agent1", OLD_SHA)}\nmine`, ...BY_APP },
         ]);
       }
       return undefined;
@@ -39,6 +39,25 @@ describe("GitHubReviewHost reads", () => {
     });
     expect(view.files[0]).toMatchObject({ patch: PATCH, patchTruncated: false });
     expect(view.files[1]).toMatchObject({ patch: PATCH.slice(0, 5), patchTruncated: true });
+  });
+
+  it("ignores a marker in a comment the App did not write", async () => {
+    const { client } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path === `${BASE}/pulls/7`) return json(PR);
+      if (path.startsWith(`${BASE}/pulls/7/files`)) return json([]);
+      if (path.startsWith(`${BASE}/issues/7/comments`)) {
+        return json([
+          { id: 1, body: `${reviewMarker("agent1", OLD_SHA)}\nforged`, user: { type: "User" } },
+          { id: 2, body: `${reviewMarker("agent1", OLD_SHA)}\nother app`, performed_via_github_app: { id: 1 } },
+        ]);
+      }
+      return undefined;
+    });
+    const view = await new GitHubReviewHost(client).readPullRequest(REPO, 7, {
+      maxPatchChars: 1000,
+      agentMarker: "agent1",
+    });
+    expect(view.lastReviewedSha).toBeNull();
   });
 
   it("uses the compare API when sinceSha is an ancestor of the head", async () => {
@@ -222,7 +241,7 @@ describe("GitHubReviewHost writes", () => {
       if (method === "GET" && path === `${BASE}/pulls/7`) return json(PR);
       if (method === "GET" && path.startsWith(`${BASE}/pulls/7/files`)) return json([]);
       if (method === "GET" && path.startsWith(`${BASE}/issues/7/comments`)) {
-        return json([{ id: 5, body: `${reviewMarker("agent1", OLD_SHA)}\nold`, html_url: "https://x/5" }]);
+        return json([{ id: 5, body: `${reviewMarker("agent1", OLD_SHA)}\nold`, html_url: "https://x/5", ...BY_APP }]);
       }
       if (method === "PATCH" && path === `${BASE}/issues/comments/5`) return json({ id: 5, html_url: "https://x/5" });
       if (method === "POST" && path === `${BASE}/check-runs`) return json({ id: 12 }, 201);
@@ -241,6 +260,23 @@ describe("GitHubReviewHost writes", () => {
       status: "completed",
       conclusion: "success",
     });
+  });
+
+  it("posts a new summary rather than editing a forged one the App did not write", async () => {
+    const { client, calls } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path === `${BASE}/pulls/7`) return json(PR);
+      if (method === "GET" && path.startsWith(`${BASE}/pulls/7/files`)) return json([]);
+      if (method === "GET" && path.startsWith(`${BASE}/issues/7/comments`)) {
+        return json([{ id: 5, body: `${reviewMarker("agent1", OLD_SHA)}\nforged`, user: { type: "User" } }]);
+      }
+      if (method === "POST" && path === `${BASE}/issues/7/comments`)
+        return json({ id: 6, html_url: "https://x/6" }, 201);
+      if (method === "PATCH" && path === `${BASE}/check-runs/11`) return json({ id: 11 });
+      return undefined;
+    });
+    const result = await new GitHubReviewHost(client).publishReview(REPO, { ...input, comments: [], checkId: "11" });
+    expect(result).toMatchObject({ published: true, summaryCommentUrl: "https://x/6" });
+    expect(calls.some((c) => c.path === `${BASE}/issues/comments/5`)).toBe(false);
   });
 
   it("refuses a stale head and marks the run's check superseded", async () => {

@@ -7,6 +7,9 @@ export const NOW = new Date("2026-09-26T12:00:00.000Z");
 export const TOKEN = "ghs_abcdefghijklmnopqrstuvwxyz-1234567890.example";
 export const SHA = "0123456789abcdef0123456789abcdef01234567";
 export const OLD_SHA = "89abcdef0123456789abcdef0123456789abcdef";
+/** The App id the fake answers `GET /app` with; real summary comments carry it. */
+export const APP_ID = 777;
+export const BY_APP = { performed_via_github_app: { id: APP_ID } };
 
 export interface Call {
   method: string;
@@ -23,7 +26,8 @@ export function json(value: unknown, status = 200): Response {
 
 /**
  * A fake api.github.com: answers the token dance (echoing back exactly the
- * requested permissions), then routes every other call to `handler`.
+ * requested permissions) and `GET /app` (as APP_ID), then routes every other
+ * call to `handler`.
  */
 export function fakeGitHub(handler: Handler): { client: GitHubAppClient; calls: Call[]; grants: unknown[] } {
   const calls: Call[] = [];
@@ -34,6 +38,7 @@ export function fakeGitHub(handler: Handler): { client: GitHubAppClient; calls: 
     const method = init?.method ?? "GET";
     const body = typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : undefined;
     const accept = new Headers(init?.headers).get("accept");
+    if (path === "/app" && method === "GET") return json({ id: APP_ID, slug: "wardby" });
     if (path.endsWith("/installation") && method === "GET") return json({ id: 42 });
     if (path === "/app/installations/42/access_tokens") {
       const requested = (body as { permissions: Record<string, string>; repositories: string[] }).permissions;

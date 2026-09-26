@@ -78,6 +78,12 @@ export function toReviewHostError(err: unknown): ReviewHostError {
   return new ReviewHostError("host_api_error", "github_request_failed");
 }
 
+/** True only for a comment the wardby App itself wrote; anyone can type a marker into a comment. */
+function writtenByApp(comment: Json, appId: number): boolean {
+  const app = comment.performed_via_github_app;
+  return !!app && typeof app === "object" && (app as Json).id === appId;
+}
+
 function repoPath(repository: string): string {
   const [owner, name] = normalizeGitHubRepository(repository).split("/");
   return `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
@@ -183,13 +189,16 @@ export class GitHubReviewHost implements CodeReviewHost {
         };
       });
 
+      const { id: appId } = await this.client.appIdentity();
       let lastReviewedSha: string | null = null;
       for (let page = 1; page <= MAX_COMMENT_PAGES && !lastReviewedSha; page++) {
         const comments = list(
           await (await get(`${base}/issues/${prNumber}/comments?per_page=100&page=${page}`)).json(),
         );
         for (const comment of comments) {
-          if (typeof comment.body === "string") lastReviewedSha ??= parseReviewMarker(comment.body, opts.agentMarker);
+          if (typeof comment.body === "string" && writtenByApp(comment, appId)) {
+            lastReviewedSha ??= parseReviewMarker(comment.body, opts.agentMarker);
+          }
         }
         if (comments.length < 100) break;
       }
@@ -345,7 +354,8 @@ export class GitHubReviewHost implements CodeReviewHost {
         body: input.body,
         outside,
       });
-      const existing = await this.findSummaryComment(get, base, input.prNumber, input.agentMarker);
+      const { id: appId } = await this.client.appIdentity();
+      const existing = await this.findSummaryComment(get, base, input.prNumber, input.agentMarker, appId);
       const summaryResponse = existing
         ? await get(
             `${base}/issues/comments/${existing}`,
@@ -407,10 +417,13 @@ export class GitHubReviewHost implements CodeReviewHost {
     base: string,
     prNumber: number,
     agentMarker: string,
+    appId: number,
   ): Promise<number | null> {
     for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
       const comments = list(await (await get(`${base}/issues/${prNumber}/comments?per_page=100&page=${page}`)).json());
-      const mine = comments.find((c) => typeof c.body === "string" && hasReviewMarker(c.body, agentMarker));
+      const mine = comments.find(
+        (c) => typeof c.body === "string" && writtenByApp(c, appId) && hasReviewMarker(c.body, agentMarker),
+      );
       if (mine) return num(mine.id);
       if (comments.length < 100) break;
     }
