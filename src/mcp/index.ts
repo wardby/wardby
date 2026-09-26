@@ -230,14 +230,14 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
 
   const eventConfig = loadGitHubEventConfig();
   const githubConfig = loadGitHubVcsConfig();
-  const githubHost = providers.reviewHosts?.github;
+  const reviewHosts = providers.reviewHosts;
   const hostEvents =
-    eventConfig.webhookSecret && githubHost && githubConfig.appId && githubConfig.privateKey
+    eventConfig.webhookSecret && reviewHosts?.github && githubConfig.appId && githubConfig.privateKey
       ? {
           github: {
             db: prisma,
             executor: providers.executor,
-            hosts: providers.reviewHosts ?? {},
+            hosts: reviewHosts,
             webhookSecret: eventConfig.webhookSecret,
             appIdentity: (() => {
               const client = new GitHubAppClient({

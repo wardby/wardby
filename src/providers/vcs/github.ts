@@ -505,7 +505,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
    * verifies the response granted exactly that (no more, no less, modulo
    * the always-implicit `metadata: read`) before trusting the token. Each
    * caller requests the narrowest permission set it needs — see
-   * withIssuesToken/withChecksToken for why these are minted separately
+   * withScopedToken/withChecksToken for why these are minted separately
    * from withRepositoryToken rather than requesting a union of everything.
    */
   private async mintScopedToken(

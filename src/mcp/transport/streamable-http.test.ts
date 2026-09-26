@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import {
@@ -349,6 +349,9 @@ describe("startHttpServer (webhook ingress)", () => {
 });
 
 describe("startHttpServer (github events ingress)", () => {
+  beforeEach(() => vi.mocked(handleGitHubEventIngress).mockReset());
+  afterEach(() => vi.mocked(handleGitHubEventIngress).mockReset());
+
   async function start(hostEvents?: StartHttpServerOptions["hostEvents"]) {
     const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb(), config: { canonicalUri: CANONICAL_URI } });
     const authProvider = fakeAuthProvider(async () => ({ subject: "user-1", roles: [], scopes: [] }));
@@ -387,5 +390,7 @@ describe("startHttpServer (github events ingress)", () => {
       body: "{}",
     });
     expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "not_found" });
+    expect(handleGitHubEventIngress).not.toHaveBeenCalled();
   });
 });
