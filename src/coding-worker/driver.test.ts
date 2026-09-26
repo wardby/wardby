@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -131,6 +131,39 @@ describe("runCodingWorker", () => {
     expect(env.PIP_INDEX_URL).toContain(deriveRegistryToken(capability));
     expect(JSON.stringify(env)).not.toContain(capability);
     expect(await readFile(join(workspace, ".cache", "npm", "npmrc"), "utf8")).toContain("_authToken=rrg_");
+  });
+
+  it("rewrites proxy tarball URLs in collected npm lockfiles back to the public registry", async () => {
+    const workspace = await tempWorkspace();
+    const proxied = `{\n  "resolved": "http://proxy:8080/registry/npm/-/tarball/%40react-aria%2Flive-announcer/3.5.1"\n}\n`;
+    const output = JSON.stringify({
+      schemaVersion: 1,
+      runId: input.runId,
+      outcome: "changes_ready",
+      summary: "Added a dependency.",
+      tests: [],
+    });
+    await runCodingWorker({
+      input,
+      workspace,
+      proxyBaseUrl: "http://proxy:8080",
+      capability: "cap",
+      signal: new AbortController().signal,
+      createClient: () => ({
+        startThread: () => ({
+          async runStreamed() {
+            // What `npm install` leaves behind in a subdirectory during the agent's turn.
+            await mkdir(join(workspace, "web"));
+            await writeFile(join(workspace, "web", "package-lock.json"), proxied);
+            return { events: events([{ type: "item.completed", item: { type: "agent_message", text: output } }]) };
+          },
+        }),
+      }),
+    });
+
+    expect(await readFile(join(workspace, "web", "package-lock.json"), "utf8")).toBe(
+      `{\n  "resolved": "https://registry.npmjs.org/@react-aria/live-announcer/-/live-announcer-3.5.1.tgz"\n}\n`,
+    );
   });
 
   it("rejects a structured result bound to another run", async () => {

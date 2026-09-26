@@ -28,6 +28,8 @@ COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
 # The driver's registry-mode setup (driver.js -> coding/registry/worker-config.js)
 # and its adapters. Their third-party imports are in src/coding-worker/package.json.
 COPY --from=build /build/dist/coding/registry ./coding/registry
+# The lockfile normaliser (coding/registry/lockfiles.js) skips the folders collection excludes.
+COPY --from=build /build/dist/coding/collect-exclude.js ./coding/collect-exclude.js
 # Fail the build, not every run, when a module the worker imports is missing:
 # driver-v4 shipped without coding/registry and every run exited at startup
 # with ERR_MODULE_NOT_FOUND before the model was called. main.js runs on
