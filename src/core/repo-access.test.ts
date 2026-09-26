@@ -50,6 +50,7 @@ function setup(
     ttlMs: opts.ttlMs,
     maxEntries: opts.maxEntries,
     now: () => clock,
+    sleep: async () => undefined,
   });
   return { gate, repositoryPermission, db, identities, advance: (ms: number) => (clock += ms) };
 }
@@ -238,5 +239,64 @@ describe("RepoAccessGate identity upkeep", () => {
     expect(
       await gate.authorizePrincipal({ principalId: "p1", provider: "github", repository: REPO, required: "read" }),
     ).toEqual({ ok: false, reason: "identity_not_linked" });
+  });
+});
+
+describe("RepoAccessGate transient host errors (runs in flight)", () => {
+  const transient = () => new ReviewHostError("host_api_error", "github_api_error:502");
+
+  it("retries a transient error once for an in-flight use, then fails closed as check_unavailable", async () => {
+    const { gate, repositoryPermission } = setup({
+      level: () => {
+        throw transient();
+      },
+    });
+    expect(await gate.authorizeUse({ ...use(), retryTransient: true })).toEqual({
+      ok: false,
+      reason: "check_unavailable",
+    });
+    expect(repositoryPermission).toHaveBeenCalledTimes(2);
+  });
+
+  it("succeeds when the retry does", async () => {
+    let calls = 0;
+    const { gate } = setup({
+      level: () => {
+        if (calls++ === 0) throw new ReviewHostError("host_api_error", "github_api_unavailable");
+        return "write";
+      },
+    });
+    expect(await gate.authorizeUse({ ...use(), retryTransient: true })).toEqual({ ok: true, level: "write" });
+  });
+
+  it("classifies rate limits and 5xx as transient, other errors as check_failed without retry", async () => {
+    for (const message of ["github_api_error:429", "github_api_error:403:abc", "github_api_error:503"]) {
+      const { gate } = setup({
+        level: () => {
+          throw new ReviewHostError("host_api_error", message);
+        },
+      });
+      expect((await gate.authorizeUse({ ...use(), retryTransient: true })) as unknown, message).toEqual({
+        ok: false,
+        reason: "check_unavailable",
+      });
+    }
+    const { gate, repositoryPermission } = setup({
+      level: () => {
+        throw new ReviewHostError("host_not_installed", "github_app_not_installed");
+      },
+    });
+    expect(await gate.authorizeUse({ ...use(), retryTransient: true })).toEqual({ ok: false, reason: "check_failed" });
+    expect(repositoryPermission).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays strict (no retry, check_failed) without retryTransient", async () => {
+    const { gate, repositoryPermission } = setup({
+      level: () => {
+        throw transient();
+      },
+    });
+    expect(await gate.authorizeUse(use())).toEqual({ ok: false, reason: "check_failed" });
+    expect(repositoryPermission).toHaveBeenCalledTimes(1);
   });
 });

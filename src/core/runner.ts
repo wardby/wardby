@@ -502,6 +502,8 @@ export async function executeRun(
               repository: current.repository,
               required: requiredLevel(current.access === "write" ? "write" : "read"),
               authorizedVia: current.authorizedVia,
+              // The run is under way: retry a transient GitHub error once.
+              retryTransient: true,
             });
           },
         });

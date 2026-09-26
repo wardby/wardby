@@ -353,3 +353,15 @@ describe("handleReviewHostTool repository authorization (H5-1)", () => {
     expect(c.hosts.github!.listFiles).not.toHaveBeenCalled();
   });
 });
+
+describe("handleReviewHostTool transient re-check failures (M-2)", () => {
+  it("reports a distinct repository_access_unavailable error when GitHub can't be asked", async () => {
+    const c = ctx({ authorize: vi.fn(async () => ({ ok: false as const, reason: "check_unavailable" as const })) });
+    const result = JSON.parse(
+      await handleReviewHostTool("repo_list_files", JSON.stringify({ repository: WRITE.repository }), c),
+    ) as { error: string; message: string };
+    expect(result.error).toBe("repository_access_unavailable");
+    expect(result.message).toMatch(/could not be reached/);
+    expect(c.hosts.github!.listFiles).not.toHaveBeenCalled();
+  });
+});

@@ -540,7 +540,9 @@ export class ContainerExecutor implements Executor {
         // process owns provisioning, or the run is no longer active.
         if ((await this.options.store.claimProvisioning(runId, claimId)) !== "claimed") return;
       }
-      await this.authorizeRepository(run);
+      // A launched run (recovered after a restart) is in flight: a transient
+      // host error is retried once before it is stopped.
+      await this.authorizeRepository(run, { inFlight: Boolean(handle) });
       try {
         workspace = await this.options.vcs.recoverWorkspace(prepared);
         if (!workspace && handle) throw new Error("coding_workspace_lost");
@@ -672,7 +674,7 @@ export class ContainerExecutor implements Executor {
    * longer covers the run's repository, so that falls back to the owner's
    * access. Throws RepoAccessError (refused before anything is cloned).
    */
-  private async authorizeRepository(run: ContainerRunSnapshot): Promise<void> {
+  private async authorizeRepository(run: ContainerRunSnapshot, opts: { inFlight: boolean }): Promise<void> {
     const sameRepository = run.profileRepository !== null && run.profileRepository === run.repository;
     const decision = await this.options.repoAccess.authorizeUse({
       ownerId: run.ownerId,
@@ -680,6 +682,7 @@ export class ContainerExecutor implements Executor {
       repository: run.repository,
       required: requiredLevel("coding"),
       authorizedVia: sameRepository ? run.repositoryAuthorizedVia : "host_permission",
+      retryTransient: opts.inFlight,
     });
     if (!decision.ok) throw new RepoAccessError(`repo_access_${decision.reason}`);
   }
@@ -794,6 +797,9 @@ export class ContainerExecutor implements Executor {
         this.terminal(current, "budget_exhausted");
         return;
       }
+      // One more (usually cached) check right before anything is pushed: access
+      // revoked while the run was working stops the push.
+      await this.authorizeRepository(current, { inFlight: true });
       const report = await this.loadRegistryReport(run.runId);
       const finalized = await this.options.vcs.finalizeChanges(workspace, {
         summary: output.summary,
@@ -1127,6 +1133,8 @@ function safeError(error: unknown): string {
  * "workspace" because "github" contains "git".
  */
 const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: string]> = [
+  // Checked first: the host could not be asked (after one retry), not a lost permission.
+  ["repo_access_check_unavailable", "repo_access_unavailable"],
   ["repo_access_", "repo_access"],
   ["github_", "github"],
   ["vcs_", "workspace"],

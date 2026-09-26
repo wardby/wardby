@@ -17,6 +17,7 @@
 import type { PrismaClient } from "#prisma";
 import {
   HOST_PERMISSION_RANK,
+  ReviewHostError,
   type HostPermission,
   type HostUser,
   type ReviewHostProvider,
@@ -33,7 +34,13 @@ export type AuthorizedVia = "host_permission" | "admin" | "grandfathered";
 export const AUTHORIZED_VIA: readonly AuthorizedVia[] = ["host_permission", "admin", "grandfathered"];
 
 export type RepoAccessDenial =
-  "owner_required" | "not_authorized" | "identity_not_linked" | "insufficient_permission" | "check_failed";
+  | "owner_required"
+  | "not_authorized"
+  | "identity_not_linked"
+  | "insufficient_permission"
+  | "check_failed"
+  /** In-flight use only: the host was unreachable or rate-limited, even after one retry. */
+  | "check_unavailable";
 
 export type RepoAccessDecision =
   { ok: true; level?: HostPermission } | { ok: false; reason: RepoAccessDenial; level?: HostPermission };
@@ -62,6 +69,13 @@ export interface AuthorizeUseInput {
   required: HostPermission;
   /** The stamp on the row granting the authority (null = never authorized). */
   authorizedVia: string | null;
+  /**
+   * A use by a run already under way (a launched coding run, its final push,
+   * a repo_* call): a transient host error (5xx, timeout, rate limit) is
+   * retried once, then denied as `check_unavailable`. Starting something new
+   * and set-time checks stay strict: any error is `check_failed`, no retry.
+   */
+  retryTransient?: boolean;
 }
 
 export interface RepoAccessGate {
@@ -94,7 +108,18 @@ export interface RepoAccessGateOptions {
   /** Default 1000; the oldest entry is evicted first. */
   maxEntries?: number;
   now?: () => number;
+  /** Delay before the one retry of a transient error (default 1s). */
+  retryDelayMs?: number;
+  sleep?: (ms: number) => Promise<void>;
 }
+
+/** 5xx, rate limits (403/429), and transport failures: worth one retry for a run already under way. */
+export function isTransientHostError(err: unknown): boolean {
+  if (!(err instanceof ReviewHostError) || err.code !== "host_api_error") return false;
+  return err.message === "github_api_unavailable" || /^github_api_error:(5\d\d|429|403)(:|$)/.test(err.message);
+}
+
+type LevelAnswer = { ok: true; level: HostPermission; login: string } | { ok: false; transient: boolean };
 
 interface CacheEntry {
   level: HostPermission;
@@ -107,35 +132,51 @@ export function createRepoAccessGate(options: RepoAccessGateOptions): RepoAccess
   const ttlMs = options.ttlMs ?? DEFAULT_REPO_ACCESS_TTL_MS;
   const maxEntries = options.maxEntries ?? 1000;
   const now = options.now ?? (() => Date.now());
+  const retryDelayMs = options.retryDelayMs ?? 1000;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const cache = new Map<string, CacheEntry>();
 
-  /** The user's level, or null when it could not be determined (host missing or failing). */
+  /** The user's level, or why it could not be determined (host missing or failing). */
   async function levelOf(
     provider: string,
     repository: string,
     user: HostUser,
     fresh: boolean,
-  ): Promise<{ level: HostPermission; login: string } | null> {
+    retryTransient: boolean,
+  ): Promise<LevelAnswer> {
     const key = `${provider}\u0000${repository}\u0000${user.id}`;
     const hit = cache.get(key);
-    if (!fresh && hit && hit.expiresAt > now()) return { level: hit.level, login: user.login };
+    if (!fresh && hit && hit.expiresAt > now()) return { ok: true, level: hit.level, login: user.login };
     const host = options.hosts[provider as ReviewHostProvider];
     if (!host) {
       log.warn({ provider, repository }, "no review host configured for a repository access check");
-      return null;
+      return { ok: false, transient: false };
     }
-    let answer: { level: HostPermission; login: string };
-    try {
-      answer = await host.repositoryPermission(repository, user);
-    } catch (err) {
-      log.warn({ err, provider, repository, hostUserId: user.id }, "repository access check failed; denying");
-      return null;
+    let answer: { level: HostPermission; login: string } | undefined;
+    for (let attempt = 0; !answer; attempt++) {
+      if (attempt > 0) await sleep(retryDelayMs);
+      try {
+        answer = await host.repositoryPermission(repository, user);
+      } catch (err) {
+        const transient = isTransientHostError(err);
+        log.warn(
+          { err, provider, repository, hostUserId: user.id, transient, attempt },
+          "repository access check failed",
+        );
+        // Strict: no retry. In flight: one retry of a transient error, then check_unavailable.
+        if (!transient || !retryTransient || attempt > 0) return { ok: false, transient: transient && retryTransient };
+      }
     }
     cache.delete(key);
     cache.set(key, { level: answer.level, expiresAt: now() + ttlMs });
     while (cache.size > maxEntries) cache.delete(cache.keys().next().value!);
-    return answer;
+    return { ok: true, ...answer };
   }
+
+  const unavailable = (answer: { transient: boolean }): RepoAccessDecision => ({
+    ok: false,
+    reason: answer.transient ? "check_unavailable" : "check_failed",
+  });
 
   function decide(level: HostPermission, required: HostPermission): RepoAccessDecision {
     return atLeast(level, required) ? { ok: true, level } : { ok: false, reason: "insufficient_permission", level };
@@ -147,6 +188,7 @@ export function createRepoAccessGate(options: RepoAccessGateOptions): RepoAccess
     repository: string;
     required: HostPermission;
     fresh?: boolean;
+    retryTransient?: boolean;
   }): Promise<RepoAccessDecision> {
     let identity;
     try {
@@ -163,8 +205,9 @@ export function createRepoAccessGate(options: RepoAccessGateOptions): RepoAccess
       input.repository,
       { id: identity.hostUserId, login: identity.login },
       input.fresh === true,
+      input.retryTransient === true,
     );
-    if (!answer) return { ok: false, reason: "check_failed" };
+    if (!answer.ok) return unavailable(answer);
     if (answer.login !== identity.login) {
       await options.db.hostIdentity
         .updateMany({
@@ -186,12 +229,13 @@ export function createRepoAccessGate(options: RepoAccessGateOptions): RepoAccess
         provider: input.provider,
         repository: input.repository,
         required: input.required,
+        retryTransient: input.retryTransient,
       });
     },
     authorizePrincipal,
     async authorizeHostUser(input) {
-      const answer = await levelOf(input.provider, input.repository, input.user, input.fresh === true);
-      if (!answer) return { ok: false, reason: "check_failed" };
+      const answer = await levelOf(input.provider, input.repository, input.user, input.fresh === true, false);
+      if (!answer.ok) return unavailable(answer);
       return decide(answer.level, input.required);
     },
   };
@@ -210,5 +254,7 @@ export function describeDenial(decision: Extract<RepoAccessDecision, { ok: false
       return `The agent owner's GitHub account has ${decision.level ?? "no"} access to ${repository}, which is not enough.`;
     case "check_failed":
       return `Could not verify access to ${repository} right now; try again later.`;
+    case "check_unavailable":
+      return `GitHub could not be reached (or rate-limited wardby) while re-checking access to ${repository}, so the use was refused for safety. Try again later.`;
   }
 }

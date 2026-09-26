@@ -302,7 +302,10 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
   }
   if (!decision.ok) {
     log.info({ agentId: ctx.agentId, repository: link.repository, reason: decision.reason }, "repository use denied");
-    return error("repository_access_denied", describeDenial(decision, link.repository));
+    return error(
+      decision.reason === "check_unavailable" ? "repository_access_unavailable" : "repository_access_denied",
+      describeDenial(decision, link.repository),
+    );
   }
 
   try {
