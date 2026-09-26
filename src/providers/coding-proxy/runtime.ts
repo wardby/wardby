@@ -50,6 +50,10 @@ export function createRegistryUpstream(pinned: typeof globalThis.fetch): Upstrea
 
 export interface CodingProxyRuntimeOptions {
   db: PrismaClient;
+  /** The package registry's own client, so its traffic (many concurrent
+   *  downloads during an install) cannot starve the budget ledger that every
+   *  model request needs. Defaults to `db`. */
+  registryDb?: PrismaClient;
   env?: NodeJS.ProcessEnv;
   startServer?: typeof startCodingProxyServer;
   startDenyPort?: typeof startDenyPortListener;
@@ -80,7 +84,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   const maxMetadataBytes = positiveInt(env.REGISTRY_MAX_METADATA_MB, 64) * MIB;
   const registry = new RegistryService({
     adapters: REGISTRY_ADAPTERS,
-    store: new PrismaRegistryStore(options.db),
+    store: new PrismaRegistryStore(options.registryDb ?? options.db),
     audit: new OsvAudit({
       fetch: upstream,
       failOpen: env.REGISTRY_AUDIT_FAIL_OPEN === "true",
