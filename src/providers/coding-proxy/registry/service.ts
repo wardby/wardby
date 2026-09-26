@@ -63,11 +63,16 @@ interface GraphEdge {
   name: string;
   range: string;
 }
-type NodeResult = { ok: true; meta?: PackageMetadata; selected: string[] } | { ok: false; cause: NodeFailure };
-/** One package's metadata and kept versions, computed once per walk and
- *  shared by every edge that reaches it (a popular package is reached
- *  under many distinct ranges). */
-type KeptPackage = { meta: PackageMetadata; keep: ReadonlySet<string> };
+/** A kept version the walk selected, with its declared dependencies. */
+type SelectedVersion = { version: string; dependencies: readonly DependencySpec[] };
+type NodeResult = { ok: true; selected: SelectedVersion[] } | { ok: false; cause: NodeFailure };
+/** One package's kept versions and each one's declared dependencies,
+ *  computed once per walk and shared by every edge that reaches it (a
+ *  popular package is reached under many distinct ranges). Deliberately
+ *  not the PackageMetadata: a walk may reach thousands of packages, and
+ *  holding each one's metadata for the walk's lifetime would bypass the
+ *  metadata cache's bounds. */
+type KeptPackage = ReadonlyMap<string, readonly DependencySpec[]>;
 
 /** A small counting semaphore. */
 class Slots {
@@ -122,11 +127,18 @@ interface GraphWalk {
    *  is here, a name not found is "unavailable", never "not allowed". */
   failed: Map<string, { edge: GraphEdge; cause: NodeFailure }>;
   running?: Promise<WalkEnd>;
+  /** Set when the run's state is released (its deadline passed): a walk
+   *  still running stops at its next batch instead of holding its state
+   *  until the graph timeout. */
+  released?: boolean;
 }
 
 const edgeKey = (edge: GraphEdge) => `${edge.name}\0${edge.range}`;
 
-type GraphAnswer = "found" | "absent" | "cut-short" | { unavailable: NodeFailure };
+/** `cutShort`: the walk stopped (its time ran out, or the package bound
+ *  tripped) before it either found the name or expanded the whole graph,
+ *  so whether the name is in the graph is unknown. */
+type GraphAnswer = "found" | "absent" | { cutShort: "timeout" | "limit" } | { unavailable: NodeFailure };
 
 /** Discriminated result of one `reader.read()` call in `download`'s stream
  *  loop, folding a rejection (`ok: false`) into the same shape as a
@@ -149,6 +161,8 @@ export const DEFAULT_MAX_REFUSAL_RECORDS = 500;
  *  they hold per replica (the proxy runs as one). */
 interface RunTally {
   deadline: number;
+  /** Drops this tally (and its graph walks) when the run's deadline passes. */
+  timer?: NodeJS.Timeout;
   refused?: number;
   /** Served files and bytes, kept live as downloads complete, so a download
    *  that started before another finished still counts it (a one-off
@@ -181,6 +195,27 @@ export function errorResponse(error: RegistryError): RegistryResponse {
 }
 
 export const DEFAULT_METADATA_CACHE_ENTRIES = 500;
+/** Byte budget of the metadata cache, by each entry's approximate retained
+ *  size. Entries are trimmed (an npm package's is a few MB at most, for
+ *  thousands of versions), but 500 of them could still add up. */
+export const DEFAULT_METADATA_CACHE_BYTES = 64 * 1024 * 1024;
+/** setTimeout's largest delay; a longer deadline is re-armed on firing. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/** `approxBytes` when the adapter reports it, otherwise a generous
+ *  estimate from the versions alone. */
+function metadataBytes(meta: PackageMetadata): number {
+  if (meta.approxBytes !== undefined) return meta.approxBytes;
+  let bytes = 256 + meta.name.length;
+  for (const info of meta.versions.values()) {
+    bytes += 400 + 2 * info.version.length;
+    for (const spec of info.dependencySpecs ?? []) bytes += 80 + spec.name.length + spec.range.length;
+    for (const name of info.dependencies) bytes += 40 + name.length;
+    for (const file of info.files)
+      bytes += 400 + file.filename.length + file.upstreamUrl.length + (file.integrity?.hex.length ?? 0);
+  }
+  return bytes;
+}
 
 /** Normalized dependency names of a package's kept versions: what serving
  *  its metadata unlocks, and what the graph walk follows. Dependency keys
@@ -215,16 +250,20 @@ function isPackageName(adapter: RegistryAdapter, name: string): boolean {
 }
 
 export class RegistryService {
-  /** Parsed metadata (adapters keep only the subset they render from, never
-   *  the raw upstream document), least recently used first. Bounded to
-   *  `metadataCacheEntries`; expired entries are dropped on access and on
-   *  insert. */
-  private readonly metadataCache = new Map<string, { expires: number; meta: PackageMetadata }>();
-  /** Single-flight: concurrent misses for one package share one upstream fetch. */
+  /** Parsed, trimmed metadata (adapters keep only the fields the proxy
+   *  reads, never the upstream document), least recently used first.
+   *  Bounded to `metadataCacheEntries` and `metadataCacheBytes`; expired
+   *  entries are dropped on access and on insert. */
+  private readonly metadataCache = new Map<string, { expires: number; bytes: number; meta: PackageMetadata }>();
+  /** Sum of the cached entries' `bytes`. */
+  private metadataCacheTotal = 0;
+  /** Single-flight: concurrent misses for one package (and render need)
+   *  share one upstream fetch. */
   private readonly metadataLoads = new Map<string, Promise<PackageMetadata>>();
   private readonly now: () => Date;
   private readonly metadataTtlMs: number;
   private readonly metadataCacheEntries: number;
+  private readonly metadataCacheBytes: number;
   private readonly metadataUpstream: UpstreamFetch;
   /** Per-run in-flight download usage: files and bytes reserved by downloads
    *  that are streaming right now but not yet recorded to the store. Without
@@ -249,6 +288,9 @@ export class RegistryService {
       now?: () => Date;
       metadataTtlMs?: number;
       metadataCacheEntries?: number;
+      /** Byte budget of the metadata cache (default 64 MiB), by each
+       *  entry's approximate retained size. */
+      metadataCacheBytes?: number;
       /** Timeout for one metadata request, body included (default 30 s). */
       metadataTimeoutMs?: number;
       /** Largest metadata document read from upstream (default 64 MiB). */
@@ -267,6 +309,7 @@ export class RegistryService {
     this.walkSlots = new Slots(options.maxGraphConcurrency ?? DEFAULT_MAX_GRAPH_CONCURRENCY);
     this.metadataTtlMs = options.metadataTtlMs ?? 300_000;
     this.metadataCacheEntries = options.metadataCacheEntries ?? DEFAULT_METADATA_CACHE_ENTRIES;
+    this.metadataCacheBytes = options.metadataCacheBytes ?? DEFAULT_METADATA_CACHE_BYTES;
     this.metadataUpstream = boundedMetadataFetch(options.upstream, {
       timeoutMs: options.metadataTimeoutMs ?? DEFAULT_METADATA_TIMEOUT_MS,
       maxBytes: options.maxMetadataBytes ?? DEFAULT_MAX_METADATA_BYTES,
@@ -304,7 +347,9 @@ export class RegistryService {
     const root = await this.authorize(adapter, context, name);
     let meta: PackageMetadata;
     try {
-      meta = await this.metadata(adapter, name);
+      // Only a metadata request renders a document; a download, the version
+      // filter and the graph walk need only the trimmed versions.
+      meta = await this.metadata(adapter, name, route.kind === "metadata");
     } catch (error) {
       // An oversized document is a refusal of this package, not a transient
       // upstream failure, so it gets a row like every other refusal.
@@ -412,6 +457,19 @@ export class RegistryService {
     // directly). Resolve the graph before refusing.
     const graph = await this.resolveInGraph(adapter, context, entries, name);
     if (graph === "found") return undefined;
+    if (typeof graph === "object" && "cutShort" in graph) {
+      // Not proven absent, so never "not allowed": a timed-out walk resumes
+      // where it stopped on the next miss, so a retry (npm retries a 5xx on
+      // its own) can find the name.
+      await this.refuse(context, adapter, name, "wardby_graph_incomplete");
+      throw new RegistryError(
+        503,
+        "wardby_graph_incomplete",
+        graph.cutShort === "timeout"
+          ? `"${name}" was not reached before this agent's ${adapter.id} dependency graph walk was cut short by its time limit (REGISTRY_GRAPH_TIMEOUT_MS); the walk continues where it stopped: try again`
+          : `"${name}" was not reached before this agent's ${adapter.id} dependency graph walk was cut short by its package limit (REGISTRY_MAX_GRAPH_PACKAGES): allowlist the package directly, or ask the operator to raise the limit`,
+      );
+    }
     if (typeof graph === "object") {
       // Some part of the graph could not be read, so whether the name is in
       // it is unknown: say so honestly rather than "not allowed".
@@ -430,9 +488,7 @@ export class RegistryService {
     const hint =
       entries.length === 0
         ? `this agent has no ${adapter.id} package allowlist`
-        : graph === "cut-short"
-          ? `"${name}" was not found in this agent's approved ${adapter.id} dependency graph before the graph walk was cut short (REGISTRY_MAX_GRAPH_PACKAGES / REGISTRY_GRAPH_TIMEOUT_MS)`
-          : `"${name}" is not on this agent's ${adapter.id} package allowlist or in its dependency graph`;
+        : `"${name}" is not on this agent's ${adapter.id} package allowlist or in its dependency graph`;
     throw new RegistryError(403, "wardby_package_not_allowed", hint);
   }
 
@@ -471,7 +527,7 @@ export class RegistryService {
     let started = false;
     for (;;) {
       if (current.found.has(name)) return "found";
-      if (current.exhausted) return "cut-short";
+      if (current.exhausted) return { cutShort: "limit" };
       // Single-flight: a miss while a walk is running waits for it rather
       // than starting a second one, then re-checks (that walk may have
       // stopped on finding a different name). Checked before the queue: a
@@ -490,7 +546,7 @@ export class RegistryService {
         });
       }
       const end = await current.running;
-      if (end === "timeout" && !current.found.has(name)) return "cut-short";
+      if (end === "timeout" && !current.found.has(name)) return { cutShort: "timeout" };
     }
   }
 
@@ -523,6 +579,7 @@ export class RegistryService {
     const kept = new Map<string, Promise<KeptPackage>>();
     while (walk.queue.length > 0) {
       if (walk.found.has(target)) return "found";
+      if (walk.released) return "timeout";
       const remaining = deadline - this.now().getTime();
       if (remaining <= 0) return "timeout";
       const room = maxPackages - walk.expandedVersions.size;
@@ -545,11 +602,11 @@ export class RegistryService {
         walk.queue.unshift(...batch);
         return "timeout";
       }
-      const expanded: { edge: GraphEdge; meta?: PackageMetadata; selected: string[] }[] = [];
+      const expanded: { edge: GraphEdge; selected: SelectedVersion[] }[] = [];
       batch.forEach((edge, index) => {
         const result = results[index];
         if (result.ok) {
-          expanded.push({ edge, meta: result.meta, selected: result.selected });
+          expanded.push({ edge, selected: result.selected });
           return;
         }
         // A transient failure is never counted as expanded: the edge is
@@ -585,13 +642,13 @@ export class RegistryService {
         throw error;
       }
       for (const name of discovered) walk.found.add(name);
-      for (const { edge, meta, selected } of expanded) {
+      for (const { edge, selected } of expanded) {
         let versions = walk.expandedVersions.get(edge.name);
         if (!versions) walk.expandedVersions.set(edge.name, (versions = new Set()));
-        for (const version of selected) {
-          if (versions.has(version) || !meta) continue;
+        for (const { version, dependencies } of selected) {
+          if (versions.has(version)) continue;
           versions.add(version);
-          for (const dependency of versionDependencies(adapter, meta, version)) {
+          for (const dependency of dependencies) {
             const key = edgeKey(dependency);
             if (walk.seen.has(key)) continue;
             walk.seen.add(key);
@@ -622,15 +679,15 @@ export class RegistryService {
       try {
         let load = memo.get(edge.name);
         if (!load) {
-          load = (async () => {
-            const meta = await this.metadata(adapter, edge.name);
+          load = (async (): Promise<KeptPackage> => {
+            const meta = await this.metadata(adapter, edge.name, false);
             const { keep } = await this.keptVersions(adapter, context, meta, matchRoot(entries, edge.name));
-            return { meta, keep };
+            return new Map([...keep].map((version) => [version, versionDependencies(adapter, meta, version)]));
           })();
           memo.set(edge.name, load);
           load.catch(() => memo.delete(edge.name));
         }
-        const { meta, keep } = await load;
+        const keep = await load;
         const inRange = (version: string) => {
           if (edge.range === "*") return true;
           try {
@@ -639,7 +696,9 @@ export class RegistryService {
             return false;
           }
         };
-        return { ok: true, meta, selected: [...keep].filter(inRange) };
+        const selected: SelectedVersion[] = [];
+        for (const [version, dependencies] of keep) if (inRange(version)) selected.push({ version, dependencies });
+        return { ok: true, selected };
       } catch (error) {
         if (error instanceof RegistryError && DEFINITIVE_NODE_ERRORS.has(error.code)) return { ok: true, selected: [] };
         const audit = error instanceof RegistryError && error.code === "wardby_audit_unavailable";
@@ -648,42 +707,72 @@ export class RegistryService {
     });
   }
 
-  private async metadata(adapter: RegistryAdapter, name: string): Promise<PackageMetadata> {
+  /** A package's metadata, cached. `render` asks for the form
+   *  `renderMetadata` can serve; a cached entry fetched without it (by the
+   *  graph walk or a download) is fetched again with it, and replaces it. */
+  private async metadata(adapter: RegistryAdapter, name: string, render: boolean): Promise<PackageMetadata> {
     const key = `${adapter.id}:${name}`;
     const now = this.now().getTime();
     const cached = this.metadataCache.get(key);
     if (cached) {
-      this.metadataCache.delete(key);
+      this.dropCached(key);
       if (cached.expires > now) {
-        this.metadataCache.set(key, cached); // most recently used
-        return cached.meta;
+        this.putCached(key, cached); // most recently used
+        if (!render || cached.meta.raw !== undefined) return cached.meta;
       }
     }
-    const pending = this.metadataLoads.get(key);
+    // Single-flight per need: a render load also serves a walk that asks
+    // meanwhile, but not the other way round.
+    const renderLoad = this.metadataLoads.get(`${key}\0render`);
+    if (renderLoad) return renderLoad;
+    const loadKey = render ? `${key}\0render` : key;
+    const pending = this.metadataLoads.get(loadKey);
     if (pending) return pending;
     const load = adapter
-      .fetchMetadata(name, this.metadataUpstream)
+      .fetchMetadata(name, this.metadataUpstream, { render })
       .then((meta) => {
         this.cacheMetadata(key, meta);
         return meta;
       })
-      .finally(() => this.metadataLoads.delete(key));
-    this.metadataLoads.set(key, load);
+      .finally(() => this.metadataLoads.delete(loadKey));
+    this.metadataLoads.set(loadKey, load);
     return load;
   }
 
+  private dropCached(key: string): void {
+    const entry = this.metadataCache.get(key);
+    if (!entry) return;
+    this.metadataCache.delete(key);
+    this.metadataCacheTotal -= entry.bytes;
+  }
+
+  private putCached(key: string, entry: { expires: number; bytes: number; meta: PackageMetadata }): void {
+    this.metadataCache.set(key, entry);
+    this.metadataCacheTotal += entry.bytes;
+  }
+
+  /** Caches `meta`, least recently used evicted first, within both the entry
+   *  and the byte budget. An entry larger than the whole byte budget is not
+   *  cached at all. A live entry that can render is not replaced by one that
+   *  cannot. */
   private cacheMetadata(key: string, meta: PackageMetadata): void {
     const now = this.now().getTime();
     for (const [cachedKey, entry] of this.metadataCache) {
-      if (entry.expires <= now) this.metadataCache.delete(cachedKey);
+      if (entry.expires <= now) this.dropCached(cachedKey);
     }
-    this.metadataCache.delete(key);
-    while (this.metadataCache.size >= this.metadataCacheEntries) {
-      const oldest = this.metadataCache.keys().next();
-      if (oldest.done) break;
-      this.metadataCache.delete(oldest.value);
+    const existing = this.metadataCache.get(key);
+    if (existing && meta.raw === undefined && existing.meta.raw !== undefined) return;
+    this.dropCached(key);
+    const bytes = metadataBytes(meta);
+    if (bytes > this.metadataCacheBytes) return;
+    while (
+      this.metadataCache.size > 0 &&
+      (this.metadataCache.size >= this.metadataCacheEntries ||
+        this.metadataCacheTotal + bytes > this.metadataCacheBytes)
+    ) {
+      this.dropCached(this.metadataCache.keys().next().value as string);
     }
-    this.metadataCache.set(key, { expires: now + this.metadataTtlMs, meta });
+    this.putCached(key, { expires: now + this.metadataTtlMs, bytes, meta });
   }
 
   private async keptVersions(
@@ -712,14 +801,44 @@ export class RegistryService {
   }
 
   private tally(context: RegistryRunContext): RunTally {
+    const now = this.now().getTime();
+    for (const [runId, stale] of this.tallies) if (stale.deadline <= now) this.releaseRun(runId);
     let tally = this.tallies.get(context.runId);
     if (!tally) {
-      const now = this.now().getTime();
-      for (const [runId, stale] of this.tallies) if (stale.deadline <= now) this.tallies.delete(runId);
       tally = { deadline: context.deadlineAt.getTime() };
       this.tallies.set(context.runId, tally);
+      this.scheduleRelease(context.runId, tally);
     }
     return tally;
+  }
+
+  /** Releases a run's in-process state when its deadline passes, whether or
+   *  not any other request ever arrives: the timer does not keep the process
+   *  alive. */
+  private scheduleRelease(runId: string, tally: RunTally): void {
+    const delay = Math.min(Math.max(0, tally.deadline - this.now().getTime()), MAX_TIMER_MS);
+    tally.timer = setTimeout(() => {
+      if (this.tallies.get(runId) !== tally) return;
+      if (tally.deadline <= this.now().getTime()) this.releaseRun(runId);
+      else this.scheduleRelease(runId, tally);
+    }, delay);
+    tally.timer.unref?.();
+  }
+
+  /** Drops a run's tally and graph walks, and stops any walk still running. */
+  private releaseRun(runId: string): void {
+    const tally = this.tallies.get(runId);
+    if (!tally) return;
+    this.tallies.delete(runId);
+    clearTimeout(tally.timer);
+    for (const walk of tally.graphs?.values() ?? []) walk.released = true;
+    tally.graphs?.clear();
+  }
+
+  /** Releases every run's in-process state (timers included), e.g. when the
+   *  server shuts down. */
+  close(): void {
+    for (const runId of [...this.tallies.keys()]) this.releaseRun(runId);
   }
 
   /** Records a refused row, at most `maxRefusalRecords` per run so a worker

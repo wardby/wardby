@@ -11,3 +11,4 @@ resources:
 patches:
   - path: proxy-cloudsql.yaml
   - path: proxy-priority.yaml
+  - path: proxy-resources.yaml

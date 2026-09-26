@@ -139,6 +139,67 @@ function validName(name: string): string {
   return name;
 }
 
+/** What `renderMetadata` needs, kept only when metadata is fetched to be
+ *  served to a client: each version's install manifest as compact JSON (a
+ *  string is a fraction of the size of the same data as objects, and only
+ *  the kept versions are ever parsed back), its publish time as upstream
+ *  wrote it, and the dist-tags. */
+interface NpmRenderData {
+  name: string;
+  distTags: Record<string, string>;
+  manifests: Map<string, string>;
+  times: Map<string, string>;
+}
+
+/** Per-version fixed cost, in bytes, of the trimmed form (Map entry,
+ *  VersionInfo, FileRef, Date, arrays), used only for the metadata cache's
+ *  byte budget. Deliberately generous. */
+const VERSION_OVERHEAD_BYTES = 400;
+const DEPENDENCY_OVERHEAD_BYTES = 80;
+
+/** Extracts what the proxy uses from a full packument, copying every value
+ *  it keeps, so the document itself is never retained: per version its
+ *  dependency specs, publish time, tarball URL and integrity (all the graph
+ *  walk, the version filter and downloads read), plus, with `render`, the
+ *  data `renderMetadata` serves. */
+function trimPackument(name: string, doc: Packument, render: boolean): PackageMetadata {
+  const versions = new Map<string, VersionInfo>();
+  const renderData: NpmRenderData | undefined = render
+    ? { name: String(doc.name), distTags: { ...(doc["dist-tags"] ?? {}) }, manifests: new Map(), times: new Map() }
+    : undefined;
+  let approxBytes = 256 + name.length;
+  for (const [version, info] of Object.entries(doc.versions ?? {})) {
+    const published = doc.time?.[version];
+    const dependencySpecs = [info.dependencies, info.optionalDependencies, info.peerDependencies].flatMap((deps) =>
+      registryDependencies(deps),
+    );
+    const dependencies = [...new Set(dependencySpecs.map((spec) => spec.name))];
+    const file: FileRef = {
+      filename: `${version}.tgz`,
+      version,
+      upstreamUrl: String(info.dist.tarball),
+      integrity: integrityOf(info.dist),
+      sizeBytes: null,
+      allowed: true,
+      publishedAt: published ? new Date(published) : null,
+    };
+    versions.set(version, { version, dependencies, dependencySpecs, files: [file] });
+    approxBytes += VERSION_OVERHEAD_BYTES + 2 * version.length + file.upstreamUrl.length;
+    approxBytes += file.integrity?.hex.length ?? 0;
+    for (const spec of dependencySpecs) approxBytes += DEPENDENCY_OVERHEAD_BYTES + spec.name.length + spec.range.length;
+    if (renderData) {
+      const manifest = JSON.stringify(abbreviated(info));
+      renderData.manifests.set(version, manifest);
+      approxBytes += manifest.length + 64;
+      if (published) {
+        renderData.times.set(version, String(published));
+        approxBytes += published.length + 64;
+      }
+    }
+  }
+  return { name, versions, raw: renderData, approxBytes };
+}
+
 export const npmAdapter: RegistryAdapter = {
   id: "npm",
   osvEcosystem: "npm",
@@ -194,58 +255,36 @@ export const npmAdapter: RegistryAdapter = {
     }
   },
 
-  async fetchMetadata(name, upstream): Promise<PackageMetadata> {
+  async fetchMetadata(name, upstream, options = {}): Promise<PackageMetadata> {
     const response = await upstream(`${UPSTREAM}${name.replaceAll("/", "%2f")}`, { accept: "application/json" });
     if (response.status === 404)
       throw new RegistryError(404, "wardby_package_not_found", `npm has no package "${name}"`);
     if (!response.ok) throw new RegistryError(502, "wardby_upstream_error", `npm returned ${response.status}`);
-    const doc = (await response.json()) as Packument;
-    const versions = new Map<string, VersionInfo>();
-    const raw: Packument = { name: doc.name, "dist-tags": doc["dist-tags"], time: {}, versions: {} };
-    for (const [version, info] of Object.entries(doc.versions ?? {})) {
-      raw.versions[version] = abbreviated(info);
-      if (doc.time?.[version]) raw.time![version] = doc.time[version];
-      const published = doc.time?.[version];
-      const dependencySpecs = [info.dependencies, info.optionalDependencies, info.peerDependencies].flatMap((deps) =>
-        registryDependencies(deps),
-      );
-      const dependencies = [...new Set(dependencySpecs.map((spec) => spec.name))];
-      const file: FileRef = {
-        filename: `${version}.tgz`,
-        version,
-        upstreamUrl: info.dist.tarball,
-        integrity: integrityOf(info.dist),
-        sizeBytes: null,
-        allowed: true,
-        publishedAt: published ? new Date(published) : null,
-      };
-      versions.set(version, {
-        version,
-        dependencies,
-        dependencySpecs,
-        files: [file],
-      });
-    }
-    return { name, versions, raw };
+    // The full packument is only ever a local of `trimPackument`: nothing
+    // returned from here references it, so it is garbage as soon as the
+    // trimmed form is built (a large one is tens of MB parsed).
+    return trimPackument(name, (await response.json()) as Packument, options.render === true);
   },
 
   renderMetadata(meta, keep, keptFiles, proxyBase) {
-    const raw = meta.raw as Packument;
-    const versions: Packument["versions"] = {};
+    const raw = meta.raw as NpmRenderData | undefined;
+    if (!raw) throw new Error(`npm metadata for "${meta.name}" was fetched without render data`);
+    const versions: Record<string, unknown> = {};
+    const time: Record<string, string> = {};
     for (const version of keep) {
-      const info = raw.versions[version];
-      if (!info || !keptFiles.has(`${version}.tgz`)) continue;
+      const manifest = raw.manifests.get(version);
+      if (manifest === undefined || !keptFiles.has(`${version}.tgz`)) continue;
+      const info = JSON.parse(manifest) as Packument["versions"][string];
       versions[version] = {
         ...info,
         dist: { ...info.dist, tarball: `${proxyBase}-/tarball/${encodeURIComponent(meta.name)}/${version}` },
       };
+      const published = raw.times.get(version);
+      if (published !== undefined) time[version] = published;
     }
     const kept = Object.keys(versions);
-    const tags = Object.fromEntries(
-      Object.entries(raw["dist-tags"] ?? {}).filter(([, version]) => kept.includes(version)),
-    );
+    const tags = Object.fromEntries(Object.entries(raw.distTags).filter(([, version]) => kept.includes(version)));
     if (!tags.latest && kept.length > 0) tags.latest = semver.maxSatisfying(kept, "*") ?? kept[kept.length - 1];
-    const time = Object.fromEntries(Object.entries(raw.time ?? {}).filter(([key]) => kept.includes(key)));
     return {
       contentType: "application/json",
       body: JSON.stringify({ name: raw.name, "dist-tags": tags, time, versions }),
