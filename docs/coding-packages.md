@@ -128,11 +128,17 @@ A refused entry refuses only itself and whatever is reachable only through
 it; everything else is approved, as exact `name@version` pairs for the run.
 The response is `{ "approved": <count>, "refused": [{ "name", "version",
 "code", "reason" }] }`, and each refusal is recorded like any other (within
-the 500-per-run cap). A tarball request for an approved `name@version` is then
-served directly, checked against the approved integrity, with no graph walk.
-Anything not approved (a refused entry, a package added with
-`npm install <new-package>`, an install without a lockfile) goes through the
-allowlist and the dependency-graph walk below.
+the 500-per-run cap). A tarball request for an approved `name@version` is then served directly,
+checked against the approved integrity, with no graph walk. A tarball request
+for a version the plan refused is answered straight from the plan, with no
+walk either: `403` with the plan's code and reason (`wardby_version_filtered`
+for a version too new or with an advisory, which it names;
+`wardby_lockfile_integrity_mismatch`; `wardby_package_not_allowed` for one
+nothing reaches). Only an entry the registry couldn't be read for
+(`wardby_upstream_error`) isn't answered from the plan. A version the plan
+never mentioned (a package added with `npm install <new-package>`, an install
+without a lockfile) goes through the allowlist and the dependency-graph walk
+below.
 
 The per-version facts (integrity, publish time, dependencies, download URL)
 never change, so they are stored in the database and reused by every later
@@ -146,9 +152,10 @@ against real npm and OSV with a 0-day release age, the knock-knock `web/`
 lockfile (216 entries: React 19, HeroUI 3, Vite 8, Vitest 5, jsdom) was
 verified in 9.5 s cold and 0.7 s with stored facts, and its whole `npm ci`
 took 12 s cold and 3 s warm, with the proxy at 183 MiB peak RSS (30 MiB
-heap). At the default 3 days the same plan took 8 s and refused 53 entries
-(vite and vitest were days old, plus what only they reach), which then went
-to the walk.
+heap). At the default 3 days the same plan
+took 10 s and refused 53 entries (vite and vitest were days old, plus what
+only they reach), and `npm ci` failed on those refusals in 14 s with the
+proxy at 179 MiB peak RSS (24 MiB heap), with no walk.
 
 ### Lockfile installs without a plan: the dependency-graph walk
 
@@ -224,9 +231,7 @@ deadline passes. Even so, a lockfile install of a large graph is the proxy's
 largest memory user: a measured `npm ci` of a ~220-package lockfile (React
 19, Vite 8, Vitest 5, jsdom) peaked at 1752 MiB RSS (549 MiB heap), which is
 why the GKE overlay gives the proxy 3Gi. A lockfile the shim verified
-avoids the walk for every version the plan approved; the walk still runs for
-anything it refused (for example a version younger than the release age, and
-what depends on it).
+avoids the walk for every version the plan approved or refused.
 
 ## What the agent can then run
 

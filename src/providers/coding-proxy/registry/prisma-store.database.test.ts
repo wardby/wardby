@@ -127,8 +127,17 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaRegistryStore (database)", () 
         downloadUrl: facts[1].downloadUrl,
       });
       expect(await store.findApprovedVersion(runId, "npm", name, "1.0.2")).toBeNull();
+      await store.refusePlanVersions(runId, "npm", [
+        { name, version: "9.0.0", code: "wardby_package_not_allowed", reason: "unreachable" },
+      ]);
+      expect(await store.findPlanRefusal(runId, "npm", name, "9.0.0")).toEqual({
+        code: "wardby_package_not_allowed",
+        reason: "unreachable",
+      });
+      expect(await store.findPlanRefusal(runId, "npm", name, "1.0.1")).toBeNull();
       await db.codingRun.delete({ where: { runId } });
       expect(await db.registryApprovedVersion.count({ where: { runId } })).toBe(0);
+      expect(await db.registryPlanRefusal.count({ where: { runId } })).toBe(0);
       expect(await db.registryVersionFact.count({ where: { name } })).toBe(600);
     } finally {
       await db.registryVersionFact.deleteMany({ where: { name } });

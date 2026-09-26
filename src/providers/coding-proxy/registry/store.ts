@@ -37,6 +37,14 @@ export interface ApprovedVersion {
   integrity: string;
 }
 
+/** One exact version a lockfile plan definitively refused for a run. */
+export interface PlanRefusedVersion {
+  name: string;
+  version: string;
+  code: string;
+  reason: string;
+}
+
 /** Run-scoped store over the registry-only token session lookup and the
  *  RegistryAllowance/RegistryFetch tables (Task 5). Backs the registry proxy:
  *  it never sees the model capability, only the derived registry token. */
@@ -66,6 +74,15 @@ export interface RegistryStore {
     name: string,
     version: string,
   ): Promise<{ integrity: string; downloadUrl: string } | null>;
+  /** Stores the run's plan refusals (an existing one is kept). */
+  refusePlanVersions(runId: string, ecosystem: string, versions: readonly PlanRefusedVersion[]): Promise<void>;
+  /** The run's plan refusal of this exact version, or null. */
+  findPlanRefusal(
+    runId: string,
+    ecosystem: string,
+    name: string,
+    version: string,
+  ): Promise<{ code: string; reason: string } | null>;
 }
 
 /** In-memory adapter for tests. `contexts` is settable directly so tests can
@@ -78,6 +95,8 @@ export class MemoryRegistryStore implements RegistryStore {
   readonly facts = new Map<string, StoredVersionFact>();
   /** `runId\0ecosystem\0name\0version` -> approval. */
   readonly approvals = new Map<string, ApprovedVersion>();
+  /** `runId\0ecosystem\0name\0version` -> plan refusal. */
+  readonly planRefusals = new Map<string, PlanRefusedVersion>();
 
   async findRunByRegistryTokenHash(hash: string, now: Date): Promise<RegistryRunContext | null> {
     const context = this.contexts.get(hash);
@@ -139,5 +158,22 @@ export class MemoryRegistryStore implements RegistryStore {
     const approval = this.approvals.get(`${runId}\0${ecosystem}\0${name}\0${version}`);
     const fact = this.facts.get(`${ecosystem}\0${name}\0${version}`);
     return approval && fact ? { integrity: approval.integrity, downloadUrl: fact.downloadUrl } : null;
+  }
+
+  async refusePlanVersions(runId: string, ecosystem: string, versions: readonly PlanRefusedVersion[]): Promise<void> {
+    for (const refusal of versions) {
+      const key = `${runId}\0${ecosystem}\0${refusal.name}\0${refusal.version}`;
+      if (!this.planRefusals.has(key)) this.planRefusals.set(key, refusal);
+    }
+  }
+
+  async findPlanRefusal(
+    runId: string,
+    ecosystem: string,
+    name: string,
+    version: string,
+  ): Promise<{ code: string; reason: string } | null> {
+    const refusal = this.planRefusals.get(`${runId}\0${ecosystem}\0${name}\0${version}`);
+    return refusal ? { code: refusal.code, reason: refusal.reason } : null;
   }
 }

@@ -3,6 +3,7 @@ import type { PackageAllowlist } from "../../../coding/registry/allowlist.js";
 import type { DeclaredDependency } from "../../../coding/registry/types.js";
 import type {
   ApprovedVersion,
+  PlanRefusedVersion,
   RegistryFetchRecord,
   RegistryRunContext,
   RegistryStore,
@@ -148,5 +149,25 @@ export class PrismaRegistryStore implements RegistryStore {
       select: { downloadUrl: true },
     });
     return fact ? { integrity: approval.integrity, downloadUrl: fact.downloadUrl } : null;
+  }
+
+  async refusePlanVersions(runId: string, ecosystem: string, versions: readonly PlanRefusedVersion[]): Promise<void> {
+    if (versions.length === 0) return;
+    await this.db.registryPlanRefusal.createMany({
+      data: versions.map(({ name, version, code, reason }) => ({ runId, ecosystem, name, version, code, reason })),
+      skipDuplicates: true,
+    });
+  }
+
+  async findPlanRefusal(
+    runId: string,
+    ecosystem: string,
+    name: string,
+    version: string,
+  ): Promise<{ code: string; reason: string } | null> {
+    return this.db.registryPlanRefusal.findUnique({
+      where: { runId_ecosystem_name_version: { runId, ecosystem, name, version } },
+      select: { code: true, reason: true },
+    });
   }
 }

@@ -425,6 +425,47 @@ describe("downloads of approved versions", () => {
     expect(store.fetches.at(-1)).toMatchObject({ name: "c", outcome: "refused", reason: "wardby_integrity_mismatch" });
   });
 
+  it("answers a version the plan refused straight from the plan: no upstream call, no walk", async () => {
+    const registry: FakeRegistry = { ...chain, b: { "1.1.0": { deps: { c: "~2.0.0" }, published: NEW } } };
+    const { plan, service, store, calls } = setup(registry);
+    await plan(chainLock);
+    calls.length = 0;
+    const fetchesBefore = store.fetches.length;
+    for (const attempt of [1, 2]) {
+      const tooNew = await service.handle(download("b", "1.1.0"));
+      expect([attempt, tooNew.status, await drain(tooNew)]).toEqual([
+        attempt,
+        403,
+        expect.stringMatching(/wardby_version_filtered: .*newer than the release-age limit/),
+      ]);
+    }
+    const unreachable = await service.handle(download("c", "2.0.3"));
+    expect([unreachable.status, await drain(unreachable)]).toEqual([
+      403,
+      expect.stringContaining("wardby_package_not_allowed"),
+    ]);
+    expect(calls).toEqual([]);
+    expect(store.allowances.size).toBe(0);
+    // Recorded as download refusals, a retried one once.
+    expect(store.fetches.slice(fetchesBefore).map((fetch) => [fetch.name, fetch.version, fetch.reason])).toEqual([
+      ["b", "1.1.0", "wardby_version_filtered"],
+      ["c", "2.0.3", "wardby_package_not_allowed"],
+    ]);
+  });
+
+  it("answers an advisory refusal naming the advisory, and sends a failed registry read down the usual path", async () => {
+    const npm = fakeNpm(chain);
+    const upstream: UpstreamFetch = async (url, init) =>
+      url === "https://registry.npmjs.org/c/2.0.3" ? new Response("", { status: 503 }) : npm.upstream(url, init);
+    const { plan, service, store } = setup(chain, { upstream, withheld: { "b@1.1.0": ["GHSA-high"] } });
+    await plan(chainLock);
+    const advisory = await service.handle(download("b", "1.1.0"));
+    expect([advisory.status, await drain(advisory)]).toEqual([403, expect.stringContaining("GHSA-high")]);
+    expect([...store.planRefusals.values()].map((refusal) => `${refusal.name}:${refusal.code}`)).toEqual([
+      "b:wardby_version_filtered",
+    ]);
+  });
+
   it("sends an unapproved version of an approved name down the usual path", async () => {
     const registry: FakeRegistry = { ...chain, c: { "2.0.3": {}, "3.0.0": {} } };
     const { plan, service, calls } = setup(registry);

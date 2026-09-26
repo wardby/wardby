@@ -61,6 +61,9 @@ const DEFINITIVE_NODE_ERRORS = new Set(["wardby_package_not_found", "wardby_meta
 /** Largest per-version document read from upstream for lockfile
  *  verification (they are a few KB). */
 const MAX_VERSION_DOCUMENT_BYTES = 4 * 1024 * 1024;
+/** Plan refusal codes that are not a verdict on the version (a registry
+ *  read failed), so a later download of it is not answered from the plan. */
+const TRANSIENT_PLAN_CODES = new Set(["wardby_upstream_error"]);
 /** Lockfile plans verified at once across every run. */
 const PLAN_CONCURRENCY = 2;
 /** The `filename` of a refused RegistryFetch row a lockfile plan recorded
@@ -189,6 +192,9 @@ interface RunTally {
   /** A lockfile plan is running for the run: one at a time per run, so a
    *  worker cannot queue many (each holds its parsed lockfile). */
   planning?: boolean;
+  /** Downloads answered from a plan refusal already recorded, so a
+   *  retried download records its refusal once. */
+  planAnswered?: Set<string>;
   /** Plan refusals already recorded (`ecosystem\0name@version\0code`), so
    *  a lockfile planned again records each refusal once. */
   planRefusals?: Set<string>;
@@ -454,6 +460,14 @@ export class RegistryService {
       );
     }
     await store.approveVersions(context.runId, adapter.id, result.approved);
+    // Definitive refusals answer later downloads of those exact versions;
+    // a registry read that failed is not definitive, so those still take
+    // the usual path.
+    await store.refusePlanVersions(
+      context.runId,
+      adapter.id,
+      result.refused.filter((refusal) => !TRANSIENT_PLAN_CODES.has(refusal.code)),
+    );
     await this.recordPlanRefusals(context, adapter, result.refused);
     return {
       status: 200,
@@ -536,6 +550,25 @@ export class RegistryService {
         }
         if (request.method === "HEAD") return { status: 200, contentType: contentTypeOf(route), body: "" };
         return this.download(adapter, context, name, route, file, request.signal);
+      }
+      // A version the plan definitively refused is answered from the plan,
+      // with its code and reason: no metadata, no graph walk.
+      const refused = approved
+        ? null
+        : await this.options.store.findPlanRefusal(context.runId, adapter.id, name, route.version);
+      if (refused) {
+        const tally = this.tally(context);
+        tally.planAnswered ??= new Set();
+        const key = `${adapter.id}\0${name}@${route.version}\0${refused.code}`;
+        if (!tally.planAnswered.has(key)) {
+          tally.planAnswered.add(key);
+          await this.refuse(context, adapter, name, refused.code, { version: route.version, filename: route.filename });
+        }
+        throw new RegistryError(
+          403,
+          refused.code,
+          `"${name}" ${route.version} was refused by this run's lockfile verification: ${refused.reason}`,
+        );
       }
     }
     const root = await this.authorize(adapter, context, name);

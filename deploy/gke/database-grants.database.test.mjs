@@ -88,6 +88,7 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
     await admin.registryFetch.deleteMany({ where: { runId } });
     await admin.registryAllowance.deleteMany({ where: { runId } });
     await admin.registryApprovedVersion.deleteMany({ where: { runId } });
+    await admin.registryPlanRefusal.deleteMany({ where: { runId } });
     await admin.registryVersionFact.deleteMany({ where: { name: factName } });
     await admin.$executeRaw`DELETE FROM "CodingProxySession" WHERE "id" = ${sessionId}`;
     await admin.codingRun.deleteMany({ where: { runId } });
@@ -209,8 +210,15 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
       downloadUrl: fact.downloadUrl,
     });
     expect(await registry.findApprovedVersion(runId, "npm", factName, "2.0.0")).toBeNull();
-    for (const table of ["RegistryVersionFact", "RegistryApprovedVersion"]) {
-      await expect(proxy.$executeRawUnsafe(`UPDATE "${table}" SET "integrity" = 'x' WHERE false`)).rejects.toThrow(
+    const refusal = { name: factName, version: "3.0.0", code: "wardby_version_filtered", reason: "too new" };
+    await registry.refusePlanVersions(runId, "npm", [refusal]);
+    await registry.refusePlanVersions(runId, "npm", [refusal]);
+    expect(await registry.findPlanRefusal(runId, "npm", factName, "3.0.0")).toEqual({
+      code: "wardby_version_filtered",
+      reason: "too new",
+    });
+    for (const table of ["RegistryVersionFact", "RegistryApprovedVersion", "RegistryPlanRefusal"]) {
+      await expect(proxy.$executeRawUnsafe(`UPDATE "${table}" SET "version" = 'x' WHERE false`)).rejects.toThrow(
         /permission denied/,
       );
       await expect(proxy.$executeRawUnsafe(`DELETE FROM "${table}" WHERE false`)).rejects.toThrow(/permission denied/);
@@ -269,9 +277,10 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
         .replace(/\bRegistryFetch\b/g, `RegistryFetch${missing}`)
         .replace(/\bRegistryVersionFact\b/g, `RegistryVersionFact${missing}`)
         .replace(/\bRegistryApprovedVersion\b/g, `RegistryApprovedVersion${missing}`)
+        .replace(/\bRegistryPlanRefusal\b/g, `RegistryPlanRefusal${missing}`)
         .replace(/\b_prisma_migrations\b/g, `_prisma_migrations${missing}`);
       expect(sql).not.toMatch(
-        /"(CodingProxySession|CodingProxyRequest|Run|CodingRun|RegistryAllowance|RegistryFetch|RegistryVersionFact|RegistryApprovedVersion|_prisma_migrations)"/,
+        /"(CodingProxySession|CodingProxyRequest|Run|CodingRun|RegistryAllowance|RegistryFetch|RegistryVersionFact|RegistryApprovedVersion|RegistryPlanRefusal|_prisma_migrations)"/,
       );
       for (const st of statements(sql)) await admin.$executeRawUnsafe(st);
       const [{ tables, columns }] = await admin.$queryRawUnsafe(
