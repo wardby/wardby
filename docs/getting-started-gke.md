@@ -291,6 +291,14 @@ A brand-new project runs, in this order:
 Two bootstrap runs, not one: a grant on a named table can't apply before the
 migration that creates that table has run.
 
+The same applies to every later release that adds a table the coding proxy
+uses: run `bootstrap-database-iam.sh` again after its migration. `up.sh`
+checks this for you. After the rollout it asks the database, as the proxy's
+own role, for every privilege `database-grants.sql` gives `wardby_proxy`
+(`deploy/gke/proxy-grant-checks.mjs`), and stops with the list of missing
+grants instead of letting the proxy fail registry requests with "permission
+denied".
+
 `bootstrap-database-iam.sh --check` runs the grants inside a transaction that
 is then rolled back, and reports success or the exact statement the database
 refused, without changing anything. Run it before the real run on a live

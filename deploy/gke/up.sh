@@ -371,6 +371,34 @@ import("/app/dist/core/db.js")
 DATABASE_OK=true
 database_roundtrip wardby-control-plane control-plane Agent "control plane" || DATABASE_OK=false
 database_roundtrip wardby-coding-proxy proxy CodingProxySession "coding proxy" || DATABASE_OK=false
+# The proxy's grants only take effect when bootstrap-database-iam.sh runs, and
+# this script does not run it: a release that adds proxy tables deploys fine
+# and then fails every registry request with "permission denied" (an unlogged
+# 502 to npm or pip). Check every privilege database-grants.sql gives
+# wardby_proxy, as the proxy's own role, inside its pod.
+proxy_grants_check() {
+  local pod query out script
+  query="$(node deploy/gke/proxy-grant-checks.mjs)" || return 1
+  script='const mask = (m) => String(m).replace(/postgres(ql)?:\/\/[^\s\x60\x27"]+/gi, "<database url>");
+setTimeout(() => { console.error("no answer from the database in 30s"); process.exit(1); }, 30000);
+import("/app/dist/core/db.js")
+  .then(({ createPrismaClient }) => createPrismaClient().$queryRawUnsafe('"$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$query")"'))
+  .then(
+    (rows) => { for (const row of rows) console.log(row.grant); process.exit(rows.length === 0 ? 0 : 2); },
+    (e) => { console.error(mask(e && e.message ? e.message : e)); process.exit(1); },
+  );'
+  pod="$(new_pod wardby-coding-proxy)"
+  [[ -n "$pod" ]] || { echo "up.sh: no running wardby-coding-proxy pod to check grants in." >&2; return 1; }
+  if out="$(kubectl -n "$NAMESPACE" exec "pod/${pod}" -c proxy -- node --input-type=commonjs -e "$script" 2>&1)"; then
+    echo "    coding proxy has every grant in database-grants.sql"
+    return 0
+  fi
+  echo "up.sh: the coding proxy is missing database grants that database-grants.sql gives it:" >&2
+  echo "${out:-(no output)}" | sed 's/^/    /' >&2
+  echo "up.sh: run deploy/gke/bootstrap-database-iam.sh (--check first), then up.sh again." >&2
+  return 1
+}
+proxy_grants_check || DATABASE_OK=false
 if ! $DATABASE_OK; then
   cat >&2 <<EOF
 up.sh: the new pods cannot use the database.
