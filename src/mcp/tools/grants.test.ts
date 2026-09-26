@@ -44,7 +44,11 @@ function fakeDb(agents: Row[], principals: string[], grants: FakeGrantSeed[] = [
     webhook: {},
     $queryRaw: async () => [],
   };
-  db.$transaction = async (fn: (tx: unknown) => unknown) => fn(db);
+  db.isolationLevels = [];
+  db.$transaction = async (fn: (tx: unknown) => unknown, options?: { isolationLevel?: string }) => {
+    db.isolationLevels.push(options?.isolationLevel);
+    return fn(db);
+  };
   return db as PrismaClient & { resourceGrant: ReturnType<typeof fakeResourceGrants> };
 }
 
@@ -123,6 +127,23 @@ describe("grant_access / revoke_access / list_access", () => {
       expect(revoked.isError).toBeFalsy();
     }
     expect(db.resourceGrant.rows).toHaveLength(0);
+    await client.close();
+  });
+
+  it("M3/M4: grant and revoke run in a Serializable transaction; a principalId grantee's subject isn't echoed", async () => {
+    const db = fakeDb(agents, people);
+    const { client } = await connect(db, ctx(db, "owner"));
+    const granted = await client.callTool({
+      name: "grant_access",
+      arguments: { resourceType: "agent", resourceId: "a1", grantee: { principalId: "alice" }, level: "read" },
+    });
+    expect(JSON.parse(text(granted)).grantee).toEqual({ principalId: "alice" });
+    expect(text(granted)).not.toContain("sub-alice");
+    await client.callTool({
+      name: "revoke_access",
+      arguments: { resourceType: "agent", resourceId: "a1", grantee: { principalId: "alice" } },
+    });
+    expect((db as any).isolationLevels).toEqual(["Serializable", "Serializable"]);
     await client.close();
   });
 

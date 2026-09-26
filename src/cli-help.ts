@@ -22,7 +22,7 @@ export const CLI_USAGE = `usage:
   wardby mcp   (MCP_TRANSPORT=stdio|http selects the transport)
   wardby serve [--scope default]   (mcp + scheduler + reconciler in one process; http only)
   wardby grants migration-report [--json]
-  wardby grants adopt-public --owner <subject> [--dry-run]
+  wardby grants adopt-public --owner <subject> [--dry-run] [--keep-everyone-execute]
   wardby grants prune-bindings [--dry-run]
   wardby import <bundle-dir> [--owner <subject>] [--public] [--include-secrets --transfer-key <pem>] [--default-budget <usd>] [--dry-run] [--prefix <p>] [--on-conflict fail|skip|rename] [--allow-open-fetch]
 

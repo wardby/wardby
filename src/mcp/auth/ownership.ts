@@ -42,7 +42,11 @@ export async function requireOwnedBudgetGroup(db: PrismaClient, id: string, prin
   return group;
 }
 
-export async function requireReadableBudgetGroup(db: PrismaClient, id: string, principalId: string) {
+export async function requireReadableBudgetGroup(
+  db: Pick<PrismaClient, "budgetGroup">,
+  id: string,
+  principalId: string,
+) {
   const group = await db.budgetGroup.findUnique({ where: { id } });
   if (!group || !canRead(group.ownerId, principalId)) {
     throw new McpError(404, `Budget group "${id}" not found.`);

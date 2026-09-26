@@ -274,6 +274,10 @@ describe.skipIf(!process.env.DATABASE_URL)("make_owner re-stamps repository appr
     await client.close();
     expect(result.isError).toBeFalsy();
     expect(JSON.parse(result.content[0].text).grantsReset).toBe(0);
-    expect(await db.resourceGrant.count({ where: { resourceId: agent.id } })).toBe(1);
+    // I3: kept, but everyone is lowered to read (the agent may regain the new owner's bindings).
+    expect(await db.resourceGrant.findMany({ where: { resourceId: agent.id }, select: { level: true } })).toEqual([
+      { level: "read" },
+    ]);
+    expect(JSON.parse(result.content[0].text).everyoneGrant).toEqual({ before: "execute", after: "read" });
   });
 });

@@ -266,7 +266,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
     name: "attach_tool",
     scope: "tools:write",
     description:
-      "Attaches a tool to an agent (needs write on the agent). The four capability fields (allowedSecrets, allowedDatastorePrefixes, allowedHosts, allowedSharedDatastorePrefixes) are the agent owner's to grant: anyone else passing one gets 403, and their attachment runs with none until the owner re-runs attach_tool with the capabilities. When the owner grants an attachment it had not granted before (someone else attached it, or the agent changed owner), every capability not passed is reset to empty, so state each one you want.",
+      "Attaches a tool to an agent (needs write on the agent). The four capability fields (allowedSecrets, allowedDatastorePrefixes, allowedHosts, allowedSharedDatastorePrefixes) are the agent owner's to grant: anyone else passing one gets 403, and their attachment runs with none until the owner re-runs attach_tool with the capabilities. When the owner grants an attachment it had not granted before (someone else attached it, or the agent changed owner), every capability not passed is reset to empty, so state each one you want. Granting capabilities to a tool someone else owns vouches for code you can't read (only its owner sees it); the tool's owner can't change it while it's attached to your agent, and detaching drops your grant.",
     inputSchema: {
       type: "object",
       properties: {

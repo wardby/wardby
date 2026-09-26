@@ -35,7 +35,7 @@ import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { createTaskResult, getTask, cancelTask } from "../tasks/manager.js";
 import { requireOwnedTask } from "../auth/ownership.js";
-import { assertAgentAccess, type AgentAccess } from "../auth/access.js";
+import { assertAgentAccess } from "../auth/access.js";
 import type { McpRequestContext } from "../context.js";
 import type { PrismaClient } from "#prisma";
 import { textResult } from "./text-result.js";
@@ -65,11 +65,14 @@ function parseTriggerArgs(args: unknown): z.infer<typeof TriggerAgentSchema> {
  * defaultTask. Resource-sharing grants spec §3.4.5.
  */
 function assertOverrideAllowed(
-  access: AgentAccess,
-  agent: { id: string; codingProfile: { allowWebhookTaskOverride: boolean } | null },
+  principalId: string,
+  agent: { id: string; ownerId: string | null; codingProfile: { allowWebhookTaskOverride: boolean } | null },
   args: { task?: string; baseRef?: string },
 ): void {
-  if (access === "owner" || (args.task === undefined && args.baseRef === undefined)) return;
+  // Strictly the owner: the stdio operator's owner-level access doesn't make
+  // it the owner whose repository authority the task steers (review M8).
+  const isOwner = agent.ownerId !== null && agent.ownerId === principalId;
+  if (isOwner || (args.task === undefined && args.baseRef === undefined)) return;
   if (!agent.codingProfile?.allowWebhookTaskOverride) {
     throw new McpError(
       403,
@@ -92,8 +95,8 @@ async function requireTriggerable<A extends TriggerableAgent>(
   args: { task?: string; baseRef?: string },
   db: Pick<PrismaClient, "resourceGrant"> = ctx.db,
 ): Promise<A> {
-  const { agent, access } = await assertAgentAccess(ctx, row, id, "execute", db);
-  assertOverrideAllowed(access, agent, args);
+  const { agent } = await assertAgentAccess(ctx, row, id, "execute", db);
+  assertOverrideAllowed(ctx.principal.id, agent, args);
   return agent;
 }
 

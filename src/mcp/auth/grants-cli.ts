@@ -8,7 +8,9 @@
  *   deploy`: it uses raw SQL over columns that exist in both, and predicts
  *   what the grants migration will do when its table isn't there yet.
  * - adopt-public gives every owner-less agent an owner (one Serializable
- *   transaction per agent), keeping its grants, keeping and reviving the new
+ *   transaction per agent), keeping its grants (but lowering an everyone
+ *   grant to read unless --keep-everyone-execute: the agent is about to
+ *   regain the adopter's secrets and capabilities), keeping and reviving the new
  *   owner's own bindings, deleting the rest, and stamping the new owner's
  *   consent on attachments of its own tools. Other attachments stay inert
  *   and are printed with the attach_tool call that re-grants them.
@@ -22,7 +24,7 @@ import { canDelegate } from "../../core/grants.js";
 import { resolvePrincipal } from "./principal.js";
 
 const USAGE =
-  "Use grants migration-report [--json] | grants adopt-public --owner <subject> [--dry-run] | grants prune-bindings [--dry-run].";
+  "Use grants migration-report [--json] | grants adopt-public --owner <subject> [--dry-run] [--keep-everyone-execute] | grants prune-bindings [--dry-run].";
 
 /** The report needs only raw queries, so it can run on a schema the generated client doesn't match. */
 export interface ReportDb {
@@ -62,14 +64,26 @@ function hasCapabilities(caps: Caps): boolean {
 export const BEHAVIOUR_CHANGES = [
   "Other principals can no longer edit a formerly public agent: update_agent, set/disable_schedule, delete_agent, attach/detach_tool, attach/detach_subagent, attach/detach_secret, attach/detach_datastore, datastore_set/delete, set/delete_agent_memory, create_webhook, unlink_repository.",
   "They can no longer read its data: get/list_agent_memory, datastore_get/list, or other principals' runs.",
-  "They keep list_agents, get_agent (other owners' tool code hidden), list_subagents, list_repositories, list_tools, trigger_agent and the MCP prompts (everyone holds execute).",
+  "They keep list_agents, get_agent (other owners' tool code hidden), list_subagents, list_repositories, list_tools, trigger_agent and the MCP prompts (everyone holds execute until adoption; adopt-public lowers it to read unless --keep-everyone-execute).",
   "Until adopt-public runs, a formerly public agent runs with no owned secrets or datastores and without its tools' capabilities.",
   "make_owner no longer accepts ownerId: null; non-owner coding task/baseRef needs the owner's allowWebhookTaskOverride.",
 ];
 
 export interface MigrationReport {
   grantsTable: boolean;
-  ownerlessAgents: { agentId: string; name: string; everyoneGrant: string | null }[];
+  ownerlessAgents: {
+    agentId: string;
+    name: string;
+    everyoneGrant: string | null;
+    /** What adopting the agent as each principal would bring back into force (review I3). */
+    revivedByAdopter: {
+      principalId: string;
+      subject: string;
+      secrets: string[];
+      datastores: string[];
+      toolCapabilities: string[];
+    }[];
+  }[];
   inertBindings: {
     kind: "secret" | "datastore";
     agentId: string;
@@ -82,6 +96,12 @@ export interface MigrationReport {
     prunable: boolean;
   }[];
   suspendedCapabilities: { agentId: string; agentName: string; toolId: string; toolName: string; regrant: string }[];
+  /**
+   * Capabilities the migration stamps with the current owner on owner-less
+   * tools: a previous owner may have set them before a make_owner (review
+   * M2). They stay in force; the owner should review them.
+   */
+  reviewCapabilities: { agentId: string; agentName: string; toolId: string; toolName: string; regrant: string }[];
   failingEdges: {
     parentAgentId: string;
     parentOwnerId: string | null;
@@ -116,6 +136,40 @@ export async function migrationReport(db: ReportDb): Promise<MigrationReport> {
           SELECT a."id" AS "agentId", a."name" FROM "Agent" a WHERE a."ownerId" IS NULL ORDER BY a."name"`
       ).map((row) => ({ ...row, everyoneGrant: "execute (pending migration)" }));
 
+  type ReviveRow = { agentId: string; principalId: string; subject: string; label: string };
+  const revivedSecrets = await db.$queryRaw<ReviveRow[]>`
+    SELECT a."id" AS "agentId", p."id" AS "principalId", p."subject", x."boundName" AS "label"
+    FROM "AgentSecret" x JOIN "Secret" s ON s."id" = x."secretId" JOIN "Agent" a ON a."id" = x."agentId"
+      JOIN "Principal" p ON p."id" = s."ownerId"
+    WHERE a."ownerId" IS NULL ORDER BY x."boundName"`;
+  const revivedDatastores = await db.$queryRaw<ReviveRow[]>`
+    SELECT a."id" AS "agentId", p."id" AS "principalId", p."subject", x."boundName" AS "label"
+    FROM "AgentDatastore" x JOIN "Datastore" d ON d."id" = x."datastoreId" JOIN "Agent" a ON a."id" = x."agentId"
+      JOIN "Principal" p ON p."id" = d."ownerId"
+    WHERE a."ownerId" IS NULL ORDER BY x."boundName"`;
+  const revivedTools = await db.$queryRaw<(ReviveRow & Caps)[]>`
+    SELECT a."id" AS "agentId", p."id" AS "principalId", p."subject", t."name" AS "label",
+      x."allowedSecrets", x."allowedDatastorePrefixes", x."allowedHosts", x."allowedSharedDatastorePrefixes"
+    FROM "AgentTool" x JOIN "Tool" t ON t."id" = x."toolId" JOIN "Agent" a ON a."id" = x."agentId"
+      JOIN "Principal" p ON p."id" = t."ownerId"
+    WHERE a."ownerId" IS NULL ORDER BY t."name"`;
+  const revivedFor = (agentId: string): MigrationReport["ownerlessAgents"][number]["revivedByAdopter"] => {
+    const byPrincipal = new Map<string, MigrationReport["ownerlessAgents"][number]["revivedByAdopter"][number]>();
+    const entry = (row: ReviveRow) => {
+      let e = byPrincipal.get(row.principalId);
+      if (!e) {
+        e = { principalId: row.principalId, subject: row.subject, secrets: [], datastores: [], toolCapabilities: [] };
+        byPrincipal.set(row.principalId, e);
+      }
+      return e;
+    };
+    for (const r of revivedSecrets) if (r.agentId === agentId) entry(r).secrets.push(r.label);
+    for (const r of revivedDatastores) if (r.agentId === agentId) entry(r).datastores.push(r.label);
+    for (const r of revivedTools)
+      if (r.agentId === agentId && hasCapabilities(r)) entry(r).toolCapabilities.push(r.label);
+    return [...byPrincipal.values()].sort((a, b) => a.subject.localeCompare(b.subject));
+  };
+
   // A binding resolves only while the resource's owner is the agent's owner,
   // both non-null (core/secrets.ts, core/datastores.ts).
   const bindings = await db.$queryRaw<BindingRow[]>`
@@ -148,6 +202,20 @@ export async function migrationReport(db: ReportDb): Promise<MigrationReport> {
           x."allowedSecrets", x."allowedDatastorePrefixes", x."allowedHosts", x."allowedSharedDatastorePrefixes"
         FROM "AgentTool" x JOIN "Agent" a ON a."id" = x."agentId" JOIN "Tool" t ON t."id" = x."toolId"
         WHERE a."ownerId" IS NULL OR (t."ownerId" IS NOT NULL AND t."ownerId" <> a."ownerId")
+        ORDER BY a."name", t."name"`;
+
+  const review = stamped
+    ? await db.$queryRaw<CapsRow[]>`
+        SELECT a."id" AS "agentId", a."name" AS "agentName", t."id" AS "toolId", t."name" AS "toolName",
+          x."allowedSecrets", x."allowedDatastorePrefixes", x."allowedHosts", x."allowedSharedDatastorePrefixes"
+        FROM "AgentTool" x JOIN "Agent" a ON a."id" = x."agentId" JOIN "Tool" t ON t."id" = x."toolId"
+        WHERE a."ownerId" IS NOT NULL AND t."ownerId" IS NULL AND x."capabilitiesGrantedById" = a."ownerId"
+        ORDER BY a."name", t."name"`
+    : await db.$queryRaw<CapsRow[]>`
+        SELECT a."id" AS "agentId", a."name" AS "agentName", t."id" AS "toolId", t."name" AS "toolName",
+          x."allowedSecrets", x."allowedDatastorePrefixes", x."allowedHosts", x."allowedSharedDatastorePrefixes"
+        FROM "AgentTool" x JOIN "Agent" a ON a."id" = x."agentId" JOIN "Tool" t ON t."id" = x."toolId"
+        WHERE a."ownerId" IS NOT NULL AND t."ownerId" IS NULL
         ORDER BY a."name", t."name"`;
 
   // canDelegate: same owner (null = null), or the parent's owner holds
@@ -203,9 +271,16 @@ export async function migrationReport(db: ReportDb): Promise<MigrationReport> {
 
   return {
     grantsTable: present,
-    ownerlessAgents: ownerless,
+    ownerlessAgents: ownerless.map((a) => ({ ...a, revivedByAdopter: revivedFor(a.agentId) })),
     inertBindings: bindings.map((b) => ({ ...b, prunable: b.agentOwnerId !== null })),
     suspendedCapabilities: suspended.filter(hasCapabilities).map((row) => ({
+      agentId: row.agentId,
+      agentName: row.agentName,
+      toolId: row.toolId,
+      toolName: row.toolName,
+      regrant: regrantCall(row.agentId, row.toolId, row),
+    })),
+    reviewCapabilities: review.filter(hasCapabilities).map((row) => ({
       agentId: row.agentId,
       agentName: row.agentName,
       toolId: row.toolId,
@@ -232,7 +307,14 @@ export function formatMigrationReport(report: MigrationReport): string {
   );
   section(
     "1. Owner-less agents (everyone grant)",
-    report.ownerlessAgents.map((a) => `${a.name} (${a.agentId}): everyone ${a.everyoneGrant ?? "none"}`),
+    report.ownerlessAgents.flatMap((a) => [
+      `${a.name} (${a.agentId}): everyone ${a.everyoneGrant ?? "none"}` +
+        (a.everyoneGrant ? " (adopt-public lowers it to read unless --keep-everyone-execute)" : ""),
+      ...a.revivedByAdopter.map(
+        (r) =>
+          `    adopting as ${r.subject} would bring back: secrets [${r.secrets.join(", ")}], datastores [${r.datastores.join(", ")}], capabilities of tools [${r.toolCapabilities.join(", ")}]`,
+      ),
+    ]),
   );
   section(
     "2. Cross-owner secret/datastore bindings (inert at run time)",
@@ -245,6 +327,10 @@ export function formatMigrationReport(report: MigrationReport): string {
   section(
     "3. Attachments whose capabilities are (or will be) suspended",
     report.suspendedCapabilities.map((c) => `${c.agentName} / ${c.toolName}: re-grant with ${c.regrant}`),
+  );
+  section(
+    "3b. Owner-less-tool capabilities kept in force on owned agents (review: a previous owner may have set them)",
+    report.reviewCapabilities.map((c) => `${c.agentName} / ${c.toolName}: currently ${c.regrant}`),
   );
   section(
     "4. Sub-agent edges refused at run time (canDelegate)",
@@ -281,8 +367,11 @@ export interface AdoptedAgent {
   bindingsRemoved: { kind: "secret" | "datastore"; boundName: string; resourceId: string }[];
   bindingsKept: { kind: "secret" | "datastore"; boundName: string }[];
   capabilitiesStamped: string[];
-  capabilitiesInert: { toolId: string; toolName: string; regrant: string }[];
+  /** Every attached tool the new owner doesn't own (review M7); `regrant` only when it had capabilities. */
+  foreignTools: { toolId: string; toolName: string; toolOwnerId: string | null; regrant: string | null }[];
   failingEdges: { parentAgentId: string; childAgentId: string; boundName: string }[];
+  /** The everyone grant before and after adoption (null = none). */
+  everyoneGrant: { before: string | null; after: string | null };
 }
 
 export interface AdoptResult {
@@ -296,7 +385,7 @@ class DryRunRollback extends Error {}
 /** Gives every owner-less agent `ownerSubject` as its owner. See the module header. */
 export async function adoptPublic(
   db: PrismaClient,
-  opts: { ownerSubject: string; dryRun: boolean },
+  opts: { ownerSubject: string; dryRun: boolean; keepEveryoneExecute?: boolean },
 ): Promise<AdoptResult> {
   // findUnique, never upsert: a typo must not mint a principal that then owns everything.
   const owner = await db.principal.findUnique({ where: { subject: opts.ownerSubject } });
@@ -363,6 +452,24 @@ export async function adoptPublic(
             },
             orderBy: { boundName: "asc" },
           });
+          // The agent is about to regain the adopter's secrets and tool
+          // capabilities: an everyone grant above read would let anyone run
+          // it with them (review I3). Lowered to read unless the operator
+          // explicitly keeps execute.
+          const everyone = await tx.resourceGrant.findUnique({
+            where: {
+              resourceType_resourceId_granteeKey: { resourceType: "agent", resourceId: id, granteeKey: "everyone" },
+            },
+          });
+          const everyoneGrant = { before: everyone?.level ?? null, after: everyone?.level ?? null };
+          if (everyone && everyone.level !== "read" && !opts.keepEveryoneExecute) {
+            await tx.resourceGrant.update({
+              where: { id: everyone.id },
+              data: { level: "read", source: "operator", grantedById: owner.id },
+            });
+            everyoneGrant.after = "read";
+          }
+
           const failingEdges: AdoptedAgent["failingEdges"] = [];
           for (const edge of edges) {
             if (!(await canDelegate(tx, edge.parent, edge.child))) {
@@ -398,10 +505,16 @@ export async function adoptPublic(
                 .map((b) => ({ kind: "datastore" as const, boundName: b.boundName })),
             ],
             capabilitiesStamped: own.map((at) => at.tool.name),
-            capabilitiesInert: attachments
-              .filter((at) => at.tool.ownerId !== owner.id && hasCapabilities(at))
-              .map((at) => ({ toolId: at.toolId, toolName: at.tool.name, regrant: regrantCall(id, at.toolId, at) })),
+            foreignTools: attachments
+              .filter((at) => at.tool.ownerId !== owner.id)
+              .map((at) => ({
+                toolId: at.toolId,
+                toolName: at.tool.name,
+                toolOwnerId: at.tool.ownerId,
+                regrant: hasCapabilities(at) ? regrantCall(id, at.toolId, at) : null,
+              })),
             failingEdges,
+            everyoneGrant,
           };
           if (opts.dryRun) throw new DryRunRollback();
         },
@@ -420,12 +533,23 @@ export function formatAdoptResult(result: AdoptResult): string {
     `${result.dryRun ? "[dry run] would adopt" : "Adopted"} ${result.agents.length} owner-less agent(s) for ${result.owner.subject} (${result.owner.id}).`,
   ];
   for (const a of result.agents) {
-    lines.push("", `${a.name} (${a.agentId}): owner ${result.owner.subject}; its grants are kept.`);
+    lines.push("", `${a.name} (${a.agentId}): owner ${result.owner.subject}; named grants are kept.`);
     for (const b of a.bindingsKept) lines.push(`  kept ${b.kind} binding "${b.boundName}"`);
     for (const b of a.bindingsRemoved) lines.push(`  removed ${b.kind} binding "${b.boundName}" (${b.resourceId})`);
     for (const t of a.capabilitiesStamped) lines.push(`  capabilities of own tool "${t}" now in force`);
-    for (const t of a.capabilitiesInert)
-      lines.push(`  capabilities of "${t.toolName}" stay inert; re-grant: ${t.regrant}`);
+    if (a.everyoneGrant.before !== null) {
+      lines.push(
+        a.everyoneGrant.before === a.everyoneGrant.after
+          ? `  everyone keeps ${a.everyoneGrant.after}${a.everyoneGrant.after === "execute" ? ": anyone can run it with the secrets and capabilities it regains (revoke_access to stop that)" : ""}`
+          : `  everyone lowered from ${a.everyoneGrant.before} to ${a.everyoneGrant.after} (webhooks others created stop firing; grant execute to named principals instead)`,
+      );
+    }
+    for (const t of a.foreignTools) {
+      lines.push(
+        `  tool "${t.toolName}" (${t.toolId}) is owned by ${t.toolOwnerId ?? "nobody"}: review or detach_tool it` +
+          (t.regrant ? `; its capabilities stay inert, re-grant: ${t.regrant}` : ""),
+      );
+    }
     for (const e of a.failingEdges) {
       lines.push(
         `  sub-agent edge ${e.parentAgentId} -> ${e.childAgentId} as "${e.boundName}" is refused at run time (not deleted)`,
@@ -545,11 +669,21 @@ export async function grantsCommand(
     const { values } = parseArgs({
       args: rest,
       strict: true,
-      options: { owner: { type: "string" }, "dry-run": { type: "boolean" } },
+      options: {
+        owner: { type: "string" },
+        "dry-run": { type: "boolean" },
+        "keep-everyone-execute": { type: "boolean" },
+      },
     });
     if (!values.owner) throw new Error("grants adopt-public requires --owner <subject>.");
     output(
-      formatAdoptResult(await adoptPublic(db, { ownerSubject: values.owner, dryRun: values["dry-run"] === true })),
+      formatAdoptResult(
+        await adoptPublic(db, {
+          ownerSubject: values.owner,
+          dryRun: values["dry-run"] === true,
+          keepEveryoneExecute: values["keep-everyone-execute"] === true,
+        }),
+      ),
     );
     return;
   }

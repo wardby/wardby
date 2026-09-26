@@ -92,7 +92,7 @@ const runnerLog = logger.child({ module: "runner" });
 function delegateToolDef(boundName: string): LoadedTool {
   return {
     name: `${DELEGATE_TOOL_PREFIX}${boundName}`,
-    description: `Delegates a task to your "${boundName}" sub-agent. Runs synchronously and blocks until it finishes; its spend counts against your own run's shared budget scope.`,
+    description: `Delegates a task to your "${boundName}" sub-agent. Runs synchronously and blocks until it finishes; its spend counts against your own run's shared budget scope. If the sub-agent belongs to another owner it runs only its own instructions: pass an empty task.`,
     jsonSchema: {
       type: "object",
       properties: {
@@ -611,8 +611,10 @@ export async function executeRun(
         if (parentOwnerId !== childOwnerId) {
           // Across owners the edge carries execute and nothing more: no
           // model-chosen memory grant, no continuation of another run's PR,
-          // and no coding task text unless the child's owner opted in to
-          // non-owner task text (allowWebhookTaskOverride).
+          // and no task text the caller couldn't give the child directly --
+          // the trigger_agent rule (review I3): a coding child only with its
+          // owner's allowWebhookTaskOverride opt-in, a native child never
+          // (it runs its owner's fixed prompt; pass an empty task).
           const refusal =
             (args.grantParentMemoryKeys?.length ?? 0) > 0
               ? "grantParentMemoryKeys is only allowed when the sub-agent has the same owner."
@@ -620,7 +622,9 @@ export async function executeRun(
                 ? "continuePriorRun is only allowed when the sub-agent has the same owner."
                 : childAgent.kind === "coding" && !childAgent.codingProfile?.allowWebhookTaskOverride
                   ? "This coding sub-agent belongs to another owner and does not accept task text from others (allowWebhookTaskOverride)."
-                  : null;
+                  : childAgent.kind !== "coding" && (args.task.trim() !== "" || args.datastoreRef !== undefined)
+                    ? 'This sub-agent belongs to another owner and runs only its own instructions: delegate with task "" and no datastoreRef.'
+                    : null;
           if (refusal) return JSON.stringify({ error: "cross_owner_not_allowed", message: refusal });
         }
 
@@ -705,7 +709,9 @@ export async function executeRun(
 
         const taskOverride = args.datastoreRef
           ? `${args.task}\n\n[Referenced datastore: name="${args.datastoreRef.name}", key="${args.datastoreRef.key}" — use your datastore tools to read it.]`
-          : args.task;
+          : args.task.trim() !== ""
+            ? args.task
+            : undefined;
         const childRun = await db.run.create({
           data: {
             agentId: edge.childAgentId,

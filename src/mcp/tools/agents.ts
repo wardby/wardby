@@ -20,7 +20,7 @@ import {
   readableAgentsWhere,
   requireAgentAccess,
 } from "../auth/access.js";
-import { atLeast, canDelegate, deleteGrantsFor, effectiveAccess } from "../../core/grants.js";
+import { EVERYONE_KEY, atLeast, canDelegate, deleteGrantsFor, effectiveAccess } from "../../core/grants.js";
 import { projectTool } from "./tools.js";
 import { requireAnyScope, requireScope } from "../auth/resource-server.js";
 import { authorizeRepositoryForSet, type RepositoryAuthorization } from "../auth/repo-authorization.js";
@@ -406,6 +406,23 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         );
       };
       if (!adminEdit && !isOwner && repositoryChanges(before)) refuseRepositoryBinding();
+      // The coding profile as a whole (task, base ref, protected paths,
+      // task-override opt-in, image, packages, limits...), leaving coding,
+      // and budget-group membership direct what runs do with the owner's
+      // repository access and money: owner-only, like the repository itself
+      // (review I1/M1/M6). Write keeps name, prompt, model, budget amount,
+      // turns, effort, memory and schedule.
+      const ownerOnlyChange = (existingKind: string) =>
+        args.codingProfile !== undefined ||
+        (args.kind !== undefined && args.kind !== existingKind) ||
+        args.budgetGroupId !== undefined;
+      const refuseOwnerOnly = () => {
+        throw new McpError(
+          403,
+          `Agent "${args.id}": only its owner can change its coding profile, kind or budget group.`,
+        );
+      };
+      if (!adminEdit && !isOwner && ownerOnlyChange(before.kind)) refuseOwnerOnly();
       const authorization =
         plannedRepository !== null && repositoryChanges(before)
           ? await authorizeRepositoryForSet(ctx, {
@@ -427,6 +444,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           if (!adminEdit) {
             await assertAgentAccess(ctx, existing, args.id, "write", tx);
             if (!isOwner && repositoryChanges(existing)) refuseRepositoryBinding();
+            if (!isOwner && ownerOnlyChange(existing.kind)) refuseOwnerOnly();
           }
           if (
             existing.ownerId !== before.ownerId ||
@@ -437,7 +455,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             throw new McpError(409, `Agent "${args.id}" changed while it was being updated; try again.`);
           }
           if (args.budgetGroupId) {
-            await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id);
+            await requireReadableBudgetGroup(tx, args.budgetGroupId, ctx.principal.id);
           }
 
           const nextKind = args.kind ?? existing.kind;
@@ -594,10 +612,18 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      properties: { agentId: { type: "string" }, ownerId: { type: ["string", "null"] } },
+      properties: {
+        agentId: { type: "string" },
+        ownerId: { type: ["string", "null"] },
+        keepEveryoneExecute: {
+          type: "boolean",
+          description:
+            "When adopting an owner-less agent: keep an everyone grant at execute instead of lowering it to read. Anyone could then run it with the new owner's secrets and capabilities.",
+        },
+      },
       required: ["agentId", "ownerId"],
     },
-    handler: async (args: { agentId: string; ownerId: string | null }, ctx) => {
+    handler: async (args: { agentId: string; ownerId: string | null; keepEveryoneExecute?: boolean }, ctx) => {
       if (args.ownerId === null) {
         throw new McpError(
           400,
@@ -641,8 +667,26 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
 
           // Grants: between two owners every grant is reset (the new owner
           // decides who shares it); adopting an owner-less agent keeps them,
-          // including the migration's everyone grant.
+          // but lowers an everyone grant to read unless keepEveryoneExecute:
+          // the agent may regain the new owner's secrets and capabilities
+          // (review I3).
           const grantsReset = transfer ? await deleteGrantsFor(tx, "agent", agent.id) : 0;
+          let everyoneGrant: { before: string; after: string } | null = null;
+          if (agent.ownerId === null) {
+            const everyone = await tx.resourceGrant.findFirst({
+              where: { resourceType: "agent", resourceId: agent.id, granteeKey: EVERYONE_KEY },
+            });
+            if (everyone) {
+              everyoneGrant = { before: everyone.level, after: everyone.level };
+              if (everyone.level !== "read" && args.keepEveryoneExecute !== true) {
+                await tx.resourceGrant.update({
+                  where: { id: everyone.id },
+                  data: { level: "read", source: "operator", grantedById: ctx.principal.id },
+                });
+                everyoneGrant.after = "read";
+              }
+            }
+          }
 
           const updated = await tx.agent.update({ where: { id: args.agentId }, data: { ownerId: newOwner } });
 
@@ -727,6 +771,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             toolCapabilitiesSuspended,
             subAgentEdgesRemoved,
             grantsReset,
+            everyoneGrant,
             webhooksInactive,
           };
         },

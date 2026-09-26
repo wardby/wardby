@@ -282,6 +282,18 @@ describe("trigger_agent", () => {
       await reader.client.close();
     });
 
+    it("M8: the stdio operator is not the owner for task overrides either", async () => {
+      const db = fakeDb([{ ...coding(false), model: "gpt-5.6-luna" } as FakeAgentRow]);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext({ ...fakeCtx(db, "local", ["runs:trigger"], false), operator: true });
+      registerTriggerTool(mcp);
+      const client = await connectClient(mcp);
+      const refused = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1", task: "x" } });
+      expect(refused.isError).toBe(true);
+      expect((await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } })).isError).toBeFalsy();
+      await client.close();
+    });
+
     it("a non-owner may pass a coding task or baseRef only when the owner opted in (allowWebhookTaskOverride)", async () => {
       const closed = await as("g", coding(false), [grant("execute")]);
       for (const extra of [{ task: "rewrite everything" }, { baseRef: "evil-branch" }]) {

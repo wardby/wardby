@@ -1603,12 +1603,28 @@ describe("agent tools under grants", () => {
     });
     expect(refused.isError).toBe(true);
     expect(text(refused)).toMatch(/owner/);
-    // Other coding-profile fields are ordinary config at write.
-    const ok = await writer.client.callTool({
-      name: "update_agent",
-      arguments: { id: "a1", codingProfile: { baseRef: "develop" } },
-    });
-    expect(ok.isError).toBeFalsy();
+    // I1: the whole coding profile is the owner's, not just the repository.
+    for (const codingProfile of [
+      { baseRef: "develop" },
+      { defaultTask: "push to main" },
+      { allowWebhookTaskOverride: true },
+      { protectedPaths: ["nothing/**"] },
+      { collectExclude: ["x"] },
+      { timeoutSec: 7200 },
+      { toolchain: "node-python" },
+      { workspaceDiskMb: 4096 },
+    ]) {
+      const refusedField = await writer.client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile },
+      });
+      expect(refusedField.isError, JSON.stringify(codingProfile)).toBe(true);
+      expect(text(refusedField)).toMatch(/owner/);
+    }
+    // Leaving coding (dropping the repository binding) is owner-only too (M6).
+    const toNative = await writer.client.callTool({ name: "update_agent", arguments: { id: "a1", kind: "native" } });
+    expect(toNative.isError).toBe(true);
+    expect((await writer.db.agent.findUnique({ where: { id: "a1" } }))?.kind).toBe("coding");
     await writer.client.close();
 
     const nativeWriter = await as("g", base(), [grant("write")]);
@@ -1619,6 +1635,59 @@ describe("agent tools under grants", () => {
     expect(toCoding.isError).toBe(true);
     expect(text(toCoding)).toMatch(/owner/);
     await nativeWriter.client.close();
+  });
+
+  it("I1: budgetGroupId is owner-only; write covers name, prompt, model, budget amount, turns, effort, memory and schedule", async () => {
+    const writer = await as("g", base(), [grant("write")]);
+    for (const budgetGroupId of ["g-mine", null]) {
+      const refused = await writer.client.callTool({ name: "update_agent", arguments: { id: "a1", budgetGroupId } });
+      expect(refused.isError).toBe(true);
+      expect(text(refused)).toMatch(/owner/);
+    }
+    const ok = await writer.client.callTool({
+      name: "update_agent",
+      arguments: {
+        id: "a1",
+        name: "renamed",
+        systemPrompt: "p",
+        model: "gpt-5.6-luna",
+        budgetUsd: 2,
+        maxTurns: 3,
+        memoryEnabled: true,
+        schedule: "0 * * * *",
+        timezone: "UTC",
+        scheduleEnabled: true,
+      },
+    });
+    expect(ok.isError).toBeFalsy();
+    await writer.client.close();
+  });
+
+  it("M8: the stdio operator can't edit another owner's coding profile either", async () => {
+    const coder = base({
+      kind: "coding",
+      codingProfile: {
+        provider: "codex",
+        repository: "o/r",
+        baseRef: "main",
+        defaultTask: null,
+        timeoutSec: 1800,
+        protectedPaths: ["CODEOWNERS"],
+      },
+    });
+    const db = fakeDb([coder]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext({ ...fakeCtx(db, "local", ["agents:write", "agents:read"]), operator: true });
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const refused = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { protectedPaths: ["x/**"] } },
+    });
+    expect(refused.isError).toBe(true);
+    const ok = await client.callTool({ name: "update_agent", arguments: { id: "a1", systemPrompt: "fixed" } });
+    expect(ok.isError).toBeFalsy();
+    await client.close();
   });
 
   it("A7: get_agent hides non-owned tool code", async () => {

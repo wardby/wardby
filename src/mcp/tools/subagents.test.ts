@@ -290,7 +290,7 @@ describe("subagent tools", () => {
       const client = await connectClient(mcp);
       const refused = await client.callTool(attach);
       expect(refused.isError).toBeTruthy();
-      expect(JSON.stringify(refused)).toMatch(/execute/);
+      expect(JSON.stringify(refused)).toMatch(/owner/);
       expect((db as any).edges).toEqual([]);
       await client.close();
     });
@@ -307,7 +307,7 @@ describe("subagent tools", () => {
       const client = await connectClient(mcp);
       const refused = await client.callTool(attach);
       expect(refused.isError).toBeTruthy();
-      expect(JSON.stringify(refused)).toMatch(/needs write/);
+      expect(JSON.stringify(refused)).toMatch(/owner/);
       expect((db as any).edges).toEqual([]);
       await client.close();
     });
@@ -337,11 +337,42 @@ describe("subagent tools", () => {
       await client.close();
     });
 
+    it("N1: the parent's owner can't attach another owner's child it holds only read on", async () => {
+      const { db, mcp } = setup(agents, "alice", [g("C", "alice", "read")]);
+      const client = await connectClient(mcp);
+      const refused = await client.callTool(attach);
+      expect(refused.isError).toBeTruthy();
+      expect(JSON.stringify(refused)).toMatch(/execute/);
+      expect((db as any).edges).toEqual([]);
+      await client.close();
+    });
+
     it("allowed when the parent's owner holds execute on the child", async () => {
       const { db, mcp } = setup(agents, "alice", [g("C", "alice", "execute")]);
       const client = await connectClient(mcp);
       const ok = await client.callTool(attach);
       expect(ok.isError).toBeFalsy();
+      expect((db as any).edges).toHaveLength(1);
+      await client.close();
+    });
+
+    it("I2: a write-grantee can't attach or detach sub-agents, even the parent owner's own agents", async () => {
+      const sameOwner: FakeAgentRow[] = [
+        { id: "P", name: "alice-parent", ownerId: "alice" },
+        { id: "C", name: "alice-child", ownerId: "alice" },
+      ];
+      const { db, mcp } = setup(sameOwner, "w", [g("P", "w", "write"), g("C", "w", "execute")]);
+      const client = await connectClient(mcp);
+      const refused = await client.callTool(attach);
+      expect(refused.isError).toBeTruthy();
+      expect(JSON.stringify(refused)).toMatch(/owner/);
+      expect((db as any).edges).toEqual([]);
+      (db as any).edges.push({ parentAgentId: "P", childAgentId: "C", boundName: "c" });
+      const noDetach = await client.callTool({
+        name: "detach_subagent",
+        arguments: { parentAgentId: "P", childAgentId: "C" },
+      });
+      expect(noDetach.isError).toBeTruthy();
       expect((db as any).edges).toHaveLength(1);
       await client.close();
     });

@@ -11,7 +11,7 @@
  * - Takes effect on the next check; runs already in flight keep going.
  */
 import { z } from "zod";
-import type { Principal } from "#prisma";
+import { Prisma, type Principal, type PrismaClient } from "#prisma";
 import {
   EVERYONE_KEY,
   EVERYONE_MAX,
@@ -65,12 +65,12 @@ function shareableType(value: string): ResourceType {
 }
 
 /** The grantee's principal (must have signed in once: never created here), or null for everyone. */
-async function resolveGrantee(ctx: McpRequestContext, grantee: Grantee): Promise<Principal | null> {
+async function resolveGrantee(db: GrantTx, grantee: Grantee): Promise<Principal | null> {
   if (grantee === "everyone") return null;
   const principal =
     "subject" in grantee
-      ? await ctx.db.principal.findUnique({ where: { subject: grantee.subject } })
-      : await ctx.db.principal.findUnique({ where: { id: grantee.principalId } });
+      ? await db.principal.findUnique({ where: { subject: grantee.subject } })
+      : await db.principal.findUnique({ where: { id: grantee.principalId } });
   if (!principal) {
     throw new McpError(404, "Grantee not found: they must have signed in to wardby at least once.");
   }
@@ -78,11 +78,23 @@ async function resolveGrantee(ctx: McpRequestContext, grantee: Grantee): Promise
 }
 
 /** Grant management is the owner's (or the stdio operator's). Phase 1: agents. */
-async function requireOwnedResource(ctx: McpRequestContext, type: ResourceType, id: string) {
+async function requireOwnedResource(ctx: McpRequestContext, db: GrantTx, type: ResourceType, id: string) {
   // Only "agent" reaches here in Phase 1 (shareableType).
   void type;
-  const row = await ctx.db.agent.findUnique({ where: { id } });
-  return (await assertAgentAccess(ctx, row, id, "owner")).agent;
+  const row = await db.agent.findUnique({ where: { id } });
+  return (await assertAgentAccess(ctx, row, id, "owner", db)).agent;
+}
+
+type GrantTx = Pick<PrismaClient, "agent" | "principal" | "resourceGrant">;
+
+/**
+ * The ownership check and the write in one Serializable transaction (review
+ * M3): a concurrent make_owner, which resets grants in its own transaction,
+ * conflicts instead of letting the old owner's grant land on the new
+ * owner's agent.
+ */
+function inSerializable<T>(ctx: McpRequestContext, fn: (tx: GrantTx) => Promise<T>): Promise<T> {
+  return ctx.db.$transaction((tx) => fn(tx), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 }
 
 function isAdmin(ctx: McpRequestContext): boolean {
@@ -118,9 +130,13 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
     name: "grant_access",
     scope: "agents:write",
     description:
-      "Shares an agent you own with one principal or with everyone, at a level: read (see its config, never secret values or other owners' tool code), execute (also trigger runs and see the runs they triggered), or write (also change its prompt, model, schedule, budget, tools and sub-agents). " +
-      "Consequences: execute lets them run your agent with your tools, secrets, datastores and repository -- and every run shares the agent's memory. " +
-      "Write lets them change what those runs do (its prompt and schedule), but never bind secrets, datastores or repositories, nor grant a tool your capabilities. " +
+      "Shares an agent you own with one principal or with everyone, at a level: " +
+      "read (see its config, never secret values or other owners' tool code); " +
+      "execute (also trigger runs and see the runs they triggered); " +
+      "write (also change its name, prompt, model, budget amount, max turns, effort, memory on/off and schedule, attach tools they can use and detach tools, and create webhooks). " +
+      "Owner-only whatever the level: the coding profile (task, base ref, protected paths, task-override opt-in, image, packages, limits), kind, budget group, sub-agents, secret/datastore/repository bindings, tool capabilities, memory and datastore contents, grants, delete. " +
+      "Consequences: execute lets them run your agent with your tools, secrets, datastores and repository, and every run shares the agent's memory; they supply no task text unless it's a coding agent with allowWebhookTaskOverride. " +
+      "Write lets them rewrite what those runs do: the prompt can make a run use everything the agent can already reach (the capabilities you granted, its memory, its linked repositories), and on a coding agent the prompt is part of every coding task, so write directs work done with your GitHub access. " +
       "Granting again replaces the level. Everyone is capped at execute. The grantee must have signed in once.",
     inputSchema: {
       type: "object",
@@ -138,37 +154,48 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
       if (!isLevel(type, args.level)) {
         throw new McpError(400, `Level "${args.level}" is not valid for ${type} (${LEVELS[type].join(" < ")}).`);
       }
-      const resource = await requireOwnedResource(ctx, type, args.resourceId);
-      const principal = await resolveGrantee(ctx, args.grantee);
-      if (principal && (principal.id === resource.ownerId || principal.id === ctx.principal.id)) {
-        throw new McpError(400, "The owner already has full access; a grant to yourself or the owner changes nothing.");
-      }
-      if (!principal && accessRank(type, args.level) > accessRank(type, EVERYONE_MAX[type])) {
-        throw new McpError(
-          400,
-          `An everyone grant can be at most ${EVERYONE_MAX[type]}: write for everyone would let anyone rewrite an agent that holds your tools and secrets.`,
-        );
-      }
-      const granteeKey = principal ? principalGranteeKey(principal.id) : EVERYONE_KEY;
-      const grant = await ctx.db.resourceGrant.upsert({
-        where: { resourceType_resourceId_granteeKey: { resourceType: type, resourceId: resource.id, granteeKey } },
-        create: {
-          resourceType: type,
-          resourceId: resource.id,
-          granteeKind: principal ? "principal" : "everyone",
-          granteePrincipalId: principal?.id ?? null,
-          granteeKey,
-          level: args.level,
-          source: "owner",
-          grantedById: ctx.principal.id,
-        },
-        update: { level: args.level, source: "owner", grantedById: ctx.principal.id },
+      const { resource, principal, grant } = await inSerializable(ctx, async (tx) => {
+        const resource = await requireOwnedResource(ctx, tx, type, args.resourceId);
+        const principal = await resolveGrantee(tx, args.grantee);
+        if (principal && (principal.id === resource.ownerId || principal.id === ctx.principal.id)) {
+          throw new McpError(
+            400,
+            "The owner already has full access; a grant to yourself or the owner changes nothing.",
+          );
+        }
+        if (!principal && accessRank(type, args.level) > accessRank(type, EVERYONE_MAX[type])) {
+          throw new McpError(
+            400,
+            `An everyone grant can be at most ${EVERYONE_MAX[type]}: write for everyone would let anyone rewrite an agent that holds your tools and secrets.`,
+          );
+        }
+        const granteeKey = principal ? principalGranteeKey(principal.id) : EVERYONE_KEY;
+        const grant = await tx.resourceGrant.upsert({
+          where: { resourceType_resourceId_granteeKey: { resourceType: type, resourceId: resource.id, granteeKey } },
+          create: {
+            resourceType: type,
+            resourceId: resource.id,
+            granteeKind: principal ? "principal" : "everyone",
+            granteePrincipalId: principal?.id ?? null,
+            granteeKey,
+            level: args.level,
+            source: "owner",
+            grantedById: ctx.principal.id,
+          },
+          update: { level: args.level, source: "owner", grantedById: ctx.principal.id },
+        });
+        return { resource, principal, grant };
       });
       return textResult({
         granted: true,
         resourceType: type,
         resourceId: resource.id,
-        grantee: principal ? { principalId: principal.id, subject: principal.subject } : "everyone",
+        // Echo only what the caller supplied: a principalId never reveals a subject (review M4).
+        grantee: !principal
+          ? "everyone"
+          : args.grantee !== "everyone" && "subject" in args.grantee
+            ? { principalId: principal.id, subject: principal.subject }
+            : { principalId: principal.id },
         level: grant.level,
       });
     },
@@ -188,11 +215,13 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
     handler: async (rawArgs: unknown, ctx) => {
       const args = parse(RevokeSchema, "revoke_access", rawArgs);
       const type = shareableType(args.resourceType);
-      const resource = await requireOwnedResource(ctx, type, args.resourceId);
-      const granteeKey =
-        args.grantee === "everyone" ? EVERYONE_KEY : principalGranteeKey((await resolveGrantee(ctx, args.grantee))!.id);
-      const { count } = await ctx.db.resourceGrant.deleteMany({
-        where: { resourceType: type, resourceId: resource.id, granteeKey },
+      const { count } = await inSerializable(ctx, async (tx) => {
+        const resource = await requireOwnedResource(ctx, tx, type, args.resourceId);
+        const granteeKey =
+          args.grantee === "everyone"
+            ? EVERYONE_KEY
+            : principalGranteeKey((await resolveGrantee(tx, args.grantee))!.id);
+        return tx.resourceGrant.deleteMany({ where: { resourceType: type, resourceId: resource.id, granteeKey } });
       });
       return textResult({ revoked: count > 0 });
     },

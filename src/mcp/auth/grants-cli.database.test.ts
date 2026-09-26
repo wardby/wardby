@@ -77,7 +77,8 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby grants CLI (PostgreSQL)", () 
         ('pub', 't-alice', '["ALICE"]', '[]'),
         ('pub', 't-pub', '[]', '["x.example"]'),
         ('owned', 't-bob', '["BOB_ON_ALICE"]', '[]'),
-        ('owned', 't-alice', '[]', '[]');
+        ('owned', 't-alice', '[]', '[]'),
+        ('owned', 't-pub', '[]', '["pub.example"]');
       INSERT INTO "AgentSubAgent" ("parentAgentId", "childAgentId", "boundName") VALUES
         ('owned', 'bobs', 'bob-child'), ('pub', 'owned', 'alice-child'), ('owned', 'pub', 'public-child');
       INSERT INTO "Webhook" ("id", "agentId", "secretHash", "ownerId") VALUES
@@ -94,8 +95,23 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby grants CLI (PostgreSQL)", () 
   it("migration-report runs on the pre-migration schema, predicting what the migration changes", async () => {
     const report = await migrationReport(rawDb(client));
     expect(report.grantsTable).toBe(false);
+    // I3: which adopter would bring which secrets and capabilities back.
     expect(report.ownerlessAgents).toEqual([
-      { agentId: "pub", name: "formerly-public", everyoneGrant: "execute (pending migration)" },
+      {
+        agentId: "pub",
+        name: "formerly-public",
+        everyoneGrant: "execute (pending migration)",
+        revivedByAdopter: [
+          {
+            principalId: "alice",
+            subject: "sub-alice",
+            secrets: ["ALICE"],
+            datastores: ["alice-kb"],
+            toolCapabilities: ["alice-tool"],
+          },
+          { principalId: "bob", subject: "sub-bob", secrets: ["BOB"], datastores: ["bob-kb"], toolCapabilities: [] },
+        ],
+      },
     ]);
     expect(report.inertBindings.map((b) => `${b.agentId}/${b.boundName}`).sort()).toEqual([
       "owned/BOB_ON_ALICE",
@@ -123,6 +139,9 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby grants CLI (PostgreSQL)", () 
     expect(report.webhooks.onOwnerlessAgents.map((w) => w.id)).toEqual(["w-pub"]);
     expect(report.webhooks.creatorLacksExecute.map((w) => w.id)).toEqual(["w-carol"]);
     expect(report.orphanGrants).toBeNull();
+    // M2: owner-less-tool capabilities on an owned agent get the owner's stamp,
+    // but a previous owner may have set them: listed for review.
+    expect(report.reviewCapabilities.map((c) => `${c.agentId}/${c.toolId}`)).toEqual(["owned/t-pub"]);
   });
 
   it("migration-report runs after the migration too, reading the grants and consent stamps", async () => {
@@ -133,7 +152,23 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby grants CLI (PostgreSQL)", () 
     `);
     const report = await migrationReport(rawDb(client));
     expect(report.grantsTable).toBe(true);
-    expect(report.ownerlessAgents).toEqual([{ agentId: "pub", name: "formerly-public", everyoneGrant: "execute" }]);
+    expect(report.ownerlessAgents).toEqual([
+      {
+        agentId: "pub",
+        name: "formerly-public",
+        everyoneGrant: "execute",
+        revivedByAdopter: [
+          {
+            principalId: "alice",
+            subject: "sub-alice",
+            secrets: ["ALICE"],
+            datastores: ["alice-kb"],
+            toolCapabilities: ["alice-tool"],
+          },
+          { principalId: "bob", subject: "sub-bob", secrets: ["BOB"], datastores: ["bob-kb"], toolCapabilities: [] },
+        ],
+      },
+    ]);
     expect(report.suspendedCapabilities.map((c) => `${c.agentId}/${c.toolId}`).sort()).toEqual([
       "owned/t-bob",
       "pub/t-alice",
@@ -142,6 +177,7 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby grants CLI (PostgreSQL)", () 
     expect(report.failingEdges.map((e) => e.boundName).sort()).toEqual(["alice-child", "bob-child"]);
     expect(report.webhooks.creatorLacksExecute.map((w) => w.id)).toEqual(["w-carol"]);
     expect(report.orphanGrants).toEqual([{ id: "orphan", resourceType: "agent", resourceId: "deleted-agent" }]);
+    expect(report.reviewCapabilities.map((c) => `${c.agentId}/${c.toolId}`)).toEqual(["owned/t-pub"]);
     await client.query(`DELETE FROM "ResourceGrant" WHERE "id" = 'orphan'`);
 
     const lines: string[] = [];
@@ -186,7 +222,7 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby grants CLI (PostgreSQL)", () 
     ]);
     expect(
       await db.resourceGrant.findMany({ where: { resourceId: "pub" }, select: { granteeKey: true, level: true } }),
-    ).toEqual([{ granteeKey: "everyone", level: "execute" }]);
+    ).toEqual([{ granteeKey: "everyone", level: "read" }]);
     // Nothing owner-less is left to adopt.
     expect((await adoptPublic(db, { ownerSubject: "sub-alice", dryRun: false })).agents).toEqual([]);
   });
@@ -209,6 +245,23 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby grants CLI (PostgreSQL)", () 
     expect(text).toMatch(/sub-agent edge .*bob-child/);
     // The failing edge is reported, not deleted: the runner refuses it.
     expect(await db.agentSubAgent.count({ where: { parentAgentId: "pub2" } })).toBe(1);
+  });
+
+  it("I3: adopt-public lowers everyone-execute to read by default; --keep-everyone-execute keeps it", async () => {
+    await client.query(`
+      INSERT INTO "Agent" ("id", "name", "systemPrompt", "model", "budgetUsd", "updatedAt", "ownerId")
+        VALUES ('pub3', 'formerly-public-3', 'x', 'm', 1, now(), NULL), ('pub4', 'formerly-public-4', 'x', 'm', 1, now(), NULL);
+      INSERT INTO "ResourceGrant" ("id", "resourceType", "resourceId", "granteeKind", "granteeKey", "level", "source", "updatedAt")
+        VALUES ('g3', 'agent', 'pub3', 'everyone', 'everyone', 'execute', 'migration_public', now());
+    `);
+    const lines: string[] = [];
+    await grantsCommand(["adopt-public", "--owner", "sub-bob", "--keep-everyone-execute"], db, (l) => lines.push(l));
+    expect(await db.resourceGrant.findMany({ where: { resourceId: "pub3" }, select: { level: true } })).toEqual([
+      { level: "execute" },
+    ]);
+    expect(lines.join("\n")).toMatch(/everyone keeps execute/);
+    // Nothing is added where there was no everyone grant.
+    expect(await db.resourceGrant.count({ where: { resourceId: "pub4" } })).toBe(0);
   });
 
   it("prune-bindings removes exactly the cross-owner bindings on owned agents and prints each", async () => {
