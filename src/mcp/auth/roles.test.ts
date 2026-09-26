@@ -102,9 +102,12 @@ describe("privileged operations need the scope AND a role granting it", () => {
     expect(
       denial(() => requireAnyScope(ctx(["agents:admin", "packages:approve"], approver), URI, ...PACKAGES)),
     ).toBeUndefined();
-    expect(denial(() => requireAnyScope(ctx(["agents:admin"], approver), URI, ...PACKAGES))?.message).toMatch(
-      /requires a role/,
-    );
+    // Their role DOES grant packages:approve; the token just lacks it — so the
+    // fix is re-authorizing, and they get a scope challenge naming it, not a
+    // misleading "agents:admin requires admin" 403.
+    const missingScope = denial(() => requireAnyScope(ctx(["agents:admin"], approver), URI, ...PACKAGES));
+    expect(missingScope?.message).toMatch(/Insufficient scope; this operation requires: packages:approve$/);
+    expect(missingScope?.wwwAuthenticate).toContain('scope="packages:approve"');
     const owner = denial(() => requireScope(ctx(["agents:admin"], approver), URI, "agents:admin"));
     expect(owner?.httpStatus).toBe(403);
     expect(owner?.message).toMatch(/agents:admin requires a role that grants it \(admin\)/);

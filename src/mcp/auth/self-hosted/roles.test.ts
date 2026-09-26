@@ -72,6 +72,12 @@ describe.skipIf(!process.env.DATABASE_URL)("self-hosted user roles (database)", 
 
   /** Signs `user` in and runs consent + code exchange for `scope`. */
   async function login(user: { subject: string; loginKey: string }, scope = everything) {
+    const pending = await authorize(user, scope);
+    return { ...(await pending.exchange()), ...pending };
+  }
+
+  /** Signs in and consents, returning the issued code unexchanged. */
+  async function authorize(user: { subject: string; loginKey: string }, scope = everything) {
     const redirectUri = "https://client.example/cb";
     const { clientId } = await provider.registerClient({ redirectUris: [redirectUri] });
     clients.push(clientId);
@@ -92,14 +98,15 @@ describe.skipIf(!process.env.DATABASE_URL)("self-hosted user roles (database)", 
     });
     const page = await provider.consentPage(session, interactionId);
     const redirect = new URL(await provider.consent(session, interactionId, page.challenge, true));
-    const token = await provider.handleToken({
-      grantType: "authorization_code",
-      clientId,
-      redirectUri,
-      code: redirect.searchParams.get("code")!,
-      codeVerifier: verifier,
-    });
-    return { ...token, clientId, session, interactionId };
+    const exchange = () =>
+      provider.handleToken({
+        grantType: "authorization_code",
+        clientId,
+        redirectUri,
+        code: redirect.searchParams.get("code")!,
+        codeVerifier: verifier,
+      });
+    return { exchange, clientId, session, interactionId };
   }
 
   async function makeOwner(accessToken: string): Promise<string> {
@@ -141,16 +148,40 @@ describe.skipIf(!process.env.DATABASE_URL)("self-hosted user roles (database)", 
     expect(await makeOwner(narrow.accessToken)).toContain("Insufficient scope; this operation requires: agents:admin");
   });
 
-  it("roles are read live: a grant applies to an existing token on its next request, without revoking it", async () => {
+  it("roles are read live: a role added directly in the database applies to the next request", async () => {
     const user = await newUser();
     const token = await login(user);
     expect(await makeOwner(token.accessToken)).toMatch(ROLE_DENIED);
-    expect(JSON.parse(await cli("user", "grant", "--subject", user.subject, "--role", "admin"))).toMatchObject({
-      roles: ["admin"],
-      revokedGrants: false,
-    });
+    await db.authUser.updateMany({ where: { principal: { subject: user.subject } }, data: { roles: ["admin"] } });
     expect(await makeOwner(token.accessToken)).not.toMatch(/requires a role|Insufficient scope/);
     await expect(provider.verifyBearer(token.accessToken)).resolves.toMatchObject({ wardbyRoles: ["admin"] });
+  });
+
+  it("granting a role through the CLI also signs the user out: old families can't gain the new role's reach", async () => {
+    const user = await newUser();
+    const token = await login(user);
+    expect(JSON.parse(await cli("user", "grant", "--subject", user.subject, "--role", "admin"))).toMatchObject({
+      roles: ["admin"],
+      revokedGrants: true,
+    });
+    await expect(provider.verifyBearer(token.accessToken)).rejects.toThrow();
+    await expect(
+      provider.handleToken({ grantType: "refresh_token", clientId: token.clientId, refreshToken: token.refreshToken }),
+    ).rejects.toThrow(/revoked/);
+    await expect(provider.sessions.get(token.session)).rejects.toThrow();
+    // A fresh sign-in and consent gets the role.
+    const fresh = await login(user);
+    expect(await makeOwner(fresh.accessToken)).not.toMatch(/requires a role|Insufficient scope/);
+  });
+
+  it.each([
+    ["--role", "admin"],
+    ["--revoke-role", "admin"],
+  ])("an unexchanged authorization code dies with a role change (%s %s)", async (flag, role) => {
+    const user = await newUser(...(flag === "--revoke-role" ? ["--role", "admin"] : []));
+    const pending = await authorize(user);
+    await cli("user", "grant", "--subject", user.subject, flag, role);
+    await expect(pending.exchange()).rejects.toThrow(/Invalid grant/);
   });
 
   it("roles are read live: a role removed directly in the database refuses the next request", async () => {
@@ -181,7 +212,7 @@ describe.skipIf(!process.env.DATABASE_URL)("self-hosted user roles (database)", 
     await expect(provider.verifyBearer(token.accessToken)).rejects.toThrow();
   });
 
-  it("revoking a role the user doesn't hold revokes nothing", async () => {
+  it("a no-op role change (revoking a role the user doesn't hold) revokes nothing", async () => {
     const user = await newUser("--role", "package-approver");
     const token = await login(user);
     const out = JSON.parse(await cli("user", "grant", "--subject", user.subject, "--revoke-role", "admin")) as {

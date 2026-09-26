@@ -301,7 +301,11 @@ describe("loadAuthConfig role mapping", () => {
     expect(
       loadAuthConfig({ AUTH_ROLE_CLAIM: "realm_access.roles", AUTH_ROLE_MAP: "wardby-admin=admin" }),
     ).toMatchObject({ roleClaim: "realm_access.roles", roleMap: "wardby-admin=admin" });
-    const blank = loadAuthConfig({ AUTH_ROLE_CLAIM: "", AUTH_ROLE_MAP: "" });
+    expect(loadAuthConfig({ AUTH_ROLE_CLAIM: "  groups \n", AUTH_ROLE_MAP: " a=admin " })).toMatchObject({
+      roleClaim: "groups",
+      roleMap: "a=admin",
+    });
+    const blank = loadAuthConfig({ AUTH_ROLE_CLAIM: "  ", AUTH_ROLE_MAP: "" });
     expect(blank.roleClaim).toBeUndefined();
     expect(blank.roleMap).toBeUndefined();
   });

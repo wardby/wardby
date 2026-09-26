@@ -168,6 +168,10 @@ export function requireAnyScope(ctx: McpRequestContext, canonicalUri: string, ..
   // One held alternative that is non-privileged, or that a role permits, suffices.
   const permitted = permissionsOf(ctx.roles);
   if (held.some((s) => !PRIVILEGED_SCOPES.includes(s) || permitted.has(s))) return;
+  // A role DOES grant one of the unheld alternatives: re-authorizing for that
+  // scope is the fix, so say so with a scope challenge, not a role 403.
+  const reachable = alternatives.find((s) => !ctx.scopes.has(s) && permitted.has(s));
+  if (reachable) throw insufficientScope([reachable], protectedResourceMetadataUrl(canonicalUri));
   throw forbidden(held);
 }
 

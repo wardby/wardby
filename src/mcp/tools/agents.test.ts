@@ -140,13 +140,14 @@ function fakeDb(
   return db as unknown as import("#prisma").PrismaClient;
 }
 
-// Callers default to the admin role so the scope tests below exercise the
-// scope gate alone; the role tests pass their roles explicitly.
+// Callers default to NO roles (a member), as production does: a privileged
+// field accidentally gated by scope alone then fails these tests. Tests of a
+// privileged operation's scope gate pass ["admin"] explicitly.
 function fakeCtx(
   db: ReturnType<typeof fakeDb>,
   principalId: string,
   scopes: string[],
-  roles: string[] = ["admin"],
+  roles: string[] = [],
 ): McpRequestContext {
   return {
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
@@ -617,7 +618,7 @@ describe("agent CRUD tools", () => {
   it("create_agent with a workerImageRef requires agents:admin, not just agents:write", async () => {
     const db = fakeDb();
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 
@@ -634,14 +635,14 @@ describe("agent CRUD tools", () => {
     });
 
     expect(result.isError).toBe(true);
-    expect((result.content as { text: string }[])[0].text).toMatch(/scope/i);
+    expect((result.content as { text: string }[])[0].text).toMatch(/Insufficient scope/);
     await client.close();
   });
 
   it("create_agent with a workerImageRef succeeds when the caller also holds agents:admin", async () => {
     const db = fakeDb();
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:admin"]));
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:admin"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 
@@ -671,7 +672,7 @@ describe("agent CRUD tools", () => {
     ] as const) {
       const db = fakeDb();
       const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-      mcp.setFixedContext(fakeCtx(db, "p1", [...scopes]));
+      mcp.setFixedContext(fakeCtx(db, "p1", [...scopes], ["admin"]));
       registerAgentTools(mcp);
       const client = await connectClient(mcp);
       const result = await client.callTool({
@@ -719,7 +720,7 @@ describe("agent CRUD tools", () => {
   ] as const)("update_agent changing packageAllowlist with %j allowed=%s", async (scopes, allowed) => {
     const db = fakeDb([codingAgentSeed()]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", [...scopes]));
+    mcp.setFixedContext(fakeCtx(db, "p1", [...scopes], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
     const result = await client.callTool({
@@ -797,7 +798,7 @@ describe("agent CRUD tools", () => {
       },
     ]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 
@@ -806,7 +807,7 @@ describe("agent CRUD tools", () => {
       arguments: { id: "a1", codingProfile: { workerImageRef: VALID_WORKER_IMAGE_REF } },
     });
     expect(result.isError).toBe(true);
-    expect((result.content as { text: string }[])[0].text).toMatch(/scope/i);
+    expect((result.content as { text: string }[])[0].text).toMatch(/Insufficient scope/);
     await client.close();
   });
 
@@ -1013,7 +1014,7 @@ describe("agent CRUD tools", () => {
       ["new-owner"],
     );
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"]));
+    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 
@@ -1044,7 +1045,7 @@ describe("agent CRUD tools", () => {
       ["new-owner"],
     );
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"]));
+    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 
@@ -1069,7 +1070,7 @@ describe("agent CRUD tools", () => {
       },
     ]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"]));
+    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 
@@ -1100,20 +1101,20 @@ describe("agent CRUD tools", () => {
       ["p1"],
     );
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 
     const result = await client.callTool({ name: "make_owner", arguments: { agentId: "a1", ownerId: "p1" } });
     expect(result.isError).toBe(true);
-    expect((result.content as { text: string }[])[0].text).toMatch(/scope/i);
+    expect((result.content as { text: string }[])[0].text).toMatch(/Insufficient scope/);
     await client.close();
   });
 
   it("make_owner 404s for a missing agent", async () => {
     const db = fakeDb([], [], ["new-owner"]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"]));
+    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 
@@ -1141,7 +1142,7 @@ describe("agent CRUD tools", () => {
       },
     ]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"]));
+    mcp.setFixedContext(fakeCtx(db, "admin-caller", ["agents:admin"], ["admin"]));
     registerAgentTools(mcp);
     const client = await connectClient(mcp);
 

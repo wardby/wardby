@@ -91,12 +91,12 @@ export class IdentityService {
     });
   }
   /**
-   * Adds and/or removes roles on an existing user (never creates one). Roles
-   * are read live on every request, so the change applies to live tokens at
-   * once. Removing any role the user held also revokes their OAuth grant
-   * families and browser sessions in the same transaction, so no token minted
-   * under the old roles can regain that reach if a role is granted again
-   * later; the user signs in and authorizes afresh.
+   * Adds and/or removes roles on an existing user (never creates one). Any
+   * actual change signs the user out in the same transaction: their OAuth
+   * grant families, refresh grants, browser sessions and unexchanged
+   * authorization codes are revoked, and they sign in and authorize afresh.
+   * (Roles are also read live on every request, so even a direct database
+   * edit applies to live tokens at once.) A no-op change revokes nothing.
    */
   async changeRoles(subject: string, add: readonly string[], remove: readonly string[]) {
     const adding = validateRoles(add);
@@ -110,9 +110,17 @@ export class IdentityService {
       const current = (await tx.authUser.findUniqueOrThrow({ where: { id: user.id } })).roles ?? [];
       const roles = ROLE_NAMES.filter((r) => (current.includes(r) || adding.includes(r)) && !removing.includes(r));
       await tx.authUser.update({ where: { id: user.id }, data: { roles } });
-      const lost = current.some((r) => !roles.includes(r));
-      if (lost) {
+      // ANY change signs the user out (families, refresh grants, sessions,
+      // unexchanged codes): a revoked role must never come back through an
+      // old token, and a granted role must never silently widen a grant the
+      // user consented to while it was inert — they authorize afresh.
+      const changed = roles.length !== current.length || roles.some((r) => !current.includes(r));
+      if (changed) {
         const now = new Date();
+        await tx.oAuthAuthorizationCode.updateMany({
+          where: { userId: user.id, consumedAt: null },
+          data: { consumedAt: now },
+        });
         await tx.authSession.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: now } });
         await tx.oAuthFamily.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: now } });
         await tx.oAuthGrant.updateMany({
@@ -120,7 +128,7 @@ export class IdentityService {
           data: { revokedAt: now },
         });
       }
-      return { subject, roles, revokedGrants: lost };
+      return { subject, roles, revokedGrants: changed };
     });
   }
   async revokeKey(keyId: string) {

@@ -154,9 +154,10 @@ export class DelegatingAuthProvider implements AuthProvider {
         email: typeof payload.email === "string" ? payload.email : undefined,
         roles: Array.isArray(payload.roles) ? payload.roles.map(String) : [],
         scopes: scopesFromClaim(payload.scope ?? payload.scp),
-        // Read from this validated ACCESS token (signature, issuer, audience,
-        // expiry all checked above) — never from an ID token. Unconfigured,
-        // every caller has no roles and privileged operations are refused.
+        // Read from the bearer token validated above for this issuer and
+        // audience (signature, expiry too); the IdP should mint that audience
+        // only into access tokens. Unconfigured, every caller has no roles
+        // and privileged operations are refused.
         wardbyRoles:
           this.config.roleClaim && this.roleMap
             ? rolesFromClaim(resolveClaim(payload, this.config.roleClaim), this.roleMap)

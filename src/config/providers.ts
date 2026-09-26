@@ -276,8 +276,8 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig
   return {
     issuer: env.AUTH_ISSUER,
     jwksUri: env.AUTH_JWKS_URI,
-    roleClaim: env.AUTH_ROLE_CLAIM || undefined,
-    roleMap: env.AUTH_ROLE_MAP || undefined,
+    roleClaim: env.AUTH_ROLE_CLAIM?.trim() || undefined,
+    roleMap: env.AUTH_ROLE_MAP?.trim() || undefined,
     audience: env.AUTH_AUDIENCE,
     signingKey: env.AUTH_SIGNING_KEY,
     credentialHashKey: env.AUTH_CREDENTIAL_HASH_KEY,
