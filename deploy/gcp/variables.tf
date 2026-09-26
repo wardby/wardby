@@ -136,6 +136,26 @@ variable "auth_jwks_uri" {
   default     = null
 }
 
+variable "auth_role_claim" {
+  description = "Delegating mode only: the access-token claim carrying your IdP's roles/groups, mapped to wardby roles through auth_role_map (AUTH_ROLE_CLAIM). An exact top-level claim name is tried first (e.g. \"groups\", \"roles\", or a namespaced \"https://…/roles\"), else a dotted path (e.g. \"realm_access.roles\"). Leave empty (with auth_role_map) and no caller has a wardby role, so make_owner, BYO workerImageRef and package approval are refused. See docs/getting-started-identity-provider.md, \"Wardby roles\"."
+  type        = string
+  default     = ""
+  validation {
+    condition     = (trimspace(var.auth_role_claim) == "") == (trimspace(var.auth_role_map) == "")
+    error_message = "auth_role_claim and auth_role_map must be set together (or both left empty)."
+  }
+  validation {
+    condition     = trimspace(var.auth_role_claim) == "" || var.auth_provider == "delegating"
+    error_message = "auth_role_claim / auth_role_map apply only when auth_provider is \"delegating\"; self-hosted roles are granted with `wardby auth user grant`."
+  }
+}
+
+variable "auth_role_map" {
+  description = "Delegating mode only: comma-separated idpValue=wardbyRole pairs (AUTH_ROLE_MAP), e.g. \"wardby-admin=admin,wardby-packages=package-approver\". wardby roles: admin (make_owner, BYO workerImageRef, package approval) and package-approver (package approval). Matching is exact and case-sensitive; map only IdP values users cannot assign themselves. An unknown wardby role fails the app's startup."
+  type        = string
+  default     = ""
+}
+
 variable "mcp_canonical_uri_override" {
   description = "MCP_CANONICAL_URI value when create_domain_mapping is false. Only needed for a domainless deployment: the *.run.app URL doesn't exist until the Cloud Run service is created, so it can't be known on the first apply. Workflow: apply once (the app fails its own MCP_CANONICAL_URI check and won't serve real traffic yet, but every other resource - Cloud SQL, secrets, IAM - is created correctly), read the real URL from the cloud_run_service_url output, then apply again with this variable set to that URL. Ignored when create_domain_mapping is true (domain_name is used instead)."
   type        = string

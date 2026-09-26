@@ -35,6 +35,9 @@ migration_image = "us-docker.pkg.dev/my-gcp-project-id/wardby/control-plane-migr
 # auth_provider = "delegating"
 # auth_issuer   = "https://login.example.com/realms/prod"
 # auth_jwks_uri = "https://login.example.com/realms/prod/protocol/openid-connect/certs"
+# Optional wardby roles from the IdP (docs/getting-started-identity-provider.md):
+# auth_role_claim = "realm_access.roles"
+# auth_role_map   = "wardby-admin=admin,wardby-packages=package-approver"
 #
 # In delegating mode wardby verifies tokens and never issues them, and users are
 # administered entirely in your IdP. See SETUP.md for what the IdP must be

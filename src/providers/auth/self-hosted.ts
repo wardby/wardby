@@ -5,7 +5,7 @@ import type { OAuthFamily, PrismaClient } from "#prisma";
 import type { AuthProfile, AuthProvider, AuthTokens, VerifiedToken } from "./types.js";
 import { NotSupportedError } from "./types.js";
 import { requireSubject } from "./subject.js";
-import { SCOPES_SUPPORTED } from "../../mcp/auth/resource-server.js";
+import { SCOPES_SUPPORTED, limitScope } from "../../mcp/auth/resource-server.js";
 import { canonicalUrl } from "../../mcp/transport/http-limits.js";
 import { Credentials, DAY, decodeKey, lockUser, type AuthDb } from "../../mcp/auth/self-hosted/credentials.js";
 import { Sessions } from "../../mcp/auth/self-hosted/session.js";
@@ -124,7 +124,7 @@ export class SelfHostedAuthProvider implements AuthProvider {
     const metadata = client?.metadata as { redirect_uris?: string[]; grant_types?: string[] } | undefined;
     if (!metadata?.redirect_uris?.includes(p.redirectUri) || !metadata.grant_types?.includes("authorization_code"))
       throw new Error("Invalid client or redirect.");
-    const scope = [...new Set(p.scope.split(/\s+/).filter((s) => SCOPES_SUPPORTED.includes(s)))].join(" ");
+    const scope = limitScope(p.scope, SCOPES_SUPPORTED);
     const request = await this.db.oAuthAuthorizationRequest.create({
       data: {
         clientId: p.clientId,
@@ -147,7 +147,10 @@ export class SelfHostedAuthProvider implements AuthProvider {
     if (!interaction || interaction.consumedAt || interaction.expiresAt.getTime() <= Date.now())
       throw new Error("Invalid interaction.");
     const challenge = await this.sessions.challenge("consent", session.sessionId, interactionId);
-    return { interaction, challenge };
+    // Exactly what approving issues: the stored (supported-only) request.
+    // It's fixed when the interaction is created, so what the page shows
+    // can't drift from what consent() puts on the code.
+    return { interaction, challenge, scopes: interaction.requestedScope.split(" ").filter(Boolean) };
   }
   async consent(sessionToken: string, interactionId: string, challenge: string, approve: boolean) {
     const first = await this.sessions.get(sessionToken);
@@ -348,7 +351,16 @@ export class SelfHostedAuthProvider implements AuthProvider {
       payload.scope !== family.scope
     )
       throw new Error("Invalid token.");
-    return { subject, scopes: family.scope.split(/\s+/).filter(Boolean), roles: [] };
+    // Roles are read from the database on every request (no caching), so a
+    // grant or revocation applies to live tokens immediately. Scopes stay
+    // exactly what the user consented to; roles decide whether the
+    // privileged ones are honoured (resource-server.ts requireScope).
+    return {
+      subject,
+      scopes: family.scope.split(/\s+/).filter(Boolean),
+      roles: [],
+      wardbyRoles: family.user.roles ?? [],
+    };
   }
   async cleanup() {
     const now = new Date();
