@@ -110,8 +110,11 @@ requires more than owning the agent:
   `agents:admin` scope) can pass `adminOverride: true` to `link_repository`, or
   `repositoryAdminOverride: true` to `create_agent`/`update_agent`, for a
   repository no person's GitHub access covers (a bot-owned repository, say).
-  The approval is recorded with who approved it and when. Without the flag,
-  admins go through the GitHub check like anyone else.
+  The approval is recorded with who approved it and when. An admin may do this
+  on any agent that has an owner, not only their own; on someone else's agent
+  `update_agent` then accepts only `codingProfile.repository`. Without the
+  flag, admins go through the GitHub check like anyone else, on their own
+  agents only.
 - **Public (owner-less) agents can't hold a repository at all.** Anyone can
   edit a public agent, so a repository on one would belong to everyone. An
   admin assigns an owner first (`make_owner`).
@@ -119,14 +122,28 @@ requires more than owning the agent:
 The authorization is stamped on the link (`authorizedVia`: `host_permission`,
 `admin`, or `grandfathered`) and **checked again every time it is used**: on
 every coding run before its workspace is prepared, on every `repo_*` tool
-call, and on every host-event dispatch. A `host_permission` link is re-checked
-against the agent's **current** owner's GitHub access (answers are cached for
-5 minutes), so an owner who loses access, unlinks their GitHub account, or
-hands the agent to someone else (`make_owner`) stops it working. If GitHub
-can't be asked, the use is refused. Admin-approved and grandfathered
-authorizations are not re-checked; revoke them by unlinking or changing the
-repository. Links and coding profiles that existed before this was enforced
-were stamped `grandfathered` by the migration and keep working.
+call, on every host-event dispatch, and once more right before a coding run
+pushes. A `host_permission` link is re-checked against the agent's **current**
+owner's GitHub access (answers are cached for 5 minutes), so an owner who loses
+access, unlinks their GitHub account, or hands the agent to someone else
+(`make_owner`) stops it working. If GitHub can't be asked, the use is refused;
+for a run already under way, a transient GitHub error (5xx, timeout, rate
+limit) is retried once first and then refused as "access check unavailable"
+(coding failure category `repo_access_unavailable`, `repo_*` error
+`repository_access_unavailable`). Admin-approved and grandfathered
+authorizations are not re-checked while the agent keeps its owner; revoke them
+by unlinking or changing the repository. **`make_owner` to a different owner
+(or back to public) turns them into ordinary checks of the next owner's own
+GitHub access** — an approval never travels with the agent — and lists the
+affected repositories in its result (`repositoryApprovalsRevoked`). A public
+agent getting its first owner keeps them. Links and coding profiles that
+existed before this was enforced were stamped `grandfathered` by the migration
+and keep working.
+
+On a **public repository**, GitHub reports read access for every user, so any
+principal with a linked GitHub account may create a `read` link to it (the App
+must be installed there). That only exposes what is already public; write
+links and coding repositories still need real write access.
 
 What decides a run is always the agent owner's access, never who or what
 triggered it (a schedule, a webhook, a mention, or the owner).
@@ -327,19 +344,20 @@ internal marker to the model:
 Every call names the `repository` explicitly; it must resolve to one of the
 agent's links. Failures are always a JSON result, never a thrown error:
 
-| `error` code               | Meaning                                                                                                                                      |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `invalid_arguments_json`   | The tool call's arguments were not valid JSON.                                                                                               |
-| `invalid_arguments`        | Arguments failed schema validation (missing/malformed field).                                                                                |
-| `repository_not_linked`    | `repository` does not match one of this agent's links, or matches more than one and needs a `host/owner/name` prefix to disambiguate.        |
-| `write_access_required`    | A write tool (`repo_publish_review`, `repo_comment`) was called on a read-only link.                                                         |
-| `repository_access_denied` | The link is no longer authorized: the agent has no owner, the owner's GitHub account is unlinked or lost access, or it could not be checked. |
-| `host_not_configured`      | No host provider is configured for this link on this deployment.                                                                             |
-| `unknown_tool`             | Not a recognized `repo_*` tool name.                                                                                                         |
-| `host_not_installed`       | The GitHub App is not installed on this repository.                                                                                          |
-| `host_permission_missing`  | The App installation is missing a required permission.                                                                                       |
-| `host_invalid_response`    | The host returned something the client could not parse.                                                                                      |
-| `host_api_error`           | The request to GitHub failed (body-free: `github_api_error:<status>[:<request-id>]`).                                                        |
+| `error` code                    | Meaning                                                                                                                                                |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `invalid_arguments_json`        | The tool call's arguments were not valid JSON.                                                                                                         |
+| `invalid_arguments`             | Arguments failed schema validation (missing/malformed field).                                                                                          |
+| `repository_not_linked`         | `repository` does not match one of this agent's links, or matches more than one and needs a `host/owner/name` prefix to disambiguate.                  |
+| `write_access_required`         | A write tool (`repo_publish_review`, `repo_comment`) was called on a read-only link.                                                                   |
+| `repository_access_denied`      | The link is no longer authorized: the agent has no owner, the owner's GitHub account is unlinked or lost access, or it could not be checked.           |
+| `repository_access_unavailable` | GitHub could not be reached (or rate-limited wardby) while re-checking access, even after one retry; the call was refused for safety. Try again later. |
+| `host_not_configured`           | No host provider is configured for this link on this deployment.                                                                                       |
+| `unknown_tool`                  | Not a recognized `repo_*` tool name.                                                                                                                   |
+| `host_not_installed`            | The GitHub App is not installed on this repository.                                                                                                    |
+| `host_permission_missing`       | The App installation is missing a required permission.                                                                                                 |
+| `host_invalid_response`         | The host returned something the client could not parse.                                                                                                |
+| `host_api_error`                | The request to GitHub failed (body-free: `github_api_error:<status>[:<request-id>]`).                                                                  |
 
 `repo_publish_review` also returns
 `{ "published": false, "reason": "stale_head", ... }` instead of an error when

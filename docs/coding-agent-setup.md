@@ -40,7 +40,14 @@ which also covers the App's callback URL and client credentials
 Every run checks again, before its workspace is prepared, against the agent's
 current owner. A run whose owner has lost write access, unlinked their GitHub
 account, or whose repository was never authorized ends `refused` with failure
-category `repo_access` and nothing cloned. Coding agents must have an owner.
+category `repo_access` and nothing cloned. The check is repeated (usually from
+the 5-minute cache) right before the run pushes: access lost while it worked
+fails the run (`repo_access`) with nothing pushed. For a run already under way,
+a transient GitHub error during either check is retried once; if it persists
+the run fails with category `repo_access_unavailable` (GitHub could not be
+asked — not a lost permission; re-run it later). `make_owner` to a different
+owner turns an admin or grandfathered approval into a check of the new owner's
+access. Coding agents must have an owner.
 Over stdio, the local operator holds every role, so `repositoryAdminOverride`
 is the way to approve a repository there.
 

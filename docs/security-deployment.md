@@ -218,11 +218,24 @@ Trust assumptions:
 - **Owner-less (public) agents never hold a repository**, even admin-approved:
   anyone can edit them. Assign an owner first.
 - **Checked where it's used.** Every coding run (before its workspace is
-  prepared), every `repo_*` call, and every host-event dispatch re-checks a
-  `host_permission` authorization against the current owner, with a 5-minute
-  cache. A GitHub error refuses the use. Admin and grandfathered
-  authorizations are not re-checked; revoke them by unlinking, changing the
-  repository, or `make_owner` (itself admin-only).
+  prepared, and again right before it pushes), every `repo_*` call, and every
+  host-event dispatch re-checks a `host_permission` authorization against the
+  current owner, with a 5-minute cache. A GitHub error refuses the use; for a
+  run already under way, a transient error (5xx, timeout, rate limit) is
+  retried once, then refused with its own category
+  (`repo_access_unavailable`). Set-time checks never retry.
+- **Approvals stay with the owner they were granted under.** Admin and
+  grandfathered authorizations are not re-checked while the agent keeps its
+  owner; revoke them by unlinking or changing the repository. `make_owner` to
+  a different owner (or to public) converts them into checks of the next
+  owner's own GitHub access; only a public agent's first owner keeps them.
+- **Admins approve explicitly, on any owned agent.** `adminOverride` works on
+  agents the admin doesn't own (the admin role can already reassign any
+  agent); it is always recorded with the approver. On another's agent an
+  admin can change only the repository.
+- **Public repositories:** GitHub reports read access for everyone, so any
+  linked principal may create a `read` link to a public repository the App is
+  installed on. Only public data is exposed that way.
 - **Identity is proven, not claimed.** Linking uses the App's OAuth web flow
   with single-use state, S256 PKCE, and a one-time confirmation code that
   only the initiating principal can submit, so a victim clicking an attacker's
