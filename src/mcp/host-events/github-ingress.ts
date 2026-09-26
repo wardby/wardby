@@ -49,6 +49,21 @@ export async function handleGitHubEventIngress(
   }
 
   const now = (deps.now ?? (() => new Date()))();
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(req.rawBody);
+  } catch {
+    return { status: 400, body: { error: "invalid_json" } };
+  }
+  const app = await deps.appIdentity();
+  const event = normalizeGitHubEvent(eventName, payload, app);
+  // An event we don't act on must never claim the delivery id: recording it
+  // here would let a later, real delivery of the same id (GitHub does reuse
+  // ids across distinct redeliveries of what it considers the same event)
+  // be silently swallowed as a "duplicate" of something we never routed.
+  if (!event) return { status: 202, body: { ignored: true } };
+
   try {
     await deps.db.hostEventDelivery.create({ data: { provider: "github", deliveryId } });
   } catch (err) {
@@ -64,30 +79,33 @@ export async function handleGitHubEventIngress(
       .catch((err: unknown) => log.warn({ err }, "delivery prune failed"));
   }
 
-  let payload: unknown;
+  // The delivery row is recorded before routing so a duplicate can never
+  // race past it, but that means a transient failure inside routeHostEvent
+  // must not leave a delivery permanently marked "done" — GitHub's redelivery
+  // would then hit our P2002 dedup check and the event would be lost for
+  // good. On failure here, un-record the delivery and rethrow so the retry
+  // (ours or GitHub's redelivery) is routed for real, not reported duplicate.
   try {
-    payload = JSON.parse(req.rawBody);
-  } catch {
-    return { status: 400, body: { error: "invalid_json" } };
+    const routed = await routeHostEvent(event, {
+      db: deps.db,
+      executor: deps.executor,
+      hosts: deps.hosts,
+      mentionHandle: app.slug,
+    });
+    log.info({ event: event.kind, repository: event.repository, deliveryId, runIds: routed.runIds }, "host event routed");
+    return {
+      status: 202,
+      body: { runIds: routed.runIds },
+      afterResponse: async () => {
+        for (const followUp of routed.followUps) await followUp();
+      },
+    };
+  } catch (err) {
+    await deps.db.hostEventDelivery
+      .deleteMany({ where: { provider: "github", deliveryId } })
+      .catch((delErr: unknown) => log.warn({ err: delErr }, "could not roll back the delivery record after a routing failure"));
+    throw err;
   }
-  const app = await deps.appIdentity();
-  const event = normalizeGitHubEvent(eventName, payload, app);
-  if (!event) return { status: 202, body: { ignored: true } };
-
-  const routed = await routeHostEvent(event, {
-    db: deps.db,
-    executor: deps.executor,
-    hosts: deps.hosts,
-    mentionHandle: app.slug,
-  });
-  log.info({ event: event.kind, repository: event.repository, deliveryId, runIds: routed.runIds }, "host event routed");
-  return {
-    status: 202,
-    body: { runIds: routed.runIds },
-    afterResponse: async () => {
-      for (const followUp of routed.followUps) await followUp();
-    },
-  };
 }
 
 /** Test-only: reset the prune clock. */

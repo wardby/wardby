@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "#prisma";
 
 vi.mock("../../core/host-events.js", () => ({
@@ -19,20 +19,26 @@ const sign = (raw: string) => `sha256=${createHmac("sha256", SECRET).update(raw)
 
 function deps(overrides: Record<string, unknown> = {}) {
   const created: string[] = [];
+  const hostEventDelivery = {
+    create: vi.fn(async ({ data }: { data: { deliveryId: string } }) => {
+      if (created.includes(data.deliveryId)) {
+        throw new Prisma.PrismaClientKnownRequestError("dup", { code: "P2002", clientVersion: "test" });
+      }
+      created.push(data.deliveryId);
+    }),
+    deleteMany: vi.fn(async ({ where }: { where: { deliveryId?: string; receivedAt?: unknown } }) => {
+      if (where.deliveryId === undefined) return { count: 0 };
+      const idx = created.indexOf(where.deliveryId);
+      if (idx === -1) return { count: 0 };
+      created.splice(idx, 1);
+      return { count: 1 };
+    }),
+  };
   return {
     created,
+    hostEventDelivery,
     deps: {
-      db: {
-        hostEventDelivery: {
-          create: vi.fn(async ({ data }: { data: { deliveryId: string } }) => {
-            if (created.includes(data.deliveryId)) {
-              throw new Prisma.PrismaClientKnownRequestError("dup", { code: "P2002", clientVersion: "test" });
-            }
-            created.push(data.deliveryId);
-          }),
-          deleteMany: vi.fn(async () => ({ count: 0 })),
-        },
-      } as never,
+      db: { hostEventDelivery } as never,
       executor: {} as never,
       hosts: {},
       webhookSecret: SECRET,
@@ -45,6 +51,10 @@ function deps(overrides: Record<string, unknown> = {}) {
 const headers = (h: Record<string, string>) => ({ "x-github-event": "pull_request", "x-github-delivery": "d1", ...h });
 
 describe("handleGitHubEventIngress", () => {
+  beforeEach(() => {
+    vi.mocked(routeHostEvent).mockClear();
+  });
+
   it("is disabled without a configured secret", async () => {
     const { deps: d } = deps({ webhookSecret: undefined });
     expect((await handleGitHubEventIngress({ headers: headers({}), rawBody: body }, d)).status).toBe(404);
@@ -78,6 +88,18 @@ describe("handleGitHubEventIngress", () => {
     expect(result).toMatchObject({ status: 202, body: { ignored: true } });
   });
 
+  it("does not record a delivery for an event it ignores", async () => {
+    const { deps: d, created, hostEventDelivery } = deps();
+    const raw = JSON.stringify({ repository: { full_name: "chfields/knock-knock-jokes" } });
+    const result = await handleGitHubEventIngress(
+      { headers: { "x-github-event": "push", "x-github-delivery": "d2", "x-hub-signature-256": sign(raw) }, rawBody: raw },
+      d,
+    );
+    expect(result).toMatchObject({ status: 202, body: { ignored: true } });
+    expect(created).toEqual([]);
+    expect(hostEventDelivery.create).not.toHaveBeenCalled();
+  });
+
   it("requires a delivery id", async () => {
     const { deps: d } = deps();
     const result = await handleGitHubEventIngress(
@@ -85,5 +107,18 @@ describe("handleGitHubEventIngress", () => {
       d,
     );
     expect(result.status).toBe(400);
+  });
+
+  it("un-marks the delivery on a routing failure so the retry is routed, not reported duplicate", async () => {
+    const { deps: d, created } = deps();
+    vi.mocked(routeHostEvent).mockRejectedValueOnce(new Error("transient failure"));
+    const req = { headers: headers({ "x-hub-signature-256": sign(body) }), rawBody: body };
+
+    await expect(handleGitHubEventIngress(req, d)).rejects.toThrow("transient failure");
+    expect(created).toEqual([]);
+
+    const retried = await handleGitHubEventIngress(req, d);
+    expect(retried).toMatchObject({ status: 202, body: { runIds: ["run1"] } });
+    expect(routeHostEvent).toHaveBeenCalledTimes(2);
   });
 });
