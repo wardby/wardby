@@ -60,8 +60,11 @@ interface GraphEdge {
   name: string;
   range: string;
 }
-type NodeResult =
-  { ok: true; selected: { version: string; dependencies: DependencySpec[] }[] } | { ok: false; cause: NodeFailure };
+type NodeResult = { ok: true; meta?: PackageMetadata; selected: string[] } | { ok: false; cause: NodeFailure };
+/** One package's metadata and kept versions, computed once per walk and
+ *  shared by every edge that reaches it (a popular package is reached
+ *  under many distinct ranges). */
+type KeptPackage = { meta: PackageMetadata; keep: ReadonlySet<string> };
 
 /** A small counting semaphore. */
 class Slots {
@@ -511,6 +514,10 @@ export class RegistryService {
     for (const [key] of retry) walk.failed.delete(key);
     walk.queue.unshift(...retry.map(([, entry]) => entry.edge));
     const attemptsThisWalk = new Map<string, number>();
+    // Per-walk memo: a walk lasts at most the graph timeout, well inside
+    // the metadata and audit cache lifetimes, so this changes no decision.
+    // A failed computation is not memoized, so its retry really retries.
+    const kept = new Map<string, Promise<KeptPackage>>();
     while (walk.queue.length > 0) {
       if (walk.found.has(target)) return "found";
       const remaining = deadline - this.now().getTime();
@@ -523,7 +530,7 @@ export class RegistryService {
       // Each edge adds at most one new package, so a batch no larger than
       // the room left can never overshoot the bound.
       const batch = walk.queue.splice(0, Math.min(GRAPH_WALK_CONCURRENCY, room));
-      const expansions = Promise.all(batch.map((edge) => this.graphNode(adapter, context, entries, edge)));
+      const expansions = Promise.all(batch.map((edge) => this.graphNode(adapter, context, entries, edge, kept)));
       let timer: NodeJS.Timeout | undefined;
       const timedOut = new Promise<"timeout">((resolve) => {
         timer = setTimeout(() => resolve("timeout"), remaining);
@@ -535,11 +542,11 @@ export class RegistryService {
         walk.queue.unshift(...batch);
         return "timeout";
       }
-      const expanded: { edge: GraphEdge; selected: { version: string; dependencies: DependencySpec[] }[] }[] = [];
+      const expanded: { edge: GraphEdge; meta?: PackageMetadata; selected: string[] }[] = [];
       batch.forEach((edge, index) => {
         const result = results[index];
         if (result.ok) {
-          expanded.push({ edge, selected: result.selected });
+          expanded.push({ edge, meta: result.meta, selected: result.selected });
           return;
         }
         // A transient failure is never counted as expanded: the edge is
@@ -575,13 +582,13 @@ export class RegistryService {
         throw error;
       }
       for (const name of discovered) walk.found.add(name);
-      for (const { edge, selected } of expanded) {
+      for (const { edge, meta, selected } of expanded) {
         let versions = walk.expandedVersions.get(edge.name);
         if (!versions) walk.expandedVersions.set(edge.name, (versions = new Set()));
-        for (const { version, dependencies } of selected) {
-          if (versions.has(version)) continue;
+        for (const version of selected) {
+          if (versions.has(version) || !meta) continue;
           versions.add(version);
-          for (const dependency of dependencies) {
+          for (const dependency of versionDependencies(adapter, meta, version)) {
             const key = edgeKey(dependency);
             if (walk.seen.has(key)) continue;
             walk.seen.add(key);
@@ -606,11 +613,21 @@ export class RegistryService {
     context: RegistryRunContext,
     entries: readonly AllowlistEntry[],
     edge: GraphEdge,
+    memo: Map<string, Promise<KeptPackage>>,
   ): Promise<NodeResult> {
     return this.walkSlots.run(async (): Promise<NodeResult> => {
       try {
-        const meta = await this.metadata(adapter, edge.name);
-        const { keep } = await this.keptVersions(adapter, context, meta, matchRoot(entries, edge.name));
+        let load = memo.get(edge.name);
+        if (!load) {
+          load = (async () => {
+            const meta = await this.metadata(adapter, edge.name);
+            const { keep } = await this.keptVersions(adapter, context, meta, matchRoot(entries, edge.name));
+            return { meta, keep };
+          })();
+          memo.set(edge.name, load);
+          load.catch(() => memo.delete(edge.name));
+        }
+        const { meta, keep } = await load;
         const inRange = (version: string) => {
           if (edge.range === "*") return true;
           try {
@@ -619,10 +636,7 @@ export class RegistryService {
             return false;
           }
         };
-        const selected = [...keep]
-          .filter(inRange)
-          .map((version) => ({ version, dependencies: versionDependencies(adapter, meta, version) }));
-        return { ok: true, selected };
+        return { ok: true, meta, selected: [...keep].filter(inRange) };
       } catch (error) {
         if (error instanceof RegistryError && DEFINITIVE_NODE_ERRORS.has(error.code)) return { ok: true, selected: [] };
         const audit = error instanceof RegistryError && error.code === "wardby_audit_unavailable";
