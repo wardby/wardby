@@ -489,8 +489,8 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
 
     it("a duplicate create_budget_group is a 409 scoped to the owner", async () => {
       const name = id("dup-group");
-      await callTool("create_budget_group", { name });
-      const err = await mcpError(callTool("create_budget_group", { name }));
+      await callTool("create_budget_group", { name, dailyBudgetUsd: 1 });
+      const err = await mcpError(callTool("create_budget_group", { name, dailyBudgetUsd: 1 }));
       expect(err.httpStatus).toBe(409);
       expect(err.message).toBe("A budget group with that name already exists for this owner.");
     });
