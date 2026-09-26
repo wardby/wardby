@@ -19,6 +19,7 @@ const REPO = "chfields/knock-knock-jokes";
 function host(): CodeReviewHost {
   return {
     provider: "github",
+    repositoryPermission: vi.fn(async () => ({ level: "write" as const, login: "octo" })),
     readPullRequest: vi.fn(),
     pullRequestHead: vi.fn(async () => ({ headSha: SHA, isFork: false, state: "open" })),
     readFile: vi.fn(),
@@ -119,6 +120,7 @@ describe("routeHostEvent", () => {
       comment: { kind: "conversation", id: "4" },
       body,
       author: "chfields",
+      authorId: "1001",
     });
     const review = await routeHostEvent(mention("@wardby review please"), d);
     expect(review.runIds).toEqual(["run-a1"]);
@@ -142,6 +144,7 @@ describe("routeHostEvent mention task text", () => {
     comment: { kind: "conversation", id: "4" },
     body: "@wardby please fix the typo",
     author: "chfields",
+    authorId: "1001",
   };
   async function taskFor(event: HostEvent) {
     vi.mocked(dispatchRun).mockClear();

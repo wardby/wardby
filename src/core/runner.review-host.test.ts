@@ -68,6 +68,7 @@ const text = (s: string): LlmStreamEvent[] => [
 function fakeHost(): CodeReviewHost {
   return {
     provider: "github",
+    repositoryPermission: vi.fn(async () => ({ level: "write" as const, login: "octo" })),
     readPullRequest: vi.fn(async () => ({ number: 7 }) as never),
     pullRequestHead: vi.fn(),
     readFile: vi.fn(async () => ({ kind: "not_found" as const, path: "x" })),
