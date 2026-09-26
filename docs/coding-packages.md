@@ -82,15 +82,33 @@ complete `package-lock.json`) skips metadata and requests each tarball
 directly, at the `https://registry.npmjs.org/...` URL the lockfile records,
 which npm rewrites to the proxy. The proxy serves that standard tarball path,
 and when a request names a package it hasn't seen yet it resolves the
-approved dependency graph on demand: it walks breadth first from the
-allowlisted packages through the dependencies of every version that passes
-the same filters as a metadata request (allowlisted range, minimum release
-age, vulnerability audit), recording each dependency it finds, and stops as
-soon as it finds the requested package. This computes the same graph, just
-eagerly, so nothing outside "the allowlist plus its dependency graph" becomes
-installable. The walk is done at most once per run (concurrent and later
-misses share its result), and it is bounded by `REGISTRY_MAX_GRAPH_PACKAGES`
-and `REGISTRY_GRAPH_TIMEOUT_MS` (see [Operator limits](#operator-limits)).
+approved dependency graph on demand. The graph is range-aware:
+
+- It starts from the allowlisted packages, at their kept versions: those
+  inside the allowlisted range, past the minimum release age, and not
+  withheld by the vulnerability audit.
+- From each kept version it follows every declared dependency `name@range`
+  only into that dependency's kept versions that **satisfy the declared
+  range** (npm semver), and continues only from those versions. A
+  dependency's newer major, or an old version outside the range, never
+  contributes its own dependencies.
+- Every in-range kept version counts, not just the newest one, so a
+  lockfile pinned to an older version inside the range still gets that
+  version's dependencies.
+- A spec that isn't a range (a dist-tag such as `latest`, an empty spec)
+  counts every kept version. A range no kept version satisfies contributes
+  nothing.
+- A package joins the graph, and is recorded as allowed, once one of its
+  kept versions satisfies a range that reached it. The walk stops as soon as
+  it finds the requested package.
+
+The walk is done at most once per run (concurrent and later misses share its
+result), and it is bounded by `REGISTRY_MAX_GRAPH_PACKAGES` and
+`REGISTRY_GRAPH_TIMEOUT_MS` (see [Operator limits](#operator-limits)).
+Allowances are per package name, so once a package is allowed any of its
+kept versions can be downloaded. Serving a package's metadata directly (a
+plain `npm install`) still allows the dependencies of all its kept versions,
+because the proxy doesn't record which ranges a package was allowed under.
 A scope wildcard such as `@testing-library/*` can't be enumerated, so it is
 never a starting point of the walk. A package allowed _only_ by a scope
 wildcard is installable, but under a lockfile its own dependencies are not
@@ -103,7 +121,8 @@ wheel), so there is no walk for PyPI.
 
 Dependencies are followed by the package they install: an npm alias such as
 `"string-width-cjs": "npm:string-width@^4"` allows `string-width`, not
-`string-width-cjs`. Dependency specs that aren't fetched from the registry
+`string-width-cjs`, and follows it under the alias's own range (`^4`).
+Dependency specs that aren't fetched from the registry
 (`file:`, `link:`, local paths, git URLs and `github:`/`user/repo`
 shorthands, `http(s):` tarball URLs, `workspace:`) allow nothing.
 
@@ -180,7 +199,7 @@ one of them finishes:
 | `REGISTRY_METADATA_TIMEOUT_MS` | 30000   | Time allowed for one metadata or OSV request, body included.  |
 | `REGISTRY_MAX_METADATA_MB`     | 64      | Largest metadata or OSV response the proxy reads.             |
 | `REGISTRY_MAX_GRAPH_PACKAGES`  | 3000    | Packages the on-demand graph walk may expand in one run.      |
-| `REGISTRY_GRAPH_TIMEOUT_MS`    | 60000   | Time allowed for one on-demand graph walk.                    |
+| `REGISTRY_GRAPH_TIMEOUT_MS`    | 180000  | Time allowed for one on-demand graph walk.                    |
 
 Metadata is cached for five minutes in a bounded cache (500 packages, least
 recently used evicted first), and concurrent requests for the same package

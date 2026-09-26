@@ -233,3 +233,37 @@ describe("npmAdapter dependency specs", () => {
     ]);
   });
 });
+
+describe("npmAdapter dependency ranges", () => {
+  it("records each dependency's declared range, an alias's own range, and * for non-ranges", async () => {
+    const meta = await npmAdapter.fetchMetadata("app", async () =>
+      Response.json({
+        name: "app",
+        time: { "1.0.0": "2020-01-01T00:00:00.000Z" },
+        versions: {
+          "1.0.0": {
+            dist: { tarball: "https://registry.npmjs.org/app/-/app-1.0.0.tgz" },
+            dependencies: {
+              plain: "^1.2.0",
+              "string-width-cjs": "npm:string-width@^4.2.0",
+              bare: "npm:strip-ansi",
+              tag: "latest",
+              empty: "",
+              local: "file:../x",
+            },
+            peerDependencies: { plain: ">=1" },
+          },
+        },
+      }),
+    );
+    expect(meta.versions.get("1.0.0")?.dependencySpecs).toEqual([
+      { name: "plain", range: "^1.2.0" },
+      { name: "string-width", range: "^4.2.0" },
+      { name: "strip-ansi", range: "*" },
+      { name: "tag", range: "*" },
+      { name: "empty", range: "*" },
+      { name: "plain", range: ">=1" },
+    ]);
+    expect(meta.versions.get("1.0.0")?.dependencies).toEqual(["plain", "string-width", "strip-ansi", "tag", "empty"]);
+  });
+});

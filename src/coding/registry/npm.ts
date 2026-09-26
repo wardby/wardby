@@ -10,6 +10,7 @@ import {
   AllowlistEntryError,
   RegistryError,
   type AllowlistEntry,
+  type DependencySpec,
   type DownloadRoute,
   type FileRef,
   type Integrity,
@@ -84,29 +85,37 @@ function integrityOf(dist: { integrity?: string; shasum?: string }): Integrity |
   return null;
 }
 
-/** The registry package each dependency entry installs. An alias
- *  (`"string-width-cjs": "npm:string-width@^4"`) installs the package it
- *  names, not its key, so the target is what the run is allowed. A spec
+/** The registry package each dependency entry installs, and the range it
+ *  asks for. An alias (`"string-width-cjs": "npm:string-width@^4"`)
+ *  installs the package it names, under the alias's own range, not its
+ *  key, so the target is what the run is allowed. A spec
  *  that isn't fetched from the registry at all (`file:`, `link:`, a path,
  *  `git`/`git+…`, an `http(s):` tarball, `github:`/`user/repo` shorthands,
  *  `workspace:`) contributes nothing: every such spec contains a `:` or a
  *  `/`, which no semver range or dist-tag does. This is the single place
  *  both the metadata path and the graph walk get dependency names from. */
-export function registryDependencyNames(deps: Record<string, string> | undefined): string[] {
-  const names: string[] = [];
+export function registryDependencies(deps: Record<string, string> | undefined): DependencySpec[] {
+  const specs: DependencySpec[] = [];
   for (const [key, rawSpec] of Object.entries(deps ?? {})) {
     const spec = typeof rawSpec === "string" ? rawSpec.trim() : "";
     if (spec.startsWith("npm:")) {
       const target = spec.slice("npm:".length);
       const at = target.indexOf("@", 1);
       const name = at > 0 ? target.slice(0, at) : target;
-      if (NAME.test(name)) names.push(name);
+      if (NAME.test(name)) specs.push({ name, range: rangeOf(at > 0 ? target.slice(at + 1) : "") });
       continue;
     }
     if (/[:/]/.test(spec)) continue;
-    names.push(key);
+    specs.push({ name: key, range: rangeOf(spec) });
   }
-  return names;
+  return specs;
+}
+
+/** A declared semver range as written, or `"*"` for anything that is not
+ *  a valid range (a dist-tag such as `latest`, an empty spec): npm
+ *  resolves those to some published version, so every kept version counts. */
+function rangeOf(spec: string): string {
+  return spec !== "" && semver.validRange(spec) ? spec : "*";
 }
 
 /** Maps `<name>/-/<unscoped>-<version>.tgz` (already percent-decoded) to
@@ -195,13 +204,10 @@ export const npmAdapter: RegistryAdapter = {
       raw.versions[version] = abbreviated(info);
       if (doc.time?.[version]) raw.time![version] = doc.time[version];
       const published = doc.time?.[version];
-      const dependencies = [
-        ...new Set(
-          [info.dependencies, info.optionalDependencies, info.peerDependencies].flatMap((deps) =>
-            registryDependencyNames(deps),
-          ),
-        ),
-      ];
+      const dependencySpecs = [info.dependencies, info.optionalDependencies, info.peerDependencies].flatMap((deps) =>
+        registryDependencies(deps),
+      );
+      const dependencies = [...new Set(dependencySpecs.map((spec) => spec.name))];
       const file: FileRef = {
         filename: `${version}.tgz`,
         version,
@@ -214,6 +220,7 @@ export const npmAdapter: RegistryAdapter = {
       versions.set(version, {
         version,
         dependencies,
+        dependencySpecs,
         files: [file],
       });
     }

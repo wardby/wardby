@@ -924,7 +924,41 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
         "2.0.0": version("app", "2.0.0", { "ranged-out": "^1" }),
       },
     },
-    mid: { name: "mid", time: { "1.0.0": old }, versions: { "1.0.0": version("mid", "1.0.0", { leaf: "^1" }) } },
+    // mid@1.0.0 and mid@1.1.0 satisfy app's "^1"; mid@2.0.0 does not, so
+    // only its dependency (mid-two-only) is outside the approved graph.
+    mid: {
+      name: "mid",
+      time: { "1.0.0": old, "1.1.0": old, "2.0.0": old },
+      versions: {
+        "1.0.0": version("mid", "1.0.0", { leaf: "^1" }),
+        "1.1.0": version("mid", "1.1.0", { "leaf-new": "^1" }),
+        "2.0.0": version("mid", "2.0.0", { "mid-two-only": "^1" }),
+      },
+    },
+    "leaf-new": { name: "leaf-new", time: { "1.0.0": old }, versions: { "1.0.0": version("leaf-new", "1.0.0") } },
+    "mid-two-only": {
+      name: "mid-two-only",
+      time: { "1.0.0": old },
+      versions: { "1.0.0": version("mid-two-only", "1.0.0") },
+    },
+    // Aliases mid under another key: the alias carries its own range.
+    aliaser: {
+      name: "aliaser",
+      time: { "1.0.0": old },
+      versions: { "1.0.0": version("aliaser", "1.0.0", { "mid-alias": "npm:mid@^2" }) },
+    },
+    // Asks for mid with a range no kept version satisfies.
+    unsatisfied: {
+      name: "unsatisfied",
+      time: { "1.0.0": old },
+      versions: { "1.0.0": version("unsatisfied", "1.0.0", { mid: "^9" }) },
+    },
+    // Asks for mid by dist-tag: not a range, so every kept version counts.
+    tagged: {
+      name: "tagged",
+      time: { "1.0.0": old },
+      versions: { "1.0.0": version("tagged", "1.0.0", { mid: "latest" }) },
+    },
     leaf: { name: "leaf", time: { "1.0.0": old }, versions: { "1.0.0": version("leaf", "1.0.0") } },
     "ranged-out": {
       name: "ranged-out",
@@ -1061,7 +1095,8 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
   });
 
   it("refuses with a cut-short message when the package bound trips", async () => {
-    const { get, store } = graphService({ maxGraphPackages: 1 });
+    // app and mid fit in the bound; leaf, a third package, does not.
+    const { get, store } = graphService({ maxGraphPackages: 2 });
     const response = await get("leaf/-/leaf-1.0.0.tgz");
     expect(response).toMatchObject({ status: 403 });
     expect("body" in response && response.body).toContain("wardby_package_not_allowed");
@@ -1203,6 +1238,50 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     });
     await Promise.all([get("stranger"), get("stranger", "rrg_other")]);
     expect(concurrency.max).toBeLessThanOrEqual(2);
+  });
+
+  it("does not allow the dependencies of a dependency's version outside the declared range", async () => {
+    const { get, store } = graphService();
+    await expect(get("mid-two-only/-/mid-two-only-1.0.0.tgz")).resolves.toMatchObject({ status: 403 });
+    expect(await store.isAllowedDependency("run-1", "npm", "mid-two-only")).toBe(false);
+  });
+
+  it("allows the dependencies of every in-range version, so a lockfile pinned to an older one still works", async () => {
+    const { get, store } = graphService();
+    // mid@1.1.0 is the newest in-range version; a lockfile may pin mid@1.0.0.
+    await expect(get("leaf-new/-/leaf-new-1.0.0.tgz")).resolves.toMatchObject({ status: 200 });
+    await expect(get("leaf/-/leaf-1.0.0.tgz")).resolves.toMatchObject({ status: 200 });
+    expect(await store.isAllowedDependency("run-1", "npm", "leaf")).toBe(true);
+  });
+
+  it("follows an alias to its target under the alias's own range", async () => {
+    const { get, store } = graphService({ allowlist: ["aliaser"] });
+    await expect(get("mid-two-only")).resolves.toMatchObject({ status: 200 });
+    // ^2 excludes mid 1.x, so their dependencies are not in this graph.
+    await expect(get("leaf")).resolves.toMatchObject({ status: 403 });
+    await expect(get("leaf-new")).resolves.toMatchObject({ status: 403 });
+    expect(await store.isAllowedDependency("run-1", "npm", "mid")).toBe(true);
+    expect(await store.isAllowedDependency("run-1", "npm", "mid-alias")).toBe(false);
+  });
+
+  it("contributes nothing for a range no kept version satisfies", async () => {
+    const { get, store } = graphService({ allowlist: ["unsatisfied"] });
+    await expect(get("leaf")).resolves.toMatchObject({ status: 403 });
+    expect(await store.isAllowedDependency("run-1", "npm", "mid")).toBe(false);
+  });
+
+  it("treats a dist-tag (or any non-range spec) as every kept version", async () => {
+    const { get } = graphService({ allowlist: ["tagged"] });
+    await expect(get("mid-two-only")).resolves.toMatchObject({ status: 200 });
+    await expect(get("leaf")).resolves.toMatchObject({ status: 200 });
+  });
+
+  it("expands each version of a package once, however many ranges reach it", async () => {
+    const { get, audited } = graphService({ allowlist: ["app@^1", "tagged", "aliaser"] });
+    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    // mid is reached under ^1, latest and ^2: three edges, but its node is
+    // expanded (and audited) once per range and its versions never twice.
+    expect(audited.filter((name) => name === "leaf")).toHaveLength(1);
   });
 
   it("makes no walk calls for PyPI, whose index carries no dependencies", async () => {

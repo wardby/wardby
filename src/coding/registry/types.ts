@@ -55,10 +55,22 @@ export interface FileRef {
   publishedAt: Date | null;
 }
 
+/** One declared dependency edge: the package it installs and the range
+ *  it asks for, in the ecosystem's syntax. `"*"` means any version (also
+ *  used for a spec that is not a range, such as a dist-tag). */
+export interface DependencySpec {
+  name: string;
+  range: string;
+}
+
 export interface VersionInfo {
   version: string;
   /** Dependency names (normalized). Empty when discovered from files instead. */
   dependencies: readonly string[];
+  /** The same dependencies with their declared ranges, for the range-aware
+   *  graph walk. Adapters with `dependenciesInMetadata` set should fill it;
+   *  when omitted, each name counts as `"*"`. */
+  dependencySpecs?: readonly DependencySpec[];
   files: readonly FileRef[];
 }
 
