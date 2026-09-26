@@ -32,6 +32,7 @@ function fakePricingModule(): ClaudePricingModule {
   }
   return {
     getPricing,
+    supportedEfforts: (model) => (model === KNOWN_MODEL ? ["low", "medium", "high"] : []),
     priceUsd(model, usage) {
       const p = getPricing(model);
       const cached = usage.cachedInputTokens ?? 0;
@@ -98,6 +99,59 @@ describe("ClaudeLlmProvider", () => {
     );
     await collect(p.stream({ model: KNOWN_MODEL, messages: [{ role: "user", content: "hi" }] }));
     expect(sentParams.max_tokens).toBeGreaterThanOrEqual(16000);
+  });
+
+  describe("effort", () => {
+    const events = [
+      {
+        type: "message_start",
+        message: {
+          usage: { input_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0 },
+        },
+      },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+      { type: "message_stop" },
+    ];
+    async function sentParamsFor(req: Parameters<ClaudeLlmProvider["stream"]>[0]) {
+      let sent: any;
+      const p = new ClaudeLlmProvider(
+        fakeClient(events, (params) => {
+          sent = params;
+        }),
+        fakePricingModule(),
+      );
+      await collect(p.stream(req));
+      return sent;
+    }
+
+    it("sends output_config.effort when the model accepts the level", async () => {
+      const sent = await sentParamsFor({
+        model: KNOWN_MODEL,
+        messages: [{ role: "user", content: "hi" }],
+        effort: "low",
+      });
+      expect(sent.output_config).toEqual({ effort: "low" });
+    });
+
+    it("never sends a level the model does not accept", async () => {
+      const sent = await sentParamsFor({
+        model: KNOWN_MODEL,
+        messages: [{ role: "user", content: "hi" }],
+        effort: "max",
+      });
+      expect(sent).not.toHaveProperty("output_config");
+    });
+
+    it("sends exactly today's body when effort is unset", async () => {
+      const sent = await sentParamsFor({ model: KNOWN_MODEL, messages: [{ role: "user", content: "hi" }] });
+      expect(JSON.stringify(sent)).toBe(
+        JSON.stringify({
+          model: KNOWN_MODEL,
+          messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }] }],
+          max_tokens: 16000,
+        }),
+      );
+    });
   });
 
   it("countTokens is offline, inflates over the raw estimate, counts tools, and fails closed on an unknown model", async () => {

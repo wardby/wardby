@@ -127,6 +127,36 @@ describe("NativeEngine", () => {
     expect(toolMessage?.content).toContain("</untrusted_tool_output>");
   });
 
+  it("passes the agent's effort on every model call, and no effort key when unset", async () => {
+    const script = (): LlmStreamEvent[][] => [
+      [
+        { type: "tool_call", id: "c1", name: "t", argsJson: "{}" },
+        { type: "done", stopReason: "tool_calls", usage: { inputTokens: 1, outputTokens: 1, costUsd: 2 } },
+      ],
+      [
+        { type: "text", delta: "done" },
+        { type: "done", stopReason: "stop", usage: { inputTokens: 1, outputTokens: 1, costUsd: 2 } },
+      ],
+    ];
+    const price = (usage: { inputTokens: number; outputTokens: number }) => usage.inputTokens + usage.outputTokens;
+    const count = (messages: { content: string }[]) => messages.length;
+
+    const withEffort = scriptedLlm(script(), price, count);
+    await new NativeEngine().run(
+      makeContext({
+        llm: withEffort,
+        agent: { systemPrompt: "sys", model: "m", budgetUsd: 1000, maxTurns: 10, effort: "medium" },
+      }),
+    );
+    expect(withEffort.calls).toHaveLength(2);
+    for (const call of withEffort.calls) expect(call.effort).toBe("medium");
+
+    const without = scriptedLlm(script(), price, count);
+    await new NativeEngine().run(makeContext({ llm: without }));
+    expect(without.calls).toHaveLength(2);
+    for (const call of without.calls) expect(call).not.toHaveProperty("effort");
+  });
+
   it("stops at maxTurns without attempting another call, succeeded with the last turn's text", async () => {
     const toolTurn = (): LlmStreamEvent[] => [
       { type: "tool_call", id: "c1", name: "t", argsJson: "{}" },

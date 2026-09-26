@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { RoutingLlmProvider } from "./routing.js";
+import { RoutingLlmProvider, modelAcceptsEffort, modelSupportedEfforts } from "./routing.js";
 import type { LlmProvider } from "./types.js";
 
 function fake(name: string): LlmProvider {
@@ -45,6 +45,16 @@ describe("RoutingLlmProvider", () => {
           { provider: fake("b"), models: ["gpt-4o"] },
         ]),
     ).toThrow(/gpt-4o/);
+  });
+
+  it("answers effort support by model without the caller naming a provider", () => {
+    expect(modelAcceptsEffort("claude-sonnet-5", "xhigh")).toBe(true);
+    expect(modelSupportedEfforts("claude-opus-5")).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(modelAcceptsEffort("claude-haiku-4-5", "low")).toBe(false);
+    // Effort is not sent through Bedrock or OpenAI, and an unknown model accepts nothing.
+    expect(modelSupportedEfforts("us.anthropic.claude-sonnet-4-6")).toEqual([]);
+    expect(modelSupportedEfforts("gpt-5.6-sol")).toEqual([]);
+    expect(modelSupportedEfforts("nope")).toEqual([]);
   });
 
   it("listModels returns every registered model across all providers", () => {

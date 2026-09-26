@@ -1,4 +1,5 @@
 import { computeCost, type ModelPricing, type UsageTokens } from "./pricing-core.js";
+import type { LlmEffort } from "./types.js";
 
 const CACHE_READ_MULT = 0.1;
 const CACHE_WRITE_MULT = 1.25;
@@ -19,6 +20,22 @@ const PRICING: Record<string, ModelPricing> = {
   "claude-fable-5": claude(10, 50),
   "claude-haiku-4-5": claude(1, 5),
 };
+
+// Reasoning effort levels each model accepts (`output_config.effort`). The
+// single source of truth for direct-API Claude models; a model missing here
+// accepts no effort, so a new roster entry never gets one by accident.
+// Haiku 4.5 rejects the parameter outright.
+const ALL_EFFORTS: readonly LlmEffort[] = ["low", "medium", "high", "xhigh", "max"];
+const EFFORTS: Record<string, readonly LlmEffort[]> = {
+  "claude-opus-5": ALL_EFFORTS,
+  "claude-sonnet-5": ALL_EFFORTS,
+  "claude-fable-5": ALL_EFFORTS,
+  "claude-haiku-4-5": [],
+};
+
+export function anthropicSupportedEfforts(model: string): readonly LlmEffort[] {
+  return EFFORTS[model] ?? [];
+}
 
 export function getAnthropicPricing(model: string): ModelPricing {
   const p = PRICING[model];
