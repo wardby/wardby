@@ -161,7 +161,7 @@ describe.skipIf(!process.env.DATABASE_URL)("budget groups (database)", () => {
       await db.agent.findUniqueOrThrow({ where: { id: native } }),
       new Date(),
       undefined,
-      { selfRunId: nativeRun.id },
+      { self: { id: nativeRun.id, startedAt: nativeRun.startedAt } },
     );
     expect(own.effectiveBudgetUsd).toBeCloseTo(4, 6);
 
@@ -188,6 +188,79 @@ describe.skipIf(!process.env.DATABASE_URL)("budget groups (database)", () => {
 
     await db.run.updateMany({
       where: { id: { in: results.map((r) => r!.run.id) } },
+      data: { status: "cancelled", finishedAt: new Date() },
+    });
+  });
+
+  it("I1: a burst of 8 concurrent grouped coding dispatches all persist, and never reserve more than the cap", async () => {
+    const g = await group("burst", 5);
+    const agents = await Promise.all(Array.from({ length: 8 }, (_, i) => codingAgent(`burst-${i}`, 1, g)));
+
+    const results = await Promise.all(agents.map((agentId) => dispatchRun({ db, executor, agentId })));
+
+    const runs = await db.run.findMany({
+      where: { id: { in: results.map((r) => r!.run.id) } },
+      include: { codingRun: { select: { budgetReservedUsd: true } } },
+    });
+    expect(runs).toHaveLength(8);
+    const reserved = runs.reduce((sum, r) => sum + Number(r.codingRun?.budgetReservedUsd ?? 0), 0);
+    expect(reserved).toBeCloseTo(5, 6);
+    expect(runs.filter((r) => r.status === "refused")).toHaveLength(3);
+    for (const r of runs.filter((run) => run.status === "refused")) {
+      expect(r.error).toMatch(/^budget_group_exhausted:day\b/);
+    }
+
+    await db.run.updateMany({
+      where: { id: { in: runs.map((r) => r.id) }, status: "pending" },
+      data: { status: "cancelled", finishedAt: new Date() },
+    });
+  });
+
+  it("I2: a run that stopped heartbeating no longer holds budget against the group", async () => {
+    const g = await group("zombie", 5);
+    const native = await nativeAgent("zombie-native", 5, g);
+    const coder = await codingAgent("zombie-coder", 5, g);
+    // Ctrl-C'd an hour ago: still "running", no beat since.
+    const stale = new Date(Date.now() - 60 * 60 * 1000);
+    const zombie = await db.run.create({
+      data: { agentId: native, status: "running", costUsd: 0.5, startedAt: stale, heartbeatAt: stale },
+    });
+
+    const result = await dispatchRun({ db, executor, agentId: coder });
+
+    // Only the zombie's real $0.50 counts, not its $4.50 unspent hold.
+    expect(await reservedUsd(result!.run.id)).toBeCloseTo(4.5, 6);
+    await db.run.updateMany({
+      where: { id: { in: [zombie.id, result!.run.id] } },
+      data: { status: "cancelled", finishedAt: new Date() },
+    });
+  });
+
+  it("I3: two cap-sized native members dispatched on the same tick: exactly one gets the budget", async () => {
+    const g = await group("fcfs", 5);
+    const [a, b] = await Promise.all([nativeAgent("fcfs-a", 5, g), nativeAgent("fcfs-b", 5, g)]);
+    const tick = new Date();
+    const [runA, runB] = await Promise.all([
+      db.run.create({ data: { agentId: a, startedAt: tick, executionManaged: true } }),
+      db.run.create({ data: { agentId: b, startedAt: tick, executionManaged: true } }),
+    ]);
+
+    // Both load steps at once, each seeing the other's pending row.
+    const [budgetA, budgetB] = await Promise.all(
+      [
+        { agentId: a, run: runA },
+        { agentId: b, run: runB },
+      ].map(async ({ agentId, run }) =>
+        effectiveBudgetForRun(db, await db.agent.findUniqueOrThrow({ where: { id: agentId } }), new Date(), undefined, {
+          self: { id: run.id, startedAt: run.startedAt },
+        }),
+      ),
+    );
+
+    const budgets = [budgetA.effectiveBudgetUsd, budgetB.effectiveBudgetUsd].sort();
+    expect(budgets).toEqual([0, 5]);
+    await db.run.updateMany({
+      where: { id: { in: [runA.id, runB.id] } },
       data: { status: "cancelled", finishedAt: new Date() },
     });
   });

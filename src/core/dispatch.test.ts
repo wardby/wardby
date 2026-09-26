@@ -3,8 +3,16 @@ import type { Executor } from "../providers/executor/types.js";
 import { MAX_CODING_TASK_BYTES } from "../coding/protocol.js";
 import { dispatchRun, isSerializationConflict, type DispatchDb } from "./dispatch.js";
 
-function fakeDb(agent: Record<string, any>, seedCodingRuns: Record<string, any>[] = []) {
+interface FakeBudget {
+  /** The agent's budget group (ids must match agent.budgetGroupId). */
+  group?: Record<string, any>;
+  /** Rows the group-spend query sees (agentId, status, costUsd, startedAt, heartbeatAt, codingRun). */
+  groupRuns?: Record<string, any>[];
+}
+
+function fakeDb(agent: Record<string, any>, seedCodingRuns: Record<string, any>[] = [], budget: FakeBudget = {}) {
   let transactionActive = false;
+  const rawStatements: string[] = [];
   let runNumber = 0;
   const runs: Record<string, any>[] = [];
   const codingRuns: Record<string, any>[] = [...seedCodingRuns];
@@ -20,6 +28,10 @@ function fakeDb(agent: Record<string, any>, seedCodingRuns: Record<string, any>[
         runs.push(row);
         return row;
       },
+      findMany: async ({ where }: any) =>
+        (budget.groupRuns ?? []).filter(
+          (r) => where.agentId?.in.includes(r.agentId) && r.startedAt >= where.startedAt.gte,
+        ),
       updateMany: async ({ where, data }: any) => {
         let count = 0;
         for (const run of runs) {
@@ -46,7 +58,14 @@ function fakeDb(agent: Record<string, any>, seedCodingRuns: Record<string, any>[
       },
     },
     webhook: {},
+    budgetGroup: {
+      findUnique: async ({ where }: any) => (budget.group && where.id === budget.group.id ? budget.group : null),
+    },
     $queryRaw: async () => [{ id: agent.id }],
+    $executeRawUnsafe: async (sql: string) => {
+      rawStatements.push(sql);
+      return 0;
+    },
   };
   db.$transaction = async (callback: (tx: any) => Promise<unknown>) => {
     transactionActive = true;
@@ -61,6 +80,7 @@ function fakeDb(agent: Record<string, any>, seedCodingRuns: Record<string, any>[
     runs,
     codingRuns,
     tasks,
+    rawStatements,
     transactionActive: () => transactionActive,
   };
 }
@@ -121,6 +141,86 @@ describe("dispatchRun", () => {
     const state = fakeDb(agent);
     await dispatchRun({ db: state.db, executor: { async start() {}, async stop() {} }, agentId: agent.id });
     expect(state.codingRuns[0]).not.toHaveProperty("allowedEgress");
+  });
+
+  describe("budget groups (E-01)", () => {
+    const groupedCodingAgent = () => ({
+      ...nativeAgent(),
+      kind: "coding",
+      budgetUsd: 2,
+      budgetGroupId: "group_1",
+      codingProfile: {
+        provider: "codex",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        protectedPaths: [],
+      },
+    });
+    const group = (dailyBudgetUsd: number) => ({
+      id: "group_1",
+      name: "team",
+      dailyBudgetUsd,
+      weeklyBudgetUsd: null,
+      monthlyBudgetUsd: null,
+      warnThresholdRatio: 0.8,
+      agents: [{ id: "agent_1", budgetUsd: 2 }],
+    });
+    const spent = (costUsd: number) => ({
+      id: "earlier",
+      agentId: "agent_1",
+      status: "succeeded",
+      costUsd,
+      startedAt: new Date(),
+      heartbeatAt: null,
+      codingRun: null,
+    });
+
+    it("refuses a top-level grouped coding run once the group is spent: no CodingRun, never started", async () => {
+      const state = fakeDb(groupedCodingAgent(), [], { group: group(5), groupRuns: [spent(5)] });
+      const start = vi.fn(async () => {});
+
+      const result = await dispatchRun({ db: state.db, executor: { start, async stop() {} }, agentId: "agent_1" });
+
+      expect(result?.run.status).toBe("refused");
+      expect(result?.run.error).toMatch(/^budget_group_exhausted:day\b/);
+      expect(result?.run.finishedAt).toBeInstanceOf(Date);
+      expect(state.codingRuns).toHaveLength(0);
+      expect(start).not.toHaveBeenCalled();
+      expect(state.rawStatements).toEqual(['LOCK TABLE "BudgetGroup" IN SHARE ROW EXCLUSIVE MODE']);
+    });
+
+    it("caps a top-level grouped coding run's reservation at the group's remainder", async () => {
+      const state = fakeDb(groupedCodingAgent(), [], { group: group(5), groupRuns: [spent(4.25)] });
+      const start = vi.fn(async () => {});
+
+      const result = await dispatchRun({ db: state.db, executor: { start, async stop() {} }, agentId: "agent_1" });
+
+      expect(result?.run.status).toBe("pending");
+      expect(state.codingRuns[0].budgetReservedUsd).toBeCloseTo(0.75, 6);
+      expect(start).toHaveBeenCalledWith(result?.run.id);
+    });
+
+    it("treats a sub-micro-dollar remainder as exhausted rather than reserving $0", async () => {
+      const state = fakeDb(groupedCodingAgent(), [], { group: group(5), groupRuns: [spent(4.9999997)] });
+
+      const result = await dispatchRun({
+        db: state.db,
+        executor: { async start() {}, async stop() {} },
+        agentId: "agent_1",
+      });
+
+      expect(result?.run.status).toBe("refused");
+      expect(state.codingRuns).toHaveLength(0);
+    });
+
+    it("takes no group lock for an ungrouped coding agent", async () => {
+      const state = fakeDb({ ...groupedCodingAgent(), budgetGroupId: null });
+      await dispatchRun({ db: state.db, executor: { async start() {}, async stop() {} }, agentId: "agent_1" });
+      expect(state.rawStatements).toEqual([]);
+      expect(state.codingRuns[0].budgetReservedUsd).toBe(2);
+    });
   });
 
   it("snapshots immutable coding input and reserves the full configured budget", async () => {

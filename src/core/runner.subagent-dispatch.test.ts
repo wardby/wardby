@@ -314,6 +314,7 @@ describe("delegate_to_<boundName> dispatch tool", () => {
       taskOverride: string | null;
       status: string;
       finalText: string | null;
+      heartbeatAt: Date | null;
     }>;
     expect(childRun).toHaveLength(1);
     expect(childRun[0].agentId).toBe("child-agent");
@@ -322,6 +323,8 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     expect(childRun[0].taskOverride).toBe("find the answer");
     expect(childRun[0].status).toBe("succeeded");
     expect(childRun[0].finalText).toBe("the child found it");
+    // No executor watches an inline child, so it beats itself (its budget-group hold stays live).
+    expect(childRun[0].heartbeatAt).toBeInstanceOf(Date);
   });
 
   it("folds a datastoreRef into the child's taskOverride as a note, not a silent extra mechanism", async () => {

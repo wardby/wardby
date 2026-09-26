@@ -47,6 +47,7 @@ import { buildSecretCipher } from "./providers/secrets/index.js";
 import type { ProviderRegistry } from "./providers/index.js";
 import { prisma } from "./core/db.js";
 import { runAgent } from "./core/runner.js";
+import { cancelRunOnSignal } from "./core/run-heartbeat.js";
 import { buildReviewHosts } from "./providers/review-host/index.js";
 import { createRepoAccessGate } from "./core/repo-access.js";
 import { validateCronExpression } from "./core/cron.js";
@@ -579,6 +580,9 @@ async function run(name: string | undefined): Promise<void> {
   const memory = buildMemory();
 
   let run;
+  // Ctrl-C (or a SIGTERM) records the run as cancelled rather than leaving a
+  // `running` row behind.
+  let removeSignalHandlers: (() => void) | undefined;
   try {
     run = await runAgent(
       name,
@@ -587,9 +591,14 @@ async function run(name: string | undefined): Promise<void> {
       (delta) => {
         process.stdout.write(delta);
       },
+      (created) => {
+        removeSignalHandlers = cancelRunOnSignal(prisma, created.id);
+      },
     );
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err));
+  } finally {
+    removeSignalHandlers?.();
   }
   process.stdout.write("\n");
 

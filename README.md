@@ -285,8 +285,11 @@ production alerts, and SLOs remain operator responsibilities. See the
   Group caps apply to native and coding runs alike, whether scheduled,
   webhook-, MCP-, host-event- or sub-agent-triggered: a coding run reserves at
   most what its group has left and is refused (`budget_group_exhausted:<period>`)
-  when nothing is left. A run still in flight holds its unspent reservation
-  against the group, so concurrent runs cannot each claim the same remainder.
+  when nothing is left. A live run still in flight holds its unspent
+  reservation against the group, so concurrent top-level runs cannot each
+  claim the same remainder (native runs are served first come, first served).
+  Known limit: within one sub-agent run tree, a parent's in-progress spend is
+  not yet visible to its child's budget.
 - **Scoped capabilities:** tools, secrets, datastores, and sub-agents are
   attached explicitly and checked against the authenticated owner. Agents are
   private until their owner shares them (`grant_access` at read, execute or

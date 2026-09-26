@@ -22,6 +22,7 @@ interface FakeRunRow {
   id: string;
   agentId: string;
   status: string;
+  error?: string | null;
   triggeredById?: string | null;
 }
 interface FakeTaskRow {
@@ -35,7 +36,11 @@ interface FakeTaskRow {
   ttlAt: Date;
 }
 
-function fakeDb(agents: FakeAgentRow[], grants: FakeGrantSeed[] = []) {
+function fakeDb(
+  agents: FakeAgentRow[],
+  grants: FakeGrantSeed[] = [],
+  budget: { group?: Record<string, unknown>; groupRuns?: Record<string, unknown>[] } = {},
+) {
   const agentsById = new Map(agents.map((a) => [a.id, a]));
   const runs = new Map<string, FakeRunRow>();
   const tasks = new Map<string, FakeTaskRow>();
@@ -56,11 +61,16 @@ function fakeDb(agents: FakeAgentRow[], grants: FakeGrantSeed[] = []) {
       },
     },
     run: {
-      create: async ({ data }: { data: { agentId: string; trigger: string; triggeredById?: string | null } }) => {
+      create: async ({
+        data,
+      }: {
+        data: { agentId: string; trigger: string; triggeredById?: string | null; status?: string; error?: string };
+      }) => {
         const row: FakeRunRow = {
           id: `run_${++runCounter}`,
           agentId: data.agentId,
-          status: "pending",
+          status: data.status ?? "pending",
+          error: data.error ?? null,
           triggeredById: data.triggeredById,
         };
         runs.set(row.id, row);
@@ -73,7 +83,10 @@ function fakeDb(agents: FakeAgentRow[], grants: FakeGrantSeed[] = []) {
         return row;
       },
       updateMany: async () => ({ count: 1 }),
+      findMany: async () => budget.groupRuns ?? [],
     },
+    budgetGroup: { findUnique: async () => budget.group ?? null },
+    $executeRawUnsafe: async () => 0,
     task: {
       create: async ({
         data,
@@ -280,6 +293,43 @@ describe("trigger_agent", () => {
       expect(refused.isError).toBe(true);
       expect(JSON.stringify(refused)).toMatch(/needs execute/);
       await reader.client.close();
+    });
+
+    it("E-01: a coding run refused at dispatch (group spent) is reported as refused, with its reason", async () => {
+      const agent = { ...coding(false), model: "gpt-5.6-luna", budgetUsd: 2, budgetGroupId: "g1" } as FakeAgentRow;
+      const db = fakeDb([agent], [], {
+        group: {
+          id: "g1",
+          name: "team",
+          dailyBudgetUsd: 5,
+          weeklyBudgetUsd: null,
+          monthlyBudgetUsd: null,
+          warnThresholdRatio: 0.8,
+          agents: [{ id: "a1", budgetUsd: 2 }],
+        },
+        groupRuns: [
+          {
+            id: "old",
+            agentId: "a1",
+            status: "succeeded",
+            costUsd: 5,
+            startedAt: new Date(),
+            heartbeatAt: null,
+            codingRun: null,
+          },
+        ],
+      });
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "owner", ["runs:trigger"], false));
+      registerTriggerTool(mcp);
+      const client = await connectClient(mcp);
+
+      const result = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+      expect(result.isError).toBeFalsy();
+      const body = parseText(result as never) as { runId: string; status: string; error: string };
+      expect(body.status).toBe("refused");
+      expect(body.error).toMatch(/^budget_group_exhausted:day\b/);
+      await client.close();
     });
 
     it("M8: the stdio operator is not the owner for task overrides either", async () => {

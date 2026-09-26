@@ -30,6 +30,7 @@ import { scopeDatastore } from "../providers/datastore/scoped.js";
 import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
 import { buildSharedDatastoreAccessor, scopeSharedDatastoreAccessor } from "./datastores.js";
 import { effectiveBudgetForRun } from "./budget-groups.js";
+import { withRunHeartbeat } from "./run-heartbeat.js";
 import { dispatchRun } from "./dispatch.js";
 import { canDelegate } from "./grants.js";
 import { MEMORY_TOOL_DEFS, MEMORY_TOOL_NAMES, handleMemoryTool } from "./memory-tools.js";
@@ -353,14 +354,15 @@ export async function executeRun(
         `Agent "${agent.name}" has more than one attached tool named ${duplicates.map((n) => `"${n}"`).join(", ")}; detach all but one before running it.`,
       );
     }
-    // The run's own row is already pending/running; its reservation must not
-    // count against itself (E-04). Every other in-flight run's does.
+    // The run's own row is already pending/running: its hold must not count
+    // against itself, and runs that started after it wait their turn (first
+    // come, first served; E-04). Every earlier live hold counts.
     const { effectiveBudgetUsd } = await effectiveBudgetForRun(
       db,
       agent,
       new Date(),
       existingRun.parentRunId ?? undefined,
-      { selfRunId: existingRun.id },
+      { self: { id: existingRun.id, startedAt: existingRun.startedAt } },
     );
     // Visibility only, not the security boundary — subagent_memory_get,
     // parent_memory_get, and delegate_to_<boundName> each re-check the
@@ -726,7 +728,9 @@ export async function executeRun(
             triggeredById: existingRun.triggeredById,
           },
         });
-        const childResult = await executeRun(childRun.id, providers, db);
+        // Runs inline, so no executor beats for it: beat here to keep its
+        // budget-group hold live while it runs (and let it lapse if we die).
+        const childResult = await withRunHeartbeat(db, childRun.id, () => executeRun(childRun.id, providers, db));
         return JSON.stringify({
           status: childResult.status,
           finalText: childResult.finalText,
@@ -816,13 +820,19 @@ export async function executeRun(
   }
 }
 
-/** Convenience: create + execute a manual run in one call (what the CLI's `wardby run` uses). */
+/**
+ * Convenience: create + execute a manual run in one call (what the CLI's
+ * `wardby run` uses). No executor watches it, so it beats itself; `onCreated`
+ * lets the caller hook the new run (the CLI cancels it on SIGINT/SIGTERM).
+ */
 export async function runAgent(
   agentName: string,
   providers: NativeRunProviders,
   db: RunnerDb = defaultDb,
   onText?: (delta: string) => void,
+  onCreated?: (run: Run) => void,
 ): Promise<Run> {
   const run = await createRun(db, agentName, "manual");
-  return executeRun(run.id, providers, db, onText);
+  onCreated?.(run);
+  return withRunHeartbeat(db, run.id, () => executeRun(run.id, providers, db, onText));
 }

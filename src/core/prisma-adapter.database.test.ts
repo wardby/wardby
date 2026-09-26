@@ -15,7 +15,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Prisma } from "#prisma";
 import type { PrismaClient } from "#prisma";
 import { createPrismaClient } from "./db.js";
-import { dispatchRun, isSerializationConflict } from "./dispatch.js";
+import { dispatchRun, isSerializationConflict, PERSIST_ATTEMPTS } from "./dispatch.js";
 import { attachSecret } from "./secrets.js";
 import type { Executor } from "../providers/executor/types.js";
 import type { McpRequestContext } from "../mcp/context.js";
@@ -292,7 +292,7 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
       expect(result?.run.agentId).toBe(agentId);
     });
 
-    it("gives up after three conflicting attempts and rethrows the serialization failure", async () => {
+    it("gives up after PERSIST_ATTEMPTS conflicting attempts and rethrows the serialization failure", async () => {
       const agentId = await createAgent("always-conflict");
       let attempts = 0;
       const err = await knownError(
@@ -308,7 +308,7 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
           },
         }),
       );
-      expect(attempts).toBe(3);
+      expect(attempts).toBe(PERSIST_ATTEMPTS);
       expect(err.code).toBe("P2010");
       expect(isSerializationConflict(err)).toBe(true);
       expect(await db.run.count({ where: { agentId } })).toBe(0);

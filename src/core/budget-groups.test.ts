@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  CODING_HOLD_GRACE_SEC,
+  HOLD_HEARTBEAT_TTL_MS,
   computeGroupSpend,
   computeRunTreeSpend,
   effectiveBudgetForRun,
@@ -39,7 +41,9 @@ interface FakeRun {
   parentRunId?: string | null;
   /** Defaults to a finished run. */
   status?: string;
-  codingRun?: { budgetReservedUsd: number } | null;
+  /** Defaults to NOW: a live run. */
+  heartbeatAt?: Date | null;
+  codingRun?: { budgetReservedUsd: number; timeoutSec?: number } | null;
 }
 interface FakeGroup {
   id: string;
@@ -59,7 +63,12 @@ interface FakeAgent {
 function fakeDb(groups: FakeGroup[], runs: FakeRun[], agents: FakeAgent[] = []): BudgetGroupsDb {
   const byId = new Map(groups.map((g) => [g.id, g]));
   const agentsById = new Map(agents.map((a) => [a.id, a]));
-  const withDefaults = runs.map((r) => ({ status: "succeeded", codingRun: null, ...r }));
+  const withDefaults = runs.map((r) => ({
+    status: "succeeded",
+    heartbeatAt: NOW,
+    ...r,
+    codingRun: r.codingRun ? { timeoutSec: 1800, ...r.codingRun } : null,
+  }));
   const runsById = new Map(withDefaults.filter((r) => r.id).map((r) => [r.id!, r]));
   return {
     budgetGroup: {
@@ -112,6 +121,7 @@ function fakeDb(groups: FakeGroup[], runs: FakeRun[], agents: FakeAgent[] = []):
 
 const NOW = new Date("2026-09-09T12:00:00.000Z"); // a Wednesday
 const TODAY_START = new Date("2026-09-09T00:00:00.000Z");
+const LATER = new Date("2026-09-09T00:00:01.000Z");
 
 describe("computeGroupSpend", () => {
   it("returns nothing when the group has no caps configured", async () => {
@@ -216,6 +226,111 @@ describe("computeGroupSpend", () => {
   });
 });
 
+describe("hold liveness (I2) and first come, first served (I3)", () => {
+  const cap = { dailyBudgetUsd: 20, weeklyBudgetUsd: null, monthlyBudgetUsd: null } as never;
+  const members = [
+    { id: "native", budgetUsd: 4 },
+    { id: "coder", budgetUsd: 9 },
+  ];
+  const ago = (ms: number) => new Date(NOW.getTime() - ms);
+
+  it("a native run that stopped heartbeating releases its hold; one that still beats keeps it", async () => {
+    const db = fakeDb(
+      [],
+      [
+        {
+          id: "zombie",
+          agentId: "native",
+          costUsd: 1,
+          startedAt: TODAY_START,
+          status: "running",
+          heartbeatAt: ago(HOLD_HEARTBEAT_TTL_MS + 1),
+        },
+        {
+          id: "alive",
+          agentId: "native",
+          costUsd: 1,
+          startedAt: TODAY_START,
+          status: "running",
+          heartbeatAt: ago(5_000),
+        },
+        { id: "unbeaten", agentId: "native", costUsd: 0, startedAt: TODAY_START, status: "pending", heartbeatAt: null },
+      ],
+    );
+    const [day] = await computeGroupSpend(db, cap, members, NOW);
+    // Only "alive" holds: $4 - $1. Every row's real cost still counts.
+    expect(day).toMatchObject({ spentUsd: 2, reservedUsd: 3, remainingUsd: 15 });
+  });
+
+  it("a queued coding run holds until its queue + run timeout pass, beat or not", async () => {
+    const coding = (id: string, startedAt: Date) => ({
+      id,
+      agentId: "coder",
+      costUsd: 0,
+      startedAt,
+      status: "pending",
+      heartbeatAt: null,
+      codingRun: { budgetReservedUsd: 2, timeoutSec: 600 },
+    });
+    // With a 100s queue timeout a run lapses (100 + 600 + grace) = 760s after dispatch.
+    expect(100 + 600 + CODING_HOLD_GRACE_SEC).toBe(760);
+    const db = fakeDb([], [coding("queued", ago(500_000)), coding("expired", ago(800_000))]);
+    const [day] = await computeGroupSpend(db, cap, members, NOW, { codingQueueTimeoutSec: 100 });
+    expect(day.reservedUsd).toBe(2);
+    const [longQueue] = await computeGroupSpend(db, cap, members, NOW, { codingQueueTimeoutSec: 1_000 });
+    expect(longQueue.reservedUsd).toBe(4);
+  });
+
+  it("holdsBefore counts only runs ordered earlier by (startedAt, id)", async () => {
+    const db = fakeDb(
+      [],
+      [
+        { id: "a", agentId: "native", costUsd: 0, startedAt: TODAY_START, status: "pending" },
+        { id: "b", agentId: "native", costUsd: 0, startedAt: TODAY_START, status: "pending" },
+        { id: "c", agentId: "native", costUsd: 0, startedAt: LATER, status: "pending" },
+      ],
+    );
+    const held = async (self: { id: string; startedAt: Date }) =>
+      (await computeGroupSpend(db, cap, members, NOW, { excludeReservationRunIds: [self.id], holdsBefore: self }))[0]
+        .reservedUsd;
+    expect(await held({ id: "a", startedAt: TODAY_START })).toBe(0);
+    expect(await held({ id: "b", startedAt: TODAY_START })).toBe(4);
+    expect(await held({ id: "c", startedAt: LATER })).toBe(8);
+  });
+
+  it("two cap-sized members dispatched together: exactly one gets the budget", async () => {
+    const group = {
+      id: "g1",
+      name: "g",
+      dailyBudgetUsd: 5,
+      weeklyBudgetUsd: null,
+      monthlyBudgetUsd: null,
+      warnThresholdRatio: 0.8,
+      agentIds: ["a1", "a2"],
+    };
+    const agents = [
+      { id: "a1", budgetGroupId: "g1", budgetUsd: 5 },
+      { id: "a2", budgetGroupId: "g1", budgetUsd: 5 },
+    ];
+    const db = fakeDb(
+      [group],
+      [
+        { id: "r1", agentId: "a1", costUsd: 0, startedAt: TODAY_START, status: "pending" },
+        { id: "r2", agentId: "a2", costUsd: 0, startedAt: TODAY_START, status: "pending" },
+      ],
+      agents,
+    );
+    const first = await effectiveBudgetForRun(db, agents[0] as never, NOW, undefined, {
+      self: { id: "r1", startedAt: TODAY_START },
+    });
+    const second = await effectiveBudgetForRun(db, agents[1] as never, NOW, undefined, {
+      self: { id: "r2", startedAt: TODAY_START },
+    });
+    expect(first.effectiveBudgetUsd).toBe(5);
+    expect(second.effectiveBudgetUsd).toBe(0);
+  });
+});
+
 describe("effectiveBudgetForRun", () => {
   it("returns the agent's own budgetUsd unchanged when it has no budgetGroupId", async () => {
     const db = fakeDb([], []);
@@ -281,7 +396,7 @@ describe("effectiveBudgetForRun", () => {
     expect(result.exhaustedBy).toBe("day");
   });
 
-  it("E-04: another member's in-flight reservation tightens the budget; the run's own (selfRunId) does not", async () => {
+  it("E-04: another member's in-flight reservation tightens the budget; the run's own (self) does not", async () => {
     const db = fakeDb(
       [
         {
@@ -308,7 +423,7 @@ describe("effectiveBudgetForRun", () => {
       { id: "a1", budgetGroupId: "g1", budgetUsd: 5 } as never,
       NOW,
       undefined,
-      { selfRunId: "self" },
+      { self: { id: "self", startedAt: TODAY_START } },
     );
     // $10 cap - a2's $7 held by its in-flight run = $3; a1's own run is not counted against itself.
     expect(result).toEqual({ effectiveBudgetUsd: 3, constrainedBy: ["day"] });
@@ -398,7 +513,7 @@ describe("computeRunTreeSpend", () => {
         },
       ],
       [
-        { id: "run-root", agentId: "root-agent", costUsd: 1, startedAt: TODAY_START, status: "running" },
+        { id: "run-root", agentId: "root-agent", costUsd: 1, startedAt: LATER, status: "running" },
         { id: "run-other", agentId: "other-agent", costUsd: 0, startedAt: TODAY_START, status: "pending" },
       ],
       [
@@ -406,7 +521,7 @@ describe("computeRunTreeSpend", () => {
         { id: "other-agent", budgetGroupId: "g1", budgetUsd: 5 },
       ],
     );
-    // Root ceiling: min(6, 10 - $1 spent - other's $5 held) = 4; the tree has spent $1.
+    // Root ceiling: min(6, 10 - $1 spent - other's $5 held, it started first) = 4; the tree has spent $1.
     const tree = await computeRunTreeSpend(db, "run-root", NOW);
     expect(tree).toEqual({ rootRunId: "run-root", capUsd: 4, spentUsd: 1, remainingUsd: 3 });
   });
@@ -441,6 +556,47 @@ describe("effectiveBudgetForRun with parentRunId (sub-agent dispatch)", () => {
       "run-root",
     );
     expect(result).toEqual({ effectiveBudgetUsd: 4, constrainedBy: ["run-tree"] });
+  });
+
+  it("M1: a child in a different group than the root counts the tree's holds in its own group", async () => {
+    const g2 = {
+      id: "g2",
+      name: "g2",
+      dailyBudgetUsd: 10,
+      weeklyBudgetUsd: null,
+      monthlyBudgetUsd: null,
+      warnThresholdRatio: 0.8,
+      agentIds: ["mid-agent", "leaf-agent"],
+    };
+    const db = fakeDb(
+      [g2],
+      [
+        { id: "run-root", agentId: "root-agent", costUsd: 0, startedAt: TODAY_START, status: "running" },
+        {
+          id: "run-mid",
+          agentId: "mid-agent",
+          costUsd: 0,
+          startedAt: LATER,
+          status: "running",
+          parentRunId: "run-root",
+        },
+      ],
+      [
+        { id: "root-agent", budgetGroupId: null, budgetUsd: 100 },
+        { id: "mid-agent", budgetGroupId: "g2", budgetUsd: 7 },
+        { id: "leaf-agent", budgetGroupId: "g2", budgetUsd: 9 },
+      ],
+    );
+    // The root is ungrouped, so the mid run's $7 hold in g2 is not covered by
+    // any hold the root made there: the leaf sees $10 - $7 = $3.
+    const result = await effectiveBudgetForRun(
+      db,
+      { id: "leaf-agent", budgetGroupId: "g2", budgetUsd: 9 } as never,
+      NOW,
+      "run-mid",
+    );
+    expect(result.effectiveBudgetUsd).toBe(3);
+    expect(result.constrainedBy).toEqual(["day"]);
   });
 
   it("reports run-tree as the exhausted constraint once the tree's ceiling is spent", async () => {

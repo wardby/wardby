@@ -8,7 +8,7 @@ import {
   composeCodingTask,
 } from "../coding/protocol.js";
 import { assertCodingProviderModel } from "../coding/provider.js";
-import { effectiveBudgetForRun, type BudgetConstraint } from "./budget-groups.js";
+import { effectiveBudgetForRun, MIN_RESERVATION_USD, type BudgetConstraint } from "./budget-groups.js";
 import { logger } from "./logger.js";
 
 const dispatchLog = logger.child({ module: "dispatch" });
@@ -20,7 +20,16 @@ export type DispatchDb = Pick<
 
 export type DispatchTx = Pick<
   Prisma.TransactionClient,
-  "agent" | "run" | "runHostCheck" | "codingRun" | "task" | "webhook" | "budgetGroup" | "resourceGrant" | "$queryRaw"
+  | "agent"
+  | "run"
+  | "runHostCheck"
+  | "codingRun"
+  | "task"
+  | "webhook"
+  | "budgetGroup"
+  | "resourceGrant"
+  | "$queryRaw"
+  | "$executeRawUnsafe"
 >;
 
 type DispatchAgent = Prisma.AgentGetPayload<{ include: { codingProfile: true } }>;
@@ -164,17 +173,29 @@ export function budgetExhaustedError(constraint: BudgetConstraint): string {
   }
   return (
     `budget_group_exhausted:${constraint}: the agent's budget group has no ${constraint} budget left ` +
-    "(recorded spend plus in-flight runs' reservations have reached its cap); the run was not started."
+    "(recorded spend plus live in-flight runs' holds have reached its cap); the run was not started."
   );
 }
 
 /**
+ * Serializes grouped coding dispatches (security review I1). Under
+ * Serializable, a row lock taken after the transaction's first read cannot
+ * queue anything: the snapshot is already fixed, so each waiter wakes up
+ * with a stale view and aborts. LOCK TABLE is the one statement that takes
+ * no snapshot, so as the transaction's first statement it makes a waiter's
+ * snapshot start only after the previous holder committed. SHARE ROW
+ * EXCLUSIVE conflicts with itself and with writes to BudgetGroup rows, but not
+ * with the ROW SHARE that foreign-key checks from Agent take, so attaching
+ * agents to groups is not blocked. It serializes grouped coding dispatches
+ * across all groups; each holds it only for one short transaction.
+ */
+const GROUP_DISPATCH_LOCK_SQL = 'LOCK TABLE "BudgetGroup" IN SHARE ROW EXCLUSIVE MODE';
+
+/**
  * A coding run's budget reservation: the requested ceiling (override or the
  * agent's budgetUsd) tightened by its budget group and run tree, where every
- * in-flight run's unspent reservation already counts as spent. The group row
- * is locked first so dispatches in one group queue behind each other; the
- * Serializable transaction then turns a stale read into a retried conflict,
- * so two dispatches never both reserve the same remainder.
+ * live in-flight run's unspent hold already counts as spent. Rounded down to
+ * CodingRun.budgetReservedUsd's 6 decimal places; less than that is refused.
  */
 async function reserveCodingBudget(
   tx: DispatchTx,
@@ -182,16 +203,29 @@ async function reserveCodingBudget(
   now: Date,
   options: DispatchRunOptions,
 ): Promise<{ budgetUsd: number; refusal?: string }> {
-  if (agent.budgetGroupId) {
-    await tx.$queryRaw`SELECT "id" FROM "BudgetGroup" WHERE "id" = ${agent.budgetGroupId} FOR UPDATE`;
-  }
   const effective = await effectiveBudgetForRun(tx, agent, now, options.parentRunId);
   const requested = options.budgetUsdOverride ?? Number(agent.budgetUsd);
-  const budgetUsd = Math.min(requested, effective.effectiveBudgetUsd);
-  if (budgetUsd <= 0 && effective.exhaustedBy) {
+  const budgetUsd =
+    Math.floor(Math.min(requested, effective.effectiveBudgetUsd) / MIN_RESERVATION_USD) * MIN_RESERVATION_USD;
+  if (budgetUsd < MIN_RESERVATION_USD && effective.exhaustedBy) {
     return { budgetUsd: 0, refusal: budgetExhaustedError(effective.exhaustedBy) };
   }
   return { budgetUsd };
+}
+
+/**
+ * Attempts for the persist transaction, and the jittered backoff between
+ * them, for serialization failures and deadlocks.
+ *
+ * @internal Exported only for the real-PostgreSQL tests.
+ */
+export const PERSIST_ATTEMPTS = 8;
+const RETRY_BASE_MS = 20;
+const RETRY_MAX_MS = 250;
+
+function retryDelayMs(attempt: number): number {
+  const ceiling = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** attempt);
+  return Math.floor(ceiling / 2 + Math.random() * (ceiling / 2));
 }
 
 /**
@@ -201,9 +235,19 @@ async function reserveCodingBudget(
  */
 export async function dispatchRun(options: DispatchRunOptions): Promise<DispatchRunResult | null> {
   const now = options.now ?? new Date();
+  // Read outside the transaction only to decide whether to take the group
+  // dispatch lock before the transaction's first read; everything the run is
+  // built from is re-read inside. If the agent changes in between, the
+  // Serializable transaction still refuses a conflicting commit.
+  const preview = await options.db.agent.findUnique({
+    where: { id: options.agentId },
+    select: { kind: true, budgetGroupId: true },
+  });
+  const lockGroups = preview?.kind === "coding" && preview.budgetGroupId != null;
   const persistOnce = () =>
     options.db.$transaction(
       async (tx) => {
+        if (lockGroups) await tx.$executeRawUnsafe(GROUP_DISPATCH_LOCK_SQL);
         if (options.lockAgent) {
           const locked = await tx.$queryRaw<{ id: string }[]>`
         SELECT "id" FROM "Agent" WHERE "id" = ${options.agentId} FOR UPDATE SKIP LOCKED
@@ -352,12 +396,13 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
     );
 
   let persisted: DispatchRunResult | null = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < PERSIST_ATTEMPTS; attempt += 1) {
     try {
       persisted = await persistOnce();
       break;
     } catch (err) {
-      if (!isSerializationConflict(err) || attempt === 2) throw err;
+      if (!isSerializationConflict(err) || attempt === PERSIST_ATTEMPTS - 1) throw err;
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
     }
   }
 

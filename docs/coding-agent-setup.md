@@ -121,11 +121,28 @@ configured period and, for a sub-agent, whatever its run tree has left. The
 worker can never spend more than that reservation. When a group or run tree
 has nothing left, the run is recorded as `refused` with the error
 `budget_group_exhausted:<day|week|month>` or `run_tree_exhausted`, and no
-container starts. Every run still pending or running holds its unspent
-reservation (reservation minus cost so far) against its group; a native run
-holds its agent's per-run `budgetUsd`. So overlapping scheduled, webhook and
-manual runs share one cap rather than each seeing the full remainder, and
+container starts (`trigger_agent` returns that status and error directly).
+
+Every live run still pending or running holds its unspent reservation
+(reservation minus cost so far) against its group; a native run holds its
+agent's per-run `budgetUsd`. So overlapping scheduled, webhook and manual runs
+share one cap rather than each seeing the full remainder, and
 `get_budget_group` reports those holds as `reservedUsd` next to `spentUsd`.
+Native runs are served first come, first served: a native run only counts the
+holds of runs that started before it, so members dispatched on the same tick
+don't starve each other.
+
+A hold lapses by itself when the run stops showing signs of life, so a crashed
+process or an interrupted `wardby run` cannot pin a group for the rest of the
+period. A run holds while its last heartbeat (or its start, before the first
+beat) is under 60 seconds old (the reconciler's heartbeat timeout plus one
+reconcile interval). Managed runs, `wardby run` and native sub-agent children
+all beat every 10 seconds. A coding run also holds until its
+`CODING_QUEUE_TIMEOUT_SEC` + its `timeoutSec` + 60 seconds have passed since
+dispatch, because it does not beat while it waits in the coding queue. Its
+recorded cost always counts. `wardby run` records the run as `cancelled` on
+Ctrl-C or SIGTERM. If a row is still stuck in `running` for another reason,
+only its real cost counts once its hold lapses.
 
 ## Stop the setup
 
