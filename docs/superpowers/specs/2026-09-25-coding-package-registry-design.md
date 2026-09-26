@@ -527,9 +527,10 @@ because `GOPROXY` is designed for this kind of proxy.
 ## Amendments during planning and implementation
 
 The plan that implemented this design (Tasks 1–12) made four amendments to
-this design during planning, and the controller made five further rulings
-during implementation. All nine are recorded here so this document stays the
-accurate record of what shipped.
+this design during planning, the controller made five further rulings
+during implementation, and the final whole-branch review added four more.
+All thirteen are recorded here so this document stays the accurate record of
+what shipped.
 
 ### From planning
 
@@ -582,3 +583,36 @@ accurate record of what shipped.
    check uses `SHADOW_DATABASE_URL` with `--to-schema --exit-code`) after this
    design was written. This design is otherwise version-agnostic: only import
    paths and drift-check commands differ from a Prisma 6 reading of it.
+
+### From the final review
+
+10. **npm names are case-exact.** npm treats some legacy capitalized names
+    as distinct packages (`JSONStream` is not `jsonstream`), so the npm
+    adapter's `normalizeName` is the identity, not lower-casing: allowlist
+    entries, routes, dependency keys and upstream paths keep the name exactly
+    as written, and allowlist matching is exact. Only scope wildcards are
+    folded, since npm scopes are always lower case. PyPI keeps PEP 503
+    normalization.
+11. **PyPI minimum release age is per file.** The age cutoff (§3) applies to
+    each file's own `upload-time`, not to the release's earliest upload: a
+    wheel added to an old release is dropped from the rendered index and
+    refused with `404 wardby_version_filtered` until it is old enough, while
+    the release's older wheels are served. `publishedAt` therefore lives on
+    `FileRef` (npm sets it to the version's publish time, since an npm
+    version has one immutable tarball), and `renderMetadata` also receives
+    the set of kept filenames.
+12. **Refusal records are capped.** At most 500 refused `RegistryFetch` rows
+    are recorded per run (an in-process counter seeded from the store, per
+    ruling 6's single-replica assumption). Further refusals still return
+    their normal error to the client but are not recorded, so a worker
+    retrying refused names cannot grow the table, `get_run` or the pull
+    request body without bound. The pull request section lists at most 100
+    packages and 100 refusals, then points to `get_run` for the full list.
+13. **OSV ranges are evaluated per package.** The audit counts only
+    `affected[]` entries whose ecosystem and adapter-normalized name match
+    the queried package, and a version is affected when it is listed or
+    falls inside a `SEMVER`/`ECOSYSTEM` range (npm GHSA entries carry ranges
+    only), compared with a new adapter method, `compareVersions` (semver for
+    npm, PEP 440 for PyPI). Metadata and OSV requests are bounded by
+    `REGISTRY_METADATA_TIMEOUT_MS` (504 `wardby_upstream_unavailable`) and
+    `REGISTRY_MAX_METADATA_MB` (502 `wardby_metadata_too_large`).

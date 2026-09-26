@@ -64,6 +64,11 @@ version range in that ecosystem's own syntax, or (npm only) a scope wildcard:
 - `flask>=3` — PEP 440 specifier syntax for PyPI.
 - A bare name with no range (`"lodash"`) allows any version, subject to the
   other safeguards below.
+- npm names are matched exactly, including case. npm treats some legacy
+  capitalized names as distinct packages (`JSONStream` is not `jsonstream`),
+  so allowing one never allows the other; write the name as npm spells it.
+  (npm scopes are always lower case.) PyPI names are compared after PEP 503
+  normalization, so `Flask`, `flask` and `FLASK` are the same entry.
 
 An absent or empty allowlist leaves registry mode off for that agent (the
 default). Only _top-level_ entries need to be on the allowlist — once a
@@ -92,10 +97,19 @@ commit or diff.
   malicious release is excluded by default. The default is 3 days; a
   profile's `packagePolicy.minReleaseAgeDays` can override it to any integer
   0–30. A version with no publish timestamp is treated as too new to install.
+  For PyPI the age applies to each file on its own upload time: a wheel added
+  to an old release yesterday is hidden from the index and refused
+  (`404 wardby_version_filtered`) until it is old enough, while the release's
+  older wheels are served. npm versions are immutable, so each version's
+  tarball has the version's publish time.
 - **OSV vulnerability audit.** Every package version is checked against the
   OSV database; versions affected by a **high** or **critical** severity
   advisory are withheld, and lower-severity advisories are allowed but
-  reported. If OSV can't be reached, installs in that request fail closed
+  reported. A version is affected when an advisory entry for that exact
+  package (same ecosystem and name) lists it, or when it falls inside one
+  of the entry's version ranges, compared with the ecosystem's own version
+  rules (semver for npm, PEP 440 for PyPI). A version the audit cannot
+  parse counts as affected. If OSV can't be reached, installs in that request fail closed
   (`503 wardby_audit_unavailable`) rather than skipping the check — an
   operator can opt out of fail-closed with `REGISTRY_AUDIT_FAIL_OPEN=true`.
 - **Wheels only for Python.** PyPI source distributions (sdists), which can
@@ -118,13 +132,23 @@ as what's already been recorded, so parallel downloads (for example npm's
 default concurrent connections) can't add up to more than the limit before any
 one of them finishes:
 
-| Setting                    | Default | Meaning                                                       |
-| -------------------------- | ------- | ------------------------------------------------------------- |
-| `REGISTRY_MAX_FILE_MB`     | 200     | Largest single downloaded file.                               |
-| `REGISTRY_MAX_TOTAL_MB`    | 2048    | Total bytes downloaded in one run.                            |
-| `REGISTRY_MAX_FILES`       | 5000    | Total files served in one run.                                |
-| `REGISTRY_IDLE_TIMEOUT_MS` | 120000  | Idle time allowed on one download.                            |
-| `REGISTRY_AUDIT_FAIL_OPEN` | `false` | Allow-and-report instead of refusing when OSV is unreachable. |
+| Setting                        | Default | Meaning                                                       |
+| ------------------------------ | ------- | ------------------------------------------------------------- |
+| `REGISTRY_MAX_FILE_MB`         | 200     | Largest single downloaded file.                               |
+| `REGISTRY_MAX_TOTAL_MB`        | 2048    | Total bytes downloaded in one run.                            |
+| `REGISTRY_MAX_FILES`           | 5000    | Total files served in one run.                                |
+| `REGISTRY_IDLE_TIMEOUT_MS`     | 120000  | Idle time allowed on one download.                            |
+| `REGISTRY_AUDIT_FAIL_OPEN`     | `false` | Allow-and-report instead of refusing when OSV is unreachable. |
+| `REGISTRY_METADATA_TIMEOUT_MS` | 30000   | Time allowed for one metadata or OSV request, body included.  |
+| `REGISTRY_MAX_METADATA_MB`     | 64      | Largest metadata or OSV response the proxy reads.             |
+
+Metadata is cached for five minutes in a bounded cache (500 packages, least
+recently used evicted first), and concurrent requests for the same package
+share one upstream fetch.
+
+At most 500 refusals are recorded per run. Refusals past that still return
+their normal error to npm or pip; they just aren't added to the run's record,
+so a worker retrying refused names in a loop can't grow it without bound.
 
 ## Integrity
 
@@ -139,28 +163,50 @@ streamed unverified for those files — there is nothing to verify against.
 
 ## What the reviewer sees
 
-Every package the proxy served or refused during a run is recorded. `get_run`
-returns `packages` (the ecosystem, name, and version of everything served)
-and `packageRefusals` (the ecosystem, name, and reason for everything
-refused) for a coding run. The pull request finalization also appends a
-collapsed **Packages installed during this run** section listing the same
-information, so a reviewer doesn't have to ask the agent what it added.
+Every package the proxy served during a run is recorded, and so is every
+refusal up to the 500-per-run cap above. `get_run` returns `packages` and
+`packageRefusals` for a coding run, each deduplicated (a retried download is
+one package):
+
+```json
+{
+  "packages": [
+    { "ecosystem": "npm", "name": "@heroui/react", "version": "3.2.6", "size": 482113 },
+    { "ecosystem": "pypi", "name": "flask", "version": "3.0.0", "size": 101817 }
+  ],
+  "packageRefusals": [{ "ecosystem": "npm", "name": "left-pad", "reason": "wardby_package_not_allowed" }]
+}
+```
+
+`size` is the number of bytes served, or `null` if none was recorded.
+
+The pull request finalization also appends a collapsed **Packages installed
+during this run** section listing the same information, so a reviewer
+doesn't have to ask the agent what it added. It lists at most 100 packages
+and 100 refusals, followed by "…and N more — see get_run for the full list";
+`get_run` always has the complete list. If the report can't be loaded or
+rendered, the section is left out and the pull request is still opened.
 
 ## Error codes
 
 npm and pip print the proxy's error body verbatim, so these are what you'll
 see on a failed install:
 
-| Code                         | Status | Meaning / what to do                                                                                                                                                                                         |
-| ---------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `wardby_package_not_allowed` | 403    | The package isn't on the allowlist and isn't reachable from an allowlisted package's dependency graph. Add it (or its top-level dependent) to `packageAllowlist`.                                            |
-| `wardby_file_not_allowed`    | 403    | The specific file type is never served for this ecosystem (for example a PyPI sdist). Nothing to configure; use a wheel.                                                                                     |
-| `wardby_version_filtered`    | 404    | Every matching version is too new (younger than `minReleaseAgeDays`) or withheld by the vulnerability audit. Wait for it to age past the threshold, or lower `minReleaseAgeDays` if you understand the risk. |
-| `wardby_package_not_found`   | 404    | The upstream registry has no such package name. Check the spelling.                                                                                                                                          |
-| `wardby_package_too_large`   | 413    | The file exceeds `REGISTRY_MAX_FILE_MB`. Ask the operator to raise it if the file is legitimately larger.                                                                                                    |
-| `wardby_package_limit`       | 429    | The run hit `REGISTRY_MAX_FILES` or `REGISTRY_MAX_TOTAL_MB`. Trim what the run installs, or ask the operator to raise the limit.                                                                             |
-| `wardby_audit_unavailable`   | 503    | OSV couldn't be reached and `REGISTRY_AUDIT_FAIL_OPEN` isn't set. Retry, or have the operator set that flag if the outage is expected to be long.                                                            |
-| `invalid_capability`         | 401    | The run's registry token doesn't match a live session (the run has ended or the token is malformed). Not something a package choice can fix.                                                                 |
+| Code                               | Status | Meaning / what to do                                                                                                                                                                                         |
+| ---------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `wardby_package_not_allowed`       | 403    | The package isn't on the allowlist and isn't reachable from an allowlisted package's dependency graph. Add it (or its top-level dependent) to `packageAllowlist`.                                            |
+| `wardby_file_not_allowed`          | 403    | The specific file type is never served for this ecosystem (for example a PyPI sdist). Nothing to configure; use a wheel.                                                                                     |
+| `wardby_version_filtered`          | 404    | Every matching version is too new (younger than `minReleaseAgeDays`) or withheld by the vulnerability audit. Wait for it to age past the threshold, or lower `minReleaseAgeDays` if you understand the risk. |
+| `wardby_package_not_found`         | 404    | The upstream registry has no such package name. Check the spelling (npm names are case-sensitive).                                                                                                           |
+| `wardby_package_too_large`         | 413    | The file exceeds `REGISTRY_MAX_FILE_MB`. Ask the operator to raise it if the file is legitimately larger.                                                                                                    |
+| `wardby_package_limit`             | 429    | The run hit `REGISTRY_MAX_FILES` or `REGISTRY_MAX_TOTAL_MB`. Trim what the run installs, or ask the operator to raise the limit.                                                                             |
+| `wardby_audit_unavailable`         | 503    | OSV couldn't be reached and `REGISTRY_AUDIT_FAIL_OPEN` isn't set. Retry, or have the operator set that flag if the outage is expected to be long.                                                            |
+| `wardby_bad_request`               | 400    | The request path is malformed (bad percent-encoding, or not a valid package name). A client or agent bug, not a package choice.                                                                              |
+| `wardby_upstream_error`            | 502    | The upstream registry answered with an error, or the download failed partway. Retry.                                                                                                                         |
+| `wardby_upstream_unavailable`      | 504    | The upstream registry didn't answer a metadata request within `REGISTRY_METADATA_TIMEOUT_MS`. Retry.                                                                                                         |
+| `wardby_metadata_too_large`        | 502    | The package's metadata document is larger than `REGISTRY_MAX_METADATA_MB`. Ask the operator to raise it.                                                                                                     |
+| `wardby_upstream_host_not_allowed` | 502    | The file's download URL points outside that ecosystem's own upstream hosts, so the proxy won't fetch it.                                                                                                     |
+| `invalid_capability`               | 401    | The run's registry token doesn't match a live session (the run has ended or the token is malformed). Not something a package choice can fix.                                                                 |
 
 ## Adding an ecosystem
 
