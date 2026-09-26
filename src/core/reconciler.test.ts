@@ -375,7 +375,8 @@ function withHostChecks(db: ReconcilerDb, runs: FakeRun[], checks: FakeHostCheck
         if (!run || check.completedAt !== where.completedAt) return false;
         if (!where.provider.in.includes(check.provider)) return false;
         if (where.run.status.notIn.includes(run.status)) return false;
-        return run.finishedAt !== null && run.finishedAt <= where.run.finishedAt.lte;
+        const { lte, gte } = where.run.finishedAt;
+        return run.finishedAt !== null && run.finishedAt <= lte && run.finishedAt >= gte;
       })
       .map((check) => ({ run: runs.find((r) => r.id === check.runId)! }));
     return out.slice(0, take);
@@ -469,6 +470,18 @@ describe("reconcileOnce orphaned host checks", () => {
       expect.objectContaining({ take: 50, orderBy: { run: { finishedAt: "desc" } } }),
     );
     expect(host.completeCheck).toHaveBeenCalledTimes(50);
+  });
+
+  it("gives up on a check whose run finished more than a day ago", async () => {
+    const runs = [baseRun({ id: "old", status: "lost", finishedAt: new Date(NOW.getTime() - 24 * 60 * 60_000 - 1) })];
+    const checks = [hostCheck("old")];
+    const { db } = withHostChecks(fakeDb(runs), runs, checks);
+    const host = fakeHost();
+
+    await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, { github: host });
+
+    expect(host.completeCheck).not.toHaveBeenCalled();
+    expect(checks[0].completedAt).toBeNull();
   });
 
   it("never queries host checks when no review host is configured", async () => {

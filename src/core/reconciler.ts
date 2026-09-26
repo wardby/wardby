@@ -54,12 +54,17 @@ export type ReconcilerDb = Pick<PrismaClient, "run" | "runHostCheck">;
 export const ORPHANED_CHECK_GRACE_MS = 60_000;
 /** Upper bound on checks completed per pass, so a backlog drains over several passes. */
 export const ORPHANED_CHECK_BATCH = 50;
+/** How long after a run finishes the sweep keeps trying to complete its check. */
+export const ORPHANED_CHECK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Completes (neutral) open host checks whose run reached a terminal status
- * at least ORPHANED_CHECK_GRACE_MS ago. Newest-finished first, so old checks
- * the host keeps refusing cannot starve newer ones. Never queries when no
- * host is configured. `closeOpenHostCheck` is best-effort and never throws.
+ * at least ORPHANED_CHECK_GRACE_MS and at most ORPHANED_CHECK_MAX_AGE_MS
+ * ago. Newest-finished first, so old checks the host keeps refusing cannot
+ * starve newer ones. A check the host still refuses after the max age (the
+ * check was deleted, the App was uninstalled, ...) is left as it is rather
+ * than retried forever; its Re-run button still works. Never queries when
+ * no host is configured. `closeOpenHostCheck` is best-effort and never throws.
  */
 export async function closeOrphanedHostChecks(
   db: Pick<PrismaClient, "runHostCheck">,
@@ -75,7 +80,10 @@ export async function closeOrphanedHostChecks(
       provider: { in: providers },
       run: {
         status: { notIn: ["pending", "running"] },
-        finishedAt: { lte: new Date(now.getTime() - ORPHANED_CHECK_GRACE_MS) },
+        finishedAt: {
+          lte: new Date(now.getTime() - ORPHANED_CHECK_GRACE_MS),
+          gte: new Date(now.getTime() - ORPHANED_CHECK_MAX_AGE_MS),
+        },
       },
     },
     select: { run: { select: { id: true, status: true } } },
