@@ -279,6 +279,21 @@ describe("GitHubReviewHost writes", () => {
     expect(calls.some((c) => c.path === `${BASE}/issues/comments/5`)).toBe(false);
   });
 
+  it("creates no check when given neither a check id nor a check name", async () => {
+    const { client, calls } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path === `${BASE}/pulls/7`) return json(PR);
+      if (method === "GET" && path.startsWith(`${BASE}/pulls/7/files`)) return json([]);
+      if (method === "GET" && path.startsWith(`${BASE}/issues/7/comments`)) return json([]);
+      if (method === "POST" && path === `${BASE}/issues/7/comments`)
+        return json({ id: 6, html_url: "https://x/6" }, 201);
+      return undefined;
+    });
+    const { checkName: _omitted, ...unchecked } = input;
+    const result = await new GitHubReviewHost(client).publishReview(REPO, { ...unchecked, comments: [] });
+    expect(result).toMatchObject({ published: true, checkId: null, checkConclusion: "failure" });
+    expect(calls.some((c) => c.path.includes("/check-runs"))).toBe(false);
+  });
+
   it("refuses a stale head and marks the run's check superseded", async () => {
     const moved = { ...PR, head: { ...PR.head, sha: OLD_SHA } };
     const { client, calls } = fakeGitHub(({ method, path }) => {

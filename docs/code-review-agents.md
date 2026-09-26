@@ -122,8 +122,9 @@ internal marker to the model:
 - `repo_pr_read` — a pull request's metadata and per-file diff patches.
 - `repo_read_file` / `repo_list_files` — read a file or list a directory at
   a ref.
-- `repo_publish_review` — publish inline comments, a summary, and the check
-  verdict for one PR head, in one call.
+- `repo_publish_review` — publish inline comments, a summary, and (only for
+  an agent linked with a `checkName`) the check verdict for one PR head, in
+  one call. Without a `checkName` no check is created.
 - `repo_comment` — post or reply to a conversation or inline-review comment.
 
 Every call names the `repository` explicitly; it must resolve to one of the
@@ -149,7 +150,15 @@ agent's links. Failures are always a JSON result, never a thrown error:
 To require a passing review before merge, add the link's `checkName` (e.g.
 "wardby review") as a required status check in the repository's branch
 protection rules. GitHub matches required checks by name, so it must be
-exactly what was passed to `link_repository`.
+exactly what was passed to `link_repository`. Also set the required check's
+expected source to the wardby GitHub App, so a check of the same name
+reported by anything else (another App, or a workflow in the repository)
+cannot satisfy it.
+
+The verdict comes from an LLM reading the pull request's own diff — content
+the PR's author controls and can use to steer the model. Treat it as one
+signal, not the only merge gate: keep a human approval (or another
+independent check) required alongside it.
 
 ## Accepted gap: a run reaped as lost leaves its check open
 

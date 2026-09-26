@@ -41,7 +41,6 @@ export interface ReviewToolContext {
   markRunCheckCompleted: () => Promise<void>;
 }
 
-const DEFAULT_CHECK_NAME = "wardby review";
 const DEFAULT_PATCH_CHARS = 60_000;
 const SHA = z.string().regex(/^[0-9a-f]{40}$/);
 const Repository = z.string().min(1).max(300);
@@ -155,7 +154,7 @@ export const REVIEW_HOST_TOOL_DEFS: LoadedTool[] = [
   {
     name: "repo_publish_review",
     description:
-      "Publishes your review of one pull request head, in one call: inline comments on diff lines (a ```suggestion block in a comment body becomes a one-click fix; comments on lines outside the diff move to the summary automatically), one summary comment that is edited in place on later reviews, and the check conclusion (APPROVE = success, CHANGES_REQUESTED = failure, COMMENT = neutral). Returns published:false with reason stale_head if the PR moved on; then stop.",
+      "Publishes your review of one pull request head, in one call: inline comments on diff lines (a ```suggestion block in a comment body becomes a one-click fix; comments on lines outside the diff move to the summary automatically), one summary comment that is edited in place on later reviews, and — only for an agent linked with a check name — the check conclusion (APPROVE = success, CHANGES_REQUESTED = failure, COMMENT = neutral). Returns published:false with reason stale_head if the PR moved on; then stop.",
     jsonSchema: {
       type: "object",
       properties: {
@@ -307,7 +306,7 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
           body: a.body,
           comments: (a.comments ?? []).map((c) => ({ ...c, side: c.side ?? "RIGHT" })),
           agentMarker: ctx.agentId,
-          checkName: link.checkName ?? DEFAULT_CHECK_NAME,
+          checkName: link.checkName ?? undefined,
           ...(ownsCheck ? { checkId: ctx.runCheck!.checkId } : {}),
         });
         if (ownsCheck) await ctx.markRunCheckCompleted();

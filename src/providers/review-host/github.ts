@@ -375,10 +375,10 @@ export class GitHubReviewHost implements CodeReviewHost {
         summary: input.summary,
         text: summaryBody.slice(0, CHECK_TEXT_LIMIT),
       };
-      let checkId = input.checkId;
+      let checkId: string | null = input.checkId ?? null;
       if (checkId) {
         await this.patchCheck(get, base, { checkId, conclusion, ...output, detailsUrl: summaryCommentUrl });
-      } else {
+      } else if (input.checkName) {
         const created = record(
           await (
             await get(

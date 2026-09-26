@@ -115,6 +115,27 @@ describe("handleReviewHostTool", () => {
     expect(c.markRunCheckCompleted).toHaveBeenCalledOnce();
   });
 
+  it("publishes with neither a check name nor a check id when the link has no check name and the run no check", async () => {
+    const UNCHECKED: RepositoryLink = { ...WRITE, checkName: null };
+    const c = ctx({ links: [UNCHECKED] });
+    await handleReviewHostTool(
+      "repo_publish_review",
+      JSON.stringify({
+        repository: WRITE.repository,
+        prNumber: 7,
+        headSha: SHA,
+        verdict: "COMMENT",
+        summary: "s",
+        body: "b",
+      }),
+      c,
+    );
+    const input = vi.mocked(c.hosts.github!.publishReview).mock.calls[0][1];
+    expect(input.checkName).toBeUndefined();
+    expect(input.checkId).toBeUndefined();
+    expect(c.markRunCheckCompleted).not.toHaveBeenCalled();
+  });
+
   it("does not hand another repository's run check to publish", async () => {
     const c = ctx({ runCheck: { provider: "github", repository: "chfields/elsewhere", checkId: "11" } });
     await handleReviewHostTool(

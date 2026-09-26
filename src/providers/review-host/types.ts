@@ -87,8 +87,11 @@ export interface PublishReviewInput {
   comments: InlineComment[];
   /** Identifies this agent's summary comment; the agent id. */
   agentMarker: string;
-  /** Used only when no checkId is supplied (a run not started by a host event). */
-  checkName: string;
+  /**
+   * Names a completed check to create when no checkId is supplied (a run not
+   * started by a host event). With neither, no check is created.
+   */
+  checkName?: string;
   /** The run's own in-progress check, when the control plane started one. */
   checkId?: string;
 }
@@ -98,7 +101,9 @@ export type PublishReviewResult =
       published: true;
       reviewUrl: string | null;
       summaryCommentUrl: string;
-      checkId: string;
+      /** Null when no check was completed or created (neither checkId nor checkName). */
+      checkId: string | null;
+      /** The verdict's check mapping — informational when checkId is null. */
       checkConclusion: CheckConclusion;
       inlineCount: number;
       outsideDiffCount: number;
