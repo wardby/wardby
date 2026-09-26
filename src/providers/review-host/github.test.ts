@@ -354,19 +354,40 @@ describe("GitHubReviewHost writes", () => {
     });
   });
 
+  it("edits a conversation comment or a review-thread reply with issues+pull_requests write", async () => {
+    const { client, calls, grants } = fakeGitHub(({ method, path }) => {
+      if (method === "PATCH" && path === `${BASE}/issues/comments/31`) return json({ id: 31 }, 200);
+      if (method === "PATCH" && path === `${BASE}/pulls/comments/32`) return json({ id: 32 }, 200);
+      return undefined;
+    });
+    const host = new GitHubReviewHost(client);
+    await host.editComment(REPO, { kind: "conversation", id: "31", body: "done" });
+    await host.editComment(REPO, { kind: "inline", id: "32", body: "done too" });
+    expect(calls.map((c) => [c.method, c.path, c.body])).toEqual([
+      ["PATCH", `${BASE}/issues/comments/31`, { body: "done" }],
+      ["PATCH", `${BASE}/pulls/comments/32`, { body: "done too" }],
+    ]);
+    expect(grants).toEqual([
+      { issues: "write", pull_requests: "write" },
+      { issues: "write", pull_requests: "write" },
+    ]);
+  });
+
   it("comments on an issue or replies in a review thread with issues+pull_requests write", async () => {
     const { client, calls, grants } = fakeGitHub(({ method, path }) => {
-      if (method === "POST" && path === `${BASE}/issues/3/comments`) return json({ html_url: "https://x/c" }, 201);
+      if (method === "POST" && path === `${BASE}/issues/3/comments`)
+        return json({ id: 31, html_url: "https://x/c" }, 201);
       if (method === "POST" && path === `${BASE}/pulls/7/comments/88/replies`)
-        return json({ html_url: "https://x/r" }, 201);
+        return json({ id: 32, html_url: "https://x/r" }, 201);
       if (method === "POST" && path === `${BASE}/issues/comments/4/reactions`) return json({ id: 1 }, 201);
       if (method === "POST" && path === `${BASE}/issues/12/reactions`) return json({ id: 2 }, 201);
       return undefined;
     });
     const host = new GitHubReviewHost(client);
-    await expect(host.comment(REPO, { number: 3, body: "hi" })).resolves.toEqual({ url: "https://x/c" });
+    await expect(host.comment(REPO, { number: 3, body: "hi" })).resolves.toEqual({ url: "https://x/c", id: "31" });
     await expect(host.comment(REPO, { number: 7, body: "yes", replyToReviewCommentId: "88" })).resolves.toEqual({
       url: "https://x/r",
+      id: "32",
     });
     await host.acknowledge(REPO, { kind: "conversation", id: "4" });
     await host.acknowledge(REPO, { kind: "subject", id: "12" });

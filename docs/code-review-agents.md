@@ -39,6 +39,26 @@ Once an agent is linked to a repository with the `pull_request` trigger:
   the issue. An edit that leaves an existing mention in place does not start
   another run, and only the issue author's own edits count.
 
+A `mention` run also gets a status comment from the App: "👀 Working on it"
+with the run id, posted on the issue or PR (or as a reply in the review
+thread) right after the reaction. When the run ends, the App edits that
+comment with the outcome:
+
+- the pull requests the run's coding sub-runs opened or pushed to;
+- the agent's final reply, quoted, when no pull request came out (for
+  example, a question back to the requester). `@`-mentions in the reply are
+  defused so nobody is pinged;
+- the run's final status when it did not succeed (`failed`, `lost`,
+  `budget_exhausted`, ...). Error text is never posted; look the run up by
+  its id.
+
+The final reply is posted where the mention was, so anyone who can read the
+issue or PR can read it. Do not give a mention agent instructions that would
+make it echo secrets or internal details into its final answer. If an edit
+fails, or the run ends before the comment exists, the reconciler finishes
+the comment within a few minutes. `@<app-slug> review` gets no status comment:
+its check run already shows the progress.
+
 Only comments and issues from people with **write (push) access** to the
 repository can trigger a run. wardby asks GitHub for the author's real
 permission on the repository (by their numeric user id) before either path
@@ -85,9 +105,11 @@ PR description:
 ```
 
 - The first line of the task appears only on a pull request that a wardby
-  coding run opened: the PR must be authored by the App itself and its
-  description must start with the run's hidden marker. A marker on anyone
-  else's PR is ignored. This relies on coding runs opening their PRs through
+  coding run opened and that is still open: the PR must be authored by the
+  App itself and its description must start with the run's hidden marker. A
+  marker on anyone else's PR is ignored. On a merged or closed PR the line is
+  left out, so a follow-up there starts from the default branch instead of
+  the PR's stale branch. This relies on coding runs opening their PRs through
   the same GitHub App that receives the mention. A router agent that
   delegates coding work can pass that run id on so the existing branch and
   PR are continued rather than a new one being opened.

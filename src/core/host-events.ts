@@ -9,6 +9,7 @@ import type { PrismaClient } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import type { CodeReviewHost, HostEvent, ReviewHostRegistry } from "../providers/review-host/types.js";
 import { dispatchRun } from "./dispatch.js";
+import { postMentionStatus } from "./host-status.js";
 import { logger } from "./logger.js";
 import { requiredLevel, type RepoAccessGate } from "./repo-access.js";
 import { composeTaskOverride } from "./untrusted-content.js";
@@ -22,7 +23,16 @@ const HOST_NAMES: Record<HostEvent["provider"], string> = { github: "GitHub" };
 
 export type HostEventDb = Pick<
   PrismaClient,
-  "agentRepository" | "agent" | "run" | "runHostCheck" | "codingRun" | "task" | "webhook" | "$transaction" | "$queryRaw"
+  | "agentRepository"
+  | "agent"
+  | "run"
+  | "runHostCheck"
+  | "runHostStatus"
+  | "codingRun"
+  | "task"
+  | "webhook"
+  | "$transaction"
+  | "$queryRaw"
 >;
 
 export interface RouteHostEventDeps {
@@ -37,7 +47,7 @@ export interface RouteHostEventDeps {
 
 export interface RouteResult {
   runIds: string[];
-  /** Cosmetic work to do after the webhook response is sent (reactions). */
+  /** Cosmetic work to do after the webhook response is sent (reactions, status comments). */
   followUps: Array<() => Promise<void>>;
 }
 
@@ -274,7 +284,9 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
         { repository: event.repository, number: event.number, runId: dispatched.run.id },
         "mention run dispatched",
       );
-      return { runIds: [dispatched.run.id], followUps: [react] };
+      const runId = dispatched.run.id;
+      const status = () => postMentionStatus(deps.db, host, event, runId, deps.hosts);
+      return { runIds: [runId], followUps: [react, status] };
     }
   }
 }

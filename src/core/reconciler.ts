@@ -31,7 +31,8 @@
  * Each pass also completes review-host checks left "in progress" by a run
  * that ended without reaching `executeRun`'s own finalizer (reaped here as
  * `lost`, failed to start, failed while loading, ...). One sweep covers all
- * of those paths instead of patching each.
+ * of those paths instead of patching each. Mention status comments get the
+ * same sweep: it also catches a run that ended before its comment was posted.
  */
 
 import type { Prisma, PrismaClient } from "#prisma";
@@ -41,10 +42,11 @@ import { HEARTBEAT_TIMEOUT_MS, RECONCILE_INTERVAL_MS } from "./timing.js";
 import { prisma as defaultDb } from "./db.js";
 import { logger } from "./logger.js";
 import { closeOpenHostCheck } from "./review-host-checks.js";
+import { completeHostStatus } from "./host-status.js";
 
 const reconcilerLog = logger.child({ module: "reconciler" });
 
-export type ReconcilerDb = Pick<PrismaClient, "run" | "runHostCheck">;
+export type ReconcilerDb = Pick<PrismaClient, "run" | "runHostCheck" | "runHostStatus">;
 
 /**
  * How long after a run finishes before its still-open check counts as
@@ -91,6 +93,38 @@ export async function closeOrphanedHostChecks(
     take: ORPHANED_CHECK_BATCH,
   });
   for (const { run } of orphans) await closeOpenHostCheck(db, run, hosts);
+}
+
+/**
+ * Completes open mention status comments on the same terms as
+ * closeOrphanedHostChecks: the run ended between ORPHANED_CHECK_GRACE_MS and
+ * ORPHANED_CHECK_MAX_AGE_MS ago, newest first, at most ORPHANED_CHECK_BATCH per
+ * pass. `completeHostStatus` is best-effort and never throws.
+ */
+export async function closeOrphanedHostStatuses(
+  db: Pick<PrismaClient, "runHostStatus" | "run">,
+  hosts: ReviewHostRegistry | undefined,
+  now: Date = new Date(),
+): Promise<void> {
+  const providers = Object.keys(hosts ?? {}) as ReviewHostProvider[];
+  if (!hosts || providers.length === 0) return;
+  const orphans = await db.runHostStatus.findMany({
+    where: {
+      completedAt: null,
+      provider: { in: providers },
+      run: {
+        status: { notIn: ["pending", "running"] },
+        finishedAt: {
+          lte: new Date(now.getTime() - ORPHANED_CHECK_GRACE_MS),
+          gte: new Date(now.getTime() - ORPHANED_CHECK_MAX_AGE_MS),
+        },
+      },
+    },
+    select: { run: { select: { id: true, status: true, finalText: true } } },
+    orderBy: { run: { finishedAt: "desc" } },
+    take: ORPHANED_CHECK_BATCH,
+  });
+  for (const { run } of orphans) await completeHostStatus(db, run, hosts);
 }
 
 /** Runs one reconciliation pass. Returns the number of runs marked `lost`. */
@@ -195,6 +229,7 @@ export async function reconcileOnce(
     lost += result.count;
   }
   await closeOrphanedHostChecks(db, reviewHosts, now);
+  await closeOrphanedHostStatuses(db, reviewHosts, now);
   return lost;
 }
 

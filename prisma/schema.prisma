@@ -319,6 +319,7 @@ model Run {
   executionBackend String?
   codingRun        CodingRun?
   hostCheck        RunHostCheck?
+  hostStatus       RunHostStatus?
 
   /// Un-phased: sub-agent dispatch (see AgentSubAgent). Null for a
   /// top-level run; set when this run was created by a parent run's
@@ -917,6 +918,23 @@ model RunHostCheck {
 }
 
 /// De-duplicates host webhook redeliveries; pruned after 7 days.
+/// The status comment wardby posts on the issue or pull request whose
+/// @-mention started this run ("working on it"), edited with the outcome
+/// when the run ends. One per mention run.
+model RunHostStatus {
+  runId       String    @id
+  run         Run       @relation(fields: [runId], references: [id], onDelete: Cascade)
+  provider    String
+  repository  String
+  /// The issue or pull request number the comment is on.
+  number      Int
+  /// "conversation" (issue/PR comment) or "inline" (a reply in a review thread).
+  commentKind String
+  commentId   String
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+}
+
 model HostEventDelivery {
   provider   String
   deliveryId String
