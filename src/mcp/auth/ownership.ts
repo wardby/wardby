@@ -1,14 +1,14 @@
 /**
- * Single seam for ownership decisions across Agent/BudgetGroup/Tool/Secret/
- * Webhook/Task (and anything else that gains a nullable owner column
- * later). A null owner means "public": readable AND mutable by anyone —
- * there is no gatekeeper, so no principal is turned away. `isOwner` stays
+ * Ownership decisions for the resource types that don't have grants yet:
+ * BudgetGroup/Tool/Secret/Datastore/Webhook/Task. A null owner still means
+ * "public" here: readable AND mutable by anyone. Tool and budget-group
+ * grants replace that in the resource-sharing grants Phases 2 and 3.
+ *
+ * Agents are NOT decided here any more: they use explicit grants (owner, or
+ * read < execute < write), and an owner-less agent is reachable only
+ * through its grants -- see ./access.ts and core/grants.ts. `isOwner` stays
  * available (strict, no null-passthrough) for checks that must stay
- * owner-only regardless of publicness — e.g. a future claim-on-edit
- * feature would use it to tell "already owned" apart from "public" before
- * deciding whether to stamp a new owner. Every tool file routes through
- * this module instead of re-deriving the null-handling itself, so changing
- * the policy again later is a change here, not an N-file sweep.
+ * owner-only regardless of publicness.
  */
 import type { PrismaClient, Tool } from "#prisma";
 import { McpError } from "../errors.js";
@@ -33,21 +33,6 @@ export function assertCanMutate(ownerId: string | null, principalId: string, not
 /** Prisma where-clause fragment: rows owned by the caller, plus public (null-owner) rows. */
 export function visibleToPrincipal(principalId: string) {
   return { OR: [{ ownerId: principalId }, { ownerId: null }] };
-}
-
-export async function requireOwnedAgent(db: PrismaClient, id: string, principalId: string) {
-  const agent = await db.agent.findUnique({ where: { id } });
-  if (!agent) throw new McpError(404, `Agent "${id}" not found.`);
-  assertCanMutate(agent.ownerId, principalId, `Agent "${id}" is not owned by the caller.`);
-  return agent;
-}
-
-export async function requireReadableAgent(db: PrismaClient, id: string, principalId: string) {
-  const agent = await db.agent.findUnique({ where: { id } });
-  if (!agent || !canRead(agent.ownerId, principalId)) {
-    throw new McpError(404, `Agent "${id}" not found.`);
-  }
-  return agent;
 }
 
 export async function requireOwnedBudgetGroup(db: PrismaClient, id: string, principalId: string) {

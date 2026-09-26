@@ -5,6 +5,7 @@ import { Prisma } from "#prisma";
 import { buildMcpServer } from "./server.js";
 import { TASKS_EXTENSION_ID } from "./capabilities.js";
 import type { McpRequestContext } from "./context.js";
+import { fakeResourceGrants, type FakeGrantSeed } from "../core/grants.test-support.js";
 
 const fakeProviders = {} as unknown as import("../providers/index.js").ProviderRegistry;
 const fakeDb = {} as unknown as import("#prisma").PrismaClient;
@@ -29,15 +30,18 @@ interface FakeAgentRow {
   ownerId: string | null;
 }
 
-function fakeDbWithAgents(agents: FakeAgentRow[]) {
+type AgentWhere = { ownerId: string } | { id: { in: string[] } };
+
+function fakeDbWithAgents(agents: FakeAgentRow[], grants: FakeGrantSeed[] = []) {
+  const matches = (a: FakeAgentRow, cond: AgentWhere) =>
+    "ownerId" in cond ? a.ownerId === cond.ownerId : cond.id.in.includes(a.id);
   return {
+    resourceGrant: fakeResourceGrants(grants),
     agent: {
-      findMany: async ({ where }: { where: { ownerId: string | null } | { OR: { ownerId: string | null }[] } }) => {
-        if ("OR" in where) {
-          const allowed = new Set(where.OR.map((c) => c.ownerId));
-          return agents.filter((a) => allowed.has(a.ownerId));
-        }
-        return agents.filter((a) => a.ownerId === where.ownerId);
+      findMany: async ({ where }: { where: AgentWhere | { OR: AgentWhere[] } | Record<string, never> }) => {
+        if ("OR" in where) return agents.filter((a) => (where.OR).some((c) => matches(a, c)));
+        if (Object.keys(where).length === 0) return agents;
+        return agents.filter((a) => matches(a, where as AgentWhere));
       },
     },
   } as unknown as import("#prisma").PrismaClient;
@@ -258,23 +262,29 @@ describe("buildMcpServer", () => {
     await client.close();
   });
 
-  it("a public agent is registered as an MCP prompt carrying its system prompt", async () => {
+  it("an agent shared with everyone is registered as an MCP prompt carrying its system prompt", async () => {
     const mcp = buildMcpServer({
       providers: fakeProviders,
-      db: fakeDbWithAgents([
-        {
-          id: "a1",
-          name: "public-review-agent",
-          model: "claude-sonnet-5",
-          systemPrompt: "Review the diff for bugs.",
-          ownerId: null,
-        },
-      ]),
+      db: fakeDbWithAgents(
+        [
+          {
+            id: "a1",
+            name: "public-review-agent",
+            model: "claude-sonnet-5",
+            systemPrompt: "Review the diff for bugs.",
+            ownerId: "owner-1",
+          },
+          { id: "a2", name: "ungranted-orphan", model: "m", systemPrompt: "x", ownerId: null },
+        ],
+        [{ resourceType: "agent", resourceId: "a1", granteeKind: "everyone", level: "read" }],
+      ),
       config: { canonicalUri: "https://host/mcp" },
     });
     const { client } = await connectClient(mcp);
     const { prompts } = await client.listPrompts();
     expect(prompts.map((p) => p.name)).toContain("public-review-agent");
+    // An owner-less agent is no longer public by itself: only a grant shares it.
+    expect(prompts.map((p) => p.name)).not.toContain("ungranted-orphan");
 
     const result = await client.getPrompt({ name: "public-review-agent" });
     const text = (result.messages[0].content as { type: "text"; text: string }).text;
@@ -310,6 +320,22 @@ describe("buildMcpServer", () => {
     const { client } = await connectClient(mcp);
     const { prompts } = await client.listPrompts();
     expect(prompts.map((p) => p.name)).toContain("private-agent");
+    await client.close();
+  });
+
+  it("the stdio operator sees every agent as a prompt", async () => {
+    const mcp = buildMcpServer({
+      providers: fakeProviders,
+      db: fakeDbWithAgents([
+        { id: "a1", name: "someone-elses", model: "m", systemPrompt: "x", ownerId: "owner-1" },
+        { id: "a2", name: "orphan", model: "m", systemPrompt: "x", ownerId: null },
+      ]),
+      config: { canonicalUri: "https://host/mcp" },
+    });
+    mcp.setFixedContext({ ...fakeCtx(), operator: true });
+    const { client } = await connectClient(mcp);
+    const { prompts } = await client.listPrompts();
+    expect(prompts.map((p) => p.name).sort()).toEqual(["orphan", "someone-elses"]);
     await client.close();
   });
 });

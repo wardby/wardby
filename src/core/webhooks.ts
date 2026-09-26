@@ -51,8 +51,19 @@ export async function createWebhook(
   return { id: webhook.id, secret };
 }
 
-export async function listWebhooks(ownerId: string, db: PrismaClient): Promise<WebhookMetadata[]> {
-  const webhooks = await db.webhook.findMany({ where: { ownerId } });
+/**
+ * Webhooks the principal created, plus every webhook on an agent it owns
+ * (the agent owner must be able to see standing triggers others hold on
+ * its agent). `all` (the stdio operator) lists every webhook.
+ */
+export async function listWebhooks(
+  principalId: string,
+  db: PrismaClient,
+  opts: { all?: boolean } = {},
+): Promise<WebhookMetadata[]> {
+  const webhooks = await db.webhook.findMany({
+    where: opts.all ? {} : { OR: [{ ownerId: principalId }, { agent: { ownerId: principalId } }] },
+  });
   return webhooks.map(({ id, agentId, status, ownerId: owner, createdAt, lastFiredAt }) => ({
     id,
     agentId,

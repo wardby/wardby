@@ -1,10 +1,16 @@
 import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
-import { requireReadableAgent } from "../auth/ownership.js";
+import { agentAccess, requireAgentAccess } from "../auth/access.js";
 import { publicCodingRunResult } from "../../coding/protocol.js";
 import { countPlanRefusals, summarizeRegistryFetches } from "../../coding/registry/report.js";
 import { textResult } from "./text-result.js";
 
+/**
+ * Run visibility (resource-sharing grants spec §3.5, A6): a run's output is
+ * the triggerer's and the agent owner's, never every reader's. The owner
+ * (and the stdio operator) sees every run; anyone else only runs with
+ * Run.triggeredById equal to themselves.
+ */
 export function registerRunTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "list_runs",
@@ -15,9 +21,13 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       required: ["agentId"],
     },
     handler: async (args: { agentId: string; status?: string; limit?: number }, ctx) => {
-      await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
+      const { access } = await requireAgentAccess(ctx, args.agentId, "read");
       const runs = await ctx.db.run.findMany({
-        where: { agentId: args.agentId, ...(args.status ? { status: args.status as never } : {}) },
+        where: {
+          agentId: args.agentId,
+          ...(args.status ? { status: args.status as never } : {}),
+          ...(access === "owner" ? {} : { triggeredById: ctx.principal.id }),
+        },
         take: args.limit,
         orderBy: { startedAt: "desc" },
       });
@@ -47,8 +57,14 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
     inputSchema: { type: "object", properties: { runId: { type: "string" } }, required: ["runId"] },
     handler: async (args: { runId: string }, ctx) => {
       const run = await ctx.db.run.findUnique({ where: { id: args.runId } });
-      if (!run) throw new McpError(404, `Run "${args.runId}" not found.`);
-      await requireReadableAgent(ctx.db, run.agentId, ctx.principal.id);
+      const notFound = new McpError(404, `Run "${args.runId}" not found.`);
+      if (!run) throw notFound;
+      // Its triggerer keeps seeing it even after losing access to the agent;
+      // otherwise only the agent's owner. read on the agent is not enough.
+      if (run.triggeredById !== ctx.principal.id) {
+        const agent = await ctx.db.agent.findUnique({ where: { id: run.agentId } });
+        if (!agent || (await agentAccess(ctx, agent)) !== "owner") throw notFound;
+      }
       const codingRun = await ctx.db.codingRun.findUnique({
         where: { runId: run.id },
         select: { result: true, queuedAt: true, failureCategory: true, diagnosticId: true },

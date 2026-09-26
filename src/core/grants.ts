@@ -108,11 +108,15 @@ export async function effectiveAccess<T extends ResourceType>(
   return access as Access<T>;
 }
 
-/** resourceId -> best level the principal holds through grants (ownership not included). */
+/**
+ * resourceId -> best level the principal holds through grants (ownership
+ * not included). A null principal gets everyone grants only (e.g. an HTTP
+ * connection whose identity isn't known yet).
+ */
 export async function grantedAccessMap<T extends ResourceType>(
   db: GrantDb,
   type: T,
-  principalId: string,
+  principalId: string | null,
 ): Promise<Map<string, Level<T>>> {
   const rows = await db.resourceGrant.findMany({
     where: { resourceType: type, granteeKey: { in: granteeKeys(principalId) } },
@@ -131,7 +135,7 @@ export async function grantedAccessMap<T extends ResourceType>(
 export async function grantedIds<T extends ResourceType>(
   db: GrantDb,
   type: T,
-  principalId: string,
+  principalId: string | null,
   minLevel: Level<T>,
 ): Promise<string[]> {
   const map = await grantedAccessMap(db, type, principalId);

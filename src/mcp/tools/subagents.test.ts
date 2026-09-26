@@ -5,6 +5,7 @@ import { Prisma } from "#prisma";
 import { buildMcpServer } from "../server.js";
 import { registerSubAgentTools } from "./subagents.js";
 import type { McpRequestContext } from "../context.js";
+import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 
 const CANONICAL_URI = "https://host/mcp";
 
@@ -20,10 +21,12 @@ interface FakeEdgeRow {
   boundName: string;
 }
 
-function fakeDb(agents: FakeAgentRow[]) {
+function fakeDb(agents: FakeAgentRow[], grants: FakeGrantSeed[] = []) {
   const agentRows = new Map(agents.map((a) => [a.id, a]));
   const edges: FakeEdgeRow[] = [];
   return {
+    resourceGrant: fakeResourceGrants(grants),
+    edges,
     agent: {
       findUnique: async ({ where }: { where: { id: string } }) => agentRows.get(where.id) ?? null,
     },
@@ -87,8 +90,14 @@ function fakeDb(agents: FakeAgentRow[]) {
   } as unknown as import("#prisma").PrismaClient;
 }
 
-function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {
+function fakeCtx(
+  db: ReturnType<typeof fakeDb>,
+  principalId: string,
+  scopes: string[],
+  extra: Partial<McpRequestContext> = {},
+): McpRequestContext {
   return {
+    ...extra,
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
     canonicalUri: CANONICAL_URI,
@@ -112,10 +121,15 @@ function parseText(result: { content: { text: string }[] }): unknown {
   return JSON.parse(result.content[0].text);
 }
 
-function setup(agents: FakeAgentRow[], principalId: string) {
-  const db = fakeDb(agents);
+function setup(
+  agents: FakeAgentRow[],
+  principalId: string,
+  grants: FakeGrantSeed[] = [],
+  extra: Partial<McpRequestContext> = {},
+) {
+  const db = fakeDb(agents, grants);
   const mcp = buildMcpServer({ providers: {} as never, db, config: { canonicalUri: CANONICAL_URI } });
-  mcp.setFixedContext(fakeCtx(db, principalId, ["agents:read", "agents:write"]));
+  mcp.setFixedContext(fakeCtx(db, principalId, ["agents:read", "agents:write"], extra));
   registerSubAgentTools(mcp);
   return { db, mcp };
 }
@@ -245,12 +259,129 @@ describe("subagent tools", () => {
     await client.close();
   });
 
-  it("list_subagents requires ownership of the queried agent", async () => {
+  it("list_subagents hides an agent the caller can't read", async () => {
     const { mcp } = setup([{ id: "a", name: "a", ownerId: "someone-else" }], "p1");
     const client = await connectClient(mcp);
 
     const result = await client.callTool({ name: "list_subagents", arguments: { agentId: "a" } });
     expect(result.isError).toBeTruthy();
+    expect(JSON.stringify(result)).toContain("not found");
     await client.close();
+  });
+
+  describe("across owners (N1)", () => {
+    const agents: FakeAgentRow[] = [
+      { id: "P", name: "alice-parent", ownerId: "alice" },
+      { id: "C", name: "bob-child", ownerId: "bob" },
+    ];
+    const g = (resourceId: string, principalId: string, level: string): FakeGrantSeed => ({
+      resourceType: "agent",
+      resourceId,
+      principalId,
+      level,
+    });
+    const attach = { name: "attach_subagent", arguments: { parentAgentId: "P", childAgentId: "C" } };
+
+    it("N1: owned child under foreign parent is refused at attach and at delegation (attach side)", async () => {
+      // Bob can edit Alice's parent and owns the child, but Alice never gave
+      // Bob's child to her agent: the edge would run Bob's agent (with Bob's
+      // bindings) on behalf of anyone who can trigger Alice's.
+      const { db, mcp } = setup(agents, "bob", [g("P", "bob", "write")]);
+      const client = await connectClient(mcp);
+      const refused = await client.callTool(attach);
+      expect(refused.isError).toBeTruthy();
+      expect(JSON.stringify(refused)).toMatch(/execute/);
+      expect((db as any).edges).toEqual([]);
+      await client.close();
+    });
+
+    it("the old N1 path: execute on a formerly public parent is not enough to attach to it", async () => {
+      const { db, mcp } = setup(
+        [
+          { id: "P", name: "public-parent", ownerId: null },
+          { id: "C", name: "bob-child", ownerId: "bob" },
+        ],
+        "bob",
+        [{ resourceType: "agent", resourceId: "P", granteeKind: "everyone", level: "execute" }],
+      );
+      const client = await connectClient(mcp);
+      const refused = await client.callTool(attach);
+      expect(refused.isError).toBeTruthy();
+      expect(JSON.stringify(refused)).toMatch(/needs write/);
+      expect((db as any).edges).toEqual([]);
+      await client.close();
+    });
+
+    it("an owner-less parent can't take any sub-agent, even from the operator", async () => {
+      const { mcp } = setup(
+        [
+          { id: "P", name: "public-parent", ownerId: null },
+          { id: "C", name: "child", ownerId: null },
+        ],
+        "local",
+        [],
+        { operator: true },
+      );
+      const client = await connectClient(mcp);
+      const refused = await client.callTool(attach);
+      expect(refused.isError).toBeTruthy();
+      expect(JSON.stringify(refused)).toMatch(/owner/);
+      await client.close();
+    });
+
+    it("the caller needs execute on the child (404 when it can't even read it)", async () => {
+      const { mcp } = setup(agents, "alice");
+      const client = await connectClient(mcp);
+      const refused = await client.callTool(attach);
+      expect(JSON.stringify(refused)).toContain("not found");
+      await client.close();
+    });
+
+    it("allowed when the parent's owner holds execute on the child", async () => {
+      const { db, mcp } = setup(agents, "alice", [g("C", "alice", "execute")]);
+      const client = await connectClient(mcp);
+      const ok = await client.callTool(attach);
+      expect(ok.isError).toBeFalsy();
+      expect((db as any).edges).toHaveLength(1);
+      await client.close();
+    });
+
+    it("the child's owner can always cut the edge, without write on the parent", async () => {
+      const { db, mcp } = setup(agents, "bob");
+      (db as any).edges.push({ parentAgentId: "P", childAgentId: "C", boundName: "c" });
+      const client = await connectClient(mcp);
+      const ok = await client.callTool({
+        name: "detach_subagent",
+        arguments: { parentAgentId: "P", childAgentId: "C" },
+      });
+      expect(ok.isError).toBeFalsy();
+      expect((db as any).edges).toEqual([]);
+      await client.close();
+    });
+
+    it("a stranger can't detach", async () => {
+      const { db, mcp } = setup(agents, "mallory", [g("P", "mallory", "execute"), g("C", "mallory", "execute")]);
+      (db as any).edges.push({ parentAgentId: "P", childAgentId: "C", boundName: "c" });
+      const client = await connectClient(mcp);
+      const refused = await client.callTool({
+        name: "detach_subagent",
+        arguments: { parentAgentId: "P", childAgentId: "C" },
+      });
+      expect(refused.isError).toBeTruthy();
+      expect((db as any).edges).toHaveLength(1);
+      await client.close();
+    });
+
+    it("list_subagents needs read, and names only agents the caller can read", async () => {
+      const { db, mcp } = setup(agents, "reader", [g("P", "reader", "read")]);
+      (db as any).edges.push({ parentAgentId: "P", childAgentId: "C", boundName: "c" });
+      const client = await connectClient(mcp);
+      const listed = await client.callTool({ name: "list_subagents", arguments: { agentId: "P" } });
+      expect(listed.isError).toBeFalsy();
+      const body = parseText(listed as never);
+      expect(body).toEqual({ children: [], parents: [], hiddenChildren: 1 });
+      expect(JSON.stringify(body)).not.toContain("bob-child");
+      await client.close();
+    });
   });
 });

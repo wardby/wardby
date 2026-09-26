@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import { registerSchedulingTools } from "./scheduling.js";
 import type { McpRequestContext } from "../context.js";
+import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 
 const CANONICAL_URI = "https://host/mcp";
 const fakeProviders = {} as unknown as import("../../providers/index.js").ProviderRegistry;
@@ -18,9 +19,10 @@ interface FakeAgentRow {
   codingProfile?: { defaultTask: string | null } | null;
 }
 
-function fakeDb(agents: FakeAgentRow[]) {
+function fakeDb(agents: FakeAgentRow[], grants: FakeGrantSeed[] = []) {
   const rows = new Map(agents.map((a) => [a.id, a]));
   const transactionDb = {
+    resourceGrant: fakeResourceGrants(grants),
     agent: {
       findUnique: async ({ where }: { where: { id: string } }) => rows.get(where.id) ?? null,
       update: async ({ where, data }: { where: { id: string }; data: Partial<FakeAgentRow> }) => {
@@ -150,6 +152,52 @@ describe("scheduling tools", () => {
     expect(result.isError).toBeFalsy();
     const body = parseText(result as never) as { scheduleEnabled: boolean };
     expect(body.scheduleEnabled).toBe(false);
+    await client.close();
+  });
+
+  it("set_schedule and disable_schedule need write: a write-grantee may, an execute-grantee may not", async () => {
+    const agent = (): FakeAgentRow => ({
+      id: "a1",
+      ownerId: "owner",
+      schedule: "0 * * * *",
+      timezone: "UTC",
+      scheduleEnabled: true,
+    });
+    for (const [level, allowed] of [
+      ["write", true],
+      ["execute", false],
+    ] as const) {
+      const db = fakeDb([agent()], [{ resourceType: "agent", resourceId: "a1", principalId: "g", level }]);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "g", ["agents:write"]));
+      registerSchedulingTools(mcp);
+      const client = await connectClient(mcp);
+      const set = await client.callTool({
+        name: "set_schedule",
+        arguments: { agentId: "a1", schedule: "5 * * * *", timezone: "UTC" },
+      });
+      const disable = await client.callTool({ name: "disable_schedule", arguments: { agentId: "a1" } });
+      expect(Boolean(set.isError)).toBe(!allowed);
+      expect(Boolean(disable.isError)).toBe(!allowed);
+      if (!allowed) expect(JSON.stringify(set)).toMatch(/needs write/);
+      await client.close();
+    }
+  });
+
+  it("nobody but the stdio operator edits an owner-less agent's schedule", async () => {
+    const db = fakeDb(
+      [{ id: "a1", ownerId: null, schedule: null, timezone: "UTC", scheduleEnabled: true }],
+      [{ resourceType: "agent", resourceId: "a1", granteeKind: "everyone", level: "execute" }],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "anyone", ["agents:write"]));
+    registerSchedulingTools(mcp);
+    const client = await connectClient(mcp);
+    const refused = await client.callTool({ name: "disable_schedule", arguments: { agentId: "a1" } });
+    expect(refused.isError).toBe(true);
+    mcp.setFixedContext({ ...fakeCtx(db, "local", ["agents:write"]), operator: true });
+    const ok = await client.callTool({ name: "disable_schedule", arguments: { agentId: "a1" } });
+    expect(ok.isError).toBeFalsy();
     await client.close();
   });
 });

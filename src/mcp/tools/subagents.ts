@@ -1,13 +1,17 @@
 /**
- * AgentSubAgent CRUD — agent-composition edges. Attach/detach require
- * ownership of both the parent and child agent (same convention as
- * attach_tool requiring ownership of both the agent and the tool), and
- * attach rejects any edge that would create a cycle in the parent/child
- * graph (§7 of the design doc) — cycles are not something Postgres can
- * enforce natively.
+ * AgentSubAgent CRUD — agent-composition edges. An edge runs the child
+ * (with its owner's bindings) whenever the parent delegates, so across
+ * owners it needs an explicit grant (resource-sharing grants spec §3.4.4,
+ * N1): attaching needs write on the parent and execute on the child, and
+ * the parent's owner must be the child's owner or hold execute on it
+ * (canDelegate, re-checked on every delegation at run time). The child's
+ * owner can always cut an edge. Attach also rejects any edge that would
+ * create a cycle in the parent/child graph (§7 of the design doc) — cycles
+ * are not something Postgres can enforce natively.
  */
 import { Prisma, type PrismaClient } from "#prisma";
-import { requireOwnedAgent } from "../auth/ownership.js";
+import { atLeast, canDelegate } from "../../core/grants.js";
+import { agentAccess, agentAccessResolver, agentNotFound, requireAgentAccess } from "../auth/access.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
@@ -64,8 +68,21 @@ export function registerSubAgentTools(mcp: WardbyMcpServer): void {
       if (args.parentAgentId === args.childAgentId) {
         throw new McpError(400, "An agent cannot be its own sub-agent.");
       }
-      const parent = await requireOwnedAgent(ctx.db, args.parentAgentId, ctx.principal.id);
-      const child = await requireOwnedAgent(ctx.db, args.childAgentId, ctx.principal.id);
+      const { agent: parent } = await requireAgentAccess(ctx, args.parentAgentId, "write");
+      // The caller could trigger the child anyway; the edge must not widen that.
+      const { agent: child } = await requireAgentAccess(ctx, args.childAgentId, "execute");
+      if (parent.ownerId === null) {
+        throw new McpError(
+          403,
+          `Agent "${parent.id}" has no owner, so it can't take sub-agents; an admin can assign one with make_owner.`,
+        );
+      }
+      if (!(await canDelegate(ctx.db, parent, child))) {
+        throw new McpError(
+          403,
+          `"${child.name}" belongs to another owner, who has not given the owner of "${parent.name}" execute access to it.`,
+        );
+      }
       if (await canReach(ctx.db, args.childAgentId, args.parentAgentId)) {
         throw new McpError(400, `Attaching "${child.name}" as a sub-agent of "${parent.name}" would create a cycle.`);
       }
@@ -99,8 +116,21 @@ export function registerSubAgentTools(mcp: WardbyMcpServer): void {
       required: ["parentAgentId", "childAgentId"],
     },
     handler: async (args: { parentAgentId: string; childAgentId: string }, ctx) => {
-      await requireOwnedAgent(ctx.db, args.parentAgentId, ctx.principal.id);
-      await requireOwnedAgent(ctx.db, args.childAgentId, ctx.principal.id);
+      // Write on the parent, or ownership of the child: a child's owner can
+      // always take its agent back out of someone else's composition.
+      const [parent, child] = await Promise.all([
+        ctx.db.agent.findUnique({ where: { id: args.parentAgentId } }),
+        ctx.db.agent.findUnique({ where: { id: args.childAgentId } }),
+      ]);
+      const parentAccess = parent ? await agentAccess(ctx, parent) : "none";
+      const childAccess = child ? await agentAccess(ctx, child) : "none";
+      if (!atLeast("agent", parentAccess, "write") && childAccess !== "owner") {
+        if (!atLeast("agent", parentAccess, "read")) throw agentNotFound(args.parentAgentId);
+        throw new McpError(
+          403,
+          `Detaching needs write on "${args.parentAgentId}" or ownership of "${args.childAgentId}".`,
+        );
+      }
       await ctx.db.agentSubAgent.deleteMany({
         where: { parentAgentId: args.parentAgentId, childAgentId: args.childAgentId },
       });
@@ -118,20 +148,29 @@ export function registerSubAgentTools(mcp: WardbyMcpServer): void {
       required: ["agentId"],
     },
     handler: async (args: { agentId: string }, ctx) => {
-      await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+      await requireAgentAccess(ctx, args.agentId, "read");
+      const accessOf = await agentAccessResolver(ctx);
       const [asParent, asChild] = await Promise.all([
         ctx.db.agentSubAgent.findMany({
           where: { parentAgentId: args.agentId },
-          include: { child: { select: { id: true, name: true } } },
+          include: { child: { select: { id: true, name: true, ownerId: true } } },
         }),
         ctx.db.agentSubAgent.findMany({
           where: { childAgentId: args.agentId },
-          include: { parent: { select: { id: true, name: true } } },
+          include: { parent: { select: { id: true, name: true, ownerId: true } } },
         }),
       ]);
+      // Only agents the caller can read are named; the rest are counted.
+      const readable = (agent: { id: string; ownerId: string | null }) => atLeast("agent", accessOf(agent), "read");
+      const children = asParent.filter((e) => readable(e.child));
+      const parents = asChild.filter((e) => readable(e.parent));
+      const hiddenChildren = asParent.length - children.length;
+      const hiddenParents = asChild.length - parents.length;
       return textResult({
-        children: asParent.map((e) => ({ boundName: e.boundName, agentId: e.child.id, agentName: e.child.name })),
-        parents: asChild.map((e) => ({ boundName: e.boundName, agentId: e.parent.id, agentName: e.parent.name })),
+        children: children.map((e) => ({ boundName: e.boundName, agentId: e.child.id, agentName: e.child.name })),
+        parents: parents.map((e) => ({ boundName: e.boundName, agentId: e.parent.id, agentName: e.parent.name })),
+        ...(hiddenChildren > 0 ? { hiddenChildren } : {}),
+        ...(hiddenParents > 0 ? { hiddenParents } : {}),
       });
     },
   });

@@ -34,7 +34,10 @@ import { z } from "zod";
 import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { createTaskResult, getTask, cancelTask } from "../tasks/manager.js";
-import { canMutate, requireOwnedAgent, requireOwnedTask } from "../auth/ownership.js";
+import { requireOwnedTask } from "../auth/ownership.js";
+import { assertAgentAccess, type AgentAccess } from "../auth/access.js";
+import type { McpRequestContext } from "../context.js";
+import type { PrismaClient } from "#prisma";
 import { textResult } from "./text-result.js";
 
 const DEFAULT_TASK_TTL_MS = 24 * 60 * 60 * 1000;
@@ -54,6 +57,46 @@ function parseTriggerArgs(args: unknown): z.infer<typeof TriggerAgentSchema> {
   throw new McpError(400, `Invalid trigger_agent arguments: ${details}`);
 }
 
+/**
+ * A non-owner's coding task or baseRef would steer what the owner's
+ * repository authority does, so it is allowed only when the owner opted in
+ * to non-owner task text (codingProfile.allowWebhookTaskOverride, the same
+ * opt-in webhooks use). Otherwise a non-owner run uses the owner's
+ * defaultTask. Resource-sharing grants spec §3.4.5.
+ */
+function assertOverrideAllowed(
+  access: AgentAccess,
+  agent: { id: string; codingProfile: { allowWebhookTaskOverride: boolean } | null },
+  args: { task?: string; baseRef?: string },
+): void {
+  if (access === "owner" || (args.task === undefined && args.baseRef === undefined)) return;
+  if (!agent.codingProfile?.allowWebhookTaskOverride) {
+    throw new McpError(
+      403,
+      `Agent "${agent.id}": only its owner can pass a task or baseRef, unless the owner allows it (codingProfile.allowWebhookTaskOverride).`,
+    );
+  }
+}
+
+type TriggerableAgent = {
+  id: string;
+  ownerId: string | null;
+  codingProfile: { allowWebhookTaskOverride: boolean } | null;
+};
+
+/** execute on the agent, plus the override rule; `db` is the transaction when re-checking. */
+async function requireTriggerable<A extends TriggerableAgent>(
+  ctx: McpRequestContext,
+  row: A | null,
+  id: string,
+  args: { task?: string; baseRef?: string },
+  db: Pick<PrismaClient, "resourceGrant"> = ctx.db,
+): Promise<A> {
+  const { agent, access } = await assertAgentAccess(ctx, row, id, "execute", db);
+  assertOverrideAllowed(access, agent, args);
+  return agent;
+}
+
 export function registerTriggerTool(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "trigger_agent",
@@ -66,7 +109,12 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
     },
     handler: async (rawArgs: unknown, ctx) => {
       const args = parseTriggerArgs(rawArgs);
-      const agent = await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+      const agent = await requireTriggerable(
+        ctx,
+        await ctx.db.agent.findUnique({ where: { id: args.agentId }, include: { codingProfile: true } }),
+        args.agentId,
+        args,
+      );
       if (agent.kind !== "coding" && (args.task !== undefined || args.baseRef !== undefined)) {
         throw new McpError(400, "Task and baseRef overrides are only valid for coding agents.");
       }
@@ -79,10 +127,11 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         codingTask: args.task,
         codingBaseRef: args.baseRef,
         task: ctx.clientSupportsTasks ? { principalId: ctx.principal.id, ttlMs: DEFAULT_TASK_TTL_MS } : undefined,
-        beforePersist: async (_tx, current) => {
-          if (!canMutate(current.ownerId, ctx.principal.id)) {
-            throw new McpError(403, `Agent "${agent.id}" is not owned by the caller.`);
-          }
+        triggeredById: ctx.principal.id,
+        // Re-checked through the transaction: a concurrent revoke or
+        // make_owner conflicts instead of racing the run in.
+        beforePersist: async (tx, current) => {
+          await requireTriggerable(ctx, current, agent.id, args, tx);
           return true;
         },
       });

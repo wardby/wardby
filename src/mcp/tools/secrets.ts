@@ -7,7 +7,8 @@ import { inputRequired, inputResponse } from "@modelcontextprotocol/server";
 import { createSecret, listSecrets, attachSecret, detachSecret, deleteSecret } from "../../core/secrets.js";
 import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
-import { requireOwnedAgent, requireOwnedSecret } from "../auth/ownership.js";
+import { requireOwnedSecret } from "../auth/ownership.js";
+import { requireAgentAccess, requireBindingOwner } from "../auth/access.js";
 import { getSecretElicitationOutcome, type SecretElicitationPayload } from "./secret-elicitation.js";
 import { textResult } from "./text-result.js";
 
@@ -109,9 +110,15 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
       required: ["agentId", "name"],
     },
     handler: async (args: { agentId: string; name: string; alias?: string }, ctx) => {
-      await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+      // Strictly the agent owner's own secret on the owner's own agent
+      // (A2/S2-2): a binding hands the value to every tool the owner lets
+      // read it. Not even the stdio operator crosses owners.
+      const { agent } = await requireAgentAccess(ctx, args.agentId, "read");
+      requireBindingOwner(ctx, agent);
+      const ownerId = agent.ownerId!;
       try {
-        await attachSecret(args.agentId, args.name, ctx.principal.id, ctx.db, args.alias ?? args.name);
+        // Resolved among the agent owner's secrets (== the caller here).
+        await attachSecret(args.agentId, args.name, ownerId, ctx.db, args.alias ?? args.name);
       } catch (err) {
         throw new McpError(404, err instanceof Error ? err.message : String(err));
       }
@@ -130,7 +137,8 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
       required: ["agentId", "name"],
     },
     handler: async (args: { agentId: string; name: string }, ctx) => {
-      await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+      const { agent } = await requireAgentAccess(ctx, args.agentId, "read");
+      requireBindingOwner(ctx, agent);
       const count = await detachSecret(args.agentId, args.name, ctx.db);
       if (count === 0) {
         throw new McpError(404, `No secret is attached to agent "${args.agentId}" as "${args.name}".`);

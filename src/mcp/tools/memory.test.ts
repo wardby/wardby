@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import { registerMemoryTools } from "./memory.js";
 import type { McpRequestContext } from "../context.js";
+import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 
 const CANONICAL_URI = "https://host/mcp";
 
@@ -28,9 +29,10 @@ function fakeMemory() {
   };
 }
 
-function fakeDb(agents: FakeAgentRow[]) {
+function fakeDb(agents: FakeAgentRow[], grants: FakeGrantSeed[] = []) {
   const rows = new Map(agents.map((a) => [a.id, a]));
   return {
+    resourceGrant: fakeResourceGrants(grants),
     agent: {
       findUnique: async ({ where }: { where: { id: string } }) => rows.get(where.id) ?? null,
     },
@@ -137,29 +139,50 @@ describe("agent memory tools", () => {
     await client.close();
   });
 
-  it("a public (ownerId: null) agent's memory is readable and writable by any principal", async () => {
-    const db = fakeDb([{ id: "a1", ownerId: null }]);
+  it("A6: memory is owner-only; read, execute and write grantees and everyone-execute get 403", async () => {
     const memory = fakeMemory();
-    const mcp = buildMcpServer({ providers: { memory } as never, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, memory, "anyone", ["agents:read", "memory:write"]));
-    registerMemoryTools(mcp);
-    const client = await connectClient(mcp);
-
-    const listResult = await client.callTool({ name: "list_agent_memory", arguments: { agentId: "a1" } });
-    expect(listResult.isError).toBeFalsy();
-
-    const setResult = await client.callTool({
-      name: "set_agent_memory",
-      arguments: { agentId: "a1", key: "k1", content: "v1" },
-    });
-    expect(setResult.isError).toBeFalsy();
-
-    const deleteResult = await client.callTool({
-      name: "delete_agent_memory",
-      arguments: { agentId: "a1", key: "k1" },
-    });
-    expect(deleteResult.isError).toBeFalsy();
-    await client.close();
+    await memory.set("a1", "k1", "written by someone's run");
+    const cases: [FakeAgentRow, FakeGrantSeed[], string][] = [
+      [
+        { id: "a1", ownerId: "owner" },
+        [{ resourceType: "agent", resourceId: "a1", principalId: "g", level: "read" }],
+        "g",
+      ],
+      [
+        { id: "a1", ownerId: "owner" },
+        [{ resourceType: "agent", resourceId: "a1", principalId: "g", level: "execute" }],
+        "g",
+      ],
+      [
+        { id: "a1", ownerId: "owner" },
+        [{ resourceType: "agent", resourceId: "a1", principalId: "g", level: "write" }],
+        "g",
+      ],
+      [
+        { id: "a1", ownerId: null },
+        [{ resourceType: "agent", resourceId: "a1", granteeKind: "everyone", level: "execute" }],
+        "anyone",
+      ],
+    ];
+    for (const [agent, grants, caller] of cases) {
+      const db = fakeDb([agent], grants);
+      const mcp = buildMcpServer({ providers: { memory } as never, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, memory, caller, ["agents:read", "memory:write"]));
+      registerMemoryTools(mcp);
+      const client = await connectClient(mcp);
+      for (const [name, args] of [
+        ["get_agent_memory", { agentId: "a1", key: "k1" }],
+        ["list_agent_memory", { agentId: "a1" }],
+        ["set_agent_memory", { agentId: "a1", key: "k1", content: "overwritten" }],
+        ["delete_agent_memory", { agentId: "a1", key: "k1" }],
+      ] as const) {
+        const result = await client.callTool({ name, arguments: args });
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result)).toMatch(/owner/);
+      }
+      await client.close();
+    }
+    expect(await memory.get("a1", "k1")).toBe("written by someone's run");
   });
 
   it("delete_agent_memory removes a key, and list_agent_memory reflects it", async () => {

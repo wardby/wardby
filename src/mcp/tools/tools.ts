@@ -115,7 +115,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
     name: "update_tool",
     scope: "tools:write",
     description:
-      "Replaces a tool's description, paramsZod and/or code in place (its name can't change: agents' prompts call it by name). Owner-only: public tools can't be changed over MCP. Refused while the tool is attached to any agent you don't own, including public agents, since the change would reach another owner's agent; detach it there first or create a new tool. Runs already started keep the version they loaded for their whole lifetime; the next run picks up the new one.",
+      "Replaces a tool's description, paramsZod and/or code in place (its name can't change: agents' prompts call it by name). Owner-only: public tools can't be changed over MCP. Refused while the tool is attached to any agent you don't own, including owner-less ones and agents shared with you, since the change would reach another owner's agent; detach it there first or create a new tool. Runs already started keep the version they loaded for their whole lifetime; the next run picks up the new one.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -139,7 +139,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
       if (!prepared.ok) {
         return textResult({ ok: false, errorKind: prepared.errorKind, errorMessage: prepared.errorMessage });
       }
-      // Any attachment to an agent the caller doesn't own (a public agent
+      // Any attachment to an agent the caller doesn't own (an owner-less one
       // included) blocks every field; see core/tool-admin.ts for why, and
       // for the Serializable transaction that keeps a concurrent attach from
       // landing between the check and the write.
@@ -164,7 +164,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
     name: "delete_tool",
     scope: "tools:write",
     description:
-      "Deletes a tool you own. Refused while it is attached to any agent; pass detach: true to detach it from your own agents first. It is never detached from another owner's or a public agent -- use detach_tool for a public agent, or ask the other owner. Past runs are unaffected, and a run already under way keeps the version it loaded.",
+      "Deletes a tool you own. Refused while it is attached to any agent; pass detach: true to detach it from your own agents first. It is never detached from an agent you don't own -- use detach_tool where you hold write on the agent, or ask its owner. Past runs are unaffected, and a run already under way keeps the version it loaded.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -187,7 +187,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
           case "other_owners":
             throw new McpError(
               409,
-              `Tool "${args.toolId}" is still attached to ${agents}. Only your own agents can be detached here; detach it from public agents with detach_tool, or ask the other owners to.`,
+              `Tool "${args.toolId}" is still attached to ${agents}. Only your own agents can be detached here; use detach_tool where you hold write on the agent, or ask the other owners to.`,
             );
           case "needs_detach":
             throw new McpError(

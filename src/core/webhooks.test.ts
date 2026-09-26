@@ -45,8 +45,10 @@ function fakeDb(agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
         return row;
       },
       findUnique: async ({ where }: { where: { id: string } }) => webhooks.get(where.id) ?? null,
-      findMany: async ({ where }: { where: { ownerId: string } }) =>
-        [...webhooks.values()].filter((w) => w.ownerId === where.ownerId),
+      findMany: async ({ where }: { where: { OR: [{ ownerId: string }, { agent: { ownerId: string } }] } }) =>
+        [...webhooks.values()].filter(
+          (w) => w.ownerId === where.OR[0].ownerId || agentsById.get(w.agentId)?.ownerId === where.OR[1].agent.ownerId,
+        ),
       delete: async ({ where }: { where: { id: string } }) => {
         const row = webhooks.get(where.id);
         webhooks.delete(where.id);

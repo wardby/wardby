@@ -4,6 +4,7 @@ import { Client, fromJsonSchema } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import { registerTriggerTool } from "./trigger.js";
 import type { McpRequestContext } from "../context.js";
+import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 
 const CANONICAL_URI = "https://host/mcp";
 const fakeProviders = {
@@ -21,6 +22,7 @@ interface FakeRunRow {
   id: string;
   agentId: string;
   status: string;
+  triggeredById?: string | null;
 }
 interface FakeTaskRow {
   id: string;
@@ -33,7 +35,7 @@ interface FakeTaskRow {
   ttlAt: Date;
 }
 
-function fakeDb(agents: FakeAgentRow[]) {
+function fakeDb(agents: FakeAgentRow[], grants: FakeGrantSeed[] = []) {
   const agentsById = new Map(agents.map((a) => [a.id, a]));
   const runs = new Map<string, FakeRunRow>();
   const tasks = new Map<string, FakeTaskRow>();
@@ -41,6 +43,8 @@ function fakeDb(agents: FakeAgentRow[]) {
   let taskCounter = 0;
 
   const db: any = {
+    resourceGrant: fakeResourceGrants(grants),
+    runs,
     agent: {
       // Prompt discovery runs during MCP connection setup; this stub keeps the
       // focused trigger tests from treating that optional path as a warning.
@@ -52,8 +56,13 @@ function fakeDb(agents: FakeAgentRow[]) {
       },
     },
     run: {
-      create: async ({ data }: { data: { agentId: string; trigger: string } }) => {
-        const row: FakeRunRow = { id: `run_${++runCounter}`, agentId: data.agentId, status: "pending" };
+      create: async ({ data }: { data: { agentId: string; trigger: string; triggeredById?: string | null } }) => {
+        const row: FakeRunRow = {
+          id: `run_${++runCounter}`,
+          agentId: data.agentId,
+          status: "pending",
+          triggeredById: data.triggeredById,
+        };
         runs.set(row.id, row);
         return row;
       },
@@ -197,16 +206,105 @@ describe("trigger_agent", () => {
     await client.close();
   });
 
-  it("any principal can trigger a public (ownerId: null) agent", async () => {
-    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: null }]);
-    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "anyone", ["runs:trigger"], false));
+  it("any principal can trigger an owner-less agent through its everyone-execute grant, and only through it", async () => {
+    const granted = fakeDb(
+      [{ id: "a1", name: "greeter", ownerId: null }],
+      [{ resourceType: "agent", resourceId: "a1", granteeKind: "everyone", level: "execute" }],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db: granted, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(granted, "anyone", ["runs:trigger"], false));
     registerTriggerTool(mcp);
     const client = await connectClient(mcp);
-
     const result = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
     expect(result.isError).toBeFalsy();
     await client.close();
+
+    const ungranted = fakeDb([{ id: "a1", name: "greeter", ownerId: null }]);
+    const mcp2 = buildMcpServer({ providers: fakeProviders, db: ungranted, config: { canonicalUri: CANONICAL_URI } });
+    mcp2.setFixedContext(fakeCtx(ungranted, "anyone", ["runs:trigger"], false));
+    registerTriggerTool(mcp2);
+    const client2 = await connectClient(mcp2);
+    const refused = await client2.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused)).toContain("not found");
+    await client2.close();
+  });
+
+  describe("under grants", () => {
+    const coding = (allowWebhookTaskOverride: boolean): FakeAgentRow => ({
+      id: "a1",
+      name: "coder",
+      ownerId: "owner",
+      kind: "coding",
+      codingProfile: {
+        provider: "codex",
+        repository: "o/r",
+        baseRef: "main",
+        defaultTask: "the owner's task",
+        allowWebhookTaskOverride,
+        timeoutSec: 900,
+        protectedPaths: [],
+        collectExclude: [],
+        packageAllowlist: {},
+        packagePolicy: {},
+        toolchain: "node",
+        toolchainVersion: null,
+        workerImageRef: null,
+        workspaceDiskMb: null,
+      },
+    });
+    async function as(principalId: string, agent: FakeAgentRow, grants: FakeGrantSeed[]) {
+      const db = fakeDb([{ ...agent, model: "gpt-5.6-luna" } as FakeAgentRow], grants);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, principalId, ["runs:trigger"], false));
+      registerTriggerTool(mcp);
+      return { db, client: await connectClient(mcp) };
+    }
+    const grant = (level: string): FakeGrantSeed => ({
+      resourceType: "agent",
+      resourceId: "a1",
+      principalId: "g",
+      level,
+    });
+
+    it("an execute-grantee triggers, and the run records it as the triggerer; a read-grantee gets 403", async () => {
+      const runner = await as("g", { id: "a1", name: "greeter", ownerId: "owner" }, [grant("execute")]);
+      const ok = await runner.client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+      expect(ok.isError).toBeFalsy();
+      const { runId } = parseText(ok as never) as { runId: string };
+      expect((runner.db as any).runs.get(runId).triggeredById).toBe("g");
+      await runner.client.close();
+
+      const reader = await as("g", { id: "a1", name: "greeter", ownerId: "owner" }, [grant("read")]);
+      const refused = await reader.client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+      expect(refused.isError).toBe(true);
+      expect(JSON.stringify(refused)).toMatch(/needs execute/);
+      await reader.client.close();
+    });
+
+    it("a non-owner may pass a coding task or baseRef only when the owner opted in (allowWebhookTaskOverride)", async () => {
+      const closed = await as("g", coding(false), [grant("execute")]);
+      for (const extra of [{ task: "rewrite everything" }, { baseRef: "evil-branch" }]) {
+        const refused = await closed.client.callTool({ name: "trigger_agent", arguments: { agentId: "a1", ...extra } });
+        expect(refused.isError).toBe(true);
+        expect(JSON.stringify(refused)).toMatch(/allowWebhookTaskOverride/);
+      }
+      // The owner's default task still runs.
+      expect(
+        (await closed.client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } })).isError,
+      ).toBeFalsy();
+      await closed.client.close();
+
+      const open = await as("g", coding(true), [grant("execute")]);
+      const ok = await open.client.callTool({ name: "trigger_agent", arguments: { agentId: "a1", task: "do x" } });
+      expect(ok.isError).toBeFalsy();
+      await open.client.close();
+
+      const owner = await as("owner", coding(false), []);
+      const own = await owner.client.callTool({ name: "trigger_agent", arguments: { agentId: "a1", task: "do x" } });
+      expect(own.isError).toBeFalsy();
+      await owner.client.close();
+    });
   });
 
   it("missing runs:trigger scope is rejected", async () => {

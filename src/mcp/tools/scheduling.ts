@@ -2,7 +2,7 @@ import { Prisma } from "#prisma";
 import { validateCronExpression } from "../../core/cron.js";
 import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
-import { assertCanMutate, requireOwnedAgent } from "../auth/ownership.js";
+import { assertAgentAccess, requireAgentAccess } from "../auth/access.js";
 import { textResult } from "./text-result.js";
 
 export function registerSchedulingTools(mcp: WardbyMcpServer): void {
@@ -22,9 +22,13 @@ export function registerSchedulingTools(mcp: WardbyMcpServer): void {
       }
       const agent = await ctx.db.$transaction(
         async (tx) => {
-          const existing = await tx.agent.findUnique({ where: { id: args.agentId }, include: { codingProfile: true } });
-          if (!existing) throw new McpError(404, `Agent "${args.agentId}" not found.`);
-          assertCanMutate(existing.ownerId, ctx.principal.id, `Agent "${args.agentId}" is not owned by the caller.`);
+          const { agent: existing } = await assertAgentAccess(
+            ctx,
+            await tx.agent.findUnique({ where: { id: args.agentId }, include: { codingProfile: true } }),
+            args.agentId,
+            "write",
+            tx,
+          );
           if (existing.kind === "coding" && !existing.codingProfile?.defaultTask) {
             throw new McpError(400, "A default task is required before enabling a coding-agent schedule.");
           }
@@ -44,7 +48,7 @@ export function registerSchedulingTools(mcp: WardbyMcpServer): void {
     scope: "agents:write",
     inputSchema: { type: "object", properties: { agentId: { type: "string" } }, required: ["agentId"] },
     handler: async (args: { agentId: string }, ctx) => {
-      await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
+      await requireAgentAccess(ctx, args.agentId, "write");
       const agent = await ctx.db.agent.update({ where: { id: args.agentId }, data: { scheduleEnabled: false } });
       return textResult(agent);
     },
