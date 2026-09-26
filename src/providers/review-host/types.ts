@@ -40,6 +40,12 @@ export interface PullRequestView {
   lastReviewedSha: string | null;
   /** Set when `files` is the compare of `comparedFrom...headSha` rather than the whole PR. */
   comparedFrom: string | null;
+  /**
+   * The base branch was merged into the PR since `comparedFrom`: `files` is
+   * then the PR's own diff (against its base), limited to files that changed
+   * since `comparedFrom`, so base-branch changes are left out.
+   */
+  baseMergedSince: boolean;
   files: PullRequestFileView[];
 }
 

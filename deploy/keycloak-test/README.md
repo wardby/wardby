@@ -34,14 +34,15 @@ Tear down with `docker compose -f deploy/keycloak-test/docker-compose.yml down`.
 
 ## What it sets up, and why
 
-| Object                             | Why it exists                                                                                                             |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| Realm `wardby`                     | Isolation; recreated on every `setup-realm.sh` run                                                                        |
-| Client scopes (`agents:read`, …)   | wardby authorizes per-tool off the token's `scope` claim, so its scopes must exist in the IdP and be emitted in the token |
-| Audience mapper                    | Keycloak's default `aud` is the client itself; wardby requires the resource it protects                                   |
-| `wardby-mcp-client` (confidential) | `client_credentials` tokens for scripted/curl testing                                                                     |
-| `wardby-mcp-cli` (public, PKCE)    | A real MCP client driving the browser flow with a **pre-registered** client id                                            |
-| User `wardby-user`                 | Someone to log in as in the browser flow                                                                                  |
+| Object                                                                                 | Why it exists                                                                                                             |
+| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Realm `wardby`                                                                         | Isolation; recreated on every `setup-realm.sh` run                                                                        |
+| Client scopes (`agents:read`, …)                                                       | wardby authorizes per-tool off the token's `scope` claim, so its scopes must exist in the IdP and be emitted in the token |
+| Audience mapper                                                                        | Keycloak's default `aud` is the client itself; wardby requires the resource it protects                                   |
+| `wardby-mcp-client` (confidential)                                                     | `client_credentials` tokens for scripted/curl testing                                                                     |
+| `wardby-mcp-cli` (public, PKCE)                                                        | A real MCP client driving the browser flow with a **pre-registered** client id                                            |
+| User `wardby-user`                                                                     | Someone to log in as in the browser flow (a member)                                                                       |
+| Realm roles `wardby-admin`, `wardby-packages`; users `wardby-admin`, `wardby-approver` | wardby roles `admin` / `package-approver`, read from `realm_access.roles` via `AUTH_ROLE_CLAIM`/`AUTH_ROLE_MAP`           |
 
 ## Things this harness exists to keep us honest about
 
@@ -60,8 +61,8 @@ real IdP rather than a hand-minted token.
 `scopes_supported` from wardby's protected-resource metadata and requests _all_
 of them; Keycloak fails the whole authorization request with `invalid_scope` if
 even one is unknown to the realm. Claude Code hit exactly this when the realm
-carried only three of wardby's nine scopes. `setup-realm.sh` creates all nine
-(and assigns a deliberately narrower set to the machine client, so scope
+carried only three of wardby's scopes at the time. `setup-realm.sh` creates all
+of them, including `memory:write` (and assigns a deliberately narrower set to the machine client, so scope
 enforcement stays observable).
 
 **Scopes must be mapped into the token, not just requested.** A token that
@@ -69,6 +70,15 @@ authenticates fine will still fail per-tool authorization if the `scope` claim
 does not carry wardby's scopes. The harness attaches them as _default_ client
 scopes so they are always present; a real deployment may prefer optional
 scopes and explicit requests.
+
+**A privileged scope isn't enough on its own.** Wardby honours `agents:admin`
+and `packages:approve` only when the access token's role claim, mapped through
+`AUTH_ROLE_MAP`, gives the caller a Wardby role that grants them:
+
+- `wardby-user` has no Wardby role, so `make_owner` is refused with a role
+  error even though the token carries `agents:admin`.
+- `wardby-approver` can approve packages but not call `make_owner`.
+- `wardby-admin` can do both.
 
 **Dynamic client registration is usually disabled.** Keycloak returns `403` for
 anonymous DCR out of the box, and enterprise IdPs typically keep it that way on

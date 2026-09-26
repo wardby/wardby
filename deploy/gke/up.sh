@@ -432,8 +432,10 @@ Still manual, because neither belongs in a script:
     resolve, which it will not before the endpoint exists.
   * A login key: self-hosted auth has no signup over HTTP, so mint one with
       kubectl exec -n ${NAMESPACE} deploy/wardby-control-plane -c control-plane -- \\
-        node dist/cli.js auth user create --subject <you>
-    It is printed once and is a bearer credential valid for a year.
+        node dist/cli.js auth user create --subject <you> --role admin
+    It is printed once and is a bearer credential valid for a year. --role admin
+    allows the privileged operations; other users default to no roles. After an
+    upgrade, existing users have no roles: auth user grant --subject <you> --role admin
 
 Roll back (images are pinned by digest, so this is exactly what ran before):
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-control-plane

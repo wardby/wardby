@@ -1,6 +1,14 @@
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Prisma, PrismaClient } from "#prisma";
 import { requireSubject } from "../../../providers/auth/subject.js";
+import { ROLE_NAMES, isRoleName } from "../resource-server.js";
+
+/** Rejects unknown role names loudly; returns the deduplicated list. */
+export function validateRoles(roles: readonly string[]): string[] {
+  for (const r of roles)
+    if (!isRoleName(r)) throw new Error(`Unknown role "${r}" (known roles: ${ROLE_NAMES.join(", ")}).`);
+  return [...new Set(roles)];
+}
 
 export type AuthDb = Prisma.TransactionClient;
 export const DAY = 86_400_000;
@@ -45,16 +53,17 @@ export class IdentityService {
   ) {
     this.credentials = new Credentials(hashKey);
   }
-  async createUser(subject: string) {
+  async createUser(subject: string, roles: readonly string[] = []) {
     requireSubject(subject);
+    const granted = validateRoles(roles);
     return this.db.$transaction(async (tx) => {
       const principal = await tx.principal.upsert({ where: { subject }, create: { subject }, update: {} });
-      const user = await tx.authUser.create({ data: { principalId: principal.id } });
+      const user = await tx.authUser.create({ data: { principalId: principal.id, roles: granted } });
       const key = this.credentials.create("rvk");
       await tx.authLoginKey.create({
         data: { keyId: key.id, userId: user.id, secretHash: key.hash, expiresAt: new Date(Date.now() + 365 * DAY) },
       });
-      return { userId: user.id, subject, loginKey: key.token };
+      return { userId: user.id, subject, roles: granted, loginKey: key.token };
     });
   }
   async createKey(subject: string) {
@@ -81,6 +90,47 @@ export class IdentityService {
       await tx.oAuthFamily.updateMany({ where: { userId: user.id }, data: { revokedAt: now } });
     });
   }
+  /**
+   * Adds and/or removes roles on an existing user (never creates one). Any
+   * actual change signs the user out in the same transaction: their OAuth
+   * grant families, refresh grants, browser sessions and unexchanged
+   * authorization codes are revoked, and they sign in and authorize afresh.
+   * (Roles are also read live on every request, so even a direct database
+   * edit applies to live tokens at once.) A no-op change revokes nothing.
+   */
+  async changeRoles(subject: string, add: readonly string[], remove: readonly string[]) {
+    const adding = validateRoles(add);
+    const removing = validateRoles(remove);
+    const both = adding.filter((r) => removing.includes(r));
+    if (both.length) throw new Error(`Cannot both grant and revoke: ${both.join(", ")}.`);
+    const user = await this.db.authUser.findFirst({ where: { principal: { subject: requireSubject(subject) } } });
+    if (!user) throw new Error("Unknown user.");
+    return this.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "AuthUser" WHERE "id" = ${user.id} FOR UPDATE`;
+      const current = (await tx.authUser.findUniqueOrThrow({ where: { id: user.id } })).roles ?? [];
+      const roles = ROLE_NAMES.filter((r) => (current.includes(r) || adding.includes(r)) && !removing.includes(r));
+      await tx.authUser.update({ where: { id: user.id }, data: { roles } });
+      // ANY change signs the user out (families, refresh grants, sessions,
+      // unexchanged codes): a revoked role must never come back through an
+      // old token, and a granted role must never silently widen a grant the
+      // user consented to while it was inert — they authorize afresh.
+      const changed = roles.length !== current.length || roles.some((r) => !current.includes(r));
+      if (changed) {
+        const now = new Date();
+        await tx.oAuthAuthorizationCode.updateMany({
+          where: { userId: user.id, consumedAt: null },
+          data: { consumedAt: now },
+        });
+        await tx.authSession.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: now } });
+        await tx.oAuthFamily.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: now } });
+        await tx.oAuthGrant.updateMany({
+          where: { family: { userId: user.id }, revokedAt: null },
+          data: { revokedAt: now },
+        });
+      }
+      return { subject, roles, revokedGrants: changed };
+    });
+  }
   async revokeKey(keyId: string) {
     const key = await this.db.authLoginKey.findUnique({ where: { keyId } });
     if (!key) return;
@@ -93,7 +143,13 @@ export class IdentityService {
   }
   listUsers() {
     return this.db.authUser.findMany({
-      select: { id: true, status: true, displayName: true, principal: { select: { subject: true } } },
+      select: {
+        id: true,
+        status: true,
+        roles: true,
+        displayName: true,
+        principal: { select: { subject: true } },
+      },
     });
   }
   listKeys(subject: string) {

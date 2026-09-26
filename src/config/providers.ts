@@ -259,6 +259,10 @@ export interface AuthConfig {
   issuer?: string;
   /** Delegating mode: JWKS endpoint for signature verification. */
   jwksUri?: string;
+  /** Delegating mode: access-token claim carrying the IdP's roles/groups (AUTH_ROLE_CLAIM). */
+  roleClaim?: string;
+  /** Delegating mode: `idpValue=wardbyRole,...` (AUTH_ROLE_MAP). */
+  roleMap?: string;
   /** Both modes: the audience a token must carry to be accepted (wardby's canonical URI). */
   audience?: string;
   /** Self-hosted mode: independent 32-byte hex keys. */
@@ -272,6 +276,8 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig
   return {
     issuer: env.AUTH_ISSUER,
     jwksUri: env.AUTH_JWKS_URI,
+    roleClaim: env.AUTH_ROLE_CLAIM?.trim() || undefined,
+    roleMap: env.AUTH_ROLE_MAP?.trim() || undefined,
     audience: env.AUTH_AUDIENCE,
     signingKey: env.AUTH_SIGNING_KEY,
     credentialHashKey: env.AUTH_CREDENTIAL_HASH_KEY,

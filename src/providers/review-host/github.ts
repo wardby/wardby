@@ -158,23 +158,36 @@ export class GitHubReviewHost implements CodeReviewHost {
       const pr = record(await (await get(`${base}/pulls/${prNumber}`)).json());
       const { headSha, isFork, state } = this.head(repository, pr);
 
+      const prFiles = async (): Promise<Json[]> => {
+        const all: Json[] = [];
+        for (let page = 1; page <= MAX_FILE_PAGES; page++) {
+          const batch = list(await (await get(`${base}/pulls/${prNumber}/files?per_page=100&page=${page}`)).json());
+          all.push(...batch);
+          if (batch.length < 100) break;
+        }
+        return all;
+      };
+
       let rawFiles: Json[] | null = null;
       let comparedFrom: string | null = null;
+      let baseMergedSince = false;
       if (opts.sinceSha && SAFE_SHA.test(opts.sinceSha) && opts.sinceSha !== headSha) {
         const compare = record(await (await get(`${base}/compare/${opts.sinceSha}...${headSha}`)).json());
         if (compare.status === "ahead") {
           rawFiles = list(compare.files ?? []);
           comparedFrom = opts.sinceSha;
+          // A merge commit since the last review (typically the base branch
+          // merged in) makes the compare carry every base-branch change too.
+          // The PR's own diff is always relative to the base, so it holds
+          // only the PR's changes; keep those in files that moved since.
+          baseMergedSince = list(compare.commits ?? []).some((c) => list(c.parents ?? []).length > 1);
+          if (baseMergedSince) {
+            const changedSince = new Set(rawFiles.map((f) => f.filename));
+            rawFiles = (await prFiles()).filter((f) => changedSince.has(f.filename));
+          }
         }
       }
-      if (!rawFiles) {
-        rawFiles = [];
-        for (let page = 1; page <= MAX_FILE_PAGES; page++) {
-          const batch = list(await (await get(`${base}/pulls/${prNumber}/files?per_page=100&page=${page}`)).json());
-          rawFiles.push(...batch);
-          if (batch.length < 100) break;
-        }
-      }
+      rawFiles ??= await prFiles();
 
       let budget = opts.maxPatchChars;
       const files = rawFiles.map((raw) => {
@@ -219,6 +232,7 @@ export class GitHubReviewHost implements CodeReviewHost {
         htmlUrl: str(pr.html_url),
         lastReviewedSha,
         comparedFrom,
+        baseMergedSince,
         files,
       };
     });
