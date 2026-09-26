@@ -2,16 +2,15 @@
 
 Two independent subsystems currently run side by side on the same host and
 share only Postgres and a Docker Compose network: the `wardby mcp` process
-(agents/runs/webhooks/MCP tools) and the observability stack shipped in
-`feat: add local Prometheus and Grafana observability` (coding-proxy metrics
-→ Prometheus → Grafana). Neither depends on the other; restarting one has no
-effect on the other.
+(agents/runs/webhooks/MCP tools) and the local observability stack
+(coding-proxy metrics → Prometheus → Grafana). Neither depends on the other;
+restarting one has no effect on the other.
 
 ```mermaid
 flowchart TB
-    subgraph GH["GitHub — chfields/knock-knock-jokes"]
-        Issue["Issue labeled 'ai-plan' /\n@knock-knock-delivery comment"]
-        Action["Actions workflow:\nwardby-delivery-trigger.yml"]
+    subgraph GH["GitHub — your-org/your-repo"]
+        Issue["Issue or comment that\nmentions your agent"]
+        Action["Actions workflow that\nPOSTs the task to wardby"]
         PRout["Draft PR opened"]
         Issue --> Action
     end
@@ -42,7 +41,7 @@ flowchart TB
         Worker -->|"push branch"| PRout
 
         Proxy -->|"scraped"| Prom["local-prometheus-1\n127.0.0.1:9090 (loopback)\n24h retention"]
-        Prom -->|"query"| Graf["local-grafana-1\n127.0.0.1:3000 (loopback)\ndashboards: wardby-coding-proxy,\nwardby-knock-knock"]
+        Prom -->|"query"| Graf["local-grafana-1\n127.0.0.1:3000 (loopback)\ndashboards: wardby-coding-proxy,\nwardby-coding-budget"]
     end
 ```
 

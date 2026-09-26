@@ -212,6 +212,20 @@ see on a failed install:
 
 npm and PyPI are the two ecosystems registry mode supports today; the adapter
 interface is designed to add more (Composer, RubyGems, Go modules are the
-known candidates) without changing the schema or the allowlist format. See
-the design spec's [§5 checklist](superpowers/specs/2026-09-25-coding-package-registry-design.md#5-ecosystem-adapters)
-for what a new adapter needs to provide and document.
+known candidates) without changing the schema or the allowlist format. Adding
+one means:
+
+1. Implement `RegistryAdapter` and add it to `REGISTRY_ADAPTERS`. No schema
+   change is needed.
+2. Set `upstreamHosts` to the smallest set of hosts its downloads use.
+3. Mark `allowed: false` on file types that run code at install time where the
+   proxy can tell them apart, and use `workerConfig` to disable install-time
+   code where only the client can.
+4. Record upstream fixtures, and add a real-client integration test.
+5. Provide a worker image with the language runtime.
+6. Document every safeguard the ecosystem cannot enforce.
+
+For example, Composer downloads from GitHub and GitLab archive hosts, often
+with `integrity: null`, and needs `--no-plugins` and `--no-scripts` set
+through a `COMPOSER_HOME/config.json` file from `workerConfig`. Go fits most
+directly, because `GOPROXY` is designed for this kind of proxy.
