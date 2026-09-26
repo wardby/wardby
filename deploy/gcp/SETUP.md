@@ -204,7 +204,15 @@ but most deployments will want to front an IdP they already run:
 auth_provider = "delegating"
 auth_issuer   = "https://login.example.com/realms/prod"
 auth_jwks_uri = "https://login.example.com/realms/prod/protocol/openid-connect/certs"
+# Optional: which IdP roles/groups become wardby roles (both or neither).
+auth_role_claim = "realm_access.roles"
+auth_role_map   = "wardby-admin=admin,wardby-packages=package-approver"
 ```
+
+Without `auth_role_claim`/`auth_role_map`, no caller holds a wardby role, so
+`make_owner`, BYO `workerImageRef` and package approval are refused. Matching is
+exact and case-sensitive. Map only IdP values that users can't assign
+themselves. See `docs/getting-started-identity-provider.md`, "Wardby roles".
 
 In this mode wardby only _verifies_ tokens — it never issues them — and there is
 no local user administration at all: a `Principal` row is created from the

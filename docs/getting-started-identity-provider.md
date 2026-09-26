@@ -109,17 +109,35 @@ The claim can be a single string or an array of strings. Each value that
 
 - Values the map doesn't list are ignored.
 - A missing claim, or one of any other type, gives the caller no roles.
-- Whitespace around entries in `AUTH_ROLE_MAP` is ignored.
+- Matching is exact and **case-sensitive**. `Wardby-Admin` does not match
+  `wardby-admin`.
+- A space-separated string counts as one value, not a list.
+- Whitespace around `AUTH_ROLE_CLAIM`, and around entries in `AUTH_ROLE_MAP`,
+  is ignored.
+
+**Map only IdP values that users can't create or assign to themselves.** Anyone
+who can put a mapped value into their own token becomes an admin. Avoid group
+names in providers that allow self-service groups or user-editable profile
+attributes. Prefer application roles, or group IDs that only administrators
+manage.
+
+A dotted path splits on every `.`, so it can't address a Keycloak
+`resource_access.<client-id>` whose client ID itself contains a dot. Use realm
+roles in that case.
 
 Wardby refuses to start if:
 
 - only one of the two variables is set, or
 - the map names an unknown Wardby role.
 
+`AUTH_ROLE_CLAIM` and `AUTH_ROLE_MAP` are ignored in self-hosted mode, and
+Wardby logs a warning at startup if they are set there.
+
 With neither variable set, no caller has a role and the privileged operations
-are refused. The claim is read on every request from the validated access token,
-never from an ID token. Removing someone's group or role takes effect with their
-next token.
+are refused. The claim is read on every request, from the bearer token validated
+for Wardby's issuer and audience. Configure the provider so that only access
+tokens carry that audience. Removing someone's group or role takes effect with
+their next token.
 
 Provider examples:
 
@@ -201,7 +219,8 @@ For the portable container deployment, place these values in the protected
 production environment described by
 [the production boundary](../deploy/production/README.md). The GKE deployment
 helper uses self-hosted authentication by default; replace the control-plane
-secret's auth settings with the delegated values before rollout and preserve
+secret's auth settings with the delegated values, including `AUTH_ROLE_CLAIM`
+and `AUTH_ROLE_MAP`, before rollout, and preserve
 that customization in your deployment automation so a later `up.sh` does not
 restore self-hosted mode.
 

@@ -107,18 +107,31 @@ Callers who fail the check get `403`:
 - A caller whose token holds the scope but whose roles don't grant it gets a
   "requires a role" error. Authorizing again for more scopes can't fix this;
   an operator has to grant a role.
-- A caller who has the role but whose token lacks the scope gets the usual
-  `insufficient_scope` challenge.
+- A caller who has a role granting the permission but whose token lacks the
+  scope gets the usual `insufficient_scope` challenge, naming the scope to
+  request. For package approval, that is the alternative their role grants.
 
-Roles are read from the database on every request and are never cached:
+Roles are read from the database on every request and are never cached.
 
-- **Granting a role** applies to the user's existing tokens on their next
-  request.
-- **Revoking any role** with `auth user grant --revoke-role` also revokes the
-  user's OAuth grant families and browser sessions in the same transaction.
-  - Every client must sign in and authorize again.
-  - A token minted under the old roles can never regain that reach if the role
-    is granted again later.
+**Any role change signs the user out.** This applies to both `--role` and
+`--revoke-role`. In the same transaction, `auth user grant` revokes all of the
+user's:
+
+- OAuth grant families and refresh tokens;
+- browser sessions;
+- unexchanged authorization codes.
+
+Every client must sign in and authorize again. The user sees the scopes afresh
+under their new roles. This has two consequences:
+
+- A token minted under the old roles can never regain that reach if a role is
+  granted again later.
+- A grant the user consented to while a privileged scope was inert (for
+  example, an MCP client that requested every scope) never silently gains
+  privileged reach through a promotion.
+
+A change that leaves the roles as they were, such as revoking a role the user
+doesn't hold, revokes nothing.
 
 The other scopes are not privileged, but they are not strictly per-tenant
 either. They are ownership-checked on every call, but public (unowned) agents
