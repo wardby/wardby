@@ -103,7 +103,11 @@ export async function requireStrictlyOwnedTool(
   id: string,
   principalId: string,
 ): Promise<Tool> {
-  const tool = await db.tool.findUnique({ where: { id } });
+  return assertStrictlyOwnedTool(await db.tool.findUnique({ where: { id } }), id, principalId);
+}
+
+/** requireStrictlyOwnedTool's rule for a row already read (e.g. inside core/tool-admin.ts's transaction). */
+export function assertStrictlyOwnedTool(tool: Tool | null, id: string, principalId: string): Tool {
   if (!tool || !canRead(tool.ownerId, principalId)) throw new McpError(404, `Tool "${id}" not found.`);
   if (!isOwner(tool.ownerId, principalId)) {
     throw new McpError(403, `Tool "${id}" is public; public tools can't be changed or deleted over MCP.`);

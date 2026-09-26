@@ -15,6 +15,14 @@ import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
 import { buildSharedDatastoreAccessor } from "../../core/datastores.js";
 import { findSameNamedAttachedTool, reservedToolNameReason } from "../../core/tool-names.js";
+import {
+  ToolAttachedError,
+  deleteToolGuarded,
+  hasToolChanges,
+  prepareToolUpdate,
+  updateToolGuarded,
+  type AttachedAgent,
+} from "../../core/tool-admin.js";
 import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import {
@@ -23,21 +31,11 @@ import {
   requireOwnedTool,
   requireReadableAgent,
   requireStrictlyOwnedTool,
+  assertStrictlyOwnedTool,
   visibleToPrincipal,
   canRead,
 } from "../auth/ownership.js";
 import { textResult } from "./text-result.js";
-
-type AttachedAgent = { id: string; name: string; ownerId: string | null };
-
-/** The agents `toolId` is attached to, read inside the caller's transaction. */
-async function attachedAgents(tx: Pick<Prisma.TransactionClient, "agentTool">, toolId: string) {
-  const rows = await tx.agentTool.findMany({
-    where: { toolId },
-    select: { agent: { select: { id: true, name: true, ownerId: true } } },
-  });
-  return rows.map((row): AttachedAgent => row.agent);
-}
 
 /**
  * Names the agents the caller can read (its own and public ones) and only
@@ -116,54 +114,35 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
       required: ["toolId"],
     },
     handler: async (args: { toolId: string; description?: string; paramsZod?: string; code?: string }, ctx) => {
-      if (args.description === undefined && args.paramsZod === undefined && args.code === undefined) {
+      const changes = { description: args.description, paramsZod: args.paramsZod, code: args.code };
+      if (!hasToolChanges(changes)) {
         throw new McpError(400, "update_tool needs at least one of description, paramsZod or code.");
       }
       // Checked once up front so a non-owner never gets as far as a sandbox
       // compile, and again (with the attachments) inside the transaction.
       await requireStrictlyOwnedTool(ctx.db, args.toolId, ctx.principal.id);
-      // Same derivation as create_tool: the cached jsonSchema must never go
-      // stale against paramsZod (see Tool.jsonSchema). Done before the
-      // transaction so a QuickJS compile never holds it open.
-      let jsonSchema: object | undefined;
-      if (args.paramsZod !== undefined) {
-        const schemaResult = await deriveJsonSchema(args.paramsZod);
-        if (!schemaResult.ok) {
-          return textResult({ ok: false, errorKind: schemaResult.errorKind, errorMessage: schemaResult.errorMessage });
-        }
-        jsonSchema = schemaResult.value as object;
+      const prepared = await prepareToolUpdate(changes);
+      if (!prepared.ok) {
+        return textResult({ ok: false, errorKind: prepared.errorKind, errorMessage: prepared.errorMessage });
       }
-      const tool = await ctx.db.$transaction(
-        async (tx) => {
-          await requireStrictlyOwnedTool(tx, args.toolId, ctx.principal.id);
-          // An attachment's grants (secrets, hosts, datastore prefixes) hand
-          // whatever code this row holds to that agent's owner's resources,
-          // and the description reaches that owner's model context -- so any
-          // cross-owner attachment (a public agent included) blocks every
-          // field. Serializable, like attach_tool's own transaction, so a
-          // concurrent cross-owner attach can't land between this check and
-          // the write.
-          const crossOwner = (await attachedAgents(tx, args.toolId)).filter(
-            (agent) => agent.ownerId !== ctx.principal.id,
+      // Any attachment to an agent the caller doesn't own (a public agent
+      // included) blocks every field; see core/tool-admin.ts for why, and
+      // for the Serializable transaction that keeps a concurrent attach from
+      // landing between the check and the write.
+      try {
+        const tool = await updateToolGuarded(ctx.db, args.toolId, prepared.data, (row) =>
+          assertStrictlyOwnedTool(row, args.toolId, ctx.principal.id),
+        );
+        return textResult(tool);
+      } catch (err) {
+        if (err instanceof ToolAttachedError) {
+          throw new McpError(
+            409,
+            `Tool "${args.toolId}" is attached to agents you don't own: ${describeAgents(err.agents, ctx.principal.id)}. Detach it from those agents first (or ask their owners to), or create a new tool instead.`,
           );
-          if (crossOwner.length > 0) {
-            throw new McpError(
-              409,
-              `Tool "${args.toolId}" is attached to agents you don't own: ${describeAgents(crossOwner, ctx.principal.id)}. Detach it from those agents first (or ask their owners to), or create a new tool instead.`,
-            );
-          }
-          return tx.tool.update({
-            where: { id: args.toolId },
-            data: {
-              ...(args.description !== undefined ? { description: args.description } : {}),
-              ...(args.code !== undefined ? { code: args.code } : {}),
-              ...(args.paramsZod !== undefined ? { paramsZod: args.paramsZod, jsonSchema } : {}),
-            },
-          });
-        },
-        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-      );
-      return textResult(tool);
+        }
+        throw err;
+      }
     },
   });
 
@@ -179,48 +158,31 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
       required: ["toolId"],
     },
     handler: async (args: { toolId: string; detach?: boolean }, ctx) => {
-      const stillAttached = (agents: AttachedAgent[], hint: string) =>
-        new McpError(
-          409,
-          `Tool "${args.toolId}" is still attached to ${describeAgents(agents, ctx.principal.id)}.${hint}`,
-        );
       try {
-        const detachedFrom = await ctx.db.$transaction(
-          async (tx) => {
-            await requireStrictlyOwnedTool(tx, args.toolId, ctx.principal.id);
-            const agents = await attachedAgents(tx, args.toolId);
-            const own = agents.filter((agent) => agent.ownerId === ctx.principal.id);
-            const others = agents.filter((agent) => agent.ownerId !== ctx.principal.id);
-            // Checked before any detach, so a refusal leaves every
-            // attachment in place. Public agents are included: pulling a
-            // tool from a shared agent should be an explicit detach_tool.
-            if (others.length > 0) {
-              throw stillAttached(
-                others,
-                " Only your own agents can be detached here; detach it from public agents with detach_tool, or ask the other owners to.",
-              );
-            }
-            if (own.length > 0 && args.detach !== true) {
-              throw stillAttached(own, " Pass detach: true to detach it from these agents and delete it.");
-            }
-            if (own.length > 0) {
-              await tx.agentTool.deleteMany({
-                where: { toolId: args.toolId, agentId: { in: own.map((agent) => agent.id) } },
-              });
-            }
-            await tx.tool.delete({ where: { id: args.toolId } });
-            return own.map((agent) => agent.id);
-          },
-          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-        );
+        const detachedFrom = await deleteToolGuarded(ctx.db, args.toolId, {
+          detach: args.detach === true,
+          authorize: (row) => assertStrictlyOwnedTool(row, args.toolId, ctx.principal.id),
+        });
         return textResult({ deleted: args.toolId, detachedFrom });
       } catch (err) {
-        // AgentTool.toolId is ON DELETE RESTRICT: an attachment that raced in
-        // past the check above still stops the delete, as P2003.
-        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2003") {
-          throw new McpError(409, `Tool "${args.toolId}" is still attached to an agent; nothing was deleted.`);
+        if (!(err instanceof ToolAttachedError)) throw err;
+        const agents = describeAgents(err.agents, ctx.principal.id);
+        switch (err.reason) {
+          // Public agents are included: pulling a tool from a shared agent
+          // should be an explicit detach_tool.
+          case "other_owners":
+            throw new McpError(
+              409,
+              `Tool "${args.toolId}" is still attached to ${agents}. Only your own agents can be detached here; detach it from public agents with detach_tool, or ask the other owners to.`,
+            );
+          case "needs_detach":
+            throw new McpError(
+              409,
+              `Tool "${args.toolId}" is still attached to ${agents}. Pass detach: true to detach it from these agents and delete it.`,
+            );
+          case "race":
+            throw new McpError(409, `Tool "${args.toolId}" is still attached to an agent; nothing was deleted.`);
         }
-        throw err;
       }
     },
   });
@@ -342,9 +304,15 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
           // duplicate tool name to the model and silently shadow one of them.
           const clash = await findSameNamedAttachedTool(tx, args.agentId, tool);
           if (clash) {
+            // Anyone can attach their own tool to a public agent, so the
+            // clashing tool may be another principal's private one: name its
+            // id only when the caller could read it anyway.
+            const which = canRead(clash.ownerId, ctx.principal.id)
+              ? ` (${clash.id})`
+              : " (a tool owned by another principal)";
             throw new McpError(
               409,
-              `Agent "${args.agentId}" already has a different tool named "${tool.name}" attached (${clash.id}); detach it first.`,
+              `Agent "${args.agentId}" already has a different tool named "${tool.name}" attached${which}; detach it first.`,
             );
           }
           await tx.agentTool.upsert({

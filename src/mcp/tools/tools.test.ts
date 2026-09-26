@@ -38,6 +38,7 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
     allowedHosts?: string[];
   }[] = [];
   let counter = toolRows.size;
+  const isolationLevels: unknown[] = [];
 
   const transactionDb = {
     tool: {
@@ -160,8 +161,22 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
   };
   return {
     ...transactionDb,
-    $transaction: async <T>(callback: (tx: typeof transactionDb) => Promise<T>) => callback(transactionDb),
+    // Records each transaction's isolation level, so the tests can pin the
+    // Serializable isolation the cross-owner checks depend on (this fake
+    // itself can't produce a serialization conflict).
+    isolationLevels,
+    $transaction: async <T>(
+      callback: (tx: typeof transactionDb) => Promise<T>,
+      options?: { isolationLevel?: unknown },
+    ) => {
+      isolationLevels.push(options?.isolationLevel);
+      return callback(transactionDb);
+    },
   } as unknown as import("#prisma").PrismaClient;
+}
+
+function isolationLevelsOf(db: import("#prisma").PrismaClient): unknown[] {
+  return (db as unknown as { isolationLevels: unknown[] }).isolationLevels;
 }
 
 function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {
@@ -501,6 +516,32 @@ describe("tool authoring tools", () => {
     await client.close();
   });
 
+  it("attach_tool's same-name refusal never reveals another principal's private tool id", async () => {
+    const tool = (id: string, ownerId: string | null) => ({
+      id,
+      name: "foo",
+      description: "x",
+      paramsZod: "z.object({})",
+      jsonSchema: {},
+      code: "",
+      ownerId,
+    });
+    // p2 attached its private foo to a public agent; p1 now tries its own foo.
+    const db = fakeDb([tool("mine", "p1"), tool("p2-private-tool", "p2")], [{ id: "a-public", ownerId: null }]);
+    await db.agentTool.create({ data: { agentId: "a-public", toolId: "p2-private-tool" } });
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "attach_tool", arguments: { agentId: "a-public", toolId: "mine" } });
+    expect(result.isError).toBe(true);
+    const text = (result.content as { text: string }[])[0].text;
+    expect(text).toMatch(/already has a different tool named "foo"/);
+    expect(text).not.toContain("p2-private-tool");
+    await client.close();
+  });
+
   it("attach_tool rejects native sandbox tools for coding agents", async () => {
     const db = fakeDb(
       [
@@ -702,6 +743,7 @@ describe("tool authoring tools", () => {
       expect(body).toMatchObject({ id: "t1", name: "greet", code: "return 'new';", description: "new description" });
       expect(JSON.stringify(body.jsonSchema)).toContain("who");
       expect((await db.tool.findUnique({ where: { id: "t1" } }))?.code).toBe("return 'new';");
+      expect(isolationLevelsOf(db)).toEqual([Prisma.TransactionIsolationLevel.Serializable]);
       await client.close();
     });
 
@@ -826,6 +868,7 @@ describe("tool authoring tools", () => {
       expect(result.isError).toBeFalsy();
       expect(parseText(result as never)).toEqual({ deleted: "t1", detachedFrom: [] });
       expect(await db.tool.findUnique({ where: { id: "t1" } })).toBeNull();
+      expect(isolationLevelsOf(db)).toEqual([Prisma.TransactionIsolationLevel.Serializable]);
       await client.close();
     });
 
