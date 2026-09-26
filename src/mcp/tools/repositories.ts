@@ -62,6 +62,8 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "link_repository",
     scope: "agents:write",
+    description:
+      "Links a native agent to a repository on a code-review host, with its access, event triggers, and checkName. Re-linking an already-linked repository replaces its access, triggers, and checkName (an omitted field is cleared, not kept) — always send the full desired state.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

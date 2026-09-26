@@ -125,6 +125,15 @@ function setup(agents: FakeAgentRow[], principalId: string, repositories: FakeRe
 }
 
 describe("repository tools", () => {
+  it("describes link_repository as a full replace of the link", async () => {
+    const { mcp } = setup([], "p1");
+    const client = await connectClient(mcp);
+    const { tools } = await client.listTools();
+    const link = tools.find((t) => t.name === "link_repository")!;
+    expect(link.description).toMatch(/replaces/i);
+    expect(link.description).toContain("full desired state");
+  });
+
   it("links a native agent owned by the caller, normalizing the repository", async () => {
     const { mcp } = setup([{ id: "a1", name: "reviewer", ownerId: "p1", kind: "native" }], "p1");
     const client = await connectClient(mcp);

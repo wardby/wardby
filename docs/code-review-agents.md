@@ -80,8 +80,10 @@ deliveries will fail signature verification.
 
 ## Linking an agent to a repository
 
-Use the `link_repository` tool (agents:write) on a native agent. Two common
-shapes:
+Use the `link_repository` tool (agents:write) on a native agent. Calling it
+again for an already-linked repository replaces that link's `access`,
+`triggers`, and `checkName` — omitted fields are cleared, not kept — so
+always send the full desired state. Two common shapes:
 
 **A reviewer**, which starts a check on every PR push:
 
