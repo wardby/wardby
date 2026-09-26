@@ -14,6 +14,7 @@ import {
   visibleToPrincipal,
 } from "../auth/ownership.js";
 import { requireAnyScope, requireScope } from "../auth/resource-server.js";
+import { authorizeRepositoryForSet, type RepositoryAuthorization } from "../auth/repo-authorization.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
@@ -67,6 +68,7 @@ const CreateAgentSchema = z
     memoryEnabled: agentFields.memoryEnabled.default(false),
     effort: agentFields.effort.optional(),
     codingProfile: CodingProfileSchema.optional(),
+    repositoryAdminOverride: z.boolean().optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -117,18 +119,38 @@ const UpdateAgentSchema = z
     memoryEnabled: agentFields.memoryEnabled.optional(),
     effort: agentFields.effort.nullable().optional(),
     codingProfile: CodingProfilePatchSchema.optional(),
+    repositoryAdminOverride: z.boolean().optional(),
   })
   .strict();
 
 type CreateAgentArgs = z.infer<typeof CreateAgentSchema>;
 type UpdateAgentArgs = z.infer<typeof UpdateAgentSchema>;
 
+const REPOSITORY_ADMIN_OVERRIDE = {
+  type: "boolean",
+  description:
+    "Admins only (agents:admin with the admin role): approve codingProfile.repository without checking GitHub access, recorded as an admin approval.",
+};
+
+/** The profile columns a repository authorization is stamped into. */
+function profileStamp(authorization: RepositoryAuthorization) {
+  return {
+    repositoryAuthorizedVia: authorization.authorizedVia,
+    repositoryAuthorizedById: authorization.authorizedById,
+    repositoryAuthorizedAt: authorization.authorizedAt,
+  };
+}
+
 const profileJsonSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
     provider: { type: "string", enum: ["codex", "claude-code"] },
-    repository: { type: "string" },
+    repository: {
+      type: "string",
+      description:
+        "owner/name on GitHub. Your linked GitHub account (link_host_account) must have write access to it, unless a wardby admin approves it (repositoryAdminOverride). Re-checked on every run.",
+    },
     baseRef: { type: "string" },
     defaultTask: { type: ["string", "null"] },
     allowWebhookTaskOverride: { type: "boolean" },
@@ -249,6 +271,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           description: "Reasoning effort for native agents. Unset uses the provider default.",
         },
         codingProfile: { ...profileJsonSchema, required: ["repository"] },
+        repositoryAdminOverride: REPOSITORY_ADMIN_OVERRIDE,
       },
       required: ["name", "systemPrompt", "model", "budgetUsd"],
     },
@@ -267,12 +290,27 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       if (args.budgetGroupId) {
         await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id);
       }
-      const { codingProfile, ...agentData } = args;
+      const { codingProfile, repositoryAdminOverride, ...agentData } = args;
+      if (repositoryAdminOverride !== undefined && !codingProfile) {
+        throw new McpError(400, "repositoryAdminOverride only applies with a codingProfile repository.");
+      }
+      // The creator is the owner, so it's the creator's GitHub access that counts.
+      const authorization = codingProfile
+        ? await authorizeRepositoryForSet(ctx, {
+            ownerId: ctx.principal.id,
+            provider: "github",
+            repository: codingProfile.repository,
+            kind: "coding",
+            adminOverride: repositoryAdminOverride,
+          })
+        : null;
       const agent = await ctx.db.agent.create({
         data: {
           ...agentData,
           ownerId: ctx.principal.id,
-          ...(codingProfile ? { codingProfile: { create: codingProfile } } : {}),
+          ...(codingProfile && authorization
+            ? { codingProfile: { create: { ...codingProfile, ...profileStamp(authorization) } } }
+            : {}),
         },
         include: { codingProfile: true },
       });
@@ -305,6 +343,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           description: "Reasoning effort for native agents. Null clears it back to the provider default.",
         },
         codingProfile: profileJsonSchema,
+        repositoryAdminOverride: REPOSITORY_ADMIN_OVERRIDE,
       },
       required: ["id"],
     },
@@ -313,11 +352,48 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       if (args.codingProfile?.workerImageRef !== undefined) requireWorkerImageRefScope(ctx);
       if (args.codingProfile?.packageAllowlist !== undefined || args.codingProfile?.packagePolicy !== undefined)
         requirePackageApproval(ctx);
+
+      // Repository authorization calls GitHub, so it runs before (outside) the
+      // serializable transaction, on a pre-read; the transaction then verifies
+      // the pre-read still holds. Only a changed repository (or becoming a
+      // coding agent) is re-authorized; other edits keep the existing stamp.
+      const before = await ctx.db.agent.findUnique({ where: { id: args.id }, include: { codingProfile: true } });
+      if (!before) throw new McpError(404, `Agent "${args.id}" not found.`);
+      assertCanMutate(before.ownerId, ctx.principal.id, `Agent "${args.id}" is not owned by the caller.`);
+      const repositoryAfter = (kind: string, profile: { repository: string } | null | undefined) =>
+        kind === "coding" ? (args.codingProfile?.repository ?? profile?.repository ?? null) : null;
+      const plannedRepository = repositoryAfter(args.kind ?? before.kind, before.codingProfile);
+      const repositoryChanges = (existing: { kind: string; codingProfile: { repository: string } | null }) => {
+        const next = repositoryAfter(args.kind ?? existing.kind, existing.codingProfile);
+        return next !== null && (existing.kind !== "coding" || existing.codingProfile?.repository !== next);
+      };
+      const authorization =
+        plannedRepository !== null && repositoryChanges(before)
+          ? await authorizeRepositoryForSet(ctx, {
+              ownerId: before.ownerId,
+              provider: "github",
+              repository: plannedRepository,
+              kind: "coding",
+              adminOverride: args.repositoryAdminOverride,
+            })
+          : null;
+      if (args.repositoryAdminOverride !== undefined && !authorization) {
+        throw new McpError(400, "repositoryAdminOverride only applies when the coding repository changes.");
+      }
+
       const agent = await ctx.db.$transaction(
         async (tx) => {
           const existing = await tx.agent.findUnique({ where: { id: args.id }, include: { codingProfile: true } });
           if (!existing) throw new McpError(404, `Agent "${args.id}" not found.`);
           assertCanMutate(existing.ownerId, ctx.principal.id, `Agent "${args.id}" is not owned by the caller.`);
+          if (
+            existing.ownerId !== before.ownerId ||
+            (repositoryChanges(existing) &&
+              (!authorization ||
+                repositoryAfter(args.kind ?? existing.kind, existing.codingProfile) !== plannedRepository))
+          ) {
+            throw new McpError(409, `Agent "${args.id}" changed while it was being updated; try again.`);
+          }
           if (args.budgetGroupId) {
             await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id);
           }
@@ -359,15 +435,16 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             throw new McpError(400, "A default task is required for an enabled coding-agent schedule.");
           }
 
-          const { id, codingProfile: _profilePatch, ...updates } = args;
+          const { id, codingProfile: _profilePatch, repositoryAdminOverride: _override, ...updates } = args;
+          const stamp = authorization ? profileStamp(authorization) : {};
           const profileMutation =
             nextKind === "native"
               ? existing.codingProfile
                 ? { delete: true as const }
                 : undefined
               : existing.codingProfile
-                ? { update: nextProfile! }
-                : { create: nextProfile! };
+                ? { update: { ...nextProfile!, ...stamp } }
+                : { create: { ...nextProfile!, ...stamp } };
           return tx.agent.update({
             where: { id },
             data: {

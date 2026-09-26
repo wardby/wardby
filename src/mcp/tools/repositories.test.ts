@@ -1,4 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { Prisma } from "#prisma";
+import type { RepoAccessDecision, RepoAccessGate } from "../../core/repo-access.js";
+import type { HostPermission } from "../../providers/review-host/types.js";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
@@ -23,9 +26,12 @@ interface FakeRepositoryRow {
   triggers: string[];
   checkName: string | null;
   createdAt: Date;
+  authorizedVia?: string | null;
+  authorizedById?: string | null;
+  authorizedAt?: Date | null;
 }
 
-function fakeDb(agents: FakeAgentRow[], repositories: FakeRepositoryRow[] = []) {
+function fakeDb(agents: FakeAgentRow[], repositories: FakeRepositoryRow[] = [], opts: { failUpsertWith?: Error } = {}) {
   const agentRows = new Map(agents.map((a) => [a.id, a]));
   const rows: FakeRepositoryRow[] = [...repositories];
   let nextId = rows.length + 1;
@@ -53,16 +59,15 @@ function fakeDb(agents: FakeAgentRow[], repositories: FakeRepositoryRow[] = []) 
       }: {
         where: { agentId_provider_repository: { agentId: string; provider: string; repository: string } };
         create: Omit<FakeRepositoryRow, "id" | "createdAt">;
-        update: { access: string; triggers: string[]; checkName: string | null };
+        update: Partial<FakeRepositoryRow>;
       }) => {
+        if (opts.failUpsertWith) throw opts.failUpsertWith;
         const { agentId, provider, repository } = where.agentId_provider_repository;
         const existing = rows.find(
           (r) => r.agentId === agentId && r.provider === provider && r.repository === repository,
         );
         if (existing) {
-          existing.access = update.access;
-          existing.triggers = update.triggers;
-          existing.checkName = update.checkName;
+          Object.assign(existing, update);
           return { ...existing };
         }
         const row: FakeRepositoryRow = { id: `repo${nextId++}`, createdAt: new Date(), ...create };
@@ -87,12 +92,34 @@ function fakeDb(agents: FakeAgentRow[], repositories: FakeRepositoryRow[] = []) 
   } as unknown as import("#prisma").PrismaClient;
 }
 
-function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {
+/** A gate whose linked identity (for every principal) has `level` on every repository. */
+function gateAt(level: HostPermission | "unlinked" | "error") {
+  const rank = ["none", "read", "triage", "write", "maintain", "admin"];
+  const authorizePrincipal = vi.fn(async (input: { required: HostPermission }): Promise<RepoAccessDecision> => {
+    if (level === "unlinked") return { ok: false, reason: "identity_not_linked" };
+    if (level === "error") return { ok: false, reason: "check_failed" };
+    return rank.indexOf(level) >= rank.indexOf(input.required)
+      ? { ok: true, level }
+      : { ok: false, reason: "insufficient_permission", level };
+  });
+  const gate: RepoAccessGate = { authorizePrincipal, authorizeUse: vi.fn(), authorizeHostUser: vi.fn() };
+  return { gate, authorizePrincipal };
+}
+
+function fakeCtx(
+  db: ReturnType<typeof fakeDb>,
+  principalId: string,
+  scopes: string[],
+  opts: { gate?: RepoAccessGate | null; roles?: string[] } = {},
+): McpRequestContext {
   return {
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
+    roles: opts.roles ?? [],
     canonicalUri: CANONICAL_URI,
-    providers: {} as unknown as import("../../providers/index.js").ProviderRegistry,
+    providers: {
+      ...(opts.gate === null ? {} : { repoAccess: opts.gate ?? gateAt("write").gate }),
+    } as unknown as import("../context.js").McpProviders,
     db,
     clientSupportsTasks: false,
     mcpReq: { requestState: () => undefined },
@@ -116,10 +143,15 @@ function errorText(result: { content: { text: string }[] }): string {
   return result.content[0].text;
 }
 
-function setup(agents: FakeAgentRow[], principalId: string, repositories: FakeRepositoryRow[] = []) {
-  const db = fakeDb(agents, repositories);
+function setup(
+  agents: FakeAgentRow[],
+  principalId: string,
+  repositories: FakeRepositoryRow[] = [],
+  opts: { gate?: RepoAccessGate | null; roles?: string[]; scopes?: string[]; failUpsertWith?: Error } = {},
+) {
+  const db = fakeDb(agents, repositories, { failUpsertWith: opts.failUpsertWith });
   const mcp = buildMcpServer({ providers: {} as never, db, config: { canonicalUri: CANONICAL_URI } });
-  mcp.setFixedContext(fakeCtx(db, principalId, ["agents:read", "agents:write"]));
+  mcp.setFixedContext(fakeCtx(db, principalId, opts.scopes ?? ["agents:read", "agents:write"], opts));
   registerRepositoryTools(mcp);
   return { db, mcp };
 }
@@ -325,6 +357,171 @@ describe("repository tools", () => {
 
     const listed = await client.callTool({ name: "list_repositories", arguments: { agentId: "a1" } });
     expect(parseText(listed as never)).toEqual({ repositories: [] });
+    await client.close();
+  });
+});
+
+describe("link_repository authorization (H5-1)", () => {
+  const OWNED: FakeAgentRow = { id: "a1", name: "reviewer", ownerId: "p1", kind: "native" };
+  const link = (extra: Record<string, unknown> = {}) => ({
+    name: "link_repository",
+    arguments: { agentId: "a1", repository: "chfields/knock-knock-jokes", access: "write", ...extra },
+  });
+
+  it("refuses a member with no linked GitHub account, pointing at link_host_account", async () => {
+    const { mcp } = setup([OWNED], "p1", [], { gate: gateAt("unlinked").gate });
+    const client = await connectClient(mcp);
+    const result = await client.callTool(link());
+    expect(result.isError).toBeTruthy();
+    expect(errorText(result as never)).toContain("link_host_account");
+    await client.close();
+  });
+
+  it("refuses a write link but allows a read link for a member with read access", async () => {
+    const { gate, authorizePrincipal } = gateAt("read");
+    const { mcp } = setup([OWNED], "p1", [], { gate });
+    const client = await connectClient(mcp);
+    const write = await client.callTool(link());
+    expect(write.isError).toBeTruthy();
+    expect(errorText(write as never)).toMatch(/has read access.*needs write/);
+    const read = await client.callTool(link({ access: "read" }));
+    expect(read.isError).toBeFalsy();
+    expect(authorizePrincipal).toHaveBeenLastCalledWith({
+      principalId: "p1",
+      provider: "github",
+      repository: "chfields/knock-knock-jokes",
+      required: "read",
+      fresh: true,
+    });
+    await client.close();
+  });
+
+  it("stamps a link authorized through the owner's GitHub access", async () => {
+    const { mcp } = setup([OWNED], "p1", [], { gate: gateAt("maintain").gate });
+    const client = await connectClient(mcp);
+    const result = await client.callTool(link());
+    const { link: row } = parseText(result as never) as { link: FakeRepositoryRow };
+    expect(row).toMatchObject({ authorizedVia: "host_permission", authorizedById: "p1" });
+    expect(new Date(row.authorizedAt as unknown as string).getTime()).toBeGreaterThan(Date.now() - 60_000);
+    await client.close();
+  });
+
+  it("records an explicit admin approval without asking GitHub", async () => {
+    const { gate, authorizePrincipal } = gateAt("none");
+    const { mcp } = setup([OWNED], "p1", [], {
+      gate,
+      roles: ["admin"],
+      scopes: ["agents:read", "agents:write", "agents:admin"],
+    });
+    const client = await connectClient(mcp);
+    const result = await client.callTool(link({ adminOverride: true }));
+    expect(result.isError).toBeFalsy();
+    const { link: row } = parseText(result as never) as { link: FakeRepositoryRow };
+    expect(row).toMatchObject({ authorizedVia: "admin", authorizedById: "p1" });
+    expect(authorizePrincipal).not.toHaveBeenCalled();
+    await client.close();
+  });
+
+  it("refuses adminOverride from a member, even holding the agents:admin scope", async () => {
+    const { gate, authorizePrincipal } = gateAt("admin");
+    const { mcp } = setup([OWNED], "p1", [], { gate, scopes: ["agents:read", "agents:write", "agents:admin"] });
+    const client = await connectClient(mcp);
+    const result = await client.callTool(link({ adminOverride: true }));
+    expect(result.isError).toBeTruthy();
+    expect(errorText(result as never)).toMatch(/requires a role/);
+    expect(authorizePrincipal).not.toHaveBeenCalled();
+    await client.close();
+  });
+
+  it("refuses a public (owner-less) agent, admin or not", async () => {
+    const { gate, authorizePrincipal } = gateAt("admin");
+    const { mcp } = setup([{ ...OWNED, ownerId: null }], "p1", [], {
+      gate,
+      roles: ["admin"],
+      scopes: ["agents:read", "agents:write", "agents:admin"],
+    });
+    const client = await connectClient(mcp);
+    for (const extra of [{}, { adminOverride: true }]) {
+      const result = await client.callTool(link(extra));
+      expect(result.isError).toBeTruthy();
+      expect(errorText(result as never)).toMatch(/without an owner/);
+    }
+    expect(authorizePrincipal).not.toHaveBeenCalled();
+    await client.close();
+  });
+
+  it("fails closed when GitHub cannot be asked or no gate is configured", async () => {
+    const failing = setup([OWNED], "p1", [], { gate: gateAt("error").gate });
+    const c1 = await connectClient(failing.mcp);
+    expect((await c1.callTool(link())).isError).toBeTruthy();
+    await c1.close();
+    const none = setup([OWNED], "p1", [], { gate: null });
+    const c2 = await connectClient(none.mcp);
+    const result = await c2.callTool(link());
+    expect(result.isError).toBeTruthy();
+    expect(errorText(result as never)).toMatch(/adminOverride/);
+    await c2.close();
+  });
+});
+
+describe("link_repository check names (H5-2)", () => {
+  const OWNED: FakeAgentRow = { id: "a1", name: "reviewer", ownerId: "p1", kind: "native" };
+
+  it("allows a checkName only with the pull_request trigger", async () => {
+    const { mcp } = setup([OWNED], "p1");
+    const client = await connectClient(mcp);
+    for (const triggers of [undefined, [], ["mention"]]) {
+      const result = await client.callTool({
+        name: "link_repository",
+        arguments: { agentId: "a1", repository: "o/r", access: "write", checkName: "wardby review", triggers },
+      });
+      expect(result.isError).toBeTruthy();
+      expect(errorText(result as never)).toContain("checkName needs the pull_request trigger");
+    }
+    await client.close();
+  });
+
+  it("checks a name against every other link in the repository, whatever its triggers", async () => {
+    const legacy: FakeRepositoryRow = {
+      id: "r9",
+      agentId: "a9",
+      provider: "github",
+      repository: "o/r",
+      access: "write",
+      triggers: [],
+      checkName: "wardby review",
+      createdAt: new Date(),
+    };
+    const { mcp } = setup([OWNED], "p1", [legacy]);
+    const client = await connectClient(mcp);
+    const result = await client.callTool({
+      name: "link_repository",
+      arguments: {
+        agentId: "a1",
+        repository: "o/r",
+        access: "write",
+        triggers: ["pull_request"],
+        checkName: "wardby review",
+      },
+    });
+    expect(result.isError).toBeTruthy();
+    expect(errorText(result as never)).toContain("already uses check name");
+    await client.close();
+  });
+
+  it("maps a unique-index race on the check name to 409", async () => {
+    const race = new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+      code: "P2002",
+      clientVersion: "test",
+    });
+    const { mcp } = setup([OWNED], "p1", [], { failUpsertWith: race });
+    const client = await connectClient(mcp);
+    const result = await client.callTool({
+      name: "link_repository",
+      arguments: { agentId: "a1", repository: "o/r", access: "write", triggers: ["pull_request"], checkName: "x" },
+    });
+    expect(result.isError).toBeTruthy();
+    expect(errorText(result as never)).toContain("already uses check name");
     await client.close();
   });
 });

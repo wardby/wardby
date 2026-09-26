@@ -1,4 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import type { RepoAccessDecision, RepoAccessGate } from "../../core/repo-access.js";
+import type { HostPermission } from "../../providers/review-host/types.js";
 import { Prisma } from "#prisma";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
@@ -7,7 +9,19 @@ import { registerAgentTools } from "./agents.js";
 import type { McpRequestContext } from "../context.js";
 
 const CANONICAL_URI = "https://host/mcp";
-const fakeProviders = {} as unknown as import("../../providers/index.js").ProviderRegistry;
+/** A gate whose linked identity (for every principal) has `level` on every repository. */
+function gateAt(level: HostPermission | "unlinked") {
+  const rank = ["none", "read", "triage", "write", "maintain", "admin"];
+  const authorizePrincipal = vi.fn(async (input: { required: HostPermission }): Promise<RepoAccessDecision> => {
+    if (level === "unlinked") return { ok: false, reason: "identity_not_linked" };
+    return rank.indexOf(level) >= rank.indexOf(input.required)
+      ? { ok: true, level }
+      : { ok: false, reason: "insufficient_permission", level };
+  });
+  const gate: RepoAccessGate = { authorizePrincipal, authorizeUse: vi.fn(), authorizeHostUser: vi.fn() };
+  return { gate, authorizePrincipal };
+}
+const fakeProviders = { repoAccess: gateAt("admin").gate } as unknown as import("../context.js").McpProviders;
 
 interface FakeAgentRow {
   id: string;
@@ -112,7 +126,8 @@ function fakeDb(
           ...agentData,
           codingProfile: codingProfile?.delete
             ? null
-            : (codingProfile?.create ?? codingProfile?.update ?? row.codingProfile),
+            : (codingProfile?.create ??
+              (codingProfile?.update ? { ...row.codingProfile!, ...codingProfile.update } : row.codingProfile)),
         };
         rows.set(where.id, updated);
         return updated;
@@ -149,13 +164,14 @@ function fakeCtx(
   principalId: string,
   scopes: string[],
   roles: string[] = [],
+  providers = fakeProviders,
 ): McpRequestContext {
   return {
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
     roles,
     canonicalUri: CANONICAL_URI,
-    providers: fakeProviders,
+    providers,
     db,
     clientSupportsTasks: false,
     mcpReq: { requestState: () => undefined },
@@ -1402,5 +1418,201 @@ describe("agent CRUD tools", () => {
       expect(JSON.stringify(result)).toMatch(/only valid for native agents/);
       await client.close();
     });
+  });
+});
+
+describe("coding repository authorization (H5-1/C3-2)", () => {
+  const text = (result: { content: unknown }) => (result.content as { text: string }[])[0].text;
+  const createCoding = (extra: Record<string, unknown> = {}) => ({
+    name: "create_agent",
+    arguments: {
+      name: "coder",
+      systemPrompt: "x",
+      model: "gpt-5.6-luna",
+      budgetUsd: 0.25,
+      kind: "coding",
+      codingProfile: { repository: "OpenAI/Example" },
+      ...extra,
+    },
+  });
+  const seeded = (ownerId: string | null = "p1") =>
+    fakeDb([
+      {
+        id: "a1",
+        name: "coder",
+        systemPrompt: "x",
+        model: "gpt-5.6-luna",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId,
+        tools: [],
+        kind: "coding",
+        codingProfile: {
+          provider: "codex",
+          repository: "openai/example",
+          baseRef: "main",
+          defaultTask: null,
+          timeoutSec: 1800,
+          protectedPaths: [".github/workflows/**"],
+          repositoryAuthorizedVia: "grandfathered",
+          repositoryAuthorizedById: null,
+        } as never,
+      },
+    ]);
+  async function connect(
+    db: ReturnType<typeof fakeDb>,
+    gate: RepoAccessGate,
+    opts: { roles?: string[]; scopes?: string[] } = {},
+  ) {
+    const providers = { repoAccess: gate } as unknown as import("../context.js").McpProviders;
+    const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", opts.scopes ?? ["agents:write"], opts.roles ?? [], providers));
+    registerAgentTools(mcp);
+    return connectClient(mcp);
+  }
+
+  it("create_agent checks the caller's GitHub access at write and stamps the profile", async () => {
+    const { gate, authorizePrincipal } = gateAt("write");
+    const client = await connect(fakeDb(), gate);
+    const result = await client.callTool(createCoding());
+    expect(result.isError).toBeFalsy();
+    expect(authorizePrincipal).toHaveBeenCalledWith({
+      principalId: "p1",
+      provider: "github",
+      repository: "openai/example",
+      required: "write",
+      fresh: true,
+    });
+    expect(JSON.parse(text(result)).codingProfile).toMatchObject({
+      repository: "openai/example",
+      repositoryAuthorizedVia: "host_permission",
+      repositoryAuthorizedById: "p1",
+    });
+    await client.close();
+  });
+
+  it("create_agent refuses a caller without a linked account or with only read or triage", async () => {
+    for (const level of ["unlinked", "read", "triage"] as const) {
+      const db = fakeDb();
+      const client = await connect(db, gateAt(level).gate);
+      const result = await client.callTool(createCoding());
+      expect(result.isError, level).toBe(true);
+      expect(text(result)).toMatch(level === "unlinked" ? /link_host_account/ : /needs write/);
+      expect((await db.agent.findMany({})).length).toBe(0);
+      await client.close();
+    }
+  });
+
+  it("repositoryAdminOverride records an admin approval, and is refused for a member", async () => {
+    const admin = gateAt("none");
+    const asAdmin = await connect(fakeDb(), admin.gate, {
+      roles: ["admin"],
+      scopes: ["agents:write", "agents:admin"],
+    });
+    const approved = await asAdmin.callTool(createCoding({ repositoryAdminOverride: true }));
+    expect(approved.isError).toBeFalsy();
+    expect(JSON.parse(text(approved)).codingProfile).toMatchObject({
+      repositoryAuthorizedVia: "admin",
+      repositoryAuthorizedById: "p1",
+    });
+    expect(admin.authorizePrincipal).not.toHaveBeenCalled();
+    await asAdmin.close();
+
+    const member = await connect(fakeDb(), gateAt("admin").gate, { scopes: ["agents:write", "agents:admin"] });
+    const refused = await member.callTool(createCoding({ repositoryAdminOverride: true }));
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toMatch(/requires a role/);
+    await member.close();
+  });
+
+  it("update_agent without a repository change makes no GitHub call and keeps the stamp", async () => {
+    const { gate, authorizePrincipal } = gateAt("none");
+    const client = await connect(seeded(), gate);
+    const result = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", systemPrompt: "y", codingProfile: { timeoutSec: 900, repository: "OpenAI/Example" } },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(authorizePrincipal).not.toHaveBeenCalled();
+    expect(JSON.parse(text(result)).codingProfile).toMatchObject({
+      timeoutSec: 900,
+      repositoryAuthorizedVia: "grandfathered",
+    });
+    await client.close();
+  });
+
+  it("update_agent re-authorizes a changed repository, and refuses it without access", async () => {
+    const denied = gateAt("read");
+    const db = seeded();
+    const refusedClient = await connect(db, denied.gate);
+    const refused = await refusedClient.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { repository: "openai/other" } },
+    });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toMatch(/needs write/);
+    expect(
+      ((await db.agent.findUnique({ where: { id: "a1" } })) as { codingProfile?: unknown } | null)?.codingProfile,
+    ).toMatchObject({
+      repository: "openai/example",
+    });
+    await refusedClient.close();
+
+    const allowed = gateAt("write");
+    const client = await connect(db, allowed.gate);
+    const changed = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { repository: "openai/other" } },
+    });
+    expect(changed.isError).toBeFalsy();
+    expect(allowed.authorizePrincipal).toHaveBeenCalledWith(expect.objectContaining({ repository: "openai/other" }));
+    expect(JSON.parse(text(changed)).codingProfile).toMatchObject({
+      repository: "openai/other",
+      repositoryAuthorizedVia: "host_permission",
+      repositoryAuthorizedById: "p1",
+    });
+    await client.close();
+  });
+
+  it("update_agent refuses to give a public (owner-less) agent a repository", async () => {
+    const { gate, authorizePrincipal } = gateAt("admin");
+    const client = await connect(seeded(null), gate, { roles: ["admin"], scopes: ["agents:write", "agents:admin"] });
+    for (const extra of [{}, { repositoryAdminOverride: true }]) {
+      const result = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile: { repository: "openai/other" }, ...extra },
+      });
+      expect(result.isError).toBe(true);
+      expect(text(result)).toMatch(/without an owner/);
+    }
+    expect(authorizePrincipal).not.toHaveBeenCalled();
+    await client.close();
+  });
+
+  it("update_agent turning a native agent into a coding one checks its repository", async () => {
+    const db = fakeDb([
+      {
+        id: "a1",
+        name: "agent",
+        systemPrompt: "x",
+        model: "gpt-5.6-luna",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: null,
+        timezone: "UTC",
+        ownerId: "p1",
+        tools: [],
+      },
+    ]);
+    const client = await connect(db, gateAt("unlinked").gate);
+    const result = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", kind: "coding", codingProfile: { repository: "openai/example" } },
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/link_host_account/);
+    await client.close();
   });
 });
