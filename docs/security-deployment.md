@@ -198,9 +198,16 @@ and pins the validated DNS result to the connection while retaining Host and
 TLS verification. Cross-origin redirects remove credentials, including custom
 API-key headers; forwarding a request body across origins is rejected.
 
-`WARDBY_FETCH_ALLOWED_HOSTS` accepts exact normalized hosts only. Private-host
-allowlisting intentionally bypasses destination isolation for those hosts.
-Separately deny metadata/private egress at the container/VPC/firewall layer.
+Every resolved address must be global. A tool's own `allowedHosts` only
+narrows egress; it never opens a private, loopback or link-local destination.
+Only the operator's `WARDBY_FETCH_ALLOWED_HOSTS` (exact normalized hosts) can,
+and a non-wildcard tool must list the host too. Cloud metadata endpoints
+(`169.254.169.254`, `169.254.169.252`, `169.254.170.2`, `169.254.170.23`,
+`100.100.100.200`, `fd00:ec2::254`, `fd00:ec2::23`, `fd20:ce::254`, their
+mapped/NAT64/6to4 IPv6 forms, `metadata.google.internal`, `metadata`) are
+always blocked, even if listed.
+The network layer cannot back this up for the control plane on GKE, because
+Workload Identity needs the metadata server.
 Sandbox code can explicitly log secrets it has been given; log size limits do
 not provide automatic redaction. Keep tool-authoring privileges restricted.
 Public/non-owner tool listings expose only id/name/description; owners retain

@@ -11,7 +11,7 @@ import type { Datastore, DatastoreSetOptions, DatastoreValue } from "../provider
 import type { SecretsAccessor } from "../core/secrets.js";
 import type { SharedDatastoreAccessor } from "../core/datastores.js";
 import { registerJsonAsyncFunction } from "./bridge.js";
-import { parseAllowedHosts } from "./fetch-policy.js";
+import { parseAllowedHosts, type FetchPolicyOptions } from "./fetch-policy.js";
 import { safeFetch } from "./safe-fetch.js";
 import { FETCH_WILDCARD } from "./tool-capabilities.js";
 import { boundedJson, boundedString } from "./bounded-json.js";
@@ -27,6 +27,20 @@ const MIN_REDACTABLE_SECRET_LENGTH = 6;
 const FETCH_ALLOWED_HOSTS = parseAllowedHosts(process.env.WARDBY_FETCH_ALLOWED_HOSTS);
 let sharedParserPool: ParserWorkerPool | undefined;
 
+/**
+ * Fetch policy for one tool invocation. The tool's own host list only narrows
+ * egress; private destinations open solely via the operator's
+ * WARDBY_FETCH_ALLOWED_HOSTS (and, for a non-wildcard tool, only when the tool
+ * also lists the host). Cloud metadata stays blocked either way (fetch-policy.ts).
+ */
+export function sandboxFetchPolicy(
+  toolHosts: readonly string[],
+  operatorHosts: readonly string[] = FETCH_ALLOWED_HOSTS,
+): FetchPolicyOptions {
+  if (toolHosts.includes(FETCH_WILDCARD)) return { privateHostAllowlist: [...operatorHosts] };
+  return { allowedHosts: [...toolHosts], restrictToAllowedHosts: true, privateHostAllowlist: [...operatorHosts] };
+}
+
 export interface HostFunctionOptions {
   signal?: AbortSignal;
   agentId: string;
@@ -40,7 +54,7 @@ export interface HostFunctionOptions {
   logger?: Logger;
   /** Overrides the shared default parser-worker pool — mainly for tests. */
   parserPool?: ParserWorkerPool;
-  /** Hosts this specific tool attachment may fetch. Omitted/empty = no outbound fetch at all; a literal "*" element lifts the restriction (existing SSRF protection against private/link-local addresses still applies). */
+  /** Hosts this specific tool attachment may fetch. Omitted/empty = no outbound fetch at all; a literal "*" element lifts the restriction. Either way this list only narrows egress: private/link-local destinations need the operator's WARDBY_FETCH_ALLOWED_HOSTS, and cloud metadata is always blocked. */
   allowedFetchHosts?: string[];
 }
 
@@ -105,11 +119,7 @@ export function installHostFunctions(
 
   register("__bridge_fetch", async (argsJson) => {
     const [url, init] = args<[string, { method?: string; headers?: Record<string, string>; body?: string }]>(argsJson);
-    const hosts = allowedFetchHosts ?? [];
-    if (hosts.includes(FETCH_WILDCARD)) {
-      return safeFetch(url, init, { allowedHosts: FETCH_ALLOWED_HOSTS, signal });
-    }
-    return safeFetch(url, init, { allowedHosts: hosts, restrictToAllowedHosts: true, signal });
+    return safeFetch(url, init, { ...sandboxFetchPolicy(allowedFetchHosts ?? []), signal });
   });
 
   register("__bridge_datastoreGet", async (argsJson) => {
