@@ -7,5 +7,7 @@ resources:
   - proxy-database-egress.yaml
   - control-plane.yaml
   - control-plane-gateway.yaml
+  - priority.yaml
 patches:
   - path: proxy-cloudsql.yaml
+  - path: proxy-priority.yaml
