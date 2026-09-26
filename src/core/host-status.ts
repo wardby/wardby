@@ -1,12 +1,14 @@
 /**
- * The status comment for a run started by an @-mention: posted as soon as the
- * run is dispatched ("working on it"), then edited once with the outcome — the
- * pull requests its coding sub-runs opened or updated, the agent's reply when
- * none came out, or the status of a run that did not succeed. Best effort
- * throughout: nothing here throws, and a comment the edit could not reach is
- * retried by the reconciler (closeOrphanedHostStatuses).
+ * The status comment for a run started by an @-mention. Where to comment is
+ * recorded with the run itself (mentionStatusRow, written in the dispatch
+ * transaction); the "working on it" comment is posted right after the webhook
+ * is answered, and edited once with the outcome — the pull requests its coding
+ * sub-runs opened or updated, the agent's reply when none came out, or why it
+ * did not succeed. A run that ends before its comment was posted (the instance
+ * died first, say) still gets one: the reconciler posts the outcome as a new
+ * comment. Best effort throughout: nothing here throws.
  */
-import type { PrismaClient, Run } from "#prisma";
+import type { Prisma, PrismaClient, Run } from "#prisma";
 import type { CodeReviewHost, ReviewHostProvider, ReviewHostRegistry } from "../providers/review-host/types.js";
 import { logger } from "./logger.js";
 
@@ -27,10 +29,32 @@ export interface PullRequestOutcome {
   pullRequestNumber: number;
 }
 
+/** A sub-run that ended without succeeding. */
+export interface FailedChild {
+  id: string;
+  status: string;
+}
+
 const runLine = (runId: string): string => `<sub>wardby run \`${runId}\`</sub>`;
 
 export function workingBody(runId: string): string {
   return `👀 Working on it.\n\n${runLine(runId)}`;
+}
+
+/** The status row for a mention run, created in the same transaction as the run. */
+export function mentionStatusRow(
+  provider: ReviewHostProvider,
+  event: { repository: string; number: number; replyToReviewCommentId?: string },
+  runId: string,
+): Prisma.RunHostStatusUncheckedCreateInput {
+  return {
+    runId,
+    provider,
+    repository: event.repository,
+    number: event.number,
+    commentKind: event.replyToReviewCommentId ? "inline" : "conversation",
+    replyToReviewCommentId: event.replyToReviewCommentId ?? null,
+  };
 }
 
 function pullRequestOutcome(result: unknown): PullRequestOutcome | null {
@@ -52,7 +76,12 @@ function quoteReply(text: string): string {
     .join("\n");
 }
 
-export function outcomeBody(run: FinishedRun, repository: string, pullRequests: PullRequestOutcome[]): string {
+export function outcomeBody(
+  run: FinishedRun,
+  repository: string,
+  pullRequests: PullRequestOutcome[],
+  failedChildren: FailedChild[] = [],
+): string {
   const links = pullRequests.map((pr) => {
     const ref =
       pr.repository.toLowerCase() === repository.toLowerCase()
@@ -60,83 +89,114 @@ export function outcomeBody(run: FinishedRun, repository: string, pullRequests: 
         : `${pr.repository}#${pr.pullRequestNumber}`;
     return pr.outcome === "pull_request_opened" ? `Opened ${ref}` : `Pushed changes to ${ref}`;
   });
+  const partial = links.length > 0 ? `\n\n${links.join(", ")}.` : "";
   const footer = runLine(run.id);
+  if (run.status === "lost") {
+    return `❌ Interrupted before it finished (for example, wardby restarted). Repeat your request to retry.${partial}\n\n${footer}`;
+  }
   if (run.status !== "succeeded") {
     // Only the status: a run's error text can carry internal detail that does not belong on the host.
-    const partial = links.length > 0 ? `\n\n${links.join(", ")}.` : "";
     return `❌ Stopped: the run ended with status \`${run.status}\`.${partial}\n\n${footer}`;
   }
-  if (links.length > 0) return `✅ ${links.join(", ")}.\n\n${footer}`;
   const reply = run.finalText?.trim();
-  return `✅ Finished without opening a pull request.${reply ? `\n\n${quoteReply(reply)}` : ""}\n\n${footer}`;
+  const quoted = reply ? `\n\n${quoteReply(reply)}` : "";
+  if (failedChildren.length > 0) {
+    // The agent itself finished, but the work it handed off did not.
+    const which = failedChildren.map((c) => `\`${c.id}\` (\`${c.status}\`)`).join(", ");
+    return `❌ A sub-run did not succeed: ${which}.${partial}${quoted}\n\n${footer}`;
+  }
+  if (links.length > 0) return `✅ ${links.join(", ")}.\n\n${footer}`;
+  return `✅ Finished without opening a pull request.${quoted}\n\n${footer}`;
 }
 
 /**
- * Edits a run's status comment with its outcome and marks it complete. Does
- * nothing when the run has no status comment or it is already complete. A
- * failed edit leaves the row open so the reconciler retries it.
+ * Writes a finished run's outcome to its status comment and marks it
+ * complete: edits the comment when it exists; when it does not yet, posts the
+ * outcome as a new comment only if `postIfMissing` (the reconciler, well after
+ * the run ended), and otherwise leaves the row for postMentionStatus, which
+ * is about to post it. A failed host call leaves the row open for the
+ * reconciler to retry.
  */
 export async function completeHostStatus(
   db: HostStatusDb,
   run: FinishedRun,
   hosts: ReviewHostRegistry | undefined,
+  opts: { postIfMissing?: boolean } = {},
 ): Promise<void> {
   if (!hosts) return;
   try {
     const status = await db.runHostStatus.findUnique({ where: { runId: run.id } });
     if (!status || status.completedAt) return;
+    if (!status.commentId && !opts.postIfMissing) return;
     const host = hosts[status.provider as ReviewHostProvider];
     if (!host) return;
     const children = await db.run.findMany({
       where: { parentRunId: run.id },
-      select: { codingRun: { select: { result: true } } },
+      select: { id: true, status: true, codingRun: { select: { result: true } } },
       orderBy: { startedAt: "asc" },
     });
     const pullRequests = children
       .map((c) => pullRequestOutcome(c.codingRun?.result))
       .filter((pr): pr is PullRequestOutcome => pr !== null);
-    await host.editComment(status.repository, {
-      kind: status.commentKind === "inline" ? "inline" : "conversation",
-      id: status.commentId,
-      body: outcomeBody(run, status.repository, pullRequests),
-    });
-    await db.runHostStatus.update({ where: { runId: run.id }, data: { completedAt: new Date() } });
+    const failedChildren = children
+      .filter((c) => TERMINAL.has(c.status) && c.status !== "succeeded")
+      .map((c) => ({ id: c.id, status: c.status }));
+    const body = outcomeBody(run, status.repository, pullRequests, failedChildren);
+    let commentId = status.commentId;
+    if (commentId) {
+      await host.editComment(status.repository, {
+        kind: status.commentKind === "inline" ? "inline" : "conversation",
+        id: commentId,
+        body,
+      });
+    } else {
+      commentId = (
+        await host.comment(status.repository, {
+          number: status.number,
+          body,
+          ...(status.replyToReviewCommentId ? { replyToReviewCommentId: status.replyToReviewCommentId } : {}),
+        })
+      ).id;
+    }
+    await db.runHostStatus.update({ where: { runId: run.id }, data: { commentId, completedAt: new Date() } });
   } catch (err) {
     log.warn({ err, runId: run.id }, "could not complete the run's status comment");
   }
 }
 
 /**
- * Posts the "working on it" comment for a mention run and records it. When
- * the run already ended (a fast failure can beat this follow-up), completes it
- * at once instead of waiting for the reconciler. Never throws.
+ * Posts the "working on it" comment for a mention run whose status row was
+ * written at dispatch, and records the comment on the row. When the run
+ * already ended (a fast failure can beat this follow-up), completes it at
+ * once. Does nothing when the row is gone, already has a comment, or is
+ * already complete. Never throws.
  */
 export async function postMentionStatus(
   db: HostStatusDb,
   host: CodeReviewHost,
-  event: { repository: string; number: number; replyToReviewCommentId?: string },
   runId: string,
   hosts: ReviewHostRegistry | undefined,
 ): Promise<void> {
   try {
-    const posted = await host.comment(event.repository, {
-      number: event.number,
+    const status = await db.runHostStatus.findUnique({ where: { runId } });
+    if (!status || status.commentId || status.completedAt) return;
+    const posted = await host.comment(status.repository, {
+      number: status.number,
       body: workingBody(runId),
-      ...(event.replyToReviewCommentId ? { replyToReviewCommentId: event.replyToReviewCommentId } : {}),
+      ...(status.replyToReviewCommentId ? { replyToReviewCommentId: status.replyToReviewCommentId } : {}),
     });
-    await db.runHostStatus.create({
-      data: {
-        runId,
-        provider: host.provider,
-        repository: event.repository,
-        number: event.number,
-        commentKind: event.replyToReviewCommentId ? "inline" : "conversation",
-        commentId: posted.id,
-      },
+    const claimed = await db.runHostStatus.updateMany({
+      where: { runId, commentId: null, completedAt: null },
+      data: { commentId: posted.id },
     });
+    if (claimed.count === 0) {
+      // The reconciler posted the outcome meanwhile; this comment is surplus.
+      log.warn({ runId }, "status comment posted after the outcome; leaving both");
+      return;
+    }
     const run = await db.run.findUnique({ where: { id: runId }, select: { id: true, status: true, finalText: true } });
     if (run && TERMINAL.has(run.status)) await completeHostStatus(db, run, hosts);
   } catch (err) {
-    log.warn({ err, repository: event.repository, number: event.number, runId }, "could not post the status comment");
+    log.warn({ err, runId }, "could not post the status comment");
   }
 }

@@ -500,7 +500,10 @@ describe("reconcileOnce orphaned host checks", () => {
 describe("reconcileOnce orphaned status comments", () => {
   const LONG_DONE = new Date(NOW.getTime() - 61_000);
 
-  function withStatuses(runs: FakeRun[], statuses: Array<{ runId: string; completedAt: Date | null }>) {
+  function withStatuses(
+    runs: FakeRun[],
+    statuses: Array<{ runId: string; completedAt: Date | null; commentId?: string | null }>,
+  ) {
     const base = fakeDb(runs) as unknown as { run: Record<string, unknown> };
     const rows = statuses.map((s) => ({
       ...s,
@@ -508,7 +511,8 @@ describe("reconcileOnce orphaned status comments", () => {
       repository: "o/n",
       number: 3,
       commentKind: "conversation",
-      commentId: `c-${s.runId}`,
+      replyToReviewCommentId: null,
+      commentId: s.commentId === undefined ? `c-${s.runId}` : s.commentId,
     }));
     const runHostStatus = {
       findMany: vi.fn(async ({ where, take }: any) =>
@@ -559,9 +563,27 @@ describe("reconcileOnce orphaned status comments", () => {
     expect(host.editComment).toHaveBeenCalledWith("o/n", {
       kind: "conversation",
       id: "c-lost1",
-      body: expect.stringContaining("`lost`"),
+      body: expect.stringMatching(/^❌ Interrupted before it finished/),
     });
     expect(rows.find((r) => r.runId === "lost1")!.completedAt).not.toBeNull();
     expect(rows.find((r) => r.runId === "live")!.completedAt).toBeNull();
+  });
+  it("posts the outcome as a new comment when the run died before its comment was posted", async () => {
+    const runs = [baseRun({ id: "died", status: "lost", finishedAt: LONG_DONE })];
+    const { db, rows } = withStatuses(runs, [{ runId: "died", completedAt: null, commentId: null }]);
+    const host = {
+      provider: "github",
+      editComment: vi.fn(async () => undefined),
+      comment: vi.fn(async () => ({ url: "https://x/9", id: "9" })),
+    } as unknown as CodeReviewHost;
+
+    await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, { github: host });
+
+    expect(host.editComment).not.toHaveBeenCalled();
+    expect(host.comment).toHaveBeenCalledWith("o/n", {
+      number: 3,
+      body: expect.stringMatching(/^❌ Interrupted before it finished/),
+    });
+    expect(rows[0]).toMatchObject({ commentId: "9", completedAt: expect.any(Date) });
   });
 });

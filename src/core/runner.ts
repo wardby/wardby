@@ -55,6 +55,7 @@ import {
 import { closeOpenHostCheck } from "./review-host-checks.js";
 import { RUN_TASK_TAG, splitTaskOverride, wrapUntrusted } from "./untrusted-content.js";
 import { completeHostStatus } from "./host-status.js";
+import { trackRun } from "./in-flight-runs.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
 
 const runnerLog = logger.child({ module: "runner" });
@@ -306,6 +307,17 @@ export async function executeRun(
   db: RunnerDb = defaultDb,
   onText?: (delta: string) => void,
   step: StepRunner = runStepInline,
+): Promise<Run> {
+  // Counted so a shutdown waits for this run instead of abandoning it (core/in-flight-runs.ts).
+  return trackRun(runId, () => executeTrackedRun(runId, providers, db, onText, step));
+}
+
+async function executeTrackedRun(
+  runId: string,
+  providers: NativeRunProviders,
+  db: RunnerDb,
+  onText: ((delta: string) => void) | undefined,
+  step: StepRunner,
 ): Promise<Run> {
   const existingRun = await db.run.findUnique({ where: { id: runId } });
   if (!existingRun) {

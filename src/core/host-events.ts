@@ -9,7 +9,7 @@ import type { PrismaClient } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import type { CodeReviewHost, HostEvent, ReviewHostRegistry } from "../providers/review-host/types.js";
 import { dispatchRun } from "./dispatch.js";
-import { postMentionStatus } from "./host-status.js";
+import { mentionStatusRow, postMentionStatus } from "./host-status.js";
 import { logger } from "./logger.js";
 import { requiredLevel, type RepoAccessGate } from "./repo-access.js";
 import { composeTaskOverride } from "./untrusted-content.js";
@@ -318,6 +318,11 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
         agentId: allowed[0].agentId,
         trigger: "host_event",
         taskOverride: mentionTaskText(event),
+        // Where to report, written with the run: even if this instance dies
+        // before the follow-up below, the run's outcome still gets a comment.
+        afterPersist: async (tx, run) => {
+          await tx.runHostStatus.create({ data: mentionStatusRow(host.provider, event, run.id) });
+        },
       });
       if (!dispatched) return none;
       log.info(
@@ -325,7 +330,7 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
         "mention run dispatched",
       );
       const runId = dispatched.run.id;
-      const status = () => postMentionStatus(deps.db, host, event, runId, deps.hosts);
+      const status = () => postMentionStatus(deps.db, host, runId, deps.hosts);
       return { runIds: [runId], followUps: [react, status] };
     }
   }

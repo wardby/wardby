@@ -23,6 +23,7 @@ export type DispatchTx = Pick<
   | "agent"
   | "run"
   | "runHostCheck"
+  | "runHostStatus"
   | "codingRun"
   | "task"
   | "webhook"

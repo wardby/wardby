@@ -5,7 +5,12 @@ import { isReviewCommand, routeHostEvent, type HostEvent } from "./host-events.j
 import { splitTaskOverride } from "./untrusted-content.js";
 
 // vi.mock factories are hoisted above every declaration, so shared state goes through vi.hoisted.
-const { txStub } = vi.hoisted(() => ({ txStub: { runHostCheck: { create: vi.fn(async () => undefined) } } }));
+const { txStub } = vi.hoisted(() => ({
+  txStub: {
+    runHostCheck: { create: vi.fn(async () => undefined) },
+    runHostStatus: { create: vi.fn(async () => undefined) },
+  },
+}));
 vi.mock("./dispatch.js", () => ({
   dispatchRun: vi.fn(async (opts: { agentId: string; afterPersist?: (tx: unknown, run: unknown) => Promise<void> }) => {
     const run = { id: `run-${opts.agentId}`, trigger: "host_event" };
@@ -76,7 +81,19 @@ function deps(
           })),
         ),
       },
-      runHostStatus: { create: vi.fn(async () => undefined), findUnique: vi.fn(async () => null) },
+      runHostStatus: {
+        findUnique: vi.fn(async ({ where }: { where: { runId: string } }) => ({
+          runId: where.runId,
+          provider: "github",
+          repository: REPO,
+          number: 7,
+          commentKind: "conversation",
+          commentId: null,
+          replyToReviewCommentId: null,
+          completedAt: null,
+        })),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+      },
       runHostCheck: { findFirst: reviewLookup },
       run: { findUnique: vi.fn(async () => ({ id: "run", status: "running", finalText: null })) },
     } as never,
@@ -212,10 +229,22 @@ describe("routeHostEvent", () => {
       number: 7,
       body: expect.stringContaining("run `run-a3`"),
     });
+    // The status row is written with the run; the follow-up records the posted comment on it.
+    expect(txStub.runHostStatus.create).toHaveBeenCalledWith({
+      data: {
+        runId: "run-a3",
+        provider: "github",
+        repository: REPO,
+        number: 7,
+        commentKind: "conversation",
+        replyToReviewCommentId: null,
+      },
+    });
     expect(
-      (d.db as unknown as { runHostStatus: { create: ReturnType<typeof vi.fn> } }).runHostStatus.create,
+      (d.db as unknown as { runHostStatus: { updateMany: ReturnType<typeof vi.fn> } }).runHostStatus.updateMany,
     ).toHaveBeenCalledWith({
-      data: expect.objectContaining({ runId: "run-a3", number: 7, commentKind: "conversation", commentId: "501" }),
+      where: { runId: "run-a3", commentId: null, completedAt: null },
+      data: { commentId: "501" },
     });
   });
 });

@@ -54,9 +54,17 @@ comment with the outcome:
 - the agent's final reply, quoted, when no pull request came out (for
   example, a question back to the requester). `@`-mentions in the reply are
   defused so nobody is pinged;
-- the run's final status when it did not succeed (`failed`, `lost`,
+- a failure when a coding sub-run it started did not succeed, even though
+  the mention agent itself finished (with the agent's reply quoted);
+- that the request was **interrupted** and should be repeated, when the run
+  was lost (for example, the instance running it was replaced and could not
+  finish it in time);
+- the run's final status for any other unsuccessful end (`failed`,
   `budget_exhausted`, ...). Error text is never posted; look the run up by
   its id.
+
+Where to comment is recorded together with the run, so even a run whose
+instance stopped before posting "Working on it" gets its outcome comment.
 
 The final reply is posted where the mention was, so anyone who can read the
 issue or PR can read it. Do not give a mention agent instructions that would

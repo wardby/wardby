@@ -16,11 +16,13 @@
 import {
   loadProviderConfig,
   loadMcpConfig,
+  loadShutdownDrainSeconds,
   loadAuthConfig,
   loadGitHubEventConfig,
   loadGitHubVcsConfig,
 } from "../config/providers.js";
 import { prisma } from "../core/db.js";
+import { waitForInFlightRuns } from "../core/in-flight-runs.js";
 import { NativeEngine } from "../core/engine-native.js";
 import { resolveLlmRegistrations, RoutingLlmProvider } from "../providers/llm/index.js";
 import { PostgresDatastore } from "../providers/datastore/index.js";
@@ -204,6 +206,8 @@ async function closeQuietly(promise: Promise<void> | undefined, what: string): P
 /** The real CLI entry point: `wardby mcp`. Reads config from the environment, starts stdio or HTTP per MCP_TRANSPORT. */
 export async function startMcp(options: StartMcpOptions = {}): Promise<McpServerHandle> {
   const mcpConfig = loadMcpConfig();
+  // Parsed up front so a malformed value fails at startup, not at shutdown.
+  const drainSeconds = loadShutdownDrainSeconds();
   const providers = options.providers ?? buildMcpProviders().providers;
   await providers.executor.launch?.();
   if (!options.schedulerAttached) await warnIfNothingWillFireSchedules();
@@ -317,6 +321,9 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     close: async () => {
       if (cleanupTimer) clearInterval(cleanupTimer);
       await closeQuietly(http.close(), "HTTP transport close");
+      // Let the runs this instance is executing finish before the executor
+      // closes under them; a run abandoned here is lost, never resumed.
+      await waitForInFlightRuns(drainSeconds * 1000);
       await closeQuietly(providers.executor.close?.(), "executor close");
     },
   };
