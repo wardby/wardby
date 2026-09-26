@@ -24,6 +24,13 @@ export interface EngineAgent {
   maxTurns: number;
   /** Reasoning effort sent on every model call; absent = provider default. */
   effort?: LlmEffort;
+  /**
+   * Background for this run that nobody vetted (e.g. the title and
+   * description of the GitHub issue a mention was made on). Delivered in the
+   * first user message inside untrusted_context tags, never in the system
+   * prompt. Absent = the first user message is just "Begin.".
+   */
+  untrustedContext?: string;
 }
 
 export interface LoadedTool {
