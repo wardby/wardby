@@ -23,7 +23,7 @@ gets.
    point the agent's profile at your own image, built on wardby's driver base
    image (see [Bring-your-own worker images](coding-worker-byo-images.md)),
    with everything preinstalled. Setting `workerImageRef` needs `agents:admin`
-   and the image must be pinned by digest.
+   and the admin role, and the image must be pinned by digest.
 3. **Both together.** Use a custom image for a toolchain or system libraries
    the registry can't provide (a compiler, a non-Node/Python runtime, apt
    packages), and the registry for the project-level npm/PyPI packages your
@@ -39,7 +39,9 @@ the real registry.
 
 Package permissions live on the coding profile's `packageAllowlist` field,
 changed with `update_agent`. Changing `packageAllowlist` or `packagePolicy`
-needs the `packages:approve` scope (or `agents:admin`) — holding only
+needs the `packages:approve` scope (or `agents:admin`) plus a role that grants it,
+`admin` or `package-approver` (see
+[roles and privileged operations](security-deployment.md#roles-and-privileged-operations)) — holding only
 `agents:write` lets you manage everything else about the agent, but a
 `packageAllowlist`/`packagePolicy` change from that caller is refused, since
 it widens what the agent can download.

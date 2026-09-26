@@ -371,12 +371,27 @@ The discovery request should return `200`; an unauthenticated MCP
 `initialize` request should return `401`. Send the JSON body: without it the
 server answers `415`, because it checks the content type before the token.
 
-Create the first self-hosted login credential. It is printed once:
+Create the first self-hosted login credential. It is printed once.
+`--role admin` makes this operator account an admin. Only admins can use all
+the privileged operations: `make_owner`, BYO `workerImageRef`, and package
+approval. A `package-approver` can approve packages only. Users created
+without `--role` have no roles. See
+[roles and privileged operations](security-deployment.md#roles-and-privileged-operations).
 
 ```sh
 kubectl exec -n wardby-coding deploy/wardby-control-plane \
   -c control-plane -- \
-  node dist/cli.js auth user create --subject YOUR_SUBJECT
+  node dist/cli.js auth user create --subject YOUR_SUBJECT --role admin
+```
+
+When you upgrade a deployment created before roles existed, every existing
+user has no roles, including you. Grant the admin role to yourself, then
+reconnect your MCP client:
+
+```sh
+kubectl exec -n wardby-coding deploy/wardby-control-plane \
+  -c control-plane -- \
+  node dist/cli.js auth user grant --subject YOUR_SUBJECT --role admin
 ```
 
 The deployment helper configures Wardby's self-hosted authorization server by

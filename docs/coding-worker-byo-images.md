@@ -71,7 +71,9 @@ passing `workerImageRef` inside `codingProfile` on `create_agent` or
 setting or changing it is gated the same way `make_owner` is: a caller with
 only `agents:write` can still manage coding agents normally (including
 picking `toolchain`/`toolchainVersion` from wardby's own images), but cannot
-point one at an arbitrary image without the step-up scope.
+point one at an arbitrary image without the step-up scope. The scope alone
+isn't enough: the caller must also hold the admin role (see
+[roles and privileged operations](security-deployment.md#roles-and-privileged-operations)).
 
 ## What this doesn't cover
 

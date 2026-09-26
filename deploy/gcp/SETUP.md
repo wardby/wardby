@@ -192,7 +192,11 @@ because some objects depend on it". Recover with
 
 By default the module deploys `auth_provider = "self-hosted"`: wardby acts as
 its own OAuth authorization server, and you create accounts with
-`wardby auth user create`, which hands back a login key. That needs no external
+`wardby auth user create`, which hands back a login key. Add `--role admin` for
+an operator account. Only users with a role that grants them can use the
+privileged operations, such as
+`make_owner`, BYO `workerImageRef`, and package approval (see
+`docs/security-deployment.md`, "Roles and privileged operations"). That needs no external
 identity system, which makes it the fastest way to get a deployment running —
 but most deployments will want to front an IdP they already run:
 
