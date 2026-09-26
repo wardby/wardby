@@ -1,4 +1,4 @@
-FROM ghcr.io/wardby/wardby/wardby-coding-worker-driver@sha256:17095388e1c92de60b2cf5669b5846d7976e2b399fd8f667d6131e02ec13db54 AS runtime
+FROM ghcr.io/wardby/wardby/wardby-coding-worker-driver@sha256:4fccda914f590848926b6a4719af5e69c39783b44b6b0dd9bbe6e91ad8d146f6 AS runtime
 RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/ssh \
     && test ! -e /usr/bin/curl \
