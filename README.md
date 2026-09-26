@@ -283,7 +283,10 @@ production alerts, and SLOs remain operator responsibilities. See the
 - **Hard budget enforcement:** per-agent limits and shared daily, weekly, or
   monthly budget groups stop additional model work when the cap is reached.
 - **Scoped capabilities:** tools, secrets, datastores, and sub-agents are
-  attached explicitly and checked against the authenticated owner.
+  attached explicitly and checked against the authenticated owner. Agents are
+  private until their owner shares them (`grant_access` at read, execute or
+  write), and one owner's secrets, datastores, repositories and sub-agents
+  never reach another owner's agent without a grant on that exact resource.
 - **Sandboxed tools:** native agent tools execute inside a constrained QuickJS
   environment with controlled fetch and secret bindings.
 - **Isolated coding workers:** Codex and Claude Code run in hardened containers

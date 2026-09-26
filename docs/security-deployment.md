@@ -86,7 +86,8 @@ Scopes and roles do different jobs:
 Four operations are privileged:
 
 - `make_owner`, which reassigns any agent's owner, including another
-  principal's private agent;
+  principal's private agent (see [Sharing agents](#sharing-agents) for what
+  moves with it);
 - setting a BYO `workerImageRef`;
 - approving coding agents' package allowlists or policy;
 - approving a repository for an agent without checking GitHub access
@@ -136,11 +137,10 @@ under their new roles. This has two consequences:
 A change that leaves the roles as they were, such as revoking a role the user
 doesn't hold, revokes nothing.
 
-The other scopes are not privileged, but they are not strictly per-tenant
-either. They are ownership-checked on every call, but public (unowned) agents
-still let them reach resources other principals attached there. The security
-review tracks this separately. Repositories are the exception: a public agent
-can't hold one (next section).
+The other scopes are not privileged. Every agent tool also checks the
+caller's access to that agent, its owner or an explicit grant (see
+[Sharing agents](#sharing-agents)); a scope never reaches an agent the caller
+has no access to.
 
 **Upgrading:** every existing self-hosted user starts with no roles, including
 the operator. After deploying, grant yourself the admin role, then reconnect
@@ -194,6 +194,105 @@ together during a planned global credential reset; provision new login keys
 and reauthorize clients. Do not rotate `SECRET_APP_KEY` without a separate
 encrypted-secret migration, or existing application secrets become unreadable.
 
+## Sharing agents
+
+An agent is private to its owner unless the owner shares it. A grant is
+`(agent, grantee, level)`; the grantee is one principal or **everyone**:
+
+| Level     | Lets the grantee                                                                                 |
+| --------- | ------------------------------------------------------------------------------------------------ |
+| `read`    | see the agent's config (never secret values, never other owners' tool code), list its sub-agents |
+| `execute` | also trigger runs, and see the runs they triggered                                               |
+| `write`   | also change its prompt, model, budget, schedule, tools and sub-agents                            |
+| owner     | everything, plus the owner-only operations below                                                 |
+
+Owners manage grants with `grant_access`, `revoke_access` and `list_access`.
+Granting again replaces the level. A revoke takes effect on the next check
+(trigger, delegation, webhook fire); runs already in flight keep going.
+
+**Owner-only, whatever the grants:** `delete_agent`, managing grants, the
+agent's secret, datastore and repository bindings, reading or writing its
+memory and datastore contents, and granting capabilities to a tool
+attachment.
+
+**What execute hands over.** An execute-grantee runs your agent with your
+tools, secrets, datastores and repository, and every run shares the agent's
+memory. The trigger supplies only task text, and for a coding agent only
+when you allow it: a non-owner may pass a coding `task` or `baseRef` only if
+`codingProfile.allowWebhookTaskOverride` is on (the same opt-in webhooks use);
+otherwise their run uses your `defaultTask`. Runs are visible to their
+triggerer and to you, never to other grantees.
+
+**What write hands over.** A write-grantee can change what the agent does
+(prompt, schedule, tools, sub-agents), but not what it can reach: the four
+capability fields on a tool attachment (`allowedSecrets`,
+`allowedDatastorePrefixes`, `allowedHosts`, `allowedSharedDatastorePrefixes`)
+are the owner's to grant. A tool a write-grantee attaches runs with none of
+them until you re-run `attach_tool` with the capabilities. They also can't set
+a repository or turn the agent into a coding agent.
+
+**Everyone** can be granted at most `execute`: everyone-write would let
+anyone rewrite an agent that holds your tools and secrets.
+
+**Nothing crosses owners without a grant on that exact resource**, checked
+when bindings are written and again at run time, so rows written before this
+rule (or left behind by `make_owner`) stop working on their own:
+
+- a secret or datastore binding resolves only while the resource's owner is
+  the agent's current owner; any other binding behaves like an unattached
+  name;
+- a tool attachment's capabilities count only while the agent's current owner
+  granted them;
+- a sub-agent runs only if it has the parent's owner, or the parent's owner
+  holds `execute` on it (`attach_subagent` needs `write` on the parent and
+  `execute` on the child). Across owners, the edge carries no memory access,
+  no `grantParentMemoryKeys`, no `continuePriorRun`, and no coding task
+  unless the child allows non-owner task text. The child's owner can always
+  detach it;
+- a webhook fires only while its creator owns the agent or holds `execute`.
+
+**The stdio operator** (`wardby mcp` over stdio) is owner of every agent for
+access checks and sees every agent, but does not bypass the binding rules:
+it can't bind its own secret to someone else's agent. An HTTP user whose
+subject equals `LOCAL_PRINCIPAL` is not the operator. **Admins** get no
+implicit access to others' agents: they can `list_access` any agent (incident
+response) and reassign one with `make_owner`, which removes bindings the new
+owner doesn't own, suspends tool capabilities the new owner never granted,
+cuts sub-agent edges the new owner can't delegate, and, between two owners,
+resets every grant. `make_owner` no longer releases an agent to owner-less.
+
+### Upgrading: owner-less agents
+
+Before this release, an agent with no owner was public: anyone could read
+**and change** it. The migration keeps such agents runnable by giving each an
+everyone-`execute` grant; nobody but the stdio operator can edit them until
+they get an owner. Until then they run without owned secrets or datastores and
+without their tools' capabilities. Operator runbook:
+
+1. On the old version, with the new binary:
+   `wardby grants migration-report > before.txt`. It is read-only and lists
+   owner-less agents, the bindings and capabilities that will stop working,
+   sub-agent edges that will be refused, webhooks that won't fire, and the
+   behaviour changes.
+2. `prisma migrate deploy` (`npm run prisma:migrate`), then roll out. The
+   migration needs PostgreSQL 13 or later.
+3. Immediately: `wardby grants adopt-public --owner <subject> --dry-run`,
+   then the same without `--dry-run`. Every owner-less agent gets that owner
+   and keeps its everyone grant; the owner's own bindings come back to life,
+   the others are removed and printed; attachments of the owner's own tools
+   regain their capabilities, the rest are printed with the `attach_tool`
+   call that re-grants them. The subject must already exist.
+4. `wardby grants prune-bindings` removes, and prints, every remaining
+   binding of one owner's secret or datastore to another owner's agent
+   (already inert).
+5. `wardby grants migration-report > after.txt`.
+
+`wardby agent create` now owns the agent by `--owner <subject>` or
+`LOCAL_PRINCIPAL` (`--public` adds everyone-`execute`), `wardby tool attach`
+grants capabilities in the agent owner's name, and `wardby import --public`
+owns the imported agents by `--owner` or the importing operator, shared with
+everyone at `execute`.
+
 ## Repository access
 
 The GitHub App is installed on repositories by their owners, not per wardby
@@ -212,11 +311,13 @@ a repository — a `link_repository` link, or a coding agent's
 Trust assumptions:
 
 - **The owner's access decides, not the trigger's.** Whoever triggers a run (a
-  schedule, a webhook, a host event, the owner) only supplies task text; the
-  owner controls the prompt, tools, secrets, and repository. Owned agents can
-  be triggered over MCP only by their owner.
-- **Owner-less (public) agents never hold a repository**, even admin-approved:
-  anyone can edit them. Assign an owner first.
+  schedule, a webhook, a host event, the owner, an `execute`-grantee) only
+  supplies task text, and a non-owner supplies coding task text only when the
+  owner enabled `allowWebhookTaskOverride`; the owner controls the tools,
+  secrets and repository. A repository is a binding: only the owner (or an
+  admin's explicit approval) sets it, never a `write`-grantee.
+- **Owner-less agents never hold a repository**, even admin-approved: there is
+  no owner whose GitHub access can be checked. Assign an owner first.
 - **Checked where it's used.** Every coding run (before its workspace is
   prepared, and again right before it pushes), every `repo_*` call, and every
   host-event dispatch re-checks a `host_permission` authorization against the
@@ -227,8 +328,8 @@ Trust assumptions:
 - **Approvals stay with the owner they were granted under.** Admin and
   grandfathered authorizations are not re-checked while the agent keeps its
   owner; revoke them by unlinking or changing the repository. `make_owner` to
-  a different owner (or to public) converts them into checks of the next
-  owner's own GitHub access; only a public agent's first owner keeps them.
+  a different owner converts them into checks of the next owner's own GitHub
+  access; only an owner-less agent's first owner keeps them.
 - **Admins approve explicitly, on any owned agent.** `adminOverride` works on
   agents the admin doesn't own (the admin role can already reassign any
   agent); it is always recorded with the approver. On another's agent an
@@ -248,9 +349,9 @@ Trust assumptions:
 - **Checks are bound to the dispatched PR.** A review publishes a check only on
   the pull request its run was dispatched for; fork PRs are never dispatched.
 
-Before upgrading, find public agents that have a repository link or a coding
-profile (`list_agents`, `list_repositories`) and give each an owner with
-`make_owner`, or they stop running. See
+Before upgrading, find owner-less agents that have a repository link or a
+coding profile (`list_agents`, `list_repositories`) and give each an owner
+with `make_owner` (or `wardby grants adopt-public`), or they stop running. See
 [code-review-agents.md](code-review-agents.md#who-may-give-an-agent-a-repository)
 for the App settings (callback URL, client ID and secret).
 
