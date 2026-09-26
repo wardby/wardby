@@ -708,14 +708,11 @@ async function scheduler(args: string[]): Promise<void> {
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
   const memory = buildMemory();
-  const nativeExecutor = buildExecutor(
-    config,
-    { llm, engine, datastore, secrets, memory, reviewHosts: buildReviewHosts() },
-    prisma,
-  );
+  const reviewHosts = buildReviewHosts();
+  const nativeExecutor = buildExecutor(config, { llm, engine, datastore, secrets, memory, reviewHosts }, prisma);
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig: config });
   await executor.launch?.();
-  const reconciler = startReconciler({ db: prisma, executor });
+  const reconciler = startReconciler({ db: prisma, executor, reviewHosts });
   const sched = startScheduler({
     executor,
     db: prisma,

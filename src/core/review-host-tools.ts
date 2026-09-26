@@ -115,7 +115,7 @@ export const REVIEW_HOST_TOOL_DEFS: LoadedTool[] = [
   {
     name: "repo_pr_read",
     description:
-      "Reads a pull request: title, body, author, state, refs, headSha, isFork, each changed file's unified-diff patch (patches share a character budget; truncated ones are flagged), and lastReviewedSha — the head you last reviewed on this PR, if any. Pass sinceSha (usually lastReviewedSha) to get only what changed since then.",
+      "Reads a pull request: title, body, author, state, refs, headSha, isFork, each changed file's unified-diff patch (patches share a character budget; truncated ones are flagged), and lastReviewedSha — the head you last reviewed on this PR, if any. Pass sinceSha (usually lastReviewedSha) to get only what changed since then; if baseMergedSince is true, the base branch was merged in meanwhile and each file shows the PR's full diff against the base, limited to files that changed since sinceSha.",
     jsonSchema: {
       type: "object",
       properties: {
