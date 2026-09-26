@@ -287,6 +287,10 @@ production alerts, and SLOs remain operator responsibilities. See the
 - **Isolated coding workers:** Codex and Claude Code run in hardened containers
   with resource limits, protected paths, bounded output, and no network access
   except the coding proxy.
+- **Allowlisted package installs:** a coding agent's `npm`/`pip` installs (Codex
+  workers only) are limited to an approved dependency graph, served through the
+  same proxy with a minimum release age, an OSV vulnerability audit, and every
+  package recorded.
 - **Credential separation:** workers do not receive provider credentials or the
   GitHub App private key; trusted components proxy model use and finalize Git.
 - **Explicit action authority:** the worker that produces an outcome does not

@@ -116,10 +116,12 @@ host alias, or NetworkPolicy rule is added: the worker still reaches only
 
 ### Authentication
 
-npm sends the run capability as a bearer token and pip as HTTP basic auth. The
-proxy looks it up exactly as it does for model calls: it must match a live
-session within its deadline. Registry requests are not charged to the model
-budget and never reach a model upstream.
+npm sends the derived registry token as a bearer token and pip as HTTP basic
+auth (see the amendments below for how the token is derived and why it is not
+the run capability). The proxy looks up the session it hashes to exactly as it
+does for model calls: it must match a live session within its deadline.
+Registry requests are not charged to the model budget and never reach a model
+upstream.
 
 ### npm
 
@@ -156,8 +158,10 @@ budget and never reach a model upstream.
 
 ### Worker environment
 
-The worker driver adds these variables to the agent's environment (the run
-capability it already holds supplies the credentials):
+The worker driver adds these variables to the agent's environment, this table
+applies to the Codex worker driver only (see the amendments below): a derived,
+registry-only token, never the model-API run capability, supplies the
+credentials:
 
 | Variable                    | Value                                                                                                  |
 | --------------------------- | ------------------------------------------------------------------------------------------------------ |
@@ -165,13 +169,14 @@ capability it already holds supplies the credentials):
 | `npm_config_userconfig`     | `/workspace/.cache/npm/npmrc`, written by the driver with the `_authToken` line for the proxy registry |
 | `npm_config_ignore_scripts` | `true`                                                                                                 |
 | `npm_config_cache`          | `/workspace/.cache/npm`                                                                                |
-| `PIP_INDEX_URL`             | `http://wardby:<capability>@wardby-proxy:8787/registry/pypi/simple/`                                   |
+| `PIP_INDEX_URL`             | `http://wardby:<registry-token>@wardby-proxy:8787/registry/pypi/simple/`                               |
 | `PIP_TRUSTED_HOST`          | `wardby-proxy`                                                                                         |
 | `PIP_ONLY_BINARY`           | `:all:`                                                                                                |
 | `PIP_CACHE_DIR`             | `/workspace/.cache/pip`                                                                                |
 
-The capability is written only under `.cache`, which is never collected, and it
-expires with the run's deadline.
+The registry token is written only under `.cache`, which is never collected,
+and it expires with the run's deadline along with the session it is derived
+from.
 
 Installs land in the workspace because it is the only writable location large
 enough: the root filesystem is read-only and `/tmp` and the home directory are
@@ -421,8 +426,9 @@ export type UpstreamFetch = (url: string, init?: { accept?: string }) => Promise
 export interface WorkerConfigInput {
   /** e.g. "http://wardby-proxy:8787/registry/npm/" */
   registryUrl: string;
-  /** The run capability. Written only under cacheDir, never elsewhere. */
-  capability: string;
+  /** The derived registry-only token (see the amendments below), never the
+   *  run capability. Written only under cacheDir, never elsewhere. */
+  token: string;
   /** e.g. "/workspace/.cache/npm"; always inside a collection-excluded folder. */
   cacheDir: string;
 }
@@ -517,3 +523,62 @@ because `GOPROXY` is designed for this kind of proxy.
   image.
 - The migration is additive except for dropping `allowedEgress`, which no code
   path reads.
+
+## Amendments during planning and implementation
+
+The plan that implemented this design (Tasks 1–12) made four amendments to
+this design during planning, and the controller made five further rulings
+during implementation. All nine are recorded here so this document stays the
+accurate record of what shipped.
+
+### From planning
+
+1. **Registry token.** npm and pip authenticate with `rrg_` +
+   base64url(sha256(`"wardby-registry\0"` + capability)), derived by the
+   driver, not the model-API run capability itself. The proxy stores its hash
+   on `CodingProxySession.registryTokenHash` and accepts it only on
+   `/registry/` routes; the model routes accept only the original capability.
+   The agent's shell never receives the model capability.
+2. **`allowedEgress` removal is two-phase.** This plan removes every code path
+   that reads or writes it but keeps the columns; dropping them is a later,
+   separately released task, after this plan's release is fully rolled out, so
+   pods from the previous release never query a dropped column.
+3. **Always configured.** The driver configures npm and pip for every coding
+   run; an agent with no allowlist for an ecosystem gets
+   `403 wardby_package_not_allowed` naming the missing allowlist, so no
+   worker-protocol change is needed.
+4. **`resolveFileMetadata`.** The adapter interface gains an optional
+   `resolveFileMetadata(route, meta)` for PEP 658 metadata files.
+
+### From implementation
+
+5. **Registry mode is Codex-only for now.** Claude Code runs every shell
+   command inside a credential-free, networkless tool-runner container
+   (`--network none`), which can never reach the proxy, so wiring registry
+   environment variables into the Claude driver would be inert and
+   misleading. The registry environment (§2) is applied by the Codex worker
+   driver only. Supporting Claude Code is a follow-up: put the tool-runner
+   container on the proxy network and give it the same registry settings.
+6. **In-flight limit reservation.** The per-run limits in §3 are enforced
+   per proxy process (a single replica): `RegistryService` reserves each
+   in-flight download's file count and byte estimate before streaming it, in
+   addition to the already-recorded usage, so concurrent downloads (for
+   example npm's default parallel sockets) cannot overshoot `REGISTRY_MAX_FILES`
+   or `REGISTRY_MAX_TOTAL_MB` before any one download completes and is
+   recorded. A future multi-replica proxy would need this reservation moved
+   to the database.
+7. **Every refusal is recorded, including limits and audit failures.** The
+   `429 wardby_package_limit` and `503 wardby_audit_unavailable` refusals are
+   persisted as `RegistryFetch` rows with `outcome: "refused"`, exactly like
+   every other refusal in §3, so `get_run.packageRefusals` and the pull
+   request's packages section show them too.
+8. **Verify integrity only where the ecosystem publishes it.** A download
+   whose `FileRef.integrity` is `null` (an ecosystem that publishes no
+   checksum for that file, such as some Composer archives) is streamed
+   unverified; every other download's integrity is verified while streaming,
+   as §2 and §5 describe.
+9. **Prisma 7, not Prisma 6.** The repository moved to Prisma 7 (generated
+   client imported from `#prisma`, not `@prisma/client`; the schema drift
+   check uses `SHADOW_DATABASE_URL` with `--to-schema --exit-code`) after this
+   design was written. This design is otherwise version-agnostic: only import
+   paths and drift-check commands differ from a Prisma 6 reading of it.

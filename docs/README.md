@@ -14,6 +14,8 @@
   model and enforced worker boundary.
 - [Bring-your-own worker images](coding-worker-byo-images.md) explains how to
   extend the reviewed worker image contract.
+- [Installing packages in coding runs](coding-packages.md) covers the coding
+  package registry: allowlists, safeguards, limits, and error codes.
 - [Observability](observability.md) covers Prometheus metrics, Grafana, cloud
   collectors, retention, and production ownership.
 - [Release verification](release-verification.md) lists the automated and live
