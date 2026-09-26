@@ -680,6 +680,11 @@ model AuthUser {
   principal   Principal                @relation(fields: [principalId], references: [id])
   displayName String?
   status      String                   @default("enabled")
+  /// wardby roles (src/mcp/auth/resource-server.ts ROLE_PERMISSIONS: admin,
+  /// package-approver), set with `wardby auth user grant`. Empty = member.
+  /// A privileged operation needs its scope on the token AND a role here
+  /// that grants it; unknown values grant nothing.
+  roles       String[]                 @default([])
   createdAt   DateTime                 @default(now())
   updatedAt   DateTime                 @updatedAt
   loginKeys   AuthLoginKey[]

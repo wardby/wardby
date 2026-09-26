@@ -34,6 +34,12 @@ export interface VerifiedToken {
   scopes: string[];
   email?: string;
   roles?: string[];
+  /**
+   * wardby roles (not the IdP's raw `roles`), decided by the provider at
+   * verification time: self-hosted reads AuthUser.roles live; delegating
+   * maps the configured signed claim through AUTH_ROLE_MAP. Absent = none.
+   */
+  wardbyRoles?: string[];
 }
 
 export interface AuthTokens {
