@@ -51,6 +51,14 @@ export interface PullRequestInput {
   /** Deduplicated by the caller isn't required — pullRequestBody dedupes itself (ecosystem+name+version / +reason). */
   packages?: readonly PackageReport[];
   packageRefusals?: readonly PackageRefusal[];
+  /**
+   * A continuation re-finds the PR its root run opened, and a person may
+   * have marked that PR ready for review since. The push has already updated
+   * it, so it is accepted as found instead of failing the run as
+   * `github_pull_request_not_draft`. A PR this client creates is always a
+   * draft either way; unset (a fresh run), only a draft PR is accepted.
+   */
+  acceptReadyForReview?: boolean;
 }
 
 export interface PullRequestResult {
@@ -337,7 +345,13 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
       throw new Error("github_status_comment_input_invalid");
     }
     await this.withRepositoryToken(repository, async (token) => {
-      const pr = await this.findPullRequest(token, { runId: input.rootRunId, repository, baseRef, headRef });
+      const pr = await this.findPullRequest(token, {
+        runId: input.rootRunId,
+        repository,
+        baseRef,
+        headRef,
+        acceptReadyForReview: true,
+      });
       if (!pr) return;
       const existing = await this.findStatusComment(token, repository, pr.number, input.runId);
       const [owner, name] = repository.split("/");
@@ -368,7 +382,13 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
       throw new Error("github_status_comment_input_invalid");
     }
     await this.withRepositoryToken(repository, async (token) => {
-      const pr = await this.findPullRequest(token, { runId: input.rootRunId, repository, baseRef, headRef });
+      const pr = await this.findPullRequest(token, {
+        runId: input.rootRunId,
+        repository,
+        baseRef,
+        headRef,
+        acceptReadyForReview: true,
+      });
       if (!pr) return;
       const existing = await this.findStatusComment(token, repository, pr.number, input.runId);
       if (!existing) return;
@@ -581,17 +601,16 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     for (const item of payload) {
       const candidate = record(item);
       if (typeof candidate.body === "string" && candidate.body.includes(marker)) {
-        if (candidate.draft !== true) throw new Error("github_pull_request_not_draft");
-        return this.parsePullRequest(candidate, input.repository);
+        return this.parsePullRequest(candidate, input.repository, input.acceptReadyForReview === true);
       }
     }
     return null;
   }
 
-  private parsePullRequest(value: unknown, repository: string): PullRequestResult {
+  private parsePullRequest(value: unknown, repository: string, acceptReadyForReview = false): PullRequestResult {
     const payload = record(value);
     const number = positiveInteger(payload.number);
-    if (payload.draft !== true) throw new Error("github_pull_request_not_draft");
+    if (payload.draft !== true && !acceptReadyForReview) throw new Error("github_pull_request_not_draft");
     const expectedUrl = `https://github.com/${repository}/pull/${number}`;
     if (typeof payload.html_url !== "string") throw new Error("github_pull_request_response_invalid");
     let receivedUrl: URL;

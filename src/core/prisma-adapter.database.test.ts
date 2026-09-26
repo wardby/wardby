@@ -19,10 +19,12 @@ import { dispatchRun, isSerializationConflict } from "./dispatch.js";
 import { attachSecret } from "./secrets.js";
 import type { Executor } from "../providers/executor/types.js";
 import type { McpRequestContext } from "../mcp/context.js";
-import { McpError } from "../mcp/errors.js";
+import { McpError, mapPrismaError } from "../mcp/errors.js";
 import type { WardbyMcpServer } from "../mcp/server.js";
 import { registerAgentTools } from "../mcp/tools/agents.js";
+import { registerBudgetGroupTools } from "../mcp/tools/budget-groups.js";
 import { registerDatastoreTools } from "../mcp/tools/datastore.js";
+import { registerRunTools } from "../mcp/tools/runs.js";
 import { registerSchedulingTools } from "../mcp/tools/scheduling.js";
 import { registerSubAgentTools } from "../mcp/tools/subagents.js";
 import { registerToolAuthoringTools } from "../mcp/tools/tools.js";
@@ -32,19 +34,24 @@ const PREFIX = "pad-";
 const suffix = randomUUID();
 const id = (name: string) => `${PREFIX}${name}-${suffix}`;
 const principalId = id("principal");
+const otherPrincipalId = id("other-principal");
 
 async function cleanupByPrefix(): Promise<void> {
   const where = { startsWith: PREFIX };
-  await db.run.deleteMany({ where: { agentId: where } });
-  await db.agentTool.deleteMany({ where: { agentId: where } });
+  // create_agent / create_tool mint cuid ids, so those rows are matched by
+  // name or owner rather than by id.
+  const agentWhere = { OR: [{ id: where }, { name: where }] };
+  await db.run.deleteMany({ where: { agent: agentWhere } });
+  await db.agentTool.deleteMany({ where: { OR: [{ agent: agentWhere }, { tool: { ownerId: where } }] } });
   await db.agentDatastore.deleteMany({ where: { agentId: where } });
   await db.agentSecret.deleteMany({ where: { agentId: where } });
   await db.agentSubAgent.deleteMany({ where: { parentAgentId: where } });
-  await db.tool.deleteMany({ where: { id: where } });
+  await db.tool.deleteMany({ where: { OR: [{ id: where }, { name: where }, { ownerId: where }] } });
+  await db.budgetGroup.deleteMany({ where: { name: where } });
   await db.datastoreEntry.deleteMany({ where: { datastore: { name: where } } });
   await db.datastore.deleteMany({ where: { name: where } });
   await db.secret.deleteMany({ where: { name: where } });
-  await db.agent.deleteMany({ where: { id: where } });
+  await db.agent.deleteMany({ where: agentWhere });
   await db.principal.deleteMany({ where: { id: where } });
 }
 
@@ -70,7 +77,9 @@ function mcpHandlers(): Map<string, Handler> {
     registerTool: (spec: { name: string; handler: Handler }) => handlers.set(spec.name, spec.handler),
   } as unknown as WardbyMcpServer;
   registerAgentTools(mcp);
+  registerBudgetGroupTools(mcp);
   registerDatastoreTools(mcp);
+  registerRunTools(mcp);
   registerSchedulingTools(mcp);
   registerSubAgentTools(mcp);
   registerToolAuthoringTools(mcp);
@@ -79,10 +88,10 @@ function mcpHandlers(): Map<string, Handler> {
 
 const handlers = mcpHandlers();
 
-function ctx(database: PrismaClient = db): McpRequestContext {
+function ctx(database: PrismaClient = db, principal: string = principalId): McpRequestContext {
   return {
-    principal: { id: principalId, subject: principalId, createdAt: new Date() },
-    scopes: new Set(["agents:write", "agents:read", "tools:write", "datastore:write"]),
+    principal: { id: principal, subject: principal, createdAt: new Date() },
+    scopes: new Set(["agents:write", "agents:read", "tools:write", "datastore:write", "budget_groups:write"]),
     canonicalUri: "https://host/mcp",
     providers: {} as McpRequestContext["providers"],
     db: database,
@@ -91,10 +100,34 @@ function ctx(database: PrismaClient = db): McpRequestContext {
   };
 }
 
-async function callTool(name: string, args: Record<string, unknown>, database: PrismaClient = db): Promise<unknown> {
+/** Calls a real handler directly: a thrown Prisma error arrives raw, as the adapter raised it. */
+async function callHandler(
+  name: string,
+  args: Record<string, unknown>,
+  database: PrismaClient = db,
+  principal: string = principalId,
+): Promise<unknown> {
   const handler = handlers.get(name);
   if (!handler) throw new Error(`no handler registered for ${name}`);
-  return handler(args as never, ctx(database));
+  return handler(args as never, ctx(database, principal));
+}
+
+/**
+ * Calls a real handler the way server.ts dispatches it: a thrown Prisma error
+ * goes through mapPrismaError, so it arrives as the McpError a client would
+ * see.
+ */
+async function callTool(
+  name: string,
+  args: Record<string, unknown>,
+  database: PrismaClient = db,
+  principal: string = principalId,
+): Promise<unknown> {
+  try {
+    return await callHandler(name, args, database, principal);
+  } catch (err) {
+    throw mapPrismaError(err);
+  }
 }
 
 /**
@@ -107,7 +140,7 @@ async function callTool(name: string, args: Record<string, unknown>, database: P
  */
 function interleavedDb(
   interleave: () => Promise<unknown>,
-  at: { model: "agent" | "run"; method: string } = { model: "agent", method: "findUnique" },
+  at: { model: "agent" | "run" | "agentTool"; method: string } = { model: "agent", method: "findUnique" },
 ): PrismaClient {
   let fired = false;
   const bind = (target: object, prop: string | symbol) => {
@@ -139,6 +172,46 @@ function interleavedDb(
   });
 }
 
+/**
+ * `db`, except that inside every interactive transaction a tool's attachment
+ * listing (`tx.agentTool.findMany` filtered by toolId) comes back empty -- a
+ * deterministic stand-in for an attachment that commits after the check has
+ * read, so the write that follows meets the real foreign key.
+ */
+function attachmentsHiddenDb(): PrismaClient {
+  const bind = (target: object, prop: string | symbol) => {
+    const value: unknown = Reflect.get(target, prop);
+    return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+  };
+  return new Proxy(db, {
+    get(target, prop) {
+      if (prop !== "$transaction") return bind(target, prop);
+      return (fn: (tx: Prisma.TransactionClient) => Promise<unknown>, options?: object) =>
+        target.$transaction(async (tx) => {
+          const agentTool = new Proxy(tx.agentTool, {
+            get(real, p) {
+              const method = bind(real, p);
+              if (p !== "findMany" || typeof method !== "function") return method;
+              return async (args: { where?: { toolId?: unknown } }) =>
+                args.where?.toolId !== undefined ? [] : (method as (a: unknown) => Promise<unknown>)(args);
+            },
+          });
+          return fn(new Proxy(tx, { get: (t, p) => (p === "agentTool" ? agentTool : bind(t, p)) }));
+        }, options);
+    },
+  });
+}
+
+/** Whatever a promise rejects with (fails the test if it resolves). */
+async function promiseError(promise: Promise<unknown>): Promise<unknown> {
+  const outcome = await promise.then(
+    () => ({ resolved: true as const }),
+    (error: unknown) => ({ resolved: false as const, error }),
+  );
+  expect(outcome.resolved, "expected the promise to reject").toBe(false);
+  return outcome.resolved ? undefined : outcome.error;
+}
+
 /** The McpError a promise rejects with. */
 async function mcpError(promise: Promise<unknown>): Promise<McpError> {
   const err = await promise.then(
@@ -163,6 +236,7 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
   beforeAll(async () => {
     await cleanupByPrefix();
     await db.principal.create({ data: { id: principalId, subject: principalId } });
+    await db.principal.create({ data: { id: otherPrincipalId, subject: otherPrincipalId } });
   });
 
   afterAll(async () => {
@@ -404,19 +478,109 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
     });
   });
 
+  describe("friendly errors: mapPrismaError at dispatch, pinned against the real adapter's error metadata", () => {
+    it("a duplicate create_agent is a 409 naming the model and field", async () => {
+      const name = id("dup-agent");
+      await callTool("create_agent", { name, systemPrompt: "t", model: "t", budgetUsd: 1 });
+      const err = await mcpError(callTool("create_agent", { name, systemPrompt: "t", model: "t", budgetUsd: 1 }));
+      expect(err.httpStatus).toBe(409);
+      expect(err.message).toBe("An agent with that name already exists.");
+    });
+
+    it("a duplicate create_budget_group is a 409 scoped to the owner", async () => {
+      const name = id("dup-group");
+      await callTool("create_budget_group", { name, dailyBudgetUsd: 1 });
+      const err = await mcpError(callTool("create_budget_group", { name, dailyBudgetUsd: 1 }));
+      expect(err.httpStatus).toBe(409);
+      expect(err.message).toBe("A budget group with that name already exists for this owner.");
+    });
+
+    it("a duplicate create_tool is a 409 whose message names the tool", async () => {
+      const name = id("dup-tool");
+      const args = { name, description: "t", paramsZod: "z.object({})", code: "return 1;" };
+      await callTool("create_tool", args);
+      const err = await mcpError(callTool("create_tool", args));
+      expect(err.httpStatus).toBe(409);
+      expect(err.message).toContain(`"${name}"`);
+    });
+  });
+
+  describe("per-owner tool names", () => {
+    it("two principals can each create a tool with the same name; one principal cannot twice", async () => {
+      const name = id("foo");
+      const args = { name, description: "t", paramsZod: "z.object({})", code: "return 1;" };
+      await callTool("create_tool", args);
+      await callTool("create_tool", args, db, otherPrincipalId);
+      expect(await db.tool.count({ where: { name } })).toBe(2);
+      const err = await mcpError(callTool("create_tool", args, db, otherPrincipalId));
+      expect(err.httpStatus).toBe(409);
+      expect(err.message).toBe(`A tool named "${name}" already exists for your principal.`);
+    });
+  });
+
+  describe("delete_tool", () => {
+    async function ownedTool(name: string) {
+      return db.tool.create({
+        data: {
+          id: id(name),
+          name: id(name),
+          description: "t",
+          paramsZod: "z.object({})",
+          jsonSchema: {},
+          code: "return 1;",
+          ownerId: principalId,
+        },
+      });
+    }
+
+    it("a past run of an agent that used the tool still returns from get_run after the delete", async () => {
+      const agentId = await createAgent("delete-tool-history");
+      const tool = await ownedTool("delete-tool-history");
+      await db.agentTool.create({ data: { agentId, toolId: tool.id } });
+      const run = await db.run.create({ data: { agentId, status: "succeeded", finalText: "used the tool" } });
+
+      const deleted = await callTool("delete_tool", { toolId: tool.id, detach: true });
+      expect(JSON.parse((deleted as { content: { text: string }[] }).content[0].text)).toEqual({
+        deleted: tool.id,
+        detachedFrom: [agentId],
+      });
+      expect(await db.tool.count({ where: { id: tool.id } })).toBe(0);
+
+      const got = (await callTool("get_run", { runId: run.id })) as { content: { text: string }[] };
+      expect(JSON.parse(got.content[0].text)).toMatchObject({ id: run.id, finalText: "used the tool" });
+    });
+
+    it("an attachment the check didn't see still blocks the delete, as a 409 rather than a raw P2003", async () => {
+      const agentId = await createAgent("delete-tool-race");
+      const tool = await ownedTool("delete-tool-race");
+      await db.agentTool.create({ data: { agentId, toolId: tool.id } });
+
+      const err = await mcpError(callTool("delete_tool", { toolId: tool.id }, attachmentsHiddenDb()));
+      expect(err.httpStatus).toBe(409);
+      expect(err.message).toContain("still attached");
+      expect(await db.tool.count({ where: { id: tool.id } })).toBe(1);
+      // Pins the error the handler branches on, through the real adapter.
+      expect((await knownError(db.tool.delete({ where: { id: tool.id } }))).code).toBe("P2003");
+    });
+  });
+
   describe("MCP tools' Serializable transactions under a genuine conflict", () => {
-    // None of these tools retry: a serialization failure propagates to the
-    // caller as P2034, and the concurrent writer's commit stands.
+    // None of these tools retry: a serialization failure propagates as P2034
+    // (callHandler: unmapped, to pin the adapter's code), and the concurrent
+    // writer's commit stands. A client sees it as mapPrismaError's 409.
     it("set_schedule surfaces P2034", async () => {
       const agentId = await createAgent("set-schedule");
       const conflicted = interleavedDb(() =>
         db.agent.update({ where: { id: agentId }, data: { timezone: "Europe/Paris" } }),
       );
       const err = await knownError(
-        callTool("set_schedule", { agentId, schedule: "0 * * * *", timezone: "UTC" }, conflicted),
+        callHandler("set_schedule", { agentId, schedule: "0 * * * *", timezone: "UTC" }, conflicted),
       );
       expect(err.code).toBe("P2034");
       expect(isSerializationConflict(err)).toBe(true);
+      const mapped = mapPrismaError(err) as McpError;
+      expect(mapped.httpStatus).toBe(409);
+      expect(mapped.message).toContain("retry");
       const row = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
       expect(row.timezone).toBe("Europe/Paris");
       expect(row.schedule).toBeNull();
@@ -427,7 +591,7 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
       const conflicted = interleavedDb(() =>
         db.agent.update({ where: { id: agentId }, data: { systemPrompt: "concurrent" } }),
       );
-      const err = await knownError(callTool("update_agent", { id: agentId, systemPrompt: "mine" }, conflicted));
+      const err = await knownError(callHandler("update_agent", { id: agentId, systemPrompt: "mine" }, conflicted));
       expect(err.code).toBe("P2034");
       expect((await db.agent.findUniqueOrThrow({ where: { id: agentId } })).systemPrompt).toBe("concurrent");
     });
@@ -449,11 +613,50 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
         db.agentTool.create({ data: { agentId, toolId: tool.id, allowedHosts: ["concurrent.example"] } }),
       );
       const err = await knownError(
-        callTool("attach_tool", { agentId, toolId: tool.id, allowedHosts: ["mine.example"] }, conflicted),
+        callHandler("attach_tool", { agentId, toolId: tool.id, allowedHosts: ["mine.example"] }, conflicted),
       );
       expect(err.code).toBe("P2034");
       const row = await db.agentTool.findUniqueOrThrow({ where: { agentId_toolId: { agentId, toolId: tool.id } } });
       expect(row.allowedHosts).toEqual(["concurrent.example"]);
+    });
+
+    it("update_tool and a concurrent attach_tool onto a public agent cannot both commit", async () => {
+      // The security property update_tool's cross-owner check depends on:
+      // update_tool reads the tool's attachments and writes the Tool row,
+      // attach_tool reads the Tool row and writes an attachment. Under
+      // Serializable one of them must abort, so new code never reaches an
+      // agent that was attached between the check and the write.
+      const publicAgentId = id("update-vs-attach-public");
+      await db.agent.create({
+        data: { id: publicAgentId, name: publicAgentId, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: null },
+      });
+      const tool = await db.tool.create({
+        data: {
+          id: id("update-vs-attach-tool"),
+          name: id("update-vs-attach-tool"),
+          description: "t",
+          paramsZod: "z.object({})",
+          jsonSchema: {},
+          code: "return 'original';",
+          ownerId: principalId,
+        },
+      });
+      // Right after update_tool's transaction lists the tool's attachments
+      // (and finds none), the owner attaches it to a public agent on a
+      // separate connection, and that commits first.
+      const conflicted = interleavedDb(() => callHandler("attach_tool", { agentId: publicAgentId, toolId: tool.id }), {
+        model: "agentTool",
+        method: "findMany",
+      });
+
+      const err = await promiseError(
+        callHandler("update_tool", { toolId: tool.id, code: "return 'new';" }, conflicted),
+      );
+      expect(isSerializationConflict(err)).toBe(true);
+      expect((mapPrismaError(err) as McpError).httpStatus).toBe(409);
+      // The attach won; the tool's code is unchanged.
+      expect((await db.tool.findUniqueOrThrow({ where: { id: tool.id } })).code).toBe("return 'original';");
+      expect(await db.agentTool.count({ where: { agentId: publicAgentId, toolId: tool.id } })).toBe(1);
     });
   });
 });

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { InMemoryTransport, inputRequired } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
+import { Prisma } from "#prisma";
 import { buildMcpServer } from "./server.js";
 import { TASKS_EXTENSION_ID } from "./capabilities.js";
 import type { McpRequestContext } from "./context.js";
@@ -84,6 +85,37 @@ describe("buildMcpServer", () => {
 
     expect(result.isError).toBeFalsy();
     expect(receivedCtx?.principal.subject).toBe("user-1");
+    await client.close();
+  });
+
+  it("a handler's Prisma unique violation reaches the client as a friendly 409, not the raw Prisma text", async () => {
+    const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb, config: { canonicalUri: "https://host/mcp" } });
+    mcp.setFixedContext(fakeCtx(["agents:write"]));
+    mcp.registerTool({
+      name: "dup",
+      scope: "agents:write",
+      inputSchema: {},
+      handler: async () => {
+        throw new Prisma.PrismaClientKnownRequestError(
+          "Invalid `prisma.agent.create()` invocation: Unique constraint",
+          {
+            code: "P2002",
+            clientVersion: "test",
+            meta: {
+              modelName: "Agent",
+              driverAdapterError: { cause: { constraint: { index: "Agent_name_key" } } },
+            },
+          },
+        );
+      },
+    });
+
+    const { client } = await connectClient(mcp);
+    const result = await client.callTool({ name: "dup", arguments: {} });
+    expect(result.isError).toBe(true);
+    const text = (result.content as { text: string }[])[0].text;
+    expect(text).toContain("An agent with that name already exists.");
+    expect(text).not.toContain("Invalid `prisma");
     await client.close();
   });
 

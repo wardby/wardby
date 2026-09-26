@@ -296,6 +296,9 @@ function buildFakeDb() {
       },
       findMany: async ({ where }: { where: { agentId: string } }) =>
         agentTools.filter((a) => a.agentId === where.agentId).map((a) => ({ ...a, tool: tools.get(a.toolId) })),
+      // attach_tool's same-name guard: this fixture never attaches two
+      // same-named tools to one agent.
+      findFirst: async () => null,
     },
     secret: {
       create: async ({ data }: { data: Partial<FakeSecretRow> & { name: string } }) => {

@@ -35,7 +35,7 @@ import { randomBytes } from "node:crypto";
 import type { Agent, PrismaClient, Principal } from "#prisma";
 import type { McpRequestContext, McpProviders } from "./context.js";
 import { requireScope } from "./auth/resource-server.js";
-import { McpError } from "./errors.js";
+import { McpError, mapPrismaError } from "./errors.js";
 import { TASKS_EXTENSION_ID, clientSupportsTasks } from "./capabilities.js";
 import { visibleToPrincipal } from "./auth/ownership.js";
 import { logger } from "../core/logger.js";
@@ -255,7 +255,13 @@ export function buildMcpServer(opts: BuildMcpServerOptions): WardbyMcpServer {
         async (args: unknown, sdkCtx: ServerContext) => {
           const ctx = resolveCtx(sdkCtx);
           requireScope(ctx, opts.config.canonicalUri, ...requiredScopes);
-          return spec.handler(args as never, ctx);
+          try {
+            return await spec.handler(args as never, ctx);
+          } catch (err) {
+            // A raw Prisma error would reach the client verbatim (the SDK
+            // renders any thrown error's message) -- see mapPrismaError.
+            throw mapPrismaError(err);
+          }
         },
       );
     }
@@ -273,7 +279,11 @@ export function buildMcpServer(opts: BuildMcpServerOptions): WardbyMcpServer {
         async (params: unknown, sdkCtx: ServerContext) => {
           const ctx = resolveCtx(sdkCtx);
           requireScope(ctx, opts.config.canonicalUri, ...scope);
-          return (await handler(params, ctx)) as Record<string, unknown>;
+          try {
+            return (await handler(params, ctx)) as Record<string, unknown>;
+          } catch (err) {
+            throw mapPrismaError(err);
+          }
         },
       );
     }

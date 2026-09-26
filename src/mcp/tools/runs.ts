@@ -51,7 +51,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       await requireReadableAgent(ctx.db, run.agentId, ctx.principal.id);
       const codingRun = await ctx.db.codingRun.findUnique({
         where: { runId: run.id },
-        select: { result: true, queuedAt: true },
+        select: { result: true, queuedAt: true, failureCategory: true, diagnosticId: true },
       });
       const codingResult = publicCodingRunResult(codingRun?.result);
       // A pending coding run with queuedAt is waiting for a concurrency slot
@@ -64,9 +64,17 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         ? await ctx.db.registryFetch.findMany({ where: { runId: run.id }, orderBy: { createdAt: "asc" } })
         : [];
       const { packages, packageRefusals } = summarizeRegistryFetches(registryFetches);
+      // A failed coding run's error is only an opaque id; these two say which
+      // stage failed and are the key an operator searches the control-plane
+      // log for (the real reason is logged there, never persisted). Both are
+      // designed to be safe to show the agent's owner (schema.prisma).
+      const failureCategory = codingRun?.failureCategory ?? undefined;
+      const diagnosticId = codingRun?.diagnosticId ?? undefined;
       return textResult({
         ...run,
         ...(codingResult ? { codingResult } : {}),
+        ...(failureCategory ? { failureCategory } : {}),
+        ...(diagnosticId ? { diagnosticId } : {}),
         ...(codingQueuedAt ? { codingQueuedAt } : {}),
         ...(codingRun ? { packages, packageRefusals } : {}),
       });

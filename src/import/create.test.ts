@@ -35,7 +35,8 @@ function fakeDb() {
   return {
     calls,
     tool: {
-      upsert: vi.fn(async (a: unknown) => {
+      findFirst: vi.fn(async () => null),
+      create: vi.fn(async (a: unknown) => {
         calls.tool.push(a);
         return { id: "t", name: "n" };
       }),
@@ -47,7 +48,7 @@ function fakeDb() {
       }),
       update: vi.fn(async () => ({})),
     },
-    agentTool: { upsert: vi.fn(async () => ({})) },
+    agentTool: { upsert: vi.fn(async () => ({})), findFirst: vi.fn(async () => null) },
     secret: {
       upsert: vi.fn(async (a: unknown) => {
         calls.secret.push(a);
@@ -185,5 +186,65 @@ describe("createFromBundle", () => {
     expect(
       res.warnings.some((w) => w.includes("budget group monthly-budget: skipped — budget groups require an owner")),
     ).toBe(true);
+  });
+
+  it("looks a tool up by (owner, name): an existing one of the target owner is reused, not re-created", async () => {
+    const db = fakeDb();
+    db.tool.findFirst.mockResolvedValueOnce({ id: "existing", name: "shared-tool", ownerId: "p1" });
+
+    const res = await createFromBundle(
+      bundleWith({
+        agents: [{ name: "agent" }],
+        tools: [{ name: "shared-tool", code: "code", paramsZod: "z.object({})", description: "" }],
+        agentTools: [{ agentName: "agent", toolName: "shared-tool", allowedHosts: [] }],
+      }),
+      emptyRecon,
+      { db, cipher, ownerId: "p1", defaultBudget: "5.00", secretMode: "references", allowOpenFetch: false } as any,
+    );
+
+    expect(db.tool.findFirst).toHaveBeenCalledWith({ where: { ownerId: "p1", name: "shared-tool" } });
+    expect(db.tool.create).not.toHaveBeenCalled();
+    expect(res.toolsCreated).toBe(1);
+    expect(db.agentTool.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { agentId_toolId: { agentId: "a", toolId: "existing" } } }),
+    );
+  });
+
+  it("skips an attachment with a warning when the agent already has a different same-named tool", async () => {
+    const db = fakeDb();
+    db.agentTool.findFirst.mockResolvedValueOnce({ tool: { id: "other", name: "n", ownerId: null } });
+
+    const res = await createFromBundle(
+      bundleWith({
+        agents: [{ name: "agent" }],
+        tools: [{ name: "n", code: "code", paramsZod: "z.object({})", description: "" }],
+        agentTools: [{ agentName: "agent", toolName: "n", allowedHosts: [] }],
+      }),
+      emptyRecon,
+      { db, cipher, ownerId: "p1", defaultBudget: "5.00", secretMode: "references", allowOpenFetch: false } as any,
+    );
+
+    expect(db.agentTool.upsert).not.toHaveBeenCalled();
+    expect(res.warnings.some((w) => w.includes("agent-tool agent/n: skipped") && w.includes("same name"))).toBe(true);
+  });
+
+  it("skips a tool whose name a runtime built-in reserves, with a warning", async () => {
+    const db = fakeDb();
+    const res = await createFromBundle(
+      bundleWith({
+        tools: [
+          { name: "delegate_to_x", code: "code", paramsZod: "z.object({})", description: "" },
+          { name: "memory_get", code: "code", paramsZod: "z.object({})", description: "" },
+          { name: "fine", code: "code", paramsZod: "z.object({})", description: "" },
+        ],
+      }),
+      emptyRecon,
+      { db, cipher, ownerId: "p1", defaultBudget: "5.00", secretMode: "references", allowOpenFetch: false } as any,
+    );
+
+    expect(db.tool.create).toHaveBeenCalledTimes(1);
+    expect(res.toolsCreated).toBe(1);
+    expect(res.warnings.some((w) => w.startsWith("tool delegate_to_x: skipped") && w.includes("reserved"))).toBe(true);
+    expect(res.warnings.some((w) => w.startsWith("tool memory_get: skipped"))).toBe(true);
   });
 });

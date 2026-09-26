@@ -8,8 +8,10 @@ export const CLI_USAGE = `usage:
   wardby agent list
   wardby agent schedule <name> --cron "<expr>" [--timezone <tz>] [--disable]
   wardby tool create --name <n> --description <d> --params <file> --code <file>
-  wardby tool attach <tool-name> <agent-name>
-  wardby tool detach <tool-name> <agent-name>
+  wardby tool attach <tool-name|tool-id> <agent-name>
+  wardby tool detach <tool-name|tool-id> <agent-name>
+  wardby tool update <tool-name|tool-id> [--description <d>] [--params <file>] [--code <file>]
+  wardby tool delete <tool-name|tool-id> [--detach]
   wardby tool list [--agent <name>]
   wardby run <name>
   wardby runs [--agent <name>] [--limit N] [--status <s>]

@@ -14,6 +14,7 @@ import { createSecret, attachSecret } from "../core/secrets.js";
 import { createDatastore, attachDatastore } from "../core/datastores.js";
 import { createWebhook } from "../core/webhooks.js";
 import { deriveJsonSchema } from "../sandbox/zod-params.js";
+import { findSameNamedAttachedTool, reservedToolNameReason } from "../core/tool-names.js";
 import { ToolCapabilitiesPatchSchema, FETCH_WILDCARD } from "../sandbox/tool-capabilities.js";
 import { PostgresDatastore } from "../providers/datastore/postgres.js";
 import type { DatastoreValue } from "../providers/datastore/types.js";
@@ -74,6 +75,13 @@ export async function createFromBundle(
   const toolIdMap = new Map<string, string>();
   for (const t of bundle.readTools()) {
     if (toolRejected(t.name) || toolSkipped(t.name)) continue;
+    // A built-in dispatched before user tools would shadow it, so the tool
+    // could be created but never called (see core/tool-names.ts).
+    const reserved = reservedToolNameReason(eff(t.name));
+    if (reserved) {
+      warnings.push(`tool ${t.name}: skipped — ${reserved}`);
+      continue;
+    }
 
     const schema = await deriveJsonSchema(t.paramsZod);
     if (!schema.ok) {
@@ -81,18 +89,22 @@ export async function createFromBundle(
       continue;
     }
 
-    const tool = await db.tool.upsert({
-      where: { name: eff(t.name) },
-      create: {
-        name: eff(t.name),
-        description: t.description,
-        paramsZod: t.paramsZod,
-        code: t.code,
-        jsonSchema: schema.value as object,
-        ownerId,
-      },
-      update: {},
-    });
+    // Names are unique per owner: reuse the target owner's own same-named
+    // tool (what upsert-by-name used to do), never another owner's. A
+    // compound unique with a nullable column can't key an upsert, hence
+    // findFirst + create.
+    const tool =
+      (await db.tool.findFirst({ where: { ownerId, name: eff(t.name) } })) ??
+      (await db.tool.create({
+        data: {
+          name: eff(t.name),
+          description: t.description,
+          paramsZod: t.paramsZod,
+          code: t.code,
+          jsonSchema: schema.value as object,
+          ownerId,
+        },
+      }));
     toolIdMap.set(t.name, tool.id);
     toolsCreated++;
   }
@@ -147,6 +159,20 @@ export async function createFromBundle(
 
     if (!capsPatch.success) {
       warnings.push(`agent-tool ${at.agentName}/${at.toolName}: invalid capabilities, skipping attachment`);
+      continue;
+    }
+
+    // Same guard as MCP attach_tool: an existing agent reused by name may
+    // already hold a different tool under this name (say a public one), and
+    // the runtime dispatches by name. Unlike attach_tool this check-then-
+    // upsert is not one Serializable transaction: the importer is an
+    // operator-only path, so a concurrent attach racing it is not defended
+    // against here (the runner's load-time duplicate check still is).
+    const clash = await findSameNamedAttachedTool(db, agentId, { id: toolId, name: eff(at.toolName) });
+    if (clash) {
+      warnings.push(
+        `agent-tool ${at.agentName}/${at.toolName}: skipped — the agent already has a different tool with the same name (${clash.id})`,
+      );
       continue;
     }
 

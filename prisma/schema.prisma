@@ -135,7 +135,11 @@ enum RunStatus {
 /// Phase 3: a WASM-sandboxed, Zod-validated tool a model can call.
 model Tool {
   id          String      @id @default(cuid())
-  name        String      @unique
+  /// Unique per owner (@@unique below), not globally: the name is what the
+  /// model calls, so what must never repeat is a name within one agent's
+  /// attachments — attach_tool, `wardby tool attach` and the importer refuse
+  /// a second same-named tool on an agent.
+  name        String
   description String
   /// Zod schema *source text*; compiled and evaluated inside the sandbox,
   /// never in the host process.
@@ -144,7 +148,8 @@ model Tool {
   /// and cached here — re-deriving it on every run would spin a fresh QuickJS
   /// runtime and evaluate the whole vendored zod bundle per attached tool,
   /// before the first LLM call, on every single run. Safe to cache because
-  /// there's no "update tool" path — paramsZod can't change without a new row.
+  /// every write of paramsZod (create, and MCP update_tool) re-derives it in
+  /// the same write. A run pins the version its load step read.
   jsonSchema  Json
   /// Tool body source; run inside the sandbox with the validated params.
   code        String
@@ -155,6 +160,8 @@ model Tool {
   // Phase 4: ownership. Null = public/unowned.
   ownerId String?
   owner   Principal? @relation(fields: [ownerId], references: [id])
+
+  @@unique([ownerId, name])
 }
 
 /// Phase 3: explicit many-to-many join between Agent and Tool.
