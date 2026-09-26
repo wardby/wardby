@@ -23,6 +23,7 @@ locals {
     "secret-app-key",
     "github-app-id",
     "github-app-private-key",
+    "github-app-webhook-secret",
     "auth-signing-key",
     "auth-credential-hash-key",
   ])

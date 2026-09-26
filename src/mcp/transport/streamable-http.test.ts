@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import {
@@ -8,6 +8,11 @@ import {
 } from "./streamable-http.js";
 import { createServer } from "node:http";
 import type { AuthProvider, VerifiedToken } from "../../providers/auth/types.js";
+
+vi.mock("../host-events/github-ingress.js", () => ({
+  handleGitHubEventIngress: vi.fn(),
+}));
+import { handleGitHubEventIngress, type GitHubIngressDeps } from "../host-events/github-ingress.js";
 
 const fetch: typeof globalThis.fetch = (input, init) =>
   globalThis.fetch(input, { ...init, headers: { host: "host", ...init?.headers } });
@@ -340,5 +345,52 @@ describe("startHttpServer (webhook ingress)", () => {
       body: "{}",
     });
     expect(res.status).toBe(401);
+  });
+});
+
+describe("startHttpServer (github events ingress)", () => {
+  beforeEach(() => vi.mocked(handleGitHubEventIngress).mockReset());
+  afterEach(() => vi.mocked(handleGitHubEventIngress).mockReset());
+
+  async function start(hostEvents?: StartHttpServerOptions["hostEvents"]) {
+    const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb(), config: { canonicalUri: CANONICAL_URI } });
+    const authProvider = fakeAuthProvider(async () => ({ subject: "user-1", roles: [], scopes: [] }));
+    handle = await startHttpServer({
+      mcp,
+      config: { canonicalUri: CANONICAL_URI, httpBind: { host: "127.0.0.1", port: 0 }, authProviderKind: "delegating" },
+      auth: { authProvider, db: fakeDb(), providers: fakeProviders },
+      hostEvents,
+    });
+    return `http://127.0.0.1:${handle.port}`;
+  }
+
+  it("serves /hosts/github/events from the raw body and runs follow-ups after responding", async () => {
+    const afterSpy = vi.fn(async () => undefined);
+    vi.mocked(handleGitHubEventIngress).mockImplementation(async (req) => {
+      expect(req.rawBody).toBe('{"a": 1}'); // exact bytes, not re-serialised
+      return { status: 202, body: { ok: true }, afterResponse: afterSpy };
+    });
+    const base = await start({ github: {} as unknown as GitHubIngressDeps });
+
+    const res = await fetch(`${base}/hosts/github/events`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"a": 1}',
+    });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ ok: true });
+    await vi.waitFor(() => expect(afterSpy).toHaveBeenCalled());
+  });
+
+  it("returns 404 for /hosts/github/events when no ingress is configured", async () => {
+    const base = await start(undefined);
+    const res = await fetch(`${base}/hosts/github/events`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "not_found" });
+    expect(handleGitHubEventIngress).not.toHaveBeenCalled();
   });
 });

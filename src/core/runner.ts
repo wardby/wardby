@@ -42,6 +42,14 @@ import { prisma as defaultDb } from "./db.js";
 import { logger } from "./logger.js";
 import { loadCodingConcurrencyConfig } from "../config/providers.js";
 import type { Executor } from "../providers/executor/types.js";
+import type { ReviewHostRegistry } from "../providers/review-host/types.js";
+import {
+  REVIEW_HOST_TOOL_DEFS,
+  REVIEW_HOST_TOOL_NAMES,
+  handleReviewHostTool,
+  type RepositoryLink,
+} from "./review-host-tools.js";
+import { closeOpenHostCheck } from "./review-host-checks.js";
 
 const runnerLog = logger.child({ module: "runner" });
 
@@ -132,7 +140,24 @@ export type RunnerDb = Pick<
   | "webhook"
   | "$transaction"
   | "$queryRaw"
+  | "agentRepository"
+  | "runHostCheck"
 >;
+
+/** The providers a native run needs; `executor` and `reviewHosts` are optional capabilities. */
+export type NativeRunProviders = Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory"> & {
+  executor?: ProviderRegistry["executor"];
+  reviewHosts?: ReviewHostRegistry;
+};
+
+/**
+ * The composed review hosts, or undefined when there are none (no GitHub App
+ * configured yields an empty registry). Undefined means the run never touches
+ * the AgentRepository/RunHostCheck tables at all.
+ */
+function configuredReviewHosts(hosts: ReviewHostRegistry | undefined): ReviewHostRegistry | undefined {
+  return hosts && Object.values(hosts).some(Boolean) ? hosts : undefined;
+}
 
 /**
  * The two states a Run can still be driven out of. Every write `executeRun`
@@ -266,9 +291,7 @@ export async function createRun(db: RunnerDb, agentName: string, trigger: RunTri
 /** Drives an existing Run (created by `createRun` or the scheduler) to a terminal state. */
 export async function executeRun(
   runId: string,
-  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory"> & {
-    executor?: ProviderRegistry["executor"];
-  },
+  providers: NativeRunProviders,
   db: RunnerDb = defaultDb,
   onText?: (delta: string) => void,
   step: StepRunner = runStepInline,
@@ -289,6 +312,8 @@ export async function executeRun(
     runnerLog.info({ runId, status: existingRun.status }, "skipping execution of an already-terminal run");
     return existingRun;
   }
+
+  const reviewHosts = configuredReviewHosts(providers.reviewHosts);
 
   // Pinned in one checkpointed step: on replay after a crash, the agent row
   // or its budget group may have changed since first execution. The
@@ -329,6 +354,16 @@ export async function executeRun(
       where: { parentAgentId: agent.id },
       select: { boundName: true, childAgentId: true },
     });
+    // Only queried when a review host is configured, so deployments without
+    // a GitHub App (and tests) never touch the table.
+    const repositoryLinks: RepositoryLink[] = reviewHosts
+      ? (await db.agentRepository.findMany({ where: { agentId: agent.id } })).map((l) => ({
+          provider: l.provider as RepositoryLink["provider"],
+          repository: l.repository,
+          access: l.access === "write" ? "write" : "read",
+          checkName: l.checkName,
+        }))
+      : [];
     const isDispatchedChild = existingRun.parentRunId != null;
     // Appended, never prepended: the loaded systemPrompt's stable prefix
     // stays prompt-cache-eligible across every dispatch, even though the
@@ -346,6 +381,7 @@ export async function executeRun(
       kind: agent.kind,
       memoryEnabled: agent.memoryEnabled,
       subAgentEdges,
+      repositoryLinks,
       agent: {
         systemPrompt,
         model: agent.model,
@@ -372,6 +408,7 @@ export async function executeRun(
         ...(subAgentEdges.length > 0 ? [SUBAGENT_MEMORY_GET_TOOL] : []),
         ...(isDispatchedChild ? [PARENT_MEMORY_GET_TOOL] : []),
         ...subAgentEdges.map((edge): LoadedTool => delegateToolDef(edge.boundName)),
+        ...(repositoryLinks.length > 0 ? REVIEW_HOST_TOOL_DEFS : []),
       ],
       toolsByName: Object.fromEntries(
         attached.map((attachment) => [
@@ -410,6 +447,26 @@ export async function executeRun(
     const runSandboxTool = async (name: string, argsJson: string): Promise<string> => {
       if (loaded.memoryEnabled && MEMORY_TOOL_NAMES.has(name)) {
         return handleMemoryTool(name, argsJson, loaded.agentId, providers.memory);
+      }
+      if (REVIEW_HOST_TOOL_NAMES.has(name) && loaded.repositoryLinks.length > 0 && reviewHosts) {
+        const check = await db.runHostCheck.findUnique({ where: { runId } });
+        return handleReviewHostTool(name, argsJson, {
+          agentId: loaded.agentId,
+          links: loaded.repositoryLinks,
+          hosts: reviewHosts,
+          runCheck:
+            check && !check.completedAt
+              ? {
+                  provider: check.provider,
+                  repository: check.repository,
+                  checkId: check.checkId,
+                  headSha: check.headSha,
+                }
+              : null,
+          markRunCheckCompleted: async () => {
+            await db.runHostCheck.update({ where: { runId }, data: { completedAt: new Date() } });
+          },
+        });
       }
       if (name === "subagent_memory_get") {
         return handleSubAgentMemoryGet(argsJson, loaded.agentId, db, providers.memory);
@@ -611,7 +668,7 @@ export async function executeRun(
       step,
     });
 
-    return finishRun(db, runId, {
+    const finished = await finishRun(db, runId, {
       status: engineResult.status,
       tokensIn: engineResult.usage.tokensIn,
       tokensOut: engineResult.usage.tokensOut,
@@ -621,26 +678,28 @@ export async function executeRun(
       turns: engineResult.turns,
       finishedAt: new Date(),
     });
+    await closeOpenHostCheck(db, finished, reviewHosts);
+    return finished;
   } catch (err) {
     // Defensive backstop: the engine is expected to catch its own errors
     // and return a "failed" EngineResult, but an unexpected throw here
     // (a real bug, or tool-loading failing outside the per-tool try above)
     // must still never leave the run dangling in "running". A cancellation
     // is not a failure: it carries the operator's own reason.
-    return finishRun(db, runId, {
+    const finished = await finishRun(db, runId, {
       status: err instanceof RunCancelledError ? "cancelled" : "failed",
       error: err instanceof Error ? err.message : String(err),
       finishedAt: new Date(),
     });
+    await closeOpenHostCheck(db, finished, reviewHosts);
+    return finished;
   }
 }
 
 /** Convenience: create + execute a manual run in one call (what the CLI's `wardby run` uses). */
 export async function runAgent(
   agentName: string,
-  providers: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory"> & {
-    executor?: ProviderRegistry["executor"];
-  },
+  providers: NativeRunProviders,
   db: RunnerDb = defaultDb,
   onText?: (delta: string) => void,
 ): Promise<Run> {
