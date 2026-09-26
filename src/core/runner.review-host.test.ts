@@ -85,6 +85,8 @@ function fakeHost(): CodeReviewHost {
       checkConclusion: "success" as const,
       inlineCount: 0,
       outsideDiffCount: 0,
+      resolvedThreadIds: [],
+      skippedThreadIds: [],
     })),
     comment: vi.fn(async () => ({ url: "https://x/c", id: "1" })),
     editComment: vi.fn(async () => undefined),

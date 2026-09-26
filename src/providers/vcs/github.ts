@@ -704,4 +704,18 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     if (!expectedStatuses.includes(response.status)) throw safeApiError(response);
     return response;
   }
+
+  /**
+   * Public for the code-review host: one GraphQL request, for what REST lacks
+   * (review threads). A response carrying `errors` fails like a REST error.
+   */
+  async graphql(bearer: string, query: string, variables: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const response = await this.requestJson("/graphql", bearer, {
+      method: "POST",
+      body: JSON.stringify({ query, variables }),
+    });
+    const payload = record(await response.json());
+    if (Array.isArray(payload.errors) && payload.errors.length > 0) throw new Error("github_graphql_error");
+    return record(payload.data);
+  }
 }

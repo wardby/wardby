@@ -105,6 +105,10 @@ const PublishArgs = z
     summary: z.string().min(1).max(140),
     body: z.string().min(1).max(60_000),
     comments: z.array(InlineCommentArgs).max(50).optional(),
+    resolveThreadIds: z
+      .array(z.string().regex(/^[A-Za-z0-9_=-]{1,100}$/))
+      .max(100)
+      .optional(),
   })
   .strict();
 const CommentArgs = z
@@ -128,7 +132,7 @@ export const REVIEW_HOST_TOOL_DEFS: LoadedTool[] = [
   {
     name: "repo_pr_read",
     description:
-      "Reads a pull request: title, body, author, state, refs, headSha, isFork, each changed file's unified-diff patch (patches share a character budget; truncated ones are flagged), and lastReviewedSha — the head you last reviewed on this PR, if any. Pass sinceSha (usually lastReviewedSha) to get only what changed since then; if baseMergedSince is true, the base branch was merged in meanwhile and each file shows the PR's full diff against the base, limited to files that changed since sinceSha.",
+      "Reads a pull request: title, body, author, state, refs, headSha, isFork, each changed file's unified-diff patch (patches share a character budget; truncated ones are flagged), lastReviewedSha — the head you last reviewed on this PR, if any — and openThreads: your own unresolved inline review threads (id, path, line, outdated, body). Pass sinceSha (usually lastReviewedSha) to get only what changed since then; if baseMergedSince is true, the base branch was merged in meanwhile and each file shows the PR's full diff against the base, limited to files that changed since sinceSha.",
     jsonSchema: {
       type: "object",
       properties: {
@@ -172,7 +176,7 @@ export const REVIEW_HOST_TOOL_DEFS: LoadedTool[] = [
   {
     name: "repo_publish_review",
     description:
-      "Publishes your review of one pull request head, in one call: inline comments on diff lines (a ```suggestion block in a comment body becomes a one-click fix; comments on lines outside the diff move to the summary automatically), one summary comment that is edited in place on later reviews, and — only on the pull request this run was started for, by an agent linked with a check name — the check conclusion (APPROVE = success, CHANGES_REQUESTED = failure, COMMENT = neutral). Returns published:false with reason stale_head if the PR moved on; then stop.",
+      "Publishes your review of one pull request head, in one call: inline comments on diff lines (a ```suggestion block in a comment body becomes a one-click fix; comments on lines outside the diff move to the summary automatically), one summary comment that is edited in place on later reviews, and — only on the pull request this run was started for, by an agent linked with a check name — the check conclusion (APPROVE = success, CHANGES_REQUESTED = failure, COMMENT = neutral). Pass resolveThreadIds with the ids of your openThreads that this head fixes; only your own open threads on this PR are resolved, and the result lists resolvedThreadIds and skippedThreadIds. Returns published:false with reason stale_head if the PR moved on; then stop.",
     jsonSchema: {
       type: "object",
       properties: {
@@ -201,6 +205,13 @@ export const REVIEW_HOST_TOOL_DEFS: LoadedTool[] = [
             required: ["path", "line", "severity", "body"],
             additionalProperties: false,
           },
+        },
+        resolveThreadIds: {
+          type: "array",
+          maxItems: 100,
+          items: { type: "string", pattern: "^[A-Za-z0-9_=-]{1,100}$" },
+          description:
+            "Ids from repo_pr_read's openThreads whose problem this head fixes. Leave a thread out when unsure.",
         },
       },
       required: ["repository", "prNumber", "headSha", "verdict", "summary", "body"],
@@ -370,6 +381,7 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
           agentMarker: ctx.agentId,
           ...(samePullRequest && link.checkName ? { checkName: link.checkName } : {}),
           ...(ownsCheck ? { checkId: runCheck.checkId } : {}),
+          ...(a.resolveThreadIds?.length ? { resolveThreadIds: a.resolveThreadIds } : {}),
         });
         if (ownsCheck) await markCompleted(ctx);
         return JSON.stringify(result);

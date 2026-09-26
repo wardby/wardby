@@ -1,5 +1,5 @@
 // src/providers/review-host/github.test.ts
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { GitHubAppClient } from "../vcs/github.js";
 import { GitHubReviewHost } from "./github.js";
 import { BY_APP, fakeGitHub, json, OLD_SHA, PATCH, PR, REPO, SHA } from "./github.test-support.js";
@@ -254,11 +254,18 @@ describe("GitHubReviewHost writes", () => {
       checkConclusion: "failure",
       inlineCount: 1,
       outsideDiffCount: 1,
+      resolvedThreadIds: [],
+      skippedThreadIds: [],
     });
     const review = calls.find((c) => c.path === `${BASE}/pulls/7/reviews`)!.body as Record<string, unknown>;
     expect(review).toMatchObject({ commit_id: SHA, event: "COMMENT" });
     expect(review.comments).toEqual([
-      { path: "a.py", line: 2, side: "RIGHT", body: "**[MAJOR]** off by one\n```suggestion\nnew 2\n```" },
+      {
+        path: "a.py",
+        line: 2,
+        side: "RIGHT",
+        body: "**[MAJOR]** off by one\n```suggestion\nnew 2\n```\n\n<!-- wardby:finding:agent1 -->",
+      },
     ]);
     const summary = calls.find((c) => c.method === "POST" && c.path === `${BASE}/issues/7/comments`)!.body as {
       body: string;
@@ -276,6 +283,138 @@ describe("GitHubReviewHost writes", () => {
     expect(checkText).toBe(summary.body);
     expect(checkText).toContain("## Findings\n- bug");
     expect(checkText).toContain("## Outside the diff");
+  });
+
+  describe("review threads", () => {
+    const APP_BOT = { __typename: "Bot", login: "wardby" };
+    const thread = (id: string, over: Record<string, unknown> = {}, comment: Record<string, unknown> = {}) => ({
+      id,
+      isResolved: false,
+      isOutdated: false,
+      path: "a.py",
+      line: 2,
+      comments: {
+        nodes: [{ body: "**[MAJOR]** off by one\n\n<!-- wardby:finding:agent1 -->", author: APP_BOT, ...comment }],
+      },
+      ...over,
+    });
+    const THREADS = [
+      thread("T1"),
+      thread("T2", { isOutdated: true, line: null }),
+      thread("T3", { isResolved: true }),
+      thread("T4", {}, { author: { __typename: "User", login: "wardby" } }),
+      thread("T5", {}, { author: { __typename: "Bot", login: "other-app" } }),
+      thread("T6", {}, { body: "**[MINOR]** x\n\n<!-- wardby:finding:agent2 -->" }),
+      thread("T7", {}, { body: "a human-looking comment" }),
+    ];
+    const threadsAnswer = () => json({ data: { repository: { pullRequest: { reviewThreads: { nodes: THREADS } } } } });
+    const isThreadsQuery = (body: unknown) => String((body as { query: string }).query).includes("reviewThreads");
+
+    it("lists only this agent's own unresolved threads when reading a PR", async () => {
+      const { client, calls } = fakeGitHub(({ method, path, body }) => {
+        if (method === "GET" && path === `${BASE}/pulls/7`) return json(PR);
+        if (method === "GET" && path.startsWith(`${BASE}/pulls/7/files`)) return json([]);
+        if (method === "GET" && path.startsWith(`${BASE}/issues/7/comments`)) return json([]);
+        if (method === "POST" && path === "/graphql" && isThreadsQuery(body)) return threadsAnswer();
+        return undefined;
+      });
+      const view = await new GitHubReviewHost(client).readPullRequest(REPO, 7, {
+        maxPatchChars: 1000,
+        agentMarker: "agent1",
+      });
+      expect(view.openThreads).toEqual([
+        { id: "T1", path: "a.py", line: 2, outdated: false, body: "**[MAJOR]** off by one" },
+        { id: "T2", path: "a.py", line: null, outdated: true, body: "**[MAJOR]** off by one" },
+      ]);
+      expect(calls.find((c) => c.path === "/graphql")!.body).toMatchObject({
+        variables: { owner: "chfields", name: "knock-knock-jokes", number: 7 },
+      });
+    });
+
+    const publishFake = (mutation: (threadId: string) => Response | undefined) =>
+      fakeGitHub(({ method, path, body }) => {
+        if (method === "GET" && path === `${BASE}/pulls/7`) return json(PR);
+        if (method === "GET" && path.startsWith(`${BASE}/pulls/7/files`)) return json([]);
+        if (method === "GET" && path.startsWith(`${BASE}/issues/7/comments`)) return json([]);
+        if (method === "POST" && path === `${BASE}/issues/7/comments`)
+          return json({ id: 6, html_url: "https://x/6" }, 201);
+        if (method === "PATCH" && path === `${BASE}/check-runs/11`) return json({ id: 11 });
+        if (method === "POST" && path === "/graphql") {
+          if (isThreadsQuery(body)) return threadsAnswer();
+          return mutation((body as { variables: { threadId: string } }).variables.threadId);
+        }
+        return undefined;
+      });
+    const resolvedOk = (threadId: string) =>
+      json({ data: { resolveReviewThread: { thread: { id: threadId, isResolved: true } } } });
+
+    it("resolves only its own open threads, with a Contents-write token, after publishing", async () => {
+      const { client, calls, grants } = publishFake(resolvedOk);
+      const result = await new GitHubReviewHost(client).publishReview(REPO, {
+        ...input,
+        comments: [],
+        checkId: "11",
+        resolveThreadIds: ["T1", "T2", "T3", "T4", "T5", "T6", "T7", "nope", "T1"],
+      });
+      expect(result).toMatchObject({
+        published: true,
+        resolvedThreadIds: ["T1", "T2"],
+        skippedThreadIds: ["T3", "T4", "T5", "T6", "T7", "nope"],
+      });
+      expect(grants).toEqual([
+        { pull_requests: "write", checks: "write" },
+        { contents: "write", pull_requests: "write" },
+      ]);
+      const mutations = calls
+        .filter((c) => c.path === "/graphql" && !isThreadsQuery(c.body))
+        .map((c) => (c.body as { variables: unknown }).variables);
+      expect(mutations).toEqual([{ threadId: "T1" }, { threadId: "T2" }]);
+    });
+
+    it("skips a thread the host refuses to resolve, and every thread when the token is refused", async () => {
+      const partial = publishFake((id) => (id === "T1" ? json({ errors: [{ message: "no" }] }) : resolvedOk(id)));
+      await expect(
+        new GitHubReviewHost(partial.client).publishReview(REPO, {
+          ...input,
+          comments: [],
+          checkId: "11",
+          resolveThreadIds: ["T1", "T2"],
+        }),
+      ).resolves.toMatchObject({ published: true, resolvedThreadIds: ["T2"], skippedThreadIds: ["T1"] });
+
+      const refused = publishFake(resolvedOk);
+      let call = 0;
+      const host = new GitHubReviewHost(refused.client);
+      const scoped = refused.client.withScopedToken.bind(refused.client);
+      vi.spyOn(refused.client, "withScopedToken").mockImplementation((repo, perms, action) => {
+        call += 1;
+        if (call === 2) return Promise.reject(new Error("github_installation_token_scope_invalid"));
+        return scoped(repo, perms, action);
+      });
+      await expect(
+        host.publishReview(REPO, { ...input, comments: [], checkId: "11", resolveThreadIds: ["T1"] }),
+      ).resolves.toMatchObject({ published: true, resolvedThreadIds: [], skippedThreadIds: ["T1"] });
+    });
+
+    it("makes no thread calls without ids, or when the head moved on", async () => {
+      const none = publishFake(resolvedOk);
+      await new GitHubReviewHost(none.client).publishReview(REPO, { ...input, comments: [], checkId: "11" });
+      expect(none.calls.some((c) => c.path === "/graphql")).toBe(false);
+      expect(none.grants).toHaveLength(1);
+
+      const moved = fakeGitHub(({ method, path }) => {
+        if (method === "GET" && path === `${BASE}/pulls/7`) return json({ ...PR, head: { ...PR.head, sha: OLD_SHA } });
+        if (method === "PATCH" && path === `${BASE}/check-runs/11`) return json({ id: 11 });
+        return undefined;
+      });
+      const stale = await new GitHubReviewHost(moved.client).publishReview(REPO, {
+        ...input,
+        checkId: "11",
+        resolveThreadIds: ["T1"],
+      });
+      expect(stale).toMatchObject({ published: false, reason: "stale_head" });
+      expect(moved.calls.some((c) => c.path === "/graphql")).toBe(false);
+    });
   });
 
   it("edits the existing summary comment and creates a completed check when the run has none", async () => {
