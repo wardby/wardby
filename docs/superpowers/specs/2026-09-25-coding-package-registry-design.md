@@ -324,21 +324,38 @@ export interface RegistryAdapter {
   /** Parse one allowlist entry in this ecosystem's syntax. Throws an
    *  AllowlistEntryError with a user-facing message if it is invalid. */
   parseAllowlistEntry(raw: string): AllowlistEntry;
-  /** Canonical name used for every comparison (npm: lower case;
-   *  PyPI: PEP 503 normalization). */
+  /** Canonical name used for every comparison (npm: the name exactly as
+   *  written, since npm names are case-sensitive; PyPI: PEP 503
+   *  normalization). */
   normalizeName(name: string): string;
   /** Whether `version` satisfies `range` in this ecosystem's syntax
    *  (npm semver ranges, PEP 440 specifiers). */
   satisfies(version: string, range: string): boolean;
+  /** Total order over this ecosystem's version strings (semver for npm,
+   *  PEP 440 for PyPI, normalizing non-canonical spellings first), used to
+   *  evaluate OSV advisory ranges. Throws on a version it cannot parse; the
+   *  audit treats that as affected (fail closed). */
+  compareVersions(a: string, b: string): number;
 
   // --- Protocol ---------------------------------------------------------
-  /** Classify a request under /registry/<id>/, or null for 404. */
+  /** Classify a request under /registry/<id>/, or null for 404. Throws a
+   *  400 `wardby_bad_request` RegistryError for a malformed path (bad
+   *  percent-encoding or an invalid package name); the core records it. */
   route(method: string, subpath: string, headers: Headers): RegistryRoute | null;
-  /** Fetch and parse upstream metadata for one package. */
+  /** Fetch and parse upstream metadata for one package. `upstream` is the
+   *  core's bounded fetch (timeout and byte cap). `raw` keeps only the
+   *  subset renderMetadata and the resolvers read. */
   fetchMetadata(name: string, upstream: UpstreamFetch): Promise<PackageMetadata>;
   /** Build the client-facing metadata document containing only `keep`
-   *  versions, with every download link rewritten to a proxy route. */
-  renderMetadata(meta: PackageMetadata, keep: ReadonlySet<string>, proxyBase: string): RenderedDocument;
+   *  versions and, of their files, only the filenames in `keptFiles` (the
+   *  core's per-file release-age filter), with every download link
+   *  rewritten to a proxy route. */
+  renderMetadata(
+    meta: PackageMetadata,
+    keep: ReadonlySet<string>,
+    keptFiles: ReadonlySet<string>,
+    proxyBase: string,
+  ): RenderedDocument;
   /** Map a download route to a file in metadata the proxy fetched itself.
    *  Returns null if the route names no known file. */
   resolveDownload(route: DownloadRoute, meta: PackageMetadata): FileRef | null;
@@ -346,6 +363,10 @@ export interface RegistryAdapter {
    *  names read from a served file or its metadata file. Omitted when
    *  VersionInfo.dependencies is already complete (npm). */
   dependenciesFromFile?(route: DownloadRoute | FileMetadataRoute, body: Uint8Array): Promise<string[]>;
+  /** Map a file-metadata route (PEP 658) to the file it describes, from
+   *  metadata the proxy fetched itself. Returns null if the route names no
+   *  known file. The core applies the release age of the wheel it describes. */
+  resolveFileMetadata?(route: FileMetadataRoute, meta: PackageMetadata): FileRef | null;
 
   // --- Worker -----------------------------------------------------------
   /** Environment variables and files the driver writes so the package
@@ -372,8 +393,6 @@ export interface PackageMetadata {
 
 export interface VersionInfo {
   version: string;
-  /** Release time; null means unknown and is treated as too new. */
-  publishedAt: Date | null;
   /** Dependency names (normalized). Empty when discovered from files instead. */
   dependencies: readonly string[];
   files: readonly FileRef[];
@@ -388,6 +407,11 @@ export interface FileRef {
   sizeBytes: number | null;
   /** False for files the ecosystem's safeguards exclude, e.g. PyPI sdists. */
   allowed: boolean;
+  /** When this file was published; null means unknown and is treated as too
+   *  new. The minimum release age applies per file: a PyPI release can gain
+   *  a new wheel long after its first upload. For npm every version has one
+   *  immutable tarball, so this is the version's publish time. */
+  publishedAt: Date | null;
 }
 
 export interface Integrity {
@@ -421,7 +445,10 @@ export interface RenderedDocument {
 
 /** The pinned upstream client: HTTPS only, adapter's upstreamHosts only,
  *  no redirects, no private addresses. */
-export type UpstreamFetch = (url: string, init?: { accept?: string }) => Promise<Response>;
+export type UpstreamFetch = (
+  url: string,
+  init?: { method?: "GET" | "POST"; body?: string; accept?: string; signal?: AbortSignal },
+) => Promise<Response>;
 
 export interface WorkerConfigInput {
   /** e.g. "http://wardby-proxy:8787/registry/npm/" */
@@ -451,16 +478,17 @@ export const REGISTRY_ADAPTERS: ReadonlyMap<EcosystemId, RegistryAdapter> = new 
 
 ### How the two first adapters fill it in
 
-| Member           | npm                                                                                                                       | PyPI                                                                    |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `osvEcosystem`   | `npm`                                                                                                                     | `PyPI`                                                                  |
-| `upstreamHosts`  | `registry.npmjs.org`                                                                                                      | `pypi.org`, `files.pythonhosted.org`                                    |
-| `collectExclude` | `node_modules`                                                                                                            | `.venv`, `venv`, `__pycache__`                                          |
-| `publishedAt`    | packument `time[version]`                                                                                                 | file `upload-time` (earliest per version)                               |
-| `dependencies`   | from `dependencies`, `optionalDependencies`, `peerDependencies`                                                           | empty; `dependenciesFromFile` reads `Requires-Dist`                     |
-| `allowed: false` | never                                                                                                                     | sdists (wheels only)                                                    |
-| `integrity`      | `dist.integrity` (sha512) or `dist.shasum` (sha1)                                                                         | `hashes.sha256`                                                         |
-| `workerConfig`   | `npm_config_registry`, `npm_config_userconfig` (npmrc with `_authToken`), `npm_config_ignore_scripts`, `npm_config_cache` | `PIP_INDEX_URL`, `PIP_TRUSTED_HOST`, `PIP_ONLY_BINARY`, `PIP_CACHE_DIR` |
+| Member                        | npm                                                                                                                       | PyPI                                                                    |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `compareVersions`             | `semver.compare`                                                                                                          | PEP 440 `compare` after `clean`                                         |
+| `osvEcosystem`                | `npm`                                                                                                                     | `PyPI`                                                                  |
+| `upstreamHosts`               | `registry.npmjs.org`                                                                                                      | `pypi.org`, `files.pythonhosted.org`                                    |
+| `collectExclude`              | `node_modules`                                                                                                            | `.venv`, `venv`, `__pycache__`                                          |
+| `publishedAt` (per `FileRef`) | packument `time[version]`                                                                                                 | each file's own `upload-time` (a `.metadata` file inherits its wheel's) |
+| `dependencies`                | from `dependencies`, `optionalDependencies`, `peerDependencies`                                                           | empty; `dependenciesFromFile` reads `Requires-Dist`                     |
+| `allowed: false`              | never                                                                                                                     | sdists (wheels only)                                                    |
+| `integrity`                   | `dist.integrity` (sha512) or `dist.shasum` (sha1)                                                                         | `hashes.sha256`                                                         |
+| `workerConfig`                | `npm_config_registry`, `npm_config_userconfig` (npmrc with `_authToken`), `npm_config_ignore_scripts`, `npm_config_cache` | `PIP_INDEX_URL`, `PIP_TRUSTED_HOST`, `PIP_ONLY_BINARY`, `PIP_CACHE_DIR` |
 
 The core's built-in collection skip list (section 4) is the union of every
 adapter's `collectExclude` plus the language-neutral cache folders.
