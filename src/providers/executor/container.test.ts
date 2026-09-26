@@ -1053,6 +1053,31 @@ describe("failure diagnostics", () => {
     expect(JSON.stringify(logged)).not.toContain(token);
   });
 
+  it.each([
+    ["github_pull_request_not_draft", "github"],
+    ["github_api_error:422:ABCD", "github"],
+    ["github_api_unavailable", "github"],
+    ["vcs_head_ref_conflict", "workspace"],
+    ["git_push_failed", "workspace"],
+  ])("categorizes a post-push %s failure by its prefix, as %s", async (message, category) => {
+    // A GitHub API failure after the push used to be reported as
+    // "workspace": the category substring-matched "git" in "github_".
+    const created = await harness();
+    created.vcs.finalizeChanges = async () => {
+      throw new Error(message);
+    };
+
+    await created.executor.start("run-1");
+
+    expect(created.store.run.status).toBe("failed");
+    const persisted = (created.store.terminations.at(-1) as { error: string }).error;
+    expect(persisted).toMatch(new RegExp(`^coding_failure_${category}:coding_diag_`));
+    expect(created.observer.events.find((event) => event.stage === "terminal")).toMatchObject({
+      outcome: "failed",
+      failureCategory: category,
+    });
+  });
+
   it("logs which output-schema fields a failed worker rejected, next to the diagnostic id", async () => {
     const created = await harness();
     created.jobs.statusValue = { state: "failed" };

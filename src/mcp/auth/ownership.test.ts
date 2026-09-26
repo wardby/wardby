@@ -11,6 +11,7 @@ import {
   requireOwnedSecret,
   requireOwnedWebhook,
   requireOwnedTool,
+  requireStrictlyOwnedTool,
   requireOwnedBudgetGroup,
   requireReadableBudgetGroup,
 } from "./ownership.js";
@@ -229,5 +230,24 @@ describe("requireReadableBudgetGroup", () => {
   it("404s for a group owned by someone else", async () => {
     const db = fakeDb({}, {}, {}, {}, { g1: { id: "g1", ownerId: "someone-else" } });
     await expect(requireReadableBudgetGroup(db, "g1", "p1")).rejects.toMatchObject({ httpStatus: 404 });
+  });
+});
+
+describe("requireStrictlyOwnedTool", () => {
+  it("returns the tool for its owner", async () => {
+    const db = fakeDb({}, {}, {}, {}, {}, { t1: { id: "t1", ownerId: "p1" } });
+    await expect(requireStrictlyOwnedTool(db, "t1", "p1")).resolves.toMatchObject({ id: "t1" });
+  });
+  it("404s for a missing tool", async () => {
+    const db = fakeDb({}, {}, {}, {}, {}, {});
+    await expect(requireStrictlyOwnedTool(db, "missing", "p1")).rejects.toMatchObject({ httpStatus: 404 });
+  });
+  it("404s for another principal's tool, not confirming it exists", async () => {
+    const db = fakeDb({}, {}, {}, {}, {}, { t1: { id: "t1", ownerId: "owner-1" } });
+    await expect(requireStrictlyOwnedTool(db, "t1", "p1")).rejects.toMatchObject({ httpStatus: 404 });
+  });
+  it("403s for a public (null-owner) tool, unlike requireOwnedTool", async () => {
+    const db = fakeDb({}, {}, {}, {}, {}, { t1: { id: "t1", ownerId: null } });
+    await expect(requireStrictlyOwnedTool(db, "t1", "anyone")).rejects.toMatchObject({ httpStatus: 403 });
   });
 });

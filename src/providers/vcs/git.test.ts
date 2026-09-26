@@ -250,6 +250,8 @@ describe("GitVcsProvider", () => {
     expect(push.args.join(" ")).not.toContain(TOKEN);
     expect(push.args).toContain(`${COMMIT_SHA}:refs/heads/wardby/run-run-1`);
     expect(github.pullRequestCalls).toHaveLength(1);
+    // A fresh run only ever opens or finds a draft PR.
+    expect(github.pullRequestCalls[0]?.acceptReadyForReview).toBeUndefined();
   });
 
   it("passes the agent's summary, tests, and tag through to the pull request", async () => {
@@ -415,7 +417,13 @@ describe("GitVcsProvider", () => {
         pullRequestUrl: "https://github.com/openai/example/pull/42",
       });
       // PR identity is keyed to the ROOT run's id, not this (continuation) run's own.
-      expect(github.pullRequestCalls[0]).toMatchObject({ runId: "run-1", headRef: "wardby/run-run-1" });
+      // A person may have marked that PR ready for review since; the push
+      // above already updated it, so a continuation accepts it as found.
+      expect(github.pullRequestCalls[0]).toMatchObject({
+        runId: "run-1",
+        headRef: "wardby/run-run-1",
+        acceptReadyForReview: true,
+      });
     });
 
     it("recovers a continuation workspace deterministically without minting another token", async () => {

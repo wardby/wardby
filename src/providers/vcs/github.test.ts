@@ -368,6 +368,39 @@ describe("GitHubAppClient", () => {
     ).rejects.toThrow("github_pull_request_not_draft");
   });
 
+  it("accepts a marked PR a person already marked ready for review when the caller is a continuation", async () => {
+    const requests: string[] = [];
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      requests.push(`${init?.method ?? "GET"} ${url}`);
+      if (url.endsWith("/installation")) return json({ id: 42 });
+      if (url.endsWith("/access_tokens")) return tokenResponse();
+      if (url.includes("/pulls?"))
+        return json([
+          {
+            number: 7,
+            html_url: "https://github.com/OpenAI/Example/pull/7",
+            body: "<!-- wardby:run-1 -->",
+            draft: false,
+          },
+        ]);
+      if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+      throw new Error(`unexpected request ${url}`);
+    }) as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+    await expect(
+      client.createOrFindDraftPullRequest({
+        runId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "wardby/run-run-1",
+        acceptReadyForReview: true,
+      }),
+    ).resolves.toEqual({ number: 7, url: "https://github.com/openai/example/pull/7" });
+    // Found, not re-created: no POST to /pulls.
+    expect(requests.some((r) => r.startsWith("POST") && r.endsWith("/pulls"))).toBe(false);
+  });
+
   describe("continuation status notifications", () => {
     const PR_LOOKUP_RESPONSE = [
       {
@@ -386,6 +419,36 @@ describe("GitHubAppClient", () => {
         if (url.endsWith("/installation")) return json({ id: 42 });
         if (url.endsWith("/access_tokens")) return tokenResponse();
         if (url.includes("/pulls?")) return json(PR_LOOKUP_RESPONSE);
+        if (url.includes("/issues/23/comments") && method === "GET") return json([]);
+        if (url.includes("/issues/23/comments") && method === "POST") {
+          createdBody = JSON.parse(bodyText(init?.body)).body;
+          return json({ id: 555 }, 201);
+        }
+        if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+        throw new Error(`unexpected request ${method} ${url}`);
+      }) as typeof fetch;
+      const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+
+      await client.upsertContinuationStatusComment({
+        runId: "run-2",
+        rootRunId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "wardby/run-run-1",
+        body: "working...",
+      });
+
+      expect(createdBody).toBe("<!-- wardby-status:run-2 -->\n\nworking...");
+    });
+
+    it("upsertContinuationStatusComment still finds the PR after a person marked it ready for review", async () => {
+      let createdBody: string | undefined;
+      const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (url.endsWith("/installation")) return json({ id: 42 });
+        if (url.endsWith("/access_tokens")) return tokenResponse();
+        if (url.includes("/pulls?")) return json([{ ...PR_LOOKUP_RESPONSE[0], draft: false }]);
         if (url.includes("/issues/23/comments") && method === "GET") return json([]);
         if (url.includes("/issues/23/comments") && method === "POST") {
           createdBody = JSON.parse(bodyText(init?.body)).body;

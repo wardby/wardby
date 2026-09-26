@@ -498,9 +498,12 @@ export class GitVcsProvider implements VcsProvider {
     // run's id), not this run's own -- this finds the existing open PR and
     // returns it rather than creating a new one, since headRef/baseRef
     // already match it exactly. No other change needed here: pushing a new
-    // commit onto that branch already updates the PR natively.
+    // commit onto that branch already updates the PR natively -- which is
+    // also why a PR a person has since marked ready for review is accepted
+    // (acceptReadyForReview) rather than failing an already-pushed run.
     const pullRequest = await this.options.github.createOrFindDraftPullRequest({
       runId: prepared.continuation?.rootRunId ?? prepared.runId,
+      ...(prepared.continuation ? { acceptReadyForReview: true } : {}),
       repository: prepared.repository,
       baseRef: prepared.baseRef,
       headRef: prepared.headRef,

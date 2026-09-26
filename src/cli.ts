@@ -47,6 +47,17 @@ import { startReconciler } from "./core/reconciler.js";
 import { NativeEngine } from "./core/engine-native.js";
 import { logger } from "./core/logger.js";
 import { deriveJsonSchema } from "./sandbox/zod-params.js";
+import { findSameNamedAttachedTool, reservedToolNameReason, resolveToolRef } from "./core/tool-names.js";
+import {
+  ToolAttachedError,
+  deleteToolGuarded,
+  formatAttachedAgents,
+  formatToolLine,
+  hasToolChanges,
+  prepareToolUpdate,
+  updateToolGuarded,
+  type AuthorizeTool,
+} from "./core/tool-admin.js";
 import { ToolCapabilitiesPatchSchema } from "./sandbox/tool-capabilities.js";
 import { startMcp } from "./mcp/index.js";
 import { startServe } from "./serve.js";
@@ -178,6 +189,8 @@ async function toolCreate(args: string[]): Promise<void> {
   if (!values.name || !values.description || !values.params || !values.code) {
     fail("tool create requires --name, --description, --params <file>, and --code <file>.");
   }
+  const reserved = reservedToolNameReason(values.name);
+  if (reserved) fail(reserved);
 
   let paramsZod: string;
   let code: string;
@@ -193,11 +206,19 @@ async function toolCreate(args: string[]): Promise<void> {
   }
 
   // Fails at registration, not at call time: a malformed schema never gets
-  // persisted. The derived schema is cached on the row (no "update tool"
-  // path exists, so it can never go stale) rather than re-derived per run.
+  // persisted. The derived schema is cached on the row rather than
+  // re-derived per run; MCP update_tool re-derives it whenever paramsZod
+  // changes, so it never goes stale.
   const schemaResult = await deriveJsonSchema(paramsZod!);
   if (!schemaResult.ok) {
     fail(`invalid --params schema: ${schemaResult.errorMessage}`);
+  }
+
+  // CLI tools are public (no owner), and the (ownerId, name) unique index
+  // treats NULL owners as distinct, so it can't stop a second public tool
+  // with this name -- check here instead.
+  if (await prisma.tool.findFirst({ where: { ownerId: null, name: values.name } })) {
+    fail(`a public tool named "${values.name}" already exists.`);
   }
 
   const tool = await prisma.tool.create({
@@ -228,11 +249,14 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
   });
   const [toolName, agentName] = positionals;
   if (!toolName || !agentName) {
-    fail(`tool ${detach ? "detach" : "attach"} requires <tool-name> <agent-name>.`);
+    fail(`tool ${detach ? "detach" : "attach"} requires <tool-name|tool-id> <agent-name>.`);
   }
 
-  const tool = await prisma.tool.findUnique({ where: { name: toolName } });
-  if (!tool) fail(`unknown tool "${toolName}".`);
+  // Tool names are unique per owner, not globally: an ambiguous name fails
+  // with the candidate ids, and an id is accepted in its place.
+  const resolved = await resolveToolRef(prisma, toolName);
+  if (!resolved.ok) fail(resolved.error);
+  const tool = resolved.tool;
   const agent = await prisma.agent.findUnique({ where: { name: agentName } });
   if (!agent) fail(`unknown agent "${agentName}".`);
 
@@ -254,6 +278,17 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
       const prefix = entry.slice(sep + 1);
       (allowedSharedDatastorePrefixes[boundName] ??= []).push(prefix);
     }
+  }
+
+  // Same guard as MCP attach_tool: one agent never holds two tools with the
+  // same name, since the runtime dispatches by name. Operator-only, so unlike
+  // attach_tool this check-then-upsert is not one Serializable transaction
+  // (the runner's load-time duplicate check still catches a race).
+  const clash = await findSameNamedAttachedTool(prisma, agent.id, tool);
+  if (clash) {
+    fail(
+      `agent "${agentName}" already has a different tool named "${tool.name}" attached (${clash.id}); detach it first.`,
+    );
   }
 
   const patch = ToolCapabilitiesPatchSchema.safeParse({
@@ -301,16 +336,120 @@ async function toolList(args: string[]): Promise<void> {
       console.log(`no tools attached to "${values.agent}".`);
       return;
     }
-    for (const a of attached) console.log(`${a.tool.name}  ${a.tool.description}`);
+    for (const a of attached) console.log(formatToolLine(a.tool));
     return;
   }
 
-  const tools = await prisma.tool.findMany({ orderBy: { name: "asc" } });
+  const tools = await prisma.tool.findMany({ orderBy: [{ name: "asc" }, { id: "asc" }] });
   if (tools.length === 0) {
     console.log("no tools registered.");
     return;
   }
-  for (const t of tools) console.log(`${t.name}  ${t.description}`);
+  for (const t of tools) console.log(formatToolLine(t));
+}
+
+/**
+ * The operator may change any tool, public ones included; only a row that
+ * vanished since it was resolved is refused. Thrown rather than fail()ed:
+ * it runs inside the transaction, which must roll back, not exit mid-way.
+ */
+function operatorAuthorize(ref: string): AuthorizeTool {
+  return (tool) => {
+    if (!tool) throw new Error(`unknown tool "${ref}".`);
+  };
+}
+
+/**
+ * `wardby tool update <tool-name|tool-id>` -- the operator's counterpart of
+ * MCP update_tool, and the only way to change a public tool. Same
+ * validation (jsonSchema re-derived from --params) and the same attachment
+ * rule, judged against the tool's owner (core/tool-admin.ts).
+ */
+async function toolUpdate(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: {
+      description: { type: "string" },
+      params: { type: "string" },
+      code: { type: "string" },
+    },
+  });
+  const [ref] = positionals;
+  if (!ref) fail("tool update requires <tool-name|tool-id>.");
+
+  const readFile = (flag: string, path: string | undefined): string | undefined => {
+    if (path === undefined) return undefined;
+    try {
+      return readFileSync(path, "utf8");
+    } catch (err) {
+      fail(`could not read ${flag} file "${path}": ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+  const changes = {
+    description: values.description,
+    paramsZod: readFile("--params", values.params),
+    code: readFile("--code", values.code),
+  };
+  if (!hasToolChanges(changes)) {
+    fail("tool update requires at least one of --description, --params <file>, --code <file>.");
+  }
+
+  const resolved = await resolveToolRef(prisma, ref);
+  if (!resolved.ok) fail(resolved.error);
+  const prepared = await prepareToolUpdate(changes);
+  if (!prepared.ok) fail(`invalid --params schema: ${prepared.errorMessage}`);
+
+  try {
+    await updateToolGuarded(prisma, resolved.tool.id, prepared.data, operatorAuthorize(ref));
+  } catch (err) {
+    if (err instanceof ToolAttachedError) {
+      fail(
+        `tool "${ref}" is attached to agents with a different owner: ${formatAttachedAgents(err.agents)}. Detach it from those agents first, or create a new tool.`,
+      );
+    }
+    throw err;
+  }
+  console.log(`updated tool ${resolved.tool.id}.`);
+}
+
+/** `wardby tool delete <tool-name|tool-id> [--detach]` -- MCP delete_tool's rules, public tools included. */
+async function toolDelete(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: { detach: { type: "boolean" } },
+  });
+  const [ref] = positionals;
+  if (!ref) fail("tool delete requires <tool-name|tool-id>.");
+  const resolved = await resolveToolRef(prisma, ref);
+  if (!resolved.ok) fail(resolved.error);
+
+  let detachedFrom: string[];
+  try {
+    detachedFrom = await deleteToolGuarded(prisma, resolved.tool.id, {
+      detach: values.detach ?? false,
+      authorize: operatorAuthorize(ref),
+    });
+  } catch (err) {
+    if (!(err instanceof ToolAttachedError)) throw err;
+    if (err.reason === "other_owners") {
+      fail(
+        `tool "${ref}" is attached to agents with a different owner: ${formatAttachedAgents(err.agents)}. Detach it from those agents first (wardby tool detach).`,
+      );
+    }
+    if (err.reason === "needs_detach") {
+      fail(
+        `tool "${ref}" is still attached to ${formatAttachedAgents(err.agents)}. Pass --detach to detach it and delete it.`,
+      );
+    }
+    fail(`tool "${ref}" is still attached to an agent; nothing was deleted.`);
+  }
+  console.log(
+    detachedFrom.length > 0
+      ? `deleted tool ${resolved.tool.id} (detached from ${detachedFrom.join(", ")}).`
+      : `deleted tool ${resolved.tool.id}.`,
+  );
 }
 
 async function agentSchedule(args: string[]): Promise<void> {
@@ -644,6 +783,10 @@ async function main(): Promise<void> {
       await toolAttach(rest.slice(1), false);
     } else if (command === "tool" && rest[0] === "detach") {
       await toolAttach(rest.slice(1), true);
+    } else if (command === "tool" && rest[0] === "update") {
+      await toolUpdate(rest.slice(1));
+    } else if (command === "tool" && rest[0] === "delete") {
+      await toolDelete(rest.slice(1));
     } else if (command === "tool" && rest[0] === "list") {
       await toolList(rest.slice(1));
     } else if (command === "run") {

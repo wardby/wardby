@@ -112,6 +112,9 @@ function buildCombinedDb(
       },
       findMany: async ({ where }: any) =>
         attachments.filter((a) => a.agentId === where.agentId).map((a) => ({ ...a, tool: tools.get(a.toolId) })),
+      // attach_tool's same-name guard: this fixture never attaches two
+      // same-named tools to one agent.
+      findFirst: async () => null,
     },
     agentSecret: {
       findFirst: async () => null,

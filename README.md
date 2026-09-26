@@ -195,7 +195,9 @@ Claude or Codex can translate that request into Wardby MCP operations such as
 6. A person reviews and decides whether anything merges.
 
 The same agent can be updated, paused, triggered, inspected, or deleted from an
-MCP conversation. The CLI remains available as the bootstrap and operations
+MCP conversation, and so can its sandboxed tools: `update_tool` fixes a tool's
+code in place for the next run, and `delete_tool` removes one you no longer
+need. The CLI remains available as the bootstrap and operations
 floor. The result is autonomy with a receipt: an owned run with bounded spend,
 assigned capabilities, durable status, and a reviewable outcome.
 

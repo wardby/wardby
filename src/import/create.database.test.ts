@@ -217,7 +217,7 @@ describe.skipIf(!process.env.DATABASE_URL)("createFromBundle (database)", () => 
     expect(createdAgent?.tools).toHaveLength(1);
     expect(createdAgent?.budgetGroup?.name).toBe(budgetName);
 
-    const createdTool = await db.tool.findUnique({ where: { name: toolName } });
+    const createdTool = await db.tool.findFirst({ where: { ownerId: owner.id, name: toolName } });
     expect(createdTool).toBeTruthy();
     expect(createdTool?.description).toBe("Test tool");
 
@@ -699,6 +699,138 @@ describe.skipIf(!process.env.DATABASE_URL)("createFromBundle (database)", () => 
       }
       if (agentId) await db.agent.deleteMany({ where: { id: agentId } });
       if (owner) await db.principal.deleteMany({ where: { subject: ownerSubject4 } });
+    }
+  });
+
+  it("tool names are per owner: another owner's same-named tool is not reused, the target owner's own is", async () => {
+    const testId5 = randomUUID().slice(0, 8);
+    const agentName5 = `test-agent-per-owner-${testId5}`;
+    const toolName5 = `test-tool-per-owner-${testId5}`;
+    const ownerSubject5 = `test-owner-per-owner-${testId5}`;
+    const otherSubject5 = `test-other-per-owner-${testId5}`;
+
+    const manifest: Manifest = {
+      bundleVersion: 1,
+      source: { product: "test", exporterVersion: "1.0", exportedAt: new Date().toISOString() },
+      secretMode: "references",
+      transferKeyId: null,
+      contentWindowDays: null,
+      contentSince: null,
+      toolCallDetail: "metadata",
+      runAuditWindowDays: null,
+      runAuditSince: null,
+      capabilities: [],
+      counts: { agents: 1, tools: 1 },
+    };
+    const agent: NeutralAgent = {
+      name: agentName5,
+      systemPrompt: "Test agent",
+      provider: "bedrock",
+      model: "claude-opus-4",
+      region: null,
+      schedule: null,
+      timezone: "UTC",
+      scheduleEnabled: false,
+      maxTurns: 10,
+      budgetUsd: "5.00",
+      ownerEmail: null,
+      kind: "native",
+      memoryEnabled: false,
+      unmodeled: {},
+    };
+    const tool: NeutralTool = {
+      name: toolName5,
+      description: "imported",
+      paramsZod: "z.object({})",
+      jsonSchema: null,
+      code: "return 1;",
+      secretSchema: "",
+    };
+    const agentTool: NeutralAgentTool = {
+      agentName: agentName5,
+      toolName: toolName5,
+      allowedSecrets: [],
+      allowedDatastorePrefixes: [],
+      allowedHosts: [],
+      allowedSharedDatastorePrefixes: {},
+    };
+    const bundle: Bundle = {
+      manifest,
+      readAgents: () => [agent],
+      readTools: () => [tool],
+      readAgentTools: () => [agentTool],
+      readSecrets: () => [],
+      readAgentSecrets: () => [],
+      readSingleDatastores: () => [],
+      readSharedDatastores: () => [],
+      readWebhooks: () => [],
+      readBudgets: () => [],
+    };
+
+    const owner = await resolvePrincipal(ownerSubject5, db);
+    const other = await resolvePrincipal(otherSubject5, db);
+    try {
+      const othersTool = await db.tool.create({
+        data: {
+          name: toolName5,
+          description: "someone else's",
+          paramsZod: "z.object({})",
+          jsonSchema: {},
+          code: "return 2;",
+          ownerId: other.id,
+        },
+      });
+      const cipher = buildSecretCipher(loadProviderConfig());
+      // Mirrors runImport: collisions are checked against the target
+      // owner's tools only.
+      const reconcile = async (onConflict: "fail" | "skip") =>
+        preflight({
+          bundle,
+          routableModels: new Set(["claude-opus-4"]),
+          supportedGlobals: new Set(),
+          existingAgentNames: new Set((await db.agent.findMany({ select: { name: true } })).map((a) => a.name)),
+          existingToolNames: new Set(
+            (await db.tool.findMany({ where: { ownerId: owner.id }, select: { name: true } })).map((t) => t.name),
+          ),
+          capabilitiesSupported: new Set([]),
+          onConflict,
+          prefix: "",
+          allowOpenFetch: false,
+        });
+      const options = {
+        db,
+        cipher,
+        ownerId: owner.id,
+        defaultBudget: "5.00",
+        secretMode: "references" as const,
+        allowOpenFetch: false,
+      };
+
+      const first = await reconcile("fail");
+      expect(first.hasFatalCollision).toBe(false);
+      const result = await createFromBundle(bundle, first, options);
+      expect(result.toolsCreated).toBe(1);
+
+      const mine = await db.tool.findFirstOrThrow({ where: { ownerId: owner.id, name: toolName5 } });
+      expect(mine.id).not.toBe(othersTool.id);
+      expect(mine.code).toBe("return 1;");
+      const createdAgent = await db.agent.findUniqueOrThrow({ where: { name: agentName5 }, include: { tools: true } });
+      expect(createdAgent.tools.map((t) => t.toolId)).toEqual([mine.id]);
+
+      // Re-importing for the same owner: its own same-named tool is a
+      // collision, handled per --on-conflict (skip), and no second row appears.
+      const second = await reconcile("skip");
+      expect(second.tools[0]?.skipped).toBe("collision");
+      await createFromBundle(bundle, second, options);
+      expect(await db.tool.count({ where: { name: toolName5 } })).toBe(2);
+    } finally {
+      const agentRow = await db.agent.findUnique({ where: { name: agentName5 } });
+      if (agentRow) {
+        await db.agentTool.deleteMany({ where: { agentId: agentRow.id } });
+        await db.agent.deleteMany({ where: { id: agentRow.id } });
+      }
+      await db.tool.deleteMany({ where: { name: toolName5 } });
+      await db.principal.deleteMany({ where: { subject: { in: [ownerSubject5, otherSubject5] } } });
     }
   });
 });

@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import { registerToolAuthoringTools } from "./tools.js";
 import type { McpRequestContext } from "../context.js";
+import { Prisma } from "#prisma";
 
 const CANONICAL_URI = "https://host/mcp";
 const fakeProviders = {
@@ -21,6 +22,7 @@ interface FakeToolRow {
 }
 interface FakeAgentRow {
   id: string;
+  name?: string;
   ownerId: string | null;
   kind?: "native" | "coding";
 }
@@ -36,10 +38,20 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
     allowedHosts?: string[];
   }[] = [];
   let counter = toolRows.size;
+  const isolationLevels: unknown[] = [];
 
   const transactionDb = {
     tool: {
       create: async ({ data }: { data: Partial<FakeToolRow> & { name: string } }) => {
+        // Mirrors Tool's unique index, so a duplicate surfaces as the same
+        // P2002 the real database raises.
+        if ([...toolRows.values()].some((t) => t.ownerId === (data.ownerId ?? null) && t.name === data.name)) {
+          throw new Prisma.PrismaClientKnownRequestError("Invalid `prisma.tool.create()` invocation", {
+            code: "P2002",
+            clientVersion: "test",
+            meta: { modelName: "Tool" },
+          });
+        }
         const row: FakeToolRow = {
           id: `tool_${++counter}`,
           description: "",
@@ -53,6 +65,24 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
         return row;
       },
       findUnique: async ({ where }: { where: { id: string } }) => toolRows.get(where.id) ?? null,
+      update: async ({ where, data }: { where: { id: string }; data: Partial<FakeToolRow> }) => {
+        const row = { ...toolRows.get(where.id)!, ...data };
+        toolRows.set(where.id, row);
+        return row;
+      },
+      delete: async ({ where }: { where: { id: string } }) => {
+        // Mirrors AgentTool.toolId's ON DELETE RESTRICT.
+        if (attachments.some((a) => a.toolId === where.id)) {
+          throw new Prisma.PrismaClientKnownRequestError("Foreign key constraint violated", {
+            code: "P2003",
+            clientVersion: "test",
+            meta: { modelName: "Tool" },
+          });
+        }
+        const row = toolRows.get(where.id)!;
+        toolRows.delete(where.id);
+        return row;
+      },
       findMany: async ({ where }: { where?: { OR?: { ownerId: string | null }[] } } = {}) => {
         const all = [...toolRows.values()];
         if (!where?.OR) return all;
@@ -94,21 +124,59 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
         attachments[idx] = { ...attachments[idx], ...update };
         return attachments[idx];
       },
-      deleteMany: async ({ where }: { where: { agentId: string; toolId: string } }) => {
+      deleteMany: async ({ where }: { where: { agentId: string | { in: string[] }; toolId: string } }) => {
+        const matchesAgent = (agentId: string) =>
+          typeof where.agentId === "string" ? agentId === where.agentId : where.agentId.in.includes(agentId);
         const before = attachments.length;
-        const kept = attachments.filter((a) => !(a.agentId === where.agentId && a.toolId === where.toolId));
+        const kept = attachments.filter((a) => !(matchesAgent(a.agentId) && a.toolId === where.toolId));
         attachments.length = 0;
         attachments.push(...kept);
         return { count: before - kept.length };
       },
-      findMany: async ({ where }: { where: { agentId: string } }) =>
-        attachments.filter((a) => a.agentId === where.agentId).map((a) => ({ ...a, tool: toolRows.get(a.toolId) })),
+      findMany: async ({ where }: { where: { agentId?: string; toolId?: string } }) =>
+        attachments
+          .filter(
+            (a) =>
+              (where.agentId === undefined || a.agentId === where.agentId) &&
+              (where.toolId === undefined || a.toolId === where.toolId),
+          )
+          .map((a) => {
+            const agent = agentRows.get(a.agentId);
+            return {
+              ...a,
+              tool: toolRows.get(a.toolId),
+              agent: { id: a.agentId, name: agent?.name ?? a.agentId, ownerId: agent?.ownerId ?? null },
+            };
+          }),
+      findFirst: async ({ where }: { where: { agentId: string; toolId: { not: string }; tool: { name: string } } }) => {
+        const hit = attachments.find(
+          (a) =>
+            a.agentId === where.agentId &&
+            a.toolId !== where.toolId.not &&
+            toolRows.get(a.toolId)?.name === where.tool.name,
+        );
+        return hit ? { tool: toolRows.get(hit.toolId) } : null;
+      },
     },
   };
   return {
     ...transactionDb,
-    $transaction: async <T>(callback: (tx: typeof transactionDb) => Promise<T>) => callback(transactionDb),
+    // Records each transaction's isolation level, so the tests can pin the
+    // Serializable isolation the cross-owner checks depend on (this fake
+    // itself can't produce a serialization conflict).
+    isolationLevels,
+    $transaction: async <T>(
+      callback: (tx: typeof transactionDb) => Promise<T>,
+      options?: { isolationLevel?: unknown },
+    ) => {
+      isolationLevels.push(options?.isolationLevel);
+      return callback(transactionDb);
+    },
   } as unknown as import("#prisma").PrismaClient;
+}
+
+function isolationLevelsOf(db: import("#prisma").PrismaClient): unknown[] {
+  return (db as unknown as { isolationLevels: unknown[] }).isolationLevels;
 }
 
 function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {
@@ -184,7 +252,9 @@ describe("tool authoring tools", () => {
       const rows = parseText(result as never) as Record<string, unknown>[];
       expect(rows).toHaveLength(2);
       expect(rows[0].code).toBe("source0");
-      expect(rows[1]).toEqual({ id: "t2", name: "tool2", description: "description" });
+      // `public: true` tells a public tool apart from the caller's own
+      // same-named one now that names are only unique per owner.
+      expect(rows[1]).toEqual({ id: "t2", name: "tool2", description: "description", public: true });
     }
     await client.close();
   });
@@ -212,6 +282,26 @@ describe("tool authoring tools", () => {
     await client.close();
   });
 
+  it("create_tool reports a duplicate name for the caller as a friendly 409 naming the tool", async () => {
+    const db = fakeDb([
+      { id: "t1", name: "greet", description: "x", paramsZod: "z.object({})", jsonSchema: {}, code: "", ownerId: "p1" },
+    ]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "create_tool",
+      arguments: { name: "greet", description: "x", paramsZod: "z.object({})", code: "return 1;" },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as { text: string }[])[0].text;
+    expect(text).toContain('A tool named "greet" already exists for your principal.');
+    expect(text).not.toContain("Invalid `prisma");
+    await client.close();
+  });
+
   it("create_tool rejects a name reserved for a built-in memory tool", async () => {
     const db = fakeDb();
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
@@ -228,6 +318,25 @@ describe("tool authoring tools", () => {
 
     const stored = await db.tool.findMany();
     expect(stored.length).toBe(0);
+    await client.close();
+  });
+
+  it("create_tool rejects every name a runtime built-in shadows", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    for (const name of ["parent_memory_get", "subagent_memory_get", "delegate_to_x"]) {
+      const result = await client.callTool({
+        name: "create_tool",
+        arguments: { name, description: "x", paramsZod: "z.object({})", code: "return 1;" },
+      });
+      expect(result.isError, name).toBe(true);
+      expect((result.content as { text: string }[])[0].text, name).toMatch(/reserved/i);
+    }
+    expect(await db.tool.findMany()).toHaveLength(0);
     await client.close();
   });
 
@@ -373,6 +482,63 @@ describe("tool authoring tools", () => {
 
     const result = await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "t1" } });
     expect(result.isError).toBe(true);
+    await client.close();
+  });
+
+  it("attach_tool refuses a second, different tool with the same name on one agent", async () => {
+    const tool = (id: string, ownerId: string | null) => ({
+      id,
+      name: "foo",
+      description: "x",
+      paramsZod: "z.object({})",
+      jsonSchema: {},
+      code: "",
+      ownerId,
+    });
+    const db = fakeDb([tool("mine", "p1"), tool("public", null)], [{ id: "a1", ownerId: "p1" }]);
+    await db.agentTool.create({ data: { agentId: "a1", toolId: "public" } });
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "mine" } });
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0].text).toMatch(/already has a different tool named "foo"/);
+    expect((await db.agentTool.findMany({ where: { agentId: "a1" } })).map((r) => r.toolId)).toEqual(["public"]);
+
+    // Re-attaching the same tool (a capability update) is not a clash.
+    const again = await client.callTool({
+      name: "attach_tool",
+      arguments: { agentId: "a1", toolId: "public", allowedHosts: ["api.example.com"] },
+    });
+    expect(again.isError).toBeFalsy();
+    await client.close();
+  });
+
+  it("attach_tool's same-name refusal never reveals another principal's private tool id", async () => {
+    const tool = (id: string, ownerId: string | null) => ({
+      id,
+      name: "foo",
+      description: "x",
+      paramsZod: "z.object({})",
+      jsonSchema: {},
+      code: "",
+      ownerId,
+    });
+    // p2 attached its private foo to a public agent; p1 now tries its own foo.
+    const db = fakeDb([tool("mine", "p1"), tool("p2-private-tool", "p2")], [{ id: "a-public", ownerId: null }]);
+    await db.agentTool.create({ data: { agentId: "a-public", toolId: "p2-private-tool" } });
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "attach_tool", arguments: { agentId: "a-public", toolId: "mine" } });
+    expect(result.isError).toBe(true);
+    const text = (result.content as { text: string }[])[0].text;
+    expect(text).toMatch(/already has a different tool named "foo"/);
+    expect(text).not.toContain("p2-private-tool");
     await client.close();
   });
 
@@ -536,5 +702,247 @@ describe("tool authoring tools", () => {
     const rows = await db.agentTool.findMany({ where: { agentId: "a1" } });
     expect(rows[0]).toMatchObject({ allowedSecrets: ["API_KEY"], allowedHosts: ["api.example.com"] });
     await client.close();
+  });
+
+  describe("update_tool", () => {
+    const owned = (overrides: Partial<FakeToolRow> = {}): FakeToolRow => ({
+      id: "t1",
+      name: "greet",
+      description: "old description",
+      paramsZod: "z.object({})",
+      jsonSchema: { old: true },
+      code: "return 'old';",
+      ownerId: "p1",
+      ...overrides,
+    });
+
+    async function setup(tools: FakeToolRow[], agents: FakeAgentRow[] = [], principal = "p1") {
+      const db = fakeDb(tools, agents);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, principal, ["tools:write"]));
+      registerToolAuthoringTools(mcp);
+      return { db, client: await connectClient(mcp) };
+    }
+
+    it("lets the owner replace code, description and paramsZod, re-deriving the cached jsonSchema", async () => {
+      const { db, client } = await setup([owned()], [{ id: "a1", name: "mine", ownerId: "p1" }]);
+      // Attached to the caller's own agent: not a cross-owner attachment.
+      await db.agentTool.create({ data: { agentId: "a1", toolId: "t1" } });
+
+      const result = await client.callTool({
+        name: "update_tool",
+        arguments: {
+          toolId: "t1",
+          code: "return 'new';",
+          description: "new description",
+          paramsZod: "z.object({ who: z.string() })",
+        },
+      });
+      expect(result.isError).toBeFalsy();
+      const body = parseText(result as never) as FakeToolRow;
+      expect(body).toMatchObject({ id: "t1", name: "greet", code: "return 'new';", description: "new description" });
+      expect(JSON.stringify(body.jsonSchema)).toContain("who");
+      expect((await db.tool.findUnique({ where: { id: "t1" } }))?.code).toBe("return 'new';");
+      expect(isolationLevelsOf(db)).toEqual([Prisma.TransactionIsolationLevel.Serializable]);
+      await client.close();
+    });
+
+    it("returns {ok:false} for an invalid paramsZod and leaves the row unchanged", async () => {
+      const { db, client } = await setup([owned()]);
+      const result = await client.callTool({
+        name: "update_tool",
+        arguments: { toolId: "t1", paramsZod: "not valid zod {{{", code: "return 'new';" },
+      });
+      expect(result.isError).toBeFalsy();
+      const body = parseText(result as never) as { ok: boolean; errorMessage?: string };
+      expect(body.ok).toBe(false);
+      expect(body.errorMessage).toBeTruthy();
+      expect(await db.tool.findUnique({ where: { id: "t1" } })).toMatchObject({
+        code: "return 'old';",
+        paramsZod: "z.object({})",
+        jsonSchema: { old: true },
+      });
+      await client.close();
+    });
+
+    it("requires at least one field to change", async () => {
+      const { client } = await setup([owned()]);
+      const result = await client.callTool({ name: "update_tool", arguments: { toolId: "t1" } });
+      expect(result.isError).toBe(true);
+      expect((result.content as { text: string }[])[0].text).toMatch(/at least one/i);
+      await client.close();
+    });
+
+    it("rejects `name` (a rename would silently break every attached agent's prompt)", async () => {
+      const { db, client } = await setup([owned()]);
+      // Alongside a valid field, so only the schema's additionalProperties
+      // can be what refuses it.
+      const result = await client.callTool({
+        name: "update_tool",
+        arguments: { toolId: "t1", name: "renamed", code: "return 'new';" },
+      });
+      expect(result.isError).toBe(true);
+      expect(await db.tool.findUnique({ where: { id: "t1" } })).toMatchObject({ name: "greet", code: "return 'old';" });
+      await client.close();
+    });
+
+    it("hides another principal's tool as not found", async () => {
+      const { db, client } = await setup([owned({ ownerId: "p2" })]);
+      const result = await client.callTool({ name: "update_tool", arguments: { toolId: "t1", code: "return 1;" } });
+      expect(result.isError).toBe(true);
+      expect((result.content as { text: string }[])[0].text).toMatch(/not found/);
+      expect((await db.tool.findUnique({ where: { id: "t1" } }))?.code).toBe("return 'old';");
+      await client.close();
+    });
+
+    it("refuses a public (null-owner) tool with 403, whoever asks", async () => {
+      const { db, client } = await setup([owned({ ownerId: null })]);
+      const result = await client.callTool({ name: "update_tool", arguments: { toolId: "t1", code: "return 1;" } });
+      expect(result.isError).toBe(true);
+      expect((result.content as { text: string }[])[0].text).toMatch(/public/i);
+      expect((await db.tool.findUnique({ where: { id: "t1" } }))?.code).toBe("return 'old';");
+      await client.close();
+    });
+
+    it("refuses while attached to another principal's agent, naming only agents the caller can read", async () => {
+      const { db, client } = await setup(
+        [owned()],
+        [
+          { id: "a-mine", name: "mine", ownerId: "p1" },
+          { id: "a-public", name: "shared-bot", ownerId: null },
+          { id: "a-theirs", name: "secret-project", ownerId: "p2" },
+        ],
+      );
+      for (const agentId of ["a-mine", "a-public", "a-theirs"]) {
+        await db.agentTool.create({ data: { agentId, toolId: "t1" } });
+      }
+      const result = await client.callTool({
+        name: "update_tool",
+        arguments: { toolId: "t1", description: "even a description" },
+      });
+      expect(result.isError).toBe(true);
+      const text = (result.content as { text: string }[])[0].text;
+      expect(text).toContain('"shared-bot" (a-public)');
+      expect(text).toContain("1 agent(s) owned by other principals");
+      expect(text).not.toContain("secret-project");
+      expect(text).not.toContain("a-theirs");
+      expect(text).not.toContain('"mine"');
+      expect((await db.tool.findUnique({ where: { id: "t1" } }))?.description).toBe("old description");
+      await client.close();
+    });
+
+    it("refuses while attached to a public agent", async () => {
+      const { db, client } = await setup([owned()], [{ id: "a-public", name: "shared-bot", ownerId: null }]);
+      await db.agentTool.create({ data: { agentId: "a-public", toolId: "t1" } });
+      const result = await client.callTool({ name: "update_tool", arguments: { toolId: "t1", code: "return 1;" } });
+      expect(result.isError).toBe(true);
+      expect((result.content as { text: string }[])[0].text).toContain('"shared-bot" (a-public)');
+      expect((await db.tool.findUnique({ where: { id: "t1" } }))?.code).toBe("return 'old';");
+      await client.close();
+    });
+  });
+
+  describe("delete_tool", () => {
+    const tool = (ownerId: string | null = "p1"): FakeToolRow => ({
+      id: "t1",
+      name: "greet",
+      description: "x",
+      paramsZod: "z.object({})",
+      jsonSchema: {},
+      code: "",
+      ownerId,
+    });
+
+    async function setup(tools: FakeToolRow[], agents: FakeAgentRow[] = [], principal = "p1") {
+      const db = fakeDb(tools, agents);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, principal, ["tools:write"]));
+      registerToolAuthoringTools(mcp);
+      return { db, client: await connectClient(mcp) };
+    }
+    const errorText = (result: unknown) => (result as { content: { text: string }[] }).content[0].text;
+
+    it("deletes an unattached tool", async () => {
+      const { db, client } = await setup([tool()]);
+      const result = await client.callTool({ name: "delete_tool", arguments: { toolId: "t1" } });
+      expect(result.isError).toBeFalsy();
+      expect(parseText(result as never)).toEqual({ deleted: "t1", detachedFrom: [] });
+      expect(await db.tool.findUnique({ where: { id: "t1" } })).toBeNull();
+      expect(isolationLevelsOf(db)).toEqual([Prisma.TransactionIsolationLevel.Serializable]);
+      await client.close();
+    });
+
+    it("refuses while attached to the caller's own agent unless detach is passed, with a hint", async () => {
+      const { db, client } = await setup([tool()], [{ id: "a1", name: "mine", ownerId: "p1" }]);
+      await db.agentTool.create({ data: { agentId: "a1", toolId: "t1" } });
+
+      const refused = await client.callTool({ name: "delete_tool", arguments: { toolId: "t1" } });
+      expect(refused.isError).toBe(true);
+      expect(errorText(refused)).toContain('"mine" (a1)');
+      expect(errorText(refused)).toContain("detach: true");
+      expect(await db.tool.findUnique({ where: { id: "t1" } })).not.toBeNull();
+
+      const deleted = await client.callTool({ name: "delete_tool", arguments: { toolId: "t1", detach: true } });
+      expect(deleted.isError).toBeFalsy();
+      expect(parseText(deleted as never)).toEqual({ deleted: "t1", detachedFrom: ["a1"] });
+      expect(await db.tool.findUnique({ where: { id: "t1" } })).toBeNull();
+      expect(await db.agentTool.findMany({ where: { agentId: "a1" } })).toEqual([]);
+      await client.close();
+    });
+
+    it("never auto-detaches from another principal's or a public agent, and then detaches nothing", async () => {
+      const { db, client } = await setup(
+        [tool()],
+        [
+          { id: "a-mine", name: "mine", ownerId: "p1" },
+          { id: "a-public", name: "shared-bot", ownerId: null },
+          { id: "a-theirs", name: "secret-project", ownerId: "p2" },
+        ],
+      );
+      for (const agentId of ["a-mine", "a-public", "a-theirs"]) {
+        await db.agentTool.create({ data: { agentId, toolId: "t1" } });
+      }
+      const result = await client.callTool({ name: "delete_tool", arguments: { toolId: "t1", detach: true } });
+      expect(result.isError).toBe(true);
+      const text = errorText(result);
+      expect(text).toContain('"shared-bot" (a-public)');
+      expect(text).toContain("1 agent(s) owned by other principals");
+      expect(text).not.toContain("secret-project");
+      expect(text).not.toContain('"mine"');
+      expect(await db.tool.findUnique({ where: { id: "t1" } })).not.toBeNull();
+      // Nothing was detached -- not even the caller's own agent.
+      expect(await db.agentTool.findMany({ where: { agentId: "a-mine" } })).toHaveLength(1);
+      await client.close();
+    });
+
+    it("hides another principal's tool as not found and refuses a public tool with 403", async () => {
+      const others = await setup([tool("p2")]);
+      const hidden = await others.client.callTool({ name: "delete_tool", arguments: { toolId: "t1" } });
+      expect(hidden.isError).toBe(true);
+      expect(errorText(hidden)).toMatch(/not found/);
+      expect(await others.db.tool.findUnique({ where: { id: "t1" } })).not.toBeNull();
+      await others.client.close();
+
+      const publicTool = await setup([tool(null)]);
+      const refused = await publicTool.client.callTool({ name: "delete_tool", arguments: { toolId: "t1" } });
+      expect(refused.isError).toBe(true);
+      expect(errorText(refused)).toMatch(/public/i);
+      expect(await publicTool.db.tool.findUnique({ where: { id: "t1" } })).not.toBeNull();
+      await publicTool.client.close();
+    });
+
+    it("maps an attachment that raced in after the check (the RESTRICT FK's P2003) to the same 409", async () => {
+      const { db, client } = await setup([tool()], [{ id: "a1", name: "mine", ownerId: "p1" }]);
+      await db.agentTool.create({ data: { agentId: "a1", toolId: "t1" } });
+      // The attachment is invisible to the check but still blocks the delete.
+      const realFindMany = db.agentTool.findMany.bind(db.agentTool);
+      (db.agentTool as { findMany: unknown }).findMany = async (args: { where: { toolId?: string } }) =>
+        args.where.toolId ? [] : realFindMany(args as never);
+      const result = await client.callTool({ name: "delete_tool", arguments: { toolId: "t1" } });
+      expect(result.isError).toBe(true);
+      expect(errorText(result)).toMatch(/still attached/);
+      expect(errorText(result)).not.toContain("Foreign key");
+      await client.close();
+    });
   });
 });
