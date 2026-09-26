@@ -146,7 +146,9 @@ export interface RegistryAdapter {
   compareVersions(a: string, b: string): number;
 
   // --- Protocol ---------------------------------------------------------
-  /** Classify a request under /registry/<id>/, or null for 404. */
+  /** Classify a request under /registry/<id>/, or null for 404. Throws a
+   *  400 `wardby_bad_request` RegistryError for a malformed path (bad
+   *  percent-encoding or an invalid package name); the core records it. */
   route(method: string, subpath: string, headers: Headers): RegistryRoute | null;
   /** Fetch and parse upstream metadata for one package. */
   fetchMetadata(name: string, upstream: UpstreamFetch): Promise<PackageMetadata>;

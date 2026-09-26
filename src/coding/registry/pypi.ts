@@ -43,6 +43,24 @@ function uploadTime(file: SimpleFile): Date | null {
   return Number.isNaN(time) ? null : new Date(time);
 }
 
+/** A valid PyPI project name (PEP 508): ASCII letters and digits, with
+ *  `.`, `_` and `-` allowed only between them. */
+const PROJECT_NAME = /^(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9])$/;
+
+function decoded(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    throw new RegistryError(400, "wardby_bad_request", "malformed percent-encoding in the registry path");
+  }
+}
+
+function projectName(segment: string): string {
+  const name = decoded(segment);
+  if (!PROJECT_NAME.test(name)) throw new RegistryError(400, "wardby_bad_request", "not a valid Python project name");
+  return normalizePypiName(name);
+}
+
 export function normalizePypiName(name: string): string {
   return name.toLowerCase().replace(/[-_.]+/g, "-");
 }
@@ -98,11 +116,11 @@ export const pypiAdapter: RegistryAdapter = {
   route(method, subpath): RegistryRoute | null {
     if (method !== "GET" && method !== "HEAD") return null;
     const simple = subpath.match(/^simple\/([^/]+)\/?$/);
-    if (simple) return { kind: "metadata", name: normalizePypiName(decodeURIComponent(simple[1])) };
+    if (simple) return { kind: "metadata", name: projectName(simple[1]) };
     const file = subpath.match(/^files\/([^/]+)\/([^/]+)$/);
     if (!file) return null;
-    const name = normalizePypiName(decodeURIComponent(file[1]));
-    const filename = decodeURIComponent(file[2]);
+    const name = projectName(file[1]);
+    const filename = decoded(file[2]);
     if (filename.endsWith(".metadata")) {
       return { kind: "file-metadata", name, filename: filename.slice(0, -".metadata".length) };
     }

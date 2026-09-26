@@ -682,6 +682,88 @@ describe("agent CRUD tools", () => {
     }
   });
 
+  const codingAgentSeed = () => ({
+    id: "a1",
+    name: "coder",
+    systemPrompt: "x",
+    model: "gpt-5.6-luna",
+    budgetUsd: 1,
+    maxTurns: 10,
+    schedule: null,
+    timezone: "UTC",
+    ownerId: "p1",
+    tools: [],
+    kind: "coding" as const,
+    codingProfile: {
+      provider: "codex" as const,
+      repository: "openai/example",
+      baseRef: "main",
+      defaultTask: null,
+      timeoutSec: 1800,
+      protectedPaths: ["CODEOWNERS"],
+    },
+  });
+
+  it.each([
+    [["agents:write"], false],
+    [["agents:write", "packages:approve"], true],
+    [["agents:write", "agents:admin"], true],
+  ] as const)("update_agent changing packageAllowlist with %j allowed=%s", async (scopes, allowed) => {
+    const db = fakeDb([codingAgentSeed()]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", [...scopes]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const result = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { packageAllowlist: { npm: ["react"] } } },
+    });
+    expect(Boolean(result.isError)).toBe(!allowed);
+    if (!allowed) {
+      const text = (result.content as { text: string }[])[0].text;
+      expect(text).toMatch(/insufficient_scope|scope/i);
+      expect(text).toContain("packages:approve");
+    }
+    await client.close();
+  });
+
+  it("packagePolicy alone needs packages:approve on create_agent", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const result = await client.callTool({
+      name: "create_agent",
+      arguments: {
+        name: "coder",
+        systemPrompt: "Make the requested change.",
+        model: "gpt-5.6-luna",
+        budgetUsd: 0.25,
+        kind: "coding",
+        codingProfile: { repository: "openai/example", packagePolicy: { minReleaseAgeDays: 0 } },
+      },
+    });
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0].text).toContain("packages:approve");
+    await client.close();
+  });
+
+  it("packagePolicy alone needs packages:approve on update_agent", async () => {
+    const db = fakeDb([codingAgentSeed()]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const result = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { packagePolicy: { minReleaseAgeDays: 0 } } },
+    });
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0].text).toContain("packages:approve");
+    await client.close();
+  });
+
   it("update_agent patching workerImageRef requires agents:admin, not just agents:write", async () => {
     const db = fakeDb([
       {

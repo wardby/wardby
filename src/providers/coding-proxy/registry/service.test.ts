@@ -611,6 +611,150 @@ describe("RegistryService metadata fetch safety and cache", () => {
   });
 });
 
+describe("RegistryService served-byte tally and per-adapter hosts", () => {
+  it("counts a download that finished after another one started toward the byte limit", async () => {
+    // Sizes are undeclared, so bytes are reserved only as they stream. A
+    // streams and completes while B waits for its first chunk; when B's
+    // bytes arrive, A's reservation is gone and A's row has landed. B must
+    // see A's served bytes, not a usage snapshot from before A finished.
+    let openB: () => void = () => {};
+    const bGate = new Promise<void>((resolve) => {
+      openB = resolve;
+    });
+    let calls = 0;
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { fake: ["noint"] },
+      policy: {},
+    });
+    const undeclared: RegistryAdapter = {
+      ...fakeAdapter,
+      resolveDownload: (route, m) => {
+        const file = m.versions.get(route.version)?.files[0];
+        return file ? { ...file, sizeBytes: null } : null;
+      },
+    };
+    const registry = new RegistryService({
+      adapters: new Map([["fake", undeclared]]),
+      store,
+      audit: { audit: async () => NO_ADVISORIES },
+      upstream: async () => {
+        calls += 1;
+        if (calls === 1) return new Response(tarball);
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            async pull(controller) {
+              await bGate;
+              controller.enqueue(tarball);
+              controller.close();
+            },
+          }),
+        );
+      },
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: {
+        maxFileBytes: 1_000_000,
+        maxTotalBytes: Math.floor(tarball.byteLength * 1.5),
+        maxFiles: 10,
+        idleTimeoutMs: 1_000,
+      },
+      now: () => NOW,
+    });
+    const a = await registry.handle(request("dl/noint/1.0.0"));
+    const b = await registry.handle(request("dl/noint/1.0.0"));
+    if (!("stream" in a) || !("stream" in b)) throw new Error("expected streams");
+    await new Response(a.stream).arrayBuffer();
+    openB();
+    await expect(new Response(b.stream).arrayBuffer()).rejects.toThrow();
+    expect(store.fetches.map((fetch) => [fetch.outcome, fetch.reason])).toEqual([
+      ["served", undefined],
+      ["refused", "wardby_package_limit"],
+    ]);
+  });
+
+  it("seeds served usage from the store", async () => {
+    const store = new MemoryRegistryStore();
+    await store.recordFetch({
+      runId: "run-1",
+      ecosystem: "fake",
+      name: "app",
+      version: "1.0.0",
+      sizeBytes: tarball.byteLength,
+      outcome: "served",
+    });
+    const { registry } = service({ store, limits: { maxFiles: 1 } });
+    await expect(registry.handle(request("dl/app/1.0.0"))).resolves.toMatchObject({ status: 429 });
+  });
+
+  it("refuses and records a file hosted outside the adapter's own upstream hosts", async () => {
+    const urls: string[] = [];
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { fake: ["app"] },
+      policy: {},
+    });
+    const elsewhere: RegistryAdapter = {
+      ...fakeAdapter,
+      // files.pythonhosted.org is allowed for PyPI, never for this adapter.
+      resolveDownload: (route, m) => {
+        const file = m.versions.get(route.version)?.files[0];
+        return file ? { ...file, upstreamUrl: "https://files.pythonhosted.org/evil.tgz" } : null;
+      },
+    };
+    const registry = new RegistryService({
+      adapters: new Map([["fake", elsewhere]]),
+      store,
+      audit: { audit: async () => NO_ADVISORIES },
+      upstream: async (url) => {
+        urls.push(url);
+        return new Response(tarball);
+      },
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
+      now: () => NOW,
+    });
+    const response = await registry.handle(request("dl/app/1.0.0"));
+    expect(response).toMatchObject({ status: 502 });
+    expect("body" in response && response.body).toContain("wardby_upstream_host_not_allowed");
+    expect(urls).toEqual([]);
+    expect(store.fetches).toMatchObject([{ outcome: "refused", reason: "wardby_upstream_host_not_allowed" }]);
+  });
+});
+
+describe("RegistryService with the PyPI adapter: malformed paths", () => {
+  it.each(["simple/%E0%A4%A/", "files/demo/demo-1.0-py3-none-any%E0%A4%A.whl", "simple/-bad-/", "simple/a%20b/"])(
+    "answers %s with a recorded 400 wardby_bad_request",
+    async (subpath) => {
+      const store = new MemoryRegistryStore();
+      store.contexts.set(capabilityHash("rrg_token"), {
+        runId: "run-1",
+        deadlineAt: new Date(NOW.getTime() + DAY),
+        allowlist: { pypi: ["demo"] },
+        policy: {},
+      });
+      const registry = new RegistryService({
+        adapters: new Map([["pypi", pypiAdapter]]),
+        store,
+        audit: { audit: async () => NO_ADVISORIES },
+        upstream: async () => {
+          throw new Error("no upstream call expected");
+        },
+        proxyBase: "http://wardby-proxy:8787/registry/",
+        limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
+        now: () => NOW,
+      });
+      const response = await registry.handle({ ...request(subpath), ecosystem: "pypi" });
+      expect(response).toMatchObject({ status: 400 });
+      expect("body" in response && response.body).toContain("wardby_bad_request");
+      expect(store.fetches).toMatchObject([{ outcome: "refused", reason: "wardby_bad_request" }]);
+    },
+  );
+});
+
 describe("RegistryService with the npm adapter: names are case-exact", () => {
   const old = new Date(NOW.getTime() - 30 * DAY).toISOString();
   const packument = (name: string, dependencies: Record<string, string> = {}) => ({

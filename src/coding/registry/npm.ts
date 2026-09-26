@@ -130,7 +130,7 @@ export const npmAdapter: RegistryAdapter = {
       const name = decodeURIComponent(subpath);
       return NAME.test(name) ? { kind: "metadata", name } : null;
     } catch {
-      return null;
+      throw new RegistryError(400, "wardby_bad_request", "malformed percent-encoding in the registry path");
     }
   },
 

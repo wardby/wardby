@@ -18,6 +18,7 @@ import {
   type FileRef,
   type PackageMetadata,
   type RegistryAdapter,
+  type RegistryRoute,
   type UpstreamFetch,
 } from "../../../coding/registry/types.js";
 import { capabilityHash } from "../proxy.js";
@@ -26,7 +27,13 @@ import { boundedMetadataFetch, DEFAULT_MAX_METADATA_BYTES, DEFAULT_METADATA_TIME
 import type { RegistryRunContext, RegistryStore } from "./store.js";
 
 const DAY_MS = 86_400_000;
+/** Bytes of a served file kept for `dependenciesFromFile`. A larger file is
+ *  truncated here, the adapter cannot read its metadata from a truncated
+ *  archive, and it yields no dependencies: this fails closed (nothing is
+ *  allowed that the file did not prove). */
 const DEPENDENCY_BUFFER_LIMIT = 64 * 1024 * 1024;
+/** npm's own name-length limit; longer recorded names are truncated. */
+const MAX_RECORDED_NAME = 214;
 
 /** Discriminated result of one `reader.read()` call in `download`'s stream
  *  loop, folding a rejection (`ok: false`) into the same shape as a
@@ -50,6 +57,10 @@ export const DEFAULT_MAX_REFUSAL_RECORDS = 500;
 interface RunTally {
   deadline: number;
   refused?: number;
+  /** Served files and bytes, kept live as downloads complete, so a download
+   *  that started before another finished still counts it (a one-off
+   *  `usage()` snapshot would not). */
+  served?: { files: number; bytes: number };
 }
 export type RegistryResponse =
   | { status: number; contentType: string; body: string }
@@ -139,7 +150,17 @@ export class RegistryService {
     if (!adapter) throw new RegistryError(404, "wardby_registry_unknown", `no registry named "${request.ecosystem}"`);
     const context = await this.options.store.findRunByRegistryTokenHash(capabilityHash(request.token), this.now());
     if (!context) throw new RegistryError(401, "invalid_capability", "the registry token is not valid for a live run");
-    const route = adapter.route(request.method, request.subpath, new Headers());
+    let route: RegistryRoute | null;
+    try {
+      route = adapter.route(request.method, request.subpath, new Headers());
+    } catch (error) {
+      // A malformed path (bad percent-encoding, an invalid package name) is
+      // the client's error, recorded like any other refusal.
+      await this.refuse(context, adapter, request.subpath.slice(0, MAX_RECORDED_NAME), "wardby_bad_request");
+      throw error instanceof RegistryError
+        ? error
+        : new RegistryError(400, "wardby_bad_request", "malformed registry path");
+    }
     if (!route) throw new RegistryError(404, "wardby_route_unknown", "unknown registry path");
 
     const name = adapter.normalizeName(route.name);
@@ -206,10 +227,40 @@ export class RegistryService {
         `"${file.filename}" is a source distribution; only wheels are allowed`,
       );
     }
+    // Each adapter may reach only its own upstream hosts, not every host
+    // the pinned fetch allows for the registry as a whole.
+    if (!this.hostAllowed(adapter, file.upstreamUrl)) {
+      await this.refuse(context, adapter, name, "wardby_upstream_host_not_allowed", file);
+      throw new RegistryError(
+        502,
+        "wardby_upstream_host_not_allowed",
+        `"${file.filename}" is hosted outside the ${adapter.id} registry's upstreams`,
+      );
+    }
     // HEAD answers from metadata alone: no upstream download, no
     // reservation, nothing recorded as served.
     if (request.method === "HEAD") return { status: 200, contentType: contentTypeOf(route), body: "" };
     return this.download(adapter, context, name, route, file, request.signal);
+  }
+
+  private hostAllowed(adapter: RegistryAdapter, url: string): boolean {
+    try {
+      const parsed = new URL(url);
+      return parsed.protocol === "https:" && adapter.upstreamHosts.includes(parsed.hostname.toLowerCase());
+    } catch {
+      return false;
+    }
+  }
+
+  /** Served usage for the run, seeded once from the store and then kept
+   *  current in-process as downloads complete. */
+  private async servedUsage(context: RegistryRunContext): Promise<{ files: number; bytes: number }> {
+    const tally = this.tally(context);
+    if (!tally.served) {
+      const recorded = await this.options.store.usage(context.runId);
+      tally.served ??= { files: recorded.files, bytes: recorded.bytes };
+    }
+    return tally.served;
   }
 
   private async authorize(
@@ -376,9 +427,9 @@ export class RegistryService {
   ): Promise<RegistryResponse> {
     const { limits, store } = this.options;
     const runId = context.runId;
-    const usage = await store.usage(runId);
+    const served = await this.servedUsage(context);
     const flight = this.inFlightUsage(runId);
-    if (usage.files + flight.files >= limits.maxFiles) {
+    if (served.files + flight.files >= limits.maxFiles) {
       await this.refuse(context, adapter, name, "wardby_package_limit", file);
       throw new RegistryError(429, "wardby_package_limit", "this run has reached its package file limit");
     }
@@ -503,6 +554,10 @@ export class RegistryService {
               sizeBytes: bytes,
               outcome: "served",
             });
+            // Counted before release() drops the reservation, so no window
+            // exists where neither the tally nor inFlight holds this file.
+            served.files += 1;
+            served.bytes += bytes;
             if (adapter.dependenciesFromFile && buffered.length > 0) {
               const body = Buffer.concat(buffered);
               const names = await adapter.dependenciesFromFile(route, body).catch(() => []);
@@ -532,7 +587,7 @@ export class RegistryService {
         bytes += value.byteLength;
         if (file.sizeBytes === null) this.trackStreamedBytes(runId, value.byteLength);
         if (bytes > limits.maxFileBytes) return fail(controller, "wardby_package_too_large");
-        if (usage.bytes + this.inFlightUsage(runId).bytes > limits.maxTotalBytes)
+        if (served.bytes + this.inFlightUsage(runId).bytes > limits.maxTotalBytes)
           return fail(controller, "wardby_package_limit");
         hash?.update(value);
         if (adapter.dependenciesFromFile && bytes <= DEPENDENCY_BUFFER_LIMIT) buffered.push(value);
