@@ -18,7 +18,11 @@ import {
   type VersionInfo,
 } from "./types.js";
 
-const NAME = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
+/** Scoped names are lower case (npm never allowed capitals in them); an
+ *  unscoped legacy name may contain capitals, and npm treats it as a
+ *  different package from its lower-case spelling (`JSONStream` is not
+ *  `jsonstream`), so names are never case-folded anywhere. */
+const NAME = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/[a-z0-9-~][a-z0-9-._~]*|[A-Za-z0-9-~][A-Za-z0-9-._~]*)$/;
 const SCOPE_WILDCARD = /^(@[a-z0-9-~][a-z0-9-._~]*)\/\*$/;
 const UPSTREAM = "https://registry.npmjs.org/";
 
@@ -45,9 +49,8 @@ function integrityOf(dist: { integrity?: string; shasum?: string }): Integrity |
 }
 
 function validName(name: string): string {
-  const normalized = name.toLowerCase();
-  if (!NAME.test(normalized)) throw new AllowlistEntryError(`"${name}" is not a valid npm package name`);
-  return normalized;
+  if (!NAME.test(name)) throw new AllowlistEntryError(`"${name}" is not a valid npm package name`);
+  return name;
 }
 
 export const npmAdapter: RegistryAdapter = {
@@ -58,6 +61,8 @@ export const npmAdapter: RegistryAdapter = {
 
   parseAllowlistEntry(raw: string): AllowlistEntry {
     const value = raw.trim();
+    // Scopes are always lower case on npm, so folding one cannot select a
+    // different package; package names are kept exactly as written.
     const scope = value.toLowerCase().match(SCOPE_WILDCARD);
     if (scope) return { name: `${scope[1]}/`, wildcard: true };
     const at = value.indexOf("@", 1);
@@ -68,7 +73,7 @@ export const npmAdapter: RegistryAdapter = {
     return { name, wildcard: false, range };
   },
 
-  normalizeName: (name) => name.toLowerCase(),
+  normalizeName: (name) => name,
 
   satisfies: (version, range) => semver.satisfies(version, range),
 
@@ -82,12 +87,12 @@ export const npmAdapter: RegistryAdapter = {
     const tarball = subpath.match(/^-\/tarball\/([^/]+)\/([^/]+)$/);
     try {
       if (tarball) {
-        const name = decodeURIComponent(tarball[1]).toLowerCase();
+        const name = decodeURIComponent(tarball[1]);
         const version = decodeURIComponent(tarball[2]);
         if (!NAME.test(name) || !semver.valid(version)) return null;
         return { kind: "download", name, version, filename: `${version}.tgz` };
       }
-      const name = decodeURIComponent(subpath).toLowerCase();
+      const name = decodeURIComponent(subpath);
       return NAME.test(name) ? { kind: "metadata", name } : null;
     } catch {
       return null;
@@ -106,7 +111,7 @@ export const npmAdapter: RegistryAdapter = {
       const dependencies = [
         ...new Set(
           [info.dependencies, info.optionalDependencies, info.peerDependencies].flatMap((deps) =>
-            Object.keys(deps ?? {}).map((dep) => dep.toLowerCase()),
+            Object.keys(deps ?? {}),
           ),
         ),
       ];
@@ -125,7 +130,7 @@ export const npmAdapter: RegistryAdapter = {
         files: [file],
       });
     }
-    return { name: doc.name.toLowerCase(), versions, raw: doc };
+    return { name, versions, raw: doc };
   },
 
   renderMetadata(meta, keep, proxyBase) {

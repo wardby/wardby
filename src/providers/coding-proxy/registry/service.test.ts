@@ -6,6 +6,7 @@ import {
   type RegistryAdapter,
   type PackageMetadata,
 } from "../../../coding/registry/types.js";
+import { npmAdapter } from "../../../coding/registry/npm.js";
 import { capabilityHash } from "../proxy.js";
 import { MemoryRegistryStore, type RegistryFetchRecord, type RegistryStore } from "./store.js";
 import { RegistryService } from "./service.js";
@@ -371,5 +372,65 @@ describe("RegistryService", () => {
 
     releaseRecord();
     expect(new Uint8Array(await bodyAPromise)).toEqual(tarball);
+  });
+});
+
+describe("RegistryService with the npm adapter: names are case-exact", () => {
+  const old = new Date(NOW.getTime() - 30 * DAY).toISOString();
+  const packument = (name: string, dependencies: Record<string, string> = {}) => ({
+    name,
+    time: { "1.0.0": old },
+    versions: {
+      "1.0.0": { dist: { tarball: `https://registry.npmjs.org/${name}/-/x-1.0.0.tgz` }, dependencies },
+    },
+  });
+
+  function npmService(allowlist: string[]) {
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { npm: allowlist },
+      policy: {},
+    });
+    const urls: string[] = [];
+    const registry = new RegistryService({
+      adapters: new Map([["npm", npmAdapter]]),
+      store,
+      audit: { audit: async () => NO_ADVISORIES },
+      upstream: async (url) => {
+        urls.push(url);
+        const name = decodeURIComponent(url.slice("https://registry.npmjs.org/".length));
+        return Response.json(packument(name, name === "app" ? { JSONStream: "^1" } : {}));
+      },
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
+      now: () => NOW,
+    });
+    const get = (subpath: string) => registry.handle({ ...request(subpath), ecosystem: "npm" });
+    return { get, urls, store };
+  }
+
+  it("allowing JSONStream does not allow jsonstream", async () => {
+    const { get, urls } = npmService(["JSONStream"]);
+    await expect(get("jsonstream")).resolves.toMatchObject({ status: 403 });
+    await expect(get("JSONStream")).resolves.toMatchObject({ status: 200 });
+    expect(urls).toEqual(["https://registry.npmjs.org/JSONStream"]);
+  });
+
+  it("allowing jsonstream does not allow JSONStream", async () => {
+    const { get, urls } = npmService(["jsonstream"]);
+    await expect(get("JSONStream")).resolves.toMatchObject({ status: 403 });
+    await expect(get("jsonstream")).resolves.toMatchObject({ status: 200 });
+    expect(urls).toEqual(["https://registry.npmjs.org/jsonstream"]);
+  });
+
+  it("a JSONStream dependency is allowed exactly and fetched from /JSONStream", async () => {
+    const { get, urls, store } = npmService(["app"]);
+    await expect(get("app")).resolves.toMatchObject({ status: 200 });
+    expect(await store.isAllowedDependency("run-1", "npm", "JSONStream")).toBe(true);
+    await expect(get("jsonstream")).resolves.toMatchObject({ status: 403 });
+    await expect(get("JSONStream")).resolves.toMatchObject({ status: 200 });
+    expect(urls).toEqual(["https://registry.npmjs.org/app", "https://registry.npmjs.org/JSONStream"]);
   });
 });

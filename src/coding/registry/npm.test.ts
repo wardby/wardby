@@ -12,6 +12,8 @@ describe("npmAdapter allowlist syntax", () => {
     ["react@^19", { name: "react", wildcard: false, range: "^19" }],
     ["@heroui/react@^3", { name: "@heroui/react", wildcard: false, range: "^3" }],
     ["@HeroUI/*", { name: "@heroui/", wildcard: true }],
+    ["JSONStream", { name: "JSONStream", wildcard: false }],
+    ["JSONStream@^1", { name: "JSONStream", wildcard: false, range: "^1" }],
   ])("parses %s", (raw, expected) => {
     expect(npmAdapter.parseAllowlistEntry(raw)).toEqual(expected);
   });
@@ -34,6 +36,32 @@ describe("npmAdapter protocol", () => {
       filename: "3.2.6.tgz",
     });
     expect(npmAdapter.route("POST", "left-pad", new Headers())).toBeNull();
+  });
+
+  it("keeps legacy capitalized names exact: JSONStream is not jsonstream", async () => {
+    expect(npmAdapter.normalizeName("JSONStream")).toBe("JSONStream");
+    expect(npmAdapter.route("GET", "JSONStream", new Headers())).toEqual({ kind: "metadata", name: "JSONStream" });
+    expect(npmAdapter.route("GET", "-/tarball/JSONStream/1.3.5", new Headers())).toMatchObject({
+      kind: "download",
+      name: "JSONStream",
+    });
+    const urls: string[] = [];
+    const meta = await npmAdapter.fetchMetadata("JSONStream", async (url) => {
+      urls.push(url);
+      return Response.json({
+        name: "JSONStream",
+        time: { "1.3.5": "2018-11-14T00:00:00.000Z" },
+        versions: {
+          "1.3.5": {
+            dist: { tarball: "https://registry.npmjs.org/JSONStream/-/JSONStream-1.3.5.tgz" },
+            dependencies: { jsonparse: "^1.2.0", Through: "^2.2.7" },
+          },
+        },
+      });
+    });
+    expect(urls).toEqual(["https://registry.npmjs.org/JSONStream"]);
+    expect(meta.name).toBe("JSONStream");
+    expect(meta.versions.get("1.3.5")?.dependencies).toEqual(["jsonparse", "Through"]);
   });
 
   it("parses versions, dates, dependencies and integrity", async () => {

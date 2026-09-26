@@ -129,8 +129,9 @@ export interface RegistryAdapter {
   /** Parse one allowlist entry in this ecosystem's syntax. Throws an
    *  AllowlistEntryError with a user-facing message if it is invalid. */
   parseAllowlistEntry(raw: string): AllowlistEntry;
-  /** Canonical name used for every comparison (npm: lower case;
-   *  PyPI: PEP 503 normalization). */
+  /** Canonical name used for every comparison (npm: the name exactly as
+   *  written, since npm names are case-sensitive; PyPI: PEP 503
+   *  normalization). */
   normalizeName(name: string): string;
   /** Whether `version` satisfies `range` in this ecosystem's syntax
    *  (npm semver ranges, PEP 440 specifiers). */
