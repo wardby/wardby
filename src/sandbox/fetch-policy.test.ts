@@ -24,11 +24,21 @@ describe("assertFetchDestinationAllowed (literal IPs, no DNS involved)", () => {
   it("allows a real public IP", () => expectAllowed("http://8.8.8.8/"));
 });
 
-describe("assertFetchDestinationAllowed (allowlist)", () => {
-  it("allows an otherwise-blocked host when explicitly allowlisted", async () => {
+describe("assertFetchDestinationAllowed (private-host allowlist)", () => {
+  const loopback = async () => [{ address: "127.0.0.1", family: 4 }];
+  it("allows an otherwise-blocked host only via the operator's privateHostAllowlist", async () => {
     await expect(
-      assertFetchDestinationAllowed("http://localhost:5432/", { allowedHosts: ["localhost"] }),
+      assertFetchDestinationAllowed("http://localhost:5432/", {
+        privateHostAllowlist: ["localhost"],
+        resolve: loopback,
+      }),
     ).resolves.toBeUndefined();
+  });
+
+  it("does NOT let the egress allowlist (allowedHosts) open a private destination", async () => {
+    await expect(
+      assertFetchDestinationAllowed("http://localhost:5432/", { allowedHosts: ["localhost"], resolve: loopback }),
+    ).rejects.toThrow(/blocked/);
   });
 });
 

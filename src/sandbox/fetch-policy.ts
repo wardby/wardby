@@ -3,10 +3,21 @@ import { lookup } from "node:dns/promises";
 export type ResolvedAddress = { address: string; family: number };
 export type Resolver = (hostname: string) => Promise<ResolvedAddress[]>;
 export interface FetchPolicyOptions {
+  /**
+   * Egress allowlist, enforced only with `restrictToAllowedHosts`. It can only
+   * NARROW where fetch may go: a listed host must still resolve exclusively to
+   * global addresses. Tool-controlled lists belong here.
+   */
   allowedHosts?: string[];
-  allowPrivateHosts?: boolean;
-  resolve?: Resolver;
   restrictToAllowedHosts?: boolean;
+  /**
+   * Hosts that may resolve to a non-global (private/loopback/link-local)
+   * address. Operator-controlled ONLY (WARDBY_FETCH_ALLOWED_HOSTS) — never
+   * populate it from a tool's or caller's own capability list. Cloud metadata
+   * endpoints stay blocked even when listed here.
+   */
+  privateHostAllowlist?: string[];
+  resolve?: Resolver;
 }
 export class FetchPolicyError extends Error {
   constructor() {
@@ -60,6 +71,21 @@ export function isGlobalAddress(address: string): boolean {
     })
   );
 }
+/** Cloud instance-metadata endpoints (GCP/AWS/Azure IMDS, GKE metadata proxy, ECS task creds, AWS IMDS IPv6). */
+const METADATA_V4 = new Set(["169.254.169.254", "169.254.169.252", "169.254.170.2"]);
+const METADATA_V6 = v6("fd00:ec2::254");
+const METADATA_HOSTNAMES = new Set(["metadata.google.internal", "metadata"]);
+/** True for a cloud metadata address, including IPv4-mapped/-compatible and NAT64 (64:ff9b::/96) IPv6 forms. */
+export function isCloudMetadataAddress(address: string): boolean {
+  if (isIP(address) === 4) return METADATA_V4.has(address);
+  if (isIP(address) !== 6) return false;
+  const n = v6(new URL("http://[" + address + "]").hostname.slice(1, -1));
+  if (n === METADATA_V6) return true;
+  const high = n >> 32n;
+  if (high !== 0n && high !== 0xffffn && high !== v6("64:ff9b::") >> 32n) return false;
+  const low = Number(n & 0xffffffffn);
+  return METADATA_V4.has([24, 16, 8, 0].map((shift) => (low >>> shift) & 0xff).join("."));
+}
 export function normalizeHost(host: string): string {
   if (!host || /[\s*/@?#\\]/.test(host)) throw new FetchPolicyError();
   const value = host.startsWith("[") ? host.slice(1, -1) : host;
@@ -83,8 +109,12 @@ export async function resolveDestination(urlString: string, options: FetchPolicy
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || urlString.length > 8192)
     throw new FetchPolicyError();
   const hostname = normalizeHost(url.hostname);
+  if (METADATA_HOSTNAMES.has(hostname)) throw new FetchPolicyError();
   const allowed = (options.allowedHosts ?? []).map(normalizeHost).includes(hostname);
   if (options.restrictToAllowedHosts && !allowed) throw new FetchPolicyError();
+  // Only the operator list may open a non-global destination; a restricted
+  // caller additionally needs the host in its own list (checked just above).
+  const privateAllowed = (options.privateHostAllowlist ?? []).map(normalizeHost).includes(hostname);
   const version = isIP(hostname);
   const addresses = version
     ? [{ address: hostname, family: version }]
@@ -95,7 +125,8 @@ export async function resolveDestination(urlString: string, options: FetchPolicy
       (a) =>
         !isIP(a.address) ||
         isIP(a.address) !== a.family ||
-        (!isGlobalAddress(a.address) && !(allowed && options.allowPrivateHosts !== false)),
+        isCloudMetadataAddress(a.address) ||
+        (!isGlobalAddress(a.address) && !privateAllowed),
     )
   )
     throw new FetchPolicyError();
