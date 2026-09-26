@@ -25,8 +25,9 @@ Once an agent is linked to a repository with the `pull_request` trigger:
   against the PR's current head. **Re-run all checks** (a check-suite
   re-request) is not handled — use the check's own **Re-run**, or comment
   `@<app-slug> review`.
-- Commenting `@<app-slug> review` on a pull request (from an owner, member,
-  or collaborator) starts a review the same way a push does.
+- Commenting `@<app-slug> review` on a pull request (from someone with write
+  access to the repository — see below) starts a review the same way a push
+  does.
 - Any other `@<app-slug> ...` mention — on an issue, a PR conversation, or
   inside an inline review thread — is routed to whichever agent is linked
   with the `mention` trigger instead, as a normal run with the comment as its
@@ -38,9 +39,15 @@ Once an agent is linked to a repository with the `pull_request` trigger:
   the issue. An edit that leaves an existing mention in place does not start
   another run, and only the issue author's own edits count.
 
-Only comments and issues from the repository's owner, a member, or a
-collaborator can trigger a run; other users' `@<app-slug>` mentions, and
-mentions by bots, are ignored.
+Only comments and issues from people with **write (push) access** to the
+repository can trigger a run. wardby asks GitHub for the author's real
+permission on the repository (by their numeric user id) before either path
+runs; `read` and `triage` are not enough, because a mention drives an agent
+that holds its owner's tools, secrets, and write access. GitHub's
+`author_association` (owner, member, collaborator) is only a first filter:
+it would admit any organization member, or a read-only collaborator. Mentions
+by bots, and mentions from anyone without write access, are ignored silently
+(no run, no reaction).
 
 ### What the mention agent receives
 
@@ -86,6 +93,78 @@ A pull request whose head is in a fork never starts a review, on a push or on
 rather than the base repository. Review it manually, or merge the fork's
 changes into a branch on the base repository first.
 
+## Who may give an agent a repository
+
+Linking a repository (or setting a coding agent's `codingProfile.repository`)
+gives the agent the App's access to that repository: it reads it, comments,
+publishes checks, and — for coding agents — pushes branches. So wardby
+requires more than owning the agent:
+
+- **The agent owner's own GitHub access.** Each person links their GitHub
+  account to their wardby identity once, with `link_host_account` (below).
+  wardby then asks GitHub, with the App's installation token, what permission
+  that GitHub account has on the repository. A `write` link and a coding
+  repository need **write** (push, maintain, or admin); a `read` link needs
+  **read**.
+- **Or an explicit admin approval.** A wardby `admin` (the role, not just the
+  `agents:admin` scope) can pass `adminOverride: true` to `link_repository`, or
+  `repositoryAdminOverride: true` to `create_agent`/`update_agent`, for a
+  repository no person's GitHub access covers (a bot-owned repository, say).
+  The approval is recorded with who approved it and when. Without the flag,
+  admins go through the GitHub check like anyone else.
+- **Public (owner-less) agents can't hold a repository at all.** Anyone can
+  edit a public agent, so a repository on one would belong to everyone. An
+  admin assigns an owner first (`make_owner`).
+
+The authorization is stamped on the link (`authorizedVia`: `host_permission`,
+`admin`, or `grandfathered`) and **checked again every time it is used**: on
+every coding run before its workspace is prepared, on every `repo_*` tool
+call, and on every host-event dispatch. A `host_permission` link is re-checked
+against the agent's **current** owner's GitHub access (answers are cached for
+5 minutes), so an owner who loses access, unlinks their GitHub account, or
+hands the agent to someone else (`make_owner`) stops it working. If GitHub
+can't be asked, the use is refused. Admin-approved and grandfathered
+authorizations are not re-checked; revoke them by unlinking or changing the
+repository. Links and coding profiles that existed before this was enforced
+were stamped `grandfathered` by the migration and keep working.
+
+What decides a run is always the agent owner's access, never who or what
+triggered it (a schedule, a webhook, a mention, or the owner).
+
+### Linking your GitHub account (`link_host_account`)
+
+1. Call `link_host_account` (agents:write) with no arguments. It returns an
+   `authorizeUrl` (valid for 10 minutes).
+2. Open it in a browser signed in to the GitHub account you want to link, and
+   authorize the App. GitHub redirects to wardby's callback page, which shows
+   the GitHub login, the wardby account it will be linked to, and a one-time
+   code such as `ABCD-EFGH`.
+3. Call `link_host_account` again with `confirmationCode` set to that code.
+
+The confirmation code is what stops someone from sending you their own
+authorize URL: GitHub skips its consent screen for users who already
+authorized the App, so a single click would otherwise link _your_ GitHub
+account to _their_ wardby identity. Only the wardby principal that started the
+link can submit the code, five tries at most. If you did not start a link,
+close the page and never share the code.
+
+wardby stores only your GitHub numeric user id and login — never a token: the
+user token GitHub issues is used once to read your identity, then revoked
+immediately. A GitHub account can be linked to only one wardby identity.
+`get_host_account` shows your link and `unlink_host_account` removes it. An
+operator can list or remove anyone's link, in either auth mode:
+
+```sh
+node dist/cli.js auth host-account list [--subject <subject>]
+node dist/cli.js auth host-account unlink --subject <subject>
+```
+
+Linking needs the HTTP transport (the callback is served at the host of
+`MCP_CANONICAL_URI`) and the App's OAuth client credentials
+(`GITHUB_APP_CLIENT_ID`/`GITHUB_APP_CLIENT_SECRET`, below). Without them the
+tool says so and the callback answers 404 — authorization is still enforced,
+so only admin approvals and existing authorizations work.
+
 ## Registering the GitHub App
 
 Create or reuse a GitHub App (Settings → Developer settings → GitHub Apps)
@@ -112,6 +191,25 @@ If you change these permissions on an App that is already installed, every
 installation must explicitly accept the new permission set before the App's
 webhooks resume working for it.
 
+Repository access checks need no extra permission: they use the collaborator
+permission endpoint, which only needs **Metadata: read** (always granted), and
+reading a user's own identity needs no user permission.
+
+For **GitHub account linking** (`link_host_account`), in the App's
+**General** settings:
+
+- **Callback URL**: `https://<your-host>/hosts/github/user-callback`, where
+  `<your-host>` is the host of `MCP_CANONICAL_URI` — the server rejects any
+  other `Host`.
+- **Request user authorization (OAuth) during installation**: leave this
+  **unchecked**. It starts the flow without wardby's state, so the callback
+  would reject it.
+- **Enable Device Flow** is not needed. **Expire user authorization tokens**
+  may be either value: wardby revokes each user token as soon as it has read
+  the user.
+- Note the App's **Client ID** (it is not the numeric App ID), and under
+  **Client secrets** generate a new client secret.
+
 A GitHub App has exactly one webhook URL. Register a **separate App** for
 local development or a staging environment rather than pointing your
 production App's webhook at a dev host.
@@ -134,12 +232,32 @@ that is not there yet. Then copy the seeded value into the App's webhook
 settings. The local kind setup (`deploy/kind-coding/control-plane-secret.sh`)
 does not carry this secret, so the events ingress stays disabled there.
 
+### `GITHUB_APP_CLIENT_ID` and `GITHUB_APP_CLIENT_SECRET`
+
+The App's OAuth Client ID and client secret; set both or neither
+(`.env.example`). They enable `link_host_account` and its callback page. On
+the GKE deployment, `deploy/gke/seed-secrets.mjs` seeds them into Secret
+Manager as `github-app-client-id` and `github-app-client-secret`, carried over
+from the cluster or `.env.local` (never generated: they come from the App's
+settings). The seed stops, before writing anything, if either has no value.
+Rotate the client secret in the App's settings, then add the new value as a
+new Secret Manager version.
+
+On an **existing GKE cluster**, order the rollout the same way as for the
+webhook secret: put both values in `.env.local`, apply the Terraform
+(`deploy/gke`) and run `seed-secrets.mjs` so both secrets exist, and only then
+apply the updated ExternalSecret and canary manifests. The local kind setup
+(`deploy/kind-coding/control-plane-secret.sh`) does not carry these, so
+linking stays disabled there.
+
 ## Linking an agent to a repository
 
-Use the `link_repository` tool (agents:write) on a native agent. Calling it
+First link your GitHub account (`link_host_account`, above). Then use the
+`link_repository` tool (agents:write) on a native agent you own. Calling it
 again for an already-linked repository replaces that link's `access`,
-`triggers`, and `checkName` — omitted fields are cleared, not kept — so
-always send the full desired state. Two common shapes:
+`triggers`, and `checkName` — omitted fields are cleared, not kept — and
+checks your access again, so always send the full desired state. Two common
+shapes:
 
 **A reviewer**, which starts a check on every PR push:
 
@@ -166,10 +284,25 @@ review command:
 ```
 
 Only one agent per repository may hold the `mention` trigger, and only one
-agent per repository may use a given `checkName`; linking a second agent the
-same way returns a 409 conflict. `access: "read"` may be used without event
-triggers to let the agent's `repo_*` tools read a repository on demand
-without ever being dispatched by a webhook.
+link per repository may use a given `checkName` (whatever its triggers; the
+database enforces it); linking a second agent the same way returns a 409
+conflict. A `checkName` is only allowed together with the `pull_request`
+trigger, which requires one. (The migration that introduced these rules
+cleared the `checkName` of every link without the `pull_request` trigger: if
+a branch-protection required check relied on such a name, it no longer
+reports.) `access: "read"` may be used without event triggers to let the
+agent's `repo_*` tools read a repository on demand without ever being
+dispatched by a webhook.
+
+The errors you may get while linking:
+
+| Status | Meaning                                                                                                           |
+| ------ | ----------------------------------------------------------------------------------------------------------------- |
+| 400    | `owner_required`: the agent has no owner. Or a malformed request (e.g. `checkName` without `pull_request`).       |
+| 403    | Your GitHub account is not linked (`link_host_account`), or its access to the repository is below what is needed. |
+| 403    | `adminOverride` from a caller without the `admin` role.                                                           |
+| 409    | Another agent already holds the `mention` trigger or this `checkName` on the repository.                          |
+| 503    | GitHub could not be asked (e.g. the App isn't installed on the repository). Nothing was changed.                  |
 
 ## The `repo_*` tools
 
@@ -180,26 +313,33 @@ internal marker to the model:
 - `repo_pr_read` — a pull request's metadata and per-file diff patches.
 - `repo_read_file` / `repo_list_files` — read a file or list a directory at
   a ref.
-- `repo_publish_review` — publish inline comments, a summary, and (only for
-  an agent linked with a `checkName`) the check verdict for one PR head, in
-  one call. Without a `checkName` no check is created.
+- `repo_publish_review` — publish inline comments, a summary, and the check
+  verdict for one PR head, in one call. A check is completed or created
+  **only on the pull request the run was dispatched for** (by a push, a
+  Re-run, or `@<app-slug> review`), and only for an agent linked with a
+  `checkName`. A review of any other PR — or from a run that was not started
+  by the host, such as a scheduled or manual run — posts its comments and
+  summary but no check, so an agent can never put a passing verdict on a PR
+  it was not asked to review. If the run's check could not be started when it
+  was dispatched, the review is published without a check; use **Re-run**.
 - `repo_comment` — post or reply to a conversation or inline-review comment.
 
 Every call names the `repository` explicitly; it must resolve to one of the
 agent's links. Failures are always a JSON result, never a thrown error:
 
-| `error` code              | Meaning                                                                                                                               |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `invalid_arguments_json`  | The tool call's arguments were not valid JSON.                                                                                        |
-| `invalid_arguments`       | Arguments failed schema validation (missing/malformed field).                                                                         |
-| `repository_not_linked`   | `repository` does not match one of this agent's links, or matches more than one and needs a `host/owner/name` prefix to disambiguate. |
-| `write_access_required`   | A write tool (`repo_publish_review`, `repo_comment`) was called on a read-only link.                                                  |
-| `host_not_configured`     | No host provider is configured for this link on this deployment.                                                                      |
-| `unknown_tool`            | Not a recognized `repo_*` tool name.                                                                                                  |
-| `host_not_installed`      | The GitHub App is not installed on this repository.                                                                                   |
-| `host_permission_missing` | The App installation is missing a required permission.                                                                                |
-| `host_invalid_response`   | The host returned something the client could not parse.                                                                               |
-| `host_api_error`          | The request to GitHub failed (body-free: `github_api_error:<status>[:<request-id>]`).                                                 |
+| `error` code               | Meaning                                                                                                                                      |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `invalid_arguments_json`   | The tool call's arguments were not valid JSON.                                                                                               |
+| `invalid_arguments`        | Arguments failed schema validation (missing/malformed field).                                                                                |
+| `repository_not_linked`    | `repository` does not match one of this agent's links, or matches more than one and needs a `host/owner/name` prefix to disambiguate.        |
+| `write_access_required`    | A write tool (`repo_publish_review`, `repo_comment`) was called on a read-only link.                                                         |
+| `repository_access_denied` | The link is no longer authorized: the agent has no owner, the owner's GitHub account is unlinked or lost access, or it could not be checked. |
+| `host_not_configured`      | No host provider is configured for this link on this deployment.                                                                             |
+| `unknown_tool`             | Not a recognized `repo_*` tool name.                                                                                                         |
+| `host_not_installed`       | The GitHub App is not installed on this repository.                                                                                          |
+| `host_permission_missing`  | The App installation is missing a required permission.                                                                                       |
+| `host_invalid_response`    | The host returned something the client could not parse.                                                                                      |
+| `host_api_error`           | The request to GitHub failed (body-free: `github_api_error:<status>[:<request-id>]`).                                                        |
 
 `repo_publish_review` also returns
 `{ "published": false, "reason": "stale_head", ... }` instead of an error when

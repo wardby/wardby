@@ -26,6 +26,24 @@ The GitHub App installation is the only step that cannot be created from this
 repository. It is intentionally scoped to the test repository because a coding
 run can push a branch and create a draft pull request.
 
+## Repository authorization
+
+A coding agent's `codingProfile.repository` must be authorized for the agent's
+owner: `create_agent` and `update_agent` (when the repository changes) check
+that the owner's linked GitHub account has **write** access to it, or record
+an explicit admin approval (`repositoryAdminOverride: true`, `admin` role
+only). Link your GitHub account once with `link_host_account` first; see
+[code-review-agents.md](code-review-agents.md#who-may-give-an-agent-a-repository),
+which also covers the App's callback URL and client credentials
+(`GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`).
+
+Every run checks again, before its workspace is prepared, against the agent's
+current owner. A run whose owner has lost write access, unlinked their GitHub
+account, or whose repository was never authorized ends `refused` with failure
+category `repo_access` and nothing cloned. Coding agents must have an owner.
+Over stdio, the local operator holds every role, so `repositoryAdminOverride`
+is the way to approve a repository there.
+
 ## Start the trusted proxy
 
 Run these commands from the repository root:
