@@ -196,6 +196,10 @@ describe("GitHubReviewHost writes", () => {
       details_url: "https://github.com/r/pull/7#issuecomment-5",
       output: { title: "Changes requested", summary: "One bug." },
     });
+    const checkText = (check.output as { text: string }).text;
+    expect(checkText).toBe(summary.body);
+    expect(checkText).toContain("## Findings\n- bug");
+    expect(checkText).toContain("## Outside the diff");
   });
 
   it("edits the existing summary comment and creates a completed check when the run has none", async () => {
