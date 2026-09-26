@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
+import type { ReviewHostRegistry } from "../providers/review-host/types.js";
 import { createPrismaClient } from "./db.js";
+import { closeOrphanedHostChecks } from "./reconciler.js";
 
 const db = createPrismaClient();
 const agentIds: string[] = [];
@@ -52,6 +54,44 @@ describe.skipIf(!process.env.DATABASE_URL)("code-review host schema (PostgreSQL)
     await db.agent.delete({ where: { id: agent.id } });
     expect(await db.agentRepository.count({ where: { agentId: agent.id } })).toBe(0);
     expect(await db.runHostCheck.count({ where: { runId: run.id } })).toBe(0);
+  });
+
+  it("the orphaned-check sweep completes only open checks of runs that ended past the grace period", async () => {
+    const agent = await db.agent.create({
+      data: { name: `review-host-${randomUUID()}`, systemPrompt: "x", model: "m", budgetUsd: 1 },
+    });
+    agentIds.push(agent.id);
+    // A provider key no other test uses, so the global sweep only ever sees this test's rows.
+    const provider = `test-${randomUUID()}`;
+    const now = new Date();
+    const longAgo = new Date(now.getTime() - 5 * 60_000);
+    const seed = async (status: "lost" | "failed" | "running", finishedAt: Date | null) => {
+      const run = await db.run.create({ data: { agentId: agent.id, trigger: "host_event", status, finishedAt } });
+      await db.runHostCheck.create({
+        data: { runId: run.id, provider, repository: "o/n", checkId: run.id, headSha: "a".repeat(40) },
+      });
+      return run.id;
+    };
+    const lost = await seed("lost", longAgo);
+    const recent = await seed("failed", new Date(now.getTime() - 10_000));
+    const live = await seed("running", null);
+    const completeCheck = vi.fn(async () => undefined);
+    const hosts = { [provider]: { provider, completeCheck } } as unknown as ReviewHostRegistry;
+
+    await closeOrphanedHostChecks(db, hosts, now);
+
+    expect(completeCheck).toHaveBeenCalledTimes(1);
+    expect(completeCheck).toHaveBeenCalledWith("o/n", expect.objectContaining({ checkId: lost }));
+    const completed = await db.runHostCheck.findMany({
+      where: { provider },
+      select: { runId: true, completedAt: true },
+    });
+    expect(Object.fromEntries(completed.map((c) => [c.runId, c.completedAt !== null]))).toEqual({
+      [lost]: true,
+      [recent]: false,
+      [live]: false,
+    });
+    await db.run.deleteMany({ where: { agentId: agent.id } });
   });
 
   it("rejects a duplicate delivery id for the same provider", async () => {
