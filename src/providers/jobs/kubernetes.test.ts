@@ -21,7 +21,10 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })));
 });
 
-async function harness(runId = "run-k8s-test", options: { runtimeClassName?: string } = {}) {
+async function harness(
+  runId = "run-k8s-test",
+  options: { runtimeClassName?: string; priorityClassName?: string } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "wardby-k8s-launcher-"));
   roots.push(root);
   const workspaceRoot = join(root, "workspaces");
@@ -190,6 +193,31 @@ describe("KubernetesJobLauncher", () => {
     expect(h.api.execCalls).toHaveLength(9);
     expect(h.api.execCalls.every((c) => c.container === "keeper")).toBe(true);
     expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+  });
+
+  it("submits the configured priority class and attests the pod the class resolves to", async () => {
+    const h = await harness("run-priority", { priorityClassName: "wardby-coding-run" });
+    // The API server's Priority admission fills these two fields from the class.
+    const create = h.api.createPod;
+    h.api.createPod = async (ns, body) => {
+      const created = await create(ns, body);
+      const stored = structuredClone(h.api.objects.get(`pod/wardby-coding/${h.names.pod}`) as V1Pod);
+      stored.spec!.priority = 1000;
+      stored.spec!.preemptionPolicy = "Never";
+      h.api.put("pod", "wardby-coding", stored);
+      return created;
+    };
+    const handle = await h.launcher.launch(h.spec);
+    const pod = h.api.objects.get(`pod/wardby-coding/${h.names.pod}`) as V1Pod;
+    expect(pod.spec!.priorityClassName).toBe("wardby-coding-run");
+    expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+  });
+
+  it("submits no priority class when none is configured", async () => {
+    const h = await harness();
+    await h.launcher.launch(h.spec);
+    const pod = h.api.objects.get(`pod/wardby-coding/${h.names.pod}`) as V1Pod;
+    expect(pod.spec).not.toHaveProperty("priorityClassName");
   });
 
   it("warns on every launch when no runtime class is configured", async () => {

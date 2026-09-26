@@ -1,0 +1,11 @@
+# GKE only: the coding proxy runs at the control plane's priority (priority.yaml).
+# The class exists only in this overlay, so the kind overlay's proxy has none.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-coding-proxy
+  namespace: wardby-coding
+spec:
+  template:
+    spec:
+      priorityClassName: wardby-control-plane

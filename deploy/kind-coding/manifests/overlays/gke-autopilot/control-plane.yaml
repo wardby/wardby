@@ -94,6 +94,9 @@ spec:
         app.kubernetes.io/name: wardby-control-plane
     spec:
       serviceAccountName: wardby-control-plane
+      # Evicted after coding runs and the headroom placeholder, never before
+      # them (priority.yaml).
+      priorityClassName: wardby-control-plane
       # The 30s preStop drain below, plus time for the scheduler and reconciler
       # to stop cleanly on SIGTERM.
       terminationGracePeriodSeconds: 90
@@ -243,6 +246,11 @@ spec:
               value: gke-autopilot
             - name: KUBERNETES_RUNTIME_CLASS
               value: gvisor
+            # Coding-run pods (and the preflight canary) get this PriorityClass
+            # from priority.yaml: below the control plane, and they never
+            # preempt anything themselves.
+            - name: KUBERNETES_RUN_PRIORITY_CLASS
+              value: wardby-coding-run
             # The defaults (90s preflight, 120s ready) assume a cluster with a
             # warm node pool. Autopilot provisions per pod, and a gVisor node
             # takes roughly two minutes to appear from cold -- so on an idle

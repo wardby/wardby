@@ -261,6 +261,33 @@ describe("loadKubernetesJobConfig", () => {
     );
   });
 
+  it("leaves the run pods' priority class unset by default", () => {
+    expect(loadKubernetesJobConfig({})).not.toHaveProperty("priorityClassName");
+    expect(loadKubernetesJobConfig({ KUBERNETES_RUN_PRIORITY_CLASS: "" })).not.toHaveProperty("priorityClassName");
+  });
+
+  it.each(["wardby-coding-run", "coding.runs", "a"])("reads KUBERNETES_RUN_PRIORITY_CLASS=%j", (value) => {
+    expect(loadKubernetesJobConfig({ KUBERNETES_RUN_PRIORITY_CLASS: value }).priorityClassName).toBe(value);
+  });
+
+  it.each(["Upper", "under_score", "-leading", "trailing-", "a..b", ".a", "x".repeat(254)])(
+    "rejects KUBERNETES_RUN_PRIORITY_CLASS=%j",
+    (value) => {
+      expect(() => loadKubernetesJobConfig({ KUBERNETES_RUN_PRIORITY_CLASS: value })).toThrow(
+        "KUBERNETES_RUN_PRIORITY_CLASS must be a DNS-1123 subdomain.",
+      );
+    },
+  );
+
+  it.each(["system-cluster-critical", "system-node-critical"])(
+    "refuses to run untrusted coding pods at the reserved class %j",
+    (value) => {
+      expect(() => loadKubernetesJobConfig({ KUBERNETES_RUN_PRIORITY_CLASS: value })).toThrow(
+        "KUBERNETES_RUN_PRIORITY_CLASS must not name a system- priority class.",
+      );
+    },
+  );
+
   it("reads the two cluster timeouts as bounded integers", () => {
     const config = loadKubernetesJobConfig({
       KUBERNETES_PREFLIGHT_TIMEOUT_MS: "600000",

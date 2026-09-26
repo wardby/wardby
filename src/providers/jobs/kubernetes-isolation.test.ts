@@ -233,6 +233,15 @@ describe("buildRunPod", () => {
     expect(pod().spec!.runtimeClassName).toBeUndefined();
     expect(buildRunPod(spec, { ...options, runtimeClassName: "gvisor" }).spec!.runtimeClassName).toBe("gvisor");
   });
+
+  it("adds the priority class only when configured", () => {
+    expect(pod().spec).not.toHaveProperty("priorityClassName");
+    const prioritized = buildRunPod(spec, { ...options, priorityClassName: "wardby-coding-run" });
+    expect(prioritized.spec!.priorityClassName).toBe("wardby-coding-run");
+    // Nothing else moves: the class is the only difference from the default pod.
+    delete prioritized.spec!.priorityClassName;
+    expect(prioritized).toEqual(pod());
+  });
 });
 
 describe("buildRunPod under the gke-autopilot platform", () => {
@@ -656,6 +665,40 @@ describe("assertRunPodMatches", () => {
     const actual = withApiDefaults(gv);
     delete actual.spec!.runtimeClassName;
     expect(() => assertRunPodMatches(actual, gv)).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
+  describe("with a priority class", () => {
+    const prioritized = buildRunPod(spec, { ...options, priorityClassName: "wardby-coding-run" });
+    // The Priority admission plugin resolves the class into these two fields on create.
+    const fromClass = (p: V1Pod): V1Pod => {
+      const c = withApiDefaults(p);
+      c.spec!.priority = 1000;
+      c.spec!.preemptionPolicy = "Never";
+      return c;
+    };
+
+    it("accepts the read-back pod with the priority and preemption policy the class resolves to", () => {
+      expect(() => assertRunPodMatches(fromClass(prioritized), prioritized)).not.toThrow();
+      expect(() => assertRunPodMatches(apiRoundTrip(fromClass(prioritized), "V1Pod"), prioritized)).not.toThrow();
+    });
+
+    it("rejects a different priority class", () => {
+      const actual = fromClass(prioritized);
+      actual.spec!.priorityClassName = "system-cluster-critical";
+      expect(() => assertRunPodMatches(actual, prioritized)).toThrow(KUBERNETES_ISOLATION_ERROR);
+    });
+
+    it("rejects a missing priority class", () => {
+      const actual = fromClass(prioritized);
+      delete actual.spec!.priorityClassName;
+      expect(() => assertRunPodMatches(actual, prioritized)).toThrow(KUBERNETES_ISOLATION_ERROR);
+    });
+
+    it("rejects a priority class the launcher did not ask for", () => {
+      const actual = withApiDefaults(expected);
+      actual.spec!.priorityClassName = "wardby-coding-run";
+      expect(() => assertRunPodMatches(actual, expected)).toThrow(KUBERNETES_ISOLATION_ERROR);
+    });
   });
 });
 

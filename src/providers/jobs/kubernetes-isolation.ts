@@ -186,6 +186,8 @@ export interface RunPodOptions {
   namespace: string;
   proxyIp: string;
   runtimeClassName?: string;
+  /** Emitted only when set, so an unconfigured launcher submits exactly the pod it always has. */
+  priorityClassName?: string;
   /** Which platform's admission rules the emitted resources must already satisfy. Default: "generic". */
   platform?: KubernetesPlatform;
 }
@@ -289,6 +291,9 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
       dnsConfig: { nameservers: ["127.0.0.1"] },
       hostAliases: [{ ip: options.proxyIp, hostnames: [CODING_PROXY_ALIAS] }],
       ...(options.runtimeClassName ? { runtimeClassName: options.runtimeClassName } : {}),
+      // Part of the submitted spec, so attestation compares it like any other field; the
+      // `priority` and `preemptionPolicy` the API server resolves from it are normalized away.
+      ...(options.priorityClassName ? { priorityClassName: options.priorityClassName } : {}),
       securityContext: {
         runAsNonRoot: true,
         runAsUser: CODING_WORKER_UID,

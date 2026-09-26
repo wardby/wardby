@@ -432,6 +432,34 @@ roll; if it fails, `up.sh` prints the `migrate` and `cloud-sql-proxy` container
 logs (and, if those are empty or the Job timed out, the Job's and pod's
 events), then stops.
 
+### Pod priority and headroom
+
+The GKE overlay defines three PriorityClasses so that, when a node runs short,
+the scheduler evicts the cheapest pods first instead of an arbitrary one:
+
+| Class                  | Value   | Used by                                  | Preempts others |
+| ---------------------- | ------- | ---------------------------------------- | --------------- |
+| `wardby-control-plane` | 1000000 | control plane and coding proxy           | yes             |
+| `wardby-coding-run`    | 1000    | coding-run pods and the preflight canary | no              |
+| `wardby-headroom`      | -10     | the `wardby-headroom` placeholder        | no              |
+
+Coding runs get their class through `KUBERNETES_RUN_PRIORITY_CLASS` on the
+control plane. GKE's own `system-*` classes still outrank all three: priority
+decides who is evicted first, not whether anything can be.
+
+`wardby-headroom` is a one-replica Deployment of the `pause` image that
+reserves spare capacity, preferably on the control plane's node. A
+higher-priority pod that cannot fit takes that capacity by evicting the
+placeholder rather than a Wardby pod, and Autopilot then provisions a node for
+the placeholder. Autopilot bills for its requests (250m CPU and 512 MiB of
+memory), and it counts against the `wardby-coding` ResourceQuota. To disable
+it, set `replicas: 0` in
+`deploy/kind-coding/manifests/overlays/gke-autopilot/priority.yaml` and re-run
+`up.sh`; raise its requests to reserve more.
+
+A PriorityClass's value and preemption policy cannot be changed in place:
+delete the class and re-run `up.sh` to change them.
+
 ### Roll back
 
 Images are pinned by digest, so undoing a rollout restores exactly what ran
