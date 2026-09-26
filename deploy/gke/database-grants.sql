@@ -48,6 +48,34 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "{{owner}}" IN SCHEMA public
   GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO wardby_app;
 -- ;;
 
+-- The durable executor (EXECUTOR=dbos): DBOS keeps its workflow and step
+-- records in schema "dbos". The migrator creates and migrates it (the migration
+-- Job's `npm run dbos:migrate`), so its tables are owned by the owner like
+-- Prisma's; the app gets the same data-not-schema access it has on public.
+-- Without USAGE and SELECT the app cannot see dbos.dbos_migrations, takes the
+-- schema for a new one at launch, and fails on CREATE SCHEMA. Created here, not
+-- only by the Job, because ALTER DEFAULT PRIVILEGES ... IN SCHEMA needs it to
+-- exist; either may run first.
+CREATE SCHEMA IF NOT EXISTS dbos AUTHORIZATION "{{owner}}";
+-- ;;
+GRANT USAGE ON SCHEMA dbos TO wardby_app;
+-- ;;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA dbos TO wardby_app;
+-- ;;
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA dbos TO wardby_app;
+-- ;;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA dbos TO wardby_app;
+-- ;;
+ALTER DEFAULT PRIVILEGES FOR ROLE "{{owner}}" IN SCHEMA dbos
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO wardby_app;
+-- ;;
+ALTER DEFAULT PRIVILEGES FOR ROLE "{{owner}}" IN SCHEMA dbos
+  GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO wardby_app;
+-- ;;
+ALTER DEFAULT PRIVILEGES FOR ROLE "{{owner}}" IN SCHEMA dbos
+  GRANT EXECUTE ON FUNCTIONS TO wardby_app;
+-- ;;
+
 -- The coding proxy: its budget ledger (src/providers/coding-proxy/prisma-ledger.ts)
 -- and its package registry store (src/providers/coding-proxy/registry/prisma-store.ts).
 GRANT USAGE ON SCHEMA public TO wardby_proxy;

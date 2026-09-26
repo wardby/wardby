@@ -232,6 +232,37 @@ spec:
             # hit, registration fails until an operator prunes.
             - name: AUTH_MAX_CLIENTS
               value: "20"
+            # Native runs are DBOS durable workflows (src/providers/executor/
+            # dbos.ts), so a run survives this pod being preempted, evicted or
+            # rescheduled: each LLM turn and tool call is checkpointed in
+            # Postgres, and the replacement pod picks the run up from its last
+            # completed step. Coding runs are unaffected (they are Jobs).
+            #
+            # DBOS_EXECUTOR_ID is deliberately unset, so every process gets a
+            # random one (loadDbosConfig). A replacement pod does not need the
+            # dead pod's id: once a run's heartbeat goes stale, the reconciler
+            # asks DbosExecutor.recover(), which resumes a live workflow owned
+            # by any other id, and DBOS dequeues it here on application version
+            # alone. That keeps the rolling update below safe (old and new pod
+            # overlap without sharing an id) and gives a `kubectl exec ... mcp`
+            # process its own id too.
+            #
+            # The schema is `dbos` on DATABASE_URL, the defaults. The migrate
+            # Job creates and migrates it; the app only reads and writes it
+            # (deploy/gke/database-grants.sql).
+            #
+            # Back to the in-process executor: set EXECUTOR to in-process and
+            # re-apply (docs/security-deployment.md, "Durable executor").
+            - name: EXECUTOR
+              value: dbos
+            # DBOS resumes a workflow only under the application version that
+            # recorded it. up.sh substitutes the runtime image digest, so a pod
+            # rescheduled onto the same image resumes its runs, while a deploy of
+            # new code does not replay old checkpoints against it: those runs
+            # are reaped as lost (recover() reports the version mismatch), as
+            # with the in-process executor. Target-specific, so a placeholder.
+            - name: DBOS__APPVERSION
+              value: wardby-dbos-app-version
             - name: JOB_LAUNCHER
               value: kubernetes
             # KUBERNETES_CONTEXT is deliberately unset: ClientNodeKubernetesApi

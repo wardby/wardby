@@ -90,7 +90,7 @@ iam_substitutions() {
 # placeholder strings.
 assert_no_placeholders() {
   local leftover
-  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job|cidr: wardby-database-cidr' || true)"
+  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job|cidr: wardby-database-cidr|wardby-dbos-app-version' || true)"
   if [[ -n "$leftover" ]]; then
     echo "up.sh: unresolved placeholder(s) in rendered manifest:" >&2
     echo "$leftover" | sort -u >&2
@@ -297,8 +297,15 @@ PREVIOUS_IMAGES="$(kubectl -n "$NAMESPACE" get deploy wardby-control-plane wardb
 # Every value below is target identity: it is substituted here and never
 # committed. The placeholders are the contract between this script and the
 # tracked manifests.
+#
+# DBOS__APPVERSION is the runtime image's digest (sha256:...): the durable
+# executor resumes a run only under the version that recorded it, so a re-run of
+# this script with unchanged source keeps in-flight runs across the rollout, and
+# a deploy of new code does not replay old checkpoints against it (those runs
+# end lost, as they would without the durable executor).
 OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
   | sed -e "s|image: wardby-runtime|image: ${RUNTIME_IMAGE}|" \
+        -e "s|value: wardby-dbos-app-version|value: \"${RUNTIME_IMAGE##*@}\"|" \
         -e "s|value: wardby-coding-worker-image-node-python-3-12$|value: ${WORKER_IMAGE_NODE_PYTHON}|" \
         -e "s|value: wardby-coding-worker-image$|value: ${WORKER_IMAGE}|" \
         -e "s|value: wardby-apiserver-host|value: ${API_HOST}|" \
@@ -310,7 +317,13 @@ echo "$OVERLAY_MANIFEST" | kubectl apply -f - >/dev/null
 
 echo "==> 10/${TOTAL_STEPS} wait for rollouts"
 kubectl -n "$NAMESPACE" rollout status deploy/wardby-coding-proxy --timeout=300s
-kubectl -n "$NAMESPACE" rollout status deploy/wardby-control-plane --timeout=600s
+if ! kubectl -n "$NAMESPACE" rollout status deploy/wardby-control-plane --timeout=600s; then
+  # The previous pod keeps serving (maxUnavailable 0). The durable executor
+  # launches before anything else, so a missing `dbos` schema grant shows here
+  # as a crash loop rather than in step 11.
+  echo "up.sh: the control plane did not roll out. If its log shows \"permission denied\" for the database or schema \"dbos\", the durable executor's grants are missing: run deploy/gke/bootstrap-database-iam.sh, then up.sh again (docs/getting-started-gke.md, \"Durable executor\")." >&2
+  exit 1
+fi
 
 echo "==> 11/${TOTAL_STEPS} prove the new pods can use the database"
 # A Ready pod has not necessarily touched the database: the control plane and

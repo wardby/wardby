@@ -224,13 +224,25 @@ recovery, auth identity derivation, CSRF, transactions, and SSRF before rollout.
 ## Durable executor
 
 `EXECUTOR=dbos` tables live outside Prisma's migration chain: DBOS creates and
-migrates its own `dbos` schema at `launch()`, so the database role used by the
-server needs `CREATE` on that schema (not just the application schema Prisma
-manages). `DBOS_EXECUTOR_ID` is required and must be unique per running
-_process_ — two processes sharing an id each believe they own the other's
-in-flight runs and re-drive them at launch, so the scheduler and the MCP
-server must be given different values. There is deliberately no default:
-`EXECUTOR=dbos` refuses to start without one.
+migrates its own `dbos` schema (`DBOS_SCHEMA`) at `launch()`. On a fresh
+schema that starts with `CREATE SCHEMA IF NOT EXISTS`, which Postgres checks
+against `CREATE` on the _database_ even when the schema already exists, so a
+server role limited to data access cannot launch DBOS on its own. Either give
+the server's role that privilege, or migrate the schema out of band as a
+privileged role with `npm run dbos:migrate` (`dbos schema "$DATABASE_URL"`)
+and grant the server's role `USAGE` on the schema plus `SELECT`, `INSERT`,
+`UPDATE` and `DELETE` on its tables, with default privileges for tables a
+later SDK version adds. Once the schema is current, `launch()` changes
+nothing. The GKE module does the latter (`deploy/gke/database-grants.sql`).
+
+`DBOS_EXECUTOR_ID` must be unique per running _process_ — two processes
+sharing an id each believe they own the other's in-flight runs and re-drive
+them at launch. Left unset, each process generates a random one, which is the
+safe default: a process that replaces a dead one does not need its id,
+because the reconciler adopts any live workflow whose run's heartbeat has gone
+stale, whichever executor id owns it. Set a fixed id only for a single,
+long-lived process that should re-drive its own runs at launch rather than
+after the heartbeat timeout.
 
 **New data at rest.** Durable execution checkpoints every step's result into
 `dbos.operation_outputs`: each turn's assistant text, every tool call's
@@ -263,7 +275,8 @@ reconciled to `lost` once its heartbeat times out, because no executor is left
 to recover it, and nothing else in the deployment depends on the `dbos`
 schema. The return trip is the part to know about: those workflows are still
 PENDING in the `dbos` schema, and re-enabling `EXECUTOR=dbos` with the same
-executor id re-drives them at launch. They no longer re-spend — `executeRun`
+executor id re-drives them at launch. (With a random per-process id, nothing
+re-drives them: they stay PENDING until pruned.) They no longer re-spend — `executeRun`
 short-circuits on any run whose row is already terminal, so a re-driven
 workflow whose run was reaped as `lost` does no work and leaves the row
 `lost` — but the workflows do wake up and run to completion in DBOS's own
