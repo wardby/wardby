@@ -124,6 +124,7 @@ export interface WardbyMcpServer {
 
 interface AuthInfoExtra {
   principal?: Principal;
+  roles?: McpRequestContext["roles"];
 }
 
 const REQUEST_STATE_KEY_BYTES = 32;
@@ -207,6 +208,7 @@ export function buildMcpServer(opts: BuildMcpServerOptions): WardbyMcpServer {
       return {
         principal: extra.principal,
         scopes: new Set(authInfo!.scopes),
+        roles: extra.roles ?? [],
         canonicalUri: opts.config.canonicalUri,
         providers: opts.providers,
         db: opts.db,

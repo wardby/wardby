@@ -150,6 +150,21 @@ resource "google_cloud_run_v2_service" "main" {
         }
       }
 
+      # Delegating mode only, and only when configured: which signed
+      # access-token claim carries the IdP's roles, and how its values map to
+      # wardby roles. Unset, no caller holds a wardby role (privileged
+      # operations are refused); self-hosted roles live in the database.
+      dynamic "env" {
+        for_each = var.auth_provider == "delegating" && trimspace(var.auth_role_claim) != "" ? {
+          AUTH_ROLE_CLAIM = trimspace(var.auth_role_claim)
+          AUTH_ROLE_MAP   = trimspace(var.auth_role_map)
+        } : {}
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+
       # Self-hosted mode only: these sign wardby's own OAuth tokens and hash
       # stored credentials (src/providers/auth/index.ts). Delegating mode
       # issues no tokens and stores no login keys, so they are neither
