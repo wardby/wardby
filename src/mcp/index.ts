@@ -92,6 +92,9 @@ export function localOperatorContext(
     principal,
     scopes: new Set(SCOPES_SUPPORTED),
     roles: [...ROLE_NAMES],
+    // Full access to every resource (resource-sharing grants spec §3.9),
+    // but never past the binding rules.
+    operator: true,
     canonicalUri: STDIO_PLACEHOLDER_URI,
     providers,
     db,
