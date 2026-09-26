@@ -322,7 +322,23 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
   });
 
   it("refuses a package not on the allowlist and surfaces the reason to npm", async () => {
-    const { server, token, registryUrl: registryUrlFor } = await startTestRegistry({ npm: ["left-pad"] }, new Map());
+    // The root's metadata must be reachable: before refusing, the proxy
+    // resolves the approved graph from it, and an unreadable graph is
+    // answered "unavailable, try again" (502), never "not allowed". The
+    // fixture's dependencies are dropped so the graph is just the root.
+    const npmDoc = JSON.parse(
+      await readFile(new URL("../../../coding/registry/fixtures/npm-left-pad.json", import.meta.url), "utf8"),
+    );
+    for (const version of Object.values(npmDoc.versions as Record<string, { dependencies?: unknown }>))
+      delete version.dependencies;
+    const {
+      server,
+      token,
+      registryUrl: registryUrlFor,
+    } = await startTestRegistry(
+      { npm: ["left-pad"] },
+      new Map([["https://registry.npmjs.org/left-pad", () => Response.json(npmDoc)]]),
+    );
     cleanups.push(() => server.close());
 
     const cacheDir = await tmpDir("wardby-npm-cache-denied-");

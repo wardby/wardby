@@ -178,3 +178,65 @@ describe("inOsvRange", () => {
     expect(inOsvRange("not-a-version", [{ introduced: "1.0.0" }, { fixed: "2.0.0" }], compare)).toBe(true);
   });
 });
+
+describe("OsvAudit cache bounds and single-flight", () => {
+  it("shares one OSV query between concurrent audits of the same package", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fetch = vi.fn(async () => {
+      await gate;
+      return Response.json({ vulns: [] });
+    });
+    const audit = new OsvAudit({ fetch, failOpen: false });
+    const both = Promise.all([audit.audit(npmAdapter, "a"), audit.audit(npmAdapter, "a")]);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    release();
+    await both;
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not cache a failed query: the next audit queries again", async () => {
+    let fail = true;
+    const fetch = vi.fn(async () => (fail ? new Response("busy", { status: 429 }) : Response.json({ vulns: [] })));
+    const audit = new OsvAudit({ fetch, failOpen: false });
+    await expect(audit.audit(npmAdapter, "a")).rejects.toMatchObject({ code: "wardby_audit_unavailable" });
+    fail = false;
+    await expect(audit.audit(npmAdapter, "a")).resolves.toBeDefined();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("is a bounded LRU: the least recently used package is evicted first", async () => {
+    const queried: string[] = [];
+    const fetch = vi.fn(async (_url: string, init?: { body?: string }) => {
+      queried.push((JSON.parse(init?.body ?? "{}") as { package: { name: string } }).package.name);
+      return Response.json({ vulns: [] });
+    });
+    const audit = new OsvAudit({ fetch, failOpen: false, maxEntries: 2 });
+    await audit.audit(npmAdapter, "a");
+    await audit.audit(npmAdapter, "b");
+    await audit.audit(npmAdapter, "a"); // a is now most recently used
+    await audit.audit(npmAdapter, "c"); // evicts b
+    await audit.audit(npmAdapter, "a"); // still cached
+    await audit.audit(npmAdapter, "b"); // queried again
+    expect(queried).toEqual(["a", "b", "c", "b"]);
+  });
+
+  it("drops expired entries before evicting live ones", async () => {
+    let now = 0;
+    const queried: string[] = [];
+    const fetch = vi.fn(async (_url: string, init?: { body?: string }) => {
+      queried.push((JSON.parse(init?.body ?? "{}") as { package: { name: string } }).package.name);
+      return Response.json({ vulns: [] });
+    });
+    const audit = new OsvAudit({ fetch, failOpen: false, maxEntries: 2, ttlMs: 1_000, now: () => now });
+    await audit.audit(npmAdapter, "old");
+    now = 900;
+    await audit.audit(npmAdapter, "live");
+    now = 1_001; // "old" has expired, "live" has not
+    await audit.audit(npmAdapter, "new"); // drops "old", keeps "live"
+    await audit.audit(npmAdapter, "live");
+    expect(queried).toEqual(["old", "live", "new"]);
+  });
+});

@@ -942,24 +942,53 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       graphTimeoutMs?: number;
       hang?: string;
       gate?: Promise<void>;
+      /** Upstream metadata failures per package name: a count of failing
+       *  calls before it succeeds, or Infinity for always. */
+      upstreamFailures?: Record<string, number>;
+      /** Audit failures per package name, the same way. */
+      auditFailures?: Record<string, number>;
+      withheld?: Record<string, string[]>;
+      store?: MemoryRegistryStore;
+      now?: () => Date;
+      maxGraphConcurrency?: number;
+      /** Other runs sharing the same service: token -> npm allowlist. */
+      otherRuns?: Record<string, string[]>;
+      upstreamDelayMs?: number;
     } = {},
   ) {
-    const store = new MemoryRegistryStore();
+    const store = overrides.store ?? new MemoryRegistryStore();
     store.contexts.set(capabilityHash("rrg_token"), {
       runId: "run-1",
       deadlineAt: new Date(NOW.getTime() + DAY),
       allowlist: { npm: overrides.allowlist ?? ["app@^1"] },
       policy: {},
     });
+    for (const [token, allowlist] of Object.entries(overrides.otherRuns ?? {})) {
+      store.contexts.set(capabilityHash(token), {
+        runId: `run-${token}`,
+        deadlineAt: new Date(NOW.getTime() + DAY),
+        allowlist: { npm: allowlist },
+        policy: {},
+      });
+    }
     const urls: string[] = [];
     const audited: string[] = [];
+    const upstreamFailures = { ...overrides.upstreamFailures };
+    const auditFailures = { ...overrides.auditFailures };
+    let inFlight = 0;
+    const concurrency = { max: 0 };
     const registry = new RegistryService({
       adapters: new Map([["npm", npmAdapter]]),
       store,
       audit: {
         audit: async (_adapter, name) => {
           audited.push(name);
-          return NO_ADVISORIES;
+          if ((auditFailures[name] ?? 0) > 0) {
+            auditFailures[name] -= 1;
+            throw new RegistryError(503, "wardby_audit_unavailable", `the audit for "${name}" is unreachable`);
+          }
+          const withheld = overrides.withheld?.[name] ?? [];
+          return { withheld: (v: string) => (withheld.includes(v) ? ["GHSA-x"] : []), reported: () => [] };
         },
       },
       upstream: async (url, init) => {
@@ -971,11 +1000,23 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
             init?.signal?.addEventListener("abort", () => reject(init.signal!.reason as Error)),
           );
         if (overrides.gate) await overrides.gate;
-        return packuments[name] ? Response.json(packuments[name]) : new Response("not found", { status: 404 });
+        inFlight += 1;
+        concurrency.max = Math.max(concurrency.max, inFlight);
+        try {
+          if (overrides.upstreamDelayMs) await new Promise((resolve) => setTimeout(resolve, overrides.upstreamDelayMs));
+          if ((upstreamFailures[name] ?? 0) > 0) {
+            upstreamFailures[name] -= 1;
+            return new Response("busy", { status: 503 });
+          }
+          return packuments[name] ? Response.json(packuments[name]) : new Response("not found", { status: 404 });
+        } finally {
+          inFlight -= 1;
+        }
       },
       proxyBase: "http://wardby-proxy:8787/registry/",
       limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
-      now: () => NOW,
+      now: overrides.now ?? (() => NOW),
+      maxGraphConcurrency: overrides.maxGraphConcurrency,
       // No metadata caching, so an upstream call not made proves the walk
       // itself was memoized, not merely answered from the metadata cache.
       metadataTtlMs: 0,
@@ -983,8 +1024,9 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       maxGraphPackages: overrides.maxGraphPackages,
       graphTimeoutMs: overrides.graphTimeoutMs,
     });
-    const get = (subpath: string) => registry.handle({ ...request(subpath), ecosystem: "npm" });
-    return { get, urls, audited, store };
+    const get = (subpath: string, token = "rrg_token") =>
+      registry.handle({ ...request(subpath, token), ecosystem: "npm" });
+    return { get, urls, audited, store, concurrency };
   }
 
   it("serves a transitive dependency's tarball, two levels deep, with no prior metadata request", async () => {
@@ -1071,6 +1113,98 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     expect(urls).toEqual([]);
   });
 
+  it("retries a node whose metadata fails once, and finds the name", async () => {
+    const { get } = graphService({ upstreamFailures: { mid: 1 } });
+    await expect(get("leaf")).resolves.toMatchObject({ status: 200 });
+  });
+
+  it("retries a node whose audit fails once, and finds the name", async () => {
+    const { get } = graphService({ auditFailures: { mid: 1 } });
+    await expect(get("leaf")).resolves.toMatchObject({ status: 200 });
+  });
+
+  it("answers 502 wardby_upstream_error, not package_not_allowed, when a node's metadata stays unavailable", async () => {
+    const { get, store } = graphService({ upstreamFailures: { mid: Infinity } });
+    const response = await get("leaf/-/leaf-1.0.0.tgz");
+    expect(response).toMatchObject({ status: 502 });
+    const body = "body" in response ? response.body : "";
+    expect(body).toContain("wardby_upstream_error");
+    expect(body).toContain("try again");
+    expect(body).not.toContain("wardby_package_not_allowed");
+    expect(store.fetches).toMatchObject([{ name: "leaf", outcome: "refused", reason: "wardby_upstream_error" }]);
+  });
+
+  it("answers 503 wardby_audit_unavailable when a node's audit stays unavailable", async () => {
+    const { get, store } = graphService({ auditFailures: { mid: Infinity } });
+    const response = await get("leaf");
+    expect(response).toMatchObject({ status: 503 });
+    expect("body" in response && response.body).toContain("wardby_audit_unavailable");
+    expect(store.fetches).toMatchObject([{ name: "leaf", outcome: "refused", reason: "wardby_audit_unavailable" }]);
+  });
+
+  it("retries a failed node on a later miss, with a per-run cap on attempts", async () => {
+    const { get, urls } = graphService({ upstreamFailures: { mid: 2 } });
+    // Two attempts in the first walk both fail; the next miss retries and finds it.
+    await expect(get("leaf")).resolves.toMatchObject({ status: 502 });
+    await expect(get("leaf")).resolves.toMatchObject({ status: 200 });
+    const always = graphService({ upstreamFailures: { mid: Infinity } });
+    for (let i = 0; i < 5; i += 1) await always.get("leaf");
+    expect(always.urls.filter((url) => url.endsWith("/mid")).length).toBeLessThanOrEqual(4);
+    expect(urls.filter((url) => url.endsWith("/mid")).length).toBe(3);
+  });
+
+  it("does not follow the dependencies of a version withheld by the audit", async () => {
+    const { get, store } = graphService({ withheld: { mid: ["1.0.0"] } });
+    await expect(get("leaf")).resolves.toMatchObject({ status: 403 });
+    expect(await store.isAllowedDependency("run-1", "npm", "leaf")).toBe(false);
+  });
+
+  it("keeps walk state per run: another run's allowlist does not widen this one", async () => {
+    const { get } = graphService({ allowlist: ["stranger"], otherRuns: { rrg_other: ["app@^1"] } });
+    await expect(get("leaf", "rrg_other")).resolves.toMatchObject({ status: 200 });
+    await expect(get("leaf")).resolves.toMatchObject({ status: 403 });
+    await expect(get("mid")).resolves.toMatchObject({ status: 403 });
+  });
+
+  it("re-queues the batch and returns the error when an allowance write fails", async () => {
+    const store = new MemoryRegistryStore();
+    const addAllowances = store.addAllowances.bind(store);
+    let failWrites = true;
+    store.addAllowances = async (...args) => {
+      if (failWrites) throw new Error("database down");
+      return addAllowances(...args);
+    };
+    const { get } = graphService({ store });
+    const failed = await get("leaf");
+    expect(failed).toMatchObject({ status: 502 });
+    failWrites = false;
+    await expect(get("leaf")).resolves.toMatchObject({ status: 200 });
+    expect(await store.isAllowedDependency("run-1", "npm", "mid")).toBe(true);
+  });
+
+  it("uses the injected clock for the walk deadline", async () => {
+    let tick = 0;
+    const { get, urls } = graphService({
+      graphTimeoutMs: 1_000,
+      now: () => new Date(NOW.getTime() + (tick += 5_000)),
+    });
+    const response = await get("leaf");
+    expect(response).toMatchObject({ status: 403 });
+    expect("body" in response && response.body).toContain("cut short");
+    expect(urls).toEqual([]);
+  });
+
+  it("caps concurrent walk fetches across every run", async () => {
+    const { get, concurrency } = graphService({
+      allowlist: ["app@^1", "mid", "leaf", "ranged-out", "too-new"],
+      otherRuns: { rrg_other: ["app@^1", "mid", "leaf", "ranged-out", "too-new"] },
+      maxGraphConcurrency: 2,
+      upstreamDelayMs: 5,
+    });
+    await Promise.all([get("stranger"), get("stranger", "rrg_other")]);
+    expect(concurrency.max).toBeLessThanOrEqual(2);
+  });
+
   it("makes no walk calls for PyPI, whose index carries no dependencies", async () => {
     const store = new MemoryRegistryStore();
     store.contexts.set(capabilityHash("rrg_token"), {
@@ -1135,5 +1269,44 @@ describe("RegistryService graph walk hardening", () => {
       status: 403,
     });
     expect(urls).toEqual(["https://registry.npmjs.org/app"]);
+  });
+});
+
+describe("RegistryService metadata path dependency names", () => {
+  it("records neither invalid names nor alias keys as allowances, only the alias target", async () => {
+    const old = new Date(NOW.getTime() - 30 * DAY).toISOString();
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { npm: ["app"] },
+      policy: {},
+    });
+    const registry = new RegistryService({
+      adapters: new Map([["npm", npmAdapter]]),
+      store,
+      audit: { audit: async () => NO_ADVISORIES },
+      upstream: async () =>
+        Response.json({
+          name: "app",
+          time: { "1.0.0": old },
+          versions: {
+            "1.0.0": {
+              dist: { tarball: "https://registry.npmjs.org/app/-/app-1.0.0.tgz" },
+              dependencies: {
+                "../../evil": "1",
+                "string-width-cjs": "npm:string-width@^4",
+                local: "file:../local",
+                ok: "^1",
+              },
+            },
+          },
+        }),
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
+      now: () => NOW,
+    });
+    await expect(registry.handle({ ...request("app"), ecosystem: "npm" })).resolves.toMatchObject({ status: 200 });
+    expect([...store.allowances].map((key) => key.split("\0")[2]).sort()).toEqual(["ok", "string-width"]);
   });
 });

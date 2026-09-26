@@ -36,8 +36,42 @@ const DEPENDENCY_BUFFER_LIMIT = 64 * 1024 * 1024;
 const MAX_RECORDED_NAME = 214;
 export const DEFAULT_MAX_GRAPH_PACKAGES = 3000;
 export const DEFAULT_GRAPH_TIMEOUT_MS = 60_000;
-/** Packages a graph walk expands at once (metadata + audit each). */
+/** Packages one graph walk expands at once (metadata + audit each). */
 const GRAPH_WALK_CONCURRENCY = 8;
+/** Graph-walk expansions in flight at once across every run, so one run's
+ *  walk cannot starve the others' upstream fetches. */
+export const DEFAULT_MAX_GRAPH_CONCURRENCY = 16;
+/** A node whose metadata or audit fails transiently is retried once more
+ *  in the same walk, then parked; a later miss retries it again, up to
+ *  this many attempts per node per run. */
+const GRAPH_NODE_ATTEMPTS_PER_WALK = 2;
+const MAX_GRAPH_NODE_ATTEMPTS = 4;
+/** RegistryErrors that are a definitive answer about a package (it has no
+ *  dependencies the run can use), not a transient failure to retry. */
+const DEFINITIVE_NODE_ERRORS = new Set(["wardby_package_not_found", "wardby_metadata_too_large"]);
+
+/** Why a graph node could not be expanded: its OSV audit or its upstream
+ *  metadata was unavailable. */
+type NodeFailure = "audit" | "upstream";
+type NodeResult = { ok: true; dependencies: string[] } | { ok: false; cause: NodeFailure };
+
+/** A small counting semaphore. */
+class Slots {
+  private active = 0;
+  private readonly waiting: (() => void)[] = [];
+  constructor(private readonly size: number) {}
+  async run<T>(task: () => Promise<T>): Promise<T> {
+    if (this.active >= this.size) await new Promise<void>((resolve) => this.waiting.push(resolve));
+    else this.active += 1;
+    try {
+      return await task();
+    } finally {
+      const next = this.waiting.shift();
+      if (next) next();
+      else this.active -= 1;
+    }
+  }
+}
 
 /** Why a graph walk stopped: it found the name it was started for, it
  *  expanded every reachable package, or a bound tripped. */
@@ -61,8 +95,16 @@ interface GraphWalk {
   expanded: number;
   /** The package bound tripped: the graph is incomplete for good. */
   exhausted: boolean;
+  /** Failed attempts per node, across the run. */
+  attempts: Map<string, number>;
+  /** Nodes that could not be expanded (transient upstream or audit
+   *  failure), retried by a later walk while attempts remain. While any
+   *  is here, a name not found is "unavailable", never "not allowed". */
+  failed: Map<string, NodeFailure>;
   running?: Promise<WalkEnd>;
 }
+
+type GraphAnswer = "found" | "absent" | "cut-short" | { unavailable: NodeFailure };
 
 /** Discriminated result of one `reader.read()` call in `download`'s stream
  *  loop, folding a rejection (`ok: false`) into the same shape as a
@@ -119,10 +161,15 @@ export function errorResponse(error: RegistryError): RegistryResponse {
 export const DEFAULT_METADATA_CACHE_ENTRIES = 500;
 
 /** Normalized dependency names of a package's kept versions: what serving
- *  its metadata unlocks, and what the graph walk follows. */
+ *  its metadata unlocks, and what the graph walk follows. Dependency keys
+ *  come from the upstream document, so only real package names are kept:
+ *  neither path ever records an allowance for, or builds an upstream
+ *  request from, a key the adapter's own parser would reject. */
 function keptDependencies(adapter: RegistryAdapter, meta: PackageMetadata, keep: ReadonlySet<string>): string[] {
   const names = [...keep].flatMap((version) => meta.versions.get(version)?.dependencies ?? []);
-  return [...new Set(names.map((dependency) => adapter.normalizeName(dependency)))];
+  return [...new Set(names.map((dependency) => adapter.normalizeName(dependency)))].filter((dependency) =>
+    isPackageName(adapter, dependency),
+  );
 }
 
 /** Whether `name` is a plain, valid package name in this ecosystem (no
@@ -158,6 +205,7 @@ export class RegistryService {
    *  across replicas. */
   private readonly inFlight = new Map<string, { files: number; bytes: number }>();
   private readonly tallies = new Map<string, RunTally>();
+  private readonly walkSlots: Slots;
 
   constructor(
     private readonly options: {
@@ -179,9 +227,13 @@ export class RegistryService {
       maxGraphPackages?: number;
       /** Time one on-demand graph walk may take (default 60 s). */
       graphTimeoutMs?: number;
+      /** Graph-walk expansions in flight at once across every run
+       *  (default 16). */
+      maxGraphConcurrency?: number;
     },
   ) {
     this.now = options.now ?? (() => new Date());
+    this.walkSlots = new Slots(options.maxGraphConcurrency ?? DEFAULT_MAX_GRAPH_CONCURRENCY);
     this.metadataTtlMs = options.metadataTtlMs ?? 300_000;
     this.metadataCacheEntries = options.metadataCacheEntries ?? DEFAULT_METADATA_CACHE_ENTRIES;
     this.metadataUpstream = boundedMetadataFetch(options.upstream, {
@@ -329,6 +381,20 @@ export class RegistryService {
     // directly). Resolve the graph before refusing.
     const graph = await this.resolveInGraph(adapter, context, entries, name);
     if (graph === "found") return undefined;
+    if (typeof graph === "object") {
+      // Some part of the graph could not be read, so whether the name is in
+      // it is unknown: say so honestly rather than "not allowed".
+      const [status, code, source] =
+        graph.unavailable === "audit"
+          ? ([503, "wardby_audit_unavailable", "the OSV vulnerability audit"] as const)
+          : ([502, "wardby_upstream_error", `the ${adapter.id} registry`] as const);
+      await this.refuse(context, adapter, name, code);
+      throw new RegistryError(
+        status,
+        code,
+        `"${name}" could not be checked against this agent's approved ${adapter.id} dependency graph because ${source} was unavailable while resolving it; try again`,
+      );
+    }
     await this.refuse(context, adapter, name, "wardby_package_not_allowed");
     const hint =
       entries.length === 0
@@ -351,17 +417,25 @@ export class RegistryService {
     context: RegistryRunContext,
     entries: readonly AllowlistEntry[],
     name: string,
-  ): Promise<"found" | "absent" | "cut-short"> {
+  ): Promise<GraphAnswer> {
     if (!adapter.dependenciesInMetadata) return "absent";
     const tally = this.tally(context);
     tally.graphs ??= new Map();
     let walk = tally.graphs.get(adapter.id);
     if (!walk) {
       const roots = [...new Set(entries.filter((entry) => !entry.wildcard).map((entry) => entry.name))];
-      walk = { found: new Set(roots), queue: [...roots], expanded: 0, exhausted: false };
+      walk = {
+        found: new Set(roots),
+        queue: [...roots],
+        expanded: 0,
+        exhausted: false,
+        attempts: new Map(),
+        failed: new Map(),
+      };
       tally.graphs.set(adapter.id, walk);
     }
     const current = walk;
+    let started = false;
     for (;;) {
       if (current.found.has(name)) return "found";
       if (current.exhausted) return "cut-short";
@@ -369,9 +443,15 @@ export class RegistryService {
       // than starting a second one, then re-checks (that walk may have
       // stopped on finding a different name). Checked before the queue: a
       // running walk has taken its current batch off the queue, so an
-      // empty queue alone does not mean the graph is complete.
+      // empty queue alone does not mean the graph is complete. Each miss
+      // starts at most one walk of its own, so it spends at most one
+      // round of retries on failed nodes.
       if (!current.running) {
-        if (current.queue.length === 0) return "absent";
+        const retriable = [...current.failed.keys()].some(
+          (node) => (current.attempts.get(node) ?? 0) < MAX_GRAPH_NODE_ATTEMPTS,
+        );
+        if (started || (current.queue.length === 0 && !retriable)) return this.graphMiss(current);
+        started = true;
         current.running = this.walkGraph(adapter, context, entries, current, name).finally(() => {
           current.running = undefined;
         });
@@ -379,6 +459,14 @@ export class RegistryService {
       const end = await current.running;
       if (end === "timeout" && !current.found.has(name)) return "cut-short";
     }
+  }
+
+  /** The answer for a name the walk did not find: unavailable while any
+   *  node could not be expanded (the audit, if any failure was the
+   *  audit's), otherwise absent. */
+  private graphMiss(walk: GraphWalk): GraphAnswer {
+    if (walk.failed.size === 0) return "absent";
+    return { unavailable: [...walk.failed.values()].includes("audit") ? "audit" : "upstream" };
   }
 
   private async walkGraph(
@@ -389,10 +477,16 @@ export class RegistryService {
     target: string,
   ): Promise<WalkEnd> {
     const maxPackages = this.options.maxGraphPackages ?? DEFAULT_MAX_GRAPH_PACKAGES;
-    const deadline = Date.now() + (this.options.graphTimeoutMs ?? DEFAULT_GRAPH_TIMEOUT_MS);
+    const deadline = this.now().getTime() + (this.options.graphTimeoutMs ?? DEFAULT_GRAPH_TIMEOUT_MS);
+    // Parked failures with attempts left go first: a later miss is this
+    // walk's retry of them.
+    const retry = [...walk.failed.keys()].filter((node) => (walk.attempts.get(node) ?? 0) < MAX_GRAPH_NODE_ATTEMPTS);
+    for (const node of retry) walk.failed.delete(node);
+    walk.queue.unshift(...retry);
+    const attemptsThisWalk = new Map<string, number>();
     while (walk.queue.length > 0) {
       if (walk.found.has(target)) return "found";
-      const remaining = deadline - Date.now();
+      const remaining = deadline - this.now().getTime();
       if (remaining <= 0) return "timeout";
       const room = maxPackages - walk.expanded;
       if (room <= 0) {
@@ -405,16 +499,34 @@ export class RegistryService {
       const timedOut = new Promise<"timeout">((resolve) => {
         timer = setTimeout(() => resolve("timeout"), remaining);
       });
-      const result = await Promise.race([expansions, timedOut]).finally(() => clearTimeout(timer));
-      if (result === "timeout") {
+      const results = await Promise.race([expansions, timedOut]).finally(() => clearTimeout(timer));
+      if (results === "timeout") {
         // Not expanded: put the batch back so a later miss retries it (its
         // metadata is likely cached by then).
         walk.queue.unshift(...batch);
         return "timeout";
       }
-      walk.expanded += batch.length;
+      const expanded: { node: string; dependencies: string[] }[] = [];
+      batch.forEach((node, index) => {
+        const result = results[index];
+        if (result.ok) {
+          expanded.push({ node, dependencies: result.dependencies });
+          return;
+        }
+        // A transient failure is never counted as expanded: the node is
+        // retried (once more in this walk, then by later misses) instead
+        // of silently closing its whole subtree for the run.
+        walk.attempts.set(node, (walk.attempts.get(node) ?? 0) + 1);
+        attemptsThisWalk.set(node, (attemptsThisWalk.get(node) ?? 0) + 1);
+        if (
+          (attemptsThisWalk.get(node) ?? 0) < GRAPH_NODE_ATTEMPTS_PER_WALK &&
+          (walk.attempts.get(node) ?? 0) < MAX_GRAPH_NODE_ATTEMPTS
+        )
+          walk.queue.push(node);
+        else walk.failed.set(node, result.cause);
+      });
       try {
-        for (const dependencies of result) {
+        for (const { dependencies } of expanded) {
           const discovered = dependencies.filter((dependency) => !walk.found.has(dependency));
           if (discovered.length === 0) continue;
           // Recorded before it counts as found, so `found` never holds a
@@ -426,37 +538,40 @@ export class RegistryService {
           }
         }
       } catch (error) {
-        // The store write failed: put the batch back so a later miss
-        // re-expands it, rather than leaving the graph silently short.
-        walk.expanded -= batch.length;
-        walk.queue.unshift(...batch);
+        // The store write failed: put the expanded nodes back so a later
+        // miss re-expands them, rather than leaving the graph silently short.
+        walk.queue.unshift(...expanded.map(({ node }) => node));
         throw error;
       }
+      walk.expanded += expanded.length;
     }
     return walk.found.has(target) ? "found" : "complete";
   }
 
   /** The dependencies of one package's kept versions, through the same
-   *  metadata cache and `keptVersions` filter the metadata path uses. A
-   *  failure (upstream error, oversized document, audit unavailable)
-   *  yields no dependencies: that branch of the graph stays closed, and
-   *  the request that needs it is refused. */
-  private async graphNode(
+   *  metadata cache and `keptVersions` filter the metadata path uses, and
+   *  within the process-wide walk concurrency cap. A package npm doesn't
+   *  have, or whose metadata is too large, definitively contributes
+   *  nothing; any other failure (upstream error or timeout, audit
+   *  unavailable) is transient and reported for retry. */
+  private graphNode(
     adapter: RegistryAdapter,
     context: RegistryRunContext,
     entries: readonly AllowlistEntry[],
     name: string,
-  ): Promise<string[]> {
-    try {
-      const meta = await this.metadata(adapter, name);
-      const { keep } = await this.keptVersions(adapter, context, meta, matchRoot(entries, name));
-      // Dependency keys come from the upstream document: follow only real
-      // package names, so the walk never builds an upstream request from a
-      // key the adapter's own routing would reject.
-      return keptDependencies(adapter, meta, keep).filter((dependency) => isPackageName(adapter, dependency));
-    } catch {
-      return [];
-    }
+  ): Promise<NodeResult> {
+    return this.walkSlots.run(async (): Promise<NodeResult> => {
+      try {
+        const meta = await this.metadata(adapter, name);
+        const { keep } = await this.keptVersions(adapter, context, meta, matchRoot(entries, name));
+        return { ok: true, dependencies: keptDependencies(adapter, meta, keep) };
+      } catch (error) {
+        if (error instanceof RegistryError && DEFINITIVE_NODE_ERRORS.has(error.code))
+          return { ok: true, dependencies: [] };
+        const audit = error instanceof RegistryError && error.code === "wardby_audit_unavailable";
+        return { ok: false, cause: audit ? "audit" : "upstream" };
+      }
+    });
   }
 
   private async metadata(adapter: RegistryAdapter, name: string): Promise<PackageMetadata> {

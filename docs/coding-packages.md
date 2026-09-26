@@ -92,10 +92,28 @@ installable. The walk is done at most once per run (concurrent and later
 misses share its result), and it is bounded by `REGISTRY_MAX_GRAPH_PACKAGES`
 and `REGISTRY_GRAPH_TIMEOUT_MS` (see [Operator limits](#operator-limits)).
 A scope wildcard such as `@testing-library/*` can't be enumerated, so it is
-never a starting point of the walk; its packages are still reached when an
-allowlisted package depends on them, and by a direct `npm install`. PyPI's
-index carries no dependencies (pip reads them from each wheel), so there is
-no walk for PyPI.
+never a starting point of the walk. A package allowed _only_ by a scope
+wildcard is installable, but under a lockfile its own dependencies are not
+found by the walk (it never expands that package unless an exact allowlist
+entry's graph reaches it). When npm reads that package's metadata, as a plain
+`npm install` does, its dependencies are allowed as usual. With `npm ci`, give
+its dependencies their own allowlist entries, or also list the package itself
+by exact name. PyPI's index carries no dependencies (pip reads them from each
+wheel), so there is no walk for PyPI.
+
+Dependencies are followed by the package they install: an npm alias such as
+`"string-width-cjs": "npm:string-width@^4"` allows `string-width`, not
+`string-width-cjs`. Dependency specs that aren't fetched from the registry
+(`file:`, `link:`, local paths, git URLs and `github:`/`user/repo`
+shorthands, `http(s):` tarball URLs, `workspace:`) allow nothing.
+
+If an upstream (the npm registry or the OSV audit) fails while the walk reads
+part of the graph, that part is retried: once more straight away, then again
+on later requests, up to four attempts per package per run. Until it can be
+read, a package that wasn't found is answered with a "could not be checked…
+try again" error (`502 wardby_upstream_error`, or
+`503 wardby_audit_unavailable` if it was the audit), not with
+`wardby_package_not_allowed`.
 
 ## What the agent can then run
 
@@ -222,9 +240,9 @@ see on a failed install:
 | `wardby_package_not_found`         | 404    | The upstream registry has no such package name. Check the spelling (npm names are case-sensitive).                                                                                                                                                                                                                                                                                                                        |
 | `wardby_package_too_large`         | 413    | The file exceeds `REGISTRY_MAX_FILE_MB`. Ask the operator to raise it if the file is legitimately larger.                                                                                                                                                                                                                                                                                                                 |
 | `wardby_package_limit`             | 429    | The run hit `REGISTRY_MAX_FILES` or `REGISTRY_MAX_TOTAL_MB`. Trim what the run installs, or ask the operator to raise the limit.                                                                                                                                                                                                                                                                                          |
-| `wardby_audit_unavailable`         | 503    | OSV couldn't be reached and `REGISTRY_AUDIT_FAIL_OPEN` isn't set. Retry, or have the operator set that flag if the outage is expected to be long.                                                                                                                                                                                                                                                                         |
+| `wardby_audit_unavailable`         | 503    | OSV couldn't be reached and `REGISTRY_AUDIT_FAIL_OPEN` isn't set. Retry, or have the operator set that flag if the outage is expected to be long. Also returned, as "could not be checked against this agent's approved dependency graph… try again", when the audit failed while resolving a lockfile install's dependency graph.                                                                                        |
 | `wardby_bad_request`               | 400    | The request path is malformed (bad percent-encoding, or not a valid package name). A client or agent bug, not a package choice.                                                                                                                                                                                                                                                                                           |
-| `wardby_upstream_error`            | 502    | The upstream registry answered with an error, or the download failed partway. Retry.                                                                                                                                                                                                                                                                                                                                      |
+| `wardby_upstream_error`            | 502    | The upstream registry answered with an error, or the download failed partway. Retry. Also returned, as "could not be checked against this agent's approved dependency graph… try again", when the registry failed while resolving a lockfile install's dependency graph.                                                                                                                                                  |
 | `wardby_upstream_unavailable`      | 504    | The upstream registry didn't answer a metadata request within `REGISTRY_METADATA_TIMEOUT_MS`. Retry.                                                                                                                                                                                                                                                                                                                      |
 | `wardby_metadata_too_large`        | 502    | The package's metadata document is larger than `REGISTRY_MAX_METADATA_MB`. Ask the operator to raise it.                                                                                                                                                                                                                                                                                                                  |
 | `wardby_upstream_host_not_allowed` | 502    | The file's download URL points outside that ecosystem's own upstream hosts, so the proxy won't fetch it.                                                                                                                                                                                                                                                                                                                  |

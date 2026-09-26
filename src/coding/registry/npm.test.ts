@@ -163,3 +163,73 @@ describe("npmAdapter standard tarball path (lockfile resolved URLs)", () => {
     expect(route(subpath)).toBeNull();
   });
 });
+
+describe("npmAdapter dependency specs", () => {
+  const depsOf = async (dependencies: Record<string, string>, extra: Record<string, unknown> = {}) => {
+    const meta = await npmAdapter.fetchMetadata("app", async () =>
+      Response.json({
+        name: "app",
+        time: { "1.0.0": "2020-01-01T00:00:00.000Z" },
+        versions: {
+          "1.0.0": { dist: { tarball: "https://registry.npmjs.org/app/-/app-1.0.0.tgz" }, dependencies, ...extra },
+        },
+      }),
+    );
+    return meta.versions.get("1.0.0")?.dependencies;
+  };
+
+  it("follows an npm: alias to the package it names, not the alias key", async () => {
+    await expect(
+      depsOf({
+        "string-width-cjs": "npm:string-width@^4.2.0",
+        "strip-ansi-cjs": "npm:strip-ansi",
+        "scoped-alias": "npm:@scope/pkg@^1",
+        "@types/x-alias": "npm:@types/x@1.0.0",
+        plain: "^1.0.0",
+      }),
+    ).resolves.toEqual(["string-width", "strip-ansi", "@scope/pkg", "@types/x", "plain"]);
+  });
+
+  it("applies the same rules to optional and peer dependencies", async () => {
+    await expect(
+      depsOf({}, { optionalDependencies: { a: "npm:b@1" }, peerDependencies: { c: "git+https://example.com/c.git" } }),
+    ).resolves.toEqual(["b"]);
+  });
+
+  it.each([
+    "file:../local",
+    "link:../local",
+    "./local",
+    "../local",
+    "~/local",
+    "/abs/local",
+    "git://github.com/u/r.git",
+    "git+ssh://git@github.com/u/r.git",
+    "git+https://github.com/u/r.git",
+    "http://example.com/r.tgz",
+    "https://example.com/r.tgz",
+    "github:u/r",
+    "gitlab:u/r",
+    "bitbucket:u/r",
+    "gist:abc",
+    "u/r",
+    "u/r#main",
+    "workspace:*",
+    "npm:",
+    "npm:@scope",
+    "npm:../evil@1",
+  ])("skips the non-registry spec %s", async (spec) => {
+    await expect(depsOf({ local: spec, kept: "*" })).resolves.toEqual(["kept"]);
+  });
+
+  it("keeps registry specs: ranges, exact versions, tags and empty", async () => {
+    await expect(depsOf({ a: "^1", b: "1.2.3", c: "latest", d: "", e: "*", f: ">=1 <2 || 3.x" })).resolves.toEqual([
+      "a",
+      "b",
+      "c",
+      "d",
+      "e",
+      "f",
+    ]);
+  });
+});

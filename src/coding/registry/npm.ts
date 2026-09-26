@@ -84,6 +84,31 @@ function integrityOf(dist: { integrity?: string; shasum?: string }): Integrity |
   return null;
 }
 
+/** The registry package each dependency entry installs. An alias
+ *  (`"string-width-cjs": "npm:string-width@^4"`) installs the package it
+ *  names, not its key, so the target is what the run is allowed. A spec
+ *  that isn't fetched from the registry at all (`file:`, `link:`, a path,
+ *  `git`/`git+…`, an `http(s):` tarball, `github:`/`user/repo` shorthands,
+ *  `workspace:`) contributes nothing: every such spec contains a `:` or a
+ *  `/`, which no semver range or dist-tag does. This is the single place
+ *  both the metadata path and the graph walk get dependency names from. */
+export function registryDependencyNames(deps: Record<string, string> | undefined): string[] {
+  const names: string[] = [];
+  for (const [key, rawSpec] of Object.entries(deps ?? {})) {
+    const spec = typeof rawSpec === "string" ? rawSpec.trim() : "";
+    if (spec.startsWith("npm:")) {
+      const target = spec.slice("npm:".length);
+      const at = target.indexOf("@", 1);
+      const name = at > 0 ? target.slice(0, at) : target;
+      if (NAME.test(name)) names.push(name);
+      continue;
+    }
+    if (/[:/]/.test(spec)) continue;
+    names.push(key);
+  }
+  return names;
+}
+
 /** Maps `<name>/-/<unscoped>-<version>.tgz` (already percent-decoded) to
  *  the same download route as `-/tarball/<name>/<version>`, or null. The
  *  filename must name this exact package (case-sensitive, as npm names
@@ -173,7 +198,7 @@ export const npmAdapter: RegistryAdapter = {
       const dependencies = [
         ...new Set(
           [info.dependencies, info.optionalDependencies, info.peerDependencies].flatMap((deps) =>
-            Object.keys(deps ?? {}),
+            registryDependencyNames(deps),
           ),
         ),
       ];
