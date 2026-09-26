@@ -733,9 +733,14 @@ describe("tool authoring tools", () => {
 
     it("rejects `name` (a rename would silently break every attached agent's prompt)", async () => {
       const { db, client } = await setup([owned()]);
-      const result = await client.callTool({ name: "update_tool", arguments: { toolId: "t1", name: "renamed" } });
+      // Alongside a valid field, so only the schema's additionalProperties
+      // can be what refuses it.
+      const result = await client.callTool({
+        name: "update_tool",
+        arguments: { toolId: "t1", name: "renamed", code: "return 'new';" },
+      });
       expect(result.isError).toBe(true);
-      expect((await db.tool.findUnique({ where: { id: "t1" } }))?.name).toBe("greet");
+      expect(await db.tool.findUnique({ where: { id: "t1" } })).toMatchObject({ name: "greet", code: "return 'old';" });
       await client.close();
     });
 
