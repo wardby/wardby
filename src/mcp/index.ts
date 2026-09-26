@@ -42,6 +42,7 @@ import { registerSchedulingTools } from "./tools/scheduling.js";
 import { registerRunTools } from "./tools/runs.js";
 import { registerDatastoreTools } from "./tools/datastore.js";
 import { registerSubAgentTools } from "./tools/subagents.js";
+import { registerRepositoryTools } from "./tools/repositories.js";
 import { registerMemoryTools } from "./tools/memory.js";
 import { registerSecretsTools, type SecretElicitationUrlBuilder } from "./tools/secrets.js";
 import { registerWebhookTools } from "./tools/webhooks.js";
@@ -80,6 +81,7 @@ export function registerAllTools(
   registerRunTools(mcp);
   registerDatastoreTools(mcp);
   registerSubAgentTools(mcp);
+  registerRepositoryTools(mcp);
   registerMemoryTools(mcp);
   registerSecretsTools(mcp, {
     buildElicitationUrl: opts.secretElicitationUrl,
