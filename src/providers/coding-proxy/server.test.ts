@@ -1,7 +1,19 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { MemoryProxyLedger } from "./memory-ledger.js";
 import { CodingProxy, type CreatedCodingProxySession } from "./proxy.js";
+import type { RegistryRequest, RegistryResponse } from "./registry/service.js";
 import { startCodingProxyServer, type CodingProxyServerHandle } from "./server.js";
+
+/** A minimal CodingProxy wired only well enough to start the HTTP server;
+ *  the registry-routing tests never exercise the LLM proxy path. Mirrors
+ *  the `beforeAll` construction above without the sessions/pricing this
+ *  suite's other tests need. */
+function fakeProxy(): CodingProxy {
+  return new CodingProxy({
+    ledger: new MemoryProxyLedger(),
+    credentials: { resolve: async () => "UNUSED" },
+  });
+}
 
 describe("coding proxy HTTP boundary", () => {
   let server: CodingProxyServerHandle;
@@ -173,5 +185,93 @@ describe("coding proxy HTTP boundary", () => {
     });
     expect(response.status).toBe(400);
     expect(upstream).toHaveBeenCalledTimes(upstreamCalls);
+  });
+});
+
+describe("coding proxy registry routing", () => {
+  it("routes /registry/ requests with bearer or basic auth to the registry and streams the result", async () => {
+    const calls: { ecosystem: string; subpath: string; token: string }[] = [];
+    const registry = {
+      handle: async (request: RegistryRequest): Promise<RegistryResponse> => {
+        calls.push({ ecosystem: request.ecosystem, subpath: request.subpath, token: request.token });
+        return request.subpath.startsWith("-/tarball")
+          ? { status: 200 as const, contentType: "application/octet-stream", stream: new Response("bytes").body! }
+          : { status: 200, contentType: "application/json", body: "{}" };
+      },
+    };
+    const server = await startCodingProxyServer(fakeProxy(), {
+      host: "127.0.0.1",
+      port: 0,
+      expectedHost: undefined,
+      registry,
+    });
+    const base = `http://127.0.0.1:${server.port}/registry`;
+    await fetch(`${base}/npm/react`, { headers: { authorization: "Bearer rrg_a" } });
+    const tar = await fetch(`${base}/npm/-/tarball/react/19.0.0`, {
+      headers: { authorization: `Basic ${Buffer.from("wardby:rrg_b").toString("base64")}` },
+    });
+    expect(await tar.text()).toBe("bytes");
+    expect(calls).toEqual([
+      expect.objectContaining({ ecosystem: "npm", subpath: "react", token: "rrg_a" }),
+      expect.objectContaining({ ecosystem: "npm", subpath: "-/tarball/react/19.0.0", token: "rrg_b" }),
+    ]);
+    const post = await fetch(`${base}/npm/react`, { method: "POST" });
+    expect(post.status).toBe(405);
+    await server.close();
+  });
+
+  it("still enforces the expected-host check for /registry/ requests", async () => {
+    const registry = {
+      handle: async (): Promise<RegistryResponse> => ({ status: 200, contentType: "text", body: "" }),
+    };
+    const server = await startCodingProxyServer(fakeProxy(), {
+      host: "127.0.0.1",
+      port: 0,
+      expectedHost: "wardby-proxy:8787",
+      registry,
+    });
+    const response = await fetch(`http://127.0.0.1:${server.port}/registry/npm/react`);
+    expect(response.status).toBe(403);
+    await server.close();
+  });
+
+  it("returns 404 for /registry/ when no registry is configured", async () => {
+    const server = await startCodingProxyServer(fakeProxy(), { host: "127.0.0.1", port: 0 });
+    expect((await fetch(`http://127.0.0.1:${server.port}/registry/npm/react`)).status).toBe(404);
+    await server.close();
+  });
+
+  it("destroys the response instead of ending it cleanly when the registry stream errors mid-transfer", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("partial-bytes"));
+        queueMicrotask(() => controller.error(new Error("upstream_broke")));
+      },
+    });
+    const registry = {
+      handle: async (): Promise<RegistryResponse> => ({
+        status: 200,
+        contentType: "application/octet-stream",
+        stream,
+      }),
+    };
+    const server = await startCodingProxyServer(fakeProxy(), {
+      host: "127.0.0.1",
+      port: 0,
+      expectedHost: undefined,
+      registry,
+    });
+    // The failure can surface either as the fetch() call itself rejecting
+    // (the socket was destroyed before headers finished flushing) or as a
+    // rejection reading the body (destroyed mid-stream): either way, the
+    // client must see an aborted transfer, never a clean 200 with a
+    // silently truncated body.
+    await expect(
+      (async () => {
+        const response = await fetch(`http://127.0.0.1:${server.port}/registry/npm/-/tarball/react/19.0.0`);
+        return response.text();
+      })(),
+    ).rejects.toThrow();
+    await server.close();
   });
 });

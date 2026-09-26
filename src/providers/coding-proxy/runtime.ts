@@ -1,17 +1,53 @@
 import type { PrismaClient } from "#prisma";
+import { REGISTRY_ADAPTERS } from "../../coding/registry/adapters.js";
+import type { UpstreamFetch } from "../../coding/registry/types.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "../jobs/docker-isolation.js";
 import { startDenyPortListener, type DenyPortListenerHandle } from "./deny-port.js";
 import { EnvironmentCredentialResolver } from "./environment-credentials.js";
 import { CodingProxy } from "./proxy.js";
 import { PrismaProxyLedger } from "./prisma-ledger.js";
+import { OsvAudit } from "./registry/audit.js";
+import { PrismaRegistryStore } from "./registry/prisma-store.js";
+import { RegistryService } from "./registry/service.js";
+import { createPinnedProxyFetch, type PinnedProxyFetchOptions } from "./secure-fetch.js";
 import { startCodingProxyServer, type CodingProxyServerHandle } from "./server.js";
 import type { ProxyAuditSink } from "./types.js";
+
+const MIB = 1024 * 1024;
+
+function positiveInt(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** Adapts the pinned upstream `fetch` (which only forwards `init.headers`)
+ *  to `UpstreamFetch`'s narrower init shape: `accept` becomes an `accept`
+ *  header, and a `content-type: application/json` header is set whenever a
+ *  body is present (every registry/OSV upstream call sends or expects
+ *  JSON). Exported so its header-mapping can be unit-tested directly,
+ *  without needing a live upstream. */
+export function createRegistryUpstream(pinned: typeof globalThis.fetch): UpstreamFetch {
+  return (url, init = {}) =>
+    pinned(url, {
+      method: init.method ?? "GET",
+      body: init.body,
+      signal: init.signal,
+      redirect: "error",
+      headers: {
+        ...(init.accept ? { accept: init.accept } : {}),
+        ...(init.body ? { "content-type": "application/json" } : {}),
+      },
+    });
+}
 
 export interface CodingProxyRuntimeOptions {
   db: PrismaClient;
   env?: NodeJS.ProcessEnv;
   startServer?: typeof startCodingProxyServer;
   startDenyPort?: typeof startDenyPortListener;
+  /** Overridable for tests: proves the OSV host and every adapter's
+   *  upstream hosts are actually passed to the pinned-fetch allowlist. */
+  createPinnedFetch?: (options: PinnedProxyFetchOptions) => typeof globalThis.fetch;
   audit?: ProxyAuditSink;
   onRequest?: (event: {
     protocol: "openai-responses" | "anthropic-messages" | "other";
@@ -28,11 +64,30 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     credentials: new EnvironmentCredentialResolver(env),
     audit: options.audit,
   });
+  const buildPinnedFetch = options.createPinnedFetch ?? createPinnedProxyFetch;
+  const upstreamHosts = [...new Set([...REGISTRY_ADAPTERS.values()].flatMap((adapter) => adapter.upstreamHosts))];
+  const pinned = buildPinnedFetch({ allowedHosts: [...upstreamHosts, "api.osv.dev"] });
+  const upstream = createRegistryUpstream(pinned);
+  const registry = new RegistryService({
+    adapters: REGISTRY_ADAPTERS,
+    store: new PrismaRegistryStore(options.db),
+    audit: new OsvAudit({ fetch: upstream, failOpen: env.REGISTRY_AUDIT_FAIL_OPEN === "true" }),
+    upstream,
+    proxyBase: `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}/registry/`,
+    limits: {
+      maxFileBytes: positiveInt(env.REGISTRY_MAX_FILE_MB, 200) * MIB,
+      maxTotalBytes: positiveInt(env.REGISTRY_MAX_TOTAL_MB, 2048) * MIB,
+      maxFiles: positiveInt(env.REGISTRY_MAX_FILES, 5000),
+      idleTimeoutMs: positiveInt(env.REGISTRY_IDLE_TIMEOUT_MS, 120_000),
+    },
+  });
+
   const startServer = options.startServer ?? startCodingProxyServer;
   const server = await startServer(proxy, {
     host: "0.0.0.0",
     port: CODING_PROXY_PORT,
     expectedHost: `${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
+    registry,
     onRequest: options.onRequest,
   });
   let deny: DenyPortListenerHandle;
