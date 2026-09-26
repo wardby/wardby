@@ -2,6 +2,7 @@ import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { requireReadableAgent } from "../auth/ownership.js";
 import { publicCodingRunResult } from "../../coding/protocol.js";
+import { summarizeRegistryFetches } from "../../coding/registry/report.js";
 import { textResult } from "./text-result.js";
 
 export function registerRunTools(mcp: WardbyMcpServer): void {
@@ -62,32 +63,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       const registryFetches = codingRun
         ? await ctx.db.registryFetch.findMany({ where: { runId: run.id }, orderBy: { createdAt: "asc" } })
         : [];
-      const packages = [
-        ...new Map(
-          registryFetches
-            .filter((row) => row.outcome === "served" && row.version)
-            .map(
-              (row) =>
-                [
-                  `${row.ecosystem}\0${row.name}\0${row.version}`,
-                  { ecosystem: row.ecosystem, name: row.name, version: row.version! },
-                ] as const,
-            ),
-        ).values(),
-      ];
-      const packageRefusals = [
-        ...new Map(
-          registryFetches
-            .filter((row) => row.outcome === "refused")
-            .map((row) => {
-              const reason = row.reason ?? "refused";
-              return [
-                `${row.ecosystem}\0${row.name}\0${reason}`,
-                { ecosystem: row.ecosystem, name: row.name, reason },
-              ] as const;
-            }),
-        ).values(),
-      ];
+      const { packages, packageRefusals } = summarizeRegistryFetches(registryFetches);
       return textResult({
         ...run,
         ...(codingResult ? { codingResult } : {}),

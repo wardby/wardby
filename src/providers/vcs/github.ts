@@ -137,13 +137,29 @@ function isSafeMarkdownFragment(value: string): boolean {
   return !value.includes("`") && !value.includes("\n") && !value.includes("\r");
 }
 
-/** The hidden run marker stays first and unconditional: createOrFindDraftPullRequest's idempotent lookup depends on it. */
-function pullRequestBody(input: PullRequestInput): string {
-  const sections = [`${RUN_MARKER_PREFIX}${input.runId} -->`];
-  if (input.summary) sections.push(input.summary);
-  if (input.tests?.length) {
-    sections.push(["**Tests:**", ...input.tests.map((test) => `- \`${test.command}\`: ${test.outcome}`)].join("\n"));
+/** At most this many packages, and separately this many refusals, are listed
+ *  in a PR body; the rest are counted in a "…and N more" line pointing at
+ *  get_run, which returns the full list. */
+export const MAX_PR_PACKAGE_LINES = 100;
+/** A hard ceiling on each list's rendered size, whatever the entries
+ *  contain, so the section can never push the body past GitHub's limit. */
+const MAX_PR_PACKAGE_LIST_CHARS = 16 * 1024;
+
+/** Renders at most MAX_PR_PACKAGE_LINES lines (and at most
+ *  MAX_PR_PACKAGE_LIST_CHARS characters) of `lines`, then a count of the rest. */
+function cappedList(lines: readonly string[]): string[] {
+  const shown: string[] = [];
+  let chars = 0;
+  for (const line of lines.slice(0, MAX_PR_PACKAGE_LINES)) {
+    if (chars + line.length + 1 > MAX_PR_PACKAGE_LIST_CHARS) break;
+    shown.push(line);
+    chars += line.length + 1;
   }
+  const more = lines.length - shown.length;
+  return more > 0 ? [...shown, `- …and ${more} more — see get_run for the full list`] : shown;
+}
+
+function packagesSection(input: PullRequestInput): string | undefined {
   const packages = [
     ...new Map(
       (input.packages ?? [])
@@ -168,23 +184,37 @@ function pullRequestBody(input: PullRequestInput): string {
         .map((refusal) => [`${refusal.ecosystem}\0${refusal.name}\0${refusal.reason}`, refusal] as const),
     ).values(),
   ];
-  if (packages.length > 0 || refusals.length > 0) {
-    sections.push(
-      [
-        "<details>",
-        `<summary>Packages installed during this run (${packages.length})</summary>`,
-        "",
-        ...packages.map((pkg) => `- ${pkg.ecosystem} \`${pkg.name}@${pkg.version}\``),
-        ...(refusals.length > 0
-          ? [
-              "",
-              "**Refused:**",
-              ...refusals.map((refusal) => `- ${refusal.ecosystem} \`${refusal.name}\`: ${refusal.reason}`),
-            ]
-          : []),
-        "</details>",
-      ].join("\n"),
-    );
+  if (packages.length === 0 && refusals.length === 0) return undefined;
+  return [
+    "<details>",
+    `<summary>Packages installed during this run (${packages.length})</summary>`,
+    "",
+    ...cappedList(packages.map((pkg) => `- ${pkg.ecosystem} \`${pkg.name}@${pkg.version}\``)),
+    ...(refusals.length > 0
+      ? [
+          "",
+          "**Refused:**",
+          ...cappedList(refusals.map((refusal) => `- ${refusal.ecosystem} \`${refusal.name}\`: ${refusal.reason}`)),
+        ]
+      : []),
+    "</details>",
+  ].join("\n");
+}
+
+/** The hidden run marker stays first and unconditional: createOrFindDraftPullRequest's idempotent lookup depends on it. */
+export function pullRequestBody(input: PullRequestInput): string {
+  const sections = [`${RUN_MARKER_PREFIX}${input.runId} -->`];
+  if (input.summary) sections.push(input.summary);
+  if (input.tests?.length) {
+    sections.push(["**Tests:**", ...input.tests.map((test) => `- \`${test.command}\`: ${test.outcome}`)].join("\n"));
+  }
+  // The packages section is informational: a failure rendering it (e.g. a
+  // malformed report) omits the section and never fails finalization.
+  try {
+    const packages = packagesSection(input);
+    if (packages) sections.push(packages);
+  } catch {
+    // omitted
   }
   return sections.join("\n\n");
 }

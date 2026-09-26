@@ -86,6 +86,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaRegistryStore (database)", () 
       reason: "wardby_package_not_allowed",
     });
     expect(await store.usage(runId)).toEqual({ files: 1, bytes: 100 });
+    expect(await store.refusalCount(runId)).toBe(1);
 
     const fetches = await store.listFetches(runId);
     expect(fetches).toHaveLength(2);

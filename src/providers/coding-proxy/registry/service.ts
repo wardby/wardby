@@ -37,6 +37,18 @@ export interface RegistryLimits {
   maxTotalBytes: number;
   maxFiles: number;
   idleTimeoutMs: number;
+  /** Refused RegistryFetch rows recorded per run (default 500). Further
+   *  refusals still get their normal error, but no row. */
+  maxRefusalRecords?: number;
+}
+export const DEFAULT_MAX_REFUSAL_RECORDS = 500;
+
+/** Per-run in-process tallies, seeded from the store on first use and
+ *  dropped once the run's registry token has expired. Like `inFlight`,
+ *  they hold per replica (the proxy runs as one). */
+interface RunTally {
+  deadline: number;
+  refused?: number;
 }
 export type RegistryResponse =
   | { status: number; contentType: string; body: string }
@@ -74,6 +86,7 @@ export class RegistryService {
    *  in-process only — it holds per replica of the registry proxy, not
    *  across replicas. */
   private readonly inFlight = new Map<string, { files: number; bytes: number }>();
+  private readonly tallies = new Map<string, RunTally>();
 
   constructor(
     private readonly options: {
@@ -219,6 +232,20 @@ export class RegistryService {
     return { keep, keptFiles };
   }
 
+  private tally(context: RegistryRunContext): RunTally {
+    let tally = this.tallies.get(context.runId);
+    if (!tally) {
+      const now = this.now().getTime();
+      for (const [runId, stale] of this.tallies) if (stale.deadline <= now) this.tallies.delete(runId);
+      tally = { deadline: context.deadlineAt.getTime() };
+      this.tallies.set(context.runId, tally);
+    }
+    return tally;
+  }
+
+  /** Records a refused row, at most `maxRefusalRecords` per run so a worker
+   *  hammering refused names cannot grow the table (or get_run and the PR
+   *  body) without bound. Callers still return the refusal's error. */
   private async refuse(
     context: RegistryRunContext,
     adapter: RegistryAdapter,
@@ -226,6 +253,13 @@ export class RegistryService {
     reason: string,
     file?: FileRef,
   ) {
+    const tally = this.tally(context);
+    if (tally.refused === undefined) {
+      const recorded = await this.options.store.refusalCount(context.runId);
+      tally.refused ??= recorded; // a concurrent first refusal may have seeded it already
+    }
+    if (tally.refused >= (this.options.limits.maxRefusalRecords ?? DEFAULT_MAX_REFUSAL_RECORDS)) return;
+    tally.refused += 1;
     await this.options.store.recordFetch({
       runId: context.runId,
       ecosystem: adapter.id,

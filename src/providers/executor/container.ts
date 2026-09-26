@@ -371,10 +371,13 @@ export interface ContainerExecutorOptions {
    * a rejection is swallowed and treated as "nothing to report" since a
    * reporting failure must never fail the run itself.
    */
-  registryReport?: (runId: string) => Promise<{
-    packages: Array<{ ecosystem: string; name: string; version: string }>;
-    packageRefusals: Array<{ ecosystem: string; name: string; reason: string }>;
-  }>;
+  registryReport?: (runId: string) => Promise<RegistryReport>;
+}
+
+/** A run's deduplicated served packages and refusals (see summarizeRegistryFetches). */
+export interface RegistryReport {
+  packages: Array<{ ecosystem: string; name: string; version: string }>;
+  packageRefusals: Array<{ ecosystem: string; name: string; reason: string }>;
 }
 
 class PreflightError extends Error {}
@@ -755,16 +758,12 @@ export class ContainerExecutor implements Executor {
         this.terminal(current, "budget_exhausted");
         return;
       }
-      const report = (await this.options.registryReport?.(run.runId).catch(() => undefined)) ?? {
-        packages: [],
-        packageRefusals: [],
-      };
+      const report = await this.loadRegistryReport(run.runId);
       const finalized = await this.options.vcs.finalizeChanges(workspace, {
         summary: output.summary,
         tests: output.tests,
         tag: output.tag,
-        ...(report.packages.length > 0 ? { packages: report.packages } : {}),
-        ...(report.packageRefusals.length > 0 ? { packageRefusals: report.packageRefusals } : {}),
+        ...report,
       });
       const result = this.resultFor(output, current, finalized.outcome, finalized);
       await this.options.store.complete(run.runId, "succeeded", result);
@@ -792,6 +791,25 @@ export class ContainerExecutor implements Executor {
       }
       await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
       this.emit({ stage: "cleanup", runId: run.runId, jobId: handle.id, cleanupSucceeded: true });
+    }
+  }
+
+  /** The package report is informational: any failure loading it (a
+   *  rejection, a synchronous throw, or a malformed result) yields no
+   *  package section rather than failing finalization. */
+  private async loadRegistryReport(
+    runId: string,
+  ): Promise<{ packages?: RegistryReport["packages"]; packageRefusals?: RegistryReport["packageRefusals"] }> {
+    try {
+      const report = await this.options.registryReport?.(runId);
+      const packages = Array.isArray(report?.packages) ? report.packages : [];
+      const packageRefusals = Array.isArray(report?.packageRefusals) ? report.packageRefusals : [];
+      return {
+        ...(packages.length > 0 ? { packages } : {}),
+        ...(packageRefusals.length > 0 ? { packageRefusals } : {}),
+      };
+    } catch {
+      return {};
     }
   }
 

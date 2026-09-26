@@ -9,6 +9,7 @@ import {
   loadProviderConfig,
   type ProviderConfig,
 } from "../../config/providers.js";
+import { summarizeRegistryFetches } from "../../coding/registry/report.js";
 import { drainCodingQueue } from "../../core/coding-queue.js";
 import { logger } from "../../core/logger.js";
 import { EnvironmentCredentialResolver } from "../coding-proxy/environment-credentials.js";
@@ -130,14 +131,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     maxDiskMb: config.maxDiskMb,
     registryReport: async (runId) => {
       const rows = await options.db.registryFetch.findMany({ where: { runId }, orderBy: { createdAt: "asc" } });
-      return {
-        packages: rows
-          .filter((row) => row.outcome === "served" && row.version)
-          .map((row) => ({ ecosystem: row.ecosystem, name: row.name, version: row.version! })),
-        packageRefusals: rows
-          .filter((row) => row.outcome === "refused")
-          .map((row) => ({ ecosystem: row.ecosystem, name: row.name, reason: row.reason ?? "refused" })),
-      };
+      return summarizeRegistryFetches(rows);
     },
     onSlotReleased: () => {
       void drainCodingQueue({

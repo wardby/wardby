@@ -53,6 +53,10 @@ export class PrismaRegistryStore implements RegistryStore {
     return { files: totals._count._all, bytes: totals._sum.sizeBytes ?? 0 };
   }
 
+  async refusalCount(runId: string): Promise<number> {
+    return this.db.registryFetch.count({ where: { runId, outcome: "refused" } });
+  }
+
   async listFetches(runId: string): Promise<(RegistryFetchRecord & { createdAt: Date })[]> {
     const rows = await this.db.registryFetch.findMany({ where: { runId }, orderBy: { createdAt: "asc" } });
     return rows.map((row) => ({

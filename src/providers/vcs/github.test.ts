@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { decodeJwt } from "jose";
 import { describe, expect, it, vi } from "vitest";
-import { GitHubAppClient } from "./github.js";
+import { GitHubAppClient, pullRequestBody, type PullRequestInput } from "./github.js";
 
 const TOKEN = "ghs_abcdefghijklmnopqrstuvwxyz-1234567890.example";
 const NOW = new Date("2026-09-06T12:00:00.000Z");
@@ -611,5 +611,54 @@ describe("GitHubAppClient", () => {
           apiVersion: "latest\r\nx-injected: true",
         }),
     ).toThrow("github_api_version_invalid");
+  });
+});
+
+describe("pullRequestBody packages section", () => {
+  const base = { runId: "run-1", repository: "openai/example", baseRef: "main", headRef: "wardby/run-run-1" };
+
+  it("lists at most 100 packages and 100 refusals, then points at get_run, staying well under 65,536 chars", () => {
+    const packages = Array.from({ length: 2000 }, (_, i) => ({
+      ecosystem: "npm",
+      name: `@scope-${i}/package-with-a-fairly-long-name-${i}`,
+      version: `1.${i}.0`,
+    }));
+    const packageRefusals = Array.from({ length: 2000 }, (_, i) => ({
+      ecosystem: "npm",
+      name: `refused-package-with-a-long-name-${i}`,
+      reason: "wardby_package_not_allowed",
+    }));
+    const body = pullRequestBody({ ...base, packages, packageRefusals });
+    expect(body.length).toBeLessThan(40_000);
+    expect(body).toContain("<summary>Packages installed during this run (2000)</summary>");
+    expect(body).toContain("- npm `@scope-99/package-with-a-fairly-long-name-99@1.99.0`");
+    expect(body).not.toContain("@scope-100/");
+    expect(body).toContain("- npm `refused-package-with-a-long-name-99`");
+    expect(body).not.toContain("refused-package-with-a-long-name-100`");
+    expect(body.match(/…and 1900 more — see get_run for the full list/g)).toHaveLength(2);
+  });
+
+  it("bounds the section even when entries are pathologically long", () => {
+    const packages = Array.from({ length: 100 }, (_, i) => ({
+      ecosystem: "npm",
+      name: "x".repeat(5000) + i,
+      version: "1.0.0",
+    }));
+    const body = pullRequestBody({ ...base, packages });
+    expect(body.length).toBeLessThan(20_000);
+    expect(body).toMatch(/…and \d+ more — see get_run for the full list/);
+  });
+
+  it("omits the section, never throws, when the package report cannot be rendered", () => {
+    const input = {
+      ...base,
+      summary: "Did the thing.",
+      get packages(): PullRequestInput["packages"] {
+        throw new Error("malformed report");
+      },
+    } as PullRequestInput;
+    const body = pullRequestBody(input);
+    expect(body).toContain("Did the thing.");
+    expect(body).not.toContain("<details>");
   });
 });

@@ -32,6 +32,7 @@ interface FakeRunRow {
     version: string | null;
     outcome: "served" | "refused";
     reason: string | null;
+    sizeBytes?: number | null;
     createdAt: Date;
   }>;
 }
@@ -271,6 +272,7 @@ describe("run observability tools", () => {
               version: "3.2.6",
               outcome: "served",
               reason: null,
+              sizeBytes: 482_113,
               createdAt: new Date(now.getTime()),
             },
             // A retried fetch of the same served package/version — collapses into one entry.
@@ -280,7 +282,18 @@ describe("run observability tools", () => {
               version: "3.2.6",
               outcome: "served",
               reason: null,
+              sizeBytes: 482_113,
               createdAt: new Date(now.getTime() + 1000),
+            },
+            // A served row with no recorded size reports size null.
+            {
+              ecosystem: "pypi",
+              name: "flask",
+              version: "3.0.0",
+              outcome: "served",
+              reason: null,
+              sizeBytes: null,
+              createdAt: new Date(now.getTime() + 1500),
             },
             {
               ecosystem: "npm",
@@ -288,6 +301,7 @@ describe("run observability tools", () => {
               version: null,
               outcome: "refused",
               reason: "wardby_package_not_allowed",
+              sizeBytes: null,
               createdAt: new Date(now.getTime() + 2000),
             },
           ],
@@ -316,10 +330,13 @@ describe("run observability tools", () => {
 
     const codingResult = await client.callTool({ name: "get_run", arguments: { runId: "r1" } });
     const codingBody = parseText(codingResult as never) as {
-      packages: Array<{ ecosystem: string; name: string; version: string }>;
+      packages: Array<{ ecosystem: string; name: string; version: string; size: number | null }>;
       packageRefusals: Array<{ ecosystem: string; name: string; reason: string }>;
     };
-    expect(codingBody.packages).toEqual([{ ecosystem: "npm", name: "@heroui/react", version: "3.2.6" }]);
+    expect(codingBody.packages).toEqual([
+      { ecosystem: "npm", name: "@heroui/react", version: "3.2.6", size: 482_113 },
+      { ecosystem: "pypi", name: "flask", version: "3.0.0", size: null },
+    ]);
     expect(codingBody.packageRefusals).toEqual([
       { ecosystem: "npm", name: "left-pad", reason: "wardby_package_not_allowed" },
     ]);

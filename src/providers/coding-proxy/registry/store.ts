@@ -28,6 +28,8 @@ export interface RegistryStore {
   addAllowances(runId: string, ecosystem: string, names: readonly string[]): Promise<void>;
   recordFetch(record: RegistryFetchRecord): Promise<void>;
   usage(runId: string): Promise<{ files: number; bytes: number }>;
+  /** Number of refused RegistryFetch rows recorded for the run. */
+  refusalCount(runId: string): Promise<number>;
   listFetches(runId: string): Promise<(RegistryFetchRecord & { createdAt: Date })[]>;
 }
 
@@ -58,6 +60,10 @@ export class MemoryRegistryStore implements RegistryStore {
   async usage(runId: string): Promise<{ files: number; bytes: number }> {
     const served = this.fetches.filter((fetch) => fetch.runId === runId && fetch.outcome === "served");
     return { files: served.length, bytes: served.reduce((sum, fetch) => sum + (fetch.sizeBytes ?? 0), 0) };
+  }
+
+  async refusalCount(runId: string): Promise<number> {
+    return this.fetches.filter((fetch) => fetch.runId === runId && fetch.outcome === "refused").length;
   }
 
   async listFetches(runId: string): Promise<(RegistryFetchRecord & { createdAt: Date })[]> {

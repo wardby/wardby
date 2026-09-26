@@ -89,13 +89,20 @@ function service(
   overrides: {
     upstreamBody?: Uint8Array;
     withheld?: string[];
-    limits?: { maxFileBytes?: number; maxTotalBytes?: number; maxFiles?: number; idleTimeoutMs?: number };
+    limits?: {
+      maxFileBytes?: number;
+      maxTotalBytes?: number;
+      maxFiles?: number;
+      idleTimeoutMs?: number;
+      maxRefusalRecords?: number;
+    };
+    store?: MemoryRegistryStore;
     upstream?: (url: string, init?: { signal?: AbortSignal }) => Promise<Response>;
     allowlist?: Record<string, string[]>;
     audit?: () => Promise<AdvisoryIndex>;
   } = {},
 ) {
-  const store = new MemoryRegistryStore();
+  const store = overrides.store ?? new MemoryRegistryStore();
   store.contexts.set(capabilityHash("rrg_token"), {
     runId: "run-1",
     deadlineAt: new Date(NOW.getTime() + DAY),
@@ -231,6 +238,7 @@ describe("RegistryService", () => {
         throw new Error("simulated database error");
       },
       usage: (runId) => inner.usage(runId),
+      refusalCount: (runId) => inner.refusalCount(runId),
       listFetches: (runId) => inner.listFetches(runId),
     };
     const hangingBody = new ReadableStream<Uint8Array>({
@@ -444,6 +452,37 @@ describe("RegistryService reservations on HEAD and client abort", () => {
     await reader.cancel();
     expect(store.fetches).toEqual([]);
     await expect(registry.handle(request("dl/app/1.0.0"))).resolves.toMatchObject({ status: 200 });
+  });
+});
+
+describe("RegistryService refusal-record cap", () => {
+  it("records at most 500 refused rows per run but still refuses every request", async () => {
+    const { registry, store } = service();
+    for (let i = 0; i < 510; i += 1) {
+      const response = await registry.handle(request("stranger"));
+      expect(response).toMatchObject({ status: 403 });
+    }
+    expect(store.fetches.filter((fetch) => fetch.outcome === "refused")).toHaveLength(500);
+  });
+
+  it("seeds the count from the store, so a restarted proxy keeps the cap", async () => {
+    const store = new MemoryRegistryStore();
+    for (let i = 0; i < 4; i += 1)
+      await store.recordFetch({ runId: "run-1", ecosystem: "fake", name: "x", outcome: "refused", reason: "r" });
+    const { registry } = service({ store, limits: { maxRefusalRecords: 5 } });
+    await Promise.all([registry.handle(request("stranger")), registry.handle(request("stranger"))]);
+    await registry.handle(request("stranger"));
+    expect(store.fetches.filter((fetch) => fetch.outcome === "refused")).toHaveLength(5);
+  });
+
+  it("still records served rows after the refusal cap is reached", async () => {
+    const { registry, store } = service({ limits: { maxRefusalRecords: 1 } });
+    await registry.handle(request("stranger"));
+    await registry.handle(request("stranger"));
+    const response = await registry.handle(request("dl/app/1.0.0"));
+    if (!("stream" in response)) throw new Error("expected a stream");
+    await new Response(response.stream).arrayBuffer();
+    expect(store.fetches.map((fetch) => fetch.outcome)).toEqual(["refused", "served"]);
   });
 });
 

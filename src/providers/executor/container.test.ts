@@ -623,6 +623,33 @@ describe("ContainerExecutor", () => {
     expect(created.vcs.lastFinalizeDetails).toEqual({ summary: "Added HeroUI.", tests: [] });
   });
 
+  it.each([
+    [
+      "throws synchronously",
+      (): Promise<never> => {
+        throw new Error("sync_failure");
+      },
+    ],
+    [
+      "returns a malformed report",
+      (async () => ({ packages: null, packageRefusals: "x" })) as unknown as () => Promise<never>,
+    ],
+  ])("never fails finalization when the registry report %s", async (_label, registryReport) => {
+    const created = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, { registryReport });
+    created.jobs.result.resultArtifact = JSON.stringify({
+      schemaVersion: 1,
+      runId: "run-1",
+      outcome: "changes_ready",
+      summary: "Added HeroUI.",
+      tests: [],
+    });
+
+    await created.executor.start("run-1");
+
+    expect(created.store.run.status).toBe("succeeded");
+    expect(created.vcs.lastFinalizeDetails).toEqual({ summary: "Added HeroUI.", tests: [] });
+  });
+
   it("skips materialization and VCS finalization for a no-change output", async () => {
     const created = await harness();
     created.jobs.result.resultArtifact = JSON.stringify({
