@@ -95,6 +95,14 @@ export default tseslint.config(
       "@typescript-eslint/no-unsafe-argument": "off",
       "@typescript-eslint/no-unsafe-return": "off",
       "@typescript-eslint/no-unsafe-call": "off",
+      // unbound-method fires on `expect(fake.method).toHaveBeenCalledWith(...)`
+      // / `vi.mocked(fake.method)` for any interface declared with method
+      // syntax (e.g. CodeReviewHost) -- the assertion takes the mocked
+      // method as a bare reference, which the rule reads as an unsafe
+      // unbound `this`. The fakes never call through `this`, so there's no
+      // real risk here; it's the vitest mocking idiom this codebase uses to
+      // assert on a specific call.
+      "@typescript-eslint/unbound-method": "off",
     },
   },
   {
