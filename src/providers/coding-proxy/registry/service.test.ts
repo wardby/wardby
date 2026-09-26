@@ -848,6 +848,8 @@ describe("RegistryService with the PyPI adapter: release age applies per file", 
           // An old release (first uploaded 100 days ago) that gained a
           // brand-new wheel yesterday.
           return Response.json({ name: "demo", files: [file(oldWheel, 100), file(newWheel, 1)] });
+        if (url.endsWith(".metadata"))
+          return new Response("Metadata-Version: 2.1\nName: demo\nVersion: 1.0\nRequires-Dist: Werkzeug>=3\n");
         return new Response(wheelBytes);
       },
       proxyBase: "http://wardby-proxy:8787/registry/",
@@ -868,6 +870,17 @@ describe("RegistryService with the PyPI adapter: release age applies per file", 
     const served = await get(`files/demo/${oldWheel}`);
     if (!("stream" in served)) throw new Error("expected a stream");
     expect(new Uint8Array(await new Response(served.stream).arrayBuffer())).toEqual(wheelBytes);
+  });
+
+  it("serves the kept wheel's PEP 658 metadata and allows its dependencies", async () => {
+    const { get, urls, store } = pypiService();
+    const response = await get(`files/demo/${oldWheel}.metadata`);
+    expect(response).toMatchObject({ status: 200, contentType: "text/plain" });
+    if (!("stream" in response)) throw new Error("expected a stream");
+    expect(await new Response(response.stream).text()).toContain("Requires-Dist: Werkzeug>=3");
+    expect(urls).toContain(`https://files.pythonhosted.org/packages/xx/${oldWheel}.metadata`);
+    expect(await store.isAllowedDependency("run-1", "pypi", "werkzeug")).toBe(true);
+    expect(store.fetches).toMatchObject([{ outcome: "served", filename: `${oldWheel}.metadata` }]);
   });
 
   it("refuses and records the new wheel and its metadata file like a filtered version", async () => {

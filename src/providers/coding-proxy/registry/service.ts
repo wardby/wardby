@@ -213,8 +213,11 @@ export class RegistryService {
         ? adapter.resolveDownload(route, meta)
         : (adapter.resolveFileMetadata?.(route, meta) ?? null);
     // The release age applies per file: a file newer than the cutoff is
-    // refused exactly like a filtered version, even in a kept release.
-    if (!file || !keep.has(file.version) || !keptFiles.has(file.filename)) {
+    // refused exactly like a filtered version, even in a kept release. A
+    // PEP 658 metadata file is judged by the wheel it describes
+    // (route.filename), since keptFiles holds wheel filenames.
+    const agedFile = route.kind === "file-metadata" ? route.filename : file?.filename;
+    if (!file || !keep.has(file.version) || !agedFile || !keptFiles.has(agedFile)) {
       await this.refuse(context, adapter, name, "wardby_version_filtered", file ?? undefined);
       const versionSuffix = route.kind === "download" ? ` ${route.version}` : "";
       throw new RegistryError(404, "wardby_version_filtered", `"${name}"${versionSuffix} is not available to this run`);

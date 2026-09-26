@@ -165,6 +165,15 @@ describe("inOsvRange", () => {
     expect(inOsvRange("3.0.0", events, compare)).toBe(false);
   });
 
+  it.each([
+    ["fixed first", [{ introduced: "0" }, { fixed: "2.0.0" }, { introduced: "2.0.0" }, { fixed: "3.0.0" }]],
+    ["introduced first", [{ introduced: "0" }, { introduced: "2.0.0" }, { fixed: "2.0.0" }, { fixed: "3.0.0" }]],
+  ])("treats a fixed/introduced tie at one version as affected regardless of order (%s)", (_label, events) => {
+    expect(inOsvRange("2.0.0", events, compare)).toBe(true);
+    expect(inOsvRange("1.0.0", events, compare)).toBe(true);
+    expect(inOsvRange("3.0.0", events, compare)).toBe(false);
+  });
+
   it("fails closed on a version it cannot parse", () => {
     expect(inOsvRange("not-a-version", [{ introduced: "1.0.0" }, { fixed: "2.0.0" }], compare)).toBe(true);
   });

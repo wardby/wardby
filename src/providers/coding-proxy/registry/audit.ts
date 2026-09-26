@@ -72,7 +72,12 @@ export function inOsvRange(version: string, events: readonly OsvEvent[], compare
       .sort((a, b) => {
         if (a.introduced === "0") return b.introduced === "0" ? 0 : -1;
         if (b.introduced === "0") return 1;
-        return compare(eventVersion(a)!, eventVersion(b)!);
+        const order = compare(eventVersion(a)!, eventVersion(b)!);
+        if (order !== 0) return order;
+        // Ties are resolved independent of array order: an `introduced` at
+        // the same version as a closing event is processed last, so that
+        // version counts as affected (fail closed).
+        return Number(a.introduced !== undefined) - Number(b.introduced !== undefined);
       });
     let affected = false;
     for (const event of sorted) {
