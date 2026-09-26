@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import type { IncomingMessage } from "node:http";
 import { Readable } from "node:stream";
-import { resolveDestination, isCloudMetadataAddress, type Resolver } from "./fetch-policy.js";
+import {
+  resolveDestination,
+  isCloudMetadataAddress,
+  isGlobalAddress,
+  normalizeHost,
+  parseAllowedHosts,
+  type Resolver,
+} from "./fetch-policy.js";
 import { safeFetch, type SafeFetchOptions } from "./safe-fetch.js";
 import { sandboxFetchPolicy } from "./host-functions.js";
 
@@ -179,4 +186,80 @@ describe("sandbox fetch policy through safeFetch redirects", () => {
     expect(result.status).toBe(200);
     expect(connect.mock.calls[1][0].address).toBe("10.1.2.3");
   });
+});
+
+describe("review follow-ups", () => {
+  // M1: other clouds' metadata endpoints and transition encodings of them.
+  it.each([
+    "169.254.170.23", // EKS Pod Identity
+    "fd00:ec2::23", // EKS Pod Identity (IPv6)
+    "fd20:ce::254", // GCE metadata (IPv6)
+    "100.100.100.200", // Alibaba Cloud
+    "2002:a9fe:a9fe::", // 6to4 of 169.254.169.254
+    "2002:a9fe:a9fe:1::5", // 6to4, any interface id
+    "2002:6464:64c8::1", // 6to4 of 100.100.100.200
+    "64:ff9b::a9fe:aa17", // NAT64 well-known of 169.254.170.23
+    "64:ff9b:1::a9fe:a9fe", // RFC 8215 local-use NAT64, /96 layout
+    "64:ff9b:1:a9fe:a9:fe00::", // RFC 8215 local-use NAT64, RFC 6052 /48 layout
+    "::ffff:100.100.100.200",
+  ])("M1: treats %s as cloud metadata", (address) => expect(isCloudMetadataAddress(address)).toBe(true));
+
+  it.each([
+    "169.254.170.23",
+    "100.100.100.200",
+    "[fd20:ce::254]",
+    "[fd00:ec2::23]",
+    "[2002:a9fe:a9fe::]",
+    "[64:ff9b:1::a9fe:a9fe]",
+  ])("M1: blocks %s even when both the operator and the tool list it", async (host) => {
+    await expectBlocked(`http://${host}/`, [host], [host]);
+    await expectBlocked(`http://${host}/`, ["*"], [host]);
+  });
+
+  it.each(["2002:808:808::1", "64:ff9b:1::808:808"])("M1: does not flag %s as metadata", (address) =>
+    expect(isCloudMetadataAddress(address)).toBe(false),
+  );
+
+  // M2: every trailing dot is stripped, so the metadata hostname check can't be dodged.
+  it("M2: strips all trailing dots when normalizing", () => {
+    expect(normalizeHost("Example.COM..")).toBe("example.com");
+    expect(normalizeHost("metadata.google.internal...")).toBe("metadata.google.internal");
+  });
+  it.each(["http://metadata.google.internal../", "http://metadata../"])(
+    "M2: blocks %s by name even if it resolved to a public address",
+    async (url) => {
+      const publicOnly: Resolver = async () => [{ address: "93.184.216.34", family: 4 }];
+      await expect(resolveDestination(url, { ...sandboxFetchPolicy(["*"], []), resolve: publicOnly })).rejects.toThrow(
+        "fetch_destination_blocked",
+      );
+    },
+  );
+
+  // M3: a bracketed IPv6 literal must be closed.
+  it.each(["[::1", "[fd00::1", "[", "[::1]x"])("M3: rejects the malformed bracketed host %s", (host) => {
+    expect(() => normalizeHost(host)).toThrow("fetch_destination_blocked");
+    expect(() => parseAllowedHosts(host)).toThrow("fetch_destination_blocked");
+  });
+  it("M3: still accepts a well-formed bracketed IPv6 literal", () => {
+    expect(normalizeHost("[::1]")).toBe("::1");
+  });
+
+  // M5: zone-scoped answers fail as a policy block, not a raw TypeError.
+  it("M5: never treats a zone-scoped address as global or throws on it", () => {
+    expect(isGlobalAddress("fe80::1%eth0")).toBe(false);
+    expect(isGlobalAddress("2001:4860:4860::8888%eth0")).toBe(false);
+    expect(() => isCloudMetadataAddress("fe80::1%eth0")).not.toThrow();
+  });
+  it.each(["fe80::1%eth0", "2001:4860:4860::8888%1", "fd00:ec2::254%eth0"])(
+    "M5: a resolver answer of %s is fetch_destination_blocked, even for an operator-listed host",
+    async (address) => {
+      const scoped: Resolver = async () => [{ address, family: 6 }];
+      const err = await resolveDestination("http://db.internal.test/", {
+        ...sandboxFetchPolicy(["db.internal.test"], ["db.internal.test"]),
+        resolve: scoped,
+      }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe("fetch_destination_blocked");
+    },
+  );
 });

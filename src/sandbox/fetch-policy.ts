@@ -52,6 +52,8 @@ function v6(ip: string): bigint {
   return groups.reduce((n: bigint, g: string) => (n << 16n) + BigInt("0x" + g), 0n);
 }
 export function isGlobalAddress(address: string): boolean {
+  // Zone-scoped (fe80::1%eth0) answers are link-local by nature; never global.
+  if (address.includes("%")) return false;
   if (isIP(address) === 4)
     return !blockedV4.some(([net, prefix]) => v4(address) >>> (32 - prefix) === v4(net) >>> (32 - prefix));
   if (isIP(address) !== 6) return false;
@@ -71,30 +73,58 @@ export function isGlobalAddress(address: string): boolean {
     })
   );
 }
-/** Cloud instance-metadata endpoints (GCP/AWS/Azure IMDS, GKE metadata proxy, ECS task creds, AWS IMDS IPv6). */
-const METADATA_V4 = new Set(["169.254.169.254", "169.254.169.252", "169.254.170.2"]);
-const METADATA_V6 = v6("fd00:ec2::254");
+/**
+ * Cloud instance-metadata endpoints: GCP/AWS/Azure IMDS, GKE metadata proxy,
+ * ECS task credentials, EKS Pod Identity, Alibaba Cloud; plus the AWS, EKS and
+ * GCE IPv6 addresses.
+ */
+const METADATA_V4 = new Set([
+  "169.254.169.254",
+  "169.254.169.252",
+  "169.254.170.2",
+  "169.254.170.23",
+  "100.100.100.200",
+]);
+const METADATA_V6 = new Set(["fd00:ec2::254", "fd00:ec2::23", "fd20:ce::254"].map(v6));
 const METADATA_HOSTNAMES = new Set(["metadata.google.internal", "metadata"]);
-/** True for a cloud metadata address, including IPv4-mapped/-compatible and NAT64 (64:ff9b::/96) IPv6 forms. */
+const NAT64_WELL_KNOWN = v6("64:ff9b::") >> 32n;
+const NAT64_LOCAL_USE = v6("64:ff9b:1::") >> 80n;
+const SIX_TO_FOUR = 0x2002n;
+function v4FromBits(bits: bigint): string {
+  const n = Number(bits & 0xffffffffn);
+  return [24, 16, 8, 0].map((shift) => (n >>> shift) & 0xff).join(".");
+}
+/**
+ * True for a cloud metadata address, including IPv6 encodings of the IPv4
+ * ones: IPv4-mapped/-compatible (::ffff:0:0/96, ::/96), NAT64 well-known
+ * (64:ff9b::/96), RFC 8215 local-use NAT64 (64:ff9b:1::/48, /96 and RFC 6052
+ * /48 layouts) and 6to4 (2002::/16). A zone id is ignored for the comparison.
+ */
 export function isCloudMetadataAddress(address: string): boolean {
-  if (isIP(address) === 4) return METADATA_V4.has(address);
-  if (isIP(address) !== 6) return false;
-  const n = v6(new URL("http://[" + address + "]").hostname.slice(1, -1));
-  if (n === METADATA_V6) return true;
-  const high = n >> 32n;
-  if (high !== 0n && high !== 0xffffn && high !== v6("64:ff9b::") >> 32n) return false;
-  const low = Number(n & 0xffffffffn);
-  return METADATA_V4.has([24, 16, 8, 0].map((shift) => (low >>> shift) & 0xff).join("."));
+  const bare = address.split("%")[0];
+  if (isIP(bare) === 4) return METADATA_V4.has(bare);
+  if (isIP(bare) !== 6) return false;
+  const n = v6(new URL("http://[" + bare + "]").hostname.slice(1, -1));
+  if (METADATA_V6.has(n)) return true;
+  const embedded: bigint[] = [];
+  const high96 = n >> 32n;
+  if (high96 === 0n || high96 === 0xffffn || high96 === NAT64_WELL_KNOWN) embedded.push(n);
+  if (n >> 80n === NAT64_LOCAL_USE) embedded.push(n, (((n >> 64n) & 0xffffn) << 16n) | ((n >> 40n) & 0xffffn));
+  if (n >> 112n === SIX_TO_FOUR) embedded.push(n >> 80n);
+  return embedded.some((bits) => METADATA_V4.has(v4FromBits(bits)));
 }
 export function normalizeHost(host: string): string {
   if (!host || /[\s*/@?#\\]/.test(host)) throw new FetchPolicyError();
+  if (host.startsWith("[") !== host.endsWith("]")) throw new FetchPolicyError();
   const value = host.startsWith("[") ? host.slice(1, -1) : host;
   if (isIP(value))
     return new URL(isIP(value) === 6 ? "http://[" + value + "]" : "http://" + value).hostname
       .replace(/^\[|\]$/g, "")
       .toLowerCase();
   if (host.includes(":")) throw new FetchPolicyError();
-  return new URL("http://" + host).hostname.toLowerCase().replace(/\.$/, "");
+  const name = new URL("http://" + host).hostname.toLowerCase().replace(/\.+$/, "");
+  if (!name) throw new FetchPolicyError();
+  return name;
 }
 export function parseAllowedHosts(value: string | undefined): string[] {
   return value === undefined || value === "" ? [] : value.split(",").map((host) => normalizeHost(host.trim()));
@@ -123,6 +153,7 @@ export async function resolveDestination(urlString: string, options: FetchPolicy
     !addresses.length ||
     addresses.some(
       (a) =>
+        a.address.includes("%") ||
         !isIP(a.address) ||
         isIP(a.address) !== a.family ||
         isCloudMetadataAddress(a.address) ||
