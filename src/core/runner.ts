@@ -51,7 +51,7 @@ import {
   type RepositoryLink,
 } from "./review-host-tools.js";
 import { closeOpenHostCheck } from "./review-host-checks.js";
-import type { RepoAccessGate } from "./repo-access.js";
+import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
 
 const runnerLog = logger.child({ module: "runner" });
 
@@ -144,6 +144,7 @@ export type RunnerDb = Pick<
   | "$queryRaw"
   | "agentRepository"
   | "runHostCheck"
+  | "hostIdentity"
 >;
 
 /** The providers a native run needs; `executor` and `reviewHosts` are optional capabilities. */
@@ -318,6 +319,9 @@ export async function executeRun(
   }
 
   const reviewHosts = configuredReviewHosts(providers.reviewHosts);
+  const repoAccess = reviewHosts
+    ? (providers.repoAccess ?? createRepoAccessGate({ db, hosts: reviewHosts }))
+    : undefined;
 
   // Pinned in one checkpointed step: on replay after a crash, the agent row
   // or its budget group may have changed since first execution. The
@@ -455,7 +459,7 @@ export async function executeRun(
       if (loaded.memoryEnabled && MEMORY_TOOL_NAMES.has(name)) {
         return handleMemoryTool(name, argsJson, loaded.agentId, providers.memory);
       }
-      if (REVIEW_HOST_TOOL_NAMES.has(name) && loaded.repositoryLinks.length > 0 && reviewHosts) {
+      if (REVIEW_HOST_TOOL_NAMES.has(name) && loaded.repositoryLinks.length > 0 && reviewHosts && repoAccess) {
         const check = await db.runHostCheck.findUnique({ where: { runId } });
         return handleReviewHostTool(name, argsJson, {
           agentId: loaded.agentId,
@@ -468,10 +472,37 @@ export async function executeRun(
                   repository: check.repository,
                   checkId: check.checkId,
                   headSha: check.headSha,
+                  prNumber: check.prNumber,
                 }
               : null,
           markRunCheckCompleted: async () => {
             await db.runHostCheck.update({ where: { runId }, data: { completedAt: new Date() } });
+          },
+          // Live, not from the pinned load: the link's current stamp and
+          // access, and the agent's CURRENT owner (a make_owner, unlink, or
+          // lost GitHub access takes effect on the very next call).
+          authorize: async (link) => {
+            const current = await db.agentRepository.findUnique({
+              where: {
+                agentId_provider_repository: {
+                  agentId: loaded.agentId,
+                  provider: link.provider,
+                  repository: link.repository,
+                },
+              },
+              include: { agent: { select: { ownerId: true } } },
+            });
+            // Removed, or downgraded to read since the run loaded it as write.
+            if (!current || (link.access === "write" && current.access !== "write")) {
+              return { ok: false, reason: "not_authorized" };
+            }
+            return repoAccess.authorizeUse({
+              ownerId: current.agent.ownerId,
+              provider: current.provider,
+              repository: current.repository,
+              required: requiredLevel(current.access === "write" ? "write" : "read"),
+              authorizedVia: current.authorizedVia,
+            });
           },
         });
       }

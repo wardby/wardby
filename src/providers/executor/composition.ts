@@ -27,7 +27,8 @@ import { buildVcsProvider } from "../vcs/index.js";
 import { ContainerExecutor, PrismaContainerExecutionStore, RunCapabilityVault } from "./container.js";
 import { PrismaExecutionKindResolver, RoutingExecutor } from "./routing.js";
 import type { Executor } from "./types.js";
-import type { RepoAccessGate } from "../../core/repo-access.js";
+import { createRepoAccessGate, type RepoAccessGate } from "../../core/repo-access.js";
+import { buildReviewHosts } from "../review-host/index.js";
 
 const compositionLog = logger.child({ module: "executor-composition" });
 
@@ -132,6 +133,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     anthropicCredentialRef: config.anthropicCredentialRef,
     limits: { cpus: config.cpus, memoryMb: config.memoryMb, pids: config.pids, diskMb: config.diskMb },
     maxDiskMb: config.maxDiskMb,
+    repoAccess: options.repoAccess ?? createRepoAccessGate({ db: options.db, hosts: buildReviewHosts(env) }),
     registryReport: async (runId) => {
       const rows = await options.db.registryFetch.findMany({ where: { runId }, orderBy: { createdAt: "asc" } });
       return summarizeRegistryFetches(rows);

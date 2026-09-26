@@ -5,6 +5,7 @@ import type { PrismaClient } from "#prisma";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { CodingProfileSchema } from "../../coding/profile.js";
 import { logger } from "../../core/logger.js";
+import { requiredLevel, type RepoAccessGate } from "../../core/repo-access.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import { codingRunObserver, type CodingRunObserver } from "../../coding/observability.js";
 import {
@@ -78,6 +79,10 @@ export interface ContainerRunSnapshot {
   result: unknown;
   workerImage: string | null;
   workspaceDiskMb: number | null;
+  /** The agent's CURRENT coding-profile repository (null if the profile is gone); may differ from `repository`. */
+  profileRepository: string | null;
+  /** How the profile's repository was authorized (CodingAgentProfile.repositoryAuthorizedVia). */
+  repositoryAuthorizedVia: string | null;
 }
 
 /**
@@ -116,7 +121,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
   async load(runId: string): Promise<ContainerRunSnapshot | null> {
     const row = await this.db.run.findUnique({
       where: { id: runId },
-      include: { agent: true, codingRun: { include: { proxySession: true } } },
+      include: { agent: { include: { codingProfile: true } }, codingRun: { include: { proxySession: true } } },
     });
     if (!row?.codingRun) return null;
     return {
@@ -148,6 +153,8 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       result: row.codingRun.result,
       workerImage: row.codingRun.workerImage,
       workspaceDiskMb: row.codingRun.workspaceDiskMb,
+      profileRepository: row.agent.codingProfile?.repository ?? null,
+      repositoryAuthorizedVia: row.agent.codingProfile?.repositoryAuthorizedVia ?? null,
     };
   }
 
@@ -372,6 +379,12 @@ export interface ContainerExecutorOptions {
    * reporting failure must never fail the run itself.
    */
   registryReport?: (runId: string) => Promise<RegistryReport>;
+  /**
+   * Repository authorization: every run is checked, before its workspace is
+   * prepared, against the agent owner's current GitHub access (or a recorded
+   * admin/grandfathered approval of this exact repository).
+   */
+  repoAccess: RepoAccessGate;
 }
 
 /** A run's deduplicated served packages and refusals (see summarizeRegistryFetches). */
@@ -381,6 +394,9 @@ export interface RegistryReport {
 }
 
 class PreflightError extends Error {}
+
+/** A refusal by repository authorization; its message is the failure category's prefix (repo_access_*). */
+class RepoAccessError extends PreflightError {}
 
 export class ContainerExecutor implements Executor {
   private readonly artifactRoot: string;
@@ -524,6 +540,7 @@ export class ContainerExecutor implements Executor {
         // process owns provisioning, or the run is no longer active.
         if ((await this.options.store.claimProvisioning(runId, claimId)) !== "claimed") return;
       }
+      await this.authorizeRepository(run);
       try {
         workspace = await this.options.vcs.recoverWorkspace(prepared);
         if (!workspace && handle) throw new Error("coding_workspace_lost");
@@ -646,6 +663,25 @@ export class ContainerExecutor implements Executor {
     } finally {
       clearInterval(timer);
     }
+  }
+
+  /**
+   * The run may use its repository only if the agent's current owner still
+   * has write on it, or the profile's approval (admin or grandfathered)
+   * covers exactly this repository. A profile changed since dispatch no
+   * longer covers the run's repository, so that falls back to the owner's
+   * access. Throws RepoAccessError (refused before anything is cloned).
+   */
+  private async authorizeRepository(run: ContainerRunSnapshot): Promise<void> {
+    const sameRepository = run.profileRepository !== null && run.profileRepository === run.repository;
+    const decision = await this.options.repoAccess.authorizeUse({
+      ownerId: run.ownerId,
+      provider: "github",
+      repository: run.repository,
+      required: requiredLevel("coding"),
+      authorizedVia: sameRepository ? run.repositoryAuthorizedVia : "host_permission",
+    });
+    if (!decision.ok) throw new RepoAccessError(`repo_access_${decision.reason}`);
   }
 
   private preflight(run: ContainerRunSnapshot): VcsPrepareInput {
@@ -1091,6 +1127,7 @@ function safeError(error: unknown): string {
  * "workspace" because "github" contains "git".
  */
 const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: string]> = [
+  ["repo_access_", "repo_access"],
   ["github_", "github"],
   ["vcs_", "workspace"],
   ["git_", "workspace"],

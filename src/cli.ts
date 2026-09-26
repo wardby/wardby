@@ -47,6 +47,7 @@ import type { ProviderRegistry } from "./providers/index.js";
 import { prisma } from "./core/db.js";
 import { runAgent } from "./core/runner.js";
 import { buildReviewHosts } from "./providers/review-host/index.js";
+import { createRepoAccessGate } from "./core/repo-access.js";
 import { validateCronExpression } from "./core/cron.js";
 import { startScheduler } from "./core/scheduler.js";
 import { startReconciler } from "./core/reconciler.js";
@@ -710,8 +711,14 @@ async function scheduler(args: string[]): Promise<void> {
   const datastore = buildDatastore(secrets);
   const memory = buildMemory();
   const reviewHosts = buildReviewHosts();
-  const nativeExecutor = buildExecutor(config, { llm, engine, datastore, secrets, memory, reviewHosts }, prisma);
-  const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig: config });
+  // One repository-access gate (and cache) for native repo_* calls and coding runs.
+  const repoAccess = createRepoAccessGate({ db: prisma, hosts: reviewHosts });
+  const nativeExecutor = buildExecutor(
+    config,
+    { llm, engine, datastore, secrets, memory, reviewHosts, repoAccess },
+    prisma,
+  );
+  const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig: config, repoAccess });
   await executor.launch?.();
   const reconciler = startReconciler({ db: prisma, executor, reviewHosts });
   const sched = startScheduler({

@@ -17,6 +17,8 @@ const body = JSON.stringify({
 });
 const sign = (raw: string) => `sha256=${createHmac("sha256", SECRET).update(raw).digest("hex")}`;
 
+const REPO_ACCESS = { authorizeUse: vi.fn(), authorizeHostUser: vi.fn(), authorizePrincipal: vi.fn() };
+
 function deps(overrides: Record<string, unknown> = {}) {
   const created: string[] = [];
   const hostEventDelivery = {
@@ -41,6 +43,7 @@ function deps(overrides: Record<string, unknown> = {}) {
       db: { hostEventDelivery } as never,
       executor: {} as never,
       hosts: {},
+      repoAccess: REPO_ACCESS,
       webhookSecret: SECRET,
       appIdentity: async () => ({ id: 777, slug: "wardby" }),
       ...overrides,
@@ -79,6 +82,7 @@ describe("handleGitHubEventIngress", () => {
     const again = await handleGitHubEventIngress(req, d);
     expect(again).toMatchObject({ status: 202, body: { duplicate: true } });
     expect(routeHostEvent).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(routeHostEvent).mock.calls[0][1].repoAccess).toBe(REPO_ACCESS);
   });
 
   it("accepts and ignores events it does not handle", async () => {

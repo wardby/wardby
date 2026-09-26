@@ -11,6 +11,7 @@ import { logger } from "../../core/logger.js";
 import type { Executor } from "../../providers/executor/types.js";
 import { normalizeGitHubEvent, verifyGitHubSignature } from "../../providers/review-host/github-events.js";
 import type { ReviewHostRegistry } from "../../providers/review-host/types.js";
+import type { RepoAccessGate } from "../../core/repo-access.js";
 
 const log = logger.child({ module: "github-ingress" });
 const DELIVERY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -22,6 +23,8 @@ export interface GitHubIngressDeps {
   db: HostEventDb & Pick<PrismaClient, "hostEventDelivery">;
   executor: Executor;
   hosts: ReviewHostRegistry;
+  /** Repository authorization for every dispatch, and the mention author's permission. */
+  repoAccess: RepoAccessGate;
   webhookSecret: string | undefined;
   appIdentity: () => Promise<{ id: number; slug: string }>;
   now?: () => Date;
@@ -90,6 +93,7 @@ export async function handleGitHubEventIngress(
       db: deps.db,
       executor: deps.executor,
       hosts: deps.hosts,
+      repoAccess: deps.repoAccess,
       mentionHandle: app.slug,
     });
     log.info(

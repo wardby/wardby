@@ -42,6 +42,7 @@ function ctx(overrides: Partial<ReviewToolContext> = {}): ReviewToolContext {
     hosts: { github: fakeHost() },
     runCheck: null,
     markRunCheckCompleted: vi.fn(async () => undefined),
+    authorize: vi.fn(async () => ({ ok: true as const })),
     ...overrides,
   };
 }
@@ -86,7 +87,9 @@ describe("handleReviewHostTool", () => {
   });
 
   it("publishes with the run's check id, and records the check completed", async () => {
-    const c = ctx({ runCheck: { provider: "github", repository: WRITE.repository, checkId: "11", headSha: SHA } });
+    const c = ctx({
+      runCheck: { provider: "github", repository: WRITE.repository, checkId: "11", headSha: SHA, prNumber: 7 },
+    });
     const result = JSON.parse(
       await handleReviewHostTool(
         "repo_publish_review",
@@ -139,7 +142,7 @@ describe("handleReviewHostTool", () => {
 
   it("does not hand another repository's run check to publish", async () => {
     const c = ctx({
-      runCheck: { provider: "github", repository: "chfields/elsewhere", checkId: "11", headSha: SHA },
+      runCheck: { provider: "github", repository: "chfields/elsewhere", checkId: "11", headSha: SHA, prNumber: 7 },
     });
     await handleReviewHostTool(
       "repo_publish_review",
@@ -159,7 +162,9 @@ describe("handleReviewHostTool", () => {
 
   it("supersedes the run's check when the review is of a different head, then publishes without it", async () => {
     const OLD = "89abcdef0123456789abcdef0123456789abcdef";
-    const c = ctx({ runCheck: { provider: "github", repository: WRITE.repository, checkId: "11", headSha: OLD } });
+    const c = ctx({
+      runCheck: { provider: "github", repository: WRITE.repository, checkId: "11", headSha: OLD, prNumber: 7 },
+    });
     const result = JSON.parse(
       await handleReviewHostTool(
         "repo_publish_review",
@@ -192,7 +197,7 @@ describe("handleReviewHostTool", () => {
 
   it("returns the published result even when recording the check completed fails", async () => {
     const c = ctx({
-      runCheck: { provider: "github", repository: WRITE.repository, checkId: "11", headSha: SHA },
+      runCheck: { provider: "github", repository: WRITE.repository, checkId: "11", headSha: SHA, prNumber: 7 },
       markRunCheckCompleted: vi.fn(async () => {
         throw new Error("db down");
       }),
@@ -258,5 +263,93 @@ describe("handleReviewHostTool", () => {
         ),
       ),
     ).toMatchObject({ error: "host_not_configured" });
+  });
+});
+
+describe("handleReviewHostTool check binding (E-08/H5-4)", () => {
+  const publish = (prNumber: number) =>
+    JSON.stringify({
+      repository: WRITE.repository,
+      prNumber,
+      headSha: SHA,
+      verdict: "APPROVE",
+      summary: "ok",
+      body: "fine",
+    });
+
+  it("never creates a check for a run with no check of its own, even on a linked check name", async () => {
+    const c = ctx();
+    await handleReviewHostTool("repo_publish_review", publish(7), c);
+    const input = vi.mocked(c.hosts.github!.publishReview).mock.calls[0][1];
+    expect(input.checkName).toBeUndefined();
+    expect(input.checkId).toBeUndefined();
+  });
+
+  it("publishes comments only, touching no check, on a PR the run was not dispatched for", async () => {
+    const c = ctx({
+      runCheck: { provider: "github", repository: WRITE.repository, checkId: "11", headSha: SHA, prNumber: 7 },
+    });
+    const result = JSON.parse(await handleReviewHostTool("repo_publish_review", publish(8), c));
+    expect(result).toMatchObject({ published: true });
+    const input = vi.mocked(c.hosts.github!.publishReview).mock.calls[0][1];
+    expect(input.prNumber).toBe(8);
+    expect(input.checkName).toBeUndefined();
+    expect(input.checkId).toBeUndefined();
+    expect(c.hosts.github!.completeCheck).not.toHaveBeenCalled();
+    expect(c.markRunCheckCompleted).not.toHaveBeenCalled();
+  });
+
+  it("treats a legacy run check with no recorded PR as not bound to any PR", async () => {
+    const c = ctx({
+      runCheck: { provider: "github", repository: WRITE.repository, checkId: "11", headSha: SHA, prNumber: null },
+    });
+    await handleReviewHostTool("repo_publish_review", publish(7), c);
+    const input = vi.mocked(c.hosts.github!.publishReview).mock.calls[0][1];
+    expect(input.checkName).toBeUndefined();
+    expect(input.checkId).toBeUndefined();
+  });
+});
+
+describe("handleReviewHostTool repository authorization (H5-1)", () => {
+  it("re-authorizes the link before every host call and refuses without touching the host", async () => {
+    const authorize = vi.fn(async () => ({ ok: false as const, reason: "identity_not_linked" as const }));
+    const c = ctx({ authorize });
+    const calls: Array<[string, Record<string, unknown>]> = [
+      ["repo_pr_read", { repository: WRITE.repository, prNumber: 7 }],
+      ["repo_read_file", { repository: WRITE.repository, path: "a.py" }],
+      ["repo_list_files", { repository: WRITE.repository }],
+      ["repo_comment", { repository: WRITE.repository, number: 7, body: "hi" }],
+      [
+        "repo_publish_review",
+        { repository: WRITE.repository, prNumber: 7, headSha: SHA, verdict: "COMMENT", summary: "s", body: "b" },
+      ],
+    ];
+    for (const [name, args] of calls) {
+      const result = JSON.parse(await handleReviewHostTool(name, JSON.stringify(args), c)) as {
+        error: string;
+        message: string;
+      };
+      expect(result.error, name).toBe("repository_access_denied");
+      expect(result.message).toMatch(/link_host_account/);
+    }
+    expect(authorize).toHaveBeenCalledTimes(calls.length);
+    expect(authorize).toHaveBeenCalledWith(WRITE);
+    const host = c.hosts.github!;
+    for (const fn of [host.readPullRequest, host.readFile, host.listFiles, host.comment, host.publishReview]) {
+      expect(fn).not.toHaveBeenCalled();
+    }
+  });
+
+  it("fails closed when the authorization itself throws", async () => {
+    const c = ctx({
+      authorize: vi.fn(async () => {
+        throw new Error("db down");
+      }),
+    });
+    const result = JSON.parse(
+      await handleReviewHostTool("repo_list_files", JSON.stringify({ repository: WRITE.repository }), c),
+    ) as { error: string };
+    expect(result.error).toBe("repository_access_denied");
+    expect(c.hosts.github!.listFiles).not.toHaveBeenCalled();
   });
 });

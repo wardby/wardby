@@ -18,6 +18,7 @@ import {
 } from "../providers/review-host/types.js";
 import { normalizeGitHubRepository } from "../coding/protocol.js";
 import { logger } from "./logger.js";
+import { describeDenial, type RepoAccessDecision } from "./repo-access.js";
 
 const log = logger.child({ module: "review-host-tools" });
 
@@ -34,6 +35,12 @@ export interface RunHostCheckRef {
   checkId: string;
   /** The head the check was started on; the check is only the review's if the heads match. */
   headSha: string;
+  /**
+   * The pull request the run was dispatched for. A check (the run's own, or a
+   * new one under the link's checkName) is only ever published for this PR;
+   * null (a row from before it was recorded) binds to no PR.
+   */
+  prNumber: number | null;
 }
 
 export interface ReviewToolContext {
@@ -44,6 +51,12 @@ export interface ReviewToolContext {
   runCheck: RunHostCheckRef | null;
   /** Records that the run's check is now completed (RunHostCheck.completedAt). */
   markRunCheckCompleted: () => Promise<void>;
+  /**
+   * Re-authorizes the link against its current stamp and the agent's current
+   * owner (core/repo-access.ts). Called before every host call; a denial or a
+   * throw refuses the call.
+   */
+  authorize: (link: RepositoryLink) => Promise<RepoAccessDecision>;
 }
 
 const DEFAULT_PATCH_CHARS = 60_000;
@@ -159,7 +172,7 @@ export const REVIEW_HOST_TOOL_DEFS: LoadedTool[] = [
   {
     name: "repo_publish_review",
     description:
-      "Publishes your review of one pull request head, in one call: inline comments on diff lines (a ```suggestion block in a comment body becomes a one-click fix; comments on lines outside the diff move to the summary automatically), one summary comment that is edited in place on later reviews, and — only for an agent linked with a check name — the check conclusion (APPROVE = success, CHANGES_REQUESTED = failure, COMMENT = neutral). Returns published:false with reason stale_head if the PR moved on; then stop.",
+      "Publishes your review of one pull request head, in one call: inline comments on diff lines (a ```suggestion block in a comment body becomes a one-click fix; comments on lines outside the diff move to the summary automatically), one summary comment that is edited in place on later reviews, and — only on the pull request this run was started for, by an agent linked with a check name — the check conclusion (APPROVE = success, CHANGES_REQUESTED = failure, COMMENT = neutral). Returns published:false with reason stale_head if the PR moved on; then stop.",
     jsonSchema: {
       type: "object",
       properties: {
@@ -280,6 +293,17 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
   }
   const host = ctx.hosts[link.provider];
   if (!host) return error("host_not_configured", `No ${link.provider} host is configured on this deployment.`);
+  let decision: RepoAccessDecision;
+  try {
+    decision = await ctx.authorize(link);
+  } catch (err) {
+    log.warn({ err, agentId: ctx.agentId }, "repository authorization failed; denying");
+    decision = { ok: false, reason: "check_failed" };
+  }
+  if (!decision.ok) {
+    log.info({ agentId: ctx.agentId, repository: link.repository, reason: decision.reason }, "repository use denied");
+    return error("repository_access_denied", describeDenial(decision, link.repository));
+  }
 
   try {
     switch (name) {
@@ -309,10 +333,17 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
       case "repo_publish_review": {
         const a = PublishArgs.parse(parsed);
         const runCheck = ctx.runCheck;
-        const sameRepository =
-          runCheck !== null && runCheck.provider === link.provider && runCheck.repository === link.repository;
-        const ownsCheck = sameRepository && a.headSha === runCheck.headSha;
-        if (sameRepository && !ownsCheck) {
+        // E-08/H5-4: a verdict check is only ever published on the PR this
+        // run was dispatched for (never a fork: those are never dispatched).
+        // Any other publish is comments only, with no check at all.
+        const samePullRequest =
+          runCheck !== null &&
+          runCheck.provider === link.provider &&
+          runCheck.repository === link.repository &&
+          runCheck.prNumber !== null &&
+          runCheck.prNumber === a.prNumber;
+        const ownsCheck = samePullRequest && a.headSha === runCheck.headSha;
+        if (samePullRequest && !ownsCheck) {
           // The run's check sits on another head; close it rather than attach this review's verdict to it.
           try {
             await host.completeCheck(link.repository, {
@@ -334,7 +365,7 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
           body: a.body,
           comments: (a.comments ?? []).map((c) => ({ ...c, side: c.side ?? "RIGHT" })),
           agentMarker: ctx.agentId,
-          checkName: link.checkName ?? undefined,
+          ...(samePullRequest && link.checkName ? { checkName: link.checkName } : {}),
           ...(ownsCheck ? { checkId: runCheck.checkId } : {}),
         });
         if (ownsCheck) await markCompleted(ctx);
