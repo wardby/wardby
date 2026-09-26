@@ -13,7 +13,7 @@ import { supportedGlobalsFromPrelude } from "./tool-scan.js";
 import { SANDBOX_PRELUDE } from "../sandbox/prelude.js";
 import { resolveLlmRegistrations } from "../providers/llm/registration.js";
 import { RoutingLlmProvider } from "../providers/llm/routing.js";
-import { loadProviderConfig } from "../config/providers.js";
+import { loadMcpConfig, loadProviderConfig } from "../config/providers.js";
 import { buildSecretCipher } from "../providers/secrets/index.js";
 import { resolvePrincipal } from "../mcp/auth/principal.js";
 import { loadTransferPrivateKey, transferKeyIdOf } from "../providers/secrets/transfer-envelope.js";
@@ -37,12 +37,12 @@ export interface ImportOptions {
 export async function runImport(opts: ImportOptions): Promise<{ report: string; result?: ImportResult }> {
   const env = opts.env ?? process.env;
 
-  // Guard: owner XOR public
+  // Guard: --owner or --public (or both). --public no longer means
+  // owner-less: the imported agents are owned by --owner, or by the
+  // importing operator (LOCAL_PRINCIPAL), and shared with everyone at
+  // execute (resource-sharing grants spec §3.8).
   if (opts.owner === null && !opts.isPublic) {
-    throw new Error("Must specify either --owner or --public (not neither)");
-  }
-  if (opts.owner !== null && opts.isPublic) {
-    throw new Error("Cannot specify both --owner and --public");
+    throw new Error("Must specify --owner, --public, or both");
   }
 
   // Open bundle
@@ -125,11 +125,19 @@ export async function runImport(opts: ImportOptions): Promise<{ report: string; 
   const providerConfig = loadProviderConfig(env);
   const cipher = buildSecretCipher(providerConfig, env);
 
+  // The imported agents' owner: --owner, or in --public mode the importing
+  // operator. Resolved only for a real import (never on --dry-run).
+  const agentOwnerId = opts.isPublic
+    ? (await resolvePrincipal(opts.owner ?? loadMcpConfig(env).localPrincipal, opts.db)).id
+    : ownerId;
+
   // Run create
   const result = await createFromBundle(bundle, recon, {
     db: opts.db,
     cipher,
     ownerId,
+    agentOwnerId,
+    publicAgents: opts.isPublic,
     defaultBudget: opts.defaultBudget ?? "10.00",
     secretMode: effectiveSecretMode,
     transferPrivateKey,

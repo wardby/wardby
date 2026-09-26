@@ -31,7 +31,15 @@ function seal(plaintext: string, name: string, recipientPub: KeyObject): Transfe
 // Minimal fake db capturing calls; enough to prove references-mode creates no secrets
 // and envelope-mode decrypts. Real coverage is in create.database.test.ts.
 function fakeDb() {
-  const calls: Record<string, unknown[]> = { tool: [], agent: [], secret: [], agentSecret: [], webhook: [] };
+  const calls: Record<string, any[]> = {
+    tool: [],
+    agent: [],
+    secret: [],
+    agentSecret: [],
+    webhook: [],
+    agentTool: [],
+    resourceGrant: [],
+  };
   return {
     calls,
     tool: {
@@ -48,7 +56,19 @@ function fakeDb() {
       }),
       update: vi.fn(async () => ({})),
     },
-    agentTool: { upsert: vi.fn(async () => ({})), findFirst: vi.fn(async () => null) },
+    agentTool: {
+      upsert: vi.fn(async (a: unknown) => {
+        calls.agentTool.push(a);
+        return {};
+      }),
+      findFirst: vi.fn(async () => null),
+    },
+    resourceGrant: {
+      upsert: vi.fn(async (a: unknown) => {
+        calls.resourceGrant.push(a);
+        return {};
+      }),
+    },
     secret: {
       upsert: vi.fn(async (a: unknown) => {
         calls.secret.push(a);
@@ -186,6 +206,55 @@ describe("createFromBundle", () => {
     expect(
       res.warnings.some((w) => w.includes("budget group monthly-budget: skipped — budget groups require an owner")),
     ).toBe(true);
+  });
+
+  it("public import: agents owned by the importing operator with an everyone-execute grant; attachments stamped", async () => {
+    const db = fakeDb();
+    db.agent.upsert.mockImplementation(async (a: any) => {
+      db.calls.agent.push(a);
+      return { id: "a", name: "public-agent", ownerId: a.create.ownerId };
+    });
+    db.tool.create.mockImplementation(async (a: any) => {
+      db.calls.tool.push(a);
+      return { id: "t", name: "public-tool" };
+    });
+
+    await createFromBundle(
+      bundleWith({
+        agents: [{ name: "public-agent" }],
+        tools: [{ name: "public-tool", code: "code", paramsZod: "z.object({})", description: "" }],
+        agentTools: [{ agentName: "public-agent", toolName: "public-tool", allowedHosts: ["api.example.com"] }],
+      }),
+      emptyRecon,
+      {
+        db,
+        cipher,
+        ownerId: null,
+        agentOwnerId: "operator",
+        publicAgents: true,
+        defaultBudget: "5.00",
+        secretMode: "references",
+        allowOpenFetch: false,
+      } as any,
+    );
+
+    expect(db.calls.agent[0].create.ownerId).toBe("operator");
+    // Tools stay owner-less in Phase 1.
+    expect(db.calls.tool[0].data.ownerId).toBeNull();
+    expect(db.calls.resourceGrant).toEqual([
+      expect.objectContaining({
+        create: expect.objectContaining({
+          resourceType: "agent",
+          resourceId: "a",
+          granteeKind: "everyone",
+          granteeKey: "everyone",
+          level: "execute",
+          source: "import",
+        }),
+      }),
+    ]);
+    expect(db.calls.agentTool[0].create).toMatchObject({ capabilitiesGrantedById: "operator" });
+    expect(db.calls.agentTool[0].update).toMatchObject({ capabilitiesGrantedById: "operator" });
   });
 
   it("looks a tool up by (owner, name): an existing one of the target owner is reused, not re-created", async () => {

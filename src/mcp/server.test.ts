@@ -39,7 +39,7 @@ function fakeDbWithAgents(agents: FakeAgentRow[], grants: FakeGrantSeed[] = []) 
     resourceGrant: fakeResourceGrants(grants),
     agent: {
       findMany: async ({ where }: { where: AgentWhere | { OR: AgentWhere[] } | Record<string, never> }) => {
-        if ("OR" in where) return agents.filter((a) => (where.OR).some((c) => matches(a, c)));
+        if ("OR" in where) return agents.filter((a) => where.OR.some((c) => matches(a, c)));
         if (Object.keys(where).length === 0) return agents;
         return agents.filter((a) => matches(a, where as AgentWhere));
       },

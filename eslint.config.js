@@ -51,6 +51,7 @@ export default tseslint.config(
       "src/quickstart/*.ts",
       "src/mcp/auth/self-hosted/cli.ts",
       "src/mcp/auth/host-account-cli.ts",
+      "src/mcp/auth/grants-cli.ts",
       "src/tools/*.ts",
     ],
     rules: { "no-console": "off" },

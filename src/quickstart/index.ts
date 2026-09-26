@@ -257,8 +257,13 @@ function applyMigrations(paths: QuickstartPaths): void {
 
 async function seedDemo(paths: QuickstartPaths, state: QuickstartState, budget: number): Promise<void> {
   const { createPrismaClient } = await import("../core/db.js");
-  const db = createPrismaClient(readQuickstartEnv(paths).DATABASE_URL);
+  const { resolvePrincipal } = await import("../mcp/auth/principal.js");
+  const env = readQuickstartEnv(paths);
+  const db = createPrismaClient(env.DATABASE_URL);
   try {
+    // The demo agent belongs to the local operator (LOCAL_PRINCIPAL) and is
+    // private: agents are never owner-less (resource-sharing grants).
+    const owner = await resolvePrincipal(env.LOCAL_PRINCIPAL || "local", db);
     const existing = await db.agent.findUnique({ where: { name: DEMO_AGENT } });
     if (existing && existing.systemPrompt !== DEMO_PROMPT) {
       throw new Error(
@@ -268,7 +273,12 @@ async function seedDemo(paths: QuickstartPaths, state: QuickstartState, budget: 
     if (existing) {
       await db.agent.update({
         where: { name: DEMO_AGENT },
-        data: { model: state.model, budgetUsd: budget, maxTurns: 2 },
+        data: {
+          model: state.model,
+          budgetUsd: budget,
+          maxTurns: 2,
+          ...(existing.ownerId ? {} : { ownerId: owner.id }),
+        },
       });
     } else {
       await db.agent.create({
@@ -278,6 +288,7 @@ async function seedDemo(paths: QuickstartPaths, state: QuickstartState, budget: 
           budgetUsd: budget,
           maxTurns: 2,
           systemPrompt: DEMO_PROMPT,
+          ownerId: owner.id,
         },
       });
     }

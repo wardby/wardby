@@ -27,9 +27,10 @@ export function parseImportArgs(args: string[]): Omit<ImportOptions, "db" | "env
   }
   const dir = positionals[0];
 
-  // Parse owner/public
+  // Parse owner/public: --public may be combined with --owner (the owner of
+  // the imported agents, which --public then shares with everyone).
   const isPublic = values.public ?? false;
-  const owner = isPublic ? null : (values.owner ?? null);
+  const owner = values.owner ?? null;
 
   // Validate on-conflict
   const onConflict = (values["on-conflict"] ?? "fail") as ConflictPolicy;

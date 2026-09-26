@@ -27,6 +27,10 @@ describe("parseImportArgs", () => {
     expect(o.transferKeyPath).toBe("/k.pem");
     expect(o.onConflict).toBe("rename");
   });
+  it("keeps --owner alongside --public (the imported agents' owner)", () => {
+    const o = parseImportArgs(["/tmp/b", "--public", "--owner", "sub-1"]);
+    expect(o).toMatchObject({ isPublic: true, owner: "sub-1" });
+  });
   it("throws when the bundle dir positional is missing", () => {
     expect(() => parseImportArgs(["--owner", "s"])).toThrow(/bundle/i);
   });
