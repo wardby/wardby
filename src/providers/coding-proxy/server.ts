@@ -1,11 +1,12 @@
-import { createServer, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { StringDecoder } from "node:string_decoder";
 import { pipeline, Readable } from "node:stream";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { HTTP_LIMITS, HttpBoundaryError, readBody } from "../../mcp/transport/http-limits.js";
 import { logger } from "../../core/logger.js";
 import { CodingProxyError, PROXY_MAX_BODY_BYTES, type CodingProxy, type ProxyResponseSink } from "./proxy.js";
 import { RegistryError } from "../../coding/registry/types.js";
-import { errorResponse, MAX_PLAN_BODY_BYTES, type RegistryResponse, type RegistryService } from "./registry/service.js";
+import { MAX_PLAN_BODY_BYTES, type RegistryResponse, type RegistryService } from "./registry/service.js";
 import type { ProxyProtocol } from "./types.js";
 
 const proxyLog = logger.child({ module: "coding-proxy" });
@@ -55,6 +56,54 @@ function sendRegistry(response: ServerResponse, result: RegistryResponse & { bod
   response
     .writeHead(result.status, { "content-type": result.contentType, "cache-control": "no-store" })
     .end(result.body);
+}
+
+/** Reads a lockfile body within MAX_PLAN_BODY_BYTES, decoding each chunk
+ *  as it arrives (no buffered copy of the raw bytes), and joins the text
+ *  once. A RegistryError says why it could not be read. */
+function readPlanBody(request: IncomingMessage, signal: AbortSignal): Promise<string> {
+  const tooLarge = () => new RegistryError(413, "wardby_lockfile_too_large", "the lockfile is larger than 20 MiB");
+  const length = request.headers["content-length"];
+  if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > MAX_PLAN_BODY_BYTES))
+    return Promise.reject(tooLarge());
+  const encoding = request.headers["content-encoding"];
+  if (encoding && encoding !== "identity")
+    return Promise.reject(new RegistryError(400, "wardby_bad_request", "the lockfile must not be content-encoded"));
+  return new Promise((resolve, reject) => {
+    const decoder = new StringDecoder("utf8");
+    const parts: string[] = [];
+    let size = 0;
+    const cleanup = () => {
+      request.off("data", data);
+      request.off("end", end);
+      request.off("error", failed);
+      request.off("aborted", failed);
+      signal.removeEventListener("abort", failed);
+    };
+    const fail = (error: RegistryError) => {
+      cleanup();
+      parts.length = 0;
+      request.pause();
+      reject(error);
+    };
+    const failed = () => fail(new RegistryError(400, "wardby_bad_request", "the lockfile could not be read"));
+    const data = (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_PLAN_BODY_BYTES) fail(tooLarge());
+      else parts.push(decoder.write(chunk));
+    };
+    const end = () => {
+      cleanup();
+      parts.push(decoder.end());
+      resolve(parts.join(""));
+    };
+    request.on("data", data);
+    request.once("end", end);
+    request.once("error", failed);
+    request.once("aborted", failed);
+    signal.addEventListener("abort", failed, { once: true });
+    if (signal.aborted) failed();
+  });
 }
 
 function routeProtocol(method: string | undefined, url: string | undefined): ProxyProtocol | undefined {
@@ -110,34 +159,26 @@ export async function startCodingProxyServer(
         }
         const plan = request.url.match(/^\/registry\/([a-z0-9-]+)\/-\/plan(?:\?.*)?$/);
         if (plan && request.method === "POST" && config.registry.plan) {
-          // Lockfile verification: the body is the lockfile, read within
-          // its own size and time bounds.
+          // Lockfile verification. The registry authenticates the token and
+          // takes a plan slot before it asks for the body, which is then read
+          // within its own size and time bounds.
           const controller = new AbortController();
           response.on("close", () => {
             if (!response.writableFinished) controller.abort();
           });
-          const upload = AbortSignal.any([controller.signal, AbortSignal.timeout(PLAN_UPLOAD_MS)]);
-          let body: string;
-          try {
-            body = await readBody(request, MAX_PLAN_BODY_BYTES, upload);
-          } catch (error) {
-            const tooLarge = error instanceof HttpBoundaryError && error.status === 413;
-            sendRegistry(
-              response,
-              errorResponse(
-                tooLarge
-                  ? new RegistryError(413, "wardby_lockfile_too_large", "the lockfile is larger than 20 MiB")
-                  : new RegistryError(400, "wardby_bad_request", "the lockfile could not be read"),
-              ) as RegistryResponse & { body: string },
-            );
-            return;
-          }
+          let bodyRead = false;
           const result = await config.registry.plan({
             ecosystem: plan[1],
             token: registryToken(request.headers.authorization),
-            body,
+            readBody: () => {
+              bodyRead = true;
+              return readPlanBody(request, AbortSignal.any([controller.signal, AbortSignal.timeout(PLAN_UPLOAD_MS)]));
+            },
             signal: controller.signal,
           });
+          // Refused before the body was read: close the connection rather
+          // than read (or keep) what the client is still sending.
+          if (!bodyRead) response.setHeader("connection", "close");
           if ("body" in result) sendRegistry(response, result);
           else {
             void result.stream.cancel().catch(() => undefined);

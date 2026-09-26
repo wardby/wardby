@@ -43,6 +43,8 @@ export interface PlanRefusedVersion {
   version: string;
   code: string;
   reason: string;
+  /** Set for a too-new refusal: it lapses once the version is old enough. */
+  publishedAt?: Date | null;
 }
 
 /** Run-scoped store over the registry-only token session lookup and the
@@ -82,7 +84,7 @@ export interface RegistryStore {
     ecosystem: string,
     name: string,
     version: string,
-  ): Promise<{ code: string; reason: string } | null>;
+  ): Promise<{ code: string; reason: string; publishedAt: Date | null } | null>;
 }
 
 /** In-memory adapter for tests. `contexts` is settable directly so tests can
@@ -172,8 +174,8 @@ export class MemoryRegistryStore implements RegistryStore {
     ecosystem: string,
     name: string,
     version: string,
-  ): Promise<{ code: string; reason: string } | null> {
+  ): Promise<{ code: string; reason: string; publishedAt: Date | null } | null> {
     const refusal = this.planRefusals.get(`${runId}\0${ecosystem}\0${name}\0${version}`);
-    return refusal ? { code: refusal.code, reason: refusal.reason } : null;
+    return refusal ? { code: refusal.code, reason: refusal.reason, publishedAt: refusal.publishedAt ?? null } : null;
   }
 }

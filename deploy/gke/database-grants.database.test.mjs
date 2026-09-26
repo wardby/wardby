@@ -210,12 +210,20 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
       downloadUrl: fact.downloadUrl,
     });
     expect(await registry.findApprovedVersion(runId, "npm", factName, "2.0.0")).toBeNull();
-    const refusal = { name: factName, version: "3.0.0", code: "wardby_version_filtered", reason: "too new" };
+    const publishedAt = new Date("2026-09-25T00:00:00Z");
+    const refusal = {
+      name: factName,
+      version: "3.0.0",
+      code: "wardby_version_filtered",
+      reason: "too new",
+      publishedAt,
+    };
     await registry.refusePlanVersions(runId, "npm", [refusal]);
     await registry.refusePlanVersions(runId, "npm", [refusal]);
     expect(await registry.findPlanRefusal(runId, "npm", factName, "3.0.0")).toEqual({
       code: "wardby_version_filtered",
       reason: "too new",
+      publishedAt,
     });
     for (const table of ["RegistryVersionFact", "RegistryApprovedVersion", "RegistryPlanRefusal"]) {
       await expect(proxy.$executeRawUnsafe(`UPDATE "${table}" SET "version" = 'x' WHERE false`)).rejects.toThrow(

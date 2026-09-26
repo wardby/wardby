@@ -23,6 +23,8 @@ interface FakeVersion {
   peer?: Record<string, string>;
   optional?: Record<string, string>;
   published?: string;
+  /** The registry's tarball URL, when not the standard one. */
+  tarball?: string;
 }
 type FakeRegistry = Record<string, Record<string, FakeVersion>>;
 
@@ -47,7 +49,10 @@ function fakeNpm(registry: FakeRegistry) {
     const manifest = (version: string) => ({
       name,
       version,
-      dist: { integrity: sriOf(tarballOf(name, version)), tarball: tarballUrl(name, version) },
+      dist: {
+        integrity: sriOf(tarballOf(name, version)),
+        tarball: versions[version].tarball ?? tarballUrl(name, version),
+      },
       ...(versions[version].deps ? { dependencies: versions[version].deps } : {}),
       ...(versions[version].peer ? { peerDependencies: versions[version].peer } : {}),
       ...(versions[version].optional ? { optionalDependencies: versions[version].optional } : {}),
@@ -97,13 +102,16 @@ function setup(
     upstream?: UpstreamFetch;
     planMaxEntries?: number;
     planTimeoutMs?: number;
+    now?: () => Date;
+    planConcurrency?: number;
+    planMaxPerRun?: number;
   } = {},
 ) {
   const npm = fakeNpm(registry);
   const store = options.store ?? new MemoryRegistryStore();
   store.contexts.set(capabilityHash("rrg_token"), {
     runId: "run-1",
-    deadlineAt: new Date(NOW.getTime() + DAY),
+    deadlineAt: new Date(NOW.getTime() + 10 * DAY),
     allowlist: { npm: options.allowlist ?? ["a"] },
     policy: {},
   });
@@ -122,15 +130,17 @@ function setup(
     upstream: options.upstream ?? npm.upstream,
     proxyBase: "http://wardby-proxy:8787/registry/",
     limits: { maxFileBytes: 1_000_000, maxTotalBytes: 10_000_000, maxFiles: 100, idleTimeoutMs: 1_000 },
-    now: () => NOW,
+    now: options.now ?? (() => NOW),
     planMaxEntries: options.planMaxEntries,
     planTimeoutMs: options.planTimeoutMs,
+    planConcurrency: options.planConcurrency,
+    planMaxPerRun: options.planMaxPerRun,
   });
   const plan = async (body: string) => {
     const response = await service.plan({
       ecosystem: "npm",
       token: "rrg_token",
-      body,
+      readBody: async () => body,
       signal: new AbortController().signal,
     });
     return { status: response.status, json: JSON.parse((response as { body: string }).body) };
@@ -213,6 +223,44 @@ describe("lockfile plan verification", () => {
     expect(approvedOf(store)).toEqual(["a@1.0.0", "b@1.1.0", "c@2.0.3"]);
     // An unreachable entry costs nothing upstream.
     expect(calls.some((url) => url.includes("evil"))).toBe(false);
+  });
+
+  it("refuses an entry at a declared dependency's folder that is a different package", async () => {
+    // b's folder holds a real, verifiable package that is not b.
+    const registry: FakeRegistry = { ...chain, evil: { "1.1.0": {} } };
+    const lock = JSON.parse(chainLock);
+    lock.packages["node_modules/b"] = { name: "evil", ...locked("evil", "1.1.0") };
+    const { json } = await setup(registry).plan(JSON.stringify(lock));
+    expect(refusedOf(json)).toEqual({
+      "evil@1.1.0": "wardby_package_not_allowed",
+      "c@2.0.3": "wardby_package_not_allowed",
+    });
+  });
+
+  it("does not start from a project dependency whose folder holds a different package", async () => {
+    // The project declares q, but q's folder holds the allowlisted a.
+    const lock = JSON.parse(chainLock);
+    lock.packages[""].dependencies = { q: "^1.0.0" };
+    lock.packages["node_modules/q"] = { name: "a", ...lock.packages["node_modules/a"] };
+    delete lock.packages["node_modules/a"];
+    const { json } = await setup(chain).plan(JSON.stringify(lock));
+    expect(json.approved).toBe(0);
+  });
+
+  it("refuses a version whose registry download is hosted outside npm", async () => {
+    const registry: FakeRegistry = {
+      ...chain,
+      b: { "1.1.0": { deps: { c: "~2.0.0" }, tarball: "https://evil.example/b-1.1.0.tgz" } },
+    };
+    const { json, store } = await (async () => {
+      const s = setup(registry);
+      return { json: (await s.plan(chainLock)).json, store: s.store };
+    })();
+    expect(refusedOf(json)).toEqual({
+      "b@1.1.0": "wardby_upstream_host_not_allowed",
+      "c@2.0.3": "wardby_package_not_allowed",
+    });
+    expect(approvedOf(store)).toEqual(["a@1.0.0"]);
   });
 
   it("refuses a child outside its parent's declared range", async () => {
@@ -347,7 +395,9 @@ describe("lockfile plan verification", () => {
     const bad = await service.plan({
       ecosystem: "npm",
       token: "nope",
-      body: chainLock,
+      readBody: async () => {
+        throw new Error("the body must not be read for a bad token");
+      },
       signal: new AbortController().signal,
     });
     expect(bad.status).toBe(401);
@@ -368,6 +418,49 @@ describe("lockfile plan verification", () => {
     release();
     expect((await first).json.approved).toBe(3);
     expect((await plan(chainLock)).status).toBe(200);
+  });
+
+  it("reads a queued plan's body only once a global slot frees", async () => {
+    const npm = fakeNpm(chain);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const upstream: UpstreamFetch = async (url, init) => {
+      await gate;
+      return npm.upstream(url, init);
+    };
+    const { service, store } = setup(chain, { upstream, planConcurrency: 1 });
+    store.contexts.set(capabilityHash("rrg_token2"), {
+      runId: "run-2",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { npm: ["a"] },
+      policy: {},
+    });
+    const reads: string[] = [];
+    const planFor = (token: string) =>
+      service.plan({
+        ecosystem: "npm",
+        token,
+        readBody: async () => {
+          reads.push(token);
+          return chainLock;
+        },
+        signal: new AbortController().signal,
+      });
+    const first = planFor("rrg_token");
+    const second = planFor("rrg_token2");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(reads).toEqual(["rrg_token"]);
+    release();
+    expect([(await first).status, (await second).status]).toEqual([200, 200]);
+    expect(reads).toEqual(["rrg_token", "rrg_token2"]);
+  });
+
+  it("caps the plans one run may make", async () => {
+    const { plan } = setup(chain, { planMaxPerRun: 2 });
+    expect((await plan(chainLock)).status).toBe(200);
+    expect((await plan(chainLock)).status).toBe(200);
+    const third = await plan(chainLock);
+    expect([third.status, third.json.error]).toEqual([429, expect.stringContaining("wardby_plan_limit")]);
   });
 
   it("stops at its time bound with a retryable 503, keeping what it verified", async () => {
@@ -425,7 +518,7 @@ describe("downloads of approved versions", () => {
     expect(store.fetches.at(-1)).toMatchObject({ name: "c", outcome: "refused", reason: "wardby_integrity_mismatch" });
   });
 
-  it("answers a version the plan refused straight from the plan: no upstream call, no walk", async () => {
+  it("answers a version the plan refused as too new straight from the plan: no upstream call, no walk", async () => {
     const registry: FakeRegistry = { ...chain, b: { "1.1.0": { deps: { c: "~2.0.0" }, published: NEW } } };
     const { plan, service, store, calls } = setup(registry);
     await plan(chainLock);
@@ -439,18 +532,69 @@ describe("downloads of approved versions", () => {
         expect.stringMatching(/wardby_version_filtered: .*newer than the release-age limit/),
       ]);
     }
-    const unreachable = await service.handle(download("c", "2.0.3"));
-    expect([unreachable.status, await drain(unreachable)]).toEqual([
-      403,
-      expect.stringContaining("wardby_package_not_allowed"),
-    ]);
     expect(calls).toEqual([]);
     expect(store.allowances.size).toBe(0);
-    // Recorded as download refusals, a retried one once.
+    // Recorded as a download refusal, the retried one once.
     expect(store.fetches.slice(fetchesBefore).map((fetch) => [fetch.name, fetch.version, fetch.reason])).toEqual([
       ["b", "1.1.0", "wardby_version_filtered"],
-      ["c", "2.0.3", "wardby_package_not_allowed"],
     ]);
+  });
+
+  it("stores only verdicts about the version itself: an unreachable entry's download takes the usual path", async () => {
+    const registry: FakeRegistry = { ...chain, b: { "1.1.0": { deps: { c: "~2.0.0" }, published: NEW } } };
+    const { plan, service, store, calls } = setup(registry);
+    const { json } = await plan(chainLock);
+    expect(refusedOf(json)).toEqual({ "b@1.1.0": "wardby_version_filtered", "c@2.0.3": "wardby_package_not_allowed" });
+    expect([...store.planRefusals.values()].map((refusal) => `${refusal.name}@${refusal.version}`)).toEqual([
+      "b@1.1.0",
+    ]);
+    calls.length = 0;
+    // c was refused only because the lockfile reaches it through b: the
+    // walk decides it (and, b being too new, refuses it too).
+    const response = await service.handle(download("c", "2.0.3"));
+    expect(response.status).toBe(403);
+    expect(calls).toContain("https://registry.npmjs.org/a");
+  });
+
+  it("a too-new refusal lapses once the version is old enough", async () => {
+    const registry: FakeRegistry = { ...chain, b: { "1.1.0": { deps: { c: "~2.0.0" }, published: NEW } } };
+    let now = NOW;
+    const { plan, service } = setup(registry, { now: () => now });
+    await plan(chainLock);
+    expect((await service.handle(download("b", "1.1.0"))).status).toBe(403);
+    now = new Date(NOW.getTime() + 3 * DAY);
+    const aged = await service.handle(download("b", "1.1.0"));
+    expect([aged.status, await drain(aged)]).toEqual([200, "tarball b@1.1.0"]);
+  });
+
+  it("scenario A: an overrides-forced version the lockfile doesn't reach is not stored, and the walk can allow it", async () => {
+    // `overrides` forced c to 3.0.0 under b, whose registry range is ~2.0.0.
+    const registry: FakeRegistry = { ...chain, c: { "2.0.3": {}, "3.0.0": {} } };
+    const lock = JSON.parse(chainLock);
+    lock.packages["node_modules/c"] = locked("c", "3.0.0");
+    const { plan, service, store } = setup(registry);
+    const { json } = await plan(JSON.stringify(lock));
+    expect(refusedOf(json)).toEqual({ "c@3.0.0": "wardby_package_not_allowed" });
+    expect(store.planRefusals.size).toBe(0);
+    const response = await service.handle(download("c", "3.0.0"));
+    expect([response.status, await drain(response)]).toEqual([200, "tarball c@3.0.0"]);
+  });
+
+  it("scenario B: a hostile entry claiming another package's name@version does not block that package", async () => {
+    const registry: FakeRegistry = { ...chain, react: { "18.3.1": {} } };
+    const lock = JSON.parse(chainLock);
+    lock.packages["node_modules/zzz"] = {
+      name: "react",
+      version: "18.3.1",
+      resolved: tarballUrl("react", "18.3.1"),
+      integrity: "sha512-bogus",
+    };
+    const { plan, service, store } = setup(registry, { allowlist: ["a", "react"] });
+    const { json } = await plan(JSON.stringify(lock));
+    expect(refusedOf(json)["react@18.3.1"]).toBe("wardby_package_not_allowed");
+    expect(store.planRefusals.size).toBe(0);
+    const response = await service.handle(download("react", "18.3.1"));
+    expect([response.status, await drain(response)]).toEqual([200, "tarball react@18.3.1"]);
   });
 
   it("answers an advisory refusal naming the advisory, and sends a failed registry read down the usual path", async () => {
@@ -464,6 +608,39 @@ describe("downloads of approved versions", () => {
     expect([...store.planRefusals.values()].map((refusal) => `${refusal.name}:${refusal.code}`)).toEqual([
       "b:wardby_version_filtered",
     ]);
+  });
+
+  it("never downloads an approved version from outside the adapter's hosts", async () => {
+    const { service, store, calls } = setup(chain);
+    await store.putVersionFacts("npm", [
+      {
+        name: "c",
+        version: "2.0.3",
+        publishedAt: new Date(OLD),
+        integrity: sriOf(tarballOf("c", "2.0.3")),
+        downloadUrl: "https://evil.example/c-2.0.3.tgz",
+        dependencies: [],
+      },
+    ]);
+    await store.approveVersions("run-1", "npm", [
+      { name: "c", version: "2.0.3", integrity: sriOf(tarballOf("c", "2.0.3")) },
+    ]);
+    const response = await service.handle(download("c", "2.0.3"));
+    expect([response.status, await drain(response)]).toEqual([
+      502,
+      expect.stringContaining("wardby_upstream_host_not_allowed"),
+    ]);
+    expect(calls).toEqual([]);
+  });
+
+  it("an approval of a version wins over a plan refusal of it", async () => {
+    const { plan, service, store } = setup(chain, { withheld: { "c@2.0.3": ["GHSA-was-high"] } });
+    await plan(chainLock);
+    expect(store.planRefusals.size).toBe(1);
+    // A later plan approves it (the advisory was withdrawn).
+    await setup(chain, { store }).plan(chainLock);
+    const response = await service.handle(download("c", "2.0.3"));
+    expect([response.status, await drain(response)]).toEqual([200, "tarball c@2.0.3"]);
   });
 
   it("sends an unapproved version of an approved name down the usual path", async () => {

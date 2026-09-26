@@ -3,7 +3,10 @@ import { MemoryProxyLedger } from "./memory-ledger.js";
 import { CodingProxy, type CreatedCodingProxySession } from "./proxy.js";
 import type { RegistryAdapter } from "../../coding/registry/types.js";
 import { capabilityHash } from "./proxy.js";
+import { npmAdapter } from "../../coding/registry/npm.js";
+import { RegistryError } from "../../coding/registry/types.js";
 import {
+  errorResponse,
   RegistryService,
   type RegistryPlanRequest,
   type RegistryRequest,
@@ -228,12 +231,16 @@ describe("coding proxy registry routing", () => {
     await server.close();
   });
 
-  it("routes POST /registry/<ecosystem>/-/plan with its body to the registry's plan, within 20 MiB", async () => {
+  it("routes POST /registry/<ecosystem>/-/plan to the registry's plan, which reads the body within 20 MiB", async () => {
     const plans: { ecosystem: string; token: string; body: string }[] = [];
     const registry = {
       handle: async (): Promise<RegistryResponse> => ({ status: 200, contentType: "text", body: "" }),
       plan: async (request: RegistryPlanRequest): Promise<RegistryResponse> => {
-        plans.push({ ecosystem: request.ecosystem, token: request.token, body: request.body });
+        try {
+          plans.push({ ecosystem: request.ecosystem, token: request.token, body: await request.readBody() });
+        } catch (error) {
+          return errorResponse(error as RegistryError);
+        }
         return { status: 200, contentType: "application/json", body: '{"approved":1,"refused":[]}' };
       },
     };
@@ -250,6 +257,36 @@ describe("coding proxy registry routing", () => {
     expect(plans).toHaveLength(1);
     // Only POST plans; a GET of the same path is an ordinary registry request.
     expect((await fetch(url)).status).toBe(200);
+    await server.close();
+  });
+
+  it("rejects an unauthenticated plan before reading its body", async () => {
+    const registry = new RegistryService({
+      adapters: new Map([["npm", npmAdapter]]),
+      store: new MemoryRegistryStore(),
+      audit: { audit: async () => ({ withheld: () => [], reported: () => [] }), auditVersions: async () => new Map() },
+      upstream: async () => new Response("", { status: 500 }),
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1, maxTotalBytes: 1, maxFiles: 1, idleTimeoutMs: 1_000 },
+    });
+    const server = await startCodingProxyServer(fakeProxy(), { host: "127.0.0.1", port: 0, registry });
+    let pulled = 0;
+    // A body that never ends: the answer can only come before it is read.
+    const body = new ReadableStream<Uint8Array>({
+      pull: async (controller) => {
+        pulled += 1;
+        if (pulled === 1) controller.enqueue(new TextEncoder().encode("{"));
+        else await new Promise(() => {});
+      },
+    });
+    const response = await fetch(`http://127.0.0.1:${server.port}/registry/npm/-/plan`, {
+      method: "POST",
+      headers: { authorization: "Bearer rrg_nope" },
+      body,
+      duplex: "half",
+    });
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: expect.stringContaining("invalid_capability") });
     await server.close();
   });
 

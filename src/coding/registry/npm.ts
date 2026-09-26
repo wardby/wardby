@@ -283,6 +283,8 @@ export const npmAdapter: RegistryAdapter = {
         npm_config_audit: "false",
         npm_config_fund: "false",
         npm_config_update_notifier: "false",
+        // The only registry the npm shim (npm-shim.mjs) sends a lockfile to.
+        WARDBY_NPM_PLAN_REGISTRY: registryUrl,
       },
       files: [{ path: npmrc, content: `${registryUrl.replace(/^https?:/, "")}:_authToken=${token}\n`, mode: 0o600 }],
     };

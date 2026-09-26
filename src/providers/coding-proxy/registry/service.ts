@@ -21,6 +21,7 @@ import {
   type Integrity,
   type LockfilePlanSupport,
   type PackageMetadata,
+  type ParsedLockfile,
   type RegistryAdapter,
   type RegistryRoute,
   type UpstreamFetch,
@@ -61,11 +62,11 @@ const DEFINITIVE_NODE_ERRORS = new Set(["wardby_package_not_found", "wardby_meta
 /** Largest per-version document read from upstream for lockfile
  *  verification (they are a few KB). */
 const MAX_VERSION_DOCUMENT_BYTES = 4 * 1024 * 1024;
-/** Plan refusal codes that are not a verdict on the version (a registry
- *  read failed), so a later download of it is not answered from the plan. */
-const TRANSIENT_PLAN_CODES = new Set(["wardby_upstream_error"]);
-/** Lockfile plans verified at once across every run. */
-const PLAN_CONCURRENCY = 2;
+/** Lockfile plans read and verified at once across every run: with the
+ *  20 MiB body cap, this bounds the lockfile text held at once. */
+export const DEFAULT_PLAN_CONCURRENCY = 2;
+/** Lockfile plans one run may make (REGISTRY_PLAN_MAX_PER_RUN). */
+export const DEFAULT_PLAN_MAX_PER_RUN = 20;
 /** The `filename` of a refused RegistryFetch row a lockfile plan recorded
  *  (the route it came from), which is how get_run tells plan refusals from
  *  download refusals. */
@@ -192,6 +193,8 @@ interface RunTally {
   /** A lockfile plan is running for the run: one at a time per run, so a
    *  worker cannot queue many (each holds its parsed lockfile). */
   planning?: boolean;
+  /** Lockfile plans the run has started. */
+  plans?: number;
   /** Downloads answered from a plan refusal already recorded, so a
    *  retried download records its refusal once. */
   planAnswered?: Set<string>;
@@ -212,8 +215,11 @@ export interface RegistryRequest {
 export interface RegistryPlanRequest {
   ecosystem: string;
   token: string;
-  /** The lockfile, as sent (at most MAX_PLAN_BODY_BYTES). */
-  body: string;
+  /** Reads the lockfile (at most MAX_PLAN_BODY_BYTES). Called only once the
+   *  token is authenticated and a plan slot is held, so an unauthenticated
+   *  or queued request never has its body buffered. Throws a RegistryError
+   *  (413 or 400) for a body it cannot read. */
+  readBody(): Promise<string>;
   signal: AbortSignal;
 }
 
@@ -326,7 +332,7 @@ export class RegistryService {
   private readonly inFlight = new Map<string, { files: number; bytes: number }>();
   private readonly tallies = new Map<string, RunTally>();
   private readonly walkSlots: Slots;
-  private readonly planSlots = new Slots(PLAN_CONCURRENCY);
+  private readonly planSlots: Slots;
   private readonly versionUpstream: UpstreamFetch;
 
   constructor(
@@ -359,10 +365,15 @@ export class RegistryService {
       planMaxEntries?: number;
       /** Time one lockfile plan may take (default 120 s). */
       planTimeoutMs?: number;
+      /** Lockfile plans read and verified at once across every run (default 2). */
+      planConcurrency?: number;
+      /** Lockfile plans one run may make (default 20). */
+      planMaxPerRun?: number;
     },
   ) {
     this.now = options.now ?? (() => new Date());
     this.walkSlots = new Slots(options.maxGraphConcurrency ?? DEFAULT_MAX_GRAPH_CONCURRENCY);
+    this.planSlots = new Slots(options.planConcurrency ?? DEFAULT_PLAN_CONCURRENCY);
     this.metadataTtlMs = options.metadataTtlMs ?? 300_000;
     this.metadataCacheEntries = options.metadataCacheEntries ?? DEFAULT_METADATA_CACHE_ENTRIES;
     this.metadataCacheBytes = options.metadataCacheBytes ?? DEFAULT_METADATA_CACHE_BYTES;
@@ -404,9 +415,25 @@ export class RegistryService {
         "wardby_plan_in_progress",
         "a lockfile plan is already running for this run; wait for it to finish",
       );
+    const maxPlans = this.options.planMaxPerRun ?? DEFAULT_PLAN_MAX_PER_RUN;
+    if ((tally.plans ?? 0) >= maxPlans)
+      throw new RegistryError(
+        429,
+        "wardby_plan_limit",
+        `this run has made its ${maxPlans} lockfile plans (REGISTRY_PLAN_MAX_PER_RUN)`,
+      );
     tally.planning = true;
+    tally.plans = (tally.plans ?? 0) + 1;
     try {
-      return await this.verifyPlan(request, adapter, support, auditVersions, context);
+      // The body is read only while a slot is held: a queued plan holds no
+      // lockfile text, and at most `planConcurrency` bodies exist at once.
+      return await this.planSlots.run(async () => {
+        const lockfile = support.parse(await request.readBody(), {
+          maxEntries: this.options.planMaxEntries ?? DEFAULT_PLAN_MAX_ENTRIES,
+          proxyRegistryUrl: `${this.options.proxyBase}${adapter.id}/`,
+        });
+        return this.verifyPlan(request, adapter, support, lockfile, auditVersions, context);
+      });
     } finally {
       tally.planning = false;
     }
@@ -416,13 +443,10 @@ export class RegistryService {
     request: RegistryPlanRequest,
     adapter: RegistryAdapter,
     support: LockfilePlanSupport,
+    lockfile: ParsedLockfile,
     auditVersions: OsvAudit["auditVersions"],
     context: RegistryRunContext,
   ): Promise<RegistryResponse> {
-    const lockfile = support.parse(request.body, {
-      maxEntries: this.options.planMaxEntries ?? DEFAULT_PLAN_MAX_ENTRIES,
-      proxyRegistryUrl: `${this.options.proxyBase}${adapter.id}/`,
-    });
     const entries = parseAllowlist(context.allowlist, this.options.adapters).get(adapter.id) ?? [];
     const { minReleaseAgeDays } = resolvePolicy(context.policy);
     const timeoutMs = this.options.planTimeoutMs ?? DEFAULT_PLAN_TIMEOUT_MS;
@@ -430,24 +454,22 @@ export class RegistryService {
     const store = this.options.store;
     let result;
     try {
-      result = await this.planSlots.run(() =>
-        verifyLockfilePlan({
-          adapter,
-          support,
-          lockfile,
-          roots: entries,
-          cutoff: new Date(this.now().getTime() - minReleaseAgeDays * DAY_MS),
-          facts: {
-            getVersionFacts: (versions) => store.getVersionFacts(adapter.id, versions),
-            putVersionFacts: (facts) => store.putVersionFacts(adapter.id, facts),
-          },
-          upstream: this.versionUpstream,
-          streamUpstream: this.options.upstream,
-          audit: (versions, auditSignal) => auditVersions(adapter, versions, auditSignal),
-          hostAllowed: (url) => this.hostAllowed(adapter, url),
-          signal,
-        }),
-      );
+      result = await verifyLockfilePlan({
+        adapter,
+        support,
+        lockfile,
+        roots: entries,
+        cutoff: new Date(this.now().getTime() - minReleaseAgeDays * DAY_MS),
+        facts: {
+          getVersionFacts: (versions) => store.getVersionFacts(adapter.id, versions),
+          putVersionFacts: (facts) => store.putVersionFacts(adapter.id, facts),
+        },
+        upstream: this.versionUpstream,
+        streamUpstream: this.options.upstream,
+        audit: (versions, auditSignal) => auditVersions(adapter, versions, auditSignal),
+        hostAllowed: (url) => this.hostAllowed(adapter, url),
+        signal,
+      });
     } catch (error) {
       if (!signal.aborted) throw error;
       // Every fact read so far is stored, so a retry resumes from there.
@@ -460,19 +482,25 @@ export class RegistryService {
       );
     }
     await store.approveVersions(context.runId, adapter.id, result.approved);
-    // Definitive refusals answer later downloads of those exact versions;
-    // a registry read that failed is not definitive, so those still take
-    // the usual path.
+    // Only verdicts about the registry's name@version itself answer later
+    // downloads; a lockfile-dependent one (unreachable, an integrity or
+    // source the lockfile claims) must not block the same version reached
+    // another way, so those downloads take the usual path.
     await store.refusePlanVersions(
       context.runId,
       adapter.id,
-      result.refused.filter((refusal) => !TRANSIENT_PLAN_CODES.has(refusal.code)),
+      result.refused
+        .filter((refusal) => refusal.intrinsic)
+        .map(({ name, version, code, reason, publishedAt }) => ({ name, version, code, reason, publishedAt })),
     );
     await this.recordPlanRefusals(context, adapter, result.refused);
     return {
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ approved: result.approved.length, refused: result.refused }),
+      body: JSON.stringify({
+        approved: result.approved.length,
+        refused: result.refused.map(({ name, version, code, reason }) => ({ name, version, code, reason })),
+      }),
     };
   }
 
@@ -556,7 +584,10 @@ export class RegistryService {
       const refused = approved
         ? null
         : await this.options.store.findPlanRefusal(context.runId, adapter.id, name, route.version);
-      if (refused) {
+      // A too-new refusal lapses once the version is old enough: the
+      // release-age cutoff moves with time.
+      const cutoff = this.now().getTime() - resolvePolicy(context.policy).minReleaseAgeDays * DAY_MS;
+      if (refused && (refused.publishedAt === null || refused.publishedAt.getTime() > cutoff)) {
         const tally = this.tally(context);
         tally.planAnswered ??= new Set();
         const key = `${adapter.id}\0${name}@${route.version}\0${refused.code}`;

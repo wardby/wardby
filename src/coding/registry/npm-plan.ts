@@ -186,6 +186,9 @@ export function parseNpmLockfile(
   }
 
   const resolve = (fromPath: string, key: string): LockfileEntry | undefined => {
+    // npm searches the package's own node_modules, then each enclosing
+    // package's (never a bare `node_modules` or `@scope` folder), then the
+    // root's; a workspace project's enclosing package is the root.
     let directory = fromPath;
     for (;;) {
       const candidate = `${directory === "" ? "" : `${directory}/`}${NODE_MODULES}${key}`;
@@ -193,8 +196,8 @@ export function parseNpmLockfile(
       const found = byPath.get(candidate);
       if (found) return found;
       if (directory === "") return undefined;
-      const slash = directory.lastIndexOf("/");
-      directory = slash < 0 ? "" : directory.slice(0, slash);
+      const enclosing = directory.lastIndexOf(`/${NODE_MODULES}`);
+      directory = enclosing < 0 ? "" : directory.slice(0, enclosing);
     }
   };
   return { entries, projects, resolve };
@@ -293,13 +296,13 @@ export async function fetchNpmPublishTimes(
   return times;
 }
 
-/** npm's own rule for whether a locked version satisfies a declared range
- *  (arborist's dep-valid): `*` and dist-tags accept any version, otherwise
- *  a loose semver match. */
+/** Whether a locked version satisfies a declared range: `*` and dist-tags
+ *  accept any version (as npm's own dep-valid does), otherwise strict semver,
+ *  the same match the graph walk uses. */
 export function npmEdgeSatisfies(version: string, range: string): boolean {
   if (range === "*" || range === "") return true;
   try {
-    return semver.satisfies(version, range, { loose: true });
+    return semver.satisfies(version, range);
   } catch {
     return false;
   }
