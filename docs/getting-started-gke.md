@@ -26,6 +26,9 @@ use `deploy/gke` and the `gke-autopilot` Kubernetes overlay described here.
   Cloud Armor rate-limit policy.
 - Namespace RBAC and default-deny network policies constrain the launcher,
   proxy, control plane, and worker pods.
+- Native runs use the durable executor (`EXECUTOR=dbos`), so a run survives
+  the control-plane pod being preempted or rescheduled. See "Durable executor"
+  below.
 
 Claude Code's two-container executor is currently Docker-only; the Kubernetes
 launcher accepts Codex coding workers.
@@ -242,9 +245,9 @@ group role in `deploy/gke/database-grants.sql`:
 
 | Workload      | Google service account   | Kubernetes service account | May do                                                                                                                                                                 |
 | ------------- | ------------------------ | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Control plane | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app`: read/write every table                                                                                                                                   |
+| Control plane | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app`: read/write every table, including the durable executor's in schema `dbos`; never change a schema                                                         |
 | Coding proxy  | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy`: only its budget ledger — `CodingProxySession`/`CodingProxyRequest`, plus update `tokensIn`, `tokensOut` and `costUsd` on `Run`, and read only its `id` |
-| Migrations    | `<name_prefix>-migrator` | `wardby-migrator`          | Acts as the table owner (`SET ROLE`), so `prisma migrate deploy` can alter and create tables                                                                           |
+| Migrations    | `<name_prefix>-migrator` | `wardby-migrator`          | Acts as the table owner (`SET ROLE`), so `prisma migrate deploy` and `dbos schema` can alter and create tables                                                         |
 
 `deploy/gke/bootstrap-database-iam.sh` applies the grants as the built-in
 owner, from a short-lived Job inside the cluster. Run it whenever
@@ -431,6 +434,47 @@ Migrations run as a `wardby-migrate-<unix time>` Job before the Deployments
 roll; if it fails, `up.sh` prints the `migrate` and `cloud-sql-proxy` container
 logs (and, if those are empty or the Job timed out, the Job's and pod's
 events), then stops.
+
+### Durable executor
+
+The control plane runs native runs on the durable executor (`EXECUTOR=dbos`):
+each LLM turn and tool call is checkpointed in Postgres, in schema `dbos`. If
+the control-plane pod is preempted, evicted or rescheduled, its replacement
+picks each interrupted run up from its last completed step once the run's
+heartbeat times out (about a minute after the replacement is running). Only
+the step that was in flight runs again. Coding runs are Kubernetes Jobs and are unaffected.
+
+- **Schema.** The migration Job creates and migrates `dbos` as the migrator
+  (`npm run dbos:migrate`) after the Prisma migrations, so it always runs
+  before the control plane starts. The control plane's role only reads and
+  writes it: `database-grants.sql` grants `wardby_app` `USAGE` on the schema,
+  `SELECT`/`INSERT`/`UPDATE`/`DELETE` on its tables, and the same through the
+  owner's default privileges for tables a later DBOS version adds.
+- **Executor id.** `DBOS_EXECUTOR_ID` is left unset, so every process gets a
+  random one. A replacement pod does not need the old pod's id: the
+  reconciler adopts any interrupted run, whichever process started it. This is
+  also what makes the overlapping rolling update safe.
+- **Version.** `up.sh` sets `DBOS__APPVERSION` to the runtime image digest. A
+  run resumes only under the version that started it: across a pod move, or an
+  `up.sh` re-run whose source did not change, runs continue. When you deploy
+  new code, runs still in flight as the old pod stops are marked `lost`, the
+  same as without the durable executor. Deploy between runs if that matters.
+- **Data at rest and retention.** `dbos.operation_outputs` holds every step's
+  output — prompts, model responses and full tool results — with no retention
+  limit. Pruning finished workflows is the operator's job; see
+  [Durable executor](security-deployment.md#durable-executor) for what is
+  stored and how to prune it with `DBOS.deleteWorkflow`.
+
+**Enabling it on an existing deployment.** The grants changed, so apply them
+before deploying: run `deploy/gke/bootstrap-database-iam.sh --check`, then
+`deploy/gke/bootstrap-database-iam.sh`, then `deploy/gke/up.sh`. Without the
+grants the new control-plane pod crash-loops with "permission denied" while
+the old one keeps serving, and `up.sh` stops at the rollout. On a brand-new
+project the order under "Database login" already covers it.
+
+**Switching back** to the in-process executor: set `EXECUTOR` to `in-process`
+in `deploy/kind-coding/manifests/overlays/gke-autopilot/control-plane.yaml`
+and re-run `up.sh`. Runs in flight at that moment end `lost`.
 
 ### Pod priority and headroom
 

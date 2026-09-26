@@ -1,13 +1,18 @@
 // Proves deploy/gke/database-grants.sql against a real Postgres: the coding
 // proxy can do everything its ledger and package registry do and nothing else, the app can read
 // and write data but not change the schema, and the migrator acts as the owner.
+// It also proves the durable executor's `dbos` schema: the migrator creates and
+// migrates it with DBOS's own CLI (as the migration Job does), and the app can
+// then launch DBOS on it and use its tables, but not change them.
 // Runs in CI (DATABASE_URL set); the test user must be able to create roles.
 // The test renders the script against per-run copies of the wardby_app /
 // wardby_proxy group roles (t_wardby_app_<suffix> / t_wardby_proxy_<suffix>),
 // so it never creates, drops, or otherwise touches the real group roles a
 // live bootstrap created, and concurrent runs of this suite don't collide.
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../../src/core/db.ts";
 import { PrismaProxyLedger } from "../../src/providers/coding-proxy/prisma-ledger.ts";
@@ -20,6 +25,9 @@ const groupsFor = (s) => ({ app: `t_wardby_app_${s}`, proxy: `t_wardby_proxy_${s
 const roles = rolesFor(suffix);
 const groups = groupsFor(suffix);
 const PASSWORD = "test-only-grants";
+// A per-run copy of the `dbos` schema, for the same reason as the group roles.
+const dbosSchema = `t_dbos_${suffix}`;
+const DBOS_CLI = fileURLToPath(new URL("../../node_modules/@dbos-inc/dbos-sdk/dist/src/cli/cli.js", import.meta.url));
 
 function render(owner, r = roles, g = groups) {
   return GRANTS.replaceAll("{{owner}}", owner)
@@ -27,7 +35,8 @@ function render(owner, r = roles, g = groups) {
     .replaceAll("{{app}}", r.app)
     .replaceAll("{{proxy}}", r.proxy)
     .replace(/\bwardby_app\b/g, g.app)
-    .replace(/\bwardby_proxy\b/g, g.proxy);
+    .replace(/\bwardby_proxy\b/g, g.proxy)
+    .replace(/\bdbos\b/g, dbosSchema);
 }
 // Each statement in the SQL file ends with a "-- ;;" line (the file has a DO
 // block with inner semicolons, so splitting on ';' would break it).
@@ -37,11 +46,23 @@ function statements(sql) {
     .map((s) => s.replace(/^\s*--.*$/gm, "").trim())
     .filter(Boolean);
 }
-function clientAs(role) {
+function urlAs(role) {
   const url = new URL(process.env.DATABASE_URL);
   url.username = role;
   url.password = PASSWORD;
-  return createPrismaClient(url.toString());
+  return url.toString();
+}
+function clientAs(role) {
+  return createPrismaClient(urlAs(role));
+}
+// `dbos schema <url>`: the migration Job's `npm run dbos:migrate`. It is also
+// what DBOS.launch() runs against the system database (the SDK's
+// ensureSystemDatabase), so running it as the app proves the app can launch.
+function dbosSchemaAs(role) {
+  return execFileSync(process.execPath, [DBOS_CLI, "schema", urlAs(role), "--schema", dbosSchema], {
+    env: { PATH: process.env.PATH },
+    stdio: "pipe",
+  }).toString();
 }
 
 describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", () => {
@@ -69,6 +90,7 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
     await admin.codingRun.deleteMany({ where: { runId } });
     await admin.run.deleteMany({ where: { id: runId } });
     await admin.agent.deleteMany({ where: { id: agentId } });
+    await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${dbosSchema}" CASCADE`);
     for (const role of [...Object.values(roles), ...Object.values(groups)]) {
       await admin.$executeRawUnsafe(`DROP OWNED BY "${role}"`);
       await admin.$executeRawUnsafe(`DROP ROLE IF EXISTS "${role}"`);
@@ -258,5 +280,72 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
     clients.push(app);
     await expect(app.$executeRawUnsafe(`INSERT INTO "${table}" VALUES (1)`)).resolves.toBe(1);
     await admin.$executeRawUnsafe(`DROP TABLE "${table}"`);
+  });
+
+  it("lets the migrator create and migrate the dbos schema, owned by the owner", async () => {
+    dbosSchemaAs(roles.migrator);
+    const owners = await admin.$queryRawUnsafe(
+      `SELECT DISTINCT tableowner FROM pg_tables WHERE schemaname = $1`,
+      dbosSchema,
+    );
+    expect(owners).toEqual([{ tableowner: owner }]);
+    const [{ tables }] = await admin.$queryRawUnsafe(
+      `SELECT count(*)::int AS tables FROM pg_tables
+        WHERE schemaname = $1 AND tablename IN ('workflow_status', 'operation_outputs', 'dbos_migrations')`,
+      dbosSchema,
+    );
+    expect(tables).toBe(3);
+  });
+
+  it("lets the app launch DBOS on the migrated schema and use its tables, but not change them", async () => {
+    // The launch path: finds the schema current and changes nothing. Without
+    // the grants the app cannot see dbos_migrations, takes the schema for a new
+    // one, and fails on CREATE SCHEMA ("permission denied for database").
+    dbosSchemaAs(roles.app);
+    const app = clientAs(roles.app);
+    clients.push(app);
+    const wf = `grants-wf-${suffix}`;
+    await app.$executeRawUnsafe(
+      `INSERT INTO "${dbosSchema}".workflow_status (workflow_uuid, status, executor_id) VALUES ($1, 'PENDING', 'a')`,
+      wf,
+    );
+    await app.$executeRawUnsafe(
+      `INSERT INTO "${dbosSchema}".operation_outputs (workflow_uuid, function_id, output) VALUES ($1, 0, 'x')`,
+      wf,
+    );
+    // Adoption and dequeue claim rows under a row lock and rewrite the owner.
+    await app.$transaction([
+      app.$queryRawUnsafe(`SELECT 1 FROM "${dbosSchema}".workflow_status WHERE workflow_uuid = $1 FOR UPDATE`, wf),
+      app.$executeRawUnsafe(
+        `UPDATE "${dbosSchema}".workflow_status SET executor_id = 'b' WHERE workflow_uuid = $1`,
+        wf,
+      ),
+    ]);
+    // Pruning (DBOS.deleteWorkflow) deletes a workflow's rows.
+    await expect(
+      app.$executeRawUnsafe(`DELETE FROM "${dbosSchema}".operation_outputs WHERE workflow_uuid = $1`, wf),
+    ).resolves.toBe(1);
+    await expect(
+      app.$executeRawUnsafe(`DELETE FROM "${dbosSchema}".workflow_status WHERE workflow_uuid = $1`, wf),
+    ).resolves.toBe(1);
+
+    await expect(app.$executeRawUnsafe(`CREATE TABLE "${dbosSchema}".probe (id int)`)).rejects.toThrow(
+      /permission denied/,
+    );
+    await expect(app.$executeRawUnsafe(`TRUNCATE "${dbosSchema}".operation_outputs`)).rejects.toThrow(
+      /permission denied/,
+    );
+    await expect(
+      app.$executeRawUnsafe(`ALTER TABLE "${dbosSchema}".operation_outputs ADD COLUMN probe int`),
+    ).rejects.toThrow(/must be owner/);
+  });
+
+  it("gives the app the tables a later DBOS migration adds, through the owner's default privileges", async () => {
+    const migrator = clientAs(roles.migrator);
+    clients.push(migrator);
+    await migrator.$executeRawUnsafe(`CREATE TABLE "${dbosSchema}".later_table (id int)`);
+    const app = clientAs(roles.app);
+    clients.push(app);
+    await expect(app.$executeRawUnsafe(`INSERT INTO "${dbosSchema}".later_table VALUES (1)`)).resolves.toBe(1);
   });
 });
