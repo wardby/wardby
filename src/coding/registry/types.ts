@@ -135,6 +135,11 @@ export interface RegistryAdapter {
   /** Whether `version` satisfies `range` in this ecosystem's syntax
    *  (npm semver ranges, PEP 440 specifiers). */
   satisfies(version: string, range: string): boolean;
+  /** Total order over this ecosystem's version strings (semver for npm,
+   *  PEP 440 for PyPI, normalizing non-canonical spellings first), used to
+   *  evaluate OSV advisory ranges. Throws on a version it cannot parse; the
+   *  audit treats that as affected (fail closed). */
+  compareVersions(a: string, b: string): number;
 
   // --- Protocol ---------------------------------------------------------
   /** Classify a request under /registry/<id>/, or null for 404. */

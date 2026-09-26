@@ -64,6 +64,7 @@ const fakeAdapter: RegistryAdapter = {
   parseAllowlistEntry: (raw) => ({ name: raw, wildcard: false }),
   normalizeName: (name) => name,
   satisfies: () => true,
+  compareVersions: (a, b) => a.localeCompare(b),
   route: (_method, subpath) => {
     const download = subpath.match(/^dl\/([^/]+)\/([^/]+)$/);
     return download
@@ -77,9 +78,10 @@ const fakeAdapter: RegistryAdapter = {
 };
 
 type AdvisoryIndex = {
-  withheld: ReadonlyMap<string, readonly string[]>;
-  reported: ReadonlyMap<string, readonly string[]>;
+  withheld: (version: string) => readonly string[];
+  reported: (version: string) => readonly string[];
 };
+const NO_ADVISORIES: AdvisoryIndex = { withheld: () => [], reported: () => [] };
 
 function service(
   overrides: {
@@ -105,8 +107,8 @@ function service(
       audit:
         overrides.audit ??
         (async () => ({
-          withheld: new Map((overrides.withheld ?? []).map((v) => [v, ["GHSA-x"]])),
-          reported: new Map(),
+          withheld: (version: string) => ((overrides.withheld ?? []).includes(version) ? ["GHSA-x"] : []),
+          reported: () => [],
         })),
     },
     upstream: overrides.upstream ?? (async () => new Response(overrides.upstreamBody ?? tarball)),
@@ -235,7 +237,7 @@ describe("RegistryService", () => {
     const registry = new RegistryService({
       adapters: new Map([["fake", fakeAdapter]]),
       store,
-      audit: { audit: async () => ({ withheld: new Map(), reported: new Map() }) },
+      audit: { audit: async () => NO_ADVISORIES },
       upstream: async () => new Response(hangingBody),
       proxyBase: "http://wardby-proxy:8787/registry/",
       limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 5 },
@@ -350,7 +352,7 @@ describe("RegistryService", () => {
     const registry = new RegistryService({
       adapters: new Map([["fake", fakeAdapter]]),
       store,
-      audit: { audit: async () => ({ withheld: new Map(), reported: new Map() }) },
+      audit: { audit: async () => NO_ADVISORIES },
       upstream: async () => new Response(tarball),
       proxyBase: "http://wardby-proxy:8787/registry/",
       limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 1, idleTimeoutMs: 1_000 },

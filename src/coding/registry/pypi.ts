@@ -5,7 +5,7 @@
  * configures pip for the sandboxed worker to use the proxy as its only
  * index with binary-only installs.
  */
-import { satisfies as pepSatisfies, validRange } from "@renovatebot/pep440";
+import { clean as pepClean, compare as pepCompare, satisfies as pepSatisfies, validRange } from "@renovatebot/pep440";
 import { unzipSync, strFromU8 } from "fflate";
 import {
   AllowlistEntryError,
@@ -80,6 +80,15 @@ export const pypiAdapter: RegistryAdapter = {
   normalizeName: normalizePypiName,
 
   satisfies: (version, range) => pepSatisfies(version, range),
+
+  compareVersions(a, b) {
+    // OSV and PyPI filenames both carry non-canonical spellings ("2.0rc1",
+    // "1.0-post1"); normalize each to PEP 440 before comparing.
+    const left = pepClean(a);
+    const right = pepClean(b);
+    if (!left || !right) throw new Error(`not a PEP 440 version: "${a}" / "${b}"`);
+    return pepCompare(left, right);
+  },
 
   route(method, subpath): RegistryRoute | null {
     if (method !== "GET" && method !== "HEAD") return null;

@@ -1,30 +1,50 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
-import { OsvAudit } from "./audit.js";
+import { npmAdapter } from "../../../coding/registry/npm.js";
+import { pypiAdapter } from "../../../coding/registry/pypi.js";
+import { inOsvRange, OsvAudit } from "./audit.js";
 
-const vulns = {
-  vulns: [
-    { id: "GHSA-high", affected: [{ versions: ["1.0.0"] }], database_specific: { severity: "HIGH" } },
-    { id: "GHSA-low", affected: [{ versions: ["1.1.0"] }], database_specific: { severity: "LOW" } },
-  ],
-};
+/** Trimmed real `POST /v1/query` responses from api.osv.dev (2026-09-25):
+ *  `details` and `references` dropped, everything else as served. */
+const fixture = async (file: string) =>
+  JSON.parse(await readFile(new URL(`./fixtures/${file}`, import.meta.url), "utf8")) as {
+    vulns: { id: string; affected: { versions?: string[] }[] }[];
+  };
 
-describe("OsvAudit", () => {
+const osv = (body: unknown) => vi.fn(async () => Response.json(body));
+
+describe("OsvAudit severity", () => {
   it("withholds HIGH and CRITICAL versions and reports the rest", async () => {
-    const fetch = vi.fn(async () => Response.json(vulns));
-    const index = await new OsvAudit({ fetch, failOpen: false }).audit("npm", "left-pad");
-    expect([...index.withheld.keys()]).toEqual(["1.0.0"]);
-    expect([...index.reported.keys()]).toEqual(["1.1.0"]);
+    const vulns = {
+      vulns: [
+        {
+          id: "GHSA-high",
+          affected: [{ package: { name: "left-pad", ecosystem: "npm" }, versions: ["1.0.0"] }],
+          database_specific: { severity: "HIGH" },
+        },
+        {
+          id: "GHSA-low",
+          affected: [{ package: { name: "left-pad", ecosystem: "npm" }, versions: ["1.1.0"] }],
+          database_specific: { severity: "LOW" },
+        },
+      ],
+    };
+    const fetch = osv(vulns);
+    const index = await new OsvAudit({ fetch, failOpen: false }).audit(npmAdapter, "left-pad");
+    expect(index.withheld("1.0.0")).toEqual(["GHSA-high"]);
+    expect(index.withheld("1.1.0")).toEqual([]);
+    expect(index.reported("1.1.0")).toEqual(["GHSA-low"]);
     expect(fetch).toHaveBeenCalledWith("https://api.osv.dev/v1/query", expect.objectContaining({ method: "POST" }));
   });
 
   it("caches per package for an hour", async () => {
     let now = 0;
-    const fetch = vi.fn(async () => Response.json({ vulns: [] }));
+    const fetch = osv({ vulns: [] });
     const audit = new OsvAudit({ fetch, failOpen: false, now: () => now });
-    await audit.audit("npm", "a");
-    await audit.audit("npm", "a");
+    await audit.audit(npmAdapter, "a");
+    await audit.audit(npmAdapter, "a");
     now += 3_600_001;
-    await audit.audit("npm", "a");
+    await audit.audit(npmAdapter, "a");
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
@@ -32,10 +52,103 @@ describe("OsvAudit", () => {
     const fetch = vi.fn(async () => {
       throw new Error("offline");
     });
-    await expect(new OsvAudit({ fetch, failOpen: false }).audit("npm", "a")).rejects.toMatchObject({
+    await expect(new OsvAudit({ fetch, failOpen: false }).audit(npmAdapter, "a")).rejects.toMatchObject({
       status: 503,
       code: "wardby_audit_unavailable",
     });
-    await expect(new OsvAudit({ fetch, failOpen: true }).audit("npm", "a")).resolves.toMatchObject({});
+    await expect(new OsvAudit({ fetch, failOpen: true }).audit(npmAdapter, "a")).resolves.toMatchObject({});
+  });
+});
+
+describe("OsvAudit on real npm GHSA entries (SEMVER ranges only)", () => {
+  it("has no enumerated versions for the npm package, only ranges", async () => {
+    const { vulns } = await fixture("osv-npm-lodash.json");
+    const lodash = vulns
+      .flatMap((vuln) => vuln.affected)
+      .filter((affected) => JSON.stringify(affected).includes('"pkg:npm/lodash"'));
+    expect(lodash.length).toBeGreaterThan(0);
+    expect(lodash.every((affected) => affected.versions === undefined)).toBe(true);
+  });
+
+  it("withholds lodash versions inside a HIGH/CRITICAL range and serves the fixed one", async () => {
+    const audit = new OsvAudit({ fetch: osv(await fixture("osv-npm-lodash.json")), failOpen: false });
+    const index = await audit.audit(npmAdapter, "lodash");
+    // GHSA-35jh-r3h4-6jhm (HIGH): introduced "0", fixed 4.17.21.
+    expect(index.withheld("0.1.0")).toContain("GHSA-35jh-r3h4-6jhm");
+    expect(index.withheld("4.17.20")).toContain("GHSA-35jh-r3h4-6jhm");
+    expect(index.withheld("4.17.21")).toEqual([]);
+    // GHSA-p6mc-m468-83gw (HIGH): introduced 3.7.0, fixed 4.17.19.
+    expect(index.withheld("3.7.0")).toContain("GHSA-p6mc-m468-83gw");
+    expect(index.withheld("4.17.19")).not.toContain("GHSA-p6mc-m468-83gw");
+    // GHSA-29mw-wpgm-hmr9 (MODERATE) is reported, not withheld.
+    expect(index.reported("4.17.20")).toEqual(["GHSA-29mw-wpgm-hmr9"]);
+  });
+
+  it("does not leak another npm package's range onto the queried one (lodash.update is not lodash)", async () => {
+    // GHSA-p6mc-m468-83gw also lists npm lodash.update (introduced "0",
+    // last_affected 4.10.2). lodash itself is only affected from 3.7.0.
+    const audit = new OsvAudit({ fetch: osv(await fixture("osv-npm-lodash.json")), failOpen: false });
+    const index = await audit.audit(npmAdapter, "lodash");
+    expect(index.withheld("3.6.0")).not.toContain("GHSA-p6mc-m468-83gw");
+  });
+
+  it("does not leak another ecosystem's entry: RubyGems lodash-rails versions never match an npm package", async () => {
+    // GHSA-4xc9-xhrj-v574 lists npm lodash plus RubyGems lodash-rails with an
+    // enumerated versions list. Asking about an npm package named
+    // lodash-rails must ignore the RubyGems entry entirely.
+    const audit = new OsvAudit({ fetch: osv(await fixture("osv-npm-lodash.json")), failOpen: false });
+    const index = await audit.audit(npmAdapter, "lodash-rails");
+    expect(index.withheld("4.17.10")).toEqual([]);
+    expect(index.withheld("4.0.0")).toEqual([]);
+  });
+
+  it("treats last_affected as inclusive", async () => {
+    // GHSA-p6mc-m468-83gw: npm lodash.update introduced "0", last_affected 4.10.2.
+    const audit = new OsvAudit({ fetch: osv(await fixture("osv-npm-lodash.json")), failOpen: false });
+    const index = await audit.audit(npmAdapter, "lodash.update");
+    expect(index.withheld("4.10.2")).toContain("GHSA-p6mc-m468-83gw");
+    expect(index.withheld("4.10.3")).not.toContain("GHSA-p6mc-m468-83gw");
+  });
+});
+
+describe("OsvAudit on real PyPI entries", () => {
+  it("evaluates ECOSYSTEM ranges with PEP 440 and PEP 503-normalized names, ignoring GIT ranges", async () => {
+    const body = await fixture("osv-pypi-jinja2.json");
+    // Drop the enumerated versions so only the ranges can match.
+    for (const vuln of body.vulns) for (const affected of vuln.affected) delete affected.versions;
+    const audit = new OsvAudit({ fetch: osv(body), failOpen: false });
+    const index = await audit.audit(pypiAdapter, "Jinja2");
+    // GHSA-462w-v97r-4m45 (HIGH): introduced "0", fixed 2.10.1.
+    expect(index.withheld("2.10")).toEqual(["GHSA-462w-v97r-4m45"]);
+    expect(index.withheld("2.10.0")).toEqual(["GHSA-462w-v97r-4m45"]); // non-canonical spelling
+    expect(index.withheld("2.0rc1")).toEqual(["GHSA-462w-v97r-4m45"]);
+    expect(index.withheld("2.10.1")).toEqual([]);
+    // GHSA-gmj6-6f8f-6699 (MODERATE): introduced 3.0.0, fixed 3.1.5. PYSEC
+    // entries carry no severity and are reported.
+    expect(index.reported("3.1.4")).toContain("GHSA-gmj6-6f8f-6699");
+    expect(index.reported("3.1.5")).not.toContain("GHSA-gmj6-6f8f-6699");
+    expect(index.reported("2.7.2")).toContain("PYSEC-2014-82");
+  });
+
+  it("matches enumerated PyPI versions after PEP 440 normalization", async () => {
+    const audit = new OsvAudit({ fetch: osv(await fixture("osv-pypi-jinja2.json")), failOpen: false });
+    const index = await audit.audit(pypiAdapter, "jinja2");
+    expect(index.withheld("2.9.6")).toEqual(["GHSA-462w-v97r-4m45"]);
+    expect(index.withheld("2.9.6.0")).toEqual(["GHSA-462w-v97r-4m45"]);
+  });
+});
+
+describe("inOsvRange", () => {
+  const compare = (a: string, b: string) => npmAdapter.compareVersions(a, b);
+  it("handles several introduced/fixed pairs in order", () => {
+    const events = [{ introduced: "2.0.0" }, { fixed: "3.0.0" }, { introduced: "0" }, { fixed: "1.0.0" }];
+    expect(inOsvRange("0.5.0", events, compare)).toBe(true);
+    expect(inOsvRange("1.5.0", events, compare)).toBe(false);
+    expect(inOsvRange("2.5.0", events, compare)).toBe(true);
+    expect(inOsvRange("3.0.0", events, compare)).toBe(false);
+  });
+
+  it("fails closed on a version it cannot parse", () => {
+    expect(inOsvRange("not-a-version", [{ introduced: "1.0.0" }, { fixed: "2.0.0" }], compare)).toBe(true);
   });
 });

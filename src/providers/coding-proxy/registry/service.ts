@@ -192,12 +192,12 @@ export class RegistryService {
   ): Promise<Set<string>> {
     const { minReleaseAgeDays } = resolvePolicy(context.policy);
     const cutoff = this.now().getTime() - minReleaseAgeDays * DAY_MS;
-    const advisories = await this.options.audit.audit(adapter.osvEcosystem, meta.name);
+    const advisories = await this.options.audit.audit(adapter, meta.name);
     const keep = new Set<string>();
     for (const info of meta.versions.values()) {
       if (root?.range && !adapter.satisfies(info.version, root.range)) continue;
       if (!info.publishedAt || info.publishedAt.getTime() > cutoff) continue;
-      if (advisories.withheld.has(info.version)) continue;
+      if (advisories.withheld(info.version).length > 0) continue;
       keep.add(info.version);
     }
     return keep;

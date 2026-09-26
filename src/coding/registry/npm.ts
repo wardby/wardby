@@ -72,6 +72,11 @@ export const npmAdapter: RegistryAdapter = {
 
   satisfies: (version, range) => semver.satisfies(version, range),
 
+  compareVersions(a, b) {
+    if (!semver.valid(a) || !semver.valid(b)) throw new Error(`not a semver version: "${a}" / "${b}"`);
+    return semver.compare(a, b);
+  },
+
   route(method, subpath): RegistryRoute | null {
     if (method !== "GET" && method !== "HEAD") return null;
     const tarball = subpath.match(/^-\/tarball\/([^/]+)\/([^/]+)$/);
