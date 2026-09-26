@@ -6,7 +6,14 @@
  */
 import type { GitHubAppClient } from "../vcs/github.js";
 import { normalizeGitHubRepository } from "../../coding/protocol.js";
-import { parseReviewMarker } from "./review-format.js";
+import { partitionComments } from "./diff-lines.js";
+import {
+  hasReviewMarker,
+  parseReviewMarker,
+  renderInlineComment,
+  renderSummaryComment,
+  verdictConclusion,
+} from "./review-format.js";
 import {
   ReviewHostError,
   type CodeReviewHost,
@@ -29,6 +36,10 @@ const MAX_FILE_PAGES = 3;
 const MAX_COMMENT_PAGES = 3;
 const MAX_LISTED_FILES = 1000;
 const VENDORED = /(^|\/)(node_modules|dist|\.venv)\//;
+const CHECK_TEXT_LIMIT = 65_535;
+const COMMENT_WRITE = { issues: "write", pull_requests: "write" } as const;
+const REVIEW_WRITE = { pull_requests: "write", checks: "write" } as const;
+const CHECK_TITLES = { APPROVE: "Approved", CHANGES_REQUESTED: "Changes requested", COMMENT: "Comments" } as const;
 
 type Json = Record<string, unknown>;
 
@@ -264,20 +275,200 @@ export class GitHubReviewHost implements CodeReviewHost {
     });
   }
 
-  // Write methods land in Task 5.
-  publishReview(_repository: string, _input: PublishReviewInput): Promise<PublishReviewResult> {
-    return Promise.reject(new ReviewHostError("host_api_error", "not_implemented"));
+  async publishReview(repository: string, input: PublishReviewInput): Promise<PublishReviewResult> {
+    const base = repoPath(repository);
+    return this.withToken(repository, REVIEW_WRITE, async (get) => {
+      const pr = record(await (await get(`${base}/pulls/${input.prNumber}`)).json());
+      const { headSha } = this.head(repository, pr);
+      if (headSha !== input.headSha) {
+        if (input.checkId) {
+          await this.patchCheck(get, base, {
+            checkId: input.checkId,
+            conclusion: "neutral",
+            title: "Superseded by a newer push",
+            summary: `The pull request moved to ${headSha.slice(0, 7)} before this review finished.`,
+          });
+        }
+        return { published: false, reason: "stale_head", currentHeadSha: headSha };
+      }
+
+      const patches = new Map<string, string | undefined>();
+      for (let page = 1; page <= MAX_FILE_PAGES; page++) {
+        const batch = list(await (await get(`${base}/pulls/${input.prNumber}/files?per_page=100&page=${page}`)).json());
+        for (const file of batch) patches.set(str(file.filename), typeof file.patch === "string" ? file.patch : undefined);
+        if (batch.length < 100) break;
+      }
+      const { inline, outside } = partitionComments(input.comments, patches);
+
+      let reviewUrl: string | null = null;
+      if (inline.length > 0) {
+        const review = record(
+          await (
+            await get(
+              `${base}/pulls/${input.prNumber}/reviews`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  commit_id: input.headSha,
+                  event: "COMMENT",
+                  body: `wardby review: ${inline.length} inline comment${inline.length === 1 ? "" : "s"} — the summary is in the conversation.`,
+                  comments: inline.map((c) => ({ path: c.path, line: c.line, side: c.side, body: renderInlineComment(c) })),
+                }),
+              },
+              [200],
+            )
+          ).json(),
+        );
+        reviewUrl = str(review.html_url);
+      }
+
+      const summaryBody = renderSummaryComment({
+        agentMarker: input.agentMarker,
+        headSha: input.headSha,
+        verdict: input.verdict,
+        summary: input.summary,
+        body: input.body,
+        outside,
+      });
+      const existing = await this.findSummaryComment(get, base, input.prNumber, input.agentMarker);
+      const summaryResponse = existing
+        ? await get(`${base}/issues/comments/${existing}`, { method: "PATCH", body: JSON.stringify({ body: summaryBody }) }, [200])
+        : await get(`${base}/issues/${input.prNumber}/comments`, { method: "POST", body: JSON.stringify({ body: summaryBody }) }, [201]);
+      const summaryCommentUrl = str(record(await summaryResponse.json()).html_url);
+
+      const conclusion = verdictConclusion(input.verdict);
+      const output = {
+        title: CHECK_TITLES[input.verdict],
+        summary: input.summary,
+        text: summaryBody.slice(0, CHECK_TEXT_LIMIT),
+      };
+      let checkId = input.checkId;
+      if (checkId) {
+        await this.patchCheck(get, base, { checkId, conclusion, ...output, detailsUrl: summaryCommentUrl });
+      } else {
+        const created = record(
+          await (
+            await get(
+              `${base}/check-runs`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  name: input.checkName,
+                  head_sha: input.headSha,
+                  status: "completed",
+                  conclusion,
+                  details_url: summaryCommentUrl,
+                  output,
+                }),
+              },
+              [201],
+            )
+          ).json(),
+        );
+        checkId = String(num(created.id));
+      }
+      return {
+        published: true,
+        reviewUrl,
+        summaryCommentUrl,
+        checkId,
+        checkConclusion: conclusion,
+        inlineCount: inline.length,
+        outsideDiffCount: outside.length,
+      };
+    });
   }
-  comment(_repository: string, _input: CommentInput): Promise<{ url: string }> {
-    return Promise.reject(new ReviewHostError("host_api_error", "not_implemented"));
+
+  private async findSummaryComment(
+    get: (path: string, init?: RequestInit, expected?: number[]) => Promise<Response>,
+    base: string,
+    prNumber: number,
+    agentMarker: string,
+  ): Promise<number | null> {
+    for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
+      const comments = list(await (await get(`${base}/issues/${prNumber}/comments?per_page=100&page=${page}`)).json());
+      const mine = comments.find((c) => typeof c.body === "string" && hasReviewMarker(c.body, agentMarker));
+      if (mine) return num(mine.id);
+      if (comments.length < 100) break;
+    }
+    return null;
   }
-  acknowledge(_repository: string, _target: CommentRef): Promise<void> {
-    return Promise.reject(new ReviewHostError("host_api_error", "not_implemented"));
+
+  private async patchCheck(
+    get: (path: string, init?: RequestInit, expected?: number[]) => Promise<Response>,
+    base: string,
+    input: CompleteCheckInput,
+  ): Promise<void> {
+    await get(
+      `${base}/check-runs/${encodeURIComponent(input.checkId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          status: "completed",
+          conclusion: input.conclusion,
+          ...(input.detailsUrl ? { details_url: input.detailsUrl } : {}),
+          output: {
+            title: input.title,
+            summary: input.summary.slice(0, CHECK_TEXT_LIMIT),
+            ...(input.text !== undefined ? { text: input.text.slice(0, CHECK_TEXT_LIMIT) } : {}),
+          },
+        }),
+      },
+      [200],
+    );
   }
-  startCheck(_repository: string, _input: StartCheckInput): Promise<{ checkId: string }> {
-    return Promise.reject(new ReviewHostError("host_api_error", "not_implemented"));
+
+  async comment(repository: string, input: CommentInput): Promise<{ url: string }> {
+    const base = repoPath(repository);
+    return this.withToken(repository, COMMENT_WRITE, async (get) => {
+      const response = input.replyToReviewCommentId
+        ? await get(
+            `${base}/pulls/${input.number}/comments/${encodeURIComponent(input.replyToReviewCommentId)}/replies`,
+            { method: "POST", body: JSON.stringify({ body: input.body }) },
+            [201],
+          )
+        : await get(`${base}/issues/${input.number}/comments`, { method: "POST", body: JSON.stringify({ body: input.body }) }, [201]);
+      return { url: str(record(await response.json()).html_url) };
+    });
   }
-  completeCheck(_repository: string, _input: CompleteCheckInput): Promise<void> {
-    return Promise.reject(new ReviewHostError("host_api_error", "not_implemented"));
+
+  async acknowledge(repository: string, target: CommentRef): Promise<void> {
+    const base = repoPath(repository);
+    const path =
+      target.kind === "inline"
+        ? `${base}/pulls/comments/${encodeURIComponent(target.id)}/reactions`
+        : `${base}/issues/comments/${encodeURIComponent(target.id)}/reactions`;
+    await this.withToken(repository, COMMENT_WRITE, async (get) => {
+      await get(path, { method: "POST", body: JSON.stringify({ content: "eyes" }) }, [200, 201]);
+    });
+  }
+
+  async startCheck(repository: string, input: StartCheckInput): Promise<{ checkId: string }> {
+    const base = repoPath(repository);
+    return this.withToken(repository, { checks: "write" }, async (get) => {
+      const created = record(
+        await (
+          await get(
+            `${base}/check-runs`,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                name: input.name,
+                head_sha: input.headSha,
+                status: "in_progress",
+                output: { title: "Review in progress", summary: "wardby is reviewing this commit." },
+              }),
+            },
+            [201],
+          )
+        ).json(),
+      );
+      return { checkId: String(num(created.id)) };
+    });
+  }
+
+  async completeCheck(repository: string, input: CompleteCheckInput): Promise<void> {
+    const base = repoPath(repository);
+    await this.withToken(repository, { checks: "write" }, (get) => this.patchCheck(get, base, input));
   }
 }

@@ -135,3 +135,147 @@ describe("GitHubReviewHost reads", () => {
     expect(host.provider).toBe("github");
   });
 });
+
+describe("GitHubReviewHost writes", () => {
+  const input = {
+    prNumber: 7,
+    headSha: SHA,
+    verdict: "CHANGES_REQUESTED" as const,
+    summary: "One bug.",
+    body: "## Findings\n- bug",
+    agentMarker: "agent1",
+    checkName: "wardby review",
+    comments: [
+      { path: "a.py", line: 2, side: "RIGHT" as const, severity: "MAJOR", body: "off by one\n```suggestion\nnew 2\n```" },
+      { path: "a.py", line: 50, side: "RIGHT" as const, severity: "MINOR", body: "outside" },
+    ],
+  };
+
+  it("posts inline comments, creates the summary comment, and completes the run's check", async () => {
+    const { client, calls, grants } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path === `${BASE}/pulls/7`) return json(PR);
+      if (method === "GET" && path.startsWith(`${BASE}/pulls/7/files`)) {
+        return json([{ filename: "a.py", status: "modified", additions: 1, deletions: 0, patch: PATCH }]);
+      }
+      if (method === "POST" && path === `${BASE}/pulls/7/reviews`) {
+        return json({ id: 9, html_url: "https://github.com/r/pull/7#pullrequestreview-9" });
+      }
+      if (method === "GET" && path.startsWith(`${BASE}/issues/7/comments`)) return json([]);
+      if (method === "POST" && path === `${BASE}/issues/7/comments`) {
+        return json({ id: 5, html_url: "https://github.com/r/pull/7#issuecomment-5" }, 201);
+      }
+      if (method === "PATCH" && path === `${BASE}/check-runs/11`) return json({ id: 11 });
+      return undefined;
+    });
+    const result = await new GitHubReviewHost(client).publishReview(REPO, { ...input, checkId: "11" });
+
+    expect(grants).toEqual([{ pull_requests: "write", checks: "write" }]);
+    expect(result).toEqual({
+      published: true,
+      reviewUrl: "https://github.com/r/pull/7#pullrequestreview-9",
+      summaryCommentUrl: "https://github.com/r/pull/7#issuecomment-5",
+      checkId: "11",
+      checkConclusion: "failure",
+      inlineCount: 1,
+      outsideDiffCount: 1,
+    });
+    const review = calls.find((c) => c.path === `${BASE}/pulls/7/reviews`)!.body as Record<string, unknown>;
+    expect(review).toMatchObject({ commit_id: SHA, event: "COMMENT" });
+    expect(review.comments).toEqual([
+      { path: "a.py", line: 2, side: "RIGHT", body: "**[MAJOR]** off by one\n```suggestion\nnew 2\n```" },
+    ]);
+    const summary = calls.find((c) => c.method === "POST" && c.path === `${BASE}/issues/7/comments`)!.body as {
+      body: string;
+    };
+    expect(summary.body).toContain(reviewMarker("agent1", SHA));
+    expect(summary.body).toContain("**[MINOR] a.py:50** outside");
+    const check = calls.find((c) => c.path === `${BASE}/check-runs/11`)!.body as Record<string, unknown>;
+    expect(check).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      details_url: "https://github.com/r/pull/7#issuecomment-5",
+      output: { title: "Changes requested", summary: "One bug." },
+    });
+  });
+
+  it("edits the existing summary comment and creates a completed check when the run has none", async () => {
+    const { client, calls } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path === `${BASE}/pulls/7`) return json(PR);
+      if (method === "GET" && path.startsWith(`${BASE}/pulls/7/files`)) return json([]);
+      if (method === "GET" && path.startsWith(`${BASE}/issues/7/comments`)) {
+        return json([{ id: 5, body: `${reviewMarker("agent1", OLD_SHA)}\nold`, html_url: "https://x/5" }]);
+      }
+      if (method === "PATCH" && path === `${BASE}/issues/comments/5`) return json({ id: 5, html_url: "https://x/5" });
+      if (method === "POST" && path === `${BASE}/check-runs`) return json({ id: 12 }, 201);
+      return undefined;
+    });
+    const result = await new GitHubReviewHost(client).publishReview(REPO, { ...input, verdict: "APPROVE", comments: [] });
+    expect(result).toMatchObject({ published: true, reviewUrl: null, checkId: "12", checkConclusion: "success" });
+    expect(calls.some((c) => c.path === `${BASE}/pulls/7/reviews`)).toBe(false);
+    expect(calls.find((c) => c.path === `${BASE}/check-runs`)!.body).toMatchObject({
+      name: "wardby review",
+      head_sha: SHA,
+      status: "completed",
+      conclusion: "success",
+    });
+  });
+
+  it("refuses a stale head and marks the run's check superseded", async () => {
+    const moved = { ...PR, head: { ...PR.head, sha: OLD_SHA } };
+    const { client, calls } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path === `${BASE}/pulls/7`) return json(moved);
+      if (method === "PATCH" && path === `${BASE}/check-runs/11`) return json({ id: 11 });
+      return undefined;
+    });
+    await expect(new GitHubReviewHost(client).publishReview(REPO, { ...input, checkId: "11" })).resolves.toEqual({
+      published: false,
+      reason: "stale_head",
+      currentHeadSha: OLD_SHA,
+    });
+    expect(calls.find((c) => c.path === `${BASE}/check-runs/11`)!.body).toMatchObject({
+      conclusion: "neutral",
+      output: { title: "Superseded by a newer push" },
+    });
+  });
+
+  it("comments on an issue or replies in a review thread with issues+pull_requests write", async () => {
+    const { client, calls, grants } = fakeGitHub(({ method, path }) => {
+      if (method === "POST" && path === `${BASE}/issues/3/comments`) return json({ html_url: "https://x/c" }, 201);
+      if (method === "POST" && path === `${BASE}/pulls/7/comments/88/replies`) return json({ html_url: "https://x/r" }, 201);
+      if (method === "POST" && path === `${BASE}/issues/comments/4/reactions`) return json({ id: 1 }, 201);
+      return undefined;
+    });
+    const host = new GitHubReviewHost(client);
+    await expect(host.comment(REPO, { number: 3, body: "hi" })).resolves.toEqual({ url: "https://x/c" });
+    await expect(host.comment(REPO, { number: 7, body: "yes", replyToReviewCommentId: "88" })).resolves.toEqual({
+      url: "https://x/r",
+    });
+    await host.acknowledge(REPO, { kind: "conversation", id: "4" });
+    expect(grants).toEqual([
+      { issues: "write", pull_requests: "write" },
+      { issues: "write", pull_requests: "write" },
+      { issues: "write", pull_requests: "write" },
+    ]);
+    expect(calls.at(-1)!.body).toEqual({ content: "eyes" });
+  });
+
+  it("starts an in-progress check and completes it with capped text", async () => {
+    const { client, calls, grants } = fakeGitHub(({ method, path }) => {
+      if (method === "POST" && path === `${BASE}/check-runs`) return json({ id: 21 }, 201);
+      if (method === "PATCH" && path === `${BASE}/check-runs/21`) return json({ id: 21 });
+      return undefined;
+    });
+    const host = new GitHubReviewHost(client);
+    await expect(host.startCheck(REPO, { headSha: SHA, name: "wardby review" })).resolves.toEqual({ checkId: "21" });
+    await host.completeCheck(REPO, {
+      checkId: "21",
+      conclusion: "neutral",
+      title: "Review did not complete",
+      summary: "s",
+      text: "x".repeat(70_000),
+    });
+    expect(grants).toEqual([{ checks: "write" }, { checks: "write" }]);
+    expect(calls[0].body).toMatchObject({ name: "wardby review", head_sha: SHA, status: "in_progress" });
+    expect(((calls[1].body as { output: { text: string } }).output.text).length).toBe(65_535);
+  });
+});
