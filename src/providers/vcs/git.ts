@@ -507,6 +507,8 @@ export class GitVcsProvider implements VcsProvider {
       summary: details?.summary,
       tests: details?.tests,
       tag: details?.tag,
+      packages: details?.packages,
+      packageRefusals: details?.packageRefusals,
     });
     return {
       outcome: prepared.continuation ? "pull_request_updated" : "pull_request_opened",

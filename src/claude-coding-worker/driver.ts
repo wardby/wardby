@@ -119,6 +119,8 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     model: options.input.model,
     budgetUsd: options.input.budgetUsd,
     signal: options.signal,
+    // Package registry settings are not applied here: Claude Code runs commands in the
+    // network-less tool runner, so registry mode is Codex-only for now.
     environment: agentEnvironment(options.proxyBaseUrl, options.capability),
     relayEnvironment: relayEnvironment(),
     outputSchema: CLAUDE_OUTPUT_JSON_SCHEMA,

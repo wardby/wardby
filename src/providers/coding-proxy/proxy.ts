@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { getModelPricing, PRICING_VERSION, type ModelPricing } from "../llm/pricing.js";
 import { getAnthropicPricing } from "../llm/pricing-anthropic.js";
+import { deriveRegistryToken } from "../../coding/registry/token.js";
 import {
   AnthropicSseUsageTracker,
   actualCostUsd,
@@ -108,7 +109,7 @@ interface ParsedRequest {
   anthropicBeta?: string;
 }
 
-function capabilityHash(capability: string): string {
+export function capabilityHash(capability: string): string {
   return createHash("sha256").update(capability).digest("base64url");
 }
 
@@ -504,6 +505,7 @@ export class CodingProxy {
     if (!input.credentialRef || input.credentialRef.length > 200) throw new Error("invalid_proxy_credential_reference");
     const capability = `rrp_${randomBytes(32).toString("base64url")}`;
     const id = randomUUID();
+    const registryTokenHash = capabilityHash(deriveRegistryToken(capability));
     await this.ledger.createSession({
       id,
       runId: input.runId,
@@ -513,6 +515,7 @@ export class CodingProxy {
       allowedModels: models,
       deadlineAt: input.deadlineAt,
       budgetUsd: input.budgetUsd,
+      registryTokenHash,
     });
     this.audit({ type: "session.created", runId: input.runId });
     return {

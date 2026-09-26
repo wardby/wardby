@@ -116,10 +116,12 @@ host alias, or NetworkPolicy rule is added: the worker still reaches only
 
 ### Authentication
 
-npm sends the run capability as a bearer token and pip as HTTP basic auth. The
-proxy looks it up exactly as it does for model calls: it must match a live
-session within its deadline. Registry requests are not charged to the model
-budget and never reach a model upstream.
+npm sends the derived registry token as a bearer token and pip as HTTP basic
+auth (see the amendments below for how the token is derived and why it is not
+the run capability). The proxy looks up the session it hashes to exactly as it
+does for model calls: it must match a live session within its deadline.
+Registry requests are not charged to the model budget and never reach a model
+upstream.
 
 ### npm
 
@@ -156,8 +158,10 @@ budget and never reach a model upstream.
 
 ### Worker environment
 
-The worker driver adds these variables to the agent's environment (the run
-capability it already holds supplies the credentials):
+The worker driver adds these variables to the agent's environment, this table
+applies to the Codex worker driver only (see the amendments below): a derived,
+registry-only token, never the model-API run capability, supplies the
+credentials:
 
 | Variable                    | Value                                                                                                  |
 | --------------------------- | ------------------------------------------------------------------------------------------------------ |
@@ -165,13 +169,14 @@ capability it already holds supplies the credentials):
 | `npm_config_userconfig`     | `/workspace/.cache/npm/npmrc`, written by the driver with the `_authToken` line for the proxy registry |
 | `npm_config_ignore_scripts` | `true`                                                                                                 |
 | `npm_config_cache`          | `/workspace/.cache/npm`                                                                                |
-| `PIP_INDEX_URL`             | `http://wardby:<capability>@wardby-proxy:8787/registry/pypi/simple/`                                   |
+| `PIP_INDEX_URL`             | `http://wardby:<registry-token>@wardby-proxy:8787/registry/pypi/simple/`                               |
 | `PIP_TRUSTED_HOST`          | `wardby-proxy`                                                                                         |
 | `PIP_ONLY_BINARY`           | `:all:`                                                                                                |
 | `PIP_CACHE_DIR`             | `/workspace/.cache/pip`                                                                                |
 
-The capability is written only under `.cache`, which is never collected, and it
-expires with the run's deadline.
+The registry token is written only under `.cache`, which is never collected,
+and it expires with the run's deadline along with the session it is derived
+from.
 
 Installs land in the workspace because it is the only writable location large
 enough: the root filesystem is read-only and `/tmp` and the home directory are
@@ -319,21 +324,38 @@ export interface RegistryAdapter {
   /** Parse one allowlist entry in this ecosystem's syntax. Throws an
    *  AllowlistEntryError with a user-facing message if it is invalid. */
   parseAllowlistEntry(raw: string): AllowlistEntry;
-  /** Canonical name used for every comparison (npm: lower case;
-   *  PyPI: PEP 503 normalization). */
+  /** Canonical name used for every comparison (npm: the name exactly as
+   *  written, since npm names are case-sensitive; PyPI: PEP 503
+   *  normalization). */
   normalizeName(name: string): string;
   /** Whether `version` satisfies `range` in this ecosystem's syntax
    *  (npm semver ranges, PEP 440 specifiers). */
   satisfies(version: string, range: string): boolean;
+  /** Total order over this ecosystem's version strings (semver for npm,
+   *  PEP 440 for PyPI, normalizing non-canonical spellings first), used to
+   *  evaluate OSV advisory ranges. Throws on a version it cannot parse; the
+   *  audit treats that as affected (fail closed). */
+  compareVersions(a: string, b: string): number;
 
   // --- Protocol ---------------------------------------------------------
-  /** Classify a request under /registry/<id>/, or null for 404. */
+  /** Classify a request under /registry/<id>/, or null for 404. Throws a
+   *  400 `wardby_bad_request` RegistryError for a malformed path (bad
+   *  percent-encoding or an invalid package name); the core records it. */
   route(method: string, subpath: string, headers: Headers): RegistryRoute | null;
-  /** Fetch and parse upstream metadata for one package. */
+  /** Fetch and parse upstream metadata for one package. `upstream` is the
+   *  core's bounded fetch (timeout and byte cap). `raw` keeps only the
+   *  subset renderMetadata and the resolvers read. */
   fetchMetadata(name: string, upstream: UpstreamFetch): Promise<PackageMetadata>;
   /** Build the client-facing metadata document containing only `keep`
-   *  versions, with every download link rewritten to a proxy route. */
-  renderMetadata(meta: PackageMetadata, keep: ReadonlySet<string>, proxyBase: string): RenderedDocument;
+   *  versions and, of their files, only the filenames in `keptFiles` (the
+   *  core's per-file release-age filter), with every download link
+   *  rewritten to a proxy route. */
+  renderMetadata(
+    meta: PackageMetadata,
+    keep: ReadonlySet<string>,
+    keptFiles: ReadonlySet<string>,
+    proxyBase: string,
+  ): RenderedDocument;
   /** Map a download route to a file in metadata the proxy fetched itself.
    *  Returns null if the route names no known file. */
   resolveDownload(route: DownloadRoute, meta: PackageMetadata): FileRef | null;
@@ -341,6 +363,10 @@ export interface RegistryAdapter {
    *  names read from a served file or its metadata file. Omitted when
    *  VersionInfo.dependencies is already complete (npm). */
   dependenciesFromFile?(route: DownloadRoute | FileMetadataRoute, body: Uint8Array): Promise<string[]>;
+  /** Map a file-metadata route (PEP 658) to the file it describes, from
+   *  metadata the proxy fetched itself. Returns null if the route names no
+   *  known file. The core applies the release age of the wheel it describes. */
+  resolveFileMetadata?(route: FileMetadataRoute, meta: PackageMetadata): FileRef | null;
 
   // --- Worker -----------------------------------------------------------
   /** Environment variables and files the driver writes so the package
@@ -367,8 +393,6 @@ export interface PackageMetadata {
 
 export interface VersionInfo {
   version: string;
-  /** Release time; null means unknown and is treated as too new. */
-  publishedAt: Date | null;
   /** Dependency names (normalized). Empty when discovered from files instead. */
   dependencies: readonly string[];
   files: readonly FileRef[];
@@ -383,6 +407,11 @@ export interface FileRef {
   sizeBytes: number | null;
   /** False for files the ecosystem's safeguards exclude, e.g. PyPI sdists. */
   allowed: boolean;
+  /** When this file was published; null means unknown and is treated as too
+   *  new. The minimum release age applies per file: a PyPI release can gain
+   *  a new wheel long after its first upload. For npm every version has one
+   *  immutable tarball, so this is the version's publish time. */
+  publishedAt: Date | null;
 }
 
 export interface Integrity {
@@ -416,13 +445,17 @@ export interface RenderedDocument {
 
 /** The pinned upstream client: HTTPS only, adapter's upstreamHosts only,
  *  no redirects, no private addresses. */
-export type UpstreamFetch = (url: string, init?: { accept?: string }) => Promise<Response>;
+export type UpstreamFetch = (
+  url: string,
+  init?: { method?: "GET" | "POST"; body?: string; accept?: string; signal?: AbortSignal },
+) => Promise<Response>;
 
 export interface WorkerConfigInput {
   /** e.g. "http://wardby-proxy:8787/registry/npm/" */
   registryUrl: string;
-  /** The run capability. Written only under cacheDir, never elsewhere. */
-  capability: string;
+  /** The derived registry-only token (see the amendments below), never the
+   *  run capability. Written only under cacheDir, never elsewhere. */
+  token: string;
   /** e.g. "/workspace/.cache/npm"; always inside a collection-excluded folder. */
   cacheDir: string;
 }
@@ -445,16 +478,17 @@ export const REGISTRY_ADAPTERS: ReadonlyMap<EcosystemId, RegistryAdapter> = new 
 
 ### How the two first adapters fill it in
 
-| Member           | npm                                                                                                                       | PyPI                                                                    |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `osvEcosystem`   | `npm`                                                                                                                     | `PyPI`                                                                  |
-| `upstreamHosts`  | `registry.npmjs.org`                                                                                                      | `pypi.org`, `files.pythonhosted.org`                                    |
-| `collectExclude` | `node_modules`                                                                                                            | `.venv`, `venv`, `__pycache__`                                          |
-| `publishedAt`    | packument `time[version]`                                                                                                 | file `upload-time` (earliest per version)                               |
-| `dependencies`   | from `dependencies`, `optionalDependencies`, `peerDependencies`                                                           | empty; `dependenciesFromFile` reads `Requires-Dist`                     |
-| `allowed: false` | never                                                                                                                     | sdists (wheels only)                                                    |
-| `integrity`      | `dist.integrity` (sha512) or `dist.shasum` (sha1)                                                                         | `hashes.sha256`                                                         |
-| `workerConfig`   | `npm_config_registry`, `npm_config_userconfig` (npmrc with `_authToken`), `npm_config_ignore_scripts`, `npm_config_cache` | `PIP_INDEX_URL`, `PIP_TRUSTED_HOST`, `PIP_ONLY_BINARY`, `PIP_CACHE_DIR` |
+| Member                        | npm                                                                                                                       | PyPI                                                                    |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `compareVersions`             | `semver.compare`                                                                                                          | PEP 440 `compare` after `clean`                                         |
+| `osvEcosystem`                | `npm`                                                                                                                     | `PyPI`                                                                  |
+| `upstreamHosts`               | `registry.npmjs.org`                                                                                                      | `pypi.org`, `files.pythonhosted.org`                                    |
+| `collectExclude`              | `node_modules`                                                                                                            | `.venv`, `venv`, `__pycache__`                                          |
+| `publishedAt` (per `FileRef`) | packument `time[version]`                                                                                                 | each file's own `upload-time` (a `.metadata` file inherits its wheel's) |
+| `dependencies`                | from `dependencies`, `optionalDependencies`, `peerDependencies`                                                           | empty; `dependenciesFromFile` reads `Requires-Dist`                     |
+| `allowed: false`              | never                                                                                                                     | sdists (wheels only)                                                    |
+| `integrity`                   | `dist.integrity` (sha512) or `dist.shasum` (sha1)                                                                         | `hashes.sha256`                                                         |
+| `workerConfig`                | `npm_config_registry`, `npm_config_userconfig` (npmrc with `_authToken`), `npm_config_ignore_scripts`, `npm_config_cache` | `PIP_INDEX_URL`, `PIP_TRUSTED_HOST`, `PIP_ONLY_BINARY`, `PIP_CACHE_DIR` |
 
 The core's built-in collection skip list (section 4) is the union of every
 adapter's `collectExclude` plus the language-neutral cache folders.
@@ -517,3 +551,96 @@ because `GOPROXY` is designed for this kind of proxy.
   image.
 - The migration is additive except for dropping `allowedEgress`, which no code
   path reads.
+
+## Amendments during planning and implementation
+
+The plan that implemented this design (Tasks 1–12) made four amendments to
+this design during planning, the controller made five further rulings
+during implementation, and the final whole-branch review added four more.
+All thirteen are recorded here so this document stays the accurate record of
+what shipped.
+
+### From planning
+
+1. **Registry token.** npm and pip authenticate with `rrg_` +
+   base64url(sha256(`"wardby-registry\0"` + capability)), derived by the
+   driver, not the model-API run capability itself. The proxy stores its hash
+   on `CodingProxySession.registryTokenHash` and accepts it only on
+   `/registry/` routes; the model routes accept only the original capability.
+   The agent's shell never receives the model capability.
+2. **`allowedEgress` removal is two-phase.** This plan removes every code path
+   that reads or writes it but keeps the columns; dropping them is a later,
+   separately released task, after this plan's release is fully rolled out, so
+   pods from the previous release never query a dropped column.
+3. **Always configured.** The driver configures npm and pip for every coding
+   run; an agent with no allowlist for an ecosystem gets
+   `403 wardby_package_not_allowed` naming the missing allowlist, so no
+   worker-protocol change is needed.
+4. **`resolveFileMetadata`.** The adapter interface gains an optional
+   `resolveFileMetadata(route, meta)` for PEP 658 metadata files.
+
+### From implementation
+
+5. **Registry mode is Codex-only for now.** Claude Code runs every shell
+   command inside a credential-free, networkless tool-runner container
+   (`--network none`), which can never reach the proxy, so wiring registry
+   environment variables into the Claude driver would be inert and
+   misleading. The registry environment (§2) is applied by the Codex worker
+   driver only. Supporting Claude Code is a follow-up: put the tool-runner
+   container on the proxy network and give it the same registry settings.
+6. **In-flight limit reservation.** The per-run limits in §3 are enforced
+   per proxy process (a single replica): `RegistryService` reserves each
+   in-flight download's file count and byte estimate before streaming it, in
+   addition to the already-recorded usage, so concurrent downloads (for
+   example npm's default parallel sockets) cannot overshoot `REGISTRY_MAX_FILES`
+   or `REGISTRY_MAX_TOTAL_MB` before any one download completes and is
+   recorded. A future multi-replica proxy would need this reservation moved
+   to the database.
+7. **Every refusal is recorded, including limits and audit failures.** The
+   `429 wardby_package_limit` and `503 wardby_audit_unavailable` refusals are
+   persisted as `RegistryFetch` rows with `outcome: "refused"`, exactly like
+   every other refusal in §3, so `get_run.packageRefusals` and the pull
+   request's packages section show them too.
+8. **Verify integrity only where the ecosystem publishes it.** A download
+   whose `FileRef.integrity` is `null` (an ecosystem that publishes no
+   checksum for that file, such as some Composer archives) is streamed
+   unverified; every other download's integrity is verified while streaming,
+   as §2 and §5 describe.
+9. **Prisma 7, not Prisma 6.** The repository moved to Prisma 7 (generated
+   client imported from `#prisma`, not `@prisma/client`; the schema drift
+   check uses `SHADOW_DATABASE_URL` with `--to-schema --exit-code`) after this
+   design was written. This design is otherwise version-agnostic: only import
+   paths and drift-check commands differ from a Prisma 6 reading of it.
+
+### From the final review
+
+10. **npm names are case-exact.** npm treats some legacy capitalized names
+    as distinct packages (`JSONStream` is not `jsonstream`), so the npm
+    adapter's `normalizeName` is the identity, not lower-casing: allowlist
+    entries, routes, dependency keys and upstream paths keep the name exactly
+    as written, and allowlist matching is exact. Only scope wildcards are
+    folded, since npm scopes are always lower case. PyPI keeps PEP 503
+    normalization.
+11. **PyPI minimum release age is per file.** The age cutoff (§3) applies to
+    each file's own `upload-time`, not to the release's earliest upload: a
+    wheel added to an old release is dropped from the rendered index and
+    refused with `404 wardby_version_filtered` until it is old enough, while
+    the release's older wheels are served. `publishedAt` therefore lives on
+    `FileRef` (npm sets it to the version's publish time, since an npm
+    version has one immutable tarball), and `renderMetadata` also receives
+    the set of kept filenames.
+12. **Refusal records are capped.** At most 500 refused `RegistryFetch` rows
+    are recorded per run (an in-process counter seeded from the store, per
+    ruling 6's single-replica assumption). Further refusals still return
+    their normal error to the client but are not recorded, so a worker
+    retrying refused names cannot grow the table, `get_run` or the pull
+    request body without bound. The pull request section lists at most 100
+    packages and 100 refusals, then points to `get_run` for the full list.
+13. **OSV ranges are evaluated per package.** The audit counts only
+    `affected[]` entries whose ecosystem and adapter-normalized name match
+    the queried package, and a version is affected when it is listed or
+    falls inside a `SEMVER`/`ECOSYSTEM` range (npm GHSA entries carry ranges
+    only), compared with a new adapter method, `compareVersions` (semver for
+    npm, PEP 440 for PyPI). Metadata and OSV requests are bounded by
+    `REGISTRY_METADATA_TIMEOUT_MS` (504 `wardby_upstream_unavailable`) and
+    `REGISTRY_MAX_METADATA_MB` (502 `wardby_metadata_too_large`).

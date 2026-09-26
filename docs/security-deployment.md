@@ -265,6 +265,27 @@ Per-run record ConfigMaps currently require operator-managed garbage collection,
 Claude Code is not supported by the Kubernetes launcher, and the real-cluster
 suite does not yet cover every Docker containment scenario.
 
+## Coding package registry
+
+Enabling a coding agent's package allowlist widens the trusted proxy's own
+egress, not the worker's: the proxy (the only host any worker can reach) is
+additionally permitted to reach `registry.npmjs.org`, `pypi.org`,
+`files.pythonhosted.org`, and `api.osv.dev`, through the same pinned HTTPS
+fetch used for everything else it calls out to (no redirects, no private or
+IP-literal addresses). The worker's own network reachability is unchanged: it
+still reaches only `wardby-proxy:8787`. See
+[Installing packages in coding runs](coding-packages.md) for the full model,
+including its per-run download limits.
+
+Two of that page's safeguards are worth calling out for an operator: npm
+install scripts are disabled only by a configuration default
+(`npm_config_ignore_scripts=true`) that the proxy cannot enforce against a
+downloaded tarball, so treat it as a documented limit rather than a
+guarantee; and the OSV vulnerability audit fails **closed**
+(`503 wardby_audit_unavailable`) when OSV can't be reached, unless the
+operator explicitly sets `REGISTRY_AUDIT_FAIL_OPEN=true` to allow installs
+through unaudited during an OSV outage.
+
 ## Images and dependencies
 
 ```sh

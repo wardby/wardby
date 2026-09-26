@@ -19,6 +19,14 @@ plane. A dedicated proxy container is attached to both that internal network
 as `wardby-proxy` and an external network. No other service may join the run
 network.
 
+For a Codex run with a package allowlist, the same proxy container also serves
+the coding package registry (npm and PyPI) on the same `wardby-proxy:8787`
+port, over a separate, registry-only token derived from the run's capability;
+npm and pip never receive the run's model-API capability. See
+[Installing packages in coding runs](coding-packages.md). Registry mode is
+Codex-only today: Claude Code's tool container below has `--network none` and
+so cannot reach the proxy at all.
+
 Claude Code uses a credential-separated composite job. Its agent container is
 attached only to the proxy bridge and does not mount the repository. Its tool
 container mounts the workspace, has `--network none`, and receives no model

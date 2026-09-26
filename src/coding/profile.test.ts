@@ -10,14 +10,26 @@ describe("CodingProfileSchema", () => {
       defaultTask: null,
       allowWebhookTaskOverride: false,
       timeoutSec: 1800,
-      allowedEgress: [],
       protectedPaths: [...DEFAULT_PROTECTED_PATHS],
       toolchain: "node",
       toolchainVersion: null,
       workerImageRef: null,
       workspaceDiskMb: null,
       collectExclude: [],
+      packageAllowlist: {},
+      packagePolicy: {},
     });
+  });
+
+  it("validates package allowlists per ecosystem", () => {
+    const base = { repository: "openai/example" };
+    expect(
+      CodingProfileSchema.parse({ ...base, packageAllowlist: { npm: ["@heroui/*", "react@^19"], pypi: ["flask>=3"] } })
+        .packageAllowlist,
+    ).toEqual({ npm: ["@heroui/*", "react@^19"], pypi: ["flask>=3"] });
+    expect(() => CodingProfileSchema.parse({ ...base, packageAllowlist: { cargo: ["serde"] } })).toThrow();
+    expect(() => CodingProfileSchema.parse({ ...base, packageAllowlist: { npm: ["react@nope"] } })).toThrow();
+    expect(() => CodingProfileSchema.parse({ ...base, packagePolicy: { minReleaseAgeDays: 31 } })).toThrow();
   });
 
   it.each([
@@ -25,10 +37,7 @@ describe("CodingProfileSchema", () => {
     { repository: "openai/example", baseRef: "-c core.hooksPath=/tmp/pwn" },
     { repository: "openai/example", timeoutSec: 59 },
     { repository: "openai/example", timeoutSec: 7201 },
-    { repository: "openai/example", allowedEgress: ["https://registry.npmjs.org"] },
-    { repository: "openai/example", allowedEgress: ["127.0.0.1"] },
-    { repository: "openai/example", allowedEgress: ["999.999.999.999"] },
-    { repository: "openai/example", allowedEgress: ["*.npmjs.org"] },
+    { repository: "openai/example", allowedEgress: [] },
     { repository: "openai/example", protectedPaths: ["../secrets"] },
     { repository: "openai/example", protectedPaths: ["/etc/passwd"] },
     { repository: "openai/example", credential: "secret" },
@@ -57,13 +66,11 @@ describe("CodingProfileSchema", () => {
     );
   });
 
-  it("normalizes and deduplicates host and protected-path policy", () => {
+  it("deduplicates protected-path policy", () => {
     const parsed = CodingProfileSchema.parse({
       repository: "openai/example",
-      allowedEgress: ["Registry.NPMJS.org", "registry.npmjs.org"],
       protectedPaths: [".github/workflows/**", ".github/workflows/**", "CODEOWNERS"],
     });
-    expect(parsed.allowedEgress).toEqual(["registry.npmjs.org"]);
     expect(parsed.protectedPaths).toEqual([".github/workflows/**", "CODEOWNERS"]);
   });
 

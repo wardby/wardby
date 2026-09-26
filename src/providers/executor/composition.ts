@@ -9,6 +9,7 @@ import {
   loadProviderConfig,
   type ProviderConfig,
 } from "../../config/providers.js";
+import { summarizeRegistryFetches } from "../../coding/registry/report.js";
 import { drainCodingQueue } from "../../core/coding-queue.js";
 import { logger } from "../../core/logger.js";
 import { EnvironmentCredentialResolver } from "../coding-proxy/environment-credentials.js";
@@ -128,6 +129,10 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     anthropicCredentialRef: config.anthropicCredentialRef,
     limits: { cpus: config.cpus, memoryMb: config.memoryMb, pids: config.pids, diskMb: config.diskMb },
     maxDiskMb: config.maxDiskMb,
+    registryReport: async (runId) => {
+      const rows = await options.db.registryFetch.findMany({ where: { runId }, orderBy: { createdAt: "asc" } });
+      return summarizeRegistryFetches(rows);
+    },
     onSlotReleased: () => {
       void drainCodingQueue({
         db: options.db,

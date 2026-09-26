@@ -2,6 +2,7 @@ import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { requireReadableAgent } from "../auth/ownership.js";
 import { publicCodingRunResult } from "../../coding/protocol.js";
+import { summarizeRegistryFetches } from "../../coding/registry/report.js";
 import { textResult } from "./text-result.js";
 
 export function registerRunTools(mcp: WardbyMcpServer): void {
@@ -57,10 +58,17 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       // (CODING_MAX_CONCURRENT), not stuck.
       const codingQueuedAt =
         run.status === "pending" && codingRun?.queuedAt ? codingRun.queuedAt.toISOString() : undefined;
+      // Packages served/refused only exist for coding runs; a non-coding run
+      // has no RegistryFetch rows at all, so skip the query entirely.
+      const registryFetches = codingRun
+        ? await ctx.db.registryFetch.findMany({ where: { runId: run.id }, orderBy: { createdAt: "asc" } })
+        : [];
+      const { packages, packageRefusals } = summarizeRegistryFetches(registryFetches);
       return textResult({
         ...run,
         ...(codingResult ? { codingResult } : {}),
         ...(codingQueuedAt ? { codingQueuedAt } : {}),
+        ...(codingRun ? { packages, packageRefusals } : {}),
       });
     },
   });

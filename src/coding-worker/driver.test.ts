@@ -1,7 +1,15 @@
+import { mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { deriveRegistryToken } from "../coding/registry/token.js";
 import type { CodingTaskInput } from "../coding/protocol.js";
 import { CODING_OUTPUT_JSON_SCHEMA, runCodingWorker, WORKER_SECURITY_INSTRUCTIONS } from "./driver.js";
 import type { WorkerClientConfig, WorkerEvent, WorkerThread } from "./types.js";
+
+async function tempWorkspace(): Promise<string> {
+  return mkdtemp(join(tmpdir(), "wardby-driver-"));
+}
 
 const input: CodingTaskInput = {
   schemaVersion: 1,
@@ -40,6 +48,7 @@ describe("runCodingWorker", () => {
   it("pins the model, workspace sandbox, proxy capability, and immutable developer policy", async () => {
     const capture: { config?: WorkerClientConfig; thread?: unknown; prompt?: string } = {};
     const progress = vi.fn();
+    const workspace = await tempWorkspace();
     const output = JSON.stringify({
       schemaVersion: 1,
       runId: input.runId,
@@ -49,7 +58,7 @@ describe("runCodingWorker", () => {
     });
     const result = await runCodingWorker({
       input,
-      workspace: "/workspace",
+      workspace,
       proxyBaseUrl: "http://proxy:8080",
       capability: "rrp_worker_capability",
       signal: new AbortController().signal,
@@ -67,16 +76,22 @@ describe("runCodingWorker", () => {
     });
 
     expect(result.outcome).toBe("changes_ready");
-    expect(capture.config).toEqual({
+    expect(capture.config).toMatchObject({
       proxyBaseUrl: "http://proxy:8080",
       capability: "rrp_worker_capability",
       developerInstructions: WORKER_SECURITY_INSTRUCTIONS,
-      environment: { HOME: "/home/wardby", LANG: "C.UTF-8", PATH: "/usr/local/bin:/usr/bin:/bin", TMPDIR: "/tmp" },
+      environment: expect.objectContaining({
+        HOME: "/home/wardby",
+        LANG: "C.UTF-8",
+        PATH: "/usr/local/bin:/usr/bin:/bin",
+        TMPDIR: "/tmp",
+        npm_config_registry: "http://proxy:8080/registry/npm/",
+      }),
     });
     expect(capture.thread).toEqual({
       model: input.model,
       sandboxMode: "danger-full-access",
-      workingDirectory: "/workspace",
+      workingDirectory: workspace,
       skipGitRepoCheck: true,
       networkAccessEnabled: false,
       webSearchMode: "disabled",
@@ -90,6 +105,34 @@ describe("runCodingWorker", () => {
     expect(progress).toHaveBeenCalledWith(expect.objectContaining({ type: "activity", kind: "other" }));
   });
 
+  it("points npm and pip at the proxy with the registry token, never the capability", async () => {
+    const workspace = await tempWorkspace();
+    const capability = "rrp_worker_capability";
+    const proxyBaseUrl = "http://proxy:8080";
+    const capture: { config?: WorkerClientConfig } = {};
+    const output = JSON.stringify({
+      schemaVersion: 1,
+      runId: input.runId,
+      outcome: "no_changes",
+      summary: "None.",
+      tests: [],
+    });
+    await runCodingWorker({
+      input,
+      workspace,
+      proxyBaseUrl,
+      capability,
+      signal: new AbortController().signal,
+      createClient: clientFor([{ type: "item.completed", item: { type: "agent_message", text: output } }], capture),
+    });
+
+    const env = capture.config!.environment;
+    expect(env.npm_config_registry).toBe(`${proxyBaseUrl}/registry/npm/`);
+    expect(env.PIP_INDEX_URL).toContain(deriveRegistryToken(capability));
+    expect(JSON.stringify(env)).not.toContain(capability);
+    expect(await readFile(join(workspace, ".cache", "npm", "npmrc"), "utf8")).toContain("_authToken=rrg_");
+  });
+
   it("rejects a structured result bound to another run", async () => {
     const output = JSON.stringify({
       schemaVersion: 1,
@@ -101,7 +144,7 @@ describe("runCodingWorker", () => {
     await expect(
       runCodingWorker({
         input,
-        workspace: "/workspace",
+        workspace: await tempWorkspace(),
         proxyBaseUrl: "http://proxy",
         capability: "cap",
         signal: new AbortController().signal,
@@ -113,7 +156,7 @@ describe("runCodingWorker", () => {
   it("returns a bounded budget result without reflecting provider errors", async () => {
     const result = await runCodingWorker({
       input,
-      workspace: "/workspace",
+      workspace: await tempWorkspace(),
       proxyBaseUrl: "http://proxy",
       capability: "cap",
       signal: new AbortController().signal,
@@ -137,7 +180,7 @@ describe("runCodingWorker", () => {
     });
     const result = await runCodingWorker({
       input,
-      workspace: "/workspace",
+      workspace: await tempWorkspace(),
       proxyBaseUrl: "http://proxy",
       capability,
       signal: new AbortController().signal,
@@ -153,7 +196,7 @@ describe("runCodingWorker", () => {
     await expect(
       runCodingWorker({
         input,
-        workspace: "/workspace",
+        workspace: await tempWorkspace(),
         proxyBaseUrl: "http://proxy",
         capability: "cap",
         signal: new AbortController().signal,
@@ -177,7 +220,7 @@ describe("runCodingWorker", () => {
     await expect(
       runCodingWorker({
         input,
-        workspace: "/workspace",
+        workspace: await tempWorkspace(),
         proxyBaseUrl: "http://proxy",
         capability: "cap",
         signal: new AbortController().signal,
@@ -190,7 +233,7 @@ describe("runCodingWorker", () => {
     await expect(
       runCodingWorker({
         input,
-        workspace: "/workspace",
+        workspace: await tempWorkspace(),
         proxyBaseUrl: "http://proxy",
         capability: "cap",
         signal: new AbortController().signal,

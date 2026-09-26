@@ -48,6 +48,9 @@ export interface FinalizeChangesDetails {
   summary?: string;
   tests?: readonly { command: string; outcome: "passed" | "failed" | "skipped" }[];
   tag?: string;
+  /** Packages the registry proxy served/refused during this run (RegistryFetch), for the PR body. */
+  packages?: readonly { ecosystem: string; name: string; version: string }[];
+  packageRefusals?: readonly { ecosystem: string; name: string; reason: string }[];
 }
 
 export type FinalizeChangesResult =

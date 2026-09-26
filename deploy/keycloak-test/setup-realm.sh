@@ -34,7 +34,7 @@ AUDIENCE=${AUDIENCE:-http://127.0.0.1:8099/}
 # scopes_supported from the protected-resource metadata and asks for the lot,
 # and Keycloak rejects the whole authorization request with invalid_scope if
 # even one is unknown.
-ALL_SCOPES=${ALL_SCOPES:-"agents:read agents:write tools:write runs:trigger datastore:write secrets:write webhooks:write budget_groups:write agents:admin"}
+ALL_SCOPES=${ALL_SCOPES:-"agents:read agents:write tools:write runs:trigger datastore:write secrets:write webhooks:write budget_groups:write agents:admin packages:approve"}
 # Deliberately narrower for the machine client, so scope enforcement stays
 # observable: a token with these may call list_agents but not create_secret.
 M2M_SCOPES=${M2M_SCOPES:-"agents:read agents:write runs:trigger"}

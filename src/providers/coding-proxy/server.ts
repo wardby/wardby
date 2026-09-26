@@ -1,7 +1,10 @@
 import { createServer, type ServerResponse } from "node:http";
+import { pipeline, Readable } from "node:stream";
+import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { HTTP_LIMITS, HttpBoundaryError, readBody } from "../../mcp/transport/http-limits.js";
 import { logger } from "../../core/logger.js";
 import { CodingProxyError, PROXY_MAX_BODY_BYTES, type CodingProxy, type ProxyResponseSink } from "./proxy.js";
+import type { RegistryService } from "./registry/service.js";
 import type { ProxyProtocol } from "./types.js";
 
 const proxyLog = logger.child({ module: "coding-proxy" });
@@ -10,6 +13,7 @@ export interface CodingProxyServerConfig {
   host: string;
   port: number;
   expectedHost?: string;
+  registry?: Pick<RegistryService, "handle">;
   onRequest?: (event: { protocol: ProxyProtocol | "other"; status: number; durationMs: number }) => void;
 }
 
@@ -27,6 +31,20 @@ function sendError(response: ServerResponse, status: number, code: string): void
 function bearer(value: string | undefined): string {
   if (!value?.startsWith("Bearer ") || value.indexOf(" ", 7) !== -1) return "";
   return value.slice(7);
+}
+
+/** The registry's own auth: a registry-only token (`rrg_…`) carried as either
+ *  a bearer token or the password half of HTTP basic auth (some clients,
+ *  e.g. pip, only support basic auth for a package index). */
+function registryToken(authorization: string | undefined): string {
+  if (!authorization) return "";
+  const bearerToken = bearer(authorization);
+  if (bearerToken) return bearerToken;
+  const basic = authorization.match(/^Basic ([A-Za-z0-9+/=]+)$/);
+  if (!basic) return "";
+  const decoded = Buffer.from(basic[1], "base64").toString("utf8");
+  const colon = decoded.indexOf(":");
+  return colon >= 0 ? decoded.slice(colon + 1) : "";
 }
 
 function routeProtocol(method: string | undefined, url: string | undefined): ProxyProtocol | undefined {
@@ -73,6 +91,50 @@ export async function startCodingProxyServer(
     void (async () => {
       if (config.expectedHost && request.headers.host !== config.expectedHost) {
         sendError(response, 403, "invalid_host");
+        return;
+      }
+      if (request.url?.startsWith("/registry/")) {
+        if (!config.registry) {
+          sendError(response, 404, "not_found");
+          return;
+        }
+        if (request.method !== "GET" && request.method !== "HEAD") {
+          sendError(response, 405, "method_not_allowed");
+          return;
+        }
+        const match = request.url.match(/^\/registry\/([a-z0-9-]+)\/(.*)$/);
+        if (!match) {
+          sendError(response, 404, "not_found");
+          return;
+        }
+        const controller = new AbortController();
+        response.on("close", () => controller.abort());
+        const result = await config.registry.handle({
+          method: request.method,
+          ecosystem: match[1],
+          subpath: match[2].split("?")[0],
+          token: registryToken(request.headers.authorization),
+          signal: controller.signal,
+        });
+        response.statusCode = result.status;
+        response.setHeader("content-type", result.contentType);
+        if ("body" in result) {
+          response.end(request.method === "HEAD" ? undefined : result.body);
+          return;
+        }
+        if (request.method === "HEAD") {
+          // The registry answers HEAD without starting a download; cancel
+          // defensively anyway so a stream can never hold a reservation.
+          void result.stream.cancel().catch(() => undefined);
+          response.end();
+          return;
+        }
+        // pipeline (not .pipe) destroys the source when the client
+        // disconnects or the response errors, which cancels the web stream
+        // so the registry releases the run's in-flight reservation.
+        pipeline(Readable.fromWeb(result.stream as WebReadableStream), response, (error) => {
+          if (error && !response.destroyed) response.destroy();
+        });
         return;
       }
       if (request.method === "HEAD" && request.url === "/api/hello") {

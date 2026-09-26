@@ -64,10 +64,11 @@ Create these scopes in the provider:
 | `secrets:write`       | Create, attach, rotate, and remove secret bindings.               |
 | `webhooks:write`      | Create and manage webhook triggers.                               |
 | `budget_groups:write` | Create and manage shared budget groups.                           |
+| `packages:approve`    | Approve coding agents' package allowlists.                        |
 | `agents:admin`        | Reassign agent ownership; reserve for administrators.             |
 
 MCP clients discover this list from Wardby's protected-resource metadata and
-may request every advertised scope. Define all nine in the provider even when
+may request every advertised scope. Define all ten in the provider even when
 policy grants a particular client or user only a subset. Ensure granted scopes
 are emitted in the access token's `scope` or `scp` claim; defining them only in
 the provider UI is not sufficient.
@@ -143,7 +144,7 @@ Confirm that:
 
 - `resource` is the canonical MCP URI;
 - `authorization_servers` contains the external issuer; and
-- `scopes_supported` contains all nine Wardby scopes.
+- `scopes_supported` contains all ten Wardby scopes.
 
 An unauthenticated MCP request must return `401` with a `WWW-Authenticate`
 challenge pointing back to that metadata document.

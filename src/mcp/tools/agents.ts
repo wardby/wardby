@@ -11,7 +11,7 @@ import {
   requireReadableBudgetGroup,
   visibleToPrincipal,
 } from "../auth/ownership.js";
-import { requireScope } from "../auth/resource-server.js";
+import { insufficientScope, protectedResourceMetadataUrl, requireScope } from "../auth/resource-server.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
@@ -23,6 +23,12 @@ import { textResult } from "./text-result.js";
 // uses for its own sensitive, ownership-bypassing mutation.
 function requireWorkerImageRefScope(ctx: McpRequestContext): void {
   requireScope(ctx, ctx.canonicalUri, "agents:admin");
+}
+
+/** Package allowlists widen what a run may download, so they need their own approval. */
+function requirePackageApproval(ctx: McpRequestContext): void {
+  if (ctx.scopes.has("packages:approve") || ctx.scopes.has("agents:admin")) return;
+  throw insufficientScope(["packages:approve"], protectedResourceMetadataUrl(ctx.canonicalUri));
 }
 
 const MAX_AGENT_NAME_CHARS = 200;
@@ -123,7 +129,6 @@ const profileJsonSchema = {
     defaultTask: { type: ["string", "null"] },
     allowWebhookTaskOverride: { type: "boolean" },
     timeoutSec: { type: "integer", minimum: 60, maximum: 7200 },
-    allowedEgress: { type: "array", maxItems: 64, items: { type: "string" } },
     protectedPaths: { type: "array", minItems: 1, maxItems: 128, items: { type: "string" } },
     collectExclude: { type: "array", maxItems: 64, items: { type: "string" } },
     toolchain: { type: "string", enum: ["node", "node-python"] },
@@ -135,6 +140,16 @@ const profileJsonSchema = {
       maximum: 32768,
       description:
         "Workspace disk size in MiB. Null uses the deployment default (CODING_DISK_MB), capped by the operator's CODING_MAX_DISK_MB.",
+    },
+    packageAllowlist: {
+      type: "object",
+      description: "Approved top-level packages per ecosystem (npm, pypi). Needs packages:approve or agents:admin.",
+      additionalProperties: { type: "array", maxItems: 256, items: { type: "string" } },
+    },
+    packagePolicy: {
+      type: "object",
+      properties: { minReleaseAgeDays: { type: "integer", minimum: 0, maximum: 30 } },
+      additionalProperties: false,
     },
   },
 };
@@ -173,13 +188,14 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
     defaultTask: profile.defaultTask,
     allowWebhookTaskOverride: profile.allowWebhookTaskOverride,
     timeoutSec: profile.timeoutSec,
-    allowedEgress: profile.allowedEgress,
     protectedPaths: profile.protectedPaths,
     collectExclude: profile.collectExclude,
     toolchain: profile.toolchain,
     toolchainVersion: profile.toolchainVersion,
     workerImageRef: profile.workerImageRef,
     workspaceDiskMb: profile.workspaceDiskMb,
+    packageAllowlist: profile.packageAllowlist,
+    packagePolicy: profile.packagePolicy,
   });
 }
 
@@ -209,6 +225,13 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
     handler: async (rawArgs: unknown, ctx) => {
       const args = parseCreateAgent(rawArgs);
       if (args.codingProfile?.workerImageRef != null) requireWorkerImageRefScope(ctx);
+      const packages = args.codingProfile;
+      if (
+        packages &&
+        (Object.keys(packages.packageAllowlist ?? {}).length > 0 ||
+          Object.keys(packages.packagePolicy ?? {}).length > 0)
+      )
+        requirePackageApproval(ctx);
       validateSchedule(args.schedule, args.timezone ?? "UTC");
       if (args.budgetGroupId) {
         await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id);
@@ -252,6 +275,8 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
     handler: async (rawArgs: unknown, ctx) => {
       const args = parseUpdateAgent(rawArgs);
       if (args.codingProfile?.workerImageRef !== undefined) requireWorkerImageRefScope(ctx);
+      if (args.codingProfile?.packageAllowlist !== undefined || args.codingProfile?.packagePolicy !== undefined)
+        requirePackageApproval(ctx);
       const agent = await ctx.db.$transaction(
         async (tx) => {
           const existing = await tx.agent.findUnique({ where: { id: args.id }, include: { codingProfile: true } });

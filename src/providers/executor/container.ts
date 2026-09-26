@@ -63,7 +63,6 @@ export interface ContainerRunSnapshot {
   provider: string;
   model: string;
   timeoutSec: number;
-  allowedEgress: unknown;
   protectedPaths: unknown;
   /** Stored per-agent collection paths; see src/coding/collect-exclude.ts. */
   collectExclude: unknown;
@@ -133,7 +132,6 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       provider: row.codingRun.provider,
       model: row.codingRun.model,
       timeoutSec: row.codingRun.timeoutSec,
-      allowedEgress: row.codingRun.allowedEgress,
       protectedPaths: row.codingRun.protectedPaths,
       collectExclude: row.codingRun.collectExclude,
       rootCodingRunId: row.codingRun.rootCodingRunId,
@@ -366,6 +364,20 @@ export interface ContainerExecutorOptions {
    * than on the next scheduler tick. Never called for a run that was queued.
    */
   onSlotReleased?: () => void;
+  /**
+   * Loads this run's RegistryFetch ledger (composition.ts wires the Prisma
+   * query) so finalizeChanges can surface installed/refused packages in the
+   * PR body. Optional so tests and non-registry deployments can omit it;
+   * a rejection is swallowed and treated as "nothing to report" since a
+   * reporting failure must never fail the run itself.
+   */
+  registryReport?: (runId: string) => Promise<RegistryReport>;
+}
+
+/** A run's deduplicated served packages and refusals (see summarizeRegistryFetches). */
+export interface RegistryReport {
+  packages: Array<{ ecosystem: string; name: string; version: string }>;
+  packageRefusals: Array<{ ecosystem: string; name: string; reason: string }>;
 }
 
 class PreflightError extends Error {}
@@ -652,7 +664,6 @@ export class ContainerExecutor implements Executor {
         baseRef: run.baseRef,
         defaultTask: null,
         timeoutSec: run.timeoutSec,
-        allowedEgress: run.allowedEgress,
         protectedPaths: run.protectedPaths,
       });
       const expectedHeadRunId = run.rootCodingRunId ?? run.runId;
@@ -747,10 +758,12 @@ export class ContainerExecutor implements Executor {
         this.terminal(current, "budget_exhausted");
         return;
       }
+      const report = await this.loadRegistryReport(run.runId);
       const finalized = await this.options.vcs.finalizeChanges(workspace, {
         summary: output.summary,
         tests: output.tests,
         tag: output.tag,
+        ...report,
       });
       const result = this.resultFor(output, current, finalized.outcome, finalized);
       await this.options.store.complete(run.runId, "succeeded", result);
@@ -778,6 +791,25 @@ export class ContainerExecutor implements Executor {
       }
       await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
       this.emit({ stage: "cleanup", runId: run.runId, jobId: handle.id, cleanupSucceeded: true });
+    }
+  }
+
+  /** The package report is informational: any failure loading it (a
+   *  rejection, a synchronous throw, or a malformed result) yields no
+   *  package section rather than failing finalization. */
+  private async loadRegistryReport(
+    runId: string,
+  ): Promise<{ packages?: RegistryReport["packages"]; packageRefusals?: RegistryReport["packageRefusals"] }> {
+    try {
+      const report = await this.options.registryReport?.(runId);
+      const packages = Array.isArray(report?.packages) ? report.packages : [];
+      const packageRefusals = Array.isArray(report?.packageRefusals) ? report.packageRefusals : [];
+      return {
+        ...(packages.length > 0 ? { packages } : {}),
+        ...(packageRefusals.length > 0 ? { packageRefusals } : {}),
+      };
+    } catch {
+      return {};
     }
   }
 

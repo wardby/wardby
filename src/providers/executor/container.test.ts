@@ -67,7 +67,6 @@ function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSn
     provider: "codex",
     model: "gpt-5.6-luna",
     timeoutSec: 900,
-    allowedEgress: [],
     protectedPaths: [".github/workflows/**", "CODEOWNERS"],
     collectExclude: [],
     rootCodingRunId: null,
@@ -576,6 +575,79 @@ describe("ContainerExecutor", () => {
       tag: "JIRA-123",
     });
     expect(created.store.run.result).toMatchObject({ tag: "JIRA-123" });
+  });
+
+  it("loads the registry report and passes packages/refusals through to VCS finalization", async () => {
+    const registryReport = vi.fn(async (runId: string) => {
+      expect(runId).toBe("run-1");
+      return {
+        packages: [{ ecosystem: "npm", name: "@heroui/react", version: "3.2.6" }],
+        packageRefusals: [{ ecosystem: "npm", name: "left-pad", reason: "wardby_package_not_allowed" }],
+      };
+    });
+    const created = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, { registryReport });
+    created.jobs.result.resultArtifact = JSON.stringify({
+      schemaVersion: 1,
+      runId: "run-1",
+      outcome: "changes_ready",
+      summary: "Added HeroUI.",
+      tests: [],
+    });
+
+    await created.executor.start("run-1");
+
+    expect(registryReport).toHaveBeenCalledWith("run-1");
+    expect(created.vcs.lastFinalizeDetails).toMatchObject({
+      packages: [{ ecosystem: "npm", name: "@heroui/react", version: "3.2.6" }],
+      packageRefusals: [{ ecosystem: "npm", name: "left-pad", reason: "wardby_package_not_allowed" }],
+    });
+  });
+
+  it("treats a rejected registry report as nothing to report, never failing the run", async () => {
+    const created = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, {
+      registryReport: async () => {
+        throw new Error("registry_report_unavailable");
+      },
+    });
+    created.jobs.result.resultArtifact = JSON.stringify({
+      schemaVersion: 1,
+      runId: "run-1",
+      outcome: "changes_ready",
+      summary: "Added HeroUI.",
+      tests: [],
+    });
+
+    await created.executor.start("run-1");
+
+    expect(created.store.run.status).toBe("succeeded");
+    expect(created.vcs.lastFinalizeDetails).toEqual({ summary: "Added HeroUI.", tests: [] });
+  });
+
+  it.each([
+    [
+      "throws synchronously",
+      (): Promise<never> => {
+        throw new Error("sync_failure");
+      },
+    ],
+    [
+      "returns a malformed report",
+      (async () => ({ packages: null, packageRefusals: "x" })) as unknown as () => Promise<never>,
+    ],
+  ])("never fails finalization when the registry report %s", async (_label, registryReport) => {
+    const created = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, { registryReport });
+    created.jobs.result.resultArtifact = JSON.stringify({
+      schemaVersion: 1,
+      runId: "run-1",
+      outcome: "changes_ready",
+      summary: "Added HeroUI.",
+      tests: [],
+    });
+
+    await created.executor.start("run-1");
+
+    expect(created.store.run.status).toBe("succeeded");
+    expect(created.vcs.lastFinalizeDetails).toEqual({ summary: "Added HeroUI.", tests: [] });
   });
 
   it("skips materialization and VCS finalization for a no-change output", async () => {
