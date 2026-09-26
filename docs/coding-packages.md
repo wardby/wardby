@@ -170,9 +170,11 @@ lockfile (216 entries: React 19, HeroUI 3, Vite 8, Vitest 5, jsdom) was
 verified in 9.5 s cold and 0.7 s with stored facts, and its whole `npm ci`
 took 12 s cold and 3 s warm, with the proxy at 183 MiB peak RSS (30 MiB
 heap). At the default 3 days the same plan
-took 10 s and refused 53 entries (vite and vitest were days old, plus what
-only they reach), and `npm ci` failed on those refusals in 14 s with the
-proxy at 179 MiB peak RSS (24 MiB heap), with no walk.
+took 8 s and refused 53 entries: vite 8.3.1 and vitest 5.0.2 were days old,
+and those two are answered from the plan, but the 51 entries refused only as
+unreachable through them are lockfile-dependent verdicts, so npm's requests
+for them went to the graph walk, and the failing `npm ci` took 547 s with the
+proxy at 1604 MiB peak RSS.
 
 ### Lockfile installs without a plan: the dependency-graph walk
 
@@ -248,7 +250,8 @@ deadline passes. Even so, a lockfile install of a large graph is the proxy's
 largest memory user: a measured `npm ci` of a ~220-package lockfile (React
 19, Vite 8, Vitest 5, jsdom) peaked at 1752 MiB RSS (549 MiB heap), which is
 why the GKE overlay gives the proxy 3Gi. A lockfile the shim verified
-avoids the walk for every version the plan approved or refused.
+avoids the walk for every version the plan approved, and for every version it
+refused for a reason about the version itself (too new, an advisory, ...).
 
 ## What the agent can then run
 
