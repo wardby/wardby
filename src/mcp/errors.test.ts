@@ -54,16 +54,58 @@ describe("mapPrismaError", () => {
     expect(mapped.message).not.toContain("prisma");
   });
 
-  it("maps P2003 to a 409 'still referenced' error", () => {
-    const mapped = mapPrismaError(knownError("P2003", { modelName: "Tool" })) as McpError;
+  it("maps P2003 to a neutral 409 covering both directions of a foreign-key failure", () => {
+    // P2003 is a delete blocked by a reference *or* an insert/update pointing
+    // at a row that no longer exists (attach_tool racing delete_tool).
+    const mapped = mapPrismaError(knownError("P2003", { modelName: "AgentTool" })) as McpError;
     expect(mapped).toBeInstanceOf(McpError);
     expect(mapped.httpStatus).toBe(409);
-    expect(mapped.message).toBe("The tool is still referenced by other records.");
+    expect(mapped.message).toBe(
+      "The agent tool conflicts with a related record: it is still referenced by another record, or refers to one that no longer exists.",
+    );
   });
 
-  it("returns every other error unchanged", () => {
-    const other = knownError("P2025");
-    expect(mapPrismaError(other)).toBe(other);
+  it("maps a serialization failure (P2034) to a 409 asking the client to retry", () => {
+    const mapped = mapPrismaError(knownError("P2034")) as McpError;
+    expect(mapped).toBeInstanceOf(McpError);
+    expect(mapped.httpStatus).toBe(409);
+    expect(mapped.message).toBe("A concurrent change conflicted with this one; retry the request.");
+  });
+
+  it("maps a serialization failure raised at COMMIT (an unwrapped driver adapter error) the same way", () => {
+    const atCommit = Object.assign(new Error("could not serialize access"), {
+      name: "DriverAdapterError",
+      cause: { originalCode: "40001" },
+    });
+    expect((mapPrismaError(atCommit) as McpError).httpStatus).toBe(409);
+    const other = Object.assign(new Error("connection reset"), {
+      name: "DriverAdapterError",
+      cause: { originalCode: "08006" },
+    });
+    expect((mapPrismaError(other) as McpError).httpStatus).toBe(500);
+  });
+
+  it("turns every other Prisma error into a generic 500 without the invocation text", () => {
+    const errors: unknown[] = [
+      knownError("P2025"),
+      new Prisma.PrismaClientValidationError("Invalid `prisma.tool.update()` invocation in /srv/app/src/x.ts:12", {
+        clientVersion: "test",
+      }),
+      new Prisma.PrismaClientUnknownRequestError("Invalid `tx.tool.update()` invocation in /srv/app/src/y.ts:3", {
+        clientVersion: "test",
+      }),
+    ];
+    for (const err of errors) {
+      const mapped = mapPrismaError(err) as McpError;
+      expect(mapped).toBeInstanceOf(McpError);
+      expect(mapped.httpStatus).toBe(500);
+      expect(mapped.message).toMatch(/^Internal database error \(reference: [0-9a-f-]{36}\)\.$/);
+      expect(mapped.message).not.toContain("prisma");
+      expect(mapped.message).not.toContain("/srv/app");
+    }
+  });
+
+  it("returns non-Prisma errors, McpErrors included, unchanged", () => {
     const plain = new Error("boom");
     expect(mapPrismaError(plain)).toBe(plain);
     const mcp = new McpError(404, "nope");

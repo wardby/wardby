@@ -100,12 +100,8 @@ function ctx(database: PrismaClient = db, principal: string = principalId): McpR
   };
 }
 
-/**
- * Calls a real handler the way server.ts dispatches it: a thrown Prisma error
- * goes through mapPrismaError, so a P2002/P2003 arrives as the McpError a
- * client would see and every other error (e.g. P2034) arrives unchanged.
- */
-async function callTool(
+/** Calls a real handler directly: a thrown Prisma error arrives raw, as the adapter raised it. */
+async function callHandler(
   name: string,
   args: Record<string, unknown>,
   database: PrismaClient = db,
@@ -113,8 +109,22 @@ async function callTool(
 ): Promise<unknown> {
   const handler = handlers.get(name);
   if (!handler) throw new Error(`no handler registered for ${name}`);
+  return handler(args as never, ctx(database, principal));
+}
+
+/**
+ * Calls a real handler the way server.ts dispatches it: a thrown Prisma error
+ * goes through mapPrismaError, so it arrives as the McpError a client would
+ * see.
+ */
+async function callTool(
+  name: string,
+  args: Record<string, unknown>,
+  database: PrismaClient = db,
+  principal: string = principalId,
+): Promise<unknown> {
   try {
-    return await handler(args as never, ctx(database, principal));
+    return await callHandler(name, args, database, principal);
   } catch (err) {
     throw mapPrismaError(err);
   }
@@ -130,7 +140,7 @@ async function callTool(
  */
 function interleavedDb(
   interleave: () => Promise<unknown>,
-  at: { model: "agent" | "run"; method: string } = { model: "agent", method: "findUnique" },
+  at: { model: "agent" | "run" | "agentTool"; method: string } = { model: "agent", method: "findUnique" },
 ): PrismaClient {
   let fired = false;
   const bind = (target: object, prop: string | symbol) => {
@@ -190,6 +200,16 @@ function attachmentsHiddenDb(): PrismaClient {
         }, options);
     },
   });
+}
+
+/** Whatever a promise rejects with (fails the test if it resolves). */
+async function promiseError(promise: Promise<unknown>): Promise<unknown> {
+  const outcome = await promise.then(
+    () => ({ resolved: true as const }),
+    (error: unknown) => ({ resolved: false as const, error }),
+  );
+  expect(outcome.resolved, "expected the promise to reject").toBe(false);
+  return outcome.resolved ? undefined : outcome.error;
 }
 
 /** The McpError a promise rejects with. */
@@ -545,18 +565,22 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
   });
 
   describe("MCP tools' Serializable transactions under a genuine conflict", () => {
-    // None of these tools retry: a serialization failure propagates to the
-    // caller as P2034, and the concurrent writer's commit stands.
+    // None of these tools retry: a serialization failure propagates as P2034
+    // (callHandler: unmapped, to pin the adapter's code), and the concurrent
+    // writer's commit stands. A client sees it as mapPrismaError's 409.
     it("set_schedule surfaces P2034", async () => {
       const agentId = await createAgent("set-schedule");
       const conflicted = interleavedDb(() =>
         db.agent.update({ where: { id: agentId }, data: { timezone: "Europe/Paris" } }),
       );
       const err = await knownError(
-        callTool("set_schedule", { agentId, schedule: "0 * * * *", timezone: "UTC" }, conflicted),
+        callHandler("set_schedule", { agentId, schedule: "0 * * * *", timezone: "UTC" }, conflicted),
       );
       expect(err.code).toBe("P2034");
       expect(isSerializationConflict(err)).toBe(true);
+      const mapped = mapPrismaError(err) as McpError;
+      expect(mapped.httpStatus).toBe(409);
+      expect(mapped.message).toContain("retry");
       const row = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
       expect(row.timezone).toBe("Europe/Paris");
       expect(row.schedule).toBeNull();
@@ -567,7 +591,7 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
       const conflicted = interleavedDb(() =>
         db.agent.update({ where: { id: agentId }, data: { systemPrompt: "concurrent" } }),
       );
-      const err = await knownError(callTool("update_agent", { id: agentId, systemPrompt: "mine" }, conflicted));
+      const err = await knownError(callHandler("update_agent", { id: agentId, systemPrompt: "mine" }, conflicted));
       expect(err.code).toBe("P2034");
       expect((await db.agent.findUniqueOrThrow({ where: { id: agentId } })).systemPrompt).toBe("concurrent");
     });
@@ -589,11 +613,50 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
         db.agentTool.create({ data: { agentId, toolId: tool.id, allowedHosts: ["concurrent.example"] } }),
       );
       const err = await knownError(
-        callTool("attach_tool", { agentId, toolId: tool.id, allowedHosts: ["mine.example"] }, conflicted),
+        callHandler("attach_tool", { agentId, toolId: tool.id, allowedHosts: ["mine.example"] }, conflicted),
       );
       expect(err.code).toBe("P2034");
       const row = await db.agentTool.findUniqueOrThrow({ where: { agentId_toolId: { agentId, toolId: tool.id } } });
       expect(row.allowedHosts).toEqual(["concurrent.example"]);
+    });
+
+    it("update_tool and a concurrent attach_tool onto a public agent cannot both commit", async () => {
+      // The security property update_tool's cross-owner check depends on:
+      // update_tool reads the tool's attachments and writes the Tool row,
+      // attach_tool reads the Tool row and writes an attachment. Under
+      // Serializable one of them must abort, so new code never reaches an
+      // agent that was attached between the check and the write.
+      const publicAgentId = id("update-vs-attach-public");
+      await db.agent.create({
+        data: { id: publicAgentId, name: publicAgentId, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: null },
+      });
+      const tool = await db.tool.create({
+        data: {
+          id: id("update-vs-attach-tool"),
+          name: id("update-vs-attach-tool"),
+          description: "t",
+          paramsZod: "z.object({})",
+          jsonSchema: {},
+          code: "return 'original';",
+          ownerId: principalId,
+        },
+      });
+      // Right after update_tool's transaction lists the tool's attachments
+      // (and finds none), the owner attaches it to a public agent on a
+      // separate connection, and that commits first.
+      const conflicted = interleavedDb(() => callHandler("attach_tool", { agentId: publicAgentId, toolId: tool.id }), {
+        model: "agentTool",
+        method: "findMany",
+      });
+
+      const err = await promiseError(
+        callHandler("update_tool", { toolId: tool.id, code: "return 'new';" }, conflicted),
+      );
+      expect(isSerializationConflict(err)).toBe(true);
+      expect((mapPrismaError(err) as McpError).httpStatus).toBe(409);
+      // The attach won; the tool's code is unchanged.
+      expect((await db.tool.findUniqueOrThrow({ where: { id: tool.id } })).code).toBe("return 'original';");
+      expect(await db.agentTool.count({ where: { agentId: publicAgentId, toolId: tool.id } })).toBe(1);
     });
   });
 });
