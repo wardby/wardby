@@ -1105,15 +1105,17 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     expect(await store.isAllowedDependency("run-1", "npm", name)).toBe(false);
   });
 
-  it("answers 503 wardby_graph_incomplete, never not-allowed, when the package bound trips", async () => {
+  it("answers a definitive 403 wardby_graph_limit, never not-allowed and never a retryable 503, when the package bound trips", async () => {
     // app and mid fit in the bound; leaf, a third package, does not.
     const { get, store } = graphService({ maxGraphPackages: 2 });
     const response = await get("leaf/-/leaf-1.0.0.tgz");
-    expect(response).toMatchObject({ status: 503 });
-    expect("body" in response && response.body).toContain("wardby_graph_incomplete");
-    expect("body" in response && response.body).toContain("cut short by its package limit");
+    expect(response).toMatchObject({ status: 403 });
+    expect("body" in response && response.body).toContain("wardby_graph_limit");
+    expect("body" in response && response.body).toContain("retrying will not help");
     expect("body" in response && response.body).not.toContain("wardby_package_not_allowed");
-    expect(store.fetches).toMatchObject([{ name: "leaf", outcome: "refused", reason: "wardby_graph_incomplete" }]);
+    expect(store.fetches).toMatchObject([{ name: "leaf", outcome: "refused", reason: "wardby_graph_limit" }]);
+    // The bound is permanent for the run: a retry gets the same definitive answer.
+    await expect(get("leaf/-/leaf-1.0.0.tgz")).resolves.toMatchObject({ status: 403 });
     // mid was found before the bound tripped, so it stays allowed.
     await expect(get("mid")).resolves.toMatchObject({ status: 200 });
   });
@@ -1532,6 +1534,10 @@ describe("RegistryService memory: nothing retains a parsed packument, and run st
   it("releases a run's walk state when its deadline passes, with no other request", async () => {
     let clock = NOW;
     const { get, internals } = memoryService(new Date(NOW.getTime() + 50), () => clock);
+    // No real-time race: while the injected clock stays at NOW, a timer that
+    // fires early only re-arms (scheduleRelease checks this.now() against the
+    // deadline), so the walk below cannot be released mid-walk however slow
+    // the machine is.
     await expect(get("leaf")).resolves.toMatchObject({ status: 200 });
     const walk = internals.tallies.get("run-1")?.graphs?.get("npm");
     expect(walk).toBeDefined();

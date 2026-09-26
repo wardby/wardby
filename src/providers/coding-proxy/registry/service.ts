@@ -458,6 +458,18 @@ export class RegistryService {
     const graph = await this.resolveInGraph(adapter, context, entries, name);
     if (graph === "found") return undefined;
     if (typeof graph === "object" && "cutShort" in graph) {
+      if (graph.cutShort === "limit") {
+        // The bound is permanent for the rest of the run, so a retry can
+        // never succeed: answer with a definitive 4xx (npm does not retry
+        // it) rather than a 503 that a client or agent would retry forever.
+        // Still not "not allowed": the name was not proven absent.
+        await this.refuse(context, adapter, name, "wardby_graph_limit");
+        throw new RegistryError(
+          403,
+          "wardby_graph_limit",
+          `"${name}" was not reached before this agent's ${adapter.id} dependency graph walk hit its package limit (REGISTRY_MAX_GRAPH_PACKAGES) for this run; retrying will not help: allowlist the package directly, or ask the operator to raise the limit`,
+        );
+      }
       // Not proven absent, so never "not allowed": a timed-out walk resumes
       // where it stopped on the next miss, so a retry (npm retries a 5xx on
       // its own) can find the name.
@@ -465,9 +477,7 @@ export class RegistryService {
       throw new RegistryError(
         503,
         "wardby_graph_incomplete",
-        graph.cutShort === "timeout"
-          ? `"${name}" was not reached before this agent's ${adapter.id} dependency graph walk was cut short by its time limit (REGISTRY_GRAPH_TIMEOUT_MS); the walk continues where it stopped: try again`
-          : `"${name}" was not reached before this agent's ${adapter.id} dependency graph walk was cut short by its package limit (REGISTRY_MAX_GRAPH_PACKAGES): allowlist the package directly, or ask the operator to raise the limit`,
+        `"${name}" was not reached before this agent's ${adapter.id} dependency graph walk was cut short by its time limit (REGISTRY_GRAPH_TIMEOUT_MS); the walk continues where it stopped: try again`,
       );
     }
     if (typeof graph === "object") {
