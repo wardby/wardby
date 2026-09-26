@@ -83,7 +83,12 @@ describe("normalizeGitHubEvent", () => {
       action: "created",
       repository,
       pull_request: { number: 7 },
-      comment: { id: 88, body: "@wardby is this safe?", author_association: "COLLABORATOR", user: { login: "dev", type: "User" } },
+      comment: {
+        id: 88,
+        body: "@wardby is this safe?",
+        author_association: "COLLABORATOR",
+        user: { login: "dev", type: "User" },
+      },
     };
     expect(normalizeGitHubEvent("pull_request_review_comment", reviewComment, APP)).toMatchObject({
       kind: "mention",

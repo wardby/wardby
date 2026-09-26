@@ -64,7 +64,11 @@ const ReadFileArgs = z
   })
   .strict();
 const ListFilesArgs = z
-  .object({ repository: Repository, ref: z.string().min(1).max(200).optional(), pathPrefix: z.string().max(500).optional() })
+  .object({
+    repository: Repository,
+    ref: z.string().min(1).max(200).optional(),
+    pathPrefix: z.string().max(500).optional(),
+  })
   .strict();
 const InlineCommentArgs = z
   .object({
@@ -168,7 +172,11 @@ export const REVIEW_HOST_TOOL_DEFS: LoadedTool[] = [
             type: "object",
             properties: {
               path: { type: "string" },
-              line: { type: "integer", minimum: 1, description: "Line number in the new file (side RIGHT) or the old file (side LEFT)." },
+              line: {
+                type: "integer",
+                minimum: 1,
+                description: "Line number in the new file (side RIGHT) or the old file (side LEFT).",
+              },
               side: { type: "string", enum: ["LEFT", "RIGHT"] },
               severity: { type: "string", description: "e.g. CRITICAL, MAJOR, MINOR, NIT" },
               body: { type: "string", maxLength: 4000 },
@@ -214,7 +222,10 @@ function normalizeFor(provider: ReviewHostProvider, value: string): string | nul
   return null;
 }
 
-export function resolveLink(links: readonly RepositoryLink[], repositoryArg: string): RepositoryLink | "ambiguous" | null {
+export function resolveLink(
+  links: readonly RepositoryLink[],
+  repositoryArg: string,
+): RepositoryLink | "ambiguous" | null {
   const raw = repositoryArg.trim();
   for (const provider of REVIEW_HOST_PROVIDERS) {
     const prefix = HOST_PREFIXES[provider];
@@ -248,7 +259,8 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
   const repositoryArg = (parsed as { repository?: unknown } | null)?.repository;
   if (typeof repositoryArg !== "string") return error("invalid_arguments", "repository is required");
   const link = resolveLink(ctx.links, repositoryArg);
-  if (link === "ambiguous") return error("repository_not_linked", "Ambiguous repository; qualify it as host/owner/name.");
+  if (link === "ambiguous")
+    return error("repository_not_linked", "Ambiguous repository; qualify it as host/owner/name.");
   if (!link) return error("repository_not_linked", `This agent is not linked to "${repositoryArg}".`);
   if (WRITE_TOOLS.has(name) && link.access !== "write") {
     return error("write_access_required", `This agent's link to ${link.repository} is read-only.`);
@@ -271,7 +283,10 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
       case "repo_read_file": {
         const a = ReadFileArgs.parse(parsed);
         return JSON.stringify(
-          await host.readFile(link.repository, a.path, a.ref, { startLine: a.startLine ?? 1, maxLines: a.maxLines ?? 400 }),
+          await host.readFile(link.repository, a.path, a.ref, {
+            startLine: a.startLine ?? 1,
+            maxLines: a.maxLines ?? 400,
+          }),
         );
       }
       case "repo_list_files": {
@@ -281,7 +296,9 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
       case "repo_publish_review": {
         const a = PublishArgs.parse(parsed);
         const ownsCheck =
-          ctx.runCheck !== null && ctx.runCheck.provider === link.provider && ctx.runCheck.repository === link.repository;
+          ctx.runCheck !== null &&
+          ctx.runCheck.provider === link.provider &&
+          ctx.runCheck.repository === link.repository;
         const result = await host.publishReview(link.repository, {
           prNumber: a.prNumber,
           headSha: a.headSha,
@@ -299,7 +316,11 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
       case "repo_comment": {
         const a = CommentArgs.parse(parsed);
         return JSON.stringify(
-          await host.comment(link.repository, { number: a.number, body: a.body, replyToReviewCommentId: a.replyToReviewCommentId }),
+          await host.comment(link.repository, {
+            number: a.number,
+            body: a.body,
+            replyToReviewCommentId: a.replyToReviewCommentId,
+          }),
         );
       }
       default:
@@ -307,7 +328,10 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
     }
   } catch (err) {
     if (err instanceof z.ZodError) {
-      return error("invalid_arguments", err.issues.map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; "));
+      return error(
+        "invalid_arguments",
+        err.issues.map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; "),
+      );
     }
     if (err instanceof ReviewHostError) return error(err.code, err.message);
     return error("host_api_error", "The host request failed.");

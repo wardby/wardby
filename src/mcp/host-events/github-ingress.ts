@@ -92,7 +92,10 @@ export async function handleGitHubEventIngress(
       hosts: deps.hosts,
       mentionHandle: app.slug,
     });
-    log.info({ event: event.kind, repository: event.repository, deliveryId, runIds: routed.runIds }, "host event routed");
+    log.info(
+      { event: event.kind, repository: event.repository, deliveryId, runIds: routed.runIds },
+      "host event routed",
+    );
     return {
       status: 202,
       body: { runIds: routed.runIds },
@@ -103,7 +106,9 @@ export async function handleGitHubEventIngress(
   } catch (err) {
     await deps.db.hostEventDelivery
       .deleteMany({ where: { provider: "github", deliveryId } })
-      .catch((delErr: unknown) => log.warn({ err: delErr }, "could not roll back the delivery record after a routing failure"));
+      .catch((delErr: unknown) =>
+        log.warn({ err: delErr }, "could not roll back the delivery record after a routing failure"),
+      );
     throw err;
   }
 }

@@ -58,10 +58,9 @@ export function renderSummaryComment(input: {
   ];
   if (input.outside.length > 0) {
     sections.push(
-      [
-        "## Outside the diff",
-        ...input.outside.map((c) => `- **[${c.severity}] ${c.path}:${c.line}** ${c.body}`),
-      ].join("\n"),
+      ["## Outside the diff", ...input.outside.map((c) => `- **[${c.severity}] ${c.path}:${c.line}** ${c.body}`)].join(
+        "\n",
+      ),
     );
   }
   return sections.join("\n\n");

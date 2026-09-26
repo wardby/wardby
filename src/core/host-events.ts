@@ -114,12 +114,18 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
   switch (event.kind) {
     case "pr_updated": {
       if (event.isFork || reviewers.length === 0) return none;
-      return { runIds: await startReviews(deps, host, event.repository, event.prNumber, event.headSha, reviewers), followUps: [] };
+      return {
+        runIds: await startReviews(deps, host, event.repository, event.prNumber, event.headSha, reviewers),
+        followUps: [],
+      };
     }
     case "check_rerun": {
       const owner = reviewers.filter((r) => r.checkName === event.checkName);
       if (owner.length === 0) return none;
-      return { runIds: await startReviews(deps, host, event.repository, event.prNumber, event.headSha, owner), followUps: [] };
+      return {
+        runIds: await startReviews(deps, host, event.repository, event.prNumber, event.headSha, owner),
+        followUps: [],
+      };
     }
     case "mention": {
       const react = async () => {
@@ -149,7 +155,10 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
         taskOverride: `${header}\n\n${event.body.slice(0, MAX_TASK_BODY)}`,
       });
       if (!dispatched) return none;
-      log.info({ repository: event.repository, number: event.number, runId: dispatched.run.id }, "mention run dispatched");
+      log.info(
+        { repository: event.repository, number: event.number, runId: dispatched.run.id },
+        "mention run dispatched",
+      );
       return { runIds: [dispatched.run.id], followUps: [react] };
     }
   }

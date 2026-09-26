@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { hasReviewMarker, parseReviewMarker, renderSummaryComment, reviewMarker, verdictConclusion } from "./review-format.js";
+import {
+  hasReviewMarker,
+  parseReviewMarker,
+  renderSummaryComment,
+  reviewMarker,
+  verdictConclusion,
+} from "./review-format.js";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 

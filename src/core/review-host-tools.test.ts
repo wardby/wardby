@@ -3,7 +3,12 @@ import { ReviewHostError, type CodeReviewHost } from "../providers/review-host/t
 import { handleReviewHostTool, resolveLink, type RepositoryLink, type ReviewToolContext } from "./review-host-tools.js";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
-const WRITE: RepositoryLink = { provider: "github", repository: "chfields/knock-knock-jokes", access: "write", checkName: "wardby review" };
+const WRITE: RepositoryLink = {
+  provider: "github",
+  repository: "chfields/knock-knock-jokes",
+  access: "write",
+  checkName: "wardby review",
+};
 const READ: RepositoryLink = { provider: "github", repository: "chfields/other", access: "read", checkName: null };
 
 function fakeHost(): CodeReviewHost {
@@ -52,11 +57,19 @@ describe("resolveLink", () => {
 describe("handleReviewHostTool", () => {
   it("rejects an unlinked repository and a write tool on a read link", async () => {
     const c = ctx();
-    expect(JSON.parse(await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: "x/y", prNumber: 1 }), c))).toMatchObject({
+    expect(
+      JSON.parse(await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: "x/y", prNumber: 1 }), c)),
+    ).toMatchObject({
       error: "repository_not_linked",
     });
     expect(
-      JSON.parse(await handleReviewHostTool("repo_comment", JSON.stringify({ repository: "chfields/other", number: 1, body: "hi" }), c)),
+      JSON.parse(
+        await handleReviewHostTool(
+          "repo_comment",
+          JSON.stringify({ repository: "chfields/other", number: 1, body: "hi" }),
+          c,
+        ),
+      ),
     ).toMatchObject({ error: "write_access_required" });
     expect(c.hosts.github!.comment).not.toHaveBeenCalled();
   });
@@ -76,7 +89,14 @@ describe("handleReviewHostTool", () => {
     const result = JSON.parse(
       await handleReviewHostTool(
         "repo_publish_review",
-        JSON.stringify({ repository: WRITE.repository, prNumber: 7, headSha: SHA, verdict: "APPROVE", summary: "ok", body: "fine" }),
+        JSON.stringify({
+          repository: WRITE.repository,
+          prNumber: 7,
+          headSha: SHA,
+          verdict: "APPROVE",
+          summary: "ok",
+          body: "fine",
+        }),
         c,
       ),
     );
@@ -99,7 +119,14 @@ describe("handleReviewHostTool", () => {
     const c = ctx({ runCheck: { provider: "github", repository: "chfields/elsewhere", checkId: "11" } });
     await handleReviewHostTool(
       "repo_publish_review",
-      JSON.stringify({ repository: WRITE.repository, prNumber: 7, headSha: SHA, verdict: "COMMENT", summary: "s", body: "b" }),
+      JSON.stringify({
+        repository: WRITE.repository,
+        prNumber: 7,
+        headSha: SHA,
+        verdict: "COMMENT",
+        summary: "s",
+        body: "b",
+      }),
       c,
     );
     expect(vi.mocked(c.hosts.github!.publishReview).mock.calls[0][1].checkId).toBeUndefined();
@@ -113,7 +140,15 @@ describe("handleReviewHostTool", () => {
       JSON.parse(
         await handleReviewHostTool(
           "repo_publish_review",
-          JSON.stringify({ repository: WRITE.repository, prNumber: 7, headSha: SHA, verdict: "COMMENT", summary: "s", body: "b", comments: tooMany }),
+          JSON.stringify({
+            repository: WRITE.repository,
+            prNumber: 7,
+            headSha: SHA,
+            verdict: "COMMENT",
+            summary: "s",
+            body: "b",
+            comments: tooMany,
+          }),
           c,
         ),
       ),
@@ -121,15 +156,25 @@ describe("handleReviewHostTool", () => {
 
     vi.mocked(c.hosts.github!.readFile).mockRejectedValueOnce(new ReviewHostError("host_not_installed"));
     expect(
-      JSON.parse(await handleReviewHostTool("repo_read_file", JSON.stringify({ repository: WRITE.repository, path: "a.py" }), c)),
+      JSON.parse(
+        await handleReviewHostTool("repo_read_file", JSON.stringify({ repository: WRITE.repository, path: "a.py" }), c),
+      ),
     ).toEqual({ error: "host_not_installed", message: "host_not_installed" });
 
-    expect(JSON.parse(await handleReviewHostTool("repo_read_file", "{bad", c))).toMatchObject({ error: "invalid_arguments_json" });
+    expect(JSON.parse(await handleReviewHostTool("repo_read_file", "{bad", c))).toMatchObject({
+      error: "invalid_arguments_json",
+    });
   });
 
   it("reports host_not_configured when the link's provider has no host", async () => {
     expect(
-      JSON.parse(await handleReviewHostTool("repo_list_files", JSON.stringify({ repository: WRITE.repository }), ctx({ hosts: {} }))),
+      JSON.parse(
+        await handleReviewHostTool(
+          "repo_list_files",
+          JSON.stringify({ repository: WRITE.repository }),
+          ctx({ hosts: {} }),
+        ),
+      ),
     ).toMatchObject({ error: "host_not_configured" });
   });
 });

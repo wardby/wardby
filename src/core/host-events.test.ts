@@ -38,13 +38,22 @@ function deps(links: Array<{ agentId: string; triggers: string[]; checkName: str
     mentionHandle: "wardby",
     db: {
       agentRepository: {
-        findMany: vi.fn(async () => links.map((l) => ({ ...l, provider: "github", repository: REPO, access: "write" }))),
+        findMany: vi.fn(async () =>
+          links.map((l) => ({ ...l, provider: "github", repository: REPO, access: "write" })),
+        ),
       },
     } as never,
   };
 }
 
-const pr: HostEvent = { kind: "pr_updated", provider: "github", repository: REPO, prNumber: 7, headSha: SHA, isFork: false };
+const pr: HostEvent = {
+  kind: "pr_updated",
+  provider: "github",
+  repository: REPO,
+  prNumber: 7,
+  headSha: SHA,
+  isFork: false,
+};
 
 describe("routeHostEvent", () => {
   it("starts a check, dispatches, and records the check for every pull_request agent", async () => {

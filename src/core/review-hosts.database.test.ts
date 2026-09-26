@@ -36,9 +36,17 @@ describe.skipIf(!process.env.DATABASE_URL)("code-review host schema (PostgreSQL)
 
     const run = await db.run.create({ data: { agentId: agent.id, trigger: "host_event" } });
     await db.runHostCheck.create({
-      data: { runId: run.id, provider: "github", repository: "chfields/knock-knock-jokes", checkId: "123", headSha: "a".repeat(40) },
+      data: {
+        runId: run.id,
+        provider: "github",
+        repository: "chfields/knock-knock-jokes",
+        checkId: "123",
+        headSha: "a".repeat(40),
+      },
     });
-    expect((await db.run.findUniqueOrThrow({ where: { id: run.id }, include: { hostCheck: true } })).hostCheck?.checkId).toBe("123");
+    expect(
+      (await db.run.findUniqueOrThrow({ where: { id: run.id }, include: { hostCheck: true } })).hostCheck?.checkId,
+    ).toBe("123");
 
     await db.run.deleteMany({ where: { agentId: agent.id } });
     await db.agent.delete({ where: { id: agent.id } });

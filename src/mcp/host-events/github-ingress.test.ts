@@ -62,7 +62,10 @@ describe("handleGitHubEventIngress", () => {
 
   it("rejects a bad signature without routing", async () => {
     const { deps: d } = deps();
-    const result = await handleGitHubEventIngress({ headers: headers({ "x-hub-signature-256": "sha256=00" }), rawBody: body }, d);
+    const result = await handleGitHubEventIngress(
+      { headers: headers({ "x-hub-signature-256": "sha256=00" }), rawBody: body },
+      d,
+    );
     expect(result.status).toBe(401);
     expect(routeHostEvent).not.toHaveBeenCalled();
   });
@@ -82,7 +85,10 @@ describe("handleGitHubEventIngress", () => {
     const { deps: d } = deps();
     const raw = JSON.stringify({ repository: { full_name: "chfields/knock-knock-jokes" } });
     const result = await handleGitHubEventIngress(
-      { headers: { "x-github-event": "push", "x-github-delivery": "d2", "x-hub-signature-256": sign(raw) }, rawBody: raw },
+      {
+        headers: { "x-github-event": "push", "x-github-delivery": "d2", "x-hub-signature-256": sign(raw) },
+        rawBody: raw,
+      },
       d,
     );
     expect(result).toMatchObject({ status: 202, body: { ignored: true } });
@@ -92,7 +98,10 @@ describe("handleGitHubEventIngress", () => {
     const { deps: d, created, hostEventDelivery } = deps();
     const raw = JSON.stringify({ repository: { full_name: "chfields/knock-knock-jokes" } });
     const result = await handleGitHubEventIngress(
-      { headers: { "x-github-event": "push", "x-github-delivery": "d2", "x-hub-signature-256": sign(raw) }, rawBody: raw },
+      {
+        headers: { "x-github-event": "push", "x-github-delivery": "d2", "x-hub-signature-256": sign(raw) },
+        rawBody: raw,
+      },
       d,
     );
     expect(result).toMatchObject({ status: 202, body: { ignored: true } });

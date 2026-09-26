@@ -30,7 +30,13 @@ describe("GitHubReviewHost reads", () => {
       agentMarker: "agent1",
     });
     expect(grants).toEqual([{ contents: "read", pull_requests: "read" }]);
-    expect(view).toMatchObject({ number: 7, headSha: SHA, isFork: false, lastReviewedSha: OLD_SHA, comparedFrom: null });
+    expect(view).toMatchObject({
+      number: 7,
+      headSha: SHA,
+      isFork: false,
+      lastReviewedSha: OLD_SHA,
+      comparedFrom: null,
+    });
     expect(view.files[0]).toMatchObject({ patch: PATCH, patchTruncated: false });
     expect(view.files[1]).toMatchObject({ patch: PATCH.slice(0, 5), patchTruncated: true });
   });
@@ -39,7 +45,10 @@ describe("GitHubReviewHost reads", () => {
     const { client } = fakeGitHub(({ path }) => {
       if (path === `${BASE}/pulls/7`) return json(PR);
       if (path === `${BASE}/compare/${OLD_SHA}...${SHA}`) {
-        return json({ status: "ahead", files: [{ filename: "c.py", status: "modified", additions: 1, deletions: 0, patch: PATCH }] });
+        return json({
+          status: "ahead",
+          files: [{ filename: "c.py", status: "modified", additions: 1, deletions: 0, patch: PATCH }],
+        });
       }
       if (path.startsWith(`${BASE}/issues/7/comments`)) return json([]);
       return undefined;
@@ -146,7 +155,13 @@ describe("GitHubReviewHost writes", () => {
     agentMarker: "agent1",
     checkName: "wardby review",
     comments: [
-      { path: "a.py", line: 2, side: "RIGHT" as const, severity: "MAJOR", body: "off by one\n```suggestion\nnew 2\n```" },
+      {
+        path: "a.py",
+        line: 2,
+        side: "RIGHT" as const,
+        severity: "MAJOR",
+        body: "off by one\n```suggestion\nnew 2\n```",
+      },
       { path: "a.py", line: 50, side: "RIGHT" as const, severity: "MINOR", body: "outside" },
     ],
   };
@@ -213,7 +228,11 @@ describe("GitHubReviewHost writes", () => {
       if (method === "POST" && path === `${BASE}/check-runs`) return json({ id: 12 }, 201);
       return undefined;
     });
-    const result = await new GitHubReviewHost(client).publishReview(REPO, { ...input, verdict: "APPROVE", comments: [] });
+    const result = await new GitHubReviewHost(client).publishReview(REPO, {
+      ...input,
+      verdict: "APPROVE",
+      comments: [],
+    });
     expect(result).toMatchObject({ published: true, reviewUrl: null, checkId: "12", checkConclusion: "success" });
     expect(calls.some((c) => c.path === `${BASE}/pulls/7/reviews`)).toBe(false);
     expect(calls.find((c) => c.path === `${BASE}/check-runs`)!.body).toMatchObject({
@@ -245,7 +264,8 @@ describe("GitHubReviewHost writes", () => {
   it("comments on an issue or replies in a review thread with issues+pull_requests write", async () => {
     const { client, calls, grants } = fakeGitHub(({ method, path }) => {
       if (method === "POST" && path === `${BASE}/issues/3/comments`) return json({ html_url: "https://x/c" }, 201);
-      if (method === "POST" && path === `${BASE}/pulls/7/comments/88/replies`) return json({ html_url: "https://x/r" }, 201);
+      if (method === "POST" && path === `${BASE}/pulls/7/comments/88/replies`)
+        return json({ html_url: "https://x/r" }, 201);
       if (method === "POST" && path === `${BASE}/issues/comments/4/reactions`) return json({ id: 1 }, 201);
       return undefined;
     });
@@ -280,6 +300,6 @@ describe("GitHubReviewHost writes", () => {
     });
     expect(grants).toEqual([{ checks: "write" }, { checks: "write" }]);
     expect(calls[0].body).toMatchObject({ name: "wardby review", head_sha: SHA, status: "in_progress" });
-    expect(((calls[1].body as { output: { text: string } }).output.text).length).toBe(65_535);
+    expect((calls[1].body as { output: { text: string } }).output.text.length).toBe(65_535);
   });
 });

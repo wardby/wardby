@@ -176,12 +176,18 @@ export class GitHubReviewHost implements CodeReviewHost {
         const patch = fullPatch ?? "";
         const kept = patch.length <= budget ? patch : patch.slice(0, Math.max(0, budget));
         budget -= kept.length;
-        return { ...view, patch: kept, patchTruncated: kept.length < patch.length || (fullPatch === undefined && changes > 0) };
+        return {
+          ...view,
+          patch: kept,
+          patchTruncated: kept.length < patch.length || (fullPatch === undefined && changes > 0),
+        };
       });
 
       let lastReviewedSha: string | null = null;
       for (let page = 1; page <= MAX_COMMENT_PAGES && !lastReviewedSha; page++) {
-        const comments = list(await (await get(`${base}/issues/${prNumber}/comments?per_page=100&page=${page}`)).json());
+        const comments = list(
+          await (await get(`${base}/issues/${prNumber}/comments?per_page=100&page=${page}`)).json(),
+        );
         for (const comment of comments) {
           if (typeof comment.body === "string") lastReviewedSha ??= parseReviewMarker(comment.body, opts.agentMarker);
         }
@@ -229,7 +235,10 @@ export class GitHubReviewHost implements CodeReviewHost {
       if (text.trimStart().startsWith("[")) {
         try {
           const entries: unknown = JSON.parse(text);
-          if (Array.isArray(entries) && entries.every((e) => e && typeof e === "object" && "type" in e && "path" in e)) {
+          if (
+            Array.isArray(entries) &&
+            entries.every((e) => e && typeof e === "object" && "type" in e && "path" in e)
+          ) {
             return {
               kind: "directory",
               path,
@@ -295,7 +304,8 @@ export class GitHubReviewHost implements CodeReviewHost {
       const patches = new Map<string, string | undefined>();
       for (let page = 1; page <= MAX_FILE_PAGES; page++) {
         const batch = list(await (await get(`${base}/pulls/${input.prNumber}/files?per_page=100&page=${page}`)).json());
-        for (const file of batch) patches.set(str(file.filename), typeof file.patch === "string" ? file.patch : undefined);
+        for (const file of batch)
+          patches.set(str(file.filename), typeof file.patch === "string" ? file.patch : undefined);
         if (batch.length < 100) break;
       }
       const { inline, outside } = partitionComments(input.comments, patches);
@@ -312,7 +322,12 @@ export class GitHubReviewHost implements CodeReviewHost {
                   commit_id: input.headSha,
                   event: "COMMENT",
                   body: `wardby review: ${inline.length} inline comment${inline.length === 1 ? "" : "s"} — the summary is in the conversation.`,
-                  comments: inline.map((c) => ({ path: c.path, line: c.line, side: c.side, body: renderInlineComment(c) })),
+                  comments: inline.map((c) => ({
+                    path: c.path,
+                    line: c.line,
+                    side: c.side,
+                    body: renderInlineComment(c),
+                  })),
                 }),
               },
               [200],
@@ -332,8 +347,16 @@ export class GitHubReviewHost implements CodeReviewHost {
       });
       const existing = await this.findSummaryComment(get, base, input.prNumber, input.agentMarker);
       const summaryResponse = existing
-        ? await get(`${base}/issues/comments/${existing}`, { method: "PATCH", body: JSON.stringify({ body: summaryBody }) }, [200])
-        : await get(`${base}/issues/${input.prNumber}/comments`, { method: "POST", body: JSON.stringify({ body: summaryBody }) }, [201]);
+        ? await get(
+            `${base}/issues/comments/${existing}`,
+            { method: "PATCH", body: JSON.stringify({ body: summaryBody }) },
+            [200],
+          )
+        : await get(
+            `${base}/issues/${input.prNumber}/comments`,
+            { method: "POST", body: JSON.stringify({ body: summaryBody }) },
+            [201],
+          );
       const summaryCommentUrl = str(record(await summaryResponse.json()).html_url);
 
       const conclusion = verdictConclusion(input.verdict);
@@ -427,7 +450,11 @@ export class GitHubReviewHost implements CodeReviewHost {
             { method: "POST", body: JSON.stringify({ body: input.body }) },
             [201],
           )
-        : await get(`${base}/issues/${input.number}/comments`, { method: "POST", body: JSON.stringify({ body: input.body }) }, [201]);
+        : await get(
+            `${base}/issues/${input.number}/comments`,
+            { method: "POST", body: JSON.stringify({ body: input.body }) },
+            [201],
+          );
       return { url: str(record(await response.json()).html_url) };
     });
   }

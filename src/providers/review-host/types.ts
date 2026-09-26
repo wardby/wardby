@@ -154,7 +154,8 @@ export interface CodeReviewHost {
   completeCheck(repository: string, input: CompleteCheckInput): Promise<void>;
 }
 
-export type ReviewHostErrorCode = "host_not_installed" | "host_permission_missing" | "host_api_error" | "host_invalid_response";
+export type ReviewHostErrorCode =
+  "host_not_installed" | "host_permission_missing" | "host_api_error" | "host_invalid_response";
 
 export class ReviewHostError extends Error {
   constructor(
@@ -173,8 +174,22 @@ export type ReviewHostRegistry = Partial<Record<ReviewHostProvider, CodeReviewHo
  * provider payload into, for src/core/host-events.ts to route.
  */
 export type HostEvent =
-  | { kind: "pr_updated"; provider: ReviewHostProvider; repository: string; prNumber: number; headSha: string; isFork: boolean }
-  | { kind: "check_rerun"; provider: ReviewHostProvider; repository: string; prNumber: number; headSha: string; checkName: string }
+  | {
+      kind: "pr_updated";
+      provider: ReviewHostProvider;
+      repository: string;
+      prNumber: number;
+      headSha: string;
+      isFork: boolean;
+    }
+  | {
+      kind: "check_rerun";
+      provider: ReviewHostProvider;
+      repository: string;
+      prNumber: number;
+      headSha: string;
+      checkName: string;
+    }
   | {
       kind: "mention";
       provider: ReviewHostProvider;

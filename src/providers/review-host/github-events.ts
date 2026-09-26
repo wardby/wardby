@@ -20,7 +20,8 @@ export function verifyGitHubSignature(rawBody: string, header: string | undefine
 type Json = Record<string, unknown>;
 const obj = (value: unknown): Json | null =>
   value && typeof value === "object" && !Array.isArray(value) ? (value as Json) : null;
-const int = (value: unknown): number | null => (Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : null);
+const int = (value: unknown): number | null =>
+  Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : null;
 
 function repositoryOf(payload: Json): string | null {
   const name = obj(payload.repository)?.full_name;
@@ -37,7 +38,11 @@ function mentions(body: string, slug: string): boolean {
   return new RegExp(`(^|[^\\w@.-])@${escaped}(?![\\w-])`, "i").test(body);
 }
 
-export function normalizeGitHubEvent(eventName: string, payload: unknown, app: { id: number; slug: string }): HostEvent | null {
+export function normalizeGitHubEvent(
+  eventName: string,
+  payload: unknown,
+  app: { id: number; slug: string },
+): HostEvent | null {
   const p = obj(payload);
   if (!p) return null;
   const repository = repositoryOf(p);
@@ -62,7 +67,8 @@ export function normalizeGitHubEvent(eventName: string, payload: unknown, app: {
     const prNumber = int(obj(Array.isArray(check?.pull_requests) ? check.pull_requests[0] : null)?.number);
     const headSha = check?.head_sha;
     const checkName = check?.name;
-    if (!prNumber || typeof headSha !== "string" || !SAFE_SHA.test(headSha) || typeof checkName !== "string") return null;
+    if (!prNumber || typeof headSha !== "string" || !SAFE_SHA.test(headSha) || typeof checkName !== "string")
+      return null;
     return { kind: "check_rerun", provider: "github", repository, prNumber, headSha, checkName };
   }
 
@@ -73,7 +79,8 @@ export function normalizeGitHubEvent(eventName: string, payload: unknown, app: {
     const body = comment?.body;
     const commentId = int(comment?.id);
     if (typeof body !== "string" || !commentId || !mentions(body, app.slug)) return null;
-    if (typeof comment?.author_association !== "string" || !TRUSTED_ASSOCIATIONS.has(comment.author_association)) return null;
+    if (typeof comment?.author_association !== "string" || !TRUSTED_ASSOCIATIONS.has(comment.author_association))
+      return null;
     if (user?.type !== "User" || typeof user.login !== "string") return null;
     if (eventName === "issue_comment") {
       const issue = obj(p.issue);

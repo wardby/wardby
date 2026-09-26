@@ -37,7 +37,11 @@ type LinkDb = Pick<PrismaClient, "agentRepository">;
 
 async function assertNoConflicts(
   tx: LinkDb,
-  args: Required<Pick<LinkArgs, "agentId" | "provider">> & { repository: string; triggers: string[]; checkName: string | null },
+  args: Required<Pick<LinkArgs, "agentId" | "provider">> & {
+    repository: string;
+    triggers: string[];
+    checkName: string | null;
+  },
 ): Promise<void> {
   if (args.triggers.length === 0) return;
   const others = await tx.agentRepository.findMany({
@@ -74,7 +78,10 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
     handler: async (args: LinkArgs, ctx) => {
       const agent = await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
       if (agent.kind !== "native") {
-        throw new McpError(400, "Repository links are for native agents only; coding agents use codingProfile.repository.");
+        throw new McpError(
+          400,
+          "Repository links are for native agents only; coding agents use codingProfile.repository.",
+        );
       }
       const provider = args.provider ?? "github";
       const repository = normalizeRepository(provider, args.repository);
@@ -118,7 +125,9 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
       const provider = args.provider ?? "github";
       const repository = normalizeRepository(provider, args.repository);
-      const { count } = await ctx.db.agentRepository.deleteMany({ where: { agentId: args.agentId, provider, repository } });
+      const { count } = await ctx.db.agentRepository.deleteMany({
+        where: { agentId: args.agentId, provider, repository },
+      });
       return textResult({ unlinked: count > 0 });
     },
   });
@@ -134,7 +143,10 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
     },
     handler: async (args: { agentId: string }, ctx) => {
       await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
-      const links = await ctx.db.agentRepository.findMany({ where: { agentId: args.agentId }, orderBy: { createdAt: "asc" } });
+      const links = await ctx.db.agentRepository.findMany({
+        where: { agentId: args.agentId },
+        orderBy: { createdAt: "asc" },
+      });
       return textResult({ repositories: links });
     },
   });
