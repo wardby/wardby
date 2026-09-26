@@ -47,6 +47,7 @@ import { startReconciler } from "./core/reconciler.js";
 import { NativeEngine } from "./core/engine-native.js";
 import { logger } from "./core/logger.js";
 import { deriveJsonSchema } from "./sandbox/zod-params.js";
+import { findSameNamedAttachedTool, reservedToolNameReason, resolveToolRef } from "./core/tool-names.js";
 import { ToolCapabilitiesPatchSchema } from "./sandbox/tool-capabilities.js";
 import { startMcp } from "./mcp/index.js";
 import { startServe } from "./serve.js";
@@ -178,6 +179,8 @@ async function toolCreate(args: string[]): Promise<void> {
   if (!values.name || !values.description || !values.params || !values.code) {
     fail("tool create requires --name, --description, --params <file>, and --code <file>.");
   }
+  const reserved = reservedToolNameReason(values.name);
+  if (reserved) fail(reserved);
 
   let paramsZod: string;
   let code: string;
@@ -193,11 +196,19 @@ async function toolCreate(args: string[]): Promise<void> {
   }
 
   // Fails at registration, not at call time: a malformed schema never gets
-  // persisted. The derived schema is cached on the row (no "update tool"
-  // path exists, so it can never go stale) rather than re-derived per run.
+  // persisted. The derived schema is cached on the row rather than
+  // re-derived per run; MCP update_tool re-derives it whenever paramsZod
+  // changes, so it never goes stale.
   const schemaResult = await deriveJsonSchema(paramsZod!);
   if (!schemaResult.ok) {
     fail(`invalid --params schema: ${schemaResult.errorMessage}`);
+  }
+
+  // CLI tools are public (no owner), and the (ownerId, name) unique index
+  // treats NULL owners as distinct, so it can't stop a second public tool
+  // with this name -- check here instead.
+  if (await prisma.tool.findFirst({ where: { ownerId: null, name: values.name } })) {
+    fail(`a public tool named "${values.name}" already exists.`);
   }
 
   const tool = await prisma.tool.create({
@@ -228,11 +239,14 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
   });
   const [toolName, agentName] = positionals;
   if (!toolName || !agentName) {
-    fail(`tool ${detach ? "detach" : "attach"} requires <tool-name> <agent-name>.`);
+    fail(`tool ${detach ? "detach" : "attach"} requires <tool-name|tool-id> <agent-name>.`);
   }
 
-  const tool = await prisma.tool.findUnique({ where: { name: toolName } });
-  if (!tool) fail(`unknown tool "${toolName}".`);
+  // Tool names are unique per owner, not globally: an ambiguous name fails
+  // with the candidate ids, and an id is accepted in its place.
+  const resolved = await resolveToolRef(prisma, toolName);
+  if (!resolved.ok) fail(resolved.error);
+  const tool = resolved.tool;
   const agent = await prisma.agent.findUnique({ where: { name: agentName } });
   if (!agent) fail(`unknown agent "${agentName}".`);
 
@@ -254,6 +268,15 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
       const prefix = entry.slice(sep + 1);
       (allowedSharedDatastorePrefixes[boundName] ??= []).push(prefix);
     }
+  }
+
+  // Same guard as MCP attach_tool: one agent never holds two tools with the
+  // same name, since the runtime dispatches by name.
+  const clash = await findSameNamedAttachedTool(prisma, agent.id, tool);
+  if (clash) {
+    fail(
+      `agent "${agentName}" already has a different tool named "${tool.name}" attached (${clash.id}); detach it first.`,
+    );
   }
 
   const patch = ToolCapabilitiesPatchSchema.safeParse({

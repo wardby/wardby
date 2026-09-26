@@ -113,6 +113,15 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
       },
       findMany: async ({ where }: { where: { agentId: string } }) =>
         attachments.filter((a) => a.agentId === where.agentId).map((a) => ({ ...a, tool: toolRows.get(a.toolId) })),
+      findFirst: async ({ where }: { where: { agentId: string; toolId: { not: string }; tool: { name: string } } }) => {
+        const hit = attachments.find(
+          (a) =>
+            a.agentId === where.agentId &&
+            a.toolId !== where.toolId.not &&
+            toolRows.get(a.toolId)?.name === where.tool.name,
+        );
+        return hit ? { tool: toolRows.get(hit.toolId) } : null;
+      },
     },
   };
   return {
@@ -194,7 +203,9 @@ describe("tool authoring tools", () => {
       const rows = parseText(result as never) as Record<string, unknown>[];
       expect(rows).toHaveLength(2);
       expect(rows[0].code).toBe("source0");
-      expect(rows[1]).toEqual({ id: "t2", name: "tool2", description: "description" });
+      // `public: true` tells a public tool apart from the caller's own
+      // same-named one now that names are only unique per owner.
+      expect(rows[1]).toEqual({ id: "t2", name: "tool2", description: "description", public: true });
     }
     await client.close();
   });
@@ -258,6 +269,25 @@ describe("tool authoring tools", () => {
 
     const stored = await db.tool.findMany();
     expect(stored.length).toBe(0);
+    await client.close();
+  });
+
+  it("create_tool rejects every name a runtime built-in shadows", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    for (const name of ["parent_memory_get", "subagent_memory_get", "delegate_to_x"]) {
+      const result = await client.callTool({
+        name: "create_tool",
+        arguments: { name, description: "x", paramsZod: "z.object({})", code: "return 1;" },
+      });
+      expect(result.isError, name).toBe(true);
+      expect((result.content as { text: string }[])[0].text, name).toMatch(/reserved/i);
+    }
+    expect(await db.tool.findMany()).toHaveLength(0);
     await client.close();
   });
 
@@ -403,6 +433,37 @@ describe("tool authoring tools", () => {
 
     const result = await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "t1" } });
     expect(result.isError).toBe(true);
+    await client.close();
+  });
+
+  it("attach_tool refuses a second, different tool with the same name on one agent", async () => {
+    const tool = (id: string, ownerId: string | null) => ({
+      id,
+      name: "foo",
+      description: "x",
+      paramsZod: "z.object({})",
+      jsonSchema: {},
+      code: "",
+      ownerId,
+    });
+    const db = fakeDb([tool("mine", "p1"), tool("public", null)], [{ id: "a1", ownerId: "p1" }]);
+    await db.agentTool.create({ data: { agentId: "a1", toolId: "public" } });
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "mine" } });
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0].text).toMatch(/already has a different tool named "foo"/);
+    expect((await db.agentTool.findMany({ where: { agentId: "a1" } })).map((r) => r.toolId)).toEqual(["public"]);
+
+    // Re-attaching the same tool (a capability update) is not a clash.
+    const again = await client.callTool({
+      name: "attach_tool",
+      arguments: { agentId: "a1", toolId: "public", allowedHosts: ["api.example.com"] },
+    });
+    expect(again.isError).toBeFalsy();
     await client.close();
   });
 

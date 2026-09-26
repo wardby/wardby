@@ -31,6 +31,7 @@ import { buildSharedDatastoreAccessor, scopeSharedDatastoreAccessor } from "./da
 import { effectiveBudgetForRun } from "./budget-groups.js";
 import { dispatchRun } from "./dispatch.js";
 import { MEMORY_TOOL_DEFS, MEMORY_TOOL_NAMES, handleMemoryTool } from "./memory-tools.js";
+import { DELEGATE_TOOL_PREFIX, duplicateToolNames } from "./tool-names.js";
 import {
   SUBAGENT_MEMORY_GET_TOOL,
   PARENT_MEMORY_GET_TOOL,
@@ -71,9 +72,10 @@ const runnerLog = logger.child({ module: "runner" });
  *   concurrency cap `Executor.start` can resolve with the child merely
  *   queued (still pending), so the call then polls the child row until it
  *   is terminal — see `waitForCodingChild`.
+ *
+ * The `delegate_to_` prefix lives in core/tool-names.ts, which reserves it
+ * so no user tool can be created under a name this dispatch would shadow.
  */
-const DELEGATE_TOOL_PREFIX = "delegate_to_";
-
 function delegateToolDef(boundName: string): LoadedTool {
   return {
     name: `${DELEGATE_TOOL_PREFIX}${boundName}`,
@@ -302,6 +304,17 @@ export async function executeRun(
       where: { agentId: agent.id },
       include: { tool: true },
     });
+    // Tools are dispatched by name (toolsByName below), and names are only
+    // unique per owner. Every attach path refuses a second same-named tool
+    // on one agent (core/tool-names.ts); this is the defence in depth for a
+    // row that got past them, failing loudly rather than letting one tool
+    // silently shadow the other.
+    const duplicates = duplicateToolNames(attached.map((attachment) => attachment.tool.name));
+    if (duplicates.length > 0) {
+      throw new Error(
+        `Agent "${agent.name}" has more than one attached tool named ${duplicates.map((n) => `"${n}"`).join(", ")}; detach all but one before running it.`,
+      );
+    }
     const { effectiveBudgetUsd } = await effectiveBudgetForRun(
       db,
       agent,

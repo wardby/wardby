@@ -14,7 +14,7 @@ import { deriveJsonSchema, validateParams } from "../../sandbox/zod-params.js";
 import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
 import { buildSharedDatastoreAccessor } from "../../core/datastores.js";
-import { MEMORY_TOOL_NAMES } from "../../core/memory-tools.js";
+import { findSameNamedAttachedTool, reservedToolNameReason } from "../../core/tool-names.js";
 import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import {
@@ -26,6 +26,12 @@ import {
   canRead,
 } from "../auth/ownership.js";
 import { textResult } from "./text-result.js";
+
+/** Refuses a name one of the runner's built-ins would shadow (see core/tool-names.ts). */
+function assertToolNameAllowed(name: string): void {
+  const reason = reservedToolNameReason(name);
+  if (reason) throw new McpError(400, reason);
+}
 
 export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
@@ -42,9 +48,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
       required: ["name", "description", "paramsZod", "code"],
     },
     handler: async (args: { name: string; description: string; paramsZod: string; code: string }, ctx) => {
-      if (MEMORY_TOOL_NAMES.has(args.name)) {
-        throw new McpError(400, `Tool name "${args.name}" is reserved for the built-in agent-memory tools.`);
-      }
+      assertToolNameAllowed(args.name);
       const schemaResult = await deriveJsonSchema(args.paramsZod);
       if (!schemaResult.ok) {
         return textResult({ ok: false, errorKind: schemaResult.errorKind, errorMessage: schemaResult.errorMessage });
@@ -181,7 +185,17 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
           if (agent.kind === "coding") {
             throw new McpError(400, "Native sandbox tools cannot be attached to coding agents.");
           }
-          await requireOwnedTool(tx, args.toolId, ctx.principal.id);
+          const tool = await requireOwnedTool(tx, args.toolId, ctx.principal.id);
+          // The runtime dispatches by name, and names are only unique per
+          // owner: a second same-named tool on one agent would be a
+          // duplicate tool name to the model and silently shadow one of them.
+          const clash = await findSameNamedAttachedTool(tx, args.agentId, tool);
+          if (clash) {
+            throw new McpError(
+              409,
+              `Agent "${args.agentId}" already has a different tool named "${tool.name}" attached (${clash.id}); detach it first.`,
+            );
+          }
           await tx.agentTool.upsert({
             where: { agentId_toolId: { agentId: args.agentId, toolId: args.toolId } },
             create: {
@@ -232,7 +246,11 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
     inputSchema: { type: "object", properties: { agentId: { type: "string" } } },
     handler: async (args: { agentId?: string }, ctx) => {
       const project = (tool: Tool) =>
-        tool.ownerId === ctx.principal.id ? tool : { id: tool.id, name: tool.name, description: tool.description };
+        tool.ownerId === ctx.principal.id
+          ? tool
+          : // `public` tells a public tool apart from the caller's own
+            // same-named one: names are unique per owner, not globally.
+            { id: tool.id, name: tool.name, description: tool.description, public: true };
       if (args.agentId) {
         await requireReadableAgent(ctx.db, args.agentId, ctx.principal.id);
         const rows = await ctx.db.agentTool.findMany({ where: { agentId: args.agentId }, include: { tool: true } });

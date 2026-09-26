@@ -453,6 +453,19 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
     });
   });
 
+  describe("per-owner tool names", () => {
+    it("two principals can each create a tool with the same name; one principal cannot twice", async () => {
+      const name = id("foo");
+      const args = { name, description: "t", paramsZod: "z.object({})", code: "return 1;" };
+      await callTool("create_tool", args);
+      await callTool("create_tool", args, db, otherPrincipalId);
+      expect(await db.tool.count({ where: { name } })).toBe(2);
+      const err = await mcpError(callTool("create_tool", args, db, otherPrincipalId));
+      expect(err.httpStatus).toBe(409);
+      expect(err.message).toBe(`A tool named "${name}" already exists for your principal.`);
+    });
+  });
+
   describe("MCP tools' Serializable transactions under a genuine conflict", () => {
     // None of these tools retry: a serialization failure propagates to the
     // caller as P2034, and the concurrent writer's commit stands.

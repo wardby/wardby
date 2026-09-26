@@ -100,6 +100,35 @@ describe("runImport", () => {
     expect(db.agent.upsert).not.toHaveBeenCalled();
   });
 
+  it("checks tool-name collisions only against the target owner's tools", async () => {
+    // Tool names are unique per owner: another owner's same-named tool is no
+    // collision, so the import must not skip or rename around it.
+    const toolFindMany = vi.fn(async () => []);
+    const db = {
+      agent: { findMany: vi.fn(async () => []), upsert: vi.fn() },
+      tool: { findMany: toolFindMany },
+      secret: { findMany: vi.fn(async () => []) },
+      budgetGroup: { findMany: vi.fn(async () => []) },
+      principal: { upsert: vi.fn(async () => ({ id: "principal-1", subject: "sub-1" })) },
+    } as any;
+    const base = {
+      dir,
+      includeSecrets: false,
+      dryRun: true,
+      prefix: "imported-",
+      onConflict: "fail" as const,
+      allowOpenFetch: false,
+      db,
+      env: {},
+    };
+
+    await runImport({ ...base, owner: "sub-1", isPublic: false });
+    expect(toolFindMany).toHaveBeenLastCalledWith(expect.objectContaining({ where: { ownerId: "principal-1" } }));
+
+    await runImport({ ...base, owner: null, isPublic: true });
+    expect(toolFindMany).toHaveBeenLastCalledWith(expect.objectContaining({ where: { ownerId: null } }));
+  });
+
   it("errors when neither --owner nor --public is given", async () => {
     await expect(runImport({ owner: null, isPublic: false } as any)).rejects.toThrow(/owner|public/i);
   });

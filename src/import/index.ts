@@ -64,11 +64,14 @@ export async function runImport(opts: ImportOptions): Promise<{ report: string; 
   const existingAgents = await opts.db.agent.findMany({ select: { name: true } });
   const existingAgentNames = new Set(existingAgents.map((a) => a.name));
 
-  const existingTools = await opts.db.tool.findMany({ select: { name: true } });
-  const existingToolNames = new Set(existingTools.map((t) => t.name));
-
-  // For owner-scoped entities (secrets, budgets), load only if we have an owner
+  // For owner-scoped entities (tools, secrets, budgets), load only if we have an owner
   const ownerId = opts.owner !== null && !opts.isPublic ? (await resolvePrincipal(opts.owner, opts.db)).id : null;
+
+  // Tool names are unique per owner (null = the public namespace), so only
+  // the target owner's tools can collide; another owner's same-named tool
+  // is no conflict.
+  const existingTools = await opts.db.tool.findMany({ where: { ownerId }, select: { name: true } });
+  const existingToolNames = new Set(existingTools.map((t) => t.name));
 
   // Tier-1 capabilities: "budgets" and "shared-datastores" are implemented
   const capabilitiesSupported = new Set(["budgets", "shared-datastores"]);

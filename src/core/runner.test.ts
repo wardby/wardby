@@ -623,6 +623,43 @@ describe("runAgent", () => {
     expect(run.error).toBe("engine bug");
   });
 
+  it("refuses to load an agent holding two same-named tools instead of letting one shadow the other", async () => {
+    // Every attach path refuses this (core/tool-names.ts); the load-time
+    // check is defence in depth for rows that bypassed those guards.
+    const tool = (id: string): FakeTool => ({
+      id,
+      name: "foo",
+      description: "d",
+      paramsZod: "z.object({})",
+      jsonSchema: {},
+      code: `return "${id}";`,
+    });
+    const db = fakeDb(
+      [{ id: "a1", name: "dupes", systemPrompt: "sys", model: "m", budgetUsd: 5, maxTurns: 3 }],
+      [tool("t1"), tool("t2")],
+      [
+        { agentId: "a1", toolId: "t1" },
+        { agentId: "a1", toolId: "t2" },
+      ],
+    );
+    let engineRan = false;
+    const engine = fakeEngine(
+      { status: "succeeded", finalText: "", turns: 1, usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 } },
+      () => {
+        engineRan = true;
+      },
+    );
+
+    await expect(
+      runAgent(
+        "dupes",
+        { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+        db,
+      ),
+    ).rejects.toThrow(/more than one attached tool named "foo"/);
+    expect(engineRan).toBe(false);
+  });
+
   it("throws for an unknown agent without creating a Run", async () => {
     const db = fakeDb([]);
     const engine = fakeEngine({
