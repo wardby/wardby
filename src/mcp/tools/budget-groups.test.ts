@@ -123,7 +123,7 @@ describe("budget group tools", () => {
 
     const got = await client.callTool({ name: "get_budget_group", arguments: { id: group.id } });
     const gotBody = parseText(got as never) as { spend: { period: string; capUsd: number }[] };
-    expect(gotBody.spend).toEqual([{ period: "day", capUsd: 25, spentUsd: 0, remainingUsd: 25 }]);
+    expect(gotBody.spend).toEqual([{ period: "day", capUsd: 25, spentUsd: 0, reservedUsd: 0, remainingUsd: 25 }]);
     await client.close();
   });
 

@@ -8,18 +8,28 @@ import {
   composeCodingTask,
 } from "../coding/protocol.js";
 import { assertCodingProviderModel } from "../coding/provider.js";
+import { effectiveBudgetForRun, MIN_RESERVATION_USD, type BudgetConstraint } from "./budget-groups.js";
 import { logger } from "./logger.js";
 
 const dispatchLog = logger.child({ module: "dispatch" });
 
 export type DispatchDb = Pick<
   PrismaClient,
-  "agent" | "run" | "runHostCheck" | "codingRun" | "task" | "webhook" | "$transaction" | "$queryRaw"
+  "agent" | "run" | "runHostCheck" | "codingRun" | "task" | "webhook" | "budgetGroup" | "$transaction" | "$queryRaw"
 >;
 
 export type DispatchTx = Pick<
   Prisma.TransactionClient,
-  "agent" | "run" | "runHostCheck" | "codingRun" | "task" | "webhook" | "resourceGrant" | "$queryRaw"
+  | "agent"
+  | "run"
+  | "runHostCheck"
+  | "codingRun"
+  | "task"
+  | "webhook"
+  | "budgetGroup"
+  | "resourceGrant"
+  | "$queryRaw"
+  | "$executeRawUnsafe"
 >;
 
 type DispatchAgent = Prisma.AgentGetPayload<{ include: { codingProfile: true } }>;
@@ -69,10 +79,10 @@ export interface DispatchRunOptions {
    */
   taskOverride?: string;
   /**
-   * Overrides `agent.budgetUsd` for this run's coding budget reservation —
-   * used by sub-agent dispatch to apply the run-tree's tightened effective
-   * budget (see src/core/budget-groups.ts) instead of the agent's raw
-   * per-run ceiling, the same composability already applied to native runs.
+   * Replaces `agent.budgetUsd` as the requested ceiling for this run's coding
+   * budget reservation. The reservation is still tightened by the agent's
+   * budget group and, with `parentRunId`, the run tree (see
+   * src/core/budget-groups.ts), computed inside the persist transaction.
    * Ignored for native agents, which compute their own effective budget
    * inside executeRun's load step.
    */
@@ -153,15 +163,91 @@ export async function markRunFailedFromExecutorError(
 }
 
 /**
+ * The `Run.error` of a coding run refused at dispatch because a budget
+ * constraint has nothing left: `budget_group_exhausted:<period>` or
+ * `run_tree_exhausted`, then a sentence for people.
+ */
+export function budgetExhaustedError(constraint: BudgetConstraint): string {
+  if (constraint === "run-tree") {
+    return "run_tree_exhausted: the run tree's shared budget is spent; the run was not started.";
+  }
+  return (
+    `budget_group_exhausted:${constraint}: the agent's budget group has no ${constraint} budget left ` +
+    "(recorded spend plus live in-flight runs' holds have reached its cap); the run was not started."
+  );
+}
+
+/**
+ * Serializes grouped coding dispatches (security review I1). Under
+ * Serializable, a row lock taken after the transaction's first read cannot
+ * queue anything: the snapshot is already fixed, so each waiter wakes up
+ * with a stale view and aborts. LOCK TABLE is the one statement that takes
+ * no snapshot, so as the transaction's first statement it makes a waiter's
+ * snapshot start only after the previous holder committed. SHARE ROW
+ * EXCLUSIVE conflicts with itself and with writes to BudgetGroup rows, but not
+ * with the ROW SHARE that foreign-key checks from Agent take, so attaching
+ * agents to groups is not blocked. It serializes grouped coding dispatches
+ * across all groups; each holds it only for one short transaction.
+ */
+const GROUP_DISPATCH_LOCK_SQL = 'LOCK TABLE "BudgetGroup" IN SHARE ROW EXCLUSIVE MODE';
+
+/**
+ * A coding run's budget reservation: the requested ceiling (override or the
+ * agent's budgetUsd) tightened by its budget group and run tree, where every
+ * live in-flight run's unspent hold already counts as spent. Rounded down to
+ * CodingRun.budgetReservedUsd's 6 decimal places; less than that is refused.
+ */
+async function reserveCodingBudget(
+  tx: DispatchTx,
+  agent: DispatchAgent,
+  now: Date,
+  options: DispatchRunOptions,
+): Promise<{ budgetUsd: number; refusal?: string }> {
+  const effective = await effectiveBudgetForRun(tx, agent, now, options.parentRunId);
+  const requested = options.budgetUsdOverride ?? Number(agent.budgetUsd);
+  const budgetUsd =
+    Math.floor(Math.min(requested, effective.effectiveBudgetUsd) / MIN_RESERVATION_USD) * MIN_RESERVATION_USD;
+  if (budgetUsd < MIN_RESERVATION_USD && effective.exhaustedBy) {
+    return { budgetUsd: 0, refusal: budgetExhaustedError(effective.exhaustedBy) };
+  }
+  return { budgetUsd };
+}
+
+/**
+ * Attempts for the persist transaction, and the jittered backoff between
+ * them, for serialization failures and deadlocks.
+ *
+ * @internal Exported only for the real-PostgreSQL tests.
+ */
+export const PERSIST_ATTEMPTS = 8;
+const RETRY_BASE_MS = 20;
+const RETRY_MAX_MS = 250;
+
+function retryDelayMs(attempt: number): number {
+  const ceiling = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** attempt);
+  return Math.floor(ceiling / 2 + Math.random() * (ceiling / 2));
+}
+
+/**
  * Persists every detached run input in one transaction, then invokes the
  * executor only after commit. A null result means the caller's transactional
  * claim was no longer valid (for example, a schedule was already claimed).
  */
 export async function dispatchRun(options: DispatchRunOptions): Promise<DispatchRunResult | null> {
   const now = options.now ?? new Date();
+  // Read outside the transaction only to decide whether to take the group
+  // dispatch lock before the transaction's first read; everything the run is
+  // built from is re-read inside. If the agent changes in between, the
+  // Serializable transaction still refuses a conflicting commit.
+  const preview = await options.db.agent.findUnique({
+    where: { id: options.agentId },
+    select: { kind: true, budgetGroupId: true },
+  });
+  const lockGroups = preview?.kind === "coding" && preview.budgetGroupId != null;
   const persistOnce = () =>
     options.db.$transaction(
       async (tx) => {
+        if (lockGroups) await tx.$executeRawUnsafe(GROUP_DISPATCH_LOCK_SQL);
         if (options.lockAgent) {
           const locked = await tx.$queryRaw<{ id: string }[]>`
         SELECT "id" FROM "Agent" WHERE "id" = ${options.agentId} FOR UPDATE SKIP LOCKED
@@ -180,6 +266,17 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           throw new Error("taskOverride can only be supplied for a native agent.");
         }
 
+        // A coding run's budget is reserved here, at dispatch (E-01): the
+        // container only ever checks the run's own reservation. A native run
+        // computes its effective budget in executeRun's load step instead.
+        let codingBudget: { budgetUsd: number; refusal?: string } | undefined;
+        if (agent.kind === "coding") {
+          if (!agent.codingProfile) throw new Error(`Coding agent "${agent.id}" has no coding profile.`);
+          assertCodingProviderModel(agent.codingProfile.provider, agent.model);
+          codingBudget = await reserveCodingBudget(tx, agent, now, options);
+        }
+        const refusal = codingBudget?.refusal;
+
         const run = await tx.run.create({
           data: {
             agentId: agent.id,
@@ -189,19 +286,22 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             grantedParentMemoryKeys: options.grantedParentMemoryKeys ?? [],
             taskOverride: options.taskOverride,
             triggeredById: options.triggeredById ?? null,
+            // Refused before it starts, the same terminal status (and zero
+            // spend) as a native run whose budget is gone at turn 1.
+            ...(refusal ? { status: "refused" as const, error: refusal, finishedAt: now } : {}),
           },
         });
 
         if (options.afterPersist) await options.afterPersist(tx, run);
 
-        if (agent.kind === "coding") {
-          if (!agent.codingProfile) throw new Error(`Coding agent "${agent.id}" has no coding profile.`);
+        if (agent.kind === "coding" && agent.codingProfile && codingBudget && !refusal) {
+          // Checked above too; repeated so the provider type narrows here.
           assertCodingProviderModel(agent.codingProfile.provider, agent.model);
           const request = options.codingTask ?? agent.codingProfile.defaultTask;
           if (!request) throw new Error(`Coding agent "${agent.id}" requires a task.`);
           // The worker sees only the task text, so the agent's own instructions ride in it.
           const task = composeCodingTask(agent.systemPrompt, request);
-          const budgetUsd = options.budgetUsdOverride ?? Number(agent.budgetUsd);
+          const budgetUsd = codingBudget.budgetUsd;
 
           let baseRef = options.codingBaseRef ?? agent.codingProfile.baseRef;
           let headRef = `wardby/run-${run.id}`;
@@ -271,9 +371,10 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             },
           });
         } else if (
-          options.codingTask !== undefined ||
-          options.codingBaseRef !== undefined ||
-          options.continuesCodingRunId !== undefined
+          agent.kind !== "coding" &&
+          (options.codingTask !== undefined ||
+            options.codingBaseRef !== undefined ||
+            options.continuesCodingRunId !== undefined)
         ) {
           throw new Error("Coding overrides cannot be supplied for a native agent.");
         }
@@ -295,16 +396,24 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
     );
 
   let persisted: DispatchRunResult | null = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < PERSIST_ATTEMPTS; attempt += 1) {
     try {
       persisted = await persistOnce();
       break;
     } catch (err) {
-      if (!isSerializationConflict(err) || attempt === 2) throw err;
+      if (!isSerializationConflict(err) || attempt === PERSIST_ATTEMPTS - 1) throw err;
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
     }
   }
 
   if (!persisted) return null;
+  if (persisted.run.status === "refused") {
+    dispatchLog.warn(
+      { runId: persisted.run.id, agentId: options.agentId, reason: persisted.run.error },
+      "coding run refused at dispatch: its budget constraint has nothing left",
+    );
+    return persisted;
+  }
   const runStart = async () => {
     try {
       await options.executor.start(persisted.run.id);
