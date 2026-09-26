@@ -140,10 +140,18 @@ function fakeDb(
   return db as unknown as import("#prisma").PrismaClient;
 }
 
-function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {
+// Callers default to the admin role so the scope tests below exercise the
+// scope gate alone; the role tests pass their roles explicitly.
+function fakeCtx(
+  db: ReturnType<typeof fakeDb>,
+  principalId: string,
+  scopes: string[],
+  roles: string[] = ["admin"],
+): McpRequestContext {
   return {
     principal: { id: principalId, subject: principalId, createdAt: new Date() },
     scopes: new Set(scopes),
+    roles,
     canonicalUri: CANONICAL_URI,
     providers: fakeProviders,
     db,
@@ -924,6 +932,65 @@ describe("agent CRUD tools", () => {
     expect(text).toMatch(/disable_schedule/);
     expect(text).not.toMatch(/prisma|Run_agentId_fkey/i);
     await client.close();
+  });
+
+  describe("privileged operations by role (the token also carries every privileged scope)", () => {
+    const text = (result: { content: unknown }) => (result.content as { text: string }[])[0].text;
+    const ALL = ["agents:write", "agents:admin", "packages:approve"];
+    async function as(roles: string[], scopes = ALL) {
+      const db = fakeDb([codingAgentSeed()], [], ["new-owner"]);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", scopes, roles));
+      registerAgentTools(mcp);
+      return connectClient(mcp);
+    }
+    const ops = {
+      make_owner: { name: "make_owner", arguments: { agentId: "a1", ownerId: "new-owner" } },
+      workerImageRef: {
+        name: "create_agent",
+        arguments: {
+          name: "byo-coder",
+          systemPrompt: "x",
+          model: "gpt-5.6-luna",
+          budgetUsd: 0.25,
+          kind: "coding",
+          codingProfile: { repository: "openai/example", workerImageRef: VALID_WORKER_IMAGE_REF },
+        },
+      },
+      packages: {
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile: { packageAllowlist: { npm: ["react"] } } },
+      },
+    } as const;
+
+    it.each([
+      [[], { make_owner: false, workerImageRef: false, packages: false }],
+      [["package-approver"], { make_owner: false, workerImageRef: false, packages: true }],
+      [["admin"], { make_owner: true, workerImageRef: true, packages: true }],
+    ] as const)("roles %j", async (roles, allowed) => {
+      for (const [op, call] of Object.entries(ops) as [keyof typeof ops, (typeof ops)[keyof typeof ops]][]) {
+        const client = await as([...roles]);
+        const result = await client.callTool(call);
+        expect(Boolean(result.isError), `${op} for ${JSON.stringify(roles)}`).toBe(!allowed[op]);
+        if (!allowed[op]) expect(text(result)).toMatch(/requires a role that grants it/);
+        await client.close();
+      }
+    });
+
+    it("package-approver still needs packages:approve on the token", async () => {
+      const client = await as(["package-approver"], ["agents:write"]);
+      const result = await client.callTool(ops.packages);
+      expect(result.isError).toBe(true);
+      expect(text(result)).toMatch(/Insufficient scope/);
+      await client.close();
+    });
+
+    it("non-privileged edits still work for a member", async () => {
+      const client = await as([], ["agents:write"]);
+      const result = await client.callTool({ name: "update_agent", arguments: { id: "a1", systemPrompt: "y" } });
+      expect(result.isError).toBeFalsy();
+      await client.close();
+    });
   });
 
   it("make_owner reassigns an already-owned agent to a different principal, with agents:admin", async () => {

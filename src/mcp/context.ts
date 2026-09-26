@@ -23,6 +23,12 @@ export interface McpRequestContext {
   principal: Principal;
   scopes: Set<string>;
   /**
+   * The caller's wardby roles (resource-server.ts ROLE_PERMISSIONS), resolved
+   * per request, never cached: a privileged scope is honoured only when one
+   * of these grants it (see requireScope). Absent/empty = member.
+   */
+  roles?: readonly string[];
+  /**
    * The server's resource identifier, for tool handlers that need a
    * field-level scope step-up beyond the tool's own declared scope (e.g.
    * requiring agents:admin only when a mutation touches workerImageRef).

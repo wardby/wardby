@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  loadAuthConfig,
   loadContainerExecutorConfig,
   loadProviderConfig,
   loadMcpConfig,
@@ -292,5 +293,16 @@ describe("loadGitHubEventConfig", () => {
       "GITHUB_APP_WEBHOOK_SECRET must be at least 20 characters.",
     );
     expect(() => loadGitHubEventConfig({ GITHUB_APP_WEBHOOK_SECRET: ` ${VALID.slice(0, 19)} ` })).toThrow();
+  });
+});
+
+describe("loadAuthConfig role mapping", () => {
+  it("reads AUTH_ROLE_CLAIM / AUTH_ROLE_MAP, treating blanks as unset", () => {
+    expect(
+      loadAuthConfig({ AUTH_ROLE_CLAIM: "realm_access.roles", AUTH_ROLE_MAP: "wardby-admin=admin" }),
+    ).toMatchObject({ roleClaim: "realm_access.roles", roleMap: "wardby-admin=admin" });
+    const blank = loadAuthConfig({ AUTH_ROLE_CLAIM: "", AUTH_ROLE_MAP: "" });
+    expect(blank.roleClaim).toBeUndefined();
+    expect(blank.roleMap).toBeUndefined();
   });
 });

@@ -11,7 +11,7 @@ import {
   requireReadableBudgetGroup,
   visibleToPrincipal,
 } from "../auth/ownership.js";
-import { insufficientScope, protectedResourceMetadataUrl, requireScope } from "../auth/resource-server.js";
+import { requireAnyScope, requireScope } from "../auth/resource-server.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
@@ -27,8 +27,7 @@ function requireWorkerImageRefScope(ctx: McpRequestContext): void {
 
 /** Package allowlists widen what a run may download, so they need their own approval. */
 function requirePackageApproval(ctx: McpRequestContext): void {
-  if (ctx.scopes.has("packages:approve") || ctx.scopes.has("agents:admin")) return;
-  throw insufficientScope(["packages:approve"], protectedResourceMetadataUrl(ctx.canonicalUri));
+  requireAnyScope(ctx, ctx.canonicalUri, "packages:approve", "agents:admin");
 }
 
 const MAX_AGENT_NAME_CHARS = 200;

@@ -33,12 +33,13 @@ import { buildAuthProvider } from "../providers/auth/index.js";
 import { GitHubAppClient } from "../providers/vcs/github.js";
 import type { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
 import { buildMcpServer, type WardbyMcpServer } from "./server.js";
-import type { McpProviders } from "./context.js";
+import type { McpProviders, McpRequestContext } from "./context.js";
+import type { Principal, PrismaClient } from "#prisma";
 import { countUnattendedSchedules, unattendedSchedulesWarning } from "./unattended-schedules.js";
 import { runStdioServer } from "./transport/stdio.js";
 import { startHttpServer } from "./transport/streamable-http.js";
 import { resolvePrincipal } from "./auth/principal.js";
-import { SCOPES_SUPPORTED } from "./auth/resource-server.js";
+import { ROLE_NAMES, SCOPES_SUPPORTED } from "./auth/resource-server.js";
 import { canonicalUrl } from "./transport/http-limits.js";
 import { registerAgentTools } from "./tools/agents.js";
 import { registerBudgetGroupTools } from "./tools/budget-groups.js";
@@ -73,6 +74,30 @@ async function warnIfNothingWillFireSchedules(): Promise<void> {
 
 /** Placeholder identifier for stdio, which has no HTTP endpoint to name. Never surfaced: stdio's fixed context always holds every scope, so no scope challenge is ever built against it. */
 const STDIO_PLACEHOLDER_URI = "urn:wardby:local-stdio";
+
+/**
+ * stdio's one fixed identity: the local operator (LOCAL_PRINCIPAL), trusted
+ * with every supported scope and every role — whoever can start the
+ * process already holds the database and its keys.
+ */
+export function localOperatorContext(
+  principal: Principal,
+  providers: McpProviders,
+  db: PrismaClient,
+): McpRequestContext {
+  return {
+    principal,
+    scopes: new Set(SCOPES_SUPPORTED),
+    roles: [...ROLE_NAMES],
+    canonicalUri: STDIO_PLACEHOLDER_URI,
+    providers,
+    db,
+    clientSupportsTasks: false,
+    // Placeholder — server.ts's resolveCtx overwrites this with the
+    // current call's real mcpReq on every dispatch.
+    mcpReq: { requestState: () => undefined },
+  };
+}
 
 /** Registers the full Phase 4 tool surface — every module, in one place. */
 export function registerAllTools(
@@ -184,17 +209,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     // local identity for the whole connection, per the design's own
     // "stdio local mode: no token; the operator is trusted."
     const principal = await resolvePrincipal(mcpConfig.localPrincipal, prisma);
-    mcp.setFixedContext({
-      principal,
-      scopes: new Set(SCOPES_SUPPORTED),
-      canonicalUri: STDIO_PLACEHOLDER_URI,
-      providers,
-      db: prisma,
-      clientSupportsTasks: false,
-      // Placeholder — server.ts's resolveCtx overwrites this with the
-      // current call's real mcpReq on every dispatch.
-      mcpReq: { requestState: () => undefined },
-    });
+    mcp.setFixedContext(localOperatorContext(principal, providers, prisma));
     const stdio = runStdioServer(mcp);
     return {
       close: async () => {

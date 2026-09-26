@@ -26,7 +26,44 @@ export const SCOPES_SUPPORTED = [
   // whether it's public) — a step above agents:write, which only ever lets
   // a caller act on agents they already own or that are unowned.
   "agents:admin",
+  // set_agent_memory / delete_agent_memory (reading memory is agents:read).
+  "memory:write",
 ];
+
+/**
+ * Scopes whose operations reach beyond the caller's own (or public)
+ * resources — they double as the permission names roles grant:
+ * agents:admin reassigns ANY agent's owner (make_owner) and sets a BYO
+ * workerImageRef; packages:approve widens coding agents' package allowlists.
+ * A token scope only DELEGATES — it never authorizes on its own:
+ * requireScope/requireAnyScope honour one only when one of the caller's
+ * roles (McpRequestContext.roles, resolved live per request) grants it.
+ */
+export const PRIVILEGED_SCOPES: readonly string[] = ["agents:admin", "packages:approve"];
+
+/**
+ * The built-in roles and the permissions (privileged scope names) each
+ * grants. No roles = member: every non-privileged scope, nothing privileged.
+ */
+export const ROLE_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
+  admin: ["agents:admin", "packages:approve"],
+  "package-approver": ["packages:approve"],
+};
+export const ROLE_NAMES: readonly string[] = Object.keys(ROLE_PERMISSIONS);
+
+export function isRoleName(name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(ROLE_PERMISSIONS, name);
+}
+
+/** The permissions granted by `roles`; unknown role names grant nothing. */
+export function permissionsOf(roles: readonly string[] | null | undefined): Set<string> {
+  return new Set((roles ?? []).filter(isRoleName).flatMap((r) => ROLE_PERMISSIONS[r]));
+}
+
+/** Intersects a space-delimited scope string with `allowed`, deduplicated, keeping request order. */
+export function limitScope(scope: string, allowed: readonly string[]): string {
+  return [...new Set(scope.split(/\s+/).filter((s) => allowed.includes(s)))].join(" ");
+}
 
 export interface ProtectedResourceMetadata {
   resource: string;
@@ -92,6 +129,9 @@ export async function authenticate(headers: AuthenticateHeaders, deps: Authentic
   return {
     principal,
     scopes: new Set(verified.scopes),
+    // Decided by the provider on THIS request (self-hosted: AuthUser.roles
+    // read from the database; delegating: the configured signed role claim).
+    roles: (verified.wardbyRoles ?? []).filter(isRoleName),
     canonicalUri: deps.canonicalUri,
     providers: deps.providers,
     db: deps.db,
@@ -113,8 +153,44 @@ export async function authenticate(headers: AuthenticateHeaders, deps: Authentic
  */
 export function requireScope(ctx: McpRequestContext, canonicalUri: string, ...scopes: string[]): void {
   const held = scopes.every((s) => ctx.scopes.has(s));
-  if (held) return;
-  throw insufficientScope(scopes, protectedResourceMetadataUrl(canonicalUri));
+  if (!held) throw insufficientScope(scopes, protectedResourceMetadataUrl(canonicalUri));
+  requirePermission(ctx, scopes);
+}
+
+/**
+ * Like requireScope, but any ONE of `alternatives` suffices (e.g. package
+ * approval: packages:approve or agents:admin). The first alternative is the
+ * one named in the insufficient_scope challenge.
+ */
+export function requireAnyScope(ctx: McpRequestContext, canonicalUri: string, ...alternatives: string[]): void {
+  const held = alternatives.filter((s) => ctx.scopes.has(s));
+  if (held.length === 0) throw insufficientScope(alternatives.slice(0, 1), protectedResourceMetadataUrl(canonicalUri));
+  // One held alternative that is non-privileged, or that a role permits, suffices.
+  const permitted = permissionsOf(ctx.roles);
+  if (held.some((s) => !PRIVILEGED_SCOPES.includes(s) || permitted.has(s))) return;
+  throw forbidden(held);
+}
+
+/**
+ * The one role check: a privileged scope is honoured only when one of the
+ * caller's roles grants it as a permission. This is authorization, not
+ * delegation, so the 403 carries no scope challenge — a client re-authorizing
+ * for more scopes can't fix it; an operator must grant a role.
+ */
+function requirePermission(ctx: McpRequestContext, scopes: readonly string[]): void {
+  const permitted = permissionsOf(ctx.roles);
+  const missing = scopes.filter((s) => PRIVILEGED_SCOPES.includes(s) && !permitted.has(s));
+  if (missing.length > 0) throw forbidden(missing);
+}
+
+function forbidden(permissions: readonly string[]): McpError {
+  const grantedBy = ROLE_NAMES.filter((r) => permissions.some((p) => ROLE_PERMISSIONS[r].includes(p)));
+  return new McpError(
+    403,
+    `Forbidden: ${permissions.join(" ")} requires a role that grants it (${grantedBy.join(" or ")}); ` +
+      "the token's scope alone is not enough. An operator grants roles (self-hosted: " +
+      "`wardby auth user grant --subject <subject> --role <role>`; delegating: AUTH_ROLE_CLAIM/AUTH_ROLE_MAP).",
+  );
 }
 
 export { McpError, insufficientScope };
