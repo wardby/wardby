@@ -9,6 +9,7 @@
  * weaken one by omission.
  */
 import { createHash } from "node:crypto";
+import { logger } from "../../../core/logger.js";
 import { matchRoot, parseAllowlist, resolvePolicy } from "../../../coding/registry/allowlist.js";
 import { PLAN_REFUSAL_FILENAME } from "../../../coding/registry/report.js";
 import {
@@ -31,6 +32,33 @@ import type { OsvAudit } from "./audit.js";
 import { boundedMetadataFetch, DEFAULT_MAX_METADATA_BYTES, DEFAULT_METADATA_TIMEOUT_MS } from "./bounded-fetch.js";
 import { DEFAULT_PLAN_MAX_ENTRIES, DEFAULT_PLAN_TIMEOUT_MS, verifyLockfilePlan, type PlanRefusal } from "./plan.js";
 import type { RegistryRunContext, RegistryStore } from "./store.js";
+
+const registryLog = logger.child({ module: "coding-registry" });
+
+/** Server-side record of a registry failure. The worker only ever sees the
+ *  RegistryError's code and message; the operator needs the cause. Without
+ *  this, a proxy database role missing its grants (permission denied) was
+ *  indistinguishable from an upstream outage: an unlogged 502 to npm or pip.
+ *  Expected refusals (4xx) stay unlogged here: they are recorded per run. */
+function logRegistryFailure(route: "handle" | "plan", ecosystem: string, error: unknown): void {
+  if (error instanceof RegistryError) {
+    if (error.status >= 500) {
+      registryLog.warn(
+        {
+          event: "registry.unavailable",
+          route,
+          ecosystem,
+          status: error.status,
+          code: error.code,
+          reason: error.message,
+        },
+        "coding registry could not answer",
+      );
+    }
+    return;
+  }
+  registryLog.error({ event: "registry.failed", route, ecosystem, err: error }, "coding registry request failed");
+}
 
 const DAY_MS = 86_400_000;
 /** Bytes of a served file kept for `dependenciesFromFile`. A larger file is
@@ -394,6 +422,7 @@ export class RegistryService {
     try {
       return await this.planLockfile(request);
     } catch (error) {
+      logRegistryFailure("plan", request.ecosystem, error);
       if (error instanceof RegistryError) return errorResponse(error);
       return errorResponse(new RegistryError(502, "wardby_upstream_error", "the lockfile could not be verified"));
     }
@@ -528,6 +557,7 @@ export class RegistryService {
     try {
       return await this.dispatch(request);
     } catch (error) {
+      logRegistryFailure("handle", request.ecosystem, error);
       if (error instanceof RegistryError) return errorResponse(error);
       return errorResponse(new RegistryError(502, "wardby_upstream_error", "the package registry request failed"));
     }

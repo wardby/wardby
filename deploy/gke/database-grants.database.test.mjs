@@ -17,6 +17,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../../src/core/db.ts";
 import { PrismaProxyLedger } from "../../src/providers/coding-proxy/prisma-ledger.ts";
 import { PrismaRegistryStore } from "../../src/providers/coding-proxy/registry/prisma-store.ts";
+import { missingGrantsQuery, proxyGrantChecks } from "./proxy-grant-checks.mjs";
 
 const GRANTS = readFileSync(new URL("./database-grants.sql", import.meta.url), "utf8");
 const suffix = randomUUID().slice(0, 8);
@@ -237,6 +238,26 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
     // The ledger only ever writes these three columns; it may not read them back.
     for (const column of ["tokensIn", "tokensOut", "costUsd"]) {
       await expect(proxy.$queryRawUnsafe(`SELECT "${column}" FROM "Run" LIMIT 1`)).rejects.toThrow(/permission denied/);
+    }
+  });
+
+  it("up.sh's proxy grant check finds nothing missing for the proxy, and every missing grant for a role without them", async () => {
+    const query = missingGrantsQuery(proxyGrantChecks(GRANTS));
+    const proxy = clientAs(roles.proxy);
+    clients.push(proxy);
+    await expect(proxy.$queryRawUnsafe(query)).resolves.toEqual([]);
+
+    const bare = `t_bare_${suffix}`;
+    await admin.$executeRawUnsafe(`CREATE ROLE "${bare}" LOGIN PASSWORD '${PASSWORD}'`);
+    const client = clientAs(bare);
+    try {
+      const missing = await client.$queryRawUnsafe(query);
+      expect(missing).toHaveLength(proxyGrantChecks(GRANTS).length);
+      expect(missing).toContainEqual({ grant: "INSERT ON RegistryPlanRefusal" });
+    } finally {
+      await client.$disconnect();
+      await admin.$executeRawUnsafe(`DROP OWNED BY "${bare}"`);
+      await admin.$executeRawUnsafe(`DROP ROLE IF EXISTS "${bare}"`);
     }
   });
 
