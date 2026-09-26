@@ -122,10 +122,10 @@ export const npmAdapter: RegistryAdapter = {
         integrity: integrityOf(info.dist),
         sizeBytes: null,
         allowed: true,
+        publishedAt: published ? new Date(published) : null,
       };
       versions.set(version, {
         version,
-        publishedAt: published ? new Date(published) : null,
         dependencies,
         files: [file],
       });
@@ -133,12 +133,12 @@ export const npmAdapter: RegistryAdapter = {
     return { name, versions, raw: doc };
   },
 
-  renderMetadata(meta, keep, proxyBase) {
+  renderMetadata(meta, keep, keptFiles, proxyBase) {
     const raw = meta.raw as Packument;
     const versions: Packument["versions"] = {};
     for (const version of keep) {
       const info = raw.versions[version];
-      if (!info) continue;
+      if (!info || !keptFiles.has(`${version}.tgz`)) continue;
       versions[version] = {
         ...info,
         dist: { ...info.dist, tarball: `${proxyBase}-/tarball/${encodeURIComponent(meta.name)}/${version}` },

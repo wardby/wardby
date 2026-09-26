@@ -38,7 +38,10 @@ describe("pypiAdapter protocol", () => {
     const files = [...meta.versions.values()].flatMap((version) => version.files);
     expect(files.filter((file) => file.filename.endsWith(".tar.gz")).every((file) => !file.allowed)).toBe(true);
     const keep = new Set(meta.versions.keys());
-    const doc = JSON.parse(pypiAdapter.renderMetadata(meta, keep, "http://wardby-proxy:8787/registry/pypi/").body);
+    const allFiles = new Set(files.map((file) => file.filename));
+    const doc = JSON.parse(
+      pypiAdapter.renderMetadata(meta, keep, allFiles, "http://wardby-proxy:8787/registry/pypi/").body,
+    );
     expect(doc.files.every((file: { filename: string }) => file.filename.endsWith(".whl"))).toBe(true);
     expect(doc.files[0].url.startsWith("http://wardby-proxy:8787/registry/pypi/files/flask/")).toBe(true);
   });

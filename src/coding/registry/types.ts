@@ -48,12 +48,15 @@ export interface FileRef {
   sizeBytes: number | null;
   /** False for files the ecosystem's safeguards exclude, e.g. PyPI sdists. */
   allowed: boolean;
+  /** When this file was published; null means unknown and is treated as too
+   *  new. The minimum release age applies per file: a PyPI release can gain
+   *  a new wheel long after its first upload. For npm every version has one
+   *  immutable tarball, so this is the version's publish time. */
+  publishedAt: Date | null;
 }
 
 export interface VersionInfo {
   version: string;
-  /** Release time; null means unknown and is treated as too new. */
-  publishedAt: Date | null;
   /** Dependency names (normalized). Empty when discovered from files instead. */
   dependencies: readonly string[];
   files: readonly FileRef[];
@@ -148,8 +151,15 @@ export interface RegistryAdapter {
   /** Fetch and parse upstream metadata for one package. */
   fetchMetadata(name: string, upstream: UpstreamFetch): Promise<PackageMetadata>;
   /** Build the client-facing metadata document containing only `keep`
-   *  versions, with every download link rewritten to a proxy route. */
-  renderMetadata(meta: PackageMetadata, keep: ReadonlySet<string>, proxyBase: string): RenderedDocument;
+   *  versions and, of their files, only the filenames in `keptFiles` (the
+   *  core's per-file release-age filter), with every download link
+   *  rewritten to a proxy route. */
+  renderMetadata(
+    meta: PackageMetadata,
+    keep: ReadonlySet<string>,
+    keptFiles: ReadonlySet<string>,
+    proxyBase: string,
+  ): RenderedDocument;
   /** Map a download route to a file in metadata the proxy fetched itself.
    *  Returns null if the route names no known file. */
   resolveDownload(route: DownloadRoute, meta: PackageMetadata): FileRef | null;

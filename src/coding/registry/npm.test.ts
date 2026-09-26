@@ -67,7 +67,7 @@ describe("npmAdapter protocol", () => {
   it("parses versions, dates, dependencies and integrity", async () => {
     const meta = await npmAdapter.fetchMetadata("left-pad", await upstream(await fixture()));
     const [first] = [...meta.versions.values()];
-    expect(first.publishedAt).toBeInstanceOf(Date);
+    expect(first.files[0].publishedAt).toBeInstanceOf(Date);
     expect(first.files[0].integrity?.algorithm).toBe("sha512");
     expect(first.files[0].upstreamUrl.startsWith("https://registry.npmjs.org/")).toBe(true);
   });
@@ -76,7 +76,10 @@ describe("npmAdapter protocol", () => {
     const meta = await npmAdapter.fetchMetadata("left-pad", await upstream(await fixture()));
     const versions = [...meta.versions.keys()];
     const keep = new Set([versions[0]]);
-    const doc = JSON.parse(npmAdapter.renderMetadata(meta, keep, "http://wardby-proxy:8787/registry/npm/").body);
+    const doc = JSON.parse(
+      npmAdapter.renderMetadata(meta, keep, new Set([`${versions[0]}.tgz`]), "http://wardby-proxy:8787/registry/npm/")
+        .body,
+    );
     expect(Object.keys(doc.versions)).toEqual([versions[0]]);
     expect(doc.versions[versions[0]].dist.tarball).toBe(
       `http://wardby-proxy:8787/registry/npm/-/tarball/left-pad/${versions[0]}`,

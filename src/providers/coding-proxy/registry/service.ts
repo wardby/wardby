@@ -108,8 +108,9 @@ export class RegistryService {
     const root = await this.authorize(adapter, context, name);
     const meta = await this.metadata(adapter, name);
     let keep: Set<string>;
+    let keptFiles: Set<string>;
     try {
-      keep = await this.keptVersions(adapter, context, meta, root);
+      ({ keep, keptFiles } = await this.keptVersions(adapter, context, meta, root));
     } catch (error) {
       // Every refusal gets a row, including one the run never chose: the
       // audit being unreachable (fail-closed) still stops this request.
@@ -134,7 +135,7 @@ export class RegistryService {
         adapter.id,
         dependencies.map((dependency) => adapter.normalizeName(dependency)),
       );
-      const document = adapter.renderMetadata(meta, keep, `${this.options.proxyBase}${adapter.id}/`);
+      const document = adapter.renderMetadata(meta, keep, keptFiles, `${this.options.proxyBase}${adapter.id}/`);
       return { status: 200, contentType: document.contentType, body: document.body };
     }
 
@@ -142,7 +143,9 @@ export class RegistryService {
       route.kind === "download"
         ? adapter.resolveDownload(route, meta)
         : (adapter.resolveFileMetadata?.(route, meta) ?? null);
-    if (!file || !keep.has(file.version)) {
+    // The release age applies per file: a file newer than the cutoff is
+    // refused exactly like a filtered version, even in a kept release.
+    if (!file || !keep.has(file.version) || !keptFiles.has(file.filename)) {
       await this.refuse(context, adapter, name, "wardby_version_filtered", file ?? undefined);
       const versionSuffix = route.kind === "download" ? ` ${route.version}` : "";
       throw new RegistryError(404, "wardby_version_filtered", `"${name}"${versionSuffix} is not available to this run`);
@@ -189,18 +192,24 @@ export class RegistryService {
     context: RegistryRunContext,
     meta: PackageMetadata,
     root: AllowlistEntry | undefined,
-  ): Promise<Set<string>> {
+  ): Promise<{ keep: Set<string>; keptFiles: Set<string> }> {
     const { minReleaseAgeDays } = resolvePolicy(context.policy);
     const cutoff = this.now().getTime() - minReleaseAgeDays * DAY_MS;
     const advisories = await this.options.audit.audit(adapter, meta.name);
     const keep = new Set<string>();
+    const keptFiles = new Set<string>();
     for (const info of meta.versions.values()) {
       if (root?.range && !adapter.satisfies(info.version, root.range)) continue;
-      if (!info.publishedAt || info.publishedAt.getTime() > cutoff) continue;
+      // Per-file release age: a file with an unknown or too-recent publish
+      // time is never listed or served. A version survives if any of its
+      // files does.
+      const oldEnough = info.files.filter((file) => file.publishedAt && file.publishedAt.getTime() <= cutoff);
+      if (oldEnough.length === 0) continue;
       if (advisories.withheld(info.version).length > 0) continue;
       keep.add(info.version);
+      for (const file of oldEnough) keptFiles.add(file.filename);
     }
-    return keep;
+    return { keep, keptFiles };
   }
 
   private async refuse(

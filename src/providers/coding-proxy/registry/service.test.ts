@@ -7,6 +7,7 @@ import {
   type PackageMetadata,
 } from "../../../coding/registry/types.js";
 import { npmAdapter } from "../../../coding/registry/npm.js";
+import { pypiAdapter } from "../../../coding/registry/pypi.js";
 import { capabilityHash } from "../proxy.js";
 import { MemoryRegistryStore, type RegistryFetchRecord, type RegistryStore } from "./store.js";
 import { RegistryService } from "./service.js";
@@ -28,7 +29,6 @@ function meta(
         version,
         {
           version,
-          publishedAt: info.ageDays === null ? null : new Date(NOW.getTime() - info.ageDays * DAY),
           dependencies: info.deps ?? [],
           files: [
             {
@@ -38,6 +38,7 @@ function meta(
               integrity: info.integrity === undefined ? { algorithm: "sha512", hex: sha512 } : info.integrity,
               sizeBytes: tarball.byteLength,
               allowed: true,
+              publishedAt: info.ageDays === null ? null : new Date(NOW.getTime() - info.ageDays * DAY),
             },
           ],
         },
@@ -432,5 +433,74 @@ describe("RegistryService with the npm adapter: names are case-exact", () => {
     await expect(get("jsonstream")).resolves.toMatchObject({ status: 403 });
     await expect(get("JSONStream")).resolves.toMatchObject({ status: 200 });
     expect(urls).toEqual(["https://registry.npmjs.org/app", "https://registry.npmjs.org/JSONStream"]);
+  });
+});
+
+describe("RegistryService with the PyPI adapter: release age applies per file", () => {
+  const wheelBytes = new TextEncoder().encode("wheel bytes");
+  const sha256 = createHash("sha256").update(wheelBytes).digest("hex");
+  const oldWheel = "demo-1.0-py3-none-any.whl";
+  const newWheel = "demo-1.0-cp313-cp313-manylinux_2_17_x86_64.whl";
+  const file = (filename: string, ageDays: number) => ({
+    filename,
+    url: `https://files.pythonhosted.org/packages/xx/${filename}`,
+    hashes: { sha256 },
+    "upload-time": new Date(NOW.getTime() - ageDays * DAY).toISOString(),
+    size: wheelBytes.byteLength,
+    "core-metadata": true,
+  });
+
+  function pypiService() {
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { pypi: ["demo"] },
+      policy: {},
+    });
+    const urls: string[] = [];
+    const registry = new RegistryService({
+      adapters: new Map([["pypi", pypiAdapter]]),
+      store,
+      audit: { audit: async () => NO_ADVISORIES },
+      upstream: async (url) => {
+        urls.push(url);
+        if (url === "https://pypi.org/simple/demo/")
+          // An old release (first uploaded 100 days ago) that gained a
+          // brand-new wheel yesterday.
+          return Response.json({ name: "demo", files: [file(oldWheel, 100), file(newWheel, 1)] });
+        return new Response(wheelBytes);
+      },
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
+      now: () => NOW,
+    });
+    const get = (subpath: string) => registry.handle({ ...request(subpath), ecosystem: "pypi" });
+    return { get, urls, store };
+  }
+
+  it("hides the new wheel from the index and serves the old one", async () => {
+    const { get } = pypiService();
+    const index = await get("simple/demo/");
+    if (!("body" in index)) throw new Error("expected a body");
+    const listed = (JSON.parse(index.body) as { files: { filename: string }[] }).files.map((f) => f.filename);
+    expect(listed).toEqual([oldWheel]);
+
+    const served = await get(`files/demo/${oldWheel}`);
+    if (!("stream" in served)) throw new Error("expected a stream");
+    expect(new Uint8Array(await new Response(served.stream).arrayBuffer())).toEqual(wheelBytes);
+  });
+
+  it("refuses and records the new wheel and its metadata file like a filtered version", async () => {
+    const { get, urls, store } = pypiService();
+    const refused = await get(`files/demo/${newWheel}`);
+    expect(refused).toMatchObject({ status: 404 });
+    expect("body" in refused && refused.body).toContain("wardby_version_filtered");
+    await expect(get(`files/demo/${newWheel}.metadata`)).resolves.toMatchObject({ status: 404 });
+    expect(urls.some((url) => url.endsWith(newWheel) || url.endsWith(`${newWheel}.metadata`))).toBe(false);
+    expect(store.fetches.map((fetch) => [fetch.outcome, fetch.reason])).toEqual([
+      ["refused", "wardby_version_filtered"],
+      ["refused", "wardby_version_filtered"],
+    ]);
   });
 });

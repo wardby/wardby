@@ -38,6 +38,11 @@ interface SimpleIndex {
   files: SimpleFile[];
 }
 
+function uploadTime(file: SimpleFile): Date | null {
+  const time = file["upload-time"] ? Date.parse(file["upload-time"]) : NaN;
+  return Number.isNaN(time) ? null : new Date(time);
+}
+
 export function normalizePypiName(name: string): string {
   return name.toLowerCase().replace(/[-_.]+/g, "-");
 }
@@ -111,11 +116,11 @@ export const pypiAdapter: RegistryAdapter = {
       throw new RegistryError(404, "wardby_package_not_found", `PyPI has no package "${name}"`);
     if (!response.ok) throw new RegistryError(502, "wardby_upstream_error", `PyPI returned ${response.status}`);
     const index = (await response.json()) as SimpleIndex;
-    const grouped = new Map<string, { files: FileRef[]; times: number[] }>();
+    const versions = new Map<string, VersionInfo & { files: FileRef[] }>();
     for (const file of index.files) {
       const version = versionOf(file.filename);
       if (!version || file.yanked) continue;
-      const entry = grouped.get(version) ?? { files: [], times: [] };
+      const entry = versions.get(version) ?? { version, dependencies: [], files: [] };
       entry.files.push({
         filename: file.filename,
         version,
@@ -123,27 +128,18 @@ export const pypiAdapter: RegistryAdapter = {
         integrity: file.hashes?.sha256 ? { algorithm: "sha256", hex: file.hashes.sha256 } : null,
         sizeBytes: file.size ?? null,
         allowed: file.filename.endsWith(".whl"),
+        publishedAt: uploadTime(file),
       });
-      if (file["upload-time"]) entry.times.push(Date.parse(file["upload-time"]));
-      grouped.set(version, entry);
-    }
-    const versions = new Map<string, VersionInfo>();
-    for (const [version, { files, times }] of grouped) {
-      versions.set(version, {
-        version,
-        publishedAt: times.length === files.length ? new Date(Math.min(...times)) : null,
-        dependencies: [],
-        files,
-      });
+      versions.set(version, entry);
     }
     return { name: normalizePypiName(index.name), versions, raw: index };
   },
 
-  renderMetadata(meta, keep, proxyBase) {
+  renderMetadata(meta, keep, keptFiles, proxyBase) {
     const index = meta.raw as SimpleIndex;
     const files = index.files
       .filter((file) => file.filename.endsWith(".whl"))
-      .filter((file) => keep.has(versionOf(file.filename) ?? ""))
+      .filter((file) => keep.has(versionOf(file.filename) ?? "") && keptFiles.has(file.filename))
       .map((file) => ({
         ...file,
         url: `${proxyBase}files/${encodeURIComponent(meta.name)}/${encodeURIComponent(file.filename)}`,
@@ -172,6 +168,8 @@ export const pypiAdapter: RegistryAdapter = {
       integrity: sha256 ? { algorithm: "sha256", hex: sha256 } : null,
       sizeBytes: null,
       allowed: true,
+      // The metadata file is as old as the wheel it describes.
+      publishedAt: uploadTime(source),
     };
   },
 
