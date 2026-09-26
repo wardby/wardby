@@ -11,6 +11,22 @@ export interface RegistryFetchRow {
   outcome: string;
   reason: string | null;
   sizeBytes: number | null;
+  /** `-/plan` for a refusal a lockfile plan recorded (see PLAN_FETCH_FILENAME). */
+  filename?: string | null;
+}
+
+/** The `filename` a lockfile plan records its refusals under. */
+export const PLAN_REFUSAL_FILENAME = "-/plan";
+
+/** Distinct refusals lockfile plans recorded (ecosystem + name + version +
+ *  reason), however often the lockfile was planned. */
+export function countPlanRefusals(rows: readonly RegistryFetchRow[]): number {
+  const keys = new Set<string>();
+  for (const row of rows) {
+    if (row.outcome !== "refused" || row.filename !== PLAN_REFUSAL_FILENAME) continue;
+    keys.add(`${row.ecosystem}\0${row.name}\0${row.version ?? ""}\0${row.reason ?? ""}`);
+  }
+  return keys.size;
 }
 
 export interface RegistryPackageSummary {

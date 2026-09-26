@@ -109,6 +109,14 @@ DO $$ BEGIN
   IF to_regclass('public."RegistryFetch"') IS NOT NULL THEN
     EXECUTE format('GRANT SELECT, INSERT ON public.%I TO wardby_proxy', 'RegistryFetch');
   END IF;
+  -- Lockfile verification: immutable per-version facts (reused forever, never
+  -- changed) and the exact versions a run's plan approved.
+  IF to_regclass('public."RegistryVersionFact"') IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT, INSERT ON public.%I TO wardby_proxy', 'RegistryVersionFact');
+  END IF;
+  IF to_regclass('public."RegistryApprovedVersion"') IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT, INSERT ON public.%I TO wardby_proxy', 'RegistryApprovedVersion');
+  END IF;
   IF to_regclass('public."_prisma_migrations"') IS NOT NULL THEN
     EXECUTE format('REVOKE ALL ON public.%I FROM wardby_app', '_prisma_migrations');
   END IF;

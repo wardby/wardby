@@ -95,4 +95,44 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaRegistryStore (database)", () 
 
     expect(await store.findRunByRegistryTokenHash("h1", new Date(Date.now() + 10 * 86_400_000))).toBeNull();
   });
+
+  it("stores facts once, looks up approvals with their download URL, and drops approvals with the run", async () => {
+    const { runId, agentId } = await seedRun({ registryTokenHash: `h2-${randomUUID()}`, allowlist: {} });
+    agentIds.push(agentId);
+    const name = `fact-${randomUUID()}`;
+    const store = new PrismaRegistryStore(db);
+    const facts = Array.from({ length: 600 }, (_, i) => ({
+      name,
+      version: `1.0.${i}`,
+      publishedAt: new Date("2020-01-01T00:00:00Z"),
+      integrity: `sha512-${i}`,
+      downloadUrl: `https://registry.npmjs.org/${name}/-/${name}-1.0.${i}.tgz`,
+      dependencies: [{ key: "a-cjs", name: "a", range: "^1" }],
+    }));
+    try {
+      await store.putVersionFacts("npm", facts);
+      await store.putVersionFacts("npm", [{ ...facts[0], integrity: "sha512-changed" }]);
+      // More versions than one query's chunk.
+      const read = await store.getVersionFacts(
+        "npm",
+        facts.map(({ version }) => ({ name, version })),
+      );
+      expect(read).toHaveLength(600);
+      expect(read.find((fact) => fact.version === "1.0.0")).toEqual(facts[0]);
+      expect(await store.getVersionFacts("pypi", [{ name, version: "1.0.0" }])).toEqual([]);
+
+      await store.approveVersions(runId, "npm", [{ name, version: "1.0.1", integrity: "sha512-1" }]);
+      expect(await store.findApprovedVersion(runId, "npm", name, "1.0.1")).toEqual({
+        integrity: "sha512-1",
+        downloadUrl: facts[1].downloadUrl,
+      });
+      expect(await store.findApprovedVersion(runId, "npm", name, "1.0.2")).toBeNull();
+      await db.codingRun.delete({ where: { runId } });
+      expect(await db.registryApprovedVersion.count({ where: { runId } })).toBe(0);
+      expect(await db.registryVersionFact.count({ where: { name } })).toBe(600);
+    } finally {
+      await db.registryVersionFact.deleteMany({ where: { name } });
+      await db.run.deleteMany({ where: { id: runId } });
+    }
+  });
 });

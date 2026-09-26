@@ -140,5 +140,10 @@ describe("createRegistryUpstream", () => {
     const headers = new Headers(calls[0].init.headers);
     expect(headers.get("accept")).toBe("application/json");
     expect(headers.has("content-type")).toBe(false);
+    expect(headers.has("accept-encoding")).toBe(false);
+
+    // A caller that decompresses itself (lockfile plans stream packuments) asks for gzip.
+    await upstream("https://registry.npmjs.org/left-pad", { accept: "application/json", acceptEncoding: "gzip" });
+    expect(new Headers(calls[1].init.headers).get("accept-encoding")).toBe("gzip");
   });
 });

@@ -243,6 +243,11 @@ describe("RegistryService", () => {
       usage: (runId) => inner.usage(runId),
       refusalCount: (runId) => inner.refusalCount(runId),
       listFetches: (runId) => inner.listFetches(runId),
+      getVersionFacts: (ecosystem, versions) => inner.getVersionFacts(ecosystem, versions),
+      putVersionFacts: (ecosystem, facts) => inner.putVersionFacts(ecosystem, facts),
+      approveVersions: (runId, ecosystem, versions) => inner.approveVersions(runId, ecosystem, versions),
+      findApprovedVersion: (runId, ecosystem, name, version) =>
+        inner.findApprovedVersion(runId, ecosystem, name, version),
     };
     const hangingBody = new ReadableStream<Uint8Array>({
       pull: () => new Promise<void>(() => {}), // never resolves

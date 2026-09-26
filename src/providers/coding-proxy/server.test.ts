@@ -3,7 +3,12 @@ import { MemoryProxyLedger } from "./memory-ledger.js";
 import { CodingProxy, type CreatedCodingProxySession } from "./proxy.js";
 import type { RegistryAdapter } from "../../coding/registry/types.js";
 import { capabilityHash } from "./proxy.js";
-import { RegistryService, type RegistryRequest, type RegistryResponse } from "./registry/service.js";
+import {
+  RegistryService,
+  type RegistryPlanRequest,
+  type RegistryRequest,
+  type RegistryResponse,
+} from "./registry/service.js";
 import { MemoryRegistryStore } from "./registry/store.js";
 import { startCodingProxyServer, type CodingProxyServerHandle } from "./server.js";
 
@@ -220,6 +225,31 @@ describe("coding proxy registry routing", () => {
     ]);
     const post = await fetch(`${base}/npm/react`, { method: "POST" });
     expect(post.status).toBe(405);
+    await server.close();
+  });
+
+  it("routes POST /registry/<ecosystem>/-/plan with its body to the registry's plan, within 20 MiB", async () => {
+    const plans: { ecosystem: string; token: string; body: string }[] = [];
+    const registry = {
+      handle: async (): Promise<RegistryResponse> => ({ status: 200, contentType: "text", body: "" }),
+      plan: async (request: RegistryPlanRequest): Promise<RegistryResponse> => {
+        plans.push({ ecosystem: request.ecosystem, token: request.token, body: request.body });
+        return { status: 200, contentType: "application/json", body: '{"approved":1,"refused":[]}' };
+      },
+    };
+    const server = await startCodingProxyServer(fakeProxy(), { host: "127.0.0.1", port: 0, registry });
+    const url = `http://127.0.0.1:${server.port}/registry/npm/-/plan`;
+    const ok = await fetch(url, { method: "POST", headers: { authorization: "Bearer rrg_p" }, body: '{"lock":1}' });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ approved: 1, refused: [] });
+    expect(plans).toEqual([{ ecosystem: "npm", token: "rrg_p", body: '{"lock":1}' }]);
+
+    const large = await fetch(url, { method: "POST", body: "x".repeat(20 * 1024 * 1024 + 1) });
+    expect(large.status).toBe(413);
+    expect(await large.json()).toEqual({ error: expect.stringContaining("wardby_lockfile_too_large") });
+    expect(plans).toHaveLength(1);
+    // Only POST plans; a GET of the same path is an ordinary registry request.
+    expect((await fetch(url)).status).toBe(200);
     await server.close();
   });
 

@@ -15,6 +15,11 @@ describe("coding worker image policy", () => {
     // language toolchain and hardening checks the derived Dockerfile adds).
     expect(dockerfile).not.toContain("USER 10001:10001");
     expect(dockerfile).not.toContain("ENTRYPOINT");
+    // The npm shim (lockfile verification before an install) is on the
+    // agent's PATH, login shells included, and runs the real npm.
+    expect(dockerfile).toContain("COPY src/coding-worker/npm-shim.mjs ./bin/npm-shim.mjs");
+    expect(dockerfile).toContain("ln -s npm-shim.mjs /opt/wardby/bin/npm");
+    expect(dockerfile).toContain("/etc/profile.d/wardby-shims.sh");
   });
 
   it("Dockerfile pins its FROM to the driver by digest and excludes privileged or general-purpose host tooling", async () => {

@@ -83,7 +83,7 @@ describe("runCodingWorker", () => {
       environment: expect.objectContaining({
         HOME: "/home/wardby",
         LANG: "C.UTF-8",
-        PATH: "/usr/local/bin:/usr/bin:/bin",
+        PATH: "/opt/wardby/bin:/usr/local/bin:/usr/bin:/bin",
         TMPDIR: "/tmp",
         npm_config_registry: "http://proxy:8080/registry/npm/",
       }),

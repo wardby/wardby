@@ -30,6 +30,16 @@ COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
 COPY --from=build /build/dist/coding/registry ./coding/registry
 # The lockfile normaliser (coding/registry/lockfiles.js) skips the folders collection excludes.
 COPY --from=build /build/dist/coding/collect-exclude.js ./coding/collect-exclude.js
+# The npm shim (npm-shim.mjs): verifies a project's lockfile with the registry
+# proxy (POST /registry/npm/-/plan) before an install, then runs the real npm.
+# The driver puts /opt/wardby/bin first on the agent's PATH; a login shell
+# (bash -l) resets PATH from /etc/profile, so profile.d puts it back.
+COPY src/coding-worker/npm-shim.mjs ./bin/npm-shim.mjs
+RUN chmod 0755 /opt/wardby/bin/npm-shim.mjs \
+    && ln -s npm-shim.mjs /opt/wardby/bin/npm \
+    && printf '%s\n' 'case ":$PATH:" in *:/opt/wardby/bin:*) ;; *) PATH="/opt/wardby/bin:$PATH" ;; esac' > /etc/profile.d/wardby-shims.sh \
+    && PATH="/opt/wardby/bin:$PATH" npm --version \
+    && test "$(bash -lc 'command -v npm')" = /opt/wardby/bin/npm
 # Fail the build, not every run, when a module the worker imports is missing:
 # driver-v4 shipped without coding/registry and every run exited at startup
 # with ERR_MODULE_NOT_FOUND before the model was called. main.js runs on

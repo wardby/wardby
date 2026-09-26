@@ -7,6 +7,7 @@
  */
 import semver from "semver";
 import { npmLockfiles } from "./npm-lockfile.js";
+import { npmLockfilePlan, registryDependencyEdges } from "./npm-plan.js";
 import {
   AllowlistEntryError,
   RegistryError,
@@ -87,36 +88,11 @@ function integrityOf(dist: { integrity?: string; shasum?: string }): Integrity |
 }
 
 /** The registry package each dependency entry installs, and the range it
- *  asks for. An alias (`"string-width-cjs": "npm:string-width@^4"`)
- *  installs the package it names, under the alias's own range, not its
- *  key, so the target is what the run is allowed. A spec
- *  that isn't fetched from the registry at all (`file:`, `link:`, a path,
- *  `git`/`git+…`, an `http(s):` tarball, `github:`/`user/repo` shorthands,
- *  `workspace:`) contributes nothing: every such spec contains a `:` or a
- *  `/`, which no semver range or dist-tag does. This is the single place
- *  both the metadata path and the graph walk get dependency names from. */
+ *  asks for (aliases resolved, non-registry specs dropped; see
+ *  registryDependencyEdges). This is the single place both the metadata
+ *  path and the graph walk get dependency names from. */
 export function registryDependencies(deps: Record<string, string> | undefined): DependencySpec[] {
-  const specs: DependencySpec[] = [];
-  for (const [key, rawSpec] of Object.entries(deps ?? {})) {
-    const spec = typeof rawSpec === "string" ? rawSpec.trim() : "";
-    if (spec.startsWith("npm:")) {
-      const target = spec.slice("npm:".length);
-      const at = target.indexOf("@", 1);
-      const name = at > 0 ? target.slice(0, at) : target;
-      if (NAME.test(name)) specs.push({ name, range: rangeOf(at > 0 ? target.slice(at + 1) : "") });
-      continue;
-    }
-    if (/[:/]/.test(spec)) continue;
-    specs.push({ name: key, range: rangeOf(spec) });
-  }
-  return specs;
-}
-
-/** A declared semver range as written, or `"*"` for anything that is not
- *  a valid range (a dist-tag such as `latest`, an empty spec): npm
- *  resolves those to some published version, so every kept version counts. */
-function rangeOf(spec: string): string {
-  return spec !== "" && semver.validRange(spec) ? spec : "*";
+  return registryDependencyEdges(deps).map(({ name, range }) => ({ name, range }));
 }
 
 /** Maps `<name>/-/<unscoped>-<version>.tgz` (already percent-decoded) to
@@ -207,6 +183,7 @@ export const npmAdapter: RegistryAdapter = {
   collectExclude: ["node_modules"],
   dependenciesInMetadata: true,
   lockfiles: npmLockfiles,
+  lockfilePlan: npmLockfilePlan,
 
   parseAllowlistEntry(raw: string): AllowlistEntry {
     const value = raw.trim();

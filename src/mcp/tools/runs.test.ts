@@ -40,8 +40,10 @@ interface FakeRunRow {
     outcome: "served" | "refused";
     reason: string | null;
     sizeBytes?: number | null;
+    filename?: string | null;
     createdAt: Date;
   }>;
+  approvedVersions?: number;
 }
 
 function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[]) {
@@ -49,7 +51,7 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[]) {
   const runRows = new Map(runs.map((r) => [r.id, r]));
   const publicRun = (run: FakeRunRow | undefined) => {
     if (!run) return null;
-    const { codingRun: _codingRun, registryFetches: _registryFetches, ...row } = run;
+    const { codingRun: _codingRun, registryFetches: _registryFetches, approvedVersions: _approved, ...row } = run;
     return row;
   };
   return {
@@ -69,6 +71,9 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[]) {
         where.runId.in
           .map((runId) => ({ runId, queuedAt: runRows.get(runId)?.codingRun?.queuedAt ?? null }))
           .filter((row) => row.queuedAt !== null),
+    },
+    registryApprovedVersion: {
+      count: async ({ where }: { where: { runId: string } }) => runRows.get(where.runId)?.approvedVersions ?? 0,
     },
     registryFetch: {
       findMany: async ({ where }: { where: { runId: string } }) =>
@@ -347,7 +352,19 @@ describe("run observability tools", () => {
               sizeBytes: null,
               createdAt: new Date(now.getTime() + 2000),
             },
+            // Lockfile plan refusals, one recorded twice: counted once.
+            ...[3000, 3500, 4000].map((offset, index) => ({
+              ecosystem: "npm",
+              name: index === 2 ? "stray" : "evil",
+              version: "1.0.0",
+              filename: "-/plan",
+              outcome: "refused" as const,
+              reason: "wardby_package_not_allowed",
+              sizeBytes: null,
+              createdAt: new Date(now.getTime() + offset),
+            })),
           ],
+          approvedVersions: 42,
         },
         // A non-coding run has no registry fetches at all.
         {
@@ -375,6 +392,7 @@ describe("run observability tools", () => {
     const codingBody = parseText(codingResult as never) as {
       packages: Array<{ ecosystem: string; name: string; version: string; size: number | null }>;
       packageRefusals: Array<{ ecosystem: string; name: string; reason: string }>;
+      packagePlan: { approved: number; refused: number };
     };
     expect(codingBody.packages).toEqual([
       { ecosystem: "npm", name: "@heroui/react", version: "3.2.6", size: 482_113 },
@@ -382,12 +400,16 @@ describe("run observability tools", () => {
     ]);
     expect(codingBody.packageRefusals).toEqual([
       { ecosystem: "npm", name: "left-pad", reason: "wardby_package_not_allowed" },
+      { ecosystem: "npm", name: "evil", reason: "wardby_package_not_allowed" },
+      { ecosystem: "npm", name: "stray", reason: "wardby_package_not_allowed" },
     ]);
+    expect(codingBody.packagePlan).toEqual({ approved: 42, refused: 2 });
 
     const nonCodingResult = await client.callTool({ name: "get_run", arguments: { runId: "r2" } });
     const nonCodingBody = parseText(nonCodingResult as never) as Record<string, unknown>;
     expect(nonCodingBody).not.toHaveProperty("packages");
     expect(nonCodingBody).not.toHaveProperty("packageRefusals");
+    expect(nonCodingBody).not.toHaveProperty("packagePlan");
     await client.close();
   });
 

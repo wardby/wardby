@@ -14,7 +14,7 @@ import semver from "semver";
 
 const PUBLIC_REGISTRY = "https://registry.npmjs.org/";
 /** Same shape as the adapter's allowlist name check (scoped names are lower case). */
-const PACKAGE_NAME = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/[a-z0-9-~][a-z0-9-._~]*|[A-Za-z0-9-~][A-Za-z0-9-._~]*)$/;
+export const PACKAGE_NAME = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/[a-z0-9-~][a-z0-9-._~]*|[A-Za-z0-9-~][A-Za-z0-9-._~]*)$/;
 /** A `"resolved": "<value>"` pair whose value has no JSON escapes. */
 const RESOLVED = /("resolved"\s*:\s*")([^"\\]*)(")/g;
 

@@ -8,6 +8,7 @@ import { CodingProxy } from "./proxy.js";
 import { PrismaProxyLedger } from "./prisma-ledger.js";
 import { OsvAudit } from "./registry/audit.js";
 import { PrismaRegistryStore } from "./registry/prisma-store.js";
+import { DEFAULT_PLAN_MAX_ENTRIES, DEFAULT_PLAN_TIMEOUT_MS } from "./registry/plan.js";
 import { DEFAULT_GRAPH_TIMEOUT_MS, DEFAULT_MAX_GRAPH_PACKAGES, RegistryService } from "./registry/service.js";
 import { createPinnedProxyFetch, type PinnedProxyFetchOptions } from "./secure-fetch.js";
 import { startCodingProxyServer, type CodingProxyServerHandle } from "./server.js";
@@ -22,7 +23,8 @@ function positiveInt(value: string | undefined, fallback: number): number {
 
 /** Adapts the pinned upstream `fetch` (which only forwards `init.headers`)
  *  to `UpstreamFetch`'s narrower init shape: `accept` becomes an `accept`
- *  header, and a `content-type: application/json` header is set whenever a
+ *  header, `acceptEncoding` an `accept-encoding` header (the pinned fetch
+ *  never decompresses; the caller that asks for gzip does), and a `content-type: application/json` header is set whenever a
  *  body is present (every registry/OSV upstream call sends or expects
  *  JSON). Exported so its header-mapping can be unit-tested directly,
  *  without needing a live upstream. */
@@ -35,6 +37,7 @@ export function createRegistryUpstream(pinned: typeof globalThis.fetch): Upstrea
       redirect: "error",
       headers: {
         ...(init.accept ? { accept: init.accept } : {}),
+        ...(init.acceptEncoding ? { "accept-encoding": init.acceptEncoding } : {}),
         ...(init.body ? { "content-type": "application/json" } : {}),
       },
     });
@@ -84,6 +87,8 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     maxMetadataBytes,
     maxGraphPackages: positiveInt(env.REGISTRY_MAX_GRAPH_PACKAGES, DEFAULT_MAX_GRAPH_PACKAGES),
     graphTimeoutMs: positiveInt(env.REGISTRY_GRAPH_TIMEOUT_MS, DEFAULT_GRAPH_TIMEOUT_MS),
+    planMaxEntries: positiveInt(env.REGISTRY_PLAN_MAX_ENTRIES, DEFAULT_PLAN_MAX_ENTRIES),
+    planTimeoutMs: positiveInt(env.REGISTRY_PLAN_TIMEOUT_MS, DEFAULT_PLAN_TIMEOUT_MS),
     proxyBase: `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}/registry/`,
     limits: {
       maxFileBytes: positiveInt(env.REGISTRY_MAX_FILE_MB, 200) * MIB,
