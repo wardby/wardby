@@ -20,6 +20,7 @@ import {
   type CommentInput,
   type CommentRef,
   type CompleteCheckInput,
+  type EditCommentInput,
   type FileListView,
   type FileReadResult,
   type HostPermission,
@@ -527,7 +528,7 @@ export class GitHubReviewHost implements CodeReviewHost {
     );
   }
 
-  async comment(repository: string, input: CommentInput): Promise<{ url: string }> {
+  async comment(repository: string, input: CommentInput): Promise<{ url: string; id: string }> {
     const base = repoPath(repository);
     return this.withToken(repository, COMMENT_WRITE, async (get) => {
       const response = input.replyToReviewCommentId
@@ -541,7 +542,17 @@ export class GitHubReviewHost implements CodeReviewHost {
             { method: "POST", body: JSON.stringify({ body: input.body }) },
             [201],
           );
-      return { url: str(record(await response.json()).html_url) };
+      const created = record(await response.json());
+      return { url: str(created.html_url), id: String(num(created.id)) };
+    });
+  }
+
+  async editComment(repository: string, input: EditCommentInput): Promise<void> {
+    const base = repoPath(repository);
+    const id = encodeURIComponent(input.id);
+    const path = input.kind === "inline" ? `${base}/pulls/comments/${id}` : `${base}/issues/comments/${id}`;
+    await this.withToken(repository, COMMENT_WRITE, async (get) => {
+      await get(path, { method: "PATCH", body: JSON.stringify({ body: input.body }) }, [200]);
     });
   }
 

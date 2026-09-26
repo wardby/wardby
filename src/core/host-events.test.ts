@@ -27,7 +27,8 @@ function host(): CodeReviewHost {
     readFile: vi.fn(),
     listFiles: vi.fn(),
     publishReview: vi.fn(),
-    comment: vi.fn(),
+    comment: vi.fn(async () => ({ url: "https://x/c", id: "501" })),
+    editComment: vi.fn(async () => undefined),
     acknowledge: vi.fn(async () => undefined),
     startCheck: vi.fn(async () => ({ checkId: "11" })),
     completeCheck: vi.fn(async () => undefined),
@@ -72,6 +73,8 @@ function deps(
           })),
         ),
       },
+      runHostStatus: { create: vi.fn(async () => undefined), findUnique: vi.fn(async () => null) },
+      run: { findUnique: vi.fn(async () => ({ id: "run", status: "running", finalText: null })) },
     } as never,
   };
 }
@@ -160,6 +163,17 @@ describe("routeHostEvent", () => {
     );
     for (const f of [...review.followUps, ...ask.followUps]) await f();
     expect(d.hosts.github.acknowledge).toHaveBeenCalledWith(REPO, { kind: "conversation", id: "4" });
+    // Only the mention run gets a status comment; "@wardby review" has its check.
+    expect(d.hosts.github.comment).toHaveBeenCalledTimes(1);
+    expect(d.hosts.github.comment).toHaveBeenCalledWith(REPO, {
+      number: 7,
+      body: expect.stringContaining("run `run-a3`"),
+    });
+    expect(
+      (d.db as unknown as { runHostStatus: { create: ReturnType<typeof vi.fn> } }).runHostStatus.create,
+    ).toHaveBeenCalledWith({
+      data: expect.objectContaining({ runId: "run-a3", number: 7, commentKind: "conversation", commentId: "501" }),
+    });
   });
 });
 
@@ -392,7 +406,7 @@ describe("routeHostEvent repository authorization (H5-1) and mention gate (H5-3)
     );
     const result = await routeHostEvent(mention("@wardby please fix it"), d);
     expect(result.runIds).toEqual(["run-a3"]);
-    expect(result.followUps).toHaveLength(1);
+    expect(result.followUps).toHaveLength(2); // the reaction, then the status comment
   });
 
   it("does not ask about the commenter when no agent would act on the mention", async () => {

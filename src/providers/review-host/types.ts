@@ -122,6 +122,13 @@ export interface CommentInput {
   replyToReviewCommentId?: string;
 }
 
+/** A comment the App wrote, to edit later: a conversation comment or a reply in a review thread. */
+export interface EditCommentInput {
+  kind: "conversation" | "inline";
+  id: string;
+  body: string;
+}
+
 export interface CommentRef {
   /**
    * "conversation" = a top-level comment on an issue/PR conversation; "inline" = a comment on a diff line (review
@@ -190,7 +197,10 @@ export interface CodeReviewHost {
   ): Promise<FileReadResult>;
   listFiles(repository: string, ref: string | undefined, pathPrefix?: string): Promise<FileListView>;
   publishReview(repository: string, input: PublishReviewInput): Promise<PublishReviewResult>;
-  comment(repository: string, input: CommentInput): Promise<{ url: string }>;
+  /** `id` identifies the new comment for editComment; a reply is an "inline" comment, anything else "conversation". */
+  comment(repository: string, input: CommentInput): Promise<{ url: string; id: string }>;
+  /** Replaces the body of a comment the App wrote. */
+  editComment(repository: string, input: EditCommentInput): Promise<void>;
   /** Marks a comment as picked up (GitHub: a 👀 reaction); a host without reactions may do nothing. */
   acknowledge(repository: string, target: CommentRef): Promise<void>;
   startCheck(repository: string, input: StartCheckInput): Promise<{ checkId: string }>;

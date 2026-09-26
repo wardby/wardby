@@ -52,6 +52,7 @@ import {
 } from "./review-host-tools.js";
 import { closeOpenHostCheck } from "./review-host-checks.js";
 import { RUN_TASK_TAG, splitTaskOverride, wrapUntrusted } from "./untrusted-content.js";
+import { completeHostStatus } from "./host-status.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
 
 const runnerLog = logger.child({ module: "runner" });
@@ -145,6 +146,7 @@ export type RunnerDb = Pick<
   | "$queryRaw"
   | "agentRepository"
   | "runHostCheck"
+  | "runHostStatus"
   | "hostIdentity"
 >;
 
@@ -731,6 +733,7 @@ export async function executeRun(
       finishedAt: new Date(),
     });
     await closeOpenHostCheck(db, finished, reviewHosts);
+    await completeHostStatus(db, finished, reviewHosts);
     return finished;
   } catch (err) {
     // Defensive backstop: the engine is expected to catch its own errors
@@ -744,6 +747,7 @@ export async function executeRun(
       finishedAt: new Date(),
     });
     await closeOpenHostCheck(db, finished, reviewHosts);
+    await completeHostStatus(db, finished, reviewHosts);
     return finished;
   }
 }

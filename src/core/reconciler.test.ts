@@ -391,7 +391,8 @@ function withHostChecks(db: ReconcilerDb, runs: FakeRun[], checks: FakeHostCheck
       ),
     ),
   };
-  return { db: { ...db, runHostCheck } as unknown as ReconcilerDb, runHostCheck };
+  const runHostStatus = { findMany: vi.fn(async () => []) };
+  return { db: { ...db, runHostCheck, runHostStatus } as unknown as ReconcilerDb, runHostCheck };
 }
 
 function hostCheck(runId: string): FakeHostCheck {
@@ -493,5 +494,74 @@ describe("reconcileOnce orphaned host checks", () => {
 
     expect(runHostCheck.findMany).not.toHaveBeenCalled();
     expect(runHostCheck.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+describe("reconcileOnce orphaned status comments", () => {
+  const LONG_DONE = new Date(NOW.getTime() - 61_000);
+
+  function withStatuses(runs: FakeRun[], statuses: Array<{ runId: string; completedAt: Date | null }>) {
+    const base = fakeDb(runs) as unknown as { run: Record<string, unknown> };
+    const rows = statuses.map((s) => ({
+      ...s,
+      provider: "github",
+      repository: "o/n",
+      number: 3,
+      commentKind: "conversation",
+      commentId: `c-${s.runId}`,
+    }));
+    const runHostStatus = {
+      findMany: vi.fn(async ({ where, take }: any) =>
+        rows
+          .filter((row) => {
+            const run = runs.find((r) => r.id === row.runId);
+            if (!run || row.completedAt !== where.completedAt) return false;
+            if (!where.provider.in.includes(row.provider)) return false;
+            if (where.run.status.notIn.includes(run.status)) return false;
+            const { lte, gte } = where.run.finishedAt;
+            return run.finishedAt !== null && run.finishedAt <= lte && run.finishedAt >= gte;
+          })
+          .map((row) => ({ run: { ...runs.find((r) => r.id === row.runId)!, finalText: null } }))
+          .slice(0, take),
+      ),
+      findUnique: vi.fn(async ({ where }: any) => rows.find((r) => r.runId === where.runId) ?? null),
+      update: vi.fn(async ({ where, data }: any) =>
+        Object.assign(
+          rows.find((r) => r.runId === where.runId)!,
+          data,
+        ),
+      ),
+    };
+    const runHostCheck = { findMany: vi.fn(async () => []) };
+    const run = {
+      ...base.run,
+      findMany: vi.fn(async (args: any) =>
+        args.where.parentRunId ? [] : (base.run.findMany as (a: unknown) => unknown)(args),
+      ),
+    };
+    return { db: { run, runHostCheck, runHostStatus } as unknown as ReconcilerDb, rows };
+  }
+
+  it("edits the status comment of a run that ended without completing it", async () => {
+    const runs = [
+      baseRun({ id: "lost1", status: "lost", finishedAt: LONG_DONE }),
+      baseRun({ id: "live", status: "running", heartbeatAt: FRESH }),
+    ];
+    const { db, rows } = withStatuses(runs, [
+      { runId: "lost1", completedAt: null },
+      { runId: "live", completedAt: null },
+    ]);
+    const host = { provider: "github", editComment: vi.fn(async () => undefined) } as unknown as CodeReviewHost;
+
+    await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, { github: host });
+
+    expect(host.editComment).toHaveBeenCalledTimes(1);
+    expect(host.editComment).toHaveBeenCalledWith("o/n", {
+      kind: "conversation",
+      id: "c-lost1",
+      body: expect.stringContaining("`lost`"),
+    });
+    expect(rows.find((r) => r.runId === "lost1")!.completedAt).not.toBeNull();
+    expect(rows.find((r) => r.runId === "live")!.completedAt).toBeNull();
   });
 });
