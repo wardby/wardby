@@ -165,20 +165,19 @@ export async function confirmHostIdentityLink(input: {
     },
     orderBy: { callbackAt: "desc" },
   });
-  if (!request?.confirmHash || !request.hostUserId || !request.login) {
-    throw new HostLinkError(
-      404,
-      "No account link is waiting for a confirmation code from you. Start again with link_host_account (no code).",
-    );
-  }
+  if (!request?.confirmHash || !request.hostUserId || !request.login) throw noPendingLink();
+  // Spend an attempt BEFORE comparing, atomically: concurrent guesses can't
+  // each get a comparison before the counter saturates.
+  const claimed = await input.db.hostIdentityLinkRequest.updateMany({
+    where: { id: request.id, attempts: { lt: HOST_LINK_MAX_ATTEMPTS }, expiresAt: { gt: now } },
+    data: { attempts: { increment: 1 } },
+  });
+  if (claimed.count !== 1) throw noPendingLink();
   const presented = Buffer.from(sha256(code), "hex");
   const expected = Buffer.from(request.confirmHash, "hex");
   if (presented.length !== expected.length || !timingSafeEqual(presented, expected)) {
-    await input.db.hostIdentityLinkRequest.updateMany({
-      where: { id: request.id, attempts: { lt: HOST_LINK_MAX_ATTEMPTS } },
-      data: { attempts: { increment: 1 } },
-    });
-    const left = HOST_LINK_MAX_ATTEMPTS - request.attempts - 1;
+    const after = await input.db.hostIdentityLinkRequest.findUnique({ where: { id: request.id } });
+    const left = Math.max(0, HOST_LINK_MAX_ATTEMPTS - (after?.attempts ?? HOST_LINK_MAX_ATTEMPTS));
     throw new HostLinkError(
       400,
       left > 0
@@ -192,8 +191,9 @@ export async function confirmHostIdentityLink(input: {
     await input.db.$transaction(
       async (tx) => {
         // Consume the request first: a concurrent confirmation of the same code loses here.
+        // (Its attempt was already spent above, so attempts may now equal the limit.)
         const consumed = await tx.hostIdentityLinkRequest.deleteMany({
-          where: { id: request.id, attempts: { lt: HOST_LINK_MAX_ATTEMPTS }, expiresAt: { gt: now } },
+          where: { id: request.id, expiresAt: { gt: now } },
         });
         if (consumed.count !== 1) throw new HostLinkError(404, "This link attempt is no longer valid; start again.");
         const holder = await tx.hostIdentity.findUnique({
@@ -214,6 +214,13 @@ export async function confirmHostIdentityLink(input: {
     throw err;
   }
   return { hostUserId, login };
+}
+
+function noPendingLink(): HostLinkError {
+  return new HostLinkError(
+    404,
+    "No account link is waiting for a confirmation code from you. Start again with link_host_account (no code).",
+  );
 }
 
 function alreadyLinked(): HostLinkError {

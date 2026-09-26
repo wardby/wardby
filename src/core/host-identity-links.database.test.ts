@@ -180,6 +180,28 @@ describe.skipIf(!process.env.DATABASE_URL)("host identity linking (PostgreSQL)",
     expect(await db.hostIdentity.count({ where: { principalId: p.id } })).toBe(0);
   });
 
+  it("counts attempts atomically: concurrent wrong guesses get at most 5 comparisons", async () => {
+    const p = await principal();
+    const { authorizer } = fakeAuthorizer({ hostUserId: uniqueUserId(), login: "octo" });
+    const { outcome } = await linkThroughCallback(p.id, authorizer);
+    if (outcome.kind !== "confirm") throw new Error("expected a code");
+    const wrong = outcome.code.startsWith("A") ? "BBBB-BBBB" : "AAAA-AAAA";
+    const results = await Promise.all(
+      Array.from({ length: 12 }, () =>
+        confirmHostIdentityLink({ db, principalId: p.id, provider: "github", confirmationCode: wrong }).then(
+          () => 0,
+          (e: HostLinkError) => e.status,
+        ),
+      ),
+    );
+    expect(results.filter((s) => s === 400).length).toBeLessThanOrEqual(5);
+    expect(results.every((s) => s === 400 || s === 404)).toBe(true);
+    expect((await db.hostIdentityLinkRequest.findFirstOrThrow({ where: { principalId: p.id } })).attempts).toBe(5);
+    await expect(
+      confirmHostIdentityLink({ db, principalId: p.id, provider: "github", confirmationCode: outcome.code }),
+    ).rejects.toMatchObject({ status: 404 });
+  });
+
   it("refuses a malformed code without spending an attempt", async () => {
     const p = await principal();
     const { authorizer } = fakeAuthorizer({ hostUserId: uniqueUserId(), login: "octo" });
