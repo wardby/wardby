@@ -31,6 +31,8 @@ const OSV_BATCH_MAX_PAGES = 20;
 /** Advisory details fetched at once. */
 const OSV_VULN_CONCURRENCY = 8;
 export const DEFAULT_VULN_CACHE_ENTRIES = 10_000;
+/** Exact versions whose querybatch results are cached. */
+export const DEFAULT_BATCH_CACHE_ENTRIES = 20_000;
 const BLOCKING = new Set(["HIGH", "CRITICAL"]);
 const RANGE_TYPES = new Set(["SEMVER", "ECOSYSTEM"]);
 
@@ -47,8 +49,32 @@ interface OsvAffected {
 }
 interface OsvVuln {
   id: string;
-  affected?: OsvAffected[];
-  database_specific?: { severity?: string };
+  aliases?: string[];
+  affected?: (OsvAffected & { database_specific?: Record<string, unknown> })[];
+  database_specific?: { severity?: string; cwe_ids?: unknown; [key: string]: unknown };
+}
+
+/** Whether an advisory reports malicious code: an OSV malicious-packages
+ *  entry (`MAL-…`, which carries no severity at all), one that aliases or
+ *  imports one, or a CWE-506 (embedded malicious code) advisory. Withheld
+ *  whatever its severity says. */
+export function isMalware(vuln: OsvVuln): boolean {
+  if (vuln.id.startsWith("MAL-") || (vuln.aliases ?? []).some((alias) => alias.startsWith("MAL-"))) return true;
+  const specific = vuln.database_specific ?? {};
+  if (specific["malicious-packages-origins"] !== undefined) return true;
+  if (Array.isArray(specific.cwe_ids) && specific.cwe_ids.includes("CWE-506")) return true;
+  return (vuln.affected ?? []).some((affected) => {
+    const detail = affected.database_specific ?? {};
+    return (
+      detail["malicious-packages-origins"] !== undefined ||
+      (typeof detail.source === "string" && detail.source.includes("/malicious-packages/"))
+    );
+  });
+}
+
+/** Whether an advisory withholds the versions it affects. */
+function blocks(vuln: OsvVuln): boolean {
+  return BLOCKING.has(vuln.database_specific?.severity?.toUpperCase() ?? "") || isMalware(vuln);
 }
 
 /** What the audit needs from an adapter: which OSV ecosystem to query, how
@@ -160,6 +186,10 @@ export class OsvAudit {
   /** Advisory severities by id, with the OSV `modified` time they were
    *  read at, least recently used first. */
   private readonly vulns = new Map<string, { modified: string; blocking: boolean }>();
+  /** Advisory ids (and their `modified` time) per exact version from
+   *  querybatch, for the audit TTL, least recently used first, so repeated
+   *  plans don't re-query. */
+  private readonly batchCache = new Map<string, { expires: number; vulns: { id: string; modified: string }[] }>();
   private readonly now: () => number;
   private readonly ttlMs: number;
   private readonly maxEntries: number;
@@ -175,6 +205,8 @@ export class OsvAudit {
       maxEntries?: number;
       /** Advisory severities kept for exact-version audits (default 10000). */
       maxVulnEntries?: number;
+      /** Exact versions whose querybatch results are kept (default 20000). */
+      maxBatchEntries?: number;
       /** Timeout for one OSV request, body included (default 30 s). */
       timeoutMs?: number;
       /** Largest OSV response read (default 64 MiB). */
@@ -256,8 +288,26 @@ export class OsvAudit {
     const unique = [...new Map(versions.map((entry) => [versionKey(entry.name, entry.version), entry])).values()];
     /** Advisory id -> its `modified` time, and the versions it affects. */
     const found = new Map<string, { modified: string; versions: Set<string> }>();
-    for (let start = 0; start < unique.length; start += OSV_BATCH_SIZE) {
-      const chunk = unique.slice(start, start + OSV_BATCH_SIZE);
+    const note = (key: string, vuln: { id: string; modified: string }) => {
+      const advisory = found.get(vuln.id) ?? { modified: vuln.modified, versions: new Set<string>() };
+      advisory.versions.add(key);
+      found.set(vuln.id, advisory);
+    };
+    const now = this.now();
+    const missing: AuditedVersion[] = [];
+    for (const entry of unique) {
+      const key = versionKey(entry.name, entry.version);
+      const cacheKey = `${adapter.osvEcosystem}:${key}`;
+      const cached = this.batchCache.get(cacheKey);
+      if (cached && cached.expires > now) {
+        this.batchCache.delete(cacheKey);
+        this.batchCache.set(cacheKey, cached); // most recently used
+        for (const vuln of cached.vulns) note(key, vuln);
+      } else missing.push(entry);
+    }
+    const fresh = new Map<string, { id: string; modified: string }[]>();
+    for (let start = 0; start < missing.length; start += OSV_BATCH_SIZE) {
+      const chunk = missing.slice(start, start + OSV_BATCH_SIZE);
       let pending = chunk.map((entry) => ({ entry, pageToken: undefined as string | undefined }));
       for (let page = 0; pending.length > 0; page += 1) {
         if (page >= OSV_BATCH_MAX_PAGES) throw new Error("osv_batch_pages");
@@ -284,12 +334,13 @@ export class OsvAudit {
         const next: typeof pending = [];
         results.forEach((result, index) => {
           const key = versionKey(pending[index].entry.name, pending[index].entry.version);
+          const list = fresh.get(key) ?? [];
+          fresh.set(key, list);
           for (const vuln of result.vulns ?? []) {
             if (typeof vuln.id !== "string" || vuln.id === "") throw new Error("osv_batch_vuln_id");
-            const modified = typeof vuln.modified === "string" ? vuln.modified : "";
-            const advisory = found.get(vuln.id) ?? { modified, versions: new Set<string>() };
-            advisory.versions.add(key);
-            found.set(vuln.id, advisory);
+            const entry = { id: vuln.id, modified: typeof vuln.modified === "string" ? vuln.modified : "" };
+            list.push(entry);
+            note(key, entry);
           }
           if (typeof result.next_page_token === "string" && result.next_page_token !== "")
             next.push({ entry: pending[index].entry, pageToken: result.next_page_token });
@@ -297,6 +348,8 @@ export class OsvAudit {
         pending = next;
       }
     }
+    // Cached only once every page of every version was read.
+    for (const [key, vulns] of fresh) this.rememberBatch(`${adapter.osvEcosystem}:${key}`, vulns);
     const withheld: WithheldVersions = new Map();
     const ids = [...found.keys()];
     let cursor = 0;
@@ -312,6 +365,18 @@ export class OsvAudit {
     return withheld;
   }
 
+  private rememberBatch(key: string, vulns: { id: string; modified: string }[]): void {
+    const now = this.now();
+    this.batchCache.delete(key);
+    const limit = this.options.maxBatchEntries ?? DEFAULT_BATCH_CACHE_ENTRIES;
+    while (this.batchCache.size >= limit) {
+      const oldest = this.batchCache.keys().next();
+      if (oldest.done) break;
+      this.batchCache.delete(oldest.value);
+    }
+    this.batchCache.set(key, { expires: now + this.ttlMs, vulns });
+  }
+
   /** Whether an advisory is HIGH or CRITICAL, cached by id while OSV's
    *  `modified` time for it is unchanged. */
   private async blocking(id: string, modified: string, signal?: AbortSignal): Promise<boolean> {
@@ -324,8 +389,8 @@ export class OsvAudit {
     const response = await this.fetch(`${OSV_VULN}${encodeURIComponent(id)}`, { accept: "application/json", signal });
     if (!response.ok) throw new Error(`osv_status_${response.status}`);
     const vuln = (await response.json()) as OsvVuln & { modified?: unknown };
-    const severity = vuln.database_specific?.severity?.toUpperCase() ?? "";
-    const blocking = BLOCKING.has(severity);
+    if (typeof vuln.id !== "string") throw new Error("osv_vuln_invalid");
+    const blocking = blocks(vuln);
     this.vulns.delete(id);
     while (this.vulns.size >= (this.options.maxVulnEntries ?? DEFAULT_VULN_CACHE_ENTRIES)) {
       const oldest = this.vulns.keys().next();
@@ -359,8 +424,7 @@ export class OsvAudit {
           adapter.normalizeName(entry.package.name) === wanted,
       );
       if (affected.length === 0) continue;
-      const severity = vuln.database_specific?.severity?.toUpperCase() ?? "";
-      advisories.push({ id: vuln.id, blocking: BLOCKING.has(severity), affected });
+      advisories.push({ id: vuln.id, blocking: blocks(vuln), affected });
     }
     return advisories;
   }

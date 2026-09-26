@@ -71,6 +71,7 @@ async function layout(code = 0) {
     HOME: root,
     npm_config_registry: registry,
     npm_config_userconfig: npmrc,
+    WARDBY_NPM_PLAN_REGISTRY: registry,
   };
   const calls = async () =>
     (await readFile(record, "utf8").catch(() => ""))
@@ -132,6 +133,17 @@ describe("npm shim", () => {
     expect((await run(shim, ["ci"], { cwd: project, env: { ...env, WARDBY_NPM_SHIM_ACTIVE: "1" } })).code).toBe(0);
     expect(plans).toEqual([]);
     expect((await calls()).map((call) => call.args)).toEqual([["ci"], ["test"], ["--version"], ["ci"]]);
+  });
+
+  it("sends nothing to a registry other than the proxy's own, and still runs npm", async () => {
+    const { shim, project, env, calls } = await layout();
+    await writeFile(join(project, "package-lock.json"), "{}");
+    for (const expected of [undefined, `http://wardby-proxy:8787/registry/npm/`]) {
+      const result = await run(shim, ["ci"], { cwd: project, env: { ...env, WARDBY_NPM_PLAN_REGISTRY: expected } });
+      expect(result.code).toBe(0);
+    }
+    expect(plans).toEqual([]);
+    expect(await calls()).toHaveLength(2);
   });
 
   it("still runs npm when the plan fails, and passes npm's exit code through", async () => {

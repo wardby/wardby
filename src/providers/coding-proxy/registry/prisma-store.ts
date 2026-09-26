@@ -154,7 +154,15 @@ export class PrismaRegistryStore implements RegistryStore {
   async refusePlanVersions(runId: string, ecosystem: string, versions: readonly PlanRefusedVersion[]): Promise<void> {
     if (versions.length === 0) return;
     await this.db.registryPlanRefusal.createMany({
-      data: versions.map(({ name, version, code, reason }) => ({ runId, ecosystem, name, version, code, reason })),
+      data: versions.map(({ name, version, code, reason, publishedAt }) => ({
+        runId,
+        ecosystem,
+        name,
+        version,
+        code,
+        reason,
+        publishedAt: publishedAt ?? null,
+      })),
       skipDuplicates: true,
     });
   }
@@ -164,10 +172,10 @@ export class PrismaRegistryStore implements RegistryStore {
     ecosystem: string,
     name: string,
     version: string,
-  ): Promise<{ code: string; reason: string } | null> {
+  ): Promise<{ code: string; reason: string; publishedAt: Date | null } | null> {
     return this.db.registryPlanRefusal.findUnique({
       where: { runId_ecosystem_name_version: { runId, ecosystem, name, version } },
-      select: { code: true, reason: true },
+      select: { code: true, reason: true, publishedAt: true },
     });
   }
 }

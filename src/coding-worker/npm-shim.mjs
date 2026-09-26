@@ -118,6 +118,9 @@ function registryAuth() {
   const userconfig = process.env.npm_config_userconfig ?? process.env.NPM_CONFIG_USERCONFIG;
   if (!registry || !userconfig) return undefined;
   const base = registry.endsWith("/") ? registry : `${registry}/`;
+  // Send the lockfile and token only to the proxy's own registry route,
+  // which the driver names in WARDBY_NPM_PLAN_REGISTRY.
+  if (!process.env.WARDBY_NPM_PLAN_REGISTRY || base !== process.env.WARDBY_NPM_PLAN_REGISTRY) return undefined;
   const prefix = `${base.replace(/^https?:/, "")}:_authToken=`;
   let npmrc;
   try {

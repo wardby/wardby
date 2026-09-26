@@ -559,19 +559,22 @@ model RegistryApprovedVersion {
   @@id([runId, ecosystem, name, version])
 }
 
-/// One exact package version a run's lockfile plan definitively refused
-/// (too new, an advisory, an integrity mismatch, unreachable, ...): a
-/// download of it is answered from here with the same code and reason,
-/// without a graph walk.
+/// One exact package version a run's lockfile plan refused for a reason
+/// intrinsic to the registry's name@version (too new, an advisory, not
+/// published, no integrity, hosted elsewhere): a download of it is answered
+/// from here with the same code and reason, without a graph walk.
 model RegistryPlanRefusal {
   runId     String
   ecosystem String
   name      String
   version   String
-  code      String
-  reason    String
-  createdAt DateTime  @default(now())
-  run       CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
+  code        String
+  reason      String
+  /// Set for a too-new refusal: the answer re-checks the version's age
+  /// against the run's cutoff at answer time, so the refusal lapses.
+  publishedAt DateTime?
+  createdAt   DateTime  @default(now())
+  run         CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
 
   @@id([runId, ecosystem, name, version])
 }

@@ -292,8 +292,9 @@ describe("OsvAudit exact versions (querybatch)", () => {
     });
   });
 
-  it("follows a result's next page, and caches severities by id and modified time", async () => {
+  it("follows a result's next page, caches each version's results for the TTL, and severities by id and modified time", async () => {
     let modified = "m1";
+    let now = 0;
     const fetch = osvBatch(
       (queries) =>
         queries.map((query) =>
@@ -303,14 +304,22 @@ describe("OsvAudit exact versions (querybatch)", () => {
         ),
       { "GHSA-page1": { severity: "LOW" }, "GHSA-page2": { severity: "HIGH" } },
     );
-    const audit = new OsvAudit({ fetch, failOpen: false });
-    expect([...(await audit.auditVersions(npmAdapter, versionsOf(1)))]).toEqual([["p0@1.0.0", ["GHSA-page2"]]]);
-    await audit.auditVersions(npmAdapter, versionsOf(1));
+    const audit = new OsvAudit({ fetch, failOpen: false, now: () => now });
+    const batchCalls = () => fetch.mock.calls.filter(([url]) => url.endsWith("/querybatch")).length;
     const vulnCalls = () => fetch.mock.calls.filter(([url]) => url.includes("/v1/vulns/")).length;
-    expect(vulnCalls()).toBe(2);
+    expect([...(await audit.auditVersions(npmAdapter, versionsOf(1)))]).toEqual([["p0@1.0.0", ["GHSA-page2"]]]);
+    expect([batchCalls(), vulnCalls()]).toEqual([2, 2]);
+    // A repeated plan within the TTL makes no OSV request at all.
+    expect([...(await audit.auditVersions(npmAdapter, versionsOf(1)))]).toEqual([["p0@1.0.0", ["GHSA-page2"]]]);
+    expect([batchCalls(), vulnCalls()]).toEqual([2, 2]);
+    // Past the TTL it queries again; an unchanged advisory is not re-read.
+    now += 3_600_001;
+    await audit.auditVersions(npmAdapter, versionsOf(1));
+    expect([batchCalls(), vulnCalls()]).toEqual([4, 2]);
+    now += 3_600_001;
     modified = "m2";
     await audit.auditVersions(npmAdapter, versionsOf(1));
-    expect(vulnCalls()).toBe(4);
+    expect([batchCalls(), vulnCalls()]).toEqual([6, 4]);
   });
 
   it("fails closed on any OSV failure or a mismatched answer, unless configured to fail open", async () => {
@@ -336,5 +345,45 @@ describe("OsvAudit exact versions (querybatch)", () => {
     expect(await new OsvAudit({ fetch: down, failOpen: true }).auditVersions(npmAdapter, versionsOf(2))).toEqual(
       new Map(),
     );
+  });
+});
+
+describe("malware advisories", () => {
+  const malware = [
+    { id: "MAL-2026-1", database_specific: { "malicious-packages-origins": [{ source: "ghsa-malware" }] } },
+    { id: "GHSA-alias-mal", aliases: ["MAL-2026-2"], database_specific: {} },
+    { id: "GHSA-cwe506", database_specific: { severity: "LOW", cwe_ids: ["CWE-506"] } },
+    {
+      id: "OSV-affected-mal",
+      affected: [{ database_specific: { source: "https://github.com/ossf/malicious-packages/blob/main/x.json" } }],
+    },
+  ];
+
+  it("withholds malware advisories on the per-package audit path, whatever their severity", async () => {
+    const fetch = osv({
+      vulns: malware.map((vuln) => ({
+        ...vuln,
+        affected: [{ package: { name: "evil", ecosystem: "npm" }, versions: ["1.0.0"], ...(vuln.affected?.[0] ?? {}) }],
+      })),
+    });
+    const index = await new OsvAudit({ fetch, failOpen: false }).audit(npmAdapter, "evil");
+    expect(index.withheld("1.0.0")).toEqual(malware.map((vuln) => vuln.id));
+  });
+
+  it("withholds malware advisories on the exact-version (plan) path", async () => {
+    const fetch = vi.fn(async (url: string, init?: { body?: string }) => {
+      if (url.endsWith("/querybatch")) {
+        const { queries } = JSON.parse(init!.body!) as { queries: unknown[] };
+        return Response.json({
+          results: queries.map(() => ({ vulns: malware.map((vuln) => ({ id: vuln.id, modified: "m" })) })),
+        });
+      }
+      const id = decodeURIComponent(url.slice("https://api.osv.dev/v1/vulns/".length));
+      return Response.json({ ...malware.find((vuln) => vuln.id === id), modified: "m" });
+    });
+    const withheld = await new OsvAudit({ fetch, failOpen: false }).auditVersions(npmAdapter, [
+      { name: "evil", version: "1.0.0" },
+    ]);
+    expect(withheld.get("evil@1.0.0")?.sort()).toEqual(malware.map((vuln) => vuln.id).sort());
   });
 });

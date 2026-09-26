@@ -130,9 +130,24 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaRegistryStore (database)", () 
       await store.refusePlanVersions(runId, "npm", [
         { name, version: "9.0.0", code: "wardby_package_not_allowed", reason: "unreachable" },
       ]);
+      await store.refusePlanVersions(runId, "npm", [
+        {
+          name,
+          version: "9.1.0",
+          code: "wardby_version_filtered",
+          reason: "too new",
+          publishedAt: facts[0].publishedAt,
+        },
+      ]);
       expect(await store.findPlanRefusal(runId, "npm", name, "9.0.0")).toEqual({
         code: "wardby_package_not_allowed",
         reason: "unreachable",
+        publishedAt: null,
+      });
+      expect(await store.findPlanRefusal(runId, "npm", name, "9.1.0")).toEqual({
+        code: "wardby_version_filtered",
+        reason: "too new",
+        publishedAt: facts[0].publishedAt,
       });
       expect(await store.findPlanRefusal(runId, "npm", name, "1.0.1")).toBeNull();
       await db.codingRun.delete({ where: { runId } });

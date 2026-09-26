@@ -48,6 +48,15 @@ export interface PlanRefusal {
   version: string;
   code: string;
   reason: string;
+  /** A verdict about the registry's name@version itself (too new, an
+   *  advisory, not published, no integrity, hosted elsewhere), true of it
+   *  whatever lockfile names it. Only these answer later downloads; a
+   *  lockfile-dependent verdict (unreachable, an integrity or source the
+   *  lockfile claims) never does. */
+  intrinsic?: boolean;
+  /** For a too-new refusal: the version's publish time, so whoever answers
+   *  from it can re-check the age against the cutoff at that time. */
+  publishedAt?: Date;
 }
 
 export interface PlanResult {
@@ -155,6 +164,8 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
         refusals.set(entry, {
           code: "wardby_version_filtered",
           reason: `published ${fact.publishedAt.toISOString()}, newer than the release-age limit`,
+          intrinsic: true,
+          publishedAt: fact.publishedAt,
         });
         continue;
       }
@@ -186,7 +197,11 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
     const ids = withheld.get(versionKey(entry.name, entry.version));
     if (ids && ids.length > 0) {
       candidates.delete(entry);
-      refusals.set(entry, { code: "wardby_version_filtered", reason: `high-severity advisory ${ids.join(", ")}` });
+      refusals.set(entry, {
+        code: "wardby_version_filtered",
+        reason: `withheld by advisory ${ids.join(", ")} (high severity or malware)`,
+        intrinsic: true,
+      });
     }
   }
 
@@ -266,7 +281,11 @@ async function loadFacts(input: PlanInput, layer: readonly LockfileEntry[], outc
       const fact = await withRetry(signal, () => support.fetchVersionFact(name, version, input.upstream, signal));
       if (!fact) {
         outcomes.set(key, {
-          refusal: { code: "wardby_package_not_found", reason: `the registry has no ${name}@${version}` },
+          refusal: {
+            code: "wardby_package_not_found",
+            reason: `the registry has no ${name}@${version}`,
+            intrinsic: true,
+          },
         });
         return;
       }
@@ -324,13 +343,18 @@ async function loadFacts(input: PlanInput, layer: readonly LockfileEntry[], outc
 function checkedFact(input: PlanInput, fact: StoredVersionFact): FactOutcome {
   if (fact.integrity === "")
     return {
-      refusal: { code: "wardby_lockfile_integrity_mismatch", reason: "the registry publishes no integrity for it" },
+      refusal: {
+        code: "wardby_registry_integrity_missing",
+        reason: "the registry publishes no integrity to check it against",
+        intrinsic: true,
+      },
     };
   if (!input.hostAllowed(fact.downloadUrl))
     return {
       refusal: {
         code: "wardby_upstream_host_not_allowed",
         reason: `hosted outside the ${input.adapter.id} registry's upstreams`,
+        intrinsic: true,
       },
     };
   return { fact };

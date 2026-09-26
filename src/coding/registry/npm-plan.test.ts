@@ -89,6 +89,39 @@ describe("parseNpmLockfile", () => {
     expect(parsed.resolve("", "local")).toBeUndefined();
   });
 
+  it("searches only the directories npm does: never a bare node_modules or @scope folder", () => {
+    const parsed = parse({
+      lockfileVersion: 3,
+      packages: {
+        "": {},
+        "node_modules/@s/a": { version: "1.0.0" },
+        "node_modules/@s/node_modules/x": { version: "9.0.0" },
+        "node_modules/node_modules/x": { version: "8.0.0" },
+        "node_modules/x": { version: "1.0.0" },
+        "node_modules/p/node_modules/q": { version: "1.0.0" },
+        "node_modules/p/node_modules/node_modules/x": { version: "7.0.0" },
+        "node_modules/p": { version: "1.0.0" },
+      },
+    });
+    expect(parsed.resolve("node_modules/@s/a", "x")?.version).toBe("1.0.0");
+    expect(parsed.resolve("node_modules/p/node_modules/q", "x")?.version).toBe("1.0.0");
+  });
+
+  it("stops at a nearer workspace link instead of reaching past it to a registry entry", () => {
+    const parsed = parse({
+      lockfileVersion: 3,
+      packages: {
+        "": {},
+        "node_modules/a": { version: "1.0.0" },
+        "node_modules/a/node_modules/x": { resolved: "packages/x", link: true },
+        "node_modules/x": { version: "1.0.0" },
+        "packages/x": { name: "x", version: "0.0.0" },
+      },
+    });
+    expect(parsed.resolve("node_modules/a", "x")).toBeUndefined();
+    expect(parsed.resolve("", "x")?.path).toBe("node_modules/x");
+  });
+
   it("refuses lockfile v1, a lockfile without packages, and invalid JSON", () => {
     const code = (fn: () => unknown) => {
       try {
@@ -154,6 +187,9 @@ describe("registry dependency declarations", () => {
     expect(npmEdgeSatisfies("2.0.0", "^1.0.0")).toBe(false);
     expect(npmEdgeSatisfies("1.0.0-rc.1", "*")).toBe(true);
     expect(npmEdgeSatisfies("1.0.0", "not a range")).toBe(false);
+    // Strict semver, as the graph walk matches: no loose parsing.
+    expect(npmEdgeSatisfies("1.2.3-beta", "1.2.3beta")).toBe(false);
+    expect(npmEdgeSatisfies("1.2.3-beta.1", "^1.0.0")).toBe(false);
   });
 });
 

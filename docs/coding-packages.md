@@ -92,7 +92,9 @@ the driver image puts a small shim first on the agent's `PATH`
 proxy's `POST /registry/npm/-/plan` (with the run's registry token), prints a
 one-line summary and any refusals to stderr, and then runs the real npm with
 the same arguments. Anything else runs npm directly, and a plan that fails
-still runs npm: the install then goes through the usual checks below.
+still runs npm: the install then goes through the usual checks below. An npm
+started by another npm (a lifecycle script's) doesn't plan again; its
+installs also go through the usual checks.
 
 The proxy trusts nothing the lockfile claims. For lockfileVersion 2 or 3
 (version 1 is refused with `400 wardby_lockfile_unsupported`; regenerate it
@@ -105,8 +107,9 @@ with npm 7 or later):
 - **Edges.** Dependencies come from the registry's record too (dependencies,
   optional and peer dependencies, npm aliases resolved), never from the
   lockfile. Each one is matched to the lockfile entry npm would use (the
-  nearest ancestor `node_modules/<name>`), and counts only when that entry is
-  the declared package at a version inside the declared range.
+  nearest enclosing package's `node_modules/<name>`), and counts only when
+  that entry is the declared package at a version inside the declared range
+  (strict semver, as the walk matches).
 - **Reachability.** It starts from the project's own dependencies (and
   workspaces') that are allowlist entries, at a version inside the
   allowlisted range; a scope wildcard such as `@heroui/*` counts here, since
@@ -116,8 +119,9 @@ with npm 7 or later):
   streaming the package's full document for its `time` field, never holding
   it) must be older than `minReleaseAgeDays`, and one OSV `querybatch`
   request covers every version (1000 per request), with each advisory's
-  severity read once. Too new, or a HIGH/CRITICAL advisory:
-  `wardby_version_filtered`. If OSV can't be reached, the whole plan fails
+  severity read once (a version's results are cached for an hour, so a
+  repeated plan doesn't query again). Too new, or a HIGH/CRITICAL or
+  malware advisory: `wardby_version_filtered`. If OSV can't be reached, the whole plan fails
   closed with `503 wardby_audit_unavailable` (unless
   `REGISTRY_AUDIT_FAIL_OPEN` is set).
 - **Other sources.** An entry installed from git, a URL or a path is refused
@@ -129,16 +133,25 @@ it; everything else is approved, as exact `name@version` pairs for the run.
 The response is `{ "approved": <count>, "refused": [{ "name", "version",
 "code", "reason" }] }`, and each refusal is recorded like any other (within
 the 500-per-run cap). A tarball request for an approved `name@version` is then served directly,
-checked against the approved integrity, with no graph walk. A tarball request
-for a version the plan refused is answered straight from the plan, with no
-walk either: `403` with the plan's code and reason (`wardby_version_filtered`
-for a version too new or with an advisory, which it names;
-`wardby_lockfile_integrity_mismatch`; `wardby_package_not_allowed` for one
-nothing reaches). Only an entry the registry couldn't be read for
-(`wardby_upstream_error`) isn't answered from the plan. A version the plan
-never mentioned (a package added with `npm install <new-package>`, an install
-without a lockfile) goes through the allowlist and the dependency-graph walk
-below.
+checked against the approved integrity, with no graph walk.
+
+A version the plan refused for a reason about that `name@version` itself is
+answered straight from the plan, with no walk either: `403` with the plan's
+code and reason. That is a version too new (`wardby_version_filtered`, until
+it is old enough: the age is re-checked at each request), one with a
+HIGH/CRITICAL or malware advisory (`wardby_version_filtered`, naming it), one
+npm doesn't have (`wardby_package_not_found`), one npm publishes no integrity
+for (`wardby_registry_integrity_missing`), and one hosted outside npm
+(`wardby_upstream_host_not_allowed`). A refusal that depends on the lockfile
+(`wardby_package_not_allowed`, `wardby_lockfile_integrity_mismatch`,
+`wardby_lockfile_entry_unsupported`) is reported in the plan's response, but
+isn't used to answer downloads: the same version reached another way (an
+`overrides` entry, a later `npm install`) goes through the usual checks, and
+a hostile lockfile entry can't block a package by claiming its name. Neither
+does a version the registry couldn't be read for, nor one the plan never
+mentioned (a package added with `npm install <new-package>`, an install
+without a lockfile): they go through the allowlist and the dependency-graph
+walk below.
 
 The per-version facts (integrity, publish time, dependencies, download URL)
 never change, so they are stored in the database and reused by every later
@@ -146,8 +159,12 @@ plan; decisions are always recomputed from the run's own allowlist. A plan is
 bounded by `REGISTRY_PLAN_MAX_ENTRIES` entries (`413
 wardby_lockfile_too_large`, as is a lockfile over 20 MiB) and
 `REGISTRY_PLAN_TIMEOUT_MS` (`503 wardby_plan_incomplete`; what was verified is
-kept, so a retry resumes). It only reads the registry for entries it reaches,
-so a lockfile full of unrelated packages costs nothing upstream. Measured
+kept, so a retry resumes). The proxy checks the registry token and waits for
+one of two plan slots before it reads the lockfile at all, so an
+unauthenticated or queued plan holds none of it; a run may run one plan at a
+time and make `REGISTRY_PLAN_MAX_PER_RUN` in all (`429 wardby_plan_limit`).
+It only reads the registry for entries it reaches, so a lockfile full of
+unrelated packages costs nothing upstream. Measured
 against real npm and OSV with a 0-day release age, the knock-knock `web/`
 lockfile (216 entries: React 19, HeroUI 3, Vite 8, Vitest 5, jsdom) was
 verified in 9.5 s cold and 0.7 s with stored facts, and its whole `npm ci`
@@ -260,7 +277,9 @@ commit or diff.
   tarball has the version's publish time.
 - **OSV vulnerability audit.** Every package version is checked against the
   OSV database; versions affected by a **high** or **critical** severity
-  advisory are withheld, and lower-severity advisories are allowed but
+  advisory, or by a **malware** advisory (an OSV `MAL-…` entry, which has no
+  severity, one aliasing or importing one, or a CWE-506 "embedded malicious
+  code" advisory), are withheld, and lower-severity advisories are allowed but
   reported. A version is affected when an advisory entry for that exact
   package (same ecosystem and name) lists it, or when it falls inside one
   of the entry's version ranges, compared with the ecosystem's own version
@@ -301,6 +320,7 @@ one of them finishes:
 | `REGISTRY_GRAPH_TIMEOUT_MS`    | 180000  | Time allowed for one on-demand graph walk.                    |
 | `REGISTRY_PLAN_MAX_ENTRIES`    | 5000    | Entries a lockfile plan (`POST /-/plan`) may have.            |
 | `REGISTRY_PLAN_TIMEOUT_MS`     | 120000  | Time allowed for one lockfile plan.                           |
+| `REGISTRY_PLAN_MAX_PER_RUN`    | 20      | Lockfile plans one run may make.                              |
 
 Metadata is cached for five minutes in a bounded cache (500 packages and
 64 MiB of trimmed metadata, least recently used evicted first), and
@@ -370,6 +390,8 @@ see on a failed install:
 | `wardby_lockfile_too_large`          | 413    | The lockfile is over 20 MiB or has more than `REGISTRY_PLAN_MAX_ENTRIES` entries. The install still runs, through the walk.                                                                                                                                                                                                        |
 | `wardby_lockfile_integrity_mismatch` | —      | A plan refusal: the lockfile's `integrity` for this entry isn't the registry's own (or the registry publishes none). Regenerate the lockfile entry; never edit integrity by hand.                                                                                                                                                  |
 | `wardby_lockfile_entry_unsupported`  | —      | A plan refusal: the entry is installed from git, a URL or a path, or isn't an exact registry version. Only registry packages can be approved.                                                                                                                                                                                      |
+| `wardby_plan_limit`                  | 429    | The run has made `REGISTRY_PLAN_MAX_PER_RUN` lockfile plans. The install still runs, through the usual checks.                                                                                                                                                                                                                     |
+| `wardby_registry_integrity_missing`  | —      | A plan refusal: npm publishes no integrity for this version, so a download of it couldn't be checked.                                                                                                                                                                                                                              |
 | `wardby_plan_in_progress`            | 429    | A lockfile plan is already running for this run (one at a time). Wait for it; the install still runs, through the walk.                                                                                                                                                                                                            |
 | `wardby_plan_incomplete`             | 503    | The plan didn't finish within `REGISTRY_PLAN_TIMEOUT_MS` (or the client went away). What was verified is kept, so a retry resumes; the install still runs, through the walk.                                                                                                                                                       |
 | `wardby_bad_request`                 | 400    | The request path is malformed (bad percent-encoding, or not a valid package name). A client or agent bug, not a package choice.                                                                                                                                                                                                    |
