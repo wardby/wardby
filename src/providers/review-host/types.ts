@@ -167,3 +167,23 @@ export class ReviewHostError extends Error {
 }
 
 export type ReviewHostRegistry = Partial<Record<ReviewHostProvider, CodeReviewHost>>;
+
+/**
+ * Host-neutral shape a webhook adapter (github-events.ts) normalises its
+ * provider payload into, for src/core/host-events.ts to route.
+ */
+export type HostEvent =
+  | { kind: "pr_updated"; provider: ReviewHostProvider; repository: string; prNumber: number; headSha: string; isFork: boolean }
+  | { kind: "check_rerun"; provider: ReviewHostProvider; repository: string; prNumber: number; headSha: string; checkName: string }
+  | {
+      kind: "mention";
+      provider: ReviewHostProvider;
+      repository: string;
+      number: number;
+      isPullRequest: boolean;
+      comment: CommentRef;
+      /** Set when the mention is inside an inline review thread. */
+      replyToReviewCommentId?: string;
+      body: string;
+      author: string;
+    };
