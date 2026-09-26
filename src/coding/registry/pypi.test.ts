@@ -46,6 +46,13 @@ describe("pypiAdapter protocol", () => {
     expect(doc.files[0].url.startsWith("http://wardby-proxy:8787/registry/pypi/files/flask/")).toBe(true);
   });
 
+  it("keeps only wheels, with the fields it renders, in the cached index", async () => {
+    const meta = await pypiAdapter.fetchMetadata("flask", async () => Response.json(await json()));
+    const raw = meta.raw as { files: Record<string, unknown>[] };
+    expect(raw.files.length).toBeGreaterThan(0);
+    expect(raw.files.every((file) => String(file.filename).endsWith(".whl"))).toBe(true);
+  });
+
   it("reads Requires-Dist names and skips extras", async () => {
     const names = requiresDist(await metadataText());
     expect(names).toContain("werkzeug");

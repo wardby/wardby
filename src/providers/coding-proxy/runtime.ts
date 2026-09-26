@@ -68,11 +68,20 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   const upstreamHosts = [...new Set([...REGISTRY_ADAPTERS.values()].flatMap((adapter) => adapter.upstreamHosts))];
   const pinned = buildPinnedFetch({ allowedHosts: [...upstreamHosts, "api.osv.dev"] });
   const upstream = createRegistryUpstream(pinned);
+  const metadataTimeoutMs = positiveInt(env.REGISTRY_METADATA_TIMEOUT_MS, 30_000);
+  const maxMetadataBytes = positiveInt(env.REGISTRY_MAX_METADATA_MB, 64) * MIB;
   const registry = new RegistryService({
     adapters: REGISTRY_ADAPTERS,
     store: new PrismaRegistryStore(options.db),
-    audit: new OsvAudit({ fetch: upstream, failOpen: env.REGISTRY_AUDIT_FAIL_OPEN === "true" }),
+    audit: new OsvAudit({
+      fetch: upstream,
+      failOpen: env.REGISTRY_AUDIT_FAIL_OPEN === "true",
+      timeoutMs: metadataTimeoutMs,
+      maxBytes: maxMetadataBytes,
+    }),
     upstream,
+    metadataTimeoutMs,
+    maxMetadataBytes,
     proxyBase: `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}/registry/`,
     limits: {
       maxFileBytes: positiveInt(env.REGISTRY_MAX_FILE_MB, 200) * MIB,

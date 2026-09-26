@@ -22,6 +22,7 @@ import {
 } from "../../../coding/registry/types.js";
 import { capabilityHash } from "../proxy.js";
 import type { OsvAudit } from "./audit.js";
+import { boundedMetadataFetch, DEFAULT_MAX_METADATA_BYTES, DEFAULT_METADATA_TIMEOUT_MS } from "./bounded-fetch.js";
 import type { RegistryRunContext, RegistryStore } from "./store.js";
 
 const DAY_MS = 86_400_000;
@@ -73,10 +74,20 @@ export function errorResponse(error: RegistryError): RegistryResponse {
   };
 }
 
+export const DEFAULT_METADATA_CACHE_ENTRIES = 500;
+
 export class RegistryService {
+  /** Parsed metadata (adapters keep only the subset they render from, never
+   *  the raw upstream document), least recently used first. Bounded to
+   *  `metadataCacheEntries`; expired entries are dropped on access and on
+   *  insert. */
   private readonly metadataCache = new Map<string, { expires: number; meta: PackageMetadata }>();
+  /** Single-flight: concurrent misses for one package share one upstream fetch. */
+  private readonly metadataLoads = new Map<string, Promise<PackageMetadata>>();
   private readonly now: () => Date;
   private readonly metadataTtlMs: number;
+  private readonly metadataCacheEntries: number;
+  private readonly metadataUpstream: UpstreamFetch;
   /** Per-run in-flight download usage: files and bytes reserved by downloads
    *  that are streaming right now but not yet recorded to the store. Without
    *  this, `usage()` (which only counts already-served rows) is read once
@@ -98,10 +109,20 @@ export class RegistryService {
       limits: RegistryLimits;
       now?: () => Date;
       metadataTtlMs?: number;
+      metadataCacheEntries?: number;
+      /** Timeout for one metadata request, body included (default 30 s). */
+      metadataTimeoutMs?: number;
+      /** Largest metadata document read from upstream (default 64 MiB). */
+      maxMetadataBytes?: number;
     },
   ) {
     this.now = options.now ?? (() => new Date());
     this.metadataTtlMs = options.metadataTtlMs ?? 300_000;
+    this.metadataCacheEntries = options.metadataCacheEntries ?? DEFAULT_METADATA_CACHE_ENTRIES;
+    this.metadataUpstream = boundedMetadataFetch(options.upstream, {
+      timeoutMs: options.metadataTimeoutMs ?? DEFAULT_METADATA_TIMEOUT_MS,
+      maxBytes: options.maxMetadataBytes ?? DEFAULT_MAX_METADATA_BYTES,
+    });
   }
 
   async handle(request: RegistryRequest): Promise<RegistryResponse> {
@@ -123,7 +144,17 @@ export class RegistryService {
 
     const name = adapter.normalizeName(route.name);
     const root = await this.authorize(adapter, context, name);
-    const meta = await this.metadata(adapter, name);
+    let meta: PackageMetadata;
+    try {
+      meta = await this.metadata(adapter, name);
+    } catch (error) {
+      // An oversized document is a refusal of this package, not a transient
+      // upstream failure, so it gets a row like every other refusal.
+      if (error instanceof RegistryError && error.code === "wardby_metadata_too_large") {
+        await this.refuse(context, adapter, name, "wardby_metadata_too_large");
+      }
+      throw error;
+    }
     let keep: Set<string>;
     let keptFiles: Set<string>;
     try {
@@ -199,12 +230,40 @@ export class RegistryService {
 
   private async metadata(adapter: RegistryAdapter, name: string): Promise<PackageMetadata> {
     const key = `${adapter.id}:${name}`;
-    const cached = this.metadataCache.get(key);
     const now = this.now().getTime();
-    if (cached && cached.expires > now) return cached.meta;
-    const meta = await adapter.fetchMetadata(name, this.options.upstream);
+    const cached = this.metadataCache.get(key);
+    if (cached) {
+      this.metadataCache.delete(key);
+      if (cached.expires > now) {
+        this.metadataCache.set(key, cached); // most recently used
+        return cached.meta;
+      }
+    }
+    const pending = this.metadataLoads.get(key);
+    if (pending) return pending;
+    const load = adapter
+      .fetchMetadata(name, this.metadataUpstream)
+      .then((meta) => {
+        this.cacheMetadata(key, meta);
+        return meta;
+      })
+      .finally(() => this.metadataLoads.delete(key));
+    this.metadataLoads.set(key, load);
+    return load;
+  }
+
+  private cacheMetadata(key: string, meta: PackageMetadata): void {
+    const now = this.now().getTime();
+    for (const [cachedKey, entry] of this.metadataCache) {
+      if (entry.expires <= now) this.metadataCache.delete(cachedKey);
+    }
+    this.metadataCache.delete(key);
+    while (this.metadataCache.size >= this.metadataCacheEntries) {
+      const oldest = this.metadataCache.keys().next();
+      if (oldest.done) break;
+      this.metadataCache.delete(oldest.value);
+    }
     this.metadataCache.set(key, { expires: now + this.metadataTtlMs, meta });
-    return meta;
   }
 
   private async keptVersions(

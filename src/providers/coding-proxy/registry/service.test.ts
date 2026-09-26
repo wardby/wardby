@@ -486,6 +486,131 @@ describe("RegistryService refusal-record cap", () => {
   });
 });
 
+describe("RegistryService metadata fetch safety and cache", () => {
+  function counted(overrides: { metadataCacheEntries?: number; metadataTtlMs?: number; now?: () => Date } = {}) {
+    const calls: string[] = [];
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let gated = false;
+    const adapter: RegistryAdapter = {
+      ...fakeAdapter,
+      fetchMetadata: async (name) => {
+        calls.push(name);
+        if (gated) await gate;
+        return catalog[name];
+      },
+    };
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { fake: ["app", "dep", "noint"] },
+      policy: {},
+    });
+    const registry = new RegistryService({
+      adapters: new Map([["fake", adapter]]),
+      store,
+      audit: { audit: async () => NO_ADVISORIES },
+      upstream: async () => new Response(tarball),
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
+      now: overrides.now ?? (() => NOW),
+      metadataCacheEntries: overrides.metadataCacheEntries,
+      metadataTtlMs: overrides.metadataTtlMs,
+    });
+    return {
+      registry,
+      calls,
+      gate: () => {
+        gated = true;
+      },
+      release,
+    };
+  }
+
+  it("shares one upstream fetch between concurrent misses for the same package", async () => {
+    const { registry, calls, gate, release } = counted();
+    gate();
+    const both = Promise.all([registry.handle(request("app")), registry.handle(request("app"))]);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    release();
+    const [first, second] = await both;
+    expect(first).toMatchObject({ status: 200 });
+    expect(second).toMatchObject({ status: 200 });
+    expect(calls).toEqual(["app"]);
+  });
+
+  it("is a bounded LRU: the least recently used package is evicted first", async () => {
+    const { registry, calls } = counted({ metadataCacheEntries: 2 });
+    await registry.handle(request("app"));
+    await registry.handle(request("dep"));
+    await registry.handle(request("app")); // app is now most recently used
+    await registry.handle(request("noint")); // evicts dep
+    await registry.handle(request("app")); // still cached
+    await registry.handle(request("dep")); // fetched again
+    expect(calls).toEqual(["app", "dep", "noint", "dep"]);
+  });
+
+  it("drops expired entries on access", async () => {
+    let now = NOW;
+    const { registry, calls } = counted({ metadataTtlMs: 1_000, now: () => now });
+    await registry.handle(request("app"));
+    now = new Date(NOW.getTime() + 1_001);
+    await registry.handle(request("app"));
+    expect(calls).toEqual(["app", "app"]);
+  });
+
+  it("answers a metadata timeout with 504 wardby_upstream_unavailable", async () => {
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { npm: ["react"] },
+      policy: {},
+    });
+    const registry = new RegistryService({
+      adapters: new Map([["npm", npmAdapter]]),
+      store,
+      audit: { audit: async () => NO_ADVISORIES },
+      upstream: (_url, init) =>
+        new Promise((_, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal!.reason as Error))),
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
+      now: () => NOW,
+      metadataTimeoutMs: 20,
+    });
+    const response = await registry.handle({ ...request("react"), ecosystem: "npm" });
+    expect(response).toMatchObject({ status: 504 });
+    expect("body" in response && response.body).toContain("wardby_upstream_unavailable");
+  });
+
+  it("refuses and records an oversized metadata document", async () => {
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { npm: ["react"] },
+      policy: {},
+    });
+    const registry = new RegistryService({
+      adapters: new Map([["npm", npmAdapter]]),
+      store,
+      audit: { audit: async () => NO_ADVISORIES },
+      upstream: async () => new Response("x".repeat(4096)),
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
+      now: () => NOW,
+      maxMetadataBytes: 1024,
+    });
+    const response = await registry.handle({ ...request("react"), ecosystem: "npm" });
+    expect(response).toMatchObject({ status: 502 });
+    expect("body" in response && response.body).toContain("wardby_metadata_too_large");
+    expect(store.fetches).toMatchObject([{ name: "react", outcome: "refused", reason: "wardby_metadata_too_large" }]);
+  });
+});
+
 describe("RegistryService with the npm adapter: names are case-exact", () => {
   const old = new Date(NOW.getTime() - 30 * DAY).toISOString();
   const packument = (name: string, dependencies: Record<string, string> = {}) => ({

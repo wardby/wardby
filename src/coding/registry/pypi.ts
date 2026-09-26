@@ -132,7 +132,24 @@ export const pypiAdapter: RegistryAdapter = {
       });
       versions.set(version, entry);
     }
-    return { name: normalizePypiName(index.name), versions, raw: index };
+    // Keep only what renderMetadata and resolveFileMetadata read: wheels,
+    // with the PEP 691 file fields pip uses.
+    const raw: SimpleIndex = {
+      name: index.name,
+      files: index.files
+        .filter((file) => file.filename.endsWith(".whl") && !file.yanked)
+        .map((file) => ({
+          filename: file.filename,
+          url: file.url,
+          ...(file.hashes ? { hashes: file.hashes } : {}),
+          ...(file["upload-time"] ? { "upload-time": file["upload-time"] } : {}),
+          ...(file.size !== undefined ? { size: file.size } : {}),
+          ...(file["core-metadata"] !== undefined ? { "core-metadata": file["core-metadata"] } : {}),
+          ...(file["dist-info-metadata"] !== undefined ? { "dist-info-metadata": file["dist-info-metadata"] } : {}),
+          ...(file["requires-python"] !== undefined ? { "requires-python": file["requires-python"] } : {}),
+        })),
+    };
+    return { name: normalizePypiName(index.name), versions, raw };
   },
 
   renderMetadata(meta, keep, keptFiles, proxyBase) {

@@ -17,6 +17,7 @@
  *   (fail closed).
  */
 import { RegistryError, type RegistryAdapter, type UpstreamFetch } from "../../../coding/registry/types.js";
+import { boundedMetadataFetch, DEFAULT_MAX_METADATA_BYTES, DEFAULT_METADATA_TIMEOUT_MS } from "./bounded-fetch.js";
 
 const OSV_QUERY = "https://api.osv.dev/v1/query";
 const BLOCKING = new Set(["HIGH", "CRITICAL"]);
@@ -123,12 +124,28 @@ export class OsvAudit {
   private readonly cache = new Map<string, { expires: number; advisories: Advisory[] }>();
   private readonly now: () => number;
   private readonly ttlMs: number;
+  private readonly fetch: UpstreamFetch;
 
   constructor(
-    private readonly options: { fetch: UpstreamFetch; failOpen: boolean; now?: () => number; ttlMs?: number },
+    private readonly options: {
+      fetch: UpstreamFetch;
+      failOpen: boolean;
+      now?: () => number;
+      ttlMs?: number;
+      /** Timeout for one OSV request, body included (default 30 s). */
+      timeoutMs?: number;
+      /** Largest OSV response read (default 64 MiB). */
+      maxBytes?: number;
+    },
   ) {
     this.now = options.now ?? Date.now;
     this.ttlMs = options.ttlMs ?? 3_600_000;
+    // Every OSV request is bounded in time and size; any failure, including
+    // these, makes the audit unavailable (fail closed unless configured open).
+    this.fetch = boundedMetadataFetch(options.fetch, {
+      timeoutMs: options.timeoutMs ?? DEFAULT_METADATA_TIMEOUT_MS,
+      maxBytes: options.maxBytes ?? DEFAULT_MAX_METADATA_BYTES,
+    });
   }
 
   async audit(adapter: AuditAdapter, name: string): Promise<AdvisoryIndex> {
@@ -167,7 +184,7 @@ export class OsvAudit {
     const vulns: OsvVuln[] = [];
     let pageToken: string | undefined;
     do {
-      const response = await this.options.fetch(OSV_QUERY, {
+      const response = await this.fetch(OSV_QUERY, {
         method: "POST",
         accept: "application/json",
         body: JSON.stringify({ package: { name, ecosystem }, ...(pageToken ? { page_token: pageToken } : {}) }),

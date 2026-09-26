@@ -41,6 +41,41 @@ interface Packument {
   >;
 }
 
+/** The per-version fields npm's installer reads (the same set as npm's
+ *  abbreviated "install-v1" manifest). Only these are kept from an
+ *  upstream packument, so the cached metadata never holds readmes,
+ *  descriptions, maintainers and other bulk the proxy does not render. */
+const MANIFEST_FIELDS = [
+  "name",
+  "version",
+  "dist",
+  "dependencies",
+  "optionalDependencies",
+  "devDependencies",
+  "peerDependencies",
+  "peerDependenciesMeta",
+  "bundleDependencies",
+  "bundledDependencies",
+  "acceptDependencies",
+  "bin",
+  "directories",
+  "engines",
+  "os",
+  "cpu",
+  "libc",
+  "deprecated",
+  "hasInstallScript",
+  "_hasShrinkwrap",
+  "license",
+  "funding",
+] as const;
+
+function abbreviated(manifest: Packument["versions"][string]): Packument["versions"][string] {
+  const source = manifest as unknown as Record<string, unknown>;
+  const kept = Object.fromEntries(MANIFEST_FIELDS.filter((field) => field in source).map((f) => [f, source[f]]));
+  return kept as unknown as Packument["versions"][string];
+}
+
 function integrityOf(dist: { integrity?: string; shasum?: string }): Integrity | null {
   const sri = dist.integrity?.match(/^(sha512|sha384|sha256)-([A-Za-z0-9+/=]+)$/);
   if (sri) return { algorithm: sri[1] as Integrity["algorithm"], hex: Buffer.from(sri[2], "base64").toString("hex") };
@@ -106,7 +141,10 @@ export const npmAdapter: RegistryAdapter = {
     if (!response.ok) throw new RegistryError(502, "wardby_upstream_error", `npm returned ${response.status}`);
     const doc = (await response.json()) as Packument;
     const versions = new Map<string, VersionInfo>();
+    const raw: Packument = { name: doc.name, "dist-tags": doc["dist-tags"], time: {}, versions: {} };
     for (const [version, info] of Object.entries(doc.versions ?? {})) {
+      raw.versions[version] = abbreviated(info);
+      if (doc.time?.[version]) raw.time![version] = doc.time[version];
       const published = doc.time?.[version];
       const dependencies = [
         ...new Set(
@@ -130,7 +168,7 @@ export const npmAdapter: RegistryAdapter = {
         files: [file],
       });
     }
-    return { name, versions, raw: doc };
+    return { name, versions, raw };
   },
 
   renderMetadata(meta, keep, keptFiles, proxyBase) {

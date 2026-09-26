@@ -87,6 +87,20 @@ describe("npmAdapter protocol", () => {
     expect(doc["dist-tags"].latest).toBe(versions[0]);
   });
 
+  it("keeps only the install manifest fields, not the raw packument", async () => {
+    const doc = await fixture();
+    doc.readme = "x".repeat(10_000);
+    const first = Object.keys(doc.versions)[0];
+    doc.versions[first].readme = "y".repeat(10_000);
+    doc.versions[first].description = "a description";
+    const meta = await npmAdapter.fetchMetadata("left-pad", await upstream(doc));
+    const raw = JSON.stringify(meta.raw);
+    expect(raw).not.toContain("xxxxxxxxxx");
+    expect(raw).not.toContain("yyyyyyyyyy");
+    expect(raw).not.toContain("a description");
+    expect(raw).toContain('"dist"');
+  });
+
   it("writes an npmrc with the registry token under the cache dir only", () => {
     const config = npmAdapter.workerConfig({
       registryUrl: "http://wardby-proxy:8787/registry/npm/",

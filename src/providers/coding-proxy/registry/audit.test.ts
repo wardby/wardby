@@ -58,6 +58,23 @@ describe("OsvAudit severity", () => {
     });
     await expect(new OsvAudit({ fetch, failOpen: true }).audit(npmAdapter, "a")).resolves.toMatchObject({});
   });
+
+  it("times out a stalled OSV request and fails closed", async () => {
+    const fetch = vi.fn(
+      (_url: string, init?: { signal?: AbortSignal }) =>
+        new Promise<Response>((_, reject) =>
+          init?.signal?.addEventListener("abort", () => reject(init.signal!.reason as Error)),
+        ),
+    );
+    await expect(new OsvAudit({ fetch, failOpen: false, timeoutMs: 20 }).audit(npmAdapter, "a")).rejects.toMatchObject({
+      status: 503,
+      code: "wardby_audit_unavailable",
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      "https://api.osv.dev/v1/query",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
 });
 
 describe("OsvAudit on real npm GHSA entries (SEMVER ranges only)", () => {
