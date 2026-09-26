@@ -48,8 +48,15 @@ function subjectOf(item: Json | null): { title: string; body: string } | undefin
   return typeof item?.title === "string" ? { title: item.title, body: text(item.body) } : undefined;
 }
 
-function priorRunIdOf(prBody: string): string | undefined {
-  const id = RUN_MARKER.exec(prBody)?.[1];
+/**
+ * The run that opened this PR. Only a PR the App itself authored counts:
+ * anyone can write the marker into their own PR's description.
+ */
+function priorRunIdOf(pr: Json | null, slug: string): string | undefined {
+  const author = obj(pr?.user);
+  if (author?.type !== "Bot" || typeof author.login !== "string") return undefined;
+  if (author.login.toLowerCase() !== `${slug}[bot]`.toLowerCase()) return undefined;
+  const id = RUN_MARKER.exec(text(pr?.body))?.[1];
   return id && SAFE_RUN_ID.test(id) ? id : undefined;
 }
 
@@ -144,7 +151,7 @@ export function normalizeGitHubEvent(
     if (!number) return null;
     const isPullRequest = isInline || obj(parent?.pull_request) !== null;
     const subject = subjectOf(parent);
-    const priorRunId = isPullRequest ? priorRunIdOf(text(parent?.body)) : undefined;
+    const priorRunId = isPullRequest ? priorRunIdOf(parent, app.slug) : undefined;
     return {
       kind: "mention",
       provider: "github",

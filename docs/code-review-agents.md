@@ -63,7 +63,10 @@ Request comment:
 ```
 
 - The first line appears only on a pull request that a wardby coding run
-  opened (its description starts with the run's hidden marker). A router
+  opened: the PR must be authored by the App itself and its description must
+  start with the run's hidden marker. A marker on anyone else's PR is
+  ignored. This relies on coding runs opening their PRs through the same
+  GitHub App that receives the mention. A router
   agent that delegates coding work can pass that run id on so the existing
   branch and PR are continued rather than a new one being opened.
 - The header reads `[GitHub issue #<n>: <title>]` on an issue. For a mention

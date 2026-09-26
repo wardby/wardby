@@ -128,17 +128,54 @@ describe("normalizeGitHubEvent", () => {
   });
 
   describe("continuation of a PR a coding run opened", () => {
-    const onPr = (prBody: string, event: "issue_comment" | "pull_request_review_comment" = "issue_comment") => {
+    const APP_BOT = { login: "wardby[bot]", type: "Bot" };
+    const onPr = (
+      prBody: string,
+      event: "issue_comment" | "pull_request_review_comment" = "issue_comment",
+      prAuthor: { login: string; type: string } = APP_BOT,
+    ) => {
       const comment = {
         id: 4,
         body: "@wardby fix it",
         author_association: "OWNER",
         user: { login: "dev", type: "User" },
       };
+      const pr = { number: 7, title: "T", body: prBody, user: prAuthor };
       return event === "issue_comment"
-        ? { action: "created", repository, issue: { number: 7, title: "T", body: prBody, pull_request: {} }, comment }
-        : { action: "created", repository, pull_request: { number: 7, title: "T", body: prBody }, comment };
+        ? { action: "created", repository, issue: { ...pr, pull_request: {} }, comment }
+        : { action: "created", repository, pull_request: pr, comment };
     };
+
+    it("only trusts the marker on a PR the App itself opened", () => {
+      const marker = "<!-- wardby:r1 -->\nbody";
+      expect(
+        normalizeGitHubEvent(
+          "issue_comment",
+          onPr(marker, "issue_comment", { login: "Wardby[BOT]", type: "Bot" }),
+          APP,
+        ),
+      ).toMatchObject({ priorRunId: "r1" });
+      for (const author of [
+        { login: "chfields", type: "User" },
+        { login: "stranger", type: "User" },
+        { login: "wardby[bot]", type: "User" },
+        { login: "other-app[bot]", type: "Bot" },
+        { login: "wardby", type: "Bot" },
+      ]) {
+        for (const event of ["issue_comment", "pull_request_review_comment"] as const) {
+          const result = normalizeGitHubEvent(event, onPr(marker, event, author), APP);
+          expect(result).toMatchObject({ kind: "mention", number: 7 });
+          expect(result).not.toHaveProperty("priorRunId");
+        }
+      }
+      // A fork-style PR (head in another repository) by a human carries no hint either.
+      const fork = onPr(marker, "pull_request_review_comment", { login: "stranger", type: "User" });
+      (fork.pull_request as Record<string, unknown>).head = { repo: { full_name: "stranger/knock-knock-jokes" } };
+      expect(normalizeGitHubEvent("pull_request_review_comment", fork, APP)).not.toHaveProperty("priorRunId");
+      const noAuthor = onPr(marker);
+      delete (noAuthor.issue as { user?: unknown }).user;
+      expect(normalizeGitHubEvent("issue_comment", noAuthor, APP)).not.toHaveProperty("priorRunId");
+    });
 
     it("reads the run id from the wardby marker at the top of the PR body", () => {
       expect(
