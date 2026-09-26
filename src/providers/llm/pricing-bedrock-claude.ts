@@ -7,6 +7,7 @@
  * moment one model's real cache pricing diverges from the pattern).
  */
 import { computeCost, type ModelPricing, type UsageTokens } from "./pricing-core.js";
+import type { LlmEffort } from "./types.js";
 
 function claude(
   inputPerMTok: number,
@@ -42,6 +43,16 @@ export function getBedrockClaudePricing(model: string): ModelPricing {
 
 export function bedrockClaudeSupportedModels(): string[] {
   return Object.keys(PRICING);
+}
+
+/**
+ * Reasoning effort is not sent through Bedrock: whether InvokeModel accepts
+ * the Messages `output_config.effort` field for these models is unconfirmed,
+ * and an unaccepted field fails the whole call. Every Bedrock model therefore
+ * accepts no effort until that is verified per model.
+ */
+export function bedrockClaudeSupportedEfforts(_model: string): readonly LlmEffort[] {
+  return [];
 }
 
 export function bedrockClaudePriceUsd(model: string, usage: UsageTokens): number {

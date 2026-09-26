@@ -7,6 +7,11 @@
 import { REGISTRY_ADAPTERS } from "./adapters.js";
 import { deriveRegistryToken } from "./token.js";
 
+/** The URL the worker's package manager is pointed at for one ecosystem. */
+export function registryUrlFor(proxyBaseUrl: string, ecosystem: string): string {
+  return `${proxyBaseUrl.replace(/\/$/, "")}/registry/${ecosystem}/`;
+}
+
 export function registryWorkerSetup(input: { proxyBaseUrl: string; capability: string; cacheRoot: string }): {
   env: Record<string, string>;
   files: { path: string; content: string; mode: number }[];
@@ -16,7 +21,7 @@ export function registryWorkerSetup(input: { proxyBaseUrl: string; capability: s
   const files: { path: string; content: string; mode: number }[] = [];
   for (const adapter of REGISTRY_ADAPTERS.values()) {
     const config = adapter.workerConfig({
-      registryUrl: `${input.proxyBaseUrl.replace(/\/$/, "")}/registry/${adapter.id}/`,
+      registryUrl: registryUrlFor(input.proxyBaseUrl, adapter.id),
       token,
       cacheDir: `${input.cacheRoot}/${adapter.id}`,
     });

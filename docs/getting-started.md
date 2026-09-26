@@ -100,6 +100,18 @@ After connecting, try:
 > List my Wardby agents, show the latest run and its actual cost, then create a
 > new agent with a maximum budget of $0.50. Do not run it yet.
 
+### Reasoning effort
+
+A native agent can set `effort` (`low`, `medium`, `high`, `xhigh`, or `max`)
+through `create_agent`, `update_agent`, or `wardby agent create --effort`. It is
+sent on every model call and trades depth of reasoning against latency and
+output-token cost; lower levels are faster and cheaper per turn. Leave it unset
+to use the provider's default. Wardby rejects a level the agent's model does not
+accept, including when you later change the model (clear it with
+`effort: null`). Effort currently applies to direct Anthropic API models that
+support it; OpenAI and Bedrock models accept no effort setting, and coding
+agents do not use it.
+
 ## Coding agents
 
 The first-run demo proves native model routing, budget admission, persistence,

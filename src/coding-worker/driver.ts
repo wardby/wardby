@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { CODING_PROTOCOL_VERSION, parseCodingAgentOutputJson, type CodingAgentOutput } from "../coding/protocol.js";
+import { normalizeRegistryLockfiles } from "../coding/registry/lockfiles.js";
 import { registryWorkerSetup } from "../coding/registry/worker-config.js";
 import { safeWorkerErrorCode } from "./errors.js";
 import type { WorkerEvent, WorkerProgressEvent, WorkerRunOptions } from "./types.js";
@@ -170,6 +171,11 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
     throw new Error("coding_output_invalid", { cause: error });
   }
   if (output.runId !== options.input.runId) throw new Error("coding_output_run_mismatch");
+  // Only a changes_ready workspace is collected into a pull request; lockfiles written through the
+  // registry proxy would otherwise commit sandbox-only download URLs.
+  if (output.outcome === "changes_ready") {
+    await normalizeRegistryLockfiles({ workspace: options.workspace, proxyBaseUrl: options.proxyBaseUrl });
+  }
   options.onProgress?.({ schemaVersion: 1, runId: options.input.runId, type: "completed", outcome: output.outcome });
   return output;
 }

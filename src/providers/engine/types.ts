@@ -14,6 +14,7 @@
  */
 
 import type { ProviderRegistry } from "../index.js";
+import type { LlmEffort } from "../llm/types.js";
 
 /** The subset of Agent fields the engine needs — not the Prisma type, to keep this seam Prisma-agnostic. */
 export interface EngineAgent {
@@ -21,6 +22,8 @@ export interface EngineAgent {
   model: string;
   budgetUsd: number;
   maxTurns: number;
+  /** Reasoning effort sent on every model call; absent = provider default. */
+  effort?: LlmEffort;
 }
 
 export interface LoadedTool {

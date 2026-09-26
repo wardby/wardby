@@ -34,6 +34,17 @@ export interface LlmToolDef {
   parameters: Record<string, unknown>;
 }
 
+/**
+ * Reasoning effort levels, lowest to highest. Which levels a model accepts
+ * is per model and per provider — ask `modelSupportedEfforts` (routing.ts).
+ */
+export const LLM_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type LlmEffort = (typeof LLM_EFFORT_LEVELS)[number];
+
+export function isLlmEffort(value: unknown): value is LlmEffort {
+  return typeof value === "string" && (LLM_EFFORT_LEVELS as readonly string[]).includes(value);
+}
+
 export interface LlmRequest {
   model: string;
   messages: LlmMessage[];
@@ -41,6 +52,11 @@ export interface LlmRequest {
   maxTokens?: number;
   temperature?: number;
   stopSequences?: string[];
+  /**
+   * Reasoning effort. Unset = the provider's own default. An adapter sends
+   * it only when the model accepts that level, and drops it otherwise.
+   */
+  effort?: LlmEffort;
 }
 
 export interface LlmUsage {

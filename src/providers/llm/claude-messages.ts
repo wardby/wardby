@@ -4,7 +4,7 @@
  * direct API differ only in client/auth, model IDs, and pricing.
  */
 import { encode as encodeO200kBase } from "gpt-tokenizer/encoding/o200k_base";
-import type { LlmMessage, LlmRequest, LlmToolDef, LlmStreamEvent, LlmUsage } from "./types.js";
+import type { LlmEffort, LlmMessage, LlmRequest, LlmToolDef, LlmStreamEvent, LlmUsage } from "./types.js";
 
 export interface CacheControl {
   type: "ephemeral";
@@ -43,6 +43,8 @@ export interface ClaudeRequest {
   messages: ClaudeMessage[];
   tools?: ClaudeTool[];
   max_tokens: number;
+  /** Present only when an effort is set; omitted means the API default. */
+  output_config?: { effort: LlmEffort };
 }
 
 function parseArgs(argsJson: string): unknown {
@@ -123,6 +125,7 @@ export function toClaudeRequest(req: LlmRequest, defaultMaxTokens: number): Clau
     messages,
     ...(tools && tools.length > 0 ? { tools } : {}),
     max_tokens: req.maxTokens ?? defaultMaxTokens,
+    ...(req.effort ? { output_config: { effort: req.effort } } : {}),
   };
 }
 

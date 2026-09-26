@@ -127,6 +127,9 @@ export interface RegistryAdapter {
   readonly upstreamHosts: readonly string[];
   /** Extra folder names skipped at collection, e.g. "vendor" for Composer. */
   readonly collectExclude: readonly string[];
+  /** Lockfile names this ecosystem's client writes, and a rewrite of the proxy download URLs it records in one back to
+   *  public URLs, applied before the workspace is collected (lockfiles.ts). Omitted when the client records none. */
+  readonly lockfiles?: { names: readonly string[]; normalize(content: string, registryUrl: string): string };
 
   // --- Allowlist syntax -------------------------------------------------
   /** Parse one allowlist entry in this ecosystem's syntax. Throws an
