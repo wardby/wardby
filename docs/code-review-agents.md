@@ -22,7 +22,9 @@ Once an agent is linked to a repository with the `pull_request` trigger:
 - The check completes as `success` (APPROVE), `failure`
   (CHANGES_REQUESTED), or `neutral` (COMMENT).
 - Clicking **Re-run** on the check re-requests it and starts a fresh review
-  against the PR's current head.
+  against the PR's current head. **Re-run all checks** (a check-suite
+  re-request) is not handled — use the check's own **Re-run**, or comment
+  `@<app-slug> review`.
 - Commenting `@<app-slug> review` on a pull request (from an owner, member,
   or collaborator) starts a review the same way a push does.
 - Any other `@<app-slug> ...` mention — on an issue, a PR conversation, or
@@ -46,7 +48,9 @@ changes into a branch on the base repository first.
 Create or reuse a GitHub App (Settings → Developer settings → GitHub Apps)
 with:
 
-- **Webhook URL**: `https://<your-host>/hosts/github/events`
+- **Webhook URL**: `https://<your-host>/hosts/github/events` — `<your-host>`
+  must be the host of `MCP_CANONICAL_URI`; the server rejects requests whose
+  `Host` header names anything else.
 - **Webhook secret**: the same value as `GITHUB_APP_WEBHOOK_SECRET` (see
   below) — generate it with `openssl rand -hex 32` or similar; the ingress
   endpoint answers 404 until this is set.
@@ -77,6 +81,14 @@ Secret Manager as `github-app-webhook-secret`: if no value is carried over
 from the cluster or `.env.local`, it generates a random one — copy the
 generated value into the App's webhook settings after seeding, or the App's
 deliveries will fail signature verification.
+
+On an **existing GKE cluster**, order the rollout: apply the Terraform
+(`deploy/gke`) and run `seed-secrets.mjs` first, so the
+`github-app-webhook-secret` secret exists, and only then apply the updated
+ExternalSecret and canary manifests — applied first, they reference a secret
+that is not there yet. Then copy the seeded value into the App's webhook
+settings. The local kind setup (`deploy/kind-coding/control-plane-secret.sh`)
+does not carry this secret, so the events ingress stays disabled there.
 
 ## Linking an agent to a repository
 
@@ -145,7 +157,10 @@ agent's links. Failures are always a JSON result, never a thrown error:
 | `host_invalid_response`   | The host returned something the client could not parse.                                                                               |
 | `host_api_error`          | The request to GitHub failed (body-free: `github_api_error:<status>[:<request-id>]`).                                                 |
 
-`repo_publish_review` also returns `{ "published": false, "reason": "stale_head", ... }` instead of an error when the PR moved to a new head since the review started; the agent should stop rather than retry.
+`repo_publish_review` also returns
+`{ "published": false, "reason": "stale_head", ... }` instead of an error when
+the PR moved to a new head since the review started; the agent should stop
+rather than retry.
 
 ## Branch protection
 
@@ -162,12 +177,13 @@ the PR's author controls and can use to steer the model. Treat it as one
 signal, not the only merge gate: keep a human approval (or another
 independent check) required alongside it.
 
-## Accepted gap: a run reaped as lost leaves its check open
+## Accepted gap: a run that fails outside its normal finish path leaves its check open
 
 A run's in-progress check is only closed (completed `neutral`, "Use Re-run
 to try again") when the run reaches a terminal state through its normal
-finish path. A run that the executor's reconciler instead reaps directly as
-`lost` — e.g. its process died without a heartbeat — does not go through
-that path, so its check can be left showing "in progress" indefinitely. This
-is a known, accepted gap: click **Re-run** on the check to start a fresh
-review; it does not require any other cleanup.
+finish path in the runner. A run that fails before or outside that path can
+leave its check showing "in progress" indefinitely — for example a run the
+executor's reconciler reaps directly as `lost` (its process died without a
+heartbeat), a run whose agent could not be loaded, or a run the executor
+failed to start. This is a known, accepted gap: click **Re-run** on the check
+to start a fresh review; it does not require any other cleanup.
