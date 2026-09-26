@@ -34,6 +34,35 @@ const DAY_MS = 86_400_000;
 const DEPENDENCY_BUFFER_LIMIT = 64 * 1024 * 1024;
 /** npm's own name-length limit; longer recorded names are truncated. */
 const MAX_RECORDED_NAME = 214;
+export const DEFAULT_MAX_GRAPH_PACKAGES = 3000;
+export const DEFAULT_GRAPH_TIMEOUT_MS = 60_000;
+/** Packages a graph walk expands at once (metadata + audit each). */
+const GRAPH_WALK_CONCURRENCY = 8;
+
+/** Why a graph walk stopped: it found the name it was started for, it
+ *  expanded every reachable package, or a bound tripped. */
+type WalkEnd = "found" | "complete" | "limit" | "timeout";
+
+/** One run's on-demand walk of its approved dependency graph for one
+ *  ecosystem: breadth first from the allowlist's exact roots through the
+ *  dependencies of every kept version. It is resumable (a walk stops as
+ *  soon as it finds the name it was started for, and a later miss
+ *  continues from where it stopped), single-flight (`running`), and
+ *  memoized for the run (a miss once `queue` is empty needs no upstream
+ *  call). */
+interface GraphWalk {
+  /** Every name proven part of the graph: the exact roots, plus each
+   *  dependency of a kept version of an expanded package. Every non-root
+   *  name here has been written to the store as an allowance. */
+  found: Set<string>;
+  /** Found names not yet expanded, in breadth-first order. */
+  queue: string[];
+  /** Packages expanded so far (bounded by maxGraphPackages per run). */
+  expanded: number;
+  /** The package bound tripped: the graph is incomplete for good. */
+  exhausted: boolean;
+  running?: Promise<WalkEnd>;
+}
 
 /** Discriminated result of one `reader.read()` call in `download`'s stream
  *  loop, folding a rejection (`ok: false`) into the same shape as a
@@ -61,6 +90,8 @@ interface RunTally {
    *  that started before another finished still counts it (a one-off
    *  `usage()` snapshot would not). */
   served?: { files: number; bytes: number };
+  /** On-demand dependency-graph walks, keyed by ecosystem. */
+  graphs?: Map<string, GraphWalk>;
 }
 export type RegistryResponse =
   | { status: number; contentType: string; body: string }
@@ -86,6 +117,24 @@ export function errorResponse(error: RegistryError): RegistryResponse {
 }
 
 export const DEFAULT_METADATA_CACHE_ENTRIES = 500;
+
+/** Normalized dependency names of a package's kept versions: what serving
+ *  its metadata unlocks, and what the graph walk follows. */
+function keptDependencies(adapter: RegistryAdapter, meta: PackageMetadata, keep: ReadonlySet<string>): string[] {
+  const names = [...keep].flatMap((version) => meta.versions.get(version)?.dependencies ?? []);
+  return [...new Set(names.map((dependency) => adapter.normalizeName(dependency)))];
+}
+
+/** Whether `name` is a plain, valid package name in this ecosystem (no
+ *  wildcard, no range), by the adapter's own allowlist parser. */
+function isPackageName(adapter: RegistryAdapter, name: string): boolean {
+  try {
+    const entry = adapter.parseAllowlistEntry(name);
+    return !entry.wildcard && entry.range === undefined && entry.name === name;
+  } catch {
+    return false;
+  }
+}
 
 export class RegistryService {
   /** Parsed metadata (adapters keep only the subset they render from, never
@@ -125,6 +174,11 @@ export class RegistryService {
       metadataTimeoutMs?: number;
       /** Largest metadata document read from upstream (default 64 MiB). */
       maxMetadataBytes?: number;
+      /** Distinct packages an on-demand graph walk may expand per run and
+       *  ecosystem (default 3000). */
+      maxGraphPackages?: number;
+      /** Time one on-demand graph walk may take (default 60 s). */
+      graphTimeoutMs?: number;
     },
   ) {
     this.now = options.now ?? (() => new Date());
@@ -198,12 +252,7 @@ export class RegistryService {
           `every matching version of "${name}" is outside the allowlisted range, newer than the release-age limit, or has a high-severity advisory`,
         );
       }
-      const dependencies = [...keep].flatMap((version) => meta.versions.get(version)?.dependencies ?? []);
-      await this.options.store.addAllowances(
-        context.runId,
-        adapter.id,
-        dependencies.map((dependency) => adapter.normalizeName(dependency)),
-      );
+      await this.options.store.addAllowances(context.runId, adapter.id, keptDependencies(adapter, meta, keep));
       const document = adapter.renderMetadata(meta, keep, keptFiles, `${this.options.proxyBase}${adapter.id}/`);
       return { status: 200, contentType: document.contentType, body: document.body };
     }
@@ -274,12 +323,140 @@ export class RegistryService {
     const entries = parseAllowlist(context.allowlist, this.options.adapters).get(adapter.id) ?? [];
     const root = matchRoot(entries, name);
     if (root || (await this.options.store.isAllowedDependency(context.runId, adapter.id, name))) return root;
+    // Not a root and not yet an allowance: the name may still be in the
+    // approved graph, unrecorded only because the client never asked for
+    // its parent's metadata (a lockfile install requests tarballs
+    // directly). Resolve the graph before refusing.
+    const graph = await this.resolveInGraph(adapter, context, entries, name);
+    if (graph === "found") return undefined;
     await this.refuse(context, adapter, name, "wardby_package_not_allowed");
     const hint =
       entries.length === 0
         ? `this agent has no ${adapter.id} package allowlist`
-        : `"${name}" is not on this agent's ${adapter.id} package allowlist`;
+        : graph === "cut-short"
+          ? `"${name}" was not found in this agent's approved ${adapter.id} dependency graph before the graph walk was cut short (REGISTRY_MAX_GRAPH_PACKAGES / REGISTRY_GRAPH_TIMEOUT_MS)`
+          : `"${name}" is not on this agent's ${adapter.id} package allowlist or in its dependency graph`;
     throw new RegistryError(403, "wardby_package_not_allowed", hint);
+  }
+
+  /** Whether `name` is in the run's approved graph for this ecosystem:
+   *  the allowlist's exact roots plus the dependencies of every kept
+   *  version (the same filter the metadata path applies: root range,
+   *  release age, advisories), transitively. Each newly found name is
+   *  recorded as an allowance as the walk goes, exactly as if its
+   *  parent's metadata had been served. A scoped wildcard root cannot be
+   *  enumerated, so it is never a starting point. */
+  private async resolveInGraph(
+    adapter: RegistryAdapter,
+    context: RegistryRunContext,
+    entries: readonly AllowlistEntry[],
+    name: string,
+  ): Promise<"found" | "absent" | "cut-short"> {
+    if (!adapter.dependenciesInMetadata) return "absent";
+    const tally = this.tally(context);
+    tally.graphs ??= new Map();
+    let walk = tally.graphs.get(adapter.id);
+    if (!walk) {
+      const roots = [...new Set(entries.filter((entry) => !entry.wildcard).map((entry) => entry.name))];
+      walk = { found: new Set(roots), queue: [...roots], expanded: 0, exhausted: false };
+      tally.graphs.set(adapter.id, walk);
+    }
+    const current = walk;
+    for (;;) {
+      if (current.found.has(name)) return "found";
+      if (current.exhausted) return "cut-short";
+      // Single-flight: a miss while a walk is running waits for it rather
+      // than starting a second one, then re-checks (that walk may have
+      // stopped on finding a different name). Checked before the queue: a
+      // running walk has taken its current batch off the queue, so an
+      // empty queue alone does not mean the graph is complete.
+      if (!current.running) {
+        if (current.queue.length === 0) return "absent";
+        current.running = this.walkGraph(adapter, context, entries, current, name).finally(() => {
+          current.running = undefined;
+        });
+      }
+      const end = await current.running;
+      if (end === "timeout" && !current.found.has(name)) return "cut-short";
+    }
+  }
+
+  private async walkGraph(
+    adapter: RegistryAdapter,
+    context: RegistryRunContext,
+    entries: readonly AllowlistEntry[],
+    walk: GraphWalk,
+    target: string,
+  ): Promise<WalkEnd> {
+    const maxPackages = this.options.maxGraphPackages ?? DEFAULT_MAX_GRAPH_PACKAGES;
+    const deadline = Date.now() + (this.options.graphTimeoutMs ?? DEFAULT_GRAPH_TIMEOUT_MS);
+    while (walk.queue.length > 0) {
+      if (walk.found.has(target)) return "found";
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return "timeout";
+      const room = maxPackages - walk.expanded;
+      if (room <= 0) {
+        walk.exhausted = true;
+        return "limit";
+      }
+      const batch = walk.queue.splice(0, Math.min(GRAPH_WALK_CONCURRENCY, room));
+      const expansions = Promise.all(batch.map((node) => this.graphNode(adapter, context, entries, node)));
+      let timer: NodeJS.Timeout | undefined;
+      const timedOut = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), remaining);
+      });
+      const result = await Promise.race([expansions, timedOut]).finally(() => clearTimeout(timer));
+      if (result === "timeout") {
+        // Not expanded: put the batch back so a later miss retries it (its
+        // metadata is likely cached by then).
+        walk.queue.unshift(...batch);
+        return "timeout";
+      }
+      walk.expanded += batch.length;
+      try {
+        for (const dependencies of result) {
+          const discovered = dependencies.filter((dependency) => !walk.found.has(dependency));
+          if (discovered.length === 0) continue;
+          // Recorded before it counts as found, so `found` never holds a
+          // name the store would refuse.
+          await this.options.store.addAllowances(context.runId, adapter.id, discovered);
+          for (const dependency of discovered) {
+            walk.found.add(dependency);
+            walk.queue.push(dependency);
+          }
+        }
+      } catch (error) {
+        // The store write failed: put the batch back so a later miss
+        // re-expands it, rather than leaving the graph silently short.
+        walk.expanded -= batch.length;
+        walk.queue.unshift(...batch);
+        throw error;
+      }
+    }
+    return walk.found.has(target) ? "found" : "complete";
+  }
+
+  /** The dependencies of one package's kept versions, through the same
+   *  metadata cache and `keptVersions` filter the metadata path uses. A
+   *  failure (upstream error, oversized document, audit unavailable)
+   *  yields no dependencies: that branch of the graph stays closed, and
+   *  the request that needs it is refused. */
+  private async graphNode(
+    adapter: RegistryAdapter,
+    context: RegistryRunContext,
+    entries: readonly AllowlistEntry[],
+    name: string,
+  ): Promise<string[]> {
+    try {
+      const meta = await this.metadata(adapter, name);
+      const { keep } = await this.keptVersions(adapter, context, meta, matchRoot(entries, name));
+      // Dependency keys come from the upstream document: follow only real
+      // package names, so the walk never builds an upstream request from a
+      // key the adapter's own routing would reject.
+      return keptDependencies(adapter, meta, keep).filter((dependency) => isPackageName(adapter, dependency));
+    } catch {
+      return [];
+    }
   }
 
   private async metadata(adapter: RegistryAdapter, name: string): Promise<PackageMetadata> {

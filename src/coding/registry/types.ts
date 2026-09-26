@@ -127,6 +127,14 @@ export interface RegistryAdapter {
   readonly upstreamHosts: readonly string[];
   /** Extra folder names skipped at collection, e.g. "vendor" for Composer. */
   readonly collectExclude: readonly string[];
+  /** Whether fetchMetadata's VersionInfo.dependencies is complete (npm's
+   *  packuments carry every version's dependencies). When true, the core
+   *  may resolve a run's approved dependency graph from metadata alone,
+   *  on demand, before refusing a name (a lockfile install requests
+   *  tarballs without first requesting each parent's metadata). False for
+   *  ecosystems whose indexes omit dependencies (PyPI), where such a walk
+   *  would only make upstream calls and find nothing. */
+  readonly dependenciesInMetadata: boolean;
 
   // --- Allowlist syntax -------------------------------------------------
   /** Parse one allowlist entry in this ecosystem's syntax. Throws an

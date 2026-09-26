@@ -63,6 +63,7 @@ const fakeAdapter: RegistryAdapter = {
   osvEcosystem: "npm",
   upstreamHosts: ["upstream.test"],
   collectExclude: [],
+  dependenciesInMetadata: true,
   parseAllowlistEntry: (raw) => ({ name: raw, wildcard: false }),
   normalizeName: (name) => name,
   satisfies: () => true,
@@ -894,5 +895,245 @@ describe("RegistryService with the PyPI adapter: release age applies per file", 
       ["refused", "wardby_version_filtered"],
       ["refused", "wardby_version_filtered"],
     ]);
+  });
+});
+
+describe("RegistryService resolves the approved graph on demand (npm lockfile installs)", () => {
+  const old = new Date(NOW.getTime() - 30 * DAY).toISOString();
+  const fresh = new Date(NOW.getTime() - 1 * DAY).toISOString();
+  const leafBytes = new TextEncoder().encode("leaf tarball");
+  const leafIntegrity = `sha512-${createHash("sha512").update(leafBytes).digest("base64")}`;
+  const version = (name: string, v: string, dependencies: Record<string, string> = {}) => ({
+    dist: {
+      tarball: `https://registry.npmjs.org/${name}/-/${name.split("/").pop()}-${v}.tgz`,
+      integrity: leafIntegrity,
+    },
+    dependencies,
+  });
+  // app@^1 is allowlisted. 1.0.0 (old) depends on mid, which depends on
+  // leaf: leaf is two levels deep. 2.0.0 is outside the root range and
+  // 1.1.0 is newer than the release-age cutoff, so their dependencies
+  // (ranged-out, too-new) are never part of the approved graph.
+  const packuments: Record<string, unknown> = {
+    app: {
+      name: "app",
+      time: { "1.0.0": old, "1.1.0": fresh, "2.0.0": old },
+      versions: {
+        "1.0.0": version("app", "1.0.0", { mid: "^1" }),
+        "1.1.0": version("app", "1.1.0", { mid: "^1", "too-new": "^1" }),
+        "2.0.0": version("app", "2.0.0", { "ranged-out": "^1" }),
+      },
+    },
+    mid: { name: "mid", time: { "1.0.0": old }, versions: { "1.0.0": version("mid", "1.0.0", { leaf: "^1" }) } },
+    leaf: { name: "leaf", time: { "1.0.0": old }, versions: { "1.0.0": version("leaf", "1.0.0") } },
+    "ranged-out": {
+      name: "ranged-out",
+      time: { "1.0.0": old },
+      versions: { "1.0.0": version("ranged-out", "1.0.0") },
+    },
+    "too-new": { name: "too-new", time: { "1.0.0": old }, versions: { "1.0.0": version("too-new", "1.0.0") } },
+    stranger: { name: "stranger", time: { "1.0.0": old }, versions: { "1.0.0": version("stranger", "1.0.0") } },
+  };
+
+  function graphService(
+    overrides: {
+      allowlist?: string[];
+      maxGraphPackages?: number;
+      graphTimeoutMs?: number;
+      hang?: string;
+      gate?: Promise<void>;
+    } = {},
+  ) {
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { npm: overrides.allowlist ?? ["app@^1"] },
+      policy: {},
+    });
+    const urls: string[] = [];
+    const audited: string[] = [];
+    const registry = new RegistryService({
+      adapters: new Map([["npm", npmAdapter]]),
+      store,
+      audit: {
+        audit: async (_adapter, name) => {
+          audited.push(name);
+          return NO_ADVISORIES;
+        },
+      },
+      upstream: async (url, init) => {
+        urls.push(url);
+        if (url.endsWith(".tgz")) return new Response(leafBytes);
+        const name = decodeURIComponent(url.slice("https://registry.npmjs.org/".length));
+        if (name === overrides.hang)
+          return new Promise((_, reject) =>
+            init?.signal?.addEventListener("abort", () => reject(init.signal!.reason as Error)),
+          );
+        if (overrides.gate) await overrides.gate;
+        return packuments[name] ? Response.json(packuments[name]) : new Response("not found", { status: 404 });
+      },
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
+      now: () => NOW,
+      // No metadata caching, so an upstream call not made proves the walk
+      // itself was memoized, not merely answered from the metadata cache.
+      metadataTtlMs: 0,
+      metadataTimeoutMs: 1_000,
+      maxGraphPackages: overrides.maxGraphPackages,
+      graphTimeoutMs: overrides.graphTimeoutMs,
+    });
+    const get = (subpath: string) => registry.handle({ ...request(subpath), ecosystem: "npm" });
+    return { get, urls, audited, store };
+  }
+
+  it("serves a transitive dependency's tarball, two levels deep, with no prior metadata request", async () => {
+    const { get, store } = graphService();
+    const response = await get("leaf/-/leaf-1.0.0.tgz");
+    if (!("stream" in response)) throw new Error(`expected a stream, got ${JSON.stringify(response)}`);
+    expect(new Uint8Array(await new Response(response.stream).arrayBuffer())).toEqual(leafBytes);
+    expect(await store.isAllowedDependency("run-1", "npm", "mid")).toBe(true);
+    expect(await store.isAllowedDependency("run-1", "npm", "leaf")).toBe(true);
+    expect(store.fetches).toMatchObject([{ name: "leaf", version: "1.0.0", outcome: "served" }]);
+  });
+
+  it("refuses and records a package outside the graph", async () => {
+    const { get, store } = graphService();
+    const response = await get("stranger/-/stranger-1.0.0.tgz");
+    expect(response).toMatchObject({ status: 403 });
+    expect("body" in response && response.body).toContain("wardby_package_not_allowed");
+    expect("body" in response && response.body).not.toContain("cut short");
+    expect(store.fetches).toMatchObject([
+      { name: "stranger", outcome: "refused", reason: "wardby_package_not_allowed" },
+    ]);
+  });
+
+  it.each([
+    ["ranged-out", "a version outside the root range"],
+    ["too-new", "a version newer than the release-age cutoff"],
+  ])("refuses %s, reachable only through %s", async (name) => {
+    const { get, store } = graphService();
+    await expect(get(`${name}/-/${name}-1.0.0.tgz`)).resolves.toMatchObject({ status: 403 });
+    await expect(get(name)).resolves.toMatchObject({ status: 403 });
+    expect(await store.isAllowedDependency("run-1", "npm", name)).toBe(false);
+  });
+
+  it("refuses with a cut-short message when the package bound trips", async () => {
+    const { get, store } = graphService({ maxGraphPackages: 1 });
+    const response = await get("leaf/-/leaf-1.0.0.tgz");
+    expect(response).toMatchObject({ status: 403 });
+    expect("body" in response && response.body).toContain("wardby_package_not_allowed");
+    expect("body" in response && response.body).toContain("cut short");
+    expect(store.fetches).toMatchObject([{ name: "leaf", outcome: "refused", reason: "wardby_package_not_allowed" }]);
+    // mid was found before the bound tripped, so it stays allowed.
+    await expect(get("mid")).resolves.toMatchObject({ status: 200 });
+  });
+
+  it("refuses with a cut-short message when the walk times out", async () => {
+    const { get } = graphService({ hang: "mid", graphTimeoutMs: 30 });
+    const response = await get("leaf");
+    expect(response).toMatchObject({ status: 403 });
+    expect("body" in response && response.body).toContain("cut short");
+  });
+
+  it("shares one walk between concurrent misses", async () => {
+    let open: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const { get, audited } = graphService({ gate });
+    const both = Promise.all([get("stranger"), get("stranger"), get("leaf")]);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    open();
+    const [first, second, third] = await both;
+    expect(first).toMatchObject({ status: 403 });
+    expect(second).toMatchObject({ status: 403 });
+    expect(third, JSON.stringify(third)).toMatchObject({ status: 200 });
+    // Each node of the graph was expanded (and audited) once; the extra
+    // "leaf" is the served request's own metadata path.
+    expect(audited.filter((name) => name === "app")).toHaveLength(1);
+    expect(audited.filter((name) => name === "mid")).toHaveLength(1);
+  });
+
+  it("memoizes the walk: a second miss makes no upstream calls", async () => {
+    const { get, urls } = graphService();
+    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    const before = urls.length;
+    expect(before).toBeGreaterThan(0);
+    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    await expect(get("other-stranger/-/other-stranger-1.0.0.tgz")).resolves.toMatchObject({ status: 403 });
+    expect(urls).toHaveLength(before);
+  });
+
+  it("does not start a walk from a scoped wildcard root", async () => {
+    const { get, urls } = graphService({ allowlist: ["@scope/*"] });
+    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    expect(urls).toEqual([]);
+  });
+
+  it("makes no walk calls for PyPI, whose index carries no dependencies", async () => {
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { pypi: ["demo"] },
+      policy: {},
+    });
+    const urls: string[] = [];
+    const registry = new RegistryService({
+      adapters: new Map([["pypi", pypiAdapter]]),
+      store,
+      audit: { audit: async () => NO_ADVISORIES },
+      upstream: async (url) => {
+        urls.push(url);
+        return new Response("unexpected", { status: 500 });
+      },
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
+      now: () => NOW,
+    });
+    const response = await registry.handle({ ...request("simple/stranger/"), ecosystem: "pypi" });
+    expect(response).toMatchObject({ status: 403 });
+    expect("body" in response && response.body).toContain("wardby_package_not_allowed");
+    expect(urls).toEqual([]);
+  });
+});
+
+describe("RegistryService graph walk hardening", () => {
+  it("never follows a dependency key that is not a valid package name", async () => {
+    const old = new Date(NOW.getTime() - 30 * DAY).toISOString();
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { npm: ["app"] },
+      policy: {},
+    });
+    const urls: string[] = [];
+    const registry = new RegistryService({
+      adapters: new Map([["npm", npmAdapter]]),
+      store,
+      audit: { audit: async () => NO_ADVISORIES },
+      upstream: async (url) => {
+        urls.push(url);
+        return Response.json({
+          name: "app",
+          time: { "1.0.0": old },
+          versions: {
+            "1.0.0": {
+              dist: { tarball: "https://registry.npmjs.org/app/-/app-1.0.0.tgz" },
+              dependencies: { "../../evil": "1", "a b": "1" },
+            },
+          },
+        });
+      },
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
+      now: () => NOW,
+    });
+    await expect(registry.handle({ ...request("stranger"), ecosystem: "npm" })).resolves.toMatchObject({
+      status: 403,
+    });
+    expect(urls).toEqual(["https://registry.npmjs.org/app"]);
   });
 });

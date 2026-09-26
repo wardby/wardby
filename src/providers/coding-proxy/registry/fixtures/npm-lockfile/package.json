@@ -1,0 +1,8 @@
+{
+  "name": "lockfile-app",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "wardby-lock-root": "^1.0.0"
+  }
+}

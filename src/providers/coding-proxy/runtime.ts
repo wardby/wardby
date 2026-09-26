@@ -8,7 +8,7 @@ import { CodingProxy } from "./proxy.js";
 import { PrismaProxyLedger } from "./prisma-ledger.js";
 import { OsvAudit } from "./registry/audit.js";
 import { PrismaRegistryStore } from "./registry/prisma-store.js";
-import { RegistryService } from "./registry/service.js";
+import { DEFAULT_GRAPH_TIMEOUT_MS, DEFAULT_MAX_GRAPH_PACKAGES, RegistryService } from "./registry/service.js";
 import { createPinnedProxyFetch, type PinnedProxyFetchOptions } from "./secure-fetch.js";
 import { startCodingProxyServer, type CodingProxyServerHandle } from "./server.js";
 import type { ProxyAuditSink } from "./types.js";
@@ -82,6 +82,8 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     upstream,
     metadataTimeoutMs,
     maxMetadataBytes,
+    maxGraphPackages: positiveInt(env.REGISTRY_MAX_GRAPH_PACKAGES, DEFAULT_MAX_GRAPH_PACKAGES),
+    graphTimeoutMs: positiveInt(env.REGISTRY_GRAPH_TIMEOUT_MS, DEFAULT_GRAPH_TIMEOUT_MS),
     proxyBase: `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}/registry/`,
     limits: {
       maxFileBytes: positiveInt(env.REGISTRY_MAX_FILE_MB, 200) * MIB,

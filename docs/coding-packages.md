@@ -77,6 +77,26 @@ metadata and grows the run's allowance automatically as npm or pip requests
 each dependency's metadata, so you don't have to enumerate transitive
 dependencies yourself.
 
+Installing from a lockfile works too. `npm ci` (or `npm install` with a
+complete `package-lock.json`) skips metadata and requests each tarball
+directly, at the `https://registry.npmjs.org/...` URL the lockfile records,
+which npm rewrites to the proxy. The proxy serves that standard tarball path,
+and when a request names a package it hasn't seen yet it resolves the
+approved dependency graph on demand: it walks breadth first from the
+allowlisted packages through the dependencies of every version that passes
+the same filters as a metadata request (allowlisted range, minimum release
+age, vulnerability audit), recording each dependency it finds, and stops as
+soon as it finds the requested package. This computes the same graph, just
+eagerly, so nothing outside "the allowlist plus its dependency graph" becomes
+installable. The walk is done at most once per run (concurrent and later
+misses share its result), and it is bounded by `REGISTRY_MAX_GRAPH_PACKAGES`
+and `REGISTRY_GRAPH_TIMEOUT_MS` (see [Operator limits](#operator-limits)).
+A scope wildcard such as `@testing-library/*` can't be enumerated, so it is
+never a starting point of the walk; its packages are still reached when an
+allowlisted package depends on them, and by a direct `npm install`. PyPI's
+index carries no dependencies (pip reads them from each wheel), so there is
+no walk for PyPI.
+
 ## What the agent can then run
 
 Inside the run, `npm install <package>` and `pip install <package>` (into
@@ -141,6 +161,8 @@ one of them finishes:
 | `REGISTRY_AUDIT_FAIL_OPEN`     | `false` | Allow-and-report instead of refusing when OSV is unreachable. |
 | `REGISTRY_METADATA_TIMEOUT_MS` | 30000   | Time allowed for one metadata or OSV request, body included.  |
 | `REGISTRY_MAX_METADATA_MB`     | 64      | Largest metadata or OSV response the proxy reads.             |
+| `REGISTRY_MAX_GRAPH_PACKAGES`  | 3000    | Packages the on-demand graph walk may expand in one run.      |
+| `REGISTRY_GRAPH_TIMEOUT_MS`    | 60000   | Time allowed for one on-demand graph walk.                    |
 
 Metadata is cached for five minutes in a bounded cache (500 packages, least
 recently used evicted first), and concurrent requests for the same package
@@ -192,21 +214,21 @@ rendered, the section is left out and the pull request is still opened.
 npm and pip print the proxy's error body verbatim, so these are what you'll
 see on a failed install:
 
-| Code                               | Status | Meaning / what to do                                                                                                                                                                                         |
-| ---------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `wardby_package_not_allowed`       | 403    | The package isn't on the allowlist and isn't reachable from an allowlisted package's dependency graph. Add it (or its top-level dependent) to `packageAllowlist`.                                            |
-| `wardby_file_not_allowed`          | 403    | The specific file type is never served for this ecosystem (for example a PyPI sdist). Nothing to configure; use a wheel.                                                                                     |
-| `wardby_version_filtered`          | 404    | Every matching version is too new (younger than `minReleaseAgeDays`) or withheld by the vulnerability audit. Wait for it to age past the threshold, or lower `minReleaseAgeDays` if you understand the risk. |
-| `wardby_package_not_found`         | 404    | The upstream registry has no such package name. Check the spelling (npm names are case-sensitive).                                                                                                           |
-| `wardby_package_too_large`         | 413    | The file exceeds `REGISTRY_MAX_FILE_MB`. Ask the operator to raise it if the file is legitimately larger.                                                                                                    |
-| `wardby_package_limit`             | 429    | The run hit `REGISTRY_MAX_FILES` or `REGISTRY_MAX_TOTAL_MB`. Trim what the run installs, or ask the operator to raise the limit.                                                                             |
-| `wardby_audit_unavailable`         | 503    | OSV couldn't be reached and `REGISTRY_AUDIT_FAIL_OPEN` isn't set. Retry, or have the operator set that flag if the outage is expected to be long.                                                            |
-| `wardby_bad_request`               | 400    | The request path is malformed (bad percent-encoding, or not a valid package name). A client or agent bug, not a package choice.                                                                              |
-| `wardby_upstream_error`            | 502    | The upstream registry answered with an error, or the download failed partway. Retry.                                                                                                                         |
-| `wardby_upstream_unavailable`      | 504    | The upstream registry didn't answer a metadata request within `REGISTRY_METADATA_TIMEOUT_MS`. Retry.                                                                                                         |
-| `wardby_metadata_too_large`        | 502    | The package's metadata document is larger than `REGISTRY_MAX_METADATA_MB`. Ask the operator to raise it.                                                                                                     |
-| `wardby_upstream_host_not_allowed` | 502    | The file's download URL points outside that ecosystem's own upstream hosts, so the proxy won't fetch it.                                                                                                     |
-| `invalid_capability`               | 401    | The run's registry token doesn't match a live session (the run has ended or the token is malformed). Not something a package choice can fix.                                                                 |
+| Code                               | Status | Meaning / what to do                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wardby_package_not_allowed`       | 403    | The package isn't on the allowlist and isn't reachable from an allowlisted package's dependency graph. Add it (or its top-level dependent) to `packageAllowlist`. If the message says the graph walk was cut short, the dependency graph is larger than `REGISTRY_MAX_GRAPH_PACKAGES` or took longer than `REGISTRY_GRAPH_TIMEOUT_MS` to resolve: allowlist the package directly, or ask the operator to raise the limit. |
+| `wardby_file_not_allowed`          | 403    | The specific file type is never served for this ecosystem (for example a PyPI sdist). Nothing to configure; use a wheel.                                                                                                                                                                                                                                                                                                  |
+| `wardby_version_filtered`          | 404    | Every matching version is too new (younger than `minReleaseAgeDays`) or withheld by the vulnerability audit. Wait for it to age past the threshold, or lower `minReleaseAgeDays` if you understand the risk.                                                                                                                                                                                                              |
+| `wardby_package_not_found`         | 404    | The upstream registry has no such package name. Check the spelling (npm names are case-sensitive).                                                                                                                                                                                                                                                                                                                        |
+| `wardby_package_too_large`         | 413    | The file exceeds `REGISTRY_MAX_FILE_MB`. Ask the operator to raise it if the file is legitimately larger.                                                                                                                                                                                                                                                                                                                 |
+| `wardby_package_limit`             | 429    | The run hit `REGISTRY_MAX_FILES` or `REGISTRY_MAX_TOTAL_MB`. Trim what the run installs, or ask the operator to raise the limit.                                                                                                                                                                                                                                                                                          |
+| `wardby_audit_unavailable`         | 503    | OSV couldn't be reached and `REGISTRY_AUDIT_FAIL_OPEN` isn't set. Retry, or have the operator set that flag if the outage is expected to be long.                                                                                                                                                                                                                                                                         |
+| `wardby_bad_request`               | 400    | The request path is malformed (bad percent-encoding, or not a valid package name). A client or agent bug, not a package choice.                                                                                                                                                                                                                                                                                           |
+| `wardby_upstream_error`            | 502    | The upstream registry answered with an error, or the download failed partway. Retry.                                                                                                                                                                                                                                                                                                                                      |
+| `wardby_upstream_unavailable`      | 504    | The upstream registry didn't answer a metadata request within `REGISTRY_METADATA_TIMEOUT_MS`. Retry.                                                                                                                                                                                                                                                                                                                      |
+| `wardby_metadata_too_large`        | 502    | The package's metadata document is larger than `REGISTRY_MAX_METADATA_MB`. Ask the operator to raise it.                                                                                                                                                                                                                                                                                                                  |
+| `wardby_upstream_host_not_allowed` | 502    | The file's download URL points outside that ecosystem's own upstream hosts, so the proxy won't fetch it.                                                                                                                                                                                                                                                                                                                  |
+| `invalid_capability`               | 401    | The run's registry token doesn't match a live session (the run has ended or the token is malformed). Not something a package choice can fix.                                                                                                                                                                                                                                                                              |
 
 ## Adding an ecosystem
 

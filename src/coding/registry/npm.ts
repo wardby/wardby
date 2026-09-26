@@ -1,7 +1,8 @@
 /**
  * npm registry adapter: parses npm allowlist syntax and semver ranges,
- * routes proxy requests against the npm HTTP protocol (packuments and
- * `-/tarball/<name>/<version>` downloads), and configures npm/npmrc for
+ * routes proxy requests against the npm HTTP protocol (packuments,
+ * `-/tarball/<name>/<version>` downloads, and the standard
+ * `<name>/-/<unscoped>-<version>.tgz` path lockfiles record), and configures npm/npmrc for
  * the sandboxed worker to use the proxy with install-time scripts disabled.
  */
 import semver from "semver";
@@ -83,6 +84,21 @@ function integrityOf(dist: { integrity?: string; shasum?: string }): Integrity |
   return null;
 }
 
+/** Maps `<name>/-/<unscoped>-<version>.tgz` (already percent-decoded) to
+ *  the same download route as `-/tarball/<name>/<version>`, or null. The
+ *  filename must name this exact package (case-sensitive, as npm names
+ *  are) and an exact semver version, so it can never smuggle a path
+ *  separator or `..` through: neither can appear in a valid version. */
+function standardTarball(name: string, filename: string): DownloadRoute | null {
+  if (!NAME.test(name)) return null;
+  const unscoped = name.slice(name.indexOf("/") + 1);
+  const prefix = `${unscoped}-`;
+  if (!filename.startsWith(prefix) || !filename.endsWith(".tgz")) return null;
+  const version = filename.slice(prefix.length, -".tgz".length);
+  if (semver.valid(version) !== version) return null;
+  return { kind: "download", name, version, filename: `${version}.tgz` };
+}
+
 function validName(name: string): string {
   if (!NAME.test(name)) throw new AllowlistEntryError(`"${name}" is not a valid npm package name`);
   return name;
@@ -93,6 +109,7 @@ export const npmAdapter: RegistryAdapter = {
   osvEcosystem: "npm",
   upstreamHosts: ["registry.npmjs.org"],
   collectExclude: ["node_modules"],
+  dependenciesInMetadata: true,
 
   parseAllowlistEntry(raw: string): AllowlistEntry {
     const value = raw.trim();
@@ -120,6 +137,12 @@ export const npmAdapter: RegistryAdapter = {
   route(method, subpath): RegistryRoute | null {
     if (method !== "GET" && method !== "HEAD") return null;
     const tarball = subpath.match(/^-\/tarball\/([^/]+)\/([^/]+)$/);
+    // The standard upstream tarball path, `<name>/-/<unscoped>-<version>.tgz`,
+    // which a lockfile's `resolved` URLs point at once npm rewrites their
+    // host to the configured registry (replace-registry-host). The name is
+    // one segment (`react`, `@scope%2fpkg`) or a literal scope plus name
+    // (`@scope/pkg`); the filename is one raw segment.
+    const standard = subpath.match(/^((?:@[^/]+\/)?[^/]+)\/-\/([^/]+)$/);
     try {
       if (tarball) {
         const name = decodeURIComponent(tarball[1]);
@@ -127,6 +150,7 @@ export const npmAdapter: RegistryAdapter = {
         if (!NAME.test(name) || !semver.valid(version)) return null;
         return { kind: "download", name, version, filename: `${version}.tgz` };
       }
+      if (standard) return standardTarball(decodeURIComponent(standard[1]), decodeURIComponent(standard[2]));
       const name = decodeURIComponent(subpath);
       return NAME.test(name) ? { kind: "metadata", name } : null;
     } catch {

@@ -118,3 +118,48 @@ describe("npmAdapter protocol", () => {
     ]);
   });
 });
+
+describe("npmAdapter standard tarball path (lockfile resolved URLs)", () => {
+  const route = (subpath: string) => npmAdapter.route("GET", subpath, new Headers());
+
+  it.each([
+    ["react/-/react-19.1.0.tgz", "react", "19.1.0"],
+    ["JSONStream/-/JSONStream-1.3.5.tgz", "JSONStream", "1.3.5"],
+    ["@scope/pkg/-/pkg-1.2.3.tgz", "@scope/pkg", "1.2.3"],
+    ["@scope%2fpkg/-/pkg-1.2.3.tgz", "@scope/pkg", "1.2.3"],
+    ["@scope%2Fpkg/-/pkg-1.2.3.tgz", "@scope/pkg", "1.2.3"],
+    ["react/-/react-19.0.0-rc.1.tgz", "react", "19.0.0-rc.1"],
+    ["xmlchars/-/xmlchars-2.2.0.tgz", "xmlchars", "2.2.0"],
+  ])("routes %s as a download of %s %s", (subpath, name, version) => {
+    expect(route(subpath)).toEqual({ kind: "download", name, version, filename: `${version}.tgz` });
+  });
+
+  it("answers HEAD like GET and refuses other methods", () => {
+    expect(npmAdapter.route("HEAD", "react/-/react-19.1.0.tgz", new Headers())).toMatchObject({ kind: "download" });
+    expect(npmAdapter.route("PUT", "react/-/react-19.1.0.tgz", new Headers())).toBeNull();
+  });
+
+  it.each([
+    "react/-/preact-10.0.0.tgz", // filename names another package
+    "react/-/React-19.1.0.tgz", // case differs: npm names are exact
+    "@scope/pkg/-/scope-pkg-1.2.3.tgz",
+    "@scope/pkg/-/other-1.2.3.tgz",
+    "react/-/react-latest.tgz", // not a version
+    "react/-/react-1.2.tgz",
+    "react/-/react-v1.2.3.tgz", // loose spelling, not the exact version
+    "react/-/react-1.2.3.tar.gz",
+    "react/-/react-1.2.3",
+    "react/-/react-.tgz",
+    "react/-/..",
+    "react/-/react-1.2.3%2F..%2F..%2Fx.tgz", // encoded slashes in the filename
+    "react/-/react-1.2.3%2fx.tgz",
+    "react/-/..%2Freact-1.2.3.tgz",
+    "../react/-/react-1.2.3.tgz",
+    "react/../-/react-1.2.3.tgz",
+    "a/b/-/b-1.0.0.tgz", // unscoped names have no slash
+    "@scope/pkg/extra/-/extra-1.0.0.tgz",
+    "react/-/react-1.2.3.tgz/extra",
+  ])("returns null for %s", (subpath) => {
+    expect(route(subpath)).toBeNull();
+  });
+});
