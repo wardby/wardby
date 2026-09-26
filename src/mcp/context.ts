@@ -10,13 +10,22 @@
 import type { Principal, PrismaClient } from "#prisma";
 import type { RequestStateAccessor } from "@modelcontextprotocol/server";
 import type { ProviderRegistry } from "../providers/index.js";
-import type { ReviewHostRegistry } from "../providers/review-host/types.js";
+import type { RepoAccessGate } from "../core/repo-access.js";
+import type { HostUserAuthorizerRegistry, ReviewHostRegistry } from "../providers/review-host/types.js";
 
 export type McpProviders = Pick<
   ProviderRegistry,
   "llm" | "engine" | "datastore" | "secrets" | "executor" | "memory"
 > & {
   reviewHosts?: ReviewHostRegistry;
+  /** Identity linking (link_host_account); empty or absent = linking disabled. */
+  hostUserAuthorizers?: HostUserAuthorizerRegistry;
+  /**
+   * Repository authorization (link_repository, coding profiles, host events).
+   * Absent = nothing can be authorized through host access (fail closed);
+   * only admin approvals still work.
+   */
+  repoAccess?: RepoAccessGate;
 };
 
 export interface McpRequestContext {

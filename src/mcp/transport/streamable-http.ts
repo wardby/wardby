@@ -11,6 +11,7 @@ import { authenticate, protectedResourceMetadata } from "../auth/resource-server
 import { McpError } from "../errors.js";
 import { handleWebhookIngress } from "../webhooks/ingress.js";
 import { handleGitHubEventIngress, type GitHubIngressDeps } from "../host-events/github-ingress.js";
+import { handleHostUserCallback, type HostUserCallbackDeps } from "../host-events/github-user-callback.js";
 import { canonicalUrl, HTTP_LIMITS, HttpBoundaryError, parseBody, readBody } from "./http-limits.js";
 import { browserHandler } from "../auth/self-hosted/browser.js";
 import { handleSecretElicitationForm, SECRET_ELICITATION_PATH } from "../tools/secret-elicitation-form.js";
@@ -33,6 +34,8 @@ export interface StartHttpServerOptions {
   selfHosted?: SelfHostedAuthProvider;
   /** Code-review host webhooks; absent = the endpoints answer 404. */
   hostEvents?: { github?: GitHubIngressDeps };
+  /** The host identity-link browser callback (link_host_account); absent = 404. */
+  hostUserAuth?: { github?: HostUserCallbackDeps };
 }
 export interface HttpServerHandle {
   port: number;
@@ -182,6 +185,17 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
       if (result.afterResponse) {
         void result.afterResponse().catch((err: unknown) => httpLog.warn({ err }, "host event follow-up failed"));
       }
+      return;
+    }
+    if (url.pathname === "/hosts/github/user-callback" && req.method === "GET") {
+      // Unauthenticated by design (a browser redirect from GitHub): the
+      // single-use, hashed OAuth state is what binds it to a link request,
+      // and the canonical-Host check above has already run.
+      if (!opts.hostUserAuth?.github) {
+        sendJson(res, 404, { error: "not_found" });
+        return;
+      }
+      await handleHostUserCallback(url, res, opts.hostUserAuth.github);
       return;
     }
     if (url.pathname === "/mcp") {

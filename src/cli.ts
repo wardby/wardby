@@ -68,6 +68,7 @@ import { ToolCapabilitiesPatchSchema } from "./sandbox/tool-capabilities.js";
 import { startMcp } from "./mcp/index.js";
 import { startServe } from "./serve.js";
 import { authCommand } from "./mcp/auth/self-hosted/cli.js";
+import { hostAccountCommand } from "./mcp/auth/host-account-cli.js";
 import { parseImportArgs } from "./import/cli-args.js";
 import { runImport } from "./import/index.js";
 import { CLI_USAGE } from "./cli-help.js";
@@ -793,7 +794,10 @@ async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
 
   try {
-    if (command === "auth") {
+    if (command === "auth" && rest[0] === "host-account") {
+      // Both auth modes: keyed on Principal, not the self-hosted AuthUser.
+      await hostAccountCommand(rest.slice(1), prisma);
+    } else if (command === "auth") {
       await authCommand(rest, prisma, process.env.AUTH_CREDENTIAL_HASH_KEY ?? "");
     } else if (command === "agent" && rest[0] === "create") {
       await agentCreate(rest.slice(1));

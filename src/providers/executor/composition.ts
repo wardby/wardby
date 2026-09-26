@@ -27,6 +27,7 @@ import { buildVcsProvider } from "../vcs/index.js";
 import { ContainerExecutor, PrismaContainerExecutionStore, RunCapabilityVault } from "./container.js";
 import { PrismaExecutionKindResolver, RoutingExecutor } from "./routing.js";
 import type { Executor } from "./types.js";
+import type { RepoAccessGate } from "../../core/repo-access.js";
 
 const compositionLog = logger.child({ module: "executor-composition" });
 
@@ -37,6 +38,8 @@ export interface ConfiguredExecutorOptions {
   providerConfig?: ProviderConfig;
   /** Tests only: replaces the kubeconfig-backed client when JOB_LAUNCHER=kubernetes. */
   kubernetesApi?: KubernetesApi;
+  /** Repository authorization for coding runs; built from the configured review hosts when absent. */
+  repoAccess?: RepoAccessGate;
 }
 
 /** Builds container execution only when Docker or Kubernetes is explicitly selected. */

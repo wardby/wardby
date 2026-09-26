@@ -51,6 +51,7 @@ import {
   type RepositoryLink,
 } from "./review-host-tools.js";
 import { closeOpenHostCheck } from "./review-host-checks.js";
+import type { RepoAccessGate } from "./repo-access.js";
 
 const runnerLog = logger.child({ module: "runner" });
 
@@ -149,6 +150,8 @@ export type RunnerDb = Pick<
 export type NativeRunProviders = Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory"> & {
   executor?: ProviderRegistry["executor"];
   reviewHosts?: ReviewHostRegistry;
+  /** Repository authorization for repo_* calls; built from reviewHosts when absent. */
+  repoAccess?: RepoAccessGate;
 };
 
 /**
