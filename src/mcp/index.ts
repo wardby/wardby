@@ -13,7 +13,13 @@
  * missing `AUTH_JWKS_URI`/`AUTH_SIGNING_KEY` a deployment running stdio-only
  * never needed to set.
  */
-import { loadProviderConfig, loadMcpConfig, loadAuthConfig } from "../config/providers.js";
+import {
+  loadProviderConfig,
+  loadMcpConfig,
+  loadAuthConfig,
+  loadGitHubEventConfig,
+  loadGitHubVcsConfig,
+} from "../config/providers.js";
 import { prisma } from "../core/db.js";
 import { NativeEngine } from "../core/engine-native.js";
 import { resolveLlmRegistrations, RoutingLlmProvider } from "../providers/llm/index.js";
@@ -24,6 +30,7 @@ import { buildSecretCipher } from "../providers/secrets/index.js";
 import { buildReviewHosts } from "../providers/review-host/index.js";
 import type { NativeRunProviders } from "../core/runner.js";
 import { buildAuthProvider } from "../providers/auth/index.js";
+import { GitHubAppClient } from "../providers/vcs/github.js";
 import type { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
 import { buildMcpServer, type WardbyMcpServer } from "./server.js";
 import type { McpProviders } from "./context.js";
@@ -221,6 +228,30 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
   });
 
+  const eventConfig = loadGitHubEventConfig();
+  const githubConfig = loadGitHubVcsConfig();
+  const githubHost = providers.reviewHosts?.github;
+  const hostEvents =
+    eventConfig.webhookSecret && githubHost && githubConfig.appId && githubConfig.privateKey
+      ? {
+          github: {
+            db: prisma,
+            executor: providers.executor,
+            hosts: providers.reviewHosts ?? {},
+            webhookSecret: eventConfig.webhookSecret,
+            appIdentity: (() => {
+              const client = new GitHubAppClient({
+                appId: githubConfig.appId,
+                privateKey: githubConfig.privateKey,
+                apiVersion: githubConfig.apiVersion,
+              });
+              return () => client.appIdentity();
+            })(),
+          },
+        }
+      : undefined;
+  mcpLog.info({ enabled: Boolean(hostEvents) }, "GitHub host events ingress");
+
   const http = await startHttpServer({
     mcp,
     config: {
@@ -232,6 +263,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     },
     auth: { authProvider, db: prisma, providers },
     selfHosted,
+    hostEvents,
   });
   const cleanupTimer = selfHosted
     ? setInterval(() => {

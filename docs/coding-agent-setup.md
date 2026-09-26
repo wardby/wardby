@@ -18,6 +18,9 @@ a second, networkless tool-runner container for repository access.
   `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` in `.env.local`.
 
 GitHub documents the available App permissions in its [permissions guide](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app).
+The same App can also run native agents as automated PR reviewers; see
+[code-review-agents.md](code-review-agents.md) for the extra webhook
+permissions and setup.
 
 The GitHub App installation is the only step that cannot be created from this
 repository. It is intentionally scoped to the test repository because a coding

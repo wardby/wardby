@@ -23,6 +23,7 @@ export const SECRETS = [
   { id: "secret-app-key", env: "SECRET_APP_KEY", source: "carry" },
   { id: "github-app-id", env: "GITHUB_APP_ID", source: "carry" },
   { id: "github-app-private-key", env: "GITHUB_APP_PRIVATE_KEY", source: "carry" },
+  { id: "github-app-webhook-secret", env: "GITHUB_APP_WEBHOOK_SECRET", source: "carry-or-generate" },
   { id: "auth-signing-key", env: "AUTH_SIGNING_KEY", source: "carry-or-generate" },
   { id: "auth-credential-hash-key", env: "AUTH_CREDENTIAL_HASH_KEY", source: "carry-or-generate" },
 ];
