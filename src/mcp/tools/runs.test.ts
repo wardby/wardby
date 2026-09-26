@@ -26,6 +26,14 @@ interface FakeRunRow {
   startedAt: Date;
   finishedAt: Date | null;
   codingRun?: { result: unknown; jobHandle?: string; protectedPaths?: string[]; queuedAt?: Date | null } | null;
+  registryFetches?: Array<{
+    ecosystem: string;
+    name: string;
+    version: string | null;
+    outcome: "served" | "refused";
+    reason: string | null;
+    createdAt: Date;
+  }>;
 }
 
 function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[]) {
@@ -33,7 +41,7 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[]) {
   const runRows = new Map(runs.map((r) => [r.id, r]));
   const publicRun = (run: FakeRunRow | undefined) => {
     if (!run) return null;
-    const { codingRun: _codingRun, ...row } = run;
+    const { codingRun: _codingRun, registryFetches: _registryFetches, ...row } = run;
     return row;
   };
   return {
@@ -53,6 +61,12 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[]) {
         where.runId.in
           .map((runId) => ({ runId, queuedAt: runRows.get(runId)?.codingRun?.queuedAt ?? null }))
           .filter((row) => row.queuedAt !== null),
+    },
+    registryFetch: {
+      findMany: async ({ where }: { where: { runId: string } }) =>
+        [...(runRows.get(where.runId)?.registryFetches ?? [])].sort(
+          (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
+        ),
     },
   } as unknown as import("#prisma").PrismaClient;
 }
@@ -228,6 +242,92 @@ describe("run observability tools", () => {
     expect(body).not.toHaveProperty("jobHandle");
     expect(body).not.toHaveProperty("protectedPaths");
     expect(body).toMatchObject({ codingResult: { outcome: "no_changes", summary: "No changes; [REDACTED]" } });
+    await client.close();
+  });
+
+  it("get_run returns deduplicated served packages and refusals for a coding run", async () => {
+    const now = new Date();
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [
+        {
+          id: "r1",
+          agentId: "a1",
+          status: "succeeded",
+          trigger: "manual",
+          turns: 0,
+          tokensIn: 1,
+          tokensOut: 2,
+          costUsd: 0.01,
+          finalText: null,
+          error: null,
+          startedAt: now,
+          finishedAt: now,
+          codingRun: { result: null },
+          registryFetches: [
+            {
+              ecosystem: "npm",
+              name: "@heroui/react",
+              version: "3.2.6",
+              outcome: "served",
+              reason: null,
+              createdAt: new Date(now.getTime()),
+            },
+            // A retried fetch of the same served package/version — collapses into one entry.
+            {
+              ecosystem: "npm",
+              name: "@heroui/react",
+              version: "3.2.6",
+              outcome: "served",
+              reason: null,
+              createdAt: new Date(now.getTime() + 1000),
+            },
+            {
+              ecosystem: "npm",
+              name: "left-pad",
+              version: null,
+              outcome: "refused",
+              reason: "wardby_package_not_allowed",
+              createdAt: new Date(now.getTime() + 2000),
+            },
+          ],
+        },
+        // A non-coding run has no registry fetches at all.
+        {
+          id: "r2",
+          agentId: "a1",
+          status: "succeeded",
+          trigger: "manual",
+          turns: 1,
+          tokensIn: 1,
+          tokensOut: 1,
+          costUsd: 0,
+          finalText: "x",
+          error: null,
+          startedAt: now,
+          finishedAt: now,
+        },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+
+    const codingResult = await client.callTool({ name: "get_run", arguments: { runId: "r1" } });
+    const codingBody = parseText(codingResult as never) as {
+      packages: Array<{ ecosystem: string; name: string; version: string }>;
+      packageRefusals: Array<{ ecosystem: string; name: string; reason: string }>;
+    };
+    expect(codingBody.packages).toEqual([{ ecosystem: "npm", name: "@heroui/react", version: "3.2.6" }]);
+    expect(codingBody.packageRefusals).toEqual([
+      { ecosystem: "npm", name: "left-pad", reason: "wardby_package_not_allowed" },
+    ]);
+
+    const nonCodingResult = await client.callTool({ name: "get_run", arguments: { runId: "r2" } });
+    const nonCodingBody = parseText(nonCodingResult as never) as Record<string, unknown>;
+    expect(nonCodingBody).not.toHaveProperty("packages");
+    expect(nonCodingBody).not.toHaveProperty("packageRefusals");
     await client.close();
   });
 

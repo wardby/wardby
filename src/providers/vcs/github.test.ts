@@ -202,6 +202,77 @@ describe("GitHubAppClient", () => {
     expect(body).toContain("`pytest -q`: failed");
   });
 
+  it("adds a collapsed packages section with refusals to the pull request body, deduplicated", async () => {
+    let createBody: Record<string, unknown> | undefined;
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/installation")) return json({ id: 42 });
+      if (url.endsWith("/access_tokens")) return tokenResponse();
+      if (url.includes("/pulls?")) return json([]);
+      if (url.endsWith("/pulls") && init?.method === "POST") {
+        createBody = JSON.parse(bodyText(init.body));
+        return json({ number: 12, html_url: "https://github.com/openai/example/pull/12", draft: true }, 201);
+      }
+      if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+      throw new Error(`unexpected request ${url}`);
+    }) as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+
+    await client.createOrFindDraftPullRequest({
+      runId: "run-1",
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: "wardby/run-run-1",
+      summary: "Added HeroUI.",
+      packages: [
+        { ecosystem: "npm", name: "@heroui/react", version: "3.2.6" },
+        { ecosystem: "npm", name: "@heroui/react", version: "3.2.6" },
+      ],
+      packageRefusals: [{ ecosystem: "npm", name: "left-pad", reason: "wardby_package_not_allowed" }],
+    });
+
+    const body = createBody?.body as string;
+    expect(body).toContain("<details>\n<summary>Packages installed during this run (1)</summary>");
+    expect(body).toContain("- npm `@heroui/react@3.2.6`");
+    expect(body).toContain("- npm `left-pad`: wardby_package_not_allowed");
+  });
+
+  it("drops (never renders) a package or refusal entry whose field contains a backtick or newline", async () => {
+    let createBody: Record<string, unknown> | undefined;
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/installation")) return json({ id: 42 });
+      if (url.endsWith("/access_tokens")) return tokenResponse();
+      if (url.includes("/pulls?")) return json([]);
+      if (url.endsWith("/pulls") && init?.method === "POST") {
+        createBody = JSON.parse(bodyText(init.body));
+        return json({ number: 13, html_url: "https://github.com/openai/example/pull/13", draft: true }, 201);
+      }
+      if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+      throw new Error(`unexpected request ${url}`);
+    }) as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+
+    await client.createOrFindDraftPullRequest({
+      runId: "run-1",
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: "wardby/run-run-1",
+      packages: [
+        { ecosystem: "npm", name: "evil`)</details><script>alert(1)</script", version: "1.0.0" },
+        { ecosystem: "npm", name: "evil\nname", version: "1.0.0" },
+        { ecosystem: "npm", name: "safe-package", version: "1.0.0" },
+      ],
+      packageRefusals: [{ ecosystem: "npm", name: "left-pad", reason: "blocked`\nrow" }],
+    });
+
+    const body = createBody?.body as string;
+    expect(body).toContain("<summary>Packages installed during this run (1)</summary>");
+    expect(body).toContain("- npm `safe-package@1.0.0`");
+    expect(body).not.toContain("evil");
+    expect(body).not.toContain("**Refused:**");
+  });
+
   it("prefixes the PR title with a caller-provided tag, leaving it unchanged when absent", async () => {
     let createBody: Record<string, unknown> | undefined;
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {

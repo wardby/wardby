@@ -364,6 +364,17 @@ export interface ContainerExecutorOptions {
    * than on the next scheduler tick. Never called for a run that was queued.
    */
   onSlotReleased?: () => void;
+  /**
+   * Loads this run's RegistryFetch ledger (composition.ts wires the Prisma
+   * query) so finalizeChanges can surface installed/refused packages in the
+   * PR body. Optional so tests and non-registry deployments can omit it;
+   * a rejection is swallowed and treated as "nothing to report" since a
+   * reporting failure must never fail the run itself.
+   */
+  registryReport?: (runId: string) => Promise<{
+    packages: Array<{ ecosystem: string; name: string; version: string }>;
+    packageRefusals: Array<{ ecosystem: string; name: string; reason: string }>;
+  }>;
 }
 
 class PreflightError extends Error {}
@@ -744,10 +755,16 @@ export class ContainerExecutor implements Executor {
         this.terminal(current, "budget_exhausted");
         return;
       }
+      const report = (await this.options.registryReport?.(run.runId).catch(() => undefined)) ?? {
+        packages: [],
+        packageRefusals: [],
+      };
       const finalized = await this.options.vcs.finalizeChanges(workspace, {
         summary: output.summary,
         tests: output.tests,
         tag: output.tag,
+        ...(report.packages.length > 0 ? { packages: report.packages } : {}),
+        ...(report.packageRefusals.length > 0 ? { packageRefusals: report.packageRefusals } : {}),
       });
       const result = this.resultFor(output, current, finalized.outcome, finalized);
       await this.options.store.complete(run.runId, "succeeded", result);

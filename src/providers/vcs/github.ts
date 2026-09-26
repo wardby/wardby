@@ -25,6 +25,20 @@ export interface PullRequestTestResult {
   outcome: "passed" | "failed" | "skipped";
 }
 
+/** One package the registry proxy served during the run (RegistryFetch outcome "served"). */
+export interface PackageReport {
+  ecosystem: string;
+  name: string;
+  version: string;
+}
+
+/** One package the registry proxy refused during the run (RegistryFetch outcome "refused"). */
+export interface PackageRefusal {
+  ecosystem: string;
+  name: string;
+  reason: string;
+}
+
 export interface PullRequestInput {
   runId: string;
   repository: string;
@@ -34,6 +48,9 @@ export interface PullRequestInput {
   summary?: string;
   tests?: readonly PullRequestTestResult[];
   tag?: string;
+  /** Deduplicated by the caller isn't required — pullRequestBody dedupes itself (ecosystem+name+version / +reason). */
+  packages?: readonly PackageReport[];
+  packageRefusals?: readonly PackageRefusal[];
 }
 
 export interface PullRequestResult {
@@ -108,12 +125,66 @@ function pullRequestTitle(input: PullRequestInput): string {
   return input.tag ? `[${input.tag}] Wardby run ${input.runId}` : `Wardby run ${input.runId}`;
 }
 
+/**
+ * Package names/versions/reasons come from registry metadata, not from
+ * anything Wardby validated, and land inside inline code spans in the PR
+ * body. A backtick or newline in one of those fields could break out of the
+ * span or the line structure, so any entry containing either is dropped
+ * rather than escaped (npm/PyPI names can't contain backticks in practice,
+ * so this should never trigger — it's a cheap belt-and-suspenders guard).
+ */
+function isSafeMarkdownFragment(value: string): boolean {
+  return !value.includes("`") && !value.includes("\n") && !value.includes("\r");
+}
+
 /** The hidden run marker stays first and unconditional: createOrFindDraftPullRequest's idempotent lookup depends on it. */
 function pullRequestBody(input: PullRequestInput): string {
   const sections = [`${RUN_MARKER_PREFIX}${input.runId} -->`];
   if (input.summary) sections.push(input.summary);
   if (input.tests?.length) {
     sections.push(["**Tests:**", ...input.tests.map((test) => `- \`${test.command}\`: ${test.outcome}`)].join("\n"));
+  }
+  const packages = [
+    ...new Map(
+      (input.packages ?? [])
+        .filter(
+          (pkg) =>
+            isSafeMarkdownFragment(pkg.ecosystem) &&
+            isSafeMarkdownFragment(pkg.name) &&
+            isSafeMarkdownFragment(pkg.version),
+        )
+        .map((pkg) => [`${pkg.ecosystem}\0${pkg.name}\0${pkg.version}`, pkg] as const),
+    ).values(),
+  ];
+  const refusals = [
+    ...new Map(
+      (input.packageRefusals ?? [])
+        .filter(
+          (refusal) =>
+            isSafeMarkdownFragment(refusal.ecosystem) &&
+            isSafeMarkdownFragment(refusal.name) &&
+            isSafeMarkdownFragment(refusal.reason),
+        )
+        .map((refusal) => [`${refusal.ecosystem}\0${refusal.name}\0${refusal.reason}`, refusal] as const),
+    ).values(),
+  ];
+  if (packages.length > 0 || refusals.length > 0) {
+    sections.push(
+      [
+        "<details>",
+        `<summary>Packages installed during this run (${packages.length})</summary>`,
+        "",
+        ...packages.map((pkg) => `- ${pkg.ecosystem} \`${pkg.name}@${pkg.version}\``),
+        ...(refusals.length > 0
+          ? [
+              "",
+              "**Refused:**",
+              ...refusals.map((refusal) => `- ${refusal.ecosystem} \`${refusal.name}\`: ${refusal.reason}`),
+            ]
+          : []),
+        "</details>",
+      ].join("\n"),
+    );
   }
   return sections.join("\n\n");
 }

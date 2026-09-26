@@ -57,10 +57,42 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       // (CODING_MAX_CONCURRENT), not stuck.
       const codingQueuedAt =
         run.status === "pending" && codingRun?.queuedAt ? codingRun.queuedAt.toISOString() : undefined;
+      // Packages served/refused only exist for coding runs; a non-coding run
+      // has no RegistryFetch rows at all, so skip the query entirely.
+      const registryFetches = codingRun
+        ? await ctx.db.registryFetch.findMany({ where: { runId: run.id }, orderBy: { createdAt: "asc" } })
+        : [];
+      const packages = [
+        ...new Map(
+          registryFetches
+            .filter((row) => row.outcome === "served" && row.version)
+            .map(
+              (row) =>
+                [
+                  `${row.ecosystem}\0${row.name}\0${row.version}`,
+                  { ecosystem: row.ecosystem, name: row.name, version: row.version! },
+                ] as const,
+            ),
+        ).values(),
+      ];
+      const packageRefusals = [
+        ...new Map(
+          registryFetches
+            .filter((row) => row.outcome === "refused")
+            .map((row) => {
+              const reason = row.reason ?? "refused";
+              return [
+                `${row.ecosystem}\0${row.name}\0${reason}`,
+                { ecosystem: row.ecosystem, name: row.name, reason },
+              ] as const;
+            }),
+        ).values(),
+      ];
       return textResult({
         ...run,
         ...(codingResult ? { codingResult } : {}),
         ...(codingQueuedAt ? { codingQueuedAt } : {}),
+        ...(codingRun ? { packages, packageRefusals } : {}),
       });
     },
   });
