@@ -15,6 +15,8 @@ export type { HostEvent };
 
 const log = logger.child({ module: "host-events" });
 const MAX_TASK_BODY = 8000;
+const MAX_TITLE = 256;
+const HOST_NAMES: Record<HostEvent["provider"], string> = { github: "GitHub" };
 
 export type HostEventDb = Pick<
   PrismaClient,
@@ -41,6 +43,38 @@ function escapeRegExp(value: string): string {
 
 export function isReviewCommand(body: string, mentionHandle: string): boolean {
   return new RegExp(`(^|[^\\w-])@${escapeRegExp(mentionHandle)}\\s+review(?![\\w-])`, "i").test(body);
+}
+
+type MentionEvent = Extract<HostEvent, { kind: "mention" }>;
+
+/**
+ * The mention agent's task text. Deterministic so a prompt can parse it:
+ * optional continuation hint, a header block, the issue/PR description, and
+ * the request comment — omitted when the mention is in the issue/PR itself.
+ * All of it is untrusted text; the runner wraps taskOverride as such.
+ */
+export function mentionTaskText(event: MentionEvent): string {
+  const kind = event.isPullRequest ? "PR" : "issue";
+  const sections: string[] = [];
+  if (event.priorRunId) {
+    sections.push(
+      `[This request is a follow-up on PR #${event.number}, originally opened by wardby run ${event.priorRunId}. ` +
+        `If you delegate, pass continuePriorRun set to exactly "${event.priorRunId}" so the same PR/branch is ` +
+        `continued instead of opening a new one.]`,
+    );
+  }
+  const title = event.subject?.title.replace(/\s+/g, " ").trim().slice(0, MAX_TITLE);
+  sections.push(
+    [
+      `[${HOST_NAMES[event.provider]} ${kind} #${event.number}${title ? `: ${title}` : ""}]`,
+      `Repository: ${event.repository}`,
+      `Requested by @${event.author}${event.replyToReviewCommentId ? ` (in review thread ${event.replyToReviewCommentId})` : ""}`,
+    ].join("\n"),
+  );
+  const description = event.subject?.body.trim() ? event.subject.body.slice(0, MAX_TASK_BODY) : "";
+  if (description) sections.push(`${event.isPullRequest ? "PR" : "Issue"} description:\n${description}`);
+  if (event.comment.kind !== "subject") sections.push(`Request comment:\n${event.body.slice(0, MAX_TASK_BODY)}`);
+  return sections.join("\n\n");
 }
 
 interface ReviewTarget {
@@ -144,15 +178,12 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       }
       const responder = links.find((l) => l.access === "write" && l.triggers.includes("mention"));
       if (!responder) return none;
-      const header = `[${event.repository} ${event.isPullRequest ? "PR" : "issue"} #${event.number}, comment by @${event.author}${
-        event.replyToReviewCommentId ? `, in review thread ${event.replyToReviewCommentId}` : ""
-      }]`;
       const dispatched = await dispatchRun({
         db: deps.db,
         executor: deps.executor,
         agentId: responder.agentId,
         trigger: "host_event",
-        taskOverride: `${header}\n\n${event.body.slice(0, MAX_TASK_BODY)}`,
+        taskOverride: mentionTaskText(event),
       });
       if (!dispatched) return none;
       log.info(

@@ -98,6 +98,153 @@ describe("normalizeGitHubEvent", () => {
     });
   });
 
+  it("carries the parent issue/PR title and body with a comment mention", () => {
+    const onIssue = {
+      action: "created",
+      repository,
+      issue: { number: 3, title: "Add a joke", body: "Please add one about cats." },
+      comment: { id: 4, body: "@wardby take this", author_association: "MEMBER", user: { login: "dev", type: "User" } },
+    };
+    expect(normalizeGitHubEvent("issue_comment", onIssue, APP)).toEqual({
+      kind: "mention",
+      provider: "github",
+      repository: "chfields/knock-knock-jokes",
+      number: 3,
+      isPullRequest: false,
+      comment: { kind: "conversation", id: "4" },
+      body: "@wardby take this",
+      author: "dev",
+      subject: { title: "Add a joke", body: "Please add one about cats." },
+    });
+    const inline = {
+      action: "created",
+      repository,
+      pull_request: { number: 7, title: "Cats", body: null },
+      comment: { id: 88, body: "@wardby why?", author_association: "OWNER", user: { login: "dev", type: "User" } },
+    };
+    expect(normalizeGitHubEvent("pull_request_review_comment", inline, APP)).toMatchObject({
+      subject: { title: "Cats", body: "" },
+    });
+  });
+
+  describe("continuation of a PR a coding run opened", () => {
+    const onPr = (prBody: string, event: "issue_comment" | "pull_request_review_comment" = "issue_comment") => {
+      const comment = {
+        id: 4,
+        body: "@wardby fix it",
+        author_association: "OWNER",
+        user: { login: "dev", type: "User" },
+      };
+      return event === "issue_comment"
+        ? { action: "created", repository, issue: { number: 7, title: "T", body: prBody, pull_request: {} }, comment }
+        : { action: "created", repository, pull_request: { number: 7, title: "T", body: prBody }, comment };
+    };
+
+    it("reads the run id from the wardby marker at the top of the PR body", () => {
+      expect(
+        normalizeGitHubEvent("issue_comment", onPr("<!-- wardby:run_Abc-123 -->\n\n## Summary"), APP),
+      ).toMatchObject({
+        priorRunId: "run_Abc-123",
+      });
+      expect(
+        normalizeGitHubEvent(
+          "pull_request_review_comment",
+          onPr("<!-- wardby:r1 -->\nbody", "pull_request_review_comment"),
+          APP,
+        ),
+      ).toMatchObject({ priorRunId: "r1" });
+    });
+
+    it("accepts the legacy marker", () => {
+      expect(normalizeGitHubEvent("issue_comment", onPr("<!-- reevo-run:legacy42 -->\nx"), APP)).toMatchObject({
+        priorRunId: "legacy42",
+      });
+    });
+
+    it("ignores an invalid, misplaced, or issue-only marker", () => {
+      for (const body of [
+        "<!-- wardby:../../etc -->",
+        "<!-- wardby:-leading -->",
+        `<!-- wardby:${"a".repeat(129)} -->`,
+        "text first\n<!-- wardby:r1 -->",
+        "<!-- wardby: r1 -->",
+      ]) {
+        expect(normalizeGitHubEvent("issue_comment", onPr(body), APP)).not.toHaveProperty("priorRunId");
+      }
+      const onIssue = onPr("<!-- wardby:r1 -->");
+      delete (onIssue.issue as { pull_request?: unknown }).pull_request;
+      expect(normalizeGitHubEvent("issue_comment", onIssue, APP)).not.toHaveProperty("priorRunId");
+    });
+  });
+
+  describe("issues opened/edited", () => {
+    const issue = (
+      action: string,
+      title: string,
+      body: string | null,
+      extra: { changes?: unknown; association?: string; type?: string; sender?: string } = {},
+    ) => ({
+      action,
+      repository,
+      issue: {
+        number: 12,
+        title,
+        body,
+        author_association: extra.association ?? "OWNER",
+        user: { login: "chfields", type: extra.type ?? "User" },
+      },
+      sender: { login: extra.sender ?? "chfields", type: extra.type ?? "User" },
+      ...(extra.changes ? { changes: extra.changes } : {}),
+    });
+
+    it("maps an issue opened with a mention in its body or title, acknowledged on the issue itself", () => {
+      expect(normalizeGitHubEvent("issues", issue("opened", "Jokes", "@wardby please add a joke"), APP)).toEqual({
+        kind: "mention",
+        provider: "github",
+        repository: "chfields/knock-knock-jokes",
+        number: 12,
+        isPullRequest: false,
+        comment: { kind: "subject", id: "12" },
+        body: "@wardby please add a joke",
+        author: "chfields",
+        subject: { title: "Jokes", body: "@wardby please add a joke" },
+      });
+      expect(normalizeGitHubEvent("issues", issue("opened", "@wardby add a joke", null), APP)).toMatchObject({
+        comment: { kind: "subject", id: "12" },
+        body: "",
+        subject: { title: "@wardby add a joke", body: "" },
+      });
+      expect(normalizeGitHubEvent("issues", issue("opened", "Jokes", "no mention"), APP)).toBeNull();
+      expect(normalizeGitHubEvent("issues", issue("closed", "Jokes", "@wardby hi"), APP)).toBeNull();
+    });
+
+    it("maps an edit only when it newly adds the mention", () => {
+      const added = issue("edited", "Jokes", "@wardby go", { changes: { body: { from: "go" } } });
+      expect(normalizeGitHubEvent("issues", added, APP)).toMatchObject({ kind: "mention", number: 12 });
+      const titleAdded = issue("edited", "@wardby Jokes", "go", { changes: { title: { from: "Jokes" } } });
+      expect(normalizeGitHubEvent("issues", titleAdded, APP)).toMatchObject({ kind: "mention" });
+
+      const already = issue("edited", "Jokes", "@wardby go now", { changes: { body: { from: "@wardby go" } } });
+      expect(normalizeGitHubEvent("issues", already, APP)).toBeNull();
+      const titleOnlyEdit = issue("edited", "Jokes v2", "@wardby go", { changes: { title: { from: "Jokes" } } });
+      expect(normalizeGitHubEvent("issues", titleOnlyEdit, APP)).toBeNull();
+      const noChanges = issue("edited", "Jokes", "@wardby go");
+      expect(normalizeGitHubEvent("issues", noChanges, APP)).toBeNull();
+    });
+
+    it("ignores untrusted, bot, and other-user edits", () => {
+      expect(
+        normalizeGitHubEvent("issues", issue("opened", "J", "@wardby hi", { association: "NONE" }), APP),
+      ).toBeNull();
+      expect(
+        normalizeGitHubEvent("issues", issue("opened", "J", "@wardby hi", { association: "CONTRIBUTOR" }), APP),
+      ).toBeNull();
+      expect(normalizeGitHubEvent("issues", issue("opened", "J", "@wardby hi", { type: "Bot" }), APP)).toBeNull();
+      const bySomeoneElse = issue("edited", "J", "@wardby hi", { changes: { body: { from: "hi" } }, sender: "other" });
+      expect(normalizeGitHubEvent("issues", bySomeoneElse, APP)).toBeNull();
+    });
+  });
+
   it("ignores unknown events and malformed payloads", () => {
     expect(normalizeGitHubEvent("push", { repository }, APP)).toBeNull();
     expect(normalizeGitHubEvent("pull_request", { action: "opened" }, APP)).toBeNull();

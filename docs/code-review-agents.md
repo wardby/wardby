@@ -30,11 +30,51 @@ Once an agent is linked to a repository with the `pull_request` trigger:
 - Any other `@<app-slug> ...` mention — on an issue, a PR conversation, or
   inside an inline review thread — is routed to whichever agent is linked
   with the `mention` trigger instead, as a normal run with the comment as its
-  task. The mention is acknowledged with a 👀 reaction once the run has been
-  dispatched.
+  task. The mention is acknowledged with a 👀 reaction on the comment once
+  the run has been dispatched.
+- Opening an issue whose title or description mentions `@<app-slug>` — or
+  editing an issue so that it newly does — is routed to the `mention` agent
+  the same way, with the issue itself as the request. The 👀 reaction goes on
+  the issue. An edit that leaves an existing mention in place does not start
+  another run, and only the issue author's own edits count.
 
-Only comments from the repository's owner, a member, or a collaborator can
-trigger a run; other commenters' `@<app-slug>` mentions are ignored.
+Only comments and issues from the repository's owner, a member, or a
+collaborator can trigger a run; other users' `@<app-slug>` mentions, and
+mentions by bots, are ignored.
+
+### What the mention agent receives
+
+The run's task is the text below, in this order, with blank lines between
+the parts. Everything in it comes from GitHub users and is passed to the
+agent as untrusted input.
+
+```text
+[This request is a follow-up on PR #<n>, originally opened by wardby run <run-id>. If you delegate, pass continuePriorRun set to exactly "<run-id>" so the same PR/branch is continued instead of opening a new one.]
+
+[GitHub PR #<n>: <title>]
+Repository: <owner>/<name>
+Requested by @<login>
+
+PR description:
+<the PR description>
+
+Request comment:
+<the comment that mentioned the App>
+```
+
+- The first line appears only on a pull request that a wardby coding run
+  opened (its description starts with the run's hidden marker). A router
+  agent that delegates coding work can pass that run id on so the existing
+  branch and PR are continued rather than a new one being opened.
+- The header reads `[GitHub issue #<n>: <title>]` on an issue. For a mention
+  inside an inline review thread, the `Requested by` line ends with
+  `(in review thread <id>)`.
+- The description section (`Issue description:` or `PR description:`) is
+  left out when the issue or PR has none.
+- When the mention is in the issue itself rather than in a comment, there is
+  no `Request comment:` section — the issue's title and description are the
+  request.
+- The description and the comment are each capped at 8,000 characters.
 
 ## Fork pull requests are skipped
 
@@ -55,7 +95,8 @@ with:
   below) — generate it with `openssl rand -hex 32` or similar; the ingress
   endpoint answers 404 until this is set.
 - **Subscribe to events**: Pull request, Issue comment, Pull request review
-  comment, Check run.
+  comment, Check run, and Issues (needed for mentions in a newly opened or
+  edited issue; without it only comment mentions are seen).
 - **Repository permissions**:
   | Permission    | Access         |
   | ------------- | -------------- |

@@ -123,8 +123,11 @@ export interface CommentInput {
 }
 
 export interface CommentRef {
-  /** "conversation" = a top-level comment on an issue/PR conversation; "inline" = a comment on a diff line (review thread). */
-  kind: "conversation" | "inline";
+  /**
+   * "conversation" = a top-level comment on an issue/PR conversation; "inline" = a comment on a diff line (review
+   * thread); "subject" = the issue or PR itself (its title/description), with `id` its number.
+   */
+  kind: "conversation" | "inline" | "subject";
   id: string;
 }
 
@@ -210,6 +213,11 @@ export type HostEvent =
       comment: CommentRef;
       /** Set when the mention is inside an inline review thread. */
       replyToReviewCommentId?: string;
+      /** The comment text; for a "subject" mention, the issue/PR description. */
       body: string;
       author: string;
+      /** The issue or PR the mention is on, when the payload carries it. */
+      subject?: { title: string; body: string };
+      /** The run that opened this PR, when its description carries a valid run marker. */
+      priorRunId?: string;
     };

@@ -488,10 +488,13 @@ export class GitHubReviewHost implements CodeReviewHost {
 
   async acknowledge(repository: string, target: CommentRef): Promise<void> {
     const base = repoPath(repository);
+    const id = encodeURIComponent(target.id);
     const path =
       target.kind === "inline"
-        ? `${base}/pulls/comments/${encodeURIComponent(target.id)}/reactions`
-        : `${base}/issues/comments/${encodeURIComponent(target.id)}/reactions`;
+        ? `${base}/pulls/comments/${id}/reactions`
+        : target.kind === "subject"
+          ? `${base}/issues/${id}/reactions`
+          : `${base}/issues/comments/${id}/reactions`;
     await this.withToken(repository, COMMENT_WRITE, async (get) => {
       await get(path, { method: "POST", body: JSON.stringify({ content: "eyes" }) }, [200, 201]);
     });

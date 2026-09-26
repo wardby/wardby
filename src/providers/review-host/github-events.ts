@@ -9,6 +9,10 @@ import type { HostEvent } from "./types.js";
 const PR_ACTIONS = new Set(["opened", "synchronize", "reopened", "ready_for_review"]);
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const SAFE_SHA = /^[0-9a-f]{40}$/;
+/** Mirrors the runId shape validated in providers/vcs (github.ts, git.ts). */
+const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+/** The hidden marker a coding run writes at the top of every PR it opens (providers/vcs/github.ts); legacy prefix too. */
+const RUN_MARKER = /^\s*<!-- (?:wardby|reevo-run):(\S+) -->/;
 
 export function verifyGitHubSignature(rawBody: string, header: string | undefined, secret: string): boolean {
   if (!header || !/^sha256=[0-9a-f]{64}$/.test(header)) return false;
@@ -36,6 +40,26 @@ function repositoryOf(payload: Json): string | null {
 function mentions(body: string, slug: string): boolean {
   const escaped = slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(^|[^\\w@.-])@${escaped}(?![\\w-])`, "i").test(body);
+}
+
+const text = (value: unknown): string => (typeof value === "string" ? value : "");
+
+function subjectOf(item: Json | null): { title: string; body: string } | undefined {
+  return typeof item?.title === "string" ? { title: item.title, body: text(item.body) } : undefined;
+}
+
+function priorRunIdOf(prBody: string): string | undefined {
+  const id = RUN_MARKER.exec(prBody)?.[1];
+  return id && SAFE_RUN_ID.test(id) ? id : undefined;
+}
+
+function trustedHuman(association: unknown, user: Json | null): user is Json & { login: string } {
+  return (
+    typeof association === "string" &&
+    TRUSTED_ASSOCIATIONS.has(association) &&
+    user?.type === "User" &&
+    typeof user.login === "string"
+  );
 }
 
 export function normalizeGitHubEvent(
@@ -72,6 +96,40 @@ export function normalizeGitHubEvent(
     return { kind: "check_rerun", provider: "github", repository, prNumber, headSha, checkName };
   }
 
+  if (eventName === "issues") {
+    if (p.action !== "opened" && p.action !== "edited") return null;
+    const issue = obj(p.issue);
+    const number = int(issue?.number);
+    const title = issue?.title;
+    if (!number || typeof title !== "string") return null;
+    const body = text(issue?.body);
+    const user = obj(issue?.user);
+    if (!trustedHuman(issue?.author_association, user)) return null;
+    if (!mentions(title, app.slug) && !mentions(body, app.slug)) return null;
+    if (p.action === "edited") {
+      // Only the author's own edit, and only one that newly adds the mention — not every later edit.
+      const sender = obj(p.sender);
+      if (sender?.type !== "User" || sender.login !== user.login) return null;
+      const changes = obj(p.changes);
+      const oldTitle = obj(changes?.title)?.from;
+      const oldBody = obj(changes?.body)?.from;
+      if (typeof oldTitle !== "string" && typeof oldBody !== "string") return null;
+      const before = [typeof oldTitle === "string" ? oldTitle : title, typeof oldBody === "string" ? oldBody : body];
+      if (before.some((t) => mentions(t, app.slug))) return null;
+    }
+    return {
+      kind: "mention",
+      provider: "github",
+      repository,
+      number,
+      isPullRequest: obj(issue?.pull_request) !== null,
+      comment: { kind: "subject", id: String(number) },
+      body,
+      author: user.login,
+      subject: { title, body },
+    };
+  }
+
   if (eventName === "issue_comment" || eventName === "pull_request_review_comment") {
     if (p.action !== "created") return null;
     const comment = obj(p.comment);
@@ -79,36 +137,26 @@ export function normalizeGitHubEvent(
     const body = comment?.body;
     const commentId = int(comment?.id);
     if (typeof body !== "string" || !commentId || !mentions(body, app.slug)) return null;
-    if (typeof comment?.author_association !== "string" || !TRUSTED_ASSOCIATIONS.has(comment.author_association))
-      return null;
-    if (user?.type !== "User" || typeof user.login !== "string") return null;
-    if (eventName === "issue_comment") {
-      const issue = obj(p.issue);
-      const number = int(issue?.number);
-      if (!number) return null;
-      return {
-        kind: "mention",
-        provider: "github",
-        repository,
-        number,
-        isPullRequest: obj(issue?.pull_request) !== null,
-        comment: { kind: "conversation", id: String(commentId) },
-        body,
-        author: user.login,
-      };
-    }
-    const number = int(obj(p.pull_request)?.number);
+    if (!trustedHuman(comment?.author_association, user)) return null;
+    const isInline = eventName === "pull_request_review_comment";
+    const parent = obj(isInline ? p.pull_request : p.issue);
+    const number = int(parent?.number);
     if (!number) return null;
+    const isPullRequest = isInline || obj(parent?.pull_request) !== null;
+    const subject = subjectOf(parent);
+    const priorRunId = isPullRequest ? priorRunIdOf(text(parent?.body)) : undefined;
     return {
       kind: "mention",
       provider: "github",
       repository,
       number,
-      isPullRequest: true,
-      comment: { kind: "inline", id: String(commentId) },
-      replyToReviewCommentId: String(commentId),
+      isPullRequest,
+      comment: { kind: isInline ? "inline" : "conversation", id: String(commentId) },
+      ...(isInline ? { replyToReviewCommentId: String(commentId) } : {}),
       body,
       author: user.login,
+      ...(subject ? { subject } : {}),
+      ...(priorRunId ? { priorRunId } : {}),
     };
   }
   return null;

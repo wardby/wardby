@@ -360,6 +360,7 @@ describe("GitHubReviewHost writes", () => {
       if (method === "POST" && path === `${BASE}/pulls/7/comments/88/replies`)
         return json({ html_url: "https://x/r" }, 201);
       if (method === "POST" && path === `${BASE}/issues/comments/4/reactions`) return json({ id: 1 }, 201);
+      if (method === "POST" && path === `${BASE}/issues/12/reactions`) return json({ id: 2 }, 201);
       return undefined;
     });
     const host = new GitHubReviewHost(client);
@@ -368,12 +369,19 @@ describe("GitHubReviewHost writes", () => {
       url: "https://x/r",
     });
     await host.acknowledge(REPO, { kind: "conversation", id: "4" });
+    await host.acknowledge(REPO, { kind: "subject", id: "12" });
     expect(grants).toEqual([
       { issues: "write", pull_requests: "write" },
       { issues: "write", pull_requests: "write" },
       { issues: "write", pull_requests: "write" },
+      { issues: "write", pull_requests: "write" },
     ]);
-    expect(calls.at(-1)!.body).toEqual({ content: "eyes" });
+    expect(calls.at(-2)!.body).toEqual({ content: "eyes" });
+    expect(calls.at(-1)).toMatchObject({
+      method: "POST",
+      path: `${BASE}/issues/12/reactions`,
+      body: { content: "eyes" },
+    });
   });
 
   it("starts an in-progress check and completes it with capped text", async () => {
