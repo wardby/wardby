@@ -199,37 +199,47 @@ encrypted-secret migration, or existing application secrets become unreadable.
 An agent is private to its owner unless the owner shares it. A grant is
 `(agent, grantee, level)`; the grantee is one principal or **everyone**:
 
-| Level     | Lets the grantee                                                                                 |
-| --------- | ------------------------------------------------------------------------------------------------ |
-| `read`    | see the agent's config (never secret values, never other owners' tool code), list its sub-agents |
-| `execute` | also trigger runs, and see the runs they triggered                                               |
-| `write`   | also change its prompt, model, budget, schedule, tools and sub-agents                            |
-| owner     | everything, plus the owner-only operations below                                                 |
+| Level     | Lets the grantee                                                                                                                                               |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `read`    | see the agent's config (never secret values, never other owners' tool code), list its sub-agents                                                               |
+| `execute` | also trigger runs, and see the runs they triggered                                                                                                             |
+| `write`   | also change its name, prompt, model, budget amount, max turns, effort, memory on/off and schedule; attach tools they can use and detach tools; create webhooks |
+| owner     | everything, plus the owner-only operations below                                                                                                               |
 
 Owners manage grants with `grant_access`, `revoke_access` and `list_access`.
 Granting again replaces the level. A revoke takes effect on the next check
 (trigger, delegation, webhook fire); runs already in flight keep going.
 
 **Owner-only, whatever the grants:** `delete_agent`, managing grants, the
-agent's secret, datastore and repository bindings, reading or writing its
-memory and datastore contents, and granting capabilities to a tool
-attachment.
+agent's secret, datastore and repository bindings, the whole coding profile
+(task, base ref, protected paths, task-override opt-in, image, packages,
+toolchain, limits), changing its kind, its budget group, attaching or
+detaching sub-agents, reading or writing its memory and datastore contents,
+and granting capabilities to a tool attachment.
 
 **What execute hands over.** An execute-grantee runs your agent with your
 tools, secrets, datastores and repository, and every run shares the agent's
-memory. The trigger supplies only task text, and for a coding agent only
-when you allow it: a non-owner may pass a coding `task` or `baseRef` only if
-`codingProfile.allowWebhookTaskOverride` is on (the same opt-in webhooks use);
-otherwise their run uses your `defaultTask`. Runs are visible to their
-triggerer and to you, never to other grantees.
+memory. A non-owner supplies no instructions of their own: a native agent
+takes no task text from `trigger_agent` or from another owner's sub-agent
+delegation, and a coding agent takes a `task` or `baseRef` from a non-owner
+only if `codingProfile.allowWebhookTaskOverride` is on (the same opt-in
+webhooks use); otherwise the run uses your `defaultTask`. Webhooks still
+accept task text for native agents (the webhook creator needs `write` to make
+one). Runs are visible to their triggerer and to you, never to other
+grantees.
 
-**What write hands over.** A write-grantee can change what the agent does
-(prompt, schedule, tools, sub-agents), but not what it can reach: the four
-capability fields on a tool attachment (`allowedSecrets`,
-`allowedDatastorePrefixes`, `allowedHosts`, `allowedSharedDatastorePrefixes`)
-are the owner's to grant. A tool a write-grantee attaches runs with none of
-them until you re-run `attach_tool` with the capabilities. They also can't set
-a repository or turn the agent into a coding agent.
+**What write hands over.** A write-grantee can rewrite what the agent's runs
+do, but not add to what they can reach. The prompt can make a run use
+everything the agent already reaches: the tool capabilities you granted, its
+memory, and its linked repositories. On a coding agent the prompt is part of
+every coding task, so write directs work done with your GitHub access; grant
+write on such an agent only to someone you'd let push. What stays yours: the
+four capability fields on a tool attachment (`allowedSecrets`,
+`allowedDatastorePrefixes`, `allowedHosts`, `allowedSharedDatastorePrefixes`),
+so a tool a write-grantee attaches runs with none until you re-run
+`attach_tool` with them (you then vouch for code only its owner can read);
+the coding profile, kind and budget group; and sub-agents, since an edge
+would hand every run's data to another agent.
 
 **Everyone** can be granted at most `execute`: everyone-write would let
 anyone rewrite an agent that holds your tools and secrets.
@@ -244,22 +254,26 @@ rule (or left behind by `make_owner`) stop working on their own:
 - a tool attachment's capabilities count only while the agent's current owner
   granted them;
 - a sub-agent runs only if it has the parent's owner, or the parent's owner
-  holds `execute` on it (`attach_subagent` needs `write` on the parent and
+  holds `execute` on it (`attach_subagent` is the parent's owner's, with
   `execute` on the child). Across owners, the edge carries no memory access,
-  no `grantParentMemoryKeys`, no `continuePriorRun`, and no coding task
-  unless the child allows non-owner task text. The child's owner can always
-  detach it;
+  no `grantParentMemoryKeys`, no `continuePriorRun`, no task text for a
+  native child (it runs its own prompt), and no coding task unless the child
+  allows non-owner task text. The child's owner can always detach it;
 - a webhook fires only while its creator owns the agent or holds `execute`.
 
 **The stdio operator** (`wardby mcp` over stdio) is owner of every agent for
 access checks and sees every agent, but does not bypass the binding rules:
-it can't bind its own secret to someone else's agent. An HTTP user whose
+it can't bind its own secret to someone else's agent, and it is not the owner
+for coding-profile changes, coding task overrides or sub-agent edges on
+someone else's agent (it can adopt the agent first). An HTTP user whose
 subject equals `LOCAL_PRINCIPAL` is not the operator. **Admins** get no
 implicit access to others' agents: they can `list_access` any agent (incident
 response) and reassign one with `make_owner`, which removes bindings the new
 owner doesn't own, suspends tool capabilities the new owner never granted,
 cuts sub-agent edges the new owner can't delegate, and, between two owners,
-resets every grant. `make_owner` no longer releases an agent to owner-less.
+resets every grant. Adopting an owner-less agent keeps its grants but lowers
+an everyone grant to `read` unless `keepEveryoneExecute` is set.
+`make_owner` no longer releases an agent to owner-less.
 
 ### Upgrading: owner-less agents
 
@@ -271,17 +285,24 @@ without their tools' capabilities. Operator runbook:
 
 1. On the old version, with the new binary:
    `wardby grants migration-report > before.txt`. It is read-only and lists
-   owner-less agents, the bindings and capabilities that will stop working,
-   sub-agent edges that will be refused, webhooks that won't fire, and the
-   behaviour changes.
+   owner-less agents (and, per possible adopter, which secrets, datastores
+   and tool capabilities adopting would bring back), the bindings and
+   capabilities that will stop working, owner-less-tool capabilities that
+   stay in force on owned agents (review them if the agent ever changed owner
+   with `make_owner`), sub-agent edges that will be refused, webhooks that
+   won't fire, and the behaviour changes.
 2. `prisma migrate deploy` (`npm run prisma:migrate`), then roll out. The
    migration needs PostgreSQL 13 or later.
 3. Immediately: `wardby grants adopt-public --owner <subject> --dry-run`,
-   then the same without `--dry-run`. Every owner-less agent gets that owner
-   and keeps its everyone grant; the owner's own bindings come back to life,
-   the others are removed and printed; attachments of the owner's own tools
-   regain their capabilities, the rest are printed with the `attach_tool`
-   call that re-grants them. The subject must already exist.
+   then the same without `--dry-run`. Every owner-less agent gets that owner;
+   its everyone grant is lowered to `read`, because the agent is about to
+   regain the owner's secrets and capabilities (pass
+   `--keep-everyone-execute` to keep it runnable by everyone, knowingly;
+   webhooks others created stop firing otherwise). The owner's own bindings
+   come back to life, the others are removed and printed; attachments of the
+   owner's own tools regain their capabilities; every other attached tool is
+   printed for review, with the `attach_tool` call that re-grants any
+   capabilities it had. The subject must already exist.
 4. `wardby grants prune-bindings` removes, and prints, every remaining
    binding of one owner's secret or datastore to another owner's agent
    (already inert).
