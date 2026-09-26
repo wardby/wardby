@@ -13,8 +13,13 @@
  * missing `AUTH_JWKS_URI`/`AUTH_SIGNING_KEY` a deployment running stdio-only
  * never needed to set.
  */
-import type { ProviderRegistry } from "../providers/index.js";
-import { loadProviderConfig, loadMcpConfig, loadAuthConfig } from "../config/providers.js";
+import {
+  loadProviderConfig,
+  loadMcpConfig,
+  loadAuthConfig,
+  loadGitHubEventConfig,
+  loadGitHubVcsConfig,
+} from "../config/providers.js";
 import { prisma } from "../core/db.js";
 import { NativeEngine } from "../core/engine-native.js";
 import { resolveLlmRegistrations, RoutingLlmProvider } from "../providers/llm/index.js";
@@ -22,7 +27,10 @@ import { PostgresDatastore } from "../providers/datastore/index.js";
 import { PostgresAgentMemory } from "../providers/memory/index.js";
 import { buildConfiguredExecutor, buildExecutor } from "../providers/executor/index.js";
 import { buildSecretCipher } from "../providers/secrets/index.js";
+import { buildReviewHosts } from "../providers/review-host/index.js";
+import type { NativeRunProviders } from "../core/runner.js";
 import { buildAuthProvider } from "../providers/auth/index.js";
+import { GitHubAppClient } from "../providers/vcs/github.js";
 import type { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
 import { buildMcpServer, type WardbyMcpServer } from "./server.js";
 import type { McpProviders } from "./context.js";
@@ -41,6 +49,7 @@ import { registerSchedulingTools } from "./tools/scheduling.js";
 import { registerRunTools } from "./tools/runs.js";
 import { registerDatastoreTools } from "./tools/datastore.js";
 import { registerSubAgentTools } from "./tools/subagents.js";
+import { registerRepositoryTools } from "./tools/repositories.js";
 import { registerMemoryTools } from "./tools/memory.js";
 import { registerSecretsTools, type SecretElicitationUrlBuilder } from "./tools/secrets.js";
 import { registerWebhookTools } from "./tools/webhooks.js";
@@ -79,6 +88,7 @@ export function registerAllTools(
   registerRunTools(mcp);
   registerDatastoreTools(mcp);
   registerSubAgentTools(mcp);
+  registerRepositoryTools(mcp);
   registerMemoryTools(mcp);
   registerSecretsTools(mcp, {
     buildElicitationUrl: opts.secretElicitationUrl,
@@ -106,6 +116,7 @@ export function buildMcpProviders(): McpProviderComposition {
   const secrets = buildSecretCipher(providerConfig);
   const datastore = new PostgresDatastore(prisma, secrets);
   const memory = new PostgresAgentMemory(prisma);
+  const reviewHosts = buildReviewHosts();
   // `nativeProviders` is passed by reference into buildExecutor, and native
   // runs it drives read `this.providers.executor` at call time (not at
   // construction time) — so patching `.executor` on afterward, once the
@@ -114,14 +125,12 @@ export function buildMcpProviders(): McpProviderComposition {
   // through the same composed executor everything else uses. There's no
   // way to hand the native executor a reference to its own wrapping
   // RoutingExecutor before that wrapper is constructed.
-  const nativeProviders: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory"> & {
-    executor?: ProviderRegistry["executor"];
-  } = { llm, engine, datastore, secrets, memory };
+  const nativeProviders: NativeRunProviders = { llm, engine, datastore, secrets, memory, reviewHosts };
   const nativeExecutor = buildExecutor(providerConfig, nativeProviders, prisma);
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig });
   nativeProviders.executor = executor;
 
-  return { providers: { llm, engine, datastore, secrets, executor, memory } };
+  return { providers: { llm, engine, datastore, secrets, executor, memory, reviewHosts } };
 }
 
 /** Handle returned by `startMcp()` — closes the running transport, then the executor. */
@@ -219,6 +228,30 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
   });
 
+  const eventConfig = loadGitHubEventConfig();
+  const githubConfig = loadGitHubVcsConfig();
+  const reviewHosts = providers.reviewHosts;
+  const hostEvents =
+    eventConfig.webhookSecret && reviewHosts?.github && githubConfig.appId && githubConfig.privateKey
+      ? {
+          github: {
+            db: prisma,
+            executor: providers.executor,
+            hosts: reviewHosts,
+            webhookSecret: eventConfig.webhookSecret,
+            appIdentity: (() => {
+              const client = new GitHubAppClient({
+                appId: githubConfig.appId,
+                privateKey: githubConfig.privateKey,
+                apiVersion: githubConfig.apiVersion,
+              });
+              return () => client.appIdentity();
+            })(),
+          },
+        }
+      : undefined;
+  mcpLog.info({ enabled: Boolean(hostEvents) }, "GitHub host events ingress");
+
   const http = await startHttpServer({
     mcp,
     config: {
@@ -230,6 +263,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     },
     auth: { authProvider, db: prisma, providers },
     selfHosted,
+    hostEvents,
   });
   const cleanupTimer = selfHosted
     ? setInterval(() => {

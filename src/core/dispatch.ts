@@ -14,10 +14,13 @@ const dispatchLog = logger.child({ module: "dispatch" });
 
 export type DispatchDb = Pick<
   PrismaClient,
-  "agent" | "run" | "codingRun" | "task" | "webhook" | "$transaction" | "$queryRaw"
+  "agent" | "run" | "runHostCheck" | "codingRun" | "task" | "webhook" | "$transaction" | "$queryRaw"
 >;
 
-type DispatchTx = Pick<Prisma.TransactionClient, "agent" | "run" | "codingRun" | "task" | "webhook" | "$queryRaw">;
+export type DispatchTx = Pick<
+  Prisma.TransactionClient,
+  "agent" | "run" | "runHostCheck" | "codingRun" | "task" | "webhook" | "$queryRaw"
+>;
 
 type DispatchAgent = Prisma.AgentGetPayload<{ include: { codingProfile: true } }>;
 
@@ -43,6 +46,12 @@ export interface DispatchRunOptions {
   lockAgent?: boolean;
   task?: { principalId: string; ttlMs: number };
   beforePersist?: (tx: DispatchTx, agent: DispatchAgent) => Promise<boolean>;
+  /**
+   * Runs inside the persist transaction right after the run row is created,
+   * before the executor is started — for rows that must exist before the run
+   * can observe them (e.g. RunHostCheck, see core/host-events.ts).
+   */
+  afterPersist?: (tx: DispatchTx, run: Run) => Promise<void>;
   /** Sub-agent dispatch (see AgentSubAgent): links this run into a run tree. */
   parentRunId?: string;
   grantedParentMemoryKeys?: string[];
@@ -174,6 +183,8 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             taskOverride: options.taskOverride,
           },
         });
+
+        if (options.afterPersist) await options.afterPersist(tx, run);
 
         if (agent.kind === "coding") {
           if (!agent.codingProfile) throw new Error(`Coding agent "${agent.id}" has no coding profile.`);

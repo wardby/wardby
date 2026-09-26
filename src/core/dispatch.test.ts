@@ -421,6 +421,28 @@ describe("dispatchRun", () => {
     });
   });
 
+  it("runs afterPersist inside the transaction before the executor starts", async () => {
+    const state = fakeDb(nativeAgent());
+    const order: string[] = [];
+    const executor: Executor = {
+      start: async () => void order.push("start"),
+      async stop() {},
+    };
+
+    await dispatchRun({
+      db: state.db,
+      executor,
+      agentId: "agent_1",
+      trigger: "host_event",
+      taskOverride: "Review pull request #7",
+      afterPersist: async (_tx, run) => {
+        order.push(`after:${run.trigger}`);
+      },
+    });
+
+    expect(order).toEqual(["after:host_event", "start"]);
+  });
+
   it("does not persist or launch when a transactional claim is no longer valid", async () => {
     const state = fakeDb(nativeAgent());
     const start = vi.fn(async () => {});

@@ -46,6 +46,14 @@ describe("decideSeed", () => {
     expect(decision.action).toBe("error");
     expect(decision.message).toContain("GITHUB_APP_PRIVATE_KEY");
   });
+
+  it("generates a webhook secret when none exists yet", () => {
+    expect(decideSeed(entry("github-app-webhook-secret"), { hasVersion: false, generate: () => "g" })).toEqual({
+      action: "add",
+      from: "generated",
+      value: "g",
+    });
+  });
 });
 
 describe("generateHexKey", () => {
@@ -98,7 +106,7 @@ describe("seed", () => {
     const values = [...Object.values(fullEnv), "b".repeat(64), "c".repeat(64)];
     for (const call of calls) for (const value of values) expect(call.args.join(" ")).not.toContain(value);
     const added = calls.filter((c) => c.args.includes("add"));
-    expect(added).toHaveLength(7);
+    expect(added).toHaveLength(8);
     expect(added.every((c) => c.args.includes("--data-file=-") && typeof c.input === "string")).toBe(true);
   });
 

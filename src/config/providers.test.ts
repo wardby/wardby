@@ -4,6 +4,7 @@ import {
   loadProviderConfig,
   loadMcpConfig,
   loadGitHubVcsConfig,
+  loadGitHubEventConfig,
   loadDbosConfig,
   loadCodingConcurrencyConfig,
   loadKubernetesJobConfig,
@@ -269,5 +270,27 @@ describe("loadKubernetesJobConfig", () => {
     expect(() => loadKubernetesJobConfig({ KUBERNETES_READY_TIMEOUT_MS: "10" })).toThrow(
       "KUBERNETES_READY_TIMEOUT_MS must be an integer between 1000 and 900000.",
     );
+  });
+});
+
+describe("loadGitHubEventConfig", () => {
+  const VALID = "0123456789abcdef0123";
+
+  it("is disabled when unset, empty, or whitespace", () => {
+    expect(loadGitHubEventConfig({})).toEqual({ webhookSecret: undefined });
+    expect(loadGitHubEventConfig({ GITHUB_APP_WEBHOOK_SECRET: "" })).toEqual({ webhookSecret: undefined });
+    expect(loadGitHubEventConfig({ GITHUB_APP_WEBHOOK_SECRET: "   \n" })).toEqual({ webhookSecret: undefined });
+  });
+
+  it("trims and passes a valid secret through", () => {
+    expect(loadGitHubEventConfig({ GITHUB_APP_WEBHOOK_SECRET: VALID })).toEqual({ webhookSecret: VALID });
+    expect(loadGitHubEventConfig({ GITHUB_APP_WEBHOOK_SECRET: `  ${VALID}\n` })).toEqual({ webhookSecret: VALID });
+  });
+
+  it("throws on a secret shorter than 20 characters after trimming", () => {
+    expect(() => loadGitHubEventConfig({ GITHUB_APP_WEBHOOK_SECRET: "short-secret" })).toThrow(
+      "GITHUB_APP_WEBHOOK_SECRET must be at least 20 characters.",
+    );
+    expect(() => loadGitHubEventConfig({ GITHUB_APP_WEBHOOK_SECRET: ` ${VALID.slice(0, 19)} ` })).toThrow();
   });
 });

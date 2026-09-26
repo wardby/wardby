@@ -10,8 +10,14 @@
 import type { Principal, PrismaClient } from "#prisma";
 import type { RequestStateAccessor } from "@modelcontextprotocol/server";
 import type { ProviderRegistry } from "../providers/index.js";
+import type { ReviewHostRegistry } from "../providers/review-host/types.js";
 
-export type McpProviders = Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "executor" | "memory">;
+export type McpProviders = Pick<
+  ProviderRegistry,
+  "llm" | "engine" | "datastore" | "secrets" | "executor" | "memory"
+> & {
+  reviewHosts?: ReviewHostRegistry;
+};
 
 export interface McpRequestContext {
   principal: Principal;

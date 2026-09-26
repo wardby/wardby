@@ -10,6 +10,7 @@ import type { McpProviders } from "../context.js";
 import { authenticate, protectedResourceMetadata } from "../auth/resource-server.js";
 import { McpError } from "../errors.js";
 import { handleWebhookIngress } from "../webhooks/ingress.js";
+import { handleGitHubEventIngress, type GitHubIngressDeps } from "../host-events/github-ingress.js";
 import { canonicalUrl, HTTP_LIMITS, HttpBoundaryError, parseBody, readBody } from "./http-limits.js";
 import { browserHandler } from "../auth/self-hosted/browser.js";
 import { handleSecretElicitationForm, SECRET_ELICITATION_PATH } from "../tools/secret-elicitation-form.js";
@@ -30,6 +31,8 @@ export interface StartHttpServerOptions {
   config: HttpServerConfig;
   auth: { authProvider: AuthProvider; db: PrismaClient; providers: McpProviders };
   selfHosted?: SelfHostedAuthProvider;
+  /** Code-review host webhooks; absent = the endpoints answer 404. */
+  hostEvents?: { github?: GitHubIngressDeps };
 }
 export interface HttpServerHandle {
   port: number;
@@ -105,6 +108,7 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), HTTP_LIMITS.requestMs);
     let body: unknown;
+    let rawBody: string | undefined;
     try {
       const hasBody =
         req.method === "POST" ||
@@ -114,8 +118,11 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
         req.headers["transfer-encoding"];
       if (hasBody) {
         const limit =
-          url.pathname === "/mcp" || url.pathname.startsWith("/webhooks/") ? HTTP_LIMITS.json : HTTP_LIMITS.auth;
+          url.pathname === "/mcp" || url.pathname.startsWith("/webhooks/") || url.pathname.startsWith("/hosts/")
+            ? HTTP_LIMITS.json
+            : HTTP_LIMITS.auth;
         const raw = await readBody(req, limit, controller.signal);
+        rawBody = raw;
         body = parseBody(raw, req.headers["content-type"]);
       }
     } finally {
@@ -162,6 +169,19 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
         opts.auth.providers.executor,
       );
       sendJson(res, result.status, result.body);
+      return;
+    }
+    if (url.pathname === "/hosts/github/events" && req.method === "POST") {
+      if (!opts.hostEvents?.github) {
+        sendJson(res, 404, { error: "not_found" });
+        return;
+      }
+      const headers = Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v[0] : v]));
+      const result = await handleGitHubEventIngress({ headers, rawBody: rawBody ?? "" }, opts.hostEvents.github);
+      sendJson(res, result.status, result.body);
+      if (result.afterResponse) {
+        void result.afterResponse().catch((err: unknown) => httpLog.warn({ err }, "host event follow-up failed"));
+      }
       return;
     }
     if (url.pathname === "/mcp") {

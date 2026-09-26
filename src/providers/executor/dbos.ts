@@ -15,10 +15,9 @@
 
 import { DBOS, Error as DbosErrors } from "@dbos-inc/dbos-sdk";
 import type { PrismaClient } from "#prisma";
-import type { ProviderRegistry } from "../index.js";
 import type { DbosConfig } from "../../config/providers.js";
 import type { StepRunner } from "../engine/types.js";
-import { executeRun, RunCancelledError, type RunnerDb } from "../../core/runner.js";
+import { executeRun, RunCancelledError, type NativeRunProviders, type RunnerDb } from "../../core/runner.js";
 import { markRunFailedFromExecutorError } from "../../core/dispatch.js";
 import { prisma as defaultDb } from "../../core/db.js";
 import { HEARTBEAT_INTERVAL_MS } from "../../core/timing.js";
@@ -35,7 +34,7 @@ export const DBOS_BACKEND = "dbos";
 
 const dbosLog = logger.child({ module: "dbos-executor" });
 
-type Providers = Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory">;
+type Providers = NativeRunProviders;
 type Db = RunnerDb & Pick<PrismaClient, "run">;
 
 /** The executor whose deps the registered workflow uses. Set by launch(). */
