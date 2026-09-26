@@ -122,6 +122,8 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
   mcp.registerTool({
     name: "detach_secret",
     scope: "secrets:write",
+    description:
+      "Detaches a secret from an agent. `name` is the alias it was attached under; the secret's own name also works when no attachment has that alias.",
     inputSchema: {
       type: "object",
       properties: { agentId: { type: "string" }, name: { type: "string" } },
@@ -129,8 +131,11 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
     },
     handler: async (args: { agentId: string; name: string }, ctx) => {
       await requireOwnedAgent(ctx.db, args.agentId, ctx.principal.id);
-      await detachSecret(args.agentId, args.name, ctx.db);
-      return textResult({ detached: true });
+      const count = await detachSecret(args.agentId, args.name, ctx.db);
+      if (count === 0) {
+        throw new McpError(404, `No secret is attached to agent "${args.agentId}" as "${args.name}".`);
+      }
+      return textResult({ detached: true, count });
     },
   });
 

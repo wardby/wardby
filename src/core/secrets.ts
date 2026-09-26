@@ -73,9 +73,15 @@ export async function attachSecret(
 }
 
 /** Detaches by point-of-use name — the pair (agentId, boundName) uniquely
- *  identifies the edge; agent ownership is enforced by the caller. */
-export async function detachSecret(agentId: string, boundName: string, db: PrismaClient): Promise<void> {
-  await db.agentSecret.deleteMany({ where: { agentId, boundName } });
+ *  identifies the edge — falling back to the secret's own name when no edge
+ *  has that point-of-use name, since a secret attached under an alias is
+ *  otherwise easy to "detach" by its real name without effect. Returns how
+ *  many edges were removed; agent ownership is enforced by the caller. */
+export async function detachSecret(agentId: string, name: string, db: PrismaClient): Promise<number> {
+  const byBoundName = await db.agentSecret.deleteMany({ where: { agentId, boundName: name } });
+  if (byBoundName.count > 0) return byBoundName.count;
+  const bySecretName = await db.agentSecret.deleteMany({ where: { agentId, secret: { name } } });
+  return bySecretName.count;
 }
 
 export async function deleteSecret(secretId: string, db: PrismaClient): Promise<void> {
