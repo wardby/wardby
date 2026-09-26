@@ -240,3 +240,101 @@ describe("OsvAudit cache bounds and single-flight", () => {
     expect(queried).toEqual(["old", "live", "new"]);
   });
 });
+
+describe("OsvAudit exact versions (querybatch)", () => {
+  type Init = { method?: string; body?: string };
+  function osvBatch(
+    results: (queries: { package: { name: string }; version: string; page_token?: string }[]) => unknown[],
+    vulns: Record<string, { severity?: string; modified?: string }>,
+  ) {
+    return vi.fn(async (url: string, init?: Init) => {
+      if (url === "https://api.osv.dev/v1/querybatch") {
+        const { queries } = JSON.parse(init!.body!) as {
+          queries: { package: { name: string }; version: string; page_token?: string }[];
+        };
+        return Response.json({ results: results(queries) });
+      }
+      const id = decodeURIComponent(url.slice("https://api.osv.dev/v1/vulns/".length));
+      const vuln = vulns[id];
+      if (!vuln) return new Response("{}", { status: 404 });
+      return Response.json({ id, modified: vuln.modified ?? "m1", database_specific: { severity: vuln.severity } });
+    });
+  }
+  const versionsOf = (count: number) => Array.from({ length: count }, (_, i) => ({ name: `p${i}`, version: "1.0.0" }));
+
+  it("withholds versions with HIGH/CRITICAL advisories, one batch per 1000 versions", async () => {
+    const fetch = osvBatch(
+      (queries) =>
+        queries.map((query) =>
+          query.package.name === "p1"
+            ? {
+                vulns: [
+                  { id: "GHSA-high", modified: "m1" },
+                  { id: "GHSA-low", modified: "m1" },
+                ],
+              }
+            : query.package.name === "p1500"
+              ? { vulns: [{ id: "GHSA-crit", modified: "m1" }] }
+              : {},
+        ),
+      { "GHSA-high": { severity: "HIGH" }, "GHSA-low": { severity: "LOW" }, "GHSA-crit": { severity: "CRITICAL" } },
+    );
+    const withheld = await new OsvAudit({ fetch, failOpen: false }).auditVersions(npmAdapter, versionsOf(1501));
+    expect([...withheld]).toEqual([
+      ["p1@1.0.0", ["GHSA-high"]],
+      ["p1500@1.0.0", ["GHSA-crit"]],
+    ]);
+    const batches = fetch.mock.calls.filter(([url]) => url.endsWith("/querybatch"));
+    expect(batches.map(([, init]) => JSON.parse(init!.body!).queries.length)).toEqual([1000, 501]);
+    expect(JSON.parse(batches[0][1]!.body!).queries[0]).toEqual({
+      package: { name: "p0", ecosystem: "npm" },
+      version: "1.0.0",
+    });
+  });
+
+  it("follows a result's next page, and caches severities by id and modified time", async () => {
+    let modified = "m1";
+    const fetch = osvBatch(
+      (queries) =>
+        queries.map((query) =>
+          query.page_token
+            ? { vulns: [{ id: "GHSA-page2", modified }] }
+            : { vulns: [{ id: "GHSA-page1", modified }], next_page_token: "t" },
+        ),
+      { "GHSA-page1": { severity: "LOW" }, "GHSA-page2": { severity: "HIGH" } },
+    );
+    const audit = new OsvAudit({ fetch, failOpen: false });
+    expect([...(await audit.auditVersions(npmAdapter, versionsOf(1)))]).toEqual([["p0@1.0.0", ["GHSA-page2"]]]);
+    await audit.auditVersions(npmAdapter, versionsOf(1));
+    const vulnCalls = () => fetch.mock.calls.filter(([url]) => url.includes("/v1/vulns/")).length;
+    expect(vulnCalls()).toBe(2);
+    modified = "m2";
+    await audit.auditVersions(npmAdapter, versionsOf(1));
+    expect(vulnCalls()).toBe(4);
+  });
+
+  it("fails closed on any OSV failure or a mismatched answer, unless configured to fail open", async () => {
+    const down = vi.fn(async () => new Response("", { status: 500 }));
+    await expect(
+      new OsvAudit({ fetch: down, failOpen: false }).auditVersions(npmAdapter, versionsOf(2)),
+    ).rejects.toMatchObject({
+      status: 503,
+      code: "wardby_audit_unavailable",
+    });
+    const short = osvBatch(() => [{}], {});
+    await expect(
+      new OsvAudit({ fetch: short, failOpen: false }).auditVersions(npmAdapter, versionsOf(2)),
+    ).rejects.toMatchObject({
+      code: "wardby_audit_unavailable",
+    });
+    const noDetail = osvBatch((queries) => queries.map(() => ({ vulns: [{ id: "GHSA-gone", modified: "m" }] })), {});
+    await expect(
+      new OsvAudit({ fetch: noDetail, failOpen: false }).auditVersions(npmAdapter, versionsOf(1)),
+    ).rejects.toMatchObject({
+      code: "wardby_audit_unavailable",
+    });
+    expect(await new OsvAudit({ fetch: down, failOpen: true }).auditVersions(npmAdapter, versionsOf(2))).toEqual(
+      new Map(),
+    );
+  });
+});

@@ -422,8 +422,10 @@ model CodingRun {
   rootCodingRun   CodingRun?  @relation("CodingRunContinuation", fields: [rootCodingRunId], references: [runId])
   continuations   CodingRun[] @relation("CodingRunContinuation")
 
-  registryAllowances RegistryAllowance[]
-  registryFetches    RegistryFetch[]
+  registryAllowances       RegistryAllowance[]
+  registryFetches          RegistryFetch[]
+  registryApprovedVersions RegistryApprovedVersion[]
+  registryPlanRefusals     RegistryPlanRefusal[]
 
   @@index([jobBackend, jobHandle])
   @@index([failureCategory])
@@ -529,6 +531,56 @@ model RegistryFetch {
   run       CodingRun            @relation(fields: [runId], references: [runId], onDelete: Cascade)
 
   @@index([runId, createdAt])
+}
+
+/// Immutable facts about one published package version, read from the
+/// registry itself (never from a lockfile) by lockfile verification: its
+/// publish time, integrity, download URL and declared dependencies
+/// ([{ key, name, range }], aliases resolved). Stored once and reused
+/// forever; allow/deny decisions are never cached here.
+model RegistryVersionFact {
+  ecosystem    String
+  name         String
+  version      String
+  publishedAt  DateTime
+  integrity    String
+  downloadUrl  String
+  dependencies Json
+  createdAt    DateTime @default(now())
+
+  @@id([ecosystem, name, version])
+}
+
+/// One exact package version a run's lockfile plan (POST
+/// /registry/<ecosystem>/-/plan) verified and approved: a download of it is
+/// served directly, integrity-checked against this value.
+model RegistryApprovedVersion {
+  runId     String
+  ecosystem String
+  name      String
+  version   String
+  integrity String
+  createdAt DateTime  @default(now())
+  run       CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
+
+  @@id([runId, ecosystem, name, version])
+}
+
+/// One exact package version a run's lockfile plan definitively refused
+/// (too new, an advisory, an integrity mismatch, unreachable, ...): a
+/// download of it is answered from here with the same code and reason,
+/// without a graph walk.
+model RegistryPlanRefusal {
+  runId     String
+  ecosystem String
+  name      String
+  version   String
+  code      String
+  reason    String
+  createdAt DateTime  @default(now())
+  run       CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
+
+  @@id([runId, ecosystem, name, version])
 }
 
 /// Phase 2: single-row-per-scope lease so exactly one scheduler process

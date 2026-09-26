@@ -10,6 +10,7 @@
  */
 import { createHash } from "node:crypto";
 import { matchRoot, parseAllowlist, resolvePolicy } from "../../../coding/registry/allowlist.js";
+import { PLAN_REFUSAL_FILENAME } from "../../../coding/registry/report.js";
 import {
   RegistryError,
   type AllowlistEntry,
@@ -17,6 +18,8 @@ import {
   type DownloadRoute,
   type FileMetadataRoute,
   type FileRef,
+  type Integrity,
+  type LockfilePlanSupport,
   type PackageMetadata,
   type RegistryAdapter,
   type RegistryRoute,
@@ -25,6 +28,7 @@ import {
 import { capabilityHash } from "../proxy.js";
 import type { OsvAudit } from "./audit.js";
 import { boundedMetadataFetch, DEFAULT_MAX_METADATA_BYTES, DEFAULT_METADATA_TIMEOUT_MS } from "./bounded-fetch.js";
+import { DEFAULT_PLAN_MAX_ENTRIES, DEFAULT_PLAN_TIMEOUT_MS, verifyLockfilePlan, type PlanRefusal } from "./plan.js";
 import type { RegistryRunContext, RegistryStore } from "./store.js";
 
 const DAY_MS = 86_400_000;
@@ -53,6 +57,21 @@ const MAX_GRAPH_NODE_ATTEMPTS = 4;
 /** RegistryErrors that are a definitive answer about a package (it has no
  *  dependencies the run can use), not a transient failure to retry. */
 const DEFINITIVE_NODE_ERRORS = new Set(["wardby_package_not_found", "wardby_metadata_too_large"]);
+
+/** Largest per-version document read from upstream for lockfile
+ *  verification (they are a few KB). */
+const MAX_VERSION_DOCUMENT_BYTES = 4 * 1024 * 1024;
+/** Plan refusal codes that are not a verdict on the version (a registry
+ *  read failed), so a later download of it is not answered from the plan. */
+const TRANSIENT_PLAN_CODES = new Set(["wardby_upstream_error"]);
+/** Lockfile plans verified at once across every run. */
+const PLAN_CONCURRENCY = 2;
+/** The `filename` of a refused RegistryFetch row a lockfile plan recorded
+ *  (the route it came from), which is how get_run tells plan refusals from
+ *  download refusals. */
+export const PLAN_FETCH_FILENAME = PLAN_REFUSAL_FILENAME;
+/** Largest lockfile a plan reads (the HTTP layer enforces it: 413). */
+export const MAX_PLAN_BODY_BYTES = 20 * 1024 * 1024;
 
 /** Why a graph node could not be expanded: its OSV audit or its upstream
  *  metadata was unavailable. */
@@ -170,6 +189,15 @@ interface RunTally {
   served?: { files: number; bytes: number };
   /** On-demand dependency-graph walks, keyed by ecosystem. */
   graphs?: Map<string, GraphWalk>;
+  /** A lockfile plan is running for the run: one at a time per run, so a
+   *  worker cannot queue many (each holds its parsed lockfile). */
+  planning?: boolean;
+  /** Downloads answered from a plan refusal already recorded, so a
+   *  retried download records its refusal once. */
+  planAnswered?: Set<string>;
+  /** Plan refusals already recorded (`ecosystem\0name@version\0code`), so
+   *  a lockfile planned again records each refusal once. */
+  planRefusals?: Set<string>;
 }
 export type RegistryResponse =
   | { status: number; contentType: string; body: string }
@@ -179,6 +207,13 @@ export interface RegistryRequest {
   ecosystem: string;
   subpath: string;
   token: string;
+  signal: AbortSignal;
+}
+export interface RegistryPlanRequest {
+  ecosystem: string;
+  token: string;
+  /** The lockfile, as sent (at most MAX_PLAN_BODY_BYTES). */
+  body: string;
   signal: AbortSignal;
 }
 
@@ -249,6 +284,21 @@ function isPackageName(adapter: RegistryAdapter, name: string): boolean {
   }
 }
 
+/** The strongest supported hash of an SRI integrity string (`sha512-…`,
+ *  possibly several space-separated), or null when it has none. */
+export function parseSri(value: string): Integrity | null {
+  const order: Integrity["algorithm"][] = ["sha512", "sha384", "sha256", "sha1"];
+  let best: Integrity | null = null;
+  for (const token of value.trim().split(/\s+/)) {
+    const match = token.match(/^(sha512|sha384|sha256|sha1)-([A-Za-z0-9+/]+={0,2})(?:\?.*)?$/);
+    if (!match) continue;
+    const algorithm = match[1] as Integrity["algorithm"];
+    if (best && order.indexOf(best.algorithm) <= order.indexOf(algorithm)) continue;
+    best = { algorithm, hex: Buffer.from(match[2], "base64").toString("hex") };
+  }
+  return best;
+}
+
 export class RegistryService {
   /** Parsed, trimmed metadata (adapters keep only the fields the proxy
    *  reads, never the upstream document), least recently used first.
@@ -276,12 +326,14 @@ export class RegistryService {
   private readonly inFlight = new Map<string, { files: number; bytes: number }>();
   private readonly tallies = new Map<string, RunTally>();
   private readonly walkSlots: Slots;
+  private readonly planSlots = new Slots(PLAN_CONCURRENCY);
+  private readonly versionUpstream: UpstreamFetch;
 
   constructor(
     private readonly options: {
       adapters: ReadonlyMap<string, RegistryAdapter>;
       store: RegistryStore;
-      audit: Pick<OsvAudit, "audit">;
+      audit: Pick<OsvAudit, "audit"> & Partial<Pick<OsvAudit, "auditVersions">>;
       upstream: UpstreamFetch;
       proxyBase: string;
       limits: RegistryLimits;
@@ -303,6 +355,10 @@ export class RegistryService {
       /** Graph-walk expansions in flight at once across every run
        *  (default 16). */
       maxGraphConcurrency?: number;
+      /** Entries a lockfile plan may have (default 5000). */
+      planMaxEntries?: number;
+      /** Time one lockfile plan may take (default 120 s). */
+      planTimeoutMs?: number;
     },
   ) {
     this.now = options.now ?? (() => new Date());
@@ -314,6 +370,130 @@ export class RegistryService {
       timeoutMs: options.metadataTimeoutMs ?? DEFAULT_METADATA_TIMEOUT_MS,
       maxBytes: options.maxMetadataBytes ?? DEFAULT_MAX_METADATA_BYTES,
     });
+    this.versionUpstream = boundedMetadataFetch(options.upstream, {
+      timeoutMs: options.metadataTimeoutMs ?? DEFAULT_METADATA_TIMEOUT_MS,
+      maxBytes: MAX_VERSION_DOCUMENT_BYTES,
+    });
+  }
+
+  /** `POST /registry/<ecosystem>/-/plan`: verifies a lockfile against the
+   *  registry and approves exactly its verified, reachable name@version
+   *  pairs for the run (plan.ts). Answers `{ approved, refused }`. */
+  async plan(request: RegistryPlanRequest): Promise<RegistryResponse> {
+    try {
+      return await this.planLockfile(request);
+    } catch (error) {
+      if (error instanceof RegistryError) return errorResponse(error);
+      return errorResponse(new RegistryError(502, "wardby_upstream_error", "the lockfile could not be verified"));
+    }
+  }
+
+  private async planLockfile(request: RegistryPlanRequest): Promise<RegistryResponse> {
+    const adapter = this.options.adapters.get(request.ecosystem);
+    if (!adapter) throw new RegistryError(404, "wardby_registry_unknown", `no registry named "${request.ecosystem}"`);
+    const context = await this.options.store.findRunByRegistryTokenHash(capabilityHash(request.token), this.now());
+    if (!context) throw new RegistryError(401, "invalid_capability", "the registry token is not valid for a live run");
+    const support = adapter.lockfilePlan;
+    const auditVersions = this.options.audit.auditVersions?.bind(this.options.audit);
+    if (!support || !auditVersions)
+      throw new RegistryError(404, "wardby_plan_unsupported", `the ${adapter.id} registry does not verify lockfiles`);
+    const tally = this.tally(context);
+    if (tally.planning)
+      throw new RegistryError(
+        429,
+        "wardby_plan_in_progress",
+        "a lockfile plan is already running for this run; wait for it to finish",
+      );
+    tally.planning = true;
+    try {
+      return await this.verifyPlan(request, adapter, support, auditVersions, context);
+    } finally {
+      tally.planning = false;
+    }
+  }
+
+  private async verifyPlan(
+    request: RegistryPlanRequest,
+    adapter: RegistryAdapter,
+    support: LockfilePlanSupport,
+    auditVersions: OsvAudit["auditVersions"],
+    context: RegistryRunContext,
+  ): Promise<RegistryResponse> {
+    const lockfile = support.parse(request.body, {
+      maxEntries: this.options.planMaxEntries ?? DEFAULT_PLAN_MAX_ENTRIES,
+      proxyRegistryUrl: `${this.options.proxyBase}${adapter.id}/`,
+    });
+    const entries = parseAllowlist(context.allowlist, this.options.adapters).get(adapter.id) ?? [];
+    const { minReleaseAgeDays } = resolvePolicy(context.policy);
+    const timeoutMs = this.options.planTimeoutMs ?? DEFAULT_PLAN_TIMEOUT_MS;
+    const signal = AbortSignal.any([AbortSignal.timeout(timeoutMs), request.signal]);
+    const store = this.options.store;
+    let result;
+    try {
+      result = await this.planSlots.run(() =>
+        verifyLockfilePlan({
+          adapter,
+          support,
+          lockfile,
+          roots: entries,
+          cutoff: new Date(this.now().getTime() - minReleaseAgeDays * DAY_MS),
+          facts: {
+            getVersionFacts: (versions) => store.getVersionFacts(adapter.id, versions),
+            putVersionFacts: (facts) => store.putVersionFacts(adapter.id, facts),
+          },
+          upstream: this.versionUpstream,
+          streamUpstream: this.options.upstream,
+          audit: (versions, auditSignal) => auditVersions(adapter, versions, auditSignal),
+          hostAllowed: (url) => this.hostAllowed(adapter, url),
+          signal,
+        }),
+      );
+    } catch (error) {
+      if (!signal.aborted) throw error;
+      // Every fact read so far is stored, so a retry resumes from there.
+      throw new RegistryError(
+        503,
+        "wardby_plan_incomplete",
+        request.signal.aborted
+          ? "the client went away before the lockfile was verified"
+          : `the lockfile was not verified within ${Math.round(timeoutMs / 1000)} s (REGISTRY_PLAN_TIMEOUT_MS); what was verified is kept, so try again`,
+      );
+    }
+    await store.approveVersions(context.runId, adapter.id, result.approved);
+    // Definitive refusals answer later downloads of those exact versions;
+    // a registry read that failed is not definitive, so those still take
+    // the usual path.
+    await store.refusePlanVersions(
+      context.runId,
+      adapter.id,
+      result.refused.filter((refusal) => !TRANSIENT_PLAN_CODES.has(refusal.code)),
+    );
+    await this.recordPlanRefusals(context, adapter, result.refused);
+    return {
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ approved: result.approved.length, refused: result.refused }),
+    };
+  }
+
+  /** One refused row per plan refusal, within the run's refusal cap, and
+   *  once per run however often the same lockfile is planned. */
+  private async recordPlanRefusals(
+    context: RegistryRunContext,
+    adapter: RegistryAdapter,
+    refused: readonly PlanRefusal[],
+  ): Promise<void> {
+    const tally = this.tally(context);
+    tally.planRefusals ??= new Set();
+    for (const refusal of refused) {
+      const key = `${adapter.id}\0${refusal.name}@${refusal.version}\0${refusal.code}`;
+      if (tally.planRefusals.has(key)) continue;
+      tally.planRefusals.add(key);
+      await this.refuse(context, adapter, refusal.name.slice(0, MAX_RECORDED_NAME), refusal.code, {
+        version: refusal.version,
+        filename: PLAN_FETCH_FILENAME,
+      });
+    }
   }
 
   async handle(request: RegistryRequest): Promise<RegistryResponse> {
@@ -344,6 +524,53 @@ export class RegistryService {
     if (!route) throw new RegistryError(404, "wardby_route_unknown", "unknown registry path");
 
     const name = adapter.normalizeName(route.name);
+    if (route.kind === "download") {
+      // A version the run's lockfile plan approved is served as it stands:
+      // no allowlist lookup, no graph walk, integrity checked against the
+      // approved value.
+      const approved = await this.options.store.findApprovedVersion(context.runId, adapter.id, name, route.version);
+      const integrity = approved ? parseSri(approved.integrity) : null;
+      if (approved && integrity) {
+        const file: FileRef = {
+          filename: route.filename,
+          version: route.version,
+          upstreamUrl: approved.downloadUrl,
+          integrity,
+          sizeBytes: null,
+          allowed: true,
+          publishedAt: null,
+        };
+        if (!this.hostAllowed(adapter, file.upstreamUrl)) {
+          await this.refuse(context, adapter, name, "wardby_upstream_host_not_allowed", file);
+          throw new RegistryError(
+            502,
+            "wardby_upstream_host_not_allowed",
+            `"${file.filename}" is hosted outside the ${adapter.id} registry's upstreams`,
+          );
+        }
+        if (request.method === "HEAD") return { status: 200, contentType: contentTypeOf(route), body: "" };
+        return this.download(adapter, context, name, route, file, request.signal);
+      }
+      // A version the plan definitively refused is answered from the plan,
+      // with its code and reason: no metadata, no graph walk.
+      const refused = approved
+        ? null
+        : await this.options.store.findPlanRefusal(context.runId, adapter.id, name, route.version);
+      if (refused) {
+        const tally = this.tally(context);
+        tally.planAnswered ??= new Set();
+        const key = `${adapter.id}\0${name}@${route.version}\0${refused.code}`;
+        if (!tally.planAnswered.has(key)) {
+          tally.planAnswered.add(key);
+          await this.refuse(context, adapter, name, refused.code, { version: route.version, filename: route.filename });
+        }
+        throw new RegistryError(
+          403,
+          refused.code,
+          `"${name}" ${route.version} was refused by this run's lockfile verification: ${refused.reason}`,
+        );
+      }
+    }
     const root = await this.authorize(adapter, context, name);
     let meta: PackageMetadata;
     try {
@@ -859,7 +1086,7 @@ export class RegistryService {
     adapter: RegistryAdapter,
     name: string,
     reason: string,
-    file?: FileRef,
+    file?: Pick<FileRef, "version" | "filename">,
   ) {
     const tally = this.tally(context);
     if (tally.refused === undefined) {

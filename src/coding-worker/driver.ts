@@ -85,11 +85,16 @@ function boundedPrompt(task: string, runId: string): string {
   return `Complete this software-engineering task in the current workspace.\n\nTask:\n${task}\n\nThe final JSON runId must be ${runId}.`;
 }
 
+/** Where the driver image installs Wardby's own command shims (the npm
+ *  shim that verifies a lockfile before an install: npm-shim.mjs), ahead of
+ *  the real tools on the agent's PATH. */
+export const WORKER_SHIM_DIRECTORY = "/opt/wardby/bin";
+
 function workerEnvironment(): Record<string, string> {
   return {
     HOME: "/home/wardby",
     LANG: "C.UTF-8",
-    PATH: "/usr/local/bin:/usr/bin:/bin",
+    PATH: `${WORKER_SHIM_DIRECTORY}:/usr/local/bin:/usr/bin:/bin`,
     TMPDIR: "/tmp",
   };
 }

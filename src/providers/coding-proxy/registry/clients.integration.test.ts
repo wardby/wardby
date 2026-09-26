@@ -18,7 +18,7 @@
  */
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -155,7 +155,17 @@ async function startTestRegistry(
   const registry = new RegistryService({
     adapters: REGISTRY_ADAPTERS,
     store,
-    audit: new OsvAudit({ fetch: async () => Response.json({ vulns: [] }), failOpen: true }),
+    // No advisories: `/v1/query` answers no vulns, `/v1/querybatch` one
+    // empty result per query. Fail closed, as in production.
+    audit: new OsvAudit({
+      fetch: async (url, init) =>
+        url.endsWith("/querybatch")
+          ? Response.json({
+              results: (JSON.parse(init?.body ?? "{}") as { queries: unknown[] }).queries.map(() => ({})),
+            })
+          : Response.json({ vulns: [] }),
+      failOpen: false,
+    }),
     upstream,
     proxyBase: `http://127.0.0.1:${port}/registry/`,
     limits: { maxFileBytes: 50 * 1024 * 1024, maxTotalBytes: 200 * 1024 * 1024, maxFiles: 100, idleTimeoutMs: 30_000 },
@@ -319,6 +329,91 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
         .sort(),
     ).toEqual(["wardby-lock-child", "wardby-lock-root"]);
     expect(await store.isAllowedDependency("client-integration-run", "npm", "wardby-lock-child")).toBe(true);
+  });
+
+  it("verifies a committed package-lock.json through the npm shim, then installs the approved versions without a walk", async () => {
+    // The worker's npm is the driver image's shim (npm-shim.mjs, linked as
+    // npm ahead of the real one on PATH): `npm ci` first sends the lockfile
+    // to POST /-/plan, which checks every entry against the (fake) registry
+    // and approves its exact versions, so the tarball requests that follow
+    // are served from the approvals, with no graph walk (no allowances).
+    const fixtureDir = new URL("./fixtures/npm-lockfile/", import.meta.url);
+    const lock = JSON.parse(await readFile(new URL("package-lock.json", fixtureDir), "utf8"));
+    const routes = new Map<string, () => Response>();
+    const published = "2020-01-01T00:00:00.000Z";
+    for (const [key, entry] of Object.entries(lock.packages as Record<string, Record<string, unknown>>)) {
+      if (!key) continue;
+      const name = key.slice("node_modules/".length);
+      const version = entry.version as string;
+      const resolved = entry.resolved as string;
+      const bytes = await readFile(new URL(`${name}-${version}.tgz`, fixtureDir));
+      const manifest = {
+        name,
+        version,
+        dependencies: entry.dependencies,
+        dist: { tarball: resolved, integrity: entry.integrity },
+      };
+      routes.set(resolved, () => new Response(bytes));
+      routes.set(`https://registry.npmjs.org/${name}/${version}`, () => Response.json(manifest));
+      routes.set(`https://registry.npmjs.org/${name}`, () =>
+        Response.json({
+          name,
+          "dist-tags": { latest: version },
+          versions: { [version]: manifest },
+          time: { [version]: published },
+        }),
+      );
+    }
+    const {
+      server,
+      store,
+      token,
+      registryUrl: registryUrlFor,
+    } = await startTestRegistry({ npm: ["wardby-lock-root"] }, routes);
+    cleanups.push(() => server.close());
+
+    const cacheDir = await tmpDir("wardby-npm-cache-shim-");
+    const projectDir = await tmpDir("wardby-npm-proj-shim-");
+    const shimDir = await tmpDir("wardby-npm-shim-bin-");
+    cleanups.push(() => rm(cacheDir, { recursive: true, force: true }));
+    cleanups.push(() => rm(projectDir, { recursive: true, force: true }));
+    cleanups.push(() => rm(shimDir, { recursive: true, force: true }));
+    for (const file of ["package.json", "package-lock.json"])
+      await writeFile(join(projectDir, file), await readFile(new URL(file, fixtureDir)));
+    // As Dockerfile.driver installs it.
+    await copyFile(new URL("../../../coding-worker/npm-shim.mjs", import.meta.url), join(shimDir, "npm-shim.mjs"));
+    await chmod(join(shimDir, "npm-shim.mjs"), 0o755);
+    await symlink("npm-shim.mjs", join(shimDir, "npm"));
+
+    const registryUrl = registryUrlFor("npm");
+    const config = npmAdapter.workerConfig({ registryUrl, token, cacheDir });
+    for (const file of config.files) await writeFile(file.path, file.content, { mode: file.mode });
+
+    const result = await run(join(shimDir, "npm"), ["ci", "--cache", join(cacheDir, "cache")], {
+      cwd: projectDir,
+      env: { ...process.env, ...config.env, PATH: `${shimDir}:${process.env.PATH ?? ""}` },
+    });
+    expect(result.code, `npm stderr:\n${result.stderr}`).toBe(0);
+    expect(result.stderr).toContain("wardby: verified package-lock.json: 2 approved, 0 refused");
+
+    for (const name of ["wardby-lock-root", "wardby-lock-child"]) {
+      const installed = JSON.parse(await readFile(join(projectDir, "node_modules", name, "package.json"), "utf8"));
+      expect(installed).toMatchObject({ name, version: "1.0.0" });
+    }
+    expect([...store.approvals.values()].map((approval) => approval.name).sort()).toEqual([
+      "wardby-lock-child",
+      "wardby-lock-root",
+    ]);
+    const fetches = await store.listFetches("client-integration-run");
+    expect(fetches.filter((fetch) => fetch.outcome === "refused")).toEqual([]);
+    expect(
+      fetches
+        .filter((fetch) => fetch.outcome === "served")
+        .map((fetch) => fetch.name)
+        .sort(),
+    ).toEqual(["wardby-lock-child", "wardby-lock-root"]);
+    // No graph walk ran: it would have recorded the child as an allowance.
+    expect(store.allowances.size).toBe(0);
   });
 
   it("refuses a package not on the allowlist and surfaces the reason to npm", async () => {

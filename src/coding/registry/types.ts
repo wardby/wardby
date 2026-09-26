@@ -122,11 +122,103 @@ export interface RenderedDocument {
 }
 
 /** The pinned upstream client: HTTPS only, adapter's upstreamHosts only,
- *  no redirects, no private addresses. */
+ *  no redirects, no private addresses. `acceptEncoding: "gzip"` asks for a
+ *  compressed body, which the caller then decompresses itself (the pinned
+ *  client never does). */
 export type UpstreamFetch = (
   url: string,
-  init?: { method?: "GET" | "POST"; body?: string; accept?: string; signal?: AbortSignal },
+  init?: { method?: "GET" | "POST"; body?: string; accept?: string; acceptEncoding?: "gzip"; signal?: AbortSignal },
 ) => Promise<Response>;
+
+/** One declared dependency as a lockfile or registry manifest writes it:
+ *  the folder it installs into (`key`, an alias's own name), the registry
+ *  package it installs (`name`, the alias target) and the range it asks
+ *  for (`"*"` for a dist-tag or empty spec). */
+export interface DeclaredDependency {
+  key: string;
+  name: string;
+  range: string;
+}
+
+/** One installed package a lockfile claims, where it installs it. None of
+ *  it is trusted: the plan verifies every registry entry against the
+ *  registry itself. */
+export interface LockfileEntry {
+  /** Where the lockfile installs it (npm: `node_modules/a/node_modules/b`). Unique. */
+  path: string;
+  /** The registry package (an alias's target), as the lockfile claims it. */
+  name: string;
+  version: string;
+  /** The lockfile's integrity string, or null when it records none. */
+  integrity: string | null;
+  /** `registry`: fetched from the registry (verified, then approved or
+   *  refused). `bundled`: shipped inside its parent's own tarball, never
+   *  fetched, so neither. `unsupported`: fetched from somewhere other than
+   *  the registry (git, a URL, a path) or unreadable; always refused. */
+  kind: "registry" | "bundled" | "unsupported";
+  /** Why an `unsupported` entry is refused. */
+  unsupportedReason?: string;
+}
+
+/** A parsed lockfile: its entries, the projects whose declared
+ *  dependencies are where reachability starts (the root, workspaces), and
+ *  the client's own rule for which entry a declared dependency uses. */
+export interface ParsedLockfile {
+  entries: readonly LockfileEntry[];
+  projects: readonly { path: string; dependencies: readonly DeclaredDependency[] }[];
+  /** The entry that `key`, declared by the package at `fromPath`, resolves
+   *  to (npm: the nearest ancestor `node_modules/<key>`), or undefined
+   *  (not installed, or a local project). */
+  resolve(fromPath: string, key: string): LockfileEntry | undefined;
+}
+
+/** Immutable facts about one published version, read from the registry
+ *  itself (never from a lockfile): stored once, reused forever. */
+export interface VersionFact {
+  name: string;
+  version: string;
+  /** Null only while being assembled: a fact is stored only with a publish time. */
+  publishedAt: Date | null;
+  /** The registry's integrity string (npm: `dist.integrity`, an SRI). */
+  integrity: string;
+  downloadUrl: string;
+  /** Every registry dependency the version declares (npm: dependencies,
+   *  optionalDependencies and peerDependencies, aliases resolved). */
+  dependencies: readonly DeclaredDependency[];
+}
+
+/** An ecosystem's lockfile verification hooks (`POST /-/plan`): parsing and
+ *  registry reads only. Every decision (integrity, edges, reachability,
+ *  release age, advisories) is the registry core's. */
+export interface LockfilePlanSupport {
+  /** Parse a lockfile. Throws a RegistryError for one it cannot verify
+   *  (unsupported version: 400 `wardby_lockfile_unsupported`; invalid:
+   *  400 `wardby_bad_request`; more than `maxEntries` entries: 413
+   *  `wardby_lockfile_too_large`). `proxyRegistryUrl` is the proxy's own
+   *  route for this ecosystem, which a lockfile written through it records
+   *  as the download source. */
+  parse(body: string, options: { maxEntries: number; proxyRegistryUrl: string }): ParsedLockfile;
+  /** The registry's own record of one version, without its publish time;
+   *  null when the registry has no such version. */
+  fetchVersionFact(
+    name: string,
+    version: string,
+    upstream: UpstreamFetch,
+    signal?: AbortSignal,
+  ): Promise<VersionFact | null>;
+  /** Publish times of `versions` of one package, read by streaming the
+   *  package's full document without ever holding it. A version the
+   *  registry has no time for is absent from the result. */
+  fetchPublishTimes(
+    name: string,
+    versions: readonly string[],
+    upstream: UpstreamFetch,
+    options: { maxBytes: number; signal: AbortSignal },
+  ): Promise<Map<string, Date>>;
+  /** Whether a dependency declared as `range` accepts `version`, as the
+   *  client itself decides it when it reuses a locked version. */
+  edgeSatisfies(version: string, range: string): boolean;
+}
 
 export interface WorkerConfigInput {
   /** e.g. "http://wardby-proxy:8787/registry/npm/" */
@@ -163,6 +255,9 @@ export interface RegistryAdapter {
   /** Lockfile names this ecosystem's client writes, and a rewrite of the proxy download URLs it records in one back to
    *  public URLs, applied before the workspace is collected (lockfiles.ts). Omitted when the client records none. */
   readonly lockfiles?: { names: readonly string[]; normalize(content: string, registryUrl: string): string };
+  /** Lockfile verification (`POST /registry/<id>/-/plan`); omitted when the
+   *  ecosystem has none. */
+  readonly lockfilePlan?: LockfilePlanSupport;
 
   // --- Allowlist syntax -------------------------------------------------
   /** Parse one allowlist entry in this ecosystem's syntax. Throws an

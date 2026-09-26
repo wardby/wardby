@@ -20,6 +20,17 @@ import { RegistryError, type RegistryAdapter, type UpstreamFetch } from "../../.
 import { boundedMetadataFetch, DEFAULT_MAX_METADATA_BYTES, DEFAULT_METADATA_TIMEOUT_MS } from "./bounded-fetch.js";
 
 const OSV_QUERY = "https://api.osv.dev/v1/query";
+const OSV_QUERY_BATCH = "https://api.osv.dev/v1/querybatch";
+const OSV_VULN = "https://api.osv.dev/v1/vulns/";
+/** OSV's own limit on queries per querybatch request. */
+const OSV_BATCH_SIZE = 1000;
+/** Rounds of per-query pagination one batch follows before giving up
+ *  (fail closed): a package with that many pages of advisories is not a
+ *  real case. */
+const OSV_BATCH_MAX_PAGES = 20;
+/** Advisory details fetched at once. */
+const OSV_VULN_CONCURRENCY = 8;
+export const DEFAULT_VULN_CACHE_ENTRIES = 10_000;
 const BLOCKING = new Set(["HIGH", "CRITICAL"]);
 const RANGE_TYPES = new Set(["SEMVER", "ECOSYSTEM"]);
 
@@ -127,6 +138,18 @@ const EMPTY_INDEX: AdvisoryIndex = { withheld: () => [], reported: () => [] };
 
 export const DEFAULT_AUDIT_CACHE_ENTRIES = 5000;
 
+/** One exact package version to audit. */
+export interface AuditedVersion {
+  name: string;
+  version: string;
+}
+
+/** `name@version` -> the HIGH/CRITICAL advisory ids affecting it; a
+ *  version with none is absent. */
+export type WithheldVersions = Map<string, string[]>;
+
+export const versionKey = (name: string, version: string) => `${name}@${version}`;
+
 export class OsvAudit {
   /** Advisories per package, least recently used first. Bounded to
    *  `maxEntries`; expired entries are dropped on access and before any
@@ -134,6 +157,9 @@ export class OsvAudit {
   private readonly cache = new Map<string, { expires: number; advisories: Advisory[] }>();
   /** Single-flight: concurrent audits of one package share one OSV query. */
   private readonly loads = new Map<string, Promise<Advisory[]>>();
+  /** Advisory severities by id, with the OSV `modified` time they were
+   *  read at, least recently used first. */
+  private readonly vulns = new Map<string, { modified: string; blocking: boolean }>();
   private readonly now: () => number;
   private readonly ttlMs: number;
   private readonly maxEntries: number;
@@ -147,6 +173,8 @@ export class OsvAudit {
       ttlMs?: number;
       /** Packages kept in the advisory cache (default 5000). */
       maxEntries?: number;
+      /** Advisory severities kept for exact-version audits (default 10000). */
+      maxVulnEntries?: number;
       /** Timeout for one OSV request, body included (default 30 s). */
       timeoutMs?: number;
       /** Largest OSV response read (default 64 MiB). */
@@ -195,6 +223,117 @@ export class OsvAudit {
         `the vulnerability audit for "${name}" could not reach OSV; try again later`,
       );
     }
+  }
+
+  /** Advisories for exact versions, in as few OSV requests as possible:
+   *  one querybatch per 1000 versions (OSV matches each version itself),
+   *  then each affecting advisory's severity from /v1/vulns/{id}, cached by
+   *  id and OSV's `modified` time. Fails closed like `audit`: any failure
+   *  is a 503 wardby_audit_unavailable, unless configured to fail open. */
+  async auditVersions(
+    adapter: AuditAdapter,
+    versions: readonly AuditedVersion[],
+    signal?: AbortSignal,
+  ): Promise<WithheldVersions> {
+    try {
+      return await this.loadVersions(adapter, versions, signal);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      if (this.options.failOpen) return new Map();
+      throw new RegistryError(
+        503,
+        "wardby_audit_unavailable",
+        "the vulnerability audit of the lockfile's versions could not reach OSV; try again later",
+      );
+    }
+  }
+
+  private async loadVersions(
+    adapter: AuditAdapter,
+    versions: readonly AuditedVersion[],
+    signal?: AbortSignal,
+  ): Promise<WithheldVersions> {
+    const unique = [...new Map(versions.map((entry) => [versionKey(entry.name, entry.version), entry])).values()];
+    /** Advisory id -> its `modified` time, and the versions it affects. */
+    const found = new Map<string, { modified: string; versions: Set<string> }>();
+    for (let start = 0; start < unique.length; start += OSV_BATCH_SIZE) {
+      const chunk = unique.slice(start, start + OSV_BATCH_SIZE);
+      let pending = chunk.map((entry) => ({ entry, pageToken: undefined as string | undefined }));
+      for (let page = 0; pending.length > 0; page += 1) {
+        if (page >= OSV_BATCH_MAX_PAGES) throw new Error("osv_batch_pages");
+        const response = await this.fetch(OSV_QUERY_BATCH, {
+          method: "POST",
+          accept: "application/json",
+          signal,
+          body: JSON.stringify({
+            queries: pending.map(({ entry, pageToken }) => ({
+              package: { name: entry.name, ecosystem: adapter.osvEcosystem },
+              version: entry.version,
+              ...(pageToken ? { page_token: pageToken } : {}),
+            })),
+          }),
+        });
+        if (!response.ok) throw new Error(`osv_status_${response.status}`);
+        const body = (await response.json()) as {
+          results?: { vulns?: { id?: unknown; modified?: unknown }[]; next_page_token?: unknown }[];
+        };
+        const results = body.results ?? [];
+        // One result per query, in order: anything else cannot be matched
+        // to the versions it answers (fail closed).
+        if (results.length !== pending.length) throw new Error("osv_batch_mismatch");
+        const next: typeof pending = [];
+        results.forEach((result, index) => {
+          const key = versionKey(pending[index].entry.name, pending[index].entry.version);
+          for (const vuln of result.vulns ?? []) {
+            if (typeof vuln.id !== "string" || vuln.id === "") throw new Error("osv_batch_vuln_id");
+            const modified = typeof vuln.modified === "string" ? vuln.modified : "";
+            const advisory = found.get(vuln.id) ?? { modified, versions: new Set<string>() };
+            advisory.versions.add(key);
+            found.set(vuln.id, advisory);
+          }
+          if (typeof result.next_page_token === "string" && result.next_page_token !== "")
+            next.push({ entry: pending[index].entry, pageToken: result.next_page_token });
+        });
+        pending = next;
+      }
+    }
+    const withheld: WithheldVersions = new Map();
+    const ids = [...found.keys()];
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < ids.length) {
+        const id = ids[cursor++];
+        const advisory = found.get(id)!;
+        if (!(await this.blocking(id, advisory.modified, signal))) continue;
+        for (const key of advisory.versions) withheld.set(key, [...(withheld.get(key) ?? []), id]);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(OSV_VULN_CONCURRENCY, ids.length) }, worker));
+    return withheld;
+  }
+
+  /** Whether an advisory is HIGH or CRITICAL, cached by id while OSV's
+   *  `modified` time for it is unchanged. */
+  private async blocking(id: string, modified: string, signal?: AbortSignal): Promise<boolean> {
+    const cached = this.vulns.get(id);
+    if (cached && modified !== "" && cached.modified === modified) {
+      this.vulns.delete(id);
+      this.vulns.set(id, cached); // most recently used
+      return cached.blocking;
+    }
+    const response = await this.fetch(`${OSV_VULN}${encodeURIComponent(id)}`, { accept: "application/json", signal });
+    if (!response.ok) throw new Error(`osv_status_${response.status}`);
+    const vuln = (await response.json()) as OsvVuln & { modified?: unknown };
+    const severity = vuln.database_specific?.severity?.toUpperCase() ?? "";
+    const blocking = BLOCKING.has(severity);
+    this.vulns.delete(id);
+    while (this.vulns.size >= (this.options.maxVulnEntries ?? DEFAULT_VULN_CACHE_ENTRIES)) {
+      const oldest = this.vulns.keys().next();
+      if (oldest.done) break;
+      this.vulns.delete(oldest.value);
+    }
+    this.vulns.set(id, { modified: typeof vuln.modified === "string" ? vuln.modified : modified, blocking });
+    return blocking;
   }
 
   private remember(key: string, advisories: Advisory[]): void {

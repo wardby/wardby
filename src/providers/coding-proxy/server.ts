@@ -4,7 +4,8 @@ import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { HTTP_LIMITS, HttpBoundaryError, readBody } from "../../mcp/transport/http-limits.js";
 import { logger } from "../../core/logger.js";
 import { CodingProxyError, PROXY_MAX_BODY_BYTES, type CodingProxy, type ProxyResponseSink } from "./proxy.js";
-import type { RegistryService } from "./registry/service.js";
+import { RegistryError } from "../../coding/registry/types.js";
+import { errorResponse, MAX_PLAN_BODY_BYTES, type RegistryResponse, type RegistryService } from "./registry/service.js";
 import type { ProxyProtocol } from "./types.js";
 
 const proxyLog = logger.child({ module: "coding-proxy" });
@@ -13,7 +14,7 @@ export interface CodingProxyServerConfig {
   host: string;
   port: number;
   expectedHost?: string;
-  registry?: Pick<RegistryService, "handle">;
+  registry?: Pick<RegistryService, "handle"> & Partial<Pick<RegistryService, "plan">>;
   onRequest?: (event: { protocol: ProxyProtocol | "other"; status: number; durationMs: number }) => void;
 }
 
@@ -45,6 +46,15 @@ function registryToken(authorization: string | undefined): string {
   const decoded = Buffer.from(basic[1], "base64").toString("utf8");
   const colon = decoded.indexOf(":");
   return colon >= 0 ? decoded.slice(colon + 1) : "";
+}
+
+/** Time a client has to upload a lockfile to the plan route. */
+const PLAN_UPLOAD_MS = 60_000;
+
+function sendRegistry(response: ServerResponse, result: RegistryResponse & { body: string }): void {
+  response
+    .writeHead(result.status, { "content-type": result.contentType, "cache-control": "no-store" })
+    .end(result.body);
 }
 
 function routeProtocol(method: string | undefined, url: string | undefined): ProxyProtocol | undefined {
@@ -96,6 +106,43 @@ export async function startCodingProxyServer(
       if (request.url?.startsWith("/registry/")) {
         if (!config.registry) {
           sendError(response, 404, "not_found");
+          return;
+        }
+        const plan = request.url.match(/^\/registry\/([a-z0-9-]+)\/-\/plan(?:\?.*)?$/);
+        if (plan && request.method === "POST" && config.registry.plan) {
+          // Lockfile verification: the body is the lockfile, read within
+          // its own size and time bounds.
+          const controller = new AbortController();
+          response.on("close", () => {
+            if (!response.writableFinished) controller.abort();
+          });
+          const upload = AbortSignal.any([controller.signal, AbortSignal.timeout(PLAN_UPLOAD_MS)]);
+          let body: string;
+          try {
+            body = await readBody(request, MAX_PLAN_BODY_BYTES, upload);
+          } catch (error) {
+            const tooLarge = error instanceof HttpBoundaryError && error.status === 413;
+            sendRegistry(
+              response,
+              errorResponse(
+                tooLarge
+                  ? new RegistryError(413, "wardby_lockfile_too_large", "the lockfile is larger than 20 MiB")
+                  : new RegistryError(400, "wardby_bad_request", "the lockfile could not be read"),
+              ) as RegistryResponse & { body: string },
+            );
+            return;
+          }
+          const result = await config.registry.plan({
+            ecosystem: plan[1],
+            token: registryToken(request.headers.authorization),
+            body,
+            signal: controller.signal,
+          });
+          if ("body" in result) sendRegistry(response, result);
+          else {
+            void result.stream.cancel().catch(() => undefined);
+            sendError(response, 500, "internal_error");
+          }
           return;
         }
         if (request.method !== "GET" && request.method !== "HEAD") {

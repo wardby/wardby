@@ -79,12 +79,89 @@ metadata and grows the run's allowance automatically as npm or pip requests
 each dependency's metadata, so you don't have to enumerate transitive
 dependencies yourself.
 
-Installing from a lockfile works too. `npm ci` (or `npm install` with a
-complete `package-lock.json`) skips metadata and requests each tarball
-directly, at the `https://registry.npmjs.org/...` URL the lockfile records,
-which npm rewrites to the proxy. The proxy serves that standard tarball path,
-and when a request names a package it hasn't seen yet it resolves the
-approved dependency graph on demand. The graph is range-aware:
+### Lockfile installs: verified, then approved exactly
+
+`npm ci` (or `npm install` with a complete `package-lock.json`) skips
+metadata and requests each tarball directly, at the
+`https://registry.npmjs.org/...` URL the lockfile records, which npm rewrites
+to the proxy. Before that, the coding worker's `npm` verifies the lockfile:
+the driver image puts a small shim first on the agent's `PATH`
+(`/opt/wardby/bin/npm`, also restored for login shells). For `npm ci`,
+`npm install`/`i`/`add` (and their aliases) in a project with a
+`package-lock.json` or `npm-shrinkwrap.json`, it sends the lockfile to the
+proxy's `POST /registry/npm/-/plan` (with the run's registry token), prints a
+one-line summary and any refusals to stderr, and then runs the real npm with
+the same arguments. Anything else runs npm directly, and a plan that fails
+still runs npm: the install then goes through the usual checks below.
+
+The proxy trusts nothing the lockfile claims. For lockfileVersion 2 or 3
+(version 1 is refused with `400 wardby_lockfile_unsupported`; regenerate it
+with npm 7 or later):
+
+- **Integrity.** For each entry `name@version` it reads the registry's own
+  record of that exact version (`registry.npmjs.org/<name>/<version>`, a few
+  KB). The lockfile's `integrity` must equal the registry's `dist.integrity`,
+  or the entry is refused with `wardby_lockfile_integrity_mismatch`.
+- **Edges.** Dependencies come from the registry's record too (dependencies,
+  optional and peer dependencies, npm aliases resolved), never from the
+  lockfile. Each one is matched to the lockfile entry npm would use (the
+  nearest ancestor `node_modules/<name>`), and counts only when that entry is
+  the declared package at a version inside the declared range.
+- **Reachability.** It starts from the project's own dependencies (and
+  workspaces') that are allowlist entries, at a version inside the
+  allowlisted range; a scope wildcard such as `@heroui/*` counts here, since
+  the lockfile names the exact package. From there it follows only verified
+  edges. An entry nothing reaches is refused with `wardby_package_not_allowed`.
+- **Release age and advisories.** Each version's publish time (read once by
+  streaming the package's full document for its `time` field, never holding
+  it) must be older than `minReleaseAgeDays`, and one OSV `querybatch`
+  request covers every version (1000 per request), with each advisory's
+  severity read once. Too new, or a HIGH/CRITICAL advisory:
+  `wardby_version_filtered`. If OSV can't be reached, the whole plan fails
+  closed with `503 wardby_audit_unavailable` (unless
+  `REGISTRY_AUDIT_FAIL_OPEN` is set).
+- **Other sources.** An entry installed from git, a URL or a path is refused
+  with `wardby_lockfile_entry_unsupported`; a bundled dependency is part of
+  its parent's tarball and needs nothing.
+
+A refused entry refuses only itself and whatever is reachable only through
+it; everything else is approved, as exact `name@version` pairs for the run.
+The response is `{ "approved": <count>, "refused": [{ "name", "version",
+"code", "reason" }] }`, and each refusal is recorded like any other (within
+the 500-per-run cap). A tarball request for an approved `name@version` is then served directly,
+checked against the approved integrity, with no graph walk. A tarball request
+for a version the plan refused is answered straight from the plan, with no
+walk either: `403` with the plan's code and reason (`wardby_version_filtered`
+for a version too new or with an advisory, which it names;
+`wardby_lockfile_integrity_mismatch`; `wardby_package_not_allowed` for one
+nothing reaches). Only an entry the registry couldn't be read for
+(`wardby_upstream_error`) isn't answered from the plan. A version the plan
+never mentioned (a package added with `npm install <new-package>`, an install
+without a lockfile) goes through the allowlist and the dependency-graph walk
+below.
+
+The per-version facts (integrity, publish time, dependencies, download URL)
+never change, so they are stored in the database and reused by every later
+plan; decisions are always recomputed from the run's own allowlist. A plan is
+bounded by `REGISTRY_PLAN_MAX_ENTRIES` entries (`413
+wardby_lockfile_too_large`, as is a lockfile over 20 MiB) and
+`REGISTRY_PLAN_TIMEOUT_MS` (`503 wardby_plan_incomplete`; what was verified is
+kept, so a retry resumes). It only reads the registry for entries it reaches,
+so a lockfile full of unrelated packages costs nothing upstream. Measured
+against real npm and OSV with a 0-day release age, the knock-knock `web/`
+lockfile (216 entries: React 19, HeroUI 3, Vite 8, Vitest 5, jsdom) was
+verified in 9.5 s cold and 0.7 s with stored facts, and its whole `npm ci`
+took 12 s cold and 3 s warm, with the proxy at 183 MiB peak RSS (30 MiB
+heap). At the default 3 days the same plan
+took 10 s and refused 53 entries (vite and vitest were days old, plus what
+only they reach), and `npm ci` failed on those refusals in 14 s with the
+proxy at 179 MiB peak RSS (24 MiB heap), with no walk.
+
+### Lockfile installs without a plan: the dependency-graph walk
+
+When a tarball request names a package the run hasn't approved or seen yet,
+the proxy resolves the approved dependency graph on demand. The graph is
+range-aware:
 
 - It starts from the allowlisted packages, at their kept versions: those
   inside the allowlisted range, past the minimum release age, and not
@@ -153,8 +230,8 @@ asks for a package's metadata. The walk's state is dropped when the run's
 deadline passes. Even so, a lockfile install of a large graph is the proxy's
 largest memory user: a measured `npm ci` of a ~220-package lockfile (React
 19, Vite 8, Vitest 5, jsdom) peaked at 1752 MiB RSS (549 MiB heap), which is
-why the GKE overlay gives the proxy 3Gi. Lockfile installs will move to
-lockfile verification in a follow-up.
+why the GKE overlay gives the proxy 3Gi. A lockfile the shim verified
+avoids the walk for every version the plan approved or refused.
 
 ## What the agent can then run
 
@@ -222,6 +299,8 @@ one of them finishes:
 | `REGISTRY_MAX_METADATA_MB`     | 64      | Largest metadata or OSV response the proxy reads.             |
 | `REGISTRY_MAX_GRAPH_PACKAGES`  | 3000    | Packages the on-demand graph walk may expand in one run.      |
 | `REGISTRY_GRAPH_TIMEOUT_MS`    | 180000  | Time allowed for one on-demand graph walk.                    |
+| `REGISTRY_PLAN_MAX_ENTRIES`    | 5000    | Entries a lockfile plan (`POST /-/plan`) may have.            |
+| `REGISTRY_PLAN_TIMEOUT_MS`     | 120000  | Time allowed for one lockfile plan.                           |
 
 Metadata is cached for five minutes in a bounded cache (500 packages and
 64 MiB of trimmed metadata, least recently used evicted first), and
@@ -260,6 +339,9 @@ one package):
 ```
 
 `size` is the number of bytes served, or `null` if none was recorded.
+`get_run` also returns `packagePlan: { "approved": <n>, "refused": <n> }`:
+the exact versions lockfile plans approved for the run, and the distinct
+entries they refused (each refusal is also in `packageRefusals`).
 
 The pull request finalization also appends a collapsed **Packages installed
 during this run** section listing the same information, so a reviewer
@@ -273,23 +355,29 @@ rendered, the section is left out and the pull request is still opened.
 npm and pip print the proxy's error body verbatim, so these are what you'll
 see on a failed install:
 
-| Code                               | Status | Meaning / what to do                                                                                                                                                                                                                                                                                                               |
-| ---------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `wardby_package_not_allowed`       | 403    | The package isn't on the allowlist and isn't reachable from an allowlisted package's dependency graph. Add it (or its top-level dependent) to `packageAllowlist`.                                                                                                                                                                  |
-| `wardby_file_not_allowed`          | 403    | The specific file type is never served for this ecosystem (for example a PyPI sdist). Nothing to configure; use a wheel.                                                                                                                                                                                                           |
-| `wardby_version_filtered`          | 404    | Every matching version is too new (younger than `minReleaseAgeDays`) or withheld by the vulnerability audit. Wait for it to age past the threshold, or lower `minReleaseAgeDays` if you understand the risk.                                                                                                                       |
-| `wardby_package_not_found`         | 404    | The upstream registry has no such package name. Check the spelling (npm names are case-sensitive).                                                                                                                                                                                                                                 |
-| `wardby_package_too_large`         | 413    | The file exceeds `REGISTRY_MAX_FILE_MB`. Ask the operator to raise it if the file is legitimately larger.                                                                                                                                                                                                                          |
-| `wardby_package_limit`             | 429    | The run hit `REGISTRY_MAX_FILES` or `REGISTRY_MAX_TOTAL_MB`. Trim what the run installs, or ask the operator to raise the limit.                                                                                                                                                                                                   |
-| `wardby_audit_unavailable`         | 503    | OSV couldn't be reached and `REGISTRY_AUDIT_FAIL_OPEN` isn't set. Retry, or have the operator set that flag if the outage is expected to be long. Also returned, as "could not be checked against this agent's approved dependency graph… try again", when the audit failed while resolving a lockfile install's dependency graph. |
-| `wardby_graph_incomplete`          | 503    | A lockfile install requested a package the on-demand dependency-graph walk hadn't reached when it was cut short by `REGISTRY_GRAPH_TIMEOUT_MS`. Retry: the walk resumes where it stopped (npm retries 5xx on its own). Never means the package is outside the graph.                                                               |
-| `wardby_graph_limit`               | 403    | The walk hit `REGISTRY_MAX_GRAPH_PACKAGES` for this run before reaching the package. Permanent for the run, so retrying won't help: allowlist the package directly, or ask the operator to raise the limit. Never means the package is outside the graph.                                                                          |
-| `wardby_bad_request`               | 400    | The request path is malformed (bad percent-encoding, or not a valid package name). A client or agent bug, not a package choice.                                                                                                                                                                                                    |
-| `wardby_upstream_error`            | 502    | The upstream registry answered with an error, or the download failed partway. Retry. Also returned, as "could not be checked against this agent's approved dependency graph… try again", when the registry failed while resolving a lockfile install's dependency graph.                                                           |
-| `wardby_upstream_unavailable`      | 504    | The upstream registry didn't answer a metadata request within `REGISTRY_METADATA_TIMEOUT_MS`. Retry.                                                                                                                                                                                                                               |
-| `wardby_metadata_too_large`        | 502    | The package's metadata document is larger than `REGISTRY_MAX_METADATA_MB`. Ask the operator to raise it.                                                                                                                                                                                                                           |
-| `wardby_upstream_host_not_allowed` | 502    | The file's download URL points outside that ecosystem's own upstream hosts, so the proxy won't fetch it.                                                                                                                                                                                                                           |
-| `invalid_capability`               | 401    | The run's registry token doesn't match a live session (the run has ended or the token is malformed). Not something a package choice can fix.                                                                                                                                                                                       |
+| Code                                 | Status | Meaning / what to do                                                                                                                                                                                                                                                                                                               |
+| ------------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wardby_package_not_allowed`         | 403    | The package isn't on the allowlist and isn't reachable from an allowlisted package's dependency graph. Add it (or its top-level dependent) to `packageAllowlist`.                                                                                                                                                                  |
+| `wardby_file_not_allowed`            | 403    | The specific file type is never served for this ecosystem (for example a PyPI sdist). Nothing to configure; use a wheel.                                                                                                                                                                                                           |
+| `wardby_version_filtered`            | 404    | Every matching version is too new (younger than `minReleaseAgeDays`) or withheld by the vulnerability audit. Wait for it to age past the threshold, or lower `minReleaseAgeDays` if you understand the risk.                                                                                                                       |
+| `wardby_package_not_found`           | 404    | The upstream registry has no such package name. Check the spelling (npm names are case-sensitive).                                                                                                                                                                                                                                 |
+| `wardby_package_too_large`           | 413    | The file exceeds `REGISTRY_MAX_FILE_MB`. Ask the operator to raise it if the file is legitimately larger.                                                                                                                                                                                                                          |
+| `wardby_package_limit`               | 429    | The run hit `REGISTRY_MAX_FILES` or `REGISTRY_MAX_TOTAL_MB`. Trim what the run installs, or ask the operator to raise the limit.                                                                                                                                                                                                   |
+| `wardby_audit_unavailable`           | 503    | OSV couldn't be reached and `REGISTRY_AUDIT_FAIL_OPEN` isn't set. Retry, or have the operator set that flag if the outage is expected to be long. Also returned, as "could not be checked against this agent's approved dependency graph… try again", when the audit failed while resolving a lockfile install's dependency graph. |
+| `wardby_graph_incomplete`            | 503    | A lockfile install requested a package the on-demand dependency-graph walk hadn't reached when it was cut short by `REGISTRY_GRAPH_TIMEOUT_MS`. Retry: the walk resumes where it stopped (npm retries 5xx on its own). Never means the package is outside the graph.                                                               |
+| `wardby_graph_limit`                 | 403    | The walk hit `REGISTRY_MAX_GRAPH_PACKAGES` for this run before reaching the package. Permanent for the run, so retrying won't help: allowlist the package directly, or ask the operator to raise the limit. Never means the package is outside the graph.                                                                          |
+| `wardby_lockfile_unsupported`        | 400    | The lockfile sent to `POST /-/plan` isn't lockfileVersion 2 or 3 (or has no `packages`). Regenerate it with npm 7 or later. The install still runs, through the walk.                                                                                                                                                              |
+| `wardby_lockfile_too_large`          | 413    | The lockfile is over 20 MiB or has more than `REGISTRY_PLAN_MAX_ENTRIES` entries. The install still runs, through the walk.                                                                                                                                                                                                        |
+| `wardby_lockfile_integrity_mismatch` | —      | A plan refusal: the lockfile's `integrity` for this entry isn't the registry's own (or the registry publishes none). Regenerate the lockfile entry; never edit integrity by hand.                                                                                                                                                  |
+| `wardby_lockfile_entry_unsupported`  | —      | A plan refusal: the entry is installed from git, a URL or a path, or isn't an exact registry version. Only registry packages can be approved.                                                                                                                                                                                      |
+| `wardby_plan_in_progress`            | 429    | A lockfile plan is already running for this run (one at a time). Wait for it; the install still runs, through the walk.                                                                                                                                                                                                            |
+| `wardby_plan_incomplete`             | 503    | The plan didn't finish within `REGISTRY_PLAN_TIMEOUT_MS` (or the client went away). What was verified is kept, so a retry resumes; the install still runs, through the walk.                                                                                                                                                       |
+| `wardby_bad_request`                 | 400    | The request path is malformed (bad percent-encoding, or not a valid package name). A client or agent bug, not a package choice.                                                                                                                                                                                                    |
+| `wardby_upstream_error`              | 502    | The upstream registry answered with an error, or the download failed partway. Retry. Also returned, as "could not be checked against this agent's approved dependency graph… try again", when the registry failed while resolving a lockfile install's dependency graph.                                                           |
+| `wardby_upstream_unavailable`        | 504    | The upstream registry didn't answer a metadata request within `REGISTRY_METADATA_TIMEOUT_MS`. Retry.                                                                                                                                                                                                                               |
+| `wardby_metadata_too_large`          | 502    | The package's metadata document is larger than `REGISTRY_MAX_METADATA_MB`. Ask the operator to raise it.                                                                                                                                                                                                                           |
+| `wardby_upstream_host_not_allowed`   | 502    | The file's download URL points outside that ecosystem's own upstream hosts, so the proxy won't fetch it.                                                                                                                                                                                                                           |
+| `invalid_capability`                 | 401    | The run's registry token doesn't match a live session (the run has ended or the token is malformed). Not something a package choice can fix.                                                                                                                                                                                       |
 
 ## Adding an ecosystem
 

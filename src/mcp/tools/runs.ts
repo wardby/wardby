@@ -2,7 +2,7 @@ import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { requireReadableAgent } from "../auth/ownership.js";
 import { publicCodingRunResult } from "../../coding/protocol.js";
-import { summarizeRegistryFetches } from "../../coding/registry/report.js";
+import { countPlanRefusals, summarizeRegistryFetches } from "../../coding/registry/report.js";
 import { textResult } from "./text-result.js";
 
 export function registerRunTools(mcp: WardbyMcpServer): void {
@@ -64,6 +64,14 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         ? await ctx.db.registryFetch.findMany({ where: { runId: run.id }, orderBy: { createdAt: "asc" } })
         : [];
       const { packages, packageRefusals } = summarizeRegistryFetches(registryFetches);
+      // Lockfile verification (POST /registry/<ecosystem>/-/plan): exact
+      // versions approved for the run, and distinct entries it refused.
+      const packagePlan = codingRun
+        ? {
+            approved: await ctx.db.registryApprovedVersion.count({ where: { runId: run.id } }),
+            refused: countPlanRefusals(registryFetches),
+          }
+        : undefined;
       // A failed coding run's error is only an opaque id; these two say which
       // stage failed and are the key an operator searches the control-plane
       // log for (the real reason is logged there, never persisted). Both are
@@ -76,7 +84,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         ...(failureCategory ? { failureCategory } : {}),
         ...(diagnosticId ? { diagnosticId } : {}),
         ...(codingQueuedAt ? { codingQueuedAt } : {}),
-        ...(codingRun ? { packages, packageRefusals } : {}),
+        ...(codingRun ? { packages, packageRefusals, packagePlan } : {}),
       });
     },
   });
