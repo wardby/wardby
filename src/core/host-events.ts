@@ -31,6 +31,7 @@ export type HostEventDb = Pick<
   | "codingRun"
   | "task"
   | "webhook"
+  | "budgetGroup"
   | "$transaction"
   | "$queryRaw"
 >;

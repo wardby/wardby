@@ -37,6 +37,9 @@ interface FakeRun {
   costUsd: number;
   startedAt: Date;
   parentRunId?: string | null;
+  /** Defaults to a finished run. */
+  status?: string;
+  codingRun?: { budgetReservedUsd: number } | null;
 }
 interface FakeGroup {
   id: string;
@@ -56,13 +59,14 @@ interface FakeAgent {
 function fakeDb(groups: FakeGroup[], runs: FakeRun[], agents: FakeAgent[] = []): BudgetGroupsDb {
   const byId = new Map(groups.map((g) => [g.id, g]));
   const agentsById = new Map(agents.map((a) => [a.id, a]));
-  const runsById = new Map(runs.filter((r) => r.id).map((r) => [r.id!, r]));
+  const withDefaults = runs.map((r) => ({ status: "succeeded", codingRun: null, ...r }));
+  const runsById = new Map(withDefaults.filter((r) => r.id).map((r) => [r.id!, r]));
   return {
     budgetGroup: {
       findUnique: (async ({ where }: { where: { id: string } }) => {
         const g = byId.get(where.id);
         if (!g) return null;
-        return { ...g, agents: g.agentIds.map((id) => ({ id })) };
+        return { ...g, agents: g.agentIds.map((id) => ({ id, budgetUsd: agentsById.get(id)?.budgetUsd ?? 0 })) };
       }) as never,
     },
     agent: {
@@ -88,15 +92,17 @@ function fakeDb(groups: FakeGroup[], runs: FakeRun[], agents: FakeAgent[] = []):
       }) => {
         const { where } = opts;
         if (where.agentId) {
-          return runs.filter((r) => where.agentId!.in.includes(r.agentId) && r.startedAt >= where.startedAt!.gte);
+          return withDefaults.filter(
+            (r) => where.agentId!.in.includes(r.agentId) && r.startedAt >= where.startedAt!.gte,
+          );
         }
         if (where.parentRunId) {
-          return runs.filter(
+          return withDefaults.filter(
             (r) => r.parentRunId !== undefined && where.parentRunId!.in.includes(r.parentRunId as string),
           );
         }
         if (where.id) {
-          return runs.filter((r) => r.id && where.id!.in.includes(r.id));
+          return withDefaults.filter((r) => r.id && where.id!.in.includes(r.id));
         }
         return [];
       }) as never,
@@ -113,7 +119,7 @@ describe("computeGroupSpend", () => {
     const spend = await computeGroupSpend(
       db,
       { dailyBudgetUsd: null, weeklyBudgetUsd: null, monthlyBudgetUsd: null },
-      ["a1"],
+      [{ id: "a1", budgetUsd: 5 }],
       NOW,
     );
     expect(spend).toEqual([]);
@@ -132,12 +138,15 @@ describe("computeGroupSpend", () => {
     const spend = await computeGroupSpend(
       db,
       { dailyBudgetUsd: 10, weeklyBudgetUsd: null, monthlyBudgetUsd: 20 } as never,
-      ["a1", "a2"],
+      [
+        { id: "a1", budgetUsd: 5 },
+        { id: "a2", budgetUsd: 5 },
+      ],
       NOW,
     );
     const byPeriod = Object.fromEntries(spend.map((s) => [s.period, s]));
-    expect(byPeriod.day).toEqual({ period: "day", capUsd: 10, spentUsd: 3, remainingUsd: 7 });
-    expect(byPeriod.month).toEqual({ period: "month", capUsd: 20, spentUsd: 8, remainingUsd: 12 });
+    expect(byPeriod.day).toEqual({ period: "day", capUsd: 10, spentUsd: 3, reservedUsd: 0, remainingUsd: 7 });
+    expect(byPeriod.month).toEqual({ period: "month", capUsd: 20, spentUsd: 8, reservedUsd: 0, remainingUsd: 12 });
     expect(byPeriod.week).toBeUndefined();
   });
 
@@ -146,10 +155,64 @@ describe("computeGroupSpend", () => {
     const spend = await computeGroupSpend(
       db,
       { dailyBudgetUsd: 10, weeklyBudgetUsd: null, monthlyBudgetUsd: null } as never,
-      ["a1"],
+      [{ id: "a1", budgetUsd: 5 }],
       NOW,
     );
-    expect(spend[0]).toEqual({ period: "day", capUsd: 10, spentUsd: 15, remainingUsd: 0 });
+    expect(spend[0]).toEqual({ period: "day", capUsd: 10, spentUsd: 15, reservedUsd: 0, remainingUsd: 0 });
+  });
+
+  it("E-04: counts every in-flight run's unspent reservation, native and coding, clamped at zero", async () => {
+    const db = fakeDb(
+      [],
+      [
+        // Native, running: holds its agent's $4 per-run budget, $1 spent -> $3 reserved.
+        { id: "n1", agentId: "native", costUsd: 1, startedAt: TODAY_START, status: "running" },
+        // Native, pending: nothing spent yet -> the full $4.
+        { id: "n2", agentId: "native", costUsd: 0, startedAt: TODAY_START, status: "pending" },
+        // Coding, running: holds what dispatch reserved ($2), $0.50 spent -> $1.50.
+        {
+          id: "c1",
+          agentId: "coder",
+          costUsd: 0.5,
+          startedAt: TODAY_START,
+          status: "running",
+          codingRun: { budgetReservedUsd: 2 },
+        },
+        // Coding, already over its reservation: reserves nothing more, never negative.
+        {
+          id: "c2",
+          agentId: "coder",
+          costUsd: 2.5,
+          startedAt: TODAY_START,
+          status: "running",
+          codingRun: { budgetReservedUsd: 2 },
+        },
+        // Finished: only its real cost counts.
+        { id: "f1", agentId: "native", costUsd: 1, startedAt: TODAY_START, status: "succeeded" },
+      ],
+    );
+    const spend = await computeGroupSpend(
+      db,
+      { dailyBudgetUsd: 20, weeklyBudgetUsd: null, monthlyBudgetUsd: null } as never,
+      [
+        { id: "native", budgetUsd: 4 },
+        { id: "coder", budgetUsd: 9 },
+      ],
+      NOW,
+    );
+    expect(spend[0]).toEqual({ period: "day", capUsd: 20, spentUsd: 5, reservedUsd: 8.5, remainingUsd: 6.5 });
+  });
+
+  it("E-04: leaves out the reservations of excluded runs but still counts their real cost", async () => {
+    const db = fakeDb([], [{ id: "self", agentId: "native", costUsd: 1, startedAt: TODAY_START, status: "running" }]);
+    const spend = await computeGroupSpend(
+      db,
+      { dailyBudgetUsd: 10, weeklyBudgetUsd: null, monthlyBudgetUsd: null } as never,
+      [{ id: "native", budgetUsd: 4 }],
+      NOW,
+      { excludeReservationRunIds: ["self"] },
+    );
+    expect(spend[0]).toEqual({ period: "day", capUsd: 10, spentUsd: 1, reservedUsd: 0, remainingUsd: 9 });
   });
 });
 
@@ -215,6 +278,40 @@ describe("effectiveBudgetForRun", () => {
     );
     const result = await effectiveBudgetForRun(db, { id: "a1", budgetGroupId: "g1", budgetUsd: 5 } as never, NOW);
     expect(result.effectiveBudgetUsd).toBe(0);
+    expect(result.exhaustedBy).toBe("day");
+  });
+
+  it("E-04: another member's in-flight reservation tightens the budget; the run's own (selfRunId) does not", async () => {
+    const db = fakeDb(
+      [
+        {
+          id: "g1",
+          name: "g",
+          dailyBudgetUsd: 10,
+          weeklyBudgetUsd: null,
+          monthlyBudgetUsd: null,
+          warnThresholdRatio: 0.8,
+          agentIds: ["a1", "a2"],
+        },
+      ],
+      [
+        { id: "other", agentId: "a2", costUsd: 0, startedAt: TODAY_START, status: "running" },
+        { id: "self", agentId: "a1", costUsd: 0, startedAt: TODAY_START, status: "running" },
+      ],
+      [
+        { id: "a1", budgetGroupId: "g1", budgetUsd: 5 },
+        { id: "a2", budgetGroupId: "g1", budgetUsd: 7 },
+      ],
+    );
+    const result = await effectiveBudgetForRun(
+      db,
+      { id: "a1", budgetGroupId: "g1", budgetUsd: 5 } as never,
+      NOW,
+      undefined,
+      { selfRunId: "self" },
+    );
+    // $10 cap - a2's $7 held by its in-flight run = $3; a1's own run is not counted against itself.
+    expect(result).toEqual({ effectiveBudgetUsd: 3, constrainedBy: ["day"] });
   });
 
   it("uses the tightest of multiple configured periods, not just the first one checked", async () => {
@@ -286,6 +383,33 @@ describe("computeRunTreeSpend", () => {
     const tree = await computeRunTreeSpend(db, "run-root", NOW);
     expect(tree).toEqual({ rootRunId: "run-root", capUsd: 5, spentUsd: 1, remainingUsd: 4 });
   });
+
+  it("E-04: the tree's own in-flight reservations don't shrink its ceiling; another member's do", async () => {
+    const db = fakeDb(
+      [
+        {
+          id: "g1",
+          name: "g",
+          dailyBudgetUsd: 10,
+          weeklyBudgetUsd: null,
+          monthlyBudgetUsd: null,
+          warnThresholdRatio: 0.8,
+          agentIds: ["root-agent", "other-agent"],
+        },
+      ],
+      [
+        { id: "run-root", agentId: "root-agent", costUsd: 1, startedAt: TODAY_START, status: "running" },
+        { id: "run-other", agentId: "other-agent", costUsd: 0, startedAt: TODAY_START, status: "pending" },
+      ],
+      [
+        { id: "root-agent", budgetGroupId: "g1", budgetUsd: 6 },
+        { id: "other-agent", budgetGroupId: "g1", budgetUsd: 5 },
+      ],
+    );
+    // Root ceiling: min(6, 10 - $1 spent - other's $5 held) = 4; the tree has spent $1.
+    const tree = await computeRunTreeSpend(db, "run-root", NOW);
+    expect(tree).toEqual({ rootRunId: "run-root", capUsd: 4, spentUsd: 1, remainingUsd: 3 });
+  });
 });
 
 describe("effectiveBudgetForRun with parentRunId (sub-agent dispatch)", () => {
@@ -317,6 +441,21 @@ describe("effectiveBudgetForRun with parentRunId (sub-agent dispatch)", () => {
       "run-root",
     );
     expect(result).toEqual({ effectiveBudgetUsd: 4, constrainedBy: ["run-tree"] });
+  });
+
+  it("reports run-tree as the exhausted constraint once the tree's ceiling is spent", async () => {
+    const db = fakeDb(
+      [],
+      [{ id: "run-root", agentId: "root-agent", costUsd: 2, startedAt: TODAY_START, status: "running" }],
+      [{ id: "root-agent", budgetGroupId: null, budgetUsd: 2 }],
+    );
+    const result = await effectiveBudgetForRun(
+      db,
+      { id: "child-agent", budgetGroupId: null, budgetUsd: 5 } as never,
+      NOW,
+      "run-root",
+    );
+    expect(result).toEqual({ effectiveBudgetUsd: 0, constrainedBy: ["run-tree"], exhaustedBy: "run-tree" });
   });
 
   it("a top-level run (no parentRunId) is unaffected by run-tree logic entirely", async () => {

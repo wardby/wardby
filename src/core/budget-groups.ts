@@ -10,7 +10,16 @@
  * enforces that tightened ceiling with no changes of its own: a group
  * whose period budget is already exhausted simply produces an effective
  * budget of 0, which the engine's turn-1 gate already refuses exactly
- * like any other zero/negative budget.
+ * like any other zero/negative budget. A coding run gets the same effective
+ * budget at dispatch (dispatch.ts), where it becomes the run's reservation.
+ *
+ * Spend is the real cost of the period's runs plus the unspent part of every
+ * run still in flight (pending or running): its reservation minus what it has
+ * spent so far, never below zero. A coding run's reservation is its
+ * CodingRun.budgetReservedUsd; a native run's is its agent's current
+ * per-run budgetUsd, an upper bound on the effective budget it pinned at load.
+ * Counting reservations is what stops concurrent runs from each claiming the
+ * same remainder (security review E-04).
  */
 import type { Agent, BudgetGroup, PrismaClient } from "#prisma";
 import { logger } from "./logger.js";
@@ -46,9 +55,30 @@ function toNullableNumber(value: unknown): number | null {
 export interface PeriodSpend {
   period: Period;
   capUsd: number;
+  /** Real cost recorded by the period's runs, finished or not. */
   spentUsd: number;
+  /** Unspent reservations of the period's in-flight (pending/running) runs. */
+  reservedUsd: number;
+  /** capUsd - spentUsd - reservedUsd, never below zero. */
   remainingUsd: number;
 }
+
+/** A group member as computeGroupSpend needs it: a native run in flight holds its agent's budgetUsd. */
+export interface GroupMember {
+  id: string;
+  budgetUsd: unknown;
+}
+
+export interface SpendOptions {
+  /**
+   * Runs whose unspent reservation is left out (their real cost still
+   * counts): the run asking for its own budget, and the run tree a sub-agent
+   * spends from, whose reservation already covers it.
+   */
+  excludeReservationRunIds?: readonly string[];
+}
+
+const IN_FLIGHT = new Set(["pending", "running"]);
 
 /**
  * Live per-period spend for whichever of a group's daily/weekly/monthly
@@ -60,8 +90,9 @@ export interface PeriodSpend {
 export async function computeGroupSpend(
   db: BudgetGroupsDb,
   group: Pick<BudgetGroup, "dailyBudgetUsd" | "weeklyBudgetUsd" | "monthlyBudgetUsd">,
-  memberAgentIds: string[],
+  members: readonly GroupMember[],
   now: Date = new Date(),
+  options: SpendOptions = {},
 ): Promise<PeriodSpend[]> {
   const caps: { period: Period; capUsd: number | null }[] = [
     { period: "day", capUsd: toNullableNumber(group.dailyBudgetUsd) },
@@ -77,18 +108,43 @@ export async function computeGroupSpend(
   // query itself as a cheap no-op; an empty `agentId: { in: [] }` would
   // match nothing anyway.
   const widestStart = periodStart("month", now);
+  const memberBudgets = new Map(members.map((m) => [m.id, Number(m.budgetUsd)]));
+  const excluded = new Set(options.excludeReservationRunIds ?? []);
   const runs =
-    memberAgentIds.length === 0
+    members.length === 0
       ? []
       : await db.run.findMany({
-          where: { agentId: { in: memberAgentIds }, startedAt: { gte: widestStart } },
-          select: { costUsd: true, startedAt: true },
+          where: { agentId: { in: [...memberBudgets.keys()] }, startedAt: { gte: widestStart } },
+          select: {
+            id: true,
+            agentId: true,
+            status: true,
+            costUsd: true,
+            startedAt: true,
+            codingRun: { select: { budgetReservedUsd: true } },
+          },
         });
+
+  const accounted = runs.map((r) => {
+    const costUsd = Number(r.costUsd);
+    let reservedUsd = 0;
+    if (IN_FLIGHT.has(r.status) && !excluded.has(r.id)) {
+      // A coding run holds exactly what dispatch reserved. A native run (or
+      // a coding run whose CodingRun row is missing) holds its agent's
+      // per-run budget: never less than what it can actually spend.
+      const reservation =
+        r.codingRun != null ? Number(r.codingRun.budgetReservedUsd) : (memberBudgets.get(r.agentId) ?? 0);
+      reservedUsd = Math.max(0, reservation - costUsd);
+    }
+    return { startedAt: r.startedAt, costUsd, reservedUsd };
+  });
 
   return configured.map(({ period, capUsd }) => {
     const start = periodStart(period, now);
-    const spentUsd = runs.filter((r) => r.startedAt >= start).reduce((sum, r) => sum + Number(r.costUsd), 0);
-    return { period, capUsd, spentUsd, remainingUsd: Math.max(0, capUsd - spentUsd) };
+    const inPeriod = accounted.filter((r) => r.startedAt >= start);
+    const spentUsd = inPeriod.reduce((sum, r) => sum + r.costUsd, 0);
+    const reservedUsd = inPeriod.reduce((sum, r) => sum + r.reservedUsd, 0);
+    return { period, capUsd, spentUsd, reservedUsd, remainingUsd: Math.max(0, capUsd - spentUsd - reservedUsd) };
   });
 }
 
@@ -138,13 +194,24 @@ async function collectTreeRunIds(db: Pick<BudgetGroupsDb, "run">, rootRunId: str
  * spent so far. The root's ceiling is recomputed fresh here, not pinned
  * from whatever it was when the root run started — consistent with
  * BudgetGroup periods already always being live-recomputed rather than
- * snapshotted.
+ * snapshotted. The tree's own in-flight reservations are left out of that
+ * group check: the tree spends inside the root's reservation, so counting
+ * it again would leave the tree nothing.
  */
 export async function computeRunTreeSpend(
   db: BudgetGroupsDb,
   parentRunId: string,
   now: Date = new Date(),
 ): Promise<RunTreeSpend> {
+  const { rootRunId, capUsd, spentUsd, remainingUsd } = await runTreeSpend(db, parentRunId, now);
+  return { rootRunId, capUsd, spentUsd, remainingUsd };
+}
+
+async function runTreeSpend(
+  db: BudgetGroupsDb,
+  parentRunId: string,
+  now: Date,
+): Promise<RunTreeSpend & { treeRunIds: string[] }> {
   const root = await findRootRun(db, parentRunId);
   const treeRunIds = await collectTreeRunIds(db, root.id);
   const rows = await db.run.findMany({ where: { id: { in: treeRunIds } }, select: { costUsd: true } });
@@ -156,16 +223,28 @@ export async function computeRunTreeSpend(
   });
   // Root has no parentRunId of its own, so this terminates in one level —
   // no unbounded recursion regardless of how deep `parentRunId` itself was.
-  const rootCeiling = await effectiveBudgetForRun(db, rootAgent, now);
+  const rootCeiling = await groupCappedBudget(db, rootAgent, now, treeRunIds);
 
   const capUsd = rootCeiling.effectiveBudgetUsd;
-  return { rootRunId: root.id, capUsd, spentUsd, remainingUsd: Math.max(0, capUsd - spentUsd) };
+  return { rootRunId: root.id, capUsd, spentUsd, remainingUsd: Math.max(0, capUsd - spentUsd), treeRunIds };
 }
+
+export type BudgetConstraint = Period | "run-tree";
 
 export interface EffectiveBudgetResult {
   effectiveBudgetUsd: number;
   /** Which constraint(s), if any, are tighter than the agent's own budgetUsd right now. */
-  constrainedBy: (Period | "run-tree")[];
+  constrainedBy: BudgetConstraint[];
+  /** The first constraint with nothing left (<= 0), set only when there is one. */
+  exhaustedBy?: BudgetConstraint;
+}
+
+export interface EffectiveBudgetOptions {
+  /**
+   * The run this budget is for, when its row already exists (a native run's
+   * load step): its own reservation is not counted against itself.
+   */
+  selfRunId?: string;
 }
 
 /**
@@ -185,22 +264,35 @@ export async function effectiveBudgetForRun(
   agent: Pick<Agent, "id" | "budgetGroupId" | "budgetUsd">,
   now: Date = new Date(),
   parentRunId?: string,
+  options: EffectiveBudgetOptions = {},
+): Promise<EffectiveBudgetResult> {
+  const excluded = options.selfRunId ? [options.selfRunId] : [];
+  if (!parentRunId) return groupCappedBudget(db, agent, now, excluded);
+
+  const tree = await runTreeSpend(db, parentRunId, now);
+  return groupCappedBudget(db, agent, now, [...excluded, ...tree.treeRunIds], {
+    value: tree.remainingUsd,
+    reason: "run-tree",
+  });
+}
+
+async function groupCappedBudget(
+  db: BudgetGroupsDb,
+  agent: Pick<Agent, "id" | "budgetGroupId" | "budgetUsd">,
+  now: Date,
+  excludeReservationRunIds: readonly string[],
+  extra?: { value: number; reason: BudgetConstraint },
 ): Promise<EffectiveBudgetResult> {
   const ownBudgetUsd = Number(agent.budgetUsd);
-  const candidates: { value: number; reason: Period | "run-tree" }[] = [];
+  const candidates: { value: number; reason: BudgetConstraint }[] = [];
 
   if (agent.budgetGroupId) {
     const group = await db.budgetGroup.findUnique({
       where: { id: agent.budgetGroupId },
-      include: { agents: { select: { id: true } } },
+      include: { agents: { select: { id: true, budgetUsd: true } } },
     });
     if (group) {
-      const spend = await computeGroupSpend(
-        db,
-        group,
-        group.agents.map((a) => a.id),
-        now,
-      );
+      const spend = await computeGroupSpend(db, group, group.agents, now, { excludeReservationRunIds });
       const warnThresholdRatio = Number(group.warnThresholdRatio);
       for (const s of spend) {
         candidates.push({ value: s.remainingUsd, reason: s.period });
@@ -215,14 +307,12 @@ export async function effectiveBudgetForRun(
     }
   }
 
-  if (parentRunId) {
-    const tree = await computeRunTreeSpend(db, parentRunId, now);
-    candidates.push({ value: tree.remainingUsd, reason: "run-tree" });
-  }
+  if (extra) candidates.push(extra);
 
   if (candidates.length === 0) return { effectiveBudgetUsd: ownBudgetUsd, constrainedBy: [] };
 
   const constrainedBy = candidates.filter((c) => c.value < ownBudgetUsd).map((c) => c.reason);
   const effectiveBudgetUsd = Math.min(ownBudgetUsd, ...candidates.map((c) => c.value));
-  return { effectiveBudgetUsd, constrainedBy };
+  const exhausted = candidates.find((c) => c.value <= 0);
+  return { effectiveBudgetUsd, constrainedBy, ...(exhausted ? { exhaustedBy: exhausted.reason } : {}) };
 }

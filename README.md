@@ -282,6 +282,11 @@ production alerts, and SLOs remain operator responsibilities. See the
 
 - **Hard budget enforcement:** per-agent limits and shared daily, weekly, or
   monthly budget groups stop additional model work when the cap is reached.
+  Group caps apply to native and coding runs alike, whether scheduled,
+  webhook-, MCP-, host-event- or sub-agent-triggered: a coding run reserves at
+  most what its group has left and is refused (`budget_group_exhausted:<period>`)
+  when nothing is left. A run still in flight holds its unspent reservation
+  against the group, so concurrent runs cannot each claim the same remainder.
 - **Scoped capabilities:** tools, secrets, datastores, and sub-agents are
   attached explicitly and checked against the authenticated owner. Agents are
   private until their owner shares them (`grant_access` at read, execute or

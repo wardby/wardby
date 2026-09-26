@@ -501,6 +501,99 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     expect(childRuns[0].executionManaged).toBe(true);
   });
 
+  it("E-01: reserves a coding child's budget from the run tree's remainder, not its own budgetUsd", async () => {
+    const dispatcher: FakeAgent = {
+      id: "dispatcher-agent",
+      name: "knock-knock-delivery",
+      systemPrompt: "You classify and delegate.",
+      model: "m",
+      budgetUsd: 1,
+      maxTurns: 10,
+    };
+    const implementer: FakeAgent = {
+      id: "implement-agent",
+      name: "knock-knock-implement",
+      systemPrompt: "unused for coding agents",
+      model: "gpt-5.6-luna",
+      budgetUsd: 5,
+      maxTurns: 10,
+      kind: "coding",
+      codingProfile,
+    };
+    const db = fakeDb(
+      [dispatcher, implementer],
+      [{ parentAgentId: "dispatcher-agent", childAgentId: "implement-agent", boundName: "implement" }],
+    );
+    const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent", costUsd: 0.4 } });
+    const executor = fakeCodingExecutor(db, { status: "succeeded", finalText: "done", costUsd: 0.1 });
+
+    const llm = scriptedLlm([
+      toolCall("delegate_to_implement", JSON.stringify({ task: "add the feature" })),
+      finalAnswer("parent wraps up"),
+    ]);
+    await executeRun(parentRun.id, providers(llm, executor), db);
+
+    const [child] = (await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })) as Array<{
+      id: string;
+    }>;
+    const codingRun = await db.codingRun.findUnique({ where: { runId: child.id } });
+    // Tree ceiling $1 (the root's budget) minus the $0.40 the tree has recorded.
+    expect(Number(codingRun?.budgetReservedUsd)).toBeCloseTo(0.6, 6);
+  });
+
+  it("E-01: refuses a coding child at dispatch once the run tree is spent, without starting it", async () => {
+    const dispatcher: FakeAgent = {
+      id: "dispatcher-agent",
+      name: "knock-knock-delivery",
+      systemPrompt: "You classify and delegate.",
+      model: "m",
+      budgetUsd: 1,
+      maxTurns: 10,
+    };
+    const implementer: FakeAgent = {
+      id: "implement-agent",
+      name: "knock-knock-implement",
+      systemPrompt: "unused for coding agents",
+      model: "gpt-5.6-luna",
+      budgetUsd: 5,
+      maxTurns: 10,
+      kind: "coding",
+      codingProfile,
+    };
+    const db = fakeDb(
+      [dispatcher, implementer],
+      [{ parentAgentId: "dispatcher-agent", childAgentId: "implement-agent", boundName: "implement" }],
+    );
+    // As in the native test above: the tree has recorded its whole $1 ceiling.
+    const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent", costUsd: 1 } });
+    const started: string[] = [];
+    const executor = {
+      async start(runId: string) {
+        started.push(runId);
+      },
+      async stop() {},
+    };
+
+    const llm = scriptedLlm([
+      toolCall("delegate_to_implement", JSON.stringify({ task: "add the feature" })),
+      finalAnswer("parent wraps up"),
+    ]);
+    await executeRun(parentRun.id, providers(llm, executor), db);
+
+    const [child] = (await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })) as Array<{
+      id: string;
+      status: string;
+      error: string | null;
+    }>;
+    expect(child.status).toBe("refused");
+    expect(child.error).toMatch(/^run_tree_exhausted\b/);
+    expect(started).toEqual([]);
+    expect(await db.codingRun.findUnique({ where: { runId: child.id } })).toBeNull();
+    // The parent's delegate call got the refusal back as the child's result.
+    const toolResult = llm.calls[1]?.messages.find((m) => m.role === "tool");
+    expect(JSON.stringify(toolResult)).toContain("refused");
+  });
+
   it("waits for a coding child that was queued (start resolved while still pending) and returns its terminal result", async () => {
     const dispatcher: FakeAgent = {
       id: "dispatcher-agent",

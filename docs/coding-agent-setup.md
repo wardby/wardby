@@ -113,6 +113,20 @@ terminal cleanup; investigate any retained resource as a cleanup failure.
 
 See [release verification](release-verification.md) for the complete gate.
 
+## Budgets
+
+A coding run's budget is reserved when it is dispatched: the agent's own
+`budgetUsd`, tightened to whatever its budget group has left for each
+configured period and, for a sub-agent, whatever its run tree has left. The
+worker can never spend more than that reservation. When a group or run tree
+has nothing left, the run is recorded as `refused` with the error
+`budget_group_exhausted:<day|week|month>` or `run_tree_exhausted`, and no
+container starts. Every run still pending or running holds its unspent
+reservation (reservation minus cost so far) against its group; a native run
+holds its agent's per-run `budgetUsd`. So overlapping scheduled, webhook and
+manual runs share one cap rather than each seeing the full remainder, and
+`get_budget_group` reports those holds as `reservedUsd` next to `spentUsd`.
+
 ## Stop the setup
 
 ```sh

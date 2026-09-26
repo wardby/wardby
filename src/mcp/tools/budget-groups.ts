@@ -118,18 +118,13 @@ export function registerBudgetGroupTools(mcp: WardbyMcpServer): void {
     handler: async (args: { id: string }, ctx) => {
       const group = await ctx.db.budgetGroup.findUnique({
         where: { id: args.id },
-        include: { agents: { select: { id: true, name: true } } },
+        include: { agents: { select: { id: true, name: true, budgetUsd: true } } },
       });
       if (!group || !canRead(group.ownerId, ctx.principal.id)) {
         throw new McpError(404, `Budget group "${args.id}" not found.`);
       }
-      const spend = await computeGroupSpend(
-        ctx.db,
-        group,
-        group.agents.map((a) => a.id),
-        new Date(),
-      );
-      return textResult({ ...group, spend });
+      const spend = await computeGroupSpend(ctx.db, group, group.agents, new Date());
+      return textResult({ ...group, agents: group.agents.map(({ id, name }) => ({ id, name })), spend });
     },
   });
 

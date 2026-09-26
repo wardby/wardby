@@ -353,11 +353,14 @@ export async function executeRun(
         `Agent "${agent.name}" has more than one attached tool named ${duplicates.map((n) => `"${n}"`).join(", ")}; detach all but one before running it.`,
       );
     }
+    // The run's own row is already pending/running; its reservation must not
+    // count against itself (E-04). Every other in-flight run's does.
     const { effectiveBudgetUsd } = await effectiveBudgetForRun(
       db,
       agent,
       new Date(),
       existingRun.parentRunId ?? undefined,
+      { selfRunId: existingRun.id },
     );
     // Visibility only, not the security boundary — subagent_memory_get,
     // parent_memory_get, and delegate_to_<boundName> each re-check the
@@ -651,7 +654,9 @@ export async function executeRun(
                 "This execution context has no Executor wired in, so a coding-kind sub-agent cannot be dispatched.",
             });
           }
-          const { effectiveBudgetUsd } = await effectiveBudgetForRun(db, childAgent, new Date(), runId);
+          // dispatchRun reserves the child's budget itself, inside its persist
+          // transaction: the agent's budgetUsd tightened by its budget group and
+          // by this run tree (parentRunId), or refused when either is spent.
           const dispatched = await dispatchRun({
             db,
             executor: providers.executor,
@@ -663,7 +668,6 @@ export async function executeRun(
             // The child's result flows back into this run, which the
             // triggerer sees, so the child is visible to them too.
             triggeredById: existingRun.triggeredById,
-            budgetUsdOverride: effectiveBudgetUsd,
             awaitExecution: true,
           });
           if (!dispatched) {
