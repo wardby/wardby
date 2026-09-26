@@ -440,7 +440,12 @@ export async function executeRun(
           hosts: reviewHosts,
           runCheck:
             check && !check.completedAt
-              ? { provider: check.provider, repository: check.repository, checkId: check.checkId }
+              ? {
+                  provider: check.provider,
+                  repository: check.repository,
+                  checkId: check.checkId,
+                  headSha: check.headSha,
+                }
               : null,
           markRunCheckCompleted: async () => {
             await db.runHostCheck.update({ where: { runId }, data: { completedAt: new Date() } });

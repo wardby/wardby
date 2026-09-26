@@ -17,6 +17,9 @@ import {
   type ReviewHostRegistry,
 } from "../providers/review-host/types.js";
 import { normalizeGitHubRepository } from "../coding/protocol.js";
+import { logger } from "./logger.js";
+
+const log = logger.child({ module: "review-host-tools" });
 
 export interface RepositoryLink {
   provider: ReviewHostProvider;
@@ -29,6 +32,8 @@ export interface RunHostCheckRef {
   provider: string;
   repository: string;
   checkId: string;
+  /** The head the check was started on; the check is only the review's if the heads match. */
+  headSha: string;
 }
 
 export interface ReviewToolContext {
@@ -242,6 +247,15 @@ function error(code: string, message: string = code): string {
   return JSON.stringify({ error: code, message });
 }
 
+/** Bookkeeping only: a failure to record the check completed is logged and never changes the tool result. */
+async function markCompleted(ctx: ReviewToolContext): Promise<void> {
+  try {
+    await ctx.markRunCheckCompleted();
+  } catch (err) {
+    log.warn({ err, agentId: ctx.agentId }, "could not record the run's check completed");
+  }
+}
+
 /**
  * Dispatches one built-in repo tool call. Never throws — mirrors
  * runner.ts's `runSandboxTool` contract: a failure becomes a JSON error
@@ -294,10 +308,24 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
       }
       case "repo_publish_review": {
         const a = PublishArgs.parse(parsed);
-        const ownsCheck =
-          ctx.runCheck !== null &&
-          ctx.runCheck.provider === link.provider &&
-          ctx.runCheck.repository === link.repository;
+        const runCheck = ctx.runCheck;
+        const sameRepository =
+          runCheck !== null && runCheck.provider === link.provider && runCheck.repository === link.repository;
+        const ownsCheck = sameRepository && a.headSha === runCheck.headSha;
+        if (sameRepository && !ownsCheck) {
+          // The run's check sits on another head; close it rather than attach this review's verdict to it.
+          try {
+            await host.completeCheck(link.repository, {
+              checkId: runCheck.checkId,
+              conclusion: "neutral",
+              title: "Superseded by a newer push",
+              summary: "This run reviewed a newer commit; see that commit's check.",
+            });
+            await markCompleted(ctx);
+          } catch (err) {
+            log.warn({ err, agentId: ctx.agentId }, "could not supersede the run's check");
+          }
+        }
         const result = await host.publishReview(link.repository, {
           prNumber: a.prNumber,
           headSha: a.headSha,
@@ -307,9 +335,9 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
           comments: (a.comments ?? []).map((c) => ({ ...c, side: c.side ?? "RIGHT" })),
           agentMarker: ctx.agentId,
           checkName: link.checkName ?? undefined,
-          ...(ownsCheck ? { checkId: ctx.runCheck!.checkId } : {}),
+          ...(ownsCheck ? { checkId: runCheck.checkId } : {}),
         });
-        if (ownsCheck) await ctx.markRunCheckCompleted();
+        if (ownsCheck) await markCompleted(ctx);
         return JSON.stringify(result);
       }
       case "repo_comment": {

@@ -85,7 +85,7 @@ describe("handleReviewHostTool", () => {
   });
 
   it("publishes with the run's check id, and records the check completed", async () => {
-    const c = ctx({ runCheck: { provider: "github", repository: WRITE.repository, checkId: "11" } });
+    const c = ctx({ runCheck: { provider: "github", repository: WRITE.repository, checkId: "11", headSha: SHA } });
     const result = JSON.parse(
       await handleReviewHostTool(
         "repo_publish_review",
@@ -137,7 +137,9 @@ describe("handleReviewHostTool", () => {
   });
 
   it("does not hand another repository's run check to publish", async () => {
-    const c = ctx({ runCheck: { provider: "github", repository: "chfields/elsewhere", checkId: "11" } });
+    const c = ctx({
+      runCheck: { provider: "github", repository: "chfields/elsewhere", checkId: "11", headSha: SHA },
+    });
     await handleReviewHostTool(
       "repo_publish_review",
       JSON.stringify({
@@ -152,6 +154,64 @@ describe("handleReviewHostTool", () => {
     );
     expect(vi.mocked(c.hosts.github!.publishReview).mock.calls[0][1].checkId).toBeUndefined();
     expect(c.markRunCheckCompleted).not.toHaveBeenCalled();
+  });
+
+  it("supersedes the run's check when the review is of a different head, then publishes without it", async () => {
+    const OLD = "89abcdef0123456789abcdef0123456789abcdef";
+    const c = ctx({ runCheck: { provider: "github", repository: WRITE.repository, checkId: "11", headSha: OLD } });
+    const result = JSON.parse(
+      await handleReviewHostTool(
+        "repo_publish_review",
+        JSON.stringify({
+          repository: WRITE.repository,
+          prNumber: 7,
+          headSha: SHA,
+          verdict: "APPROVE",
+          summary: "ok",
+          body: "fine",
+        }),
+        c,
+      ),
+    );
+    expect(result).toMatchObject({ published: true });
+    expect(c.hosts.github!.completeCheck).toHaveBeenCalledWith(WRITE.repository, {
+      checkId: "11",
+      conclusion: "neutral",
+      title: "Superseded by a newer push",
+      summary: "This run reviewed a newer commit; see that commit's check.",
+    });
+    expect(c.markRunCheckCompleted).toHaveBeenCalledOnce();
+    const input = vi.mocked(c.hosts.github!.publishReview).mock.calls[0][1];
+    expect(input.checkId).toBeUndefined();
+    expect(input.checkName).toBe("wardby review");
+    expect(vi.mocked(c.hosts.github!.completeCheck).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(c.hosts.github!.publishReview).mock.invocationCallOrder[0],
+    );
+  });
+
+  it("returns the published result even when recording the check completed fails", async () => {
+    const c = ctx({
+      runCheck: { provider: "github", repository: WRITE.repository, checkId: "11", headSha: SHA },
+      markRunCheckCompleted: vi.fn(async () => {
+        throw new Error("db down");
+      }),
+    });
+    const result = JSON.parse(
+      await handleReviewHostTool(
+        "repo_publish_review",
+        JSON.stringify({
+          repository: WRITE.repository,
+          prNumber: 7,
+          headSha: SHA,
+          verdict: "APPROVE",
+          summary: "ok",
+          body: "fine",
+        }),
+        c,
+      ),
+    );
+    expect(result).toMatchObject({ published: true, checkId: "11" });
+    expect(c.markRunCheckCompleted).toHaveBeenCalledOnce();
   });
 
   it("enforces limits and returns host errors as JSON, never throwing", async () => {
