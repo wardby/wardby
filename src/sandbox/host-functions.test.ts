@@ -303,6 +303,26 @@ describe("__bridge_fetch host scoping", () => {
   });
 });
 
+describe("__bridge_fetch: a tool's own allowedFetchHosts cannot open private/metadata destinations (S2-1)", () => {
+  it.each([
+    ["http://169.254.169.254/computeMetadata/v1/", "169.254.169.254"],
+    ["http://127.0.0.1:5432/", "127.0.0.1"],
+    ["http://[::1]/", "[::1]"],
+    ["http://2852039166/", "2852039166"],
+  ])("blocks %s even though the tool lists %s", async (url, host) => {
+    const result = await runInSandbox({
+      code: `return await fetch(${JSON.stringify(url)}, { headers: { "Metadata-Flavor": "Google" } });`,
+      params: {},
+      agentId: "a1",
+      datastore: fakeDatastore(),
+      sharedDatastore: fakeSharedDatastore(),
+      toolName: "fetcher",
+      allowedFetchHosts: [host],
+    });
+    expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("fetch_destination_blocked") });
+  });
+});
+
 describe("sharedDatastore sandbox host functions", () => {
   it("sharedDatastore bridge functions round-trip through a bound name", async () => {
     const sharedDatastore = fakeSharedDatastore();

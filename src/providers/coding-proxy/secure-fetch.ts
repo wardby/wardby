@@ -41,7 +41,6 @@ export function createPinnedProxyFetch(options: PinnedProxyFetchOptions): typeof
 
       const destination = await resolveDestination(url, {
         allowedHosts,
-        allowPrivateHosts: false,
         restrictToAllowedHosts: true,
         resolve: options.resolve,
       });
