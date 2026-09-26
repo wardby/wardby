@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import { registerToolAuthoringTools } from "./tools.js";
 import type { McpRequestContext } from "../context.js";
+import { Prisma } from "#prisma";
 
 const CANONICAL_URI = "https://host/mcp";
 const fakeProviders = {
@@ -40,6 +41,15 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = []) {
   const transactionDb = {
     tool: {
       create: async ({ data }: { data: Partial<FakeToolRow> & { name: string } }) => {
+        // Mirrors Tool's unique index, so a duplicate surfaces as the same
+        // P2002 the real database raises.
+        if ([...toolRows.values()].some((t) => t.ownerId === (data.ownerId ?? null) && t.name === data.name)) {
+          throw new Prisma.PrismaClientKnownRequestError("Invalid `prisma.tool.create()` invocation", {
+            code: "P2002",
+            clientVersion: "test",
+            meta: { modelName: "Tool" },
+          });
+        }
         const row: FakeToolRow = {
           id: `tool_${++counter}`,
           description: "",
@@ -209,6 +219,26 @@ describe("tool authoring tools", () => {
     expect(body.name).toBe("greet");
     expect(body.jsonSchema).toBeTruthy();
     expect(body.ownerId).toBe("p1");
+    await client.close();
+  });
+
+  it("create_tool reports a duplicate name for the caller as a friendly 409 naming the tool", async () => {
+    const db = fakeDb([
+      { id: "t1", name: "greet", description: "x", paramsZod: "z.object({})", jsonSchema: {}, code: "", ownerId: "p1" },
+    ]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "create_tool",
+      arguments: { name: "greet", description: "x", paramsZod: "z.object({})", code: "return 1;" },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as { text: string }[])[0].text;
+    expect(text).toContain('A tool named "greet" already exists for your principal.');
+    expect(text).not.toContain("Invalid `prisma");
     await client.close();
   });
 

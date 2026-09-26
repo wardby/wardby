@@ -19,9 +19,10 @@ import { dispatchRun, isSerializationConflict } from "./dispatch.js";
 import { attachSecret } from "./secrets.js";
 import type { Executor } from "../providers/executor/types.js";
 import type { McpRequestContext } from "../mcp/context.js";
-import { McpError } from "../mcp/errors.js";
+import { McpError, mapPrismaError } from "../mcp/errors.js";
 import type { WardbyMcpServer } from "../mcp/server.js";
 import { registerAgentTools } from "../mcp/tools/agents.js";
+import { registerBudgetGroupTools } from "../mcp/tools/budget-groups.js";
 import { registerDatastoreTools } from "../mcp/tools/datastore.js";
 import { registerSchedulingTools } from "../mcp/tools/scheduling.js";
 import { registerSubAgentTools } from "../mcp/tools/subagents.js";
@@ -32,19 +33,24 @@ const PREFIX = "pad-";
 const suffix = randomUUID();
 const id = (name: string) => `${PREFIX}${name}-${suffix}`;
 const principalId = id("principal");
+const otherPrincipalId = id("other-principal");
 
 async function cleanupByPrefix(): Promise<void> {
   const where = { startsWith: PREFIX };
-  await db.run.deleteMany({ where: { agentId: where } });
-  await db.agentTool.deleteMany({ where: { agentId: where } });
+  // create_agent / create_tool mint cuid ids, so those rows are matched by
+  // name or owner rather than by id.
+  const agentWhere = { OR: [{ id: where }, { name: where }] };
+  await db.run.deleteMany({ where: { agent: agentWhere } });
+  await db.agentTool.deleteMany({ where: { OR: [{ agent: agentWhere }, { tool: { ownerId: where } }] } });
   await db.agentDatastore.deleteMany({ where: { agentId: where } });
   await db.agentSecret.deleteMany({ where: { agentId: where } });
   await db.agentSubAgent.deleteMany({ where: { parentAgentId: where } });
-  await db.tool.deleteMany({ where: { id: where } });
+  await db.tool.deleteMany({ where: { OR: [{ id: where }, { name: where }, { ownerId: where }] } });
+  await db.budgetGroup.deleteMany({ where: { name: where } });
   await db.datastoreEntry.deleteMany({ where: { datastore: { name: where } } });
   await db.datastore.deleteMany({ where: { name: where } });
   await db.secret.deleteMany({ where: { name: where } });
-  await db.agent.deleteMany({ where: { id: where } });
+  await db.agent.deleteMany({ where: agentWhere });
   await db.principal.deleteMany({ where: { id: where } });
 }
 
@@ -70,6 +76,7 @@ function mcpHandlers(): Map<string, Handler> {
     registerTool: (spec: { name: string; handler: Handler }) => handlers.set(spec.name, spec.handler),
   } as unknown as WardbyMcpServer;
   registerAgentTools(mcp);
+  registerBudgetGroupTools(mcp);
   registerDatastoreTools(mcp);
   registerSchedulingTools(mcp);
   registerSubAgentTools(mcp);
@@ -79,10 +86,10 @@ function mcpHandlers(): Map<string, Handler> {
 
 const handlers = mcpHandlers();
 
-function ctx(database: PrismaClient = db): McpRequestContext {
+function ctx(database: PrismaClient = db, principal: string = principalId): McpRequestContext {
   return {
-    principal: { id: principalId, subject: principalId, createdAt: new Date() },
-    scopes: new Set(["agents:write", "agents:read", "tools:write", "datastore:write"]),
+    principal: { id: principal, subject: principal, createdAt: new Date() },
+    scopes: new Set(["agents:write", "agents:read", "tools:write", "datastore:write", "budget_groups:write"]),
     canonicalUri: "https://host/mcp",
     providers: {} as McpRequestContext["providers"],
     db: database,
@@ -91,10 +98,24 @@ function ctx(database: PrismaClient = db): McpRequestContext {
   };
 }
 
-async function callTool(name: string, args: Record<string, unknown>, database: PrismaClient = db): Promise<unknown> {
+/**
+ * Calls a real handler the way server.ts dispatches it: a thrown Prisma error
+ * goes through mapPrismaError, so a P2002/P2003 arrives as the McpError a
+ * client would see and every other error (e.g. P2034) arrives unchanged.
+ */
+async function callTool(
+  name: string,
+  args: Record<string, unknown>,
+  database: PrismaClient = db,
+  principal: string = principalId,
+): Promise<unknown> {
   const handler = handlers.get(name);
   if (!handler) throw new Error(`no handler registered for ${name}`);
-  return handler(args as never, ctx(database));
+  try {
+    return await handler(args as never, ctx(database, principal));
+  } catch (err) {
+    throw mapPrismaError(err);
+  }
 }
 
 /**
@@ -163,6 +184,7 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
   beforeAll(async () => {
     await cleanupByPrefix();
     await db.principal.create({ data: { id: principalId, subject: principalId } });
+    await db.principal.create({ data: { id: otherPrincipalId, subject: otherPrincipalId } });
   });
 
   afterAll(async () => {
@@ -401,6 +423,33 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
         db.agent.update({ where: { id: agentId }, data: { codingProfile: { create: profile } } }),
       );
       expect(err.code).toBe("P2014");
+    });
+  });
+
+  describe("friendly errors: mapPrismaError at dispatch, pinned against the real adapter's error metadata", () => {
+    it("a duplicate create_agent is a 409 naming the model and field", async () => {
+      const name = id("dup-agent");
+      await callTool("create_agent", { name, systemPrompt: "t", model: "t", budgetUsd: 1 });
+      const err = await mcpError(callTool("create_agent", { name, systemPrompt: "t", model: "t", budgetUsd: 1 }));
+      expect(err.httpStatus).toBe(409);
+      expect(err.message).toBe("An agent with that name already exists.");
+    });
+
+    it("a duplicate create_budget_group is a 409 scoped to the owner", async () => {
+      const name = id("dup-group");
+      await callTool("create_budget_group", { name });
+      const err = await mcpError(callTool("create_budget_group", { name }));
+      expect(err.httpStatus).toBe(409);
+      expect(err.message).toBe("A budget group with that name already exists for this owner.");
+    });
+
+    it("a duplicate create_tool is a 409 whose message names the tool", async () => {
+      const name = id("dup-tool");
+      const args = { name, description: "t", paramsZod: "z.object({})", code: "return 1;" };
+      await callTool("create_tool", args);
+      const err = await mcpError(callTool("create_tool", args));
+      expect(err.httpStatus).toBe(409);
+      expect(err.message).toContain(`"${name}"`);
     });
   });
 

@@ -49,17 +49,24 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
       if (!schemaResult.ok) {
         return textResult({ ok: false, errorKind: schemaResult.errorKind, errorMessage: schemaResult.errorMessage });
       }
-      const tool = await ctx.db.tool.create({
-        data: {
-          name: args.name,
-          description: args.description,
-          paramsZod: args.paramsZod,
-          code: args.code,
-          jsonSchema: schemaResult.value as object,
-          ownerId: ctx.principal.id,
-        },
-      });
-      return textResult(tool);
+      try {
+        const tool = await ctx.db.tool.create({
+          data: {
+            name: args.name,
+            description: args.description,
+            paramsZod: args.paramsZod,
+            code: args.code,
+            jsonSchema: schemaResult.value as object,
+            ownerId: ctx.principal.id,
+          },
+        });
+        return textResult(tool);
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+          throw new McpError(409, `A tool named "${args.name}" already exists for your principal.`);
+        }
+        throw err;
+      }
     },
   });
 
