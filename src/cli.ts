@@ -41,6 +41,7 @@ import { buildSecretCipher } from "./providers/secrets/index.js";
 import type { ProviderRegistry } from "./providers/index.js";
 import { prisma } from "./core/db.js";
 import { runAgent } from "./core/runner.js";
+import { buildReviewHosts } from "./providers/review-host/index.js";
 import { validateCronExpression } from "./core/cron.js";
 import { startScheduler } from "./core/scheduler.js";
 import { startReconciler } from "./core/reconciler.js";
@@ -395,9 +396,14 @@ async function run(name: string | undefined): Promise<void> {
 
   let run;
   try {
-    run = await runAgent(name, { llm, engine, datastore, secrets, memory }, prisma, (delta) => {
-      process.stdout.write(delta);
-    });
+    run = await runAgent(
+      name,
+      { llm, engine, datastore, secrets, memory, reviewHosts: buildReviewHosts() },
+      prisma,
+      (delta) => {
+        process.stdout.write(delta);
+      },
+    );
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err));
   }
@@ -546,7 +552,11 @@ async function scheduler(args: string[]): Promise<void> {
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
   const memory = buildMemory();
-  const nativeExecutor = buildExecutor(config, { llm, engine, datastore, secrets, memory }, prisma);
+  const nativeExecutor = buildExecutor(
+    config,
+    { llm, engine, datastore, secrets, memory, reviewHosts: buildReviewHosts() },
+    prisma,
+  );
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig: config });
   await executor.launch?.();
   const reconciler = startReconciler({ db: prisma, executor });

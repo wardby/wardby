@@ -13,7 +13,6 @@
  * missing `AUTH_JWKS_URI`/`AUTH_SIGNING_KEY` a deployment running stdio-only
  * never needed to set.
  */
-import type { ProviderRegistry } from "../providers/index.js";
 import { loadProviderConfig, loadMcpConfig, loadAuthConfig } from "../config/providers.js";
 import { prisma } from "../core/db.js";
 import { NativeEngine } from "../core/engine-native.js";
@@ -22,6 +21,8 @@ import { PostgresDatastore } from "../providers/datastore/index.js";
 import { PostgresAgentMemory } from "../providers/memory/index.js";
 import { buildConfiguredExecutor, buildExecutor } from "../providers/executor/index.js";
 import { buildSecretCipher } from "../providers/secrets/index.js";
+import { buildReviewHosts } from "../providers/review-host/index.js";
+import type { NativeRunProviders } from "../core/runner.js";
 import { buildAuthProvider } from "../providers/auth/index.js";
 import type { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
 import { buildMcpServer, type WardbyMcpServer } from "./server.js";
@@ -106,6 +107,7 @@ export function buildMcpProviders(): McpProviderComposition {
   const secrets = buildSecretCipher(providerConfig);
   const datastore = new PostgresDatastore(prisma, secrets);
   const memory = new PostgresAgentMemory(prisma);
+  const reviewHosts = buildReviewHosts();
   // `nativeProviders` is passed by reference into buildExecutor, and native
   // runs it drives read `this.providers.executor` at call time (not at
   // construction time) — so patching `.executor` on afterward, once the
@@ -114,14 +116,12 @@ export function buildMcpProviders(): McpProviderComposition {
   // through the same composed executor everything else uses. There's no
   // way to hand the native executor a reference to its own wrapping
   // RoutingExecutor before that wrapper is constructed.
-  const nativeProviders: Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory"> & {
-    executor?: ProviderRegistry["executor"];
-  } = { llm, engine, datastore, secrets, memory };
+  const nativeProviders: NativeRunProviders = { llm, engine, datastore, secrets, memory, reviewHosts };
   const nativeExecutor = buildExecutor(providerConfig, nativeProviders, prisma);
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig });
   nativeProviders.executor = executor;
 
-  return { providers: { llm, engine, datastore, secrets, executor, memory } };
+  return { providers: { llm, engine, datastore, secrets, executor, memory, reviewHosts } };
 }
 
 /** Handle returned by `startMcp()` — closes the running transport, then the executor. */
