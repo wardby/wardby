@@ -365,6 +365,13 @@ model CodingAgentProfile {
   workspaceDiskMb          Int?
   packageAllowlist         Json    @default("{}")
   packagePolicy            Json    @default("{}")
+
+  /// How `repository` was authorized for this agent (see AgentRepository.authorizedVia):
+  /// "host_permission", "admin", or "grandfathered". Null = never authorized; runs are refused.
+  repositoryAuthorizedVia  String?
+  /// The principal whose GitHub access (or admin approval) authorized it. Audit only, no FK.
+  repositoryAuthorizedById String?
+  repositoryAuthorizedAt   DateTime?
 }
 
 /// Phase 5: immutable dispatch inputs plus opaque execution/result state for
@@ -599,6 +606,9 @@ model Principal {
   webhooks     Webhook[]
   authUser     AuthUser?
   budgetGroups BudgetGroup[]
+
+  hostIdentities           HostIdentity[]
+  hostIdentityLinkRequests HostIdentityLinkRequest[]
 }
 
 /// Phase 4: durable handle backing both a triggered run and (reserved,
@@ -868,11 +878,22 @@ model AgentRepository {
   access     String
   /// Subset of "pull_request", "mention".
   triggers   String[] @default([])
-  /// Required when triggers contains "pull_request"; names the agent's check.
+  /// Only with the "pull_request" trigger (required there); names the agent's
+  /// check. Unique per repository across all links (NULLs are distinct).
   checkName  String?
   createdAt  DateTime @default(now())
 
+  /// How this link was authorized: "host_permission" (the agent owner's
+  /// verified host identity had enough access), "admin" (a wardby admin
+  /// approved it explicitly), or "grandfathered" (existed before
+  /// authorization was enforced). Null = never authorized; use is refused.
+  authorizedVia  String?
+  /// The principal who authorized it. Audit only: plain text, no FK.
+  authorizedById String?
+  authorizedAt   DateTime?
+
   @@unique([agentId, provider, repository])
+  @@unique([provider, repository, checkName])
   @@index([provider, repository])
 }
 
@@ -885,6 +906,10 @@ model RunHostCheck {
   repository  String
   checkId     String
   headSha     String
+  /// The pull request the run was dispatched for. The review tool only
+  /// completes or creates a check for this PR. Null on rows written before it
+  /// existed: such a run publishes without a check.
+  prNumber    Int?
   completedAt DateTime?
 }
 
@@ -896,4 +921,51 @@ model HostEventDelivery {
 
   @@id([provider, deliveryId])
   @@index([receivedAt])
+}
+
+/// A principal's verified identity on a code-review host (GitHub today),
+/// linked through the host's user-authorization flow (link_host_account).
+/// Only the numeric user id and login are stored, never a user token. A host
+/// user belongs to at most one principal.
+model HostIdentity {
+  principalId String
+  principal   Principal @relation(fields: [principalId], references: [id], onDelete: Cascade)
+  /// "github" today; validated in code.
+  provider    String
+  /// The host's numeric user id, as text.
+  hostUserId  String
+  /// Last known login; refreshed when the host reports a rename.
+  login       String
+  linkedAt    DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@id([principalId, provider])
+  @@unique([provider, hostUserId])
+}
+
+/// An in-flight host identity link (link_host_account): the OAuth state and
+/// PKCE verifier, then, after the host's callback, the verified user and the
+/// hash of the one-time confirmation code the same principal must submit.
+/// Lives 10 minutes.
+model HostIdentityLinkRequest {
+  id           String    @id @default(cuid())
+  principalId  String
+  principal    Principal @relation(fields: [principalId], references: [id], onDelete: Cascade)
+  provider     String
+  /// sha256 of the OAuth state; the state itself is never stored.
+  stateHash    String    @unique
+  /// PKCE verifier: useless without the authorization code and the client secret.
+  codeVerifier String
+  hostUserId   String?
+  login        String?
+  /// sha256 of the confirmation code shown on the callback page.
+  confirmHash  String?
+  /// Wrong confirmation codes submitted; the request is dead at 5.
+  attempts     Int       @default(0)
+  callbackAt   DateTime?
+  expiresAt    DateTime
+  createdAt    DateTime  @default(now())
+
+  @@index([principalId])
+  @@index([expiresAt])
 }

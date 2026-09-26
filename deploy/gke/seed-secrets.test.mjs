@@ -47,6 +47,17 @@ describe("decideSeed", () => {
     expect(decision.message).toContain("GITHUB_APP_PRIVATE_KEY");
   });
 
+  it("never invents the App's OAuth client credentials", () => {
+    for (const [id, env] of [
+      ["github-app-client-id", "GITHUB_APP_CLIENT_ID"],
+      ["github-app-client-secret", "GITHUB_APP_CLIENT_SECRET"],
+    ]) {
+      const decision = decideSeed(entry(id), { hasVersion: false, generate: never });
+      expect(decision.action).toBe("error");
+      expect(decision.message).toContain(env);
+    }
+  });
+
   it("generates a webhook secret when none exists yet", () => {
     expect(decideSeed(entry("github-app-webhook-secret"), { hasVersion: false, generate: () => "g" })).toEqual({
       action: "add",
@@ -89,6 +100,8 @@ const fullEnv = {
   SECRET_APP_KEY: "a".repeat(64),
   GITHUB_APP_ID: "12345",
   GITHUB_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
+  GITHUB_APP_CLIENT_ID: "Iv23liExampleClientId",
+  GITHUB_APP_CLIENT_SECRET: "example-client-secret-value",
 };
 
 describe("seed", () => {
@@ -106,7 +119,7 @@ describe("seed", () => {
     const values = [...Object.values(fullEnv), "b".repeat(64), "c".repeat(64)];
     for (const call of calls) for (const value of values) expect(call.args.join(" ")).not.toContain(value);
     const added = calls.filter((c) => c.args.includes("add"));
-    expect(added).toHaveLength(8);
+    expect(added).toHaveLength(SECRETS.length);
     expect(added.every((c) => c.args.includes("--data-file=-") && typeof c.input === "string")).toBe(true);
   });
 

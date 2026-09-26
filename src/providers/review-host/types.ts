@@ -145,8 +145,37 @@ export interface CompleteCheckInput {
   detailsUrl?: string;
 }
 
+/**
+ * A user's effective permission on one repository, host-neutral and ranked
+ * none < read < triage < write < maintain < admin. GitHub maps its
+ * collaborator permission onto these directly; GitLab would map reporter ->
+ * read, developer -> write, maintainer -> maintain, owner -> admin.
+ */
+export type HostPermission = "none" | "read" | "triage" | "write" | "maintain" | "admin";
+export const HOST_PERMISSION_RANK: Readonly<Record<HostPermission, number>> = {
+  none: 0,
+  read: 1,
+  triage: 2,
+  write: 3,
+  maintain: 4,
+  admin: 5,
+};
+
+/** A host user, by its immutable numeric id (as text) and its current login. */
+export interface HostUser {
+  id: string;
+  login: string;
+}
+
 export interface CodeReviewHost {
   readonly provider: ReviewHostProvider;
+  /**
+   * The user's effective permission on `repository`, asked with the App's own
+   * installation credential (never a user token). Answers only for the user
+   * with this id: a login that now names someone else is re-resolved by id,
+   * and `login` in the result is the user's current login.
+   */
+  repositoryPermission(repository: string, user: HostUser): Promise<{ level: HostPermission; login: string }>;
   readPullRequest(
     repository: string,
     prNumber: number,
@@ -184,6 +213,22 @@ export class ReviewHostError extends Error {
 export type ReviewHostRegistry = Partial<Record<ReviewHostProvider, CodeReviewHost>>;
 
 /**
+ * A host's user-authorization (OAuth web) flow, used only to learn who a
+ * wardby principal is on the host. Implementations never store or return the
+ * user token: `complete` reads the user and revokes the token at once.
+ */
+export interface HostUserAuthorizer {
+  readonly provider: ReviewHostProvider;
+  authorizeUrl(input: { state: string; codeChallenge: string; redirectUri: string }): string;
+  complete(input: { code: string; codeVerifier: string; redirectUri: string }): Promise<{
+    hostUserId: string;
+    login: string;
+  }>;
+}
+
+export type HostUserAuthorizerRegistry = Partial<Record<ReviewHostProvider, HostUserAuthorizer>>;
+
+/**
  * Host-neutral shape a webhook adapter (github-events.ts) normalises its
  * provider payload into, for src/core/host-events.ts to route.
  */
@@ -216,6 +261,8 @@ export type HostEvent =
       /** The comment text; for a "subject" mention, the issue/PR description. */
       body: string;
       author: string;
+      /** The author's immutable numeric host user id, as text; their permission is checked by it. */
+      authorId: string;
       /** The issue or PR the mention is on, when the payload carries it. */
       subject?: { title: string; body: string };
       /** The run that opened this PR, when its description carries a valid run marker. */

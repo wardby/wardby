@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CodeReviewHost } from "../providers/review-host/types.js";
+import type { RepoAccessDecision, RepoAccessGate } from "./repo-access.js";
 import { isReviewCommand, routeHostEvent, type HostEvent } from "./host-events.js";
 
 // vi.mock factories are hoisted above every declaration, so shared state goes through vi.hoisted.
@@ -19,6 +20,7 @@ const REPO = "chfields/knock-knock-jokes";
 function host(): CodeReviewHost {
   return {
     provider: "github",
+    repositoryPermission: vi.fn(async () => ({ level: "write" as const, login: "octo" })),
     readPullRequest: vi.fn(),
     pullRequestHead: vi.fn(async () => ({ headSha: SHA, isFork: false, state: "open" })),
     readFile: vi.fn(),
@@ -31,15 +33,42 @@ function host(): CodeReviewHost {
   };
 }
 
-function deps(links: Array<{ agentId: string; triggers: string[]; checkName: string | null }>, h = host()) {
+const OK: RepoAccessDecision = { ok: true };
+
+function gate(
+  opts: { use?: (agentId: string) => RepoAccessDecision; commenter?: RepoAccessDecision } = {},
+): RepoAccessGate & { authorizeUse: ReturnType<typeof vi.fn>; authorizeHostUser: ReturnType<typeof vi.fn> } {
+  return {
+    // The stub receives the link's owner as ownerId = `owner-<agentId>`.
+    authorizeUse: vi.fn(async (input: { ownerId: string | null }) =>
+      opts.use ? opts.use(String(input.ownerId).replace(/^owner-/, "")) : OK,
+    ),
+    authorizeHostUser: vi.fn(async () => opts.commenter ?? OK),
+    authorizePrincipal: vi.fn(),
+  };
+}
+
+function deps(
+  links: Array<{ agentId: string; triggers: string[]; checkName: string | null }>,
+  h = host(),
+  repoAccess = gate(),
+) {
   return {
     hosts: { github: h },
     executor: {} as never,
     mentionHandle: "wardby",
+    repoAccess,
     db: {
       agentRepository: {
         findMany: vi.fn(async () =>
-          links.map((l) => ({ ...l, provider: "github", repository: REPO, access: "write" })),
+          links.map((l) => ({
+            ...l,
+            provider: "github",
+            repository: REPO,
+            access: "write",
+            authorizedVia: "host_permission",
+            agent: { ownerId: `owner-${l.agentId}` },
+          })),
         ),
       },
     } as never,
@@ -71,7 +100,7 @@ describe("routeHostEvent", () => {
       taskOverride: `Review pull request #7 in ${REPO} (head ${SHA}).`,
     });
     expect(txStub.runHostCheck.create).toHaveBeenCalledWith({
-      data: { runId: "run-a1", provider: "github", repository: REPO, checkId: "11", headSha: SHA },
+      data: { runId: "run-a1", provider: "github", repository: REPO, checkId: "11", headSha: SHA, prNumber: 7 },
     });
   });
 
@@ -119,6 +148,7 @@ describe("routeHostEvent", () => {
       comment: { kind: "conversation", id: "4" },
       body,
       author: "chfields",
+      authorId: "1001",
     });
     const review = await routeHostEvent(mention("@wardby review please"), d);
     expect(review.runIds).toEqual(["run-a1"]);
@@ -142,6 +172,7 @@ describe("routeHostEvent mention task text", () => {
     comment: { kind: "conversation", id: "4" },
     body: "@wardby please fix the typo",
     author: "chfields",
+    authorId: "1001",
   };
   async function taskFor(event: HostEvent) {
     vi.mocked(dispatchRun).mockClear();
@@ -241,5 +272,112 @@ describe("isReviewCommand", () => {
     expect(isReviewCommand("hey @Wardby Review this", "wardby")).toBe(true);
     expect(isReviewCommand("@wardby reviewer?", "wardby")).toBe(false);
     expect(isReviewCommand("@wardby-dev review", "wardby")).toBe(false);
+  });
+});
+
+describe("routeHostEvent repository authorization (H5-1) and mention gate (H5-3)", () => {
+  const mention = (body: string): HostEvent => ({
+    kind: "mention",
+    provider: "github",
+    repository: REPO,
+    number: 7,
+    isPullRequest: true,
+    comment: { kind: "conversation", id: "4" },
+    body,
+    author: "chfields",
+    authorId: "1001",
+  });
+
+  it("skips a link whose owner no longer has access, and still dispatches the authorized ones", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const repoAccess = gate({
+      use: (agentId) => (agentId === "a2" ? { ok: false, reason: "insufficient_permission" } : OK),
+    });
+    const d = deps(
+      [
+        { agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" },
+        { agentId: "a2", triggers: ["pull_request"], checkName: "security" },
+      ],
+      host(),
+      repoAccess,
+    );
+    const result = await routeHostEvent(pr, d);
+    expect(result.runIds).toEqual(["run-a1"]);
+    expect(d.hosts.github.startCheck).toHaveBeenCalledTimes(1);
+    expect(d.hosts.github.startCheck).toHaveBeenCalledWith(REPO, { headSha: SHA, name: "wardby review" });
+    expect(repoAccess.authorizeUse).toHaveBeenCalledWith({
+      ownerId: "owner-a2",
+      provider: "github",
+      repository: REPO,
+      required: "write",
+      authorizedVia: "host_permission",
+    });
+  });
+
+  it.each(["read", "triage"] as const)(
+    "ignores a mention from a %s commenter: no dispatch, no reaction",
+    async (level) => {
+      vi.mocked(dispatchRun).mockClear();
+      const repoAccess = gate({ commenter: { ok: false, reason: "insufficient_permission", level } });
+      const d = deps(
+        [
+          { agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" },
+          { agentId: "a3", triggers: ["mention"], checkName: null },
+        ],
+        host(),
+        repoAccess,
+      );
+      for (const body of ["@wardby review", "@wardby please fix it"]) {
+        expect(await routeHostEvent(mention(body), d)).toEqual({ runIds: [], followUps: [] });
+      }
+      expect(dispatchRun).not.toHaveBeenCalled();
+      expect(d.hosts.github.startCheck).not.toHaveBeenCalled();
+      expect(d.hosts.github.pullRequestHead).not.toHaveBeenCalled();
+      expect(repoAccess.authorizeHostUser).toHaveBeenCalledWith({
+        provider: "github",
+        repository: REPO,
+        user: { id: "1001", login: "chfields" },
+        required: "write",
+      });
+    },
+  );
+
+  it("dispatches a mention from a commenter with write access", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps(
+      [{ agentId: "a3", triggers: ["mention"], checkName: null }],
+      host(),
+      gate({ commenter: { ok: true, level: "write" } }),
+    );
+    const result = await routeHostEvent(mention("@wardby please fix it"), d);
+    expect(result.runIds).toEqual(["run-a3"]);
+    expect(result.followUps).toHaveLength(1);
+  });
+
+  it("does not ask about the commenter when no agent would act on the mention", async () => {
+    const repoAccess = gate();
+    const d = deps([], host(), repoAccess);
+    await routeHostEvent(mention("@wardby hi"), d);
+    expect(repoAccess.authorizeHostUser).not.toHaveBeenCalled();
+  });
+
+  it("refuses the mention responder when its own link is no longer authorized", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps(
+      [{ agentId: "a3", triggers: ["mention"], checkName: null }],
+      host(),
+      gate({ use: () => ({ ok: false, reason: "owner_required" }) }),
+    );
+    expect(await routeHostEvent(mention("@wardby fix"), d)).toEqual({ runIds: [], followUps: [] });
+    expect(dispatchRun).not.toHaveBeenCalled();
+  });
+
+  it("records the dispatched PR on a review started by '@wardby review'", async () => {
+    txStub.runHostCheck.create.mockClear();
+    const d = deps([{ agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" }]);
+    await routeHostEvent(mention("@wardby review"), d);
+    expect(txStub.runHostCheck.create).toHaveBeenCalledWith({
+      data: { runId: "run-a1", provider: "github", repository: REPO, checkId: "11", headSha: SHA, prNumber: 7 },
+    });
   });
 });

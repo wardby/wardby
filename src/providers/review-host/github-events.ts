@@ -60,12 +60,18 @@ function priorRunIdOf(pr: Json | null, slug: string): string | undefined {
   return id && SAFE_RUN_ID.test(id) ? id : undefined;
 }
 
-function trustedHuman(association: unknown, user: Json | null): user is Json & { login: string } {
+/**
+ * A cheap pre-filter only: author_association is not a permission (MEMBER is
+ * any org member, COLLABORATOR includes read and triage). The real gate is the
+ * author's live repository permission, checked by id in core/host-events.ts.
+ */
+function trustedHuman(association: unknown, user: Json | null): user is Json & { login: string; id: number } {
   return (
     typeof association === "string" &&
     TRUSTED_ASSOCIATIONS.has(association) &&
     user?.type === "User" &&
-    typeof user.login === "string"
+    typeof user.login === "string" &&
+    int(user.id) !== null
   );
 }
 
@@ -133,6 +139,7 @@ export function normalizeGitHubEvent(
       comment: { kind: "subject", id: String(number) },
       body,
       author: user.login,
+      authorId: String(user.id),
       subject: { title, body },
     };
   }
@@ -162,6 +169,7 @@ export function normalizeGitHubEvent(
       ...(isInline ? { replyToReviewCommentId: String(commentId) } : {}),
       body,
       author: user.login,
+      authorId: String(user.id),
       ...(subject ? { subject } : {}),
       ...(priorRunId ? { priorRunId } : {}),
     };

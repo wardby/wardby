@@ -50,6 +50,7 @@ export default tseslint.config(
       "src/wardby-bin.ts",
       "src/quickstart/*.ts",
       "src/mcp/auth/self-hosted/cli.ts",
+      "src/mcp/auth/host-account-cli.ts",
       "src/tools/*.ts",
     ],
     rules: { "no-console": "off" },

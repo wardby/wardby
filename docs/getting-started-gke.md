@@ -142,7 +142,18 @@ GITHUB_APP_ID="..."
 GITHUB_APP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----
 ...
 -----END PRIVATE KEY-----"
+GITHUB_APP_CLIENT_ID="..."
+GITHUB_APP_CLIENT_SECRET="..."
 ```
+
+`GITHUB_APP_CLIENT_ID` and `GITHUB_APP_CLIENT_SECRET` are the App's OAuth
+Client ID (not the App ID) and a client secret generated under the App's
+**Client secrets**. Users link their GitHub accounts with them, which is how
+wardby checks that an agent's owner may use a repository. Also set the App's
+**Callback URL** to `https://<your hostname>/hosts/github/user-callback` and
+leave **Request user authorization (OAuth) during installation** unchecked; see
+[code-review-agents.md](code-review-agents.md#registering-the-github-app).
+Seeding stops, with nothing written, if either value is missing.
 
 Generate `SECRET_APP_KEY` with:
 

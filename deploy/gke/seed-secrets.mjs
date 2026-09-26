@@ -24,6 +24,10 @@ export const SECRETS = [
   { id: "github-app-id", env: "GITHUB_APP_ID", source: "carry" },
   { id: "github-app-private-key", env: "GITHUB_APP_PRIVATE_KEY", source: "carry" },
   { id: "github-app-webhook-secret", env: "GITHUB_APP_WEBHOOK_SECRET", source: "carry-or-generate" },
+  // The App's OAuth client credentials, for link_host_account (GitHub account
+  // linking). Created in the App's settings, never generated here.
+  { id: "github-app-client-id", env: "GITHUB_APP_CLIENT_ID", source: "carry" },
+  { id: "github-app-client-secret", env: "GITHUB_APP_CLIENT_SECRET", source: "carry" },
   { id: "auth-signing-key", env: "AUTH_SIGNING_KEY", source: "carry-or-generate" },
   { id: "auth-credential-hash-key", env: "AUTH_CREDENTIAL_HASH_KEY", source: "carry-or-generate" },
 ];

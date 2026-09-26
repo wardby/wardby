@@ -10,6 +10,7 @@ import type { Executor } from "../providers/executor/types.js";
 import type { CodeReviewHost, HostEvent, ReviewHostRegistry } from "../providers/review-host/types.js";
 import { dispatchRun } from "./dispatch.js";
 import { logger } from "./logger.js";
+import { requiredLevel, type RepoAccessGate } from "./repo-access.js";
 
 export type { HostEvent };
 
@@ -29,6 +30,8 @@ export interface RouteHostEventDeps {
   hosts: ReviewHostRegistry;
   /** The App's @-handle without the "@", e.g. "wardby". */
   mentionHandle: string;
+  /** Re-checks each link's authorization, and a mention author's own permission, before anything runs. */
+  repoAccess: RepoAccessGate;
 }
 
 export interface RouteResult {
@@ -109,7 +112,7 @@ async function startReviews(
         afterPersist: checkId
           ? async (tx, run) => {
               await tx.runHostCheck.create({
-                data: { runId: run.id, provider: host.provider, repository, checkId, headSha },
+                data: { runId: run.id, provider: host.provider, repository, checkId, headSha, prNumber },
               });
             }
           : undefined,
@@ -134,30 +137,66 @@ async function startReviews(
   return runIds;
 }
 
+type LinkRow = Awaited<ReturnType<HostEventDb["agentRepository"]["findMany"]>>[number] & {
+  agent: { ownerId: string | null };
+};
+
+/**
+ * Keeps only the links the gate still authorizes: the agent must have an
+ * owner, and the owner's current access (or a recorded admin/grandfathered
+ * approval) must cover the link. Denials are logged, never surfaced.
+ */
+async function authorizedLinks(deps: RouteHostEventDeps, event: HostEvent, links: LinkRow[]): Promise<LinkRow[]> {
+  const kept: LinkRow[] = [];
+  for (const link of links) {
+    const decision = await deps.repoAccess.authorizeUse({
+      ownerId: link.agent.ownerId,
+      provider: event.provider,
+      repository: event.repository,
+      required: requiredLevel(link.access === "write" ? "write" : "read"),
+      authorizedVia: link.authorizedVia,
+    });
+    if (decision.ok) kept.push(link);
+    else {
+      log.warn(
+        { repository: event.repository, agentId: link.agentId, reason: decision.reason },
+        "host event skipped an agent whose repository access is not authorized",
+      );
+    }
+  }
+  return kept;
+}
+
+const reviewTargets = (links: LinkRow[]): ReviewTarget[] =>
+  links.map((l) => ({ agentId: l.agentId, checkName: l.checkName! }));
+
 export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps): Promise<RouteResult> {
   const none: RouteResult = { runIds: [], followUps: [] };
   const host = deps.hosts[event.provider];
   if (!host) return none;
-  const links = await deps.db.agentRepository.findMany({
+  const links = (await deps.db.agentRepository.findMany({
     where: { provider: event.provider, repository: event.repository },
-  });
-  const reviewers = links
-    .filter((l) => l.access === "write" && l.triggers.includes("pull_request") && l.checkName)
-    .map((l) => ({ agentId: l.agentId, checkName: l.checkName! }));
+    include: { agent: { select: { ownerId: true } } },
+  })) as LinkRow[];
+  const reviewerLinks = links.filter((l) => l.access === "write" && l.triggers.includes("pull_request") && l.checkName);
 
   switch (event.kind) {
     case "pr_updated": {
-      if (event.isFork || reviewers.length === 0) return none;
+      if (event.isFork || reviewerLinks.length === 0) return none;
+      const reviewers = reviewTargets(await authorizedLinks(deps, event, reviewerLinks));
+      if (reviewers.length === 0) return none;
       return {
         runIds: await startReviews(deps, host, event.repository, event.prNumber, event.headSha, reviewers),
         followUps: [],
       };
     }
     case "check_rerun": {
-      const owner = reviewers.filter((r) => r.checkName === event.checkName);
-      if (owner.length === 0) return none;
+      const owners = reviewerLinks.filter((l) => l.checkName === event.checkName);
+      if (owners.length === 0) return none;
+      const reviewers = reviewTargets(await authorizedLinks(deps, event, owners));
+      if (reviewers.length === 0) return none;
       return {
-        runIds: await startReviews(deps, host, event.repository, event.prNumber, event.headSha, owner),
+        runIds: await startReviews(deps, host, event.repository, event.prNumber, event.headSha, reviewers),
         followUps: [],
       };
     }
@@ -167,21 +206,41 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
           log.warn({ err, repository: event.repository, number: event.number }, "could not add the reaction");
         });
       };
-      if (event.isPullRequest && isReviewCommand(event.body, deps.mentionHandle)) {
-        if (reviewers.length === 0) return none;
+      const reviewCommand = event.isPullRequest && isReviewCommand(event.body, deps.mentionHandle);
+      const responderLink = links.find((l) => l.access === "write" && l.triggers.includes("mention"));
+      const candidates = reviewCommand ? reviewerLinks : responderLink ? [responderLink] : [];
+      if (candidates.length === 0) return none;
+      // H5-3: a mention drives a write-capable agent holding its owner's
+      // tools and secrets, so its author needs real push access to the
+      // repository (author_association, checked upstream, is only a
+      // pre-filter). Checked by the author's immutable id.
+      const author = await deps.repoAccess.authorizeHostUser({
+        provider: event.provider,
+        repository: event.repository,
+        user: { id: event.authorId, login: event.author },
+        required: requiredLevel("mention"),
+      });
+      if (!author.ok) {
+        log.info(
+          { repository: event.repository, number: event.number, reason: author.reason, level: author.level },
+          "mention ignored: its author lacks write access",
+        );
+        return none;
+      }
+      const allowed = await authorizedLinks(deps, event, candidates);
+      if (allowed.length === 0) return none;
+      if (reviewCommand) {
         const head = await host.pullRequestHead(event.repository, event.number);
         if (head.isFork || head.state !== "open") return none;
         return {
-          runIds: await startReviews(deps, host, event.repository, event.number, head.headSha, reviewers),
+          runIds: await startReviews(deps, host, event.repository, event.number, head.headSha, reviewTargets(allowed)),
           followUps: [react],
         };
       }
-      const responder = links.find((l) => l.access === "write" && l.triggers.includes("mention"));
-      if (!responder) return none;
       const dispatched = await dispatchRun({
         db: deps.db,
         executor: deps.executor,
-        agentId: responder.agentId,
+        agentId: allowed[0].agentId,
         trigger: "host_event",
         taskOverride: mentionTaskText(event),
       });

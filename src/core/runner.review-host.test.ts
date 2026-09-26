@@ -22,6 +22,7 @@ interface FakeLink {
   access: string;
   checkName: string | null;
   triggers: string[];
+  authorizedVia: string | null;
 }
 
 interface FakeRunHostCheck {
@@ -30,6 +31,7 @@ interface FakeRunHostCheck {
   repository: string;
   checkId: string;
   headSha: string;
+  prNumber: number | null;
   completedAt: Date | null;
 }
 
@@ -46,6 +48,7 @@ const LINK: FakeLink = {
   access: "write",
   checkName: "wardby review",
   triggers: ["pull_request"],
+  authorizedVia: "grandfathered",
 };
 const OPEN_CHECK: FakeRunHostCheck = {
   runId: "run1",
@@ -53,6 +56,7 @@ const OPEN_CHECK: FakeRunHostCheck = {
   repository: REPO,
   checkId: "11",
   headSha: SHA,
+  prNumber: 7,
   completedAt: null,
 };
 
@@ -68,6 +72,7 @@ const text = (s: string): LlmStreamEvent[] => [
 function fakeHost(): CodeReviewHost {
   return {
     provider: "github",
+    repositoryPermission: vi.fn(async () => ({ level: "write" as const, login: "octo" })),
     readPullRequest: vi.fn(async () => ({ number: 7 }) as never),
     pullRequestHead: vi.fn(),
     readFile: vi.fn(async () => ({ kind: "not_found" as const, path: "x" })),
@@ -88,13 +93,26 @@ function fakeHost(): CodeReviewHost {
   };
 }
 
-function harness(opts: { links: FakeLink[]; runHostCheck?: FakeRunHostCheck; script: LlmStreamEvent[][] }) {
+function harness(opts: {
+  links: FakeLink[];
+  runHostCheck?: FakeRunHostCheck;
+  script: LlmStreamEvent[][];
+  ownerId?: string | null;
+}) {
   const state: HarnessState = {
     toolNamesOfferedOnFirstCall: [],
     agentRepositoryQueried: false,
     runHostCheck: opts.runHostCheck ? { ...opts.runHostCheck } : null,
   };
-  const agent = { id: "a1", name: "reviewer", systemPrompt: "Review PRs.", model: "m", budgetUsd: 10, maxTurns: 10 };
+  const agent = {
+    id: "a1",
+    name: "reviewer",
+    systemPrompt: "Review PRs.",
+    model: "m",
+    budgetUsd: 10,
+    maxTurns: 10,
+    ownerId: opts.ownerId === undefined ? "p1" : opts.ownerId,
+  };
   const runs = new Map<string, any>([
     [
       "run1",
@@ -138,7 +156,16 @@ function harness(opts: { links: FakeLink[]; runHostCheck?: FakeRunHostCheck; scr
         state.agentRepositoryQueried = true;
         return opts.links.filter((l) => l.agentId === where.agentId);
       },
+      findUnique: async ({ where }: any) => {
+        const key = where.agentId_provider_repository;
+        const link = opts.links.find(
+          (l) => l.agentId === key.agentId && l.provider === key.provider && l.repository === key.repository,
+        );
+        return link ? { ...link, agent: { ownerId: agent.ownerId } } : null;
+      },
     },
+    // No principal has a linked GitHub identity in this harness.
+    hostIdentity: { findUnique: async () => null, updateMany: async () => ({ count: 0 }) },
     runHostCheck: {
       findUnique: async ({ where }: any) =>
         state.runHostCheck && state.runHostCheck.runId === where.runId ? { ...state.runHostCheck } : null,
@@ -218,5 +245,46 @@ describe("repo_* built-ins in the native run loop", () => {
     await executeRun("run1", providers(llm), db);
     expect(state.toolNamesOfferedOnFirstCall).not.toContain("repo_pr_read");
     expect(state.agentRepositoryQueried).toBe(false);
+  });
+});
+
+describe("repo_* built-ins re-check repository authorization at every call", () => {
+  const publish = toolCall("repo_publish_review", {
+    repository: REPO,
+    prNumber: 7,
+    headSha: SHA,
+    verdict: "APPROVE",
+    summary: "ok",
+    body: "fine",
+  });
+
+  it("refuses a host_permission link whose owner has no linked GitHub identity", async () => {
+    const host = fakeHost();
+    const { db, llm } = harness({
+      links: [{ ...LINK, authorizedVia: "host_permission" }],
+      script: [publish, text("done")],
+    });
+    const run = await executeRun("run1", { ...providers(llm), reviewHosts: { github: host } }, db);
+    expect(run.status).toBe("succeeded");
+    expect(host.publishReview).not.toHaveBeenCalled();
+    expect(host.repositoryPermission).not.toHaveBeenCalled();
+  });
+
+  it("refuses every link, even grandfathered, once the agent has no owner", async () => {
+    const host = fakeHost();
+    const { db, llm } = harness({ links: [LINK], ownerId: null, script: [publish, text("done")] });
+    await executeRun("run1", { ...providers(llm), reviewHosts: { github: host } }, db);
+    expect(host.publishReview).not.toHaveBeenCalled();
+  });
+
+  it("refuses a link removed after the run loaded it", async () => {
+    const host = fakeHost();
+    const links = [LINK];
+    const { db, llm } = harness({ links, script: [publish, text("done")] });
+    const original = (db as any).agentRepository.findUnique;
+    (db as any).agentRepository.findUnique = async () => null;
+    await executeRun("run1", { ...providers(llm), reviewHosts: { github: host } }, db);
+    expect(host.publishReview).not.toHaveBeenCalled();
+    (db as any).agentRepository.findUnique = original;
   });
 });

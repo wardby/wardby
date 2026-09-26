@@ -27,7 +27,9 @@ import { PostgresDatastore } from "../providers/datastore/index.js";
 import { PostgresAgentMemory } from "../providers/memory/index.js";
 import { buildConfiguredExecutor, buildExecutor } from "../providers/executor/index.js";
 import { buildSecretCipher } from "../providers/secrets/index.js";
-import { buildReviewHosts } from "../providers/review-host/index.js";
+import { buildHostUserAuthorizers, buildReviewHosts } from "../providers/review-host/index.js";
+import { createRepoAccessGate } from "../core/repo-access.js";
+import { userCallbackPath } from "../core/host-identity-links.js";
 import type { NativeRunProviders } from "../core/runner.js";
 import { buildAuthProvider } from "../providers/auth/index.js";
 import { GitHubAppClient } from "../providers/vcs/github.js";
@@ -51,6 +53,7 @@ import { registerRunTools } from "./tools/runs.js";
 import { registerDatastoreTools } from "./tools/datastore.js";
 import { registerSubAgentTools } from "./tools/subagents.js";
 import { registerRepositoryTools } from "./tools/repositories.js";
+import { registerHostAccountTools } from "./tools/host-accounts.js";
 import { registerMemoryTools } from "./tools/memory.js";
 import { registerSecretsTools, type SecretElicitationUrlBuilder } from "./tools/secrets.js";
 import { registerWebhookTools } from "./tools/webhooks.js";
@@ -114,6 +117,7 @@ export function registerAllTools(
   registerDatastoreTools(mcp);
   registerSubAgentTools(mcp);
   registerRepositoryTools(mcp);
+  registerHostAccountTools(mcp);
   registerMemoryTools(mcp);
   registerSecretsTools(mcp, {
     buildElicitationUrl: opts.secretElicitationUrl,
@@ -142,6 +146,10 @@ export function buildMcpProviders(): McpProviderComposition {
   const datastore = new PostgresDatastore(prisma, secrets);
   const memory = new PostgresAgentMemory(prisma);
   const reviewHosts = buildReviewHosts();
+  const hostUserAuthorizers = buildHostUserAuthorizers();
+  // One gate (and one cache) for the whole process: set-time checks in the
+  // MCP tools, repo_* calls in native runs, coding runs, and host events.
+  const repoAccess = createRepoAccessGate({ db: prisma, hosts: reviewHosts });
   // `nativeProviders` is passed by reference into buildExecutor, and native
   // runs it drives read `this.providers.executor` at call time (not at
   // construction time) — so patching `.executor` on afterward, once the
@@ -150,12 +158,14 @@ export function buildMcpProviders(): McpProviderComposition {
   // through the same composed executor everything else uses. There's no
   // way to hand the native executor a reference to its own wrapping
   // RoutingExecutor before that wrapper is constructed.
-  const nativeProviders: NativeRunProviders = { llm, engine, datastore, secrets, memory, reviewHosts };
+  const nativeProviders: NativeRunProviders = { llm, engine, datastore, secrets, memory, reviewHosts, repoAccess };
   const nativeExecutor = buildExecutor(providerConfig, nativeProviders, prisma);
-  const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig });
+  const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig, repoAccess });
   nativeProviders.executor = executor;
 
-  return { providers: { llm, engine, datastore, secrets, executor, memory, reviewHosts } };
+  return {
+    providers: { llm, engine, datastore, secrets, executor, memory, reviewHosts, hostUserAuthorizers, repoAccess },
+  };
 }
 
 /** Handle returned by `startMcp()` — closes the running transport, then the executor. */
@@ -253,6 +263,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
             db: prisma,
             executor: providers.executor,
             hosts: reviewHosts,
+            repoAccess: providers.repoAccess ?? createRepoAccessGate({ db: prisma, hosts: reviewHosts }),
             webhookSecret: eventConfig.webhookSecret,
             appIdentity: (() => {
               const client = new GitHubAppClient({
@@ -266,6 +277,17 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
         }
       : undefined;
   mcpLog.info({ enabled: Boolean(hostEvents) }, "GitHub host events ingress");
+  const githubAuthorizer = providers.hostUserAuthorizers?.github;
+  const hostUserAuth = githubAuthorizer
+    ? {
+        github: {
+          db: prisma,
+          authorizer: githubAuthorizer,
+          redirectUri: `${httpOrigin}${userCallbackPath("github")}`,
+        },
+      }
+    : undefined;
+  mcpLog.info({ enabled: Boolean(hostUserAuth) }, "GitHub account linking");
 
   const http = await startHttpServer({
     mcp,
@@ -279,6 +301,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     auth: { authProvider, db: prisma, providers },
     selfHosted,
     hostEvents,
+    hostUserAuth,
   });
   const cleanupTimer = selfHosted
     ? setInterval(() => {

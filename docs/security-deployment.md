@@ -83,22 +83,25 @@ Scopes and roles do different jobs:
 | `package-approver` | `packages:approve`                                              |
 | (none)             | nothing privileged; every other scope works as the token allows |
 
-Three operations are privileged:
+Four operations are privileged:
 
 - `make_owner`, which reassigns any agent's owner, including another
   principal's private agent;
 - setting a BYO `workerImageRef`;
-- approving coding agents' package allowlists or policy.
+- approving coding agents' package allowlists or policy;
+- approving a repository for an agent without checking GitHub access
+  (`adminOverride` on `link_repository`, `repositoryAdminOverride` on
+  `create_agent`/`update_agent`; see [Repository access](#repository-access)).
 
 Each needs **both** its scope on the token **and** a role that grants that
 permission:
 
-- `make_owner` and `workerImageRef` need `agents:admin`.
+- `make_owner`, `workerImageRef`, and repository approval need `agents:admin`.
 - Package approval needs `packages:approve`, or `agents:admin`.
 
 In practice:
 
-- an `admin` can do all three;
+- an `admin` can do all four;
 - a `package-approver` can approve packages only;
 - a member can do none of them.
 
@@ -135,8 +138,9 @@ doesn't hold, revokes nothing.
 
 The other scopes are not privileged, but they are not strictly per-tenant
 either. They are ownership-checked on every call, but public (unowned) agents
-and repository links still let them reach resources other principals attached
-there. The security review tracks this separately.
+still let them reach resources other principals attached there. The security
+review tracks this separately. Repositories are the exception: a public agent
+can't hold one (next section).
 
 **Upgrading:** every existing self-hosted user starts with no roles, including
 the operator. After deploying, grant yourself the admin role, then reconnect
@@ -189,6 +193,66 @@ codes, challenges, and refresh tokens. Rotate signing and credential keys
 together during a planned global credential reset; provision new login keys
 and reauthorize clients. Do not rotate `SECRET_APP_KEY` without a separate
 encrypted-secret migration, or existing application secrets become unreadable.
+
+## Repository access
+
+The GitHub App is installed on repositories by their owners, not per wardby
+user, so "the App can reach it" is not permission to use it. An agent may use
+a repository — a `link_repository` link, or a coding agent's
+`codingProfile.repository` — only when:
+
+- its **current owner's** GitHub account, linked with `link_host_account`, has
+  enough permission on it: write for coding repositories and write links
+  (they push, comment, and publish checks), read for read links; or
+- a wardby `admin` approved that exact repository explicitly; the approval is
+  recorded (who, when); or
+- the authorization predates enforcement (`grandfathered`, stamped by the
+  migration).
+
+Trust assumptions:
+
+- **The owner's access decides, not the trigger's.** Whoever triggers a run (a
+  schedule, a webhook, a host event, the owner) only supplies task text; the
+  owner controls the prompt, tools, secrets, and repository. Owned agents can
+  be triggered over MCP only by their owner.
+- **Owner-less (public) agents never hold a repository**, even admin-approved:
+  anyone can edit them. Assign an owner first.
+- **Checked where it's used.** Every coding run (before its workspace is
+  prepared, and again right before it pushes), every `repo_*` call, and every
+  host-event dispatch re-checks a `host_permission` authorization against the
+  current owner, with a 5-minute cache. A GitHub error refuses the use; for a
+  run already under way, a transient error (5xx, timeout, rate limit) is
+  retried once, then refused with its own category
+  (`repo_access_unavailable`). Set-time checks never retry.
+- **Approvals stay with the owner they were granted under.** Admin and
+  grandfathered authorizations are not re-checked while the agent keeps its
+  owner; revoke them by unlinking or changing the repository. `make_owner` to
+  a different owner (or to public) converts them into checks of the next
+  owner's own GitHub access; only a public agent's first owner keeps them.
+- **Admins approve explicitly, on any owned agent.** `adminOverride` works on
+  agents the admin doesn't own (the admin role can already reassign any
+  agent); it is always recorded with the approver. On another's agent an
+  admin can change only the repository.
+- **Public repositories:** GitHub reports read access for everyone, so any
+  linked principal may create a `read` link to a public repository the App is
+  installed on. Only public data is exposed that way.
+- **Identity is proven, not claimed.** Linking uses the App's OAuth web flow
+  with single-use state, S256 PKCE, and a one-time confirmation code that
+  only the initiating principal can submit, so a victim clicking an attacker's
+  link can't bind their GitHub account to the attacker. wardby keeps only the
+  GitHub numeric user id and login; the user token is revoked immediately.
+  Permission checks use the App's installation token. One GitHub account links
+  to one principal.
+- **Mentions need push access.** An `@<app-slug>` mention runs an agent only
+  when its author has write access to the repository, checked live by user id.
+- **Checks are bound to the dispatched PR.** A review publishes a check only on
+  the pull request its run was dispatched for; fork PRs are never dispatched.
+
+Before upgrading, find public agents that have a repository link or a coding
+profile (`list_agents`, `list_repositories`) and give each an owner with
+`make_owner`, or they stop running. See
+[code-review-agents.md](code-review-agents.md#who-may-give-an-agent-a-repository)
+for the App settings (callback URL, client ID and secret).
 
 ## Migration and rollback
 

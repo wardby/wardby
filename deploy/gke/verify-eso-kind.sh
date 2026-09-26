@@ -73,7 +73,8 @@ fake_store() {
     printf 'apiVersion: external-secrets.io/v1\nkind: SecretStore\nmetadata:\n  name: gcp-secret-manager\n  namespace: %s\n' "$ns"
     printf 'spec:\n  provider:\n    fake:\n      data:\n'
     for id in openai-api-key anthropic-api-key secret-app-key github-app-id \
-      github-app-private-key github-app-webhook-secret auth-signing-key auth-credential-hash-key "$@"; do
+      github-app-private-key github-app-webhook-secret github-app-client-id github-app-client-secret \
+      auth-signing-key auth-credential-hash-key "$@"; do
       printf '        - key: test-%s\n          value: dummy-%s\n' "$id" "$id"
     done
   } | k apply -f - >/dev/null
