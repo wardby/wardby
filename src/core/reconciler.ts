@@ -124,7 +124,9 @@ export async function closeOrphanedHostStatuses(
     orderBy: { run: { finishedAt: "desc" } },
     take: ORPHANED_CHECK_BATCH,
   });
-  for (const { run } of orphans) await completeHostStatus(db, run, hosts);
+  // postIfMissing: by now the dispatching instance's follow-up has had its
+  // chance; a run that ended with no comment (it died first) gets one here.
+  for (const { run } of orphans) await completeHostStatus(db, run, hosts, { postIfMissing: true });
 }
 
 /** Runs one reconciliation pass. Returns the number of runs marked `lost`. */

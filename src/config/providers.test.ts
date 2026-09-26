@@ -9,6 +9,7 @@ import {
   loadGitHubUserAuthConfig,
   loadDbosConfig,
   loadCodingConcurrencyConfig,
+  loadShutdownDrainSeconds,
   loadKubernetesJobConfig,
 } from "./providers.js";
 
@@ -179,6 +180,18 @@ describe("loadDbosConfig", () => {
 
   it("leaves systemDatabaseUrl undefined when neither variable is set", () => {
     expect(loadDbosConfig({}).systemDatabaseUrl).toBeUndefined();
+  });
+});
+
+describe("loadShutdownDrainSeconds", () => {
+  it("defaults to 600, accepts 0 and positive integers, and rejects anything else", () => {
+    expect(loadShutdownDrainSeconds({})).toBe(600);
+    expect(loadShutdownDrainSeconds({ SHUTDOWN_DRAIN_SECONDS: "" })).toBe(600);
+    expect(loadShutdownDrainSeconds({ SHUTDOWN_DRAIN_SECONDS: "0" })).toBe(0);
+    expect(loadShutdownDrainSeconds({ SHUTDOWN_DRAIN_SECONDS: "120" })).toBe(120);
+    for (const bad of ["-1", "1.5", "ten"]) {
+      expect(() => loadShutdownDrainSeconds({ SHUTDOWN_DRAIN_SECONDS: bad })).toThrow(/SHUTDOWN_DRAIN_SECONDS/);
+    }
   });
 });
 

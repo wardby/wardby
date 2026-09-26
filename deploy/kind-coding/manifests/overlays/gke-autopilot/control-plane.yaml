@@ -97,9 +97,10 @@ spec:
       # Evicted after coding runs and the headroom placeholder, never before
       # them (priority.yaml).
       priorityClassName: wardby-control-plane
-      # The 30s preStop drain below, plus time for the scheduler and reconciler
-      # to stop cleanly on SIGTERM.
-      terminationGracePeriodSeconds: 90
+      # The 30s preStop drain below, then up to SHUTDOWN_DRAIN_SECONDS (600 by
+      # default) for the runs this pod is executing to finish, plus a margin
+      # to close the executor. An idle pod exits as soon as preStop ends.
+      terminationGracePeriodSeconds: 720
       # TRUE here, and false on every other pod in this namespace. This is the
       # one workload that talks to the Kubernetes API; the worker and the proxy
       # get no token at all.

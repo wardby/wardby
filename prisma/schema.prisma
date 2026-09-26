@@ -982,17 +982,23 @@ model RunHostCheck {
 /// @-mention started this run ("working on it"), edited with the outcome
 /// when the run ends. One per mention run.
 model RunHostStatus {
-  runId       String    @id
-  run         Run       @relation(fields: [runId], references: [id], onDelete: Cascade)
-  provider    String
-  repository  String
+  runId                  String    @id
+  run                    Run       @relation(fields: [runId], references: [id], onDelete: Cascade)
+  provider               String
+  repository             String
   /// The issue or pull request number the comment is on.
-  number      Int
+  number                 Int
   /// "conversation" (issue/PR comment) or "inline" (a reply in a review thread).
-  commentKind String
-  commentId   String
-  createdAt   DateTime  @default(now())
-  completedAt DateTime?
+  commentKind            String
+  /// Null until the "working on it" comment is posted. The row is written
+  /// with the run, so a run that dies before the comment exists still gets
+  /// an outcome comment (from the reconciler).
+  commentId              String?
+  /// For an inline mention: the review comment to reply to when the outcome
+  /// has to be posted as a new comment.
+  replyToReviewCommentId String?
+  createdAt              DateTime  @default(now())
+  completedAt            DateTime?
 }
 
 model HostEventDelivery {

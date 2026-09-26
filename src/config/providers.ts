@@ -180,6 +180,21 @@ export interface CodingConcurrencyConfig {
   queueTimeoutSec: number;
 }
 
+/**
+ * How long a shutting-down instance waits for its in-flight native runs
+ * before closing the executor (SHUTDOWN_DRAIN_SECONDS, default 600; 0 = do
+ * not wait). Keep the platform's termination grace period above this.
+ */
+export function loadShutdownDrainSeconds(env: NodeJS.ProcessEnv = process.env): number {
+  const value = env.SHUTDOWN_DRAIN_SECONDS?.trim();
+  if (!value) return 600;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error("SHUTDOWN_DRAIN_SECONDS must be a non-negative integer.");
+  }
+  return parsed;
+}
+
 export function loadCodingConcurrencyConfig(env: NodeJS.ProcessEnv = process.env): CodingConcurrencyConfig {
   return {
     maxConcurrent: optionalPositiveInteger(env.CODING_MAX_CONCURRENT, "CODING_MAX_CONCURRENT") ?? 4,

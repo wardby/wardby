@@ -476,8 +476,14 @@ the step that was in flight runs again. Coding runs are Kubernetes Jobs and are 
 - **Version.** `up.sh` sets `DBOS__APPVERSION` to the runtime image digest. A
   run resumes only under the version that started it: across a pod move, or an
   `up.sh` re-run whose source did not change, runs continue. When you deploy
-  new code, runs still in flight as the old pod stops are marked `lost`, the
-  same as without the durable executor. Deploy between runs if that matters.
+  new code, the old pod first **drains**: after its 30-second `preStop` it
+  stops the scheduler and waits for the runs it is executing to finish, up to
+  `SHUTDOWN_DRAIN_SECONDS` (default 600), while the new pod serves traffic.
+  An idle pod exits at once. A run still going after that limit is marked
+  `lost`; if an `@`-mention started it, its status comment on GitHub says the
+  request was interrupted and should be repeated. The manifest's
+  `terminationGracePeriodSeconds` (720) must stay above the drain limit plus
+  the `preStop` delay.
 - **Data at rest and retention.** `dbos.operation_outputs` holds every step's
   output — prompts, model responses and full tool results — with no retention
   limit. Pruning finished workflows is the operator's job; see
