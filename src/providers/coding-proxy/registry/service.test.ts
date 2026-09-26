@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import v8 from "node:v8";
+import vm from "node:vm";
 import { describe, expect, it } from "vitest";
 import {
   RegistryError,
@@ -796,14 +798,17 @@ describe("RegistryService with the npm adapter: names are case-exact", () => {
     const { get, urls } = npmService(["JSONStream"]);
     await expect(get("jsonstream")).resolves.toMatchObject({ status: 403 });
     await expect(get("JSONStream")).resolves.toMatchObject({ status: 200 });
-    expect(urls).toEqual(["https://registry.npmjs.org/JSONStream"]);
+    // Fetched twice, never as jsonstream: once trimmed by the graph walk
+    // that refused jsonstream, then again with render data to serve it.
+    expect(urls).toEqual(["https://registry.npmjs.org/JSONStream", "https://registry.npmjs.org/JSONStream"]);
   });
 
   it("allowing jsonstream does not allow JSONStream", async () => {
     const { get, urls } = npmService(["jsonstream"]);
     await expect(get("JSONStream")).resolves.toMatchObject({ status: 403 });
     await expect(get("jsonstream")).resolves.toMatchObject({ status: 200 });
-    expect(urls).toEqual(["https://registry.npmjs.org/jsonstream"]);
+    // Walk (trimmed) then render fetch, both of jsonstream only.
+    expect(urls).toEqual(["https://registry.npmjs.org/jsonstream", "https://registry.npmjs.org/jsonstream"]);
   });
 
   it("a JSONStream dependency is allowed exactly and fetched from /JSONStream", async () => {
@@ -812,7 +817,13 @@ describe("RegistryService with the npm adapter: names are case-exact", () => {
     expect(await store.isAllowedDependency("run-1", "npm", "JSONStream")).toBe(true);
     await expect(get("jsonstream")).resolves.toMatchObject({ status: 403 });
     await expect(get("JSONStream")).resolves.toMatchObject({ status: 200 });
-    expect(urls).toEqual(["https://registry.npmjs.org/app", "https://registry.npmjs.org/JSONStream"]);
+    // JSONStream is fetched trimmed by the walk that refused jsonstream,
+    // then with render data to serve it; never as jsonstream.
+    expect(urls).toEqual([
+      "https://registry.npmjs.org/app",
+      "https://registry.npmjs.org/JSONStream",
+      "https://registry.npmjs.org/JSONStream",
+    ]);
   });
 });
 
@@ -1094,23 +1105,46 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     expect(await store.isAllowedDependency("run-1", "npm", name)).toBe(false);
   });
 
-  it("refuses with a cut-short message when the package bound trips", async () => {
+  it("answers a definitive 403 wardby_graph_limit, never not-allowed and never a retryable 503, when the package bound trips", async () => {
     // app and mid fit in the bound; leaf, a third package, does not.
     const { get, store } = graphService({ maxGraphPackages: 2 });
     const response = await get("leaf/-/leaf-1.0.0.tgz");
     expect(response).toMatchObject({ status: 403 });
-    expect("body" in response && response.body).toContain("wardby_package_not_allowed");
-    expect("body" in response && response.body).toContain("cut short");
-    expect(store.fetches).toMatchObject([{ name: "leaf", outcome: "refused", reason: "wardby_package_not_allowed" }]);
+    expect("body" in response && response.body).toContain("wardby_graph_limit");
+    expect("body" in response && response.body).toContain("retrying will not help");
+    expect("body" in response && response.body).not.toContain("wardby_package_not_allowed");
+    expect(store.fetches).toMatchObject([{ name: "leaf", outcome: "refused", reason: "wardby_graph_limit" }]);
+    // The bound is permanent for the run: a retry gets the same definitive answer.
+    await expect(get("leaf/-/leaf-1.0.0.tgz")).resolves.toMatchObject({ status: 403 });
     // mid was found before the bound tripped, so it stays allowed.
     await expect(get("mid")).resolves.toMatchObject({ status: 200 });
   });
 
-  it("refuses with a cut-short message when the walk times out", async () => {
+  it("answers 503 wardby_graph_incomplete, never not-allowed, when the walk times out", async () => {
     const { get } = graphService({ hang: "mid", graphTimeoutMs: 30 });
     const response = await get("leaf");
-    expect(response).toMatchObject({ status: 403 });
-    expect("body" in response && response.body).toContain("cut short");
+    expect(response).toMatchObject({ status: 503 });
+    expect("body" in response && response.body).toContain("wardby_graph_incomplete");
+    expect("body" in response && response.body).toContain("cut short by its time limit");
+    expect("body" in response && response.body).not.toContain("wardby_package_not_allowed");
+    expect("body" in response && response.body).not.toContain("not found");
+  });
+
+  it("serves a name on retry once a timed-out walk resumes and reaches it", async () => {
+    let open: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const { get, store } = graphService({ gate, graphTimeoutMs: 30 });
+    await expect(get("leaf/-/leaf-1.0.0.tgz")).resolves.toMatchObject({ status: 503 });
+    open();
+    const retried = await get("leaf/-/leaf-1.0.0.tgz");
+    if (!("stream" in retried)) throw new Error(`expected a stream, got ${JSON.stringify(retried)}`);
+    await new Response(retried.stream).arrayBuffer();
+    expect(store.fetches).toMatchObject([
+      { name: "leaf", outcome: "refused", reason: "wardby_graph_incomplete" },
+      { name: "leaf", outcome: "served" },
+    ]);
   });
 
   it("shares one walk between concurrent misses", async () => {
@@ -1224,8 +1258,8 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       now: () => new Date(NOW.getTime() + (tick += 5_000)),
     });
     const response = await get("leaf");
-    expect(response).toMatchObject({ status: 403 });
-    expect("body" in response && response.body).toContain("cut short");
+    expect(response).toMatchObject({ status: 503 });
+    expect("body" in response && response.body).toContain("cut short by its time limit");
     expect(urls).toEqual([]);
   });
 
@@ -1387,5 +1421,140 @@ describe("RegistryService metadata path dependency names", () => {
     });
     await expect(registry.handle({ ...request("app"), ecosystem: "npm" })).resolves.toMatchObject({ status: 200 });
     expect([...store.allowances].map((key) => key.split("\0")[2]).sort()).toEqual(["ok", "string-width"]);
+  });
+});
+
+describe("RegistryService memory: nothing retains a parsed packument, and run state is released", () => {
+  const old = new Date(NOW.getTime() - 30 * DAY).toISOString();
+  /** A packument with bulk the proxy never reads (readmes, license texts,
+   *  maintainers) on every version. */
+  const packument = (name: string, dependencies: Record<string, string> = {}) => {
+    const versions: Record<string, unknown> = {};
+    const time: Record<string, string> = {};
+    for (let minor = 0; minor < 50; minor += 1) {
+      const version = `1.${minor}.0`;
+      time[version] = old;
+      versions[version] = {
+        name,
+        version,
+        description: "d".repeat(1_000),
+        licenseText: "l".repeat(20_000),
+        maintainers: [{ name: "someone", email: "someone@example.test" }],
+        scripts: { test: "vitest" },
+        dependencies,
+        dist: { tarball: `https://registry.npmjs.org/${name}/-/${name}-${version}.tgz`, shasum: "a".repeat(40) },
+      };
+    }
+    return { name, readme: "r".repeat(50_000), time, versions };
+  };
+  const packuments: Record<string, unknown> = {
+    app: packument("app", { mid: "^1" }),
+    mid: packument("mid", { leaf: "^1" }),
+    leaf: packument("leaf"),
+  };
+
+  function memoryService(deadlineAt = new Date(NOW.getTime() + DAY), now: () => Date = () => NOW) {
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt,
+      allowlist: { npm: ["app"] },
+      policy: {},
+    });
+    const registry = new RegistryService({
+      adapters: new Map([["npm", npmAdapter]]),
+      store,
+      audit: { audit: async () => NO_ADVISORIES },
+      upstream: async (url) => {
+        const name = decodeURIComponent(url.slice("https://registry.npmjs.org/".length));
+        return Response.json(packuments[name]);
+      },
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
+      now,
+    });
+    const get = (subpath: string) => registry.handle({ ...request(subpath), ecosystem: "npm" });
+    const internals = registry as unknown as {
+      metadataCache: Map<string, { bytes: number; meta: PackageMetadata }>;
+      tallies: Map<string, { graphs?: Map<string, { released?: boolean }> }>;
+    };
+    return { registry, get, internals };
+  }
+
+  it("lets every object of each parsed packument be collected after a walk and a metadata request", async () => {
+    v8.setFlagsFromString("--expose-gc");
+    const gc = vm.runInNewContext("gc") as () => void;
+    // Weakly track every object in every document the adapter parses.
+    const parsed: WeakRef<object>[] = [];
+    const track = (value: unknown) => {
+      if (value === null || typeof value !== "object") return;
+      parsed.push(new WeakRef(value));
+      for (const child of Object.values(value)) track(child);
+    };
+    // Patched by hand, not vi.spyOn: a spy keeps every result it returned.
+    const prototype = Response.prototype as { json: () => Promise<unknown> };
+    const json = prototype.json;
+    prototype.json = async function (this: Response) {
+      const doc: unknown = await json.call(this);
+      track(doc);
+      return doc;
+    };
+    try {
+      const { get, internals } = memoryService();
+      // Serving leaf's document walks the graph (trimmed fetches of app and
+      // mid, then a render fetch of leaf); serving app's re-fetches it to
+      // render.
+      await expect(get("leaf")).resolves.toMatchObject({ status: 200 });
+      await expect(get("app")).resolves.toMatchObject({ status: 200 });
+      expect(internals.metadataCache.size).toBe(3);
+      expect(parsed.length).toBeGreaterThan(4 * 50);
+      // WeakRef targets stay alive until the job that created them ends.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      gc();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      gc();
+      expect(parsed.filter((ref) => ref.deref() !== undefined)).toHaveLength(0);
+      // The cache holds only trimmed facts, and render data only for the
+      // two documents served.
+      for (const [key, { meta }] of internals.metadataCache) {
+        for (const info of meta.versions.values()) {
+          expect(Object.keys(info).sort()).toEqual(["dependencies", "dependencySpecs", "files", "version"]);
+          for (const file of info.files)
+            expect(Object.keys(file).sort()).toEqual(
+              ["allowed", "filename", "integrity", "publishedAt", "sizeBytes", "upstreamUrl", "version"].sort(),
+            );
+        }
+        expect(meta.raw === undefined).toBe(key === "npm:mid");
+      }
+    } finally {
+      prototype.json = json;
+    }
+  });
+
+  it("releases a run's walk state when its deadline passes, with no other request", async () => {
+    let clock = NOW;
+    const { get, internals } = memoryService(new Date(NOW.getTime() + 50), () => clock);
+    // No real-time race: while the injected clock stays at NOW, a timer that
+    // fires early only re-arms (scheduleRelease checks this.now() against the
+    // deadline), so the walk below cannot be released mid-walk however slow
+    // the machine is.
+    await expect(get("leaf")).resolves.toMatchObject({ status: 200 });
+    const walk = internals.tallies.get("run-1")?.graphs?.get("npm");
+    expect(walk).toBeDefined();
+    clock = new Date(NOW.getTime() + 60);
+    // The release timer fires at the deadline (50 ms); poll, since a loaded
+    // test machine may run it late.
+    for (let waited = 0; internals.tallies.size > 0 && waited < 2_000; waited += 20)
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(internals.tallies.size).toBe(0);
+    expect(walk?.released).toBe(true);
+  });
+
+  it("bounds the metadata cache by bytes as well as entries", async () => {
+    const { registry, get, internals } = memoryService();
+    (registry as unknown as { metadataCacheBytes: number }).metadataCacheBytes = 1;
+    await expect(get("app")).resolves.toMatchObject({ status: 200 });
+    // One entry is larger than the whole budget: it is served, not cached.
+    expect(internals.metadataCache.size).toBe(0);
   });
 });

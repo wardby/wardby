@@ -53,20 +53,18 @@ spec:
           resources:
             requests:
               cpu: 250m
-              # Streams package downloads for the coding registry, and parses
-              # full npm packuments (tens of MB for @types/node or typescript)
-              # while resolving a lockfile's dependency graph: 512Mi was
-              # OOM-killed mid-install in a live run, cutting the worker's
-              # model stream. 250m:1536Mi stays inside Autopilot's 1:6.5 ratio.
-              memory: 1536Mi
+              # Sized for kind/local use. A lockfile install's on-demand npm
+              # graph walk peaked at 1752 MiB RSS in a measured run, so the
+              # GKE overlay (proxy-resources.yaml) raises this; lockfile
+              # installs move to lockfile verification in a follow-up.
+              memory: 768Mi
             limits:
               cpu: 250m
-              # Streams package downloads for the coding registry, and parses
-              # full npm packuments (tens of MB for @types/node or typescript)
-              # while resolving a lockfile's dependency graph: 512Mi was
-              # OOM-killed mid-install in a live run, cutting the worker's
-              # model stream. 250m:1536Mi stays inside Autopilot's 1:6.5 ratio.
-              memory: 1536Mi
+              # Sized for kind/local use. A lockfile install's on-demand npm
+              # graph walk peaked at 1752 MiB RSS in a measured run, so the
+              # GKE overlay (proxy-resources.yaml) raises this; lockfile
+              # installs move to lockfile verification in a follow-up.
+              memory: 768Mi
           readinessProbe:
             tcpSocket:
               port: 8787

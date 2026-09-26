@@ -73,7 +73,7 @@ describe("npmAdapter protocol", () => {
   });
 
   it("renders only kept versions with tarballs rewritten to the proxy and latest repointed", async () => {
-    const meta = await npmAdapter.fetchMetadata("left-pad", await upstream(await fixture()));
+    const meta = await npmAdapter.fetchMetadata("left-pad", await upstream(await fixture()), { render: true });
     const versions = [...meta.versions.keys()];
     const keep = new Set([versions[0]]);
     const doc = JSON.parse(
@@ -93,8 +93,8 @@ describe("npmAdapter protocol", () => {
     const first = Object.keys(doc.versions)[0];
     doc.versions[first].readme = "y".repeat(10_000);
     doc.versions[first].description = "a description";
-    const meta = await npmAdapter.fetchMetadata("left-pad", await upstream(doc));
-    const raw = JSON.stringify(meta.raw);
+    const meta = await npmAdapter.fetchMetadata("left-pad", await upstream(doc), { render: true });
+    const raw = [...(meta.raw as { manifests: Map<string, string> }).manifests.values()].join("\n");
     expect(raw).not.toContain("xxxxxxxxxx");
     expect(raw).not.toContain("yyyyyyyyyy");
     expect(raw).not.toContain("a description");

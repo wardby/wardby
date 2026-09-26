@@ -1,0 +1,24 @@
+# GKE only: the coding proxy's size. Sized from a measured `npm ci` of a real
+# lockfile (React 19, Vite 8, Vitest 5, jsdom; ~220 packages) through the
+# registry's on-demand dependency-graph walk, with the packument memory fix and
+# the default 3-day release age: peak 1752 MiB RSS (heap 549 MiB). 3Gi leaves
+# over 50% headroom. Autopilot needs CPU:memory between 1:1 and 1:6.5, so CPU
+# rises to 500m (1:6). Lockfile installs move to lockfile verification in a
+# follow-up, after which this can come down.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-coding-proxy
+  namespace: wardby-coding
+spec:
+  template:
+    spec:
+      containers:
+        - name: proxy
+          resources:
+            requests:
+              cpu: 500m
+              memory: 3Gi
+            limits:
+              cpu: 500m
+              memory: 3Gi
