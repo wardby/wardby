@@ -52,7 +52,7 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
   const concurrency = loadCodingConcurrencyConfig();
   const providers = options.providers ?? buildMcpProviders().providers;
   const mcp = await startMcp({ providers, schedulerAttached: true });
-  const reconciler = startReconciler({ executor: providers.executor });
+  const reconciler = startReconciler({ executor: providers.executor, reviewHosts: providers.reviewHosts });
   const scheduler = startScheduler({
     executor: providers.executor,
     scope: options.scope,

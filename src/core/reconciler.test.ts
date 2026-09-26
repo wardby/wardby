@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Executor } from "../providers/executor/types.js";
+import type { CodeReviewHost } from "../providers/review-host/types.js";
 import { reconcileOnce, type ReconcilerDb } from "./reconciler.js";
 
 interface FakeRun {
@@ -353,5 +354,144 @@ describe("reconcileOnce", () => {
 
     expect(await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined)).toBe(1);
     expect(runs[0].status).toBe("lost");
+  });
+});
+
+interface FakeHostCheck {
+  runId: string;
+  provider: string;
+  repository: string;
+  checkId: string;
+  headSha: string;
+  completedAt: Date | null;
+}
+
+/** A fake `runHostCheck` delegate that honours the orphan query's filters (provider, completedAt, run status/finishedAt, take). */
+function withHostChecks(db: ReconcilerDb, runs: FakeRun[], checks: FakeHostCheck[]) {
+  const findMany = vi.fn(async ({ where, take }: any) => {
+    const out = checks
+      .filter((check) => {
+        const run = runs.find((r) => r.id === check.runId);
+        if (!run || check.completedAt !== where.completedAt) return false;
+        if (!where.provider.in.includes(check.provider)) return false;
+        if (where.run.status.notIn.includes(run.status)) return false;
+        const { lte, gte } = where.run.finishedAt;
+        return run.finishedAt !== null && run.finishedAt <= lte && run.finishedAt >= gte;
+      })
+      .map((check) => ({ run: runs.find((r) => r.id === check.runId)! }));
+    return out.slice(0, take);
+  });
+  const runHostCheck = {
+    findMany,
+    findUnique: vi.fn(async ({ where }: any) => checks.find((c) => c.runId === where.runId) ?? null),
+    update: vi.fn(async ({ where, data }: any) =>
+      Object.assign(
+        checks.find((c) => c.runId === where.runId)!,
+        data,
+      ),
+    ),
+  };
+  return { db: { ...db, runHostCheck } as unknown as ReconcilerDb, runHostCheck };
+}
+
+function hostCheck(runId: string): FakeHostCheck {
+  return { runId, provider: "github", repository: "o/n", checkId: `c-${runId}`, headSha: "a", completedAt: null };
+}
+
+const fakeHost = () =>
+  ({ provider: "github", completeCheck: vi.fn(async () => undefined) }) as unknown as CodeReviewHost;
+
+describe("reconcileOnce orphaned host checks", () => {
+  const LONG_DONE = new Date(NOW.getTime() - 61_000);
+  const JUST_DONE = new Date(NOW.getTime() - 30_000);
+
+  it("completes an open check whose run ended long enough ago, whatever the terminal status", async () => {
+    const runs = [
+      baseRun({ id: "lost1", status: "lost", finishedAt: LONG_DONE }),
+      baseRun({ id: "failed1", status: "failed", finishedAt: LONG_DONE }),
+    ];
+    const checks = [hostCheck("lost1"), hostCheck("failed1")];
+    const { db } = withHostChecks(fakeDb(runs), runs, checks);
+    const host = fakeHost();
+
+    await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, { github: host });
+
+    expect(host.completeCheck).toHaveBeenCalledTimes(2);
+    expect(host.completeCheck).toHaveBeenCalledWith(
+      "o/n",
+      expect.objectContaining({ checkId: "c-lost1", conclusion: "neutral", title: "Review did not complete" }),
+    );
+    expect(checks.every((c) => c.completedAt !== null)).toBe(true);
+  });
+
+  it("leaves checks of live runs, recently finished runs, and already-completed checks alone", async () => {
+    const runs = [
+      baseRun({ id: "live", status: "running", heartbeatAt: FRESH }),
+      baseRun({ id: "recent", status: "succeeded", finishedAt: JUST_DONE }),
+      baseRun({ id: "done", status: "succeeded", finishedAt: LONG_DONE }),
+    ];
+    const checks = [hostCheck("live"), hostCheck("recent"), { ...hostCheck("done"), completedAt: LONG_DONE }];
+    const { db } = withHostChecks(fakeDb(runs), runs, checks);
+    const host = fakeHost();
+
+    await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, { github: host });
+
+    expect(host.completeCheck).not.toHaveBeenCalled();
+  });
+
+  it("closes the check of a run it marks lost only on a later pass, once the grace period has passed", async () => {
+    const runs = [baseRun({ id: "stale", heartbeatAt: STALE })];
+    const checks = [hostCheck("stale")];
+    const { db } = withHostChecks(fakeDb(runs), runs, checks);
+    const host = fakeHost();
+
+    expect(await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, { github: host })).toBe(1);
+    expect(host.completeCheck).not.toHaveBeenCalled();
+
+    await reconcileOnce(db, new Date(NOW.getTime() + 60_000), HEARTBEAT_TIMEOUT_MS, undefined, { github: host });
+    expect(host.completeCheck).toHaveBeenCalledTimes(1);
+    expect(checks[0].completedAt).not.toBeNull();
+  });
+
+  it("caps each pass at 50 checks, newest-finished first", async () => {
+    const runs = Array.from({ length: 60 }, (_, i) =>
+      baseRun({ id: `r${i}`, status: "failed", finishedAt: LONG_DONE }),
+    );
+    const { db, runHostCheck } = withHostChecks(
+      fakeDb(runs),
+      runs,
+      runs.map((r) => hostCheck(r.id)),
+    );
+    const host = fakeHost();
+
+    await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, { github: host });
+
+    expect(runHostCheck.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ take: 50, orderBy: { run: { finishedAt: "desc" } } }),
+    );
+    expect(host.completeCheck).toHaveBeenCalledTimes(50);
+  });
+
+  it("gives up on a check whose run finished more than a day ago", async () => {
+    const runs = [baseRun({ id: "old", status: "lost", finishedAt: new Date(NOW.getTime() - 24 * 60 * 60_000 - 1) })];
+    const checks = [hostCheck("old")];
+    const { db } = withHostChecks(fakeDb(runs), runs, checks);
+    const host = fakeHost();
+
+    await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, { github: host });
+
+    expect(host.completeCheck).not.toHaveBeenCalled();
+    expect(checks[0].completedAt).toBeNull();
+  });
+
+  it("never queries host checks when no review host is configured", async () => {
+    const runs = [baseRun({ id: "lost1", status: "lost", finishedAt: LONG_DONE })];
+    const { db, runHostCheck } = withHostChecks(fakeDb(runs), runs, [hostCheck("lost1")]);
+
+    await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, {});
+    await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, undefined);
+
+    expect(runHostCheck.findMany).not.toHaveBeenCalled();
+    expect(runHostCheck.findUnique).not.toHaveBeenCalled();
   });
 });
