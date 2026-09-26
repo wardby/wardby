@@ -13,6 +13,12 @@ vi.mock("../host-events/github-ingress.js", () => ({
   handleGitHubEventIngress: vi.fn(),
 }));
 import { handleGitHubEventIngress, type GitHubIngressDeps } from "../host-events/github-ingress.js";
+vi.mock("../host-events/github-user-callback.js", () => ({
+  handleHostUserCallback: vi.fn(async (_url: URL, res: import("node:http").ServerResponse) => {
+    res.writeHead(200, { "content-type": "text/html" }).end("callback page");
+  }),
+}));
+import { handleHostUserCallback, type HostUserCallbackDeps } from "../host-events/github-user-callback.js";
 
 const fetch: typeof globalThis.fetch = (input, init) =>
   globalThis.fetch(input, { ...init, headers: { host: "host", ...init?.headers } });
@@ -392,5 +398,47 @@ describe("startHttpServer (github events ingress)", () => {
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "not_found" });
     expect(handleGitHubEventIngress).not.toHaveBeenCalled();
+  });
+});
+
+describe("startHttpServer (GitHub user callback)", () => {
+  async function start(hostUserAuth?: StartHttpServerOptions["hostUserAuth"]) {
+    const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb(), config: { canonicalUri: CANONICAL_URI } });
+    const authProvider = fakeAuthProvider(async () => ({ subject: "user-1", roles: [], scopes: [] }));
+    handle = await startHttpServer({
+      mcp,
+      config: { canonicalUri: CANONICAL_URI, httpBind: { host: "127.0.0.1", port: 0 }, authProviderKind: "delegating" },
+      auth: { authProvider, db: fakeDb(), providers: fakeProviders },
+      hostUserAuth,
+    });
+    return `http://127.0.0.1:${handle.port}`;
+  }
+
+  it("serves GET /hosts/github/user-callback, unauthenticated, with the full query", async () => {
+    vi.mocked(handleHostUserCallback).mockClear();
+    const deps = { redirectUri: "x" } as unknown as HostUserCallbackDeps;
+    const base = await start({ github: deps });
+    const res = await fetch(`${base}/hosts/github/user-callback?code=c&state=s`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("callback page");
+    const [url, , passed] = vi.mocked(handleHostUserCallback).mock.calls[0];
+    expect(url.searchParams.get("state")).toBe("s");
+    expect(passed).toBe(deps);
+    expect(
+      (
+        await fetch(`${base}/hosts/github/user-callback?code=c&state=s`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        })
+      ).status,
+    ).toBe(404);
+  });
+
+  it("returns 404 when linking is not configured", async () => {
+    vi.mocked(handleHostUserCallback).mockClear();
+    const base = await start(undefined);
+    expect((await fetch(`${base}/hosts/github/user-callback?code=c&state=s`)).status).toBe(404);
+    expect(handleHostUserCallback).not.toHaveBeenCalled();
   });
 });

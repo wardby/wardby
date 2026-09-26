@@ -105,8 +105,8 @@ written for the password era and takes `DATABASE_URL` from the existing
 `wardby-coding-proxy-env` Secret, which no longer has one on this deployment;
 don't run it here. `DATABASE_URL` isn't a secret value on GKE at all: the
 Deployment's own manifest supplies it directly (`control-plane.yaml`), not
-the Secret, so a hand-rebuilt Secret needs none. Recreate the seven
-`secret_ids` keys (`secrets.tf`) plus `AUTH_PROVIDER` (the constant
+the Secret, so a hand-rebuilt Secret needs none. Recreate every
+`secret_ids` key (`secrets.tf`) plus `AUTH_PROVIDER` (the constant
 `self-hosted` the ExternalSecret's template adds) by hand, reading each with
 `gcloud secrets versions access latest --secret <name>` and piping it into a
 Secret manifest over stdin, never with values on the command line.

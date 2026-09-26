@@ -6,6 +6,7 @@ import {
   loadMcpConfig,
   loadGitHubVcsConfig,
   loadGitHubEventConfig,
+  loadGitHubUserAuthConfig,
   loadDbosConfig,
   loadCodingConcurrencyConfig,
   loadKubernetesJobConfig,
@@ -335,5 +336,37 @@ describe("loadAuthConfig role mapping", () => {
     const blank = loadAuthConfig({ AUTH_ROLE_CLAIM: "  ", AUTH_ROLE_MAP: "" });
     expect(blank.roleClaim).toBeUndefined();
     expect(blank.roleMap).toBeUndefined();
+  });
+});
+
+describe("loadGitHubUserAuthConfig", () => {
+  const ID = "Iv23liAbCdEf01234567";
+  const SECRET = "0123456789abcdef0123456789abcdef01234567";
+
+  it("is disabled when neither is set", () => {
+    expect(loadGitHubUserAuthConfig({})).toEqual({ clientId: undefined, clientSecret: undefined });
+    expect(loadGitHubUserAuthConfig({ GITHUB_APP_CLIENT_ID: " ", GITHUB_APP_CLIENT_SECRET: "" })).toEqual({
+      clientId: undefined,
+      clientSecret: undefined,
+    });
+  });
+
+  it("trims and passes both through", () => {
+    expect(
+      loadGitHubUserAuthConfig({ GITHUB_APP_CLIENT_ID: ` ${ID} `, GITHUB_APP_CLIENT_SECRET: `${SECRET}\n` }),
+    ).toEqual({ clientId: ID, clientSecret: SECRET });
+  });
+
+  it("refuses one without the other, and a malformed client id", () => {
+    expect(() => loadGitHubUserAuthConfig({ GITHUB_APP_CLIENT_ID: ID })).toThrow(
+      "Set both GITHUB_APP_CLIENT_ID and GITHUB_APP_CLIENT_SECRET, or neither.",
+    );
+    expect(() => loadGitHubUserAuthConfig({ GITHUB_APP_CLIENT_SECRET: SECRET })).toThrow(/Set both/);
+    expect(() =>
+      loadGitHubUserAuthConfig({ GITHUB_APP_CLIENT_ID: "123456", GITHUB_APP_CLIENT_SECRET: SECRET }),
+    ).not.toThrow();
+    expect(() =>
+      loadGitHubUserAuthConfig({ GITHUB_APP_CLIENT_ID: "bad id/../", GITHUB_APP_CLIENT_SECRET: SECRET }),
+    ).toThrow("GITHUB_APP_CLIENT_ID is not a valid GitHub App client ID.");
   });
 });

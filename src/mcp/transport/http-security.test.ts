@@ -98,6 +98,10 @@ it.each([undefined, "evil.example", "host:443", "host:123", "host.evil"])(
   "rejects missing, unapproved, or malformed Host %j",
   async (host) => expect((await send("/.well-known/oauth-protected-resource", { host })).status).toBe(403),
 );
+it.each(["evil.example", "host.evil", undefined])(
+  "enforces the canonical Host on the GitHub user callback too (%j)",
+  async (host) => expect((await send("/hosts/github/user-callback?code=c&state=s", { host })).status).toBe(403),
+);
 it("rejects duplicate Host headers", async () =>
   expect((await send("/mcp", { host: ["host", "evil"] })).status).toBe(403));
 it("allows only exact origins and reports the delegated issuer in discovery", async () => {

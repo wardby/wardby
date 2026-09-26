@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryCodingRunObserver } from "../../coding/observability.js";
+import { createRepoAccessGate, type RepoAccessGate } from "../../core/repo-access.js";
+import { ReviewHostError, type HostPermission } from "../review-host/types.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "../jobs/types.js";
 import type {
   FinalizeChangesDetails,
@@ -80,8 +82,44 @@ function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSn
     result: null,
     workerImage: null,
     workspaceDiskMb: null,
+    profileRepository: "openai/example",
+    repositoryAuthorizedVia: "grandfathered",
     ...overrides,
   };
+}
+
+/**
+ * The real gate against a fake GitHub where the owner ("principal-1", linked
+ * as GitHub user 42) has `level` on every repository. `level` undefined = no
+ * linked identity.
+ */
+function gateWith(
+  level?: HostPermission | (() => HostPermission),
+  opts: { ttlMs?: number } = {},
+): { gate: RepoAccessGate; asked: string[] } {
+  const asked: string[] = [];
+  const linked = level !== undefined;
+  const gate = createRepoAccessGate({
+    db: {
+      hostIdentity: {
+        findUnique: async () =>
+          linked ? { principalId: "principal-1", provider: "github", hostUserId: "42", login: "octo" } : null,
+        updateMany: async () => ({ count: 0 }),
+      },
+    } as never,
+    hosts: {
+      github: {
+        repositoryPermission: async (repository: string) => {
+          asked.push(repository);
+          const answer = typeof level === "function" ? level() : (level ?? "none");
+          return { level: answer, login: "octo" };
+        },
+      } as never,
+    },
+    ttlMs: opts.ttlMs,
+    sleep: async () => undefined,
+  });
+  return { gate, asked };
 }
 
 class FakeStore implements ContainerExecutionStore {
@@ -340,6 +378,7 @@ async function harness(
     maxDiskMb: 8192,
     sleep: async () => {},
     observer,
+    repoAccess: gateWith().gate,
     ...extra,
   });
   return { executor, store, jobs, vcs, sessions, capabilities, events, observer };
@@ -871,6 +910,7 @@ describe("resolveCodingWorkerImage", () => {
       limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
       maxDiskMb: 8192,
       sleep: async () => {},
+      repoAccess: gateWith().gate,
     });
     expect(
       direct.resolveCodingWorkerImage?.({
@@ -936,6 +976,7 @@ describe("resolveCodingWorkerImage", () => {
       limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
       maxDiskMb: 8192,
       sleep: async () => {},
+      repoAccess: gateWith().gate,
     });
     expect(() =>
       direct.resolveCodingWorkerImage?.({
@@ -992,6 +1033,7 @@ describe("resolveCodingWorkerImage", () => {
           limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
           maxDiskMb: 8192,
           sleep: async () => {},
+          repoAccess: gateWith().gate,
         }),
     ).toThrow("coding_worker_image_invalid");
   });
@@ -1149,5 +1191,135 @@ describe("failure diagnostics", () => {
     const described = describeFailure(deepest);
     expect(described.endsWith("…")).toBe(true);
     expect(described.split(" <- ").length).toBe(6);
+  });
+});
+
+describe("ContainerExecutor repository authorization (H5-1/C3-2)", () => {
+  it("refuses, before any clone, a run whose owner lost write access (category repo_access)", async () => {
+    const { gate, asked } = gateWith("read");
+    const created = await harness({ repositoryAuthorizedVia: "host_permission" }, IMAGE, undefined, undefined, {
+      repoAccess: gate,
+    });
+    await created.executor.start("run-1");
+    expect(asked).toEqual(["openai/example"]);
+    expect(created.store.run.status).toBe("refused");
+    expect((created.store.terminations[0] as { error: string }).error).toMatch(
+      /^coding_failure_repo_access:coding_diag_/,
+    );
+    expect(created.vcs.prepared).toBe(0);
+    expect(created.jobs.launches).toBe(0);
+    expect(created.sessions.creates).toBe(0);
+  });
+
+  it("runs a grandfathered or admin-approved profile without asking GitHub", async () => {
+    for (const via of ["grandfathered", "admin"]) {
+      const { gate, asked } = gateWith();
+      const created = await harness({ repositoryAuthorizedVia: via }, IMAGE, undefined, undefined, {
+        repoAccess: gate,
+      });
+      await created.executor.start("run-1");
+      expect(created.store.run.status, via).toBe("succeeded");
+      expect(asked).toEqual([]);
+    }
+  });
+
+  it("re-checks a host_permission profile and runs it when the owner still has write", async () => {
+    const { gate, asked } = gateWith("maintain");
+    const created = await harness({ repositoryAuthorizedVia: "host_permission" }, IMAGE, undefined, undefined, {
+      repoAccess: gate,
+    });
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("succeeded");
+    expect(asked).toEqual(["openai/example"]);
+  });
+
+  it("re-checks the run's repository when the profile's repository changed after dispatch", async () => {
+    const stale = { profileRepository: "openai/elsewhere", repositoryAuthorizedVia: "grandfathered" };
+    const denied = gateWith();
+    const refused = await harness(stale, IMAGE, undefined, undefined, { repoAccess: denied.gate });
+    await refused.executor.start("run-1");
+    expect(refused.store.run.status).toBe("refused");
+    expect(refused.vcs.prepared).toBe(0);
+
+    const allowed = gateWith("write");
+    const ran = await harness(stale, IMAGE, undefined, undefined, { repoAccess: allowed.gate });
+    await ran.executor.start("run-1");
+    expect(ran.store.run.status).toBe("succeeded");
+    expect(allowed.asked).toEqual(["openai/example"]);
+  });
+
+  it("refuses a profile that was never authorized, and one with no profile left", async () => {
+    for (const overrides of [
+      { repositoryAuthorizedVia: null },
+      { profileRepository: null, repositoryAuthorizedVia: null },
+    ]) {
+      const created = await harness(overrides, IMAGE, undefined, undefined, { repoAccess: gateWith().gate });
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("refused");
+      expect(created.vcs.prepared).toBe(0);
+    }
+  });
+});
+
+describe("ContainerExecutor in-flight repository re-checks (M-1, M-2)", () => {
+  it("re-checks the owner's access right before the final push, and refuses the push if it is gone", async () => {
+    let calls = 0;
+    const { gate, asked } = gateWith(() => (calls++ === 0 ? "write" : "read"), { ttlMs: 0 });
+    const created = await harness({ repositoryAuthorizedVia: "host_permission" }, IMAGE, undefined, undefined, {
+      repoAccess: gate,
+    });
+    await created.executor.start("run-1");
+    expect(asked).toEqual(["openai/example", "openai/example"]);
+    expect(created.jobs.launches).toBe(1);
+    expect(created.vcs.finalized).toBe(0);
+    expect(created.store.run.status).toBe("failed");
+    expect((created.store.terminations[0] as { error: string }).error).toMatch(/^coding_failure_repo_access:/);
+  });
+
+  it("pushes when the pre-push re-check passes (served from the cache)", async () => {
+    const { gate, asked } = gateWith("write");
+    const created = await harness({ repositoryAuthorizedVia: "host_permission" }, IMAGE, undefined, undefined, {
+      repoAccess: gate,
+    });
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("succeeded");
+    expect(created.vcs.finalized).toBe(1);
+    expect(asked).toEqual(["openai/example"]);
+  });
+
+  it("retries a transient GitHub error once for a launched run, then fails it as repo_access_unavailable", async () => {
+    const { gate, asked } = gateWith(() => {
+      throw new ReviewHostError("host_api_error", "github_api_error:503");
+    });
+    const created = await harness(
+      {
+        repositoryAuthorizedVia: "host_permission",
+        jobHandle: { backend: "fake", id: "job-1" },
+        proxySessionId: "session-1",
+      },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: gate },
+    );
+    await created.executor.start("run-1");
+    expect(asked).toHaveLength(2);
+    expect(created.store.run.status).toBe("failed");
+    expect((created.store.terminations[0] as { error: string }).error).toMatch(
+      /^coding_failure_repo_access_unavailable:/,
+    );
+  });
+
+  it("does not retry before launch: a transient error refuses the run (strict)", async () => {
+    const { gate, asked } = gateWith(() => {
+      throw new ReviewHostError("host_api_error", "github_api_error:503");
+    });
+    const created = await harness({ repositoryAuthorizedVia: "host_permission" }, IMAGE, undefined, undefined, {
+      repoAccess: gate,
+    });
+    await created.executor.start("run-1");
+    expect(asked).toHaveLength(1);
+    expect(created.store.run.status).toBe("refused");
+    expect((created.store.terminations[0] as { error: string }).error).toMatch(/^coding_failure_repo_access:/);
   });
 });
