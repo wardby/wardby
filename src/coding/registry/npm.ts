@@ -135,7 +135,7 @@ export const npmAdapter: RegistryAdapter = {
   },
 
   async fetchMetadata(name, upstream): Promise<PackageMetadata> {
-    const response = await upstream(`${UPSTREAM}${name.replace("/", "%2f")}`, { accept: "application/json" });
+    const response = await upstream(`${UPSTREAM}${name.replaceAll("/", "%2f")}`, { accept: "application/json" });
     if (response.status === 404)
       throw new RegistryError(404, "wardby_package_not_found", `npm has no package "${name}"`);
     if (!response.ok) throw new RegistryError(502, "wardby_upstream_error", `npm returned ${response.status}`);
