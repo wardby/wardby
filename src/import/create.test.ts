@@ -227,4 +227,24 @@ describe("createFromBundle", () => {
     expect(db.agentTool.upsert).not.toHaveBeenCalled();
     expect(res.warnings.some((w) => w.includes("agent-tool agent/n: skipped") && w.includes("same name"))).toBe(true);
   });
+
+  it("skips a tool whose name a runtime built-in reserves, with a warning", async () => {
+    const db = fakeDb();
+    const res = await createFromBundle(
+      bundleWith({
+        tools: [
+          { name: "delegate_to_x", code: "code", paramsZod: "z.object({})", description: "" },
+          { name: "memory_get", code: "code", paramsZod: "z.object({})", description: "" },
+          { name: "fine", code: "code", paramsZod: "z.object({})", description: "" },
+        ],
+      }),
+      emptyRecon,
+      { db, cipher, ownerId: "p1", defaultBudget: "5.00", secretMode: "references", allowOpenFetch: false } as any,
+    );
+
+    expect(db.tool.create).toHaveBeenCalledTimes(1);
+    expect(res.toolsCreated).toBe(1);
+    expect(res.warnings.some((w) => w.startsWith("tool delegate_to_x: skipped") && w.includes("reserved"))).toBe(true);
+    expect(res.warnings.some((w) => w.startsWith("tool memory_get: skipped"))).toBe(true);
+  });
 });

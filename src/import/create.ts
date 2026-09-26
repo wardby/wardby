@@ -14,7 +14,7 @@ import { createSecret, attachSecret } from "../core/secrets.js";
 import { createDatastore, attachDatastore } from "../core/datastores.js";
 import { createWebhook } from "../core/webhooks.js";
 import { deriveJsonSchema } from "../sandbox/zod-params.js";
-import { findSameNamedAttachedTool } from "../core/tool-names.js";
+import { findSameNamedAttachedTool, reservedToolNameReason } from "../core/tool-names.js";
 import { ToolCapabilitiesPatchSchema, FETCH_WILDCARD } from "../sandbox/tool-capabilities.js";
 import { PostgresDatastore } from "../providers/datastore/postgres.js";
 import type { DatastoreValue } from "../providers/datastore/types.js";
@@ -75,6 +75,13 @@ export async function createFromBundle(
   const toolIdMap = new Map<string, string>();
   for (const t of bundle.readTools()) {
     if (toolRejected(t.name) || toolSkipped(t.name)) continue;
+    // A built-in dispatched before user tools would shadow it, so the tool
+    // could be created but never called (see core/tool-names.ts).
+    const reserved = reservedToolNameReason(eff(t.name));
+    if (reserved) {
+      warnings.push(`tool ${t.name}: skipped — ${reserved}`);
+      continue;
+    }
 
     const schema = await deriveJsonSchema(t.paramsZod);
     if (!schema.ok) {
@@ -157,7 +164,10 @@ export async function createFromBundle(
 
     // Same guard as MCP attach_tool: an existing agent reused by name may
     // already hold a different tool under this name (say a public one), and
-    // the runtime dispatches by name.
+    // the runtime dispatches by name. Unlike attach_tool this check-then-
+    // upsert is not one Serializable transaction: the importer is an
+    // operator-only path, so a concurrent attach racing it is not defended
+    // against here (the runner's load-time duplicate check still is).
     const clash = await findSameNamedAttachedTool(db, agentId, { id: toolId, name: eff(at.toolName) });
     if (clash) {
       warnings.push(
