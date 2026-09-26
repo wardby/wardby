@@ -54,8 +54,11 @@ function deps(
   links: Array<{ agentId: string; triggers: string[]; checkName: string | null }>,
   h = host(),
   repoAccess = gate(),
+  reviewed: { runId: string } | null = null,
 ) {
+  const reviewLookup = vi.fn(async () => reviewed);
   return {
+    reviewLookup,
     hosts: { github: h },
     executor: {} as never,
     mentionHandle: "wardby",
@@ -74,6 +77,7 @@ function deps(
         ),
       },
       runHostStatus: { create: vi.fn(async () => undefined), findUnique: vi.fn(async () => null) },
+      runHostCheck: { findFirst: reviewLookup },
       run: { findUnique: vi.fn(async () => ({ id: "run", status: "running", finalText: null })) },
     } as never,
   };
@@ -106,6 +110,45 @@ describe("routeHostEvent", () => {
     expect(txStub.runHostCheck.create).toHaveBeenCalledWith({
       data: { runId: "run-a1", provider: "github", repository: REPO, checkId: "11", headSha: SHA, prNumber: 7 },
     });
+  });
+
+  it("skips an automatic review of a commit this agent already reviewed, and starts no check for it", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([{ agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" }], host(), gate(), {
+      runId: "earlier",
+    });
+    await expect(routeHostEvent(pr, d)).resolves.toEqual({ runIds: [], followUps: [] });
+    expect(dispatchRun).not.toHaveBeenCalled();
+    expect(d.hosts.github.startCheck).not.toHaveBeenCalled();
+    expect(d.reviewLookup).toHaveBeenCalledWith({
+      where: {
+        repository: REPO,
+        prNumber: 7,
+        headSha: SHA,
+        run: { agentId: "a1", status: { in: ["pending", "running", "succeeded"] } },
+      },
+      select: { runId: true },
+    });
+  });
+
+  it("still re-reviews a reviewed commit when asked explicitly (check re-run)", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([{ agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" }], host(), gate(), {
+      runId: "earlier",
+    });
+    const result = await routeHostEvent(
+      {
+        kind: "check_rerun",
+        provider: "github",
+        repository: REPO,
+        prNumber: 7,
+        headSha: SHA,
+        checkName: "wardby review",
+      },
+      d,
+    );
+    expect(result.runIds).toEqual(["run-a1"]);
+    expect(d.reviewLookup).not.toHaveBeenCalled();
   });
 
   it("skips fork PRs entirely", async () => {

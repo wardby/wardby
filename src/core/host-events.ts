@@ -120,6 +120,36 @@ interface ReviewTarget {
   checkName: string;
 }
 
+/** Run states that already cover a commit: a review of it is under way or done. */
+const COVERING_REVIEW_STATUSES = ["pending", "running", "succeeded"] as const;
+
+/**
+ * Whether this agent already has a review of exactly this commit that is
+ * pending, running, or finished. Automatic triggers (opened, a push, reopened,
+ * ready for review) skip such a commit: the earlier review's check and comments
+ * still stand on it, and a second review of identical code only repeats them.
+ * On knock-knock, same-commit re-reviews (a draft marked ready right after a
+ * bot push, repeated deliveries) were roughly a quarter of a day's spend.
+ */
+async function alreadyReviewed(
+  deps: RouteHostEventDeps,
+  repository: string,
+  prNumber: number,
+  headSha: string,
+  agentId: string,
+): Promise<boolean> {
+  const prior = await deps.db.runHostCheck.findFirst({
+    where: {
+      repository,
+      prNumber,
+      headSha,
+      run: { agentId, status: { in: [...COVERING_REVIEW_STATUSES] } },
+    },
+    select: { runId: true },
+  });
+  return prior !== null;
+}
+
 async function startReviews(
   deps: RouteHostEventDeps,
   host: CodeReviewHost,
@@ -127,9 +157,18 @@ async function startReviews(
   prNumber: number,
   headSha: string,
   targets: ReviewTarget[],
+  /** True for automatic triggers; an explicit re-run or `@wardby review` always runs. */
+  skipReviewedCommits = false,
 ): Promise<string[]> {
   const runIds: string[] = [];
   for (const target of targets) {
+    if (skipReviewedCommits && (await alreadyReviewed(deps, repository, prNumber, headSha, target.agentId))) {
+      log.info(
+        { repository, prNumber, agentId: target.agentId, headSha },
+        "review skipped: this commit was already reviewed",
+      );
+      continue;
+    }
     let checkId: string | null = null;
     try {
       checkId = (await host.startCheck(repository, { headSha, name: target.checkName })).checkId;
@@ -221,7 +260,7 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       const reviewers = reviewTargets(await authorizedLinks(deps, event, reviewerLinks));
       if (reviewers.length === 0) return none;
       return {
-        runIds: await startReviews(deps, host, event.repository, event.prNumber, event.headSha, reviewers),
+        runIds: await startReviews(deps, host, event.repository, event.prNumber, event.headSha, reviewers, true),
         followUps: [],
       };
     }
