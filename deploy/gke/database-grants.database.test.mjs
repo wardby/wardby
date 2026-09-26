@@ -1,5 +1,5 @@
 // Proves deploy/gke/database-grants.sql against a real Postgres: the coding
-// proxy can do everything its ledger does and nothing else, the app can read
+// proxy can do everything its ledger and package registry do and nothing else, the app can read
 // and write data but not change the schema, and the migrator acts as the owner.
 // Runs in CI (DATABASE_URL set); the test user must be able to create roles.
 // The test renders the script against per-run copies of the wardby_app /
@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../../src/core/db.ts";
 import { PrismaProxyLedger } from "../../src/providers/coding-proxy/prisma-ledger.ts";
+import { PrismaRegistryStore } from "../../src/providers/coding-proxy/registry/prisma-store.ts";
 
 const GRANTS = readFileSync(new URL("./database-grants.sql", import.meta.url), "utf8");
 const suffix = randomUUID().slice(0, 8);
@@ -62,6 +63,8 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
 
   afterAll(async () => {
     await Promise.all(clients.map((c) => c.$disconnect()));
+    await admin.registryFetch.deleteMany({ where: { runId } });
+    await admin.registryAllowance.deleteMany({ where: { runId } });
     await admin.$executeRaw`DELETE FROM "CodingProxySession" WHERE "id" = ${sessionId}`;
     await admin.codingRun.deleteMany({ where: { runId } });
     await admin.run.deleteMany({ where: { id: runId } });
@@ -91,6 +94,8 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
         allowedEgress: [],
         protectedPaths: [],
         budgetReservedUsd: 0.0002,
+        packageAllowlist: { npm: ["react@^19"] },
+        packagePolicy: { minReleaseAgeDays: 3 },
       },
     });
     const proxy = clientAs(roles.proxy);
@@ -105,6 +110,7 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
       allowedModels: ["gpt-5.6-luna"],
       deadlineAt: new Date(Date.now() + 60_000),
       budgetUsd: 0.0002,
+      registryTokenHash: `registry-hash-${suffix}`,
     });
     expect(await ledger.findSessionByCapabilityHash(`hash-${suffix}`)).toMatchObject({ protocol: "openai-responses" });
     const reserved = await ledger.reserve({
@@ -122,6 +128,42 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
     await ledger.complete(reserved.request.id, usage, 0.00005, 200);
     const run = await admin.run.findUniqueOrThrow({ where: { id: runId } });
     expect(run.tokensIn).toBe(10);
+
+    // The package registry: every store operation, as the proxy.
+    const registry = new PrismaRegistryStore(proxy);
+    const context = await registry.findRunByRegistryTokenHash(`registry-hash-${suffix}`, new Date());
+    expect(context).toMatchObject({ runId, allowlist: { npm: ["react@^19"] }, policy: { minReleaseAgeDays: 3 } });
+    await registry.addAllowances(runId, "npm", ["loose-envify", "loose-envify"]);
+    expect(await registry.isAllowedDependency(runId, "npm", "loose-envify")).toBe(true);
+    expect(await registry.isAllowedDependency(runId, "npm", "left-pad")).toBe(false);
+    await registry.recordFetch({
+      runId,
+      ecosystem: "npm",
+      name: "react",
+      version: "19.3.0",
+      filename: "react-19.3.0.tgz",
+      integrity: "sha512-x",
+      sizeBytes: 1000,
+      outcome: "served",
+    });
+    await registry.recordFetch({
+      runId,
+      ecosystem: "npm",
+      name: "left-pad",
+      outcome: "refused",
+      reason: "wardby_package_not_allowed",
+    });
+    expect(await registry.usage(runId)).toMatchObject({ files: 1, bytes: 1000 });
+    expect(await registry.refusalCount(runId)).toBe(1);
+    expect(await registry.listFetches(runId)).toHaveLength(2);
+    // ...and it may not change what it recorded, or read the rest of a coding run.
+    await expect(proxy.$executeRawUnsafe(`DELETE FROM "RegistryFetch" WHERE false`)).rejects.toThrow(
+      /permission denied/,
+    );
+    await expect(proxy.$executeRawUnsafe(`UPDATE "RegistryAllowance" SET "name" = 'x' WHERE false`)).rejects.toThrow(
+      /permission denied/,
+    );
+    await expect(proxy.$queryRawUnsafe(`SELECT "task" FROM "CodingRun" LIMIT 1`)).rejects.toThrow(/permission denied/);
 
     await expect(proxy.$queryRawUnsafe(`SELECT "id" FROM "Agent" LIMIT 1`)).rejects.toThrow(/permission denied/);
     await expect(proxy.$queryRawUnsafe(`SELECT "agentId" FROM "Run" LIMIT 1`)).rejects.toThrow(/permission denied/);
@@ -171,8 +213,13 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
         .replace(/\bCodingProxySession\b/g, `CodingProxySession${missing}`)
         .replace(/\bCodingProxyRequest\b/g, `CodingProxyRequest${missing}`)
         .replace(/\bRun\b/g, `Run${missing}`)
+        .replace(/\bCodingRun\b/g, `CodingRun${missing}`)
+        .replace(/\bRegistryAllowance\b/g, `RegistryAllowance${missing}`)
+        .replace(/\bRegistryFetch\b/g, `RegistryFetch${missing}`)
         .replace(/\b_prisma_migrations\b/g, `_prisma_migrations${missing}`);
-      expect(sql).not.toMatch(/"(CodingProxySession|CodingProxyRequest|Run|_prisma_migrations)"/);
+      expect(sql).not.toMatch(
+        /"(CodingProxySession|CodingProxyRequest|Run|CodingRun|RegistryAllowance|RegistryFetch|_prisma_migrations)"/,
+      );
       for (const st of statements(sql)) await admin.$executeRawUnsafe(st);
       const [{ tables, columns }] = await admin.$queryRawUnsafe(
         `SELECT (SELECT count(*) FROM information_schema.role_table_grants WHERE grantee = $1)::int AS tables,

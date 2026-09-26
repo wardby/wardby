@@ -29,7 +29,7 @@ await waitFor(
 );
 
 const headers = { authorization: `Basic ${Buffer.from("admin:wardby-local-only").toString("base64")}` };
-for (const uid of ["wardby-coding-proxy", "wardby-knock-knock"]) {
+for (const uid of ["wardby-coding-proxy", "wardby-coding-budget"]) {
   const dashboard = await fetch(`http://127.0.0.1:3000/api/dashboards/uid/${uid}`, { headers });
   if (!dashboard.ok) throw new Error(`Grafana dashboard ${uid} was not provisioned: ${dashboard.status}`);
 }

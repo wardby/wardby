@@ -112,9 +112,18 @@ function fakeDb(agents: FakeAgentRow[] = []) {
         agentSecrets.push(data);
         return data;
       },
-      deleteMany: async ({ where }: { where: { agentId: string; secretId: string } }) => {
+      deleteMany: async ({
+        where,
+      }: {
+        where: { agentId: string; secretId?: string; boundName?: string; secret?: { name: string } };
+      }) => {
+        const matches = (a: { agentId: string; secretId: string; boundName?: string }) =>
+          a.agentId === where.agentId &&
+          (where.secretId === undefined || a.secretId === where.secretId) &&
+          (where.boundName === undefined || a.boundName === where.boundName) &&
+          (where.secret === undefined || secrets.get(a.secretId)?.name === where.secret.name);
         const before = agentSecrets.length;
-        const kept = agentSecrets.filter((a) => !(a.agentId === where.agentId && a.secretId === where.secretId));
+        const kept = agentSecrets.filter((a) => !matches(a));
         agentSecrets.length = 0;
         agentSecrets.push(...kept);
         return { count: before - kept.length };
@@ -318,6 +327,47 @@ describe("secrets tools", () => {
 
     const listed = await client.callTool({ name: "list_secrets", arguments: {} });
     expect(parseText(listed as never)).toEqual([]);
+    await client.close();
+  });
+
+  it("detach_secret accepts the alias or the secret's own name, and errors when nothing is attached", async () => {
+    const db = fakeDb([{ id: "a1", ownerId: "p1" }]);
+    const cipher = fakeCipher();
+    const mcp = buildMcpServer({
+      providers: { secrets: cipher } as never,
+      db,
+      config: { canonicalUri: CANONICAL_URI },
+    });
+    mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
+    registerSecretsTools(mcp, {
+      buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
+      protocolElicitation: false,
+    });
+    const client = await connectClient(mcp);
+    await client.callTool({ name: "create_secret", arguments: { name: "REVIEW_TOKEN", value: "ghp-abc" } });
+
+    await client.callTool({
+      name: "attach_secret",
+      arguments: { agentId: "a1", name: "REVIEW_TOKEN", alias: "GITHUB_TOKEN" },
+    });
+    const byName = await client.callTool({ name: "detach_secret", arguments: { agentId: "a1", name: "REVIEW_TOKEN" } });
+    expect(parseText(byName as never)).toEqual({ detached: true, count: 1 });
+
+    await client.callTool({
+      name: "attach_secret",
+      arguments: { agentId: "a1", name: "REVIEW_TOKEN", alias: "GITHUB_TOKEN" },
+    });
+    const byAlias = await client.callTool({
+      name: "detach_secret",
+      arguments: { agentId: "a1", name: "GITHUB_TOKEN" },
+    });
+    expect(parseText(byAlias as never)).toEqual({ detached: true, count: 1 });
+
+    const again = await client.callTool({ name: "detach_secret", arguments: { agentId: "a1", name: "GITHUB_TOKEN" } });
+    expect(again.isError).toBe(true);
+    expect((again.content as { text: string }[])[0].text).toContain(
+      'No secret is attached to agent "a1" as "GITHUB_TOKEN"',
+    );
     await client.close();
   });
 

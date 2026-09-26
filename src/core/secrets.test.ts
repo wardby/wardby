@@ -107,9 +107,13 @@ function fakeDb() {
         agentSecrets.push(data);
         return data;
       },
-      deleteMany: async ({ where }: { where: { agentId: string; boundName: string } }) => {
+      deleteMany: async ({ where }: { where: { agentId: string; boundName?: string; secret?: { name: string } } }) => {
+        const matches = (a: FakeAgentSecretRow) =>
+          a.agentId === where.agentId &&
+          (where.boundName === undefined || a.boundName === where.boundName) &&
+          (where.secret === undefined || secrets.get(a.secretId)?.name === where.secret.name);
         const before = agentSecrets.length;
-        const kept = agentSecrets.filter((a) => !(a.agentId === where.agentId && a.boundName === where.boundName));
+        const kept = agentSecrets.filter((a) => !matches(a));
         agentSecrets.length = 0;
         agentSecrets.push(...kept);
         return { count: before - kept.length };
@@ -183,10 +187,45 @@ describe("core/secrets", () => {
     const cipher = fakeCipher();
     await createSecret("API_KEY", "sk-live-abc123", "p1", cipher, db);
     await attachSecret("agent-1", "API_KEY", "p1", db);
-    await detachSecret("agent-1", "API_KEY", db);
+    expect(await detachSecret("agent-1", "API_KEY", db)).toBe(1);
 
     const accessor = buildSecretsAccessor("agent-1", cipher, db);
     expect(await accessor.get("API_KEY")).toBeUndefined();
+  });
+
+  it("detachSecret also accepts the secret's own name when it was attached under an alias", async () => {
+    const db = fakeDb();
+    const cipher = fakeCipher();
+    await createSecret("REVIEW_GITHUB_TOKEN", "ghp-abc", "p1", cipher, db);
+    await attachSecret("agent-1", "REVIEW_GITHUB_TOKEN", "p1", db, "GITHUB_TOKEN");
+
+    expect(await detachSecret("agent-1", "REVIEW_GITHUB_TOKEN", db)).toBe(1);
+    expect(await buildSecretsAccessor("agent-1", cipher, db).get("GITHUB_TOKEN")).toBeUndefined();
+  });
+
+  it("detachSecret prefers the alias over another secret's own name", async () => {
+    const db = fakeDb();
+    const cipher = fakeCipher();
+    await createSecret("TOKEN", "value-a", "p1", cipher, db);
+    await createSecret("OTHER", "value-b", "p1", cipher, db);
+    // "TOKEN" is secret TOKEN's own name AND the alias OTHER is attached under.
+    await attachSecret("agent-1", "TOKEN", "p1", db, "X");
+    await attachSecret("agent-1", "OTHER", "p1", db, "TOKEN");
+
+    expect(await detachSecret("agent-1", "TOKEN", db)).toBe(1);
+    const accessor = buildSecretsAccessor("agent-1", cipher, db);
+    expect(await accessor.get("TOKEN")).toBeUndefined();
+    expect(await accessor.get("X")).toBe("value-a");
+  });
+
+  it("detachSecret returns 0 when nothing matches", async () => {
+    const db = fakeDb();
+    const cipher = fakeCipher();
+    await createSecret("API_KEY", "sk-live-abc123", "p1", cipher, db);
+    await attachSecret("agent-1", "API_KEY", "p1", db);
+
+    expect(await detachSecret("agent-1", "NOPE", db)).toBe(0);
+    expect(await buildSecretsAccessor("agent-1", cipher, db).get("API_KEY")).toBe("sk-live-abc123");
   });
 
   it("two agents resolve the same boundName to their own distinct secrets", async () => {

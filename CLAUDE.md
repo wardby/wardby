@@ -133,3 +133,24 @@ this reason — do not work around it by inlining test values into a tracked
 file, a commit message, or a doc. If a real test surfaces a genuine bug or
 missing piece in the module itself, fix the module (variables, resource
 definitions, docs) — never the specific values used to exercise it.
+
+## Public docs are for operators — STRICT
+
+Everything tracked under `docs/`, `README.md`, and `deploy/**/*.md` is read by
+people running wardby on their own infrastructure. Write it as generic,
+current guidance for them — never as a record of how we built, tested, or run
+our own deployment. Keep all of these out of tracked files:
+
+- Our test runs, smoke tests, and live-test findings ("confirmed live",
+  "verified on <date>", "we saw …"), including dated review/verification notes.
+- Our own repositories, test fixtures, agents, and instance details (e.g. the
+  knock-knock test repo, `app.wardby.com`, our GCP project, cluster, IPs,
+  run/agent ids) — use neutral placeholders such as `your-org/your-repo`.
+- Internal design specs, implementation plans, rollout checklists, and SDD
+  ledgers (superpowers or otherwise). These go in `docs/private/`
+  (git-ignored), never `docs/superpowers/` or any other tracked path.
+- Commit or PR history as narrative ("shipped in `feat: …`", "as of PR #n").
+
+If a test turns up something operators genuinely need (a missing step, a
+gotcha), write the general rule in the relevant guide — not the story of how
+we found it. Code comments and test fixtures are not bound by this section.

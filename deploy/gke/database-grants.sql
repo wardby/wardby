@@ -48,7 +48,8 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "{{owner}}" IN SCHEMA public
   GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO wardby_app;
 -- ;;
 
--- The coding proxy: its budget ledger only (src/providers/coding-proxy/prisma-ledger.ts).
+-- The coding proxy: its budget ledger (src/providers/coding-proxy/prisma-ledger.ts)
+-- and its package registry store (src/providers/coding-proxy/registry/prisma-store.ts).
 GRANT USAGE ON SCHEMA public TO wardby_proxy;
 -- ;;
 
@@ -66,6 +67,19 @@ DO $$ BEGIN
   IF to_regclass('public."Run"') IS NOT NULL THEN
     EXECUTE format('GRANT UPDATE (%I, %I, %I), SELECT (%I) ON public.%I TO wardby_proxy',
       'tokensIn', 'tokensOut', 'costUsd', 'id', 'Run');
+  END IF;
+  -- The package registry (src/providers/coding-proxy/registry/prisma-store.ts):
+  -- it reads a run's package allowlist and policy snapshot, and records the
+  -- allowances and fetches of that run. It never updates or deletes either.
+  IF to_regclass('public."CodingRun"') IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT (%I, %I, %I) ON public.%I TO wardby_proxy',
+      'runId', 'packageAllowlist', 'packagePolicy', 'CodingRun');
+  END IF;
+  IF to_regclass('public."RegistryAllowance"') IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT, INSERT ON public.%I TO wardby_proxy', 'RegistryAllowance');
+  END IF;
+  IF to_regclass('public."RegistryFetch"') IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT, INSERT ON public.%I TO wardby_proxy', 'RegistryFetch');
   END IF;
   IF to_regclass('public."_prisma_migrations"') IS NOT NULL THEN
     EXECUTE format('REVOKE ALL ON public.%I FROM wardby_app', '_prisma_migrations');
