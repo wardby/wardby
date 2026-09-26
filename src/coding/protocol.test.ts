@@ -337,10 +337,12 @@ describe("redactTokenShapedValues", () => {
         RATIO_LIMIT,
       );
       // Absolute backstop, for the case where both measurements are slow. The
-      // binding shape costs ~68 ms at 200k, so ~136 ms at 400k: this is ~3.5x
-      // headroom -- enough for a reintroduced quadratic (orders of magnitude),
-      // not a tight budget.
-      expect(full, `${shape} must not stall the event loop`).toBeLessThan(500);
+      // binding shape costs ~136 ms at 400k locally, but 500 ms flaked on
+      // GitHub's 2-vCPU runners (557 ms for the jwt hyphen run) while the ratio
+      // check above passed. A reintroduced quadratic costs seconds at 400k and
+      // already fails the ratio, so this bound only has to catch a stall, not
+      // a slow runner.
+      expect(full, `${shape} must not stall the event loop`).toBeLessThan(2000);
     }
   }, 60_000);
 
