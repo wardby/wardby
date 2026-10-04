@@ -310,16 +310,16 @@ function clientInstalled(command: "codex" | "claude"): boolean {
   return runCommand(command, ["--version"]).status === 0;
 }
 
-function configureOneMcpClient(client: "codex" | "claude", paths: QuickstartPaths): void {
+function configureOneMcpClient(client: "codex" | "claude", paths: QuickstartPaths): boolean {
   if (!clientInstalled(client)) {
     console.warn(`! ${client} is not installed; skipped its MCP configuration.`);
-    return;
+    return false;
   }
 
   const existing = runCommand(client, ["mcp", "get", "wardby"], { cwd: paths.projectDir });
   if (existing.status === 0) {
     console.log(`✓ ${client} already has an MCP server named wardby.`);
-    return;
+    return true;
   }
 
   const packageSpec = `@wardby/cli@${packageJson.version}`;
@@ -354,11 +354,15 @@ function configureOneMcpClient(client: "codex" | "claude", paths: QuickstartPath
   const result = runCommand(client, args, { cwd: paths.projectDir });
   if (result.status !== 0) commandFailure(`${client} MCP configuration`, result);
   console.log(`✓ Configured Wardby MCP for ${client}.`);
+  return true;
 }
 
-function configureMcpClients(client: McpClient, paths: QuickstartPaths): void {
-  if (client === "codex" || client === "both") configureOneMcpClient("codex", paths);
-  if (client === "claude" || client === "both") configureOneMcpClient("claude", paths);
+/** True when at least one requested client ended up with the wardby MCP server. */
+function configureMcpClients(client: McpClient, paths: QuickstartPaths): boolean {
+  const results: boolean[] = [];
+  if (client === "codex" || client === "both") results.push(configureOneMcpClient("codex", paths));
+  if (client === "claude" || client === "both") results.push(configureOneMcpClient("claude", paths));
+  return results.some(Boolean);
 }
 
 async function chooseClient(nonInteractive: boolean): Promise<McpClient> {
@@ -460,12 +464,27 @@ export async function quickstartCommand(args: string[]): Promise<void> {
   }
 
   const client = parseClient(values.client) ?? (await chooseClient(nonInteractive));
-  if (client !== "none") configureMcpClients(client, paths);
+  const mcpConfigured = client !== "none" && configureMcpClients(client, paths);
 
   console.log("\nWardby is ready.");
   console.log("  npx @wardby/cli@latest status");
   console.log("  npx @wardby/cli@latest doctor");
   console.log("  npx @wardby/cli@latest down");
+  for (const line of nextStepLines(mcpConfigured)) console.log(line);
+}
+
+/** The closing "build your first agent" hint; the assistant prompts only make sense once an MCP client is configured. */
+export function nextStepLines(mcpConfigured: boolean): string[] {
+  const lines = ["", "Next: build your first agent."];
+  if (mcpConfigured) {
+    lines.push(
+      "Ask your assistant one of:",
+      '  "Set up the Wardby architecture keeper for this repository"',
+      '  "Set up a Wardby builder for this repository"',
+    );
+  }
+  lines.push("Or read the guide: npx @wardby/cli@latest help open agent-recipes");
+  return lines;
 }
 
 async function databaseHealthy(paths: QuickstartPaths): Promise<boolean> {

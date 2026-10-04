@@ -225,14 +225,14 @@ These are example systems a team can build and manage through MCP:
 **Builders can vary. The controls do not.** Each system inherits the same
 budget, capability, identity, evidence, and review contract.
 
-| Agent system             | Typical cycle                                                      | Governed outcome                     |
-| ------------------------ | ------------------------------------------------------------------ | ------------------------------------ |
-| **Delivery pipeline**    | Work request → plan → implementation → tests → review              | Optional draft feature or bug-fix PR |
-| **Security maintenance** | Scheduled scan → assess → patch → verify                           | Report or optional remediation PR    |
-| **Architecture review**  | Inspect codebase → score risks → prioritize findings               | Architecture and risk report         |
-| **QA coverage**          | Map journeys → rank gaps → add tests → run suite                   | Coverage report or optional test PR  |
-| **System monitoring**    | Receive signal → investigate → correlate → escalate                | Actionable defect or incident report |
-| **Project tracking**     | Read delivery data → compare plan, cost, and progress → flag drift | Portfolio or program update          |
+| Agent system                                                                     | Typical cycle                                                      | Governed outcome                     |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------ |
+| **[Delivery pipeline](docs/agent-recipes.md#recipe-b-a-builder-per-language)**   | Work request → plan → implementation → tests → review              | Optional draft feature or bug-fix PR |
+| **Security maintenance**                                                         | Scheduled scan → assess → patch → verify                           | Report or optional remediation PR    |
+| **[Architecture review](docs/agent-recipes.md#recipe-a-an-architecture-keeper)** | Inspect codebase → score risks → prioritize findings               | Architecture and risk report         |
+| **QA coverage**                                                                  | Map journeys → rank gaps → add tests → run suite                   | Coverage report or optional test PR  |
+| **System monitoring**                                                            | Receive signal → investigate → correlate → escalate                | Actionable defect or incident report |
+| **Project tracking**                                                             | Read delivery data → compare plan, cost, and progress → flag drift | Portfolio or program update          |
 
 Agents can stand alone or be connected as bounded sub-agents. Shared budget
 groups can cap the combined spend of an ecosystem, while each agent retains its

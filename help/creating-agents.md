@@ -82,6 +82,9 @@ A coding agent can also keep a repository's architecture knowledge current; see
 [Set up an architecture agent](help://architecture-agent) and
 [Architecture knowledge bundles](help://knowledge).
 
+For an `@mention` builder with a router, see [Agent recipes](help://agent-recipes) and
+[Builder and router prompts](help://builder-agent).
+
 Read [Connect GitHub repositories](github.md) and
 [Troubleshoot coding workers](troubleshooting/coding-workers.md) before
 enabling repository-changing work.

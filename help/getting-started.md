@@ -24,6 +24,7 @@ Read [Choose a native or coding agent](creating-agents.md) before creating your
 first agent.
 Use [MCP access](mcp.md) when connecting an MCP client. Before enabling coding
 agents against a repository, complete [GitHub integration](github.md).
+For two complete example setups, see [Agent recipes](agent-recipes.md).
 For a self-hosted installation, start with [Choose a deployment target](deployment-targets.md)
 and [Configure identity and privileged access](identity-and-access.md).
 

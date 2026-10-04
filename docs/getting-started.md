@@ -123,8 +123,22 @@ Coding agents require the stronger boundary described in
 worker image, trusted coding proxy, and either Docker or Kubernetes as the job
 launcher. Run `wardby coding preflight` before enabling a production repository.
 
+## Your first agents
+
+[Agent recipes](agent-recipes.md) gives two complete, copyable setups: an
+architecture keeper and a builder per language. They go beyond the quickstart,
+which runs native agents only. They require Wardby 0.4.0 or later. They need the
+GitHub App, worker image, and job launcher from
+[Coding-agent setup](coding-agent-setup.md). Their event triggers need GitHub to
+reach your instance at a public HTTPS URL.
+
+The assistant the quickstart connected can walk you through either recipe. Ask it
+"Set up the Wardby architecture keeper for this repository" or "Set up a Wardby
+builder for this repository"; it follows the `agent-recipes` help article.
+
 ## Next steps
 
+- [Agent recipes](agent-recipes.md)
 - [Runtime architecture](architecture-runtime.md)
 - [Coding-agent setup](coding-agent-setup.md)
 - [Bring your own identity provider](getting-started-identity-provider.md)

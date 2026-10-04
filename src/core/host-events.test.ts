@@ -3,6 +3,7 @@ import type { CodeReviewHost } from "../providers/review-host/types.js";
 import type { RepoAccessDecision, RepoAccessGate } from "./repo-access.js";
 import { isReviewCommand, routeHostEvent, type HostEvent } from "./host-events.js";
 import { splitTaskOverride } from "./untrusted-content.js";
+import { spanHash } from "../knowledge/span-hash.js";
 
 // vi.mock factories are hoisted above every declaration, so shared state goes through vi.hoisted.
 const { txStub } = vi.hoisted(() => ({
@@ -896,7 +897,8 @@ describe("routeHostEvent push (merge watcher)", () => {
     });
     await routeHostEvent(push(["src/f29.ts"]), deps([link("w1")], h));
     expect(max).toBe(8);
-    expect(h.readFile).toHaveBeenCalledTimes(30);
+    // 30 bundle files, plus the one cited file of the one affected concept.
+    expect(h.readFile).toHaveBeenCalledTimes(31);
     expect(splitTaskOverride(taskOf()).untrustedContext).toContain("- docs/knowledge/c29.md");
   });
 
@@ -999,5 +1001,202 @@ describe("routeHostEvent push (merge watcher)", () => {
     expect(untrustedContext).not.toContain("- f200.txt");
     expect(untrustedContext).toContain("… and 50 more changed files");
     expect(untrustedContext).toContain("- docs/knowledge/seed.md");
+  });
+
+  describe("citation check", () => {
+    const codeA = Array.from({ length: 30 }, (_, i) => `a${i + 1}`).join("\n") + "\n";
+    const codeB = Array.from({ length: 20 }, (_, i) => `b${i + 1}`).join("\n") + "\n";
+    type Cite = { path: string; lines?: [number, number]; hashOf?: string };
+    const cited = (cites: Cite[]) => {
+      const entries = cites.map((c) => {
+        const hash = spanHash(c.hashOf ?? "", c.lines) ?? `sha256:${"e".repeat(64)}`;
+        const lines = c.lines ? `, lines: [${c.lines[0]}, ${c.lines[1]}]` : "";
+        return `    - { repo: github:o/r, path: ${c.path}${lines}, sha: ${"c".repeat(40)}, spanHash: ${hash} }`;
+      });
+      return `---\ntype: invariant\nwardby:\n  schema: 1\n  citations:\n${entries.join("\n")}\n---\nBody.\n`;
+    };
+    /** A bundle host whose code files answer like GitHubReviewHost.readFile (windowed, numbered `content` + raw `text`). */
+    function codeHost(bundle: Record<string, string>, code: Record<string, string | null>) {
+      const h = bundleHost(bundle);
+      const bundleRead = vi.mocked(h.readFile).getMockImplementation()!;
+      vi.mocked(h.readFile).mockImplementation(async (r, path, ref, w) => {
+        if (path.startsWith("docs/knowledge/")) return bundleRead(r, path, ref, w);
+        const full = code[path];
+        if (full === undefined) return { kind: "not_found", path };
+        if (full === null) throw new Error("boom");
+        const all = full.split("\n");
+        const window = all.slice(w.startLine - 1, w.startLine - 1 + w.maxLines);
+        return {
+          kind: "file",
+          path,
+          ref: AFTER,
+          totalLines: all.length,
+          startLine: w.startLine,
+          endLine: w.startLine + window.length - 1,
+          truncated: all.length > w.startLine - 1 + window.length,
+          content: window.map((line, i) => `${w.startLine + i}: ${line}`).join("\n"),
+          text: window.join("\n"),
+        };
+      });
+      return h;
+    }
+    const codeReads = (h: CodeReviewHost) =>
+      vi.mocked(h.readFile).mock.calls.filter((c) => !String(c[1]).startsWith("docs/knowledge/"));
+    const run = async (h: CodeReviewHost, paths: string[]) => {
+      vi.mocked(dispatchRun).mockClear();
+      await routeHostEvent(push(paths), deps([link("w1")], h));
+      return splitTaskOverride(taskOf());
+    };
+    const SUMMARY = (v: number, n: number, s: number, u: number, only: "yes" | "no") =>
+      `Citation check at ${"b".repeat(12)}: ${v} of ${n} affected concepts verified, ${s} stale, ${u} not verified. Only knowledge files changed: ${only}.`;
+
+    it("reports every concept verified when a knowledge-only merge leaves all citations matching", async () => {
+      const h = codeHost(
+        {
+          "one.md": cited([{ path: "src/a.ts", lines: [2, 4], hashOf: codeA }]),
+          "two.md": cited([{ path: "src/b.ts", hashOf: codeB }]),
+        },
+        { "src/a.ts": codeA, "src/b.ts": codeB },
+      );
+      const { task, untrustedContext } = await run(h, ["docs/knowledge/one.md", "docs/knowledge/two.md"]);
+      expect(task).toContain(SUMMARY(2, 2, 0, 0, "yes"));
+      expect(untrustedContext).toContain("- docs/knowledge/one.md — citations verified");
+      expect(untrustedContext).toContain("- docs/knowledge/two.md — citations verified");
+      expect(untrustedContext).not.toContain("Citation check at");
+    });
+
+    it("marks a concept stale, naming the span, when a code change moved the cited lines", async () => {
+      const moved = ["new0", ...codeA.split("\n")].join("\n");
+      const h = codeHost(
+        {
+          "moved.md": cited([{ path: "src/a.ts", lines: [2, 4], hashOf: codeA }]),
+          "fine.md": cited([{ path: "src/b.ts", lines: [1, 3], hashOf: codeB }]),
+        },
+        { "src/a.ts": moved, "src/b.ts": codeB },
+      );
+      const { task, untrustedContext } = await run(h, ["src/a.ts", "docs/knowledge/fine.md"]);
+      expect(untrustedContext).toContain("- docs/knowledge/moved.md — 1 stale citation: src/a.ts#L2-L4");
+      expect(untrustedContext).toContain("- docs/knowledge/fine.md — citations verified");
+      expect(task).toContain(SUMMARY(1, 2, 1, 0, "no"));
+    });
+
+    it("treats cited lines beyond the end of the file as stale", async () => {
+      const h = codeHost(
+        { "short.md": cited([{ path: "src/b.ts", lines: [15, 20], hashOf: codeB }]) },
+        { "src/b.ts": codeB.split("\n").slice(0, 10).join("\n") + "\n" },
+      );
+      const { untrustedContext } = await run(h, ["src/b.ts"]);
+      expect(untrustedContext).toContain("— 1 stale citation: src/b.ts#L15-L20");
+    });
+
+    it("leaves a concept unverified when a cited file is missing or its read throws", async () => {
+      const h = codeHost(
+        {
+          "gone.md": cited([{ path: "src/gone.ts", lines: [1, 2], hashOf: codeA }]),
+          "boom.md": cited([{ path: "src/boom.ts", lines: [1, 2], hashOf: codeA }]),
+        },
+        { "src/boom.ts": null },
+      );
+      const { task, untrustedContext } = await run(h, ["docs/knowledge/gone.md", "docs/knowledge/boom.md"]);
+      expect(untrustedContext).toContain("- docs/knowledge/gone.md — citations not verified");
+      expect(untrustedContext).toContain("- docs/knowledge/boom.md — citations not verified");
+      expect(task).toContain(SUMMARY(0, 2, 0, 2, "yes"));
+    });
+
+    it("leaves a concept with no citations unverified", async () => {
+      const h = codeHost({ "bare.md": "---\ntype: invariant\n---\nBody.\n" }, {});
+      const { untrustedContext } = await run(h, ["docs/knowledge/bare.md"]);
+      expect(untrustedContext).toContain("- docs/knowledge/bare.md — citations not verified");
+    });
+
+    it("leaves a whole-file citation unverified when the read is truncated", async () => {
+      const big = Array.from({ length: 6000 }, (_, i) => `l${i}`).join("\n") + "\n";
+      const h = codeHost({ "whole.md": cited([{ path: "src/big.ts", hashOf: big }]) }, { "src/big.ts": big });
+      const { untrustedContext } = await run(h, ["docs/knowledge/whole.md"]);
+      expect(untrustedContext).toContain("- docs/knowledge/whole.md — citations not verified");
+      expect(codeReads(h)[0][3]).toEqual({ startLine: 1, maxLines: 5000 });
+    });
+
+    it("reads each cited path once, up to the largest cited end line, even when several concepts cite it", async () => {
+      const h = codeHost(
+        {
+          "one.md": cited([{ path: "src/a.ts", lines: [2, 4], hashOf: codeA }]),
+          "two.md": cited([{ path: "src/a.ts", lines: [10, 12], hashOf: codeA }]),
+        },
+        { "src/a.ts": codeA },
+      );
+      const { task } = await run(h, ["src/a.ts"]);
+      expect(task).toContain(SUMMARY(2, 2, 0, 0, "no"));
+      expect(codeReads(h)).toHaveLength(1);
+      expect(codeReads(h)[0].slice(0, 4)).toEqual([REPO, "src/a.ts", AFTER, { startLine: 1, maxLines: 12 }]);
+    });
+
+    it("verifies nothing, and reads no code, when the bundle is incomplete", async () => {
+      const h = codeHost(
+        { "ok.md": cited([{ path: "src/a.ts", lines: [2, 4], hashOf: codeA }]), "bad.md": "x" },
+        { "src/a.ts": codeA },
+      );
+      const { task, untrustedContext } = await run(h, ["src/a.ts"]);
+      expect(codeReads(h)).toHaveLength(0);
+      expect(untrustedContext).toContain("could not be fully read");
+      expect(untrustedContext).toContain("- docs/knowledge/ok.md — citations not verified");
+      expect(task).toContain(SUMMARY(0, 1, 0, 1, "no"));
+    });
+
+    it("leaves the remaining concepts unverified when the shared deadline expires during citation reads", async () => {
+      vi.useFakeTimers();
+      try {
+        const h = codeHost(
+          {
+            "fast.md": cited([{ path: "src/a.ts", lines: [2, 4], hashOf: codeA }]),
+            "slow.md": cited([{ path: "src/b.ts", lines: [1, 3], hashOf: codeB }]),
+          },
+          { "src/a.ts": codeA, "src/b.ts": codeB },
+        );
+        const read = vi.mocked(h.readFile).getMockImplementation()!;
+        vi.mocked(h.readFile).mockImplementation((r, path, ref, w) =>
+          path === "src/b.ts" ? new Promise(() => undefined) : read(r, path, ref, w),
+        );
+        vi.mocked(dispatchRun).mockClear();
+        const routed = routeHostEvent(push(["src/a.ts", "src/b.ts"]), deps([link("w1")], h));
+        await vi.advanceTimersByTimeAsync(4000);
+        const result = await routed;
+        expect(result.runIds).toEqual(["run-w1"]);
+        const { task, untrustedContext } = splitTaskOverride(taskOf());
+        expect(untrustedContext).toContain("- docs/knowledge/fast.md — citations verified");
+        expect(untrustedContext).toContain("- docs/knowledge/slow.md — citations not verified");
+        expect(task).toContain(SUMMARY(1, 2, 0, 1, "no"));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("says the merge was not knowledge-only when a code file changed alongside the knowledge", async () => {
+      const h = codeHost(
+        { "one.md": cited([{ path: "src/a.ts", lines: [2, 4], hashOf: codeA }]) },
+        { "src/a.ts": codeA },
+      );
+      const { task } = await run(h, ["docs/knowledge/one.md", "README.md"]);
+      expect(task).toContain(SUMMARY(1, 1, 0, 0, "no"));
+    });
+
+    it("says the merge was not knowledge-only when the changed-file list is incomplete", async () => {
+      const h = codeHost(
+        { "one.md": cited([{ path: "src/a.ts", lines: [2, 4], hashOf: codeA }]) },
+        { "src/a.ts": codeA },
+      );
+      vi.mocked(dispatchRun).mockClear();
+      await routeHostEvent(push(["docs/knowledge/one.md"], false), deps([link("w1")], h));
+      expect(splitTaskOverride(taskOf()).task).toContain(SUMMARY(1, 1, 0, 0, "no"));
+    });
+
+    it("omits the citation-check line when no concept is affected", async () => {
+      const h = codeHost(
+        { "one.md": cited([{ path: "src/a.ts", lines: [2, 4], hashOf: codeA }]) },
+        { "src/a.ts": codeA },
+      );
+      const { task } = await run(h, ["README.md"]);
+      expect(task).not.toContain("Citation check");
+    });
   });
 });

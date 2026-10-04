@@ -11,6 +11,8 @@
 - [Models and pricing](models.md) covers the model catalog: the shipped models,
   adding or overriding one with `set_model`, disabling and resetting, and how
   runs are billed.
+- [Agent recipes](agent-recipes.md) gives two copyable setups, an architecture
+  keeper and a per-language builder, with the prerequisites each needs.
 - [Coding-agent setup](coding-agent-setup.md) configures the local trusted proxy
   and isolated Codex or Claude Code workers.
 - [Architecture knowledge bundles](knowledge.md) covers `docs/knowledge/`: the

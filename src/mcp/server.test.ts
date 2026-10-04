@@ -259,6 +259,7 @@ describe("buildMcpServer", () => {
     });
     const { client } = await connectClient(mcp);
     expect(client.getInstructions()).toMatch(/shift.+left/i);
+    expect(client.getInstructions()).toContain('read the help article "agent-recipes" with get_help_article');
     await client.close();
   });
 
