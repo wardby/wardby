@@ -297,8 +297,8 @@ changed files`. Concept selection still uses the full list.
 - The knowledge bundle is read within a 4 second deadline (listing plus reads,
   eight files at a time), because GitHub expects a webhook response within
   about 10 seconds. Reading is capped at 200 concept files; files over 2000
-  lines or unreadable are skipped with a warning. If the bundle cannot be read,
-  is only partly read (deadline, truncated listing, file cap, skipped files),
+  lines, unreadable, or failing to parse are skipped with a warning. If the bundle cannot be read,
+  is only partly read (deadline, truncated listing, file cap, skipped files, a concept file that fails to parse),
   the context says the bundle could not be fully read and that every concept
   may be affected, and the run still starts. It says no concept is affected
   only when the whole bundle was read and none matched.

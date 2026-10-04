@@ -121,7 +121,7 @@ paths, or matches an `affects` glob). The list is incomplete when a push has 204
 affected. The context shows at most 200
 changed files (then `… and N more changed files`), but concept selection uses
 the full list. The bundle is read within a 4 second deadline, at most 200 concept
-files, skipping files over 2000 lines or unreadable. If it cannot be read or is
+files, skipping files over 2000 lines, unreadable, or that fail to parse. If it cannot be read or is
 only partly read, the context says so and that every concept may be affected,
 and the run still starts; it says no concept is affected only when the whole
 bundle was read and none matched. Commit messages and author

@@ -412,6 +412,7 @@ export class GitHubReviewHost implements CodeReviewHost {
         endLine: window.startLine + slice.length - 1,
         truncated: window.startLine - 1 + slice.length < lines.length,
         content: slice.map((line, i) => `${window.startLine + i}: ${line}`).join("\n"),
+        text: slice.join("\n"),
       };
     });
   }

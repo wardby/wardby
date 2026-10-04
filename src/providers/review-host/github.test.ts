@@ -151,6 +151,7 @@ describe("GitHubReviewHost reads", () => {
       endLine: 3,
       truncated: true,
       content: "2: b\n3: c",
+      text: "b\nc",
     });
     await expect(host.readFile(REPO, "tests", SHA, { startLine: 1, maxLines: 10 })).resolves.toEqual({
       kind: "directory",

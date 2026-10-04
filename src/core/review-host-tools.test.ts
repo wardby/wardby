@@ -385,6 +385,31 @@ describe("handleReviewHostTool repository authorization (H5-1)", () => {
   });
 });
 
+describe("repo_read_file output", () => {
+  it("serializes the numbered content and omits the raw text field", async () => {
+    const c = ctx();
+    vi.mocked(c.hosts.github!.readFile).mockResolvedValueOnce({
+      kind: "file",
+      path: "a.py",
+      ref: "main",
+      totalLines: 2,
+      startLine: 1,
+      endLine: 2,
+      truncated: false,
+      content: "1: x\n2: y",
+      text: "x\ny",
+    });
+    const out = await handleReviewHostTool(
+      "repo_read_file",
+      JSON.stringify({ repository: WRITE.repository, path: "a.py" }),
+      c,
+    );
+    expect(out).toBe(
+      '{"kind":"file","path":"a.py","ref":"main","totalLines":2,"startLine":1,"endLine":2,"truncated":false,"content":"1: x\\n2: y"}',
+    );
+  });
+});
+
 describe("handleReviewHostTool transient re-check failures (M-2)", () => {
   it("reports a distinct repository_access_unavailable error when GitHub can't be asked", async () => {
     const c = ctx({ authorize: vi.fn(async () => ({ ok: false as const, reason: "check_unavailable" as const })) });

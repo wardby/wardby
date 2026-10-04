@@ -333,12 +333,16 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
       }
       case "repo_read_file": {
         const a = ReadFileArgs.parse(parsed);
-        return JSON.stringify(
-          await host.readFile(link.repository, a.path, a.ref, {
-            startLine: a.startLine ?? 1,
-            maxLines: a.maxLines ?? 400,
-          }),
-        );
+        const read = await host.readFile(link.repository, a.path, a.ref, {
+          startLine: a.startLine ?? 1,
+          maxLines: a.maxLines ?? 400,
+        });
+        // `text` is the raw window for machine callers; agents get only the numbered `content`.
+        if (read.kind === "file") {
+          const { text: _text, ...shown } = read;
+          return JSON.stringify(shown);
+        }
+        return JSON.stringify(read);
       }
       case "repo_list_files": {
         const a = ListFilesArgs.parse(parsed);

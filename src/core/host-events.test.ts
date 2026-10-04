@@ -721,8 +721,20 @@ describe("routeHostEvent push (merge watcher)", () => {
       };
     });
     vi.mocked(h.readFile).mockImplementation(async (_r, path) => {
-      const content = files?.[path.replace("docs/knowledge/", "")] ?? "";
-      return { kind: "file", path, ref: AFTER, totalLines: 1, startLine: 1, endLine: 1, truncated: false, content };
+      const text = files?.[path.replace("docs/knowledge/", "")] ?? "";
+      // Like GitHubReviewHost.readFile: `content` is the numbered display form, `text` the raw window.
+      const lines = text.split("\n");
+      return {
+        kind: "file",
+        path,
+        ref: AFTER,
+        totalLines: lines.length,
+        startLine: 1,
+        endLine: lines.length,
+        truncated: false,
+        content: lines.map((line, i) => `${i + 1}: ${line}`).join("\n"),
+        text,
+      };
     });
     return h;
   }
@@ -742,6 +754,31 @@ describe("routeHostEvent push (merge watcher)", () => {
     expect(task).not.toContain("src/a.ts");
     expect(untrustedContext).toContain("- src/a.ts");
     expect(untrustedContext).toContain("- docs/knowledge/seed.md");
+  });
+
+  it("selects a concept from realistic numbered-content reads (parses raw text, not content)", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([link("w1")], bundleHost({ "seed.md": concept("src/a.ts") }));
+    await routeHostEvent(push(["src/a.ts"]), d);
+    const ctx = splitTaskOverride(taskOf()).untrustedContext;
+    expect(ctx).toContain("- docs/knowledge/seed.md");
+    expect(ctx).not.toContain("No knowledge concept is affected");
+  });
+
+  it("treats the bundle as incomplete when a concept file fails to parse", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([link("w1")], bundleHost({ "bad.md": "no front matter here\n" }));
+    await routeHostEvent(push(["README.md"]), d);
+    const ctx = splitTaskOverride(taskOf()).untrustedContext;
+    expect(ctx).not.toContain("No knowledge concept is affected");
+    expect(ctx).toMatch(/could not be fully read/);
+  });
+
+  it("does not count the reserved index.md and log.md as parse failures", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([link("w1")], bundleHost({ "index.md": "# Index\n", "log.md": "# Log\n" }));
+    await routeHostEvent(push(["README.md"]), d);
+    expect(splitTaskOverride(taskOf()).untrustedContext).toContain("No knowledge concept is affected");
   });
 
   it("still dispatches when only unrelated files changed, saying no concept is affected", async () => {

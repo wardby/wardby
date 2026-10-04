@@ -78,7 +78,10 @@ export type FileReadResult =
       startLine: number;
       endLine: number;
       truncated: boolean;
+      /** The window with `N: ` line-number prefixes: the display form shown to agents. */
       content: string;
+      /** The same window without line-number prefixes, lines joined by "\n": for machine parsing. */
+      text: string;
     }
   | { kind: "directory"; path: string; entries: string[] }
   | { kind: "not_found"; path: string };

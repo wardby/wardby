@@ -16,7 +16,12 @@ import { handlePullRequestClosed } from "./issue-bridge.js";
 import { logger } from "./logger.js";
 import { requiredLevel, type RepoAccessGate } from "./repo-access.js";
 import { composeTaskOverride } from "./untrusted-content.js";
-import { DEFAULT_KNOWLEDGE_BUNDLE_PATH, parseConcept, type ParsedConcept } from "../knowledge/concept.js";
+import {
+  DEFAULT_KNOWLEDGE_BUNDLE_PATH,
+  parseConcept,
+  RESERVED_BUNDLE_FILES,
+  type ParsedConcept,
+} from "../knowledge/concept.js";
 import { driftScope, type DriftScope } from "../knowledge/relevance.js";
 
 export type { HostEvent };
@@ -162,7 +167,9 @@ async function loadBundle(
       complete = false;
       log.warn(where, "the knowledge bundle listing is truncated; continuing with the files listed");
     }
-    const matching = listing.paths.filter((f) => f.startsWith(prefix) && f.endsWith(".md"));
+    const matching = listing.paths.filter(
+      (f) => f.startsWith(prefix) && f.endsWith(".md") && !RESERVED_BUNDLE_FILES.has(f.split("/").pop() ?? f),
+    );
     const files = matching.slice(0, MAX_BUNDLE_FILES);
     if (matching.length > files.length) {
       complete = false;
@@ -188,8 +195,13 @@ async function loadBundle(
             skipped += 1;
             continue;
           }
-          const parsed = parseConcept(file.slice(prefix.length), read.content);
+          const parsed = parseConcept(file.slice(prefix.length), read.text);
           if (parsed.ok) concepts.push(parsed.concept);
+          else {
+            // A concept that cannot be parsed might be one the push affects: do not claim the bundle was fully read.
+            skipped += 1;
+            lastError = new Error(parsed.error);
+          }
         } catch (err) {
           skipped += 1;
           lastError = err;
