@@ -106,13 +106,14 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
     const fake = fakeLauncher();
     const first = await sandboxRun();
     await executorWith(fake.launcher).start(first.id);
-    const active = await db.nativeGatewaySession.count({ where: { status: "active" } });
+    // A cap of 1 is full whatever other test files do: this test's own first session stays
+    // active, while sessions elsewhere in the shared database can end at any moment.
     const full = new NativeSandboxExecutor({
       db,
       providers,
       launcher: fake.launcher,
       gatewayUrl,
-      maxConcurrent: active,
+      maxConcurrent: 1,
     });
     const second = await sandboxRun();
     await expect(full.start(second.id)).rejects.toThrow(/native_sandbox_capacity/);
