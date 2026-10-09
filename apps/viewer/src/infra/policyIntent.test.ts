@@ -226,6 +226,8 @@ suite("phrasing helpers", () => {
     expect(podsName({})).toBe("every pod");
     expect(podsName(name("coding-proxy"))).toBe("the coding proxy");
     expect(podsName({ "wardby.io/component": "coding-run" })).toBe("coding runs");
+    expect(podsName({ "wardby.io/component": "native-run" })).toBe("agent sandboxes");
+    expect(podsName({ "wardby.io/component": "native-run", "wardby.io/pool": "warm" })).toBe("the warm pool");
     expect(podsName({ "wardby.io/component": "other" })).toBe("wardby.io/component=other");
     expect(podsName({ app: "x", tier: "y" })).toBe("app=x, tier=y");
   });

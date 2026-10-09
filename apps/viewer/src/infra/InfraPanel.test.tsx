@@ -66,7 +66,7 @@ describe("InfraPanel", () => {
     expect(screen.getByText("gVisor")).toBeInTheDocument();
     expect(screen.getByText(/wardby-coding-proxy :8080\/TCP/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /RUN/ }));
-    expect(onOpenRun).toHaveBeenCalledWith(RUN_SHA);
+    expect(onOpenRun).toHaveBeenCalledWith(expect.objectContaining({ runSha: RUN_SHA }));
     await screen.findByText("No recent events");
   });
 

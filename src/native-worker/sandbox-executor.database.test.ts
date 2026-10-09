@@ -9,6 +9,9 @@ import { identityCipher, memoryDatastore, MODEL, noMemory, script, scriptedModel
 import type { WorkerHandle } from "./launch.js";
 import type { WorkerInput } from "./protocol.js";
 import { NativeSandboxExecutor, type ManagedWorkerLauncher } from "./sandbox-executor.js";
+import { PrismaGatewayLedger } from "./ledger.js";
+import { PooledWorkerLauncher, type WarmWorkerLauncher } from "./warm-pool.js";
+import { PrismaWarmPoolLedger } from "./warm-pool-ledger.js";
 
 /** A launcher whose workers exit only when the test says so. */
 function fakeLauncher() {
@@ -99,6 +102,25 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
     expect(fake.launched.filter((i) => i.runId === raced.id)).toHaveLength(1);
   });
 
+  it("refuses a start past NATIVE_SANDBOX_MAX_CONCURRENT active sessions, launching nothing", async () => {
+    const fake = fakeLauncher();
+    const first = await sandboxRun();
+    await executorWith(fake.launcher).start(first.id);
+    // A cap of 1 is full whatever other test files do: this test's own first session stays
+    // active, while sessions elsewhere in the shared database can end at any moment.
+    const full = new NativeSandboxExecutor({
+      db,
+      providers,
+      launcher: fake.launcher,
+      gatewayUrl,
+      maxConcurrent: 1,
+    });
+    const second = await sandboxRun();
+    await expect(full.start(second.id)).rejects.toThrow(/native_sandbox_capacity/);
+    expect(fake.launched.map((i) => i.runId)).toEqual([first.id]);
+    expect(await db.nativeGatewaySession.findUnique({ where: { runId: second.id } })).toBeNull();
+  });
+
   it("fails a run whose worker exits without a result, and removes the worker", async () => {
     const fake = fakeLauncher();
     const run = await sandboxRun();
@@ -181,5 +203,59 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
     await db.run.update({ where: { id: ended.id }, data: { status: "succeeded" } });
     expect(await executor.sweep()).toBe(1);
     expect(fake.removed).toEqual([nativeIsolationNames(ended.id).worker]);
+  });
+
+  it("launch() sweeps, then starts the launcher's upkeep; a failing upkeep never fails it", async () => {
+    const fake = fakeLauncher();
+    const start = vi.fn(async () => {
+      throw new Error("pool down");
+    });
+    await expect(executorWith({ ...fake.launcher, start }).launch()).resolves.toBeUndefined();
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs a sandbox run on a claimed warm worker: input delivered after the claim, session ready, worker removed with its row", async () => {
+    const fake = fakeLauncher();
+    let tokens = 0;
+    const warm = new Map<string, WorkerInput | undefined>();
+    const exits = new Map<string, (code: number | null) => void>();
+    const warmOps: WarmWorkerLauncher = {
+      warmSpecHash: (waitMs) => `exec-test-${tag}:${waitMs}`,
+      startWarm: async (token) => void warm.set(token, undefined),
+      reattestWarm: async (token) => warm.has(token),
+      deliver: async (token, input) => void warm.set(token, input),
+      warmHandle: (token) => ({ exited: new Promise((resolve) => exits.set(token, resolve)), kill: () => {} }),
+      inspectWarm: async (token) => (warm.has(token) ? { state: "running" } : { state: "missing" }),
+      killWarm: async (token) => void exits.get(token)?.(137),
+      removeWarm: async (token) => void warm.delete(token),
+      listWarm: async () => [...warm.keys()],
+    };
+    const pool = new PooledWorkerLauncher({
+      ledger: new PrismaWarmPoolLedger(db),
+      launcher: { ...fake.launcher, ...warmOps, networkReadyAtLaunch: false },
+      size: 1,
+      maxAgeMs: 60_000,
+      warmTimeoutMs: 10_000,
+      onDelivered: (runId) => new PrismaGatewayLedger(db).markNetworkReadyForRun(runId),
+      newToken: () => `${tag}${String((tokens += 1)).padStart(12, "0")}`,
+    });
+    await pool.tick();
+    await pool.settled();
+    const token = `${tag}${"1".padStart(12, "0")}`;
+    expect(warm.has(token) && warm.get(token) === undefined).toBe(true);
+    const run = await sandboxRun();
+    await executorWith(pool).start(run.id);
+    expect(fake.launched).toHaveLength(0);
+    expect(warm.get(token)?.gateway?.capability).toEqual(expect.any(String));
+    const session = await db.nativeGatewaySession.findUniqueOrThrow({ where: { runId: run.id } });
+    expect(session.networkReadyAt).toBeInstanceOf(Date);
+    // The worker exits without a result: the run fails, and the worker and its row are removed.
+    exits.get(token)?.(1);
+    await vi.waitFor(async () => expect((await row(run.id)).status).toBe("failed"));
+    await vi.waitFor(() => expect(warm.has(token)).toBe(false));
+    expect(await db.nativeWarmWorker.findUnique({ where: { id: token } })).toBeNull();
+    pool.stop();
+    await pool.settled();
+    await db.nativeWarmWorker.deleteMany({ where: { specHash: { startsWith: `exec-test-${tag}` } } });
   });
 });

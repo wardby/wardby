@@ -53,7 +53,7 @@ describe("InfraView", () => {
   });
 
   it("explains a non-Kubernetes launcher", () => {
-    renderView(base({ info: { launcher: "docker", kubernetes: null } }));
+    renderView(base({ info: { launcher: "docker", kubernetes: null, native: null } }));
     expect(
       screen.getByText("This deployment runs coding jobs with Docker / locally, so there is no cluster to show."),
     ).toBeInTheDocument();

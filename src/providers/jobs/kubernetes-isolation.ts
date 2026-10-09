@@ -658,6 +658,13 @@ function normalizeResources(r?: V1Container["resources"]): void {
   }
 }
 
+/** A copy of a container's resources with every quantity in one rendering ("1" and "1000m" alike); see normalizeResources. */
+export function canonicalResources(r?: V1Container["resources"]): V1Container["resources"] {
+  const copy = r ? (JSON.parse(JSON.stringify(r)) as V1Container["resources"]) : undefined;
+  normalizeResources(copy);
+  return copy;
+}
+
 function normalizeProbe(p?: V1Container["readinessProbe"]): void {
   if (!p) return;
   p.timeoutSeconds ??= 1;

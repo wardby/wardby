@@ -7,7 +7,7 @@ interface Props {
   model: InfraModel;
   selected: string | null;
   onSelect: (pod: string) => void;
-  onOpenRun: (runSha: string) => void;
+  onOpenRun: (pod: PodView) => void;
   /** Finish time by job name; a job finished over an hour ago is hidden. */
   jobFinishedAt?: ReadonlyMap<string, string | null>;
   now?: number;
@@ -23,10 +23,10 @@ function Row({
   pod: PodView;
   selected: boolean;
   onSelect: () => void;
-  onOpenRun: (sha: string) => void;
+  onOpenRun: (pod: PodView) => void;
   now: number;
 }) {
-  const sha = pod.runSha;
+  const linked = Boolean(pod.runSha || pod.runId);
   return (
     <div className="infra-row-wrap" role="row">
       <button type="button" className="infra-row" aria-pressed={selected} onClick={onSelect}>
@@ -43,7 +43,7 @@ function Row({
         </span>
         <span className={`infra-cell status ${statusKind(pod)}`} role="cell">
           {pod.status}
-          {(pod.sandboxed || pod.group === "coding_run") && pod.runtime && (
+          {(pod.sandboxed || pod.group === "coding_run" || pod.group === "agent_sandbox") && pod.runtime && (
             <span className="muted"> · {pod.runtime}</span>
           )}
         </span>
@@ -54,13 +54,13 @@ function Row({
           {formatAge(pod.startedAt, now)}
         </span>
       </button>
-      {sha && (
+      {linked && (
         <button
           type="button"
           className="infra-open-run"
           aria-label="Open run"
           title="Open run"
-          onClick={() => onOpenRun(sha)}
+          onClick={() => onOpenRun(pod)}
         >
           ↗
         </button>
@@ -82,6 +82,12 @@ export function InfraTable({ model, selected, onSelect, onOpenRun, jobFinishedAt
   const sections: [string, PodView[]][] = [
     ["ALWAYS ON", model.groups.alwaysOn],
     ["CODING RUNS", model.groups.codingRuns],
+    ...(model.agentSandbox
+      ? ([
+          ["AGENT SANDBOXES", model.groups.agentSandboxes],
+          ["WARM POOL", model.groups.warmPool],
+        ] as [string, PodView[]][])
+      : []),
     ["JOBS", visibleJobs(model.groups.jobs, jobFinishedAt, now)],
   ];
 

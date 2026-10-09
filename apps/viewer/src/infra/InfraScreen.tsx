@@ -60,14 +60,25 @@ export function InfraScreen({
   const [waiting, setWaiting] = useState<{ sha: string; chars: number } | null>(null);
 
   const { info } = cluster;
-  const opts = useMemo(() => ({ serverUrl: server.url, context: cluster.context }), [server.url, cluster.context]);
+  // Warm pool pods a run claimed carry no run label: the runs name them.
+  // Keyed by content: live events replace `runs` often, but the claims rarely change.
+  const warmKey = JSON.stringify(runs.flatMap((r) => (r.warmWorkerName ? [[r.warmWorkerName, r.id]] : [])));
+  const warmRuns = useMemo(() => new Map(JSON.parse(warmKey) as [string, string][]), [warmKey]);
+  const opts = useMemo(
+    () => ({ serverUrl: server.url, context: cluster.context, warmRuns }),
+    [server.url, cluster.context, warmRuns],
+  );
   const model = useMemo(
     () => (info?.kubernetes && !cluster.error ? describe(cluster.cluster, info, opts) : null),
     [cluster.cluster, cluster.error, info, opts],
   );
   const platform = info ? platformOf(info, cluster.cluster, opts) : "generic";
   // Kept here, not in the Map, so an ended run survives the Map remounting (Map/Table, reconnects).
-  const endedRuns = useEndedRuns(model?.groups.codingRuns ?? NO_PODS, !!model && cluster.cluster.podsSynced);
+  const runPods = useMemo(
+    () => (model ? [...model.groups.codingRuns, ...model.groups.agentSandboxes] : NO_PODS),
+    [model],
+  );
+  const endedRuns = useEndedRuns(runPods, !!model && cluster.cluster.podsSynced);
 
   const findRun = useCallback(
     async (sha: string, chars: number) => {
@@ -78,7 +89,14 @@ export function InfraScreen({
   );
 
   const openRun = useCallback(
-    async (sha: string) => {
+    async (pod: PodView) => {
+      if (pod.runId) {
+        setNote(null);
+        onOpenRun(pod.runId);
+        return;
+      }
+      const sha = pod.runSha;
+      if (!sha) return;
       const chars = info?.kubernetes?.runLabelHashChars ?? 40;
       const id = await findRun(sha, chars);
       if (id) {
@@ -114,14 +132,26 @@ export function InfraScreen({
     };
   }, [waiting, loadedWindow, findRun, onOpenRun]);
 
-  // Run -> pod: select the coding-run pod for the pending run once the pods have loaded.
-  const runPods = model?.groups.codingRuns;
+  // Run -> pod: select the run's pod (coding run or agent sandbox) once the pods have loaded.
+  // A claimed warm pod has no run label, so hash the runs that name one to match the request.
+  const [warmShas, setWarmShas] = useState<{ of: typeof warmRuns; byRun: ReadonlyMap<string, string> } | null>(null);
+  useEffect(() => {
+    let active = true;
+    void Promise.all([...warmRuns].map(async ([pod, id]) => [await runSha(id), pod] as const)).then((pairs) => {
+      if (active) setWarmShas({ of: warmRuns, byRun: new Map(pairs) });
+    });
+    return () => {
+      active = false;
+    };
+  }, [warmRuns]);
   const loadedPods = Boolean(model) && cluster.cluster.connected && cluster.cluster.podsSynced;
   const [handled, setHandled] = useState<string | null>(null);
   if (!pendingRunSha && handled) setHandled(null);
-  if (pendingRunSha && pendingRunSha !== handled && runPods && loadedPods) {
+  const warmReady = warmShas?.of === warmRuns;
+  if (pendingRunSha && pendingRunSha !== handled && model && loadedPods && warmReady) {
     setHandled(pendingRunSha);
-    const pod = runPods.find((p) => p.runSha && pendingRunSha.startsWith(p.runSha));
+    const warmPod = warmShas.byRun.get(pendingRunSha);
+    const pod = runPods.find((p) => (p.runSha ? pendingRunSha.startsWith(p.runSha) : p.name === warmPod));
     if (pod) setSelectedPod(pod.name);
     setNote(pod ? null : POD_NOTE);
   }
@@ -153,7 +183,7 @@ export function InfraScreen({
           mode={mode}
           selectedPod={selectedPod}
           onSelectPod={setSelectedPod}
-          onOpenRun={(sha) => void openRun(sha)}
+          onOpenRun={(pod) => void openRun(pod)}
           onRetry={onRetry}
         />
       </main>

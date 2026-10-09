@@ -9,6 +9,7 @@
 
 import { isImmutableDockerImage, isolationToken } from "../providers/jobs/docker-isolation.js";
 import { createHash } from "node:crypto";
+import { WARM_INPUT_FILE } from "./warm-delivery.js";
 
 export const NATIVE_WORKER_UID = 10001;
 export const NATIVE_GATEWAY_ALIAS = "wardby-native-gateway";
@@ -53,10 +54,45 @@ function labels(runId: string): string[] {
   ];
 }
 
+/** A warm pool worker's name (native sandbox phase 6): its random token, never a run's hash. */
+export function nativeWarmWorkerName(token: string): string {
+  if (!/^[0-9a-f]{20}$/.test(token)) throw new Error("native_sandbox_invalid_warm_token");
+  return `wardby-nwarm-${token}`;
+}
+
+export function nativeWarmIsolationNames(token: string): NativeIsolationNames {
+  return { network: `wardby-nwnet-${token}`, worker: nativeWarmWorkerName(token) };
+}
+
+/** Docker's label filter for every warm pool object, and the label carrying its token. */
+export const NATIVE_WARM_LABEL_FILTER = "io.wardby.pool=warm";
+export const NATIVE_WARM_TOKEN_LABEL = "io.wardby.warm-worker";
+
+function warmLabels(token: string): string[] {
+  return [
+    "--label",
+    LABEL_MANAGED,
+    "--label",
+    LABEL_COMPONENT,
+    "--label",
+    NATIVE_WARM_LABEL_FILTER,
+    "--label",
+    `${NATIVE_WARM_TOKEN_LABEL}=${token}`,
+  ];
+}
+
 /** Docker's label filter for every native worker object (the janitor lists by it). */
 export const NATIVE_WORKER_LABEL_FILTER = LABEL_COMPONENT;
 
 export function buildNativeNetworkCreateArgs(runId: string): string[] {
+  return networkCreateArgs(nativeIsolationNames(runId).network, labels(runId));
+}
+
+export function buildNativeWarmNetworkCreateArgs(token: string): string[] {
+  return networkCreateArgs(nativeWarmIsolationNames(token).network, warmLabels(token));
+}
+
+function networkCreateArgs(network: string, objectLabels: string[]): string[] {
   return [
     "network",
     "create",
@@ -68,18 +104,26 @@ export function buildNativeNetworkCreateArgs(runId: string): string[] {
     "com.docker.network.bridge.gateway_mode_ipv4=isolated",
     "--opt",
     "com.docker.network.bridge.gateway_mode_ipv6=isolated",
-    ...labels(runId),
-    nativeIsolationNames(runId).network,
+    ...objectLabels,
+    network,
   ];
 }
 
 /** Joins the gateway container to the run's network under the name workers dial. */
 export function buildGatewayConnectArgs(runId: string, gatewayContainer: string): string[] {
-  return ["network", "connect", "--alias", NATIVE_GATEWAY_ALIAS, nativeIsolationNames(runId).network, gatewayContainer];
+  return gatewayConnectArgs(nativeIsolationNames(runId).network, gatewayContainer);
+}
+
+export function gatewayConnectArgs(network: string, gatewayContainer: string): string[] {
+  return ["network", "connect", "--alias", NATIVE_GATEWAY_ALIAS, network, gatewayContainer];
 }
 
 export function buildGatewayDisconnectArgs(runId: string, gatewayContainer: string): string[] {
-  return ["network", "disconnect", "--force", nativeIsolationNames(runId).network, gatewayContainer];
+  return gatewayDisconnectArgs(nativeIsolationNames(runId).network, gatewayContainer);
+}
+
+export function gatewayDisconnectArgs(network: string, gatewayContainer: string): string[] {
+  return ["network", "disconnect", "--force", network, gatewayContainer];
 }
 
 /**
@@ -92,16 +136,52 @@ export function buildNativeWorkerRunArgs(input: {
   image: string;
   limits: NativeWorkerLimits;
 }): string[] {
-  const { runId, image, limits } = input;
+  const names = nativeIsolationNames(input.runId);
+  return workerRunArgs({ ...input, names, mode: ["-i"], env: [], objectLabels: labels(input.runId) });
+}
+
+/**
+ * `docker run -d` for a warm pool worker: no input yet. It waits for one written into its /tmp by
+ * `docker exec -i` after a run claims it (warm-delivery.ts), so the capability still never reaches
+ * its environment, argv, or labels.
+ */
+export function buildNativeWarmWorkerRunArgs(input: {
+  token: string;
+  image: string;
+  limits: NativeWorkerLimits;
+  waitMs: number;
+}): string[] {
+  return workerRunArgs({
+    ...input,
+    names: nativeWarmIsolationNames(input.token),
+    mode: ["-d"],
+    env: [
+      "--env",
+      `NATIVE_WORKER_INPUT_FILE=${WARM_INPUT_FILE}`,
+      "--env",
+      `NATIVE_WORKER_INPUT_WAIT_MS=${Math.floor(input.waitMs)}`,
+    ],
+    objectLabels: warmLabels(input.token),
+  });
+}
+
+function workerRunArgs(input: {
+  image: string;
+  limits: NativeWorkerLimits;
+  names: NativeIsolationNames;
+  mode: string[];
+  env: string[];
+  objectLabels: string[];
+}): string[] {
+  const { image, limits, names } = input;
   if (!isImmutableDockerImage(image)) {
     throw new Error(
       "native_sandbox_image_not_pinned: the worker image must be a digest (repo@sha256:...) or a local image id.",
     );
   }
-  const names = nativeIsolationNames(runId);
   return [
     "run",
-    "-i",
+    ...input.mode,
     "--name",
     names.worker,
     "--pull",
@@ -141,7 +221,8 @@ export function buildNativeWorkerRunArgs(input: {
     "max-size=1m",
     "--log-opt",
     "max-file=2",
-    ...labels(runId),
+    ...input.env,
+    ...input.objectLabels,
     image,
   ];
 }

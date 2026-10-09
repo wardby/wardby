@@ -43,6 +43,7 @@ const INFRA = {
     componentLabel: { "wardby.io/component": "coding-run" },
     managedByLabel: { "app.kubernetes.io/managed-by": "wardby" },
   },
+  native: null,
 } as const satisfies InfraInfo;
 
 function fakeBus(initiallyLive = true) {

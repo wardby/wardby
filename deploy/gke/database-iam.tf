@@ -9,6 +9,8 @@ locals {
     app      = "wardby-control-plane"
     migrator = "wardby-migrator"
     proxy    = "wardby-coding-proxy"
+    # The native sandbox gateway: the app's data access (database-grants.sql), its own login.
+    gateway = "wardby-native-gateway"
   }
 }
 

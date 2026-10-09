@@ -28,6 +28,7 @@ import type { ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from
 import { nativeRunLabel } from "./docker-isolation.js";
 import type { NativeWorkerState } from "./docker-launcher.js";
 import { startSandboxRun, type DetachedWorkerLauncher, type WorkerHandle } from "./launch.js";
+import { NATIVE_SANDBOX_CAPACITY } from "./kubernetes-launcher.js";
 import { PrismaGatewayLedger, type GatewayLedgerDb } from "./ledger.js";
 
 const executorLog = logger.child({ module: "native-sandbox-executor" });
@@ -45,6 +46,8 @@ export interface ManagedWorkerLauncher extends DetachedWorkerLauncher {
   removeByWorkerName(name: string): Promise<void>;
   /** The URL workers dial, when only the launcher can know it (a Kubernetes Service's ClusterIP). */
   resolveGatewayUrl?(): Promise<string>;
+  /** Background upkeep the long-lived process runs from the executor's `launch()` (the warm pool's). */
+  start?(): Promise<void>;
 }
 
 export interface NativeSandboxExecutorOptions {
@@ -54,6 +57,8 @@ export interface NativeSandboxExecutorOptions {
   launcher: ManagedWorkerLauncher;
   /** What workers dial: the gateway's alias on their run network. */
   gatewayUrl: string;
+  /** NATIVE_SANDBOX_MAX_CONCURRENT: a start past this many active sessions fails with native_sandbox_capacity. */
+  maxConcurrent?: number;
   now?: () => number;
 }
 
@@ -85,6 +90,14 @@ export class NativeSandboxExecutor implements Executor {
     if (existing) {
       this.watch(runId, launcher.handle(runId), existing.deadlineAt);
       return;
+    }
+    // Fail fast rather than queue (a warm pool's job): every replica counts the same sessions, and a
+    // near-simultaneous start that overshoots by one is still bounded by the cluster's ResourceQuota.
+    const cap = this.options.maxConcurrent;
+    if (cap !== undefined && (await db.nativeGatewaySession.count({ where: { status: "active" } })) >= cap) {
+      throw new Error(
+        `${NATIVE_SANDBOX_CAPACITY}: ${cap} sandbox runs are already active (NATIVE_SANDBOX_MAX_CONCURRENT).`,
+      );
     }
     let outcome: Awaited<ReturnType<typeof startSandboxRun>>;
     try {
@@ -209,9 +222,12 @@ export class NativeSandboxExecutor implements Executor {
     };
   }
 
-  /** Startup janitor: removes worker containers whose runs have ended or passed their deadline. */
+  /** Startup janitor: removes worker containers whose runs have ended or passed their deadline. Starts the warm pool. */
   async launch(): Promise<void> {
     await this.sweep().catch((err: unknown) => executorLog.warn({ err }, "native sandbox janitor failed"));
+    await this.options.launcher
+      .start?.()
+      .catch((err: unknown) => executorLog.warn({ err }, "native warm pool failed to start"));
   }
 
   async sweep(): Promise<number> {

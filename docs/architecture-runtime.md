@@ -73,9 +73,13 @@ credentials, still reaches only the proxy, and the proxy still owns the ledger.
 
 | `JOB_LAUNCHER` | Worker runs in                   | Isolation                                            |
 | -------------- | -------------------------------- | ---------------------------------------------------- |
-| `local`        | a child process on this host     | development only, no isolation                       |
+| `local`        | nowhere: no coding launcher      | native agents only; coding runs fail before starting |
 | `docker`       | a container on a per-run network | the diagram above                                    |
 | `kubernetes`   | a pod in a namespace             | per-run NetworkPolicy, attested pod, optional gVisor |
+
+`local` is the default. It composes no coding launcher, so a coding run ends
+with "Coding agents need a container executor"; set `docker` or `kubernetes`
+to run coding agents.
 
 Under `kubernetes` the shape is the same with different nouns: the per-run
 Docker network becomes a NetworkPolicy, the keeper and worker share a pod
@@ -94,5 +98,6 @@ and GKE Autopilot overlays.
 Native agents run in the server process by default. A native agent set to
 `nativeExecutionMode=sandbox` instead runs its turn loop and user tools in a
 single-use credential-free container whose only path out is a separate native
-gateway, enabled with `NATIVE_SANDBOX_LAUNCHER=docker` (independent of
+gateway, enabled with `NATIVE_SANDBOX_LAUNCHER=docker` or `kubernetes` (a pod
+per run, including on GKE Autopilot under gVisor; independent of
 `JOB_LAUNCHER`). See [native-sandbox.md](native-sandbox.md).

@@ -68,7 +68,7 @@ describe("InfraTable", () => {
     const onSelect = vi.fn();
     render(<InfraTable model={model} selected={null} onSelect={onSelect} onOpenRun={onOpenRun} />);
     fireEvent.click(screen.getByRole("button", { name: "Open run" }));
-    expect(onOpenRun).toHaveBeenCalledWith(RUN_SHA);
+    expect(onOpenRun).toHaveBeenCalledWith(expect.objectContaining({ runSha: RUN_SHA }));
     expect(onSelect).not.toHaveBeenCalled();
   });
 

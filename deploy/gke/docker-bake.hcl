@@ -18,6 +18,7 @@ group "default" {
     "claude-coding-worker",
     "claude-tool-runner",
     "claude-tool-runner-node-python",
+    "native-worker",
   ]
 }
 
@@ -69,4 +70,12 @@ target "claude-tool-runner-node-python" {
   dockerfile = "src/claude-tool-runner/Dockerfile"
   target     = "node-python"
   tags       = ["${REGISTRY}/claude-tool-runner-node-python:latest"]
+}
+
+# The native sandbox worker (docs/native-sandbox.md): sandbox-mode native agents run in it, one pod
+# per run, reaching only the native gateway.
+target "native-worker" {
+  inherits   = ["_gke"]
+  dockerfile = "src/native-worker/Dockerfile"
+  tags       = ["${REGISTRY}/native-worker:latest"]
 }

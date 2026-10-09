@@ -7,12 +7,12 @@ import type { FlowNodeData } from "../build";
 import { sameNodeProps } from "../sameData";
 import { RUN_TITLE_MAX_CHARS, RUN_WIDTH, runHeight, tailTruncate, trayHeight } from "../sizes";
 import { exactUsd, formatUsd } from "../../format/money";
-import { codingBadge, shortModel } from "../labels";
+import { SANDBOX_BADGE, codingBadge, shortModel } from "../labels";
 import { formatTokens } from "../../format/text";
 import { trayServices, type TrayService } from "../services";
 
 const FADE_AFTER_MS = 60_000;
-/** Title characters the coding badge takes up. */
+/** Title characters a badge (coding worker or sandbox) takes up. */
 const BADGE_CHARS = 3;
 
 export function statusGlyph(status: GraphRun["status"]): string {
@@ -87,6 +87,7 @@ function RunNodeImpl({ data }: NodeProps) {
   const group = statusGroup(run.status);
   const tray = trayServices(run);
   const badge = run.codingProvider ? codingBadge(run.codingProvider) : null;
+  const sandboxed = run.nativeExecutionMode === "sandbox";
   const pct = run.budgetUsd > 0 ? Math.min(100, (run.costUsd / run.budgetUsd) * 100) : 0;
   const cls = ["flow-node", "run", group, selected ? "selected" : "", faded ? "faded" : "", running ? "pulse" : ""]
     .filter(Boolean)
@@ -117,8 +118,13 @@ function RunNodeImpl({ data }: NodeProps) {
             {badge.text}
           </span>
         )}
+        {sandboxed && (
+          <span className="sandbox-badge" role="img" aria-label={SANDBOX_BADGE.name} title={SANDBOX_BADGE.name}>
+            {SANDBOX_BADGE.text}
+          </span>
+        )}
         <span className="node-title" title={run.agentName} aria-label={run.agentName}>
-          {tailTruncate(run.agentName, RUN_TITLE_MAX_CHARS - (badge ? BADGE_CHARS : 0))}
+          {tailTruncate(run.agentName, RUN_TITLE_MAX_CHARS - (badge || sandboxed ? BADGE_CHARS : 0))}
         </span>
         <span className="node-id">{run.id.slice(-6)}</span>
       </div>

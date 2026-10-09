@@ -39,25 +39,25 @@ model Agent {
   lastScheduledAt DateTime?
 
   // Phase 3: tools + multi-turn loop.
-  tools    AgentTool[]
-  maxTurns Int         @default(10)
+  tools                AgentTool[]
+  maxTurns             Int         @default(10)
   /// Sub-agent delegations one run may make (delegate_to_*), each to a different sub-agent. 1 = route to exactly one.
-  maxDelegationsPerRun Int @default(1)
+  maxDelegationsPerRun Int         @default(1)
   /// Native leads: the delegate_to_* calls of one model turn run at the same time. False = one after another.
-  parallelDelegations Boolean @default(false)
+  parallelDelegations  Boolean     @default(false)
 
   // Phase 4: ownership. Null = owner-less, a transition state only: access
   // then comes from ResourceGrant rows alone (the migration gives everyone
   // execute), and `wardby grants adopt-public` assigns an owner. See
   // ResourceGrant.
-  ownerId      String?
-  owner        Principal?        @relation(fields: [ownerId], references: [id])
-  secrets      AgentSecret[]
-  datastores   AgentDatastore[]
-  webhooks     Webhook[]
-  repositories AgentRepository[]
-  deferredReviews DeferredReview[]
-  issueProjects AgentIssueProject[]
+  ownerId              String?
+  owner                Principal?            @relation(fields: [ownerId], references: [id])
+  secrets              AgentSecret[]
+  datastores           AgentDatastore[]
+  webhooks             Webhook[]
+  repositories         AgentRepository[]
+  deferredReviews      DeferredReview[]
+  issueProjects        AgentIssueProject[]
   notificationChannels NotificationChannel[]
 
   /// Self-defects opt-in: the Jira project and issue type wardby files the agent's own failures into. Both or neither.
@@ -325,65 +325,67 @@ enum RunTrigger {
 }
 
 model Run {
-  id               String        @id @default(cuid())
-  agent            Agent         @relation(fields: [agentId], references: [id])
-  agentId          String
-  status           RunStatus     @default(pending)
-  trigger          RunTrigger    @default(manual)
-  tokensIn         Int           @default(0)
-  tokensOut        Int           @default(0)
-  costUsd          Decimal       @default(0) @db.Decimal(10, 6)
-  error            String?
-  startedAt        DateTime      @default(now())
-  finishedAt       DateTime?
+  id                   String                   @id @default(cuid())
+  agent                Agent                    @relation(fields: [agentId], references: [id])
+  agentId              String
+  status               RunStatus                @default(pending)
+  trigger              RunTrigger               @default(manual)
+  tokensIn             Int                      @default(0)
+  tokensOut            Int                      @default(0)
+  costUsd              Decimal                  @default(0) @db.Decimal(10, 6)
+  error                String?
+  startedAt            DateTime                 @default(now())
+  finishedAt           DateTime?
   /// Phase 2: beaten by the executor while running; a stale value past
   /// HEARTBEAT_TIMEOUT is how the reconciler finds an orphaned run.
-  heartbeatAt      DateTime?
+  heartbeatAt          DateTime?
   /// Phase 4: EngineResult.finalText, persisted so a Task (MCP) or later
   /// inspection can read a completed run's answer. Previously only ever
   /// streamed live via onText and dropped — no durable place to read it
   /// from until this field existed.
-  finalText        String?
+  finalText            String?
   /// Phase 4: EngineResult.turns, persisted for the same reason as
   /// finalText — MCP's list_runs/get_run need it and it was previously
   /// dropped after the engine returned.
-  turns            Int           @default(0)
+  turns                Int                      @default(0)
   /// The run's model catalog entry, recorded when it started (native: the
   /// runner's load step; coding: dispatch). The run is billed at these rates
   /// for its whole life, resumes included. Null on runs from before the
   /// model catalog.
-  pricingVersion   String?
-  pricingSnapshot  Json?
+  pricingVersion       String?
+  pricingSnapshot      Json?
   /// Detached executors are recovered by handle rather than inferred from trigger.
-  executionManaged Boolean       @default(false)
+  executionManaged     Boolean                  @default(false)
   /// Phase 6: which durable executor backend holds this run, if any
   /// ("dbos" = a DBOS workflow whose id equals this run's id). Null for
   /// in-process runs. The reconciler consults the backend before declaring a
   /// stale run lost, and can adopt one orphaned by a dead instance.
-  executionBackend String?
+  executionBackend     String?
   /// The agent's nativeExecutionMode when this run was created, fixed for the
   /// run's life and what the executor routes on. Null for coding runs and for
   /// native runs from before the field existed, which run in the control plane.
-  nativeExecutionMode NativeExecutionMode?
-  codingRun        CodingRun?
-  hostCheck        RunHostCheck?
-  hostStatus       RunHostStatus?
-  issueStatus      RunIssueStatus?
-  attribution      RunAttribution?
-  modelUsage       RunModelUsage[]
-  serviceStatuses  CodingRunServiceStatus[]
+  nativeExecutionMode  NativeExecutionMode?
+  codingRun            CodingRun?
+  hostCheck            RunHostCheck?
+  hostStatus           RunHostStatus?
+  issueStatus          RunIssueStatus?
+  attribution          RunAttribution?
+  modelUsage           RunModelUsage[]
+  serviceStatuses      CodingRunServiceStatus[]
   /// A manual review of a local branch: this run is the review run dispatched for it.
-  localPullRequest LocalPullRequest?
+  localPullRequest     LocalPullRequest?
   /// A sandbox-mode native run's gateway session (native sandbox phase 3).
   nativeGatewaySession NativeGatewaySession?
+  /// The warm pool worker this sandbox-mode run claimed (native sandbox phase 6).
+  nativeWarmWorker     NativeWarmWorker?
   /// Set when a process that may not start runs itself (the native sandbox
   /// gateway, which holds no executor) dispatched this run: the scheduler
   /// leader starts it through the server's executor and clears this.
-  startDeferredAt   DateTime?
+  startDeferredAt      DateTime?
   /// Likewise a stop that process asked for: the scheduler leader stops the
   /// run through the server's executor and clears this.
-  stopRequestedAt   DateTime?
-  stopRequestReason String?
+  stopRequestedAt      DateTime?
+  stopRequestReason    String?
 
   /// Un-phased: sub-agent dispatch (see AgentSubAgent). Null for a
   /// top-level run; set when this run was created by a parent run's
@@ -426,27 +428,27 @@ model Run {
 /// Phase 5: owner-configured coding behavior. Runtime credentials and opaque
 /// launcher handles never live on the reusable profile.
 model CodingAgentProfile {
-  agentId                  String  @id
-  agent                    Agent   @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  provider                 String  @default("codex")
+  agentId                  String    @id
+  agent                    Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  provider                 String    @default("codex")
   repository               String
-  baseRef                  String  @default("main")
+  baseRef                  String    @default("main")
   defaultTask              String?
-  allowWebhookTaskOverride Boolean @default(false)
-  timeoutSec               Int     @default(1800)
+  allowWebhookTaskOverride Boolean   @default(false)
+  timeoutSec               Int       @default(1800)
   /// Claude Code runs only: the most agent turns a run may take. Null = the worker default (200).
   maxTurns                 Int?
   /// Unused; dropped after rollout (see the package-registry plan, Task 14).
-  allowedEgress            Json    @default("[]")
+  allowedEgress            Json      @default("[]")
   protectedPaths           Json
-  collectExclude           Json    @default("[]")
-  toolchain                String  @default("node")
+  collectExclude           Json      @default("[]")
+  toolchain                String    @default("node")
   toolchainVersion         String?
   workerImageRef           String?
   /// Per-agent workspace size in MiB; null = CODING_DISK_MB.
   workspaceDiskMb          Int?
-  packageAllowlist         Json    @default("{}")
-  packagePolicy            Json    @default("{}")
+  packageAllowlist         Json      @default("{}")
+  packagePolicy            Json      @default("{}")
   /// Admin-requested debug trace: while now < debugTraceUntil, every coding
   /// run of this agent is dispatched with CodingRun.debugTrace set. Null = off.
   debugTraceUntil          DateTime?
@@ -625,6 +627,13 @@ enum NativeGatewaySessionStatus {
   cancelled
 }
 
+enum NativeWarmWorkerStatus {
+  warming
+  idle
+  claimed
+  retiring
+}
+
 enum NativeGatewayCallStatus {
   reserved
   completed
@@ -658,6 +667,34 @@ model NativeGatewaySession {
   createdAt         DateTime                   @default(now())
   updatedAt         DateTime                   @updatedAt
   calls             NativeGatewayCall[]
+
+  /// NATIVE_SANDBOX_MAX_CONCURRENT counts the active sessions on every start.
+  @@index([status])
+}
+
+/// One worker of the native sandbox warm pool (native sandbox phase 6): an
+/// isolated worker started before any run exists, holding no run data or
+/// capability. A run claims an idle one with a compare-and-swap on this row
+/// (`runId` is set at the claim), its input is delivered only after, and the
+/// worker is destroyed after that one run. The row is inserted before the
+/// worker is created, so a worker with no row is an orphan.
+model NativeWarmWorker {
+  /// The worker's random token; its container or pod name carries it.
+  id        String                 @id
+  name      String                 @unique
+  status    NativeWarmWorkerStatus @default(warming)
+  /// What the worker was built from (image, limits, isolation settings): a
+  /// claim only takes a worker of the current spec.
+  specHash  String
+  runId     String?                @unique
+  run       Run?                   @relation(fields: [runId], references: [id], onDelete: SetNull)
+  /// When its isolation was proven and it became claimable.
+  readyAt   DateTime?
+  claimedAt DateTime?
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+
+  @@index([status, specHash])
 }
 
 /// One worker call through the gateway, keyed by its callId: model calls are
@@ -693,22 +730,22 @@ model NativeGatewayCall {
 /// Trusted-boundary state for one coding run. Only a capability digest and an
 /// upstream credential reference are persisted; neither secret value enters the DB.
 model CodingProxySession {
-  id             String                   @id @default(cuid())
-  runId          String                   @unique
-  run            CodingRun                @relation(fields: [runId], references: [runId], onDelete: Cascade)
-  capabilityHash String                   @unique
-  credentialRef  String
-  protocol       String                   @default("openai-responses")
-  allowedModels  Json
-  deadlineAt     DateTime
-  budgetUsd      Decimal                  @db.Decimal(18, 10)
-  status         CodingProxySessionStatus @default(active)
-  createdAt      DateTime                 @default(now())
-  updatedAt      DateTime                 @updatedAt
-  requests       CodingProxyRequest[]
+  id                String                   @id @default(cuid())
+  runId             String                   @unique
+  run               CodingRun                @relation(fields: [runId], references: [runId], onDelete: Cascade)
+  capabilityHash    String                   @unique
+  credentialRef     String
+  protocol          String                   @default("openai-responses")
+  allowedModels     Json
+  deadlineAt        DateTime
+  budgetUsd         Decimal                  @db.Decimal(18, 10)
+  status            CodingProxySessionStatus @default(active)
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+  requests          CodingProxyRequest[]
   /// Hash of the derived registry-only token (see deriveRegistryToken); the
   /// token itself is never persisted.
-  registryTokenHash String?               @unique
+  registryTokenHash String?                  @unique
   /// Set the first time the proxy refuses a request of this session for
   /// budget; lets the executor report the run as out of budget.
   budgetExhaustedAt DateTime?
@@ -720,8 +757,8 @@ model CodingProxySession {
   /// is created; the proxy prices and shapes requests from it. Null on
   /// sessions from before the model catalog (the proxy falls back to the
   /// shipped catalog).
-  pricingVersion String?
-  catalogEntry   Json?
+  pricingVersion    String?
+  catalogEntry      Json?
 
   @@index([deadlineAt])
 }
@@ -829,10 +866,10 @@ model RegistryApprovedVersion {
 /// published, no integrity, hosted elsewhere): a download of it is answered
 /// from here with the same code and reason, without a graph walk.
 model RegistryPlanRefusal {
-  runId     String
-  ecosystem String
-  name      String
-  version   String
+  runId       String
+  ecosystem   String
+  name        String
+  version     String
   code        String
   reason      String
   /// Set for a too-new refusal: the answer re-checks the version's age
@@ -1165,20 +1202,20 @@ model AuthRateLimit {
 /// and which host events trigger it. See
 /// docs/private/2026-09-25-code-review-host-design.md §4.1.
 model AgentRepository {
-  id         String   @id @default(cuid())
-  agentId    String
-  agent      Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  id                 String   @id @default(cuid())
+  agentId            String
+  agent              Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
   /// "github" today; validated in code so adding a host needs no enum migration.
-  provider   String
+  provider           String
   /// Canonical lower-case owner/name for the provider.
-  repository String
+  repository         String
   /// "read" or "write".
-  access     String
+  access             String
   /// Subset of "pull_request", "mention", "push", "review_fix".
-  triggers   String[] @default([])
+  triggers           String[] @default([])
   /// Only with the "pull_request" trigger (required there); names the agent's
   /// check. Unique per repository across all links (NULLs are distinct).
-  checkName  String?
+  checkName          String?
   /// Only with the "review_fix" trigger: how many automatic fix rounds a
   /// pull request gets before wardby stops. Null = the default (2).
   reviewFixMaxRounds Int?
@@ -1186,8 +1223,8 @@ model AgentRepository {
   /// pushed head until that head's own CI finishes (see DeferredReview),
   /// instead of racing it. Default off: existing links review immediately,
   /// exactly as today.
-  waitForCi  Boolean  @default(false)
-  createdAt  DateTime @default(now())
+  waitForCi          Boolean  @default(false)
+  createdAt          DateTime @default(now())
 
   /// How this link was authorized: "host_permission" (the agent owner's
   /// verified host identity had enough access), "admin" (a wardby admin
@@ -1231,24 +1268,24 @@ model DeferredReview {
 /// The host check a run owns, so the review tool can complete it and the
 /// run finalizer can close it if the run ends without publishing.
 model RunHostCheck {
-  runId       String    @id
-  run         Run       @relation(fields: [runId], references: [id], onDelete: Cascade)
-  provider    String
-  repository  String
-  checkId     String
-  headSha     String
+  runId             String    @id
+  run               Run       @relation(fields: [runId], references: [id], onDelete: Cascade)
+  provider          String
+  repository        String
+  checkId           String
+  headSha           String
   /// The pull request the run was dispatched for. The review tool only
   /// completes or creates a check for this PR. Null on rows written before it
   /// existed: such a run publishes without a check.
-  prNumber    Int?
-  completedAt DateTime?
+  prNumber          Int?
+  completedAt       DateTime?
   /// The verdict the run published on its own check ("APPROVE",
   /// "CHANGES_REQUESTED", "COMMENT"); null until then, or when the check was
   /// closed without one (superseded, or by the finalizer).
-  verdict     String?
+  verdict           String?
   /// The published review's summary and body (capped), kept for an automatic
   /// fix round started when the run finishes.
-  reviewBody  String?
+  reviewBody        String?
   /// The run published COMMENT while CI on its head was still running or had
   /// not reported yet. CI finishing on that head later re-runs the review.
   ciPendingAtReview Boolean?

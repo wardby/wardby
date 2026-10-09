@@ -76,3 +76,11 @@ output "migrator_database_user" {
 output "proxy_database_user" {
   value = google_sql_user.iam["proxy"].name
 }
+
+output "gateway_service_account" {
+  value = google_service_account.database["gateway"].email
+}
+
+output "gateway_database_user" {
+  value = google_sql_user.iam["gateway"].name
+}

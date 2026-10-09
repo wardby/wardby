@@ -26,6 +26,9 @@ import { nativeKubernetesNames, nativeRunLabels } from "./kubernetes-isolation.j
 import { KubernetesNativeWorkerLauncher } from "./kubernetes-launcher.js";
 import { PrismaGatewayLedger } from "./ledger.js";
 import { NativeSandboxExecutor } from "./sandbox-executor.js";
+import { nativeWarmWorkerName } from "./kubernetes-isolation.js";
+import { PooledWorkerLauncher } from "./warm-pool.js";
+import { PrismaWarmPoolLedger } from "./warm-pool-ledger.js";
 
 const enabled = process.env.WARDBY_NATIVE_KIND_TEST === "1";
 const CONTEXT = process.env.NATIVE_TEST_KIND_CONTEXT ?? "kind-wardby";
@@ -260,4 +263,45 @@ describe.skipIf(!enabled)("native sandbox on kind (acceptance)", () => {
     for (let i = 0; i < 30 && podExists(ended.id); i += 1) await new Promise((r) => setTimeout(r, 1000));
     expect(podExists(ended.id)).toBe(false);
   }, 120_000);
+
+  it("runs a sandboxed agent on a claimed warm pod: proven before the run, ready once its input is delivered", async () => {
+    const pool = new PooledWorkerLauncher({
+      ledger: new PrismaWarmPoolLedger(prisma),
+      launcher,
+      size: 1,
+      maxAgeMs: 600_000,
+      warmTimeoutMs: 180_000,
+      onDelivered: (runId) => ledger.markNetworkReadyForRun(runId),
+    });
+    try {
+      await pool.tick();
+      await pool.settled();
+      const [idle] = await prisma.nativeWarmWorker.findMany({ where: { specHash: pool.specHash, status: "idle" } });
+      expect(idle).toBeDefined();
+      const run = await newRun("quick");
+      const started = Date.now();
+      await new NativeSandboxExecutor({ db: prisma, providers, launcher: pool, gatewayUrl: "unused" }).start(run.id);
+      const startMs = Date.now() - started;
+      expect((await prisma.nativeWarmWorker.findUnique({ where: { id: idle.id } }))?.runId).toBe(run.id);
+      expect(podExists(run.id)).toBe(false); // no cold pod
+      const session = await prisma.nativeGatewaySession.findUniqueOrThrow({ where: { runId: run.id } });
+      expect(session.networkReadyAt).toBeInstanceOf(Date);
+      const done = await waitFor(run.id);
+      expect(done.status).toBe("succeeded");
+      expect(done.finalText).toMatch(/Friday/);
+      const pod = nativeWarmWorkerName(idle.id);
+      for (let i = 0; i < 30 && kubectlOk(["get", "pod", pod]) !== null; i += 1) {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      expect(kubectlOk(["get", "pod", pod])).toBeNull();
+      console.log(`warm start returned in ${startMs} ms`);
+    } finally {
+      pool.stop();
+      await pool.settled();
+      for (const row of await prisma.nativeWarmWorker.findMany({ where: { specHash: pool.specHash } })) {
+        await launcher.removeWarm(row.id).catch(() => {});
+      }
+      await prisma.nativeWarmWorker.deleteMany({ where: { specHash: pool.specHash } });
+    }
+  }, 360_000);
 });

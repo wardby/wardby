@@ -96,6 +96,8 @@ export const GraphRunSchema = z.object({
   codingProvider: z.string().nullable(),
   /** Where a native run executed, snapshotted at start; null for coding runs and runs from before the field existed. */
   nativeExecutionMode: z.enum(["control-plane", "sandbox"]).nullable(),
+  /** The warm pool worker (container or pod name) a sandbox run claimed, while its record lasts; null otherwise. */
+  warmWorkerName: z.string().nullable(),
   status: RunStatusSchema,
   trigger: RunTriggerSchema,
   turns: z.number().int(),
@@ -202,6 +204,24 @@ export const InfraInfoSchema = z.object({
       runLabelHashChars: z.number().int(),
       componentLabel: z.record(z.string(), z.string()),
       managedByLabel: z.record(z.string(), z.string()),
+    })
+    .nullable(),
+  /** How sandbox-mode native agents run; null when NATIVE_SANDBOX_LAUNCHER is unset. */
+  native: z
+    .object({
+      launcher: z.enum(["docker", "kubernetes"]),
+      /** Idle workers kept ready for runs to claim (0 = no pool). */
+      warmPoolSize: z.number().int(),
+      kubernetes: z
+        .object({
+          namespace: z.string(),
+          runtimeClass: z.string().nullable(),
+          runLabel: z.string(),
+          componentLabel: z.record(z.string(), z.string()),
+          warmPoolLabel: z.record(z.string(), z.string()),
+          warmWorkerLabel: z.string(),
+        })
+        .nullable(),
     })
     .nullable(),
 });

@@ -343,6 +343,32 @@ spec:
               value: wardby-claude-coding-worker-image
             - name: CODING_CLAUDE_TOOL_RUNNER_IMAGE
               value: wardby-claude-tool-runner-image
+            # The native sandbox (docs/native-sandbox.md): agents whose execution mode is
+            # "sandbox" run in single-use gVisor pods that reach only wardby-native-gateway.
+            # Namespace, runtime class, platform and priority class are the coding launcher's
+            # settings above. The worker image is a placeholder substituted like the others.
+            - name: NATIVE_SANDBOX_LAUNCHER
+              value: kubernetes
+            - name: NATIVE_SANDBOX_WORKER_IMAGE
+              value: wardby-native-worker-image
+            # 500m / 512Mi is legal on Autopilot as is (250m steps, 1 to 6.5 GiB per vCPU),
+            # so admission rewrites nothing.
+            - name: NATIVE_SANDBOX_CPUS
+              value: "0.5"
+            - name: NATIVE_SANDBOX_MEMORY_MB
+              value: "512"
+            # Size with quota.yaml: each worker pod asks for 500m / 512Mi.
+            - name: NATIVE_SANDBOX_MAX_CONCURRENT
+              value: "4"
+            # Idle, already-isolated workers kept for runs to claim (0 = every run starts a cold
+            # pod). Each one is a running 500m / 512Mi pod: raise quota.yaml by the same count.
+            - name: NATIVE_SANDBOX_WARM_POOL_SIZE
+              value: "0"
+            # A cold gVisor node takes about two minutes (see KUBERNETES_READY_TIMEOUT_MS).
+            - name: NATIVE_SANDBOX_READY_TIMEOUT_MS
+              value: "600000"
+            - name: NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS
+              value: "60000"
             # Claude's tool runner for agents whose profile sets toolchain "node-python" and
             # toolchainVersion "3.12" (Python with pytest and ruff). Substituted the same way.
             - name: CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12

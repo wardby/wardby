@@ -278,6 +278,11 @@ export function DetailPanel({ serverUrl, run, runs, onSelect, focus = null, onOp
           <p>
             Turn {run.turns} · last activity {relativeTime(run.heartbeatAt, now)}
           </p>
+          {onOpenPod && run.nativeExecutionMode === "sandbox" && (
+            <button type="button" onClick={() => onOpenPod(run.id)}>
+              Pod ↗
+            </button>
+          )}
         </Section>
       )}
 

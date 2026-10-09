@@ -203,17 +203,21 @@ sandbox-mode native agents run as pods in this cluster
   reference;
 - creates or updates the gateway's `wardby-native-gateway-env` Secret from
   `.env.local` the same way as the proxy's (`DATABASE_URL`, `OPENAI_API_KEY`,
-  `ANTHROPIC_API_KEY`, plus `SECRET_APP_KEY` if you set one; without it,
-  sandboxed tools simply get no secrets);
-- applies the native gateway from `manifests/overlays/kind/`: a Deployment
+  `ANTHROPIC_API_KEY`, and `SECRET_APP_KEY`, which is **required** in
+  `.env.local`: the gateway will not start without it), plus `GITHUB_APP_ID`
+  and `GITHUB_APP_PRIVATE_KEY` when set, so sandboxed runs get the repository
+  built-ins;
+- applies the native gateway from `manifests/base/native-gateway.yaml`: a Deployment
   running `wardby native-gateway` with no service-account token and no RBAC, a
   ClusterIP Service exposing both the gateway port `8790` and the deny port
   `8791`, and a NetworkPolicy that admits `native-run` pods on both ports
-  (`native-gateway.yaml`; `native-gateway-database-egress.yaml` lets it reach the
+  (`native-gateway-database-egress.yaml` in the kind overlay lets it reach the
   local Postgres), then restarts it and waits for the rollout.
 
-The gateway is part of the `kind` overlay only. The cloud overlays do not ship
-it yet, so on a cloud cluster you add the gateway manifests yourself.
+The gateway is part of the shared base, so every overlay ships it. Each overlay
+supplies its own database egress and the `wardby-native-gateway-env` Secret; the
+`gke-autopilot` overlay also gives it its own Workload Identity and Cloud SQL
+login (see `deploy/gke/README.md`).
 
 Add the two extra lines `up.sh` prints to `.env.local`:
 
@@ -232,6 +236,11 @@ outside address do not). On a `kind` cluster whose network layer does not
 enforce `NetworkPolicy`, every sandbox run fails with
 `native_sandbox_network_unenforced`; see the Calico fallback below.
 
+To try the warm pool locally, also set `NATIVE_SANDBOX_WARM_POOL_SIZE=1` (the
+long-running server then keeps one idle isolated worker pod, labelled
+`wardby.io/pool=warm`, that the next run claims). See
+[Warm pool](../../docs/native-sandbox.md#warm-pool).
+
 An opt-in acceptance test exercises this end to end against the cluster. It is
 skipped unless the `test:native-kind` script sets its flag:
 
@@ -240,6 +249,14 @@ NATIVE_TEST_KIND_WORKER_IMAGE=localhost:5001/wardby-native-worker@sha256:... npm
 ```
 
 Use the digest `up.sh` printed for `NATIVE_SANDBOX_WORKER_IMAGE`.
+
+`npm run test:native-cluster` runs launcher-only isolation checks against any
+cluster's deployed gateway, with no database or model needed. It requires
+`NATIVE_TEST_WORKER_IMAGE` (a registry digest) and accepts
+`NATIVE_TEST_CONTEXT`, `NATIVE_TEST_NAMESPACE`, `NATIVE_TEST_PLATFORM`,
+`NATIVE_TEST_RUNTIME_CLASS`, `NATIVE_TEST_PRIORITY_CLASS`, and
+`NATIVE_TEST_FORBIDDEN` (a list of `host:port` addresses that must be
+unreachable from a worker).
 
 ## Load testing (contributors)
 

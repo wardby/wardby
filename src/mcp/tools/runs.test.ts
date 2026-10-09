@@ -27,6 +27,7 @@ interface FakeRunRow {
   startedAt: Date;
   finishedAt: Date | null;
   triggeredById?: string | null;
+  nativeExecutionMode?: "control_plane" | "sandbox" | null;
   codingRun?: {
     result: unknown;
     jobHandle?: string;
@@ -164,6 +165,53 @@ describe("run observability tools", () => {
     expect(body.turns).toBe(3);
     expect(body.costUsd).toBe(0.01);
     expect(body.finalText).toBe("the answer");
+    await client.close();
+  });
+
+  it("get_run and list_runs return the execution mode in its operator spelling", async () => {
+    const now = new Date();
+    const run = (id: string, nativeExecutionMode: FakeRunRow["nativeExecutionMode"]): FakeRunRow => ({
+      id,
+      agentId: "a1",
+      status: "succeeded",
+      trigger: "manual",
+      turns: 1,
+      tokensIn: 1,
+      tokensOut: 1,
+      costUsd: 0,
+      finalText: "x",
+      error: null,
+      startedAt: now,
+      finishedAt: now,
+      nativeExecutionMode,
+    });
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [run("r1", "control_plane"), run("r2", "sandbox"), run("r3", null)],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+
+    const mode = async (runId: string) =>
+      (
+        parseText((await client.callTool({ name: "get_run", arguments: { runId } })) as never) as {
+          nativeExecutionMode: unknown;
+        }
+      ).nativeExecutionMode;
+    expect(await mode("r1")).toBe("control-plane");
+    expect(await mode("r2")).toBe("sandbox");
+    expect(await mode("r3")).toBeNull();
+    const listed = parseText((await client.callTool({ name: "list_runs", arguments: { agentId: "a1" } })) as never) as {
+      id: string;
+      nativeExecutionMode: unknown;
+    }[];
+    expect(Object.fromEntries(listed.map((r) => [r.id, r.nativeExecutionMode]))).toEqual({
+      r1: "control-plane",
+      r2: "sandbox",
+      r3: null,
+    });
     await client.close();
   });
 

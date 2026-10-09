@@ -9,7 +9,7 @@ interface Props {
   pod: PodView;
   context: string;
   namespace: string;
-  onOpenRun: (runSha: string) => void;
+  onOpenRun: (pod: PodView) => void;
   onClose: () => void;
 }
 
@@ -35,7 +35,7 @@ export function InfraPanel({ pod, context, namespace, onOpenRun, onClose }: Prop
   }, [context, namespace, pod.name]);
 
   const events = loaded?.pod === pod.name ? loaded : null;
-  const runPod = pod.group === "coding_run";
+  const runPod = pod.group === "coding_run" || pod.group === "agent_sandbox";
 
   return (
     <aside className="detail-panel" aria-label="Pod details">
@@ -47,10 +47,10 @@ export function InfraPanel({ pod, context, namespace, onOpenRun, onClose }: Prop
       </div>
       <p>
         {pod.status}
-        {runPod && pod.runSha && (
+        {runPod && (pod.runSha || pod.runId) && (
           <>
             {" "}
-            <button type="button" onClick={() => onOpenRun(pod.runSha!)}>
+            <button type="button" onClick={() => onOpenRun(pod)}>
               RUN ↗
             </button>
           </>

@@ -4,16 +4,17 @@ import { containerDot, podReadiness } from "./format";
 import { openUrl } from "../api/client";
 import { useEndedRuns, type EndedRun } from "./endedRuns";
 import { visibleJobs } from "./jobs";
+import { SANDBOX_BADGE } from "../graph/labels";
 
 interface Props {
   model: InfraModel;
   selected: string | null;
   onSelect: (pod: string) => void;
-  onOpenRun: (runSha: string) => void;
+  onOpenRun: (pod: PodView) => void;
   namespace?: string;
   jobFinishedAt?: ReadonlyMap<string, string | null>;
   now?: number;
-  /** Ended coding runs from the screen (see endedRuns.ts). */
+  /** Ended coding runs and agent sandboxes from the screen (see endedRuns.ts). */
   endedRuns?: { ended: EndedRun[]; dismiss: (name: string) => void };
 }
 
@@ -95,13 +96,15 @@ function Sandbox({
   pod: PodView;
   selected: boolean;
   onSelect: () => void;
-  onOpenRun: (sha: string) => void;
+  onOpenRun: (pod: PodView) => void;
   /** The pod is gone; the card stays until closed (see endedRuns.ts). */
   ended?: { leaving: boolean };
   onClose?: () => void;
 }) {
-  const label = `${pod.sandboxed && pod.runtime ? pod.runtime : "Pod"} sandbox · ${pod.name}`;
-  const sha = pod.runSha;
+  const runtime = pod.sandboxed && pod.runtime ? pod.runtime : "Pod";
+  const label =
+    pod.group === "agent_sandbox" ? `Agent sandbox · ${runtime} · ${pod.name}` : `${runtime} sandbox · ${pod.name}`;
+  const linked = Boolean(pod.runSha || pod.runId);
   // Pulses like a running run's box on the Runs graph, until the pod ends.
   const active = !ended && !pod.terminating && (pod.phase === "Pending" || pod.phase === "Running");
   const className = `map-sandbox${ended ? " ended" : ""}${ended?.leaving ? " leaving" : ""}`;
@@ -136,18 +139,96 @@ function Sandbox({
             ×
           </button>
         )}
-        {sha && (
+        {linked && (
           <button
             type="button"
             className="infra-open-run"
             aria-label={`Open run ${pod.title}`}
             title="Open run"
-            onClick={() => onOpenRun(sha)}
+            onClick={() => onOpenRun(pod)}
           >
             Run ↗
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+/** Sandbox-mode native agent runs, each in its own pod, and the warm pool of idle ones waiting to be claimed. */
+function AgentSandboxes({
+  sandbox,
+  pods,
+  warmPool,
+  ended,
+  selected,
+  onSelect,
+  onOpenRun,
+  onClose,
+}: {
+  sandbox: NonNullable<InfraModel["agentSandbox"]>;
+  pods: PodView[];
+  warmPool: PodView[];
+  ended: EndedRun[];
+  selected: string | null;
+  onSelect: (pod: string) => void;
+  onOpenRun: (pod: PodView) => void;
+  onClose: (name: string) => void;
+}) {
+  const idle = warmPool.length;
+  const size = sandbox.warmPoolSize;
+  return (
+    <div className="map-fence map-agent-fence" role="group" aria-label="Agent sandboxes">
+      <span className="map-zone-label">
+        <span className="sandbox-badge" role="img" aria-label={SANDBOX_BADGE.name} title={SANDBOX_BADGE.name}>
+          {SANDBOX_BADGE.text}
+        </span>{" "}
+        Agent sandboxes · one isolated pod per run
+      </span>
+      {sandbox.elsewhere && (
+        <span className="muted">{`They run in namespace ${sandbox.elsewhere}, which this view doesn't watch.`}</span>
+      )}
+      <div className="map-sandboxes">
+        {pods.map((p) => (
+          <Sandbox
+            key={p.name}
+            pod={p}
+            selected={selected === p.name}
+            onSelect={() => onSelect(p.name)}
+            onOpenRun={onOpenRun}
+          />
+        ))}
+        {ended.map((e) => (
+          <Sandbox
+            key={`ended-${e.pod.name}`}
+            pod={e.pod}
+            selected={false}
+            onSelect={() => {}}
+            onOpenRun={onOpenRun}
+            ended={{ leaving: e.leaving }}
+            onClose={() => onClose(e.pod.name)}
+          />
+        ))}
+        {pods.length === 0 && ended.length === 0 && <span className="muted">No sandboxed runs</span>}
+      </div>
+      {(idle > 0 || (size ?? 0) > 0) && (
+        <div className="map-warm-pool" role="group" aria-label="Warm pool">
+          <span className="map-zone-label">
+            {size !== null ? `Warm pool · ${idle} of ${size} ready` : `Warm pool · ${idle} ready`}
+          </span>
+          {warmPool.map((p) => (
+            <button
+              key={p.name}
+              type="button"
+              className={`map-warm-pod${p.ready ? " ready" : ""}`}
+              aria-pressed={selected === p.name}
+              aria-label={`Warm pod ${p.name}: ${p.status}`}
+              title={`${p.name} · ${p.status}`}
+              onClick={() => onSelect(p.name)}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -167,10 +248,12 @@ export function InfraMap({
     const id = setInterval(() => setClock(Date.now()), 30_000);
     return () => clearInterval(id);
   }, []);
-  const { alwaysOn, codingRuns } = model.groups;
+  const { alwaysOn, codingRuns, agentSandboxes, warmPool } = model.groups;
   // Owned by InfraScreen in the app; the local fallback keeps the Map usable on its own.
   const local = useEndedRuns(codingRuns, !endedRuns);
-  const { ended, dismiss } = endedRuns ?? local;
+  const { ended: allEnded, dismiss } = endedRuns ?? local;
+  const ended = allEnded.filter((e) => e.pod.group !== "agent_sandbox");
+  const endedAgents = allEnded.filter((e) => e.pod.group === "agent_sandbox");
   const jobs = visibleJobs(model.groups.jobs, jobFinishedAt, fixedNow ?? clock);
   const hosts = [...new Set(model.edge.flatMap((e) => e.hosts))];
   const main = alwaysOn.filter((p) => p.title !== "headroom");
@@ -283,6 +366,18 @@ export function InfraMap({
               {codingRuns.length === 0 && ended.length === 0 && <span className="muted">No coding runs</span>}
             </div>
           </div>
+        )}
+        {model.agentSandbox && (
+          <AgentSandboxes
+            sandbox={model.agentSandbox}
+            pods={agentSandboxes}
+            warmPool={warmPool}
+            ended={endedAgents}
+            selected={selected}
+            onSelect={onSelect}
+            onOpenRun={onOpenRun}
+            onClose={dismiss}
+          />
         )}
         {headroom.length > 0 && (
           <div className="map-pods map-small">

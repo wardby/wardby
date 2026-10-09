@@ -1,7 +1,7 @@
 import type { V1Pod } from "@kubernetes/client-node";
 import { describe, expect, it, vi } from "vitest";
 import { FakeKubernetesApi } from "../providers/jobs/fake-kubernetes-api.js";
-import { nativeKubernetesNames } from "./kubernetes-isolation.js";
+import { nativeKubernetesNames, nativeWarmWorkerName } from "./kubernetes-isolation.js";
 import { KubernetesNativeWorkerLauncher } from "./kubernetes-launcher.js";
 import type { WorkerInput } from "./protocol.js";
 
@@ -26,8 +26,9 @@ function setup(options: { probe?: number; serviceIp?: string | null } = {}) {
   const proven = vi.fn(async () => {});
   // The "kubelet": a created pod is Running by the launcher's first wait.
   const sleep = async () => {
-    const pod = await api.readPod(ns, names.pod);
-    if (pod && !pod.status) api.put("pod", ns, { ...pod, status: { phase: "Running" } });
+    for (const pod of await api.listPods(ns, "wardby.io/component=native-run")) {
+      if (!pod.status) api.put("pod", ns, { ...pod, status: { phase: "Running" } });
+    }
     // Yield for real: a handle's watch loop polls until the pod ends.
     await new Promise((resolve) => setTimeout(resolve, 5));
   };
@@ -140,5 +141,121 @@ describe("KubernetesNativeWorkerLauncher", () => {
     expect(JSON.stringify(canonical({ ...stored, ingress: [{ from: [] }] }))).not.toBe(
       JSON.stringify(canonical(built)),
     );
+  });
+
+  it("refuses a pod whose resources or priority class admission changed, but not a re-rendered quantity", async () => {
+    const mutate = (change: (pod: V1Pod) => void) => {
+      const ctx = setup();
+      const create = ctx.api.createPod.bind(ctx.api);
+      ctx.api.createPod = async (namespace, body) => {
+        const stored = structuredClone(body);
+        change(stored);
+        return create(namespace, stored);
+      };
+      return ctx;
+    };
+    const rewritten = mutate((pod) => {
+      pod.spec!.containers[0].resources = {
+        requests: { cpu: "2", memory: "2Gi", "ephemeral-storage": "128Mi" },
+        limits: { cpu: "2", memory: "2Gi", "ephemeral-storage": "128Mi" },
+      };
+    });
+    await expect(rewritten.launcher.launch(input)).rejects.toThrow(/native_sandbox_isolation_mismatch/);
+    const prioritized = mutate((pod) => {
+      pod.spec!.priorityClassName = "system-node-critical";
+    });
+    await expect(prioritized.launcher.launch(input)).rejects.toThrow(/native_sandbox_isolation_mismatch/);
+    // "1000m" read back as "1", "128Mi" as its byte count spelled differently: the same values.
+    const rerendered = mutate((pod) => {
+      pod.spec!.containers[0].resources = {
+        requests: { cpu: "1", memory: "512Mi", "ephemeral-storage": "134217728" },
+        limits: { cpu: "1", memory: "512Mi", "ephemeral-storage": "134217728" },
+      };
+    });
+    await expect(rerendered.launcher.launch(input)).resolves.toBeDefined();
+  });
+
+  it("reports a ResourceQuota refusal as capacity, leaving nothing behind", async () => {
+    const { api, launcher, proven } = setup();
+    api.createPod = async () => {
+      throw Object.assign(new Error("HTTP-Code: 403"), {
+        code: 403,
+        body: '{"message":"pods \\"x\\" is forbidden: exceeded quota: wardby-coding, requested: pods=1"}',
+      });
+    };
+    await expect(launcher.launch(input)).rejects.toThrow(/native_sandbox_capacity/);
+    expect(proven).not.toHaveBeenCalled();
+    expect(exists(api, "secret", names.secret)).toBe(false);
+    expect(exists(api, "networkpolicy", names.policy)).toBe(false);
+  });
+});
+
+describe("KubernetesNativeWorkerLauncher warm pool workers", () => {
+  const token = "0123456789abcdef0123";
+  const warm = nativeWarmWorkerName(token);
+
+  it("starts a warm pod with no input, proves its isolation, and lists it by token", async () => {
+    const { api, launcher, proven } = setup();
+    await launcher.startWarm(token, 60_000);
+    const pod = (await api.readPod(ns, warm))!;
+    expect(pod.spec!.volumes!.map((v) => v.name)).toEqual(["tmp"]);
+    expect(pod.spec!.containers[0].env).toEqual([
+      { name: "NATIVE_WORKER_INPUT_FILE", value: "/tmp/wardby-input/input.json" },
+      { name: "NATIVE_WORKER_INPUT_WAIT_MS", value: "60000" },
+    ]);
+    expect(pod.spec!.activeDeadlineSeconds).toBe(60 + 3600);
+    expect(exists(api, "networkpolicy", warm)).toBe(true);
+    expect(api.execCalls).toHaveLength(1);
+    expect(proven).not.toHaveBeenCalled();
+    expect(await launcher.listWarm()).toEqual([token]);
+    // The run janitor never sees a pool pod: it has no run hash.
+    expect(await launcher.listWorkers()).toEqual([]);
+  });
+
+  it("removes a warm pod whose isolation cannot be proven", async () => {
+    const { api, launcher } = setup({ probe: 5 });
+    await expect(launcher.startWarm(token, 60_000)).rejects.toThrow(/native_sandbox_network_unenforced/);
+    expect(exists(api, "pod", warm)).toBe(false);
+    expect(exists(api, "networkpolicy", warm)).toBe(false);
+  });
+
+  it("delivers the input on exec stdin, never in the command", async () => {
+    const { api, launcher } = setup();
+    await launcher.startWarm(token, 60_000);
+    let received = "";
+    api.onExec = async ({ stdin }) => {
+      for await (const chunk of stdin ?? []) received += String(chunk);
+      return 0;
+    };
+    await launcher.deliver(token, input);
+    const call = api.execCalls.at(-1)!;
+    expect(call.pod).toBe(warm);
+    expect(call.command.join(" ")).not.toContain(input.gateway!.capability);
+    expect(JSON.parse(received)).toEqual(input);
+    api.onExec = async () => 2;
+    await expect(launcher.deliver(token, input)).rejects.toThrow(/native_sandbox_warm_delivery_failed/);
+  });
+
+  it("re-attests a running, unchanged warm pod, and refuses a changed, ended, or other-spec one", async () => {
+    const { api, launcher } = setup();
+    await launcher.startWarm(token, 60_000);
+    expect(await launcher.reattestWarm(token, 60_000)).toBe(true);
+    expect(await launcher.reattestWarm(token, 90_000)).toBe(false);
+    const policy = (await api.readNetworkPolicy(ns, warm))!;
+    api.put("networkpolicy", ns, { ...policy, spec: { ...policy.spec!, egress: [{}] } });
+    expect(await launcher.reattestWarm(token, 60_000)).toBe(false);
+    api.put("networkpolicy", ns, policy);
+    const pod = (await api.readPod(ns, warm))!;
+    api.put("pod", ns, { ...pod, status: { phase: "Succeeded" } });
+    expect(await launcher.reattestWarm(token, 60_000)).toBe(false);
+    await launcher.removeWarm(token);
+    expect(await launcher.reattestWarm(token, 60_000)).toBe(false);
+    expect(exists(api, "networkpolicy", warm)).toBe(false);
+  });
+
+  it("hashes its spec: same config, same hash; another image or wait, another hash", () => {
+    const a = setup().launcher;
+    expect(a.warmSpecHash(60_000)).toBe(setup().launcher.warmSpecHash(60_000));
+    expect(a.warmSpecHash(60_000)).not.toBe(a.warmSpecHash(61_000));
   });
 });

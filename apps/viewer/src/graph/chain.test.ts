@@ -14,6 +14,7 @@ function run(id: string, overrides: Partial<GraphRun> = {}): GraphRun {
     model: "m",
     codingProvider: null,
     nativeExecutionMode: null,
+    warmWorkerName: null,
     declaredServices: [],
     status: "succeeded",
     trigger: { kind: "manual" },

@@ -25,6 +25,8 @@ export type Platform = "gke" | "eks" | "kind" | "generic";
 export interface DescribeOpts {
   serverUrl?: string;
   context?: string | null;
+  /** Warm pool workers runs have claimed: worker (pod) name -> run id, from the runs' `warmWorkerName`. */
+  warmRuns?: ReadonlyMap<string, string>;
 }
 export interface EdgeView {
   label: string;
@@ -39,7 +41,7 @@ export interface EdgeView {
 }
 export interface PodView {
   name: string;
-  group: "always_on" | "coding_run" | "job";
+  group: "always_on" | "coding_run" | "agent_sandbox" | "job";
   title: string;
   /** What to show for the pod: Terminating, Completed, a container problem, or its phase. */
   status: string;
@@ -54,6 +56,10 @@ export interface PodView {
   identity: string | null;
   containers: InfraContainer[];
   runSha: string | null;
+  /** The run, when known directly: a warm pool pod a run claimed carries no run label. */
+  runId: string | null;
+  /** A native-agent warm pool pod (idle until a run claims it). */
+  warm: boolean;
   /** The pod's page in the cloud console, when the platform has one. */
   console: { url: string; label: string } | null;
   /** Egress rules of the NetworkPolicies that select this pod. */
@@ -82,7 +88,22 @@ export interface InfraModel {
   platform: Platform;
   controlPlane: { inCluster: true } | { inCluster: false; location: string | null };
   edge: EdgeView[];
-  groups: { alwaysOn: PodView[]; codingRuns: PodView[]; jobs: PodView[] };
+  groups: {
+    alwaysOn: PodView[];
+    codingRuns: PodView[];
+    /** Sandbox-mode native agent runs, including warm pool pods a run has claimed. */
+    agentSandboxes: PodView[];
+    /** Idle warm pool pods. */
+    warmPool: PodView[];
+    jobs: PodView[];
+  };
+  /** Sandbox-mode native agents; null when the server runs none on Kubernetes. */
+  agentSandbox: {
+    /** Configured warm pool size; null when the server doesn't say. */
+    warmPoolSize: number | null;
+    /** The namespace sandboxes run in, when it isn't the one this view watches. */
+    elsewhere: string | null;
+  } | null;
   isolation: {
     egressRules: string[];
     sandbox: string | null;
@@ -92,7 +113,14 @@ export interface InfraModel {
   dataStores: DataStoreView[];
   /** `names` is null when they can't be read; `forbidden` says that is for lack of access. */
   secrets: { source: string | null; names: string[] | null; forbidden: boolean };
-  totals: { pods: number; codingRuns: number; readyContainers: number; cpuMillis: number; memoryMiB: number };
+  totals: {
+    pods: number;
+    codingRuns: number;
+    agentSandboxes: number;
+    readyContainers: number;
+    cpuMillis: number;
+    memoryMiB: number;
+  };
 }
 
 /** Kubernetes CPU quantity ("500m", "2", "0.5") to millicores. */
@@ -395,7 +423,10 @@ export function podsName(labels: Record<string, string>): string {
     if (k === "app.kubernetes.io/name" && v.startsWith("wardby-") && v.length > "wardby-".length)
       return `the ${v.slice("wardby-".length).replace(/-/g, " ")}`;
     if (k === "wardby.io/component" && v === "coding-run") return "coding runs";
+    if (k === "wardby.io/component" && v === "native-run") return "agent sandboxes";
   }
+  if (entries.length === 2 && labels["wardby.io/component"] === "native-run" && labels["wardby.io/pool"] === "warm")
+    return "the warm pool";
   return entries.map(([k, v]) => `${k}=${v}`).join(", ");
 }
 
@@ -563,11 +594,22 @@ function policyView(np: InfraNetworkPolicy, all: InfraNetworkPolicy[], rules: Pl
   return { name: np.name, selects, rules: summary, intent: policyIntent(np, all, rules) };
 }
 
+/** The labels on native sandbox pods; servers from before /admin/api/infra described them use the same ones. */
+function nativeLabels(info: InfraInfo) {
+  const k = info.native?.kubernetes;
+  return {
+    componentLabel: k?.componentLabel ?? { "wardby.io/component": "native-run" },
+    warmPoolLabel: k?.warmPoolLabel ?? { "wardby.io/pool": "warm" },
+    runLabel: k?.runLabel ?? "wardby.io/run-sha256",
+  };
+}
+
 export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeOpts = {}): InfraModel {
   const platform = platformOf(info, cluster, opts);
   const rules = RULES[platform];
   const k8s = info.kubernetes;
   const componentLabel = k8s?.componentLabel ?? {};
+  const native = nativeLabels(info);
   const sas = cluster.objects.service_account;
   const policies = values(cluster, "network_policy");
   const unique = (rules: string[]) => [...new Set(rules)];
@@ -583,12 +625,22 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
       phase: p.phase,
       terminating: p.terminating,
       ready: p.ready,
-      runtime: group === "coding_run" ? rules.sandbox(runtimeName(p.runtimeClass)) : runtimeName(p.runtimeClass),
+      runtime:
+        group === "coding_run" || group === "agent_sandbox"
+          ? rules.sandbox(runtimeName(p.runtimeClass))
+          : runtimeName(p.runtimeClass),
       sandboxed: p.runtimeClass !== null,
       node: p.node,
       identity: rules.identity(sa),
       containers: p.containers,
-      runSha: group === "coding_run" && k8s ? (p.labels[k8s.runLabel] ?? null) : null,
+      runSha:
+        group === "coding_run" && k8s
+          ? (p.labels[k8s.runLabel] ?? null)
+          : group === "agent_sandbox"
+            ? (p.labels[native.runLabel] ?? null)
+            : null,
+      runId: group === "agent_sandbox" ? (opts.warmRuns?.get(p.name) ?? null) : null,
+      warm: group === "agent_sandbox" && matches(native.warmPoolLabel, p.labels),
       console: rules.podConsole(opts.context, k8s?.namespace ?? "", p.name),
       egress: unique(policies.filter((np) => selects(np, p.labels)).flatMap((np) => np.egress)),
       policies: policies.filter((np) => selects(np, p.labels)).map((np) => np.name),
@@ -605,10 +657,17 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
 
   const alwaysOn: PodView[] = [];
   const codingRuns: PodView[] = [];
+  const agentSandboxes: PodView[] = [];
+  const warmPool: PodView[] = [];
   const jobs: PodView[] = [];
   for (const p of values(cluster, "pod")) {
     if (matches(componentLabel, p.labels)) {
       codingRuns.push(view(p, "coding_run", p.name));
+      continue;
+    }
+    if (matches(native.componentLabel, p.labels)) {
+      const v = view(p, "agent_sandbox", p.name);
+      (v.warm && !v.runId ? warmPool : agentSandboxes).push(v);
       continue;
     }
     const ownerName = p.owner?.name ?? p.name;
@@ -619,6 +678,8 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
   const order = (p: PodView) => ALWAYS_ON.findIndex(([, t]) => t === p.title);
   alwaysOn.sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name));
   codingRuns.sort((a, b) => a.name.localeCompare(b.name));
+  agentSandboxes.sort((a, b) => a.name.localeCompare(b.name));
+  warmPool.sort((a, b) => a.name.localeCompare(b.name));
   jobs.sort((a, b) => a.name.localeCompare(b.name));
 
   const edges: InfraEdge[] = [
@@ -638,7 +699,8 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
   const stores = values(cluster, "secret_store");
   const secretError = cluster.kindErrors.secret;
   const forbidden = secretError?.kind === "forbidden";
-  const all = [...alwaysOn, ...codingRuns, ...jobs];
+  const all = [...alwaysOn, ...codingRuns, ...agentSandboxes, ...warmPool, ...jobs];
+  const nativeK8s = info.native?.kubernetes ?? null;
 
   return {
     platform,
@@ -647,7 +709,15 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
         ? { inCluster: true }
         : { inCluster: false, location: hostPort(opts.serverUrl) },
     edge: edgePath(edges.map((e) => rules.edge(e, { backendPolicies: values(cluster, "backend_policy") }))),
-    groups: { alwaysOn, codingRuns, jobs },
+    groups: { alwaysOn, codingRuns, agentSandboxes, warmPool, jobs },
+    // Older servers don't describe sandboxes; their pods still show when present.
+    agentSandbox:
+      nativeK8s || agentSandboxes.length > 0 || warmPool.length > 0
+        ? {
+            warmPoolSize: info.native ? info.native.warmPoolSize : null,
+            elsewhere: nativeK8s && k8s && nativeK8s.namespace !== k8s.namespace ? nativeK8s.namespace : null,
+          }
+        : null,
     isolation: {
       egressRules,
       sandbox: rules.sandbox(runtimeName(k8s?.runtimeClass ?? null)),
@@ -666,6 +736,7 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
     totals: {
       pods: all.length,
       codingRuns: codingRuns.length,
+      agentSandboxes: agentSandboxes.length,
       readyContainers: all.reduce((s, p) => s + p.containers.filter((c) => c.ready && countsTowardReady(c)).length, 0),
       cpuMillis: all.reduce((s, p) => s + p.requests.cpuMillis, 0),
       memoryMiB: all.reduce((s, p) => s + p.requests.memoryMiB, 0),

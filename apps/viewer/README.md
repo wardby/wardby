@@ -135,6 +135,15 @@ minutes. On GKE, each pod card has a ↗ link to the pod in the Google Cloud
 console; it needs the kube context to keep the name `gcloud` gives it
 (`gke_<project>_<location>_<cluster>`).
 
+Native agents set to run in a sandbox (`nativeExecutionMode: "sandbox"`) carry
+an **SB** tag on the Runs graph, and their pods have their own **Agent
+sandboxes** area on the Map and section in the Table, marked with the same tag.
+Each run's pod links to its run, including a pod the run took from the warm
+pool; idle warm pool pods show as dots with a ready count. A sandbox run's
+**Pod ↗** button jumps to its pod. The view watches one namespace: if
+`NATIVE_SANDBOX_NAMESPACE` puts sandboxes elsewhere, the Map says so instead of
+showing them.
+
 Credential plugins (`exec` entries in your kubeconfig) run with `/opt/homebrew/bin`,
 `/usr/local/bin` and the Google Cloud SDK's `bin` directories added to `PATH`, so
 `gke-gcloud-auth-plugin` (GKE) and the AWS CLI (EKS) are found when installed

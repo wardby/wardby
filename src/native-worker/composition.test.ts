@@ -23,6 +23,8 @@ describe("native sandbox configuration", () => {
       cpus: 1,
       memoryMb: 512,
       pids: 128,
+      warmPoolSize: 0,
+      warmMaxAgeMs: 1_800_000,
     });
     expect(
       loadNativeSandboxConfig({
@@ -63,9 +65,12 @@ describe("native sandbox configuration", () => {
       workerImage: image,
       namespace: "wardby-coding",
       gatewayService: "wardby-native-gateway",
+      platform: "generic",
       cpus: 1,
       memoryMb: 512,
       pids: 128,
+      warmPoolSize: 0,
+      warmMaxAgeMs: 1_800_000,
     });
     expect(
       loadNativeSandboxConfig({
@@ -83,6 +88,61 @@ describe("native sandbox configuration", () => {
         NATIVE_GATEWAY_SERVICE: "gw",
       }),
     ).toMatchObject({ namespace: "native", gatewayService: "gw" });
+  });
+
+  it("reads GKE Autopilot's platform, run priority, timeouts, and the concurrency cap, and requires gVisor there", () => {
+    const k8s = { NATIVE_SANDBOX_LAUNCHER: "kubernetes", NATIVE_SANDBOX_WORKER_IMAGE: image };
+    const gke = {
+      ...k8s,
+      KUBERNETES_PLATFORM: "gke-autopilot",
+      KUBERNETES_RUNTIME_CLASS: "gvisor",
+      KUBERNETES_RUN_PRIORITY_CLASS: "wardby-coding-run",
+      NATIVE_SANDBOX_READY_TIMEOUT_MS: "600000",
+      NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS: "60000",
+      NATIVE_SANDBOX_MAX_CONCURRENT: "4",
+    };
+    expect(loadNativeSandboxConfig(gke)).toMatchObject({
+      platform: "gke-autopilot",
+      runtimeClassName: "gvisor",
+      priorityClassName: "wardby-coding-run",
+      readyTimeoutMs: 600_000,
+      enforcementTimeoutMs: 60_000,
+      maxConcurrent: 4,
+    });
+    expect(loadNativeSandboxConfig({ ...gke, NATIVE_SANDBOX_PRIORITY_CLASS: "native-runs" })).toMatchObject({
+      priorityClassName: "native-runs",
+    });
+    expect(() => loadNativeSandboxConfig({ ...gke, KUBERNETES_RUNTIME_CLASS: "" })).toThrow(/only under gVisor/);
+    expect(() => loadNativeSandboxConfig({ ...gke, NATIVE_SANDBOX_RUNTIME_CLASS: "runc" })).toThrow(
+      /only under gVisor/,
+    );
+    expect(() => loadNativeSandboxConfig({ ...gke, NATIVE_SANDBOX_PRIORITY_CLASS: "system-node-critical" })).toThrow(
+      /system- priority class/,
+    );
+    expect(() => loadNativeSandboxConfig({ ...gke, NATIVE_SANDBOX_READY_TIMEOUT_MS: "5" })).toThrow(
+      /NATIVE_SANDBOX_READY_TIMEOUT_MS/,
+    );
+    expect(() => loadNativeSandboxConfig({ ...k8s, KUBERNETES_PLATFORM: "eks" })).toThrow(/KUBERNETES_PLATFORM/);
+  });
+
+  it("reads the warm pool's size and max age within bounds", () => {
+    expect(
+      loadNativeSandboxConfig({
+        ...base,
+        NATIVE_SANDBOX_WARM_POOL_SIZE: "2",
+        NATIVE_SANDBOX_WARM_MAX_AGE_MS: "600000",
+      }),
+    ).toMatchObject({ warmPoolSize: 2, warmMaxAgeMs: 600_000 });
+    expect(loadNativeSandboxConfig({ ...base, NATIVE_SANDBOX_WARM_POOL_SIZE: "" })).toMatchObject({ warmPoolSize: 0 });
+    expect(() => loadNativeSandboxConfig({ ...base, NATIVE_SANDBOX_WARM_POOL_SIZE: "51" })).toThrow(
+      /NATIVE_SANDBOX_WARM_POOL_SIZE/,
+    );
+    expect(() => loadNativeSandboxConfig({ ...base, NATIVE_SANDBOX_WARM_POOL_SIZE: "-1" })).toThrow(
+      /NATIVE_SANDBOX_WARM_POOL_SIZE/,
+    );
+    expect(() => loadNativeSandboxConfig({ ...base, NATIVE_SANDBOX_WARM_MAX_AGE_MS: "1000" })).toThrow(
+      /NATIVE_SANDBOX_WARM_MAX_AGE_MS/,
+    );
   });
 
   it("requires a registry digest for Kubernetes: a cluster cannot pull a local image id", () => {

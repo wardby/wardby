@@ -32,6 +32,9 @@ import {
 } from "./docker-isolation.js";
 import { DockerNativeWorkerLauncher } from "./docker-launcher.js";
 import { NativeSandboxExecutor } from "./sandbox-executor.js";
+import { WARM_INPUT_DIR, WARM_WORKER_UNCLAIMED_EXIT } from "./warm-delivery.js";
+import { PooledWorkerLauncher } from "./warm-pool.js";
+import { PrismaWarmPoolLedger } from "./warm-pool-ledger.js";
 
 const enabled = process.env.WARDBY_NATIVE_DOCKER_TEST === "1";
 const RUNTIME_IMAGE = process.env.NATIVE_TEST_RUNTIME_IMAGE ?? "wardby-runtime:native-p4";
@@ -353,4 +356,95 @@ return { note: await datastore.get(params.key) };`,
     expect(await newExecutor().sweep()).toBeGreaterThanOrEqual(1);
     expect(dockerOk(["container", "inspect", orphan])).toBeNull();
   }, 150_000);
+
+  describe("warm pool", () => {
+    const probeScript = `
+      const net = await import("node:net");
+      const tcp = (host, port) => new Promise((ok) => { const s = net.connect({ host, port, timeout: 3000 }); s.on("connect", () => { s.destroy(); ok(true); }); s.on("error", () => ok(false)); s.on("timeout", () => { s.destroy(); ok(false); }); });
+      console.log(JSON.stringify({
+        gateway: await fetch("http://wardby-native-gateway:8790/healthz").then((r) => r.ok, () => false),
+        internet: await fetch("https://example.com", { signal: AbortSignal.timeout(4000) }).then(() => true, () => false),
+        postgres: await tcp("local-postgres-1", 5432),
+        input: (await import("node:fs")).existsSync(${JSON.stringify(WARM_INPUT_DIR)}),
+      }));`;
+    let pool: PooledWorkerLauncher;
+    const idleTokens = async () =>
+      (await prisma.nativeWarmWorker.findMany({ where: { specHash: pool.specHash, status: "idle" } })).map((r) => r.id);
+
+    beforeAll(async () => {
+      pool = new PooledWorkerLauncher({
+        ledger: new PrismaWarmPoolLedger(prisma),
+        launcher,
+        size: 1,
+        maxAgeMs: 600_000,
+        warmTimeoutMs: 120_000,
+      });
+      await pool.tick();
+      await pool.settled();
+    }, 120_000);
+    afterAll(async () => {
+      pool?.stop();
+      await pool?.settled();
+      const rows = await prisma.nativeWarmWorker.findMany({ where: { specHash: pool?.specHash } });
+      for (const row of rows) await launcher.removeWarm(row.id);
+      await prisma.nativeWarmWorker.deleteMany({ where: { specHash: pool?.specHash } });
+    });
+
+    it("keeps an idle worker isolated, holding no input, until a run claims it", async () => {
+      const [token] = await idleTokens();
+      expect(token).toBeDefined();
+      const output = docker(["exec", `wardby-nwarm-${token}`, "node", "--input-type=module", "-e", probeScript]);
+      expect(JSON.parse(output.split("\n").at(-1)!)).toEqual({
+        gateway: true,
+        internet: false,
+        postgres: false,
+        input: false,
+      });
+    }, 60_000);
+
+    it("runs each run on its own claimed warm worker, removes it after, and warms a new one", async () => {
+      const used = new Set<string>();
+      for (let i = 0; i < 2; i += 1) {
+        const [token] = await idleTokens();
+        expect(token).toBeDefined();
+        expect(used.has(token)).toBe(false);
+        used.add(token);
+        const run = await newRun("quick");
+        const pooled = new NativeSandboxExecutor({
+          db: prisma,
+          providers,
+          launcher: pool,
+          gatewayUrl: nativeGatewayUrl(),
+        });
+        await pooled.start(run.id);
+        expect((await prisma.nativeWarmWorker.findUnique({ where: { id: token } }))?.runId).toBe(run.id);
+        expect(containerExists(run.id)).toBe(false); // no cold worker
+        const done = await waitFor(run.id, terminal);
+        expect(done.status).toBe("succeeded");
+        expect(done.finalText).toMatch(/Friday/);
+        // The worker goes first, then its network, then its row.
+        for (let j = 0; j < 60 && (await prisma.nativeWarmWorker.findUnique({ where: { id: token } })); j += 1) {
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        expect(dockerOk(["container", "inspect", `wardby-nwarm-${token}`])).toBeNull();
+        expect(await prisma.nativeWarmWorker.findUnique({ where: { id: token } })).toBeNull();
+        await pool.tick();
+        await pool.settled();
+      }
+      expect(docker(["logs", gateway])).not.toContain("acceptance-secret-77");
+    }, 240_000);
+
+    it("lets an unclaimed warm worker exit on its own after its wait", async () => {
+      const token = randomUUID().replace(/-/g, "").slice(0, 20);
+      await launcher.startWarm(token, 2_000);
+      try {
+        for (let i = 0; i < 40 && (await launcher.inspectWarm(token)).state === "running"; i += 1) {
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        expect(await launcher.inspectWarm(token)).toEqual({ state: "exited", exitCode: WARM_WORKER_UNCLAIMED_EXIT });
+      } finally {
+        await launcher.removeWarm(token);
+      }
+    }, 60_000);
+  });
 });

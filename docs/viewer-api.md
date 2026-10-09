@@ -62,7 +62,12 @@ Each run carries its agent, status, trigger, turn and token counts, cost and
 budget, outcomes, and coding-run services. `model` is the model the run used
 (a coding run's own model, otherwise the agent's). `codingProvider` names the
 coding worker, such as `codex` or `claude-code`, and is `null` for runs that
-aren't coding runs.
+aren't coding runs. `nativeExecutionMode` says where a native run executed,
+`control-plane` or `sandbox` (its own isolated container or pod), recorded when
+the run started; it is `null` for coding runs and for runs from before the
+server recorded it. `warmWorkerName` names the warm pool worker (container or
+pod) a sandbox run claimed, so a client can find that pod, which carries no
+run label; it is `null` otherwise, and once the server has retired the worker.
 `declaredServices` lists the services (name and version) a coding run was
 started with; `services` holds their recorded readiness. A finished run can
 declare a service that has no readiness record, for example a run from before
@@ -93,6 +98,15 @@ coding-run pods. `runLabel` holds the first `runLabelHashChars` hex characters
 of the SHA-256 of the run id, so a client can match a pod to a run it already
 knows. The response never includes credentials, the server's kube context, or
 image references. `kubernetes` is `null` for the other launchers.
+
+`native` describes how sandbox-mode native agents run, and is `null` when
+`NATIVE_SANDBOX_LAUNCHER` is unset: `launcher` (`docker` or `kubernetes`),
+`warmPoolSize` (`NATIVE_SANDBOX_WARM_POOL_SIZE`), and for Kubernetes the
+namespace their pods run in, the runtime class (or `null`), and the labels on
+their pods: `componentLabel` on every sandbox pod, `runLabel` (the same run-id
+hash as coding runs) on a run's own pod, and `warmPoolLabel` plus the
+`warmWorkerLabel` key on warm pool pods, which have no run label even after a
+run claims them.
 
 ### `GET /admin/api/events`
 

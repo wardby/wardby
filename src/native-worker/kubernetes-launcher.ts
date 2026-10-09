@@ -14,27 +14,47 @@
 import type { V1NetworkPolicy, V1Pod } from "@kubernetes/client-node";
 import { logger } from "../core/logger.js";
 import { KubernetesAlreadyExistsError, type KubernetesApi } from "../providers/jobs/kubernetes-api.js";
+import { canonicalResources } from "../providers/jobs/kubernetes-isolation.js";
+import type { KubernetesPlatform } from "../providers/jobs/kubernetes-platform.js";
 import { NATIVE_GATEWAY_PORT, type NativeWorkerLimits } from "./docker-isolation.js";
 import type { NativeWorkerState } from "./docker-launcher.js";
+import { createHash } from "node:crypto";
+import { Readable } from "node:stream";
 import {
   buildNativeInputSecret,
   buildNativeRunNetworkPolicy,
   buildNativeRunPod,
+  buildNativeWarmNetworkPolicy,
+  buildNativeWarmPod,
   NATIVE_PROBE,
   NATIVE_RUN_SELECTOR,
   NATIVE_RUN_SHA_LABEL,
+  NATIVE_WARM_SELECTOR,
+  NATIVE_WARM_TOKEN_LABEL,
   NATIVE_WORKER_CONTAINER,
   nativeEnforcementProbe,
   nativeKubernetesNames,
+  nativeWarmWorkerName,
 } from "./kubernetes-isolation.js";
 import type { WorkerHandle } from "./launch.js";
 import type { WorkerInput } from "./protocol.js";
 import type { ManagedWorkerLauncher } from "./sandbox-executor.js";
+import { warmDeliveryCommand } from "./warm-delivery.js";
+import { NATIVE_SANDBOX_WARM_DELIVERY_FAILED, type WarmWorkerLauncher } from "./warm-pool.js";
 
 const k8sLog = logger.child({ module: "native-kubernetes-launcher" });
 
 export const NATIVE_SANDBOX_NETWORK_UNENFORCED = "native_sandbox_network_unenforced";
 export const NATIVE_SANDBOX_ISOLATION_MISMATCH = "native_sandbox_isolation_mismatch";
+export const NATIVE_SANDBOX_CAPACITY = "native_sandbox_capacity";
+
+/** The API server's refusal of a pod the namespace's ResourceQuota has no room for (403 "exceeded quota"). */
+export function isQuotaRejection(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const { code, body, message } = err as { code?: unknown; body?: unknown; message?: unknown };
+  const text = `${typeof body === "string" ? body : JSON.stringify(body ?? "")} ${typeof message === "string" ? message : ""}`;
+  return (code === 403 || code === undefined) && /exceeded quota/i.test(text);
+}
 
 export interface KubernetesNativeWorkerLauncherOptions {
   api: KubernetesApi;
@@ -44,6 +64,10 @@ export interface KubernetesNativeWorkerLauncherOptions {
   /** The native gateway's Service, in the same namespace (NetworkPolicy selects its pods there). */
   gatewayService: string;
   runtimeClassName?: string;
+  /** KUBERNETES_PLATFORM: the admission rules native pods are conformed to. */
+  platform?: KubernetesPlatform;
+  /** KUBERNETES_RUN_PRIORITY_CLASS. */
+  priorityClassName?: string;
   /** NATIVE_GATEWAY_URL: dial this instead of the Service's ClusterIP (its host is also what the probe checks). */
   gatewayUrl?: string;
   /** Called once a pod's isolation is proven; the executor marks the run's session ready. */
@@ -71,7 +95,7 @@ export function canonical(value: unknown): unknown {
   return out;
 }
 
-export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher {
+export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher, WarmWorkerLauncher {
   readonly networkReadyAtLaunch = false;
   private gatewayHost: Promise<string> | undefined;
 
@@ -128,19 +152,15 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher {
         limits: this.options.limits,
         activeDeadlineSeconds: this.options.deadlineSeconds,
         runtimeClassName: this.options.runtimeClassName,
+        platform: this.options.platform,
+        priorityClassName: this.options.priorityClassName,
       });
       const policy = buildNativeRunNetworkPolicy(runId, this.ns);
-      // Policy first, so the pod never exists without it; the Secret before the pod that mounts it.
-      await this.createIfMissing(() => this.api.createNetworkPolicy(this.ns, policy));
-      await this.createIfMissing(() => this.api.createSecret(this.ns, buildNativeInputSecret(input, this.ns)));
-      await this.createIfMissing(() => this.api.createPod(this.ns, pod));
-      try {
-        await this.attest(runId, pod, policy);
-        await this.proveIsolation(runId);
-      } catch (err) {
-        await this.remove(runId).catch(() => {});
-        throw err;
-      }
+      await this.createIsolated(pod, policy, () => this.remove(runId), {
+        // The Secret before the pod that mounts it.
+        beforePod: () =>
+          this.createIfMissing(() => this.api.createSecret(this.ns, buildNativeInputSecret(input, this.ns))),
+      });
       await this.options.onNetworkProven(runId);
     } else {
       k8sLog.info({ pod: names.pod }, "native worker pod already exists: attaching, not relaunching");
@@ -148,12 +168,50 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher {
     return this.handle(runId);
   }
 
+  /**
+   * Policy first, so the pod never exists without it; then the pod; then attest and prove it. A
+   * quota rejection becomes native_sandbox_capacity. Any failure removes what was made.
+   */
+  private async createIsolated(
+    pod: V1Pod,
+    policy: V1NetworkPolicy,
+    cleanup: () => Promise<void>,
+    hooks: { beforePod?: () => Promise<void> } = {},
+  ): Promise<void> {
+    await this.createIfMissing(() => this.api.createNetworkPolicy(this.ns, policy));
+    await hooks.beforePod?.();
+    try {
+      await this.createIfMissing(() => this.api.createPod(this.ns, pod));
+    } catch (err) {
+      if (!isQuotaRejection(err)) throw err;
+      await cleanup().catch(() => {});
+      throw new Error(
+        `${NATIVE_SANDBOX_CAPACITY}: the namespace's ResourceQuota has no room for another native worker pod.`,
+        { cause: err },
+      );
+    }
+    try {
+      await this.attest(pod, policy);
+      await this.proveIsolation(pod.metadata!.name!);
+    } catch (err) {
+      await cleanup().catch(() => {});
+      throw err;
+    }
+  }
+
   /** What the API server stored must still be what was built: an admission change voids the run. */
-  private async attest(runId: string, built: V1Pod, builtPolicy: V1NetworkPolicy): Promise<void> {
-    const names = nativeKubernetesNames(runId);
+  private async attest(built: V1Pod, builtPolicy: V1NetworkPolicy): Promise<void> {
+    if (!(await this.matches(built, builtPolicy))) {
+      throw new Error(
+        `${NATIVE_SANDBOX_ISOLATION_MISMATCH}: the worker pod or its NetworkPolicy as stored differs from what was built.`,
+      );
+    }
+  }
+
+  private async matches(built: V1Pod, builtPolicy: V1NetworkPolicy): Promise<boolean> {
     const [pod, policy] = await Promise.all([
-      this.api.readPod(this.ns, names.pod),
-      this.api.readNetworkPolicy(this.ns, names.policy),
+      this.api.readPod(this.ns, built.metadata!.name!),
+      this.api.readNetworkPolicy(this.ns, builtPolicy.metadata!.name!),
     ]);
     const stored = pod?.spec;
     const want = built.spec!;
@@ -165,25 +223,22 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher {
       stored.automountServiceAccountToken === false &&
       stored.hostNetwork !== true &&
       stored.runtimeClassName === want.runtimeClassName &&
+      stored.priorityClassName === want.priorityClassName &&
       stored.containers.length === 1 &&
       stored.containers[0].image === want.containers[0].image &&
       same(stored.containers[0].securityContext, want.containers[0].securityContext) &&
       same(stored.containers[0].env, want.containers[0].env) &&
+      same(canonicalResources(stored.containers[0].resources), canonicalResources(want.containers[0].resources)) &&
       (stored.initContainers ?? []).length === 0;
-    if (!ok) {
-      throw new Error(
-        `${NATIVE_SANDBOX_ISOLATION_MISMATCH}: the worker pod or its NetworkPolicy as stored differs from what was built.`,
-      );
-    }
+    return ok;
   }
 
   /** Waits for the pod to run, then proves its egress from inside it (bounded). */
-  private async proveIsolation(runId: string): Promise<void> {
-    const names = nativeKubernetesNames(runId);
+  private async proveIsolation(podName: string): Promise<void> {
     const pollMs = this.options.pollMs ?? 1_000;
     const readyBy = Date.now() + (this.options.readyTimeoutMs ?? 120_000);
     for (;;) {
-      const pod = await this.api.readPod(this.ns, names.pod);
+      const pod = await this.api.readPod(this.ns, podName);
       if (!pod) throw new Error("native_sandbox_worker_lost: the worker pod disappeared before it was ready.");
       const phase = pod.status?.phase ?? "Pending";
       if (phase === "Running") break;
@@ -199,7 +254,7 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher {
     let last: number;
     for (;;) {
       last = await this.api
-        .exec(this.ns, names.pod, NATIVE_WORKER_CONTAINER, command, { timeoutMs: 20_000 })
+        .exec(this.ns, podName, NATIVE_WORKER_CONTAINER, command, { timeoutMs: 20_000 })
         .catch(() => NATIVE_PROBE.gatewayUnreachable);
       if (last === NATIVE_PROBE.proven) return;
       if (Date.now() >= provenBy) break;
@@ -215,19 +270,27 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher {
   }
 
   handle(runId: string): WorkerHandle {
+    return this.handleByName(nativeKubernetesNames(runId).pod);
+  }
+
+  private handleByName(podName: string): WorkerHandle {
     const exited = (async () => {
       for (;;) {
-        const state = await this.inspect(runId);
+        const state = await this.inspectByName(podName);
         if (state.state === "exited") return state.exitCode;
         if (state.state === "missing") return null;
         await this.sleep(this.options.pollMs ?? 1_000);
       }
     })();
-    return { exited, kill: () => void this.kill(runId) };
+    return { exited, kill: () => void this.api.deletePod(this.ns, podName, 0) };
   }
 
   async inspect(runId: string): Promise<NativeWorkerState> {
-    const pod = await this.api.readPod(this.ns, nativeKubernetesNames(runId).pod);
+    return this.inspectByName(nativeKubernetesNames(runId).pod);
+  }
+
+  private async inspectByName(podName: string): Promise<NativeWorkerState> {
+    const pod = await this.api.readPod(this.ns, podName);
     if (!pod) return { state: "missing" };
     const phase = pod.status?.phase;
     if (phase === "Succeeded" || phase === "Failed") {
@@ -258,5 +321,83 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher {
     await this.api.deletePod(this.ns, name, 0);
     await this.api.deleteSecret(this.ns, `${name}-input`);
     await this.api.deleteNetworkPolicy(this.ns, name);
+  }
+
+  // --- Warm pool workers (native sandbox phase 6) ---
+
+  private warmPod(token: string, waitMs: number): V1Pod {
+    return buildNativeWarmPod({
+      token,
+      waitMs,
+      namespace: this.ns,
+      image: this.options.image,
+      limits: this.options.limits,
+      // A claimed worker keeps the run's whole deadline however long it waited.
+      activeDeadlineSeconds: Math.ceil(waitMs / 1000) + this.options.deadlineSeconds,
+      runtimeClassName: this.options.runtimeClassName,
+      platform: this.options.platform,
+      priorityClassName: this.options.priorityClassName,
+    });
+  }
+
+  warmSpecHash(waitMs: number): string {
+    const { image, limits, runtimeClassName, platform, priorityClassName, gatewayService, gatewayUrl } = this.options;
+    const spec = { launcher: "kubernetes", ns: this.ns, image, limits, runtimeClassName, platform, priorityClassName };
+    return createHash("sha256")
+      .update(JSON.stringify({ ...spec, gatewayService, gatewayUrl, waitMs }))
+      .digest("hex");
+  }
+
+  async startWarm(token: string, waitMs: number): Promise<void> {
+    await this.createIsolated(this.warmPod(token, waitMs), buildNativeWarmNetworkPolicy(token, this.ns), () =>
+      this.removeWarm(token),
+    );
+  }
+
+  async reattestWarm(token: string, waitMs: number): Promise<boolean> {
+    const pod = await this.api.readPod(this.ns, nativeWarmWorkerName(token));
+    if (pod?.status?.phase !== "Running") return false;
+    return this.matches(this.warmPod(token, waitMs), buildNativeWarmNetworkPolicy(token, this.ns));
+  }
+
+  async deliver(token: string, input: WorkerInput): Promise<void> {
+    const code = await this.api.exec(
+      this.ns,
+      nativeWarmWorkerName(token),
+      NATIVE_WORKER_CONTAINER,
+      warmDeliveryCommand(),
+      {
+        timeoutMs: 20_000,
+        stdin: Readable.from([`${JSON.stringify(input)}\n`]),
+      },
+    );
+    if (code !== 0) {
+      throw new Error(`${NATIVE_SANDBOX_WARM_DELIVERY_FAILED}: delivering the run's input exited ${code}.`);
+    }
+  }
+
+  warmHandle(token: string): WorkerHandle {
+    return this.handleByName(nativeWarmWorkerName(token));
+  }
+
+  inspectWarm(token: string): Promise<NativeWorkerState> {
+    return this.inspectByName(nativeWarmWorkerName(token));
+  }
+
+  async killWarm(token: string): Promise<void> {
+    await this.api.deletePod(this.ns, nativeWarmWorkerName(token), 0);
+  }
+
+  async removeWarm(token: string): Promise<void> {
+    const name = nativeWarmWorkerName(token);
+    await this.api.deletePod(this.ns, name, 0);
+    await this.api.deleteNetworkPolicy(this.ns, name);
+  }
+
+  async listWarm(): Promise<string[]> {
+    const pods = await this.api.listPods(this.ns, NATIVE_WARM_SELECTOR);
+    return pods
+      .map((pod) => pod.metadata?.labels?.[NATIVE_WARM_TOKEN_LABEL] ?? "")
+      .filter((token) => /^[0-9a-f]{20}$/.test(token));
   }
 }

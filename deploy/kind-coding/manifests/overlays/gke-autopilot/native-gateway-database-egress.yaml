@@ -1,0 +1,32 @@
+# The native gateway's database reachability on this target, exactly as the coding proxy's
+# (proxy-database-egress.yaml): its Auth Proxy sidecar reaches Cloud SQL on 3307 only (the
+# instance requires the connector), and the GKE metadata server for Workload Identity tokens.
+# `wardby-database-cidr` is substituted at apply time.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-native-gateway-database
+  namespace: wardby-coding
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-native-gateway
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: wardby-database-cidr
+      ports:
+        - protocol: TCP
+          port: 3307
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.254/32
+        - ipBlock:
+            cidr: 169.254.169.252/32
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 988

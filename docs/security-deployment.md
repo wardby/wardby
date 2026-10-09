@@ -636,7 +636,8 @@ socket, or network except the native gateway. The gateway is a trusted
 component: it holds the LLM credentials and integration settings, so give it
 the database and provider settings it needs and nothing else, never the Docker
 socket, and do not publish its port outside the Docker host. Only the server,
-which launches workers, needs Docker access. See
+which launches workers, needs Docker access (or, on Kubernetes, permission to
+create pods in the run namespace). See
 [Native sandbox](native-sandbox.md).
 
 ## Images and dependencies

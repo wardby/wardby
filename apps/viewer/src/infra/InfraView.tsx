@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { AppError } from "../api/client";
-import type { InfraModel } from "./adapter";
+import type { InfraModel, PodView } from "./adapter";
 import type { EndedRun } from "./endedRuns";
 import { InfraMap } from "./InfraMap";
 import { InfraPanel } from "./InfraPanel";
@@ -59,7 +59,7 @@ interface Props {
   mode: InfraMode;
   selectedPod: string | null;
   onSelectPod: (pod: string | null) => void;
-  onOpenRun: (runSha: string) => void;
+  onOpenRun: (pod: PodView) => void;
   onRetry: () => void;
 }
 
@@ -105,7 +105,8 @@ export function InfraView({ cluster: c, model, endedRuns, mode, selectedPod, onS
 
   const notes = notices(cluster, error, namespace);
 
-  const pods = [...model.groups.alwaysOn, ...model.groups.codingRuns, ...model.groups.jobs];
+  const { alwaysOn, codingRuns, agentSandboxes, warmPool, jobs } = model.groups;
+  const pods = [...alwaysOn, ...codingRuns, ...agentSandboxes, ...warmPool, ...jobs];
   const pod = pods.find((p) => p.name === selectedPod);
   const select = (name: string) => onSelectPod(name === selectedPod ? null : name);
 

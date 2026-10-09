@@ -49,6 +49,12 @@
             }
           ]
         },
+        "warmWorkerName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "status": {
           "type": "string",
           "enum": [
@@ -580,6 +586,7 @@
         "model",
         "codingProvider",
         "nativeExecutionMode",
+        "warmWorkerName",
         "status",
         "trigger",
         "turns",

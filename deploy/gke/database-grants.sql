@@ -2,7 +2,7 @@
 -- deploy/gke/bootstrap-database-iam.sh as the built-in owner. Idempotent.
 --
 -- {{owner}}    the built-in user that owns every table (terraform output database_user)
--- {{migrator}} {{app}} {{proxy}}  the three Cloud SQL IAM users
+-- {{migrator}} {{app}} {{proxy}} {{gateway}}  the four Cloud SQL IAM users
 --
 -- Privileges go to NOLOGIN group roles, so nothing below names a project; the
 -- IAM users only become members. If the coding proxy's code starts using
@@ -31,6 +31,10 @@ ALTER ROLE "{{migrator}}" SET role = '{{owner}}';
 GRANT wardby_app TO "{{app}}";
 -- ;;
 GRANT wardby_proxy TO "{{proxy}}";
+-- ;;
+-- The native sandbox gateway settles sandboxed runs, dispatches their delegations and serves
+-- their memory, datastores and secrets: the app's data access, under its own login.
+GRANT wardby_app TO "{{gateway}}";
 -- ;;
 
 -- The app: data, never schema. The default privileges cover every table the

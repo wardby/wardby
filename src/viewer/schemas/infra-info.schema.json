@@ -67,11 +67,88 @@
               "type": "null"
             }
           ]
+        },
+        "native": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "launcher": {
+                  "type": "string",
+                  "enum": [
+                    "docker",
+                    "kubernetes"
+                  ]
+                },
+                "warmPoolSize": {
+                  "type": "integer"
+                },
+                "kubernetes": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "namespace": {
+                          "type": "string"
+                        },
+                        "runtimeClass": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "runLabel": {
+                          "type": "string"
+                        },
+                        "componentLabel": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string"
+                          }
+                        },
+                        "warmPoolLabel": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string"
+                          }
+                        },
+                        "warmWorkerLabel": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "namespace",
+                        "runtimeClass",
+                        "runLabel",
+                        "componentLabel",
+                        "warmPoolLabel",
+                        "warmWorkerLabel"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "launcher",
+                "warmPoolSize",
+                "kubernetes"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "launcher",
-        "kubernetes"
+        "kubernetes",
+        "native"
       ],
       "additionalProperties": false
     }

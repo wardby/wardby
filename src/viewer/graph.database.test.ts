@@ -24,6 +24,7 @@ const ids = {
   R5: id("r5"),
 };
 const groupId = id("group");
+const warmId = randomUUID().replaceAll("-", "").slice(0, 20);
 
 describe.skipIf(!process.env.DATABASE_URL)("loadGraph (PostgreSQL)", () => {
   beforeAll(async () => {
@@ -95,7 +96,23 @@ describe.skipIf(!process.env.DATABASE_URL)("loadGraph (PostgreSQL)", () => {
       },
     });
     await db.run.create({
-      data: { id: ids.R3, agentId: ids.A, parentRunId: ids.R0, status: "running", startedAt: ago(2 * MIN) },
+      data: {
+        id: ids.R3,
+        agentId: ids.A,
+        parentRunId: ids.R0,
+        status: "running",
+        startedAt: ago(2 * MIN),
+        nativeExecutionMode: "sandbox",
+        nativeWarmWorker: {
+          create: {
+            id: warmId,
+            name: `wardby-nwarm-${warmId}`,
+            status: "claimed",
+            specHash: "s",
+            claimedAt: ago(2 * MIN),
+          },
+        },
+      },
     });
     await db.run.create({
       data: {
@@ -113,6 +130,7 @@ describe.skipIf(!process.env.DATABASE_URL)("loadGraph (PostgreSQL)", () => {
 
   afterAll(async () => {
     for (const r of [ids.R5, ids.R3, ids.R2, ids.R4, ids.R1, ids.R0]) await db.run.deleteMany({ where: { id: r } });
+    await db.nativeWarmWorker.deleteMany({ where: { id: warmId } });
     await db.agent.deleteMany({ where: { id: { in: [ids.A, ids.C] } } });
     await db.budgetGroup.deleteMany({ where: { id: groupId } });
     await db.$disconnect();
@@ -131,6 +149,9 @@ describe.skipIf(!process.env.DATABASE_URL)("loadGraph (PostgreSQL)", () => {
     // The run's execution-mode snapshot, in operator spelling; null when none was recorded.
     expect(snap.runs.find((r) => r.id === ids.R1)?.nativeExecutionMode).toBe("control-plane");
     expect(snap.runs.find((r) => r.id === ids.R0)?.nativeExecutionMode).toBeNull();
+    // A sandbox run that claimed a warm worker names it, so the viewer can find its pod.
+    expect(snap.runs.find((r) => r.id === ids.R3)?.warmWorkerName).toBe(`wardby-nwarm-${warmId}`);
+    expect(snap.runs.find((r) => r.id === ids.R1)?.warmWorkerName).toBeNull();
     const group = snap.spend.groups.find((g) => g.id === groupId);
     expect(group).toMatchObject({ dailyBudgetUsd: 10 });
     expect(group?.spentTodayUsd).toBeCloseTo(0.4);

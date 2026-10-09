@@ -201,13 +201,24 @@ ANTHROPIC_API_KEY_B64="$(b64 "$ANTHROPIC_API_KEY")"
   printf '  OPENAI_API_KEY: %s\n' "$OPENAI_API_KEY_B64"
   printf '  ANTHROPIC_API_KEY: %s\n' "$ANTHROPIC_API_KEY_B64"
 } | kubectl --context "$KUBE_CONTEXT" apply -f -
-# The native sandbox gateway's env: the proxy's values plus SECRET_APP_KEY (it decrypts the agent
-# secrets a sandboxed tool reads). Optional: without it, sandboxed tools simply get no secrets.
-SECRET_APP_KEY_VALUE=""
-if grep -qE "^[[:space:]]*(export[[:space:]]+)?SECRET_APP_KEY=" .env.local; then
-  SECRET_APP_KEY_VALUE="$(env_value SECRET_APP_KEY)"
-fi
+# The native sandbox gateway's env: the proxy's values, SECRET_APP_KEY (required: the gateway decrypts
+# the agent secrets a sandboxed tool reads, and refuses to start without it), and the GitHub App's
+# id and key when .env.local has them (a sandboxed run's repository built-ins; without them those
+# tools are simply not offered).
+# Each value is its own assignment so `set -e` stops on a missing one (see above).
+SECRET_APP_KEY_VALUE="$(env_value SECRET_APP_KEY)"
 SECRET_APP_KEY_B64="$(b64 "$SECRET_APP_KEY_VALUE")"
+# The App's private key spans lines, which env_value (one line) cannot read: dotenv-flow's parser
+# (the server's own) prints it base64-encoded, or nothing when it is unset.
+dotenv_b64() {
+  node -e 'const v = require("dotenv-flow").parse([".env.local"])[process.argv[1]]; process.stdout.write(v ? Buffer.from(v).toString("base64") : "")' "$1"
+}
+GITHUB_APP_ID_B64="$(dotenv_b64 GITHUB_APP_ID)"
+GITHUB_APP_PRIVATE_KEY_B64="$(dotenv_b64 GITHUB_APP_PRIVATE_KEY)"
+GITHUB_APP_LINES=""
+if [[ -n "$GITHUB_APP_ID_B64" && -n "$GITHUB_APP_PRIVATE_KEY_B64" ]]; then
+  GITHUB_APP_LINES="$(printf '  GITHUB_APP_ID: %s\n  GITHUB_APP_PRIVATE_KEY: %s' "$GITHUB_APP_ID_B64" "$GITHUB_APP_PRIVATE_KEY_B64")"
+fi
 {
   printf 'apiVersion: v1\n'
   printf 'kind: Secret\n'
@@ -220,9 +231,11 @@ SECRET_APP_KEY_B64="$(b64 "$SECRET_APP_KEY_VALUE")"
   printf '  OPENAI_API_KEY: %s\n' "$OPENAI_API_KEY_B64"
   printf '  ANTHROPIC_API_KEY: %s\n' "$ANTHROPIC_API_KEY_B64"
   printf '  SECRET_APP_KEY: %s\n' "$SECRET_APP_KEY_B64"
+  if [[ -n "$GITHUB_APP_LINES" ]]; then printf '%s\n' "$GITHUB_APP_LINES"; fi
 } | kubectl --context "$KUBE_CONTEXT" apply -f -
 unset DATABASE_URL OPENAI_API_KEY ANTHROPIC_API_KEY PROXY_DATABASE_URL \
-  DATABASE_URL_B64 OPENAI_API_KEY_B64 ANTHROPIC_API_KEY_B64 SECRET_APP_KEY_VALUE SECRET_APP_KEY_B64
+  DATABASE_URL_B64 OPENAI_API_KEY_B64 ANTHROPIC_API_KEY_B64 SECRET_APP_KEY_VALUE SECRET_APP_KEY_B64 \
+  GITHUB_APP_LINES GITHUB_APP_ID_B64 GITHUB_APP_PRIVATE_KEY_B64
 
 echo "==> 8/${TOTAL_STEPS} render and apply the manifests"
 kubectl kustomize "${MANIFEST_DIR}/manifests/overlays/kind" \

@@ -35,6 +35,9 @@ const CODING_BADGES: Record<string, { text: string; name: string }> = {
   "claude-code": { text: "CC", name: "Claude Code" },
 };
 
+/** The tag marking a sandbox-mode native run, on the Runs graph and the Infrastructure Map alike. */
+export const SANDBOX_BADGE = { text: "SB", name: "Agent sandbox: this run executed in its own isolated container" };
+
 /** The small tag naming a coding run's worker; an unknown provider gets its first two letters. */
 export function codingBadge(provider: string): { text: string; name: string; known: boolean } {
   const known = CODING_BADGES[provider];

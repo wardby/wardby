@@ -43,6 +43,7 @@ const k8sInfo = (): InfraInfo => ({
     componentLabel: {},
     managedByLabel: {},
   },
+  native: null,
 });
 const settle = () => act(async () => {});
 const send = (frame: ClusterFrame, srv = "https://w.example") => act(() => handler!({ server: srv, frame }));
@@ -66,7 +67,7 @@ describe("useCluster", () => {
   });
 
   it("never connects when the launcher is not kubernetes", async () => {
-    vi.mocked(client.fetchInfra).mockResolvedValue({ launcher: "docker", kubernetes: null });
+    vi.mocked(client.fetchInfra).mockResolvedValue({ launcher: "docker", kubernetes: null, native: null });
     const { result } = renderHook(() => useCluster(server()));
     await settle();
     expect(client.kubeConnect).not.toHaveBeenCalled();

@@ -6,7 +6,12 @@
  * code change. The `assembleProviders` factory (which constructs the concrete
  * adapters) is added once the adapters exist.
  */
-import { KUBERNETES_PLATFORMS, type KubernetesPlatform } from "../providers/jobs/kubernetes-platform.js";
+import {
+  GVISOR_RUNTIME_CLASS,
+  KUBERNETES_PLATFORMS,
+  platformProfile,
+  type KubernetesPlatform,
+} from "../providers/jobs/kubernetes-platform.js";
 
 export type JobLauncherKind = "local" | "docker" | "kubernetes";
 export type EmailProviderKind = "smtp" | "ses";
@@ -331,6 +336,12 @@ interface NativeSandboxCommonConfig {
   memoryMb: number;
   /** Docker only: Kubernetes has no per-pod process limit (it is a node-level kubelet setting). */
   pids: number;
+  /** NATIVE_SANDBOX_MAX_CONCURRENT: at most this many sandbox runs at once (unset = no cap). */
+  maxConcurrent?: number;
+  /** NATIVE_SANDBOX_WARM_POOL_SIZE: idle, isolated workers kept ready for runs to claim (0 = no pool). */
+  warmPoolSize: number;
+  /** NATIVE_SANDBOX_WARM_MAX_AGE_MS: an idle worker older than this is replaced, never claimed. */
+  warmMaxAgeMs: number;
 }
 
 export interface DockerNativeSandboxConfig extends NativeSandboxCommonConfig {
@@ -347,6 +358,14 @@ export interface KubernetesNativeSandboxConfig extends NativeSandboxCommonConfig
   /** The native gateway's Service in that namespace. */
   gatewayService: string;
   runtimeClassName?: string;
+  /** KUBERNETES_PLATFORM: worker pods are conformed to its admission rules. */
+  platform: KubernetesPlatform;
+  /** NATIVE_SANDBOX_PRIORITY_CLASS, else KUBERNETES_RUN_PRIORITY_CLASS. */
+  priorityClassName?: string;
+  /** How long a worker pod may take to start running (NATIVE_SANDBOX_READY_TIMEOUT_MS). */
+  readyTimeoutMs?: number;
+  /** How long its isolation may take to prove from inside (NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS). */
+  enforcementTimeoutMs?: number;
 }
 
 export type NativeSandboxConfig = DockerNativeSandboxConfig | KubernetesNativeSandboxConfig;
@@ -371,6 +390,24 @@ export function loadNativeSandboxConfig(env: NodeJS.ProcessEnv = process.env): N
     cpus: optionalPositiveNumber(env.NATIVE_SANDBOX_CPUS, "NATIVE_SANDBOX_CPUS", 1),
     memoryMb: optionalPositiveInteger(env.NATIVE_SANDBOX_MEMORY_MB, "NATIVE_SANDBOX_MEMORY_MB") ?? 512,
     pids: optionalPositiveInteger(env.NATIVE_SANDBOX_PIDS, "NATIVE_SANDBOX_PIDS") ?? 128,
+    ...optionalField(
+      "maxConcurrent",
+      optionalPositiveInteger(env.NATIVE_SANDBOX_MAX_CONCURRENT, "NATIVE_SANDBOX_MAX_CONCURRENT"),
+    ),
+    warmPoolSize:
+      optionalBoundedInteger(
+        env.NATIVE_SANDBOX_WARM_POOL_SIZE?.trim() || undefined,
+        "NATIVE_SANDBOX_WARM_POOL_SIZE",
+        0,
+        50,
+      ) ?? 0,
+    warmMaxAgeMs:
+      optionalBoundedInteger(
+        env.NATIVE_SANDBOX_WARM_MAX_AGE_MS?.trim() || undefined,
+        "NATIVE_SANDBOX_WARM_MAX_AGE_MS",
+        60_000,
+        21_600_000,
+      ) ?? 1_800_000,
   };
   if (launcher === "kubernetes") {
     // A cluster pulls by registry digest; a local image id means nothing to it.
@@ -383,13 +420,43 @@ export function loadNativeSandboxConfig(env: NodeJS.ProcessEnv = process.env): N
     const runtimeClassName =
       env.NATIVE_SANDBOX_RUNTIME_CLASS?.trim() || env.KUBERNETES_RUNTIME_CLASS?.trim() || undefined;
     const context = env.KUBERNETES_CONTEXT?.trim() || undefined;
+    // The platform and run priority class are the coding launcher's settings, validated the same way.
+    const cluster = loadKubernetesJobConfig({
+      KUBERNETES_PLATFORM: env.KUBERNETES_PLATFORM,
+      KUBERNETES_RUN_PRIORITY_CLASS: env.NATIVE_SANDBOX_PRIORITY_CLASS?.trim() || env.KUBERNETES_RUN_PRIORITY_CLASS,
+    });
+    if (platformProfile(cluster.platform).requiresGvisor && runtimeClassName !== GVISOR_RUNTIME_CLASS) {
+      throw new Error(
+        `KUBERNETES_PLATFORM=${cluster.platform} runs native workers only under gVisor: set NATIVE_SANDBOX_RUNTIME_CLASS (or KUBERNETES_RUNTIME_CLASS) to ${GVISOR_RUNTIME_CLASS} (found ${runtimeClassName ?? "unset"}).`,
+      );
+    }
     return {
       launcher,
       ...common,
       namespace,
       gatewayService: env.NATIVE_GATEWAY_SERVICE?.trim() || "wardby-native-gateway",
+      platform: cluster.platform,
       ...(context ? { context } : {}),
       ...(runtimeClassName ? { runtimeClassName } : {}),
+      ...optionalField("priorityClassName", cluster.priorityClassName),
+      ...optionalField(
+        "readyTimeoutMs",
+        optionalBoundedInteger(
+          env.NATIVE_SANDBOX_READY_TIMEOUT_MS,
+          "NATIVE_SANDBOX_READY_TIMEOUT_MS",
+          1_000,
+          1_800_000,
+        ),
+      ),
+      ...optionalField(
+        "enforcementTimeoutMs",
+        optionalBoundedInteger(
+          env.NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS,
+          "NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS",
+          1_000,
+          600_000,
+        ),
+      ),
     };
   }
   const gatewayContainer = env.NATIVE_GATEWAY_CONTAINER?.trim();
@@ -627,4 +694,9 @@ export function loadDbosConfig(env: NodeJS.ProcessEnv = process.env): DbosConfig
     schemaName: env.DBOS_SCHEMA ?? "dbos",
     executorId: env.DBOS_EXECUTOR_ID ?? crypto.randomUUID(),
   };
+}
+
+/** `{ [key]: value }` when value is set, else nothing: for spreading optional fields under exactOptionalPropertyTypes. */
+function optionalField<K extends string, V>(key: K, value: V | undefined): { [P in K]?: V } {
+  return (value === undefined ? {} : { [key]: value }) as { [P in K]?: V };
 }

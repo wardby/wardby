@@ -2,8 +2,9 @@
 /**
  * Minimal CLI.
  *
- *   wardby agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule "<cron>"] [--timezone <tz>] [--memory-enabled] [--effort <level>]
+ *   wardby agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule "<cron>"] [--timezone <tz>] [--memory-enabled] [--effort <level>] [--native-execution-mode control-plane|sandbox]
  *   wardby agent list
+ *   wardby agent mode <name> control-plane|sandbox
  *   wardby agent schedule <name> --cron "<expr>" [--timezone <tz>] [--disable]
  *   wardby run <name>
  *   wardby runs [--agent <name>] [--limit N] [--status <s>]
@@ -22,7 +23,7 @@ import { readFileSync } from "node:fs";
 import { execFile as execFileCallback } from "node:child_process";
 import { parseArgs } from "node:util";
 import { promisify } from "node:util";
-import type { RunStatus } from "#prisma";
+import type { NativeExecutionMode, RunStatus } from "#prisma";
 import {
   loadCodingConcurrencyConfig,
   loadContainerExecutorConfig,
@@ -96,6 +97,7 @@ import { everyoneGrantData } from "./core/grants.js";
 import { parseImportArgs } from "./import/cli-args.js";
 import { runImport } from "./import/index.js";
 import { CLI_USAGE } from "./cli-help.js";
+import { parseCliNativeExecutionMode } from "./cli-native-mode.js";
 import { helpCommand } from "./help/cli.js";
 
 const cliLog = logger.child({ module: "cli" });
@@ -169,6 +171,7 @@ async function agentCreate(args: string[]): Promise<void> {
       effort: { type: "string" },
       owner: { type: "string" },
       public: { type: "boolean" },
+      "native-execution-mode": { type: "string" },
     },
   });
 
@@ -184,6 +187,15 @@ async function agentCreate(args: string[]): Promise<void> {
   const maxTurns = values["max-turns"] ? Number(values["max-turns"]) : 10;
   if (!Number.isInteger(maxTurns) || maxTurns <= 0) {
     fail(`--max-turns must be a positive integer, got "${values["max-turns"]}".`);
+  }
+
+  let nativeExecutionMode: NativeExecutionMode | undefined;
+  if (values["native-execution-mode"] !== undefined) {
+    try {
+      nativeExecutionMode = parseCliNativeExecutionMode(values["native-execution-mode"]);
+    } catch (err) {
+      fail(err instanceof Error ? err.message : String(err));
+    }
   }
 
   const timezone = values.timezone ?? "UTC";
@@ -242,6 +254,7 @@ async function agentCreate(args: string[]): Promise<void> {
         maxTurns,
         memoryEnabled: values["memory-enabled"] ?? false,
         effort: values.effort ?? null,
+        ...(nativeExecutionMode ? { nativeExecutionMode } : {}),
         ownerId: ownerId!,
       },
     });
@@ -581,6 +594,29 @@ async function agentSchedule(args: string[]): Promise<void> {
   console.log(`schedule set for "${name}": "${schedule}" (${timezone}).`);
 }
 
+/** Where a native agent's later runs execute; runs already created keep their mode. */
+async function agentMode(args: string[]): Promise<void> {
+  const [name, value, ...extra] = args;
+  if (!name || !value || extra.length > 0) {
+    fail("agent mode requires an agent name and a mode: wardby agent mode <name> control-plane|sandbox");
+  }
+  let nativeExecutionMode: NativeExecutionMode;
+  try {
+    nativeExecutionMode = parseCliNativeExecutionMode(value);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+  const agent = await prisma.agent.findUnique({ where: { name } });
+  if (!agent) {
+    fail(`unknown agent "${name}".`);
+  }
+  if (agent.kind !== "native") {
+    fail(`"${name}" is a coding agent; the native execution mode only applies to native agents.`);
+  }
+  await prisma.agent.update({ where: { id: agent.id }, data: { nativeExecutionMode } });
+  console.log(`native execution mode for "${name}": ${value}.`);
+}
+
 async function agentList(): Promise<void> {
   const agents = await prisma.agent.findMany({ orderBy: { name: "asc" } });
   if (agents.length === 0) {
@@ -594,7 +630,8 @@ async function agentList(): Promise<void> {
       : "manual";
     console.log(
       `${agent.name}  ${agent.kind.padEnd(6)}  ${agent.model}  ` +
-        `$${Number(agent.budgetUsd).toFixed(4)}  ${agent.maxTurns} turns  memory ${agent.memoryEnabled ? "on" : "off"}  ${schedule}`,
+        `$${Number(agent.budgetUsd).toFixed(4)}  ${agent.maxTurns} turns  memory ${agent.memoryEnabled ? "on" : "off"}  ${schedule}` +
+        (agent.kind === "native" && agent.nativeExecutionMode === "sandbox" ? "  sandbox" : ""),
     );
   }
 }
@@ -1019,6 +1056,8 @@ async function main(): Promise<void> {
       await agentList();
     } else if (command === "agent" && rest[0] === "schedule") {
       await agentSchedule(rest.slice(1));
+    } else if (command === "agent" && rest[0] === "mode") {
+      await agentMode(rest.slice(1));
     } else if (command === "tool" && rest[0] === "create") {
       await toolCreate(rest.slice(1));
     } else if (command === "tool" && rest[0] === "attach") {

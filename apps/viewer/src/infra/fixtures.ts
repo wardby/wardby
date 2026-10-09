@@ -31,11 +31,13 @@ export const gkeInfo: InfraInfo = {
     componentLabel: labels.component,
     managedByLabel: labels.managedBy,
   },
+  native: null,
 };
 
 export const genericInfo: InfraInfo = {
   launcher: "kubernetes",
   kubernetes: { ...gkeInfo.kubernetes!, platform: "generic", runtimeClass: null },
+  native: null,
 };
 
 export function container(over: Partial<InfraContainer> = {}): InfraContainer {
@@ -190,6 +192,7 @@ export const genericCluster: ClusterState = clusterOf({
 export const kindInfo: InfraInfo = {
   launcher: "kubernetes",
   kubernetes: { ...gkeInfo.kubernetes!, namespace: "wardby-coding", platform: "generic", runtimeClass: null },
+  native: null,
 };
 
 // deploy/kind-coding: the control plane runs on the developer's machine; only the proxy and run pods are in-cluster.
@@ -288,3 +291,43 @@ export const statesCluster = clusterOf({
     }),
   ],
 });
+
+// Sandbox-mode native agents: a cold run pod, a warm pod a run claimed, and an idle warm pod.
+export const NATIVE_SHA = "c".repeat(40);
+const nativeComponent = { "wardby.io/component": "native-run" };
+const warm = (token: string) => ({ ...nativeComponent, "wardby.io/pool": "warm", "wardby.io/warm-worker": token });
+export const sandboxCluster = clusterOf({
+  pod: [
+    pod("wardby-native-aaaa", {
+      labels: { ...nativeComponent, "wardby.io/run-sha256": NATIVE_SHA },
+      runtimeClass: "gvisor",
+      containers: [container({ name: "worker" })],
+    }),
+    pod("wardby-nwarm-1111", {
+      labels: warm("1111"),
+      runtimeClass: "gvisor",
+      containers: [container({ name: "worker" })],
+    }),
+    pod("wardby-nwarm-2222", {
+      labels: warm("2222"),
+      runtimeClass: "gvisor",
+      containers: [container({ name: "worker" })],
+    }),
+  ],
+});
+
+export const sandboxInfo: InfraInfo = {
+  ...gkeInfo,
+  native: {
+    launcher: "kubernetes",
+    warmPoolSize: 2,
+    kubernetes: {
+      namespace: "wardby",
+      runtimeClass: "gvisor",
+      runLabel: "wardby.io/run-sha256",
+      componentLabel: nativeComponent,
+      warmPoolLabel: { "wardby.io/pool": "warm" },
+      warmWorkerLabel: "wardby.io/warm-worker",
+    },
+  },
+};

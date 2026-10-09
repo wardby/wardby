@@ -97,6 +97,26 @@ describe("DetailPanel", () => {
     expect(screen.getByText("Ran in a sandbox container")).toBeInTheDocument();
   });
 
+  it("links a sandbox run to its pod, and a control-plane run to none", () => {
+    const onOpenPod = vi.fn();
+    const run = makeRun({ agentKind: "native", codingProvider: null, nativeExecutionMode: "sandbox" });
+    const view = render(
+      <DetailPanel serverUrl="https://w.example" run={run} runs={known} onSelect={vi.fn()} onOpenPod={onOpenPod} />,
+    );
+    screen.getByRole("button", { name: "Pod ↗" }).click();
+    expect(onOpenPod).toHaveBeenCalledWith(run.id);
+    view.rerender(
+      <DetailPanel
+        serverUrl="https://w.example"
+        run={{ ...run, nativeExecutionMode: "control-plane" }}
+        runs={known}
+        onSelect={vi.fn()}
+        onOpenPod={onOpenPod}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Pod ↗" })).not.toBeInTheDocument();
+  });
+
   it("shows no execution-mode note for a control-plane run", () => {
     setup(makeRun({ nativeExecutionMode: "control-plane" }));
     expect(screen.queryByText("Ran in a sandbox container")).not.toBeInTheDocument();

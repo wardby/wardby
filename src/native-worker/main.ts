@@ -5,10 +5,11 @@
  * protocol frames; diagnostics (and the shared logger) go to stderr.
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { parseMessage, WorkerInputSchema } from "./protocol.js";
 import { createHttpTransport } from "./http-transport.js";
 import { createStdioTransport } from "./stdio.js";
+import { WARM_WORKER_UNCLAIMED_EXIT } from "./warm-delivery.js";
 import { runNativeWorker } from "./worker.js";
 
 function firstLine(): Promise<string> {
@@ -27,13 +28,38 @@ function firstLine(): Promise<string> {
   });
 }
 
+class UnclaimedError extends Error {}
+
 /**
- * The input's source: a mounted file when NATIVE_WORKER_INPUT_FILE names one (a Kubernetes pod
- * mounts it read-only from the run's Secret), otherwise the first line on stdin (Docker, local).
+ * A warm pool worker (NATIVE_WORKER_INPUT_WAIT_MS set) starts before any run exists: it waits for
+ * its input file, delivered after a run claims it (warm-delivery.ts), and gives up after the wait.
+ */
+async function waitForFile(file: string, waitMs: number): Promise<void> {
+  const until = Date.now() + waitMs;
+  for (;;) {
+    if (
+      await stat(file).then(
+        () => true,
+        () => false,
+      )
+    )
+      return;
+    if (Date.now() >= until) throw new UnclaimedError("no run claimed this warm worker in time");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+/**
+ * The input's source: a file when NATIVE_WORKER_INPUT_FILE names one (a Kubernetes pod mounts it
+ * read-only from the run's Secret; a warm worker waits for it), otherwise the first line on stdin
+ * (Docker, local).
  */
 async function readInput(): Promise<string> {
   const file = process.env.NATIVE_WORKER_INPUT_FILE;
-  return file ? (await readFile(file, "utf8")).trim() : firstLine();
+  if (!file) return firstLine();
+  const waitMs = Number(process.env.NATIVE_WORKER_INPUT_WAIT_MS ?? "");
+  if (Number.isFinite(waitMs) && waitMs > 0) await waitForFile(file, waitMs);
+  return (await readFile(file, "utf8")).trim();
 }
 
 async function main(): Promise<void> {
@@ -49,6 +75,10 @@ async function main(): Promise<void> {
 main().then(
   () => process.exit(0),
   (err: unknown) => {
+    if (err instanceof UnclaimedError) {
+      process.stderr.write(`native sandbox worker: ${err.message}\n`);
+      process.exit(WARM_WORKER_UNCLAIMED_EXIT);
+    }
     process.stderr.write(`native sandbox worker failed: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);
   },

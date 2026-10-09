@@ -3,7 +3,7 @@
 # Stands up a wardby control plane on GKE Autopilot, from Terraform through to a
 # serving MCP endpoint.
 #
-#   HOSTNAME=app.example.com deploy/gke/up.sh
+#   WARDBY_HOSTNAME=app.example.com deploy/gke/up.sh
 #
 # Idempotent: safe to re-run. Terraform converges, images are rebuilt and
 # re-pushed (digests change only if the source did), values already in Secret
@@ -38,7 +38,19 @@ OVERLAY="deploy/kind-coding/manifests/overlays/gke-autopilot"
 NAMESPACE="wardby-coding"
 TOTAL_STEPS=12
 
-: "${HOSTNAME:?set HOSTNAME to the hostname the MCP endpoint is published on (e.g. app.example.com)}"
+# Not HOSTNAME: bash and zsh set that to the machine's own name, so a required-variable check on
+# it always passes and the machine name ends up in the Gateway, routes and auth audience.
+: "${WARDBY_HOSTNAME:?set WARDBY_HOSTNAME to the hostname the MCP endpoint is published on (e.g. app.example.com)}"
+if ! [[ "$WARDBY_HOSTNAME" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]]; then
+  echo "up.sh: WARDBY_HOSTNAME must be a lowercase DNS name with at least one dot, no scheme or path (got \"$WARDBY_HOSTNAME\")." >&2
+  exit 1
+fi
+case "$WARDBY_HOSTNAME" in
+  *.lan | *.local | *.localdomain | *.internal | localhost | localhost.*)
+    echo "up.sh: WARDBY_HOSTNAME \"$WARDBY_HOSTNAME\" is a local name, not a public hostname." >&2
+    exit 1
+    ;;
+esac
 
 echo "==> 1/${TOTAL_STEPS} terraform: cluster, image registry, database"
 terraform -chdir="$TF_DIR" init -input=false >/dev/null
@@ -62,8 +74,11 @@ PROXY_SERVICE_ACCOUNT="$(terraform -chdir="$TF_DIR" output -raw proxy_service_ac
 APP_DATABASE_USER="$(terraform -chdir="$TF_DIR" output -raw app_database_user)"
 MIGRATOR_DATABASE_USER="$(terraform -chdir="$TF_DIR" output -raw migrator_database_user)"
 PROXY_DATABASE_USER="$(terraform -chdir="$TF_DIR" output -raw proxy_database_user)"
+GATEWAY_SERVICE_ACCOUNT="$(terraform -chdir="$TF_DIR" output -raw gateway_service_account)"
+GATEWAY_DATABASE_USER="$(terraform -chdir="$TF_DIR" output -raw gateway_database_user)"
 for var in CONNECTION DB_NAME APP_SERVICE_ACCOUNT MIGRATOR_SERVICE_ACCOUNT \
-           PROXY_SERVICE_ACCOUNT APP_DATABASE_USER MIGRATOR_DATABASE_USER PROXY_DATABASE_USER; do
+           PROXY_SERVICE_ACCOUNT APP_DATABASE_USER MIGRATOR_DATABASE_USER PROXY_DATABASE_USER \
+           GATEWAY_SERVICE_ACCOUNT GATEWAY_DATABASE_USER; do
   [[ -n "${!var}" ]] || { echo "up.sh: terraform output for ${var} came back empty; is ${TF_DIR} applied?" >&2; exit 1; }
 done
 # postgresql://<IAM user, @ as %40>@127.0.0.1:5432/<database>: the Auth Proxy
@@ -73,14 +88,17 @@ iam_url() { printf 'postgresql://%s@127.0.0.1:5432/%s' "$(printf '%s' "$1" | sed
 APP_DATABASE_URL="$(iam_url "$APP_DATABASE_USER")"
 MIGRATOR_DATABASE_URL="$(iam_url "$MIGRATOR_DATABASE_USER")"
 PROXY_DATABASE_URL="$(iam_url "$PROXY_DATABASE_USER")"
+GATEWAY_DATABASE_URL="$(iam_url "$GATEWAY_DATABASE_USER")"
 iam_substitutions() {
   sed -e "s|wardby-instance-connection-name|${CONNECTION}|g" \
       -e "s|wardby-app-gsa-email|${APP_SERVICE_ACCOUNT}|g" \
       -e "s|wardby-migrator-gsa-email|${MIGRATOR_SERVICE_ACCOUNT}|g" \
       -e "s|wardby-proxy-gsa-email|${PROXY_SERVICE_ACCOUNT}|g" \
+      -e "s|wardby-gateway-gsa-email|${GATEWAY_SERVICE_ACCOUNT}|g" \
       -e "s|value: wardby-app-database-url|value: ${APP_DATABASE_URL}|g" \
       -e "s|value: wardby-migrator-database-url|value: ${MIGRATOR_DATABASE_URL}|g" \
-      -e "s|value: wardby-proxy-database-url|value: ${PROXY_DATABASE_URL}|g"
+      -e "s|value: wardby-proxy-database-url|value: ${PROXY_DATABASE_URL}|g" \
+      -e "s|value: wardby-gateway-database-url|value: ${GATEWAY_DATABASE_URL}|g"
 }
 # Belt and suspenders against the substitution list above going stale: every
 # rendered manifest must be free of the wardby-*-gsa-email / *-database-url /
@@ -113,6 +131,28 @@ kubectl config use-context "$KUBE_CONTEXT" >/dev/null
 # out, both with 0.0.0.0/0 allowed and with an explicit Service-CIDR rule.
 API_HOST="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' | sed -e 's|https://||' -e 's|:.*||')"
 
+# hostname-change check: moving the public hostname breaks DNS, every client's configured
+# endpoint, and every issued token (their audience names the old host), so a run that would
+# change it stops for confirmation. Terraform (step 1) does not use the hostname.
+LIVE_HOSTNAME="$(kubectl -n "$NAMESPACE" get gateway wardby-control-plane -o jsonpath='{.spec.listeners[0].hostname}' 2>/dev/null || true)"
+if [[ -n "$LIVE_HOSTNAME" && "$LIVE_HOSTNAME" != "$WARDBY_HOSTNAME" ]]; then
+  echo "up.sh: the live deployment is published on ${LIVE_HOSTNAME}; this run would move it to ${WARDBY_HOSTNAME}." >&2
+  echo "       DNS, every client's endpoint, and every issued token are tied to ${LIVE_HOSTNAME}." >&2
+  if [[ "${WARDBY_HOSTNAME_CHANGE:-}" == "$WARDBY_HOSTNAME" ]]; then
+    echo "       Confirmed by WARDBY_HOSTNAME_CHANGE." >&2
+  elif [[ -t 0 ]]; then
+    read -r -p "       Type the new hostname to continue (anything else stops): " HOSTNAME_ANSWER
+    if [[ "$HOSTNAME_ANSWER" != "$WARDBY_HOSTNAME" ]]; then
+      echo "up.sh: hostname change not confirmed; nothing was rendered or applied." >&2
+      exit 1
+    fi
+  else
+    echo "up.sh: hostname change not confirmed. Re-run in a terminal, or set WARDBY_HOSTNAME_CHANGE=${WARDBY_HOSTNAME}." >&2
+    exit 1
+  fi
+fi
+# end hostname-change check
+
 echo "==> 3/${TOTAL_STEPS} build and push images (linux/amd64)"
 # Every image is built for linux/amd64 (deploy/gke/docker-bake.hcl): an arm64
 # image lands in the registry, the pod fails to start, and the failure surfaces
@@ -120,7 +160,7 @@ echo "==> 3/${TOTAL_STEPS} build and push images (linux/amd64)"
 # concurrently from one context, and the Dockerfiles compile JavaScript on the
 # builder's own platform, so an arm64 Mac only emulates what actually ships.
 REGISTRY="$REGISTRY" docker buildx bake -f deploy/gke/docker-bake.hcl --load >/dev/null
-IMAGES=(runtime migration coding-worker coding-worker-node-python claude-coding-worker claude-tool-runner claude-tool-runner-node-python)
+IMAGES=(runtime migration coding-worker coding-worker-node-python claude-coding-worker claude-tool-runner claude-tool-runner-node-python native-worker)
 PUSH_PIDS=()
 for img in "${IMAGES[@]}"; do
   docker push "${REGISTRY}/${img}:latest" >/dev/null &
@@ -143,6 +183,7 @@ WORKER_IMAGE_NODE_PYTHON="$(digest_of coding-worker-node-python)"
 CLAUDE_WORKER_IMAGE="$(digest_of claude-coding-worker)"
 CLAUDE_TOOL_RUNNER_IMAGE="$(digest_of claude-tool-runner)"
 CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON="$(digest_of claude-tool-runner-node-python)"
+NATIVE_WORKER_IMAGE="$(digest_of native-worker)"
 
 echo "==> 4/${TOTAL_STEPS} verify the worker images have tar, head and test"
 # Seeding and collection shell out to these. Without them every launch hangs
@@ -169,6 +210,14 @@ done
 # Claude's node-python tool runner runs a Python project's own checks, like the Codex one.
 if ! docker run --rm --platform linux/amd64 --entrypoint sh "$CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON" -c 'python --version && python -m pytest --version && python -m ruff --version' >/dev/null; then
   echo "up.sh: the Claude node-python tool runner image is missing python, pytest or ruff." >&2
+  exit 1
+fi
+
+# The native sandbox worker: its in-pod isolation probe runs `node`, and it carries no network
+# tooling a tool escape could use (its Dockerfile asserts the same at build time).
+if ! docker run --rm --platform linux/amd64 --entrypoint sh "$NATIVE_WORKER_IMAGE" -c \
+  'command -v node && for t in curl wget nc ssh; do ! command -v "$t"; done' >/dev/null; then
+  echo "up.sh: the native worker image is missing node or carries network tooling." >&2
   exit 1
 fi
 
@@ -218,7 +267,7 @@ fi
 # rather than adopting the hand-made ones and their old annotations. Safe
 # because step 5 put every value in Secret Manager and the canary read every
 # key.
-release_unowned_secrets wardby-coding-proxy-env wardby-control-plane-env
+release_unowned_secrets wardby-coding-proxy-env wardby-control-plane-env wardby-native-gateway-env
 if ! render_secrets external-secrets.yaml | kubectl apply -f - >/dev/null; then
   echo "up.sh: applying the ExternalSecrets failed after the hand-made Secrets were released; running pods are unaffected. Re-run up.sh to finish." >&2
   exit 1
@@ -226,7 +275,7 @@ fi
 # Forces a sync and waits for a fresh one, so a secret version that step 5
 # just added (e.g. a newly generated auth key) is in the Secret before step 9
 # rolls the Deployments.
-SYNCED_SECRETS=(wardby-coding-proxy-env wardby-control-plane-env)
+SYNCED_SECRETS=(wardby-coding-proxy-env wardby-control-plane-env wardby-native-gateway-env)
 # Jira is optional: synced when every Jira secret is set, removed when none is
 # (the control plane reads wardby-jira-env with optional: true).
 if ((JIRA_ENABLED)); then
@@ -352,7 +401,7 @@ echo "    migrations applied"
 echo "==> 9/${TOTAL_STEPS} render and apply the overlay"
 # What is running now, recorded before it is replaced: rollback means going back
 # to exactly these digests (see the rollback note at the end).
-PREVIOUS_IMAGES="$(kubectl -n "$NAMESPACE" get deploy wardby-control-plane wardby-coding-proxy \
+PREVIOUS_IMAGES="$(kubectl -n "$NAMESPACE" get deploy wardby-control-plane wardby-coding-proxy wardby-native-gateway \
   -o jsonpath='{range .items[*]}{.metadata.name}={.spec.template.spec.containers[0].image}{"\n"}{end}' 2>/dev/null || true)"
 # Every value below is target identity: it is substituted here and never
 # committed. The placeholders are the contract between this script and the
@@ -371,8 +420,9 @@ OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
         -e "s|value: wardby-claude-tool-runner-image$|value: ${CLAUDE_TOOL_RUNNER_IMAGE}|" \
         -e "s|value: wardby-claude-coding-worker-image$|value: ${CLAUDE_WORKER_IMAGE}|" \
         -e "s|value: wardby-coding-worker-image$|value: ${WORKER_IMAGE}|" \
+        -e "s|value: wardby-native-worker-image$|value: ${NATIVE_WORKER_IMAGE}|" \
         -e "s|value: wardby-apiserver-host|value: ${API_HOST}|" \
-        -e "s|wardby-control-plane-hostname|${HOSTNAME}|g" \
+        -e "s|wardby-control-plane-hostname|${WARDBY_HOSTNAME}|g" \
         -e "s|cidr: wardby-database-cidr|cidr: ${DB_IP}/32|g" \
   | iam_substitutions)"
 assert_no_placeholders "$OVERLAY_MANIFEST"
@@ -380,6 +430,7 @@ echo "$OVERLAY_MANIFEST" | kubectl apply -f - >/dev/null
 
 echo "==> 10/${TOTAL_STEPS} wait for rollouts"
 kubectl -n "$NAMESPACE" rollout status deploy/wardby-coding-proxy --timeout=300s
+kubectl -n "$NAMESPACE" rollout status deploy/wardby-native-gateway --timeout=300s
 if ! kubectl -n "$NAMESPACE" rollout status deploy/wardby-control-plane --timeout=600s; then
   # The previous pod keeps serving (maxUnavailable 0). The durable executor
   # launches before anything else, so a missing `dbos` schema grant shows here
@@ -434,6 +485,7 @@ import("/app/dist/core/db.js")
 DATABASE_OK=true
 database_roundtrip wardby-control-plane control-plane Agent "control plane" || DATABASE_OK=false
 database_roundtrip wardby-coding-proxy proxy CodingProxySession "coding proxy" || DATABASE_OK=false
+database_roundtrip wardby-native-gateway gateway NativeGatewaySession "native gateway" || DATABASE_OK=false
 # The proxy's grants only take effect when bootstrap-database-iam.sh runs, and
 # this script does not run it: a release that adds proxy tables deploys fine
 # and then fails every registry request with "permission denied" (an unlogged
@@ -467,12 +519,14 @@ if ! $DATABASE_OK; then
 up.sh: the new pods cannot use the database.
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-control-plane
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-coding-proxy
+  kubectl -n ${NAMESPACE} rollout undo deploy/wardby-native-gateway
 restores the previous images and pod templates (any revision since the IAM
 cutover), which also log in through IAM -- there is no password login to
 restore.
 "permission denied" means the grants are missing or incomplete. On a fresh
 install the coding proxy's are expected to be missing until the bootstrap runs
-again after the first migrations: run deploy/gke/bootstrap-database-iam.sh
+again after the first migrations, and the native gateway's until the bootstrap
+has run once since its identity was added: run deploy/gke/bootstrap-database-iam.sh
 (default mode), then up.sh again (docs/getting-started-gke.md, "Database
 login"). --password-from-stdin is only for a deployment still on password
 login.
@@ -505,9 +559,9 @@ expect_status() {
   echo "up.sh: expected HTTP ${want}, got ${got:-no response}: $*" >&2
   return 1
 }
-expect_status 200 "https://${HOSTNAME}/.well-known/oauth-protected-resource"
+expect_status 200 "https://${WARDBY_HOSTNAME}/.well-known/oauth-protected-resource"
 for i in $(seq 1 12); do
-  got="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://${HOSTNAME}/.well-known/oauth-protected-resource" 2>/dev/null || true)"
+  got="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://${WARDBY_HOSTNAME}/.well-known/oauth-protected-resource" 2>/dev/null || true)"
   if [[ "$got" != "200" ]]; then
     echo "up.sh: discovery answered ${got:-no response} ${i} checks after it first answered 200; the endpoint is not stable." >&2
     exit 1
@@ -515,7 +569,7 @@ for i in $(seq 1 12); do
   sleep 5
 done
 echo "    discovery answers 200, steadily for a minute"
-expect_status 401 -X POST "https://${HOSTNAME}/mcp" -H 'content-type: application/json' \
+expect_status 401 -X POST "https://${WARDBY_HOSTNAME}/mcp" -H 'content-type: application/json' \
   -H 'accept: application/json, text/event-stream' -d "$MCP_INIT"
 echo "    unauthenticated MCP is refused with 401"
 
@@ -523,14 +577,14 @@ cat <<EOF
 
 Done. The control plane is running in ${CLUSTER}.
 
-  MCP endpoint : https://${HOSTNAME}/mcp
+  MCP endpoint : https://${WARDBY_HOSTNAME}/mcp
   database     : ${DB_IP} (private IP, reached only through the Auth Proxy)
   images       : ${REGISTRY}
   secrets      : Secret Manager, prefix ${SECRET_PREFIX} (synced by External Secrets)
 
 Still manual, because neither belongs in a script:
 
-  * The Gateway needs a DNS A record for ${HOSTNAME} pointing at the reserved
+  * The Gateway needs a DNS A record for ${WARDBY_HOSTNAME} pointing at the reserved
     address, and a Google-managed certificate. Use DNS authorization rather than
     load-balancer authorization -- the latter needs the hostname to already
     resolve, which it will not before the endpoint exists.
@@ -544,6 +598,7 @@ Still manual, because neither belongs in a script:
 Roll back (images are pinned by digest, so this is exactly what ran before):
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-control-plane
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-coding-proxy
+  kubectl -n ${NAMESPACE} rollout undo deploy/wardby-native-gateway
 Images before this deploy:
 ${PREVIOUS_IMAGES:-  (none: first deploy)}
 Migrations only go forward, so a rollback is safe only while the schema change it

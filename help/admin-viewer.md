@@ -45,5 +45,9 @@ Armor, routes), each NetworkPolicy with a plain-English summary, and on GKE a
 link from each pod to the Google Cloud console. The run graph's zoom controls
 include **Fit width**, which fills the canvas with the graph's width.
 
+Native agents that run in a sandbox carry an **SB** tag on the Runs graph, and
+the Infrastructure view shows their pods in an **Agent sandboxes** area, with
+the warm pool's idle pods and a link from each pod to its run.
+
 For parameters, status codes, frame formats and schemas, follow
 [`docs/viewer-api.md`](../docs/viewer-api.md).

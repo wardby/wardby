@@ -17,6 +17,7 @@ function makeRun(overrides: Partial<GraphRun> = {}): GraphRun {
     model: "gpt-5.5-codex",
     codingProvider: "codex",
     nativeExecutionMode: null,
+    warmWorkerName: null,
     declaredServices: [],
     status: "running",
     trigger: { kind: "manual" },
@@ -115,6 +116,23 @@ describe("RunNode", () => {
     expect(screen.getByText("haiku-4-5")).toBeInTheDocument();
     expect(screen.getByText(/turn 6 · \$0\.41/)).toBeInTheDocument();
     expect(screen.queryByRole("img", { name: /Codex|Claude Code/ })).toBeNull();
+  });
+
+  it("marks a sandbox-mode native run, and only that one", () => {
+    const native = { agentKind: "native" as const, codingProvider: null };
+    const { unmount } = wrap(
+      <RunNode
+        {...props({ kind: "run", run: makeRun({ ...native, nativeExecutionMode: "sandbox" }), selected: false })}
+      />,
+    );
+    expect(screen.getByRole("img", { name: /^Agent sandbox/ })).toHaveTextContent("SB");
+    unmount();
+    wrap(
+      <RunNode
+        {...props({ kind: "run", run: makeRun({ ...native, nativeExecutionMode: "control-plane" }), selected: false })}
+      />,
+    );
+    expect(screen.queryByRole("img", { name: /^Agent sandbox/ })).toBeNull();
   });
 
   it("marks failed-family runs and selection", () => {

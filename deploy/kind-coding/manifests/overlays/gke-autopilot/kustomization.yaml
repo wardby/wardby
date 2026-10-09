@@ -5,6 +5,8 @@ resources:
   - ../../base
   - proxy-dns-egress.yaml
   - proxy-database-egress.yaml
+  - native-gateway-dns-egress.yaml
+  - native-gateway-database-egress.yaml
   - control-plane.yaml
   - control-plane-gateway.yaml
   - priority.yaml
@@ -12,3 +14,5 @@ patches:
   - path: proxy-cloudsql.yaml
   - path: proxy-priority.yaml
   - path: proxy-resources.yaml
+  - path: native-gateway-cloudsql.yaml
+  - path: quota.yaml

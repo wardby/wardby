@@ -82,6 +82,7 @@ MIGRATOR_GSA="$(out migrator_service_account)"
 MIGRATOR_USER="$(out migrator_database_user)"
 APP_USER="$(out app_database_user)"
 PROXY_USER="$(out proxy_database_user)"
+GATEWAY_USER="$(out gateway_database_user)"
 DEFAULT_KUBE_CONTEXT="gke_${PROJECT_ID}_${REGION}_${CLUSTER}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-$DEFAULT_KUBE_CONTEXT}"
 # Every call is bounded, so an unresponsive API server cannot hang the script
@@ -171,6 +172,7 @@ render_grants() {
     -e "s#{{migrator}}#$(sed_escape "$MIGRATOR_USER")#g" \
     -e "s#{{app}}#$(sed_escape "$APP_USER")#g" \
     -e "s#{{proxy}}#$(sed_escape "$PROXY_USER")#g" \
+    -e "s#{{gateway}}#$(sed_escape "$GATEWAY_USER")#g" \
     deploy/gke/database-grants.sql)"
   if grep -q '{{' <<<"$rendered"; then
     echo "bootstrap: a placeholder was left in database-grants.sql." >&2

@@ -17,11 +17,17 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../../src/core/db.ts";
 import { PrismaProxyLedger } from "../../src/providers/coding-proxy/prisma-ledger.ts";
 import { PrismaRegistryStore } from "../../src/providers/coding-proxy/registry/prisma-store.ts";
+import { PrismaGatewayLedger } from "../../src/native-worker/ledger.ts";
 import { missingGrantsQuery, proxyGrantChecks } from "./proxy-grant-checks.mjs";
 
 const GRANTS = readFileSync(new URL("./database-grants.sql", import.meta.url), "utf8");
 const suffix = randomUUID().slice(0, 8);
-const rolesFor = (s) => ({ app: `t_app_${s}`, proxy: `t_proxy_${s}`, migrator: `t_migrator_${s}` });
+const rolesFor = (s) => ({
+  app: `t_app_${s}`,
+  proxy: `t_proxy_${s}`,
+  migrator: `t_migrator_${s}`,
+  gateway: `t_gateway_${s}`,
+});
 const groupsFor = (s) => ({ app: `t_wardby_app_${s}`, proxy: `t_wardby_proxy_${s}` });
 const roles = rolesFor(suffix);
 const groups = groupsFor(suffix);
@@ -35,6 +41,7 @@ function render(owner, r = roles, g = groups) {
     .replaceAll("{{migrator}}", r.migrator)
     .replaceAll("{{app}}", r.app)
     .replaceAll("{{proxy}}", r.proxy)
+    .replaceAll("{{gateway}}", r.gateway)
     .replace(/\bwardby_app\b/g, g.app)
     .replace(/\bwardby_proxy\b/g, g.proxy)
     .replace(/\bdbos\b/g, dbosSchema);
@@ -269,6 +276,42 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
       /permission denied/,
     );
     await expect(app.$executeRawUnsafe(`TRUNCATE "CodingProxyRequest"`)).rejects.toThrow(/permission denied/);
+  });
+
+  it("lets the native gateway settle a sandboxed run through its ledger, with the app's data access and no schema change", async () => {
+    const gatewayRunId = `${runId}-gw`;
+    await admin.agent.upsert({
+      where: { id: agentId },
+      create: { id: agentId, name: agentId, systemPrompt: "x", model: "gpt-5.6-luna", budgetUsd: 1 },
+      update: {},
+    });
+    await admin.run.create({
+      data: { id: gatewayRunId, agentId, nativeExecutionMode: "sandbox", executionManaged: true },
+    });
+    try {
+      // The control plane creates the session; the gateway serves it.
+      const session = await new PrismaGatewayLedger(admin).createSession({
+        runId: gatewayRunId,
+        capabilityHash: `grants-cap-${suffix}`,
+        deadlineAt: new Date(Date.now() + 60_000),
+        budgetUsd: 1,
+        snapshot: {},
+      });
+      const gateway = clientAs(roles.gateway);
+      clients.push(gateway);
+      const ledger = new PrismaGatewayLedger(gateway);
+      await ledger.markNetworkReadyForRun(gatewayRunId);
+      expect((await ledger.findSessionByCapabilityHash(`grants-cap-${suffix}`))?.networkReadyAt).toBeInstanceOf(Date);
+      expect(await ledger.claim(session.id, "call-1", "datastore.get")).toEqual({ outcome: "claimed" });
+      await ledger.recordResult(session.id, "call-1", { ok: true });
+      await ledger.endSession(session.id, "finished");
+      await gateway.run.update({ where: { id: gatewayRunId }, data: { status: "succeeded", finishedAt: new Date() } });
+      await expect(gateway.$executeRawUnsafe(`CREATE TABLE "grants_probe_gw_${suffix}" (id int)`)).rejects.toThrow(
+        /permission denied/,
+      );
+    } finally {
+      await admin.run.deleteMany({ where: { id: gatewayRunId } });
+    }
   });
 
   it("keeps the app out of the migration history", async (ctx) => {

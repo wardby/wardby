@@ -2,8 +2,10 @@
 # service sandbox-mode native run pods call for model calls, built-in tools, and their tools'
 # datastore/secret/fetch access. It holds the database URL and provider credentials and no
 # Kubernetes API access at all (no token, no Role): runs it needs started (a delegation) are
-# recorded and started by the control plane. `image: wardby-runtime` is a placeholder — up.sh
-# substitutes the resolved runtime digest into the rendered manifest.
+# recorded and started by the control plane. `image: wardby-runtime` is a placeholder — each
+# target's up.sh substitutes the resolved runtime digest into the rendered manifest. Every target
+# adds its own database egress (overlays/*/native-gateway-database-egress.yaml) and provides the
+# wardby-native-gateway-env Secret.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -35,6 +37,10 @@ spec:
           envFrom:
             - secretRef:
                 name: wardby-native-gateway-env
+            # Jira built-ins in sandbox runs, where Jira is configured (the control plane's same Secret).
+            - secretRef:
+                name: wardby-jira-env
+                optional: true
           env:
             - name: NODE_ENV
               value: production

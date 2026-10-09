@@ -9,6 +9,7 @@ resources:
   - service-accounts.yaml
   - default-deny.yaml
   - proxy.yaml
+  - native-gateway.yaml
   - launcher-role.yaml
   - launcher-namespace-reader.yaml
   - quota.yaml

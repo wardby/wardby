@@ -7,7 +7,7 @@ vi.mock("../api/client", async (orig) => ({ ...(await orig<typeof import("../api
 const hook = vi.hoisted(() => ({ value: null as unknown }));
 vi.mock("./useCluster", () => ({ useCluster: () => hook.value }));
 
-import { gkeCluster, gkeInfo, RUN_SHA } from "./fixtures";
+import { gkeCluster, gkeInfo, RUN_SHA, sandboxCluster, sandboxInfo } from "./fixtures";
 import { InfraScreen } from "./InfraScreen";
 import { runSha } from "./runSha";
 import { initialCluster } from "./state";
@@ -224,5 +224,26 @@ describe("InfraScreen pod -> run", () => {
     await waitFor(() => expect(widen).toHaveBeenCalled());
     await act(async () => rerender(el(true)));
     expect(await screen.findByText(/not in the selected time window/)).toBeInTheDocument();
+  });
+});
+
+describe("InfraScreen agent sandboxes", () => {
+  const id = "cmus7t6wd0000hesqosaxwae7";
+  const claimed = { id, warmWorkerName: "wardby-nwarm-2222" } as GraphRun;
+
+  it("opens the run that claimed a warm pod, by the worker name it records", async () => {
+    const onOpenRun = vi.fn();
+    hook.value = live({ info: sandboxInfo, cluster: sandboxCluster });
+    renderScreen({ runs: [claimed], onOpenRun });
+    screen.getByRole("button", { name: "Open run wardby-nwarm-2222" }).click();
+    await waitFor(() => expect(onOpenRun).toHaveBeenCalledWith(id));
+  });
+
+  it("selects a claimed warm pod for its run", async () => {
+    const cleared = vi.fn();
+    hook.value = live({ info: sandboxInfo, cluster: sandboxCluster });
+    renderScreen({ runs: [claimed], pendingRunSha: await runSha(id), onPendingRunSha: cleared });
+    expect(await screen.findByRole("heading", { name: "wardby-nwarm-2222" })).toBeInTheDocument();
+    expect(cleared).toHaveBeenCalled();
   });
 });

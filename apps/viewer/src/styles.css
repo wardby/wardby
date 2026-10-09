@@ -502,6 +502,21 @@ button:disabled {
   background: #b4532f;
 }
 
+/* Sandbox-mode native runs: the same mark on the Runs graph and the Infrastructure Map. */
+.sandbox-badge {
+  flex: none;
+  align-self: center;
+  padding: 0 0.3em;
+  border-radius: 4px;
+  font-size: 0.7em;
+  font-weight: 700;
+  line-height: 1.5;
+  letter-spacing: 0.03em;
+  /* Fixed colour, dark enough for white text in both themes. */
+  color: #fff;
+  background: #6a4bc4;
+}
+
 .node-title {
   min-width: 0;
   font-weight: 600;
@@ -1319,6 +1334,40 @@ button:disabled {
 
 .map-fence > .map-zone-label {
   color: var(--warn);
+}
+
+.map-agent-fence {
+  border-color: #6a4bc4;
+}
+
+.map-agent-fence > .map-zone-label {
+  color: inherit;
+}
+
+.map-warm-pool {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.map-warm-pod {
+  width: 0.9rem;
+  height: 0.9rem;
+  padding: 0;
+  border: 1px solid #6a4bc4;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+}
+
+.map-warm-pod.ready {
+  background: #6a4bc4;
+}
+
+.map-warm-pod[aria-pressed="true"] {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .map-pods,

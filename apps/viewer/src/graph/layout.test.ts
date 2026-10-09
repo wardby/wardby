@@ -16,6 +16,7 @@ function run(id: string, parentRunId: string | null, startedAt: string): GraphRu
     model: "m",
     codingProvider: null,
     nativeExecutionMode: null,
+    warmWorkerName: null,
     declaredServices: [],
     status: "running",
     trigger: { kind: "manual" },

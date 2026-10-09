@@ -128,3 +128,64 @@ describe("DockerNativeWorkerLauncher", () => {
     expect(calls.filter((c) => c.args.startsWith("container rm"))).toHaveLength(1);
   });
 });
+
+describe("DockerNativeWorkerLauncher warm pool workers", () => {
+  const token = "0123456789abcdef0123";
+  const warm = { network: `wardby-nwnet-${token}`, worker: `wardby-nwarm-${token}` };
+
+  it("starts a detached warm worker on its own internal network, with no input and no run label", async () => {
+    const { docker, calls } = fakeDocker([[/^image inspect/, ok("sha256:abc")]]);
+    await launcher(docker).startWarm(token, 60_000);
+    const run = calls.find((c) => c.args.startsWith("run "))!;
+    expect(run.args).toMatch(/^run -d --name wardby-nwarm-0123456789abcdef0123 /);
+    expect(run.args).toContain(`--network ${warm.network}`);
+    expect(run.args).toContain("--env NATIVE_WORKER_INPUT_FILE=/tmp/wardby-input/input.json");
+    expect(run.args).toContain("--env NATIVE_WORKER_INPUT_WAIT_MS=60000");
+    expect(run.args).toContain("--label io.wardby.pool=warm");
+    expect(run.args).not.toContain("io.wardby.run-sha256");
+    expect(run.input ?? "").toBe("");
+    expect(calls.some((c) => c.args.startsWith("network create") && c.args.includes("--internal"))).toBe(true);
+    expect(
+      calls.some((c) => c.args === `network connect --alias wardby-native-gateway ${warm.network} wardby-gateway`),
+    ).toBe(true);
+  });
+
+  it("removes what it made when the warm worker cannot start", async () => {
+    const { docker, calls } = fakeDocker([
+      [/^image inspect/, ok("sha256:abc")],
+      [/^run /, no("boom")],
+    ]);
+    await expect(launcher(docker).startWarm(token, 60_000)).rejects.toThrow(/start the warm worker/);
+    expect(calls.map((c) => c.args)).toEqual(
+      expect.arrayContaining([`container rm --force ${warm.worker}`, `network rm ${warm.network}`]),
+    );
+  });
+
+  it("delivers the input on exec stdin, never in the command", async () => {
+    const { docker, calls } = fakeDocker([]);
+    await launcher(docker).deliver(token, input);
+    const call = calls.at(-1)!;
+    expect(call.args).toMatch(new RegExp(`^container exec -i ${warm.worker} node -e `));
+    expect(call.args).not.toContain(input.gateway!.capability);
+    expect(JSON.parse(call.input!)).toEqual(input);
+    const failing = fakeDocker([[/^container exec/, { code: 2, stdout: "", stderr: "" }]]);
+    await expect(launcher(failing.docker).deliver(token, input)).rejects.toThrow(/native_sandbox_warm_delivery_failed/);
+  });
+
+  it("re-attests only a running worker attached to its own network alone", async () => {
+    const answer = (stdout: string) => launcher(fakeDocker([[/^container inspect/, ok(stdout)]]).docker);
+    expect(await answer(`running {"${warm.network}":{}}\n`).reattestWarm(token)).toBe(true);
+    expect(await answer(`exited {"${warm.network}":{}}\n`).reattestWarm(token)).toBe(false);
+    expect(await answer(`running {"${warm.network}":{},"bridge":{}}\n`).reattestWarm(token)).toBe(false);
+    expect(await launcher(fakeDocker([[/^container inspect/, no("No such")]]).docker).reattestWarm(token)).toBe(false);
+  });
+
+  it("lists warm workers by token, which the run janitor's listing skips", async () => {
+    const { docker } = fakeDocker([
+      [/label=io.wardby.pool=warm/, ok(`${token}\nnot-a-token\n`)],
+      [/label=io.wardby.component=native-worker/, ok(`${warm.worker} \n`)],
+    ]);
+    expect(await launcher(docker).listWarm()).toEqual([token]);
+    expect(await launcher(docker).listWorkers()).toEqual([]);
+  });
+});

@@ -9,7 +9,10 @@ import {
   gkeInfo,
   kindCluster,
   kindInfo,
+  NATIVE_SHA,
   pod,
+  sandboxCluster,
+  sandboxInfo,
   twoRunsCluster,
 } from "./fixtures";
 import type { InfraBackendPolicy, InfraEdge, InfraNetworkPolicy } from "./types";
@@ -379,5 +382,49 @@ suite("kind and out-of-cluster control planes", () => {
       expect(describe(gkeCluster, gkeInfo, { context: "prod" }).groups.alwaysOn[0].console).toBeNull();
       expect(describe(kindCluster, kindInfo, { context: "kind-dev" }).groups.alwaysOn[0].console).toBeNull();
     });
+  });
+});
+
+suite("agent sandboxes", () => {
+  it("groups sandbox run pods apart from coding runs, with the run's sha", () => {
+    const m = describe(sandboxCluster, sandboxInfo);
+    expect(m.groups.codingRuns).toEqual([]);
+    expect(m.groups.agentSandboxes.map((p) => [p.name, p.group, p.runSha, p.warm])).toEqual([
+      ["wardby-native-aaaa", "agent_sandbox", NATIVE_SHA, false],
+    ]);
+    expect(m.groups.agentSandboxes[0].runtime).toBe("gVisor");
+    expect(m.groups.warmPool.map((p) => p.name)).toEqual(["wardby-nwarm-1111", "wardby-nwarm-2222"]);
+    expect(m.agentSandbox).toEqual({ warmPoolSize: 2, elsewhere: null });
+    expect(m.totals).toMatchObject({ pods: 3, agentSandboxes: 1 });
+  });
+
+  it("moves a claimed warm pod into the sandboxes, linked by run id", () => {
+    const m = describe(sandboxCluster, sandboxInfo, { warmRuns: new Map([["wardby-nwarm-2222", "run-7"]]) });
+    expect(m.groups.agentSandboxes.map((p) => [p.name, p.runId, p.warm])).toEqual([
+      ["wardby-native-aaaa", null, false],
+      ["wardby-nwarm-2222", "run-7", true],
+    ]);
+    expect(m.groups.warmPool.map((p) => p.name)).toEqual(["wardby-nwarm-1111"]);
+  });
+
+  it("says when sandboxes run in a namespace this view doesn't watch", () => {
+    const info = {
+      ...sandboxInfo,
+      native: {
+        ...sandboxInfo.native!,
+        kubernetes: { ...sandboxInfo.native!.kubernetes!, namespace: "wardby-native" },
+      },
+    };
+    expect(describe(clusterOf({}), info).agentSandbox).toEqual({ warmPoolSize: 2, elsewhere: "wardby-native" });
+  });
+
+  it("finds sandbox pods from an older server that doesn't describe them", () => {
+    const m = describe(sandboxCluster, { ...gkeInfo, native: undefined } as unknown as typeof gkeInfo);
+    expect(m.groups.agentSandboxes).toHaveLength(1);
+    expect(m.agentSandbox).toEqual({ warmPoolSize: null, elsewhere: null });
+  });
+
+  it("has no sandbox section when there are none", () => {
+    expect(describe(clusterOf({}), gkeInfo).agentSandbox).toBeNull();
   });
 });

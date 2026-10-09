@@ -55,15 +55,41 @@ terraform apply
 ```
 
 Terraform creates the instance, the database, and a Cloud SQL IAM database
-user per workload (`database-iam.tf`) — no password, and nothing resembling a
+user per workload (control plane, migrator, coding proxy, native gateway) (`database-iam.tf`) — no password, and nothing resembling a
 connection string to hand to the cluster. Migrations run as a separate
 `wardby-migrate` Job before the Deployments roll (`up.sh`), not as an
 initContainer on either one. See "Database login" below for what runs next.
 
+## Native sandbox
+
+The overlay also deploys the native gateway (`wardby-native-gateway`, two
+replicas) so agents set to `nativeExecutionMode=sandbox` run in single-use gVisor
+pods; see [Native sandbox](../../docs/native-sandbox.md). The gateway has its
+own Workload Identity and database login (table above), its own Cloud SQL Auth
+Proxy sidecar, egress to the database on 3307 and the metadata server, DNS
+egress to NodeLocal DNSCache (`169.254.20.10`), and the control-plane priority
+class. Its `wardby-native-gateway-env` Secret comes from External Secrets and
+reuses existing Secret Manager entries (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`SECRET_APP_KEY`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`; no new ones), with
+Jira settings from `wardby-jira-env` when configured. `DATABASE_URL` is a plain
+environment variable built by `up.sh`, never part of the Secret.
+
+The namespace ResourceQuota (26 pods, 11 CPU, 20Gi memory) includes the
+gateway's replicas and `NATIVE_SANDBOX_MAX_CONCURRENT` worker pods at 500m and
+512Mi each; raise it together with `CODING_MAX_CONCURRENT` or
+`NATIVE_SANDBOX_MAX_CONCURRENT`.
+
+To keep idle workers ready, set `NATIVE_SANDBOX_WARM_POOL_SIZE` in the control
+plane manifest. Idle workers are extra pods, so raise the ResourceQuota to cover
+`NATIVE_SANDBOX_MAX_CONCURRENT` plus `NATIVE_SANDBOX_WARM_POOL_SIZE` worker
+pods; each idle worker is billed for its 500m / 512Mi requests. See the
+[warm pool](../../docs/native-sandbox.md#warm-pool).
+
 ## Egress
 
-The namespace is default-deny. Both workloads need an egress rule to the
-instance's private address on 3307, the Cloud SQL Auth Proxy's port — the
+The namespace is default-deny. The control plane, the coding proxy, and the
+native gateway each need an egress rule to the instance's private address on
+3307, the Cloud SQL Auth Proxy's port — the
 overlay's rules that select the throwaway database by pod label do not match
 a Cloud SQL address. `connector_enforcement = REQUIRED` (`cloudsql.tf`)
 refuses a plain Postgres (5432) connection anyway, so there is no rule for
@@ -130,15 +156,16 @@ Proxy sidecar (`--private-ip`, listening on `127.0.0.1:5432`, dialing out to
 the instance on 3307), which is what actually holds the IAM credential; the
 application code just connects to localhost.
 
-| Identity      | Google service account   | Kubernetes service account | Database role                                                                                                                                                                |
-| ------------- | ------------------------ | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Control plane | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app` — read/write every table                                                                                                                                        |
-| Coding proxy  | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy` — only `CodingProxySession`/`CodingProxyRequest`/`RunModelUsage`, plus update `tokensIn`, `tokensOut`, `costUsd` and `turns` on `Run`, and read only its `id` |
-| Migrations    | `<name_prefix>-migrator` | `wardby-migrator`          | `SET ROLE` to the built-in owner, so migrations can alter and create tables                                                                                                  |
+| Identity       | Google service account   | Kubernetes service account | Database role                                                                                                                                                                               |
+| -------------- | ------------------------ | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Control plane  | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app` — read/write every table                                                                                                                                                       |
+| Coding proxy   | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy` — only `CodingProxySession`/`CodingProxyRequest`/`RunModelUsage`, plus update `tokensIn`, `tokensOut`, `costUsd` and `turns` on `Run`, and read only its `id`                |
+| Native gateway | `<name_prefix>-gateway`  | `wardby-native-gateway`    | Member of `wardby_app` — the same data access as the control plane, under its own login: it settles sandboxed runs, dispatches their delegations, and serves memory, datastores and secrets |
+| Migrations     | `<name_prefix>-migrator` | `wardby-migrator`          | `SET ROLE` to the built-in owner, so migrations can alter and create tables                                                                                                                 |
 
 `database-grants.sql` grants each privilege set to a `NOLOGIN` group role
 (`wardby_app`, `wardby_proxy`) rather than to the IAM users directly, then
-grants the IAM users membership. `bootstrap-database-iam.sh` applies that file
+grants the IAM users membership (the gateway's user joins `wardby_app`). `bootstrap-database-iam.sh` applies that file
 as the built-in owner, from a short-lived Job inside the cluster (the instance
 has no public address to reach from outside it), in one transaction: a
 statement the database refuses leaves nothing applied. Run it again whenever
@@ -151,7 +178,7 @@ runs it twice.
 
 A brand-new project, in order:
 
-1. `terraform apply` — the instance and the three IAM database users. Run
+1. `terraform apply` — the instance and the four IAM database users. Run
    it directly, not through `up.sh`: `up.sh` would go on to the migrations
    before the migrator has its grants.
 2. `bootstrap-database-iam.sh` (default mode) — fetches the cluster's kubectl
@@ -164,6 +191,11 @@ A brand-new project, in order:
 4. `bootstrap-database-iam.sh` again — adds the coding proxy's ledger
    grants, now that its tables exist.
 5. `up.sh` — passes every check.
+
+A deployment that already runs, and then gains the native gateway identity from
+`terraform apply`, runs `bootstrap-database-iam.sh` once so the gateway's user
+gets its `wardby_app` membership, then `up.sh`. `up.sh`'s database check tests
+the native gateway too and says so if that membership is missing.
 
 Two bootstrap runs, not one: a grant on a named table can't apply before the
 migration that creates it has run. See `docs/getting-started-gke.md`,
@@ -208,9 +240,9 @@ earlier revision (whose default is still `NOT_REQUIRED`), and removes any
 `connector_enforcement` override from `terraform.tfvars` when it retires the
 password here.
 
-After the rollout, `up.sh` runs one query through the control plane's and the
-coding proxy's own database login, and fails the deploy if either cannot read
-the database. `kubectl rollout undo` then restores the previous images and
+After the rollout, `up.sh` runs one query through the control plane's, the
+coding proxy's, and the native gateway's own database login, and fails the
+deploy if any cannot read the database. `kubectl rollout undo` then restores the previous images and
 pod templates (any revision since the IAM cutover), which also log in through
 IAM — there is no password path to fall back to.
 
@@ -218,6 +250,6 @@ IAM — there is no password path to fall back to.
 
 Apply `deletion_protection = false` **first**, then destroy. The flag is read
 from Terraform state, so leaving it true means an extra apply on an instance you
-are trying to remove. The three `google_sql_user.iam` users (`database-iam.tf`)
+are trying to remove. The four `google_sql_user.iam` users (`database-iam.tf`)
 use `deletion_policy = "ABANDON"`: once a user has been granted privileges,
 Postgres refuses to drop it, and destroy would fail partway through.

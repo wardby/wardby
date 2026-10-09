@@ -83,7 +83,7 @@ describe("InfraMap", () => {
   it("opens the run from the sandbox arrow without selecting", () => {
     const { onOpenRun, onSelect } = renderMap();
     fireEvent.click(screen.getByRole("button", { name: "Open run wardby-run-abc123" }));
-    expect(onOpenRun).toHaveBeenCalledWith(RUN_SHA);
+    expect(onOpenRun).toHaveBeenCalledWith(expect.objectContaining({ runSha: RUN_SHA }));
     expect(onSelect).not.toHaveBeenCalled();
   });
 

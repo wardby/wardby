@@ -18,6 +18,10 @@ RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553
 LABEL org.opencontainers.image.source="https://github.com/wardby/wardby"
+# perl-base: the pinned base image ships an older build; take Debian's security fixes.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends --only-upgrade perl-base \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin wardby
 WORKDIR /opt/wardby
 COPY --from=worker-dependencies /worker/node_modules ./node_modules
