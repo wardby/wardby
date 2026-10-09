@@ -11,26 +11,19 @@ sources:
     resource: /CLAUDE.md
 ---
 
-# Steps
+# Rules
 
-1. Update the owning guide in `docs/` (also `deploy/**/*.md`, `README.md`
-   where relevant), including env-var and role tables.
-2. Add or update a `help/` article (frontmatter: `id`, `title`, `summary`,
-   `audience`, `tags`, `appliesTo`), link related articles, run
-   `npm run build:help`, and check `search_help` finds it. New error codes
-   use `help/errors/`.
-3. The PR description says what was added to each surface, or why none.[^claude-md]
+These live in `CLAUDE.md`; read them there:
 
-# Operator-only rule
+- § "Every feature gets a docs + help check — STRICT": which changes need a
+  `docs/` update and a `help/` article, and what the PR description says.
+- § "Public docs are for operators — STRICT": what stays out of tracked docs.
+- § "Deployment (deploy/) — STRICT": reusable modules, nothing from live tests
+  committed.
 
-Tracked docs are written for people running wardby on their own
-infrastructure. Keep out our test runs, our own repos and instances, internal
-specs and plans (use git-ignored `docs/private/`), and PR-history narrative.
+# Where
 
-# Deployment modules
-
-`deploy/gcp`, `deploy/aws` and the others are reusable Terraform modules: no
-project ids, domains or credentials hardcoded, and never commit real
-`*.tfvars`, state or outputs from live tests.
-
-[^claude-md]: Project CLAUDE.md
+Operator guides are in `docs/` (plus `deploy/**/*.md` and `README.md`);
+help articles in `help/` (error codes in `help/errors/`), bundled by
+`npm run build:help` and served by the `search_help` / `get_help_article`
+MCP tools ([MCP server](/architecture/mcp-server.md)).

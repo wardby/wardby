@@ -13,20 +13,14 @@ sources:
 
 # Decision
 
-Wardby is an independent reimplementation.[^cleanroom] Permitted inputs are
-private behavioral specs, public standards and RFCs, and public docs for
-third-party libraries and cloud SDKs. Prohibited: any other project's source,
-database schema, migrations or config.
+Wardby is an independent reimplementation built only from behavioral specs,
+public standards and public library docs. The charter is `CLEANROOM.md` at the
+repository root; read it there.
 
-# Consequences
+# Where it shows up
 
-1. Implement only from the spec.
-2. Regenerate every artifact, including `prisma/schema.prisma` and migrations
-   ([database rules](/data/database-and-migrations.md)).
-3. Provider interfaces are designed from the spec
-   ([provider seams](/architecture/provider-seams.md)).
-4. Contributors affirm this via the DCO sign-off in `CONTRIBUTING.md`.
-
-License is Apache-2.0.
-
-[^cleanroom]: Clean-Room Charter
+- Migrations and `prisma/schema.prisma` are hand-written
+  ([database rules](/data/database-and-migrations.md)).
+- Provider interfaces are designed from the spec
+  ([provider seams](/architecture/provider-seams.md)).
+- Contributors certify their work with a DCO sign-off (`CONTRIBUTING.md`).

@@ -15,25 +15,16 @@ sources:
     resource: /src/providers/llm/pricing-core.ts
 ---
 
-# Rules
+# Rule
 
-- Each shipped model entry (`catalog-shipped.ts`) and every `set_model`
-  call must set `cachedInputPerMTok` and `cacheWritePerMTok`.[^claude-md]
-- **No multipliers.** Hardcode each model's own published rate as a literal,
-  even where a ratio currently holds, because ratios drift per model and tier.
-- Source rates only from the provider's own pricing page. If you can't find
-  one, stop and ask; AI search summaries have fabricated pricing pages.
-- Bump `SHIPPED_CATALOG_VERSION` when any shipped value changes.
+The pricing rules live in `CLAUDE.md` § "LLM pricing tables — STRICT"; read
+them there. In short: every catalog model carries its own published cache
+read and write rates as literals, never a multiplier, sourced from the
+provider's pricing page.
 
-# Why
+# Where
 
-`computeCost` falls back to the full input rate for missing cache
-rates,[^pricing-core] which overestimates and hides real prompt-cache savings
-from the [budget guardrail](/architecture/budget-guardrail.md).
-
-Catalog code: `src/providers/llm/catalog*.ts`; admin tools `list_models`,
-`get_model`, `set_model`, `disable_model`, `reset_model`.
-
-[^claude-md]: Project CLAUDE.md
-
-[^pricing-core]: src/providers/llm/pricing-core.ts
+Catalog code: `src/providers/llm/catalog*.ts`, with `computeCost` in
+`src/providers/llm/pricing-core.ts`; admin tools `list_models`, `get_model`,
+`set_model`, `disable_model`, `reset_model`. Cache rates matter to the
+[budget guardrail](/architecture/budget-guardrail.md).
