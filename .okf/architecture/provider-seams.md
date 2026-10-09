@@ -23,7 +23,7 @@ cloud-agnostic.
 
 | Seam        | Interface          | Purpose                                                                      |
 | ----------- | ------------------ | ---------------------------------------------------------------------------- |
-| `jobs`      | `JobLauncher`      | Where coding workers run (`local`, `docker`, `kubernetes`)                   |
+| `jobs`      | `JobLauncher`      | Where coding workers run (`docker`, `kubernetes`; `local` runs none)         |
 | `llm`       | `LlmProvider`      | Token counting, pricing, model calls (OpenAI, Anthropic, Bedrock)            |
 | `secrets`   | `SecretCipher`     | Secret encryption                                                            |
 | `auth`      | `AuthProvider`     | Self-hosted or delegated OAuth                                               |

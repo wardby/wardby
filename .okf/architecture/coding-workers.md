@@ -24,9 +24,13 @@ never auto-merges.
 
 # JOB_LAUNCHER backends (the `WorkspaceJobLauncher` seam)
 
+`local` (the default) is for native agents only: it composes no coding
+launcher, so a coding run fails before it starts (`src/core/runner.ts`,
+`src/providers/executor/composition.ts`).
+
 | Value        | Runs in                        | Isolation                                                           |
 | ------------ | ------------------------------ | ------------------------------------------------------------------- |
-| `local`      | child process                  | development only, none                                              |
+| `local`      | nothing: no coding launcher    | coding runs fail with "Coding agents need a container executor"     |
 | `docker`     | container on a per-run network | per-run network                                                     |
 | `kubernetes` | pod                            | per-run NetworkPolicy, field-by-field attested pod, optional gVisor |
 
