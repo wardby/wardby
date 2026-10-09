@@ -54,6 +54,7 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "okf:check": "tsx --conditions=wardby-source src/wardby-bin.ts knowledge check .okf --strict",
     "build:vendor": "node scripts/build-sandbox-vendor.mjs",
     "build:help": "tsx src/help/build.ts",
     "sync:reviewer-prompt": "tsx src/quickstart/sync-reviewer-prompt.ts",

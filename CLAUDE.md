@@ -10,9 +10,10 @@ architecture and `CLEANROOM.md` for the clean-room rules that bind all work here
 v0.2 bundle of architecture concepts for this repo. Start at `.okf/index.md`
 and follow links only into the concepts relevant to your task. Treat concepts
 with no `verified` entry as unverified: check them against the code before
-relying on them. The rules in this file win over anything in `.okf/`. It is
-separate from the `docs/knowledge` product feature, and `.okf/` is not one of
-the public operator docs.
+relying on them. When a change alters something a concept describes, update
+that concept in the same change and run `npm run okf:check`. The rules in this
+file win over anything in `.okf/`. It is separate from the `docs/knowledge`
+product feature, and `.okf/` is not one of the public operator docs.
 
 ## LLM pricing tables — STRICT
 
