@@ -4,6 +4,17 @@ Budget-guarded LLM agents on a schedule, with a sandboxed tool executor and a
 cloud-agnostic core behind swappable provider seams. See `README.md` for the
 architecture and `CLEANROOM.md` for the clean-room rules that bind all work here.
 
+## Knowledge bundle (OKF)
+
+`.okf/` is an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format)
+v0.2 bundle of architecture, data-rule, decision and playbook concepts for this
+repo. Read `.okf/index.md` first and follow links only into the concepts
+relevant to your task (use the `okf:okf` skill). Treat concepts with no
+`verified` entry as unverified: check them against the code before relying on
+them. When a change affects a concept, update it in the same change, then run
+`/okf:validate .okf --strict`. This is separate from the `docs/knowledge`
+product feature, and `.okf/` is not one of the public operator docs.
+
 ## LLM pricing tables — STRICT
 
 Every model entry in the model catalog (`src/providers/llm/catalog-shipped.ts`,
