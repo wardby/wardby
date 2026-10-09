@@ -157,7 +157,7 @@ jobs:
         run: npm run test:docker-isolation
         env:
           WARDBY_WORKER_IMAGE: wardby-coding-worker-node:${{ github.sha }}
-      - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: wardby-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }}
           format: spdx-json
@@ -184,7 +184,7 @@ jobs:
         with:
           persist-credentials: false
       - run: docker build -f src/native-worker/Dockerfile -t wardby-native-worker:${{ github.sha }} .
-      - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: wardby-native-worker:${{ github.sha }}
           format: spdx-json
@@ -225,12 +225,12 @@ jobs:
           WARDBY_CLAUDE_TOOL_RUNNER_IMAGE: wardby-claude-tool-runner:${{ github.sha }}
           WARDBY_DOCKER_SEED_DEBUG: "1"
           WARDBY_CLAUDE_KEEPER_PROBE: "1"
-      - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: wardby-claude-coding-worker:${{ github.sha }}
           format: spdx-json
           output-file: claude-coding-worker.spdx.json
-      - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: wardby-claude-tool-runner:${{ github.sha }}
           format: spdx-json
