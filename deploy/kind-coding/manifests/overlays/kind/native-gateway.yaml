@@ -1,0 +1,149 @@
+# The native sandbox gateway (docs/native-sandbox.md): `wardby native-gateway`, the trusted
+# service sandbox-mode native run pods call for model calls, built-in tools, and their tools'
+# datastore/secret/fetch access. It holds the database URL and provider credentials and no
+# Kubernetes API access at all (no token, no Role): runs it needs started (a delegation) are
+# recorded and started by the control plane. `image: wardby-runtime` is a placeholder — up.sh
+# substitutes the resolved runtime digest into the rendered manifest.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-native-gateway
+  namespace: wardby-coding
+  labels:
+    app.kubernetes.io/name: wardby-native-gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-native-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wardby-native-gateway
+    spec:
+      serviceAccountName: wardby-native-gateway
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: wardby-runtime
+          command: ["node", "dist/cli.js", "native-gateway"]
+          envFrom:
+            - secretRef:
+                name: wardby-native-gateway-env
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: NATIVE_GATEWAY_LISTEN
+              value: "0.0.0.0:8790"
+            - name: NATIVE_GATEWAY_DENY_PORT
+              value: "8791"
+          ports:
+            - name: gateway
+              containerPort: 8790
+            - name: deny
+              containerPort: 8791
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 250m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8790
+            periodSeconds: 5
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+---
+# Both ports are exposed so a run pod's enforcement probe can tell "my policy blocks 8791" from
+# "nothing answers there": without the deny port on the Service, an unprogrammed run pod would
+# read the deny port as unreachable and pass.
+apiVersion: v1
+kind: Service
+metadata:
+  name: wardby-native-gateway
+  namespace: wardby-coding
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: wardby-native-gateway
+  ports:
+    - name: gateway
+      port: 8790
+      targetPort: 8790
+    - name: deny
+      port: 8791
+      targetPort: 8791
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-native-gateway
+  namespace: wardby-coding
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-native-gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              wardby.io/component: native-run
+      ports:
+        - protocol: TCP
+          port: 8790
+        # The deny port is admitted HERE, at the destination, on purpose (as the coding proxy's
+        # 8788): only the run pod's own egress policy may block it, which is exactly what the
+        # launcher's in-pod probe measures. Do NOT drop this rule in an overlay — the probe would
+        # then read "blocked" for a run pod whose own policy was never programmed.
+        - protocol: TCP
+          port: 8791
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # HTTPS to the model providers and fetch targets — the internet minus private ranges
+    # (the database rule is per-environment; see native-gateway-database-egress.yaml).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 100.64.0.0/10
+      ports:
+        - protocol: TCP
+          port: 443

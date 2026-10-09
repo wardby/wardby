@@ -52,6 +52,8 @@ import { startModelCatalog, type CatalogStore } from "./providers/llm/catalog-st
 import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/index.js";
 import { DeferredExecutor, drainDeferredRuns } from "./providers/executor/deferred.js";
 import { parseGatewayListen, startGatewayServer } from "./native-worker/http-server.js";
+import { NATIVE_GATEWAY_DENY_PORT } from "./native-worker/docker-isolation.js";
+import { startDenyPortListener } from "./providers/coding-proxy/deny-port.js";
 import { buildNativeSandboxExecutor } from "./native-worker/composition.js";
 import type { Executor } from "./providers/executor/types.js";
 import { PostgresDatastore } from "./providers/datastore/index.js";
@@ -912,12 +914,16 @@ async function nativeGateway(): Promise<void> {
     executor: new DeferredExecutor(prisma, buildConfiguredExecutor({ native: noopExecutor(), db: prisma })),
   };
   const server = await startGatewayServer(listen, { db: prisma, providers });
+  // The deny port (NATIVE_GATEWAY_DENY_PORT, default 8791) serves nothing: a worker that can reach the
+  // gateway port but not this one proves its NetworkPolicy is programmed and port-scoped.
+  const denyPort = Number(process.env.NATIVE_GATEWAY_DENY_PORT ?? NATIVE_GATEWAY_DENY_PORT);
+  const deny = await startDenyPortListener(listen.host, denyPort);
   console.error(`wardby native-gateway listening on ${listen.host}:${listen.port}. Press Ctrl+C to stop.`);
   await new Promise<void>((resolve) => {
     const shutdown = () => {
       server.close(() => {
         modelCatalog.close();
-        resolve();
+        void deny.close().finally(resolve);
       });
       server.closeIdleConnections();
     };

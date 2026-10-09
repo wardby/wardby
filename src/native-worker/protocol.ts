@@ -44,6 +44,8 @@ export type GatewayErrorCode =
   | "bridge_error"
   /** The run's budget cannot cover another model call (the gateway's reservation was refused). */
   | "budget_exhausted"
+  /** The worker's network isolation is not proven yet: retry shortly. */
+  | "not_ready"
   | "internal";
 
 export class GatewayError extends Error {

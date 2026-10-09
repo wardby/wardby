@@ -151,6 +151,10 @@ export class ClientNodeKubernetesApi implements KubernetesApi {
     return readOrUndefined(() => this.core.readNamespacedPod({ namespace, name }));
   }
 
+  async listPods(namespace: string, labelSelector: string): Promise<V1Pod[]> {
+    return (await this.core.listNamespacedPod({ namespace, labelSelector })).items;
+  }
+
   deletePod(namespace: string, name: string, gracePeriodSeconds: number): Promise<void> {
     return deleteIgnoringMissing(() => this.core.deleteNamespacedPod({ namespace, name, gracePeriodSeconds }));
   }

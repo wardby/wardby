@@ -13,6 +13,8 @@ import { createHash } from "node:crypto";
 export const NATIVE_WORKER_UID = 10001;
 export const NATIVE_GATEWAY_ALIAS = "wardby-native-gateway";
 export const NATIVE_GATEWAY_PORT = 8790;
+/** The gateway's witness port: never reachable from a worker (see coding-proxy/deny-port.ts). */
+export const NATIVE_GATEWAY_DENY_PORT = 8791;
 export const NATIVE_WORKER_TMP_MB = 64;
 const LABEL_MANAGED = "io.wardby.managed=true";
 const LABEL_COMPONENT = "io.wardby.component=native-worker";

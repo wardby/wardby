@@ -69,6 +69,7 @@
     "test:contract": "vitest run --config vitest.contract.config.ts",
     "test:kubernetes": "WARDBY_KUBERNETES_TEST=1 vitest run src/providers/jobs/kubernetes.integration.test.ts",
     "test:native-docker": "WARDBY_NATIVE_DOCKER_TEST=1 vitest run src/native-worker/docker.acceptance.test.ts",
+    "test:native-kind": "WARDBY_NATIVE_KIND_TEST=1 vitest run src/native-worker/kubernetes.acceptance.test.ts",
     "prisma:generate": "PRISMA_HIDE_UPDATE_MESSAGE=1 prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "dbos:migrate": "dbos schema \"$DATABASE_URL\"",

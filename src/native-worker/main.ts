@@ -5,6 +5,7 @@
  * protocol frames; diagnostics (and the shared logger) go to stderr.
  */
 
+import { readFile } from "node:fs/promises";
 import { parseMessage, WorkerInputSchema } from "./protocol.js";
 import { createHttpTransport } from "./http-transport.js";
 import { createStdioTransport } from "./stdio.js";
@@ -26,8 +27,17 @@ function firstLine(): Promise<string> {
   });
 }
 
+/**
+ * The input's source: a mounted file when NATIVE_WORKER_INPUT_FILE names one (a Kubernetes pod
+ * mounts it read-only from the run's Secret), otherwise the first line on stdin (Docker, local).
+ */
+async function readInput(): Promise<string> {
+  const file = process.env.NATIVE_WORKER_INPUT_FILE;
+  return file ? (await readFile(file, "utf8")).trim() : firstLine();
+}
+
 async function main(): Promise<void> {
-  const input = parseMessage(await firstLine(), WorkerInputSchema);
+  const input = parseMessage(await readInput(), WorkerInputSchema);
   // The gateway answers only after the worker asks, so choosing the transport after the input
   // line misses nothing.
   const transport = input.gateway

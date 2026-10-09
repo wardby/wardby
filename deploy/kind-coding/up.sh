@@ -129,15 +129,18 @@ docker build -f deploy/Dockerfile --target runtime -t "localhost:${REGISTRY_PORT
 docker build -f src/claude-coding-worker/Dockerfile -t "localhost:${REGISTRY_PORT}/wardby-claude-coding-worker:dev" .
 docker build -f src/claude-tool-runner/Dockerfile -t "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner:dev" .
 docker build -f src/claude-tool-runner/Dockerfile --target node-python -t "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python:dev" .
+docker build -f src/native-worker/Dockerfile -t "localhost:${REGISTRY_PORT}/wardby-native-worker:dev" .
 docker push "localhost:${REGISTRY_PORT}/wardby-coding-worker:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-runtime:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-claude-coding-worker:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python:dev"
+docker push "localhost:${REGISTRY_PORT}/wardby-native-worker:dev"
 WORKER_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-coding-worker:dev")"
 WORKER_NODE_PYTHON_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python:dev")"
 RUNTIME_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-runtime:dev")"
+NATIVE_WORKER_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-native-worker:dev")"
 CLAUDE_WORKER_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-claude-coding-worker:dev")"
 CLAUDE_TOOL_RUNNER_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner:dev")"
 CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python:dev")"
@@ -198,8 +201,28 @@ ANTHROPIC_API_KEY_B64="$(b64 "$ANTHROPIC_API_KEY")"
   printf '  OPENAI_API_KEY: %s\n' "$OPENAI_API_KEY_B64"
   printf '  ANTHROPIC_API_KEY: %s\n' "$ANTHROPIC_API_KEY_B64"
 } | kubectl --context "$KUBE_CONTEXT" apply -f -
+# The native sandbox gateway's env: the proxy's values plus SECRET_APP_KEY (it decrypts the agent
+# secrets a sandboxed tool reads). Optional: without it, sandboxed tools simply get no secrets.
+SECRET_APP_KEY_VALUE=""
+if grep -qE "^[[:space:]]*(export[[:space:]]+)?SECRET_APP_KEY=" .env.local; then
+  SECRET_APP_KEY_VALUE="$(env_value SECRET_APP_KEY)"
+fi
+SECRET_APP_KEY_B64="$(b64 "$SECRET_APP_KEY_VALUE")"
+{
+  printf 'apiVersion: v1\n'
+  printf 'kind: Secret\n'
+  printf 'type: Opaque\n'
+  printf 'metadata:\n'
+  printf '  name: wardby-native-gateway-env\n'
+  printf '  namespace: wardby-coding\n'
+  printf 'data:\n'
+  printf '  DATABASE_URL: %s\n' "$DATABASE_URL_B64"
+  printf '  OPENAI_API_KEY: %s\n' "$OPENAI_API_KEY_B64"
+  printf '  ANTHROPIC_API_KEY: %s\n' "$ANTHROPIC_API_KEY_B64"
+  printf '  SECRET_APP_KEY: %s\n' "$SECRET_APP_KEY_B64"
+} | kubectl --context "$KUBE_CONTEXT" apply -f -
 unset DATABASE_URL OPENAI_API_KEY ANTHROPIC_API_KEY PROXY_DATABASE_URL \
-  DATABASE_URL_B64 OPENAI_API_KEY_B64 ANTHROPIC_API_KEY_B64
+  DATABASE_URL_B64 OPENAI_API_KEY_B64 ANTHROPIC_API_KEY_B64 SECRET_APP_KEY_VALUE SECRET_APP_KEY_B64
 
 echo "==> 8/${TOTAL_STEPS} render and apply the manifests"
 kubectl kustomize "${MANIFEST_DIR}/manifests/overlays/kind" \
@@ -209,6 +232,8 @@ kubectl kustomize "${MANIFEST_DIR}/manifests/overlays/kind" \
 echo "==> 9/${TOTAL_STEPS} restart the proxy so it picks up the current Secret, then wait for the rollout"
 kubectl --context "$KUBE_CONTEXT" -n wardby-coding rollout restart deploy/wardby-coding-proxy
 kubectl --context "$KUBE_CONTEXT" -n wardby-coding rollout status deploy/wardby-coding-proxy --timeout=120s
+kubectl --context "$KUBE_CONTEXT" -n wardby-coding rollout restart deploy/wardby-native-gateway
+kubectl --context "$KUBE_CONTEXT" -n wardby-coding rollout status deploy/wardby-native-gateway --timeout=120s
 
 echo "==> 10/${TOTAL_STEPS} done"
 cat <<EOF
@@ -219,6 +244,9 @@ not deleted):
 JOB_LAUNCHER=kubernetes
 KUBERNETES_CONTEXT=${KUBE_CONTEXT}
 CODING_WORKER_IMAGE=${WORKER_DIGEST}
+# Native sandbox (docs/native-sandbox.md): sandbox-mode native agents run as pods here.
+NATIVE_SANDBOX_LAUNCHER=kubernetes
+NATIVE_SANDBOX_WORKER_IMAGE=${NATIVE_WORKER_DIGEST}
 CODING_WORKER_IMAGE_NODE_PYTHON_3_12=${WORKER_NODE_PYTHON_DIGEST}
 CODING_CLAUDE_WORKER_IMAGE=${CLAUDE_WORKER_DIGEST}
 CODING_CLAUDE_TOOL_RUNNER_IMAGE=${CLAUDE_TOOL_RUNNER_DIGEST}

@@ -125,6 +125,14 @@ export class FakeKubernetesApi implements KubernetesApi {
   async readPod(namespace: string, name: string) {
     return this.read<V1Pod>("pod", namespace, name);
   }
+  /** Matches `key=value[,key=value]` selectors against stored pods' labels. */
+  async listPods(namespace: string, labelSelector: string) {
+    const wanted = labelSelector.split(",").map((pair) => pair.split("=") as [string, string]);
+    return [...this.objects.entries()]
+      .filter(([key]) => key.startsWith(`pod/${namespace}/`))
+      .map(([, pod]) => structuredClone(pod) as V1Pod)
+      .filter((pod) => wanted.every(([k, v]) => pod.metadata?.labels?.[k] === v));
+  }
   async deletePod(namespace: string, name: string, gracePeriodSeconds: number) {
     this.deletedPods.push({ name, gracePeriodSeconds });
     this.delete("pod", namespace, name);

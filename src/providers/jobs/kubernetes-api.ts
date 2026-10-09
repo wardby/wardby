@@ -58,6 +58,8 @@ export interface KubernetesApi {
    */
   dryRunCreatePod(namespace: string, body: V1Pod): Promise<V1Pod>;
   readPod(namespace: string, name: string): Promise<V1Pod | undefined>;
+  /** Lists pods in one namespace matching a label selector (e.g. the native sandbox janitor's). */
+  listPods(namespace: string, labelSelector: string): Promise<V1Pod[]>;
   deletePod(namespace: string, name: string, gracePeriodSeconds: number): Promise<void>;
   createNetworkPolicy(namespace: string, body: V1NetworkPolicy): Promise<V1NetworkPolicy>;
   readNetworkPolicy(namespace: string, name: string): Promise<V1NetworkPolicy | undefined>;

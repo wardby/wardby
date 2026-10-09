@@ -23,6 +23,12 @@ export interface WorkerHandle {
 /** Starts a worker for an HTTP-gateway input and returns at once. */
 export interface DetachedWorkerLauncher {
   launch(input: WorkerInput): Promise<WorkerHandle>;
+  /**
+   * False when the worker's network isolation only takes effect after it starts (a Kubernetes
+   * NetworkPolicy): its session is then created not ready, and the launcher marks it ready once
+   * proven. Absent or true: ready at creation (Docker's network exists before the container).
+   */
+  readonly networkReadyAtLaunch?: boolean;
 }
 
 /** The worker as a local child process with an empty environment (by default), its input on stdin. */
@@ -61,6 +67,7 @@ export async function startSandboxRun(options: {
     db: options.db,
     ledger: new PrismaGatewayLedger(options.db),
     gatewayUrl: options.gatewayUrl,
+    networkReady: options.launcher.networkReadyAtLaunch !== false,
   });
   if (session.kind === "ended") return session;
   const handle = await options.launcher.launch(session.input);

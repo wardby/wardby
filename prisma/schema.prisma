@@ -651,6 +651,10 @@ model NativeGatewaySession {
   snapshot          Json
   /// Set the first time the gateway refuses a model call for budget.
   budgetExhaustedAt DateTime?
+  /// When the worker's network isolation was proven (a Kubernetes run's in-pod
+  /// probe; a Docker run's network exists before its container). The gateway
+  /// serves nothing before this is set.
+  networkReadyAt    DateTime?
   createdAt         DateTime                   @default(now())
   updatedAt         DateTime                   @updatedAt
   calls             NativeGatewayCall[]

@@ -1,0 +1,21 @@
+# Only the `kind` overlay needs this: the native gateway reaches the local Postgres published by
+# deploy/local at host.docker.internal:55432 (the Docker host, from inside the kind node), as the
+# coding proxy does (proxy-database-egress.yaml).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-native-gateway-database
+  namespace: wardby-coding
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-native-gateway
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 55432

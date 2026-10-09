@@ -54,20 +54,35 @@ export function createHttpTransport(options: HttpTransportOptions): GatewayTrans
         const body = (await response.json().catch(() => undefined)) as
           { ok: true; result: unknown } | { ok: false; error: { code: string; message: string } } | undefined;
         if (body?.ok === true) return body.result;
+        // Isolation not proven yet (a pod's NetworkPolicy is still being programmed): wait and ask again.
+        if (body?.ok === false && body.error.code === "not_ready" && Date.now() < giveUpAt) {
+          await sleep(RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)]);
+          continue;
+        }
         throw gatewayError(body?.ok === false ? body.error : undefined, response.status);
       }
     },
 
     async *stream(request): AsyncIterable<LlmStreamEvent> {
+      const giveUpAt = Date.now() + retryForMs;
       let response: Response;
-      try {
-        response = await post(request);
-      } catch (err) {
-        throw new GatewayError("internal", `gateway unreachable: ${err instanceof Error ? err.message : String(err)}`);
-      }
-      if (!response.headers.get("content-type")?.includes("application/x-ndjson") || !response.body) {
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          response = await post(request);
+        } catch (err) {
+          throw new GatewayError(
+            "internal",
+            `gateway unreachable: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        if (response.headers.get("content-type")?.includes("application/x-ndjson") && response.body) break;
         const body = (await response.json().catch(() => undefined)) as
           { error?: { code: string; message: string } } | undefined;
+        // Refused before any reservation was taken, so asking again is safe.
+        if (body?.error?.code === "not_ready" && Date.now() < giveUpAt) {
+          await sleep(RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)]);
+          continue;
+        }
         throw gatewayError(body?.error, response.status);
       }
       const decoder = new TextDecoder();

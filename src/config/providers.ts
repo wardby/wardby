@@ -323,42 +323,78 @@ export interface CodingConcurrencyConfig {
  * not wait). Keep the platform's termination grace period above this.
  */
 /** The native sandbox (docs/native-sandbox.md): where sandbox-mode native runs execute. */
-export interface NativeSandboxConfig {
-  launcher: "docker";
+interface NativeSandboxCommonConfig {
   workerImage: string;
-  /** The container running `wardby native-gateway`, joined to each run's network. */
-  gatewayContainer: string;
-  /** What a worker dials; undefined = the gateway's alias on its run network. */
+  /** What a worker dials; undefined = the launcher's default (Docker: the gateway alias; Kubernetes: the Service's ClusterIP). */
   gatewayUrl?: string;
   cpus: number;
   memoryMb: number;
+  /** Docker only: Kubernetes has no per-pod process limit (it is a node-level kubelet setting). */
   pids: number;
 }
+
+export interface DockerNativeSandboxConfig extends NativeSandboxCommonConfig {
+  launcher: "docker";
+  /** The container running `wardby native-gateway`, joined to each run's network. */
+  gatewayContainer: string;
+}
+
+export interface KubernetesNativeSandboxConfig extends NativeSandboxCommonConfig {
+  launcher: "kubernetes";
+  /** Where run pods (and the native gateway) live. */
+  namespace: string;
+  context?: string;
+  /** The native gateway's Service in that namespace. */
+  gatewayService: string;
+  runtimeClassName?: string;
+}
+
+export type NativeSandboxConfig = DockerNativeSandboxConfig | KubernetesNativeSandboxConfig;
 
 /** Undefined when NATIVE_SANDBOX_LAUNCHER is unset (sandbox-mode runs then fail closed). Throws on a bad configuration. */
 export function loadNativeSandboxConfig(env: NodeJS.ProcessEnv = process.env): NativeSandboxConfig | undefined {
   const launcher = env.NATIVE_SANDBOX_LAUNCHER?.trim();
   if (!launcher) return undefined;
-  if (launcher !== "docker") {
-    throw new Error(`NATIVE_SANDBOX_LAUNCHER must be "docker" (got "${launcher}").`);
+  if (launcher !== "docker" && launcher !== "kubernetes") {
+    throw new Error(`NATIVE_SANDBOX_LAUNCHER must be "docker" or "kubernetes" (got "${launcher}").`);
   }
   const workerImage = imageVariable(env.NATIVE_SANDBOX_WORKER_IMAGE);
-  if (!workerImage) throw new Error("NATIVE_SANDBOX_WORKER_IMAGE is required when NATIVE_SANDBOX_LAUNCHER=docker.");
-  const gatewayContainer = env.NATIVE_GATEWAY_CONTAINER?.trim();
-  if (!gatewayContainer) throw new Error("NATIVE_GATEWAY_CONTAINER is required when NATIVE_SANDBOX_LAUNCHER=docker.");
+  if (!workerImage)
+    throw new Error(`NATIVE_SANDBOX_WORKER_IMAGE is required when NATIVE_SANDBOX_LAUNCHER=${launcher}.`);
   const gatewayUrl = env.NATIVE_GATEWAY_URL?.trim();
   if (gatewayUrl && !/^https?:\/\/[^\s]+$/.test(gatewayUrl)) {
     throw new Error(`NATIVE_GATEWAY_URL must be an http(s) URL (got "${gatewayUrl}").`);
   }
-  return {
-    launcher,
+  const common = {
     workerImage,
-    gatewayContainer,
     ...(gatewayUrl ? { gatewayUrl } : {}),
     cpus: optionalPositiveNumber(env.NATIVE_SANDBOX_CPUS, "NATIVE_SANDBOX_CPUS", 1),
     memoryMb: optionalPositiveInteger(env.NATIVE_SANDBOX_MEMORY_MB, "NATIVE_SANDBOX_MEMORY_MB") ?? 512,
     pids: optionalPositiveInteger(env.NATIVE_SANDBOX_PIDS, "NATIVE_SANDBOX_PIDS") ?? 128,
   };
+  if (launcher === "kubernetes") {
+    // A cluster pulls by registry digest; a local image id means nothing to it.
+    if (!/@sha256:[0-9a-f]{64}$/.test(workerImage)) {
+      throw new Error(
+        "NATIVE_SANDBOX_WORKER_IMAGE must be a registry digest (repo@sha256:...) when NATIVE_SANDBOX_LAUNCHER=kubernetes.",
+      );
+    }
+    const namespace = env.NATIVE_SANDBOX_NAMESPACE?.trim() || env.KUBERNETES_NAMESPACE?.trim() || "wardby-coding";
+    const runtimeClassName =
+      env.NATIVE_SANDBOX_RUNTIME_CLASS?.trim() || env.KUBERNETES_RUNTIME_CLASS?.trim() || undefined;
+    const context = env.KUBERNETES_CONTEXT?.trim() || undefined;
+    return {
+      launcher,
+      ...common,
+      namespace,
+      gatewayService: env.NATIVE_GATEWAY_SERVICE?.trim() || "wardby-native-gateway",
+      ...(context ? { context } : {}),
+      ...(runtimeClassName ? { runtimeClassName } : {}),
+    };
+  }
+  const gatewayContainer = env.NATIVE_GATEWAY_CONTAINER?.trim();
+  if (!gatewayContainer) throw new Error("NATIVE_GATEWAY_CONTAINER is required when NATIVE_SANDBOX_LAUNCHER=docker.");
+  return { launcher, ...common, gatewayContainer };
 }
 
 export function loadShutdownDrainSeconds(env: NodeJS.ProcessEnv = process.env): number {

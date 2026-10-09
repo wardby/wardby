@@ -1712,6 +1712,11 @@ export async function createSandboxSession(options: {
   ledger: Pick<PrismaGatewayLedger, "createSession">;
   gatewayUrl: string;
   now?: Date;
+  /**
+   * Whether the worker's network isolation exists before the worker does (Docker's internal
+   * network). False (Kubernetes): the gateway refuses calls until the launcher proves it.
+   */
+  networkReady?: boolean;
 }): Promise<SandboxSessionOutcome> {
   const { runId, providers, db, ledger } = options;
   const now = options.now ?? new Date();
@@ -1764,6 +1769,7 @@ export async function createSandboxSession(options: {
     deadlineAt: new Date(now.getTime() + SANDBOX_RUN_MAX_SEC * 1000),
     budgetUsd: loaded.agent.budgetUsd,
     snapshot: snapshot as unknown as Prisma.InputJsonValue,
+    networkReadyAt: options.networkReady === false ? null : now,
   });
   // The handle exists before any worker does, so the reconciler routes a stale run to the sandbox executor.
   await db.run.updateMany({

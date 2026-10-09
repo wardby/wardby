@@ -1,3 +1,7 @@
 resources:
   - ../../base
   - proxy-database-egress.yaml
+  # The native sandbox gateway (docs/native-sandbox.md) is kind-only until the cloud overlays add
+  # their own database egress and Secret for it.
+  - native-gateway.yaml
+  - native-gateway-database-egress.yaml

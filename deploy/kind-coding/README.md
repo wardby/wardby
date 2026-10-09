@@ -192,6 +192,55 @@ wardby-coding`) always has **two** containers: `keeper` (seeds the
    If you only ever see one container, you're looking at a canary from a
    `preflight` run, not a triggered agent's run.
 
+## Native sandbox on the kind harness
+
+`up.sh` also sets up the [native sandbox](../../docs/native-sandbox.md) so
+sandbox-mode native agents run as pods in this cluster
+(`NATIVE_SANDBOX_LAUNCHER=kubernetes`). Beyond the coding-run steps above, it:
+
+- builds and pushes the native worker image
+  (`src/native-worker/Dockerfile`) and resolves its pulled-by-digest
+  reference;
+- creates or updates the gateway's `wardby-native-gateway-env` Secret from
+  `.env.local` the same way as the proxy's (`DATABASE_URL`, `OPENAI_API_KEY`,
+  `ANTHROPIC_API_KEY`, plus `SECRET_APP_KEY` if you set one; without it,
+  sandboxed tools simply get no secrets);
+- applies the native gateway from `manifests/overlays/kind/`: a Deployment
+  running `wardby native-gateway` with no service-account token and no RBAC, a
+  ClusterIP Service exposing both the gateway port `8790` and the deny port
+  `8791`, and a NetworkPolicy that admits `native-run` pods on both ports
+  (`native-gateway.yaml`; `native-gateway-database-egress.yaml` lets it reach the
+  local Postgres), then restarts it and waits for the rollout.
+
+The gateway is part of the `kind` overlay only. The cloud overlays do not ship
+it yet, so on a cloud cluster you add the gateway manifests yourself.
+
+Add the two extra lines `up.sh` prints to `.env.local`:
+
+```dotenv
+NATIVE_SANDBOX_LAUNCHER=kubernetes
+NATIVE_SANDBOX_WORKER_IMAGE=localhost:5001/wardby-native-worker@sha256:...
+```
+
+Run pods and the gateway live in `wardby-coding`, so the server's namespace and
+`KUBERNETES_CONTEXT=kind-wardby` settings above apply unchanged. Set an agent's
+`nativeExecutionMode` to `sandbox` and trigger it; watch the run's pod with
+`kubectl get pods -n wardby-coding -l wardby.io/component=native-run`. Before
+the worker is allowed to call the gateway, the server proves the pod's
+isolation from inside it (the gateway port answers, the deny port and an
+outside address do not). On a `kind` cluster whose network layer does not
+enforce `NetworkPolicy`, every sandbox run fails with
+`native_sandbox_network_unenforced`; see the Calico fallback below.
+
+An opt-in acceptance test exercises this end to end against the cluster. It is
+skipped unless the `test:native-kind` script sets its flag:
+
+```sh
+NATIVE_TEST_KIND_WORKER_IMAGE=localhost:5001/wardby-native-worker@sha256:... npm run test:native-kind
+```
+
+Use the digest `up.sh` printed for `NATIVE_SANDBOX_WORKER_IMAGE`.
+
 ## Load testing (contributors)
 
 `manifests/overlays/kind-load` is the kind overlay plus a mock model upstream

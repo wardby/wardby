@@ -7,7 +7,8 @@
 # RoleBinding is created here: the kind control plane runs every command
 # (including the preflight and up.sh) against your own admin kubeconfig.
 # Plan 3 binds this Role to the Cloud Run service account's identity in
-# the target namespace.
+# the target namespace. The native sandbox launcher (src/native-worker/kubernetes-launcher.ts)
+# uses the same verbs plus `list` on pods.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -16,7 +17,9 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["create", "get", "delete"]
+    # list: the native sandbox janitor finds leftover native-run pods by label
+    # (src/native-worker/kubernetes-launcher.ts listWorkers); the coding seam never lists.
+    verbs: ["create", "get", "delete", "list"]
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create", "get"]

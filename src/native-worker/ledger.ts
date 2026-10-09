@@ -21,6 +21,7 @@ export interface GatewaySessionRecord {
   deadlineAt: Date;
   budgetUsd: number;
   snapshot: unknown;
+  networkReadyAt: Date | null;
 }
 
 export interface CreateGatewaySessionInput {
@@ -29,6 +30,8 @@ export interface CreateGatewaySessionInput {
   deadlineAt: Date;
   budgetUsd: number;
   snapshot: Prisma.InputJsonValue;
+  /** Set at creation when the launcher's isolation exists before the worker does (Docker). */
+  networkReadyAt?: Date | null;
 }
 
 export type ReserveOutcome =
@@ -74,6 +77,7 @@ function toSession(row: {
   deadlineAt: Date;
   budgetUsd: Prisma.Decimal;
   snapshot: Prisma.JsonValue;
+  networkReadyAt: Date | null;
 }): GatewaySessionRecord {
   return { ...row, budgetUsd: Number(row.budgetUsd) };
 }
@@ -89,6 +93,22 @@ export class PrismaGatewayLedger {
   async findSessionByCapabilityHash(capabilityHash: string): Promise<GatewaySessionRecord | null> {
     const row = await this.db.nativeGatewaySession.findUnique({ where: { capabilityHash } });
     return row ? toSession(row) : null;
+  }
+
+  /** Records that the worker's network isolation was proven: the gateway serves it from now on. */
+  async markNetworkReady(sessionId: string, at: Date = new Date()): Promise<void> {
+    await this.db.nativeGatewaySession.updateMany({
+      where: { id: sessionId, networkReadyAt: null },
+      data: { networkReadyAt: at },
+    });
+  }
+
+  /** markNetworkReady by the session's run (a launcher knows the run, not the session). */
+  async markNetworkReadyForRun(runId: string, at: Date = new Date()): Promise<void> {
+    await this.db.nativeGatewaySession.updateMany({
+      where: { runId, networkReadyAt: null },
+      data: { networkReadyAt: at },
+    });
   }
 
   async endSession(sessionId: string, status: "finished" | "cancelled"): Promise<void> {

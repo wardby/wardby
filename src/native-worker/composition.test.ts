@@ -35,7 +35,9 @@ describe("native sandbox configuration", () => {
   });
 
   it("fails fast on a configuration that cannot work", () => {
-    expect(() => loadNativeSandboxConfig({ NATIVE_SANDBOX_LAUNCHER: "kubernetes" })).toThrow(/must be "docker"/);
+    expect(() => loadNativeSandboxConfig({ NATIVE_SANDBOX_LAUNCHER: "podman" })).toThrow(
+      /must be "docker" or "kubernetes"/,
+    );
     expect(() => loadNativeSandboxConfig({ ...base, NATIVE_SANDBOX_WORKER_IMAGE: "" })).toThrow(
       /NATIVE_SANDBOX_WORKER_IMAGE is required/,
     );
@@ -52,5 +54,43 @@ describe("native sandbox configuration", () => {
     expect(
       buildNativeSandboxExecutor({ db: {} as never, providers: {} as NativeRunProviders, env: base }),
     ).toBeInstanceOf(NativeSandboxExecutor);
+  });
+
+  it("reads the Kubernetes launcher, defaulting to the coding launcher's namespace and runtime class", () => {
+    const k8s = { NATIVE_SANDBOX_LAUNCHER: "kubernetes", NATIVE_SANDBOX_WORKER_IMAGE: image };
+    expect(loadNativeSandboxConfig(k8s)).toEqual({
+      launcher: "kubernetes",
+      workerImage: image,
+      namespace: "wardby-coding",
+      gatewayService: "wardby-native-gateway",
+      cpus: 1,
+      memoryMb: 512,
+      pids: 128,
+    });
+    expect(
+      loadNativeSandboxConfig({
+        ...k8s,
+        KUBERNETES_NAMESPACE: "runs",
+        KUBERNETES_RUNTIME_CLASS: "gvisor",
+        KUBERNETES_CONTEXT: "kind-wardby",
+      }),
+    ).toMatchObject({ namespace: "runs", runtimeClassName: "gvisor", context: "kind-wardby" });
+    expect(
+      loadNativeSandboxConfig({
+        ...k8s,
+        KUBERNETES_NAMESPACE: "runs",
+        NATIVE_SANDBOX_NAMESPACE: "native",
+        NATIVE_GATEWAY_SERVICE: "gw",
+      }),
+    ).toMatchObject({ namespace: "native", gatewayService: "gw" });
+  });
+
+  it("requires a registry digest for Kubernetes: a cluster cannot pull a local image id", () => {
+    expect(() =>
+      loadNativeSandboxConfig({
+        NATIVE_SANDBOX_LAUNCHER: "kubernetes",
+        NATIVE_SANDBOX_WORKER_IMAGE: `sha256:${"b".repeat(64)}`,
+      }),
+    ).toThrow(/must be a registry digest/);
   });
 });

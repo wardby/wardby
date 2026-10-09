@@ -78,6 +78,7 @@ const STATUS_FOR: Record<string, number> = {
   run_not_drivable: 409,
   duplicate_call: 409,
   budget_exhausted: 402,
+  not_ready: 503,
   bridge_error: 200,
   internal: 500,
 };
@@ -121,6 +122,11 @@ async function handle(
   }
   if (session.status !== "active" || Date.now() >= session.deadlineAt.getTime()) {
     throw new GatewayError("run_not_drivable", "This run's gateway session has ended.");
+  }
+  // Nothing is served before the worker's network isolation is proven: until then its egress may
+  // not yet be limited to this gateway, so it must not receive tool code results, secrets, or data.
+  if (!session.networkReadyAt) {
+    throw new GatewayError("not_ready", "This run's network isolation is not proven yet; retry shortly.");
   }
   if ((await runDrivability(db, session.runId)) !== "drivable") {
     throw new GatewayError("run_not_drivable", "This run is no longer running.");

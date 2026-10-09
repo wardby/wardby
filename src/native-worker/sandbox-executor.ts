@@ -43,6 +43,8 @@ export interface ManagedWorkerLauncher extends DetachedWorkerLauncher {
   remove(runId: string): Promise<void>;
   listWorkers(): Promise<{ name: string; runHash: string }[]>;
   removeByWorkerName(name: string): Promise<void>;
+  /** The URL workers dial, when only the launcher can know it (a Kubernetes Service's ClusterIP). */
+  resolveGatewayUrl?(): Promise<string>;
 }
 
 export interface NativeSandboxExecutorOptions {
@@ -86,10 +88,16 @@ export class NativeSandboxExecutor implements Executor {
     }
     let outcome: Awaited<ReturnType<typeof startSandboxRun>>;
     try {
-      outcome = await startSandboxRun({ runId, providers, db, gatewayUrl, launcher });
+      const url = launcher.resolveGatewayUrl ? await launcher.resolveGatewayUrl() : gatewayUrl;
+      outcome = await startSandboxRun({ runId, providers, db, gatewayUrl: url, launcher });
     } catch (err) {
       // A concurrent start won the race for the run's one session: attach to its worker.
-      if (!isUniqueViolation(err)) throw err;
+      if (!isUniqueViolation(err)) {
+        // The launch failed after the session was created (e.g. isolation could not be proven):
+        // end the session so nothing can use its capability; the caller fails the run.
+        await this.endSession(runId, "cancelled").catch(() => {});
+        throw err;
+      }
       const raced = await db.nativeGatewaySession.findUniqueOrThrow({ where: { runId }, select: { deadlineAt: true } });
       this.watch(runId, launcher.handle(runId), raced.deadlineAt);
       return;
@@ -150,10 +158,11 @@ export class NativeSandboxExecutor implements Executor {
   }
 
   async stop(runId: string, reason?: string): Promise<void> {
-    const sessionId = await this.endSession(runId, "cancelled");
-    // Recorded before the kill: the exit watcher then finds the run already ended and leaves it
-    // cancelled, instead of recording the killed worker's exit as a failure.
+    // Recorded first, before the session ends or the worker is killed: either of those makes the
+    // worker exit, and its exit watcher must then find the run already ended (and leave it
+    // cancelled) rather than record the exit as a failure.
     await failNativeRun(this.finishContext(runId), new RunCancelledError(reason ?? "The run was cancelled."));
+    const sessionId = await this.endSession(runId, "cancelled");
     await this.options.launcher.kill(runId).catch(() => {});
     if (sessionId) {
       // Its delegations' children belong to the server's executor; a child left running would
@@ -212,10 +221,11 @@ export class NativeSandboxExecutor implements Executor {
     const sessions = await db.nativeGatewaySession.findMany({
       select: { runId: true, status: true, deadlineAt: true, run: { select: { status: true } } },
     });
-    const byHash = new Map(sessions.map((s) => [nativeRunLabel(s.runId), s]));
+    // Docker labels carry the full run hash; Kubernetes label values carry its first 40 characters.
+    const labelled = sessions.map((s) => ({ hash: nativeRunLabel(s.runId), session: s }));
     let removed = 0;
     for (const worker of workers) {
-      const session = byHash.get(worker.runHash);
+      const session = labelled.find((l) => l.hash.startsWith(worker.runHash))?.session;
       const live =
         session &&
         session.status === "active" &&
