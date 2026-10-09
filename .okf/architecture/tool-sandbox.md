@@ -27,6 +27,10 @@ bindings.[^readme] Code is in `src/sandbox/`[^sandbox-dir]:
 
 Tool output is untrusted content (`src/core/untrusted-content.ts`).
 
+This is where user tools run in the default `control-plane` mode. In
+`sandbox` mode the same sandbox runs inside a single-use worker instead of the
+server process; see [native sandbox](/architecture/native-sandbox.md).
+
 [^readme]: Project README
 
 [^sandbox-dir]: src/sandbox

@@ -12,6 +12,7 @@ okf_version: "0.2"
 - [Budget guardrail](architecture/budget-guardrail.md) - hard per-run spend limit enforced before provider calls
 - [Runner and engine](architecture/runner-and-engine.md) - how runs are created and executed
 - [Tool sandbox](architecture/tool-sandbox.md) - QuickJS isolation for agent tools
+- [Native sandbox](architecture/native-sandbox.md) - whole native agent in a single-use, credential-free worker
 - [Coding workers](architecture/coding-workers.md) - isolated Codex / Claude Code execution
 - [Coding proxy](architecture/coding-proxy.md) - credential injection and metering
 - [MCP server](architecture/mcp-server.md) - management surface and auth
