@@ -129,7 +129,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@openai/codex-sdk": "0.159.2",
+    "@openai/codex-sdk": "0.160.1",
     "@types/node": "^24.0.0",
     "@types/papaparse": "^5.5.2",
     "@types/pg": "8.23.1",
