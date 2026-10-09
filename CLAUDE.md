@@ -4,6 +4,22 @@ Budget-guarded LLM agents on a schedule, with a sandboxed tool executor and a
 cloud-agnostic core behind swappable provider seams. See `README.md` for the
 architecture and `CLEANROOM.md` for the clean-room rules that bind all work here.
 
+## Contributing changes — STRICT
+
+- **Sign off every commit** with `git commit -s` (Developer Certificate of
+  Origin; see `CONTRIBUTING.md` and `CLEANROOM.md`). A sign-off certifies the
+  committer's own work: never add one for someone else.
+- **Before committing, run `npm run typecheck`, `npm run lint`,
+  `npm run format:check`, and `npm test && npm run build`.** `format:check`
+  covers Markdown too; fix with `npx prettier --write <paths>`.
+- **This file is the single home for the rules in it.** Do not restate them in
+  other files (docs, knowledge bundles, agent configs); link to the section
+  instead, so there is never a second copy to drift.
+- **Do not add instructions here that depend on tools, plugins, or skills that
+  are not part of this repository.**
+- **Check facts against the code, not just other docs**, when writing
+  architecture or reference material: docs can be out of date.
+
 ## LLM pricing tables — STRICT
 
 Every model entry in the model catalog (`src/providers/llm/catalog-shipped.ts`,

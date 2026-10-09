@@ -26,6 +26,9 @@ npm test
 npm run build
 ```
 
+`format:check` runs Prettier over Markdown as well as code; fix failures with
+`npx prettier --write <paths>`.
+
 Changes to coding workers, authentication, budgets, isolation, migrations, or
 release boundaries should include focused negative tests. Do not commit secrets,
 private keys, production data, prompts, repository contents, or generated
