@@ -17,13 +17,13 @@ sources:
 
 # Rules
 
-* Each shipped model entry (`catalog-shipped.ts`) and every `set_model`
+- Each shipped model entry (`catalog-shipped.ts`) and every `set_model`
   call must set `cachedInputPerMTok` and `cacheWritePerMTok`.[^claude-md]
-* **No multipliers.** Hardcode each model's own published rate as a literal,
+- **No multipliers.** Hardcode each model's own published rate as a literal,
   even where a ratio currently holds, because ratios drift per model and tier.
-* Source rates only from the provider's own pricing page. If you can't find
+- Source rates only from the provider's own pricing page. If you can't find
   one, stop and ask; AI search summaries have fabricated pricing pages.
-* Bump `SHIPPED_CATALOG_VERSION` when any shipped value changes.
+- Bump `SHIPPED_CATALOG_VERSION` when any shipped value changes.
 
 # Why
 
@@ -35,4 +35,5 @@ Catalog code: `src/providers/llm/catalog*.ts`; admin tools `list_models`,
 `get_model`, `set_model`, `disable_model`, `reset_model`.
 
 [^claude-md]: Project CLAUDE.md
+
 [^pricing-core]: src/providers/llm/pricing-core.ts

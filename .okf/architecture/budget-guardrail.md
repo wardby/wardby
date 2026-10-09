@@ -28,12 +28,12 @@ about cost (see [runner and engine](/architecture/runner-and-engine.md)).
 
 # Pitfalls
 
-* Input estimates must include the serialized tool schemas whenever the real
+- Input estimates must include the serialized tool schemas whenever the real
   call sends them, since providers bill them as input tokens. Omitting them
   once let a run through whose real input cost already exceeded budget.
-* `cacheRatio` defaults to 0, i.e. every input token priced fresh.
-* Shared limits come from budget groups (`src/core/budget-groups.ts`).
-* Opaque coding runs are capped at the boundary by the
+- `cacheRatio` defaults to 0, i.e. every input token priced fresh.
+- Shared limits come from budget groups (`src/core/budget-groups.ts`).
+- Opaque coding runs are capped at the boundary by the
   [coding proxy](/architecture/coding-proxy.md) and reconciled afterward.
 
 # Pricing
@@ -43,4 +43,5 @@ the full input rate, which overestimates; see
 [LLM pricing catalog](/data/llm-pricing-catalog.md).
 
 [^budget-ts]: src/core/budget.ts
+
 [^pricing-core]: src/providers/llm/pricing-core.ts

@@ -15,14 +15,14 @@ sources:
 
 # Hard rules
 
-* Never `prisma db push`.
-* Never edit an already-applied migration; fix it with a new additive one.
-* Migrations are hand-written from the spec (see
+- Never `prisma db push`.
+- Never edit an already-applied migration; fix it with a new additive one.
+- Migrations are hand-written from the spec (see
   [clean-room charter](/decisions/clean-room.md)) under
   `prisma/migrations/<YYYYMMDD######>_<name>/migration.sql`.
-* A schema change ships with its migration in the same change, including
+- A schema change ships with its migration in the same change, including
   indexes and constraints (`CREATE INDEX` needs a matching `@@index`).
-* Prefer additive changes.[^claude-md]
+- Prefer additive changes.[^claude-md]
 
 # Drift check (after any schema or migration change)
 
@@ -42,4 +42,5 @@ review-host state, and the model catalog (see
 [LLM pricing catalog](/data/llm-pricing-catalog.md)).
 
 [^claude-md]: Project CLAUDE.md
+
 [^schema]: prisma/schema.prisma

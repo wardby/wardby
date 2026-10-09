@@ -15,7 +15,7 @@ sources:
 
 # Not this bundle
 
-This `.okf/` bundle documents wardby itself. The *product feature* described
+This `.okf/` bundle documents wardby itself. The _product feature_ described
 here is a separate thing: a bundle that operators keep in their own repos
 (default `docs/knowledge`).[^knowledge-doc] Coding runs receive its index and
 reviewers can use it.
@@ -29,4 +29,5 @@ path, optional lines or symbol, a full 40-hex `sha` and a `spanHash`
 (`src/knowledge/check.ts`, `span-hash.ts`).
 
 [^knowledge-doc]: Architecture knowledge bundles guide
+
 [^concept-ts]: src/knowledge/concept.ts

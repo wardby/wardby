@@ -13,9 +13,9 @@ sources:
 
 # Transports and auth
 
-* **stdio:** one fixed local principal for the whole connection; the local
+- **stdio:** one fixed local principal for the whole connection; the local
   operator is trusted.
-* **HTTP:** an OAuth 2.1 resource server. Caller identity travels as the SDK's
+- **HTTP:** an OAuth 2.1 resource server. Caller identity travels as the SDK's
   `AuthInfo.extra.principal`, and each tool enforces scope via
   `requireScope`.[^server-ts] Auth is self-hosted or delegated to your IdP
   (`src/providers/auth/`).

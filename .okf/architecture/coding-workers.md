@@ -24,11 +24,11 @@ never auto-merges.
 
 # JOB_LAUNCHER backends (the `WorkspaceJobLauncher` seam)
 
-| Value | Runs in | Isolation |
-|-------|---------|-----------|
-| `local` | child process | development only, none |
-| `docker` | container on a per-run network | per-run network |
-| `kubernetes` | pod | per-run NetworkPolicy, field-by-field attested pod, optional gVisor |
+| Value        | Runs in                        | Isolation                                                           |
+| ------------ | ------------------------------ | ------------------------------------------------------------------- |
+| `local`      | child process                  | development only, none                                              |
+| `docker`     | container on a per-run network | per-run network                                                     |
+| `kubernetes` | pod                            | per-run NetworkPolicy, field-by-field attested pod, optional gVisor |
 
 On Kubernetes the pod read back from the API server is compared with the pod
 wardby built, any difference fails the run, and the launcher proves the
@@ -42,4 +42,5 @@ cluster accepts a policy whether or not anything enforces it.[^arch-runtime]
 protected paths), `src/coding/services` (per-run Postgres, Redis, MySQL).
 
 [^readme]: Project README
+
 [^arch-runtime]: Runtime architecture guide

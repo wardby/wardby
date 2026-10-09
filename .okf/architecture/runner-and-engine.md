@@ -13,9 +13,9 @@ sources:
 
 # Split
 
-* `createRun` persists a pending Run for an agent.
-* `executeRun` drives an existing Run to a terminal state.
-* `runAgent` does both and is what the CLI's `wardby run` uses (attended,
+- `createRun` persists a pending Run for an agent.
+- `executeRun` drives an existing Run to a terminal state.
+- `runAgent` does both and is what the CLI's `wardby run` uses (attended,
   foreground, no executor durability needed).[^runner-ts]
 
 The scheduler can create the Run inside its claim transaction and hand the id
