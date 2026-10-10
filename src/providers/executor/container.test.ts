@@ -1584,6 +1584,42 @@ describe("ContainerExecutor", () => {
     expect(created.store.run.result).toMatchObject({ outcome: "no_changes" });
   });
 
+  it("calls onCodingRunTerminal with the run id once the run's terminal write is done", async () => {
+    const seen: Array<{ runId: string; status: string }> = [];
+    const created = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, {
+      onCodingRunTerminal: async (runId) => {
+        seen.push({ runId, status: created.store.run.status });
+      },
+    });
+    created.jobs.result.resultArtifact = JSON.stringify({
+      schemaVersion: 1,
+      runId: "run-1",
+      outcome: "no_changes",
+      summary: "Already correct.",
+      tests: [],
+    });
+    await created.executor.start("run-1");
+    expect(seen).toEqual([{ runId: "run-1", status: "succeeded" }]);
+  });
+
+  it("a throwing onCodingRunTerminal never changes the run's terminal state", async () => {
+    const created = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, {
+      onCodingRunTerminal: () => {
+        throw new Error("hook failed");
+      },
+    });
+    created.jobs.result.resultArtifact = JSON.stringify({
+      schemaVersion: 1,
+      runId: "run-1",
+      outcome: "no_changes",
+      summary: "Already correct.",
+      tests: [],
+    });
+    await expect(created.executor.start("run-1")).resolves.toBeUndefined();
+    expect(created.store.run.status).toBe("succeeded");
+    expect(created.store.run.result).toMatchObject({ outcome: "no_changes" });
+  });
+
   it("stops before VCS finalization when authoritative usage exceeds the budget", async () => {
     const created = await harness({ budgetUsd: 0.005 });
     await created.executor.start("run-1");

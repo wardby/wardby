@@ -55,6 +55,7 @@ import { closeOrphanedIssueStatuses } from "./issue-status.js";
 import { fileSelfDefect } from "./self-defects.js";
 import { emitRunFinishedEvents } from "./workflow-run-events.js";
 import { syncOpenPullRequestStates } from "./pull-request-state-sync.js";
+import { sweepMergeOrderChecks } from "./merge-order-check.js";
 import { startDeferredReviews, type ReviewStartDeps } from "./host-events.js";
 
 const reconcilerLog = logger.child({ module: "reconciler" });
@@ -299,6 +300,9 @@ export async function reconcileOnce(
   // Start reviews whose head's CI never finished (waitForCi links), and reviews whose delegating run
   // ended without releasing them (after the lost marking above); bounded per pass, never throws.
   if (deferredReviews) await startDeferredReviews(deferredReviews, now);
+  // Re-post `wardby merge order` checks whose pr_closed or new-head event was missed; after the
+  // deferred-review start, so no review waits on it. Throttled and bounded per pass, never throws.
+  await sweepMergeOrderChecks({ db, hosts: reviewHosts }, now);
   return lost;
 }
 

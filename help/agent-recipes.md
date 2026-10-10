@@ -203,6 +203,11 @@ request's current value (the one most recently set for it, by the run that
 opened it or a later continuation); one that passes `mergeOrder` replaces
 it.
 
+With Wardby 0.6.0 or later, once a set has more than one `mergeOrder`, each
+pull request in it also gets a `wardby merge order` check run showing
+whether its earlier steps have merged yet; search help for "merge order
+check" for its states and for requiring it in branch protection.
+
 ## Step 3: confirm
 
 Summarize what you created: each agent's name and id, the sub-agent bindings,

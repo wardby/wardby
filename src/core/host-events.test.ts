@@ -6,8 +6,10 @@ import {
   DEFERRED_REVIEW_MAX_AGE_MS,
   DEFERRED_REVIEW_MAX_WAIT_MS,
   isReviewCommand,
+  reviewTaskText,
   routeHostEvent,
   startDeferredForRequest,
+  startReviews,
   startDeferredReviews,
   type HostEvent,
 } from "./host-events.js";
@@ -204,6 +206,33 @@ describe("routeHostEvent", () => {
     );
     expect(result.runIds).toEqual(["run-a1"]);
     expect(d.reviewLookup).not.toHaveBeenCalled();
+  });
+
+  it("startReviews adds extra context: the trusted note in the task, the rest as untrusted context", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([]);
+    const runIds = await startReviews(
+      d,
+      d.hosts.github,
+      REPO,
+      7,
+      SHA,
+      [{ agentId: "a1", checkName: "wardby review" }],
+      false,
+      {
+        task: "Re-check your earlier finding.",
+        untrustedContext: "model said: nothing to fix",
+      },
+    );
+    expect(runIds).toEqual(["run-a1"]);
+    const { task, untrustedContext } = splitTaskOverride(vi.mocked(dispatchRun).mock.calls[0][0].taskOverride!);
+    expect(task).toBe(`Review pull request #7 in ${REPO} (head ${SHA}).\n\nRe-check your earlier finding.`);
+    expect(untrustedContext).toBe("model said: nothing to fix");
+    expect(d.reviewLookup).not.toHaveBeenCalled();
+  });
+
+  it("a review task without extra context is unchanged", () => {
+    expect(reviewTaskText(REPO, 7, SHA)).toBe(`Review pull request #7 in ${REPO} (head ${SHA}).`);
   });
 
   it("skips fork PRs entirely", async () => {
@@ -656,6 +685,45 @@ describe("routeHostEvent pr_closed", () => {
     (d.db as any).issuePullRequest = { findMany };
     await expect(routeHostEvent(closed, d)).resolves.toEqual({ runIds: [], followUps: [] });
     expect(findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("routeHostEvent merge order check (#261)", () => {
+  function checksHost() {
+    const h = host();
+    h.pullRequestOrigin = vi.fn(async () => ({ headSha: SHA, isFork: false, state: "open", labels: [] }));
+    h.upsertNamedCheck = vi.fn(async () => undefined);
+    return h;
+  }
+
+  it("hands a new head to the merge order check after the response, even with no reviewer linked", async () => {
+    const h = checksHost();
+    const d = deps([], h);
+    const result = await routeHostEvent(pr, d);
+    expect(result.runIds).toEqual([]);
+    expect(result.followUps).toHaveLength(1);
+    expect(h.pullRequestOrigin).not.toHaveBeenCalled();
+    // No coding run with a merge order opened this PR: one query, no host call.
+    await expect(result.followUps[0]()).resolves.toBeUndefined();
+    expect((d.db as any).$queryRaw).toHaveBeenCalled();
+    expect(h.pullRequestOrigin).not.toHaveBeenCalled();
+    expect(h.upsertNamedCheck).not.toHaveBeenCalled();
+  });
+
+  it("skips forks, and hosts that can't post named checks", async () => {
+    const h = checksHost();
+    await expect(routeHostEvent({ ...pr, isFork: true }, deps([], h))).resolves.toEqual({ runIds: [], followUps: [] });
+    await expect(routeHostEvent(pr, deps([]))).resolves.toEqual({ runIds: [], followUps: [] });
+  });
+
+  it("hands a closed PR to the merge order check after the bookkeeping; a failure there never throws", async () => {
+    const h = checksHost();
+    const d = deps([], h);
+    (d.db as any).$queryRaw = vi.fn(async () => Promise.reject(new Error("db down")));
+    const closed: HostEvent = { kind: "pr_closed", provider: "github", repository: REPO, prNumber: 7, merged: false };
+    const result = await routeHostEvent(closed, d);
+    expect(result.followUps).toHaveLength(1);
+    await expect(result.followUps[0]()).resolves.toBeUndefined();
   });
 });
 
@@ -1384,6 +1452,16 @@ describe("routeHostEvent: CI finished", () => {
       await expect(routeHostEvent(ci, d)).resolves.toEqual({ runIds: [], followUps: [] });
       expect(dispatchRun).not.toHaveBeenCalled();
     }
+  });
+
+  it("still re-runs a no-change re-review that only commented while CI was pending", async () => {
+    // r0 requested changes and a no-change fix round re-reviewed it (its own claim column);
+    // the re-review r1 then published COMMENT before CI finished.
+    const { d } = setup([
+      row({ runId: "r0", verdict: "CHANGES_REQUESTED", ciPendingAtReview: false, noChangeRereviewAt: new Date() }),
+      row(),
+    ]);
+    await expect(routeHostEvent(ci, d)).resolves.toEqual({ runIds: ["run-a1"], followUps: [] });
   });
 
   it("starts nothing when another delivery already claimed the row", async () => {

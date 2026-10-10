@@ -6,6 +6,8 @@ import type { IssueTracker } from "../providers/issue-tracker/types.js";
 
 vi.mock("./pull-request-state-sync.js", () => ({ syncOpenPullRequestStates: vi.fn(async () => 0) }));
 import { syncOpenPullRequestStates } from "./pull-request-state-sync.js";
+vi.mock("./merge-order-check.js", () => ({ sweepMergeOrderChecks: vi.fn(async () => 0) }));
+import { sweepMergeOrderChecks } from "./merge-order-check.js";
 vi.mock("./host-events.js", () => ({ startDeferredReviews: vi.fn(async () => []) }));
 import { startDeferredReviews, type ReviewStartDeps } from "./host-events.js";
 import { reconcileOnce, type ReconcilerDb } from "./reconciler.js";
@@ -789,6 +791,26 @@ describe("reconcileOnce pull-request state sync", () => {
     await reconcileOnce(db, now, undefined, undefined, hosts, trackers);
 
     expect(syncOpenPullRequestStates).toHaveBeenCalledWith(expect.anything(), hosts, trackers, now);
+  });
+
+  it("sweeps the merge order checks after the pull-request states and the deferred-review start, with the pass's hosts and clock", async () => {
+    const order: string[] = [];
+    vi.mocked(syncOpenPullRequestStates).mockImplementationOnce(async () => (order.push("states"), 0));
+    vi.mocked(startDeferredReviews).mockImplementationOnce(async () => (order.push("deferred"), []));
+    vi.mocked(sweepMergeOrderChecks).mockClear();
+    vi.mocked(sweepMergeOrderChecks).mockImplementationOnce(async () => (order.push("merge-order"), 0));
+    const hosts = { github: {} } as never;
+    const now = new Date("2026-10-05T12:00:00Z");
+    const db = {
+      ...fakeDb([]),
+      runHostCheck: { findMany: vi.fn(async () => []) },
+      runHostStatus: { findMany: vi.fn(async () => []) },
+    } as unknown as ReconcilerDb;
+
+    await reconcileOnce(db, now, undefined, undefined, hosts, undefined, {} as ReviewStartDeps);
+
+    expect(sweepMergeOrderChecks).toHaveBeenCalledWith({ db, hosts }, now);
+    expect(order).toEqual(["states", "deferred", "merge-order"]);
   });
 });
 

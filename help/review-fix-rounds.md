@@ -37,6 +37,16 @@ still running. Clicking **Re-run** on the review check isn't counted as a
 round itself; if the re-run's review requests changes, that starts a round
 like any other review.
 
+With Wardby 0.6.0 or later, a round whose agent makes no change — it decided
+the review's finding was wrong, rather than pushing a fix — doesn't leave the
+failed review check standing with nothing to replace it: wardby starts one
+fresh review of the pull request's unchanged head instead, run by the same
+reviewer that requested the changes, with the round's own summary passed
+along as untrusted context. This happens once per review that requested
+changes and still counts as one of the round cap's rounds; if the cap has
+already been reached, wardby posts the usual cap comment instead of
+re-reviewing.
+
 Rounds are tracked with labels on the pull request:
 
 - `wardby-autofix-<N>` — one per round, added before that round's run

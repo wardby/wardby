@@ -577,6 +577,15 @@ export interface ContainerExecutorOptions {
    */
   onSlotReleased?: () => void;
   /**
+   * Called with the run id at the end of each terminal finish of a collected
+   * job (succeeded, no change, budget, or failed), after the terminal write
+   * and cleanup. It may run more than once for one run (a replayed or
+   * duplicate finish), so it must be idempotent; a rejection or throw is
+   * logged and never reaches the terminal path. composition.ts wires the
+   * review-fix re-review here, so this executor imports no review logic.
+   */
+  onCodingRunTerminal?: (runId: string) => Promise<void> | void;
+  /**
    * Loads this run's RegistryFetch ledger (composition.ts wires the Prisma
    * query) so finalizeChanges can surface installed/refused packages in the
    * PR body. Optional so tests and non-registry deployments can omit it;
@@ -1168,6 +1177,18 @@ export class ContainerExecutor implements Executor {
       }
       await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
       this.emit({ stage: "cleanup", runId: run.runId, jobId: handle.id, cleanupSucceeded: true });
+      await this.notifyTerminal(run.runId);
+    }
+  }
+
+  /** Runs the onCodingRunTerminal hook; nothing it does, throws, or rejects reaches the caller. */
+  private async notifyTerminal(runId: string): Promise<void> {
+    const hook = this.options.onCodingRunTerminal;
+    if (!hook) return;
+    try {
+      await hook(runId);
+    } catch (err) {
+      containerLog.warn({ err, runId }, "coding run terminal hook failed");
     }
   }
 

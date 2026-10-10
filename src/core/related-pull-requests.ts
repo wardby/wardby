@@ -22,7 +22,7 @@
  * pull requests brings the original request's tree, and the original request
  * brings every later follow-up tree that continued one of its pull requests.
  */
-import { Prisma, type PrismaClient, type Run } from "#prisma";
+import { Prisma, type PrismaClient, type Run, type RunStatus } from "#prisma";
 import { CODING_CODE_PROVIDER, normalizeGitHubRepository } from "../coding/protocol.js";
 import {
   ISSUE_KEY,
@@ -70,6 +70,15 @@ export interface RelatedPullRequestGroup {
   pullRequests: RelatedPullRequest[];
   /** The first well-formed issue seen on the group's coding runs. */
   issue?: { provider: string; key: string };
+  /**
+   * The top-level run of every run tree the walk visited (the original
+   * request and each follow-up tree that continued one of its pull
+   * requests), with its status; absent when none was read. `codingRun` is
+   * true when the root is itself a coding run (a top-level follow-up such
+   * as a review fix round or an @mention picked up by a coding link), not a
+   * native lead agent's run.
+   */
+  roots?: Array<{ id: string; status: RunStatus; codingRun: boolean }>;
 }
 
 interface TreeCodingRun {
@@ -80,6 +89,11 @@ interface TreeCodingRun {
   issueKey: string | null;
   startedAt: Date;
   mergeOrder: number | null;
+  /** The top-level run of the tree this row was found in, and its status. */
+  treeRootId?: string;
+  treeRootStatus?: RunStatus;
+  /** True when that top-level run is itself a coding run. */
+  treeRootIsCodingRun?: boolean;
 }
 
 /** Every coding run in the top-level trees containing `seeds` (walks up parentRunId, then down). */
@@ -91,16 +105,54 @@ async function treeCodingRuns(db: RelatedPullRequestsDb, seeds: string[]): Promi
       UNION
       SELECT p."id", p."parentRunId" FROM "Run" p JOIN up u ON p."id" = u."parentRunId"
     ), down AS (
-      SELECT u."id" FROM up u WHERE u."parentRunId" IS NULL
+      SELECT u."id", u."id" AS "rootId" FROM up u WHERE u."parentRunId" IS NULL
       UNION
-      SELECT c."id" FROM "Run" c JOIN down d ON c."parentRunId" = d."id"
+      SELECT c."id", d."rootId" FROM "Run" c JOIN down d ON c."parentRunId" = d."id"
     )
-    SELECT cr."runId", cr."result", cr."rootCodingRunId", cr."issueProvider", cr."issueKey", cr."mergeOrder", r."startedAt"
+    SELECT cr."runId", cr."result", cr."rootCodingRunId", cr."issueProvider", cr."issueKey", cr."mergeOrder", r."startedAt",
+      d."rootId" AS "treeRootId", root."status"::text AS "treeRootStatus",
+      EXISTS (SELECT 1 FROM "CodingRun" rc WHERE rc."runId" = d."rootId") AS "treeRootIsCodingRun"
     FROM "CodingRun" cr
     JOIN down d ON cr."runId" = d."id"
     JOIN "Run" r ON r."id" = cr."runId"
+    JOIN "Run" root ON root."id" = d."rootId"
     ORDER BY r."startedAt" ASC, cr."runId" ASC
     LIMIT ${MAX_TREE_CODING_RUNS}`;
+}
+
+/**
+ * The top-level run of the tree a pull request's marker run belongs to,
+ * whatever its status: the marker's coding run (a continuation resolves to
+ * its root coding run first), then up its parents. Null when the marker
+ * names no coding run, or one recorded for a different repository than
+ * `repository` (compared case-insensitively; omit it to skip the check).
+ * `isOpener` is true when that root is the opening coding run itself (the
+ * pull request was not delegated). The single place this walk and its
+ * repository guard live (requestLeadRunId, the merge order check).
+ */
+export async function runTreeRoot(
+  db: Pick<PrismaClient, "$queryRaw">,
+  markerRunId: string,
+  repository?: string,
+): Promise<{ id: string; status: RunStatus; isOpener: boolean } | null> {
+  const repo = repository ?? null;
+  // UNION, not UNION ALL: a parentRunId cycle (never written, but not a constraint) can't recurse forever.
+  const rows = await db.$queryRaw<Array<{ id: string; status: RunStatus; isOpener: boolean }>>`
+    WITH RECURSIVE opener AS (
+      SELECT COALESCE(cr."rootCodingRunId", cr."runId") AS "id"
+      FROM "CodingRun" cr
+      WHERE cr."runId" = ${markerRunId}
+        AND (${repo}::text IS NULL OR lower(cr."repository") = lower(${repo}::text))
+    ), up AS (
+      SELECT r."id", r."parentRunId", r."status"::text AS "status" FROM "Run" r JOIN opener o ON r."id" = o."id"
+      UNION
+      SELECT p."id", p."parentRunId", p."status"::text FROM "Run" p JOIN up u ON p."id" = u."parentRunId"
+    )
+    SELECT u."id", u."status", u."id" IN (SELECT "id" FROM opener) AS "isOpener"
+    FROM up u
+    WHERE u."parentRunId" IS NULL
+    LIMIT 1`;
+  return rows[0] ?? null;
 }
 
 function safeRepository(value: string): string | undefined {
@@ -265,7 +317,17 @@ export async function collectRelatedPullRequests(
         `${a.repository}#${a.number}`.localeCompare(`${b.repository}#${b.number}`),
     )
     .slice(0, MAX_RELATED_GROUP);
-  return { pullRequests, ...(issue ? { issue } : {}) };
+  const roots = new Map<string, { status: RunStatus; codingRun: boolean }>();
+  for (const r of rows) {
+    if (r.treeRootId && r.treeRootStatus) {
+      roots.set(r.treeRootId, { status: r.treeRootStatus, codingRun: r.treeRootIsCodingRun === true });
+    }
+  }
+  return {
+    pullRequests,
+    ...(issue ? { issue } : {}),
+    ...(roots.size > 0 ? { roots: [...roots].map(([id, root]) => ({ id, ...root })) } : {}),
+  };
 }
 
 interface LivePullRequest {

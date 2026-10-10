@@ -89,6 +89,11 @@ need its live state. The list is current; the PR body's **Related pull
 requests** section can be stale — see
 [Related pull requests across repositories](related-pull-requests.md).
 
+With Wardby 0.6.0 or later, once a set has more than one `mergeOrder`, each
+pull request in it also gets its own check run, named `wardby merge order`,
+independent of any reviewer link; search help for "merge order check" for
+its states and for requiring it in branch protection.
+
 ## Reviewing a pull request a delegated run opened
 
 This requires Wardby 0.6.0 or later; earlier releases review such a pull
