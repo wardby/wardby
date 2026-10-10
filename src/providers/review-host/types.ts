@@ -222,16 +222,13 @@ export interface CompleteCheckInput {
   detailsUrl?: string;
 }
 
-export interface UpsertNamedCheckInput {
+export type UpsertNamedCheckInput = {
   headSha: string;
   /** The check's fixed name, e.g. MERGE_ORDER_CHECK_NAME ("wardby merge order"); identifies which run to update. */
   name: string;
-  status: "in_progress" | "completed";
-  /** Required when `status` is "completed"; omitted while "in_progress". */
-  conclusion?: "success" | "failure";
   title: string;
   summary: string;
-}
+} & ({ status: "in_progress" } | { status: "completed"; conclusion: "success" | "failure" });
 
 /**
  * A user's effective permission on one repository, host-neutral and ranked

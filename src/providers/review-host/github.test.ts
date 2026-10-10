@@ -752,8 +752,104 @@ describe("GitHubReviewHost writes", () => {
     });
     const created = calls.find((c) => c.method === "POST" && c.path === `${BASE}/check-runs`)!;
     const output = (created.body as { output: { title: string; summary: string } }).output;
-    expect(output.title.length).toBeLessThanOrEqual(1024);
+    expect(output.title.length).toBe(255);
     expect(output.summary.length).toBe(65_535);
+  });
+
+  const namedRuns = (runs: unknown[]) => ({ total_count: runs.length, check_runs: runs });
+  const LIST = `${BASE}/commits/${SHA}/check-runs?check_name=wardby%20merge%20order`;
+
+  it("upsertNamedCheck posts a fresh check when this App's existing one completed and the new status is in_progress", async () => {
+    const { client, calls } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path === LIST) {
+        return json(
+          namedRuns([
+            {
+              id: 42,
+              name: "wardby merge order",
+              status: "completed",
+              conclusion: "success",
+              output: { title: "t", summary: "s" },
+              app: { id: APP_ID, slug: "wardby" },
+            },
+          ]),
+        );
+      }
+      if (method === "POST" && path === `${BASE}/check-runs`) return json({ id: 43 }, 201);
+      return undefined;
+    });
+    await new GitHubReviewHost(client).upsertNamedCheck(REPO, {
+      headSha: SHA,
+      name: "wardby merge order",
+      status: "in_progress",
+      title: "Waiting",
+      summary: "waiting for: a/b#1",
+    });
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+    expect(calls.find((c) => c.method === "POST" && c.path === `${BASE}/check-runs`)!.body).toMatchObject({
+      head_sha: SHA,
+      status: "in_progress",
+    });
+  });
+
+  it("upsertNamedCheck patches the newest of this App's runs, and writes nothing when it already says the same", async () => {
+    const mine = (id: number, title: string) => ({
+      id,
+      name: "wardby merge order",
+      status: "completed",
+      conclusion: "failure",
+      output: { title, summary: "s" },
+      app: { id: APP_ID, slug: "wardby" },
+    });
+    let runs = [mine(40, "old"), mine(44, "old")];
+    const { client, calls } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path === LIST) return json(namedRuns(runs));
+      if (method === "PATCH") return json({ id: 44 });
+      return undefined;
+    });
+    const host = new GitHubReviewHost(client);
+    const input = {
+      headSha: SHA,
+      name: "wardby merge order",
+      status: "completed" as const,
+      conclusion: "failure" as const,
+      title: "new",
+      summary: "s",
+    };
+    await host.upsertNamedCheck(REPO, input);
+    expect(calls.filter((c) => c.method === "PATCH").map((c) => c.path)).toEqual([`${BASE}/check-runs/44`]);
+    calls.length = 0;
+    runs = [mine(44, "new")];
+    await host.upsertNamedCheck(REPO, input);
+    expect(calls.filter((c) => c.method !== "GET")).toEqual([]);
+  });
+
+  it("upsertNamedCheck refuses a malformed head sha before any request", async () => {
+    const { client, calls } = fakeGitHub(() => undefined);
+    await expect(
+      new GitHubReviewHost(client).upsertNamedCheck(REPO, {
+        headSha: "../../x",
+        name: "wardby merge order",
+        status: "in_progress",
+        title: "t",
+        summary: "s",
+      }),
+    ).rejects.toMatchObject({ code: "host_invalid_response" });
+    expect(calls).toEqual([]);
+  });
+
+  it("upsertNamedCheck reports an App identity failure as a ReviewHostError", async () => {
+    const { client } = fakeGitHub(() => undefined);
+    vi.spyOn(client, "appIdentity").mockRejectedValue(new Error("github_api_unavailable"));
+    await expect(
+      new GitHubReviewHost(client).upsertNamedCheck(REPO, {
+        headSha: SHA,
+        name: "wardby merge order",
+        status: "in_progress",
+        title: "t",
+        summary: "s",
+      }),
+    ).rejects.toMatchObject({ name: "ReviewHostError", code: "host_api_error" });
   });
 
   it("adds a label (created if missing) with issues+pull_requests write", async () => {

@@ -659,6 +659,45 @@ describe("routeHostEvent pr_closed", () => {
   });
 });
 
+describe("routeHostEvent merge order check (#261)", () => {
+  function checksHost() {
+    const h = host();
+    h.pullRequestOrigin = vi.fn(async () => ({ headSha: SHA, isFork: false, state: "open", labels: [] }));
+    h.upsertNamedCheck = vi.fn(async () => undefined);
+    return h;
+  }
+
+  it("hands a new head to the merge order check after the response, even with no reviewer linked", async () => {
+    const h = checksHost();
+    const d = deps([], h);
+    const result = await routeHostEvent(pr, d);
+    expect(result.runIds).toEqual([]);
+    expect(result.followUps).toHaveLength(1);
+    expect(h.pullRequestOrigin).not.toHaveBeenCalled();
+    // No coding run with a merge order opened this PR: one query, no host call.
+    await expect(result.followUps[0]()).resolves.toBeUndefined();
+    expect((d.db as any).$queryRaw).toHaveBeenCalled();
+    expect(h.pullRequestOrigin).not.toHaveBeenCalled();
+    expect(h.upsertNamedCheck).not.toHaveBeenCalled();
+  });
+
+  it("skips forks, and hosts that can't post named checks", async () => {
+    const h = checksHost();
+    await expect(routeHostEvent({ ...pr, isFork: true }, deps([], h))).resolves.toEqual({ runIds: [], followUps: [] });
+    await expect(routeHostEvent(pr, deps([]))).resolves.toEqual({ runIds: [], followUps: [] });
+  });
+
+  it("hands a closed PR to the merge order check after the bookkeeping; a failure there never throws", async () => {
+    const h = checksHost();
+    const d = deps([], h);
+    (d.db as any).$queryRaw = vi.fn(async () => Promise.reject(new Error("db down")));
+    const closed: HostEvent = { kind: "pr_closed", provider: "github", repository: REPO, prNumber: 7, merged: false };
+    const result = await routeHostEvent(closed, d);
+    expect(result.followUps).toHaveLength(1);
+    await expect(result.followUps[0]()).resolves.toBeUndefined();
+  });
+});
+
 describe("routeHostEvent linked-PR attribution", () => {
   const LINK = { issueProvider: "jira", issueKey: "PAY-1" };
   const mention: Extract<HostEvent, { kind: "mention" }> = {

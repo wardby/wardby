@@ -22,7 +22,7 @@
  * pull requests brings the original request's tree, and the original request
  * brings every later follow-up tree that continued one of its pull requests.
  */
-import { Prisma, type PrismaClient, type Run } from "#prisma";
+import { Prisma, type PrismaClient, type Run, type RunStatus } from "#prisma";
 import { CODING_CODE_PROVIDER, normalizeGitHubRepository } from "../coding/protocol.js";
 import {
   ISSUE_KEY,
@@ -101,6 +101,41 @@ async function treeCodingRuns(db: RelatedPullRequestsDb, seeds: string[]): Promi
     JOIN "Run" r ON r."id" = cr."runId"
     ORDER BY r."startedAt" ASC, cr."runId" ASC
     LIMIT ${MAX_TREE_CODING_RUNS}`;
+}
+
+/**
+ * The top-level run of the tree a pull request's marker run belongs to,
+ * whatever its status: the marker's coding run (a continuation resolves to
+ * its root coding run first), then up its parents. Null when the marker
+ * names no coding run, or one recorded for a different repository than
+ * `repository` (compared case-insensitively; omit it to skip the check).
+ * `isOpener` is true when that root is the opening coding run itself (the
+ * pull request was not delegated). The single place this walk and its
+ * repository guard live (requestLeadRunId, the merge order check).
+ */
+export async function runTreeRoot(
+  db: Pick<PrismaClient, "$queryRaw">,
+  markerRunId: string,
+  repository?: string,
+): Promise<{ id: string; status: RunStatus; isOpener: boolean } | null> {
+  const repo = repository ?? null;
+  // UNION, not UNION ALL: a parentRunId cycle (never written, but not a constraint) can't recurse forever.
+  const rows = await db.$queryRaw<Array<{ id: string; status: RunStatus; isOpener: boolean }>>`
+    WITH RECURSIVE opener AS (
+      SELECT COALESCE(cr."rootCodingRunId", cr."runId") AS "id"
+      FROM "CodingRun" cr
+      WHERE cr."runId" = ${markerRunId}
+        AND (${repo}::text IS NULL OR lower(cr."repository") = lower(${repo}::text))
+    ), up AS (
+      SELECT r."id", r."parentRunId", r."status"::text AS "status" FROM "Run" r JOIN opener o ON r."id" = o."id"
+      UNION
+      SELECT p."id", p."parentRunId", p."status"::text FROM "Run" p JOIN up u ON p."id" = u."parentRunId"
+    )
+    SELECT u."id", u."status", u."id" IN (SELECT "id" FROM opener) AS "isOpener"
+    FROM up u
+    WHERE u."parentRunId" IS NULL
+    LIMIT 1`;
+  return rows[0] ?? null;
 }
 
 function safeRepository(value: string): string | undefined {

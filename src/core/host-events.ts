@@ -8,13 +8,25 @@
 import { Prisma, type PrismaClient } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
-import type { CodeReviewHost, HostEvent, ReviewHostRegistry } from "../providers/review-host/types.js";
+import type {
+  CodeReviewHost,
+  HostEvent,
+  PullRequestOrigin,
+  ReviewHostRegistry,
+} from "../providers/review-host/types.js";
 import { linkedPullRequestAttribution, openingRunAttribution, RESPONSE_PATH_SNAPSHOT_BUDGET } from "./attribution.js";
 import { checkContinuation, dispatchRun } from "./dispatch.js";
 import { mentionStatusRow, postMentionStatus } from "./host-status.js";
 import { handlePullRequestClosed } from "./issue-bridge.js";
 import { logger } from "./logger.js";
-import { MAX_SIBLING_HINTS, openSiblings, SIBLING_GUIDANCE, type OpenSibling } from "./related-pull-requests.js";
+import { syncMergeOrderChecksForPullRequest } from "./merge-order-check.js";
+import {
+  MAX_SIBLING_HINTS,
+  openSiblings,
+  runTreeRoot,
+  SIBLING_GUIDANCE,
+  type OpenSibling,
+} from "./related-pull-requests.js";
 import { requiredLevel, type RepoAccessGate } from "./repo-access.js";
 import { composeTaskOverride } from "./untrusted-content.js";
 import {
@@ -984,24 +996,7 @@ export async function requestLeadRunId(
   prMarkerRunId: string,
   repository?: string,
 ): Promise<string | null> {
-  const repo = repository ?? null;
-  // UNION, not UNION ALL: a parentRunId cycle (never written, but not a constraint) can't recurse forever.
-  const rows = await db.$queryRaw<Array<{ id: string; status: string; isOpener: boolean }>>`
-    WITH RECURSIVE opener AS (
-      SELECT COALESCE(cr."rootCodingRunId", cr."runId") AS "id"
-      FROM "CodingRun" cr
-      WHERE cr."runId" = ${prMarkerRunId}
-        AND (${repo}::text IS NULL OR lower(cr."repository") = lower(${repo}::text))
-    ), up AS (
-      SELECT r."id", r."parentRunId", r."status"::text AS "status" FROM "Run" r JOIN opener o ON r."id" = o."id"
-      UNION
-      SELECT p."id", p."parentRunId", p."status"::text FROM "Run" p JOIN up u ON p."id" = u."parentRunId"
-    )
-    SELECT u."id", u."status", u."id" IN (SELECT "id" FROM opener) AS "isOpener"
-    FROM up u
-    WHERE u."parentRunId" IS NULL
-    LIMIT 1`;
-  const root = rows[0];
+  const root = await runTreeRoot(db, prMarkerRunId, repository);
   if (!root || root.isOpener || !RUN_NOT_FINISHED.has(root.status)) return null;
   return root.id;
 }
@@ -1022,11 +1017,13 @@ async function deferUntilRequest(
   host: CodeReviewHost,
   key: PullRequestKey,
   links: LinkRow[],
+  /** The pull request's origin, read at most once per event (shared with the merge order check). */
+  readOrigin: (() => Promise<PullRequestOrigin>) | undefined,
 ): Promise<{ runIds: string[] } | null> {
-  if (links.length === 0 || !host.pullRequestOrigin) return null;
+  if (links.length === 0 || !readOrigin) return null;
   let leadRunId: string | null;
   try {
-    const origin = await host.pullRequestOrigin(key.repository, key.prNumber);
+    const origin = await readOrigin();
     if (!origin.markerRunId) return null;
     leadRunId = await requestLeadRunId(deps.db, origin.markerRunId, key.repository);
   } catch (err) {
@@ -1211,7 +1208,18 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       number: event.prNumber,
       merged: event.merged,
     });
-    return none;
+    // The merge order checks of the sets this PR is a step of, after the response. Never throws.
+    if (!deps.hosts[event.provider]?.upsertNamedCheck) return none;
+    const pr = { repository: event.repository, number: event.prNumber };
+    return {
+      runIds: [],
+      followUps: [
+        () =>
+          syncMergeOrderChecksForPullRequest(deps, pr, {
+            closed: { ...pr, merged: event.merged },
+          }),
+      ],
+    };
   }
   const host = deps.hosts[event.provider];
   if (!host) return none;
@@ -1304,13 +1312,32 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       return { runIds, followUps: [] };
     }
     case "pr_updated": {
-      if (event.isFork || reviewerLinks.length === 0) return none;
+      if (event.isFork) return none;
+      // Read at most once per event, by the request deferral and the merge order check alike.
+      let origin: Promise<PullRequestOrigin> | undefined;
+      const readOrigin = host.pullRequestOrigin
+        ? () => (origin ??= host.pullRequestOrigin!(event.repository, event.prNumber))
+        : undefined;
+      // A new head needs the merge order check re-posted (check runs are per commit), on every
+      // path below, a review held for the delegating run included. After the response; never throws.
+      const followUps: RouteResult["followUps"] =
+        host.upsertNamedCheck && readOrigin
+          ? [
+              () =>
+                syncMergeOrderChecksForPullRequest(
+                  deps,
+                  { repository: event.repository, number: event.prNumber },
+                  { origin: { repository: event.repository, number: event.prNumber, read: readOrigin } },
+                ),
+            ]
+          : [];
+      if (reviewerLinks.length === 0) return { runIds: [], followUps };
       const allowed = await authorizedLinks(deps, event, reviewerLinks);
-      if (allowed.length === 0) return none;
+      if (allowed.length === 0) return { runIds: [], followUps };
       // A PR a delegated coding run opened is reviewed once the whole request
       // finished, so its sibling PRs exist and the related section is current (#259).
-      const request = await deferUntilRequest(deps, host, event, allowed);
-      if (request) return { runIds: request.runIds, followUps: [] };
+      const request = await deferUntilRequest(deps, host, event, allowed, readOrigin);
+      if (request) return { runIds: request.runIds, followUps };
       // Reviewers linked with waitForCi review this head only once its CI finished.
       const deferral = await deferUntilCi(
         deps,
@@ -1326,7 +1353,7 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
           ...(await startReviews(deps, host, event.repository, event.prNumber, event.headSha, reviewers, true)),
         );
       }
-      return { runIds, followUps: [] };
+      return { runIds, followUps };
     }
     case "ci_completed": {
       if (reviewerLinks.length === 0) return none;

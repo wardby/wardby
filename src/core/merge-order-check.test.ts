@@ -77,6 +77,15 @@ describe("mergeOrderVerdict", () => {
     expect(mergeOrderVerdict(self, [self, peer, dep])).toEqual({ status: "success", dependencies: [dep] });
   });
 
+  it("counts self's own order toward the distinct orders when the set omits self", () => {
+    const self = member({ repository: "a/b", number: 2, mergeOrder: 2 });
+    const dep = member({ repository: "a/c", number: 1, mergeOrder: 1, state: "open" });
+    expect(mergeOrderVerdict(self, [dep])).toEqual({ status: "in_progress", waitingFor: [dep] });
+    const first = member({ repository: "a/c", number: 1, mergeOrder: 1 });
+    const later = member({ repository: "a/b", number: 2, mergeOrder: 2 });
+    expect(mergeOrderVerdict(first, [later])).toEqual({ status: "success", dependencies: [] });
+  });
+
   it("never treats a null-order member as a dependency", () => {
     const self = member({ repository: "a/b", number: 2, mergeOrder: 2 });
     const noOrder = member({ repository: "a/g", number: 9, mergeOrder: null, state: "open" });
