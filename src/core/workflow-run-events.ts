@@ -9,7 +9,7 @@ import { logger } from "./logger.js";
 import { dedupeKeys, emitWorkflowEvent, shortReason } from "./workflow-events.js";
 
 const log = logger.child({ module: "workflow-run-events" });
-const FAILED = new Set(["failed", "budget_exhausted", "cancelled", "lost"]);
+const FAILED = new Set(["failed", "budget_exhausted", "cancelled", "lost", "refused"]);
 const VERDICTS = new Set(["APPROVE", "CHANGES_REQUESTED", "COMMENT"]);
 
 export type RunEventsDb = Pick<PrismaClient, "agent" | "runHostCheck">;
