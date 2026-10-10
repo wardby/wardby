@@ -41,6 +41,17 @@ describe("Codex repo skills", () => {
     expect(await repoSkillNames(root)).toEqual([]);
   });
 
+  it("never reads a symlinked or oversized SKILL.md", async () => {
+    const root = await repo({
+      "elsewhere/SKILL.md": "---\nname: linked\n---\n",
+      ".agents/skills/big/SKILL.md": `---\nname: big\n---\n${"x".repeat(64 * 1024)}`,
+      ".agents/skills/ok/SKILL.md": "---\nname: ok\n---\n",
+    });
+    await mkdir(join(root, ".agents", "skills", "link"), { recursive: true });
+    await symlink(join(root, "elsewhere", "SKILL.md"), join(root, ".agents", "skills", "link", "SKILL.md"));
+    expect(await repoSkillNames(root)).toEqual(["ok"]);
+  });
+
   it("disables only the built-ins when repo skills are on, and everything when off", async () => {
     const root = await repo({ ".agents/skills/a/SKILL.md": "---\nname: alpha\n---\n" });
     expect(await disabledCodexSkills(root, true)).toEqual([...CODEX_BUILTIN_SKILLS]);

@@ -5,8 +5,9 @@
 // the run also turns off the repository's own skills (CodingTaskInput.repoSkills
 // === false), every skill the repo defines under .agents/skills/ or
 // .codex/skills/ is disabled too.
-import { lstat, readdir, readFile } from "node:fs/promises";
+import { lstat, readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { readBoundedRegularFile } from "./artifact.js";
 
 /** Codex's own built-in skills, loaded from its installed home directory regardless of workspace. */
 export const CODEX_BUILTIN_SKILLS = ["imagegen", "openai-docs", "skill-creator", "skill-installer"] as const;
@@ -40,16 +41,11 @@ function frontmatterName(content: string): string | null {
 }
 
 async function skillNameFromFile(skillMdPath: string): Promise<string | null> {
-  let stats;
-  try {
-    stats = await lstat(skillMdPath);
-  } catch {
-    return null;
-  }
-  if (!stats.isFile() || stats.size > MAX_SKILL_MD_BYTES) return null;
   let content: string;
   try {
-    content = await readFile(skillMdPath, "utf8");
+    // Checks what was actually opened (no symlink, a regular file, within the size bound) on the
+    // open descriptor, so the file can't be swapped between the check and the read.
+    content = await readBoundedRegularFile(skillMdPath, MAX_SKILL_MD_BYTES, "codex_skill_file_invalid");
   } catch {
     return null;
   }
