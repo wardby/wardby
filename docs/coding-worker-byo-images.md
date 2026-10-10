@@ -130,6 +130,20 @@ a worker built on an older driver base doesn't recognize the input's
 without them. Rebuild your image on a current `driver-vN` digest (see "The
 driver image" above) before allowing any service on an agent that uses it.
 
+## Repository skills and instructions need a current driver
+
+Every run now carries `repoSkills` (and, for Claude Code, `claudeContext`) in
+its input, and the worker input artifact can be up to 512 KiB rather than the
+previous 64 KiB, to make room for a repository's `CLAUDE.md`, its imports,
+and its skills. A worker built on an older driver base validates the input it
+receives with a strict schema sized for the old limits: it doesn't recognize
+`repoSkills` or `claudeContext` and rejects an input over the old 64 KiB cap,
+so the run fails outright (`worker_input_failed`) rather than silently
+running without repository context. Rebuild any `workerImageRef` image on a
+current `driver-vN` digest
+(see "The driver image" above) before pointing an agent at it on this
+release.
+
 ## What this doesn't cover
 
 wardby does not re-validate the contents of your built image beyond the

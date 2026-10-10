@@ -44,6 +44,12 @@ the trusted coding proxy, and a narrowly installed GitHub App. The agent owner
 must have the required repository access, or an administrator must explicitly
 approve the repository.
 
+Every coding run loads the repository's own `AGENTS.md`/`CLAUDE.md`
+instructions, and by default also its agent skills; see
+[Repository instructions and skills in coding runs](repo-instructions-and-skills.md)
+for what each builder loads and how to turn repository skills off with
+`codingProfile.repoSkills`.
+
 ## Choosing a model
 
 Both agent types take a `model` field naming an entry in wardby's model

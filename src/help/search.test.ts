@@ -223,6 +223,20 @@ describe("build worker image help", () => {
   });
 });
 
+describe("repository instructions and skills help", () => {
+  it("is found for the obvious queries", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const id = "repo-instructions-and-skills";
+
+    for (const query of ["repoSkills", "claudeBareMode", "SKILL.md", "CLAUDE.md", "AGENTS.md", "repo skills"]) {
+      const ids = searchHelp(catalog, query).map((result) => result.page.id);
+      expect(ids, query).toContain(id);
+    }
+  });
+});
+
 describe("Slack notification help", () => {
   it("is found by the main article for broad queries and tool names in top 3", async () => {
     const { buildHelpCatalog } = await import("./catalog.js");
