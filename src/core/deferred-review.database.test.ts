@@ -121,6 +121,7 @@ describe.skipIf(!process.env.DATABASE_URL)("request deferrals (database)", () =>
   const waiter = id("waiter"); // linked with waitForCi
   const plain = id("plain"); // linked without waitForCi
   const repository = `reqdefer/repo-${suffix.slice(0, 8)}`;
+  const otherRepository = `reqdefer/other-${suffix.slice(0, 8)}`;
   const SHA = "0123456789abcdef0123456789abcdef01234567";
   let ci = "pending";
   /** PR number → the Wardby marker run id its body carries (absent: a human PR). */
@@ -176,12 +177,12 @@ describe.skipIf(!process.env.DATABASE_URL)("request deferrals (database)", () =>
   async function run(runId: string, status: "running" | "succeeded" | "failed", parentRunId?: string) {
     await db.run.create({ data: { id: runId, agentId: waiter, status, ...(parentRunId ? { parentRunId } : {}) } });
   }
-  async function coding(runId: string, rootCodingRunId?: string) {
+  async function coding(runId: string, rootCodingRunId?: string, inRepository = repository) {
     await db.codingRun.create({
       data: {
         runId,
         task: "t",
-        repository,
+        repository: inRepository,
         baseRef: "main",
         headRef: `wardby/run-${runId}`,
         provider: "codex",
@@ -232,7 +233,7 @@ describe.skipIf(!process.env.DATABASE_URL)("request deferrals (database)", () =>
 
   afterAll(async () => {
     await db.deferredReview.deleteMany({ where: { repository } });
-    await db.codingRun.deleteMany({ where: { repository } });
+    await db.codingRun.deleteMany({ where: { repository: { in: [repository, otherRepository] } } });
     await db.run.updateMany({ where: { agentId: waiter }, data: { parentRunId: null } });
     await db.run.deleteMany({ where: { agentId: waiter } });
     await db.agent.deleteMany({ where: { id: { in: [waiter, plain] } } });
@@ -267,6 +268,24 @@ describe.skipIf(!process.env.DATABASE_URL)("request deferrals (database)", () =>
     expect(dispatchedAgents()).toEqual([plain]);
     expect(await rowsFor(11)).toEqual([{ agentId: waiter, reason: "ci", leadRunId: null }]);
     await db.deferredReview.deleteMany({ where: { repository, prNumber: 11 } });
+  });
+
+  it("never follows a marker whose CodingRun opened in another repository", async () => {
+    await run(id("elsewhere-lead"), "running");
+    await run(id("elsewhere-coder"), "succeeded", id("elsewhere-lead"));
+    await coding(id("elsewhere-coder"), undefined, otherRepository);
+    // Unscoped, and scoped to its own repository (any case), the marker resolves to the running lead...
+    await expect(requestLeadRunId(db, id("elsewhere-coder"))).resolves.toBe(id("elsewhere-lead"));
+    await expect(requestLeadRunId(db, id("elsewhere-coder"), otherRepository.toUpperCase())).resolves.toBe(
+      id("elsewhere-lead"),
+    );
+    // ...but a pull request in this repository carrying that marker resolves to nothing.
+    await expect(requestLeadRunId(db, id("elsewhere-coder"), repository)).resolves.toBeNull();
+    markers.set(14, id("elsewhere-coder"));
+    ci = "passing";
+    await routeHostEvent(pushed(14), deps);
+    expect(dispatchedAgents()).toEqual([plain, waiter].sort());
+    expect(await rowsFor(14)).toEqual([]);
   });
 
   it("leaves non-delegated coding PRs and human PRs unchanged", async () => {
