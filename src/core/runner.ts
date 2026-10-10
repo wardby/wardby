@@ -22,7 +22,7 @@ import { z } from "zod";
 import type { Prisma, PrismaClient, Run, RunTrigger } from "#prisma";
 import type { ProviderRegistry } from "../providers/index.js";
 import type { EngineProgress, EngineResult, LoadedTool } from "../providers/engine/types.js";
-import { runStepInline, type StepRunner } from "../providers/engine/types.js";
+import { RunOwnershipLostError, runStepInline, type StepRunner } from "../providers/engine/types.js";
 import { isLlmEffort } from "../providers/llm/types.js";
 import { createPrivilegedHost, type PrivilegedHost } from "../sandbox/host-functions.js";
 import { consoleRedactionValues } from "../sandbox/secret-broker.js";
@@ -456,7 +456,8 @@ function toIssueProjectLink(row: {
  * reaches a terminal state first must win. A conditional `updateMany` makes
  * that a database-level CAS rather than a race — the loser's WHERE matches
  * zero rows. It also stops a *later* attempt resurrecting a run the
- * reconciler already reaped: a `lost` row stays `lost`.
+ * reconciler already reaped: a `lost` row stays `lost`. A step-level
+ * ownership loss writes nothing at all (RunOwnershipLostError).
  */
 const DRIVABLE = ["pending", "running"] as const;
 
@@ -471,6 +472,9 @@ export class RunCancelledError extends Error {
     this.name = "RunCancelledError";
   }
 }
+
+/** Re-exported beside RunCancelledError: thrown by a step runner when another attempt owns the run. */
+export { RunOwnershipLostError };
 
 /**
  * Terminal write + read-back. The write is conditional (see DRIVABLE), so
@@ -1962,6 +1966,17 @@ async function executeTrackedRun(
     // and return a "failed" EngineResult, but an unexpected throw here
     // (a real bug, or tool-loading failing outside the per-tool try above)
     // must still never leave the run dangling in "running".
+    if (err instanceof RunOwnershipLostError) {
+      // Another execution of this run recorded a step first and owns the run now. Write nothing
+      // and fire no settle side effects: the winner makes the terminal write. Rethrown (not
+      // returned) so the durable executor hands the conflict back to its SDK, which parks this
+      // attempt instead of recording a workflow outcome under the winner.
+      runnerLog.warn(
+        { runId, step: err.step, event: "run_ownership_lost" },
+        "run_ownership_lost: another execution owns this run; stopping without a terminal write (this attempt's last step is discarded)",
+      );
+      throw err;
+    }
     return failNativeRun(finishContext, err);
   }
 }
