@@ -38,14 +38,26 @@ export function issueStatusRow(
   return { runId, provider: "jira", issueKey: event.issueKey, visibilityRole };
 }
 
+/**
+ * Cents from $1 up ($12.34, $1234.50); below $1, two significant digits with at
+ * least two decimals so fractions of a cent stay readable ($0.50, $0.12, $0.0035).
+ * Never exponent form.
+ */
+const usd = (amount: number): string => {
+  const abs = Math.abs(amount);
+  const decimals = abs === 0 || abs >= 1 ? 2 : Math.max(2, 1 - Math.floor(Math.log10(abs)));
+  // Trailing zeros past the cents are noise ($0.010, $0.100 from rounding up).
+  return `$${amount.toFixed(Math.min(decimals, 20)).replace(/(\.\d\d\d*?)0+$/, "$1")}`;
+};
+
 export function formatSpendLine(input: {
   treeUsd: number;
   issueUsd: number | null;
   models: Array<{ model: string; costUsd: number }>;
 }): string {
-  const parts = [`Agent spend: $${input.treeUsd.toFixed(4)} this run`];
-  if (input.issueUsd !== null) parts.push(`$${input.issueUsd.toFixed(4)} on this issue so far`);
-  if (input.models.length > 0) parts.push(input.models.map((m) => `${m.model} $${m.costUsd.toFixed(4)}`).join(", "));
+  const parts = [`Agent spend: ${usd(input.treeUsd)} this run`];
+  if (input.issueUsd !== null) parts.push(`${usd(input.issueUsd)} on this issue so far`);
+  if (input.models.length > 0) parts.push(input.models.map((m) => `${m.model} ${usd(m.costUsd)}`).join(", "));
   return parts.join(" · ");
 }
 
