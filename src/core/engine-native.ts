@@ -8,7 +8,7 @@
  */
 
 import type { Engine, EngineResult, EngineRunContext, EngineStatus, StepRunner } from "../providers/engine/types.js";
-import { runStepInline } from "../providers/engine/types.js";
+import { RunOwnershipLostError, runStepInline } from "../providers/engine/types.js";
 import type { LlmMessage, LlmToolDef, LlmUsage } from "../providers/index.js";
 import { applyPreflightSafetyMargin, checkTokenCalibration, estimateInputCost, isOverBudget } from "./budget.js";
 import { logger } from "./logger.js";
@@ -288,10 +288,13 @@ export class NativeEngine implements Engine {
       engineLog.info({ turn, toolCallIds: batch.map((i) => toolCalls[i].id) }, "running tool calls concurrently");
       const settled = await Promise.allSettled(batch.map((i) => runCall(i)));
       const rejections = settled.filter((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
-      for (const extra of rejections.slice(1)) {
-        engineLog.warn({ turn, err: extra.reason }, "concurrent tool call also failed");
+      // An ownership loss wins over an ordinary failure: this attempt no longer owns the run, so it
+      // must stop without a terminal write rather than fail the run for the attempt that does.
+      const thrown = rejections.find((r) => r.reason instanceof RunOwnershipLostError) ?? rejections[0];
+      for (const extra of rejections) {
+        if (extra !== thrown) engineLog.warn({ turn, err: extra.reason }, "concurrent tool call also failed");
       }
-      if (rejections.length > 0) throw rejections[0].reason;
+      if (thrown) throw thrown.reason;
       settled.forEach((outcome, position) => {
         results[batch[position]] = (outcome as PromiseFulfilledResult<string>).value;
       });

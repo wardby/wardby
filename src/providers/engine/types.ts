@@ -53,6 +53,31 @@ export interface LoadedTool {
  */
 export type StepRunner = <T>(name: string, fn: () => Promise<T>) => Promise<T>;
 
+/**
+ * Part of the StepRunner contract: a step runner may throw this when another
+ * execution of the same run recorded the step first, so this attempt no
+ * longer owns the run. The attempt must stop without writing the run (the
+ * winner does that); engines and the runner rethrow it untouched.
+ */
+export class RunOwnershipLostError extends Error {
+  readonly step: string;
+  /**
+   * Usage the losing step's body reported before its result was discarded
+   * (an LLM turn's token counts and cost), when the step runner saw it. Not
+   * recorded on any run: the winner's result replaces it. Logged only.
+   */
+  readonly discardedUsage?: Readonly<Record<string, number>>;
+  constructor(step: string, options?: { cause?: unknown; discardedUsage?: Readonly<Record<string, number>> }) {
+    super(
+      `run_ownership_lost: another execution recorded step "${step}" first; this attempt stops.`,
+      options?.cause === undefined ? undefined : { cause: options.cause },
+    );
+    this.name = "RunOwnershipLostError";
+    this.step = step;
+    if (options?.discardedUsage) this.discardedUsage = options.discardedUsage;
+  }
+}
+
 /** The no-checkpoint default: run the step body directly. */
 export const runStepInline: StepRunner = (_name, fn) => fn();
 
