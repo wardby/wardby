@@ -30,12 +30,19 @@ included, plus that run tree's own siblings.
   section on every open pull request of the request with the full list and
   current states. A later run that pushes to any pull request in the set
   refreshes the section on all of them the same way, and never removes it.
-- **Suggested merge order (the order Wardby's agent opened them in)** numbers
-  the open (and draft) pull requests in delegation order. It is not a
-  dependency analysis — it is only reliable when the lead delegates
-  repositories that own shared data first (see
+- **Merge order.** Without a `mergeOrder` (see below) on any pull request in
+  the set, open (and draft) pull requests are numbered as a **Suggested merge
+  order (the order Wardby's agent opened them in)** — delegation order, not a
+  dependency analysis, and only reliable when the lead delegates repositories
+  that own shared data first (see
   [Fanning out to several builders](../docs/agent-recipes.md#fanning-out-to-several-builders)).
-  Check it before merging. Merged and closed pull requests follow in a
+  When any open pull request in the set has a `mergeOrder`, the heading
+  instead reads **Merge order (set by the delegating agent; equal steps can
+  merge in either order)**: pull requests with a `mergeOrder` are numbered
+  and labelled "step k of n" (equal values share a step and merge in either
+  order relative to each other), and any open pull request without one is
+  listed after under "Not ordered:". Either way, check it before merging —
+  neither is a guarantee. Merged and closed pull requests follow in a
   separate "Already merged or closed" list, as context only.
 - Only open pull requests that Wardby's own GitHub App opened are edited;
   merged or closed ones are listed but never changed, and a pull request
@@ -51,6 +58,30 @@ Reviewers see the section in the pull request description, so a reviewer
 agent can tell that a field, route, or schema a change relies on is added by
 a sibling pull request rather than missing. See the reviewer step in
 [Run GitHub code-review agents](code-review-agents.md#ci-and-sibling-pull-requests).
+
+## Setting a merge order
+
+A lead agent sets the order explicitly by passing `mergeOrder` on its
+`delegate_to_<name>` call to a coding sub-agent: an integer from 1 to 99,
+where 1 merges first. Give a repository that other repositories' changes
+depend on a lower number than the ones that use it — for example a shared
+service `1`, the API that calls it `2`, the client that calls the API `3`.
+Give two changes the same number when there is no order between them; they
+share a step and either can merge first. A bad value (not an integer, or
+outside 1-99) is refused as a tool error, not silently dropped or clamped.
+
+Set it whenever one request's change spans several repositories and the
+pull requests need to land in a specific sequence; leave it out and the set
+keeps the delegation-order suggestion above. `mergeOrder` applies only to
+coding sub-agents, since only a coding run's pull request can be ordered: a
+native sub-agent ignores it, and its tool result notes that it did.
+
+A `continuePriorRun` call that omits `mergeOrder` inherits the value already
+recorded for that continuation's root coding run, so a follow-up does not
+need to repeat it to keep a pull request in its place. Whichever value was
+set most recently anywhere in the set — by the run that opened a pull
+request or by a later continuation of it — is what every pull request's
+section shows.
 
 ## Follow-up runs and sibling pull requests
 

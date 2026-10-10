@@ -181,6 +181,26 @@ builder's result includes `pullRequest` (`outcome`,
 `repository`, `number`, `url`) from Wardby's own record when it opened or
 pushed to one, so the lead can report the links.
 
+When the builders' changes must land in a particular order, pass `mergeOrder`
+(1 to 99, 1 first) in each `delegate_to_<name>` call — give a dependency a
+lower number than what calls it, and give two changes the same number when
+there is no order between them:
+
+```json
+{ "task": "Add the /quotes endpoint the client will call.", "mergeOrder": 1 }
+```
+
+```json
+{ "task": "Add the quotes page that calls /quotes.", "mergeOrder": 2 }
+```
+
+Leave `mergeOrder` out and the pull requests' **Related pull requests**
+section lists them in delegation order instead, labelled as a suggestion
+rather than a set order. It applies only to coding sub-agents; a native
+sub-agent ignores it. A follow-up that continues one of these pull requests
+with `continuePriorRun` and no `mergeOrder` of its own keeps the value
+already recorded for it.
+
 ## Step 3: confirm
 
 Summarize what you created: each agent's name and id, the sub-agent bindings,
