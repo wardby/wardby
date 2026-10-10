@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -37,6 +37,28 @@ describe("materializeClaudeContext", () => {
     });
   });
 
+  it("silently drops files outside the allowlist", async () => {
+    const root = join(await parent(), "ctx");
+    const result = await materializeClaudeContext(
+      [
+        { path: "CLAUDE.md", content: "c" },
+        { path: ".claude/settings.json", content: "{}" },
+        { path: ".mcp.json", content: "{}" },
+        { path: "CLAUDE.local.md", content: "l" },
+        { path: ".claude/agents/x.md", content: "a" },
+      ],
+      root,
+    );
+    expect(result).toEqual({ directory: root, skills: false });
+    expect(await readdir(root, { recursive: true })).toEqual(["CLAUDE.md"]);
+  });
+
+  it("returns null when every file is outside the allowlist", async () => {
+    const root = join(await parent(), "ctx");
+    expect(await materializeClaudeContext([{ path: ".claude/settings.json", content: "{}" }], root)).toBeNull();
+    await expect(readdir(root)).rejects.toThrow();
+  });
+
   it("refuses to reuse an existing root", async () => {
     await expect(materializeClaudeContext([{ path: "CLAUDE.md", content: "c" }], await parent())).rejects.toThrow(
       "claude_context_root_exists",
@@ -64,6 +86,18 @@ describe("bareModeContextPrompt", () => {
     expect(prompt).toContain("- bare (/workspace/.claude/skills/bare/SKILL.md)");
     expect(prompt.indexOf("# Repository instructions")).toBeLessThan(prompt.indexOf("# Repository skills"));
     expect(prompt).not.toContain("body");
+  });
+
+  it("leaves out files outside the allowlist", () => {
+    const prompt = bareModeContextPrompt([
+      { path: "CLAUDE.md", content: "Use pnpm." },
+      { path: ".claude/settings.json", content: "SETTINGS-MARKER" },
+      { path: ".claude/agents/x.md", content: "AGENT-MARKER" },
+    ]);
+    expect(prompt).toContain("Use pnpm.");
+    expect(prompt).not.toContain("MARKER");
+    expect(prompt).not.toContain(".claude/settings.json");
+    expect(bareModeContextPrompt([{ path: ".mcp.json", content: "{}" }])).toBe("");
   });
 
   it("renders only skills when there are no instruction files", () => {

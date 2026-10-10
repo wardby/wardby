@@ -13,8 +13,8 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
   return {
     abortController,
     // Native mode with repo context: Claude Code loads CLAUDE.md (and skills) from a directory the
-    // worker wrote from the trusted input; it holds no settings, hooks, or MCP config, so "project"
-    // can load nothing else. Otherwise an empty directory and no setting sources.
+    // worker wrote (context.ts), which holds only allowlisted Markdown files: no settings, hooks,
+    // or MCP config. Otherwise an empty directory and no setting sources.
     cwd: context ?? "/opt/wardby/empty-workspace",
     model: config.model,
     maxTurns: config.maxTurns,
@@ -32,6 +32,10 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
       },
     },
     settingSources: context ? ["project"] : [],
+    // Second layer for native mode: only hooks from managed settings may run, and there are none, so
+    // a hook in any project file (settings or SKILL.md frontmatter) is ignored. This SDK's
+    // managedSettings keeps only restrictive keys; allowManagedHooksOnly is the hook lock it accepts.
+    ...(context ? { managedSettings: { allowManagedHooksOnly: true } } : {}),
     systemPrompt: config.developerInstructions,
     outputFormat: { type: "json_schema", schema: config.outputSchema },
     permissionMode: "dontAsk",

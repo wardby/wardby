@@ -7,7 +7,9 @@ import {
   CodingRunResultSchema,
   composeCodingTask,
   type FittedSection,
+  isAllowedContextPath,
   isReservedServiceEnvName,
+  isSafeContextPath,
   normalizeCodingTag,
   CodingTaskInputSchema,
   MAX_CODING_ARTIFACT_BYTES,
@@ -349,6 +351,50 @@ describe("repo context input fields", () => {
       ).toThrow();
     },
   );
+
+  it.each(["a\u0000.md", "a\nb.md", "a\u001fb.md", "a\u007fb.md", "a\u0085b.md", "a\u009fb.md"])(
+    "refuses control characters in context path %j",
+    (path) => {
+      expect(isSafeContextPath(path)).toBe(false);
+    },
+  );
+
+  it.each([
+    "CLAUDE.md",
+    ".claude/CLAUDE.md",
+    "AGENTS.md",
+    ".claude/skills/lint/SKILL.md",
+    "docs/a.md",
+    "notes/deep/b.md",
+  ])("allows context path %j", (path) => {
+    expect(isAllowedContextPath(path)).toBe(true);
+  });
+
+  it.each([
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".mcp.json",
+    "CLAUDE.local.md",
+    "claude.LOCAL.md",
+    "docs/CLAUDE.local.md",
+    ".claude/agents/x.md",
+    ".claude/commands/deploy.md",
+    ".CLAUDE/agents/x.md",
+    ".claude/skills/a/scripts/run.md",
+    ".claude/skills/a/SKILL.md/x.md",
+    "docs/.claude/settings.md",
+    "notes.txt",
+    ".git/config.md",
+    "../x.md",
+  ])("refuses context path %j", (path) => {
+    expect(isAllowedContextPath(path)).toBe(false);
+  });
+
+  it("does not reject a disallowed path at the input schema, so the run is not failed by it", () => {
+    expect(() =>
+      CodingTaskInputSchema.parse({ ...base, claudeContext: { files: [{ path: ".mcp.json", content: "{}" }] } }),
+    ).not.toThrow();
+  });
 
   it("rejects duplicate paths and an empty file list", () => {
     const dup = [

@@ -152,10 +152,20 @@ function budgetExhausted(input: CodingTaskInput): CodingAgentOutput {
 
 export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Promise<CodingAgentOutput> {
   const files = options.input.claudeContext?.files ?? [];
-  const bareMode = options.input.claudeBareMode !== false;
+  let bareMode = options.input.claudeBareMode !== false;
   // Bare mode puts the repository context in the system prompt; native mode writes it to disk for
   // Claude Code to load itself.
-  const context = bareMode ? null : await materializeClaudeContext(files, options.contextRoot);
+  let context: { directory: string; skills: boolean } | null = null;
+  if (!bareMode) {
+    try {
+      context = await materializeClaudeContext(files, options.contextRoot);
+    } catch {
+      // The context could not be written (the directory already exists, the disk is full, ...).
+      // The run still gets its context, through bare mode. Only a fixed code is reported.
+      bareMode = true;
+      process.stderr.write(`${JSON.stringify({ warning: "claude_context_unavailable" })}\n`);
+    }
+  }
   const injected = bareMode ? bareModeContextPrompt(files) : "";
   const developerInstructions = injected
     ? `${CLAUDE_WORKER_SECURITY_INSTRUCTIONS}\n\n${injected}`

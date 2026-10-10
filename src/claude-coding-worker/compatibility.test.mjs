@@ -404,6 +404,8 @@ test("loads CLAUDE.md, its imports, and project skills from a wardby-built cwd",
         allowedTools: ["Skill"],
         strictMcpConfig: true,
         settingSources: ["project"],
+        // The worker's native-mode hook lock (sdk.ts); loading must still work with it.
+        managedSettings: { allowManagedHooksOnly: true },
         systemPrompt: "Fixed security instructions",
         permissionMode: "dontAsk",
         persistSession: false,
@@ -430,4 +432,120 @@ test("loads CLAUDE.md, its imports, and project skills from a wardby-built cwd",
   assert.match(first, /PROBE-IMPORT-MARKER/, "the @import did not reach the model");
   assert.match(first, /probe-skill/, "the project skill was not offered");
   assert.match(first, /PROBE-SKILL-DESCRIPTION/, "the skill description was not offered");
+});
+
+/**
+ * Runs a native-mode query (the worker's option set) against a context directory that also holds
+ * repository hooks: .claude/settings.json hooks and SKILL.md frontmatter hooks, each touching a
+ * marker file when it runs. The fake model invokes the skill on its first turn so skill-scoped
+ * hooks get a chance to run. Returns the markers that were created.
+ */
+async function runNativeWithRepoHooks(managedSettings) {
+  const root = await mkdtemp(join(tmpdir(), "wardby-claude-hooks-"));
+  const home = await mkdtemp(join(tmpdir(), "wardby-claude-hooks-home-"));
+  const markers = await mkdtemp(join(tmpdir(), "wardby-claude-hooks-markers-"));
+  workspaces.push(root, home, markers);
+  const { mkdir, readdir, writeFile } = await import("node:fs/promises");
+  const touch = (name) => [{ hooks: [{ type: "command", command: `touch ${join(markers, name)}` }] }];
+  const toolTouch = (name) => [{ matcher: "*", hooks: [{ type: "command", command: `touch ${join(markers, name)}` }] }];
+  await writeFile(join(root, "CLAUDE.md"), "PROBE-CLAUDE-MARKER\n");
+  await mkdir(join(root, ".claude", "skills", "probe-skill"), { recursive: true });
+  await writeFile(
+    join(root, ".claude", "settings.json"),
+    JSON.stringify({
+      hooks: {
+        SessionStart: touch("settings-SessionStart"),
+        UserPromptSubmit: touch("settings-UserPromptSubmit"),
+        PreToolUse: toolTouch("settings-PreToolUse"),
+        PostToolUse: toolTouch("settings-PostToolUse"),
+        Stop: touch("settings-Stop"),
+      },
+    }),
+  );
+  await writeFile(
+    join(root, ".claude", "skills", "probe-skill", "SKILL.md"),
+    [
+      "---",
+      "name: probe-skill",
+      "description: PROBE-SKILL-DESCRIPTION",
+      "hooks:",
+      "  PreToolUse:",
+      '    - matcher: "*"',
+      "      hooks:",
+      "        - type: command",
+      `          command: touch ${join(markers, "skill-PreToolUse")}`,
+      "  PostToolUse:",
+      '    - matcher: "*"',
+      "      hooks:",
+      "        - type: command",
+      `          command: touch ${join(markers, "skill-PostToolUse")}`,
+      "  Stop:",
+      "    - hooks:",
+      "        - type: command",
+      `          command: touch ${join(markers, "skill-Stop")}`,
+      "---",
+      "body",
+      "",
+    ].join("\n"),
+  );
+  let turns = 0;
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      if (raw.includes('"messages"') && turns++ === 0) {
+        res.end(toolUseSse("toolu_probe_skill", "Skill", { skill: "probe-skill" }));
+      } else {
+        res.end(sse("done"));
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const stream = query({
+      prompt: "hi",
+      options: {
+        cwd: root,
+        model: MODEL,
+        maxTurns: 3,
+        tools: ["Skill"],
+        allowedTools: ["Skill"],
+        strictMcpConfig: true,
+        settingSources: ["project"],
+        ...(managedSettings ? { managedSettings } : {}),
+        systemPrompt: "Fixed security instructions",
+        permissionMode: "dontAsk",
+        persistSession: false,
+        env: {
+          HOME: home,
+          PATH: process.env.PATH,
+          CLAUDE_CONFIG_DIR: join(home, ".config-claude"),
+          ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}`,
+          ANTHROPIC_API_KEY: CAPABILITY,
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+          DISABLE_UPDATES: "1",
+        },
+      },
+    });
+    for await (const _message of stream) {
+      // drain
+    }
+  } finally {
+    server.close();
+  }
+  return { markers: (await readdir(markers)).sort(), turns };
+}
+
+test("repository hooks run without the managed hook lock (control for the next case)", async () => {
+  const { markers, turns } = await runNativeWithRepoHooks(undefined);
+  assert.equal(turns, 2, "the fake model was not asked a second time after the skill ran");
+  assert.ok(markers.includes("settings-SessionStart"), `settings.json hooks did not run: ${markers}`);
+  assert.ok(markers.includes("skill-Stop"), `SKILL.md frontmatter hooks did not run: ${markers}`);
+});
+
+test("allowManagedHooksOnly in managedSettings stops every repository hook in native mode", async () => {
+  const { markers, turns } = await runNativeWithRepoHooks({ allowManagedHooksOnly: true });
+  assert.equal(turns, 2, "the fake model was not asked a second time after the skill ran");
+  assert.deepEqual(markers, [], "a repository hook ran despite the managed hook lock");
 });

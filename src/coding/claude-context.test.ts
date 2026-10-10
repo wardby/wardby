@@ -116,6 +116,27 @@ describe("buildClaudeContext", () => {
     ]);
   });
 
+  it("never reads an import outside the allowlist of instruction files", async () => {
+    const root = await repo({
+      "CLAUDE.md": "@.claude/settings.json @.mcp.json @CLAUDE.local.md @.claude/agents/x.md @notes.txt @docs/a.md",
+      ".claude/settings.json": "{}",
+      ".mcp.json": "{}",
+      "CLAUDE.local.md": "local",
+      ".claude/agents/x.md": "agent",
+      "notes.txt": "notes",
+      "docs/a.md": "a",
+    });
+    const ctx = await buildClaudeContext(root, { skills: false });
+    expect(paths(ctx)).toEqual(["CLAUDE.md", "docs/a.md"]);
+    expect(ctx.skipped).toEqual([
+      { path: ".claude/settings.json", reason: "not_allowed" },
+      { path: ".mcp.json", reason: "not_allowed" },
+      { path: "CLAUDE.local.md", reason: "not_allowed" },
+      { path: ".claude/agents/x.md", reason: "not_allowed" },
+      { path: "notes.txt", reason: "not_allowed" },
+    ]);
+  });
+
   it("stops at import depth 5", async () => {
     const files: Record<string, string> = { "CLAUDE.md": "@d1.md" };
     for (let i = 1; i <= 7; i++) files[`d${i}.md`] = `@d${i + 1}.md`;
@@ -180,9 +201,9 @@ describe("buildClaudeContext", () => {
   });
 
   it("skips a directory where a file was expected", async () => {
-    const root = await repo({ "CLAUDE.md": "@docs", "docs/x.md": "x" });
+    const root = await repo({ "CLAUDE.md": "@docs.md", "docs.md/x.md": "x" });
     const ctx = await buildClaudeContext(root, { skills: false });
-    expect(ctx.skipped).toEqual([{ path: "docs", reason: "not_file" }]);
+    expect(ctx.skipped).toEqual([{ path: "docs.md", reason: "not_file" }]);
   });
 
   it("skips oversized and non-UTF-8 files", async () => {

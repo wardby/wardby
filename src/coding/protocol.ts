@@ -387,12 +387,39 @@ export const DEFAULT_CLAUDE_MAX_TURNS = 200;
 /** Longest line a debug-traced worker writes to its log (src/coding-worker/debug-trace.ts). */
 export const MAX_DEBUG_TRACE_LINE_BYTES = 16 * 1024;
 
-/** A repo-relative POSIX path with no empty, ".", or ".." segment, no backslash, and nothing under .git. */
+/** C0 and C1 control characters, which have no place in a context file path. */
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/;
+
+/**
+ * A repo-relative POSIX path with no empty, ".", or ".." segment, no backslash, no control
+ * character, and nothing under .git.
+ */
 export function isSafeContextPath(path: string): boolean {
   if (path.length === 0 || path.length > 512 || path.startsWith("/") || path.includes("\\")) return false;
+  if (CONTROL_CHARACTER.test(path)) return false;
   const segments = path.split("/");
   if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) return false;
   return segments[0] !== ".git";
+}
+
+const ALLOWED_CONTEXT_FILES = new Set(["CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md"]);
+const CONTEXT_SKILL_PATH = /^\.claude\/skills\/[^/]+\/SKILL\.md$/;
+
+/**
+ * Whether a Claude Code context file may be shipped to (and written by) the worker: a safe path
+ * that is CLAUDE.md, .claude/CLAUDE.md, AGENTS.md, a .claude/skills/<name>/SKILL.md, or any other
+ * Markdown file outside every .claude directory that is not a CLAUDE.local.md. This keeps
+ * repository settings, hooks, MCP configuration, agents, commands, and personal memory out of
+ * Claude Code's native loading. Not part of the input schema: a refused file is dropped, and never
+ * fails the run.
+ */
+export function isAllowedContextPath(path: string): boolean {
+  if (!isSafeContextPath(path)) return false;
+  if (ALLOWED_CONTEXT_FILES.has(path) || CONTEXT_SKILL_PATH.test(path)) return true;
+  const segments = path.toLowerCase().split("/");
+  if (!path.endsWith(".md")) return false;
+  if (segments.includes(".claude")) return false;
+  return segments[segments.length - 1] !== "claude.local.md";
 }
 
 export const ClaudeContextFileSchema = z

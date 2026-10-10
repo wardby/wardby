@@ -4,8 +4,11 @@
  * `.claude/CLAUDE.md`, and the files they pull in with `@path` imports) and,
  * when repository skills are enabled, each `.claude/skills/<name>/SKILL.md`.
  *
- * Only those files are read. Repository settings, hooks, MCP configuration,
- * agents, and commands under `.claude/` are never collected.
+ * Only those files are read, and every one must pass `isAllowedContextPath`
+ * (an import of anything else, such as `.claude/settings.json`, `.mcp.json`,
+ * `CLAUDE.local.md`, or a non-Markdown file, is skipped as `not_allowed`).
+ * Repository settings, hooks, MCP configuration, agents, and commands under
+ * `.claude/` are never collected.
  *
  * Repository content is untrusted, so the reader is deliberately strict:
  * - every path must stay inside the workspace (no absolute, `~`, or `..`
@@ -27,11 +30,11 @@
 import { constants, type Stats } from "node:fs";
 import { lstat, open, realpath, readdir } from "node:fs/promises";
 import { join, posix } from "node:path";
-import { CLAUDE_CONTEXT_LIMITS, isSafeContextPath, type ClaudeContextFile } from "./protocol.js";
+import { CLAUDE_CONTEXT_LIMITS, isAllowedContextPath, isSafeContextPath, type ClaudeContextFile } from "./protocol.js";
 
 export interface ClaudeContextSkip {
   path: string;
-  reason: "symlink" | "not_file" | "too_large" | "not_utf8" | "limit" | "outside_repo";
+  reason: "symlink" | "not_file" | "too_large" | "not_utf8" | "limit" | "outside_repo" | "not_allowed";
 }
 
 export interface ClaudeContext {
@@ -351,6 +354,9 @@ export async function buildClaudeContext(workspace: string, options: { skills: b
     if (seen.has(path)) return;
     seen.add(path);
     if ("skip" in resolved) skip(resolved.skip, "outside_repo");
+    // Settings, hooks, MCP configuration, agents, commands, and anything not Markdown are never
+    // read, whatever an instruction file imports.
+    else if (!isAllowedContextPath(path)) skip(path, "not_allowed");
     else queue.push({ path, depth });
   }
 
@@ -366,6 +372,7 @@ export async function buildClaudeContext(workspace: string, options: { skills: b
       if (seen.has(rel)) continue;
       seen.add(rel);
       if (!isSafeContextPath(rel)) skip(rel, "outside_repo");
+      else if (!isAllowedContextPath(rel)) skip(rel, "not_allowed");
       else await load(rel);
     }
   }

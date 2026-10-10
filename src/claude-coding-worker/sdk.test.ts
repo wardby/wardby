@@ -68,6 +68,13 @@ describe("Claude SDK configuration", () => {
     });
   });
 
+  it("restricts hooks to managed ones in native mode only", () => {
+    expect(buildClaudeSdkOptions(config())).not.toHaveProperty("managedSettings");
+    expect(buildClaudeSdkOptions({ ...config(), contextDirectory: "/tmp/wardby-context" }).managedSettings).toEqual({
+      allowManagedHooksOnly: true,
+    });
+  });
+
   it("adds the Skill tool when the native context has skills", () => {
     expect(buildClaudeSdkOptions({ ...config(), contextDirectory: "/tmp/wardby-context", skills: true })).toMatchObject(
       {

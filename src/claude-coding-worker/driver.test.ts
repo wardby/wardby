@@ -1,4 +1,4 @@
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -316,6 +316,53 @@ describe("runClaudeCodingWorker", () => {
       expect(config.skills).toBe(true);
       expect(config.environment).not.toHaveProperty("CLAUDE_CODE_SIMPLE");
       expect(config.developerInstructions).toBe(CLAUDE_WORKER_SECURITY_INSTRUCTIONS);
+    });
+
+    it("falls back to bare mode with the context injected when it cannot be written", async () => {
+      const root = await contextRoot();
+      await mkdir(root);
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        const config = await capture(
+          { ...input, claudeBareMode: false, claudeContext: { files: [instructions] } },
+          root,
+        );
+        expect(config.contextDirectory).toBeNull();
+        expect(config.skills).toBe(false);
+        expect(config.environment.CLAUDE_CODE_SIMPLE).toBe("1");
+        expect(config.developerInstructions.startsWith(CLAUDE_WORKER_SECURITY_INSTRUCTIONS)).toBe(true);
+        expect(config.developerInstructions).toContain("Use pnpm.");
+        const written = stderr.mock.calls.map((call) => String(call[0])).join("");
+        expect(written).toContain('"warning":"claude_context_unavailable"');
+        expect(written).not.toContain("Use pnpm.");
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it("removes a partly written context directory before falling back", async () => {
+      const root = await contextRoot();
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        // A file and a directory at the same path: the second write fails after the first succeeded.
+        const config = await capture(
+          {
+            ...input,
+            claudeBareMode: false,
+            claudeContext: {
+              files: [
+                { path: "docs/a.md", content: "A" },
+                { path: "docs/a.md/b.md", content: "B" },
+              ],
+            },
+          },
+          root,
+        );
+        expect(config.contextDirectory).toBeNull();
+        await expect(readdir(root)).rejects.toThrow();
+      } finally {
+        stderr.mockRestore();
+      }
     });
 
     it("drops bare mode in native mode even without context", async () => {
