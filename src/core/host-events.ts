@@ -883,13 +883,21 @@ async function startDeferredAfterCi(
  * reaches its finalizer. Never throws; returns the runs started.
  */
 export async function startDeferredReviews(deps: ReviewStartDeps, now: Date = new Date()): Promise<string[]> {
+  const providers = Object.keys(deps.hosts) as HostEvent["provider"][];
+  const runIds = await sweepCiRows(deps, providers, now);
+  // Outside the CI half's try: a failure there never keeps request rows from being released.
+  if (providers.length > 0) runIds.push(...(await sweepRequestRows(deps, providers, now)));
+  return runIds;
+}
+
+/** The sweep's half for expiry and CI rows: drops rows past the max age, then starts CI rows past the max wait. */
+async function sweepCiRows(deps: ReviewStartDeps, providers: HostEvent["provider"][], now: Date): Promise<string[]> {
   const runIds: string[] = [];
   try {
     const expired = await deps.db.deferredReview.deleteMany({
       where: { createdAt: { lt: new Date(now.getTime() - DEFERRED_REVIEW_MAX_AGE_MS) } },
     });
     if (expired.count > 0) log.info({ count: expired.count }, "dropped deferred reviews older than 24 h");
-    const providers = Object.keys(deps.hosts) as HostEvent["provider"][];
     if (providers.length === 0) return runIds;
     const due = await deps.db.deferredReview.findMany({
       where: {
@@ -929,7 +937,6 @@ export async function startDeferredReviews(deps: ReviewStartDeps, now: Date = ne
         log.warn({ err, repository: key.repository, prNumber: key.prNumber }, "could not start a deferred review");
       }
     }
-    runIds.push(...(await sweepRequestRows(deps, providers, now)));
   } catch (err) {
     log.warn({ err }, "deferred review sweep failed");
   }

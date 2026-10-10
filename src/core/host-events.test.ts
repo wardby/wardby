@@ -1857,4 +1857,28 @@ describe("delegated pull requests wait for the request (#259)", () => {
     expect(db.deferredReview.findMany.mock.calls[0][0].where).toMatchObject({ reason: "ci" });
     expect(db.deferredReview.findMany.mock.calls[1][0].where).toEqual({ leadRunId: "lead", reason: "request" });
   });
+
+  it.each([
+    ["dropping expired rows", "deleteMany"],
+    ["listing CI rows", "findMany"],
+  ])("the sweep still releases request rows when its CI half fails %s", async (_label, failing) => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([links[1]]);
+    const db = d.db as unknown as Db;
+    const row = {
+      id: "d2",
+      provider: "github",
+      repository: REPO,
+      prNumber: 7,
+      headSha: SHA,
+      agentId: "a2",
+      checkName: "security",
+    };
+    db.deferredReview[failing].mockRejectedValueOnce(new Error("db down"));
+    // Either way, the next findMany is the request half's: the finished lead's rows.
+    db.deferredReview.findMany.mockResolvedValueOnce([row]);
+    db.$queryRaw.mockResolvedValueOnce([{ leadRunId: "lead" }]);
+    await expect(startDeferredReviews(d, new Date("2026-10-06T12:00:00.000Z"))).resolves.toEqual(["run-a2"]);
+    expect(db.$queryRaw).toHaveBeenCalledTimes(1);
+  });
 });
