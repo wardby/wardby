@@ -1045,18 +1045,41 @@ describe("related pull requests section", () => {
     expect(block.indexOf("Not ordered:")).toBeLessThan(block.indexOf("Already merged"));
   });
 
-  it("renders today's unordered heading unchanged when no open entry has a mergeOrder", () => {
+  it("stable-sorts ordered entries by mergeOrder regardless of input order (self listed before a lower-step sibling)", () => {
+    const block = renderRelatedSection({
+      entries: [
+        { repository: "acme/b", number: 2, state: "open", mergeOrder: 2 },
+        { repository: "acme/a", self: true, mergeOrder: 1 },
+      ],
+    })!;
+    expect(block).toContain("1. **This pull request** — step 1 of 2");
+    expect(block).toContain("2. [acme/b#2](https://github.com/acme/b/pull/2) — open — step 2 of 2");
+    expect(block.indexOf("1. **This pull request**")).toBeLessThan(block.indexOf("2. [acme/b#2]"));
+  });
+
+  it("renders the unordered heading with today's exact wording when no open entry has a mergeOrder", () => {
     const block = renderRelatedSection({
       entries: [
         { repository: "acme/a", number: 1, state: "open" },
         { repository: "acme/b", number: 2, state: "open" },
       ],
-    })!;
-    expect(block).toContain(
-      "Suggested merge order (the order Wardby's agent opened them in; not a guarantee, so check dependencies before merging):",
+    });
+    expect(block).toBe(
+      [
+        RELATED_SECTION_START,
+        "**Related pull requests**",
+        "",
+        "Wardby opened these pull requests for the same request.",
+        "",
+        "Suggested merge order (the order Wardby's agent opened them in; not a guarantee, so check dependencies before merging):",
+        "",
+        "1. [acme/a#1](https://github.com/acme/a/pull/1) — open",
+        "2. [acme/b#2](https://github.com/acme/b/pull/2) — open",
+        "",
+        "<sub>Written by Wardby from its run records; this section is replaced when the request's runs finish.</sub>",
+        RELATED_SECTION_END,
+      ].join("\n"),
     );
-    expect(block).not.toContain("Merge order (set by the delegating agent");
-    expect(block).not.toContain("Not ordered:");
   });
 
   it("caps the list and counts the rest", () => {

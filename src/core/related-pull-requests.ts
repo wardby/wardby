@@ -7,7 +7,14 @@
  * one (CodingRun.mergeOrder; nulls last), then by when each pull request's
  * coding run was dispatched: the lead's delegation order (for a lead with
  * parallelDelegations, the order its concurrent delegations were admitted,
- * ties broken by repository#number).
+ * ties broken by repository#number). A pull request's mergeOrder is the
+ * newest non-null value set by its opener run or any later continuation
+ * that acted on it, so a lead that re-delegates with a different order
+ * after the fact is reflected here. When mergeOrder is set on any entry,
+ * every truncation cap below this collector (MAX_RELATED_GROUP here,
+ * MAX_SIBLING_HINTS on openSiblingsOf, MAX_RELATED_PULL_REQUESTS on
+ * renderRelatedSection) drops entries with no order first, since they sort
+ * last.
  * A PR opened while siblings were still running lists only the PRs opened
  * before it; updateRelatedPullRequests rewrites every open PR of the set
  * with the full list when the lead run ends. Continuations join
@@ -189,6 +196,31 @@ export async function collectRelatedPullRequests(
         ...(r.mergeOrder != null ? { mergeOrder: r.mergeOrder } : {}),
       });
     }
+  }
+  // A continuation's own mergeOrder (which can override the root's, Task 1)
+  // is set after the opener's; the entry's mergeOrder is the newest non-null
+  // value among the opener row and every continuation row (same PR key,
+  // "pull_request_opened" or "pull_request_updated") found in the tree walk.
+  const newestMergeOrder = new Map<string, { startedAt: Date; mergeOrder: number }>();
+  for (const r of rows) {
+    if (r.mergeOrder == null) continue;
+    const pr = pullRequestOutcome(r.result);
+    if (pr?.outcome !== "pull_request_opened" && pr?.outcome !== "pull_request_updated") continue;
+    if (onlyIssueKey && r.issueKey && (r.issueProvider !== onlyIssueKey.provider || r.issueKey !== onlyIssueKey.key)) {
+      continue;
+    }
+    const repository = safeRepository(pr.repository);
+    if (!repository) continue;
+    const key = keyOf(repository, pr.pullRequestNumber);
+    const startedAt = new Date(r.startedAt);
+    const current = newestMergeOrder.get(key);
+    if (!current || startedAt.getTime() >= current.startedAt.getTime()) {
+      newestMergeOrder.set(key, { startedAt, mergeOrder: r.mergeOrder });
+    }
+  }
+  for (const [key, entry] of byKey) {
+    const newest = newestMergeOrder.get(key);
+    if (newest) entry.mergeOrder = newest.mergeOrder;
   }
   const issueFilter = onlyIssueKey
     ? new Map([[`${onlyIssueKey.provider}\0${onlyIssueKey.key}`, onlyIssueKey]])

@@ -299,9 +299,14 @@ export function renderRelatedSection(input: RelatedPullRequestsInput): string | 
   const open = valid.filter((entry) => !isDone(entry)).slice(0, MAX_RELATED_PULL_REQUESTS);
   const done = valid.filter(isDone).slice(0, MAX_RELATED_PULL_REQUESTS - open.length);
   const more = valid.length - open.length - done.length;
-  const isNumber = (value: number | undefined): value is number => typeof value === "number";
+  const isNumber = (value: number | undefined): value is number => Number.isSafeInteger(value);
   const steps = [...new Set(open.map((entry) => entry.mergeOrder).filter(isNumber))].sort((a, b) => a - b);
-  const ordered = steps.length > 0 ? open.filter((entry) => isNumber(entry.mergeOrder)) : [];
+  // Stable-sorted by mergeOrder so numbering and step labels are correct
+  // regardless of the caller's input order; unordered entries keep input order.
+  const ordered =
+    steps.length > 0
+      ? open.filter((entry) => isNumber(entry.mergeOrder)).sort((a, b) => a.mergeOrder! - b.mergeOrder!)
+      : [];
   const unordered = steps.length > 0 ? open.filter((entry) => !isNumber(entry.mergeOrder)) : [];
   return [
     RELATED_SECTION_START,
