@@ -87,8 +87,9 @@ expectations.
 
 - Follow the [GKE guide](https://github.com/wardby/wardby/blob/main/docs/getting-started-gke.md)
   for the supported Google Cloud reference deployment.
-- Start from the [portable production boundary](https://github.com/wardby/wardby/blob/main/deploy/production/README.md)
-  for another cloud, VM, or container platform.
+- Start from the [self-hosted container deployment reference](https://github.com/wardby/wardby/blob/main/deploy/production/README.md)
+  for Docker Compose on a VM or on-premises host. Supply the surrounding
+  production infrastructure and controls yourself.
 - Follow [Bring your own identity provider](https://github.com/wardby/wardby/blob/main/docs/getting-started-identity-provider.md)
   to protect remote MCP with your existing OAuth/OIDC provider.
 
@@ -252,16 +253,19 @@ independently instead of defining the agent architecture. This reduces
 control-plane lock-in without pretending that source control, model providers,
 or monitoring systems disappear.
 
-| Target                               | Current support                                                                                                  |
-| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| **Local Docker, VM, or on-premises** | Portable PostgreSQL and container workflow for development and self-hosting.                                     |
-| **Production container baseline**    | Separate runtime and migration images plus a Compose/Caddy reference boundary.                                   |
-| **GKE Autopilot**                    | Supported GCP reference with private Cloud SQL, isolated Codex worker pods, HTTPS Gateway, and immutable images. |
-| **AWS**                              | The portable runtime and Bedrock model adapter are available; a native AWS deployment module is planned.         |
-| **Other clouds**                     | Run the production image and provide equivalent PostgreSQL, secrets, ingress, egress, and monitoring controls.   |
+| Target                                                                                  | Current support                                                                                                                                                              |
+| --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Local quickstart**                                                                    | Containerized PostgreSQL and a local control plane for development and evaluation.                                                                                           |
+| **Self-hosted container deployment** (e.g., Docker Compose on a VM or on-premises host) | Runtime and migration images plus a Compose/Caddy reference. The operator supplies the database, secrets, network controls, backups, monitoring, and a separate coding host. |
+| **GKE Autopilot**                                                                       | Supported Google Cloud reference with private Cloud SQL, isolated Codex and Claude Code worker pods, HTTPS Gateway, and immutable images. Complete the production checks.    |
+| **AWS**                                                                                 | The portable runtime and Bedrock model adapter are available; a native AWS deployment module is planned.                                                                     |
+| **Other clouds**                                                                        | Run the portable runtime and provide equivalent database, identity, secret, ingress, egress, isolation, and monitoring controls.                                             |
+
+The [`kind` harness](https://github.com/wardby/wardby/blob/main/deploy/kind-coding/README.md)
+is for local Kubernetes testing, not production deployment.
 
 Start with [deployment targets](https://github.com/wardby/wardby/blob/main/deploy/README.md), the
-[portable production boundary](https://github.com/wardby/wardby/blob/main/deploy/production/README.md), or the
+[self-hosted container deployment reference](https://github.com/wardby/wardby/blob/main/deploy/production/README.md), or the
 [GKE getting-started guide](https://github.com/wardby/wardby/blob/main/docs/getting-started-gke.md). Reference deployments are examples,
 not a requirement to use one vendor.
 
@@ -316,8 +320,9 @@ production alerts, and SLOs remain operator responsibilities. See the
 - **Sandboxed tools:** native agent tools execute inside a constrained QuickJS
   environment with controlled fetch and secret bindings.
 - **Isolated coding workers:** Codex and Claude Code run in hardened containers
-  with resource limits, protected paths, bounded output, and no network access
-  except the coding proxy.
+  with resource limits, protected paths, and bounded output. Egress is limited
+  to the coding proxy; runs can also reach explicitly declared services inside
+  their isolated run environment.
 - **Allowlisted package installs:** a coding agent's `npm`/`pip` installs are
   limited to an approved dependency graph, served through the same proxy with
   a minimum release age, an OSV vulnerability audit, and every package

@@ -1,6 +1,6 @@
-# Production Edge and Runtime Boundary
+# Self-hosted Container Deployment Reference
 
-This is the portable deployment baseline for Phase 7 Workstream 2. It places
+This Docker Compose reference places
 the MCP HTTP service and scheduler behind Caddy, publishes only ports 80 and
 443, and runs the application processes as the non-root runtime-image user.
 It is intentionally not a complete production environment: a platform firewall,
