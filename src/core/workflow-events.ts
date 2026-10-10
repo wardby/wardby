@@ -16,7 +16,7 @@ export type WorkflowPayload =
   | {
       kind: "run_failed";
       agentName: string;
-      status: "failed" | "budget_exhausted" | "cancelled" | "lost";
+      status: "failed" | "budget_exhausted" | "cancelled" | "lost" | "refused";
       reason: string | null;
     }
   | { kind: "pr_opened"; prLabel: string; prUrl: string; movedTo: string | null }

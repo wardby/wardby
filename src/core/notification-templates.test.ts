@@ -193,6 +193,10 @@ describe("renderEvent", () => {
       "❌ *lead* stopped: budget exhausted",
     ],
     [
+      { kind: "run_failed", agentName: "lead", status: "refused", reason: "Estimated input cost <x> meets budget" },
+      "❌ *lead* was refused: Estimated input cost &lt;x&gt; meets budget",
+    ],
+    [
       { kind: "run_failed", agentName: "lead", status: "failed", reason: "model <x> down" },
       "❌ *lead* failed: model &lt;x&gt; down",
     ],
