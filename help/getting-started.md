@@ -47,11 +47,11 @@ Claude Code. Run `wardby doctor` afterwards to verify the local installation.
   with webhooks, link a native agent to the repository with the `pull_request`
   trigger, and open a pull request. See [Code review agents](code-review-agents.md).
 
-- **D. Another language (Go, Java, Rust…).** Do A with Codex, then build a
-  worker image with that toolchain on the base image `wardby doctor` prints,
-  and set the builder's `codingProfile.workerImageRef`. Ask your assistant
-  "Help me build a Wardby worker image for Go"; it follows
-  [Build a custom worker image](build-worker-image.md). Codex agents only.
+- **D. Another language (Go, Java, Rust…).** Do A, then build an image with
+  that toolchain and set the builder's `codingProfile.workerImageRef`. Ask your
+  assistant "Help me build a Wardby worker image for Go"; it follows
+  [Build a custom worker image](build-worker-image.md), for Codex and Claude
+  Code builders.
 
 The quickstart ends with a menu of next steps to ask your assistant: run the
 builder and reviewer, allow more packages, build a worker image, schedule an

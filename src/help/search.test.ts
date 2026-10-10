@@ -221,6 +221,15 @@ describe("build worker image help", () => {
       expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("build-worker-image");
     }
   });
+
+  it("is found for custom images on Claude Code agents", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const query of ["workerImageRef", "custom image claude code", "ruby"]) {
+      expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("build-worker-image");
+    }
+  });
 });
 
 describe("repository instructions and skills help", () => {

@@ -1,9 +1,9 @@
 ---
 id: build-worker-image
 title: Build a custom worker image for another language
-summary: A procedure an MCP assistant follows to build a custom coding worker image for Go, Java, Rust or another language on Wardby's driver base image, check it, and point a Codex coding agent at it with workerImageRef.
+summary: A procedure an MCP assistant follows to build a custom image for Go, Java, Rust, Ruby or another language, check it, and point a Codex or Claude Code coding agent at it with workerImageRef.
 audience: operator
-tags: [worker-image, custom-image, workerImageRef, toolchain, other-language, go, golang, java, rust, ruby, codex]
+tags: [worker-image, custom-image, workerImageRef, toolchain, other-language, go, java, rust, ruby, codex, claude-code]
 appliesTo: ">=0.5.3"
 ---
 
@@ -11,16 +11,16 @@ appliesTo: ">=0.5.3"
 
 Wardby's own worker images have Node (`toolchain: node`) or Node and Python
 3.12 (`toolchain: node-python`). For any other language, build your own image
-on top of Wardby's driver base image and set the coding agent's
-`codingProfile.workerImageRef` to it. The long-form guide is
+and set the coding agent's `codingProfile.workerImageRef` to it. The image
+replaces the container that runs the agent's commands. The long-form guide is
 [`docs/coding-worker-byo-images.md`](../docs/coding-worker-byo-images.md).
 
-**Codex agents only.** A Claude Code agent runs its commands in Claude's tool
-runner, which `workerImageRef` does not change, so a custom image gives a Claude
-Code agent no new tools. If the agent's `codingProfile.provider` is
-`claude-code`, say so and stop; the user can switch the agent to Codex (the
-quickstart sets Codex up with `--coding-provider codex` and an
-`OPENAI_API_KEY`).
+The base image depends on the agent's builder (`codingProfile.provider`):
+
+| Builder       | Build the image `FROM`                             | Follow                                                            |
+| ------------- | -------------------------------------------------- | ----------------------------------------------------------------- |
+| `codex`       | Wardby's driver base image                         | Steps 1 to 6 below                                                |
+| `claude-code` | the tool runner image from the same Wardby release | Step 1, then [Claude Code agents](#claude-code-agents) at the end |
 
 If you are an assistant connected to Wardby over MCP, follow these steps. Do
 them in order, ask the user instead of guessing, and stop at the first failed
@@ -191,6 +191,52 @@ writes executables to `/tmp` or `/home/wardby`. Delete the clone afterwards.
    full, raise `codingProfile.workspaceDiskMb`.
 
 To undo it, call `update_agent` with `codingProfile: {workerImageRef: null}`.
+
+## Claude Code agents
+
+A Claude Code agent uses two containers. One runs Claude Code and holds its API
+key; it always uses Wardby's standard image. The other, the **tool runner**,
+runs the agent's commands and has the repository. `workerImageRef` replaces the
+tool runner.
+
+1. **Find the base image.** Ask the user for the value of
+   `CODING_CLAUDE_TOOL_RUNNER_IMAGE` in the Wardby server's settings (on a
+   quickstart install, `.env.local` in the Wardby project directory). Use
+   `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` instead when the project
+   also needs Python. If the value is a bare local ID (`sha256:...`), tag it
+   first, because Docker cannot build `FROM` an ID:
+   `docker tag sha256:<id> wardby-tool-runner-base:local`.
+2. **Write the Dockerfile.** Start from that image, install as `root`, and end
+   as the tool runner's user. Do not set `ENTRYPOINT` or `CMD`:
+
+   ```dockerfile
+   FROM <base image from step 1>
+   USER root
+   RUN apt-get update \
+       && apt-get install -y --no-install-recommends <packages> \
+       && rm -rf /var/lib/apt/lists/*
+   USER 10001:10001
+   ```
+
+   - A run can download only npm and PyPI packages, so every other package
+     must be in the image. Compile native code in an earlier build stage that
+     uses a Debian bookworm image, and copy only the results. The long-form
+     guide has a Ruby example.
+   - Commands run as `sh -lc` with a fixed environment, so `ENV` lines do not
+     reach them. Put settings in a file under `/etc/profile.d/`, and put
+     programs in `/usr/local/bin`.
+   - The filesystem rules in "Step 3: write the Dockerfile" apply here too.
+
+3. **Build it and run the tests the way a run would.** Use the commands in
+   "Step 4: build it and run the tests the way a run would", with `-lc` in
+   place of `-c` so the shell reads `/etc/profile.d/`.
+4. **Choose the image reference** as in "Step 5: choose the image reference".
+5. **Update the builder and try it** as in "Step 6: update the builder and try
+   it".
+
+If a run fails with `worker_tool_runner_unreachable`, the image was usually not
+built `FROM` this release's tool runner, or its `USER` or `ENTRYPOINT` was
+changed. Rebuild the image whenever Wardby is upgraded.
 
 Related: [Use local git repositories](local-repositories.md),
 [Approve packages for coding agents](coding-packages.md),

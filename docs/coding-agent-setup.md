@@ -104,8 +104,8 @@ JOB_LAUNCHER=docker
   folder as missing. The machine needs git 2.24 or newer.
 - **Worker images.** Use worker images from the same release as the control
   plane. An older worker image rejects `local:` repositories (the run fails with
-  `worker_input_failed`), including a bring-your-own `workerImageRef` image,
-  which must be rebuilt on a current driver image.
+  `worker_input_failed`), including a Codex agent's bring-your-own
+  `workerImageRef` image, which must be rebuilt on a current driver image.
 
 ### What a coding run does
 
@@ -146,9 +146,9 @@ The server selects the image from `CODING_WORKER_IMAGE_NODE_PYTHON_3_12`
 at its committed root; see
 [Python projects](getting-started.md#python-projects).
 
-For any other language, point a Codex agent at your own image with
-`workerImageRef` ([Bring-your-own worker images](coding-worker-byo-images.md)).
-Claude Code agents cannot use a custom toolchain yet.
+For any other language, use `codingProfile.workerImageRef` (admin only). It is
+a custom image for the container that runs the agent's commands, for Codex and
+for Claude Code; see [Bring-your-own worker images](coding-worker-byo-images.md).
 
 ### Review agents
 
@@ -361,7 +361,11 @@ image, runs fail with `worker_input_failed` once the repository has a
 `CLAUDE.md`, `AGENTS.md`, or skill to load, or the agent sets `repoSkills` or
 `claudeBareMode` to `false`; on an older Codex worker image, runs of agents with
 `repoSkills: false` fail the same way. A `workerImageRef` image must also be
-rebuilt on this release's driver base — see
+rebuilt for this release: on this release's driver image for a Codex agent, or
+on this release's tool runner image for a Claude Code agent. On a Claude Code
+agent, `workerImageRef` replaces only the tool runner (the container that runs
+the agent's commands); Claude Code itself always runs on
+`CODING_CLAUDE_WORKER_IMAGE`. See
 [Bring-Your-Own Coding-Worker Images](coding-worker-byo-images.md).
 
 ## Budgets

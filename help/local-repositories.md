@@ -143,9 +143,8 @@ then:
   `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` (Claude Code); set them to
   override. If this version has no Python image, quickstart says so and the
   builder uses the Node workspace (it can edit but not run Python tests). Other
-  languages need a bring-your-own image via `workerImageRef`, which is
-  Codex-only today: Claude Code agents cannot use a custom toolchain yet. See
-  the BYO worker images guide in the long-form docs;
+  languages need a bring-your-own image via `workerImageRef`, for Codex or
+  Claude Code. See the BYO worker images guide in the long-form docs;
 - finds the repository: a trusted folder that is a git repository, or the
   repositories directly inside a trusted folder (hidden folders are skipped).
   With several it asks which to use; non-interactively it uses the first in
