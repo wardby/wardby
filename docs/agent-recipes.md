@@ -465,6 +465,18 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
   keeps that value, and one that sets `mergeOrder` replaces it. A
   bad value (not an integer, or outside 1-99) is refused as a tool error
   rather than silently ignored.
+- With Wardby 0.6.0 or later, once a set has more than one distinct
+  `mergeOrder`, each open or draft pull request Wardby opened in it also
+  gets a check run named exactly `wardby merge order`: `in_progress` while
+  an earlier step hasn't merged, `success` once every earlier step has
+  (or there is none), and `failure` if an earlier step was closed without
+  merging. Above the set's lowest step, a would-be `success` stays
+  `in_progress` ("waiting for the delegating run to finish") while the
+  delegating run, or a follow-up that continued one of its pull requests,
+  is still running — it may still add or reorder steps. Posting it never
+  blocks a merge by itself: add `wardby merge order` as a required status
+  check in branch protection to gate on it. See
+  [The wardby merge order check](../help/merge-order-check.md).
 - The section, and the follow-up hints below, list every pull request in the
   set by repository name and number. A request that spans repositories of
   different visibility can therefore show a private repository's name in a

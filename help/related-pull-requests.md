@@ -107,6 +107,12 @@ omits `mergeOrder` keeps that current value, so a follow-up does not need to
 repeat it to keep a pull request in its place; one that sets `mergeOrder`
 replaces it.
 
+With Wardby 0.6.0 or later, once a set has more than one `mergeOrder`, each
+open or draft pull request Wardby opened in it also gets a check run named
+`wardby merge order`, tracking whether the pull requests it depends on have
+merged yet. It's an informational check by default; search help for "merge
+order check" for its states and for requiring it in branch protection.
+
 ## Follow-up runs and sibling pull requests
 
 When someone asks for a follow-up on one of these pull requests (an

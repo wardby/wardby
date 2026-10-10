@@ -262,6 +262,17 @@ it starts a fresh review, and if that review requests changes, it starts a
 fix round the same way any other review would (subject to the cap and to no
 earlier round still running).
 
+With Wardby 0.6.0 or later, a round whose coding run ends with no change —
+the agent concluded the review's finding was wrong rather than pushing a
+fix — gets one fresh review instead, of the pull request's current
+(unchanged) head, run by the reviewer whose check requested the changes.
+The fix round's own summary is passed to that reviewer as untrusted
+context: information about what was decided and why, never instructions to
+follow. This happens once per review that requested changes, counts toward
+the pull request's round cap the same as a round that pushed a change, and
+at the cap posts the usual cap comment instead of re-reviewing — since no
+push happened, nothing else would otherwise replace the failed check.
+
 If a repository already forwards wardby's reviews to a webhook through a
 hand-written CI workflow to fix them automatically, replace that workflow
 with `review_fix`: link the trigger, then delete the workflow and its
@@ -820,6 +831,14 @@ The verdict comes from an LLM reading the pull request's own diff — content
 the PR's author controls and can use to steer the model. Treat it as one
 signal, not the only merge gate: keep a human approval (or another
 independent check) required alongside it.
+
+A related set with more than one `mergeOrder` (see [Setting a merge
+order](../help/related-pull-requests.md#setting-a-merge-order)) also gets a
+check named exactly `wardby merge order` on each pull request, independent
+of any reviewer link, tracking whether the pull requests it depends on have
+merged yet. Require it the same way — add `wardby merge order` as a
+required status check — to block a merge until they have. See
+[The wardby merge order check](../help/merge-order-check.md).
 
 ## Accepted gap: a run that fails outside its normal finish path leaves its check open
 
