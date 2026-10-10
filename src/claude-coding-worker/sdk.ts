@@ -8,14 +8,19 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
   const abortController = new AbortController();
   if (config.signal.aborted) abortController.abort();
   else config.signal.addEventListener("abort", () => abortController.abort(), { once: true });
+  const context = config.contextDirectory;
+  const skills = context !== null && config.skills;
   return {
     abortController,
-    cwd: "/opt/wardby/empty-workspace",
+    // Native mode with repo context: Claude Code loads CLAUDE.md (and skills) from a directory the
+    // worker wrote from the trusted input; it holds no settings, hooks, or MCP config, so "project"
+    // can load nothing else. Otherwise an empty directory and no setting sources.
+    cwd: context ?? "/opt/wardby/empty-workspace",
     model: config.model,
     maxTurns: config.maxTurns,
     maxBudgetUsd: config.budgetUsd,
-    tools: [],
-    allowedTools: [TOOL_NAME],
+    tools: skills ? ["Skill"] : [],
+    allowedTools: skills ? [TOOL_NAME, "Skill"] : [TOOL_NAME],
     strictMcpConfig: true,
     mcpServers: {
       wardby_tools: {
@@ -26,7 +31,7 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
         alwaysLoad: true,
       },
     },
-    settingSources: [],
+    settingSources: context ? ["project"] : [],
     systemPrompt: config.developerInstructions,
     outputFormat: { type: "json_schema", schema: config.outputSchema },
     permissionMode: "dontAsk",
