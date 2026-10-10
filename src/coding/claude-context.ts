@@ -28,7 +28,7 @@
  * repositories written for other coding agents still get their instructions.
  */
 import { constants, type Stats } from "node:fs";
-import { lstat, open, realpath, readdir } from "node:fs/promises";
+import { lstat, open, opendir, realpath } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { CLAUDE_CONTEXT_LIMITS, isAllowedContextPath, isSafeContextPath, type ClaudeContextFile } from "./protocol.js";
 
@@ -44,7 +44,8 @@ export interface ClaudeContext {
   /**
    * How many further files were left out without an entry in `skipped`: skips
    * beyond `MAX_RECORDED_SKIPS`, plus `@imports` beyond `MAX_IMPORTS_PER_FILE`
-   * in a single file, which are not followed at all. 0 when nothing overflowed.
+   * in a single file, which are not followed at all, plus 1 when `.claude/skills` has more than
+   * `MAX_SKILL_ENTRIES` entries. 0 when nothing overflowed.
    */
   skippedOverflow: number;
 }
@@ -60,6 +61,11 @@ const MAX_IMPORT_DEPTH = 5;
 export const MAX_RECORDED_SKIPS = 50;
 /** Only the first this-many distinct `@imports` of each file are followed; the rest are counted in `skippedOverflow`. */
 export const MAX_IMPORTS_PER_FILE = 100;
+/**
+ * At most this many `.claude/skills` entries are considered (matching the Codex worker's scan cap);
+ * if there are more, the rest are neither read nor counted beyond adding one to `skippedOverflow`.
+ */
+export const MAX_SKILL_ENTRIES = 2000;
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 const IMPORT = /(?:^|\s)@([^\s`]+)/gm;
@@ -303,11 +309,13 @@ export async function buildClaudeContext(workspace: string, options: { skills: b
 
   /** Loads one candidate; returns its content when it was added, otherwise undefined. */
   const load = async (rel: string): Promise<string | undefined> => {
+    // Once the limit is reached nothing more is loaded, so later candidates are not even inspected
+    // (a candidate that does not exist is then also reported as limit).
+    if (limitReached) return void skip(rel, "limit");
     const inspection = await inspect(workspace, rel);
     if (inspection.kind === "absent") return undefined;
     if (inspection.kind === "skip") return void skip(rel, inspection.reason);
     if (
-      limitReached ||
       files.length >= CLAUDE_CONTEXT_LIMITS.maxFiles ||
       totalBytes + inspection.stats.size > CLAUDE_CONTEXT_LIMITS.maxTotalBytes
     ) {
@@ -367,7 +375,9 @@ export async function buildClaudeContext(workspace: string, options: { skills: b
   }
 
   if (options.skills) {
-    for (const name of await skillNames(workspace, skip)) {
+    const listing = await skillNames(workspace, skip);
+    if (listing.truncated) skippedOverflow++;
+    for (const name of listing.names) {
       const rel = `${SKILLS_DIR}/${name}/SKILL.md`;
       if (seen.has(rel)) continue;
       seen.add(rel);
@@ -381,29 +391,46 @@ export async function buildClaudeContext(workspace: string, options: { skills: b
 }
 
 /**
- * Lists the entries of `.claude/skills`, sorted by name. A missing skills
- * directory yields none; a symlinked one is reported and yields none.
+ * Lists the entries of `.claude/skills`, sorted by name: at most
+ * `MAX_SKILL_ENTRIES` of them, in directory order, with `truncated` set when
+ * more exist. A missing skills directory yields none; a symlinked one is
+ * reported and yields none.
  */
 async function skillNames(
   workspace: string,
   skip: (path: string, reason: ClaudeContextSkip["reason"]) => void,
-): Promise<string[]> {
+): Promise<{ names: string[]; truncated: boolean }> {
+  const none = { names: [], truncated: false };
   for (const directory of [".claude", SKILLS_DIR]) {
     let stats: Stats;
     try {
       stats = await lstat(join(workspace, directory));
     } catch {
-      return [];
+      return none;
     }
     if (stats.isSymbolicLink()) {
       skip(directory, "symlink");
-      return [];
+      return none;
     }
-    if (!stats.isDirectory()) return [];
+    if (!stats.isDirectory()) return none;
   }
+  const names: string[] = [];
+  let truncated = false;
   try {
-    return (await readdir(join(workspace, SKILLS_DIR))).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const dir = await opendir(join(workspace, SKILLS_DIR));
+    try {
+      for (let entry = await dir.read(); entry !== null; entry = await dir.read()) {
+        if (names.length >= MAX_SKILL_ENTRIES) {
+          truncated = true;
+          break;
+        }
+        names.push(entry.name);
+      }
+    } finally {
+      await dir.close().catch(() => undefined);
+    }
   } catch {
-    return [];
+    return none;
   }
+  return { names: names.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)), truncated };
 }

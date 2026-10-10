@@ -6,6 +6,7 @@ import {
   AGENTS_BRIDGE,
   MAX_IMPORTS_PER_FILE,
   MAX_RECORDED_SKIPS,
+  MAX_SKILL_ENTRIES,
   buildClaudeContext,
   importsOf,
 } from "./claude-context.js";
@@ -271,5 +272,34 @@ describe("buildClaudeContext", () => {
     expect(paths(ctx)).toEqual(["CLAUDE.md", ...names.slice(0, MAX_IMPORTS_PER_FILE)]);
     expect(ctx.skipped).toEqual([]);
     expect(ctx.skippedOverflow).toBe(extra);
+  });
+
+  it("reports candidates after the limit as limit without inspecting them", async () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < CLAUDE_CONTEXT_LIMITS.maxFiles; i++)
+      files[`.claude/skills/s${String(i).padStart(3, "0")}/SKILL.md`] = "s";
+    files[".claude/skills/s200/SKILL.md"] = "fits but over the count";
+    const root = await repo(files);
+    // A symlinked skill after the limit would be reported as "symlink" if it were still inspected.
+    await mkdir(join(root, ".claude", "skills", "s201"));
+    await symlink(join(root, "CLAUDE.md"), join(root, ".claude", "skills", "s201", "SKILL.md"));
+    const ctx = await buildClaudeContext(root, { skills: true });
+    expect(ctx.files).toHaveLength(CLAUDE_CONTEXT_LIMITS.maxFiles);
+    expect(ctx.skipped).toEqual([
+      { path: ".claude/skills/s200/SKILL.md", reason: "limit" },
+      { path: ".claude/skills/s201/SKILL.md", reason: "limit" },
+    ]);
+  });
+
+  it("considers at most MAX_SKILL_ENTRIES skills directory entries and counts that more were left", async () => {
+    const root = await repo({});
+    const skills = join(root, ".claude", "skills");
+    await mkdir(skills, { recursive: true });
+    // Empty skill directories: each one considered costs an inspect but loads nothing.
+    for (let i = 0; i < MAX_SKILL_ENTRIES + 3; i++) await mkdir(join(skills, `s${i}`));
+    const ctx = await buildClaudeContext(root, { skills: true });
+    expect(ctx.files).toEqual([]);
+    expect(ctx.skipped).toEqual([]);
+    expect(ctx.skippedOverflow).toBe(1);
   });
 });

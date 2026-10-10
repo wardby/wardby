@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryCodingRunObserver } from "../../coding/observability.js";
 import { CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
+import { MAX_CODING_INPUT_BYTES } from "../../coding/protocol.js";
 import type { CodingProvider } from "../../coding/provider.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
 import { resolvedFromDefinition } from "../../coding/services/catalog.js";
@@ -724,6 +725,48 @@ describe("ContainerExecutor", () => {
           message: "further repository context files were not loaded",
         },
       ]);
+    });
+
+    it("drops context files from the tail, as limit skips, until the serialized input fits", async () => {
+      const created = await harness(claudeRun, IMAGE, new InMemoryCodingRunObserver(), claudeImages);
+      const workspace = join(created.root, "vcs", "run-1", "workspace");
+      await mkdir(join(workspace, "docs"), { recursive: true });
+      // Each file fits the content limits (≤ 64 KiB, ≤ 256 KiB in total), but a control character
+      // serializes to six JSON bytes ("\u0001"), so the four together are ~1.5 MB of input.json.
+      const filler = "\u0001".repeat(60 * 1024);
+      await writeFile(join(workspace, "CLAUDE.md"), `@docs/a.md @docs/b.md @docs/c.md\n${filler}`);
+      for (const name of ["a", "b", "c"]) await writeFile(join(workspace, "docs", `${name}.md`), filler);
+      let input: { claudeContext?: { files: { path: string }[] } } | undefined;
+      let size = 0;
+      created.jobs.onLaunch = () => {
+        const text = readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8");
+        size = Buffer.byteLength(text);
+        input = JSON.parse(text) as typeof input;
+      };
+      await created.executor.start("run-1");
+      expect(created.jobs.launches).toBe(1);
+      expect(size).toBeLessThanOrEqual(MAX_CODING_INPUT_BYTES);
+      expect(input!.claudeContext!.files.map((file) => file.path)).toEqual(["CLAUDE.md"]);
+      expect(
+        logged.filter((entry) => entry.payload.event === "coding.claude_context_skipped").map((entry) => entry.payload),
+      ).toEqual([
+        { event: "coding.claude_context_skipped", runId: "run-1", path: "docs/c.md", reason: "limit" },
+        { event: "coding.claude_context_skipped", runId: "run-1", path: "docs/b.md", reason: "limit" },
+        { event: "coding.claude_context_skipped", runId: "run-1", path: "docs/a.md", reason: "limit" },
+      ]);
+    });
+
+    it("truncates a logged skip path to 256 characters", async () => {
+      const created = await harness(claudeRun, IMAGE, new InMemoryCodingRunObserver(), claudeImages);
+      const workspace = join(created.root, "vcs", "run-1", "workspace");
+      await mkdir(workspace, { recursive: true });
+      await writeFile(join(workspace, "CLAUDE.md"), `@~${"x".repeat(4096)}`);
+      await created.executor.start("run-1");
+      const skips = logged.filter((entry) => entry.payload.event === "coding.claude_context_skipped");
+      expect(skips).toHaveLength(1);
+      expect(skips[0].payload).toMatchObject({ reason: "outside_repo" });
+      expect(String(skips[0].payload.path)).toHaveLength(256);
+      expect(String(skips[0].payload.path).startsWith("~xxx")).toBe(true);
     });
 
     it("still launches a Claude Code run whose repository context could not be read, without claudeContext", async () => {

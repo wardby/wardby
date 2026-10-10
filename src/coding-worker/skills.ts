@@ -33,7 +33,8 @@ interface SkillScanBudget {
 function frontmatterName(content: string): string | null {
   const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
   if (!frontmatter) return null;
-  const name = /^name:\s*(.+)$/m.exec(frontmatter[1]);
+  // [ \t]*, not \s*: an empty `name:` must not capture the next line.
+  const name = /^name:[ \t]*(.+)$/m.exec(frontmatter[1]);
   if (!name) return null;
   return name[1].trim().replace(/^["']|["']$/g, "");
 }
@@ -52,7 +53,8 @@ async function skillNameFromFile(skillMdPath: string): Promise<string | null> {
   } catch {
     return null;
   }
-  return frontmatterName(content) ?? basename(dirname(skillMdPath));
+  // || so an empty or whitespace-only name also falls back to the directory.
+  return frontmatterName(content) || basename(dirname(skillMdPath));
 }
 
 async function walkSkillRoot(dir: string, depth: number, names: Set<string>, budget: SkillScanBudget): Promise<void> {

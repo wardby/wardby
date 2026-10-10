@@ -3,7 +3,7 @@ import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import { withBaseCommit } from "../../coding/base-commit.js";
-import { buildClaudeContext, type ClaudeContext } from "../../coding/claude-context.js";
+import { buildClaudeContext, MAX_RECORDED_SKIPS, type ClaudeContext } from "../../coding/claude-context.js";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { codingProviderForModelProvider, type CodingProvider } from "../../coding/provider.js";
 import { CodingProfileSchema } from "../../coding/profile.js";
@@ -40,8 +40,10 @@ import {
   CODING_PROTOCOL_VERSION,
   CodingRunResultSchema,
   CodingTaskInputSchema,
+  MAX_CODING_INPUT_BYTES,
   parseCodingAgentOutputJson,
   redactAndTruncate,
+  type ClaudeContextFile,
   type CodingAgentOutput,
   type CodingRunResult,
 } from "../../coding/protocol.js";
@@ -59,6 +61,8 @@ import { collectRelatedPullRequests } from "../../core/related-pull-requests.js"
 import type { RelatedPullRequestEntry, RelatedPullRequestsInput } from "../vcs/github.js";
 
 const containerLog = logger.child({ module: "container-executor" });
+/** A logged context skip path is cut to this many characters: a refused import is reported as written. */
+const MAX_LOGGED_SKIP_PATH_CHARS = 256;
 
 /** The input path in a spec built only to ask the launcher about capacity; never written or read. */
 const CAPACITY_PROBE_INPUT = "/dev/null";
@@ -1381,44 +1385,65 @@ export class ContainerExecutor implements Executor {
         );
       }
     }
-    for (const skip of claudeContext?.skipped ?? []) {
+    const build = (contextFiles: ClaudeContextFile[]) =>
+      CodingTaskInputSchema.parse({
+        schemaVersion: CODING_PROTOCOL_VERSION,
+        runId: run.runId,
+        repository: run.repository,
+        baseRef: run.baseRef,
+        headRef: run.headRef,
+        task,
+        model: run.model,
+        budgetUsd: run.budgetUsd,
+        deadlineAt: deadlineAt.toISOString(),
+        continuationOf: run.rootCodingRunId ? { runId: run.rootCodingRunId } : undefined,
+        // Only when true: an untraced run's input stays exactly what older workers expect.
+        ...(run.debugTrace ? { debugTrace: true } : {}),
+        // Only when the agent sets one: every other run's input stays exactly what older workers expect.
+        ...(run.maxTurns ? { maxTurns: run.maxTurns } : {}),
+        // Only when off: every other run's input stays exactly what older workers expect.
+        ...(run.repoSkills === false ? { repoSkills: false } : {}),
+        // Only when off: every other run's input stays exactly what older workers expect.
+        ...(run.claudeBareMode === false ? { claudeBareMode: false } : {}),
+        // Only when there are some: every other run's input stays exactly what older workers expect.
+        ...(services.length > 0 ? { services: workerServices(services) } : {}),
+        // Only when there is something to load: every other run's input stays exactly what older workers expect.
+        ...(contextFiles.length > 0 ? { claudeContext: { files: contextFiles } } : {}),
+      });
+    // The content limits bound bytes, but JSON escaping can grow them up to sixfold (a control
+    // character becomes \u00XX), so a hostile repository could still push input.json past
+    // MAX_CODING_INPUT_BYTES and fail the launch. Drop context files from the tail (skills, then the
+    // deepest imports; the root instructions go last) until the serialized input fits.
+    const contextFiles = [...(claudeContext?.files ?? [])];
+    const skipped = [...(claudeContext?.skipped ?? [])];
+    let skippedOverflow = claudeContext?.skippedOverflow ?? 0;
+    let serialized = JSON.stringify(build(contextFiles));
+    while (contextFiles.length > 0 && Buffer.byteLength(serialized) > MAX_CODING_INPUT_BYTES) {
+      const dropped = contextFiles.pop()!;
+      if (skipped.length < MAX_RECORDED_SKIPS) skipped.push({ path: dropped.path, reason: "limit" });
+      else skippedOverflow++;
+      serialized = JSON.stringify(build(contextFiles));
+    }
+    for (const skip of skipped) {
       containerLog.warn(
-        { event: "coding.claude_context_skipped", runId: run.runId, path: skip.path, reason: skip.reason },
+        {
+          event: "coding.claude_context_skipped",
+          runId: run.runId,
+          // A refused import is logged as written, which a repository can make arbitrarily long.
+          path: skip.path.slice(0, MAX_LOGGED_SKIP_PATH_CHARS),
+          reason: skip.reason,
+        },
         "a repository context file was not loaded",
       );
     }
-    if (claudeContext && claudeContext.skippedOverflow > 0) {
+    if (skippedOverflow > 0) {
       containerLog.warn(
-        { event: "coding.claude_context_skipped", runId: run.runId, overflow: claudeContext.skippedOverflow },
+        { event: "coding.claude_context_skipped", runId: run.runId, overflow: skippedOverflow },
         "further repository context files were not loaded",
       );
     }
-    const input = CodingTaskInputSchema.parse({
-      schemaVersion: CODING_PROTOCOL_VERSION,
-      runId: run.runId,
-      repository: run.repository,
-      baseRef: run.baseRef,
-      headRef: run.headRef,
-      task,
-      model: run.model,
-      budgetUsd: run.budgetUsd,
-      deadlineAt: deadlineAt.toISOString(),
-      continuationOf: run.rootCodingRunId ? { runId: run.rootCodingRunId } : undefined,
-      // Only when true: an untraced run's input stays exactly what older workers expect.
-      ...(run.debugTrace ? { debugTrace: true } : {}),
-      // Only when the agent sets one: every other run's input stays exactly what older workers expect.
-      ...(run.maxTurns ? { maxTurns: run.maxTurns } : {}),
-      // Only when off: every other run's input stays exactly what older workers expect.
-      ...(run.repoSkills === false ? { repoSkills: false } : {}),
-      // Only when off: every other run's input stays exactly what older workers expect.
-      ...(run.claudeBareMode === false ? { claudeBareMode: false } : {}),
-      // Only when there are some: every other run's input stays exactly what older workers expect.
-      ...(services.length > 0 ? { services: workerServices(services) } : {}),
-      // Only when there is something to load: every other run's input stays exactly what older workers expect.
-      ...(claudeContext && claudeContext.files.length > 0 ? { claudeContext: { files: claudeContext.files } } : {}),
-    });
     // The run directory is 0700; world-readable mode only crosses Docker's UID boundary.
-    await writeFile(temporary, JSON.stringify(input), { flag: "wx", mode: 0o444 });
+    await writeFile(temporary, serialized, { flag: "wx", mode: 0o444 });
     await rename(temporary, destination);
     return destination;
   }

@@ -290,6 +290,7 @@ describe("runClaudeCodingWorker", () => {
       expect(config.skills).toBe(false);
       expect(config.environment.CLAUDE_CODE_SIMPLE).toBe("1");
       expect(config.developerInstructions).toBe(CLAUDE_WORKER_SECURITY_INSTRUCTIONS);
+      expect(config.environment.CLAUDE_CODE_DISABLE_BUNDLED_SKILLS).toBe("1");
     });
 
     it("injects the context into the system prompt in bare mode and writes nothing", async () => {
@@ -315,6 +316,7 @@ describe("runClaudeCodingWorker", () => {
       expect(config.contextDirectory).toBe(root);
       expect(config.skills).toBe(true);
       expect(config.environment).not.toHaveProperty("CLAUDE_CODE_SIMPLE");
+      expect(config.environment.CLAUDE_CODE_DISABLE_BUNDLED_SKILLS).toBe("1");
       expect(config.developerInstructions).toBe(CLAUDE_WORKER_SECURITY_INSTRUCTIONS);
     });
 

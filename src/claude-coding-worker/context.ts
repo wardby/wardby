@@ -51,7 +51,8 @@ export async function materializeClaudeContext(
 function frontmatterField(content: string, key: string): string | undefined {
   const block = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content);
   if (!block) return undefined;
-  const line = new RegExp(`^${key}:\\s*(.+)$`, "m").exec(block[1]);
+  // [ \\t]*, not \\s*: an empty field must not capture the next line.
+  const line = new RegExp(`^${key}:[ \\t]*(.+)$`, "m").exec(block[1]);
   if (!line) return undefined;
   const value = line[1]
     .trim()

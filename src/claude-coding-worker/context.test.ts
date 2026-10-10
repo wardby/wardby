@@ -88,6 +88,17 @@ describe("bareModeContextPrompt", () => {
     expect(prompt).not.toContain("body");
   });
 
+  it("never takes the next frontmatter line as an empty name or description", () => {
+    const prompt = bareModeContextPrompt([
+      { path: ".claude/skills/empty/SKILL.md", content: "---\nname:\ndescription:\nother: value\n---\n" },
+      { path: ".claude/skills/blank/SKILL.md", content: "---\nname: \t\ndescription: Real\n---\n" },
+    ]);
+    expect(prompt).toContain("- empty (/workspace/.claude/skills/empty/SKILL.md)");
+    expect(prompt).toContain("- blank: Real (/workspace/.claude/skills/blank/SKILL.md)");
+    expect(prompt).not.toContain("description:");
+    expect(prompt).not.toContain("other: value");
+  });
+
   it("leaves out files outside the allowlist", () => {
     const prompt = bareModeContextPrompt([
       { path: "CLAUDE.md", content: "Use pnpm." },

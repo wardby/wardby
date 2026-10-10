@@ -26,6 +26,14 @@ describe("Codex repo skills", () => {
     expect(await repoSkillNames(root)).toEqual(["alpha", "b"]);
   });
 
+  it("falls back to the directory for an empty or whitespace-only name, never the next line", async () => {
+    const root = await repo({
+      ".agents/skills/empty/SKILL.md": "---\nname:\ndescription: not-a-name\n---\n",
+      ".agents/skills/blank/SKILL.md": "---\nname:   \ndescription: also-not\n---\n",
+    });
+    expect(await repoSkillNames(root)).toEqual(["blank", "empty"]);
+  });
+
   it("ignores a symlinked skills root", async () => {
     const root = await repo({ "elsewhere/x/SKILL.md": "---\nname: x\n---\n" });
     await mkdir(join(root, ".agents"), { recursive: true });

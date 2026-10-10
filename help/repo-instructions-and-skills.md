@@ -24,7 +24,7 @@ per agent.
 A repository that only has `AGENTS.md` still gets it in Claude Code, through
 a one-line `CLAUDE.md` wardby synthesizes for it. Subdirectory `CLAUDE.md`
 files (anything other than the repository root and `.claude/CLAUDE.md`) are
-not loaded.
+not loaded unless an imported file pulls them in.
 
 Claude Code's instructions and skills are bounded: at most 64 KiB per file,
 200 files, and 256 KiB combined; symlinks and non-UTF-8 files are refused. A
@@ -85,4 +85,4 @@ never loaded in either mode.
   basics and the other fields it accepts.
 - [Bring-Your-Own Coding-Worker Images](../docs/coding-worker-byo-images.md)
   — a `workerImageRef` image must be rebuilt on a current driver base to
-  accept `repoSkills` and `claudeContext`.
+  accept `repoSkills: false` and to stop offering Codex's built-in skills.

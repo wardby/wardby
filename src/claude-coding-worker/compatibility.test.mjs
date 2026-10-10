@@ -549,3 +549,138 @@ test("allowManagedHooksOnly in managedSettings stops every repository hook in na
   assert.equal(turns, 2, "the fake model was not asked a second time after the skill ran");
   assert.deepEqual(markers, [], "a repository hook ran despite the managed hook lock");
 });
+
+/**
+ * Runs a native-mode query with the worker's option set (sdk.ts: settingSources ["project"], the
+ * managed hook lock, `tools` limited to what the run offers) against a context directory holding one
+ * skill, and returns the Messages request bodies and the files created under a markers directory.
+ * `skillBody(markers)` builds the SKILL.md; when `invoke` is set the fake model calls that skill
+ * on its first turn.
+ */
+async function runNativeSkillProbe({ tools, env = {}, skillBody, invoke }) {
+  const root = await mkdtemp(join(tmpdir(), "wardby-claude-skills-"));
+  const home = await mkdtemp(join(tmpdir(), "wardby-claude-skills-home-"));
+  const markers = await mkdtemp(join(tmpdir(), "wardby-claude-skills-markers-"));
+  workspaces.push(root, home, markers);
+  const { mkdir, readdir, writeFile } = await import("node:fs/promises");
+  await writeFile(join(root, "CLAUDE.md"), "PROBE-CLAUDE-MARKER\n");
+  await mkdir(join(root, ".claude", "skills", "probe-skill"), { recursive: true });
+  await writeFile(join(root, ".claude", "skills", "probe-skill", "SKILL.md"), skillBody(markers));
+  const bodies = [];
+  let turns = 0;
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", () => {
+      bodies.push(raw);
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      if (invoke && raw.includes('"messages"') && turns++ === 0) {
+        res.end(toolUseSse("toolu_probe_skill", "Skill", { skill: invoke }));
+      } else {
+        res.end(sse("done"));
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const stream = query({
+      prompt: "hi",
+      options: {
+        cwd: root,
+        model: MODEL,
+        maxTurns: 3,
+        tools,
+        allowedTools: tools,
+        strictMcpConfig: true,
+        settingSources: ["project"],
+        managedSettings: { allowManagedHooksOnly: true },
+        systemPrompt: "Fixed security instructions",
+        permissionMode: "dontAsk",
+        persistSession: false,
+        env: {
+          HOME: home,
+          PATH: process.env.PATH,
+          CLAUDE_CONFIG_DIR: join(home, ".config-claude"),
+          ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}`,
+          ANTHROPIC_API_KEY: CAPABILITY,
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+          DISABLE_UPDATES: "1",
+          ...env,
+        },
+      },
+    });
+    for await (const _message of stream) {
+      // drain
+    }
+  } finally {
+    server.close();
+  }
+  return { bodies, markers: (await readdir(markers)).sort(), turns };
+}
+
+const PLAIN_SKILL = () => "---\nname: probe-skill\ndescription: PROBE-SKILL-DESCRIPTION\n---\nbody\n";
+// A bundled skill Claude Code offers natively unless switched off. The pinned SDK drops
+// managedSettings.disableBundledSkills, so the worker sets CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=1 instead.
+const BUNDLED_SKILL = /\bsimplify\b/;
+
+test("Claude Code offers its bundled skills in native mode without the switch (control for the next case)", async () => {
+  const { bodies } = await runNativeSkillProbe({ tools: ["Skill"], skillBody: PLAIN_SKILL });
+  const first = bodies.find((body) => body.includes('"messages"'));
+  assert.ok(first, "the SDK made no Messages request");
+  assert.match(first, /probe-skill/, "the project skill was not offered");
+  assert.match(first, BUNDLED_SKILL, "the bundled skill this guard relies on is no longer offered by default");
+});
+
+test("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=1 keeps bundled skills out of native mode", async () => {
+  const { bodies } = await runNativeSkillProbe({
+    tools: ["Skill"],
+    env: { CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: "1" },
+    skillBody: PLAIN_SKILL,
+  });
+  const first = bodies.find((body) => body.includes('"messages"'));
+  assert.ok(first, "the SDK made no Messages request");
+  assert.match(first, /probe-skill/, "the project skill was not offered");
+  assert.doesNotMatch(first, BUNDLED_SKILL, "a bundled skill was offered despite the switch");
+});
+
+/**
+ * A SKILL.md asking for Bash, with an inline `!` shell command and a ```! block, each touching a
+ * marker when its shell runs. The pinned SDK drops managedSettings.disableSkillShellExecution, so
+ * the only thing keeping a repository skill's shell from running is that the worker's `tools` list
+ * offers no Bash: this is the regression guard for that.
+ */
+const SHELL_SKILL = (markers) =>
+  [
+    "---",
+    "name: probe-skill",
+    "description: PROBE-SKILL-DESCRIPTION",
+    "allowed-tools: Bash",
+    "---",
+    `Inline: !\`touch ${join(markers, "SHELL-RAN")}\``,
+    "",
+    "```!",
+    `touch ${join(markers, "SHELL-BLOCK-RAN")}`,
+    "```",
+    "",
+  ].join("\n");
+
+test("a repository skill's shell commands run when Bash is offered (control for the next case)", async () => {
+  const { markers } = await runNativeSkillProbe({
+    tools: ["Skill", "Bash"],
+    env: { CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: "1" },
+    skillBody: SHELL_SKILL,
+    invoke: "probe-skill",
+  });
+  assert.ok(markers.includes("SHELL-RAN"), `the inline shell command did not run: ${markers}`);
+});
+
+test("a repository skill's shell commands do not run when the tools list offers no Bash", async () => {
+  const { markers, turns } = await runNativeSkillProbe({
+    tools: ["Skill"],
+    env: { CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: "1" },
+    skillBody: SHELL_SKILL,
+    invoke: "probe-skill",
+  });
+  assert.equal(turns, 2, "the fake model was not asked a second time after the skill ran");
+  assert.deepEqual(markers, [], "a repository skill's shell command ran");
+});

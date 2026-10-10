@@ -122,6 +122,11 @@ function agentEnvironment(proxyBaseUrl: string, capability: string, bareMode: bo
     // Bare mode is the hardening default. It also switches off Claude Code's own CLAUDE.md and
     // skill loading, so native-mode runs (claudeBareMode: false) drop it.
     ...(bareMode ? { CLAUDE_CODE_SIMPLE: "1" } : {}),
+    // Native mode would otherwise offer Claude Code's bundled skills (simplify, code-review, ...);
+    // the pinned SDK drops managedSettings.disableBundledSkills, so the environment switch is the
+    // one that works (compatibility.test.mjs). Set in both modes: bare mode has no Skill tool, so
+    // it is harmless there and cannot be lost if a run falls back from native to bare.
+    CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: "1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: "false",
     CLAUDE_CODE_MAX_OUTPUT_TOKENS: "4096",
