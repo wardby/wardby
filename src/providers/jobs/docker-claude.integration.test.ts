@@ -21,12 +21,10 @@ const execute = promisify(execFile);
 const enabled = process.env.WARDBY_CLAUDE_DOCKER_TEST === "1";
 const agentImage = process.env.WARDBY_CLAUDE_WORKER_IMAGE ?? "";
 const toolImage = process.env.WARDBY_CLAUDE_TOOL_RUNNER_IMAGE ?? "";
+// An operator-style tool runner built FROM the release tool runner (src/claude-tool-runner/Dockerfile.custom-example).
+const customToolImage = process.env.WARDBY_CLAUDE_CUSTOM_TOOL_RUNNER_IMAGE ?? "";
 const token = `${process.pid}-${Date.now()}`;
-const runId = `claude-docker-smoke-${token}`;
-const proxy = `wardby-claude-job-proxy-${token}`;
 const capability = "rrp_0123456789abcdef";
-const names = isolationNames(runId);
-let root: string | undefined;
 
 async function keeperProbe(container: string): Promise<string> {
   const run = async (label: string, args: string[]): Promise<string> => {
@@ -150,169 +148,217 @@ http.createServer(async (request, response) => {
 `;
 }
 
-describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance", () => {
+interface SmokeCase {
+  runId: string;
+  proxy: string;
+  toolImage: string;
+  /** The command the fake model asks run_command to run; the default exercises the npm shim. */
+  toolCommand?: string;
+  /** Whether a run_command result text is the one this case expects. */
+  toolResult: (text: string) => boolean;
+  root?: string;
+}
+
+async function cleanupSmoke(smoke: SmokeCase): Promise<void> {
+  const names = isolationNames(smoke.runId);
+  await cleanup(["container", "rm", "--force", names.workerContainer]);
+  await cleanup(["container", "rm", "--force", names.toolContainer]);
+  await cleanup(["container", "rm", "--force", names.keeperContainer]);
+  await cleanup(["network", "rm", names.network]);
+  await cleanup(["volume", "rm", names.storageVolume]);
+  await cleanup(["container", "rm", "--force", smoke.proxy]);
+  if (smoke.root) await rm(smoke.root, { recursive: true, force: true });
+}
+
+/** Launches the production agent and the given tool runner through DockerJobLauncher and drives one run_command. */
+async function runSmoke(smoke: SmokeCase): Promise<void> {
+  const { runId, proxy } = smoke;
+  const names = isolationNames(runId);
   let failedKeeperProbe: string | undefined;
+  const root = await mkdtemp(join(tmpdir(), "wardby-claude-docker-"));
+  smoke.root = root;
+  const workspace = join(root, "workspaces", runId, "workspace");
+  const git = join(root, "workspaces", runId, "git");
+  const input = join(root, "input.json");
+  const output = { schemaVersion: 1, runId, outcome: "no_changes", summary: "fixture", tests: [], tag: "fixture" };
+  await Promise.all([mkdir(workspace, { recursive: true }), mkdir(git, { recursive: true })]);
+  await Promise.all([
+    writeFile(join(workspace, "README.md"), "fixture\n"),
+    writeFile(join(git, "HEAD"), "ref: refs/heads/main\n"),
+    writeFile(
+      input,
+      JSON.stringify({
+        schemaVersion: 1,
+        runId,
+        repository: "wardby/fixture",
+        baseRef: "main",
+        headRef: `wardby/run-${runId}`,
+        task: "Return the required structured result without making changes.",
+        model: "claude-sonnet-5",
+        budgetUsd: 0.25,
+        deadlineAt: new Date(Date.now() + 90_000).toISOString(),
+      }),
+    ),
+  ]);
+  await docker([
+    "container",
+    "create",
+    "--name",
+    proxy,
+    "--network",
+    "bridge",
+    "--env",
+    `EXPECTED_CAPABILITY=${capability}`,
+    "--env",
+    `FAKE_RESULT=${JSON.stringify(output)}`,
+    ...(smoke.toolCommand ? ["--env", `FAKE_TOOL_COMMAND=${smoke.toolCommand}`] : []),
+    "--entrypoint",
+    "node",
+    agentImage,
+    "-e",
+    fakeProxyProgram(),
+  ]);
+  await docker(["container", "start", proxy]);
 
-  afterAll(async () => {
-    await cleanup(["container", "rm", "--force", names.workerContainer]);
-    await cleanup(["container", "rm", "--force", names.toolContainer]);
-    await cleanup(["container", "rm", "--force", names.keeperContainer]);
-    await cleanup(["network", "rm", names.network]);
-    await cleanup(["volume", "rm", names.storageVolume]);
-    await cleanup(["container", "rm", "--force", proxy]);
-    if (root) await rm(root, { recursive: true, force: true });
-  }, 30_000);
+  const launcher = new DockerJobLauncher({
+    stateRoot: join(root, "state"),
+    workspaceRoot: join(root, "workspaces"),
+    proxyContainer: proxy,
+    resolveCapability: async () => capability,
+    isRunActive: async () => false,
+    onProvisionFailure: async ({ keeperContainer }) => {
+      if (process.env.WARDBY_CLAUDE_KEEPER_PROBE === "1") failedKeeperProbe = await keeperProbe(keeperContainer);
+    },
+  });
+  const spec: JobSpec = {
+    kind: "coding-agent",
+    provider: "claude-code",
+    runId,
+    image: agentImage,
+    toolImage: smoke.toolImage,
+    inputArtifact: input,
+    timeoutSec: 90,
+    limits: { cpus: 1, memoryMb: 512, pids: 128, diskMb: 64 },
+    labels: {},
+  };
+  let handle: JobHandle;
+  try {
+    handle = await launcher.launch(spec);
+  } catch (error) {
+    if (error instanceof Error && failedKeeperProbe)
+      throw new Error(`${error.message}:keeper_probe=${failedKeeperProbe}`, { cause: error });
+    throw error;
+  }
+  const [agent, tool] = await Promise.all([
+    docker(["container", "inspect", names.workerContainer]).then(
+      (value) => JSON.parse(value)[0] as DockerContainerInspection,
+    ),
+    docker(["container", "inspect", names.toolContainer]).then(
+      (value) => JSON.parse(value)[0] as DockerContainerInspection,
+    ),
+  ]);
+  assertClaudeAgentContainerInspection(agent, spec, capability);
+  assertClaudeToolRunnerContainerInspection(tool, spec, claudeToolSetup(spec, capability));
+  expect((tool as DockerContainerInspection & { State?: { Running?: boolean } }).State?.Running).toBe(true);
 
-  it("runs the production agent and tool runner with only their reviewed capabilities", async () => {
-    root = await mkdtemp(join(tmpdir(), "wardby-claude-docker-"));
-    const workspace = join(root, "workspaces", runId, "workspace");
-    const git = join(root, "workspaces", runId, "git");
-    const input = join(root, "input.json");
-    const output = { schemaVersion: 1, runId, outcome: "no_changes", summary: "fixture", tests: [], tag: "fixture" };
-    await Promise.all([mkdir(workspace, { recursive: true }), mkdir(git, { recursive: true })]);
-    await Promise.all([
-      writeFile(join(workspace, "README.md"), "fixture\n"),
-      writeFile(join(git, "HEAD"), "ref: refs/heads/main\n"),
-      writeFile(
-        input,
-        JSON.stringify({
-          schemaVersion: 1,
-          runId,
-          repository: "wardby/fixture",
-          baseRef: "main",
-          headRef: `wardby/run-${runId}`,
-          task: "Return the required structured result without making changes.",
-          model: "claude-sonnet-5",
-          budgetUsd: 0.25,
-          deadlineAt: new Date(Date.now() + 90_000).toISOString(),
-        }),
-      ),
-    ]);
-    await docker([
-      "container",
-      "create",
-      "--name",
-      proxy,
-      "--network",
-      "bridge",
-      "--env",
-      `EXPECTED_CAPABILITY=${capability}`,
-      "--env",
-      `FAKE_RESULT=${JSON.stringify(output)}`,
-      "--entrypoint",
-      "node",
-      agentImage,
-      "-e",
-      fakeProxyProgram(),
-    ]);
-    await docker(["container", "start", proxy]);
-
-    const launcher = new DockerJobLauncher({
-      stateRoot: join(root, "state"),
-      workspaceRoot: join(root, "workspaces"),
-      proxyContainer: proxy,
-      resolveCapability: async () => capability,
-      isRunActive: async () => false,
-      onProvisionFailure: async ({ keeperContainer }) => {
-        if (process.env.WARDBY_CLAUDE_KEEPER_PROBE === "1") failedKeeperProbe = await keeperProbe(keeperContainer);
-      },
-    });
-    const spec: JobSpec = {
-      kind: "coding-agent",
-      provider: "claude-code",
-      runId,
-      image: agentImage,
-      toolImage,
-      inputArtifact: input,
-      timeoutSec: 90,
-      limits: { cpus: 1, memoryMb: 512, pids: 128, diskMb: 64 },
-      labels: {},
-    };
-    let handle: JobHandle;
-    try {
-      handle = await launcher.launch(spec);
-    } catch (error) {
-      if (error instanceof Error && failedKeeperProbe)
-        throw new Error(`${error.message}:keeper_probe=${failedKeeperProbe}`, { cause: error });
-      throw error;
-    }
-    const [agent, tool] = await Promise.all([
-      docker(["container", "inspect", names.workerContainer]).then(
-        (value) => JSON.parse(value)[0] as DockerContainerInspection,
-      ),
-      docker(["container", "inspect", names.toolContainer]).then(
-        (value) => JSON.parse(value)[0] as DockerContainerInspection,
-      ),
-    ]);
-    assertClaudeAgentContainerInspection(agent, spec, capability);
-    assertClaudeToolRunnerContainerInspection(tool, spec, claudeToolSetup(spec, capability));
-    expect((tool as DockerContainerInspection & { State?: { Running?: boolean } }).State?.Running).toBe(true);
-
-    let status = await launcher.status(handle);
-    for (let attempt = 0; attempt < 800 && (status.state === "pending" || status.state === "running"); attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      status = await launcher.status(handle);
-    }
-    if (status.state === "failed") {
-      throw new Error(
-        `claude_agent_failed:${await docker(["container", "logs", names.workerContainer])}:proxy:${await docker(["container", "logs", proxy])}`,
-      );
-    }
-    expect(status).toEqual({ state: "succeeded" });
-    expect(await launcher.collect(handle)).toEqual({
-      exitCode: 0,
-      reason: "completed",
-      resultArtifact: JSON.stringify(output),
-    });
-    const proxyEvents = (await docker(["container", "logs", proxy]))
-      .split("\n")
-      .filter(Boolean)
-      .map(
-        (line) =>
-          JSON.parse(line) as {
-            method: string;
-            url: string;
-            validCapability: boolean;
-            lastMessage?: { role: string; content: Array<Record<string, unknown>> };
-            messages?: Array<{ role: string; content: unknown }>;
-          },
-      );
-    expect(proxyEvents).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ method: "HEAD", url: "/api/hello", validCapability: false }),
-        expect.objectContaining({ method: "POST", url: "/v1/messages?beta=true", validCapability: true }),
-      ]),
+  let status = await launcher.status(handle);
+  for (let attempt = 0; attempt < 800 && (status.state === "pending" || status.state === "running"); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    status = await launcher.status(handle);
+  }
+  if (status.state === "failed") {
+    throw new Error(
+      `claude_agent_failed:${await docker(["container", "logs", names.workerContainer])}:proxy:${await docker(["container", "logs", proxy])}`,
     );
-    expect(proxyEvents.every((event) => event.method === "HEAD" || event.validCapability)).toBe(true);
-    const messageEvents = proxyEvents.filter((event) => event.url === "/v1/messages?beta=true");
-    expect(messageEvents.length).toBeGreaterThanOrEqual(2);
-    expect(
-      messageEvents.some((event) =>
-        event.messages?.some(
-          (message) =>
-            message.role === "user" &&
-            Array.isArray(message.content) &&
-            message.content.some(
-              (block) =>
-                block.type === "tool_result" &&
-                block.tool_use_id === "toolu_wardby_docker" &&
-                Array.isArray(block.content) &&
-                block.content.some(
-                  (part: { text?: unknown }) =>
-                    typeof part.text === "string" &&
-                    part.text.startsWith("exit_code=0\n") &&
-                    part.text.includes("http://wardby-proxy:8787/registry/npm/\n") &&
-                    /^\d+\.\d+\.\d+$/m.test(part.text),
-                ) &&
-                JSON.stringify(block.cache_control) === JSON.stringify({ type: "ephemeral" }),
-            ),
-        ),
+  }
+  expect(status).toEqual({ state: "succeeded" });
+  expect(await launcher.collect(handle)).toEqual({
+    exitCode: 0,
+    reason: "completed",
+    resultArtifact: JSON.stringify(output),
+  });
+  const proxyEvents = (await docker(["container", "logs", proxy]))
+    .split("\n")
+    .filter(Boolean)
+    .map(
+      (line) =>
+        JSON.parse(line) as {
+          method: string;
+          url: string;
+          validCapability: boolean;
+          lastMessage?: { role: string; content: Array<Record<string, unknown>> };
+          messages?: Array<{ role: string; content: unknown }>;
+        },
+    );
+  expect(proxyEvents).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ method: "HEAD", url: "/api/hello", validCapability: false }),
+      expect.objectContaining({ method: "POST", url: "/v1/messages?beta=true", validCapability: true }),
+    ]),
+  );
+  expect(proxyEvents.every((event) => event.method === "HEAD" || event.validCapability)).toBe(true);
+  const messageEvents = proxyEvents.filter((event) => event.url === "/v1/messages?beta=true");
+  expect(messageEvents.length).toBeGreaterThanOrEqual(2);
+  expect(
+    messageEvents.some((event) =>
+      event.messages?.some(
+        (message) =>
+          message.role === "user" &&
+          Array.isArray(message.content) &&
+          message.content.some(
+            (block) =>
+              block.type === "tool_result" &&
+              block.tool_use_id === "toolu_wardby_docker" &&
+              Array.isArray(block.content) &&
+              block.content.some(
+                (part: { text?: unknown }) => typeof part.text === "string" && smoke.toolResult(part.text),
+              ) &&
+              JSON.stringify(block.cache_control) === JSON.stringify({ type: "ephemeral" }),
+          ),
       ),
-    ).toBe(true);
-    await launcher.remove(handle);
-    await expect(launcher.status(handle)).rejects.toThrow("job_removed");
-  }, 120_000);
+    ),
+  ).toBe(true);
+  await launcher.remove(handle);
+  await expect(launcher.status(handle)).rejects.toThrow("job_removed");
+}
+
+describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance", () => {
+  const smoke: SmokeCase = {
+    runId: `claude-docker-smoke-${token}`,
+    proxy: `wardby-claude-job-proxy-${token}`,
+    toolImage,
+    toolResult: (text) =>
+      text.startsWith("exit_code=0\n") &&
+      text.includes("http://wardby-proxy:8787/registry/npm/\n") &&
+      /^\d+\.\d+\.\d+$/m.test(text),
+  };
+
+  afterAll(() => cleanupSmoke(smoke), 30_000);
+
+  it("runs the production agent and tool runner with only their reviewed capabilities", () => runSmoke(smoke), 120_000);
 });
+
+describe.skipIf(!enabled || !agentImage || !customToolImage)(
+  "Claude Docker acceptance with a custom tool runner",
+  () => {
+    const smoke: SmokeCase = {
+      runId: `claude-docker-custom-${token}`,
+      proxy: `wardby-claude-custom-proxy-${token}`,
+      toolImage: customToolImage,
+      // The added tool, then the run's workspace: only the tool runner has both (the agent has no repo).
+      toolCommand: "wardby-custom-tool && cat README.md",
+      toolResult: (text) => text.startsWith("exit_code=0\n") && text.includes("wardby-custom-tool-ok\nfixture\n"),
+    };
+
+    afterAll(() => cleanupSmoke(smoke), 30_000);
+
+    it(
+      "runs the agent's commands in a tool runner built FROM the release image, under the same isolation checks",
+      () => runSmoke(smoke),
+      120_000,
+    );
+  },
+);
 
 const servicesRunId = `claude-docker-services-${token}`;
 const servicesProxy = `wardby-claude-services-proxy-${token}`;
