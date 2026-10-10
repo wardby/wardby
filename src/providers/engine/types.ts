@@ -61,10 +61,20 @@ export type StepRunner = <T>(name: string, fn: () => Promise<T>) => Promise<T>;
  */
 export class RunOwnershipLostError extends Error {
   readonly step: string;
-  constructor(step: string, options?: { cause?: unknown }) {
-    super(`run_ownership_lost: another execution recorded step "${step}" first; this attempt stops.`, options);
+  /**
+   * Usage the losing step's body reported before its result was discarded
+   * (an LLM turn's token counts and cost), when the step runner saw it. Not
+   * recorded on any run: the winner's result replaces it. Logged only.
+   */
+  readonly discardedUsage?: Readonly<Record<string, number>>;
+  constructor(step: string, options?: { cause?: unknown; discardedUsage?: Readonly<Record<string, number>> }) {
+    super(
+      `run_ownership_lost: another execution recorded step "${step}" first; this attempt stops.`,
+      options?.cause === undefined ? undefined : { cause: options.cause },
+    );
     this.name = "RunOwnershipLostError";
     this.step = step;
+    if (options?.discardedUsage) this.discardedUsage = options.discardedUsage;
   }
 }
 

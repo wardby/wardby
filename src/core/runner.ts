@@ -1972,7 +1972,7 @@ async function executeTrackedRun(
       // returned) so the durable executor hands the conflict back to its SDK, which parks this
       // attempt instead of recording a workflow outcome under the winner.
       runnerLog.warn(
-        { runId, step: err.step, event: "run_ownership_lost" },
+        { runId, step: err.step, event: "run_ownership_lost", discardedUsage: err.discardedUsage },
         "run_ownership_lost: another execution owns this run; stopping without a terminal write (this attempt's last step is discarded)",
       );
       throw err;
