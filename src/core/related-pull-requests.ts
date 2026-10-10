@@ -70,6 +70,12 @@ export interface RelatedPullRequestGroup {
   pullRequests: RelatedPullRequest[];
   /** The first well-formed issue seen on the group's coding runs. */
   issue?: { provider: string; key: string };
+  /**
+   * The top-level run of every run tree the walk visited (the original
+   * request and each follow-up tree that continued one of its pull
+   * requests), with its status; absent when none was read.
+   */
+  roots?: Array<{ id: string; status: RunStatus }>;
 }
 
 interface TreeCodingRun {
@@ -80,6 +86,9 @@ interface TreeCodingRun {
   issueKey: string | null;
   startedAt: Date;
   mergeOrder: number | null;
+  /** The top-level run of the tree this row was found in, and its status. */
+  treeRootId?: string;
+  treeRootStatus?: RunStatus;
 }
 
 /** Every coding run in the top-level trees containing `seeds` (walks up parentRunId, then down). */
@@ -91,14 +100,16 @@ async function treeCodingRuns(db: RelatedPullRequestsDb, seeds: string[]): Promi
       UNION
       SELECT p."id", p."parentRunId" FROM "Run" p JOIN up u ON p."id" = u."parentRunId"
     ), down AS (
-      SELECT u."id" FROM up u WHERE u."parentRunId" IS NULL
+      SELECT u."id", u."id" AS "rootId" FROM up u WHERE u."parentRunId" IS NULL
       UNION
-      SELECT c."id" FROM "Run" c JOIN down d ON c."parentRunId" = d."id"
+      SELECT c."id", d."rootId" FROM "Run" c JOIN down d ON c."parentRunId" = d."id"
     )
-    SELECT cr."runId", cr."result", cr."rootCodingRunId", cr."issueProvider", cr."issueKey", cr."mergeOrder", r."startedAt"
+    SELECT cr."runId", cr."result", cr."rootCodingRunId", cr."issueProvider", cr."issueKey", cr."mergeOrder", r."startedAt",
+      d."rootId" AS "treeRootId", root."status"::text AS "treeRootStatus"
     FROM "CodingRun" cr
     JOIN down d ON cr."runId" = d."id"
     JOIN "Run" r ON r."id" = cr."runId"
+    JOIN "Run" root ON root."id" = d."rootId"
     ORDER BY r."startedAt" ASC, cr."runId" ASC
     LIMIT ${MAX_TREE_CODING_RUNS}`;
 }
@@ -300,7 +311,13 @@ export async function collectRelatedPullRequests(
         `${a.repository}#${a.number}`.localeCompare(`${b.repository}#${b.number}`),
     )
     .slice(0, MAX_RELATED_GROUP);
-  return { pullRequests, ...(issue ? { issue } : {}) };
+  const roots = new Map<string, RunStatus>();
+  for (const r of rows) if (r.treeRootId && r.treeRootStatus) roots.set(r.treeRootId, r.treeRootStatus);
+  return {
+    pullRequests,
+    ...(issue ? { issue } : {}),
+    ...(roots.size > 0 ? { roots: [...roots].map(([id, status]) => ({ id, status })) } : {}),
+  };
 }
 
 interface LivePullRequest {

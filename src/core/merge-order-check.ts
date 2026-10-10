@@ -18,7 +18,7 @@
  * missed events. State is read fresh from the host each time; nothing is
  * stored. Best effort: none of these ever throws.
  */
-import type { Run, RunStatus } from "#prisma";
+import type { Run } from "#prisma";
 import { CODING_CODE_PROVIDER, normalizeGitHubRepository } from "../coding/protocol.js";
 import type { PullRequestOrigin, ReviewHostRegistry, UpsertNamedCheckInput } from "../providers/review-host/types.js";
 import { logger, type Logger } from "./logger.js";
@@ -81,10 +81,11 @@ export interface MergeOrderSyncOptions {
   /** A pull request this event reports closed: its state comes from the event, and it is not read. */
   closed?: { repository: string; number: number; merged: boolean };
   /**
-   * Status of the run tree's root (the delegating run), when the caller
-   * already has it; otherwise read from `seedRunId` when that is a root.
+   * Sets already synced in this event or sweep pass, keyed by their sorted
+   * members: seeds from different roots of one set (an original request
+   * and a follow-up) collect the same set, which is then written once.
    */
-  rootStatus?: RunStatus;
+  synced?: Set<string>;
 }
 
 interface LiveMember {
@@ -189,19 +190,21 @@ export async function syncMergeOrderChecks(
   if (!host?.upsertNamedCheck || !host.pullRequestOrigin) return;
   try {
     const group = await collectRelatedPullRequests(deps.db, seedRunId);
+    if (opts.synced) {
+      const setKey = group.pullRequests
+        .map((pr) => keyOf(pr.repository, pr.number))
+        .sort()
+        .join("\n");
+      if (opts.synced.has(setKey)) return;
+      opts.synced.add(setKey);
+    }
     const steps = [
       ...new Set(group.pullRequests.flatMap((pr) => (pr.mergeOrder !== undefined ? [pr.mergeOrder] : []))),
     ].sort((a, b) => a - b);
     if (steps.length < 2) return;
-    let rootStatus = opts.rootStatus;
-    if (rootStatus === undefined) {
-      const seed = await deps.db.run.findUnique({
-        where: { id: seedRunId },
-        select: { status: true, parentRunId: true },
-      });
-      if (seed && seed.parentRunId === null) rootStatus = seed.status;
-    }
-    const leadRunning = rootStatus === "pending" || rootStatus === "running";
+    // A property of the set, whichever root it was seeded from: any of its run trees' roots (the
+    // original request, or a follow-up that continued one of its PRs) still running may change steps.
+    const leadRunning = (group.roots ?? []).some((r) => r.status === "pending" || r.status === "running");
 
     const reused = opts.origin ? safeRepository(opts.origin.repository) : undefined;
     const closed = opts.closed ? safeRepository(opts.closed.repository) : undefined;
@@ -336,7 +339,7 @@ export async function syncMergeOrderChecksForPullRequest(
   if (!host?.upsertNamedCheck || !host.pullRequestOrigin) return;
   const repository = safeRepository(pr.repository);
   if (!repository || !Number.isSafeInteger(pr.number) || pr.number <= 0) return;
-  let roots: Array<{ id: string; status: RunStatus }>;
+  let roots: Array<{ id: string }>;
   try {
     roots = [];
     for (const seed of await orderedSeeds(deps.db, repository, pr.number)) {
@@ -347,7 +350,8 @@ export async function syncMergeOrderChecksForPullRequest(
     log.warn({ err, repository, number: pr.number }, "could not find the merge-ordered sets of a pull request");
     return;
   }
-  for (const root of roots) await syncMergeOrderChecks(deps, root.id, { ...opts, rootStatus: root.status });
+  const synced = new Set<string>();
+  for (const root of roots) await syncMergeOrderChecks(deps, root.id, { ...opts, synced });
 }
 
 /** The sweep runs at most this often per process (the reconciler ticks every 15 s). */
@@ -383,7 +387,7 @@ export async function sweepMergeOrderChecks(deps: MergeOrderSyncDeps, now: Date 
   lastSweepAt = now.getTime();
   const since = new Date(now.getTime() - MERGE_ORDER_SWEEP_MAX_AGE_MS);
   for (const [root, at] of lastSyncedAt) if (at < since.getTime()) lastSyncedAt.delete(root);
-  let roots: Array<{ id: string; status: RunStatus }>;
+  let roots: Array<{ id: string }>;
   try {
     // Covers the MERGE_ORDER_SWEEP_SEEDS most recently updated coding runs with a merge order
     // within the last 7 days; older sets rely on their pr_closed/pr_updated events alone.
@@ -408,9 +412,10 @@ export async function sweepMergeOrderChecks(deps: MergeOrderSyncDeps, now: Date 
     .map((root, index) => ({ root, index, at: lastSyncedAt.get(root.id) ?? Number.NEGATIVE_INFINITY }))
     .sort((a, b) => a.at - b.at || a.index - b.index)
     .slice(0, MERGE_ORDER_SWEEP_BATCH);
+  const synced = new Set<string>();
   for (const { root } of batch) {
     lastSyncedAt.set(root.id, now.getTime());
-    await syncMergeOrderChecks(deps, root.id, { rootStatus: root.status });
+    await syncMergeOrderChecks(deps, root.id, { synced });
   }
   return batch.length;
 }

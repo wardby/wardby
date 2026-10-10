@@ -146,6 +146,31 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby merge order check (database)"
     await coder("hy", id("hold"), repoD, 21, 2);
     prs.get(`${repoD}#20`)!.state = "closed";
     prs.get(`${repoD}#20`)!.merged = true;
+    // A finished original request (E#40 step 1, merged; F#41 step 2) and a follow-up request, still
+    // running, that continued F#41: the set spans two run trees.
+    await run(id("orig"), "succeeded");
+    await coder("ce", id("orig"), repoD, 40, 1);
+    await coder("cf", id("orig"), repoD, 41, 2);
+    Object.assign(prs.get(`${repoD}#40`)!, { state: "closed", merged: true });
+    await run(id("fu"), "running");
+    await run(id("cf2"), "succeeded", id("fu"));
+    await db.codingRun.create({
+      data: {
+        runId: id("cf2"),
+        task: "t",
+        repository: repoD,
+        baseRef: "main",
+        headRef: `wardby/run-${id("cf")}`,
+        provider: "codex",
+        model: "m",
+        timeoutSec: 900,
+        protectedPaths: [],
+        budgetReservedUsd: 1,
+        mergeOrder: 2,
+        rootCodingRunId: id("cf"),
+        result: { outcome: "pull_request_updated", repository: repoD, pullRequestNumber: 41 },
+      },
+    });
     // Lead with three ordered steps: A#1 (1) -> B#2 (2) -> C#3 (3).
     await run(id("lead"), "running");
     await coder("ca", id("lead"), repoA, 1, 1);
@@ -302,6 +327,33 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby merge order check (database)"
     posted.length = 0;
     await db.run.update({ where: { id: id("hold") }, data: { status: "succeeded", finishedAt: new Date() } });
     await syncMergeOrderChecksAfterRun({ db, hosts: deps.hosts }, { id: id("hold"), parentRunId: null });
+    expect(verdicts()).toEqual([`${repoD} completed/success`]);
+  });
+
+  it("a set spanning a finished and a running tree holds its later steps, from either root, written once per event", async () => {
+    for (const seed of [id("orig"), id("fu")]) {
+      posted.length = 0;
+      await syncMergeOrderChecks({ db, hosts: deps.hosts }, seed);
+      expect(verdicts()).toEqual([`${repoD} in_progress`]);
+      expect(summaryFor(repoD)).toContain("delegating run is still running");
+    }
+    // F#41 has a coding run with an order in each tree: two roots, one set, one write.
+    posted.length = 0;
+    const pushed: HostEvent = {
+      kind: "pr_updated",
+      provider: "github",
+      repository: repoD,
+      prNumber: 41,
+      headSha: SHA,
+      isFork: false,
+    };
+    const routed = await routeHostEvent(pushed, deps);
+    for (const followUp of routed.followUps) await followUp();
+    expect(verdicts()).toEqual([`${repoD} in_progress`]);
+    // The follow-up's lead finishes: success.
+    posted.length = 0;
+    await db.run.update({ where: { id: id("fu") }, data: { status: "succeeded", finishedAt: new Date() } });
+    await syncMergeOrderChecksAfterRun({ db, hosts: deps.hosts }, { id: id("fu"), parentRunId: null });
     expect(verdicts()).toEqual([`${repoD} completed/success`]);
   });
 
