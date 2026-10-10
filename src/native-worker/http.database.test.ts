@@ -203,6 +203,13 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox gateway over HTTP (da
     const session = await db.nativeGatewaySession.findUniqueOrThrow({ where: { runId: sandboxed.finished.id } });
     expect(session.status).toBe("finished");
     expect(JSON.stringify(session.snapshot)).not.toContain("s3cret-value-123");
+    // The worker read the "api" secret through host.call; its value must not be in the ledger.
+    const calls = await db.nativeGatewayCall.findMany({
+      where: { session: { runId: sandboxed.finished.id } },
+      select: { result: true },
+    });
+    expect(calls.length).toBeGreaterThan(0);
+    expect(JSON.stringify(calls)).not.toContain("s3cret-value-123");
   });
 
   it("finishes the run when the gateway replica serving it stops mid-run", async () => {
