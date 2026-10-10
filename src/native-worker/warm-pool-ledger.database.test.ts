@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../core/db.js";
 import { PrismaWarmPoolLedger } from "./warm-pool-ledger.js";
+import { lockWarmPoolTable, LOCK_WAIT_MS } from "./warm-pool-lock.test-support.js";
 
 describe.skipIf(!process.env.DATABASE_URL)("PrismaWarmPoolLedger (database)", () => {
   const db = createPrismaClient();
@@ -19,15 +20,19 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaWarmPoolLedger (database)", ()
   };
   const longAgo = new Date(0);
 
+  let release: (() => Promise<void>) | undefined;
+
   beforeAll(async () => {
+    release = await lockWarmPoolTable();
     await db.agent.create({ data: { id: agentId, name: agentId, systemPrompt: "s", model: "m", budgetUsd: 1 } });
-  });
+  }, LOCK_WAIT_MS);
 
   afterAll(async () => {
     await db.nativeWarmWorker.deleteMany({ where: { specHash: { in: specs } } });
     await db.run.deleteMany({ where: { agentId } });
     await db.agent.deleteMany({ where: { id: agentId } });
     await db.$disconnect();
+    await release?.();
   });
 
   const run = async () => (await db.run.create({ data: { agentId, nativeExecutionMode: "sandbox" } })).id;

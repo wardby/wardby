@@ -7,6 +7,7 @@ import type { WorkerInput } from "./protocol.js";
 import type { ManagedWorkerLauncher } from "./sandbox-executor.js";
 import { PooledWorkerLauncher, type WarmWorkerLauncher } from "./warm-pool.js";
 import { PrismaWarmPoolLedger } from "./warm-pool-ledger.js";
+import { lockWarmPoolTable, LOCK_WAIT_MS } from "./warm-pool-lock.test-support.js";
 
 /** Pool workers and cold workers in memory, recording what reached each. */
 class FakeLauncher implements ManagedWorkerLauncher, WarmWorkerLauncher {
@@ -83,9 +84,12 @@ describe.skipIf(!process.env.DATABASE_URL)("PooledWorkerLauncher (database)", ()
   const newToken = () => `${tag}${String((counter += 1)).padStart(12, "0")}`;
   const pools: PooledWorkerLauncher[] = [];
 
+  let release: (() => Promise<void>) | undefined;
+
   beforeAll(async () => {
+    release = await lockWarmPoolTable();
     await db.agent.create({ data: { id: agentId, name: agentId, systemPrompt: "s", model: "m", budgetUsd: 1 } });
-  });
+  }, LOCK_WAIT_MS);
 
   afterAll(async () => {
     for (const pool of pools) pool.stop();
@@ -93,10 +97,11 @@ describe.skipIf(!process.env.DATABASE_URL)("PooledWorkerLauncher (database)", ()
     await db.run.deleteMany({ where: { agentId } });
     await db.agent.deleteMany({ where: { id: agentId } });
     await db.$disconnect();
+    await release?.();
   });
 
   function pool(size: number, launcher = new FakeLauncher(), extra: { now?: () => number } = {}) {
-    // A spec unique to this pool keeps tests (and other suites' rows) apart.
+    // A spec unique to this pool keeps tests apart (other suites' rows: lockWarmPoolTable).
     launcher.spec = `spec-${randomUUID()}`;
     const onDelivered = vi.fn(async () => {});
     const p = new PooledWorkerLauncher({
