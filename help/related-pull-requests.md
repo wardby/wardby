@@ -30,10 +30,14 @@ included, plus that run tree's own siblings.
   section on every open pull request of the request with the full list and
   current states. A later run that pushes to any pull request in the set
   refreshes the section on all of them the same way, and never removes it.
-  A reviewer linked to one of these pull requests does not review it until
-  that same lead run finishes, so the section is already current the first
-  time any of them is reviewed — see [Reviewing a pull request a delegated
-  run opened](code-review-agents.md#reviewing-a-pull-request-a-delegated-run-opened).
+  From Wardby 0.6.0, a reviewer linked to one of these pull requests does
+  not review it until that same lead run finishes, however it ends. When the
+  lead finishes normally the section has already been rewritten by then;
+  when it is ended another way, such as being cancelled, reviews start
+  without that rewrite, so reviewers should rely on `repo_pr_read`'s
+  `relatedPullRequests` either way — see [Reviewing a pull request a
+  delegated run
+  opened](code-review-agents.md#reviewing-a-pull-request-a-delegated-run-opened).
 - **Merge order.** Without a `mergeOrder` (see below) on any pull request in
   the set, open (and draft) pull requests are numbered as a **Suggested merge
   order (the order Wardby's agent opened them in)** — delegation order, not a
@@ -67,11 +71,16 @@ Reviewers see the section in the pull request description, so a reviewer
 agent can tell that a field, route, or schema a change relies on is added by
 a sibling pull request rather than missing. Because the description is only
 rewritten at the points above, a sibling opened (or merged, or closed) since
-then can be missing from it or shown with an old state; `repo_pr_read`'s
-`relatedPullRequests` field is computed fresh on every call instead, so a
-reviewer should prefer it over the description's section when they disagree.
-`relatedPullRequests` is empty for a pull request on a local repository,
-which has no App-authored marker to resolve the request from. See the
+then can be missing from it or shown with an old state. From Wardby 0.6.0,
+`repo_pr_read`'s `relatedPullRequests` field lists the request's pull
+requests fresh on every call instead, so a reviewer should prefer it over
+the description's section when they disagree. Its entry for the pull request
+just read always carries that pull request's live state; another entry
+carries a state only when Wardby has one stored (pull requests linked to an
+issue) and omits it otherwise, so call `repo_pr_read` on that pull request
+for its live state. `relatedPullRequests` is empty for a pull request on a
+local repository, which has no App-authored marker to resolve the request
+from. See the
 reviewer step in
 [Run GitHub code-review agents](code-review-agents.md#ci-and-sibling-pull-requests).
 
