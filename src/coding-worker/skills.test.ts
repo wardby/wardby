@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CODEX_BUILTIN_SKILLS, disabledCodexSkills, repoSkillNames } from "./skills.js";
 
 const roots: string[] = [];
@@ -37,5 +37,24 @@ describe("Codex repo skills", () => {
     const root = await repo({ ".agents/skills/a/SKILL.md": "---\nname: alpha\n---\n" });
     expect(await disabledCodexSkills(root, true)).toEqual([...CODEX_BUILTIN_SKILLS]);
     expect(await disabledCodexSkills(root, false)).toEqual(["alpha", ...CODEX_BUILTIN_SKILLS].sort());
+  });
+
+  it("caps the total entries scanned across both roots instead of an unbounded walk, and warns once", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wardby-codex-skills-"));
+    roots.push(root);
+    const skillsDir = join(root, ".agents", "skills");
+    await mkdir(skillsDir, { recursive: true });
+    for (let i = 0; i < 10; i++) await mkdir(join(skillsDir, `skill-${i}`), { recursive: true });
+    const writes: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      await expect(repoSkillNames(root, 3)).resolves.toEqual([]);
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(writes.filter((line) => line.includes("codex_skill_scan_truncated"))).toHaveLength(1);
   });
 });

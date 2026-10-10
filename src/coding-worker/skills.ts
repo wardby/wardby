@@ -15,6 +15,20 @@ const REPO_SKILL_ROOTS = [".agents/skills", ".codex/skills"];
 const MAX_SKILL_WALK_DEPTH = 3;
 const MAX_SKILL_MD_BYTES = 64 * 1024;
 
+/**
+ * Upper bound on how many directory entries `repoSkillNames` will visit across both
+ * roots in one call. The repository's skill roots are untrusted content: without a
+ * breadth cap, a directory with huge fan-out would drive unbounded readdir/lstat/
+ * readFile work. When the cap is hit, scanning stops early and the names found so
+ * far are returned -- never a thrown error.
+ */
+export const MAX_SKILL_SCAN_ENTRIES = 2000;
+
+interface SkillScanBudget {
+  remaining: number;
+  truncated: boolean;
+}
+
 /** First `---`-delimited frontmatter block's `name:` value, quotes trimmed. */
 function frontmatterName(content: string): string | null {
   const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
@@ -41,7 +55,11 @@ async function skillNameFromFile(skillMdPath: string): Promise<string | null> {
   return frontmatterName(content) ?? basename(dirname(skillMdPath));
 }
 
-async function walkSkillRoot(dir: string, depth: number, names: Set<string>): Promise<void> {
+async function walkSkillRoot(dir: string, depth: number, names: Set<string>, budget: SkillScanBudget): Promise<void> {
+  if (budget.remaining <= 0) {
+    budget.truncated = true;
+    return;
+  }
   let entries;
   try {
     entries = await readdir(dir, { withFileTypes: true });
@@ -49,6 +67,11 @@ async function walkSkillRoot(dir: string, depth: number, names: Set<string>): Pr
     return;
   }
   for (const entry of entries) {
+    if (budget.remaining <= 0) {
+      budget.truncated = true;
+      return;
+    }
+    budget.remaining -= 1;
     const entryPath = join(dir, entry.name);
     if (entry.isFile() && entry.name === "SKILL.md") {
       const name = await skillNameFromFile(entryPath);
@@ -57,14 +80,24 @@ async function walkSkillRoot(dir: string, depth: number, names: Set<string>): Pr
       // Dirent.isDirectory() reflects the directory-entry type from readdir itself
       // (not a followed stat), so a symlinked subdirectory reports false here and
       // is skipped without ever being opened.
-      await walkSkillRoot(entryPath, depth + 1, names);
+      await walkSkillRoot(entryPath, depth + 1, names, budget);
     }
   }
 }
 
-/** The repository's own Codex skill names, from `.agents/skills/` and `.codex/skills/` under `workspace`. */
-export async function repoSkillNames(workspace: string): Promise<string[]> {
+/**
+ * The repository's own Codex skill names, from `.agents/skills/` and `.codex/skills/`
+ * under `workspace`. Stops scanning once `maxEntries` directory entries have been
+ * visited across both roots combined (default `MAX_SKILL_SCAN_ENTRIES`; a test-only
+ * override), returning the names found so far and writing one JSON warning line to
+ * stderr -- it never throws because of a large or adversarial skills tree.
+ */
+export async function repoSkillNames(
+  workspace: string,
+  maxEntries: number = MAX_SKILL_SCAN_ENTRIES,
+): Promise<string[]> {
   const names = new Set<string>();
+  const budget: SkillScanBudget = { remaining: maxEntries, truncated: false };
   for (const root of REPO_SKILL_ROOTS) {
     const rootPath = join(workspace, root);
     let stats;
@@ -74,7 +107,10 @@ export async function repoSkillNames(workspace: string): Promise<string[]> {
       continue;
     }
     if (!stats.isDirectory()) continue;
-    await walkSkillRoot(rootPath, 0, names);
+    await walkSkillRoot(rootPath, 0, names, budget);
+  }
+  if (budget.truncated) {
+    process.stderr.write(`${JSON.stringify({ warning: "codex_skill_scan_truncated" })}\n`);
   }
   return [...names].sort();
 }
