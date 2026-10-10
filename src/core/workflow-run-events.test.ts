@@ -29,6 +29,26 @@ describe("emitRunFinishedEvents", () => {
       },
     ]);
   });
+  it("emits run_failed for a top-level run refused before any LLM call", async () => {
+    await emitRunFinishedEvents(db() as never, {
+      ...run,
+      status: "refused",
+      error: "Estimated input cost meets budget",
+    });
+    expect(events).toEqual([
+      {
+        dedupeKey: "run_failed:r1",
+        runId: "r1",
+        agentId: "a1",
+        payload: {
+          kind: "run_failed",
+          agentName: "lead",
+          status: "refused",
+          reason: "Estimated input cost meets budget",
+        },
+      },
+    ]);
+  });
   it("skips child runs and successes", async () => {
     await emitRunFinishedEvents(db() as never, { ...run, parentRunId: "p" });
     await emitRunFinishedEvents(db() as never, { ...run, status: "succeeded" });

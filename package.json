@@ -61,7 +61,7 @@
     "build": "npm run build:vendor && PRISMA_HIDE_UPDATE_MESSAGE=1 prisma generate && tsc -p tsconfig.build.json && npm run build:help",
     "prepare": "npm run build:vendor && PRISMA_HIDE_UPDATE_MESSAGE=1 prisma generate",
     "prepack": "npm run build",
-    "cli": "tsx --conditions=wardby-source src/cli.ts",
+    "cli": "tsx --conditions=wardby-source src/wardby-bin.ts",
     "codex:rerecord": "tsx --conditions=wardby-source src/tools/codex-rerecord.ts",
     "capture:autopilot": "tsx --conditions=wardby-source src/tools/capture-autopilot-dry-run.ts",
     "test": "npm run build:vendor && vitest run",
