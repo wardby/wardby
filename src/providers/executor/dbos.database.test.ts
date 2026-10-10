@@ -10,6 +10,8 @@ import type { IssueTracker } from "../issue-tracker/types.js";
 import { NativeEngine } from "../../core/engine-native.js";
 import { DBOS } from "@dbos-inc/dbos-sdk";
 import { DBOS_BACKEND, DbosExecutor } from "./dbos.js";
+import { inFlightRunIds } from "../../core/in-flight-runs.js";
+import { setWorkflowEventSink, type WorkflowEventInput } from "../../core/workflow-events.js";
 
 /** One scripted event list per stream() call; `gate` lets a test hold a turn open. */
 function scriptedLlm(scripts: LlmStreamEvent[][], gate?: { turn: number; open: Promise<void> }) {
@@ -308,6 +310,51 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
       await db.issueFingerprint.deleteMany({ where: { projectKey, issueKey: `${projectKey}-${suffix}` } });
       await db.run.deleteMany({ where: { agentId: defectAgentId } });
       await db.agent.deleteMany({ where: { id: defectAgentId } });
+    }
+  });
+
+  it("an attempt that loses a step's checkpoint to another execution writes nothing and is parked by DBOS", async () => {
+    let release!: () => void;
+    const open = new Promise<void>((resolve) => (release = resolve));
+    const llm = scriptedLlm([finalAnswer("x")], { turn: 1, open });
+    executor = build(llm);
+    await executor.launch();
+    const run = await db.run.create({ data: { agentId, executionManaged: true } });
+    const events: WorkflowEventInput[] = [];
+    setWorkflowEventSink(async (e) => {
+      events.push(e);
+    });
+    let attempt: Promise<void> | undefined;
+    try {
+      attempt = executor.start(run.id);
+      await waitFor("turn 1 to block inside the LLM step", () => llm.calls.length === 1);
+      // The "winner": another execution records the gated step first. Steps run one at a time
+      // here, so the gated step's id is the next one after the last recorded step.
+      await db.$executeRawUnsafe(
+        `INSERT INTO dbos_test.operation_outputs
+           (workflow_uuid, function_id, function_name, started_at_epoch_ms, completed_at_epoch_ms)
+         VALUES ($1, (SELECT max(function_id) + 1 FROM dbos_test.operation_outputs WHERE workflow_uuid = $1),
+                 'turn:1:llm', 1, 1)`,
+        run.id,
+      );
+      release();
+      // This attempt's step body finishes, its record conflicts, and the run leaves this process.
+      await waitFor("the losing attempt to leave executeRun", () => !inFlightRunIds().includes(run.id));
+
+      const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+      expect(after.status).toBe("running");
+      expect(after.finishedAt).toBeNull();
+      expect(after.error).toBeNull();
+      expect(events.filter((e) => e.payload.kind === "run_failed")).toEqual([]);
+      // Neither SUCCESS (the body returned) nor ERROR (a wardby error escaped it): DBOS parked it.
+      expect((await DBOS.getWorkflowStatus(run.id))?.status).toBe("PENDING");
+      const pending = Symbol("pending");
+      expect(await Promise.race([attempt.then(() => "settled"), Promise.resolve(pending)])).toBe(pending);
+    } finally {
+      setWorkflowEventSink(null);
+      release();
+      await executor.stop(run.id, "test cleanup");
+      await attempt?.catch(() => undefined);
     }
   });
 

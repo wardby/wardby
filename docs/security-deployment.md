@@ -456,6 +456,15 @@ stale, whichever executor id owns it. Set a fixed id only for a single,
 long-lived process that should re-drive its own runs at launch rather than
 after the heartbeat timeout.
 
+An owner that is stalled but still alive (event-loop or database-pool
+starvation long enough for its heartbeat to go stale) can overlap the attempt
+another process adopted. The first attempt to record a step keeps the run; the
+other stops at that step without writing the run or sending any
+notifications, and DBOS parks it as a duplicate execution. That stopped step's
+model spend is discarded rather than counted against the run, so look for the
+`run_ownership_lost` warning in the server logs (it carries the run id, the
+step, and the discarded usage when known) to see how often this happens.
+
 **New data at rest.** Durable execution checkpoints every step's result into
 `dbos.operation_outputs`: each turn's assistant text, every tool call's
 arguments, every tool result in full, and the `load` step's pinned agent

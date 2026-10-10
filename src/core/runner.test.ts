@@ -5,7 +5,7 @@ import type { AgentMemoryStore } from "../providers/memory/types.js";
 import type { Engine, EngineResult, EngineRunContext, StepRunner } from "../providers/engine/types.js";
 import type { LlmProvider } from "../providers/index.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
-import { executeRun, runAgent, RunCancelledError, type RunnerDb } from "./runner.js";
+import { executeRun, runAgent, RunCancelledError, RunOwnershipLostError, type RunnerDb } from "./runner.js";
 import { RoutingLlmProvider, type CatalogLlmAdapter } from "../providers/llm/routing.js";
 import { buildCatalog } from "../providers/llm/catalog.js";
 import { SHIPPED_CATALOG } from "../providers/llm/catalog-shipped.js";
@@ -1402,6 +1402,85 @@ describe("executeRun terminal-write races", () => {
     expect(result.status).toBe("cancelled");
     expect(result.error).toBe("Run cancelled: operator cancelled");
     expect(result.finishedAt).not.toBeNull();
+  });
+
+  it("an attempt that lost ownership of the run rethrows and writes nothing, so the winner still finishes", async () => {
+    const db = pendingRun();
+    const run = await db.run.create({ data: { agentId: "a1" } });
+    const providers = (engine: Engine) => ({
+      llm: noopLlm,
+      engine,
+      datastore: fakeDatastore(),
+      secrets: noopSecretCipher,
+      memory: fakeMemory(),
+    });
+    const lost = new RunOwnershipLostError("turn:1:llm");
+    const events: WorkflowEventInput[] = [];
+    setWorkflowEventSink(async (e) => {
+      events.push(e);
+    });
+    try {
+      const loser: Engine = {
+        async run() {
+          throw lost;
+        },
+      };
+      await expect(executeRun(run.id, providers(loser), db)).rejects.toBe(lost);
+
+      const stored = await db.run.findUnique({ where: { id: run.id } });
+      expect(stored?.status).toBe("running");
+      expect(stored?.error ?? null).toBeNull();
+      expect(stored?.finishedAt ?? null).toBeNull();
+      expect(events.filter((e) => e.payload.kind === "run_failed")).toEqual([]);
+
+      const winner = await executeRun(
+        run.id,
+        providers(
+          fakeEngine({
+            status: "succeeded",
+            finalText: "winner's answer",
+            turns: 2,
+            usage: { tokensIn: 3, tokensOut: 4, costUsd: 0.01 },
+          }),
+        ),
+        db,
+      );
+      expect(winner.status).toBe("succeeded");
+      expect(winner.finalText).toBe("winner's answer");
+    } finally {
+      setWorkflowEventSink(null);
+    }
+  });
+
+  it("an ownership loss in the load step rethrows and leaves the row pending", async () => {
+    const db = pendingRun();
+    const run = await db.run.create({ data: { agentId: "a1" } });
+    let engineCalled = false;
+    const engine = fakeEngine(
+      { status: "succeeded", finalText: "never", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 1 } },
+      () => {
+        engineCalled = true;
+      },
+    );
+    const step: StepRunner = async (name, fn) => {
+      if (name === "load") throw new RunOwnershipLostError("load");
+      return fn();
+    };
+
+    await expect(
+      executeRun(
+        run.id,
+        { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+        db,
+        undefined,
+        step,
+      ),
+    ).rejects.toBeInstanceOf(RunOwnershipLostError);
+
+    expect(engineCalled).toBe(false);
+    const stored = await db.run.findUnique({ where: { id: run.id } });
+    expect(stored?.status).toBe("pending");
+    expect(stored?.finishedAt ?? null).toBeNull();
   });
 });
 
