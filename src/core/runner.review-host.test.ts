@@ -6,12 +6,17 @@ import type { CodeReviewHost } from "../providers/review-host/types.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import { RoutingLlmProvider, type CatalogLlmAdapter } from "../providers/llm/routing.js";
 import { NativeEngine } from "./engine-native.js";
-import { executeRun, type RunnerDb } from "./runner.js";
+import { executeRun, failNativeRun, type RunnerDb } from "./runner.js";
 
 vi.mock("./review-fix.js", () => ({ startReviewFixAfterReview: vi.fn(async () => undefined) }));
 import { startReviewFixAfterReview } from "./review-fix.js";
 vi.mock("./related-pull-requests.js", () => ({ updateRelatedPullRequests: vi.fn(async () => undefined) }));
 import { updateRelatedPullRequests } from "./related-pull-requests.js";
+vi.mock("./host-events.js", async (orig) => ({
+  ...(await orig<typeof import("./host-events.js")>()),
+  startDeferredForRequest: vi.fn(async () => undefined),
+}));
+import { startDeferredForRequest } from "./host-events.js";
 
 // End-to-end coverage of the repo_* built-ins inside a real NativeEngine run
 // loop (scripted LLM, fake DB): offered only to linked agents when a review
@@ -342,5 +347,62 @@ describe("the reviewer run's finalizer starts a review-fix round", () => {
     const [, finished, hosts] = vi.mocked(updateRelatedPullRequests).mock.calls[0];
     expect(finished.id).toBe(run.id);
     expect(hosts).toEqual({ github: host });
+  });
+});
+
+describe("a lead run's finalizer releases the reviews waiting for its request (#259)", () => {
+  const executor = { start: vi.fn(), stop: vi.fn() } as never;
+
+  it("releases after the related pull requests are rewritten, for a tree root", async () => {
+    vi.mocked(startDeferredForRequest).mockClear();
+    const order: string[] = [];
+    vi.mocked(updateRelatedPullRequests).mockImplementationOnce(async () => void order.push("related"));
+    vi.mocked(startDeferredForRequest).mockImplementationOnce(async () => void order.push("release"));
+    const host = fakeHost();
+    const { db, llm } = harness({ links: [LINK], runHostCheck: OPEN_CHECK, script: [text("done")] });
+    const run = await executeRun("run1", { ...providers(llm), reviewHosts: { github: host }, executor }, db);
+    expect(startDeferredForRequest).toHaveBeenCalledTimes(1);
+    const [deps, leadRunId] = vi.mocked(startDeferredForRequest).mock.calls[0];
+    expect(leadRunId).toBe(run.id);
+    expect(deps.hosts).toEqual({ github: host });
+    expect(order).toEqual(["related", "release"]);
+  });
+
+  it("releases when the lead run failed, too", async () => {
+    vi.mocked(startDeferredForRequest).mockClear();
+    const host = fakeHost();
+    const { db, llm } = harness({ links: [LINK], runHostCheck: OPEN_CHECK, script: [] });
+    llm.stream = async function* () {
+      yield* [];
+      throw new Error("provider down");
+    };
+    const run = await executeRun("run1", { ...providers(llm), reviewHosts: { github: host }, executor }, db);
+    expect(run.status).toBe("failed");
+    expect(vi.mocked(startDeferredForRequest).mock.calls.map((c) => c[1])).toEqual([run.id]);
+  });
+
+  it("does not release for a delegated (non-root) run, or without an executor", async () => {
+    vi.mocked(startDeferredForRequest).mockClear();
+    const host = fakeHost();
+    const child = harness({ links: [LINK], runHostCheck: OPEN_CHECK, script: [] });
+    Object.assign((await child.db.run.findUnique({ where: { id: "run1" } }))!, {
+      parentRunId: "lead",
+      status: "running",
+    });
+    const finished = await failNativeRun(
+      {
+        runId: "run1",
+        db: child.db,
+        providers: { ...providers(child.llm), executor },
+        reviewHosts: { github: host },
+        repoAccess: { authorizeUse: vi.fn(), authorizeHostUser: vi.fn(), authorizePrincipal: vi.fn() },
+        issueTrackers: undefined,
+      },
+      new Error("boom"),
+    );
+    expect(finished.parentRunId).toBe("lead");
+    const noExecutor = harness({ links: [LINK], runHostCheck: OPEN_CHECK, script: [text("done")] });
+    await executeRun("run1", { ...providers(noExecutor.llm), reviewHosts: { github: host } }, noExecutor.db);
+    expect(startDeferredForRequest).not.toHaveBeenCalled();
   });
 });

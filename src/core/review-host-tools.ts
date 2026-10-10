@@ -15,12 +15,16 @@ import {
   REVIEW_HOST_PROVIDERS,
   ReviewHostError,
   type CiView,
+  type CodeReviewHost,
+  type PullRequestView,
   type ReviewHostProvider,
   type ReviewHostRegistry,
 } from "../providers/review-host/types.js";
+import type { RelatedPullRequestState } from "../providers/vcs/github.js";
 import { isLocalRepository, normalizeGitHubRepository, normalizeLocalRepository } from "../coding/protocol.js";
 import { ciForAgent } from "./ci-context.js";
 import { logger } from "./logger.js";
+import { collectRelatedPullRequests, type RelatedPullRequestsDb } from "./related-pull-requests.js";
 import { describeDenial, type RepoAccessDecision } from "./repo-access.js";
 
 const log = logger.child({ module: "review-host-tools" });
@@ -73,6 +77,25 @@ export interface ReviewToolContext {
    * throw refuses the call.
    */
   authorize: (link: RepositoryLink) => Promise<RepoAccessDecision>;
+  /** Backs repo_pr_read's relatedPullRequests lookup (collectRelatedPullRequests). */
+  db: RelatedPullRequestsDb;
+}
+
+/** One entry of repo_pr_read's relatedPullRequests, computed fresh at call time. */
+export interface RelatedPullRequestResult {
+  repository: string;
+  number: number;
+  /**
+   * The `self` entry always has one, derived from the pull request view just read (no extra host
+   * call). A sibling has one only when Wardby has it stored (open/merged/closed, for pull requests
+   * linked to an issue, kept current by pr_closed) and omits it otherwise — siblings are never
+   * read from the host here; call repo_pr_read on a sibling for its live state.
+   */
+  state?: RelatedPullRequestState;
+  /** Step in the delegating agent's declared merge order (1-99); absent when none was set. */
+  mergeOrder?: number;
+  /** True for the pull request repo_pr_read was called on. */
+  self: boolean;
 }
 
 const DEFAULT_PATCH_CHARS = 60_000;
@@ -149,7 +172,7 @@ export const REVIEW_HOST_TOOL_DEFS: LoadedTool[] = [
   {
     name: "repo_pr_read",
     description:
-      "Reads a pull request: title, body, author, state, refs, headSha, isFork, each changed file's unified-diff patch (patches share a character budget; truncated ones are flagged), lastReviewedSha — the head you last reviewed on this PR, if any — and openThreads: your own unresolved inline review threads (id, path, line, outdated, body). Pass sinceSha (usually lastReviewedSha) to get only what changed since then; if baseMergedSince is true, the base branch was merged in meanwhile and each file shows the PR's full diff against the base, limited to files that changed since sinceSha. It also returns ci: the CI check runs and commit statuses on headSha (wardby's own checks excluded), an overall state (passing, failing, pending, inconclusive, none, unavailable), sandboxInstallIncomplete, and a note. CI is the authority on whether this head builds and passes its tests: the description's Tests list comes from Wardby's coding sandbox, which may have had an incomplete install. Where they disagree, follow CI and say so; report pending checks as pending.",
+      "Reads a pull request: title, body, author, state, refs, headSha, isFork, each changed file's unified-diff patch (patches share a character budget; truncated ones are flagged), lastReviewedSha — the head you last reviewed on this PR, if any — and openThreads: your own unresolved inline review threads (id, path, line, outdated, body). Pass sinceSha (usually lastReviewedSha) to get only what changed since then; if baseMergedSince is true, the base branch was merged in meanwhile and each file shows the PR's full diff against the base, limited to files that changed since sinceSha. It also returns ci: the CI check runs and commit statuses on headSha (wardby's own checks excluded), an overall state (passing, failing, pending, inconclusive, none, unavailable), sandboxInstallIncomplete, and a note. CI is the authority on whether this head builds and passes its tests: the description's Tests list comes from Wardby's coding sandbox, which may have had an incomplete install. Where they disagree, follow CI and say so; report pending checks as pending. It also returns relatedPullRequests: this request's other pull requests (repository, number, state, mergeOrder, self), empty on a human pull request, one with no recognized marker, or a local repository. state is draft/open/merged/closed for the self entry (this pull request, from this same read); a sibling entry carries state (open/merged/closed) only when Wardby has it stored and omits it otherwise — call repo_pr_read on that sibling when you need its live state. The set of pull requests is current; the PR body's \"Related pull requests\" section can be stale.",
     jsonSchema: {
       type: "object",
       properties: {
@@ -314,6 +337,62 @@ async function markCompleted(ctx: ReviewToolContext, review?: PublishedReview): 
   }
 }
 
+/** A pull request's state as relatedPullRequests reports it, from a host view of it. */
+function viewState(view: Pick<PullRequestView, "state" | "merged" | "draft">): RelatedPullRequestState {
+  if (view.merged) return "merged";
+  if (view.state !== "open") return "closed";
+  return view.draft ? "draft" : "open";
+}
+
+/**
+ * repo_pr_read's relatedPullRequests: this request's other pull requests,
+ * computed fresh from run records (collectRelatedPullRequests), never from
+ * the PR body's possibly-stale "Related pull requests" section. Empty for a
+ * human pull request (no markerRunId), a marker whose CodingRun did not open
+ * in this repository (never trust a marker naming another repository's run —
+ * mirrors requestLeadRunId and updateRelatedPullRequests's same check), or a
+ * host that can't say (pullRequestOrigin absent, e.g. local repositories).
+ * The self entry's state comes from `selfView` (the same call's
+ * `readPullRequest`): merged, else closed when not open, else draft, else
+ * open. Sibling entries carry only their stored state (open/merged/closed,
+ * stored for requests linked to an issue) and omit it otherwise — no extra
+ * host call per sibling. Fails open: a lookup error is logged and never
+ * fails the tool.
+ */
+async function relatedPullRequestsFor(
+  ctx: ReviewToolContext,
+  host: CodeReviewHost,
+  repository: string,
+  prNumber: number,
+  selfView: Pick<PullRequestView, "state" | "merged" | "draft">,
+): Promise<RelatedPullRequestResult[]> {
+  if (!host.pullRequestOrigin) return [];
+  try {
+    const origin = await host.pullRequestOrigin(repository, prNumber);
+    if (!origin.markerRunId) return [];
+    const opener = await ctx.db.codingRun.findUnique({
+      where: { runId: origin.markerRunId },
+      select: { repository: true },
+    });
+    if (!opener || opener.repository.toLowerCase() !== repository.toLowerCase()) return [];
+    const group = await collectRelatedPullRequests(ctx.db, origin.markerRunId);
+    return group.pullRequests.map((pr) => {
+      const self = pr.repository === repository && pr.number === prNumber;
+      const state: RelatedPullRequestState | undefined = self ? viewState(selfView) : pr.state;
+      return {
+        repository: pr.repository,
+        number: pr.number,
+        ...(state ? { state } : {}),
+        ...(pr.mergeOrder != null ? { mergeOrder: pr.mergeOrder } : {}),
+        self,
+      };
+    });
+  } catch (err) {
+    log.warn({ err, agentId: ctx.agentId, repository, prNumber }, "could not list related pull requests");
+    return [];
+  }
+}
+
 /**
  * Dispatches one built-in repo tool call. Never throws — mirrors
  * runner.ts's `runSandboxTool` contract: a failure becomes a JSON error
@@ -362,7 +441,8 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
           maxPatchChars: a.maxPatchChars ?? DEFAULT_PATCH_CHARS,
           agentMarker: ctx.agentId,
         });
-        return JSON.stringify({ ...view, ci: ciForAgent(view) });
+        const relatedPullRequests = await relatedPullRequestsFor(ctx, host, link.repository, a.prNumber, view);
+        return JSON.stringify({ ...view, relatedPullRequests, ci: ciForAgent(view) });
       }
       case "repo_read_file": {
         const a = ReadFileArgs.parse(parsed);

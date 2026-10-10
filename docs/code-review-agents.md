@@ -501,6 +501,11 @@ the full desired state. Two common shapes:
 }
 ```
 
+With Wardby 0.6.0 or later, a `pull_request` reviewer's review of a pull request
+opened by a delegated coding run is held until the run that delegated it
+finishes, whether or not this link sets `waitForCi` — see [Reviewing a pull request a delegated run
+opened](#reviewing-a-pull-request-a-delegated-run-opened) below.
+
 Add `"waitForCi": true` to a `pull_request` link to hold the reviewer's
 review of a pushed head until that head's own CI finishes, instead of racing
 it — see [Review after CI (`waitForCi`)](#review-after-ci-waitforci) below.
@@ -569,6 +574,53 @@ The errors you may get while linking:
 | 403    | `adminOverride` from a caller without the `admin` role.                                                           |
 | 409    | Another agent already holds the `mention` or `review_fix` trigger, or this `checkName`, on the repository.        |
 | 503    | GitHub could not be asked (e.g. the App isn't installed on the repository). Nothing was changed.                  |
+
+### Reviewing a pull request a delegated run opened
+
+> **Requires Wardby 0.6.0 or later.** Earlier releases review a delegated
+> run's pull request on its first push, like any other.
+
+A coding run can be delegated: a lead agent's `delegate_to_<name>` call
+starts a coding sub-agent that pushes the branch and opens the pull request
+(see [Fanning out to several builders](agent-recipes.md#fanning-out-to-several-builders)).
+While the lead run that delegated it is still running, every reviewer linked
+with the `pull_request` trigger holds its review of that pull request instead
+of starting on the first push — including a reviewer with no `waitForCi` set.
+The review starts once the lead run finishes, however it ends (including
+failing, being cancelled or being lost).
+
+Holding the review this way means the request's other pull requests, if any,
+have also been opened by the time any of them is reviewed. When the lead run
+finishes normally, the **Related pull requests** section on each of them has
+also been rewritten with the full list (see [Related pull requests across
+repositories](../help/related-pull-requests.md)). When it is ended another
+way (for example, cancelled), the held reviews start without that section
+having been rewritten, so it can be incomplete. Either way, a reviewer should
+use `repo_pr_read`'s `relatedPullRequests`, which is computed from Wardby's
+own records on every call, so it does not report a field, route, or schema as
+missing only because a sibling repository's pull request had not been opened
+yet.
+
+- A reviewer linked with `waitForCi` then also waits for CI on the head, once
+  the lead run finishes, exactly as described below — with its own full
+  15-minute fallback, counted from that point, not from the original push.
+- If the deployment cannot tell whether the pull request's opening run was
+  delegated (for example, the host call to read its origin fails), the
+  review starts immediately instead, exactly as it would without this
+  behaviour.
+- These pull requests are never held by this: one opened directly by a
+  coding run that was not delegated, one opened by a human, and one on a
+  local repository (which has no origin to read).
+- A later request that continues an already-open pull request is not held
+  again: the request that opened it has already finished. A push that
+  continues the pull request inside the same, still-running request is held
+  like the first one.
+- As with the CI fallback below, a hold here does not depend on the
+  instance that started it still running when the lead run finishes:
+  Wardby's reconciliation sweep reconsiders every review held for at least
+  15 minutes and releases it once the lead run has finished or no longer
+  exists, wherever the scheduler process runs. A held review is dropped
+  unreleased after 24 hours, the same as a review held for CI.
 
 ### Review after CI (`waitForCi`)
 
@@ -666,7 +718,20 @@ internal marker to the model:
   `note` telling the agent to follow CI over the description's **Tests**.
   Reading CI never makes `repo_pr_read` fail: an unreadable result is
   `state: "unavailable"` with `unavailableReason`. At most 50 results are
-  listed; names are capped at 100 characters.
+  listed; names are capped at 100 characters. With Wardby 0.6.0 or later it also
+  returns `relatedPullRequests`: this request's pull requests (`repository`,
+  `number`, `state`, `mergeOrder`, `self`), computed fresh at call time from
+  Wardby's own run records; empty on a human pull request, one with no
+  recognized Wardby marker, or a pull request on a local repository (which
+  has no origin marker to look up). The `self` entry (the pull request just
+  read) always has a `state` — `draft`, `open`, `merged`, or `closed` — taken
+  from that same read. Another entry has a `state` (`open`, `merged`, or
+  `closed`) only when Wardby has it stored, which it does for pull requests
+  linked to an issue; otherwise `state` is omitted. Siblings are never read
+  from the host for this: call `repo_pr_read` on a sibling when you need its
+  live state. The list of pull requests is current; the PR body's **Related
+  pull requests** section can be stale (see
+  [Related pull requests across repositories](../help/related-pull-requests.md)).
 - **Re-review when CI finishes.** When a review publishes `COMMENT` on its
   own check while CI on that head is `pending` or `none`, Wardby records it.
   When a CI check suite (not Wardby's own) completes on that head and no CI
@@ -728,10 +793,15 @@ request's **Related pull requests** section correctly:
     Reviewer step (CI and related pull requests). Read `ci` from repo_pr_read.
     When `ci` and the description's Tests disagree, follow CI and say so; never
     ask for a fix only because a sandbox test failed while CI passed. Report
-    pending checks as pending. If the description has a "Related pull requests"
-    section, a field, route or schema the change relies on may be added by one
-    of those pull requests: do not report it as missing; note the dependency
-    and the listed merge order instead.
+    pending checks as pending. If repo_pr_read's relatedPullRequests is
+    non-empty, a field, route or schema the change relies on may be added by
+    one of those pull requests: do not report it as missing; note the
+    dependency and the listed merge order instead. relatedPullRequests is
+    current; the PR body's "Related pull requests" section can be stale.
+
+On a release before 0.6.0, `repo_pr_read` has no `relatedPullRequests`: use
+the description's **Related pull requests** section in its place in that
+step.
 
 Check names and the description are repository content: treat them as data,
 as for every `repo_*` result.

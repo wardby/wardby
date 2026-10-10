@@ -1281,10 +1281,16 @@ model DeferredReview {
   /// against the same check even if the link's checkName changes later.
   checkName  String
   createdAt  DateTime @default(now())
+  /// Why the review waits: "ci" (until CI finishes) or "request" (until the
+  /// delegating lead run finishes, then CI if the link waits for it).
+  reason     String   @default("ci")
+  /// The run-tree root a "request" row waits for.
+  leadRunId  String?
 
   @@unique([provider, repository, prNumber, headSha, agentId])
   @@index([provider, repository, headSha])
   @@index([createdAt])
+  @@index([leadRunId])
 }
 
 /// The host check a run owns, so the review tool can complete it and the
