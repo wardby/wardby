@@ -365,3 +365,69 @@ test("AbortController cancels an in-flight provider stream", async () => {
     await fake.close();
   }
 });
+
+test("loads CLAUDE.md, its imports, and project skills from a wardby-built cwd", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wardby-claude-context-"));
+  // HOME must differ from cwd: when they are the same directory the CLI treats
+  // <cwd>/.claude as the user config dir and skips project skill discovery
+  // (CLAUDE.md still loads). The real worker's HOME (/home/wardby) never equals its cwd.
+  const home = await mkdtemp(join(tmpdir(), "wardby-claude-context-home-"));
+  workspaces.push(root, home);
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  await writeFile(join(root, "CLAUDE.md"), "PROBE-CLAUDE-MARKER\n@docs/extra.md\n");
+  await mkdir(join(root, "docs"), { recursive: true });
+  await writeFile(join(root, "docs", "extra.md"), "PROBE-IMPORT-MARKER\n");
+  await mkdir(join(root, ".claude", "skills", "probe-skill"), { recursive: true });
+  await writeFile(
+    join(root, ".claude", "skills", "probe-skill", "SKILL.md"),
+    "---\nname: probe-skill\ndescription: PROBE-SKILL-DESCRIPTION\n---\nbody\n",
+  );
+  const bodies = [];
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", () => {
+      bodies.push(raw);
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(sse("done"));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const stream = query({
+      prompt: "hi",
+      options: {
+        cwd: root,
+        model: MODEL,
+        maxTurns: 1,
+        tools: ["Skill"],
+        allowedTools: ["Skill"],
+        strictMcpConfig: true,
+        settingSources: ["project"],
+        systemPrompt: "Fixed security instructions",
+        permissionMode: "dontAsk",
+        persistSession: false,
+        env: {
+          HOME: home,
+          PATH: process.env.PATH,
+          CLAUDE_CONFIG_DIR: join(root, ".config-claude"),
+          ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}`,
+          ANTHROPIC_API_KEY: CAPABILITY,
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+          DISABLE_UPDATES: "1",
+        },
+      },
+    });
+    for await (const _message of stream) {
+      // drain
+    }
+  } finally {
+    server.close();
+  }
+  const first = bodies.find((body) => body.includes('"messages"'));
+  assert.ok(first, "the SDK made no Messages request");
+  assert.match(first, /PROBE-CLAUDE-MARKER/, "CLAUDE.md did not reach the model");
+  assert.match(first, /PROBE-IMPORT-MARKER/, "the @import did not reach the model");
+  assert.match(first, /probe-skill/, "the project skill was not offered");
+  assert.match(first, /PROBE-SKILL-DESCRIPTION/, "the skill description was not offered");
+});
