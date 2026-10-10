@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   getSecretElicitationOutcome,
   fulfillSecretElicitation,
+  fulfillUnbrokerElicitation,
   type SecretElicitationPayload,
 } from "./secret-elicitation.js";
 import type { SecretCipher } from "../../providers/secrets/types.js";
@@ -108,6 +109,7 @@ describe("secret elicitation outcome TTL", () => {
     await fulfillSecretElicitation(payload, "value", fakeCipher(), db);
     expect(await getSecretElicitationOutcome("p1", "TTL_TEST", db)).toEqual({
       ok: true,
+      kind: "create",
       secret: expect.objectContaining({ name: "TTL_TEST" }),
     });
 
@@ -128,6 +130,7 @@ describe("secret elicitation outcome TTL", () => {
     expect(await getSecretElicitationOutcome("p1", "STALE", db)).toBeUndefined();
     expect(await getSecretElicitationOutcome("p1", "FRESH", db)).toEqual({
       ok: true,
+      kind: "create",
       secret: expect.objectContaining({ name: "FRESH" }),
     });
   });
@@ -147,5 +150,70 @@ describe("secret elicitation outcome TTL", () => {
     );
 
     expect(second).toEqual(first);
+  });
+});
+
+describe("secret elicitation outcome kind", () => {
+  async function store(db: import("#prisma").PrismaClient, outcome: unknown) {
+    await db.secretElicitationOutcome.upsert({
+      where: { ownerId_secretName: { ownerId: "p1", secretName: "K" } },
+      create: { ownerId: "p1", secretName: "K", outcome: outcome as never, expiresAt: new Date(Date.now() + 60_000) },
+      update: { outcome: outcome as never, expiresAt: new Date(Date.now() + 60_000) },
+    });
+  }
+
+  it("an unbroker outcome answers only an unbroker lookup", async () => {
+    const db = fakeDb();
+    const outcome = { ok: false, kind: "unbroker", error: "secret_not_found: x" };
+    await store(db, outcome);
+    expect(await getSecretElicitationOutcome("p1", "K", db)).toBeUndefined();
+    expect(await getSecretElicitationOutcome("p1", "K", db, "create")).toBeUndefined();
+    expect(await getSecretElicitationOutcome("p1", "K", db, "unbroker")).toEqual(outcome);
+  });
+
+  it("a legacy outcome without kind counts as a create", async () => {
+    const db = fakeDb();
+    const legacy = { ok: false, error: "boom" };
+    await store(db, legacy);
+    expect(await getSecretElicitationOutcome("p1", "K", db)).toEqual(legacy);
+    expect(await getSecretElicitationOutcome("p1", "K", db, "unbroker")).toBeUndefined();
+  });
+
+  it("a stale unbroker outcome does not short-circuit a create", async () => {
+    const db = fakeDb();
+    await store(db, { ok: false, kind: "unbroker", error: "stale" });
+    const outcome = await fulfillSecretElicitation({ ownerId: "p1", secretName: "K" }, "value", fakeCipher(), db);
+    expect(outcome).toEqual({ ok: true, kind: "create", secret: expect.objectContaining({ name: "K", broker: null }) });
+  });
+
+  it("a payload minted before kind existed is a create", async () => {
+    const db = fakeDb();
+    const legacyPayload = { ownerId: "p1", secretName: "OLD" } as SecretElicitationPayload;
+    const outcome = await fulfillSecretElicitation(legacyPayload, "value", fakeCipher(), db);
+    expect(outcome).toMatchObject({ ok: true, kind: "create" });
+  });
+
+  it("each fulfil refuses the other kind's link without writing anything", async () => {
+    const db = fakeDb();
+    const cipher = fakeCipher();
+    const asCreate = await fulfillSecretElicitation(
+      { ownerId: "p1", secretName: "K", kind: "unbroker" },
+      "value",
+      cipher,
+      db,
+    );
+    expect(asCreate).toMatchObject({
+      ok: false,
+      kind: "create",
+      error: expect.stringMatching(/elicitation_kind_mismatch/),
+    });
+    const asUnbroker = await fulfillUnbrokerElicitation({ ownerId: "p1", secretName: "K" }, cipher, db);
+    expect(asUnbroker).toMatchObject({
+      ok: false,
+      kind: "unbroker",
+      error: expect.stringMatching(/elicitation_kind_mismatch/),
+    });
+    expect(await getSecretElicitationOutcome("p1", "K", db)).toBeUndefined();
+    expect(await getSecretElicitationOutcome("p1", "K", db, "unbroker")).toBeUndefined();
   });
 });

@@ -174,7 +174,11 @@ describe("handleSecretElicitationForm", () => {
 
     const { getSecretElicitationOutcome } = await import("./secret-elicitation.js");
     const outcome = await getSecretElicitationOutcome("p1", "FORM_TEST_CREATE", db);
-    expect(outcome).toEqual({ ok: true, secret: expect.objectContaining({ name: "FORM_TEST_CREATE", ownerId: "p1" }) });
+    expect(outcome).toEqual({
+      ok: true,
+      kind: "create",
+      secret: expect.objectContaining({ name: "FORM_TEST_CREATE", ownerId: "p1" }),
+    });
   });
 
   it("POST with no value is rejected without writing a secret", async () => {

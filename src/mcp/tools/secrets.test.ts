@@ -539,4 +539,89 @@ describe("secrets tools", () => {
     expect(JSON.stringify(thirdBody)).not.toContain("sk-live-abc123");
     await client.close();
   });
+
+  describe("brokered secrets (fake db)", () => {
+    const BROKER = {
+      hosts: ["API.Example.com"],
+      placement: { kind: "header", name: "Authorization", format: "Bearer {value}" },
+    };
+
+    async function setup() {
+      const db = fakeDb();
+      const cipher = fakeCipher();
+      const mcp = buildMcpServer({
+        providers: { secrets: cipher } as never,
+        db,
+        config: { canonicalUri: CANONICAL_URI },
+      });
+      mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
+      registerSecretsTools(mcp, {
+        buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
+        protocolElicitation: false,
+      });
+      return { mcp, client: await connectClient(mcp) };
+    }
+    const text = (r: unknown) => (r as { content: { text: string }[] }).content[0].text;
+
+    it("create_secret rejects an invalid broker config with 400 secret_broker_config_invalid", async () => {
+      const { client } = await setup();
+      for (const args of [
+        {
+          name: "K",
+          value: "sk-live-abc123",
+          broker: { hosts: ["https://x.com"], placement: { kind: "query", name: "k" } },
+        },
+        { name: "K", broker: { hosts: [] } },
+      ]) {
+        const result = await client.callTool({ name: "create_secret", arguments: args });
+        expect(result.isError).toBe(true);
+        expect(text(result)).toMatch(/secret_broker_config_invalid/);
+      }
+      expect(parseText((await client.callTool({ name: "list_secrets", arguments: {} })) as never)).toEqual([]);
+      await client.close();
+    });
+
+    it("create_secret without a value mints a create link that carries the parsed broker", async () => {
+      const { mcp, client } = await setup();
+      const result = await client.callTool({ name: "create_secret", arguments: { name: "K", broker: BROKER } });
+      const body = parseText(result as never) as { status: string; url: string };
+      expect(body.status).toBe("pending");
+      const payload = await mcp.verifyRequestState<Record<string, unknown>>(new URL(body.url).searchParams.get("t")!);
+      expect(payload).toEqual({
+        ownerId: "p1",
+        secretName: "K",
+        kind: "create",
+        broker: { ...BROKER, hosts: ["api.example.com"] },
+      });
+      await client.close();
+    });
+
+    it("list_secrets reports broker: null for an unbrokered secret", async () => {
+      const { client } = await setup();
+      await client.callTool({ name: "create_secret", arguments: { name: "K", value: "sk-live-abc123" } });
+      const list = parseText((await client.callTool({ name: "list_secrets", arguments: {} })) as never);
+      expect(list).toEqual([expect.objectContaining({ name: "K", broker: null })]);
+      await client.close();
+    });
+
+    it("set_secret_broker: invalid config is 400, an unknown name is 404, and it needs secrets:write", async () => {
+      const { mcp, client } = await setup();
+      const bad = await client.callTool({ name: "set_secret_broker", arguments: { name: "K", broker: { hosts: [] } } });
+      expect(bad.isError).toBe(true);
+      expect(text(bad)).toMatch(/secret_broker_config_invalid/);
+
+      for (const broker of [BROKER, null]) {
+        const missing = await client.callTool({ name: "set_secret_broker", arguments: { name: "NOPE", broker } });
+        expect(missing.isError).toBe(true);
+        expect(text(missing)).toMatch(/secret_not_found/);
+      }
+
+      const db = fakeDb();
+      const cipher = fakeCipher();
+      mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["agents:read"]));
+      const denied = await client.callTool({ name: "set_secret_broker", arguments: { name: "K", broker: BROKER } });
+      expect(denied.isError).toBe(true);
+      await client.close();
+    });
+  });
 });
