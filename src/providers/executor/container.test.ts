@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -326,6 +326,9 @@ class FakeVcs implements VcsProvider {
     this.lastPrepareInput = input;
     this.events.push("prepare");
     this.workspace = this.makeWorkspace(input);
+    // Mirrors a real VCS provider, which always creates the workspace directory on disk: callers
+    // that read a Claude Code run's repository (buildClaudeContext) need a real path to realpath().
+    await mkdir(this.workspace.workspacePath, { recursive: true });
     return this.workspace;
   }
   async recoverWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace | null> {
@@ -474,7 +477,7 @@ async function harness(
     repoAccess: gateWith().gate,
     ...extra,
   });
-  return { executor, store, jobs, vcs, sessions, capabilities, events, observer };
+  return { executor, store, jobs, vcs, sessions, capabilities, events, observer, root };
 }
 
 afterEach(async () => {
@@ -653,6 +656,67 @@ describe("ContainerExecutor", () => {
       expect(created.store.terminations).toEqual([
         expect.objectContaining({ status: "failed", audit: expect.objectContaining({ failureCategory: "preflight" }) }),
       ]);
+    });
+
+    it("ships CLAUDE.md and skills to a Claude Code run, and only the instructions when skills are off", async () => {
+      const launched = async (repoSkills: boolean) => {
+        const created = await harness(
+          { ...claudeRun, repoSkills },
+          IMAGE,
+          new InMemoryCodingRunObserver(),
+          claudeImages,
+        );
+        const workspace = join(created.root, "vcs", "run-1", "workspace");
+        await mkdir(join(workspace, ".claude", "skills", "lint"), { recursive: true });
+        await writeFile(join(workspace, "CLAUDE.md"), "Use pnpm.");
+        await writeFile(join(workspace, ".claude", "skills", "lint", "SKILL.md"), "---\nname: lint\n---\n");
+        let input: Record<string, unknown> | undefined;
+        created.jobs.onLaunch = () => {
+          input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+        };
+        await created.executor.start("run-1");
+        return input!;
+      };
+      expect((await launched(true)).claudeContext).toEqual({
+        files: [
+          { path: "CLAUDE.md", content: "Use pnpm." },
+          { path: ".claude/skills/lint/SKILL.md", content: "---\nname: lint\n---\n" },
+        ],
+      });
+      expect((await launched(false)).claudeContext).toEqual({ files: [{ path: "CLAUDE.md", content: "Use pnpm." }] });
+    });
+
+    it("logs one further warn line, with the overflow count, for skips beyond the first 50", async () => {
+      const created = await harness(claudeRun, IMAGE, new InMemoryCodingRunObserver(), claudeImages);
+      const workspace = join(created.root, "vcs", "run-1", "workspace");
+      await mkdir(workspace, { recursive: true });
+      // 51 distinct home-relative imports: each is refused as "outside_repo" without ever being
+      // read, so this is a cheap way to drive skippedOverflow past 0 (MAX_RECORDED_SKIPS = 50).
+      const imports = Array.from({ length: 51 }, (_, i) => `@~${i}`).join("\n");
+      await writeFile(join(workspace, "CLAUDE.md"), imports);
+      await created.executor.start("run-1");
+      const skipLogs = logged.filter((entry) => entry.payload.event === "coding.claude_context_skipped");
+      expect(skipLogs).toHaveLength(51);
+      expect(skipLogs.filter((entry) => "overflow" in entry.payload)).toEqual([
+        {
+          level: "warn",
+          payload: { event: "coding.claude_context_skipped", runId: "run-1", overflow: 1 },
+          message: "further repository context files were not loaded",
+        },
+      ]);
+    });
+
+    it("never ships claudeContext to a Codex run", async () => {
+      const created = await harness({});
+      const workspace = join(created.root, "vcs", "run-1", "workspace");
+      await mkdir(workspace, { recursive: true });
+      await writeFile(join(workspace, "CLAUDE.md"), "x");
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      expect(input).not.toHaveProperty("claudeContext");
     });
   });
 

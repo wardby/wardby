@@ -3,6 +3,7 @@ import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import { withBaseCommit } from "../../coding/base-commit.js";
+import { buildClaudeContext } from "../../coding/claude-context.js";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { codingProviderForModelProvider, type CodingProvider } from "../../coding/provider.js";
 import { CodingProfileSchema } from "../../coding/profile.js";
@@ -777,7 +778,7 @@ export class ContainerExecutor implements Executor {
         spendEnabled = true;
         sessionId = session.id;
         this.options.capabilities.set(runId, session.capability);
-        const inputArtifact = await this.writeInput(run, deadlineAt, workspace.baseCommit);
+        const inputArtifact = await this.writeInput(run, deadlineAt, workspace);
         const beforeLaunch = await this.requireCurrent(runId);
         if (TERMINAL_STATUSES.has(beforeLaunch.status)) throw new Error("coding_run_no_longer_active");
         const spec = this.jobSpec(run, inputArtifact);
@@ -1348,7 +1349,7 @@ export class ContainerExecutor implements Executor {
     throw new Error("coding_provider_not_configured:claude-code");
   }
 
-  private async writeInput(run: ContainerRunSnapshot, deadlineAt: Date, baseCommit: string): Promise<string> {
+  private async writeInput(run: ContainerRunSnapshot, deadlineAt: Date, workspace: PreparedWorkspace): Promise<string> {
     await ensurePrivateDirectory(this.artifactRoot);
     const rootReal = await realpath(this.artifactRoot);
     const directory = resolve(rootReal, run.runId);
@@ -1358,11 +1359,27 @@ export class ContainerExecutor implements Executor {
     const destination = join(directory, "input.json");
     const temporary = join(directory, `.input-${randomUUID()}.tmp`);
     const services = parseStoredServices(run.services);
-    const task = withBaseCommit(run.task, baseCommit);
-    if (task === run.task && /^[0-9a-f]{40}$/.test(baseCommit)) {
+    const task = withBaseCommit(run.task, workspace.baseCommit);
+    if (task === run.task && /^[0-9a-f]{40}$/.test(workspace.baseCommit)) {
       containerLog.warn(
         { event: "coding.base_commit_omitted", runId: run.runId },
         "the coding task left no room for the base commit line",
+      );
+    }
+    const claudeContext =
+      run.provider === "claude-code"
+        ? await buildClaudeContext(workspace.workspacePath, { skills: run.repoSkills !== false })
+        : null;
+    for (const skip of claudeContext?.skipped ?? []) {
+      containerLog.warn(
+        { event: "coding.claude_context_skipped", runId: run.runId, path: skip.path, reason: skip.reason },
+        "a repository context file was not loaded",
+      );
+    }
+    if (claudeContext && claudeContext.skippedOverflow > 0) {
+      containerLog.warn(
+        { event: "coding.claude_context_skipped", runId: run.runId, overflow: claudeContext.skippedOverflow },
+        "further repository context files were not loaded",
       );
     }
     const input = CodingTaskInputSchema.parse({
@@ -1386,6 +1403,8 @@ export class ContainerExecutor implements Executor {
       ...(run.claudeBareMode === false ? { claudeBareMode: false } : {}),
       // Only when there are some: every other run's input stays exactly what older workers expect.
       ...(services.length > 0 ? { services: workerServices(services) } : {}),
+      // Only when there is something to load: every other run's input stays exactly what older workers expect.
+      ...(claudeContext && claudeContext.files.length > 0 ? { claudeContext: { files: claudeContext.files } } : {}),
     });
     // The run directory is 0700; world-readable mode only crosses Docker's UID boundary.
     await writeFile(temporary, JSON.stringify(input), { flag: "wx", mode: 0o444 });
