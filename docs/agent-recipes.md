@@ -441,7 +441,11 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
   pushes to one of them, every open one is rewritten with the full list. Text
   you add inside the section is replaced; the rest of the description is not
   touched. Only pull requests the App opened and that are still open are
-  edited.
+  edited. A reviewer linked to one of these repositories also holds its
+  review of such a pull request until the lead run finishes, so the section
+  above is already current by the time any of them is reviewed — see
+  [Reviewing a pull request a delegated run
+  opened](code-review-agents.md#reviewing-a-pull-request-a-delegated-run-opened).
 - Each `delegate_to_<name>` call to a coding sub-agent can carry a
   `mergeOrder`: an integer from 1 to 99, where 1 merges first. Give a
   repository that other repositories' changes depend on a lower number than

@@ -501,6 +501,11 @@ the full desired state. Two common shapes:
 }
 ```
 
+A `pull_request` reviewer's review of a pull request opened by a delegated
+coding run is held until the run that delegated it finishes, whether or not
+this link sets `waitForCi` — see [Reviewing a pull request a delegated run
+opened](#reviewing-a-pull-request-a-delegated-run-opened) below.
+
 Add `"waitForCi": true` to a `pull_request` link to hold the reviewer's
 review of a pushed head until that head's own CI finishes, instead of racing
 it — see [Review after CI (`waitForCi`)](#review-after-ci-waitforci) below.
@@ -569,6 +574,42 @@ The errors you may get while linking:
 | 403    | `adminOverride` from a caller without the `admin` role.                                                           |
 | 409    | Another agent already holds the `mention` or `review_fix` trigger, or this `checkName`, on the repository.        |
 | 503    | GitHub could not be asked (e.g. the App isn't installed on the repository). Nothing was changed.                  |
+
+### Reviewing a pull request a delegated run opened
+
+A coding run can be delegated: a lead agent's `delegate_to_<name>` call
+starts a coding sub-agent that pushes the branch and opens the pull request
+(see [Fanning out to several builders](agent-recipes.md#fanning-out-to-several-builders)).
+While the lead run that delegated it is still running, every reviewer linked
+with the `pull_request` trigger holds its review of that pull request instead
+of starting on the first push — including a reviewer with no `waitForCi` set.
+The review starts once the lead run finishes, whether it succeeds, fails, or
+is cancelled.
+
+Holding the review this way means the request's other pull requests, if any,
+have also been opened and the **Related pull requests** section on each of
+them is current by the time any of them is reviewed (see [Related pull
+requests across repositories](../help/related-pull-requests.md)) — a reviewer
+never reports a field, route, or schema as missing only because a sibling
+repository's pull request had not been opened yet.
+
+- A reviewer linked with `waitForCi` then also waits for CI on the head, once
+  the lead run finishes, exactly as described below — with its own full
+  15-minute fallback, counted from that point, not from the original push.
+- If the deployment cannot tell whether the pull request's opening run was
+  delegated (for example, the host call to read its origin fails), the
+  review starts immediately instead, exactly as it would without this
+  behaviour.
+- A pull request opened directly by a coding run that was not delegated, or
+  opened by a human, is never held by this.
+- A follow-up that continues an already-open pull request is not held again:
+  the request that opened it had already finished.
+- As with the CI fallback below, a hold here does not depend on the
+  instance that started it still running when the lead run finishes:
+  Wardby's reconciliation sweep also releases it, once the lead run has
+  finished or no longer exists, wherever the scheduler process runs. A held
+  review is dropped unreleased after 24 hours, the same as a review held for
+  CI.
 
 ### Review after CI (`waitForCi`)
 

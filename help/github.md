@@ -62,4 +62,10 @@ opened. See [Automatic review fix rounds](review-fix-rounds.md).
 finishes, and gates its ability to approve on CI passing. See
 [Review after CI (`waitForCi`)](code-review-agents.md#review-after-ci-waitforci).
 
+A `pull_request` reviewer also holds its review, with or without
+`waitForCi`, until the pull request's own delegating run finishes, when its
+opening coding run was delegated by a lead agent. See [Reviewing a pull
+request a delegated run
+opened](code-review-agents.md#reviewing-a-pull-request-a-delegated-run-opened).
+
 For Jira Cloud instead of GitHub, see [Run Jira agents](jira.md).

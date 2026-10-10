@@ -30,6 +30,10 @@ included, plus that run tree's own siblings.
   section on every open pull request of the request with the full list and
   current states. A later run that pushes to any pull request in the set
   refreshes the section on all of them the same way, and never removes it.
+  A reviewer linked to one of these pull requests does not review it until
+  that same lead run finishes, so the section is already current the first
+  time any of them is reviewed — see [Reviewing a pull request a delegated
+  run opened](code-review-agents.md#reviewing-a-pull-request-a-delegated-run-opened).
 - **Merge order.** Without a `mergeOrder` (see below) on any pull request in
   the set, open (and draft) pull requests are numbered as a **Suggested merge
   order (the order Wardby's agent opened them in)** — delegation order, not a
