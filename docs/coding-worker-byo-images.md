@@ -122,12 +122,12 @@ Code agent uses two containers: one runs Claude Code and holds its API key; the
 other runs the agent's commands and has your repository. `workerImageRef` always
 replaces the container that runs commands.
 
-|                                | Codex agent                                  | Claude Code agent                                                                                               |
-| ------------------------------ | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| What `workerImageRef` replaces | the agent's only container                   | the container that runs commands                                                                                |
-| Build your image `FROM`        | the coding-worker driver image (`driver-vN`) | the `wardby-claude-tool-runner` image from the same wardby release (or `wardby-claude-tool-runner-node-python`) |
-| Rebuild when                   | the driver image changes                     | you upgrade wardby                                                                                              |
-| Claude Code itself runs on     | —                                            | wardby's standard image, never yours                                                                            |
+|                                | Codex agent                                                       | Claude Code agent                                                                                               |
+| ------------------------------ | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| What `workerImageRef` replaces | the agent's only container                                        | the container that runs commands                                                                                |
+| Build your image `FROM`        | [the coding-worker driver image](#the-driver-image) (`driver-vN`) | the `wardby-claude-tool-runner` image from the same wardby release (or `wardby-claude-tool-runner-node-python`) |
+| Rebuild when                   | the driver image changes                                          | you upgrade wardby                                                                                              |
+| Claude Code itself runs on     | —                                                                 | wardby's standard image, never yours                                                                            |
 
 The driver image sections above are for Codex. The subsections below are for
 Claude Code. In them, "tool runner" means the container that runs a Claude Code
@@ -150,7 +150,7 @@ agent's commands.
    as `root`, then switch back to the tool runner's user:
 
    ```dockerfile
-   FROM ghcr.io/wardby/wardby/wardby-claude-tool-runner@sha256:<digest from step 1>
+   FROM <image from step 1>
    USER root
    RUN apt-get update \
        && apt-get install -y --no-install-recommends <your packages> \
@@ -171,23 +171,35 @@ agent's commands.
 
 4. **Build it:** `docker build --tag <name> <build folder>`. Release images are
    `linux/amd64`; on an ARM machine, add `--platform linux/amd64`.
-5. **Get an immutable reference.** A tag is refused.
-   - **Docker launcher:** use the local image ID,
-     `docker image inspect --format '{{.Id}}' <name>`. Build on the same Docker
-     host that runs wardby's workers. Wardby never pulls these images.
+5. **Run the tests the way a run would.** Clone the repository to a throwaway
+   folder (on Linux, make it writable: `chmod -R a+rwX <clone>`). Then run the
+   project's test command with a run's restrictions and its fixed environment,
+   so `ENV` lines in the image do not apply:
+
+   ```sh
+   docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m --tmpfs /home/wardby:rw,noexec,nosuid,size=64m,uid=10001,gid=10001,mode=0700 --network none --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges -v <clone>:/workspace -w /workspace --entrypoint env <name> -i HOME=/home/wardby LANG=C.UTF-8 PATH=/opt/wardby/bin:/usr/local/bin:/usr/bin:/bin sh -lc '<test command>'
+   ```
+
+   Fix the Dockerfile until the tests pass, then delete the clone.
+
+6. **Get an immutable reference.** A tag is refused.
+   - **Docker launcher** (wardby runs coding jobs with Docker on a single
+     machine): use the local image ID,
+     `docker image inspect --format '{{.Id}}' <name>`. Build on that machine.
+     Wardby never pulls these images.
    - **Kubernetes:** push the image to a registry your cluster can pull from,
      and use `<registry>/<name>@sha256:<digest>`.
-6. **Point the agent at it.** Call `update_agent` with the agent's id. This
+7. **Point the agent at it.** Call `update_agent` with the agent's id. This
    needs the `agents:admin` scope and the admin role:
 
    ```json
    {
      "id": "<agent id>",
-     "codingProfile": { "workerImageRef": "<reference from step 5>" }
+     "codingProfile": { "workerImageRef": "<reference from step 6>" }
    }
    ```
 
-7. **Try it.** Trigger a small task that uses your tools, such as "Run the
+8. **Try it.** Trigger a small task that uses your tools, such as "Run the
    project's tests and report the results. Change nothing."
 
 To undo it, set `codingProfile.workerImageRef` to `null`. The agent then uses
@@ -221,9 +233,10 @@ COPY Gemfile Gemfile.lock ./
 RUN bundle install
 
 # Stage 2: the tool runner from your wardby release, plus Ruby and the gems.
-FROM ghcr.io/wardby/wardby/wardby-claude-tool-runner@sha256:<digest>
+FROM <tool runner image from step 1>
 USER root
-# Shared libraries Ruby needs at run time.
+# Shared libraries Ruby needs at run time, plus any library your native gems
+# link to (for example libpq5 for pg).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libffi8 libgmp10 libssl3 libyaml-0-2 zlib1g \
     && rm -rf /var/lib/apt/lists/*
@@ -245,12 +258,11 @@ the project's `Gemfile.lock` changes.
 
 ### If a run fails
 
-| What you see                                | What it usually means                                                                                                                       |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `worker_tool_runner_unreachable`            | The image was not built `FROM` the tool runner of the same wardby release, or the Dockerfile changed its `USER` or `ENTRYPOINT`.            |
-| A command is "not found"                    | The tool is not in the image, or it is not on the `PATH` described below.                                                                   |
-| A tool ignores a setting you set with `ENV` | Move the setting to a file under `/etc/profile.d/`.                                                                                         |
-| "Permission denied" when running a file     | Something writes a program to `/tmp` or `/home/wardby` and runs it. Point that tool's temporary or cache folder under `/workspace/.cache/`. |
+| What you see                            | What it usually means                                                                                                                                  |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `worker_tool_runner_unreachable`        | The image was not built `FROM` the tool runner of the same wardby release, or the Dockerfile changed its `USER` or `ENTRYPOINT`.                       |
+| A command is "not found"                | The tool is not in the image, or a setting it needs is in an `ENV` line instead of `/etc/profile.d/`.                                                  |
+| "Permission denied" when running a file | On Docker, something writes a program to `/tmp` or `/home/wardby` and runs it. Point that tool's temporary or cache folder under `/workspace/.cache/`. |
 
 ### How the tool runner runs commands
 
@@ -260,9 +272,9 @@ These details explain the rules above.
   capabilities and `no-new-privileges`. `root` and setuid programs do not work
   at run time.
 - **Filesystem.** The root filesystem is read-only. `/tmp` and `/home/wardby`
-  are small, empty scratch space where files cannot be run; anything the image
-  put there is hidden. `/workspace` holds the repository and is the only place
-  where a run can write and run files.
+  are small, empty scratch space; anything the image put there is hidden. On
+  Docker, files there cannot be run. `/workspace` holds the repository; put
+  caches, build output and temporary files under `/workspace/.cache/`.
 - **Shell and environment.** Each command runs as `sh -lc "<command>"` with a
   fixed environment: `HOME=/home/wardby`, `LANG=C.UTF-8`, `TMPDIR` under
   `/workspace/.cache/`, wardby's package registry settings, and
@@ -272,8 +284,9 @@ These details explain the rules above.
   other folder to `PATH` in your `/etc/profile.d/` file.
 - **Network.** The tool runner reaches only wardby's package registry (npm and
   PyPI).
-- **Images on the Docker launcher are never pulled.** The image must already
-  be on the Docker host. Kubernetes needs a registry digest
+- **Images on the Docker launcher are never pulled.** When wardby runs coding
+  jobs with Docker on a single machine, the image must already be on that
+  machine. Kubernetes needs a registry digest
   (`repo@sha256:<64 hex>`).
 - **Server settings.** Claude Code itself always runs on
   `CODING_CLAUDE_WORKER_IMAGE`. The server still needs both

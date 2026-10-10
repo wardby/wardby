@@ -50,8 +50,7 @@ Claude Code. Run `wardby doctor` afterwards to verify the local installation.
 - **D. Another language (Go, Java, Rust…).** Do A, then build an image with
   that toolchain and set the builder's `codingProfile.workerImageRef`. Ask your
   assistant "Help me build a Wardby worker image for Go"; it follows
-  [Build a custom worker image](build-worker-image.md), for Codex and Claude
-  Code builders.
+  [Build a custom worker image](build-worker-image.md).
 
 The quickstart ends with a menu of next steps to ask your assistant: run the
 builder and reviewer, allow more packages, build a worker image, schedule an
