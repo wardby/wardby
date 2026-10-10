@@ -477,6 +477,17 @@ export class RunCancelledError extends Error {
 export { RunOwnershipLostError };
 
 /**
+ * The one log line for an attempt that lost ownership of its run. Warn, not info: each one also
+ * means a discarded step's spend and an owner that stalled long enough to be adopted.
+ */
+function logRunOwnershipLost(runId: string, err: RunOwnershipLostError): void {
+  runnerLog.warn(
+    { runId, step: err.step, event: "run_ownership_lost", discardedUsage: err.discardedUsage },
+    "run_ownership_lost: another execution owns this run; stopping without a terminal write (this attempt's last step is discarded)",
+  );
+}
+
+/**
  * Terminal write + read-back. The write is conditional (see DRIVABLE), so
  * the returned row is the run's real state — this attempt's result if it won
  * the race, the winner's if it did not.
@@ -852,6 +863,8 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
     ) {
       return { unavailable: err.message } as const;
     }
+    // Thrown out of executeRun ahead of its backstop, so logged here instead.
+    if (err instanceof RunOwnershipLostError) logRunOwnershipLost(runId, err);
     throw err;
   });
 }
@@ -1971,10 +1984,7 @@ async function executeTrackedRun(
       // and fire no settle side effects: the winner makes the terminal write. Rethrown (not
       // returned) so the durable executor hands the conflict back to its SDK, which parks this
       // attempt instead of recording a workflow outcome under the winner.
-      runnerLog.warn(
-        { runId, step: err.step, event: "run_ownership_lost", discardedUsage: err.discardedUsage },
-        "run_ownership_lost: another execution owns this run; stopping without a terminal write (this attempt's last step is discarded)",
-      );
+      logRunOwnershipLost(runId, err);
       throw err;
     }
     return failNativeRun(finishContext, err);
