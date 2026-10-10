@@ -37,5 +37,13 @@ Alert on proxy failures, budget cutoffs, cleanup failures, stalled runs, and
 sustained latency or memory growth. Wardby's database remains the source of
 truth for runs, budgets, and accounting.
 
+With the durable executor (`EXECUTOR=dbos`), also watch the server logs for
+the `run_ownership_lost` warning. It means a run's owner stalled long enough
+for another process to adopt the run, and the stalled attempt stopped without
+writing the run; the step it stopped at had its model spend discarded. The run
+itself is unaffected. Repeated warnings point at event-loop or database-pool
+starvation. See the durable executor section of
+[`docs/security-deployment.md`](../docs/security-deployment.md).
+
 Read [`docs/observability.md`](../docs/observability.md) for configuration and
 the full production checklist.

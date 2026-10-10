@@ -274,3 +274,14 @@ describe("Slack notification help", () => {
     }
   });
 });
+
+describe("durable executor ownership-loss help", () => {
+  it("is found by the log event name and the executor setting", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const query of ["run_ownership_lost", "EXECUTOR=dbos", "durable executor"]) {
+      expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("observability");
+    }
+  });
+});

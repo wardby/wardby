@@ -11,12 +11,17 @@
  * The heartbeat is kept while the workflow runs here so the reconciler's
  * stale-heartbeat detection is unchanged; the reconciler consults
  * `recover()` (Task 6) before declaring a DBOS run lost.
+ *
+ * A stalled-but-alive owner can overlap an adopted attempt of the same run:
+ * whichever records a step second loses ownership, stops at that step
+ * without writing the run, and hands the SDK's conflict back so DBOS parks
+ * it as a duplicate execution (see dbosStep and runInsideWorkflow).
  */
 
 import { DBOS, Error as DbosErrors } from "@dbos-inc/dbos-sdk";
 import type { PrismaClient } from "#prisma";
 import type { DbosConfig } from "../../config/providers.js";
-import type { StepRunner } from "../engine/types.js";
+import { RunOwnershipLostError, type StepRunner } from "../engine/types.js";
 import { executeRun, RunCancelledError, type NativeRunProviders, type RunnerDb } from "../../core/runner.js";
 import { markRunFailedFromExecutorError } from "../../core/dispatch.js";
 import type { SelfDefectSink } from "../../core/self-defects.js";
@@ -64,18 +69,49 @@ const cancellationReasons = new Map<string, string>();
  * out of the next step boundary. Translated here into a `RunCancelledError`
  * so executeRun's backstop records `cancelled` plus the operator's reason,
  * rather than `failed` plus an SDK-internal message.
+ *
+ * DBOS signals that another execution of this workflow recorded the step
+ * first by throwing `DBOSWorkflowConflictError` after this attempt's step
+ * body already ran. Translated into a `RunOwnershipLostError` (carrying the
+ * discarded step's usage, if any, for the log) so executeRun's backstop stops
+ * this attempt without writing the run; runInsideWorkflow turns it back into
+ * the SDK error.
  */
-const dbosStep: StepRunner = async (name, fn) => {
+export const dbosStep: StepRunner = async (name, fn) => {
+  let ran: { value: unknown } | undefined;
   try {
-    return await DBOS.runStep(fn, { name, retriesAllowed: false });
+    return await DBOS.runStep(
+      async () => {
+        const value = await fn();
+        ran = { value };
+        return value;
+      },
+      { name, retriesAllowed: false },
+    );
   } catch (err) {
     if (err instanceof DbosErrors.DBOSWorkflowCancelledError) {
       const reason = cancellationReasons.get(err.workflowID);
       throw new RunCancelledError(`Run cancelled: ${reason ?? "no reason given"}`);
     }
+    if (err instanceof DbosErrors.DBOSWorkflowConflictError) {
+      const discardedUsage = usageOf(ran?.value);
+      throw new RunOwnershipLostError(name, { cause: err, ...(discardedUsage ? { discardedUsage } : {}) });
+    }
     throw err;
   }
 };
+
+/**
+ * The numeric `usage` fields of a step result, if it has any (an LLM turn's
+ * token counts and cost). Tool steps return a string and yield nothing.
+ */
+function usageOf(value: unknown): Record<string, number> | undefined {
+  if (typeof value !== "object" || value === null || !("usage" in value)) return undefined;
+  const usage = value.usage;
+  if (typeof usage !== "object" || usage === null) return undefined;
+  const numeric = Object.entries(usage).filter((entry): entry is [string, number] => typeof entry[1] === "number");
+  return numeric.length > 0 ? Object.fromEntries(numeric) : undefined;
+}
 
 /**
  * Registered once at module load — DBOS requires registration before
@@ -292,6 +328,17 @@ export class DbosExecutor implements Executor {
     const timer = setInterval(() => void beat(), this.heartbeatIntervalMs);
     try {
       await executeRun(runId, this.providers, this.db, undefined, dbosStep);
+    } catch (err) {
+      // An ownership loss leaves the workflow body as the SDK's own conflict error, so DBOS takes
+      // its duplicate-execution path: it records nothing and parks this attempt until the winner
+      // records the outcome. Any other error escaping here would be recorded as the workflow's
+      // outcome while the winner still runs. The runner already logged the loss.
+      if (err instanceof RunOwnershipLostError) {
+        throw err.cause instanceof DbosErrors.DBOSWorkflowConflictError
+          ? err.cause
+          : new DbosErrors.DBOSWorkflowConflictError(runId);
+      }
+      throw err;
     } finally {
       clearInterval(timer);
       cancellationReasons.delete(runId);
