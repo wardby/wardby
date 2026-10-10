@@ -192,7 +192,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
     name: "set_secret_broker",
     scope: "secrets:write",
     description:
-      "Sets or changes a secret's broker config ({ hosts, pathPrefixes?, placement }), so tools can only send it to those hosts with fetch(url, { secrets: [name] }) and never read it. broker: null removes brokering, which must be confirmed by a person in the browser link this returns. Every change is audited.",
+      'Sets or changes a secret\'s broker config ({ hosts, pathPrefixes?, placement }), so tools can only send it to those hosts with fetch(url, { secrets: [name] }) and never read it. broker: null removes brokering, which must be confirmed by a person in the browser link this returns. Every change is audited. See the help article "brokered-secrets".',
     inputSchema: {
       type: "object",
       properties: {

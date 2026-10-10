@@ -65,7 +65,6 @@ export function projectTool(tool: Tool, principalId: string) {
     : { id: tool.id, name: tool.name, description: tool.description, public: false, ownerIsCaller: false };
 }
 
-/** Refuses a name one of the runner's built-ins would shadow (see core/tool-names.ts). */
 /**
  * Non-blocking: which of the secrets just granted to this attachment are
  * brokered on the agent, and does the tool still read them with
@@ -87,6 +86,7 @@ async function brokeredSecretWarnings(
   return brokerCompatibilityWarnings([{ ...tool, allowedSecrets }], brokered);
 }
 
+/** Refuses a name one of the runner's built-ins would shadow (see core/tool-names.ts). */
 function assertToolNameAllowed(name: string): void {
   const reason = reservedToolNameReason(name);
   if (reason) throw new McpError(400, reason);
@@ -288,7 +288,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
     name: "attach_tool",
     scope: "tools:write",
     description:
-      "Attaches a tool to an agent (needs write on the agent). The four capability fields (allowedSecrets, allowedDatastorePrefixes, allowedHosts, allowedSharedDatastorePrefixes) are the agent owner's to grant: anyone else passing one gets 403, and their attachment runs with none until the owner re-runs attach_tool with the capabilities. When the owner grants an attachment it had not granted before (someone else attached it, or the agent changed owner), every capability not passed is reset to empty, so state each one you want. Granting capabilities to a tool someone else owns vouches for code you can't read (only its owner sees it); the tool's owner can't change it while it's attached to your agent, and detaching drops your grant.",
+      "Attaches a tool to an agent (needs write on the agent). The four capability fields (allowedSecrets, allowedDatastorePrefixes, allowedHosts, allowedSharedDatastorePrefixes) are the agent owner's to grant: anyone else passing one gets 403, and their attachment runs with none until the owner re-runs attach_tool with the capabilities. When the owner grants an attachment it had not granted before (someone else attached it, or the agent changed owner), every capability not passed is reset to empty, so state each one you want. Granting capabilities to a tool someone else owns vouches for code you can't read (only its owner sees it); the tool's owner can't change it while it's attached to your agent, and detaching drops your grant. Granting a brokered secret lets the tool send it only via fetch(url, { secrets: [name] }), never read it; the result includes warnings when the tool calls secrets.get() on one.",
     inputSchema: {
       type: "object",
       properties: {
