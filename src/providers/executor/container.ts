@@ -3,7 +3,7 @@ import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import { withBaseCommit } from "../../coding/base-commit.js";
-import { buildClaudeContext } from "../../coding/claude-context.js";
+import { buildClaudeContext, type ClaudeContext } from "../../coding/claude-context.js";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { codingProviderForModelProvider, type CodingProvider } from "../../coding/provider.js";
 import { CodingProfileSchema } from "../../coding/profile.js";
@@ -1366,10 +1366,21 @@ export class ContainerExecutor implements Executor {
         "the coding task left no room for the base commit line",
       );
     }
-    const claudeContext =
-      run.provider === "claude-code"
-        ? await buildClaudeContext(workspace.workspacePath, { skills: run.repoSkills !== false })
-        : null;
+    // A repository context read must never fail a run ("the run never fails because of context"):
+    // any fs error (an inaccessible workspace, EACCES, ...) is logged once and swallowed, leaving
+    // claudeContext null, exactly as if the run had nothing to load.
+    let claudeContext: ClaudeContext | null = null;
+    if (run.provider === "claude-code") {
+      try {
+        claudeContext = await buildClaudeContext(workspace.workspacePath, { skills: run.repoSkills !== false });
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        containerLog.warn(
+          { event: "coding.claude_context_unavailable", runId: run.runId, ...(code ? { code } : {}) },
+          "repository context could not be read; continuing without it",
+        );
+      }
+    }
     for (const skip of claudeContext?.skipped ?? []) {
       containerLog.warn(
         { event: "coding.claude_context_skipped", runId: run.runId, path: skip.path, reason: skip.reason },

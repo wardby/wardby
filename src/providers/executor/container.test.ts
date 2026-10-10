@@ -62,6 +62,25 @@ vi.mock("../../core/logger.js", () => {
   return { logger: make() };
 });
 
+/**
+ * Lets a test make buildClaudeContext reject deterministically (an
+ * inaccessible workspace, EACCES, ...) without touching the real filesystem;
+ * every other test falls through to the real implementation.
+ */
+const claudeContextOverride = vi.hoisted(() => ({
+  reject: undefined as Error | undefined,
+}));
+vi.mock("../../coding/claude-context.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../coding/claude-context.js")>();
+  return {
+    ...actual,
+    buildClaudeContext: (...args: Parameters<typeof actual.buildClaudeContext>) => {
+      if (claudeContextOverride.reject) return Promise.reject(claudeContextOverride.reject);
+      return actual.buildClaudeContext(...args);
+    },
+  };
+});
+
 const IMAGE = `registry.example/worker@sha256:${"a".repeat(64)}`;
 const CLAUDE_IMAGE = `registry.example/claude-worker@sha256:${"b".repeat(64)}`;
 const CLAUDE_TOOL_IMAGE = `registry.example/claude-tools@sha256:${"c".repeat(64)}`;
@@ -486,6 +505,7 @@ afterEach(async () => {
 
 beforeEach(() => {
   logged.length = 0;
+  claudeContextOverride.reject = undefined;
 });
 
 describe("ContainerExecutor", () => {
@@ -702,6 +722,27 @@ describe("ContainerExecutor", () => {
           level: "warn",
           payload: { event: "coding.claude_context_skipped", runId: "run-1", overflow: 1 },
           message: "further repository context files were not loaded",
+        },
+      ]);
+    });
+
+    it("still launches a Claude Code run whose repository context could not be read, without claudeContext", async () => {
+      const created = await harness(claudeRun, IMAGE, new InMemoryCodingRunObserver(), claudeImages);
+      const error = new Error("permission denied") as NodeJS.ErrnoException;
+      error.code = "EACCES";
+      claudeContextOverride.reject = error;
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      expect(created.jobs.launches).toBe(1);
+      expect(input).not.toHaveProperty("claudeContext");
+      expect(logged.filter((entry) => entry.payload.event === "coding.claude_context_unavailable")).toEqual([
+        {
+          level: "warn",
+          payload: { event: "coding.claude_context_unavailable", runId: "run-1", code: "EACCES" },
+          message: "repository context could not be read; continuing without it",
         },
       ]);
     });
