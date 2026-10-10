@@ -23,7 +23,11 @@
  */
 import type { PrismaClient } from "#prisma";
 import { createSecret, listSecrets, setSecretBroker, type SecretMetadata } from "../../core/secrets.js";
-import { parseSecretBrokerConfig, type SecretBrokerConfig } from "../../core/secret-broker-config.js";
+import {
+  parseSecretBrokerConfig,
+  SECRET_BROKER_CHANGED,
+  type SecretBrokerConfig,
+} from "../../core/secret-broker-config.js";
 import type { SecretCipher } from "../../providers/secrets/types.js";
 
 export type SecretElicitationKind = "create" | "unbroker";
@@ -35,6 +39,11 @@ export interface SecretElicitationPayload {
   kind?: SecretElicitationKind;
   /** "create" only: the broker config to save with the value (the form pre-fills it). */
   broker?: SecretBrokerConfig;
+  /**
+   * "unbroker" only: brokerConfigHash of the config the link was minted for. The
+   * removal is refused if the secret's config has changed since (or the link has none).
+   */
+  brokerHash?: string;
 }
 
 export type SecretElicitationOutcome =
@@ -149,6 +158,9 @@ export async function fulfillSecretElicitation(
 /**
  * Called by the unbroker form's POST: removes brokering (audited, via
  * "browser", the owner as actor). Idempotent like fulfillSecretElicitation.
+ * A link only removes the config it was minted for: if brokering changed
+ * since (or the link carries no brokerHash) it is refused without recording
+ * an outcome, so a fresh link for the current config still works.
  */
 export async function fulfillUnbrokerElicitation(
   payload: SecretElicitationPayload,
@@ -157,6 +169,8 @@ export async function fulfillUnbrokerElicitation(
 ): Promise<SecretElicitationOutcome> {
   const mismatch = kindMismatch(payload, "unbroker");
   if (mismatch) return mismatch;
+  const changed = { ok: false as const, kind: "unbroker" as const, error: SECRET_BROKER_CHANGED };
+  if (!payload.brokerHash) return changed;
   const now = new Date();
   await pruneExpired(db, now);
   const { ownerId, secretName } = payload;
@@ -167,11 +181,19 @@ export async function fulfillUnbrokerElicitation(
 
   let outcome: SecretElicitationOutcome;
   try {
-    await setSecretBroker(db, cipher, { ownerId, name: secretName, broker: null, actorId: ownerId, via: "browser" });
+    await setSecretBroker(db, cipher, {
+      ownerId,
+      name: secretName,
+      broker: null,
+      actorId: ownerId,
+      via: "browser",
+      expectedBrokerHash: payload.brokerHash,
+    });
     const secret = (await listSecrets(ownerId, db)).find((s) => s.name === secretName);
     if (!secret) throw new Error(`secret_not_found: no secret named "${secretName}"`);
     outcome = { ok: true, kind: "unbroker", secret };
   } catch (err) {
+    if (err instanceof Error && err.message === SECRET_BROKER_CHANGED) return changed;
     outcome = { ok: false, kind: "unbroker", error: err instanceof Error ? err.message : String(err) };
   }
 

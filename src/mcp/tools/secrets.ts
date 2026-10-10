@@ -13,7 +13,7 @@ import {
   deleteSecret,
   setSecretBroker,
 } from "../../core/secrets.js";
-import { parseSecretBrokerConfig, type SecretBrokerConfig } from "../../core/secret-broker-config.js";
+import { brokerConfigHash, parseSecretBrokerConfig, type SecretBrokerConfig } from "../../core/secret-broker-config.js";
 import type { WardbyMcpServer } from "../server.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
@@ -252,7 +252,14 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
         return textResult({ unbrokered: true, secret: metadata });
       }
 
-      const payload: SecretElicitationPayload = { ownerId, secretName: args.name, kind: "unbroker" };
+      // The hash pins the link to the config being confirmed: if it changes before
+      // the person submits, fulfillUnbrokerElicitation refuses (secret_broker_changed).
+      const payload: SecretElicitationPayload = {
+        ownerId,
+        secretName: args.name,
+        kind: "unbroker",
+        brokerHash: brokerConfigHash(parseSecretBrokerConfig(secret.broker)),
+      };
       const token = await mcp.mintRequestState(payload);
       const url = await opts.buildElicitationUrl(token);
 

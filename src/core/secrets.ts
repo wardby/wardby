@@ -9,7 +9,13 @@
 import { Prisma, type PrismaClient, type Secret } from "#prisma";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import { boundedString } from "../sandbox/bounded-json.js";
-import { assertBrokerableValue, parseSecretBrokerConfig, type SecretBrokerConfig } from "./secret-broker-config.js";
+import {
+  assertBrokerableValue,
+  brokerConfigHash,
+  parseSecretBrokerConfig,
+  SECRET_BROKER_CHANGED,
+  type SecretBrokerConfig,
+} from "./secret-broker-config.js";
 
 export type BrokerChangeVia = "mcp" | "browser";
 export type SecretMetadata = Pick<Secret, "id" | "name" | "keyId" | "ownerId" | "createdAt" | "updatedAt"> & {
@@ -91,11 +97,24 @@ export async function createSecret(
   });
 }
 
-/** Sets, changes, or (broker: null) removes a secret's broker config, with one audit row per actual change. */
+/**
+ * Sets, changes, or (broker: null) removes a secret's broker config, with one audit
+ * row per actual change. `expectedBrokerHash` (brokerConfigHash of the config the
+ * caller confirmed) makes the change conditional, checked inside the transaction:
+ * if the secret is no longer brokered with exactly that config, it throws
+ * secret_broker_changed and changes nothing.
+ */
 export async function setSecretBroker(
   db: PrismaClient,
   cipher: SecretCipher,
-  input: { ownerId: string; name: string; broker: SecretBrokerConfig | null; actorId: string; via: BrokerChangeVia },
+  input: {
+    ownerId: string;
+    name: string;
+    broker: SecretBrokerConfig | null;
+    actorId: string;
+    via: BrokerChangeVia;
+    expectedBrokerHash?: string;
+  },
 ): Promise<{ before: SecretBrokerConfig | null; after: SecretBrokerConfig | null }> {
   const after = input.broker === null ? null : parseSecretBrokerConfig(input.broker);
   return db.$transaction(async (tx) => {
@@ -104,6 +123,9 @@ export async function setSecretBroker(
     });
     if (!secret) throw new Error(`secret_not_found: no secret named "${input.name}"`);
     const before = brokerOf(secret);
+    if (input.expectedBrokerHash !== undefined && (!before || brokerConfigHash(before) !== input.expectedBrokerHash)) {
+      throw new Error(SECRET_BROKER_CHANGED);
+    }
     if (JSON.stringify(before) === JSON.stringify(after)) return { before, after };
     if (after) assertBrokerableValue(after, await cipher.decrypt(secret.ciphertext));
     await tx.secret.update({ where: { id: secret.id }, data: { broker: after ?? Prisma.JsonNull } });

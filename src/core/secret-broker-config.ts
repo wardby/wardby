@@ -3,6 +3,7 @@
  * placed. Validated on every write; the privileged host (sandbox/secret-broker.ts)
  * trusts it at request time.
  */
+import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const MIN_BROKERED_VALUE_LENGTH = 6;
@@ -57,6 +58,20 @@ export function parseSecretBrokerConfig(input: unknown): SecretBrokerConfig {
   }
   return parsed.data;
 }
+
+/**
+ * A fingerprint of one broker config (sha256 hex of its parsed JSON): an unbroker
+ * link carries the hash of the config it was minted for, so it can't remove a
+ * config that has changed since.
+ */
+export function brokerConfigHash(config: SecretBrokerConfig): string {
+  return createHash("sha256")
+    .update(JSON.stringify(parseSecretBrokerConfig(config)))
+    .digest("hex");
+}
+
+export const SECRET_BROKER_CHANGED =
+  "secret_broker_changed: brokering changed since this link was created; request a new link";
 
 export type SigV4Credentials = { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
 

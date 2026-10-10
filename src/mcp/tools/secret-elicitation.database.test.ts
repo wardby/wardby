@@ -2,11 +2,14 @@
  * Brokered secrets through the MCP surfaces against real Postgres: createSecret
  * with a broker and setSecretBroker run in transactions the fake dbs lack.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { createServer, type Server } from "node:http";
 import { afterAll, describe, expect, it } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import { createPrismaClient } from "../../core/db.js";
+import { setSecretBroker } from "../../core/secrets.js";
+import { handleSecretElicitationForm, readFormBody } from "./secret-elicitation-form.js";
 import type { SecretCipher } from "../../providers/secrets/types.js";
 import type { McpRequestContext } from "../context.js";
 import { buildMcpServer } from "../server.js";
@@ -201,7 +204,12 @@ describe.skipIf(!process.env.DATABASE_URL)("brokered secrets over MCP (database)
     const payload = await mcp.verifyRequestState<SecretElicitationPayload>(
       new URL(first.body.url as string).searchParams.get("t")!,
     );
-    expect(payload).toEqual({ ownerId: p, secretName: "GH", kind: "unbroker" });
+    expect(payload).toEqual({
+      ownerId: p,
+      secretName: "GH",
+      kind: "unbroker",
+      brokerHash: createHash("sha256").update(JSON.stringify(BROKER)).digest("hex"),
+    });
     // A create link can't stand in for the confirmation.
     expect(await fulfillSecretElicitation(payload, "other-value", cipher, db)).toMatchObject({ ok: false });
     expect(await fulfillUnbrokerElicitation({ ownerId: p, secretName: "GH" }, cipher, db)).toMatchObject({
@@ -273,5 +281,136 @@ describe.skipIf(!process.env.DATABASE_URL)("brokered secrets over MCP (database)
     expect(result.text).toMatch(/declined/);
     expect((await call("list_secrets")).body).toEqual([expect.objectContaining({ broker: BROKER })]);
     await client.close();
+  });
+
+  const CHANGED = "secret_broker_changed: brokering changed since this link was created; request a new link";
+
+  async function mintUnbrokerLink(mcp: { verifyRequestState: <T>(t: string) => Promise<T> }, url: string) {
+    return mcp.verifyRequestState<SecretElicitationPayload>(new URL(url).searchParams.get("t")!);
+  }
+
+  it("an unbroker link minted before the broker config changed is refused, leaving the new config", async () => {
+    const p = await owner();
+    const { mcp, client, call } = await connect(p);
+    await call("create_secret", { name: "GH", value: VALUE, broker: BROKER });
+    const pending = await call("set_secret_broker", { name: "GH", broker: null });
+    const stale = await mintUnbrokerLink(mcp, pending.body.url as string);
+
+    const widened = { ...BROKER, hosts: ["api.example.com", "uploads.example.com"] };
+    await call("set_secret_broker", { name: "GH", broker: widened });
+    expect(await fulfillUnbrokerElicitation(stale, cipher, db)).toEqual({
+      ok: false,
+      kind: "unbroker",
+      error: CHANGED,
+    });
+    expect((await call("list_secrets")).body).toEqual([expect.objectContaining({ name: "GH", broker: widened })]);
+    expect(await getSecretElicitationOutcome(p, "GH", db, "unbroker")).toBeUndefined();
+
+    // A fresh link for the current config still works.
+    const again = await call("set_secret_broker", { name: "GH", broker: null });
+    expect(again.body).toMatchObject({ status: "pending" });
+    const fresh = await mintUnbrokerLink(mcp, again.body.url as string);
+    expect(await fulfillUnbrokerElicitation(fresh, cipher, db)).toMatchObject({ ok: true, kind: "unbroker" });
+    await client.close();
+  });
+
+  it("an unbroker link is refused once the secret is no longer brokered, or when it carries no hash", async () => {
+    const p = await owner();
+    const { mcp, client, call } = await connect(p);
+    await call("create_secret", { name: "GH", value: VALUE, broker: BROKER });
+    const pending = await call("set_secret_broker", { name: "GH", broker: null });
+    const link = await mintUnbrokerLink(mcp, pending.body.url as string);
+
+    const { brokerHash: _omit, ...noHash } = link;
+    expect(await fulfillUnbrokerElicitation(noHash, cipher, db)).toEqual({
+      ok: false,
+      kind: "unbroker",
+      error: CHANGED,
+    });
+    expect((await call("list_secrets")).body).toEqual([expect.objectContaining({ broker: BROKER })]);
+
+    await setSecretBroker(db, cipher, { ownerId: p, name: "GH", broker: null, actorId: p, via: "mcp" });
+    expect(await fulfillUnbrokerElicitation(link, cipher, db)).toEqual({ ok: false, kind: "unbroker", error: CHANGED });
+    expect(await getSecretElicitationOutcome(p, "GH", db, "unbroker")).toBeUndefined();
+    await client.close();
+  });
+
+  describe("browser form against the database", () => {
+    let server: Server | undefined;
+    afterAll(async () => {
+      if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+    });
+
+    async function serve(payload: () => SecretElicitationPayload): Promise<string> {
+      if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+      server = createServer((req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        void handleSecretElicitationForm(req.method, url.searchParams.get("t"), () => readFormBody(req), res, {
+          verify: async () => payload(),
+          secrets: cipher,
+          db,
+        });
+      });
+      await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      return `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}/elicit/secret?t=x`;
+    }
+
+    const post = (url: string, fields: Record<string, string>) =>
+      fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(fields),
+      });
+
+    it("a checked brokered box saves the form's config, then a typed-name confirmation removes it", async () => {
+      const p = await owner();
+      const createUrl = await serve(() => ({ ownerId: p, secretName: "GH", kind: "create" }));
+      const saved = await post(createUrl, {
+        value: VALUE,
+        brokered: "1",
+        hosts: "api.example.com",
+        placement: "header",
+        headerName: "Authorization",
+        headerFormat: "Bearer {value}",
+      });
+      expect(saved.status).toBe(200);
+      expect(await saved.text()).toContain("Saved");
+      const { mcp, client, call } = await connect(p);
+      expect((await call("list_secrets")).body).toEqual([expect.objectContaining({ name: "GH", broker: BROKER })]);
+      expect(await changes(p)).toEqual([expect.objectContaining({ via: "browser", after: BROKER })]);
+
+      const pending = await call("set_secret_broker", { name: "GH", broker: null });
+      const link = await mintUnbrokerLink(mcp, pending.body.url as string);
+      const unbrokerUrl = await serve(() => link);
+      const page = await (await fetch(unbrokerUrl)).text();
+      expect(page).toContain("api.example.com");
+
+      const wrong = await post(unbrokerUrl, { confirm: "gh" });
+      expect(wrong.status).toBe(400);
+      expect((await call("list_secrets")).body).toEqual([expect.objectContaining({ broker: BROKER })]);
+
+      const removed = await post(unbrokerUrl, { confirm: "GH" });
+      expect(removed.status).toBe(200);
+      expect(await removed.text()).toContain("Brokering removed");
+      expect((await call("list_secrets")).body).toEqual([expect.objectContaining({ name: "GH", broker: null })]);
+      await client.close();
+    });
+
+    it("a stale unbroker link shows the refusal and removes nothing", async () => {
+      const p = await owner();
+      const { mcp, client, call } = await connect(p);
+      await call("create_secret", { name: "GH", value: VALUE, broker: BROKER });
+      const pending = await call("set_secret_broker", { name: "GH", broker: null });
+      const link = await mintUnbrokerLink(mcp, pending.body.url as string);
+      const widened = { ...BROKER, hosts: ["api.example.com", "uploads.example.com"] };
+      await call("set_secret_broker", { name: "GH", broker: widened });
+
+      const res = await post(await serve(() => link), { confirm: "GH" });
+      expect(res.status).toBe(400);
+      expect(await res.text()).toContain("secret_broker_changed");
+      expect((await call("list_secrets")).body).toEqual([expect.objectContaining({ broker: widened })]);
+      await client.close();
+    });
   });
 });
