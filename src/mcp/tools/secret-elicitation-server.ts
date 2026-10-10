@@ -44,7 +44,14 @@ export function createStdioSecretElicitationHost(deps: SecretFormDeps): StdioSec
         res.writeHead(404).end();
         return;
       }
-      void handleSecretElicitationForm(req.method, url.searchParams.get("t"), () => readFormBody(req), res, deps);
+      // A failure here must never become an unhandled rejection: that would take
+      // down the whole stdio MCP process, not just this request.
+      handleSecretElicitationForm(req.method, url.searchParams.get("t"), () => readFormBody(req), res, deps).catch(
+        () => {
+          if (!res.headersSent) res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+          if (!res.writableEnded) res.end("Internal error");
+        },
+      );
     });
     server = s;
     await new Promise<void>((resolve, reject) => {

@@ -28,7 +28,12 @@ interface FakeAgentRow {
   kind?: "native" | "coding";
 }
 
-function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
+function fakeDb(
+  tools: FakeToolRow[] = [],
+  agents: FakeAgentRow[] = [],
+  grants: FakeGrantSeed[] = [],
+  agentSecrets: { agentId: string; boundName: string; broker: unknown }[] = [],
+) {
   const toolRows = new Map(tools.map((t) => [t.id, t]));
   const agentRows = new Map(agents.map((a) => [a.id, a]));
   const attachments: {
@@ -45,6 +50,12 @@ function fakeDb(tools: FakeToolRow[] = [], agents: FakeAgentRow[] = [], grants: 
 
   const transactionDb = {
     resourceGrant: fakeResourceGrants(grants),
+    agentSecret: {
+      findMany: async ({ where }: { where: { agentId: string; boundName: { in: string[] } } }) =>
+        agentSecrets
+          .filter((a) => a.agentId === where.agentId && where.boundName.in.includes(a.boundName))
+          .map((a) => ({ agentId: a.agentId, boundName: a.boundName, secret: { broker: a.broker } })),
+    },
     tool: {
       create: async ({ data }: { data: Partial<FakeToolRow> & { name: string } }) => {
         // Mirrors Tool's unique index, so a duplicate surfaces as the same
@@ -691,6 +702,56 @@ describe("tool authoring tools", () => {
       allowedHosts: ["api.example.com"],
       allowedDatastorePrefixes: [],
     });
+    await client.close();
+  });
+
+  it("attach_tool warns (without blocking) when a tool that calls secrets.get() is granted a brokered secret", async () => {
+    const tool = (id: string, code: string): FakeToolRow => ({
+      id,
+      name: id,
+      description: "x",
+      paramsZod: "z.object({})",
+      jsonSchema: {},
+      code,
+      ownerId: "p1",
+    });
+    const db = fakeDb(
+      [tool("legacy", "return await secrets.get('GH');"), tool("modern", "await fetch(u, { secrets: ['GH'] });")],
+      [{ id: "a1", ownerId: "p1" }],
+      [],
+      [
+        { agentId: "a1", boundName: "GH", broker: { hosts: ["api.github.com"] } },
+        { agentId: "a1", boundName: "PLAIN", broker: null },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+    registerToolAuthoringTools(mcp);
+    const client = await connectClient(mcp);
+
+    const warned = await client.callTool({
+      name: "attach_tool",
+      arguments: { agentId: "a1", toolId: "legacy", allowedSecrets: ["GH", "PLAIN"] },
+    });
+    expect(warned.isError).toBeFalsy();
+    expect(parseText(warned as never)).toEqual({
+      attached: true,
+      warnings: [
+        'Tool "legacy" reads secrets with secrets.get(), but "GH" is brokered: that call will fail with secret_brokered. Update the tool to send it with fetch(url, { secrets: ["GH"] }).',
+      ],
+    });
+
+    const unbrokered = await client.callTool({
+      name: "attach_tool",
+      arguments: { agentId: "a1", toolId: "legacy", allowedSecrets: ["PLAIN"] },
+    });
+    expect(parseText(unbrokered as never)).toEqual({ attached: true });
+
+    const modern = await client.callTool({
+      name: "attach_tool",
+      arguments: { agentId: "a1", toolId: "modern", allowedSecrets: ["GH"] },
+    });
+    expect(parseText(modern as never)).toEqual({ attached: true });
     await client.close();
   });
 

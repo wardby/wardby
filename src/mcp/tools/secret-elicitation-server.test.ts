@@ -71,4 +71,33 @@ describe("createStdioSecretElicitationHost", () => {
     const res = await fetch(other);
     expect(res.status).toBe(404);
   });
+
+  it("answers an oversize POST with 413 and keeps serving", async () => {
+    const host = createStdioSecretElicitationHost({
+      verify: async () => ({ ownerId: "p1", secretName: "BIG" }),
+      secrets: fakeCipher(),
+      db: fakeDb(),
+    });
+    const url = await host.urlFor("good");
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ value: "x".repeat(40 * 1024) }),
+    });
+    expect(res.status).toBe(413);
+    expect((await fetch(url)).status).toBe(200);
+  });
+
+  it("a handler failure ends the response with 500 instead of an unhandled rejection", async () => {
+    // This fake db has no secret.findMany, so rendering the unbroker page throws.
+    const host = createStdioSecretElicitationHost({
+      verify: async () => ({ ownerId: "p1", secretName: "GH", kind: "unbroker", brokerHash: "h" }),
+      secrets: fakeCipher(),
+      db: fakeDb(),
+    });
+    const url = await host.urlFor("good");
+    const res = await fetch(url);
+    expect(res.status).toBe(500);
+    expect((await fetch(url)).status).toBe(500);
+  });
 });

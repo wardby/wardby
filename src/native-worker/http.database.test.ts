@@ -10,12 +10,17 @@ import { executeRun, type NativeRunProviders } from "../core/runner.js";
 import type { Executor } from "../providers/executor/types.js";
 import type { LlmStreamEvent } from "../providers/llm/types.js";
 import {
+  BROKER_CONFIG,
+  BROKERED_VALUE,
+  echoUpstream,
+  GH_TOOL_CODE,
   identityCipher,
   memoryDatastore,
   MODEL,
   noMemory,
   script,
   scriptedModel,
+  scriptFor,
   TOOL_CODE,
   usage,
 } from "./fixtures.test-support.js";
@@ -148,8 +153,8 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox gateway over HTTP (da
     await db.agentSubAgent.deleteMany({ where: { parentAgentId: agentId } });
     await db.agentTool.deleteMany({ where: { agentId } });
     await db.agentSecret.deleteMany({ where: { agentId } });
-    await db.secret.deleteMany({ where: { id: secretId } });
-    await db.tool.deleteMany({ where: { id: toolId } });
+    await db.secret.deleteMany({ where: { id: { in: [secretId, `${secretId}-gh`] } } });
+    await db.tool.deleteMany({ where: { id: { in: [toolId, `${toolId}-gh`] } } });
     await db.agent.deleteMany({ where: { id: { in: [agentId, childId] } } });
     await db.principal.deleteMany({ where: { id: ownerId } });
     await db.$disconnect();
@@ -203,6 +208,66 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox gateway over HTTP (da
     const session = await db.nativeGatewaySession.findUniqueOrThrow({ where: { runId: sandboxed.finished.id } });
     expect(session.status).toBe("finished");
     expect(JSON.stringify(session.snapshot)).not.toContain("s3cret-value-123");
+    // The worker read the "api" secret through host.call; its value must not be in the ledger.
+    const calls = await db.nativeGatewayCall.findMany({
+      where: { session: { runId: sandboxed.finished.id } },
+      select: { result: true },
+    });
+    expect(calls.length).toBeGreaterThan(0);
+    expect(JSON.stringify(calls)).not.toContain("s3cret-value-123");
+  });
+
+  it("brokers a secret through the gateway without ever recording its value", async () => {
+    await db.secret.create({
+      data: {
+        id: `${secretId}-gh`,
+        name: "gh",
+        ciphertext: BROKERED_VALUE,
+        keyId: "test",
+        ownerId,
+        broker: BROKER_CONFIG,
+      },
+    });
+    await db.agentSecret.create({ data: { agentId, secretId: `${secretId}-gh`, boundName: "gh" } });
+    await db.tool.create({
+      data: {
+        id: `${toolId}-gh`,
+        name: "ghcall",
+        description: "Calls GitHub with a brokered token.",
+        paramsZod: "z.object({})",
+        jsonSchema: { type: "object", properties: {} },
+        code: GH_TOOL_CODE,
+        ownerId,
+      },
+    });
+    await db.agentTool.create({
+      data: {
+        agentId,
+        toolId: `${toolId}-gh`,
+        allowedSecrets: ["gh"],
+        allowedHosts: ["api.github.com"],
+        capabilitiesGrantedById: ownerId,
+      },
+    });
+    const upstream = echoUpstream();
+    providers.sandboxFetch = upstream.impl;
+    try {
+      const sandboxed = await runSandboxed(scriptFor("ghcall", {}, ["Fetched."]));
+      expect(sandboxed.exitCode).toBe(0);
+      expect(sandboxed.finished.status).toBe("succeeded");
+      expect(upstream.authorizations).toEqual([`Bearer ${BROKERED_VALUE}`]);
+      expect(JSON.stringify(sandboxed.model.requests)).not.toContain(BROKERED_VALUE);
+      const toolResult = sandboxed.model.requests[1].messages.find((m) => m.role === "tool");
+      expect(toolResult?.content).toContain('"echo":"Bearer [REDACTED]"');
+      // The fetch went through host.call; neither its arguments nor its result may hold the value.
+      const calls = await db.nativeGatewayCall.findMany({ where: { session: { runId: sandboxed.finished.id } } });
+      expect(calls.length).toBeGreaterThan(0);
+      expect(JSON.stringify(calls)).toContain("api.github.com");
+      expect(JSON.stringify(calls)).not.toContain(BROKERED_VALUE);
+    } finally {
+      providers.sandboxFetch = undefined;
+      await db.agentTool.deleteMany({ where: { toolId: `${toolId}-gh` } });
+    }
   });
 
   it("finishes the run when the gateway replica serving it stops mid-run", async () => {

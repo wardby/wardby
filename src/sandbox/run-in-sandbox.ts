@@ -18,6 +18,7 @@ import type { SharedDatastoreAccessor } from "../core/datastores.js";
 import { boundedJson, boundedString } from "./bounded-json.js";
 import { BRIDGE_INPUT_BYTES } from "./limits.js";
 import type { Logger } from "../core/logger.js";
+import type { safeFetch } from "./safe-fetch.js";
 
 export type { SandboxErrorKind, SandboxLimits, SandboxResult } from "./eval-core.js";
 
@@ -38,6 +39,8 @@ export interface SandboxInvocation {
   logger?: Logger;
   /** Forwarded to installHostFunctions — which hosts this tool attachment may fetch. Omitted/empty = no outbound fetch at all; a literal "*" element lifts the restriction. */
   allowedFetchHosts?: string[];
+  /** Overrides the sandbox's outbound network call — tests only. */
+  fetchImpl?: typeof safeFetch;
 }
 
 /** Tool code plus whichever privileged host serves its bridges (in-process, or a gateway). */
@@ -97,6 +100,7 @@ export function privilegedHostFor(invocation: SandboxInvocation, signal: AbortSi
     secrets: invocation.secrets,
     logger: invocation.logger,
     allowedFetchHosts: invocation.allowedFetchHosts,
+    fetchImpl: invocation.fetchImpl,
     signal,
   });
 }

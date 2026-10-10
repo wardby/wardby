@@ -371,7 +371,9 @@ for the repository's own dependency-override policy.
   model catalog (`list_models`, `get_model`, `set_model`, `disable_model`,
   `reset_model`).
 - Per-run budgets, shared budget groups, usage accounting, and cancellation.
-- QuickJS tool isolation with host allowlists and secret bindings.
+- QuickJS tool isolation with host allowlists, secret bindings, and brokered
+  secrets that tools send to chosen hosts without reading
+  ([guide](docs/tool-secrets.md)).
 - Containerized Codex and Claude Code executors with trusted GitHub draft-PR
   finalization.
 - Optional, outbound-only [Slack workflow notifications](https://github.com/wardby/wardby/blob/main/docs/slack-notifications.md):

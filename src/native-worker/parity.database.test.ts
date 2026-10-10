@@ -1,16 +1,23 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { createPrismaClient } from "../core/db.js";
+import { logger } from "../core/logger.js";
 import { NativeEngine } from "../core/engine-native.js";
 import { executeRun, type NativeRunProviders } from "../core/runner.js";
 import type { LlmStreamEvent } from "../providers/llm/types.js";
+import type { safeFetch } from "../sandbox/safe-fetch.js";
 import {
+  BROKER_CONFIG,
+  BROKERED_VALUE,
+  echoUpstream,
+  GH_TOOL_CODE,
   identityCipher,
   memoryDatastore,
   MODEL,
   noMemory,
   script,
   scriptedModel,
+  scriptFor,
   TOOL_CODE,
   usage,
 } from "./fixtures.test-support.js";
@@ -46,8 +53,8 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox worker parity (databa
     await db.run.deleteMany({ where: { id: { in: runIds } } });
     await db.agentTool.deleteMany({ where: { agentId } });
     await db.agentSecret.deleteMany({ where: { agentId } });
-    await db.secret.deleteMany({ where: { id: secretId } });
-    await db.tool.deleteMany({ where: { id: toolId } });
+    await db.secret.deleteMany({ where: { id: { in: [secretId, `${secretId}-gh`] } } });
+    await db.tool.deleteMany({ where: { id: { in: [toolId, `${toolId}-gh`] } } });
     await db.agentSubAgent.deleteMany({ where: { parentAgentId: agentId } });
     await db.agent.deleteMany({ where: { id: { in: [agentId, childId] } } });
     await db.principal.deleteMany({ where: { id: ownerId } });
@@ -107,6 +114,7 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox worker parity (databa
     launcher: WorkerLauncher = loopbackLauncher,
     turns: LlmStreamEvent[][] = script(),
     beforeStream?: (call: number, runId: string) => Promise<void>,
+    sandboxFetch?: typeof safeFetch,
   ) {
     let runId = "";
     const { llm, requests } = scriptedModel(turns, beforeStream && ((call) => beforeStream(call, runId)));
@@ -120,13 +128,14 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox worker parity (databa
       memory: noMemory,
       // Both runs get the launcher: only the run's own snapshot decides where its engine runs.
       nativeSandbox: counting(launcher),
+      sandboxFetch,
     };
     const run = await db.run.create({ data: { agentId, trigger: "manual", nativeExecutionMode: mode } });
     runId = run.id;
     const finished = await executeRun(run.id, providers, db, (delta) => texts.push(delta));
     const modelUsage = await db.runModelUsage.findMany({ where: { runId: run.id } });
     const children = await db.run.findMany({ where: { parentRunId: run.id } });
-    return { finished, requests, datastore, texts, modelUsage, children };
+    return { finished, requests, datastore, texts, modelUsage, children, runId: run.id };
   }
 
   const summary = (r: Awaited<ReturnType<typeof runIn>>) => ({
@@ -211,6 +220,84 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox worker parity (databa
 
     expect(inProcess.finished.status).not.toBe("succeeded");
     expect(summary(sandboxed)).toEqual(summary(inProcess));
+  });
+
+  it("brokers a secret identically in both modes and never exposes it", async () => {
+    await db.secret.create({
+      data: {
+        id: `${secretId}-gh`,
+        name: "gh",
+        ciphertext: BROKERED_VALUE,
+        keyId: "test",
+        ownerId,
+        broker: BROKER_CONFIG,
+      },
+    });
+    await db.agentSecret.create({ data: { agentId, secretId: `${secretId}-gh`, boundName: "gh" } });
+    await db.tool.create({
+      data: {
+        id: `${toolId}-gh`,
+        name: "ghcall",
+        description: "Calls GitHub with a brokered token.",
+        paramsZod: "z.object({})",
+        jsonSchema: { type: "object", properties: {} },
+        code: GH_TOOL_CODE,
+        ownerId,
+      },
+    });
+    await db.agentTool.create({
+      data: {
+        agentId,
+        toolId: `${toolId}-gh`,
+        allowedSecrets: ["gh"],
+        allowedHosts: ["api.github.com"],
+        capabilitiesGrantedById: ownerId,
+      },
+    });
+
+    // Tool console output: in every mode the trusted side (in-process host or gateway) logs it
+    // through the shared logger's "sandbox-tool" child, so capture that child's lines.
+    const consoleLines: string[] = [];
+    const capture = Object.fromEntries(
+      ["info", "warn", "error"].map((level) => [
+        level,
+        (...args: unknown[]) => consoleLines.push(JSON.stringify(args)),
+      ]),
+    );
+    const realChild = logger.child.bind(logger);
+    const childSpy = vi
+      .spyOn(logger, "child")
+      .mockImplementation(((bindings: Record<string, unknown>, options?: object) =>
+        bindings.module === "sandbox-tool" ? capture : realChild(bindings, options)) as typeof logger.child);
+
+    const turns = () => scriptFor("ghcall", {}, ["Fetched."]);
+    const results = [];
+    for (const [mode, launcher] of [
+      ["control_plane", loopbackLauncher],
+      ["sandbox", loopbackLauncher],
+      ["sandbox", processLauncher],
+    ] as const) {
+      const upstream = echoUpstream();
+      const result = await runIn(mode, launcher, turns(), undefined, upstream.impl);
+      // The upstream got the credential...
+      expect(upstream.authorizations).toEqual([`Bearer ${BROKERED_VALUE}`]);
+      expect(result.finished.status).toBe("succeeded");
+      // ...the model never did, and the tool result shows it redacted.
+      expect(JSON.stringify(result.requests)).not.toContain(BROKERED_VALUE);
+      const toolResult = result.requests[1].messages.find((m) => m.role === "tool");
+      expect(toolResult?.content).toContain('{"status":200,"echo":"Bearer [REDACTED]"}');
+      // The tool logged the (scrubbed) response body, and no log line carries the value.
+      expect(consoleLines.join("\n")).toContain("sawAuth");
+      expect(consoleLines.join("\n")).not.toContain(BROKERED_VALUE);
+      consoleLines.length = 0;
+      results.push(result);
+    }
+    childSpy.mockRestore();
+    const [inProcess, sandboxed, separateProcess] = results;
+    expect(summary(sandboxed)).toEqual(summary(inProcess));
+    expect(summary(separateProcess)).toEqual(summary(inProcess));
+    expect(sandboxed.requests).toEqual(inProcess.requests);
+    expect(separateProcess.requests).toEqual(inProcess.requests);
   });
 
   it("stops a sandboxed run that is cancelled mid-run, records it cancelled, and serves nothing after", async () => {

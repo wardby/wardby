@@ -988,6 +988,8 @@ model Secret {
   name       String
   ciphertext String
   keyId      String
+  /// Brokered-secret config (core/secret-broker-config.ts). Null = readable by attached tools.
+  broker     Json?
   ownerId    String?
   owner      Principal?    @relation(fields: [ownerId], references: [id])
   createdAt  DateTime      @default(now())
@@ -995,6 +997,24 @@ model Secret {
   agents     AgentSecret[]
 
   @@unique([ownerId, name])
+}
+
+/// Audit trail of every change to a secret's broker config. No FK to Secret,
+/// so the history survives deleting the secret. Never holds a value.
+model SecretBrokerChange {
+  id         String   @id @default(cuid())
+  secretId   String
+  ownerId    String
+  secretName String
+  actorId    String
+  before     Json?
+  after      Json?
+  /// "mcp" or "browser"
+  via        String
+  createdAt  DateTime @default(now())
+
+  @@index([secretId, createdAt])
+  @@index([ownerId, createdAt])
 }
 
 /// Phase 4: attaches a secret to an agent, addressed at sandbox point-of-use

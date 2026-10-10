@@ -25,6 +25,8 @@ import type { EngineProgress, EngineResult, LoadedTool } from "../providers/engi
 import { runStepInline, type StepRunner } from "../providers/engine/types.js";
 import { isLlmEffort } from "../providers/llm/types.js";
 import { createPrivilegedHost, type PrivilegedHost } from "../sandbox/host-functions.js";
+import { consoleRedactionValues } from "../sandbox/secret-broker.js";
+import type { safeFetch } from "../sandbox/safe-fetch.js";
 import { runUserToolCall } from "../sandbox/user-tool.js";
 import {
   runSandboxedEngine,
@@ -398,6 +400,8 @@ export type NativeRunProviders = Pick<ProviderRegistry, "llm" | "engine" | "data
    * native gateway (src/native-worker). Absent: a run whose snapshot says sandbox fails closed.
    */
   nativeSandbox?: WorkerLauncher;
+  /** Overrides the sandbox's outbound network call — tests only. */
+  sandboxFetch?: typeof safeFetch;
 };
 
 /**
@@ -1320,6 +1324,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
       sharedDatastore: scopeSharedDatastoreAccessor(sharedDatastoreAccessor, tool.allowedSharedDatastorePrefixes),
       secrets: scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets),
       allowedFetchHosts: tool.allowedHosts,
+      fetchImpl: providers.sandboxFetch,
       logTag: name,
       signal,
     });
@@ -1331,13 +1336,21 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
     const tool = toolsByName.get(name);
     return tool ? scopedHost(name, tool, signal, redactSecretValues) : undefined;
   };
-  /** Every secret value the user tool `name` may read, for console redaction by a stateless gateway. */
+  /** Every secret value the user tool `name` may use (readable or brokered), for console redaction by a stateless gateway. */
   const readableSecretValues = async (name: string): Promise<string[]> => {
     const tool = toolsByName.get(name);
     if (!tool) return [];
     const scoped = scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets);
-    const values = await Promise.all(tool.allowedSecrets.map((secret) => scoped.get(secret).catch(() => undefined)));
-    return values.filter((value): value is string => typeof value === "string");
+    const values = await Promise.all(
+      tool.allowedSecrets.map((secret) =>
+        (scoped.resolve
+          ? scoped.resolve(secret).then((e) => (e ? consoleRedactionValues(e) : []))
+          : scoped.get(secret).then((v) => (v === undefined ? [] : [v]))
+        ).catch(() => []),
+      ),
+    );
+    // A SigV4 secret's key and token alone, too: the same set the in-process host redacts.
+    return values.flat().filter((value): value is string => typeof value === "string");
   };
 
   const runUserTool = async (name: string, argsJson: string): Promise<string> => {

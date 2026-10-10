@@ -1,7 +1,7 @@
 import { createPrismaClient } from "./db.js";
 import { afterAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
-import { buildSecretsAccessor } from "./secrets.js";
+import { attachSecret, buildSecretsAccessor, createSecret, listSecrets, setSecretBroker } from "./secrets.js";
 describe.skipIf(!process.env.DATABASE_URL)("bounded legacy secret reads (database)", () => {
   const db = createPrismaClient();
   const id = "secret-bound-" + randomUUID();
@@ -98,5 +98,84 @@ describe.skipIf(!process.env.DATABASE_URL)("bounded legacy secret reads (databas
       await db.agent.deleteMany({ where: { id: { in: [agent, ownerless] } } });
       await db.principal.deleteMany({ where: { id: { in: [owner, other] } } });
     }
+  });
+});
+
+describe.skipIf(!process.env.DATABASE_URL)("brokered secrets (database)", () => {
+  const db = createPrismaClient();
+  const owner = "brk-owner-" + randomUUID();
+  const agent = "brk-agent-" + randomUUID();
+  const cipher = { keyId: () => "test", encrypt: async (s: string) => s, decrypt: async (s: string) => s };
+  const broker = {
+    hosts: ["api.example.com"],
+    placement: { kind: "header" as const, name: "Authorization", format: "Bearer {value}" },
+  };
+  afterAll(async () => {
+    await db.agentSecret.deleteMany({ where: { agentId: agent } });
+    await db.secretBrokerChange.deleteMany({ where: { ownerId: owner } });
+    await db.secret.deleteMany({ where: { ownerId: owner } });
+    await db.agent.deleteMany({ where: { id: agent } });
+    await db.principal.deleteMany({ where: { id: owner } });
+    await db.$disconnect();
+  });
+
+  it("creates brokered, audits, hides from get, exposes via resolve, lists config", async () => {
+    await db.principal.create({ data: { id: owner, subject: owner } });
+    await db.agent.create({
+      data: { id: agent, name: agent, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: owner },
+    });
+    await createSecret("GH", "ghp_abcdef123", owner, cipher, db, { broker, via: "mcp" });
+    await attachSecret(agent, "GH", owner, db);
+    const accessor = buildSecretsAccessor(agent, cipher, db);
+    await expect(accessor.get("GH")).rejects.toThrow("secret_brokered");
+    expect(await accessor.resolve!("GH")).toEqual({ value: "ghp_abcdef123", broker });
+    expect((await listSecrets(owner, db)).find((s) => s.name === "GH")?.broker).toEqual(broker);
+    const rows = await db.secretBrokerChange.findMany({ where: { ownerId: owner } });
+    expect(rows).toMatchObject([{ secretName: "GH", actorId: owner, before: null, after: broker, via: "mcp" }]);
+  });
+
+  it("refuses to create a brokered secret with an unscrubbable value", async () => {
+    await expect(createSecret("SHORT", "abc", owner, cipher, db, { broker })).rejects.toThrow(
+      "secret_broker_value_invalid",
+    );
+    expect(await db.secret.findUnique({ where: { ownerId_name: { ownerId: owner, name: "SHORT" } } })).toBeNull();
+  });
+
+  it("set, change, and remove each write one audit row; unchanged writes none", async () => {
+    await createSecret("K", "plain-value-1", owner, cipher, db);
+    await setSecretBroker(db, cipher, { ownerId: owner, name: "K", broker, actorId: owner, via: "mcp" });
+    await setSecretBroker(db, cipher, { ownerId: owner, name: "K", broker, actorId: owner, via: "mcp" });
+    const changed = { ...broker, pathPrefixes: ["/repos/"] };
+    await setSecretBroker(db, cipher, { ownerId: owner, name: "K", broker: changed, actorId: owner, via: "mcp" });
+    const result = await setSecretBroker(db, cipher, {
+      ownerId: owner,
+      name: "K",
+      broker: null,
+      actorId: owner,
+      via: "browser",
+    });
+    expect(result).toEqual({ before: changed, after: null });
+    // SQL NULL, not a JSON null: "unbrokered" has one representation in the column.
+    const [{ unset }] = await db.$queryRaw<{ unset: boolean }[]>`
+      SELECT "broker" IS NULL AS "unset" FROM "Secret" WHERE "ownerId" = ${owner} AND "name" = 'K'`;
+    expect(unset).toBe(true);
+    const rows = await db.secretBrokerChange.findMany({
+      where: { ownerId: owner, secretName: "K" },
+      orderBy: { createdAt: "asc" },
+    });
+    expect(rows.map((r) => [r.before, r.after, r.via])).toEqual([
+      [null, broker, "mcp"],
+      [broker, changed, "mcp"],
+      [changed, null, "browser"],
+    ]);
+    const accessor = buildSecretsAccessor(agent, cipher, db);
+    await attachSecret(agent, "K", owner, db);
+    expect(await accessor.get("K")).toBe("plain-value-1");
+  });
+
+  it("set on a missing secret throws secret_not_found", async () => {
+    await expect(
+      setSecretBroker(db, cipher, { ownerId: owner, name: "NOPE", broker, actorId: owner, via: "mcp" }),
+    ).rejects.toThrow("secret_not_found");
   });
 });

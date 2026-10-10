@@ -14,7 +14,9 @@ checkout. Give each agent only the capabilities its job needs:
 
 - **Tools** for approved external actions or APIs.
 - **Secrets** as bindings to tools or agents; values remain in Wardby's trusted
-  components rather than being returned through MCP.
+  components rather than being returned through MCP. A secret can also be brokered, so
+  a tool sends it to chosen hosts without reading it; see
+  [Brokered secrets](brokered-secrets.md).
 - **Datastores** for scoped application data and queries.
 - **Memory** for agent-owned durable context.
 - **Schedules and webhooks** to start event-driven work.

@@ -20,6 +20,8 @@
   and the scheduled architecture agent.
 - [Native sandbox](native-sandbox.md) runs a native agent's turn loop and user
   tools in a single-use, credential-free container behind a native gateway.
+- [Secrets and tools](tool-secrets.md) covers readable and brokered secrets:
+  attaching secrets to tools, `set_secret_broker`, placements, and errors.
 - [Coding-worker isolation](coding-worker-isolation.md) documents the threat
   model and enforced worker boundary.
 - [Bring-your-own worker images](coding-worker-byo-images.md) explains how to
