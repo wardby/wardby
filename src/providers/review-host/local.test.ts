@@ -242,6 +242,7 @@ describe.skipIf(!process.env.DATABASE_URL)("LocalReviewHost (database)", () => {
         runCheck: null,
         markRunCheckCompleted: vi.fn(async () => undefined),
         authorize: vi.fn(async () => ({ ok: true as const })),
+        db,
       },
     );
     expect(JSON.parse(out)).toMatchObject({ published: true });

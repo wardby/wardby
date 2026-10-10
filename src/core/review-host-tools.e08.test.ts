@@ -32,6 +32,8 @@ function ctx(host: GitHubReviewHost, runCheck: ReviewToolContext["runCheck"]): R
     runCheck,
     markRunCheckCompleted: vi.fn(async () => undefined),
     authorize: vi.fn(async () => ({ ok: true as const })),
+    // Only repo_publish_review is exercised in this file; relatedPullRequestsFor (repo_pr_read) is untouched.
+    db: {} as ReviewToolContext["db"],
   };
 }
 

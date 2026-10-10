@@ -65,6 +65,13 @@ on the review check instead.
 Commit statuses need the App's **Commit statuses: Read** permission; without
 it only check runs are shown.
 
+`repo_pr_read` also returns `relatedPullRequests`: this request's other pull
+requests (`repository`, `number`, `state`, `mergeOrder`, `self`), computed
+fresh at call time; empty on a human pull request or one with no recognized
+Wardby marker. `relatedPullRequests` is current; the PR body's **Related
+pull requests** section can be stale — see
+[Related pull requests across repositories](related-pull-requests.md).
+
 ## Review after CI (`waitForCi`)
 
 A `pull_request` link can set `waitForCi: true` so this reviewer reviews a
@@ -105,10 +112,11 @@ Add this to a reviewer's system prompt:
     Reviewer step (CI and related pull requests). Read `ci` from repo_pr_read.
     When `ci` and the description's Tests disagree, follow CI and say so; never
     ask for a fix only because a sandbox test failed while CI passed. Report
-    pending checks as pending. If the description has a "Related pull requests"
-    section, a field, route or schema the change relies on may be added by one
-    of those pull requests: do not report it as missing; note the dependency
-    and the listed merge order instead.
+    pending checks as pending. If repo_pr_read's relatedPullRequests is
+    non-empty, a field, route or schema the change relies on may be added by
+    one of those pull requests: do not report it as missing; note the
+    dependency and the listed merge order instead. relatedPullRequests is
+    current; the PR body's "Related pull requests" section can be stale.
 
 Wardby also writes that section: see
 [Related pull requests across repositories](related-pull-requests.md).

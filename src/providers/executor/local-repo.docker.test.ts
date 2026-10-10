@@ -305,6 +305,7 @@ describe.skipIf(!enabled || !agentImage || !toolImage || !process.env.DATABASE_U
         runCheck: null,
         markRunCheckCompleted: async () => {},
         authorize: async () => ({ ok: true }),
+        db,
       };
       const read = JSON.parse(
         await handleReviewHostTool(

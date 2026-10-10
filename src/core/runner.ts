@@ -911,6 +911,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
           agentId: loaded.agentId,
           links: loaded.repositoryLinks,
           hosts: reviewHosts,
+          db,
           runCheck:
             check && !check.completedAt
               ? {

@@ -61,7 +61,12 @@ included, plus that run tree's own siblings.
 
 Reviewers see the section in the pull request description, so a reviewer
 agent can tell that a field, route, or schema a change relies on is added by
-a sibling pull request rather than missing. See the reviewer step in
+a sibling pull request rather than missing. Because the description is only
+rewritten at the points above, a sibling opened (or merged, or closed) since
+then can be missing from it or shown with an old state; `repo_pr_read`'s
+`relatedPullRequests` field is computed fresh on every call instead, so a
+reviewer should prefer it over the description's section when they disagree.
+See the reviewer step in
 [Run GitHub code-review agents](code-review-agents.md#ci-and-sibling-pull-requests).
 
 ## Setting a merge order

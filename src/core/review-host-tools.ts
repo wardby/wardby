@@ -15,12 +15,18 @@ import {
   REVIEW_HOST_PROVIDERS,
   ReviewHostError,
   type CiView,
+  type CodeReviewHost,
   type ReviewHostProvider,
   type ReviewHostRegistry,
 } from "../providers/review-host/types.js";
 import { isLocalRepository, normalizeGitHubRepository, normalizeLocalRepository } from "../coding/protocol.js";
 import { ciForAgent } from "./ci-context.js";
 import { logger } from "./logger.js";
+import {
+  collectRelatedPullRequests,
+  type RelatedPullRequestsDb,
+  type StoredPullRequestState,
+} from "./related-pull-requests.js";
 import { describeDenial, type RepoAccessDecision } from "./repo-access.js";
 
 const log = logger.child({ module: "review-host-tools" });
@@ -73,6 +79,20 @@ export interface ReviewToolContext {
    * throw refuses the call.
    */
   authorize: (link: RepositoryLink) => Promise<RepoAccessDecision>;
+  /** Backs repo_pr_read's relatedPullRequests lookup (collectRelatedPullRequests). */
+  db: RelatedPullRequestsDb;
+}
+
+/** One entry of repo_pr_read's relatedPullRequests, computed fresh at call time. */
+export interface RelatedPullRequestResult {
+  repository: string;
+  number: number;
+  /** Only when stored (kept current by pr_closed); otherwise unknown. */
+  state?: StoredPullRequestState;
+  /** Step in the delegating agent's declared merge order (1-99); absent when none was set. */
+  mergeOrder?: number;
+  /** True for the pull request repo_pr_read was called on. */
+  self: boolean;
 }
 
 const DEFAULT_PATCH_CHARS = 60_000;
@@ -149,7 +169,7 @@ export const REVIEW_HOST_TOOL_DEFS: LoadedTool[] = [
   {
     name: "repo_pr_read",
     description:
-      "Reads a pull request: title, body, author, state, refs, headSha, isFork, each changed file's unified-diff patch (patches share a character budget; truncated ones are flagged), lastReviewedSha — the head you last reviewed on this PR, if any — and openThreads: your own unresolved inline review threads (id, path, line, outdated, body). Pass sinceSha (usually lastReviewedSha) to get only what changed since then; if baseMergedSince is true, the base branch was merged in meanwhile and each file shows the PR's full diff against the base, limited to files that changed since sinceSha. It also returns ci: the CI check runs and commit statuses on headSha (wardby's own checks excluded), an overall state (passing, failing, pending, inconclusive, none, unavailable), sandboxInstallIncomplete, and a note. CI is the authority on whether this head builds and passes its tests: the description's Tests list comes from Wardby's coding sandbox, which may have had an incomplete install. Where they disagree, follow CI and say so; report pending checks as pending.",
+      "Reads a pull request: title, body, author, state, refs, headSha, isFork, each changed file's unified-diff patch (patches share a character budget; truncated ones are flagged), lastReviewedSha — the head you last reviewed on this PR, if any — and openThreads: your own unresolved inline review threads (id, path, line, outdated, body). Pass sinceSha (usually lastReviewedSha) to get only what changed since then; if baseMergedSince is true, the base branch was merged in meanwhile and each file shows the PR's full diff against the base, limited to files that changed since sinceSha. It also returns ci: the CI check runs and commit statuses on headSha (wardby's own checks excluded), an overall state (passing, failing, pending, inconclusive, none, unavailable), sandboxInstallIncomplete, and a note. CI is the authority on whether this head builds and passes its tests: the description's Tests list comes from Wardby's coding sandbox, which may have had an incomplete install. Where they disagree, follow CI and say so; report pending checks as pending. It also returns relatedPullRequests: this request's other pull requests (repository, number, state, mergeOrder, self), empty on a human pull request or one with no recognized marker. relatedPullRequests is current; the PR body's \"Related pull requests\" section can be stale.",
     jsonSchema: {
       type: "object",
       properties: {
@@ -315,6 +335,38 @@ async function markCompleted(ctx: ReviewToolContext, review?: PublishedReview): 
 }
 
 /**
+ * repo_pr_read's relatedPullRequests: this request's other pull requests,
+ * computed fresh from run records (collectRelatedPullRequests), never from
+ * the PR body's possibly-stale "Related pull requests" section. Empty for a
+ * human pull request (no markerRunId) or a host that can't say
+ * (pullRequestOrigin absent, e.g. local repositories). Fails open: a lookup
+ * error is logged and never fails the tool.
+ */
+async function relatedPullRequestsFor(
+  ctx: ReviewToolContext,
+  host: CodeReviewHost,
+  repository: string,
+  prNumber: number,
+): Promise<RelatedPullRequestResult[]> {
+  if (!host.pullRequestOrigin) return [];
+  try {
+    const origin = await host.pullRequestOrigin(repository, prNumber);
+    if (!origin.markerRunId) return [];
+    const group = await collectRelatedPullRequests(ctx.db, origin.markerRunId);
+    return group.pullRequests.map((pr) => ({
+      repository: pr.repository,
+      number: pr.number,
+      ...(pr.state ? { state: pr.state } : {}),
+      ...(pr.mergeOrder != null ? { mergeOrder: pr.mergeOrder } : {}),
+      self: pr.repository === repository && pr.number === prNumber,
+    }));
+  } catch (err) {
+    log.warn({ err, agentId: ctx.agentId, repository, prNumber }, "could not list related pull requests");
+    return [];
+  }
+}
+
+/**
  * Dispatches one built-in repo tool call. Never throws — mirrors
  * runner.ts's `runSandboxTool` contract: a failure becomes a JSON error
  * result fed back to the model as the tool's result, not an engine-halting
@@ -362,7 +414,8 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
           maxPatchChars: a.maxPatchChars ?? DEFAULT_PATCH_CHARS,
           agentMarker: ctx.agentId,
         });
-        return JSON.stringify({ ...view, ci: ciForAgent(view) });
+        const relatedPullRequests = await relatedPullRequestsFor(ctx, host, link.repository, a.prNumber);
+        return JSON.stringify({ ...view, relatedPullRequests, ci: ciForAgent(view) });
       }
       case "repo_read_file": {
         const a = ReadFileArgs.parse(parsed);
