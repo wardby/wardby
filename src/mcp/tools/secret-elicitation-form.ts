@@ -57,7 +57,19 @@ const BROKER_STYLE = `
   border-radius: 10px;
 }
 code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
-pre { overflow-x: auto; padding: 10px; background: var(--paper); border: 1px solid var(--line); border-radius: 10px; }
+code { overflow-wrap: anywhere; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; background: var(--paper); border: 1px solid var(--line); border-radius: 10px; }
+.hint { margin: 4px 0 12px; }
+.broker-summary { margin: 0 0 12px; padding: 10px 10px 10px 28px; background: var(--paper); border: 1px solid var(--line); border-radius: 10px; color: var(--ink); }
+.broker-summary li { margin: 2px 0; }
+/* Show only the selected placement's fields; browsers without :has() show them all. */
+@supports selector(:has(*)) {
+  .placement { display: none; }
+  .broker-fields:has(option[value="header"]:checked) .placement-header,
+  .broker-fields:has(option[value="query"]:checked) .placement-query,
+  .broker-fields:has(option[value="body"]:checked) .placement-body,
+  .broker-fields:has(option[value="aws-sigv4"]:checked) .placement-aws-sigv4 { display: block; }
+}
 `;
 
 /** The "Brokered (recommended)" checkbox, warning, compatibility note, and broker fields, pre-filled from `prefill`. */
@@ -75,13 +87,24 @@ export function brokerFieldset(prefill?: SecretBrokerConfig): string {
     `<label>Placement<select name="placement">` +
     `<option value="header"${sel("header")}>Header</option><option value="query"${sel("query")}>Query parameter</option>` +
     `<option value="body"${sel("body")}>Body field</option><option value="aws-sigv4"${sel("aws-sigv4")}>AWS SigV4</option></select></label>` +
+    `<div class="placement placement-header">` +
     `<label>Header name<input name="headerName" value="${escape(p?.kind === "header" ? p.name : "Authorization")}"></label>` +
     `<label>Header format<input name="headerFormat" value="${escape(p?.kind === "header" ? p.format : "Bearer {value}")}"></label>` +
+    `<p class="hint"><code>{value}</code> is replaced with the secret.</p>` +
+    `</div>` +
+    `<div class="placement placement-query">` +
     `<label>Query parameter name<input name="queryName" value="${escape(p?.kind === "query" ? p.name : "")}"></label>` +
+    `</div>` +
+    `<div class="placement placement-body">` +
     `<label>Body field name<input name="bodyField" value="${escape(p?.kind === "body" ? p.field : "")}"></label>` +
+    `<p class="hint">A top-level field of a JSON-object or form-encoded body.</p>` +
+    `</div>` +
+    `<div class="placement placement-aws-sigv4">` +
     `<label>AWS region<input name="awsRegion" value="${escape(p?.kind === "aws-sigv4" ? p.region : "")}"></label>` +
     `<label>AWS service<input name="awsService" value="${escape(p?.kind === "aws-sigv4" ? p.service : "")}"></label>` +
-    `<p>For AWS SigV4, the value is JSON: <code>{"accessKeyId":"…","secretAccessKey":"…","sessionToken":"…"}</code> (session token optional).</p>` +
+    `<p class="hint">For AWS SigV4 the secret value is JSON (session token optional):</p>` +
+    `<pre>{\n  "accessKeyId": "…",\n  "secretAccessKey": "…",\n  "sessionToken": "…"\n}</pre>` +
+    `</div>` +
     `</div>`
   );
 }
@@ -220,6 +243,28 @@ async function readBodyOr413(
   }
 }
 
+/** A readable, escaped summary of a broker config for the unbroker page. */
+function describeBroker(broker: SecretBrokerConfig | null): string {
+  if (!broker) return "<p>(not brokered)</p>";
+  const p = broker.placement;
+  const placement =
+    p.kind === "header"
+      ? `header <code>${escape(p.name)}: ${escape(p.format)}</code>`
+      : p.kind === "query"
+        ? `query parameter <code>${escape(p.name)}</code>`
+        : p.kind === "body"
+          ? `body field <code>${escape(p.field)}</code>`
+          : `AWS SigV4 (region <code>${escape(p.region)}</code>, service <code>${escape(p.service)}</code>)`;
+  const list = (items: readonly string[]) => items.map((item) => `<code>${escape(item)}</code>`).join(", ");
+  return (
+    `<ul class="broker-summary">` +
+    `<li>Hosts: ${list(broker.hosts)}</li>` +
+    (broker.pathPrefixes?.length ? `<li>Paths: ${list(broker.pathPrefixes)}</li>` : "") +
+    `<li>Sent as: ${placement}</li>` +
+    `</ul>`
+  );
+}
+
 /** The unbroker link's page: show what is brokered now, and remove it only when the person types the secret's name. */
 async function handleUnbroker(
   method: string | undefined,
@@ -230,12 +275,11 @@ async function handleUnbroker(
 ): Promise<void> {
   if (method === "GET") {
     const current = (await listSecrets(payload.ownerId, deps.db)).find((s) => s.name === payload.secretName);
-    const config = current?.broker ? JSON.stringify(current.broker, null, 2) : "(not brokered)";
     html(
       res,
       200,
       `<h1>Remove brokering</h1><p>Name: <strong>${escape(payload.secretName)}</strong></p>` +
-        `<p>Current broker config:</p><pre>${escape(config)}</pre>` +
+        `<p>Currently brokered as:</p>${describeBroker(current?.broker ?? null)}` +
         `<p class="warning">${escape(BROKER_WARNING)}</p>` +
         `<form method="post"><label>Type the secret's name to confirm` +
         `<input name="confirm" autocomplete="off" required autofocus></label>` +

@@ -277,6 +277,18 @@ describe("handleSecretElicitationForm", () => {
     expect(html).toContain("&quot;&gt;&lt;b&gt;{value}");
   });
 
+  it("brokerFieldset groups each placement's fields so CSS shows only the selected one", () => {
+    const html = brokerFieldset();
+    const group = (kind: string) => html.match(new RegExp(`<div class="placement placement-${kind}">(.*?)</div>`))?.[1];
+    expect(group("header")).toContain('name="headerName"');
+    expect(group("header")).toContain('name="headerFormat"');
+    expect(group("query")).toContain('name="queryName"');
+    expect(group("body")).toContain('name="bodyField"');
+    expect(group("aws-sigv4")).toContain('name="awsRegion"');
+    expect(group("aws-sigv4")).toContain('name="awsService"');
+    expect(group("aws-sigv4")).toContain("secretAccessKey");
+  });
+
   describe("brokerConfigFromForm", () => {
     const form = (fields: Record<string, string>) => new URLSearchParams(fields);
 
