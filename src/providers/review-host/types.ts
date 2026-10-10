@@ -222,6 +222,14 @@ export interface CompleteCheckInput {
   detailsUrl?: string;
 }
 
+export type UpsertNamedCheckInput = {
+  headSha: string;
+  /** The check's fixed name, e.g. MERGE_ORDER_CHECK_NAME ("wardby merge order"); identifies which run to update. */
+  name: string;
+  title: string;
+  summary: string;
+} & ({ status: "in_progress" } | { status: "completed"; conclusion: "success" | "failure" });
+
 /**
  * A user's effective permission on one repository, host-neutral and ranked
  * none < read < triage < write < maintain < admin. GitHub maps its
@@ -293,6 +301,15 @@ export interface CodeReviewHost {
   acknowledge(repository: string, target: CommentRef): Promise<void>;
   startCheck(repository: string, input: StartCheckInput): Promise<{ checkId: string }>;
   completeCheck(repository: string, input: CompleteCheckInput): Promise<void>;
+  /**
+   * Creates or updates, by fixed name, a check run on one commit that isn't
+   * tied to a run's own startCheck/completeCheck lifecycle (e.g. the
+   * `wardby merge order` check, recomputed fresh and reposted on demand).
+   * Finds the one this App owns among the commit's check runs with that
+   * name and patches it; creates one when none exists. Hosts that can't
+   * post checks (e.g. a local repository) leave this out.
+   */
+  upsertNamedCheck?(repository: string, input: UpsertNamedCheckInput): Promise<void>;
 }
 
 export type ReviewHostErrorCode =

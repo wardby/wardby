@@ -39,6 +39,7 @@ import {
   type PullRequestView,
   type ReviewThreadView,
   type StartCheckInput,
+  type UpsertNamedCheckInput,
 } from "./types.js";
 
 const READ = { contents: "read", pull_requests: "read" } as const;
@@ -52,6 +53,12 @@ export function skippedInListing(path: string): boolean {
   return VENDORED.test(path) || path.endsWith("package-lock.json");
 }
 const CHECK_TEXT_LIMIT = 65_535;
+/**
+ * Cap on a named check's output.title. Not a documented GitHub limit (none
+ * is published for the title); a conservative length that keeps the title
+ * a one-line heading in the checks UI.
+ */
+const CHECK_TITLE_LIMIT = 255;
 const COMMENT_WRITE = { issues: "write", pull_requests: "write" } as const;
 const REVIEW_WRITE = { pull_requests: "write", checks: "write" } as const;
 /** Always implicitly granted to an installation token; enough for the collaborator-permission endpoint. */
@@ -861,5 +868,58 @@ export class GitHubReviewHost implements CodeReviewHost {
   async completeCheck(repository: string, input: CompleteCheckInput): Promise<void> {
     const base = repoPath(repository);
     await this.withToken(repository, { checks: "write" }, (get) => this.patchCheck(get, base, input));
+  }
+
+  /**
+   * Creates or updates, by fixed name, a check run on `input.headSha` that
+   * this App owns: lists the commit's check runs filtered to that name and
+   * patches the newest one `fromApp` owns, else creates one. Writes nothing
+   * when that run already carries the same status, conclusion, and output.
+   * A completed run is never moved back to in_progress (GitHub does not
+   * allow reopening a completed check run): a fresh one is created instead.
+   */
+  async upsertNamedCheck(repository: string, input: UpsertNamedCheckInput): Promise<void> {
+    // A caller's bad input, like path_invalid: never interpolated into the URL.
+    if (!SAFE_SHA.test(input.headSha)) throw new ReviewHostError("host_api_error", "head_sha_invalid");
+    const base = repoPath(repository);
+    const output = {
+      title: input.title.slice(0, CHECK_TITLE_LIMIT),
+      summary: input.summary.slice(0, CHECK_TEXT_LIMIT),
+    };
+    const conclusion = input.status === "completed" ? input.conclusion : undefined;
+    await this.withToken(repository, { checks: "write" }, async (get) => {
+      const { id: appId } = await this.client.appIdentity();
+      const payload = record(
+        await (
+          await get(`${base}/commits/${input.headSha}/check-runs?check_name=${encodeURIComponent(input.name)}`)
+        ).json(),
+      );
+      const existing = list(payload.check_runs ?? [])
+        .filter((r) => fromApp(r, appId))
+        .sort((a, b) => num(b.id) - num(a.id))[0];
+      const body = { status: input.status, ...(conclusion ? { conclusion } : {}), output };
+      if (existing) {
+        const current = record(existing.output ?? {});
+        const unchanged =
+          existing.status === input.status &&
+          (existing.conclusion ?? undefined) === conclusion &&
+          current.title === output.title &&
+          current.summary === output.summary;
+        if (unchanged) return;
+        if (!(existing.status === "completed" && input.status !== "completed")) {
+          await get(
+            `${base}/check-runs/${encodeURIComponent(String(num(existing.id)))}`,
+            { method: "PATCH", body: JSON.stringify(body) },
+            [200],
+          );
+          return;
+        }
+      }
+      await get(
+        `${base}/check-runs`,
+        { method: "POST", body: JSON.stringify({ name: input.name, head_sha: input.headSha, ...body }) },
+        [201],
+      );
+    });
   }
 }
