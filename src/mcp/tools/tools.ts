@@ -9,7 +9,7 @@
  * (attach/detach on an agent or tool you don't own) DO throw, same
  * convention as every other tool in this codebase.
  */
-import { Prisma, type Tool } from "#prisma";
+import { Prisma, type PrismaClient, type Tool } from "#prisma";
 import { deriveJsonSchema, validateParams } from "../../sandbox/zod-params.js";
 import { runInSandbox } from "../../sandbox/run-in-sandbox.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
@@ -36,6 +36,7 @@ import { agentAccessResolver, assertAgentAccess, requireAgentAccess } from "../a
 import { atLeast } from "../../core/grants.js";
 import type { McpRequestContext } from "../context.js";
 import { textResult } from "./text-result.js";
+import { brokerCompatibilityWarnings } from "./secret-broker-compat.js";
 
 /**
  * Names the agents the caller can read (its own and ones granted to it)
@@ -65,6 +66,27 @@ export function projectTool(tool: Tool, principalId: string) {
 }
 
 /** Refuses a name one of the runner's built-ins would shadow (see core/tool-names.ts). */
+/**
+ * Non-blocking: which of the secrets just granted to this attachment are
+ * brokered on the agent, and does the tool still read them with
+ * secrets.get()? Reveals only that fact about a tool the caller may not own
+ * (attach_tool already lets the agent's owner grant capabilities to such code).
+ */
+async function brokeredSecretWarnings(
+  db: PrismaClient,
+  agentId: string,
+  tool: { name: string; code: string } | undefined,
+  allowedSecrets: readonly string[] | undefined,
+): Promise<string[]> {
+  if (!tool || !allowedSecrets?.length) return [];
+  const bindings = await db.agentSecret.findMany({
+    where: { agentId, boundName: { in: [...allowedSecrets] } },
+    include: { secret: { select: { broker: true } } },
+  });
+  const brokered = new Set(bindings.filter((b) => b.secret.broker != null).map((b) => b.boundName));
+  return brokerCompatibilityWarnings([{ ...tool, allowedSecrets }], brokered);
+}
+
 function assertToolNameAllowed(name: string): void {
   const reason = reservedToolNameReason(name);
   if (reason) throw new McpError(400, reason);
@@ -307,6 +329,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
         throw new McpError(400, `Invalid tool capabilities: ${patch.error.issues.map((i) => i.message).join("; ")}`);
       }
       const capabilitiesPassed = Object.values(patch.data).some((value) => value !== undefined);
+      let attachedTool: { name: string; code: string } | undefined;
       await ctx.db.$transaction(
         async (tx) => {
           const { agent } = await assertAgentAccess(
@@ -344,6 +367,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
           // The runtime dispatches by name, and names are only unique per
           // owner: a second same-named tool on one agent would be a
           // duplicate tool name to the model and silently shadow one of them.
+          attachedTool = { name: tool.name, code: tool.code };
           const clash = await findSameNamedAttachedTool(tx, args.agentId, tool);
           if (clash) {
             // The clashing tool may be another principal's private one (a
@@ -390,7 +414,8 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       );
-      return textResult({ attached: true });
+      const warnings = await brokeredSecretWarnings(ctx.db, args.agentId, attachedTool, patch.data.allowedSecrets);
+      return textResult(warnings.length ? { attached: true, warnings } : { attached: true });
     },
   });
 
