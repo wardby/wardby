@@ -279,7 +279,8 @@ describe("handleSecretElicitationForm", () => {
 
   it("brokerFieldset groups each placement's fields so CSS shows only the selected one", () => {
     const html = brokerFieldset();
-    const group = (kind: string) => html.match(new RegExp(`<div class="placement placement-${kind}">(.*?)</div>`))?.[1];
+    const group = (kind: string) =>
+      html.match(new RegExp(`<div class="placement placement-${kind}">([\\s\\S]*?)</div>`))?.[1];
     expect(group("header")).toContain('name="headerName"');
     expect(group("header")).toContain('name="headerFormat"');
     expect(group("query")).toContain('name="queryName"');
