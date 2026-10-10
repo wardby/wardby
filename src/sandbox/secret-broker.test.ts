@@ -166,6 +166,42 @@ describe("scrubBrokeredResponse", () => {
     expect(text).not.toContain(rb.toString("base64"));
     expect(text).not.toContain(rb.toString("base64url"));
   });
+  it("scrubs a query-placed value containing ~ ! and space in every encoding the response may echo", () => {
+    // URLSearchParams encodes ~ and ! and space (as +) differently from encodeURIComponent.
+    const value = "abc8Q~xyz!def ghi";
+    const qs: BrokeredSecret = {
+      name: "Q2",
+      value,
+      broker: { hosts: ["maps.example.com"], placement: { kind: "query", name: "k" } },
+    };
+    const placed = applyBrokerPlacements({ url: "https://maps.example.com/v1?a=1", method: "GET", headers: {} }, [qs]);
+    const sentUrl = placed.url;
+    expect(sentUrl).toContain("k=abc8Q%7Exyz%21def+ghi");
+    // Echo the placed URL and a lowercase-hex variant of its query in both the URL and the body.
+    const lowerQuery = "k=abc8Q%7exyz%21def+ghi";
+    const out = scrubBrokeredResponse(
+      {
+        url: `${sentUrl}&echo=${lowerQuery}`,
+        headers: {},
+        bodyBase64: Buffer.from(`${sentUrl} ${lowerQuery} ${value}`).toString("base64"),
+        ok: true,
+      },
+      brokerScrubValues([qs]),
+    );
+    const text = Buffer.from(out.bodyBase64, "base64").toString("utf8");
+    expect(out.url).not.toMatch(/abc8Q|xyz|def|ghi/);
+    expect(text).not.toMatch(/abc8Q|xyz|def|ghi/);
+    expect(text).toBe("https://maps.example.com/v1?a=1&k=[REDACTED] k=[REDACTED] [REDACTED]");
+  });
+  it("places a header value containing $ patterns verbatim", () => {
+    const dollar: BrokeredSecret = {
+      name: "D",
+      value: "pa$$wo$'rd99",
+      broker: { hosts: ["api.github.com"], placement: { kind: "header", name: "X-Secret", format: "Bearer {value}" } },
+    };
+    const out = applyBrokerPlacements({ url: "https://api.github.com/x", method: "GET", headers: {} }, [dollar]);
+    expect(out.headers["x-secret"]).toBe("Bearer pa$$wo$'rd99");
+  });
   it("lists SigV4 secret key and session token as scrub values", () => {
     const sig: BrokeredSecret = {
       name: "AWS",

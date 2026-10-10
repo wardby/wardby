@@ -59,7 +59,8 @@ export function applyBrokerPlacements(request: BrokerRequest, secrets: readonly 
     if (p.kind === "header") {
       const key = p.name.toLowerCase();
       if (key in headers || placed.has(`h:${key}`)) conflict(`header "${p.name}" is set by the broker for "${s.name}"`);
-      headers[key] = p.format.replace("{value}", s.value);
+      // A replacer function, not a string: "$$", "$&", "$'" in a value are literal, not patterns.
+      headers[key] = p.format.replace("{value}", () => s.value);
       placed.add(`h:${key}`);
     } else if (p.kind === "query") {
       if (url.searchParams.has(p.name) || placed.has(`q:${p.name}`))
@@ -116,13 +117,18 @@ export function brokerScrubValues(secrets: readonly BrokeredSecret[]): string[] 
 
 function encodedForms(value: string): string[] {
   const buf = Buffer.from(value, "utf8");
+  // Query placement goes through URLSearchParams, which encodes ~ ! ' ( ) differently and space as "+",
+  // so both percent-encodings are scrubbed, each also in lowercase-hex form (a response may echo either).
+  const percent = [encodeURIComponent(value), new URLSearchParams({ k: value }).toString().slice("k=".length)];
+  const lowerHex = percent.map((f) => f.replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()));
   return [
     ...new Set([
       value,
       buf.toString("base64"),
       buf.toString("base64").replace(/=+$/, ""),
       buf.toString("base64url"),
-      encodeURIComponent(value),
+      ...percent,
+      ...lowerHex,
     ]),
   ]
     .filter((form) => form.length >= 6)
