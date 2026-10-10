@@ -37,6 +37,8 @@ export interface WorkerClientConfig {
   capability: string;
   developerInstructions: string;
   environment: Record<string, string>;
+  /** Codex skills to turn off by name (src/coding-worker/skills.ts): always the built-ins, plus the repo's when repoSkills is off. */
+  disabledSkills: string[];
 }
 
 export type WorkerClientFactory = (config: WorkerClientConfig) => WorkerAgentClient;

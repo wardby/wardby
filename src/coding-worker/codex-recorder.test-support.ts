@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { Codex } from "@openai/codex-sdk";
 import { CODING_OUTPUT_JSON_SCHEMA, WORKER_SECURITY_INSTRUCTIONS } from "./driver.js";
 import { codexSdkOptions } from "./sdk.js";
+import { CODEX_BUILTIN_SKILLS } from "./skills.js";
 
 export interface RecordedCodexRequest {
   scenario: string;
@@ -400,6 +401,7 @@ async function runScenario(
       capability: "record-capability-not-a-secret",
       developerInstructions: WORKER_SECURITY_INSTRUCTIONS,
       environment,
+      disabledSkills: [...CODEX_BUILTIN_SKILLS],
     });
     const client = new Codex({ ...options, config: { ...options.config, ...scenario.config } });
     const thread = client.startThread({
