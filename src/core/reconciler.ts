@@ -36,8 +36,10 @@
  * it also catches a run that ended before its comment was posted.
  *
  * Given host-event deps, each pass also starts reviews deferred until CI
- * finished (waitForCi links) whose CI has not finished in time, and drops
- * deferred reviews that are too old (host-events.ts startDeferredReviews).
+ * finished (waitForCi links) whose CI has not finished in time, releases
+ * reviews that waited for a delegating run that ended without its finalizer
+ * (lost, including leads this pass just marked lost), and drops deferred
+ * reviews that are too old (host-events.ts startDeferredReviews).
  */
 
 import type { Prisma, PrismaClient } from "#prisma";
@@ -294,7 +296,8 @@ export async function reconcileOnce(
   await closeOrphanedIssueStatuses(db, issueTrackers, now);
   // Settle stored pull requests whose merge/close webhook was missed; bounded per pass, never throws.
   await syncOpenPullRequestStates(db, reviewHosts, issueTrackers, now);
-  // Start reviews whose head's CI never finished (waitForCi links); bounded per pass, never throws.
+  // Start reviews whose head's CI never finished (waitForCi links), and reviews whose delegating run
+  // ended without releasing them (after the lost marking above); bounded per pass, never throws.
   if (deferredReviews) await startDeferredReviews(deferredReviews, now);
   return lost;
 }

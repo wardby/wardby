@@ -1,6 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ReviewHostError, type CiView, type CodeReviewHost } from "../providers/review-host/types.js";
+import { collectRelatedPullRequests } from "./related-pull-requests.js";
 import { handleReviewHostTool, resolveLink, type RepositoryLink, type ReviewToolContext } from "./review-host-tools.js";
+
+vi.mock("./related-pull-requests.js", async (orig) => ({
+  ...(await orig<typeof import("./related-pull-requests.js")>()),
+  collectRelatedPullRequests: vi.fn(async () => ({ pullRequests: [] })),
+}));
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const WRITE: RepositoryLink = {
@@ -53,6 +59,12 @@ function ctx(overrides: Partial<ReviewToolContext> = {}): ReviewToolContext {
     runCheck: null,
     markRunCheckCompleted: vi.fn(async () => undefined),
     authorize: vi.fn(async () => ({ ok: true as const })),
+    // relatedPullRequestsFor reaches collectRelatedPullRequests through this; both are mocked, so
+    // a minimal double is enough — no test here exercises the real database query. The default
+    // findUnique matches WRITE.repository, the repository every relatedPullRequests test reads.
+    db: {
+      codingRun: { findUnique: vi.fn(async () => ({ repository: WRITE.repository })) },
+    } as unknown as ReviewToolContext["db"],
     ...overrides,
   };
 }
@@ -132,6 +144,182 @@ describe("handleReviewHostTool", () => {
     );
     expect(out.ci).toMatchObject({ state: "none", sandboxInstallIncomplete: false });
     expect(out.ci.note).toMatch(/^No CI checks/);
+  });
+
+  describe("repo_pr_read relatedPullRequests", () => {
+    beforeEach(() => {
+      vi.mocked(collectRelatedPullRequests).mockClear();
+    });
+
+    it("computes it fresh from the marker run, including a sibling opened after the PR body was written", async () => {
+      const h = fakeHost();
+      h.pullRequestOrigin = vi.fn(async () => ({
+        headSha: SHA,
+        isFork: false,
+        state: "open",
+        labels: [],
+        markerRunId: "run_lead",
+      }));
+      h.readPullRequest = vi.fn(async () => ({ number: 7, state: "open", merged: false, draft: false }) as never);
+      const c = ctx({ hosts: { github: h } });
+      vi.mocked(collectRelatedPullRequests).mockResolvedValueOnce({
+        pullRequests: [
+          {
+            repository: WRITE.repository,
+            number: 7,
+            openedAt: new Date(),
+            openedByRunId: "run_a",
+            state: "open",
+            mergeOrder: 1,
+          },
+          // Opened after the PR body was last written: only a fresh, call-time lookup sees it.
+          {
+            repository: "chfields/other-repo",
+            number: 9,
+            openedAt: new Date(),
+            openedByRunId: "run_b",
+            state: "open",
+            mergeOrder: 2,
+          },
+        ],
+      });
+      const out = JSON.parse(
+        await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c),
+      );
+      expect(out.relatedPullRequests).toEqual([
+        { repository: WRITE.repository, number: 7, state: "open", mergeOrder: 1, self: true },
+        { repository: "chfields/other-repo", number: 9, state: "open", mergeOrder: 2, self: false },
+      ]);
+      expect(collectRelatedPullRequests).toHaveBeenCalledWith(c.db, "run_lead");
+    });
+
+    it("returns none for a human pull request (no recognized marker)", async () => {
+      const h = fakeHost();
+      h.pullRequestOrigin = vi.fn(async () => ({ headSha: SHA, isFork: false, state: "open", labels: [] }));
+      const c = ctx({ hosts: { github: h } });
+      const out = JSON.parse(
+        await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c),
+      );
+      expect(out.relatedPullRequests).toEqual([]);
+      expect(collectRelatedPullRequests).not.toHaveBeenCalled();
+    });
+
+    it("returns none when the host can't say (no pullRequestOrigin, e.g. a local repository)", async () => {
+      const c = ctx(); // fakeHost() has no pullRequestOrigin
+      const out = JSON.parse(
+        await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c),
+      );
+      expect(out.relatedPullRequests).toEqual([]);
+    });
+
+    it("fails open to relatedPullRequests: [] when the lookup errors, and still returns the pull request", async () => {
+      const h = fakeHost();
+      h.pullRequestOrigin = vi.fn(async () => ({
+        headSha: SHA,
+        isFork: false,
+        state: "open",
+        labels: [],
+        markerRunId: "run_lead",
+      }));
+      vi.mocked(collectRelatedPullRequests).mockRejectedValueOnce(new Error("db down"));
+      const c = ctx({ hosts: { github: h } });
+      const out = JSON.parse(
+        await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c),
+      );
+      expect(out.relatedPullRequests).toEqual([]);
+      expect(out.number).toBe(7);
+    });
+
+    it("never follows a marker whose CodingRun opened in a different repository", async () => {
+      const h = fakeHost();
+      h.pullRequestOrigin = vi.fn(async () => ({
+        headSha: SHA,
+        isFork: false,
+        state: "open",
+        labels: [],
+        markerRunId: "run_elsewhere",
+      }));
+      const findUnique = vi.fn(async () => ({ repository: "chfields/other-repo" }));
+      const c = ctx({
+        hosts: { github: h },
+        db: { codingRun: { findUnique } } as unknown as ReviewToolContext["db"],
+      });
+      const out = JSON.parse(
+        await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c),
+      );
+      expect(out.relatedPullRequests).toEqual([]);
+      expect(findUnique).toHaveBeenCalledWith({ where: { runId: "run_elsewhere" }, select: { repository: true } });
+      expect(collectRelatedPullRequests).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { view: { state: "closed", merged: true, draft: false }, expected: "merged" },
+      { view: { state: "closed", merged: false, draft: false }, expected: "closed" },
+      { view: { state: "closed", merged: false, draft: true }, expected: "closed" },
+      { view: { state: "open", merged: false, draft: true }, expected: "draft" },
+      { view: { state: "open", merged: false, draft: false }, expected: "open" },
+    ])(
+      "derives the self entry's state ($expected) from the pull request just read, not the stored state",
+      async ({ view, expected }) => {
+        const h = fakeHost();
+        h.pullRequestOrigin = vi.fn(async () => ({
+          headSha: SHA,
+          isFork: false,
+          state: "open",
+          labels: [],
+          markerRunId: "run_lead",
+        }));
+        h.readPullRequest = vi.fn(async () => ({ number: 7, ...view }) as never);
+        const c = ctx({ hosts: { github: h } });
+        vi.mocked(collectRelatedPullRequests).mockResolvedValueOnce({
+          pullRequests: [
+            // A stored state that disagrees with the live view: the view wins for self.
+            { repository: WRITE.repository, number: 7, openedAt: new Date(), openedByRunId: "run_a", state: "open" },
+            {
+              repository: "chfields/other-repo",
+              number: 9,
+              openedAt: new Date(),
+              openedByRunId: "run_b",
+              state: "merged",
+            },
+          ],
+        });
+        const out = JSON.parse(
+          await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c),
+        );
+        expect(out.relatedPullRequests).toEqual([
+          { repository: WRITE.repository, number: 7, state: expected, self: true },
+          { repository: "chfields/other-repo", number: 9, state: "merged", self: false },
+        ]);
+      },
+    );
+
+    it("gives the self entry a state even with none stored, and omits it on a sibling with none stored", async () => {
+      const h = fakeHost();
+      h.pullRequestOrigin = vi.fn(async () => ({
+        headSha: SHA,
+        isFork: false,
+        state: "open",
+        labels: [],
+        markerRunId: "run_lead",
+      }));
+      h.readPullRequest = vi.fn(async () => ({ number: 7, state: "open", merged: false, draft: false }) as never);
+      const c = ctx({ hosts: { github: h } });
+      vi.mocked(collectRelatedPullRequests).mockResolvedValueOnce({
+        pullRequests: [
+          { repository: WRITE.repository, number: 7, openedAt: new Date(), openedByRunId: "run_a" },
+          { repository: "chfields/other-repo", number: 9, openedAt: new Date(), openedByRunId: "run_b" },
+        ],
+      });
+      const out = JSON.parse(
+        await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c),
+      );
+      expect(out.relatedPullRequests).toEqual([
+        { repository: WRITE.repository, number: 7, state: "open", self: true },
+        { repository: "chfields/other-repo", number: 9, self: false },
+      ]);
+      expect(h.readPullRequest).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("publishes with the run's check id, and records the check completed", async () => {
