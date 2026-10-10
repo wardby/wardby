@@ -84,6 +84,7 @@ import { fileSelfDefect } from "./self-defects.js";
 import { emitRunFinishedEvents } from "./workflow-run-events.js";
 import { startReviewFixAfterReview } from "./review-fix.js";
 import { updateRelatedPullRequests } from "./related-pull-requests.js";
+import { startDeferredForRequest } from "./host-events.js";
 import { recordNativeModelUsage } from "./model-usage.js";
 import { pinNativeRunPricing } from "./run-pricing.js";
 import { RoutingLlmProvider } from "../providers/llm/routing.js";
@@ -385,6 +386,8 @@ export type RunnerDb = Pick<
   | "runIssueStatus"
   | "issueFingerprint"
   | "workItem"
+  | "deferredReview"
+  | "runAttribution"
 >;
 
 /** The providers a native run needs; `executor`, `reviewHosts` and `issueTrackers` are optional capabilities. */
@@ -1414,6 +1417,17 @@ async function settleFinishedNativeRun(ctx: NativeRunFinishContext, finished: Ru
   await completeIssueStatus(db, finished, issueTrackers);
   // After the issue status, so IssuePullRequest rows for this run exist. Bounded and never throws.
   if (claimed) await updateRelatedPullRequests(db, finished, reviewHosts, issueTrackers);
+  // A tree root is the lead of a request: once it is terminal every coding run it delegated is
+  // too, so the reviews of their pull requests that waited for it start now, after the related
+  // sections above are current (#259). Not gated on `claimed`: release is claimed per row, and a
+  // lead another finalizer ended (a cancellation) should not leave them to the sweep. A run that
+  // delegated nothing has no rows: one indexed lookup. Never throws.
+  if (finished.parentRunId === null && providers.executor && reviewHosts && repoAccess) {
+    await startDeferredForRequest(
+      { db, executor: providers.executor, hosts: reviewHosts, repoAccess, issueTrackers },
+      runId,
+    ).catch((err: unknown) => runnerLog.warn({ err, runId }, "could not start the reviews waiting for this run"));
+  }
   if (claimed && providers.executor && reviewHosts && repoAccess) {
     await startReviewFixAfterReview(runId, {
       db,

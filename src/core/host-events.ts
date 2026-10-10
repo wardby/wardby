@@ -5,7 +5,7 @@
  * module decides which agents run. See
  * docs/private/2026-09-25-code-review-host-design.md §6.3.
  */
-import type { PrismaClient } from "#prisma";
+import { Prisma, type PrismaClient } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import type { CodeReviewHost, HostEvent, ReviewHostRegistry } from "../providers/review-host/types.js";
@@ -766,6 +766,7 @@ async function deferUntilCi(
           prNumber: key.prNumber,
           headSha: key.headSha,
           agentId: { in: links.map((l) => l.agentId) },
+          reason: "ci",
         },
         select: { id: true, agentId: true, checkName: true },
       });
@@ -786,8 +787,8 @@ type DeferredRow = { id: string; agentId: string; checkName: string };
  * Starts deferred reviews for one PR head. The head must still be that sha,
  * open, and not a fork; otherwise every row is dropped (a newer push records
  * its own). Each row is claimed by deleting it, so a concurrent ci_completed
- * delivery or sweep starts each review only once. On `ci`, only reviewers
- * still authorized are claimed (the rest wait for the sweep); on `sweep` (the
+ * delivery or sweep starts each review only once. On `ci` and `request`, only
+ * reviewers still authorized are claimed (the rest wait for the sweep); on `sweep` (the
  * last attempt) every row is claimed and unauthorized or unlinked reviewers
  * are dropped.
  */
@@ -797,7 +798,7 @@ async function startDeferred(
   key: PullRequestKey,
   rows: DeferredRow[],
   reviewerLinks: LinkRow[],
-  mode: "ci" | "sweep",
+  mode: "ci" | "request" | "sweep",
   reason: string,
 ): Promise<string[]> {
   const where = { repository: key.repository, prNumber: key.prNumber, headSha: key.headSha };
@@ -815,7 +816,7 @@ async function startDeferred(
   const allowedIds = new Set(allowed.map((l) => l.agentId));
   const targets: ReviewTarget[] = [];
   for (const row of rows) {
-    if (mode === "ci" && !allowedIds.has(row.agentId)) continue;
+    if (mode !== "sweep" && !allowedIds.has(row.agentId)) continue;
     const claimed = await deps.db.deferredReview.deleteMany({ where: { id: row.id } });
     if (claimed.count !== 1) continue;
     if (allowedIds.has(row.agentId)) targets.push({ agentId: row.agentId, checkName: row.checkName });
@@ -841,7 +842,9 @@ async function startDeferred(
 
 /**
  * ci_completed: starts the reviews deferred on this head (see deferUntilCi),
- * unless CI there is still pending (a later completion decides). Never
+ * unless CI there is still pending (a later completion decides). Rows still
+ * waiting for their delegating run (reason "request") are not CI's to start:
+ * startDeferredForRequest hands them over once that run is terminal. Never
  * throws; a failure is logged and the rows stay for the reconciler sweep.
  */
 async function startDeferredAfterCi(
@@ -854,7 +857,7 @@ async function startDeferredAfterCi(
   try {
     const key = { provider: event.provider, repository: event.repository, prNumber, headSha: event.headSha };
     const rows = await deps.db.deferredReview.findMany({
-      where: key,
+      where: { ...key, reason: "ci" },
       select: { id: true, agentId: true, checkName: true },
     });
     if (rows.length === 0) return [];
@@ -874,7 +877,10 @@ async function startDeferredAfterCi(
  * DEFERRED_REVIEW_MAX_AGE_MS, and starts (regardless of CI) those waiting
  * longer than DEFERRED_REVIEW_MAX_WAIT_MS, at most DEFERRED_REVIEW_BATCH per
  * pass, oldest first. Covers CI that never reported, ran very long, or whose
- * completion webhook was missed. Never throws; returns the runs started.
+ * completion webhook was missed. Rows waiting for a delegating run (reason
+ * "request") are released the same way once they are that old, but only when
+ * that run is terminal (or gone): a lead the reconciler marked lost never
+ * reaches its finalizer. Never throws; returns the runs started.
  */
 export async function startDeferredReviews(deps: ReviewStartDeps, now: Date = new Date()): Promise<string[]> {
   const runIds: string[] = [];
@@ -888,6 +894,7 @@ export async function startDeferredReviews(deps: ReviewStartDeps, now: Date = ne
     const due = await deps.db.deferredReview.findMany({
       where: {
         provider: { in: providers },
+        reason: "ci",
         createdAt: { lte: new Date(now.getTime() - DEFERRED_REVIEW_MAX_WAIT_MS) },
       },
       select: {
@@ -922,8 +929,267 @@ export async function startDeferredReviews(deps: ReviewStartDeps, now: Date = ne
         log.warn({ err, repository: key.repository, prNumber: key.prNumber }, "could not start a deferred review");
       }
     }
+    runIds.push(...(await sweepRequestRows(deps, providers, now)));
   } catch (err) {
     log.warn({ err }, "deferred review sweep failed");
+  }
+  return runIds;
+}
+
+/** The sweep's half for request rows: releases those older than the max wait whose delegating run is terminal or gone. */
+async function sweepRequestRows(
+  deps: ReviewStartDeps,
+  providers: HostEvent["provider"][],
+  now: Date,
+): Promise<string[]> {
+  const runIds: string[] = [];
+  try {
+    // Joined in the query, so leads still running never fill the batch ahead of finished ones.
+    const leads = await deps.db.$queryRaw<Array<{ leadRunId: string }>>`
+      SELECT DISTINCT d."leadRunId"
+      FROM "DeferredReview" d
+      LEFT JOIN "Run" r ON r."id" = d."leadRunId"
+      WHERE d."reason" = 'request'
+        AND d."leadRunId" IS NOT NULL
+        AND d."provider" IN (${Prisma.join(providers)})
+        AND d."createdAt" <= ${new Date(now.getTime() - DEFERRED_REVIEW_MAX_WAIT_MS)}
+        AND (r."id" IS NULL OR r."status"::text NOT IN ('pending', 'running'))
+      LIMIT ${DEFERRED_REVIEW_BATCH}`;
+    for (const { leadRunId } of leads) runIds.push(...(await releaseRequestRows(deps, leadRunId, "sweep")));
+  } catch (err) {
+    log.warn({ err }, "deferred review sweep failed for reviews waiting on a delegating run");
+  }
+  return runIds;
+}
+
+/**
+ * The run whose finish a review of this pull request waits for: the root of
+ * the run tree when the PR's opening coding run was delegated (it has a
+ * parent run) and that root is not terminal yet; otherwise null (a
+ * non-delegated coding PR, a finished request, or an unknown marker). A lead's
+ * delegate_to_* calls block until each child is terminal, so a terminal root
+ * means every sibling coding run of the request has finished and opened its
+ * pull request. A continuation's marker resolves to its root coding run, then
+ * up that run's parents. `repository`, when given, must be the coding run's.
+ */
+export async function requestLeadRunId(
+  db: Pick<HostEventDb, "$queryRaw">,
+  prMarkerRunId: string,
+  repository?: string,
+): Promise<string | null> {
+  const repo = repository ?? null;
+  // UNION, not UNION ALL: a parentRunId cycle (never written, but not a constraint) can't recurse forever.
+  const rows = await db.$queryRaw<Array<{ id: string; status: string; isOpener: boolean }>>`
+    WITH RECURSIVE opener AS (
+      SELECT COALESCE(cr."rootCodingRunId", cr."runId") AS "id"
+      FROM "CodingRun" cr
+      WHERE cr."runId" = ${prMarkerRunId}
+        AND (${repo}::text IS NULL OR lower(cr."repository") = lower(${repo}::text))
+    ), up AS (
+      SELECT r."id", r."parentRunId", r."status"::text AS "status" FROM "Run" r JOIN opener o ON r."id" = o."id"
+      UNION
+      SELECT p."id", p."parentRunId", p."status"::text FROM "Run" p JOIN up u ON p."id" = u."parentRunId"
+    )
+    SELECT u."id", u."status", u."id" IN (SELECT "id" FROM opener) AS "isOpener"
+    FROM up u
+    WHERE u."parentRunId" IS NULL
+    LIMIT 1`;
+  const root = rows[0];
+  if (!root || root.isOpener || !RUN_NOT_FINISHED.has(root.status)) return null;
+  return root.id;
+}
+
+/** Run statuses that mean the delegating run has not finished. */
+const RUN_NOT_FINISHED = new Set(["pending", "running"]);
+
+/**
+ * pr_updated for a pull request a delegated coding run opened, while the
+ * request's lead run is still running: records one DeferredReview row per
+ * reviewer (reason "request", with or without waitForCi) and starts nothing;
+ * the lead's finalizer (startDeferredForRequest) or the sweep starts them.
+ * Returns null, to review as without it, for any other pull request, or when
+ * the lead cannot be resolved or the deferral cannot be recorded.
+ */
+async function deferUntilRequest(
+  deps: ReviewStartDeps,
+  host: CodeReviewHost,
+  key: PullRequestKey,
+  links: LinkRow[],
+): Promise<{ runIds: string[] } | null> {
+  if (links.length === 0 || !host.pullRequestOrigin) return null;
+  let leadRunId: string | null;
+  try {
+    const origin = await host.pullRequestOrigin(key.repository, key.prNumber);
+    if (!origin.markerRunId) return null;
+    leadRunId = await requestLeadRunId(deps.db, origin.markerRunId, key.repository);
+  } catch (err) {
+    log.warn(
+      { err, repository: key.repository, prNumber: key.prNumber },
+      "could not read the pull request's delegating run; reviewing as usual",
+    );
+    return null;
+  }
+  if (!leadRunId) return null;
+  const head = { provider: key.provider, repository: key.repository, prNumber: key.prNumber, headSha: key.headSha };
+  try {
+    // Idempotent per head and reviewer, like deferUntilCi.
+    await deps.db.deferredReview.createMany({
+      data: links.map((l) => ({ ...head, agentId: l.agentId, checkName: l.checkName!, reason: "request", leadRunId })),
+      skipDuplicates: true,
+    });
+    // A row this head already had for CI waits for the request too: released only when both are done.
+    await deps.db.deferredReview.updateMany({
+      where: { ...head, agentId: { in: links.map((l) => l.agentId) }, reason: "ci" },
+      data: { reason: "request", leadRunId },
+    });
+  } catch (err) {
+    log.warn(
+      { err, repository: key.repository, prNumber: key.prNumber },
+      "could not record the deferred review; reviewing as usual",
+    );
+    return null;
+  }
+  log.info(
+    { ...head, leadRunId, agentIds: links.map((l) => l.agentId) },
+    "review deferred until the delegating run finishes",
+  );
+  // The lead may have finished between the lookup and the insert, its
+  // finalizer finding no row yet: check once more (rows are claimed by
+  // delete, so a racing finalizer starts each review once). A failure leaves
+  // the rows for the sweep.
+  const runIds: string[] = [];
+  try {
+    const lead = await deps.db.run.findUnique({ where: { id: leadRunId }, select: { status: true } });
+    if (!lead || !RUN_NOT_FINISHED.has(lead.status)) {
+      runIds.push(...(await releaseRequestRows(deps, leadRunId, "request")));
+    }
+  } catch (err) {
+    log.warn(
+      { err, repository: key.repository, prNumber: key.prNumber, leadRunId },
+      "could not re-check the delegating run after deferring; the sweep starts the review",
+    );
+  }
+  return { runIds };
+}
+
+/**
+ * The delegating run `leadRunId` is terminal (it succeeded, failed, or was
+ * cancelled): releases every review that waited for it. A reviewer linked
+ * with waitForCi whose head's CI is still pending is handed to CI (the row
+ * becomes reason "ci", its max wait counted from now); every other row is
+ * started (claimed by delete, so concurrent releases start each review once).
+ * Called from the lead's finalizer, after the related pull requests sections
+ * were rewritten. Never throws.
+ */
+export async function startDeferredForRequest(deps: ReviewStartDeps, leadRunId: string): Promise<void> {
+  try {
+    await releaseRequestRows(deps, leadRunId, "request");
+  } catch (err) {
+    log.warn({ err, leadRunId }, "could not start the reviews waiting for the delegating run");
+  }
+}
+
+async function releaseRequestRows(
+  deps: ReviewStartDeps,
+  leadRunId: string,
+  mode: "request" | "sweep",
+): Promise<string[]> {
+  const rows = await deps.db.deferredReview.findMany({
+    where: { leadRunId, reason: "request" },
+    select: {
+      id: true,
+      provider: true,
+      repository: true,
+      prNumber: true,
+      headSha: true,
+      agentId: true,
+      checkName: true,
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  const groups = new Map<string, typeof rows>();
+  for (const row of rows) {
+    const id = JSON.stringify([row.provider, row.repository, row.prNumber, row.headSha]);
+    groups.set(id, [...(groups.get(id) ?? []), row]);
+  }
+  const runIds: string[] = [];
+  for (const group of groups.values()) {
+    const first = group[0];
+    const provider = first.provider as HostEvent["provider"];
+    const key = { provider, repository: first.repository, prNumber: first.prNumber, headSha: first.headSha };
+    const host = deps.hosts[provider];
+    if (!host) continue;
+    try {
+      const reviewerLinks = (await loadLinks(deps, provider, key.repository)).filter(isReviewerLink);
+      runIds.push(...(await releaseRequestHead(deps, host, key, group, reviewerLinks, mode)));
+    } catch (err) {
+      log.warn(
+        { err, repository: key.repository, prNumber: key.prNumber, leadRunId },
+        "could not start a review waiting for the delegating run",
+      );
+    }
+  }
+  return runIds;
+}
+
+/** One head's request rows: hands waitForCi rows with CI still pending to CI, starts the rest. */
+async function releaseRequestHead(
+  deps: ReviewStartDeps,
+  host: CodeReviewHost,
+  key: PullRequestKey,
+  rows: DeferredRow[],
+  reviewerLinks: LinkRow[],
+  mode: "request" | "sweep",
+): Promise<string[]> {
+  const waitsForCi = new Set(reviewerLinks.filter((l) => l.waitForCi).map((l) => l.agentId));
+  let ciRows = rows.filter((r) => waitsForCi.has(r.agentId));
+  if (ciRows.length > 0 && host.readCi) {
+    let state: string | undefined;
+    try {
+      state = (await host.readCi(key.repository, key.headSha)).state;
+    } catch (err) {
+      log.warn({ err, repository: key.repository, prNumber: key.prNumber }, "could not read CI; reviewing now");
+    }
+    if (state === undefined || !CI_NOT_FINISHED_ON_PUSH.has(state)) ciRows = [];
+  } else ciRows = [];
+  const startNow = rows.filter((r) => !ciRows.includes(r));
+  const runIds =
+    startNow.length > 0
+      ? await startDeferred(deps, host, key, startNow, reviewerLinks, mode, "the delegating run finished")
+      : [];
+  if (ciRows.length === 0 || !host.readCi) return runIds;
+  const ids = ciRows.map((r) => r.id);
+  // Only a row still waiting for the request flips: a concurrent release that claimed it already started it.
+  await deps.db.deferredReview.updateMany({
+    where: { id: { in: ids }, reason: "request" },
+    data: { reason: "ci", createdAt: new Date() },
+  });
+  log.info(
+    {
+      repository: key.repository,
+      prNumber: key.prNumber,
+      headSha: key.headSha,
+      agentIds: ciRows.map((r) => r.agentId),
+    },
+    "the delegating run finished; review deferred until CI finishes",
+  );
+  // As in deferUntilCi: CI may have finished before the flip, its ci_completed skipping the request row.
+  try {
+    const again = (await host.readCi(key.repository, key.headSha)).state;
+    if (!CI_NOT_FINISHED_ON_PUSH.has(again)) {
+      const handed = await deps.db.deferredReview.findMany({
+        where: { id: { in: ids }, reason: "ci" },
+        select: { id: true, agentId: true, checkName: true },
+      });
+      if (handed.length > 0) {
+        runIds.push(...(await startDeferred(deps, host, key, handed, reviewerLinks, "ci", "CI finished")));
+      }
+    }
+  } catch (err) {
+    log.warn(
+      { err, repository: key.repository, prNumber: key.prNumber },
+      "could not re-read CI after the delegating run finished; the sweep starts the review",
+    );
   }
   return runIds;
 }
@@ -1034,6 +1300,10 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       if (event.isFork || reviewerLinks.length === 0) return none;
       const allowed = await authorizedLinks(deps, event, reviewerLinks);
       if (allowed.length === 0) return none;
+      // A PR a delegated coding run opened is reviewed once the whole request
+      // finished, so its sibling PRs exist and the related section is current (#259).
+      const request = await deferUntilRequest(deps, host, event, allowed);
+      if (request) return { runIds: request.runIds, followUps: [] };
       // Reviewers linked with waitForCi review this head only once its CI finished.
       const deferral = await deferUntilCi(
         deps,
