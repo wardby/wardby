@@ -1308,12 +1308,16 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
     const tool = toolsByName.get(name);
     return tool ? scopedHost(name, tool, signal, redactSecretValues) : undefined;
   };
-  /** Every secret value the user tool `name` may read, for console redaction by a stateless gateway. */
+  /** Every secret value the user tool `name` may use (readable or brokered), for console redaction by a stateless gateway. */
   const readableSecretValues = async (name: string): Promise<string[]> => {
     const tool = toolsByName.get(name);
     if (!tool) return [];
     const scoped = scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets);
-    const values = await Promise.all(tool.allowedSecrets.map((secret) => scoped.get(secret).catch(() => undefined)));
+    const values = await Promise.all(
+      tool.allowedSecrets.map((secret) =>
+        (scoped.resolve ? scoped.resolve(secret).then((e) => e?.value) : scoped.get(secret)).catch(() => undefined),
+      ),
+    );
     return values.filter((value): value is string => typeof value === "string");
   };
 

@@ -37,6 +37,7 @@ function fakeDb() {
   let counter = 0;
   return {
     secret: {
+      findUnique: async () => null,
       upsert: async ({
         where,
         create,

@@ -75,6 +75,7 @@ export async function fulfillSecretElicitation(
         ownerId: secret.ownerId,
         createdAt: secret.createdAt,
         updatedAt: secret.updatedAt,
+        broker: null,
       },
     };
   } catch (err) {

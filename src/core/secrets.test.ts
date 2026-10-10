@@ -333,3 +333,15 @@ describe("scopeSecretsAccessor", () => {
     await expect(scoped.get("A")).resolves.toBeUndefined();
   });
 });
+
+describe("scopeSecretsAccessor resolve", () => {
+  it("forwards resolve only for allowed names", async () => {
+    const inner = {
+      get: async () => undefined,
+      resolve: async (name: string) => ({ value: `v-${name}`, broker: null }),
+    };
+    const scoped = scopeSecretsAccessor(inner, ["A"]);
+    expect(await scoped.resolve!("A")).toEqual({ value: "v-A", broker: null });
+    expect(await scoped.resolve!("B")).toBeUndefined();
+  });
+});
