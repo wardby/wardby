@@ -182,7 +182,8 @@ export async function handleSecretElicitationForm(
   }
 
   if (method === "POST") {
-    const body = await readFormBody();
+    const body = await readBodyOr413(readFormBody, res);
+    if (!body) return;
     const value = body.get("value") ?? "";
     if (!value) {
       html(res, 400, "<h1>A value is required.</h1>");
@@ -202,6 +203,21 @@ export async function handleSecretElicitationForm(
   }
 
   res.writeHead(405).end();
+}
+
+/** Reads the POST body, or answers 413 (over the cap) and returns undefined. */
+async function readBodyOr413(
+  readFormBody: () => Promise<URLSearchParams>,
+  res: ServerResponse,
+): Promise<URLSearchParams | undefined> {
+  try {
+    return await readFormBody();
+  } catch (err) {
+    if (!(err instanceof Error && err.message === "body_too_large")) throw err;
+    res.setHeader("connection", "close");
+    html(res, 413, "<h1>Value too large</h1><p>The form was larger than this page accepts.</p>");
+    return undefined;
+  }
 }
 
 /** The unbroker link's page: show what is brokered now, and remove it only when the person types the secret's name. */
@@ -230,7 +246,8 @@ async function handleUnbroker(
   }
 
   if (method === "POST") {
-    const body = await readFormBody();
+    const body = await readBodyOr413(readFormBody, res);
+    if (!body) return;
     if (body.get("confirm") !== payload.secretName) {
       html(res, 400, `<h1>${escape("Type the secret's name to confirm.")}</h1>`);
       return;
@@ -247,21 +264,36 @@ async function handleUnbroker(
   res.writeHead(405).end();
 }
 
-/** Reads a small `application/x-www-form-urlencoded` body (8 KiB cap — a secret value and its broker fields, nothing more). */
+/**
+ * The largest form body accepted: room for the largest valid AWS SigV4 value
+ * (an 8 KiB session token, up to 3x after URL encoding) plus the broker fields.
+ */
+export const FORM_BODY_LIMIT = 32 * 1024;
+
+/**
+ * Reads a small `application/x-www-form-urlencoded` body. Over FORM_BODY_LIMIT it
+ * rejects with `body_too_large` and discards the rest of the upload, so the
+ * handler can still answer 413 on the same connection.
+ */
 export function readFormBody(req: IncomingMessage): Promise<URLSearchParams> {
   return new Promise((resolve, reject) => {
     let size = 0;
+    let tooLarge = false;
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => {
+      if (tooLarge) return;
       size += chunk.length;
-      if (size > 8192) {
+      if (size > FORM_BODY_LIMIT) {
+        tooLarge = true;
+        chunks.length = 0;
         reject(new Error("body_too_large"));
-        req.destroy();
         return;
       }
       chunks.push(chunk);
     });
-    req.on("end", () => resolve(new URLSearchParams(Buffer.concat(chunks).toString("utf8"))));
+    req.on("end", () => {
+      if (!tooLarge) resolve(new URLSearchParams(Buffer.concat(chunks).toString("utf8")));
+    });
     req.on("error", reject);
   });
 }

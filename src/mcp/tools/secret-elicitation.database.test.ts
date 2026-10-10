@@ -397,6 +397,30 @@ describe.skipIf(!process.env.DATABASE_URL)("brokered secrets over MCP (database)
       await client.close();
     });
 
+    it("accepts the largest valid AWS SigV4 value with its broker fields (well over 8 KiB encoded)", async () => {
+      const p = await owner();
+      const value = JSON.stringify({
+        accessKeyId: "AKIAEXAMPLEEXAMPLE12",
+        secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        sessionToken: "ab+/".repeat(2048),
+      });
+      const fields = {
+        value,
+        brokered: "1",
+        hosts: "s3.us-east-1.amazonaws.com",
+        placement: "aws-sigv4",
+        awsRegion: "us-east-1",
+        awsService: "s3",
+      };
+      const encoded = new URLSearchParams(fields).toString();
+      expect(encoded.length).toBeGreaterThan(12 * 1024);
+      expect(encoded.length).toBeLessThan(32 * 1024);
+      const res = await post(await serve(() => ({ ownerId: p, secretName: "AWS", kind: "create" })), fields);
+      expect(res.status).toBe(200);
+      const saved = await db.secret.findUniqueOrThrow({ where: { ownerId_name: { ownerId: p, name: "AWS" } } });
+      expect(saved.broker).toMatchObject({ placement: { kind: "aws-sigv4", region: "us-east-1", service: "s3" } });
+    });
+
     it("a stale unbroker link shows the refusal and removes nothing", async () => {
       const p = await owner();
       const { mcp, client, call } = await connect(p);

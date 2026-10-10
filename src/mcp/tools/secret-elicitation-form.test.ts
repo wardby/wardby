@@ -409,4 +409,38 @@ describe("handleSecretElicitationForm", () => {
     const { getSecretElicitationOutcome } = await import("./secret-elicitation.js");
     expect(await getSecretElicitationOutcome("p1", "GH", db)).toBeUndefined();
   });
+
+  it("POST with a body over the 32 KiB cap gets a 413 page instead of crashing", async () => {
+    const db = fakeDb();
+    const base = await startTestServer({
+      verify: async () => ({ ownerId: "p1", secretName: "FORM_TOO_BIG", kind: "create" }),
+      secrets: fakeCipher(),
+      db,
+    });
+    const res = await fetch(`${base}/secret?t=whatever`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ value: "x".repeat(40 * 1024) }),
+    });
+    expect(res.status).toBe(413);
+    expect(await res.text()).toContain("Value too large");
+    const { getSecretElicitationOutcome } = await import("./secret-elicitation.js");
+    expect(await getSecretElicitationOutcome("p1", "FORM_TOO_BIG", db)).toBeUndefined();
+    // The server still answers afterwards.
+    expect((await fetch(`${base}/secret?t=whatever`)).status).toBe(200);
+  });
+
+  it("an oversize POST to an unbroker link also gets a 413", async () => {
+    const base = await startTestServer({
+      verify: async () => ({ ownerId: "p1", secretName: "GH", kind: "unbroker", brokerHash: "h" }),
+      secrets: fakeCipher(),
+      db: fakeDb([{ name: "GH", ownerId: "p1", broker: BROKER }]),
+    });
+    const res = await fetch(`${base}/secret?t=whatever`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ confirm: "x".repeat(40 * 1024) }),
+    });
+    expect(res.status).toBe(413);
+  });
 });
