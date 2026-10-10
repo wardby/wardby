@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "#prisma";
 import { FakeKubernetesApi } from "../jobs/fake-kubernetes-api.js";
-import { buildConfiguredExecutor } from "./composition.js";
+import { buildConfiguredExecutor, reReviewOnCodingRunTerminal } from "./composition.js";
 import { RoutingExecutor } from "./routing.js";
 import type { Executor } from "./types.js";
 
@@ -249,5 +249,18 @@ describe("buildConfiguredExecutor", () => {
     ).toThrow(
       "CODING_WORKER_IMAGE (Codex) or both CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE (Claude Code) are required when JOB_LAUNCHER=kubernetes.",
     );
+  });
+});
+
+describe("reReviewOnCodingRunTerminal", () => {
+  it("starts the no-change re-review in the background and swallows its failure", async () => {
+    const review = await import("../../core/review-fix.js");
+    const spy = vi.spyOn(review, "reReviewAfterNoChangeFix");
+    spy.mockRejectedValueOnce(new Error("boom"));
+    const deps = { db, executor: native, hosts: {}, repoAccess: {} } as never;
+    const hook = reReviewOnCodingRunTerminal(() => deps);
+    expect(hook("run-1")).toBeUndefined();
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledWith("run-1", deps));
+    spy.mockRestore();
   });
 });

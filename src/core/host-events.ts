@@ -463,9 +463,20 @@ export function unknownPriorRunBody(priorRunId: string): string {
   );
 }
 
-interface ReviewTarget {
+export interface ReviewTarget {
   agentId: string;
   checkName: string;
+}
+
+/** A review run's task: the head to review, plus any extra context its trigger adds. */
+export function reviewTaskText(
+  repository: string,
+  prNumber: number,
+  headSha: string,
+  context?: { task: string; untrustedContext: string },
+): string {
+  const task = `Review pull request #${prNumber} in ${repository} (head ${headSha}).`;
+  return context ? composeTaskOverride(`${task}\n\n${context.task}`, context.untrustedContext) : task;
 }
 
 /** Run states that already cover a commit: a review of it is under way or done. */
@@ -498,7 +509,8 @@ async function alreadyReviewed(
   return prior !== null;
 }
 
-async function startReviews(
+/** Starts one review run per target on a pull request head; returns the started run ids. */
+export async function startReviews(
   deps: ReviewStartDeps,
   host: CodeReviewHost,
   repository: string,
@@ -507,6 +519,12 @@ async function startReviews(
   targets: ReviewTarget[],
   /** True for automatic triggers; an explicit re-run or `@wardby review` always runs. */
   skipReviewedCommits = false,
+  /**
+   * Extra context for this review: `task` (written by wardby, trusted) is appended to the
+   * review task; `untrustedContext` (anything a model or a person wrote) travels separately,
+   * delivered as data.
+   */
+  context?: { task: string; untrustedContext: string },
 ): Promise<string[]> {
   const runIds: string[] = [];
   // One lookup per PR, not per reviewer, and none at all when every reviewer
@@ -558,7 +576,7 @@ async function startReviews(
         selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
         agentId: target.agentId,
         trigger: "host_event",
-        taskOverride: `Review pull request #${prNumber} in ${repository} (head ${headSha}).`,
+        taskOverride: reviewTaskText(repository, prNumber, headSha, context),
         attribution: await linkedAttribution(),
         afterPersist: checkId
           ? async (tx, run) => {

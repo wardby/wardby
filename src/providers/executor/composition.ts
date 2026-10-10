@@ -13,6 +13,7 @@ import { summarizeRegistryFetches } from "../../coding/registry/report.js";
 import { drainCodingQueue } from "../../core/coding-queue.js";
 import { prismaServiceStateReporter } from "../../core/coding-service-status.js";
 import { logger } from "../../core/logger.js";
+import { reReviewAfterNoChangeFix, type ReReviewDeps } from "../../core/review-fix.js";
 import { EnvironmentCredentialResolver } from "../coding-proxy/environment-credentials.js";
 import { CodingProxy } from "../coding-proxy/proxy.js";
 import { PrismaProxyLedger } from "../coding-proxy/prisma-ledger.js";
@@ -34,6 +35,20 @@ import { buildIssueTrackers } from "../issue-tracker/index.js";
 import { buildReviewHosts } from "../review-host/index.js";
 
 const compositionLog = logger.child({ module: "executor-composition" });
+
+/**
+ * The coding-run terminal hook: a review-fix round's coding run that made no change re-reviews
+ * the PR once (core/review-fix.ts). Started in the background so the executor's terminal path
+ * (and the slot release after it) never waits on the host; idempotent, and never throws.
+ * `deps` is read only when a run finishes, after composition returned.
+ */
+export function reReviewOnCodingRunTerminal(deps: () => ReReviewDeps): (runId: string) => void {
+  return (runId) => {
+    void Promise.resolve()
+      .then(() => reReviewAfterNoChangeFix(runId, deps()))
+      .catch((err: unknown) => compositionLog.warn({ err, runId }, "no-change re-review hook failed"));
+  };
+}
 
 export interface ConfiguredExecutorOptions {
   native: Executor;
@@ -160,7 +175,9 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   }
   const issueTrackers = buildIssueTrackers(env);
   const concurrency = loadCodingConcurrencyConfig(env);
-  // The release hook needs the composed RoutingExecutor, which only exists
+  const reviewHosts = buildReviewHosts(env, options.db);
+  const repoAccess = options.repoAccess ?? createRepoAccessGate({ db: options.db, hosts: reviewHosts });
+  // The release and terminal hooks need the composed RoutingExecutor, which only exists
   // after the ContainerExecutor it wraps is built. The closure reads
   // `composed` only when a run finishes, which is after this function returns.
   const coding = new ContainerExecutor({
@@ -179,13 +196,19 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     anthropicCredentialRef: config.anthropicCredentialRef,
     limits: { cpus: config.cpus, memoryMb: config.memoryMb, pids: config.pids, diskMb: config.diskMb },
     maxDiskMb: config.maxDiskMb,
-    repoAccess:
-      options.repoAccess ?? createRepoAccessGate({ db: options.db, hosts: buildReviewHosts(env, options.db) }),
+    repoAccess,
     issueUrl: (provider, key) => (provider === "jira" ? issueTrackers.jira?.issueUrl(key) : undefined),
     registryReport: async (runId) => {
       const rows = await options.db.registryFetch.findMany({ where: { runId }, orderBy: { createdAt: "asc" } });
       return summarizeRegistryFetches(rows);
     },
+    onCodingRunTerminal: reReviewOnCodingRunTerminal((): ReReviewDeps => ({
+      db: options.db,
+      executor: composed,
+      hosts: reviewHosts,
+      repoAccess,
+      issueTrackers,
+    })),
     onSlotReleased: () => {
       void drainCodingQueue({
         db: options.db,
@@ -199,7 +222,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       });
     },
   });
-  const composed = new RoutingExecutor(
+  const composed: Executor = new RoutingExecutor(
     new PrismaExecutionKindResolver(options.db),
     options.native,
     coding,
