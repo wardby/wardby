@@ -156,3 +156,14 @@ it("cancels while DNS resolution is pending", async () => {
   abort.abort();
   await expect(pending).rejects.toThrow(/cancelled/);
 });
+it("returns a redirect instead of following it when followRedirects is false", async () => {
+  const connect = vi.fn(async () => response(302, { location: "https://elsewhere.example/" }));
+  const result = await safeFetch(
+    "https://public.example/",
+    {},
+    { resolve: publicDns, connect, followRedirects: false },
+  );
+  expect(connect).toHaveBeenCalledTimes(1);
+  expect(result.status).toBe(302);
+  expect(result.headers.location).toBe("https://elsewhere.example/");
+});
