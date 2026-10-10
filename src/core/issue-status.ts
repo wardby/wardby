@@ -38,9 +38,17 @@ export function issueStatusRow(
   return { runId, provider: "jira", issueKey: event.issueKey, visibilityRole };
 }
 
-/** Two significant digits, never exponent form: $0.0035, $0.12, $1.8, $12, $1200. */
-const SPEND = new Intl.NumberFormat("en-US", { maximumSignificantDigits: 2, useGrouping: false });
-const usd = (amount: number): string => `$${SPEND.format(amount)}`;
+/**
+ * Cents from $1 up ($12.34, $1234.50); below $1, two significant digits with at
+ * least two decimals so fractions of a cent stay readable ($0.50, $0.12, $0.0035).
+ * Never exponent form.
+ */
+const usd = (amount: number): string => {
+  const abs = Math.abs(amount);
+  const decimals = abs === 0 || abs >= 1 ? 2 : Math.max(2, 1 - Math.floor(Math.log10(abs)));
+  // Trailing zeros past the cents are noise ($0.010, $0.100 from rounding up).
+  return `$${amount.toFixed(Math.min(decimals, 20)).replace(/(\.\d\d\d*?)0+$/, "$1")}`;
+};
 
 export function formatSpendLine(input: {
   treeUsd: number;

@@ -61,15 +61,15 @@ describe.skipIf(!process.env.DATABASE_URL)("spendLine (database)", () => {
 
   it("totals the whole run tree (grandchildren too), the issue, and the tree's models by cost", async () => {
     expect(await spendLine(db, root)).toBe(
-      "Agent spend: $6 this run · $10 on this issue so far · model-a $4, model-b $2",
+      "Agent spend: $6.00 this run · $10.00 on this issue so far · model-a $4.00, model-b $2.00",
     );
   });
 
   it("counts only the subtree under a child run", async () => {
-    expect(await spendLine(db, child)).toContain("$5 this run · $10 on this issue so far");
+    expect(await spendLine(db, child)).toContain("$5.00 this run · $10.00 on this issue so far");
   });
 
   it("gives no issue total for an unattributed run", async () => {
-    expect(await spendLine(db, solo)).toBe("Agent spend: $0.5 this run");
+    expect(await spendLine(db, solo)).toBe("Agent spend: $0.50 this run");
   });
 });

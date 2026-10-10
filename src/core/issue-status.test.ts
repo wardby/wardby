@@ -265,7 +265,7 @@ describe("completeIssueStatus", () => {
     const { markdown } = (t.editComment as any).mock.calls[0][2];
     const lines = markdown.trimEnd().split("\n");
     expect(markdown).toContain(
-      "Agent spend: $1.8 this run · $4.1 on this issue so far · claude-sonnet-4-6 $1.5, claude-haiku-4-5 $0.32",
+      "Agent spend: $1.84 this run · $4.12 on this issue so far · claude-sonnet-4-6 $1.52, claude-haiku-4-5 $0.32",
     );
     expect(lines.at(-1)).toMatch(/^_wardby run `r1`_$/);
     expect(isStatusComment(adfToText(markdownToAdf(markdown)))).toBe(true);
@@ -276,7 +276,7 @@ describe("completeIssueStatus", () => {
     const d = db(row, { id: "r1", agentId: "a1", status: "succeeded", finalText: "ok", costUsd: null });
     await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: "ok" }, { jira: t });
     const { markdown } = (t.editComment as any).mock.calls[0][2];
-    expect(markdown).toContain("Agent spend: $0 this run");
+    expect(markdown).toContain("Agent spend: $0.00 this run");
     expect(markdown).not.toContain("on this issue");
   });
   it("omits the spend line but still posts the outcome when the cost lookup fails", async () => {
@@ -523,20 +523,26 @@ describe("formatSpendLine", () => {
           { model: "claude-haiku-4-5", costUsd: 0.32 },
         ],
       }),
-    ).toBe("Agent spend: $1.8 this run · $4.1 on this issue so far · claude-sonnet-4-6 $1.5, claude-haiku-4-5 $0.32");
+    ).toBe(
+      "Agent spend: $1.84 this run · $4.12 on this issue so far · claude-sonnet-4-6 $1.52, claude-haiku-4-5 $0.32",
+    );
   });
 
   it("omits the issue total when unattributed and the models when unknown", () => {
     expect(formatSpendLine({ treeUsd: 0.01, issueUsd: null, models: [] })).toBe("Agent spend: $0.01 this run");
   });
 
-  it("rounds every amount to 2 significant digits, never in exponent form", () => {
+  it("shows cents for $1 and up, and 2 significant digits below $1, never in exponent form", () => {
     const line = (usd: number) => formatSpendLine({ treeUsd: usd, issueUsd: null, models: [] });
     expect(line(0.0034567)).toBe("Agent spend: $0.0035 this run");
     expect(line(0.1234)).toBe("Agent spend: $0.12 this run");
-    expect(line(12.345)).toBe("Agent spend: $12 this run");
-    expect(line(1234.5)).toBe("Agent spend: $1200 this run");
+    expect(line(12.343)).toBe("Agent spend: $12.34 this run");
+    expect(line(1234.5)).toBe("Agent spend: $1234.50 this run");
+    expect(line(1.84)).toBe("Agent spend: $1.84 this run");
+    expect(line(0.5)).toBe("Agent spend: $0.50 this run");
     expect(line(0.00000012)).toBe("Agent spend: $0.00000012 this run");
-    expect(line(0)).toBe("Agent spend: $0 this run");
+    expect(line(0)).toBe("Agent spend: $0.00 this run");
+    expect(line(0.0999)).toBe("Agent spend: $0.10 this run");
+    expect(line(0.0012)).toBe("Agent spend: $0.0012 this run");
   });
 });
