@@ -165,8 +165,7 @@ describe("reReviewAfterNoChangeFix", () => {
     // The head was already reviewed (the fix changed nothing): the re-review must not be skipped as a repeat.
     expect(skipReviewed).toBe(false);
     expect(context?.untrustedContext).toBe(
-      "A review-fix round concluded that no code change is needed: The finding is wrong: CI is green on #8.. " +
-        "Re-check your earlier finding against the current code and related pull requests.",
+      "A review-fix round concluded that no code change is needed: The finding is wrong: CI is green on #8.",
     );
     // The model-written summary never reaches the trusted task part.
     expect(context?.task).not.toContain("CI is green");
@@ -175,8 +174,8 @@ describe("reReviewAfterNoChangeFix", () => {
     );
     // Claimed on the requesting review's check, then the round recorded, both before the dispatch.
     expect(claim).toHaveBeenCalledWith({
-      where: { runId: "review-run-1", ciRereviewAt: null },
-      data: { ciRereviewAt: expect.any(Date) },
+      where: { runId: "review-run-1", noChangeRereviewAt: null },
+      data: { noChangeRereviewAt: expect.any(Date) },
     });
     expect(addLabel).toHaveBeenCalledWith(REPO, 7, "wardby-autofix-2");
     expect(addLabel.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(startReviews).mock.invocationCallOrder[0]);

@@ -1307,29 +1307,31 @@ model DeferredReview {
 /// The host check a run owns, so the review tool can complete it and the
 /// run finalizer can close it if the run ends without publishing.
 model RunHostCheck {
-  runId             String    @id
-  run               Run       @relation(fields: [runId], references: [id], onDelete: Cascade)
-  provider          String
-  repository        String
-  checkId           String
-  headSha           String
+  runId              String    @id
+  run                Run       @relation(fields: [runId], references: [id], onDelete: Cascade)
+  provider           String
+  repository         String
+  checkId            String
+  headSha            String
   /// The pull request the run was dispatched for. The review tool only
   /// completes or creates a check for this PR. Null on rows written before it
   /// existed: such a run publishes without a check.
-  prNumber          Int?
-  completedAt       DateTime?
+  prNumber           Int?
+  completedAt        DateTime?
   /// The verdict the run published on its own check ("APPROVE",
   /// "CHANGES_REQUESTED", "COMMENT"); null until then, or when the check was
   /// closed without one (superseded, or by the finalizer).
-  verdict           String?
+  verdict            String?
   /// The published review's summary and body (capped), kept for an automatic
   /// fix round started when the run finishes.
-  reviewBody        String?
+  reviewBody         String?
   /// The run published COMMENT while CI on its head was still running or had
   /// not reported yet. CI finishing on that head later re-runs the review.
-  ciPendingAtReview Boolean?
+  ciPendingAtReview  Boolean?
   /// When CI finishing on this head re-ran the review: at most once per head.
-  ciRereviewAt      DateTime?
+  ciRereviewAt       DateTime?
+  /// When a no-change review-fix round re-reviewed this CHANGES_REQUESTED review: at most once.
+  noChangeRereviewAt DateTime?
 }
 
 /// De-duplicates host webhook redeliveries; pruned after 7 days.

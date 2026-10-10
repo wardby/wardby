@@ -154,6 +154,8 @@ describe.skipIf(!process.env.DATABASE_URL)("reReviewAfterNoChangeFix (PostgreSQL
     ]);
     expect(labels).toEqual(["wardby-autofix-1", "wardby-autofix-2"]);
     const claimed = await db.runHostCheck.findUnique({ where: { runId: reviewRun } });
-    expect(claimed?.ciRereviewAt).toBeInstanceOf(Date);
+    expect(claimed?.noChangeRereviewAt).toBeInstanceOf(Date);
+    // The CI re-review claim is a separate column, untouched here.
+    expect(claimed?.ciRereviewAt).toBeNull();
   });
 });

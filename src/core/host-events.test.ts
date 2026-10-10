@@ -1454,6 +1454,16 @@ describe("routeHostEvent: CI finished", () => {
     }
   });
 
+  it("still re-runs a no-change re-review that only commented while CI was pending", async () => {
+    // r0 requested changes and a no-change fix round re-reviewed it (its own claim column);
+    // the re-review r1 then published COMMENT before CI finished.
+    const { d } = setup([
+      row({ runId: "r0", verdict: "CHANGES_REQUESTED", ciPendingAtReview: false, noChangeRereviewAt: new Date() }),
+      row(),
+    ]);
+    await expect(routeHostEvent(ci, d)).resolves.toEqual({ runIds: ["run-a1"], followUps: [] });
+  });
+
   it("starts nothing when another delivery already claimed the row", async () => {
     const { d, updateMany } = setup([row()]);
     updateMany.mockResolvedValueOnce({ count: 0 });
