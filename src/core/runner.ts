@@ -25,6 +25,7 @@ import type { EngineProgress, EngineResult, LoadedTool } from "../providers/engi
 import { runStepInline, type StepRunner } from "../providers/engine/types.js";
 import { isLlmEffort } from "../providers/llm/types.js";
 import { createPrivilegedHost, type PrivilegedHost } from "../sandbox/host-functions.js";
+import { consoleRedactionValues } from "../sandbox/secret-broker.js";
 import type { safeFetch } from "../sandbox/safe-fetch.js";
 import { runUserToolCall } from "../sandbox/user-tool.js";
 import {
@@ -1319,10 +1320,14 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
     const scoped = scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets);
     const values = await Promise.all(
       tool.allowedSecrets.map((secret) =>
-        (scoped.resolve ? scoped.resolve(secret).then((e) => e?.value) : scoped.get(secret)).catch(() => undefined),
+        (scoped.resolve
+          ? scoped.resolve(secret).then((e) => (e ? consoleRedactionValues(e) : []))
+          : scoped.get(secret).then((v) => (v === undefined ? [] : [v]))
+        ).catch(() => []),
       ),
     );
-    return values.filter((value): value is string => typeof value === "string");
+    // A SigV4 secret's key and token alone, too: the same set the in-process host redacts.
+    return values.flat().filter((value): value is string => typeof value === "string");
   };
 
   const runUserTool = async (name: string, argsJson: string): Promise<string> => {

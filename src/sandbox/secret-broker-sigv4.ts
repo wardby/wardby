@@ -30,6 +30,8 @@ export async function signSigV4(
       throw new Error(`secret_broker_conflict: header "${h}" is set by the SigV4 signer for "${secret.name}"`);
     }
   }
+  // safeFetch replaces accept-encoding after signing; a signed one would no longer match.
+  delete headers["accept-encoding"];
   const { region, service } = secret.broker.placement;
   const signer = new SignatureV4({
     credentials: parseSigV4Value(secret.value),

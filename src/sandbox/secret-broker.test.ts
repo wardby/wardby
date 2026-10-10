@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyBrokerPlacements,
   brokerScrubValues,
+  consoleRedactionValues,
   checkBrokerDestination,
   scrubBrokeredResponse,
   type BrokeredSecret,
@@ -39,6 +40,17 @@ describe("checkBrokerDestination", () => {
     "https://API.GITHUB.COM:444/repos/o/r",
   ])("denies %s", (url) => {
     expect(() => checkBrokerDestination(url, [gh])).toThrow(/^secret_broker_destination_denied/);
+  });
+  it.each(["/repos/..%2fgists", "/repos/..%2Fgists", "/repos/..%5cgists", "/repos/..%5Cgists"])(
+    "denies an encoded path separator under a path prefix: %s",
+    (path) => {
+      expect(() => checkBrokerDestination(`https://api.github.com${path}`, [gh])).toThrow(
+        /^secret_broker_destination_denied/,
+      );
+    },
+  );
+  it("allows an encoded separator when the secret has no path prefixes", () => {
+    expect(() => checkBrokerDestination("https://maps.example.com/a%2fb", [q])).not.toThrow();
   });
   it("requires every named secret to allow the destination", () => {
     expect(() => checkBrokerDestination("https://api.github.com/repos/o/r", [gh, q])).toThrow(
@@ -193,6 +205,21 @@ describe("scrubBrokeredResponse", () => {
     expect(text).not.toMatch(/abc8Q|xyz|def|ghi/);
     expect(text).toBe("https://maps.example.com/v1?a=1&k=[REDACTED] k=[REDACTED] [REDACTED]");
   });
+  it("scrubs the status text", () => {
+    const out = scrubBrokeredResponse(
+      { url: "https://x/", headers: {}, bodyBase64: "", statusText: `Bad token ${secret}` },
+      [secret],
+    );
+    expect(out.statusText).toBe("Bad token [REDACTED]");
+  });
+  it("scrubs a value that is a prefix of another value without leaving the longer one's tail", () => {
+    const out = scrubBrokeredResponse(
+      { url: "https://x/", headers: { "x-echo": "abcdef1XYZ" }, bodyBase64: encode("abcdef1XYZ abcdef1") },
+      ["abcdef1", "abcdef1XYZ"],
+    );
+    expect(out.headers["x-echo"]).toBe("[REDACTED]");
+    expect(Buffer.from(out.bodyBase64, "base64").toString("utf8")).toBe("[REDACTED] [REDACTED]");
+  });
   it("places a header value containing $ patterns verbatim", () => {
     const dollar: BrokeredSecret = {
       name: "D",
@@ -209,5 +236,31 @@ describe("scrubBrokeredResponse", () => {
       broker: { hosts: ["s3.amazonaws.com"], placement: { kind: "aws-sigv4", region: "us-east-1", service: "s3" } },
     };
     expect(brokerScrubValues([sig]).sort()).toEqual(["secretkey123", "tok-123456"]);
+  });
+});
+
+describe("consoleRedactionValues", () => {
+  it("is the value alone for a readable secret, and adds a SigV4 secret's key and token", () => {
+    expect(consoleRedactionValues({ value: "plain-value", broker: null })).toEqual(["plain-value"]);
+    expect(consoleRedactionValues({ value: gh.value, broker: gh.broker })).toEqual([gh.value]);
+    const value = '{"accessKeyId":"AKID","secretAccessKey":"secretkey123","sessionToken":"tok-123456"}';
+    const broker = {
+      hosts: ["s3.amazonaws.com"],
+      placement: { kind: "aws-sigv4", region: "us-east-1", service: "s3" },
+    };
+    expect(consoleRedactionValues({ value, broker } as Parameters<typeof consoleRedactionValues>[0])).toEqual([
+      value,
+      "secretkey123",
+      "tok-123456",
+    ]);
+  });
+  it("falls back to the value alone when a SigV4 value does not parse", () => {
+    const broker = {
+      hosts: ["s3.amazonaws.com"],
+      placement: { kind: "aws-sigv4", region: "us-east-1", service: "s3" },
+    };
+    expect(
+      consoleRedactionValues({ value: "not-json", broker } as Parameters<typeof consoleRedactionValues>[0]),
+    ).toEqual(["not-json"]);
   });
 });

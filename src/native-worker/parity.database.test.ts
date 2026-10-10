@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { createPrismaClient } from "../core/db.js";
+import { logger } from "../core/logger.js";
 import { NativeEngine } from "../core/engine-native.js";
 import { executeRun, type NativeRunProviders } from "../core/runner.js";
 import type { LlmStreamEvent } from "../providers/llm/types.js";
@@ -254,6 +255,21 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox worker parity (databa
       },
     });
 
+    // Tool console output: in every mode the trusted side (in-process host or gateway) logs it
+    // through the shared logger's "sandbox-tool" child, so capture that child's lines.
+    const consoleLines: string[] = [];
+    const capture = Object.fromEntries(
+      ["info", "warn", "error"].map((level) => [
+        level,
+        (...args: unknown[]) => consoleLines.push(JSON.stringify(args)),
+      ]),
+    );
+    const realChild = logger.child.bind(logger);
+    const childSpy = vi
+      .spyOn(logger, "child")
+      .mockImplementation(((bindings: Record<string, unknown>, options?: object) =>
+        bindings.module === "sandbox-tool" ? capture : realChild(bindings, options)) as typeof logger.child);
+
     const turns = () => scriptFor("ghcall", {}, ["Fetched."]);
     const results = [];
     for (const [mode, launcher] of [
@@ -270,8 +286,13 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox worker parity (databa
       expect(JSON.stringify(result.requests)).not.toContain(BROKERED_VALUE);
       const toolResult = result.requests[1].messages.find((m) => m.role === "tool");
       expect(toolResult?.content).toContain('{"status":200,"echo":"Bearer [REDACTED]"}');
+      // The tool logged the (scrubbed) response body, and no log line carries the value.
+      expect(consoleLines.join("\n")).toContain("sawAuth");
+      expect(consoleLines.join("\n")).not.toContain(BROKERED_VALUE);
+      consoleLines.length = 0;
       results.push(result);
     }
+    childSpy.mockRestore();
     const [inProcess, sandboxed, separateProcess] = results;
     expect(summary(sandboxed)).toEqual(summary(inProcess));
     expect(summary(separateProcess)).toEqual(summary(inProcess));

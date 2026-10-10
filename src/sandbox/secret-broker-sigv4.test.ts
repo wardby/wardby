@@ -28,6 +28,16 @@ describe("signSigV4", () => {
     expect(out.headers.host).toBeUndefined();
   });
 
+  it("leaves a tool-set Accept-Encoding out of the signature (safeFetch overwrites it after signing)", async () => {
+    const out = await signSigV4(
+      { url: "https://example.amazonaws.com/", method: "GET", headers: { "Accept-Encoding": "gzip" } },
+      secret,
+      new Date("2015-08-30T12:36:00Z"),
+    );
+    expect(out.headers.authorization).toContain("SignedHeaders=host;x-amz-date,");
+    expect(out.headers["accept-encoding"]).toBeUndefined();
+  });
+
   it("adds the session token header", async () => {
     const withToken = {
       ...secret,

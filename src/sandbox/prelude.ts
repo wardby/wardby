@@ -341,8 +341,10 @@ globalThis.fetch = async (url, init) => {
     if (body instanceof Blob) body = await body.text();
     else body = JSON.stringify(body);
   }
-  // Brokered secrets: named here, placed by the host, never visible to this code.
-  const secretNames = init && Array.isArray(init.secrets) ? init.secrets.map(String) : [];
+  // Brokered secrets: named here, placed by the host, never visible to this code. Anything but a list
+  // goes through unchanged, so the host refuses it rather than fetching without the secret.
+  const secretNames =
+    !init || init.secrets === undefined ? [] : Array.isArray(init.secrets) ? init.secrets.map(String) : init.secrets;
   const raw = await __bridge_fetch(
     JSON.stringify([String(url), { method: (init && init.method) || "GET", headers: (init && init.headers) || {}, body }, secretNames]),
   );

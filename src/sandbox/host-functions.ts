@@ -16,6 +16,7 @@ import { safeFetch } from "./safe-fetch.js";
 import {
   applyBrokerPlacements,
   brokerScrubValues,
+  consoleRedactionValues,
   checkBrokerDestination,
   scrubBrokeredResponse,
   type BrokeredSecret,
@@ -178,7 +179,7 @@ export function createPrivilegedHost(options: PrivilegedHostOptions): Privileged
         assertBrokerableValue(entry.broker, entry.value);
         const secret: BrokeredSecret = { name, value: entry.value, broker: entry.broker };
         // Redact from console output from here on, before any network call that might throw.
-        for (const value of [secret.value, ...brokerScrubValues([secret])]) fetchedSecretValues.add(value);
+        for (const value of consoleRedactionValues(entry)) fetchedSecretValues.add(value);
         brokered.push(secret);
       }
       const sigv4 = brokered.filter((s) => s.broker.placement.kind === "aws-sigv4");

@@ -502,6 +502,22 @@ describe("brokered secrets through fetch", () => {
     expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("secret_not_brokered") });
   });
 
+  it.each(['"GH"', "{ 0: 'GH' }", "null"])(
+    "refuses a non-list secrets option (%s) instead of fetching unbrokered",
+    async (opt) => {
+      const { impl, calls } = echoFetch();
+      const result = await runInSandbox(
+        base(
+          `return await fetch('https://api.github.com/repos/o/r', { secrets: ${opt} });`,
+          impl,
+          brokeredSecrets({ GH }),
+        ),
+      );
+      expect(calls).toHaveLength(0);
+      expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("secret_not_brokered") });
+    },
+  );
+
   it("redacts a brokered value from console output", async () => {
     const { logger, calls } = captureLogger();
     const { impl } = echoFetch();

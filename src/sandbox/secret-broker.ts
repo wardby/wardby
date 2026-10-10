@@ -42,6 +42,10 @@ export function checkBrokerDestination(url: string, secrets: readonly BrokeredSe
     if (prefixes.length && !prefixes.some((p) => parsed.pathname.startsWith(p))) {
       deny(`"${s.name}" may not be sent to path ${parsed.pathname}`);
     }
+    // An encoded slash or backslash may be decoded upstream into a separator, escaping the prefix.
+    if (prefixes.length && /%2f|%5c/i.test(parsed.pathname)) {
+      deny(`"${s.name}" may not be sent to a path with an encoded separator`);
+    }
   }
 }
 
@@ -115,6 +119,21 @@ export function brokerScrubValues(secrets: readonly BrokeredSecret[]): string[] 
   });
 }
 
+/**
+ * The strings console output must not show for one secret the tool may use: its value and, for a
+ * brokered SigV4 secret, the secret key and session token alone. A value that won't parse adds nothing.
+ */
+export function consoleRedactionValues(entry: { value: string; broker: SecretBrokerConfig | null }): string[] {
+  if (!entry.broker) return [entry.value];
+  try {
+    return [entry.value, ...brokerScrubValues([{ name: "", value: entry.value, broker: entry.broker }])].filter(
+      (v, i, all) => all.indexOf(v) === i,
+    );
+  } catch {
+    return [entry.value];
+  }
+}
+
 function encodedForms(value: string): string[] {
   const buf = Buffer.from(value, "utf8");
   // Query placement goes through URLSearchParams, which encodes ~ ! ' ( ) differently and space as "+",
@@ -141,11 +160,11 @@ function scrubText(text: string, forms: readonly string[]): string {
   return out;
 }
 
-export function scrubBrokeredResponse<T extends { headers: Record<string, string>; bodyBase64: string; url: string }>(
-  response: T,
-  values: readonly string[],
-): T {
-  const forms = values.flatMap(encodedForms);
+export function scrubBrokeredResponse<
+  T extends { headers: Record<string, string>; bodyBase64: string; url: string; statusText?: string },
+>(response: T, values: readonly string[]): T {
+  // Longest first across every value: a value that prefixes another must not split the longer one.
+  const forms = [...new Set(values.flatMap(encodedForms))].sort((a, b) => b.length - a.length);
   const body = Buffer.from(response.bodyBase64, "base64").toString("latin1");
   // latin1 is byte-preserving, so scrubbing never corrupts non-UTF-8 bodies; every encoded form is ASCII,
   // and a UTF-8 plaintext's bytes appear verbatim in latin1 as the latin1 decode of its UTF-8 bytes.
@@ -153,6 +172,7 @@ export function scrubBrokeredResponse<T extends { headers: Record<string, string
   return {
     ...response,
     url: scrubText(response.url, forms),
+    ...(response.statusText === undefined ? {} : { statusText: scrubText(response.statusText, forms) }),
     headers: Object.fromEntries(Object.entries(response.headers).map(([k, v]) => [k, scrubText(v, forms)])),
     bodyBase64: Buffer.from(scrubText(body, latinForms), "latin1").toString("base64"),
   };
