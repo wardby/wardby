@@ -24,6 +24,7 @@ import {
   parseCodingAgentOutputJson,
   redactAndTruncate,
   MAX_CODING_ARTIFACT_BYTES,
+  MAX_CODING_INPUT_BYTES,
   MAX_CODING_OUTPUT_ISSUES,
   SAFE_CODING_OUTPUT_ISSUE,
 } from "../../coding/protocol.js";
@@ -363,7 +364,7 @@ export class NodeDockerArtifactTransfer implements DockerArtifactTransfer {
 
   async seedInput(sourceFile: string, container: string): Promise<void> {
     const metadata = await lstat(sourceFile);
-    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_CODING_ARTIFACT_BYTES) {
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_CODING_INPUT_BYTES) {
       throw new Error("docker_input_artifact_invalid");
     }
     const docker = new NodeDockerCommandRunner({
@@ -1366,7 +1367,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
 
   private async validateInputArtifact(path: string): Promise<void> {
     const metadata = await lstat(path);
-    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_CODING_ARTIFACT_BYTES) {
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_CODING_INPUT_BYTES) {
       throw new Error("docker_input_artifact_invalid");
     }
   }

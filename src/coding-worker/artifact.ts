@@ -1,7 +1,12 @@
 import { constants } from "node:fs";
 import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { MAX_CODING_ARTIFACT_BYTES, parseCodingTaskInputJson, type CodingAgentOutput } from "../coding/protocol.js";
+import {
+  MAX_CODING_ARTIFACT_BYTES,
+  MAX_CODING_INPUT_BYTES,
+  parseCodingTaskInputJson,
+  type CodingAgentOutput,
+} from "../coding/protocol.js";
 
 /**
  * Reads a regular file of at most `maxBytes`, refusing symlinks and anything
@@ -44,7 +49,7 @@ export async function readBoundedRegularFile(path: string, maxBytes: number, err
 
 export async function readCodingInput(path: string) {
   return parseCodingTaskInputJson(
-    await readBoundedRegularFile(path, MAX_CODING_ARTIFACT_BYTES, "coding_input_invalid_file"),
+    await readBoundedRegularFile(path, MAX_CODING_INPUT_BYTES, "coding_input_invalid_file"),
   );
 }
 

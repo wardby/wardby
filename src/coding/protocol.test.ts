@@ -11,6 +11,7 @@ import {
   normalizeCodingTag,
   CodingTaskInputSchema,
   MAX_CODING_ARTIFACT_BYTES,
+  MAX_CODING_INPUT_BYTES,
   MAX_CODING_SUMMARY_BYTES,
   MAX_CODING_TASK_BYTES,
   MAX_CODING_TEST_COMMAND_BYTES,
@@ -310,6 +311,63 @@ describe("CodingRunResultSchema", () => {
   });
 });
 
+describe("repo context input fields", () => {
+  const base = {
+    schemaVersion: CODING_PROTOCOL_VERSION,
+    runId: "run-1",
+    repository: "o/r",
+    baseRef: "main",
+    headRef: "wardby/run-run-1",
+    task: "t",
+    model: "claude-sonnet-5",
+    budgetUsd: 1,
+    deadlineAt: new Date().toISOString(),
+  };
+
+  it("accepts repoSkills and claudeContext", () => {
+    const parsed = CodingTaskInputSchema.parse({
+      ...base,
+      repoSkills: false,
+      claudeBareMode: false,
+      claudeContext: {
+        files: [
+          { path: "CLAUDE.md", content: "x" },
+          { path: ".claude/skills/a/SKILL.md", content: "y" },
+        ],
+      },
+    });
+    expect(parsed.repoSkills).toBe(false);
+    expect(parsed.claudeBareMode).toBe(false);
+    expect(parsed.claudeContext?.files).toHaveLength(2);
+  });
+
+  it.each(["/etc/passwd", "../x.md", "a/../../x.md", "a//b.md", "", "a\\b.md", "./a.md", ".git/config"])(
+    "rejects unsafe context path %j",
+    (path) => {
+      expect(() =>
+        CodingTaskInputSchema.parse({ ...base, claudeContext: { files: [{ path, content: "x" }] } }),
+      ).toThrow();
+    },
+  );
+
+  it("rejects duplicate paths and an empty file list", () => {
+    const dup = [
+      { path: "CLAUDE.md", content: "a" },
+      { path: "CLAUDE.md", content: "b" },
+    ];
+    expect(() => CodingTaskInputSchema.parse({ ...base, claudeContext: { files: dup } })).toThrow();
+    expect(() => CodingTaskInputSchema.parse({ ...base, claudeContext: { files: [] } })).toThrow();
+  });
+
+  it("parses an input larger than the output limit but within the input limit", () => {
+    const content = "x".repeat(60 * 1024);
+    const files = [0, 1, 2].map((i) => ({ path: `docs/f${i}.md`, content }));
+    const text = JSON.stringify({ ...base, claudeContext: { files } });
+    expect(Buffer.byteLength(text)).toBeGreaterThan(MAX_CODING_ARTIFACT_BYTES);
+    expect(parseCodingTaskInputJson(text).claudeContext?.files).toHaveLength(3);
+  });
+});
+
 describe("bounded duplicate-safe JSON parsing", () => {
   it("rejects malformed JSON and duplicate keys at any depth", () => {
     expect(() => parseCodingTaskInputJson("{")).toThrow(/invalid_json/);
@@ -319,9 +377,13 @@ describe("bounded duplicate-safe JSON parsing", () => {
   });
 
   it("rejects an oversized artifact before parsing", () => {
-    expect(() => parseCodingTaskInputJson(`{"padding":"${"x".repeat(MAX_CODING_ARTIFACT_BYTES)}"}`)).toThrow(
+    expect(() => parseCodingAgentOutputJson(`{"padding":"${"x".repeat(MAX_CODING_ARTIFACT_BYTES)}"}`)).toThrow(
       /size_limit/,
     );
+  });
+
+  it("rejects an oversized input artifact against the larger input limit", () => {
+    expect(() => parseCodingTaskInputJson(`{"padding":"${"x".repeat(MAX_CODING_INPUT_BYTES)}"}`)).toThrow(/size_limit/);
   });
 
   it("rejects excessive JSON nesting before schema validation", () => {

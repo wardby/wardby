@@ -5,6 +5,10 @@ export const CODING_PROTOCOL_VERSION = 1 as const;
 /** The code host every coding run's repository and pull request live on (see pullRequestUrlSchema); the one place to change when another is added. */
 export const CODING_CODE_PROVIDER = "github";
 export const MAX_CODING_ARTIFACT_BYTES = 64 * 1024;
+/** The worker input artifact (input.json): larger than results because it can carry Claude Code repo context. */
+export const MAX_CODING_INPUT_BYTES = 512 * 1024;
+/** Bounds on CodingTaskInput.claudeContext, enforced by the builder (src/coding/claude-context.ts) and this schema. */
+export const CLAUDE_CONTEXT_LIMITS = { maxFiles: 200, maxFileBytes: 64 * 1024, maxTotalBytes: 256 * 1024 } as const;
 export const MAX_CODING_TASK_BYTES = 16 * 1024;
 /** Room reserved at the end of a composed task for lines the executor appends (e.g. the base commit). */
 export const CODING_TASK_TRAILER_RESERVE_BYTES = 256;
@@ -383,6 +387,24 @@ export const DEFAULT_CLAUDE_MAX_TURNS = 200;
 /** Longest line a debug-traced worker writes to its log (src/coding-worker/debug-trace.ts). */
 export const MAX_DEBUG_TRACE_LINE_BYTES = 16 * 1024;
 
+/** A repo-relative POSIX path with no empty, ".", or ".." segment, no backslash, and nothing under .git. */
+export function isSafeContextPath(path: string): boolean {
+  if (path.length === 0 || path.length > 512 || path.startsWith("/") || path.includes("\\")) return false;
+  const segments = path.split("/");
+  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) return false;
+  return segments[0] !== ".git";
+}
+
+export const ClaudeContextFileSchema = z
+  .object({
+    path: z.string().refine(isSafeContextPath, "must be a safe repo-relative path"),
+    content: z
+      .string()
+      .refine((value) => Buffer.byteLength(value) <= CLAUDE_CONTEXT_LIMITS.maxFileBytes, "file too large"),
+  })
+  .strict();
+export type ClaudeContextFile = z.infer<typeof ClaudeContextFileSchema>;
+
 export const CodingTaskInputSchema = z
   .object({
     schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
@@ -424,6 +446,27 @@ export const CodingTaskInputSchema = z
      * predate it.
      */
     services: z.array(workerServiceSchema).min(1).max(MAX_CODING_SERVICES).optional(),
+    /**
+     * Load the repository's agent skills (CodingAgentProfile.repoSkills, fixed on the run at
+     * dispatch). Absent means true; the control plane writes the key only when false, so other
+     * runs' input is unchanged for workers that predate it.
+     */
+    repoSkills: z.boolean().optional(),
+    /**
+     * Claude Code runs (CodingAgentProfile.claudeBareMode, fixed on the run at dispatch): false
+     * turns off Claude Code's bare mode so it loads claudeContext natively. Absent means true;
+     * written only when false.
+     */
+    claudeBareMode: z.boolean().optional(),
+    /**
+     * Claude Code runs: the repository's CLAUDE.md, its @imports, and (when repoSkills) each
+     * .claude/skills/<name>/SKILL.md, read by the control plane from the prepared workspace.
+     * Absent when there is nothing to load.
+     */
+    claudeContext: z
+      .object({ files: z.array(ClaudeContextFileSchema).min(1).max(CLAUDE_CONTEXT_LIMITS.maxFiles) })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -438,6 +481,19 @@ export const CodingTaskInputSchema = z
     const names = (value.services ?? []).map((service) => service.name);
     if (new Set(names).size !== names.length) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["services"], message: "must name each service once" });
+    }
+    const contextFiles = value.claudeContext?.files ?? [];
+    const paths = contextFiles.map((file) => file.path);
+    if (new Set(paths).size !== paths.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["claudeContext", "files"],
+        message: "must name each path once",
+      });
+    }
+    const total = contextFiles.reduce((sum, file) => sum + Buffer.byteLength(file.content), 0);
+    if (total > CLAUDE_CONTEXT_LIMITS.maxTotalBytes) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["claudeContext", "files"], message: "context too large" });
     }
   });
 
@@ -638,8 +694,8 @@ export function redactAndTruncate(value: string, limit: number): string {
   return redactTokenShapedValues(value.slice(0, limit + MAX_REDACTED_SPAN)).slice(0, limit);
 }
 
-function parseJsonWithoutDuplicateKeys(text: string): unknown {
-  if (byteLength(text) > MAX_CODING_ARTIFACT_BYTES) throw new Error("coding_artifact_size_limit");
+function parseJsonWithoutDuplicateKeys(text: string, maxBytes = MAX_CODING_ARTIFACT_BYTES): unknown {
+  if (byteLength(text) > maxBytes) throw new Error("coding_artifact_size_limit");
   let offset = 0;
 
   const whitespace = () => {
@@ -722,7 +778,7 @@ function parseJsonWithoutDuplicateKeys(text: string): unknown {
 }
 
 export function parseCodingTaskInputJson(text: string): CodingTaskInput {
-  return CodingTaskInputSchema.parse(parseJsonWithoutDuplicateKeys(text));
+  return CodingTaskInputSchema.parse(parseJsonWithoutDuplicateKeys(text, MAX_CODING_INPUT_BYTES));
 }
 
 export function parseCodingAgentOutputJson(text: string): CodingAgentOutput {

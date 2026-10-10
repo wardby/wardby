@@ -33,6 +33,7 @@ import type { KubernetesJobConfig } from "../../config/providers.js";
 import { logger } from "../../core/logger.js";
 import {
   MAX_CODING_ARTIFACT_BYTES,
+  MAX_CODING_INPUT_BYTES,
   MAX_DEBUG_TRACE_LINE_BYTES,
   parseCodingAgentOutputJson,
 } from "../../coding/protocol.js";
@@ -1073,14 +1074,14 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     const staging = await mkdtemp(join(tmpdir(), "wardby-k8s-input-"));
     try {
       const source = await lstat(inputArtifact);
-      if (!source.isFile() || source.size > MAX_CODING_ARTIFACT_BYTES) {
+      if (!source.isFile() || source.size > MAX_CODING_INPUT_BYTES) {
         throw new Error("kubernetes_input_artifact_invalid");
       }
       const copy = join(staging, "input.json");
       await copyFile(inputArtifact, copy);
       // Re-check the copy: the source could have changed between lstat and copy.
       const copied = await lstat(copy);
-      if (!copied.isFile() || copied.size > MAX_CODING_ARTIFACT_BYTES) {
+      if (!copied.isFile() || copied.size > MAX_CODING_INPUT_BYTES) {
         throw new Error("kubernetes_input_artifact_invalid");
       }
       await this.seedDirectory(names, staging, INPUT_STORAGE, timeoutMs);
