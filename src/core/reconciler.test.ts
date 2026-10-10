@@ -793,9 +793,10 @@ describe("reconcileOnce pull-request state sync", () => {
     expect(syncOpenPullRequestStates).toHaveBeenCalledWith(expect.anything(), hosts, trackers, now);
   });
 
-  it("sweeps the merge order checks after the pull-request states, with the pass's hosts and clock", async () => {
+  it("sweeps the merge order checks after the pull-request states and the deferred-review start, with the pass's hosts and clock", async () => {
     const order: string[] = [];
     vi.mocked(syncOpenPullRequestStates).mockImplementationOnce(async () => (order.push("states"), 0));
+    vi.mocked(startDeferredReviews).mockImplementationOnce(async () => (order.push("deferred"), []));
     vi.mocked(sweepMergeOrderChecks).mockClear();
     vi.mocked(sweepMergeOrderChecks).mockImplementationOnce(async () => (order.push("merge-order"), 0));
     const hosts = { github: {} } as never;
@@ -806,10 +807,10 @@ describe("reconcileOnce pull-request state sync", () => {
       runHostStatus: { findMany: vi.fn(async () => []) },
     } as unknown as ReconcilerDb;
 
-    await reconcileOnce(db, now, undefined, undefined, hosts);
+    await reconcileOnce(db, now, undefined, undefined, hosts, undefined, {} as ReviewStartDeps);
 
     expect(sweepMergeOrderChecks).toHaveBeenCalledWith({ db, hosts }, now);
-    expect(order).toEqual(["states", "merge-order"]);
+    expect(order).toEqual(["states", "deferred", "merge-order"]);
   });
 });
 

@@ -370,12 +370,13 @@ describe("a lead run's finalizer releases the reviews waiting for its request (#
     expect(order).toEqual(["related", "release"]);
   });
 
-  it("syncs the merge order checks after the related sections and the release, with the review hosts", async () => {
+  it("syncs the merge order checks last, after the related sections, the release and the review fix start", async () => {
     vi.mocked(syncMergeOrderChecksAfterRun).mockClear();
     const order: string[] = [];
     vi.mocked(updateRelatedPullRequests).mockImplementationOnce(async () => void order.push("related"));
     vi.mocked(syncMergeOrderChecksAfterRun).mockImplementationOnce(async () => void order.push("merge-order"));
     vi.mocked(startDeferredForRequest).mockImplementationOnce(async () => void order.push("release"));
+    vi.mocked(startReviewFixAfterReview).mockImplementationOnce(async () => void order.push("review-fix"));
     const host = fakeHost();
     const { db, llm } = harness({ links: [LINK], runHostCheck: OPEN_CHECK, script: [text("done")] });
     const run = await executeRun("run1", { ...providers(llm), reviewHosts: { github: host }, executor }, db);
@@ -383,7 +384,7 @@ describe("a lead run's finalizer releases the reviews waiting for its request (#
     const [deps, finished] = vi.mocked(syncMergeOrderChecksAfterRun).mock.calls[0];
     expect(deps.hosts).toEqual({ github: host });
     expect(finished.id).toBe(run.id);
-    expect(order).toEqual(["related", "release", "merge-order"]);
+    expect(order).toEqual(["related", "release", "review-fix", "merge-order"]);
   });
 
   it("releases when the lead run failed, too", async () => {

@@ -297,12 +297,12 @@ export async function reconcileOnce(
   await closeOrphanedIssueStatuses(db, issueTrackers, now);
   // Settle stored pull requests whose merge/close webhook was missed; bounded per pass, never throws.
   await syncOpenPullRequestStates(db, reviewHosts, issueTrackers, now);
-  // Re-post `wardby merge order` checks whose pr_closed or new-head event was missed; throttled and
-  // bounded per pass, never throws.
-  await sweepMergeOrderChecks({ db, hosts: reviewHosts }, now);
   // Start reviews whose head's CI never finished (waitForCi links), and reviews whose delegating run
   // ended without releasing them (after the lost marking above); bounded per pass, never throws.
   if (deferredReviews) await startDeferredReviews(deferredReviews, now);
+  // Re-post `wardby merge order` checks whose pr_closed or new-head event was missed; after the
+  // deferred-review start, so no review waits on it. Throttled and bounded per pass, never throws.
+  await sweepMergeOrderChecks({ db, hosts: reviewHosts }, now);
   return lost;
 }
 
