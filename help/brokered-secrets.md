@@ -53,11 +53,17 @@ const response = await fetch("https://api.example.com/v1/items", {
 [`secret_brokered`](errors/secret-brokered.md). Redirects are not followed, and
 the value is scrubbed from responses and console output.
 
-## Remove brokering
+## Change or remove brokering
 
-`set_secret_broker { name, broker: null }` returns a browser link. A person
-confirms by typing the secret's name; the MCP call alone never removes it. Every
-change is audited.
+Changing the config (hosts, path prefixes, or placement) with
+`set_secret_broker` or `create_secret` takes effect immediately and is not
+confirmed in a browser. Anyone who can act as the owner over MCP can send the
+value to another host they also grant through `attach_tool` `allowedHosts`; the
+operator's fetch policy still applies.
+
+Only removal is confirmed: `set_secret_broker { name, broker: null }` returns a
+browser link, and a person confirms by typing the secret's name. The MCP call
+alone never removes it. Every change is audited.
 
 ## Related
 

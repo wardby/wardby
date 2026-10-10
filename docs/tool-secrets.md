@@ -52,11 +52,11 @@ There are three ways to set a broker config:
 
 The config has these fields. Unknown fields are rejected.
 
-| Field          | Required | Meaning                                                                                                          |
-| -------------- | -------- | ---------------------------------------------------------------------------------------------------------------- |
-| `hosts`        | yes      | 1 to 20 exact hostnames, for example `api.example.com`. No scheme, port, wildcard, or IP address.                |
-| `pathPrefixes` | no       | Up to 20 paths that each start with `/`. When set, the request path must start with one of them.                 |
-| `placement`    | yes      | How the value is added to the request: `header`, `query`, `body`, or `aws-sigv4`. See [Placements](#placements). |
+| Field          | Required | Meaning                                                                                                                                                           |
+| -------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hosts`        | yes      | 1 to 20 exact hostnames, for example `api.example.com`. No scheme, port, wildcard, or IP address (including short forms such as `127.1` or `0x7f.0.0.1`).         |
+| `pathPrefixes` | no       | Up to 20 paths that each start with `/`, with no `?`, `#`, backslash, control character, `%2F`, or `%5C`. When set, the request path must start with one of them. |
+| `placement`    | yes      | How the value is added to the request: `header`, `query`, `body`, or `aws-sigv4`. See [Placements](#placements).                                                  |
 
 A config that fails validation is refused with
 [`secret_broker_config_invalid`](../help/errors/secret-broker-config-invalid.md).
@@ -159,7 +159,9 @@ the value to use `fetch` instead.
 - **https only**, to the default port. Any other scheme or port is refused with
   [`secret_broker_destination_denied`](../help/errors/secret-broker-destination-denied.md).
 - **Exact hosts and path prefixes.** Every secret in the request must allow the
-  request's host and, when it sets `pathPrefixes`, its path.
+  request's host and, when it sets `pathPrefixes`, its path. A secret with
+  `pathPrefixes` is also refused for a path containing an encoded slash or
+  backslash (`%2F`, `%5C`), which a server could decode into a separator.
 - **No redirects.** A 3xx response is returned to the tool as is. Following it
   is a new request that is checked against the broker config again.
 - **No overrides.** If the tool already sets the header, query parameter, or body
@@ -169,14 +171,23 @@ the value to use `fetch` instead.
   Body placement on an unsuitable body fails with
   [`secret_broker_body_invalid`](../help/errors/secret-broker-body-invalid.md).
 - **Response scrubbing.** The value is replaced with `[REDACTED]` in the response
-  body, headers, and final URL, including its base64 and percent-encoded forms.
+  body, headers, status text, and final URL, including its base64, URL-safe
+  base64, and percent-encoded forms.
   For SigV4 the secret access key and session token are scrubbed.
 - **Console redaction.** The value is redacted from the tool's console output.
 - **Minimum length.** A brokered value must be at least 6 characters, so that
   scrubbing cannot redact ordinary short text. For SigV4, the secret access key
   and session token must each be at least 6 characters.
 
-## Removing brokering
+## Changing and removing brokering
+
+Changing a broker config takes effect immediately and is not confirmed in a
+browser. `set_secret_broker` with a new config, or `create_secret` with a
+`broker`, replaces the hosts, path prefixes, and placement at once. Anyone who
+can act as the secret's owner over MCP can therefore send the value to another
+host, as long as they can also grant that host to a tool through `attach_tool`
+`allowedHosts`. The operator's fetch policy still applies to every brokered
+request. Only removing brokering needs a person's confirmation.
 
 Removing brokering makes the value readable by tools again, so it is never done
 by an MCP call alone. `set_secret_broker { name, broker: null }` returns a
@@ -203,6 +214,10 @@ whether it came from `mcp` or `browser`.
 Brokering controls where the value goes, not what the destination does with a
 request. Choose destinations with that in mind:
 
+- Changing the config is not browser-confirmed (see
+  [Changing and removing brokering](#changing-and-removing-brokering)), so
+  brokering protects against tool code, not against someone who holds the
+  owner's MCP access.
 - An endpoint on an allowed host that stores or publishes what you send (a
   paste service, a public bucket, a webhook relay, a log collector that
   indexes request headers) can still expose the placed value. Allow only hosts

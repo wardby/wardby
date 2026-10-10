@@ -14,12 +14,14 @@ appliesTo: ">=0.6.0"
 each problem. Common causes:
 
 - `hosts` is empty, has more than 20 entries, or contains a scheme, port,
-  wildcard, or IP address; use exact hostnames such as `api.example.com`;
-- a `pathPrefixes` entry does not start with `/`;
+  wildcard, or IP address (including short forms such as `127.1`), or a label
+  ending in `-`; use exact hostnames such as `api.example.com`;
+- a `pathPrefixes` entry does not start with `/`, or contains `?`, `#`, a
+  backslash, a control character, `%2F`, or `%5C`;
 - a header `format` does not contain `{value}` exactly once or contains a line
   break, or the header name is not allowed (`Host`, `Content-Length` and similar);
 - an AWS `region` or `service` is malformed;
-- the config has fields it does not define.
+- the config or its placement has fields it does not define.
 
 1. Fix the fields named in the message and retry.
 2. The config shape is `{ hosts, pathPrefixes?, placement }`.

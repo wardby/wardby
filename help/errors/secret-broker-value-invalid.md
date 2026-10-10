@@ -19,7 +19,9 @@ config. It is returned when saving a config and when a tool uses the secret.
   token must each be at least 6 characters.
 
 1. Re-enter the value with `create_secret` using the same name; it rotates the
-   value in place.
+   value in place. Leave out `broker`: a rotation without one keeps the
+   existing broker config. In the browser form, correct the value and submit
+   the same link again.
 2. For SigV4, store the credentials as that JSON object.
 
 See [Brokered secrets](../brokered-secrets.md) and the

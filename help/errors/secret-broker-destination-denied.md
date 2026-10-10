@@ -14,7 +14,9 @@ the requested URL. The message says which check failed:
 
 - the URL is not `https`, or names a port other than the default;
 - the host is not in the secret's `hosts` (exact match, no wildcards);
-- the path does not start with any of the secret's `pathPrefixes`.
+- the path does not start with any of the secret's `pathPrefixes`, or, for a
+  secret with `pathPrefixes`, contains an encoded slash or backslash (`%2F`,
+  `%5C`).
 
 1. Correct the URL in the tool.
 2. If the destination is intended, the secret's owner updates the config with
