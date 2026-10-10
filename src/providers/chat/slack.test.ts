@@ -103,6 +103,24 @@ describe("SlackChatProvider", () => {
     await expect(ok.channelInfo("C1")).resolves.toEqual({ id: "C1", name: "eng", isPrivate: false });
   });
 
+  it("sends conversations.info form-encoded: Slack rejects JSON bodies on read methods", async () => {
+    const fetchImpl = vi.fn(async () => reply({ ok: true, channel: { id: "C1", name: "eng" } }));
+    await new SlackChatProvider(config, fetchImpl).channelInfo("C1");
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://slack.test/api/conversations.info");
+    expect((init.headers as Record<string, string>)["content-type"]).toBe("application/x-www-form-urlencoded");
+    expect(init.body as string).toBe("channel=C1");
+    expect((init.headers as Record<string, string>).authorization).toBe("Bearer xoxb-t");
+  });
+
+  it("keeps JSON bodies for write methods", async () => {
+    const fetchImpl = vi.fn(async () => reply({ ok: true, ts: "1" }));
+    await new SlackChatProvider(config, fetchImpl).updateMessage("C1", "1.0", { text: "x" });
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect((init.headers as Record<string, string>)["content-type"]).toBe("application/json; charset=utf-8");
+    expect(JSON.parse(init.body as string)).toEqual({ channel: "C1", ts: "1.0", text: "x" });
+  });
+
   it("authTest returns team and bot user", async () => {
     const slack = new SlackChatProvider(
       config,

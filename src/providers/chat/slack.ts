@@ -1,7 +1,7 @@
 /**
  * Slack Web API client for workflow notifications: chat.postMessage,
- * chat.update, conversations.info, auth.test. Plain fetch, JSON bodies, bot
- * token. Every failure becomes a ChatError with a normalized code the
+ * chat.update, conversations.info, auth.test. Plain fetch (JSON bodies for
+ * writes, form-encoded for reads), bot token. Every failure becomes a ChatError with a normalized code the
  * dispatcher acts on; Slack's own error string is kept for the operator.
  */
 import type { SlackConfig } from "../../config/providers.js";
@@ -34,16 +34,28 @@ export class SlackChatProvider implements ChatProvider {
     private readonly fetchImpl: typeof fetch = fetch,
   ) {}
 
-  private async call(method: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  /**
+   * `form` for read methods (conversations.info, auth.test): Slack accepts JSON
+   * bodies only on write methods and answers a read method's JSON body with
+   * invalid_arguments.
+   */
+  private async call(
+    method: string,
+    body: Record<string, unknown>,
+    encoding: "json" | "form" = "json",
+  ): Promise<Record<string, unknown>> {
     let res: Response;
     try {
       res = await this.fetchImpl(`${this.config.apiBaseUrl}/${method}`, {
         method: "POST",
         headers: {
           authorization: `Bearer ${this.config.botToken}`,
-          "content-type": "application/json; charset=utf-8",
+          "content-type": encoding === "json" ? "application/json; charset=utf-8" : "application/x-www-form-urlencoded",
         },
-        body: JSON.stringify(body),
+        body:
+          encoding === "json"
+            ? JSON.stringify(body)
+            : new URLSearchParams(Object.fromEntries(Object.entries(body).map(([k, v]) => [k, String(v)]))).toString(),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
     } catch (err) {
@@ -93,7 +105,7 @@ export class SlackChatProvider implements ChatProvider {
 
   async channelInfo(channel: string) {
     try {
-      const json = await this.call("conversations.info", { channel });
+      const json = await this.call("conversations.info", { channel }, "form");
       const c = json.channel as { id: string; name: string; is_private?: boolean };
       return { id: c.id, name: c.name, isPrivate: c.is_private === true };
     } catch (err) {
@@ -103,7 +115,7 @@ export class SlackChatProvider implements ChatProvider {
   }
 
   async authTest() {
-    const json = await this.call("auth.test", {});
+    const json = await this.call("auth.test", {}, "form");
     return { team: String(json.team), botUserId: String(json.user_id) };
   }
 }

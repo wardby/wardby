@@ -14,14 +14,14 @@ wardby exposes no new inbound endpoint for it.
 
 Six kinds of lifecycle event can post to a linked channel:
 
-| Kind              | Posts when                                                                    | Content                                                                      |
-| ----------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `issue_picked_up` | A Jira event starts a run on a linked issue                                   | Issue key, title, and link; agent name; trigger kind                         |
-| `run_failed`      | A top-level run ends `failed`, `budget_exhausted`, `cancelled`, or `lost`     | Agent name, status, a short first-line reason (never the full error)         |
-| `pr_opened`       | A coding run opens a pull request                                             | Repository#number and link, the issue it is for, any Jira status move        |
-| `review_posted`   | wardby's own review check posts a verdict                                     | `APPROVE` / `CHANGES_REQUESTED` / `COMMENT`, the reviewer agent, the PR link |
-| `review_fix`      | An automatic [fix round](../help/review-fix-rounds.md) starts or hits the cap | Round number of the cap, started or capped                                   |
-| `pr_closed`       | A pull request is merged or closed                                            | Merged or closed, any Jira status move                                       |
+| Kind              | Posts when                                                                           | Content                                                                      |
+| ----------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `issue_picked_up` | A Jira event starts a run on a linked issue                                          | Issue key, title, and link; agent name; trigger kind                         |
+| `run_failed`      | A top-level run ends `failed`, `refused`, `budget_exhausted`, `cancelled`, or `lost` | Agent name, status, a short first-line reason (never the full error)         |
+| `pr_opened`       | A coding run opens a pull request                                                    | Repository#number and link, the issue it is for, any Jira status move        |
+| `review_posted`   | wardby's own review check posts a verdict                                            | `APPROVE` / `CHANGES_REQUESTED` / `COMMENT`, the reviewer agent, the PR link |
+| `review_fix`      | An automatic [fix round](../help/review-fix-rounds.md) starts or hits the cap        | Round number of the cap, started or capped                                   |
+| `pr_closed`       | A pull request is merged or closed                                                   | Merged or closed, any Jira status move                                       |
 
 A run finishing successfully is not its own event — on the workflow it shows
 up as `pr_opened` or `review_posted` already. Child coding runs started by a

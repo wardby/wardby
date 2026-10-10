@@ -100,7 +100,7 @@ export function renderEvent(p: WorkflowPayload, spend: string | null): { text: s
             ? `❌ ${who} was lost (no heartbeat)`
             : p.status === "cancelled"
               ? `❌ ${who} was cancelled`
-              : `❌ ${who} failed${p.reason ? `: ${escapeMrkdwn(p.reason)}` : ""}`;
+              : `❌ ${who} ${p.status === "refused" ? "was refused" : "failed"}${p.reason ? `: ${escapeMrkdwn(p.reason)}` : ""}`;
       break;
     }
   }
