@@ -24,7 +24,7 @@ Jira Cloud only. One Jira site per wardby deployment.
   properties are not allowlisted.
 - **Status comments.** When an event starts a run, wardby posts a short
   "working on it" comment on the issue and edits it with the outcome when the
-  run ends, including a line such as `Agent spend: $0.0123` for the run and
+  run ends, including a line such as `Agent spend: $0.012` for the run and
   its direct sub-runs. That one comment is the reply: when the run succeeds
   it shows the agent's final answer, so the agent is told not to post the
   answer again with `jira_comment` (it uses `jira_comment` only for other

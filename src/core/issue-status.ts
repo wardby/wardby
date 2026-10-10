@@ -38,14 +38,18 @@ export function issueStatusRow(
   return { runId, provider: "jira", issueKey: event.issueKey, visibilityRole };
 }
 
+/** Two significant digits, never exponent form: $0.0035, $0.12, $1.8, $12, $1200. */
+const SPEND = new Intl.NumberFormat("en-US", { maximumSignificantDigits: 2, useGrouping: false });
+const usd = (amount: number): string => `$${SPEND.format(amount)}`;
+
 export function formatSpendLine(input: {
   treeUsd: number;
   issueUsd: number | null;
   models: Array<{ model: string; costUsd: number }>;
 }): string {
-  const parts = [`Agent spend: $${input.treeUsd.toFixed(4)} this run`];
-  if (input.issueUsd !== null) parts.push(`$${input.issueUsd.toFixed(4)} on this issue so far`);
-  if (input.models.length > 0) parts.push(input.models.map((m) => `${m.model} $${m.costUsd.toFixed(4)}`).join(", "));
+  const parts = [`Agent spend: ${usd(input.treeUsd)} this run`];
+  if (input.issueUsd !== null) parts.push(`${usd(input.issueUsd)} on this issue so far`);
+  if (input.models.length > 0) parts.push(input.models.map((m) => `${m.model} ${usd(m.costUsd)}`).join(", "));
   return parts.join(" · ");
 }
 
