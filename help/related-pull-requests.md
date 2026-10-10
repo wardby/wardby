@@ -41,7 +41,9 @@ included, plus that run tree's own siblings.
   by the delegating agent; equal steps can merge in either order)** and
   labelled "step k of n" (equal values share a step and merge in either
   order relative to each other), and any open pull request without one is
-  listed after under "Not ordered:". Steps are counted over the whole set,
+  listed after under "Not ordered:". If only merged or closed pull requests
+  have a `mergeOrder`, every open one is listed under "Not ordered:" and the
+  "Merge order" heading is left out. Steps are counted over the whole set,
   merged and closed pull requests included, so "step 2 of 3" keeps its label
   after step 1 merges. Either way, check it before merging — neither is a
   guarantee. Merged and closed pull requests follow in a separate "Already

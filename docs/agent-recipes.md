@@ -430,7 +430,9 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
   closed), the open ones that have a `mergeOrder` are numbered under
   **Merge order (set by the delegating agent; equal steps can merge in either
   order)** and labelled "step k of n" (equal values share a step), and any
-  open pull request without one is listed after under **Not ordered**. Steps
+  open pull request without one is listed after under **Not ordered**. If
+  only merged or closed pull requests carry a `mergeOrder`, the open ones are
+  all listed under **Not ordered**, with no **Merge order** heading. Steps
   are counted over the whole set, merged and closed pull requests included,
   so a label stays the same as earlier steps merge. Merged and closed pull
   requests are always listed separately as context, with their step label
