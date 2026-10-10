@@ -72,7 +72,7 @@ live from GitHub:
 - when the delegating run (or a run that continued one of the set's pull
   requests) finishes;
 - when any pull request in the set is closed or merged;
-- on a new head (including **Re-run**) or a reopen of any pull request in
+- on a new head or a reopen of any pull request in
   the set, on every open or draft pull request Wardby's own GitHub App
   opened; and
 - by Wardby's own reconciliation sweep (below), for events the first three
