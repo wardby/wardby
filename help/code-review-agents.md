@@ -67,8 +67,11 @@ it only check runs are shown.
 
 `repo_pr_read` also returns `relatedPullRequests`: this request's other pull
 requests (`repository`, `number`, `state`, `mergeOrder`, `self`), computed
-fresh at call time; empty on a human pull request or one with no recognized
-Wardby marker. `relatedPullRequests` is current; the PR body's **Related
+fresh at call time; empty on a human pull request, one with no recognized
+Wardby marker, or a pull request on a local repository (no origin marker to
+look up there). `state` is `draft`/`open`/`merged`/`closed` for the `self`
+entry (the pull request just read) and `open`/`merged`/`closed` for every
+other entry. `relatedPullRequests` is current; the PR body's **Related
 pull requests** section can be stale — see
 [Related pull requests across repositories](related-pull-requests.md).
 

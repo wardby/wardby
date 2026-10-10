@@ -59,9 +59,12 @@ function ctx(overrides: Partial<ReviewToolContext> = {}): ReviewToolContext {
     runCheck: null,
     markRunCheckCompleted: vi.fn(async () => undefined),
     authorize: vi.fn(async () => ({ ok: true as const })),
-    // relatedPullRequestsFor reaches collectRelatedPullRequests through this; mocked above, so a
-    // placeholder is enough — no test here exercises the real database query.
-    db: {} as ReviewToolContext["db"],
+    // relatedPullRequestsFor reaches collectRelatedPullRequests through this; both are mocked, so
+    // a minimal double is enough — no test here exercises the real database query. The default
+    // findUnique matches WRITE.repository, the repository every relatedPullRequests test reads.
+    db: {
+      codingRun: { findUnique: vi.fn(async () => ({ repository: WRITE.repository })) },
+    } as unknown as ReviewToolContext["db"],
     ...overrides,
   };
 }
@@ -224,6 +227,60 @@ describe("handleReviewHostTool", () => {
       );
       expect(out.relatedPullRequests).toEqual([]);
       expect(out.number).toBe(7);
+    });
+
+    it("never follows a marker whose CodingRun opened in a different repository", async () => {
+      const h = fakeHost();
+      h.pullRequestOrigin = vi.fn(async () => ({
+        headSha: SHA,
+        isFork: false,
+        state: "open",
+        labels: [],
+        markerRunId: "run_elsewhere",
+      }));
+      const findUnique = vi.fn(async () => ({ repository: "chfields/other-repo" }));
+      const c = ctx({
+        hosts: { github: h },
+        db: { codingRun: { findUnique } } as unknown as ReviewToolContext["db"],
+      });
+      const out = JSON.parse(
+        await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c),
+      );
+      expect(out.relatedPullRequests).toEqual([]);
+      expect(findUnique).toHaveBeenCalledWith({ where: { runId: "run_elsewhere" }, select: { repository: true } });
+      expect(collectRelatedPullRequests).not.toHaveBeenCalled();
+    });
+
+    it("sets the self entry's state to draft when the pull request just read is a draft", async () => {
+      const h = fakeHost();
+      h.pullRequestOrigin = vi.fn(async () => ({
+        headSha: SHA,
+        isFork: false,
+        state: "open",
+        labels: [],
+        markerRunId: "run_lead",
+      }));
+      h.readPullRequest = vi.fn(async () => ({ number: 7, draft: true }) as never);
+      const c = ctx({ hosts: { github: h } });
+      vi.mocked(collectRelatedPullRequests).mockResolvedValueOnce({
+        pullRequests: [
+          { repository: WRITE.repository, number: 7, openedAt: new Date(), openedByRunId: "run_a", state: "open" },
+          {
+            repository: "chfields/other-repo",
+            number: 9,
+            openedAt: new Date(),
+            openedByRunId: "run_b",
+            state: "merged",
+          },
+        ],
+      });
+      const out = JSON.parse(
+        await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c),
+      );
+      expect(out.relatedPullRequests).toEqual([
+        { repository: WRITE.repository, number: 7, state: "draft", self: true },
+        { repository: "chfields/other-repo", number: 9, state: "merged", self: false },
+      ]);
     });
   });
 

@@ -669,9 +669,13 @@ internal marker to the model:
   listed; names are capped at 100 characters. It also returns
   `relatedPullRequests`: this request's other pull requests (`repository`,
   `number`, `state`, `mergeOrder`, `self`), computed fresh at call time from
-  wardby's own run records; empty on a human pull request or one with no
-  recognized wardby marker. `relatedPullRequests` is current; the PR body's
-  **Related pull requests** section can be stale (see
+  wardby's own run records; empty on a human pull request, one with no
+  recognized wardby marker, or a pull request on a local repository (which
+  has no origin marker to look up). `state` is `draft`/`open`/`merged`/`closed`
+  for the `self` entry (the pull request just read) and `open`/`merged`/`closed`
+  for every other entry — siblings are never re-read to check draft status.
+  `relatedPullRequests` is current; the PR body's **Related pull requests**
+  section can be stale (see
   [Related pull requests across repositories](../help/related-pull-requests.md)).
 - **Re-review when CI finishes.** When a review publishes `COMMENT` on its
   own check while CI on that head is `pending` or `none`, Wardby records it.
