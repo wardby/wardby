@@ -24,6 +24,7 @@ interface Row {
   issueProvider: string | null;
   issueKey: string | null;
   startedAt: Date;
+  mergeOrder?: number | null;
 }
 
 /**
@@ -118,6 +119,35 @@ describe("collectRelatedPullRequests", () => {
     const group = await collectRelatedPullRequests(fake, "parent");
     expect(group).toEqual({ pullRequests: [] });
     expect(fake.issuePullRequest.findMany).not.toHaveBeenCalled();
+  });
+
+  it("sorts entries with orders [2, null, 1, 2] and increasing openedAt to 1, 2, 2, null (ties by openedAt, then repository#number)", async () => {
+    const { db: fake } = db([
+      [
+        row("c1", opened("acme/r1", 1), 1, { mergeOrder: 2 }),
+        row("c2", opened("acme/r2", 1), 2, { mergeOrder: null }),
+        row("c3", opened("acme/r3", 1), 3, { mergeOrder: 1 }),
+        row("c4", opened("acme/r4", 1), 4, { mergeOrder: 2 }),
+      ],
+    ]);
+    const group = await collectRelatedPullRequests(fake, "parent");
+    expect(group.pullRequests.map((p) => `${p.repository}#${p.number}`)).toEqual([
+      "acme/r3#1",
+      "acme/r1#1",
+      "acme/r4#1",
+      "acme/r2#1",
+    ]);
+    expect(group.pullRequests.map((p) => p.mergeOrder)).toEqual([1, 2, 2, undefined]);
+  });
+
+  it("leaves mergeOrder unset for an IssuePullRequest-only row (not from any CodingRun)", async () => {
+    const { db: fake } = db(
+      [[row("c1", opened("acme/r1", 1), 1, { mergeOrder: 3 })]],
+      [{ repository: "acme/r2", number: 2, createdAt: at(5), openedByRunId: "old", state: "open" }],
+    );
+    const group = await collectRelatedPullRequests(fake, "parent");
+    const r2 = group.pullRequests.find((p) => p.repository === "acme/r2");
+    expect(r2?.mergeOrder).toBeUndefined();
   });
 });
 

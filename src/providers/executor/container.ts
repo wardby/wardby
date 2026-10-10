@@ -289,6 +289,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       repository: pr.repository,
       number: pr.number,
       ...(pr.state ? { state: pr.state } : {}),
+      ...(pr.mergeOrder !== undefined ? { mergeOrder: pr.mergeOrder } : {}),
     }));
   }
 

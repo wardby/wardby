@@ -3,9 +3,11 @@
  * request opened by a coding run in the same top-level run tree (a lead that
  * fanned out to several repositories), plus any recorded for the same tracker
  * issue (IssuePullRequest). Control-plane rows only.
- * Ordered by when each pull request's coding run was dispatched: the lead's
- * delegation order (for a lead with parallelDelegations, the order its
- * concurrent delegations were admitted, ties broken by repository#number).
+ * Ordered by the delegating agent's declared merge order when any entry has
+ * one (CodingRun.mergeOrder; nulls last), then by when each pull request's
+ * coding run was dispatched: the lead's delegation order (for a lead with
+ * parallelDelegations, the order its concurrent delegations were admitted,
+ * ties broken by repository#number).
  * A PR opened while siblings were still running lists only the PRs opened
  * before it; updateRelatedPullRequests rewrites every open PR of the set
  * with the full list when the lead run ends. Continuations join
@@ -48,6 +50,13 @@ export interface RelatedPullRequest {
   openedByRunId: string;
   /** Only when stored (IssuePullRequest.state, kept current by pr_closed); otherwise unknown. */
   state?: StoredPullRequestState;
+  /**
+   * Step in the delegating agent's merge order (CodingRun.mergeOrder, 1-99),
+   * from the coding run that opened it. Absent when that run set none, or
+   * when the entry only came from IssuePullRequest (no CodingRun to read it
+   * from).
+   */
+  mergeOrder?: number;
 }
 
 export interface RelatedPullRequestGroup {
@@ -63,6 +72,7 @@ interface TreeCodingRun {
   issueProvider: string | null;
   issueKey: string | null;
   startedAt: Date;
+  mergeOrder: number | null;
 }
 
 /** Every coding run in the top-level trees containing `seeds` (walks up parentRunId, then down). */
@@ -78,7 +88,7 @@ async function treeCodingRuns(db: RelatedPullRequestsDb, seeds: string[]): Promi
       UNION
       SELECT c."id" FROM "Run" c JOIN down d ON c."parentRunId" = d."id"
     )
-    SELECT cr."runId", cr."result", cr."rootCodingRunId", cr."issueProvider", cr."issueKey", r."startedAt"
+    SELECT cr."runId", cr."result", cr."rootCodingRunId", cr."issueProvider", cr."issueKey", cr."mergeOrder", r."startedAt"
     FROM "CodingRun" cr
     JOIN down d ON cr."runId" = d."id"
     JOIN "Run" r ON r."id" = cr."runId"
@@ -176,6 +186,7 @@ export async function collectRelatedPullRequests(
         number: pr.pullRequestNumber,
         openedAt: new Date(r.startedAt),
         openedByRunId: r.runId,
+        ...(r.mergeOrder != null ? { mergeOrder: r.mergeOrder } : {}),
       });
     }
   }
@@ -212,9 +223,11 @@ export async function collectRelatedPullRequests(
       });
     }
   }
+  const order = (e: { mergeOrder?: number | null }) => e.mergeOrder ?? Number.POSITIVE_INFINITY;
   const pullRequests = [...byKey.values()]
     .sort(
       (a, b) =>
+        order(a) - order(b) ||
         a.openedAt.getTime() - b.openedAt.getTime() ||
         `${a.repository}#${a.number}`.localeCompare(`${b.repository}#${b.number}`),
     )
@@ -228,6 +241,8 @@ interface LivePullRequest {
   state?: RelatedPullRequestState;
   /** Set only when the PR is the App's own and its marker run is one this deployment recorded here. */
   markerRunId?: string;
+  /** Carried through from RelatedPullRequest.mergeOrder for rendering. */
+  mergeOrder?: number;
 }
 
 function issueFor(
@@ -271,7 +286,12 @@ export async function updateRelatedPullRequests(
     for (const pr of group.pullRequests) {
       // A stored merged/closed state is final and such a PR is never edited: no host read.
       if (pr.state === "merged" || pr.state === "closed") {
-        live.push({ repository: pr.repository, number: pr.number, state: pr.state });
+        live.push({
+          repository: pr.repository,
+          number: pr.number,
+          state: pr.state,
+          ...(pr.mergeOrder !== undefined ? { mergeOrder: pr.mergeOrder } : {}),
+        });
         continue;
       }
       try {
@@ -291,14 +311,25 @@ export async function updateRelatedPullRequests(
           });
           if (opener && opener.repository.toLowerCase() === pr.repository) markerRunId = origin.markerRunId;
         }
-        live.push({ repository: pr.repository, number: pr.number, state, ...(markerRunId ? { markerRunId } : {}) });
+        live.push({
+          repository: pr.repository,
+          number: pr.number,
+          state,
+          ...(markerRunId ? { markerRunId } : {}),
+          ...(pr.mergeOrder !== undefined ? { mergeOrder: pr.mergeOrder } : {}),
+        });
       } catch (err) {
         log.warn(
           { err, runId: run.id, repository: pr.repository, number: pr.number },
           "could not read a related pull request",
         );
         // The stored state (issue-recorded PRs) is better than none; never edited without a live read.
-        live.push({ repository: pr.repository, number: pr.number, ...(pr.state ? { state: pr.state } : {}) });
+        live.push({
+          repository: pr.repository,
+          number: pr.number,
+          ...(pr.state ? { state: pr.state } : {}),
+          ...(pr.mergeOrder !== undefined ? { mergeOrder: pr.mergeOrder } : {}),
+        });
       }
     }
 
@@ -311,6 +342,7 @@ export async function updateRelatedPullRequests(
           number: pr.number,
           ...(pr.state ? { state: pr.state } : {}),
           ...(pr === target ? { self: true } : {}),
+          ...(pr.mergeOrder !== undefined ? { mergeOrder: pr.mergeOrder } : {}),
         })),
         ...(issue ? { issue } : {}),
       });
