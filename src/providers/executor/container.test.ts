@@ -696,6 +696,39 @@ describe("ContainerExecutor", () => {
     expect(await launchedInput({ maxTurns: null })).not.toHaveProperty("maxTurns");
   });
 
+  it("hands the worker repoSkills only when the run turned skills off", async () => {
+    const launchedInput = async (overrides: Partial<ContainerRunSnapshot>) => {
+      const created = await harness(overrides);
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return input!;
+    };
+    expect(await launchedInput({ repoSkills: false })).toMatchObject({ runId: "run-1", repoSkills: false });
+    expect(await launchedInput({ repoSkills: true })).not.toHaveProperty("repoSkills");
+    expect(await launchedInput({})).not.toHaveProperty("repoSkills");
+  });
+
+  it("hands the worker claudeBareMode only when the run turned bare mode off", async () => {
+    const launchedInput = async (overrides: Partial<ContainerRunSnapshot>) => {
+      const created = await harness(overrides);
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return input!;
+    };
+    expect(await launchedInput({ claudeBareMode: false })).toMatchObject({
+      runId: "run-1",
+      claudeBareMode: false,
+    });
+    expect(await launchedInput({ claudeBareMode: true })).not.toHaveProperty("claudeBareMode");
+    expect(await launchedInput({})).not.toHaveProperty("claudeBareMode");
+  });
+
   it("hands the worker debugTrace only for a traced run, leaving other inputs unchanged", async () => {
     const launchedInput = async (overrides: Partial<ContainerRunSnapshot>) => {
       const created = await harness(overrides);

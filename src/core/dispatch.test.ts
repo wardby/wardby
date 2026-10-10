@@ -606,6 +606,54 @@ describe("dispatchRun", () => {
     expect(state.codingRuns).toEqual([expect.objectContaining({ runId: result?.run.id, maxTurns: expected })]);
   });
 
+  it.each([
+    ["skills on", true, true],
+    ["skills off", false, false],
+  ] as const)("fixes repoSkills on the run at dispatch from %s", async (_label, repoSkills, expected) => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      budgetUsd: 1.25,
+      codingProfile: {
+        provider: "codex",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        protectedPaths: [],
+        repoSkills,
+      },
+    };
+    const state = fakeDb(agent);
+    const executor: Executor = { async start() {}, async stop() {} };
+    const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+    expect(state.codingRuns).toEqual([expect.objectContaining({ runId: result?.run.id, repoSkills: expected })]);
+  });
+
+  it.each([
+    ["bare mode on", true, true],
+    ["bare mode off", false, false],
+  ] as const)("fixes claudeBareMode on the run at dispatch from %s", async (_label, claudeBareMode, expected) => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      budgetUsd: 1.25,
+      codingProfile: {
+        provider: "codex",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        protectedPaths: [],
+        claudeBareMode,
+      },
+    };
+    const state = fakeDb(agent);
+    const executor: Executor = { async start() {}, async stop() {} };
+    const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+    expect(state.codingRuns).toEqual([expect.objectContaining({ runId: result?.run.id, claudeBareMode: expected })]);
+  });
+
   it("copies the profile's collectExclude onto the run at dispatch", async () => {
     const agent = {
       ...nativeAgent(),

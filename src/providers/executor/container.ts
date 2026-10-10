@@ -145,6 +145,10 @@ export interface ContainerRunSnapshot {
   debugTrace?: boolean;
   /** Claude Code turn limit, fixed at dispatch (CodingRun.maxTurns); null = the worker default. */
   maxTurns?: number | null;
+  /** Load the repo's agent skills, fixed at dispatch (CodingRun.repoSkills); absent on older snapshots = true. */
+  repoSkills?: boolean;
+  /** Claude Code loading mode, fixed at dispatch (CodingRun.claudeBareMode); absent on older snapshots = true. */
+  claudeBareMode?: boolean;
   /** Coding-run services resolved at dispatch (CodingRun.services); parsed with parseStoredServices. */
   services?: unknown;
   /** The terminal failure category, once the run has one (CodingRun.failureCategory). */
@@ -273,6 +277,8 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       workspaceDiskMb: row.codingRun.workspaceDiskMb,
       debugTrace: row.codingRun.debugTrace,
       maxTurns: row.codingRun.maxTurns,
+      repoSkills: row.codingRun.repoSkills,
+      claudeBareMode: row.codingRun.claudeBareMode,
       services: row.codingRun.services,
       failureCategory: row.codingRun.failureCategory,
       profileRepository: row.agent.codingProfile?.repository ?? null,
@@ -1374,6 +1380,10 @@ export class ContainerExecutor implements Executor {
       ...(run.debugTrace ? { debugTrace: true } : {}),
       // Only when the agent sets one: every other run's input stays exactly what older workers expect.
       ...(run.maxTurns ? { maxTurns: run.maxTurns } : {}),
+      // Only when off: every other run's input stays exactly what older workers expect.
+      ...(run.repoSkills === false ? { repoSkills: false } : {}),
+      // Only when off: every other run's input stays exactly what older workers expect.
+      ...(run.claudeBareMode === false ? { claudeBareMode: false } : {}),
       // Only when there are some: every other run's input stays exactly what older workers expect.
       ...(services.length > 0 ? { services: workerServices(services) } : {}),
     });
