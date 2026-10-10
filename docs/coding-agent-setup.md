@@ -219,6 +219,8 @@ GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVA
 `npm run claude:images:local` builds the Claude agent image and both tool-runner
 images (`wardby-claude-tool-runner:phase5`, and
 `wardby-claude-tool-runner:phase5-node-python` for the `node-python` toolchain).
+It also builds `wardby-claude-tool-runner-custom:phase5`, a test-only custom
+tool runner that `npm run test:claude-docker` needs.
 This local, immutable-`sha256:` ID form of the `CODING_CLAUDE_*` images is only
 accepted by the Docker launcher.
 `JOB_LAUNCHER=kubernetes` needs both images pushed to a registry and set as

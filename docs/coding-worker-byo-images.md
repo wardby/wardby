@@ -170,7 +170,8 @@ agent's commands.
      lines in the Dockerfile do not reach the agent's commands.
 
 4. **Build it:** `docker build --tag <name> <build folder>`. Release images are
-   `linux/amd64`; on an ARM machine, add `--platform linux/amd64`.
+   `linux/amd64`. On an ARM machine, add `--platform linux/amd64` here and to
+   `docker run` in step 5.
 5. **Run the tests the way a run would.** Clone the repository to a throwaway
    folder (on Linux, make it writable: `chmod -R a+rwX <clone>`). Then run the
    project's test command with a run's restrictions and its fixed environment,
@@ -180,7 +181,8 @@ agent's commands.
    docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m --tmpfs /home/wardby:rw,noexec,nosuid,size=64m,uid=10001,gid=10001,mode=0700 --network none --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges -v <clone>:/workspace -w /workspace --entrypoint env <name> -i HOME=/home/wardby LANG=C.UTF-8 PATH=/opt/wardby/bin:/usr/local/bin:/usr/bin:/bin sh -lc '<test command>'
    ```
 
-   Fix the Dockerfile until the tests pass, then delete the clone.
+   On an ARM machine, add `--platform linux/amd64` after `docker run`. Fix the
+   Dockerfile until the tests pass, then delete the clone.
 
 6. **Get an immutable reference.** A tag is refused.
    - **Docker launcher** (wardby runs coding jobs with Docker on a single
@@ -243,7 +245,8 @@ RUN apt-get update \
 # Ruby lives in /usr/local, and the gems in /usr/local/bundle.
 COPY --from=builder /usr/local /usr/local
 # Settings for the agent's commands (Dockerfile ENV lines do not reach them).
-RUN printf '%s\n' \
+RUN ldconfig \
+    && printf '%s\n' \
       'export GEM_HOME=/usr/local/bundle' \
       'export BUNDLE_PATH=/usr/local/bundle' \
       'export BUNDLE_APP_CONFIG=/usr/local/bundle' \

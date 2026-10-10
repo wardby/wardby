@@ -1233,7 +1233,7 @@ export class ContainerExecutor implements Executor {
     if (selector.provider !== "codex") {
       throw new Error(`coding_provider_unsupported:${String(selector.provider)}`);
     }
-    if (selector.workerImageRef) {
+    if (selector.workerImageRef !== null) {
       if (!isImmutableDockerImage(selector.workerImageRef)) throw new Error("coding_worker_image_invalid");
       return selector.workerImageRef;
     }

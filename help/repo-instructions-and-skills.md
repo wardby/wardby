@@ -87,3 +87,5 @@ never loaded in either mode.
   — a custom `workerImageRef` image must be rebuilt for the current release. A
   Codex agent's image built on an older driver base rejects
   `repoSkills: false` and keeps offering Codex's built-in skills.
+- [Build a tool runner image for a Claude Code agent](build-claude-code-image.md)
+  to give a Claude Code agent's commands the tools your project needs.

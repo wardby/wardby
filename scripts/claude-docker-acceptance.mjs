@@ -4,7 +4,7 @@ function imageId(name, label) {
   try {
     return execFileSync("docker", ["image", "inspect", "--format", "{{.Id}}", name], { encoding: "utf8" }).trim();
   } catch {
-    process.stderr.write(`${label} image not found: ${name}\n`);
+    process.stderr.write(`${label} image not found: ${name}. Build the images with: npm run claude:images:local\n`);
     process.exit(1);
   }
 }

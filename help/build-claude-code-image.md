@@ -71,7 +71,7 @@ Rules:
   `/etc/profile.d/`, and put programs in `/usr/local/bin`.
 - **Mind the run's filesystem.** The root filesystem is read-only. `/tmp` and
   `/home/wardby` are empty scratch space; anything the image put there is
-  hidden. `/workspace` is the checkout and the only place a run can write. Put
+  hidden. `/workspace` is the checkout; files you want to keep go there. Put
   caches and temporary files under `/workspace/.cache/`.
 - **No root at run time.** Commands always run as user 10001 with
   `no-new-privileges`, so setuid programs do not help.
@@ -106,7 +106,7 @@ run. A "command not found" means a missing program or a missing
   use the local image ID,
   `docker image inspect --format '{{.Id}}' wardby-tool-runner-<language>:local`.
   Wardby never pulls these images, so build on the same machine.
-- **Hosted Wardby**: push the image to a registry the cluster can pull from,
+- **Kubernetes**: push the image to a registry the cluster can pull from,
   and use `<registry>/<name>@sha256:<digest>`.
 
 ## Step 6: update the builder and try it

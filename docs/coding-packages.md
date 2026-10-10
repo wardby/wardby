@@ -42,8 +42,10 @@ request never names the internal proxy.
    image to build or maintain; the agent installs what it needs at run time.
 2. **A custom `workerImageRef` with dependencies baked in.** Still supported:
    point the agent's profile at your own image, built on wardby's driver base
-   image (see [Bring-your-own worker images](coding-worker-byo-images.md)),
-   with everything preinstalled. Setting `workerImageRef` needs `agents:admin`
+   image for a Codex agent, or `FROM` the same release's tool runner image for
+   a Claude Code agent (see
+   [Bring-your-own worker images](coding-worker-byo-images.md)), with
+   everything preinstalled. Setting `workerImageRef` needs `agents:admin`
    and the admin role, and the image must be pinned by digest.
 3. **Both together.** Use a custom image for a toolchain or system libraries
    the registry can't provide (a compiler, a non-Node/Python runtime, apt
