@@ -107,6 +107,7 @@ export async function runNativeWorker(input: WorkerInput, transport: GatewayTran
   };
 
   let textSeq = 0;
+  let textSent: Promise<void> = Promise.resolve();
   const concurrent = new Set(input.runsConcurrently);
   const ctx: EngineRunContext = {
     agent: input.agent,
@@ -115,9 +116,17 @@ export async function runNativeWorker(input: WorkerInput, transport: GatewayTran
     runSandboxTool,
     ...(concurrent.size > 0 ? { runsConcurrently: (toolName: string) => concurrent.has(toolName) } : {}),
     onText: (delta) => {
-      void call("text", { seq: textSeq++, delta }).catch(() => {
-        // Streamed text is for live observers only; the final text travels with `finish`.
-      });
+      // One text call at a time: the gateway admits each call asynchronously, so concurrent ones
+      // can arrive out of order, and it drops any delta older than the last one it delivered.
+      const seq = textSeq++;
+      textSent = textSent.then(() =>
+        call("text", { seq, delta }).then(
+          () => {},
+          () => {
+            // Streamed text is for live observers only; the final text travels with `finish`.
+          },
+        ),
+      );
     },
     onProgress: async (progress) => {
       await call("progress", { turns: progress.turns, usage: progress.usage });
@@ -125,6 +134,8 @@ export async function runNativeWorker(input: WorkerInput, transport: GatewayTran
   };
 
   const result = await new NativeEngine().run(ctx);
+  // Live text reaches observers before the run is reported finished.
+  await textSent;
   await call("finish", {
     status: budgetRefused && result.status === "failed" ? "budget_exhausted" : result.status,
     finalText: result.finalText,
