@@ -426,12 +426,15 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
   pull request recorded for that issue in any run. When no pull request in the
   set carries a `mergeOrder` (see below), open ones are numbered as a
   **Suggested merge order** — the order the lead delegated in, not a
-  guarantee. When any open pull request does carry one, the heading becomes
+  guarantee. When any pull request in the set carries one (open, merged or
+  closed), the open ones that have a `mergeOrder` are numbered under
   **Merge order (set by the delegating agent; equal steps can merge in either
-  order)**, pull requests with a `mergeOrder` are numbered by step (equal
-  values share a step), and any open pull request without one is listed after
-  under **Not ordered**. Merged and closed pull requests are always listed
-  separately as context. A pull request lists the ones opened before it as
+  order)** and labelled "step k of n" (equal values share a step), and any
+  open pull request without one is listed after under **Not ordered**. Steps
+  are counted over the whole set, merged and closed pull requests included,
+  so a label stays the same as earlier steps merge. Merged and closed pull
+  requests are always listed separately as context, with their step label
+  when they have one. A pull request lists the ones opened before it as
   soon as it is opened; when the lead run finishes, and whenever a later run
   pushes to one of them, every open one is rewritten with the full list. Text
   you add inside the section is replaced; the rest of the description is not
@@ -446,10 +449,10 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
   and the pull requests must land in a particular sequence; leave it unset
   and the set keeps the delegation-order "Suggested merge order" above. A
   native sub-agent has no pull request to order, so it ignores `mergeOrder`
-  and the tool result notes that it did. A `continuePriorRun` call that omits
-  `mergeOrder` inherits the value already recorded for that pull request's
-  root coding run; whichever value was set most recently anywhere in the set
-  is what every pull request's **Related pull requests** section shows. A
+  and the tool result notes that it did. Each pull request shows the value
+  most recently set for it, by the run that opened it or a later
+  continuation of it: a `continuePriorRun` call that omits `mergeOrder`
+  keeps that value, and one that sets `mergeOrder` replaces it. A
   bad value (not an integer, or outside 1-99) is refused as a tool error
   rather than silently ignored.
 - The section, and the follow-up hints below, list every pull request in the

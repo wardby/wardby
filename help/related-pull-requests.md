@@ -1,7 +1,7 @@
 ---
 id: related-pull-requests
 title: Related pull requests across repositories
-summary: Wardby lists the other pull requests from the same request in each pull request's description, with a suggested merge order.
+summary: Wardby lists the other pull requests from the same request in each pull request's description, in the merge order the delegating agent set (mergeOrder) or else a suggested merge order.
 audience: operator
 tags: [github, pull-requests, multi-repo, merge-order, related, siblings, continuePriorRun, coding-agents, jira]
 appliesTo: ">=0.4.2"
@@ -14,7 +14,7 @@ agent that delegates to one coding agent per repository, or several runs for
 the same Jira issue — Wardby adds a **Related pull requests** section to each
 of those pull requests' descriptions. It lists the others with links and
 their state, names the originating issue when there is one, and gives a
-suggested merge order.
+merge order: the one the delegating agent set, or else a suggested one.
 
 Without a tracked Jira issue, the list covers the pull requests opened by
 runs in the same delegation tree (the same lead run and everything it
@@ -36,14 +36,17 @@ included, plus that run tree's own siblings.
   dependency analysis, and only reliable when the lead delegates repositories
   that own shared data first (see
   [Fanning out to several builders](../docs/agent-recipes.md#fanning-out-to-several-builders)).
-  When any open pull request in the set has a `mergeOrder`, the heading
-  instead reads **Merge order (set by the delegating agent; equal steps can
-  merge in either order)**: pull requests with a `mergeOrder` are numbered
-  and labelled "step k of n" (equal values share a step and merge in either
+  When any pull request in the set has a `mergeOrder` (open, merged or
+  closed), the open ones that have one are numbered under **Merge order (set
+  by the delegating agent; equal steps can merge in either order)** and
+  labelled "step k of n" (equal values share a step and merge in either
   order relative to each other), and any open pull request without one is
-  listed after under "Not ordered:". Either way, check it before merging —
-  neither is a guarantee. Merged and closed pull requests follow in a
-  separate "Already merged or closed" list, as context only.
+  listed after under "Not ordered:". Steps are counted over the whole set,
+  merged and closed pull requests included, so "step 2 of 3" keeps its label
+  after step 1 merges. Either way, check it before merging — neither is a
+  guarantee. Merged and closed pull requests follow in a separate "Already
+  merged or closed" list, as context only, with their step label when they
+  have one.
 - Only open pull requests that Wardby's own GitHub App opened are edited;
   merged or closed ones are listed but never changed, and a pull request
   from a different Wardby deployment sharing the same App is never touched.
@@ -76,12 +79,11 @@ keeps the delegation-order suggestion above. `mergeOrder` applies only to
 coding sub-agents, since only a coding run's pull request can be ordered: a
 native sub-agent ignores it, and its tool result notes that it did.
 
-A `continuePriorRun` call that omits `mergeOrder` inherits the value already
-recorded for that continuation's root coding run, so a follow-up does not
-need to repeat it to keep a pull request in its place. Whichever value was
-set most recently anywhere in the set — by the run that opened a pull
-request or by a later continuation of it — is what every pull request's
-section shows.
+Each pull request shows the value most recently set for it, by the run that
+opened it or a later continuation of it. A `continuePriorRun` call that
+omits `mergeOrder` keeps that current value, so a follow-up does not need to
+repeat it to keep a pull request in its place; one that sets `mergeOrder`
+replaces it.
 
 ## Follow-up runs and sibling pull requests
 

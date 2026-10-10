@@ -198,8 +198,10 @@ Leave `mergeOrder` out and the pull requests' **Related pull requests**
 section lists them in delegation order instead, labelled as a suggestion
 rather than a set order. It applies only to coding sub-agents; a native
 sub-agent ignores it. A follow-up that continues one of these pull requests
-with `continuePriorRun` and no `mergeOrder` of its own keeps the value
-already recorded for it.
+with `continuePriorRun` and no `mergeOrder` of its own keeps the pull
+request's current value (the one most recently set for it, by the run that
+opened it or a later continuation); one that passes `mergeOrder` replaces
+it.
 
 ## Step 3: confirm
 
