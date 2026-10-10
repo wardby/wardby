@@ -1,5 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
+import semver from "semver";
 
 export type HelpAudience = "operator" | "developer" | "all";
 
@@ -94,6 +95,15 @@ function parseTags(sourcePath: string, value: string): string[] {
   return tags;
 }
 
+function parseAppliesTo(sourcePath: string, raw: string): string {
+  const value = raw.replace(/^"(.*)"$/, "$1");
+  const minimum = /^>=(\d+\.\d+\.\d+)$/.exec(value)?.[1];
+  if (!minimum || !semver.valid(minimum)) {
+    throw failure(sourcePath, 'appliesTo must be a minimum release, for example ">=0.5.3"');
+  }
+  return value;
+}
+
 function headings(markdown: string): HelpHeading[] {
   return [...markdown.matchAll(/^(#{1,6})\s+(.+?)\s*#*\s*$/gm)].map((match) => ({
     level: match[1].length,
@@ -119,7 +129,7 @@ function parsePage(root: string, filePath: string, markdown: string): ParsedPage
       summary: fields.get("summary")!,
       audience,
       tags: parseTags(sourcePath, fields.get("tags")!),
-      appliesTo: fields.get("appliesTo")!,
+      appliesTo: parseAppliesTo(sourcePath, fields.get("appliesTo")!),
       sourcePath,
       markdown: body,
       plainText: plainText(body),
@@ -145,16 +155,24 @@ function isWithin(root: string, candidate: string): boolean {
   return path === "" || (!path.startsWith(`..${sep}`) && path !== "..");
 }
 
-function validateLinks(root: string, pages: ParsedPage[]): void {
+function validateLinks(root: string, pages: ParsedPage[], releaseVersion?: string): void {
   const byId = new Map(pages.map(({ page }) => [page.id, page]));
   const byFile = new Map(pages.map((parsed) => [resolve(parsed.filePath), parsed.page]));
+  const included = (page: HelpPage) => !releaseVersion || semver.satisfies(releaseVersion, page.appliesTo);
 
   for (const { page, filePath } of pages) {
     for (const match of page.markdown.matchAll(MARKDOWN_LINK)) {
       const href = match[1];
       if (href.startsWith("help://")) {
         const id = href.slice("help://".length).split("#", 1)[0];
-        if (!byId.has(id)) throw failure(page.sourcePath, `unknown help link "${href}"`);
+        const linkedPage = byId.get(id);
+        if (!linkedPage) throw failure(page.sourcePath, `unknown help link "${href}"`);
+        if (included(page) && !included(linkedPage)) {
+          throw failure(
+            page.sourcePath,
+            `help link "${href}" requires ${linkedPage.appliesTo}, after release ${releaseVersion}`,
+          );
+        }
         continue;
       }
 
@@ -169,6 +187,13 @@ function validateLinks(root: string, pages: ParsedPage[]): void {
         continue;
       }
 
+      if (included(page) && !included(linkedPage)) {
+        throw failure(
+          page.sourcePath,
+          `help link "${href}" requires ${linkedPage.appliesTo}, after release ${releaseVersion}`,
+        );
+      }
+
       if (fragment && !linkedPage.headings.some((heading) => heading.slug === decodeURIComponent(fragment))) {
         throw failure(page.sourcePath, `unknown help heading "${href}"`);
       }
@@ -177,7 +202,10 @@ function validateLinks(root: string, pages: ParsedPage[]): void {
 }
 
 /** Builds the deterministic, release-bundled catalog from the checked-in help corpus. */
-export async function buildHelpCatalog(root: string): Promise<HelpCatalog> {
+export async function buildHelpCatalog(root: string, releaseVersion?: string): Promise<HelpCatalog> {
+  if (releaseVersion && !semver.valid(releaseVersion)) {
+    throw new Error(`Invalid help release version "${releaseVersion}"`);
+  }
   const canonicalRoot = resolve(root);
   const files = await markdownFiles(canonicalRoot);
   if (!files.length) throw new Error(`Help corpus has no Markdown pages: ${canonicalRoot}`);
@@ -192,7 +220,12 @@ export async function buildHelpCatalog(root: string): Promise<HelpCatalog> {
       throw failure(current.page.sourcePath, `duplicate page id "${current.page.id}"`);
     }
   }
-  validateLinks(canonicalRoot, pages);
+  validateLinks(canonicalRoot, pages, releaseVersion);
 
-  return { schemaVersion: 1, pages: pages.map(({ page }) => page) };
+  return {
+    schemaVersion: 1,
+    pages: pages
+      .map(({ page }) => page)
+      .filter((page) => !releaseVersion || semver.satisfies(releaseVersion, page.appliesTo)),
+  };
 }

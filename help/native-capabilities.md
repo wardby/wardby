@@ -14,9 +14,7 @@ checkout. Give each agent only the capabilities its job needs:
 
 - **Tools** for approved external actions or APIs.
 - **Secrets** as bindings to tools or agents; values remain in Wardby's trusted
-  components rather than being returned through MCP. A secret can also be brokered, so
-  a tool sends it to chosen hosts without reading it; see
-  [Brokered secrets](brokered-secrets.md).
+  components rather than being returned through MCP.
 - **Datastores** for scoped application data and queries.
 - **Memory** for agent-owned durable context.
 - **Schedules and webhooks** to start event-driven work.
@@ -30,5 +28,3 @@ requires the matching MCP scope.
 
 See [Operate agents](operating-agents.md) for run and budget management, and
 [`README.md`](../README.md) for the feature overview and MCP operations.
-
-Sandbox mode runs a native agent's loop and tools in an isolated container; see [Run native agents in a sandbox](native-sandbox.md).

@@ -335,7 +335,7 @@ production alerts, and SLOs remain operator responsibilities. See the
 
 Read the [runtime architecture](https://github.com/wardby/wardby/blob/main/docs/architecture-runtime.md),
 [coding-worker isolation model](https://github.com/wardby/wardby/blob/main/docs/coding-worker-isolation.md),
-[native sandbox guide](https://github.com/wardby/wardby/blob/main/docs/native-sandbox.md), and
+[native sandbox guide](https://github.com/wardby/wardby/blob/main/docs/native-sandbox.md) (0.5.4+), and
 [security deployment guide](https://github.com/wardby/wardby/blob/main/docs/security-deployment.md) before enabling a
 production repository.
 
@@ -372,11 +372,11 @@ for the repository's own dependency-override policy.
   `reset_model`).
 - Per-run budgets, shared budget groups, usage accounting, and cancellation.
 - QuickJS tool isolation with host allowlists, secret bindings, and brokered
-  secrets that tools send to chosen hosts without reading
+  secrets (0.6.0+) that tools send to chosen hosts without reading
   ([guide](docs/tool-secrets.md)).
 - Containerized Codex and Claude Code executors with trusted GitHub draft-PR
   finalization.
-- Optional, outbound-only [Slack workflow notifications](https://github.com/wardby/wardby/blob/main/docs/slack-notifications.md):
+- Optional, outbound-only [Slack workflow notifications](https://github.com/wardby/wardby/blob/main/docs/slack-notifications.md) (0.6.0+):
   link a channel to a Jira project or an agent to follow a card from pickup
   to merge.
 - Per-run PostgreSQL, Redis and MySQL services for coding runs, declared in the

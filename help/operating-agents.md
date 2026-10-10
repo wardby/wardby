@@ -34,5 +34,3 @@ run finishes.
 
 For the full lifecycle and the controls applied to every managed run, read
 [`README.md`](../README.md).
-
-Sandbox mode runs a native agent's loop and tools in an isolated container; see [Run native agents in a sandbox](native-sandbox.md).

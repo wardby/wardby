@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenvFlow from "dotenv-flow";
 import pg from "pg";
+import semver from "semver";
 
 const projectRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const packageJson = JSON.parse(readFileSync(join(projectRoot, "package.json"), "utf8"));
@@ -69,6 +70,14 @@ try {
   ];
   for (const path of required) {
     if (!paths.has(path)) throw new Error(`packed artifact is missing ${path}`);
+  }
+  const helpCatalog = JSON.parse(readFileSync(join(projectRoot, "dist/help-index.json"), "utf8"));
+  for (const page of helpCatalog.pages) {
+    if (!semver.satisfies(packageJson.version, page.appliesTo)) {
+      throw new Error(
+        `packed help article ${page.id} requires ${page.appliesTo}, after release ${packageJson.version}`,
+      );
+    }
   }
 
   // Public documentation and the help corpus are intentionally shipped for

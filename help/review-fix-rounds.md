@@ -67,6 +67,3 @@ fix rounds at once.
 See [`docs/code-review-agents.md`](../docs/code-review-agents.md#automatic-review-fix-rounds)
 for the full trigger rules, the App's required permissions, and the related
 [code-review-agents](code-review-agents.md) article.
-
-Link a Slack channel to see each round start or hit its cap as it happens;
-see [Send workflow updates to Slack](slack-notifications.md).

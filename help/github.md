@@ -62,7 +62,4 @@ opened. See [Automatic review fix rounds](review-fix-rounds.md).
 finishes, and gates its ability to approve on CI passing. See
 [Review after CI (`waitForCi`)](code-review-agents.md#review-after-ci-waitforci).
 
-To see a pull request's open, review, fix-round, and merge events in Slack,
-see [Send workflow updates to Slack](slack-notifications.md).
-
 For Jira Cloud instead of GitHub, see [Run Jira agents](jira.md).
