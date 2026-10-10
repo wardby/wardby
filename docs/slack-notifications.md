@@ -1,5 +1,7 @@
 # Send workflow updates to Slack
 
+> **Requires Wardby 0.6.0 or later.**
+
 Link a Slack channel to a Jira project or to an agent (native or coding), and wardby posts
 that project's or agent's workflow updates there: a card picked up, a pull
 request opened, a review verdict, fix rounds, and the merge — one thread per

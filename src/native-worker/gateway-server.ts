@@ -328,8 +328,9 @@ async function hostCall(
       );
     }
   };
-  // Console lines are not worth a ledger row; everything else replays its result on a retried callId.
-  if (params.bridge === "__bridge_console") return run();
+  // Console lines are not worth a ledger row, and a secret value must never be stored in one
+  // (a secrets.get is a side-effect-free read, so a retried callId simply reads it again).
+  if (params.bridge === "__bridge_console" || params.bridge === "__bridge_secretsGet") return run();
   return replayable(ledger, ctx.session.id, callId, "host.call", run);
 }
 

@@ -81,6 +81,17 @@ export interface DispatchRunOptions {
    * exclusive with `codingBaseRef`. Coding agents only.
    */
   continuesCodingRunId?: string;
+  /**
+   * The step in the delegating agent's declared merge order for this coding
+   * run (1 = merge first; equal numbers mean no order between them). Integer
+   * 1-99, validated by the caller (the delegate_to_* tool's mergeOrder
+   * argument); throws `Error("invalid_merge_order")` otherwise. Coding agents
+   * only; ignored for a native agent (no CodingRun to store it on). A
+   * continuation (`continuesCodingRunId`) that omits this inherits the pull
+   * request's effective value: the newest non-null `mergeOrder` among the
+   * root coding run and its continuations.
+   */
+  mergeOrder?: number;
   now?: Date;
   lockAgent?: boolean;
   task?: { principalId: string; ttlMs: number };
@@ -299,6 +310,8 @@ interface CodingBranch {
   headRef?: string;
   continuationOf?: { runId: string };
   rootCodingRunId?: string;
+  /** The pull request's effective mergeOrder (effectiveMergeOrder), inherited unless this dispatch sets its own. Undefined for a fresh branch. */
+  mergeOrder?: number | null;
 }
 
 export type ContinuationRefusal = "unknown_run" | "other_repository" | "no_pull_request" | "other_owner";
@@ -406,7 +419,37 @@ async function resolveCodingBranch(
     headRef: root.headRef,
     continuationOf: { runId: root.runId },
     rootCodingRunId: root.runId,
+    mergeOrder: await effectiveMergeOrder(reader, root.runId),
   };
+}
+
+/**
+ * The pull request's current merge step: the newest non-null mergeOrder
+ * (by run start) among the root coding run and every continuation of it
+ * (CodingRun.rootCodingRunId, indexed), or null when none set one. A
+ * continuation that omits mergeOrder inherits this, so an earlier
+ * continuation's override is kept rather than reverting to the root's.
+ */
+async function effectiveMergeOrder(reader: Pick<DispatchTx, "codingRun">, rootRunId: string): Promise<number | null> {
+  const newest = await reader.codingRun.findFirst({
+    where: { OR: [{ runId: rootRunId }, { rootCodingRunId: rootRunId }], mergeOrder: { not: null } },
+    orderBy: [{ run: { startedAt: "desc" } }, { runId: "desc" }],
+    select: { mergeOrder: true },
+  });
+  return newest?.mergeOrder ?? null;
+}
+
+/**
+ * Resolves the CodingRun's mergeOrder: the caller's own value if given (an
+ * integer 1-99; anything else throws), else the inherited effective value
+ * (undefined for a fresh branch), else null (no order).
+ */
+function resolveMergeOrder(options: DispatchRunOptions, inherited: number | null | undefined): number | null {
+  if (options.mergeOrder === undefined) return inherited ?? null;
+  if (!Number.isInteger(options.mergeOrder) || options.mergeOrder < 1 || options.mergeOrder > 99) {
+    throw new Error("invalid_merge_order");
+  }
+  return options.mergeOrder;
 }
 
 /** What dispatch learned about a coding run's .wardby/services.yaml before its transaction. */
@@ -713,8 +756,9 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           // Resolved once: before the transaction when the declaration was read from it.
           const branch =
             declarationRead?.branch ?? (await resolveCodingBranch(tx, options, agent.codingProfile, agent.ownerId));
-          const { baseRef, continuationOf, rootCodingRunId } = branch;
+          const { baseRef, continuationOf, rootCodingRunId, mergeOrder: inheritedMergeOrder } = branch;
           const headRef = branch.headRef ?? `wardby/run-${run.id}`;
+          const mergeOrder = resolveMergeOrder(options, inheritedMergeOrder);
 
           const input = CodingTaskInputSchema.parse({
             schemaVersion: CODING_PROTOCOL_VERSION,
@@ -759,6 +803,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               toolImage,
               budgetReservedUsd: budgetUsd,
               rootCodingRunId,
+              mergeOrder,
               workspaceDiskMb: agent.codingProfile.workspaceDiskMb,
               maxTurns: agent.codingProfile.maxTurns,
               repoSkills: agent.codingProfile.repoSkills,

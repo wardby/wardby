@@ -1117,6 +1117,30 @@ describe("ContainerExecutor", () => {
       });
     });
 
+    it("carries the run's own mergeOrder onto its self entry, alongside an ordered sibling's", async () => {
+      const created = await harness({ mergeOrder: 1 });
+      created.store.related = [{ repository: "acme/order-service", number: 2, mergeOrder: 2 }];
+      await created.executor.start("run-1");
+      expect(created.vcs.lastFinalizeDetails?.related).toEqual({
+        entries: [
+          { repository: "acme/order-service", number: 2, mergeOrder: 2 },
+          { repository: "openai/example", self: true, mergeOrder: 1 },
+        ],
+      });
+    });
+
+    it("omits mergeOrder on the self entry when the run has none", async () => {
+      const created = await harness({});
+      created.store.related = [{ repository: "acme/order-service", number: 2 }];
+      await created.executor.start("run-1");
+      expect(created.vcs.lastFinalizeDetails?.related).toEqual({
+        entries: [
+          { repository: "acme/order-service", number: 2 },
+          { repository: "openai/example", self: true },
+        ],
+      });
+    });
+
     it("adds nothing for the first pull request, a continuation, or a store that fails", async () => {
       for (const [overrides, related] of [
         [{}, []],

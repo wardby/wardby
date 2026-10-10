@@ -12,6 +12,7 @@ import { RoutingLlmProvider, type CatalogLlmAdapter } from "../providers/llm/rou
 import type { LlmRequest, LlmStreamEvent } from "../providers/llm/types.js";
 import type { AgentMemoryStore } from "../providers/memory/types.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
+import type { safeFetch } from "../sandbox/safe-fetch.js";
 
 export const MODEL = "claude-haiku-4-5";
 
@@ -43,17 +44,23 @@ export const usage = (inputTokens: number, outputTokens: number) => {
   return { inputTokens, outputTokens, costUsd: computeCost(entry, { inputTokens, outputTokens }) };
 };
 
-export const script = (): LlmStreamEvent[][] => [
+/** One call of the tool `name` with `args`, then a final answer. */
+export const scriptFor = (
+  name: string,
+  args: unknown,
+  reply: string[] = ["The note says ", "hello."],
+): LlmStreamEvent[][] => [
   [
-    { type: "tool_call", id: "call_1", name: "lookup", argsJson: JSON.stringify({ key: "notes/a" }) },
+    { type: "tool_call", id: "call_1", name, argsJson: JSON.stringify(args) },
     { type: "done", stopReason: "tool_use", usage: usage(400, 30) },
   ],
   [
-    { type: "text", delta: "The note says " },
-    { type: "text", delta: "hello." },
+    ...reply.map((delta): LlmStreamEvent => ({ type: "text", delta })),
     { type: "done", stopReason: "end_turn", usage: usage(520, 12) },
   ],
 ];
+
+export const script = (): LlmStreamEvent[][] => scriptFor("lookup", { key: "notes/a" });
 
 export function memoryDatastore(
   seed: Record<string, DatastoreValue>,
@@ -90,3 +97,33 @@ export const TOOL_CODE = `
   await datastore.set("notes/seen", { key: params.key, keyLength: key.length });
   return { note, keyLength: key.length };
 `;
+
+// A brokered secret: tool code names it in fetch and never sees its value.
+export const BROKERED_VALUE = "ghp_brokered_value_1";
+export const BROKER_CONFIG = {
+  hosts: ["api.github.com"],
+  placement: { kind: "header", name: "Authorization", format: "Bearer {value}" },
+};
+export const GH_TOOL_CODE = `
+  const r = await fetch("https://api.github.com/repos/o/r", { secrets: ["gh"] });
+  console.log(await r.text());
+  return { status: r.status, echo: r.headers.get("x-echo") };
+`;
+
+/** Stands in for the network: records what the upstream received and echoes its Authorization header back. */
+export function echoUpstream() {
+  const authorizations: (string | undefined)[] = [];
+  const impl = (async (url, init) => {
+    const auth = init?.headers?.authorization;
+    authorizations.push(auth);
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      url,
+      headers: { "x-echo": String(auth) },
+      bodyBase64: Buffer.from(JSON.stringify({ sawAuth: auth ?? null })).toString("base64"),
+    };
+  }) as typeof safeFetch;
+  return { impl, authorizations };
+}

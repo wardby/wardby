@@ -131,6 +131,8 @@ export interface ContainerRunSnapshot {
   /** The issue that triggered this run (CodingRun.issueProvider/issueKey); null when none. */
   issueProvider?: string | null;
   issueKey?: string | null;
+  /** Step in the delegating agent's declared merge order (CodingRun.mergeOrder); null = no order. */
+  mergeOrder?: number | null;
   budgetUsd: number;
   /** The agent's own per-run budget; `budgetUsd` is less when its budget group had less left. */
   agentBudgetUsd?: number;
@@ -264,6 +266,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       rootCodingRunId: row.codingRun.rootCodingRunId,
       issueProvider: row.codingRun.issueProvider,
       issueKey: row.codingRun.issueKey,
+      mergeOrder: row.codingRun.mergeOrder,
       budgetUsd: Number(row.codingRun.budgetReservedUsd),
       agentBudgetUsd: Number(row.agent.budgetUsd),
       budgetGroupName: row.agent.budgetGroup?.name ?? null,
@@ -300,6 +303,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       repository: pr.repository,
       number: pr.number,
       ...(pr.state ? { state: pr.state } : {}),
+      ...(pr.mergeOrder !== undefined ? { mergeOrder: pr.mergeOrder } : {}),
     }));
   }
 
@@ -944,7 +948,14 @@ export class ContainerExecutor implements Executor {
       const { issue } = this.issueFor(run);
       return {
         related: {
-          entries: [...earlier, { repository: run.repository, self: true }],
+          entries: [
+            ...earlier,
+            {
+              repository: run.repository,
+              self: true,
+              ...(run.mergeOrder != null ? { mergeOrder: run.mergeOrder } : {}),
+            },
+          ],
           ...(issue ? { issue } : {}),
         },
       };

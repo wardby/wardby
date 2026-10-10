@@ -28,5 +28,3 @@ requires the matching MCP scope.
 
 See [Operate agents](operating-agents.md) for run and budget management, and
 [`README.md`](../README.md) for the feature overview and MCP operations.
-
-Sandbox mode runs a native agent's loop and tools in an isolated container; see [Run native agents in a sandbox](native-sandbox.md).

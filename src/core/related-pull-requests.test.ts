@@ -24,6 +24,7 @@ interface Row {
   issueProvider: string | null;
   issueKey: string | null;
   startedAt: Date;
+  mergeOrder?: number | null;
 }
 
 /**
@@ -118,6 +119,63 @@ describe("collectRelatedPullRequests", () => {
     const group = await collectRelatedPullRequests(fake, "parent");
     expect(group).toEqual({ pullRequests: [] });
     expect(fake.issuePullRequest.findMany).not.toHaveBeenCalled();
+  });
+
+  it("sorts entries with orders [2, null, 1, 2] and increasing openedAt to 1, 2, 2, null (ties by openedAt, then repository#number)", async () => {
+    const { db: fake } = db([
+      [
+        row("c1", opened("acme/r1", 1), 1, { mergeOrder: 2 }),
+        row("c2", opened("acme/r2", 1), 2, { mergeOrder: null }),
+        row("c3", opened("acme/r3", 1), 3, { mergeOrder: 1 }),
+        row("c4", opened("acme/r4", 1), 4, { mergeOrder: 2 }),
+      ],
+    ]);
+    const group = await collectRelatedPullRequests(fake, "parent");
+    expect(group.pullRequests.map((p) => `${p.repository}#${p.number}`)).toEqual([
+      "acme/r3#1",
+      "acme/r1#1",
+      "acme/r4#1",
+      "acme/r2#1",
+    ]);
+    expect(group.pullRequests.map((p) => p.mergeOrder)).toEqual([1, 2, 2, undefined]);
+  });
+
+  it("uses the newest non-null mergeOrder among a PR's opener and a later continuation that overrode it", async () => {
+    const { db: fake } = db([
+      [
+        row("c1", opened("acme/x", 1), 1, { mergeOrder: 2 }),
+        row("c2", { ...opened("acme/x", 1), outcome: "pull_request_updated" }, 5, {
+          mergeOrder: 1,
+          rootCodingRunId: "c1",
+        }),
+      ],
+    ]);
+    const group = await collectRelatedPullRequests(fake, "parent");
+    expect(group.pullRequests).toEqual([expect.objectContaining({ repository: "acme/x", number: 1, mergeOrder: 1 })]);
+  });
+
+  it("keeps the opener's mergeOrder when an (unrealistic) earlier-timestamped continuation row is seen first", async () => {
+    const { db: fake } = db([
+      [
+        row("c0", { ...opened("acme/z", 9), outcome: "pull_request_updated" }, 1, {
+          mergeOrder: 5,
+          rootCodingRunId: "c1",
+        }),
+        row("c1", opened("acme/z", 9), 2, { mergeOrder: 4 }),
+      ],
+    ]);
+    const group = await collectRelatedPullRequests(fake, "parent");
+    expect(group.pullRequests).toEqual([expect.objectContaining({ repository: "acme/z", number: 9, mergeOrder: 4 })]);
+  });
+
+  it("leaves mergeOrder unset for an IssuePullRequest-only row (not from any CodingRun)", async () => {
+    const { db: fake } = db(
+      [[row("c1", opened("acme/r1", 1), 1, { mergeOrder: 3 })]],
+      [{ repository: "acme/r2", number: 2, createdAt: at(5), openedByRunId: "old", state: "open" }],
+    );
+    const group = await collectRelatedPullRequests(fake, "parent");
+    const r2 = group.pullRequests.find((p) => p.repository === "acme/r2");
+    expect(r2?.mergeOrder).toBeUndefined();
   });
 });
 

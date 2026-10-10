@@ -5,6 +5,8 @@ import type { Datastore, DatastoreValue } from "../providers/datastore/types.js"
 import type { SecretsAccessor } from "../core/secrets.js";
 import type { SharedDatastoreAccessor } from "../core/datastores.js";
 import { runInSandbox } from "./run-in-sandbox.js";
+import type { SecretBrokerConfig } from "../core/secret-broker-config.js";
+import type { safeFetch } from "./safe-fetch.js";
 
 function fakeDatastore(): Datastore {
   const store = new Map<string, DatastoreValue>();
@@ -356,5 +358,197 @@ describe("bridge classification", () => {
     const local = new Set<string>(LOCAL_BRIDGE_NAMES);
     for (const name of called) expect(privileged.has(name) !== local.has(name)).toBe(true);
     expect([...privileged, ...local].sort()).toEqual([...called].sort());
+  });
+});
+
+function brokeredSecrets(
+  entries: Record<string, { value: string; broker: SecretBrokerConfig | null }>,
+): SecretsAccessor {
+  return {
+    async get(name) {
+      const e = entries[name];
+      if (e?.broker) throw new Error("secret_brokered: this secret is brokered");
+      return e?.value;
+    },
+    async resolve(name) {
+      return entries[name];
+    },
+  };
+}
+
+const GH = {
+  value: "ghp_secretvalue",
+  broker: {
+    hosts: ["api.github.com"],
+    placement: { kind: "header", name: "Authorization", format: "Bearer {value}" },
+  } as SecretBrokerConfig,
+};
+
+function echoFetch() {
+  const calls: { url: string; init: unknown; options: unknown }[] = [];
+  const impl = (async (url, init, options) => {
+    calls.push({ url, init, options });
+    const auth = init?.headers?.authorization;
+    const echoed = JSON.stringify({ sawAuth: auth ?? null });
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      url,
+      headers: { "x-echo": String(auth) },
+      bodyBase64: Buffer.from(echoed).toString("base64"),
+    };
+  }) as typeof safeFetch;
+  return { impl, calls };
+}
+
+function captureLogger() {
+  const calls: { level: string; args: unknown[] }[] = [];
+  const record =
+    (level: string) =>
+    (...args: unknown[]) => {
+      calls.push({ level, args });
+    };
+  const instance = { info: record("info"), warn: record("warn"), error: record("error"), child: () => instance };
+  return { logger: instance as never, calls };
+}
+
+describe("brokered secrets through fetch", () => {
+  const base = (code: string, fetchImpl: typeof safeFetch, secrets: SecretsAccessor) => ({
+    code,
+    params: {},
+    limits: FAST_LIMITS,
+    agentId: "a1",
+    datastore: fakeDatastore(),
+    sharedDatastore: fakeSharedDatastore(),
+    toolName: "gh",
+    allowedFetchHosts: ["api.github.com"],
+    secrets,
+    fetchImpl,
+  });
+
+  it("places the value for the upstream and scrubs it from what the tool sees", async () => {
+    const { impl, calls } = echoFetch();
+    const result = await runInSandbox(
+      base(
+        "const r = await fetch('https://api.github.com/repos/o/r', { secrets: ['GH'] }); return { body: await r.text(), echo: r.headers.get('x-echo') };",
+        impl,
+        brokeredSecrets({ GH }),
+      ),
+    );
+    expect(calls[0].init).toMatchObject({ headers: { authorization: "Bearer ghp_secretvalue" } });
+    expect(calls[0].options).toMatchObject({ followRedirects: false });
+    expect(JSON.stringify(result)).not.toContain("ghp_secretvalue");
+    expect(result).toMatchObject({ ok: true, value: { echo: "Bearer [REDACTED]" } });
+  });
+
+  it("leaves a plain fetch (no secrets) on the normal path, redirects followed", async () => {
+    const { impl, calls } = echoFetch();
+    const result = await runInSandbox(
+      base("const r = await fetch('https://api.github.com/x'); return r.status;", impl, brokeredSecrets({ GH })),
+    );
+    expect(result).toEqual({ ok: true, value: 200 });
+    expect(calls[0].options).not.toHaveProperty("followRedirects");
+  });
+
+  it("denies a destination outside the secret's hosts", async () => {
+    const { impl, calls } = echoFetch();
+    const result = await runInSandbox(
+      base("return await fetch('https://gist.github.com/', { secrets: ['GH'] });", impl, brokeredSecrets({ GH })),
+    );
+    expect(calls).toHaveLength(0);
+    expect(result).toMatchObject({
+      ok: false,
+      errorMessage: expect.stringContaining("secret_broker_destination_denied"),
+    });
+  });
+
+  it("refuses secrets.get on a brokered secret", async () => {
+    const result = await runInSandbox(
+      base("return await secrets.get('GH');", echoFetch().impl, brokeredSecrets({ GH })),
+    );
+    expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("secret_brokered") });
+  });
+
+  it("refuses a readable or unattached secret in fetch secrets", async () => {
+    const secrets = brokeredSecrets({ PLAIN: { value: "plain-value", broker: null } });
+    for (const name of ["PLAIN", "MISSING"]) {
+      const { impl, calls } = echoFetch();
+      const result = await runInSandbox(
+        base(`return await fetch('https://api.github.com/', { secrets: ['${name}'] });`, impl, secrets),
+      );
+      expect(calls).toHaveLength(0);
+      expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("secret_not_brokered") });
+    }
+  });
+
+  it("refuses brokering when the accessor cannot resolve (e.g. a dry run with no secrets)", async () => {
+    const { impl, calls } = echoFetch();
+    const result = await runInSandbox({
+      ...base("return await fetch('https://api.github.com/', { secrets: ['GH'] });", impl, brokeredSecrets({ GH })),
+      secrets: undefined,
+    });
+    expect(calls).toHaveLength(0);
+    expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("secret_not_brokered") });
+  });
+
+  it("refuses more than 8 brokered secrets in one request", async () => {
+    const { impl, calls } = echoFetch();
+    const names = JSON.stringify(Array.from({ length: 9 }, () => "GH"));
+    const result = await runInSandbox(
+      base(`return await fetch('https://api.github.com/', { secrets: ${names} });`, impl, brokeredSecrets({ GH })),
+    );
+    expect(calls).toHaveLength(0);
+    expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("secret_not_brokered") });
+  });
+
+  it.each(['"GH"', "{ 0: 'GH' }", "null"])(
+    "refuses a non-list secrets option (%s) instead of fetching unbrokered",
+    async (opt) => {
+      const { impl, calls } = echoFetch();
+      const result = await runInSandbox(
+        base(
+          `return await fetch('https://api.github.com/repos/o/r', { secrets: ${opt} });`,
+          impl,
+          brokeredSecrets({ GH }),
+        ),
+      );
+      expect(calls).toHaveLength(0);
+      expect(result).toMatchObject({ ok: false, errorMessage: expect.stringContaining("secret_not_brokered") });
+    },
+  );
+
+  it("redacts a brokered value from console output", async () => {
+    const { logger, calls } = captureLogger();
+    const { impl } = echoFetch();
+    await runInSandbox({
+      ...base(
+        "const r = await fetch('https://api.github.com/x', { secrets: ['GH'] }); console.log('v', atob(btoa('ghp_secretvalue'))); return 1;",
+        impl,
+        brokeredSecrets({ GH }),
+      ),
+      logger,
+    });
+    const serialized = JSON.stringify(calls);
+    expect(serialized).toContain("[REDACTED]");
+    expect(serialized).not.toContain("ghp_secretvalue");
+  });
+
+  it("redacts a brokered value from console output even when the fetch itself fails", async () => {
+    const { logger, calls } = captureLogger();
+    const failing = (async () => {
+      throw new Error("fetch_failed");
+    }) as typeof safeFetch;
+    await runInSandbox({
+      ...base(
+        "try { await fetch('https://api.github.com/x', { secrets: ['GH'] }); } catch (e) { console.log('v', 'ghp_secretvalue'); } return 1;",
+        failing,
+        brokeredSecrets({ GH }),
+      ),
+      logger,
+    });
+    const serialized = JSON.stringify(calls);
+    expect(serialized).toContain("[REDACTED]");
+    expect(serialized).not.toContain("ghp_secretvalue");
   });
 });

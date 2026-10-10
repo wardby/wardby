@@ -62,6 +62,8 @@ export interface HostFunctionOptions {
    * fetched, so it passes every value the attachment may read. Never logged or returned.
    */
   redactSecretValues?: readonly string[];
+  /** Overrides the network call — tests only. */
+  fetchImpl?: typeof safeFetch;
 }
 
 function args<T extends unknown[]>(argsJson: string): T {
@@ -111,6 +113,7 @@ export type PrivilegedHostOptions = Omit<HostFunctionOptions, "parserPool">;
 /** The privileged bridges for one tool invocation, scoped by its options. */
 export function createPrivilegedHost(options: PrivilegedHostOptions): PrivilegedHost {
   const { agentId, datastore, sharedDatastore, logTag, secrets, signal, allowedFetchHosts } = options;
+  const fetchImpl = options.fetchImpl ?? safeFetch;
   const sandboxLog = (options.logger ?? defaultLogger).child({
     module: "sandbox-tool",
     agentId,
@@ -142,9 +145,24 @@ export function createPrivilegedHost(options: PrivilegedHostOptions): Privileged
     },
 
     async __bridge_fetch(argsJson) {
-      const [url, init] =
-        args<[string, { method?: string; headers?: Record<string, string>; body?: string }]>(argsJson);
-      return safeFetch(url, init, { ...sandboxFetchPolicy(allowedFetchHosts ?? []), signal });
+      const [url, init = {}, secretNames] =
+        args<[string, { method?: string; headers?: Record<string, string>; body?: string }?, unknown?]>(argsJson);
+      const policy = { ...sandboxFetchPolicy(allowedFetchHosts ?? []), signal };
+      if (secretNames === undefined || (Array.isArray(secretNames) && secretNames.length === 0)) {
+        return fetchImpl(url, init, policy);
+      }
+      // Loaded only here: the brokering code needs packages the native worker image does not ship,
+      // and the worker never runs this bridge (the gateway does).
+      const { brokeredFetch } = await import("./brokered-fetch.js");
+      return brokeredFetch({
+        url,
+        init,
+        secretNames,
+        secrets,
+        fetchImpl,
+        policy,
+        redactFromConsole: (value) => fetchedSecretValues.add(value),
+      });
     },
 
     async __bridge_datastoreGet(argsJson) {

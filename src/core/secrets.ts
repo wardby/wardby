@@ -6,21 +6,44 @@
  * always resolve a name within one owner's (or, at get-time, one agent's)
  * scope, never globally.
  */
-import type { PrismaClient, Secret } from "#prisma";
+import { Prisma, type PrismaClient, type Secret } from "#prisma";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import { boundedString } from "../sandbox/bounded-json.js";
+import {
+  assertBrokerableValue,
+  brokerConfigHash,
+  parseSecretBrokerConfig,
+  SECRET_BROKER_CHANGED,
+  type SecretBrokerConfig,
+} from "./secret-broker-config.js";
 
-export type SecretMetadata = Pick<Secret, "id" | "name" | "keyId" | "ownerId" | "createdAt" | "updatedAt">;
-
-export interface SecretsAccessor {
-  get(name: string): Promise<string | undefined>;
+export type BrokerChangeVia = "mcp" | "browser";
+export type SecretMetadata = Pick<Secret, "id" | "name" | "keyId" | "ownerId" | "createdAt" | "updatedAt"> & {
+  broker: SecretBrokerConfig | null;
+};
+export interface SecretEntry {
+  value: string;
+  broker: SecretBrokerConfig | null;
 }
+export interface SecretsAccessor {
+  /** Readable secrets only: a brokered secret throws `secret_brokered`. */
+  get(name: string): Promise<string | undefined>;
+  /** Host-internal: value and broker config, brokered or not. Never exposed to tool code. */
+  resolve?(name: string): Promise<SecretEntry | undefined>;
+}
+
+function brokerOf(secret: Pick<Secret, "broker">): SecretBrokerConfig | null {
+  return secret.broker === null || secret.broker === undefined ? null : parseSecretBrokerConfig(secret.broker);
+}
+const BROKERED_GET_MESSAGE =
+  'secret_brokered: this secret is brokered; send it with fetch(url, { secrets: ["NAME"] }) instead of reading it';
 
 /**
  * Encrypts and stores a secret value. Upserts on (ownerId, name) — calling
  * this again for a name the owner already has rotates its value in place
  * (same id) rather than failing on the unique constraint. The plaintext is
- * never logged or returned.
+ * never logged or returned. With `options.broker`, the config is validated
+ * against the value, saved, and audited in the same transaction.
  */
 export async function createSecret(
   name: string,
@@ -28,28 +51,110 @@ export async function createSecret(
   ownerId: string,
   cipher: SecretCipher,
   db: PrismaClient,
+  options: { broker?: SecretBrokerConfig; via?: BrokerChangeVia } = {},
 ): Promise<Secret> {
   boundedString(name, 1024);
   boundedString(value, 65_536);
+  const broker = options.broker ? parseSecretBrokerConfig(options.broker) : undefined;
+  if (broker) assertBrokerableValue(broker, value);
   const ciphertext = await cipher.encrypt(value);
   const keyId = cipher.keyId();
-  return db.secret.upsert({
-    where: { ownerId_name: { ownerId, name } },
-    create: { name, ciphertext, keyId, ownerId },
-    update: { ciphertext, keyId },
+  if (!broker) {
+    // A rotation that omits `broker` keeps the stored config, so the new value must still be brokerable.
+    const existing = await db.secret.findUnique({
+      where: { ownerId_name: { ownerId, name } },
+      select: { broker: true },
+    });
+    if (existing?.broker) assertBrokerableValue(brokerOf(existing)!, value);
+    return db.secret.upsert({
+      where: { ownerId_name: { ownerId, name } },
+      create: { name, ciphertext, keyId, ownerId },
+      update: { ciphertext, keyId },
+    });
+  }
+  return db.$transaction(async (tx) => {
+    const existing = await tx.secret.findUnique({ where: { ownerId_name: { ownerId, name } } });
+    const before = existing ? brokerOf(existing) : null;
+    const secret = await tx.secret.upsert({
+      where: { ownerId_name: { ownerId, name } },
+      create: { name, ciphertext, keyId, ownerId, broker },
+      update: { ciphertext, keyId, broker },
+    });
+    if (JSON.stringify(before) !== JSON.stringify(broker)) {
+      await tx.secretBrokerChange.create({
+        data: {
+          secretId: secret.id,
+          ownerId,
+          secretName: name,
+          actorId: ownerId,
+          before: before ?? Prisma.JsonNull,
+          after: broker,
+          via: options.via ?? "mcp",
+        },
+      });
+    }
+    return secret;
+  });
+}
+
+/**
+ * Sets, changes, or (broker: null) removes a secret's broker config, with one audit
+ * row per actual change. `expectedBrokerHash` (brokerConfigHash of the config the
+ * caller confirmed) makes the change conditional, checked inside the transaction:
+ * if the secret is no longer brokered with exactly that config, it throws
+ * secret_broker_changed and changes nothing.
+ */
+export async function setSecretBroker(
+  db: PrismaClient,
+  cipher: SecretCipher,
+  input: {
+    ownerId: string;
+    name: string;
+    broker: SecretBrokerConfig | null;
+    actorId: string;
+    via: BrokerChangeVia;
+    expectedBrokerHash?: string;
+  },
+): Promise<{ before: SecretBrokerConfig | null; after: SecretBrokerConfig | null }> {
+  const after = input.broker === null ? null : parseSecretBrokerConfig(input.broker);
+  return db.$transaction(async (tx) => {
+    const secret = await tx.secret.findUnique({
+      where: { ownerId_name: { ownerId: input.ownerId, name: input.name } },
+    });
+    if (!secret) throw new Error(`secret_not_found: no secret named "${input.name}"`);
+    const before = brokerOf(secret);
+    if (input.expectedBrokerHash !== undefined && (!before || brokerConfigHash(before) !== input.expectedBrokerHash)) {
+      throw new Error(SECRET_BROKER_CHANGED);
+    }
+    if (JSON.stringify(before) === JSON.stringify(after)) return { before, after };
+    if (after) assertBrokerableValue(after, await cipher.decrypt(secret.ciphertext));
+    await tx.secret.update({ where: { id: secret.id }, data: { broker: after ?? Prisma.DbNull } });
+    await tx.secretBrokerChange.create({
+      data: {
+        secretId: secret.id,
+        ownerId: input.ownerId,
+        secretName: secret.name,
+        actorId: input.actorId,
+        before: before ?? Prisma.JsonNull,
+        after: after ?? Prisma.JsonNull,
+        via: input.via,
+      },
+    });
+    return { before, after };
   });
 }
 
 /** Names/metadata only — never a value or ciphertext. */
 export async function listSecrets(ownerId: string, db: PrismaClient): Promise<SecretMetadata[]> {
   const secrets = await db.secret.findMany({ where: { ownerId } });
-  return secrets.map(({ id, name, keyId, ownerId: owner, createdAt, updatedAt }) => ({
-    id,
-    name,
-    keyId,
-    ownerId: owner,
-    createdAt,
-    updatedAt,
+  return secrets.map((s) => ({
+    id: s.id,
+    name: s.name,
+    keyId: s.keyId,
+    ownerId: s.ownerId,
+    createdAt: s.createdAt,
+    updatedAt: s.updatedAt,
+    broker: brokerOf(s),
   }));
 }
 
@@ -99,37 +204,52 @@ export async function deleteSecret(secretId: string, db: PrismaClient): Promise<
  * binding written before that rule, left behind by make_owner, or on an
  * owner-less agent behaves exactly like an unattached name, so one owner's
  * secret never reaches another owner's agent (A2/S2-2, R2-1).
+ *
+ * A brokered secret's `get` throws `secret_brokered`; only the privileged host's `resolve` sees its value.
  */
 export function buildSecretsAccessor(
   agentId: string,
   cipher: SecretCipher,
   db: Pick<PrismaClient, "agentSecret"> & Partial<Pick<PrismaClient, "$queryRaw">>,
 ): SecretsAccessor {
+  async function resolve(name: string): Promise<SecretEntry | undefined> {
+    boundedString(name, 1024);
+    if (db.$queryRaw) {
+      // NULL-safe: "=" is never true when either owner is NULL.
+      const rows = await db.$queryRaw<{ ciphertext: string | null; broker: unknown }[]>`
+        SELECT CASE WHEN octet_length(s."ciphertext") <= 262144 THEN s."ciphertext" ELSE NULL END AS "ciphertext",
+               s."broker" AS "broker"
+        FROM "Secret" s
+        JOIN "AgentSecret" a ON a."secretId" = s."id"
+        JOIN "Agent" g ON g."id" = a."agentId"
+        WHERE a."agentId" = ${agentId} AND a."boundName" = ${name} AND s."ownerId" = g."ownerId" LIMIT 1`;
+      if (!rows.length) return undefined;
+      if (rows[0].ciphertext === null) throw new Error("secret_value_limit");
+      return {
+        value: await cipher.decrypt(rows[0].ciphertext),
+        broker: brokerOf({ broker: rows[0].broker as Secret["broker"] }),
+      };
+    }
+    // Lightweight provider doubles use the same post-read bound; production Prisma filters in SQL.
+    const attachment = await db.agentSecret.findFirst({
+      where: { agentId, boundName: name },
+      include: { secret: true, agent: { select: { ownerId: true } } },
+    });
+    if (!attachment) return undefined;
+    const owner = attachment.agent.ownerId;
+    if (owner === null || attachment.secret.ownerId !== owner) return undefined;
+    boundedString(attachment.secret.ciphertext, 256 * 1024);
+    return {
+      value: await cipher.decrypt(attachment.secret.ciphertext),
+      broker: brokerOf({ broker: attachment.secret.broker ?? null }),
+    };
+  }
   return {
+    resolve,
     async get(name: string): Promise<string | undefined> {
-      boundedString(name, 1024);
-      if (db.$queryRaw) {
-        // NULL-safe: "=" is never true when either owner is NULL.
-        const rows = await db.$queryRaw<{ ciphertext: string | null }[]>`
-          SELECT CASE WHEN octet_length(s."ciphertext") <= 262144 THEN s."ciphertext" ELSE NULL END AS "ciphertext"
-          FROM "Secret" s
-          JOIN "AgentSecret" a ON a."secretId" = s."id"
-          JOIN "Agent" g ON g."id" = a."agentId"
-          WHERE a."agentId" = ${agentId} AND a."boundName" = ${name} AND s."ownerId" = g."ownerId" LIMIT 1`;
-        if (!rows.length) return undefined;
-        if (rows[0].ciphertext === null) throw new Error("secret_value_limit");
-        return cipher.decrypt(rows[0].ciphertext);
-      }
-      // Lightweight provider doubles use the same post-read bound; production Prisma filters in SQL.
-      const attachment = await db.agentSecret.findFirst({
-        where: { agentId, boundName: name },
-        include: { secret: true, agent: { select: { ownerId: true } } },
-      });
-      if (!attachment) return undefined;
-      const owner = attachment.agent.ownerId;
-      if (owner === null || attachment.secret.ownerId !== owner) return undefined;
-      boundedString(attachment.secret.ciphertext, 256 * 1024);
-      return cipher.decrypt(attachment.secret.ciphertext);
+      const entry = await resolve(name);
+      if (entry?.broker) throw new Error(BROKERED_GET_MESSAGE);
+      return entry?.value;
     },
   };
 }
@@ -148,5 +268,8 @@ export function scopeSecretsAccessor(accessor: SecretsAccessor, allowedNames: re
       if (!allowed.has(name)) return undefined;
       return accessor.get(name);
     },
+    ...(accessor.resolve && {
+      resolve: async (name: string) => (allowed.has(name) ? accessor.resolve!(name) : undefined),
+    }),
   };
 }

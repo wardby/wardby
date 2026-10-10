@@ -138,8 +138,5 @@ service account can browse. The tool names `jira_get_issue`, `jira_search`,
 `jira_get_property` and `jira_set_property` are reserved; rename any existing
 user-defined tool with one of them before linking the agent.
 
-To post this project's pickup, pull-request, and merge updates to a Slack
-channel, see [Send workflow updates to Slack](slack-notifications.md).
-
 For the full guide, including tools, link options, token rotation and
 troubleshooting, follow [`docs/jira-agents.md`](../docs/jira-agents.md).

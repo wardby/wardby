@@ -9,6 +9,7 @@ import {
   type SandboxedEngineOptions,
 } from "./gateway.js";
 import { GatewayError, type WorkerInput } from "./protocol.js";
+import { loopbackLauncher } from "./loopback.js";
 
 const input: WorkerInput = {
   v: 1,
@@ -218,5 +219,38 @@ describe("runSandboxedEngine (trusted gateway)", () => {
   it("fails the run when the worker exits without a result", async () => {
     const { result } = await withWorker(async () => {});
     await expect(result).rejects.toThrow(/native_sandbox_worker_exited/);
+  });
+
+  it("delivers every streamed text delta in order when the gateway answers text calls out of order", async () => {
+    // Each gateway call first awaits a drivability check (a database read in production). Make
+    // every check faster than the one before it, so two calls in flight at once finish in reverse
+    // order, as load can make them.
+    let checks = 0;
+    const drivability = async (): Promise<RunDrivability> => {
+      checks += 1;
+      await new Promise((resolve) => setTimeout(resolve, Math.max(0, 100 - checks * 20)));
+      return "drivable";
+    };
+    const texts: string[] = [];
+    const result = await runSandboxedEngine({
+      runId: "run_1",
+      input: { ...input, userTools: {} },
+      ctx: {
+        providers: {
+          llm: llmStreaming([
+            { type: "text", delta: "The note says " },
+            { type: "text", delta: "hello." },
+            { type: "done", stopReason: "end_turn", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.01 } },
+          ]),
+        },
+        onText: (delta) => texts.push(delta),
+      },
+      builtinHandler: () => undefined,
+      privilegedHostFor: () => undefined,
+      drivability,
+      launcher: loopbackLauncher,
+    });
+    expect(result.finalText).toBe("The note says hello.");
+    expect(texts).toEqual(["The note says ", "hello."]);
   });
 });

@@ -25,5 +25,3 @@ and read the deployment guide before enabling a production repository.
 See [`docs/security-deployment.md`](../docs/security-deployment.md) and
 [`docs/coding-worker-isolation.md`](../docs/coding-worker-isolation.md) for
 the detailed operational model.
-
-Sandbox mode runs a native agent's loop and tools in an isolated container; see [Run native agents in a sandbox](native-sandbox.md).

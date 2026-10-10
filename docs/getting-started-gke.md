@@ -3,6 +3,9 @@
 This is the supported Google Cloud deployment path for Wardby. It creates a
 GKE Autopilot cluster, Artifact Registry, private-IP Cloud SQL for PostgreSQL,
 isolated coding workers, an HTTPS Gateway, and the Wardby control plane.
+Before accepting production work, complete the
+[release verification](release-verification.md) and
+[security deployment](security-deployment.md) checks.
 
 The older `deploy/gcp` Cloud Run module is deprecated. New deployments should
 use `deploy/gke` and the `gke-autopilot` Kubernetes overlay described here.
@@ -14,7 +17,8 @@ use `deploy/gke` and the `gke-autopilot` Kubernetes overlay described here.
 ## Architecture
 
 - The Wardby control plane and coding proxy run in GKE Autopilot.
-- Each Codex coding run uses an ephemeral gVisor-backed pod.
+- Each Codex or Claude Code coding run uses an ephemeral gVisor-backed pod;
+  Claude Code adds a tool-runner sidecar in that pod.
 - Native agents set to sandbox mode run in single-use gVisor pods behind the
   native gateway (see "Native sandbox" below).
 - Cloud SQL PostgreSQL has no public IP and is reached through private services
@@ -179,7 +183,7 @@ seeded: add it to the control plane's `env` in
 need it.
 
 To post [workflow notifications to Slack](slack-notifications.md), also add the
-Slack app's bot token. It is optional:
+Slack app's bot token. This requires Wardby 0.6.0 or later. It is optional:
 
 ```dotenv
 WARDBY_SLACK_BOT_TOKEN="xoxb-..."
@@ -604,6 +608,8 @@ A PriorityClass's value and preemption policy cannot be changed in place:
 delete the class and re-run `up.sh` to change them.
 
 ### Native sandbox
+
+Native sandbox requires Wardby 0.5.4 or later.
 
 `up.sh` deploys everything the [native sandbox](native-sandbox.md) needs on
 this cluster. It builds and pushes the `native-worker` image, checks it (Node is

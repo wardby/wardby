@@ -1,5 +1,7 @@
 # Native sandbox
 
+> **Requires Wardby 0.5.4 or later.**
+
 By default a native agent runs inside the Wardby server process: its turn loop
 and any user tool code you attach execute next to the database connection, the
 LLM credentials, and every other agent's runs. **Sandbox mode** moves the whole
@@ -129,13 +131,13 @@ The gateway is the same Wardby build as the server, started with the
 `native-gateway` command. It needs the server's database, LLM, secrets, and
 integration settings, and **no Docker access**.
 
-| Gateway variable        | Purpose                                                                  |
-| ----------------------- | ------------------------------------------------------------------------ |
-| `NATIVE_GATEWAY_LISTEN` | `host:port` to listen on. Default `0.0.0.0:8790`.                        |
-| `DATABASE_URL`          | The same database the server uses.                                       |
-| LLM provider keys       | The same provider settings as the server (for example `OPENAI_API_KEY`). |
-| `SECRET_APP_KEY`        | Same value as the server, so tools can read their bound secrets.         |
-| Integration settings    | The same repository-host and issue-tracker settings as the server.       |
+| Gateway variable        | Purpose                                                                                                             |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `NATIVE_GATEWAY_LISTEN` | `host:port` to listen on. Default `0.0.0.0:8790`.                                                                   |
+| `DATABASE_URL`          | The same database the server uses.                                                                                  |
+| LLM provider keys       | The same provider settings as the server (for example `OPENAI_API_KEY`).                                            |
+| `SECRET_APP_KEY`        | Same value as the server, so tools can read their bound secrets or send brokered ones ([details](tool-secrets.md)). |
+| Integration settings    | The same repository-host and issue-tracker settings as the server.                                                  |
 
 If sandboxed agents delegate to coding agents, give the gateway the same
 coding image settings as the server (for example `CODING_WORKER_IMAGE`); the
@@ -245,7 +247,8 @@ Run `wardby native-gateway` as a Deployment in the run namespace, from the
 same Wardby image as the server. Requirements:
 
 - **Environment:** the server's `DATABASE_URL`, `SECRET_APP_KEY` (so tools can
-  read their bound secrets), the LLM provider keys, and any integration or
+  read their bound secrets or send brokered ones; see
+  [tool-secrets.md](tool-secrets.md)), the LLM provider keys, and any integration or
   coding image settings the server has (see the gateway table in the Docker
   setup above). Also `NATIVE_GATEWAY_LISTEN` (default `0.0.0.0:8790`) and
   `NATIVE_GATEWAY_DENY_PORT` (default `8791`). Keep these in a Secret.

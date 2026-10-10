@@ -54,6 +54,8 @@ export function requestPinned(
 export interface SafeFetchOptions extends FetchPolicyOptions {
   signal?: AbortSignal;
   connect?: typeof requestPinned;
+  /** False: a 3xx is returned to the caller as-is (brokered requests re-check every hop themselves). */
+  followRedirects?: boolean;
 }
 async function untilAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   signal.throwIfAborted();
@@ -89,7 +91,11 @@ export async function safeFetch(input: string, init: SafeFetchInit = {}, options
       signal.throwIfAborted();
       response = await (options.connect ?? requestPinned)(destination, { method, headers, body }, signal);
       const status = response.statusCode ?? 0;
-      if ([301, 302, 303, 307, 308].includes(status) && response.headers.location) {
+      if (
+        options.followRedirects !== false &&
+        [301, 302, 303, 307, 308].includes(status) &&
+        response.headers.location
+      ) {
         response.destroy();
         if (hop >= MAX_REDIRECTS) throw new Error("fetch_redirect_limit");
         const next = new URL(response.headers.location, destination.url);

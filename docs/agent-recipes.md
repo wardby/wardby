@@ -423,14 +423,40 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
 - Wardby adds a **Related pull requests** section to each pull request the
   builders open, listing the others with links, states (open, draft, merged,
   closed) and the originating issue. With a Jira issue, the list covers every
-  pull request recorded for that issue in any run. Open ones are numbered as a
+  pull request recorded for that issue in any run. When no pull request in the
+  set carries a `mergeOrder` (see below), open ones are numbered as a
   **Suggested merge order** — the order the lead delegated in, not a
-  guarantee; merged and closed ones are listed separately as context. A pull
-  request lists the ones opened before it as soon as it is opened; when the
-  lead run finishes, and whenever a later run pushes to one of them, every
-  open one is rewritten with the full list. Text you add inside the section is
-  replaced; the rest of the description is not touched. Only pull requests the
-  App opened and that are still open are edited.
+  guarantee. When any pull request in the set carries one (open, merged or
+  closed), the open ones that have a `mergeOrder` are numbered under
+  **Merge order (set by the delegating agent; equal steps can merge in either
+  order)** and labelled "step k of n" (equal values share a step), and any
+  open pull request without one is listed after under **Not ordered**. If
+  only merged or closed pull requests carry a `mergeOrder`, the open ones are
+  all listed under **Not ordered**, with no **Merge order** heading. Steps
+  are counted over the whole set, merged and closed pull requests included,
+  so a label stays the same as earlier steps merge. Merged and closed pull
+  requests are always listed separately as context, with their step label
+  when they have one. A pull request lists the ones opened before it as
+  soon as it is opened; when the lead run finishes, and whenever a later run
+  pushes to one of them, every open one is rewritten with the full list. Text
+  you add inside the section is replaced; the rest of the description is not
+  touched. Only pull requests the App opened and that are still open are
+  edited.
+- Each `delegate_to_<name>` call to a coding sub-agent can carry a
+  `mergeOrder`: an integer from 1 to 99, where 1 merges first. Give a
+  repository that other repositories' changes depend on a lower number than
+  the ones that call it — for example a service `1`, the API in front of it
+  `2`, the client `3` — and give two changes the same number when there is no
+  order between them. Set it whenever one change spans several repositories
+  and the pull requests must land in a particular sequence; leave it unset
+  and the set keeps the delegation-order "Suggested merge order" above. A
+  native sub-agent has no pull request to order, so it ignores `mergeOrder`
+  and the tool result notes that it did. Each pull request shows the value
+  most recently set for it, by the run that opened it or a later
+  continuation of it: a `continuePriorRun` call that omits `mergeOrder`
+  keeps that value, and one that sets `mergeOrder` replaces it. A
+  bad value (not an integer, or outside 1-99) is refused as a tool error
+  rather than silently ignored.
 - The section, and the follow-up hints below, list every pull request in the
   set by repository name and number. A request that spans repositories of
   different visibility can therefore show a private repository's name in a

@@ -111,5 +111,3 @@ GitHub repository; see [Use local git repositories](local-repositories.md).
 Read [Connect GitHub repositories](github.md) and
 [Troubleshoot coding workers](troubleshooting/coding-workers.md) before
 enabling repository-changing work.
-
-Sandbox mode runs a native agent's loop and tools in an isolated container; see [Run native agents in a sandbox](native-sandbox.md).
