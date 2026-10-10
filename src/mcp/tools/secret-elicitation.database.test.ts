@@ -397,6 +397,28 @@ describe.skipIf(!process.env.DATABASE_URL)("brokered secrets over MCP (database)
       await client.close();
     });
 
+    it("a value the broker refuses gets a 400 and leaves the link usable for a corrected value", async () => {
+      const p = await owner();
+      const url = await serve(() => ({ ownerId: p, secretName: "GH", kind: "create", broker: BROKER }));
+      const fields = {
+        brokered: "1",
+        hosts: "api.example.com",
+        placement: "header",
+        headerName: "Authorization",
+        headerFormat: "Bearer {value}",
+      };
+      const short = await post(url, { ...fields, value: "abc" });
+      expect(short.status).toBe(400);
+      expect(await short.text()).toContain("secret_broker_value_invalid");
+      // Nothing recorded: create_secret keeps waiting instead of replaying the error.
+      expect(await getSecretElicitationOutcome(p, "GH", db)).toBeUndefined();
+
+      const saved = await post(url, { ...fields, value: VALUE });
+      expect(saved.status).toBe(200);
+      expect(await saved.text()).toContain("Saved");
+      expect(await getSecretElicitationOutcome(p, "GH", db)).toMatchObject({ ok: true, secret: { broker: BROKER } });
+    });
+
     it("accepts the largest valid AWS SigV4 value with its broker fields (well over 8 KiB encoded)", async () => {
       const p = await owner();
       const value = JSON.stringify({

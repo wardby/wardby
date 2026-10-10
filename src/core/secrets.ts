@@ -128,7 +128,7 @@ export async function setSecretBroker(
     }
     if (JSON.stringify(before) === JSON.stringify(after)) return { before, after };
     if (after) assertBrokerableValue(after, await cipher.decrypt(secret.ciphertext));
-    await tx.secret.update({ where: { id: secret.id }, data: { broker: after ?? Prisma.JsonNull } });
+    await tx.secret.update({ where: { id: secret.id }, data: { broker: after ?? Prisma.DbNull } });
     await tx.secretBrokerChange.create({
       data: {
         secretId: secret.id,

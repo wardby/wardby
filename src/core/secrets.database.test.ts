@@ -155,6 +155,10 @@ describe.skipIf(!process.env.DATABASE_URL)("brokered secrets (database)", () => 
       via: "browser",
     });
     expect(result).toEqual({ before: changed, after: null });
+    // SQL NULL, not a JSON null: "unbrokered" has one representation in the column.
+    const [{ unset }] = await db.$queryRaw<{ unset: boolean }[]>`
+      SELECT "broker" IS NULL AS "unset" FROM "Secret" WHERE "ownerId" = ${owner} AND "name" = 'K'`;
+    expect(unset).toBe(true);
     const rows = await db.secretBrokerChange.findMany({
       where: { ownerId: owner, secretName: "K" },
       orderBy: { createdAt: "asc" },

@@ -107,7 +107,8 @@ async function recordOutcome(
 /**
  * Called by the browser form's POST handler. Idempotent — a resubmit for
  * the same (ownerId, secretName) that's already fulfilled returns the
- * recorded outcome rather than writing again. `broker` (the form's,
+ * recorded outcome rather than writing again. A value or broker config that
+ * fails validation is returned but not recorded, so the person can correct it. `broker` (the form's,
  * pre-filled from the payload) makes the new secret brokered.
  */
 export async function fulfillSecretElicitation(
@@ -149,10 +150,19 @@ export async function fulfillSecretElicitation(
     };
   } catch (err) {
     outcome = { ok: false, kind: "create", error: err instanceof Error ? err.message : String(err) };
+    // A value or config the person can fix: not recorded, so the same link takes a corrected
+    // submission and create_secret keeps waiting rather than replaying this error.
+    if (isCorrectableInput(outcome.error)) return outcome;
   }
 
   await recordOutcome(db, ownerId, secretName, outcome, now);
   return outcome;
+}
+
+const CORRECTABLE_ERRORS = ["secret_broker_value_invalid", "secret_broker_config_invalid", "bridge_input_limit"];
+
+function isCorrectableInput(message: string): boolean {
+  return CORRECTABLE_ERRORS.some((code) => message.startsWith(code));
 }
 
 /**

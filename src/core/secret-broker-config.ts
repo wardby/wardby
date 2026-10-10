@@ -13,37 +13,59 @@ const TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/;
 const HOSTNAME = /^(?=.{1,253}$)(?!-)[a-z0-9-]{1,63}(?:\.(?!-)[a-z0-9-]{1,63})+$/;
 const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
 
+/** False for a name a resolver could read as an IPv4 address ("127.1", "0x7f.0.0.1") or with a label ending in "-". */
+function isExactHostname(h: string): boolean {
+  if (!HOSTNAME.test(h) || IPV4.test(h)) return false;
+  const labels = h.split(".");
+  const last = labels[labels.length - 1];
+  return !/^\d+$/.test(last) && !last.startsWith("0x") && !labels.some((l) => l.endsWith("-"));
+}
+
 const host = z
   .string()
   .transform((h) => h.toLowerCase())
-  .refine((h) => HOSTNAME.test(h) && !IPV4.test(h), "hosts must be exact hostnames (no scheme, port, wildcard, or IP)");
+  .refine(isExactHostname, "hosts must be exact hostnames (no scheme, port, wildcard, or IP)");
+
+const pathPrefix = z
+  .string()
+  .max(512)
+  .startsWith("/")
+  .refine(
+    // eslint-disable-next-line no-control-regex
+    (p) => !/[?#\\\x00-\x1f\x7f]/.test(p) && !/%2f|%5c/i.test(p),
+    "path prefixes must not contain ?, #, a backslash, control characters, or an encoded / or \\",
+  );
 
 const placement = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("header"),
-    name: z
-      .string()
-      .regex(TOKEN, "header name must be an HTTP token")
-      .refine((n) => !FORBIDDEN_HEADERS.includes(n.toLowerCase()), "that header cannot be set"),
-    format: z
-      .string()
-      .max(256)
-      .refine((f) => f.split("{value}").length === 2, 'format must contain "{value}" exactly once')
-      .refine((f) => !/[\r\n]/.test(f), "format must not contain line breaks"),
-  }),
-  z.object({ kind: z.literal("query"), name: z.string().min(1).max(128) }),
-  z.object({ kind: z.literal("body"), field: z.string().min(1).max(128) }),
-  z.object({
-    kind: z.literal("aws-sigv4"),
-    region: z.string().regex(/^[a-z0-9-]{1,32}$/),
-    service: z.string().regex(/^[a-z0-9-]{1,64}$/),
-  }),
+  z
+    .object({
+      kind: z.literal("header"),
+      name: z
+        .string()
+        .regex(TOKEN, "header name must be an HTTP token")
+        .refine((n) => !FORBIDDEN_HEADERS.includes(n.toLowerCase()), "that header cannot be set"),
+      format: z
+        .string()
+        .max(256)
+        .refine((f) => f.split("{value}").length === 2, 'format must contain "{value}" exactly once')
+        .refine((f) => !/[\r\n]/.test(f), "format must not contain line breaks"),
+    })
+    .strict(),
+  z.object({ kind: z.literal("query"), name: z.string().min(1).max(128) }).strict(),
+  z.object({ kind: z.literal("body"), field: z.string().min(1).max(128) }).strict(),
+  z
+    .object({
+      kind: z.literal("aws-sigv4"),
+      region: z.string().regex(/^[a-z0-9-]{1,32}$/),
+      service: z.string().regex(/^[a-z0-9-]{1,64}$/),
+    })
+    .strict(),
 ]);
 
 export const SecretBrokerConfigSchema = z
   .object({
     hosts: z.array(host).min(1).max(20),
-    pathPrefixes: z.array(z.string().max(512).startsWith("/")).max(20).optional(),
+    pathPrefixes: z.array(pathPrefix).max(20).optional(),
     placement,
   })
   .strict();
