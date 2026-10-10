@@ -6,8 +6,15 @@ Deployment configuration for wardby, organized by target.
   proxy). `npm run db:up` / `npm run coding:local:up`.
 - **`observability/`** — local Prometheus + Grafana stack (`npm run
 observability:up`), dev/local only. See `docs/observability.md`.
-- **`aws/`** — placeholder for an AWS target (Fargate `JobLauncher`, per the
-  same isolation contract used by other coding-worker launchers). Not yet built.
+- **`production/`** — self-hosted container deployment reference (e.g., Docker
+  Compose on a VM or on-premises host). It supplies the application and Caddy
+  edge configuration; operators supply the surrounding production controls.
+- **`kind-coding/`** — local Kubernetes coding-run proof harness, not a
+  production deployment.
+- **`aws/`** — a native AWS deployment module is planned, not shipped. The
+  portable runtime and Bedrock model adapter are available; this directory is
+  a placeholder for a Fargate `JobLauncher` using the same isolation contract
+  as the other coding-worker launchers.
 - **`gke/`** — the supported Google Cloud path: GKE Autopilot, private-IP Cloud
   SQL, Artifact Registry, and the `gke-autopilot` Kubernetes overlay. Start with
   the [full GKE guide](../docs/getting-started-gke.md).

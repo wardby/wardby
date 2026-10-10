@@ -3,6 +3,9 @@
 This is the supported Google Cloud deployment path for Wardby. It creates a
 GKE Autopilot cluster, Artifact Registry, private-IP Cloud SQL for PostgreSQL,
 isolated coding workers, an HTTPS Gateway, and the Wardby control plane.
+Before accepting production work, complete the
+[release verification](release-verification.md) and
+[security deployment](security-deployment.md) checks.
 
 The older `deploy/gcp` Cloud Run module is deprecated. New deployments should
 use `deploy/gke` and the `gke-autopilot` Kubernetes overlay described here.
@@ -14,7 +17,8 @@ use `deploy/gke` and the `gke-autopilot` Kubernetes overlay described here.
 ## Architecture
 
 - The Wardby control plane and coding proxy run in GKE Autopilot.
-- Each Codex coding run uses an ephemeral gVisor-backed pod.
+- Each Codex or Claude Code coding run uses an ephemeral gVisor-backed pod;
+  Claude Code adds a tool-runner sidecar in that pod.
 - Native agents set to sandbox mode run in single-use gVisor pods behind the
   native gateway (see "Native sandbox" below).
 - Cloud SQL PostgreSQL has no public IP and is reached through private services

@@ -1,16 +1,24 @@
 # Coding Worker Isolation
 
-Wardby supports isolated Codex execution with Docker or Kubernetes and
-credential-separated Claude Code execution with Docker. Both launchers fail
-closed when the effective runtime does not match the reviewed policy.
+Wardby runs Codex and Claude Code coding workers through Docker or Kubernetes
+launchers. Both fail closed when the effective runtime does not match the
+reviewed policy. Claude Code separates its model-facing worker from its
+workspace-facing tool runner: Docker uses companion containers, while
+Kubernetes uses a native sidecar in the run pod.
 
 ## Security Boundary
 
-Coding-agent repositories and instructions are untrusted. The Docker daemon,
-host kernel, Wardby control plane, immutable worker image, and dedicated coding
-proxy are trusted. Containers are defense in depth rather than a VM boundary;
-production should run the Docker host on a dedicated worker node or VM with no
-production credentials beyond those required by the proxy.
+Coding-agent repositories and instructions are untrusted. The Wardby control
+plane, immutable worker images, dedicated coding proxy, and the platform
+enforcing container and network policies are trusted.
+
+### Docker launcher
+
+The Docker daemon and host kernel are trusted. Docker containers are defense
+in depth rather than a VM boundary. Production should run the Docker host on a
+dedicated worker node or VM with no production credentials beyond those
+required by the proxy. The Kubernetes launcher section below describes the
+corresponding pod and network rules.
 
 The Codex worker has one network attachment: a unique per-run internal bridge using
 Docker's isolated gateway mode. It has no default external route, published
