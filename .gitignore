@@ -46,3 +46,6 @@ tfplan
 
 # generated Prisma client (npm run build / prepare: prisma generate)
 src/generated/
+
+# Wardby local runtime and credentials
+.wardby/
