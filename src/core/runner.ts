@@ -25,6 +25,7 @@ import type { EngineProgress, EngineResult, LoadedTool } from "../providers/engi
 import { runStepInline, type StepRunner } from "../providers/engine/types.js";
 import { isLlmEffort } from "../providers/llm/types.js";
 import { createPrivilegedHost, type PrivilegedHost } from "../sandbox/host-functions.js";
+import type { safeFetch } from "../sandbox/safe-fetch.js";
 import { runUserToolCall } from "../sandbox/user-tool.js";
 import {
   runSandboxedEngine,
@@ -375,6 +376,8 @@ export type NativeRunProviders = Pick<ProviderRegistry, "llm" | "engine" | "data
    * native gateway (src/native-worker). Absent: a run whose snapshot says sandbox fails closed.
    */
   nativeSandbox?: WorkerLauncher;
+  /** Overrides the sandbox's outbound network call — tests only. */
+  sandboxFetch?: typeof safeFetch;
 };
 
 /**
@@ -1297,6 +1300,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
       sharedDatastore: scopeSharedDatastoreAccessor(sharedDatastoreAccessor, tool.allowedSharedDatastorePrefixes),
       secrets: scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets),
       allowedFetchHosts: tool.allowedHosts,
+      fetchImpl: providers.sandboxFetch,
       logTag: name,
       signal,
     });

@@ -13,9 +13,18 @@ import type { SharedDatastoreAccessor } from "../core/datastores.js";
 import { registerJsonAsyncFunction } from "./bridge.js";
 import { parseAllowedHosts, type FetchPolicyOptions } from "./fetch-policy.js";
 import { safeFetch } from "./safe-fetch.js";
+import {
+  applyBrokerPlacements,
+  brokerScrubValues,
+  checkBrokerDestination,
+  scrubBrokeredResponse,
+  type BrokeredSecret,
+} from "./secret-broker.js";
+import { signSigV4 } from "./secret-broker-sigv4.js";
+import { assertBrokerableValue } from "../core/secret-broker-config.js";
 import { FETCH_WILDCARD } from "./tool-capabilities.js";
 import { boundedJson, boundedString } from "./bounded-json.js";
-import { PARSER_INPUT_BYTES, RANDOM_BYTES_LIMIT, LOG_BYTES, WALL_TIME_LIMIT_MS } from "./limits.js";
+import { BRIDGE_INPUT_BYTES, PARSER_INPUT_BYTES, RANDOM_BYTES_LIMIT, LOG_BYTES, WALL_TIME_LIMIT_MS } from "./limits.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import { logger as defaultLogger, type Logger } from "../core/logger.js";
 import { createParserWorkerPool, type ParserWorkerPool } from "./parser-worker/pool.js";
@@ -62,7 +71,12 @@ export interface HostFunctionOptions {
    * fetched, so it passes every value the attachment may read. Never logged or returned.
    */
   redactSecretValues?: readonly string[];
+  /** Overrides the network call — tests only. */
+  fetchImpl?: typeof safeFetch;
 }
+
+/** Most brokered secrets one fetch may name. */
+const MAX_BROKERED_SECRETS_PER_REQUEST = 8;
 
 function args<T extends unknown[]>(argsJson: string): T {
   return JSON.parse(argsJson) as T;
@@ -111,6 +125,7 @@ export type PrivilegedHostOptions = Omit<HostFunctionOptions, "parserPool">;
 /** The privileged bridges for one tool invocation, scoped by its options. */
 export function createPrivilegedHost(options: PrivilegedHostOptions): PrivilegedHost {
   const { agentId, datastore, sharedDatastore, logTag, secrets, signal, allowedFetchHosts } = options;
+  const fetchImpl = options.fetchImpl ?? safeFetch;
   const sandboxLog = (options.logger ?? defaultLogger).child({
     module: "sandbox-tool",
     agentId,
@@ -142,9 +157,46 @@ export function createPrivilegedHost(options: PrivilegedHostOptions): Privileged
     },
 
     async __bridge_fetch(argsJson) {
-      const [url, init] =
-        args<[string, { method?: string; headers?: Record<string, string>; body?: string }]>(argsJson);
-      return safeFetch(url, init, { ...sandboxFetchPolicy(allowedFetchHosts ?? []), signal });
+      const [url, init = {}, secretNames] =
+        args<[string, { method?: string; headers?: Record<string, string>; body?: string }?, unknown?]>(argsJson);
+      const policy = { ...sandboxFetchPolicy(allowedFetchHosts ?? []), signal };
+      if (secretNames === undefined || (Array.isArray(secretNames) && secretNames.length === 0)) {
+        return fetchImpl(url, init, policy);
+      }
+      if (!Array.isArray(secretNames) || secretNames.length > MAX_BROKERED_SECRETS_PER_REQUEST) {
+        throw new Error(
+          `secret_not_brokered: secrets must be a list of at most ${MAX_BROKERED_SECRETS_PER_REQUEST} brokered secret names`,
+        );
+      }
+      boundedString(url, BRIDGE_INPUT_BYTES);
+      const brokered: BrokeredSecret[] = [];
+      for (const name of secretNames) {
+        boundedString(name, 1024);
+        const entry = secrets?.resolve ? await secrets.resolve(name) : undefined;
+        if (!entry?.broker)
+          throw new Error(`secret_not_brokered: "${name}" is not a brokered secret attached to this tool`);
+        assertBrokerableValue(entry.broker, entry.value);
+        const secret: BrokeredSecret = { name, value: entry.value, broker: entry.broker };
+        // Redact from console output from here on, before any network call that might throw.
+        for (const value of [secret.value, ...brokerScrubValues([secret])]) fetchedSecretValues.add(value);
+        brokered.push(secret);
+      }
+      const sigv4 = brokered.filter((s) => s.broker.placement.kind === "aws-sigv4");
+      if (sigv4.length > 1) throw new Error("secret_broker_conflict: at most one AWS SigV4 secret per request");
+      checkBrokerDestination(url, brokered);
+      let request = applyBrokerPlacements(
+        { url, method: init.method ?? "GET", headers: init.headers ?? {}, body: init.body },
+        brokered,
+      );
+      if (sigv4.length) request = await signSigV4(request, sigv4[0]);
+      // safeFetch errors are fixed fetch_* codes that never echo the (possibly secret-bearing) URL.
+      // Redirects come back unfollowed: a placed credential must never ride a redirect to another host.
+      const response = await fetchImpl(
+        request.url,
+        { method: request.method, headers: request.headers, body: request.body },
+        { ...policy, followRedirects: false },
+      );
+      return scrubBrokeredResponse(response, brokerScrubValues(brokered));
     },
 
     async __bridge_datastoreGet(argsJson) {
