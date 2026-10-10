@@ -357,6 +357,39 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby merge order check (database)"
     expect(verdicts()).toEqual([`${repoD} completed/success`]);
   });
 
+  it("a running top-level coding run that continued a PR (review fix, @mention) never holds the set", async () => {
+    // A finished lead (G#50 step 1, merged; H#51 step 2) and a review fix round on H#51 that is
+    // itself a top-level coding run, still running: only a native lead declares merge order.
+    await run(id("orig3"), "succeeded");
+    await coder("cg", id("orig3"), repoD, 50, 1);
+    await coder("ch", id("orig3"), repoD, 51, 2);
+    Object.assign(prs.get(`${repoD}#50`)!, { state: "closed", merged: true });
+    await run(id("fix"), "running");
+    await db.codingRun.create({
+      data: {
+        runId: id("fix"),
+        task: "t",
+        repository: repoD,
+        baseRef: "main",
+        headRef: `wardby/run-${id("ch")}`,
+        provider: "codex",
+        model: "m",
+        timeoutSec: 900,
+        protectedPaths: [],
+        budgetReservedUsd: 1,
+        rootCodingRunId: id("ch"),
+        result: { outcome: "pull_request_updated", repository: repoD, pullRequestNumber: 51 },
+      },
+    });
+    for (const seed of [id("orig3"), id("fix")]) {
+      posted.length = 0;
+      await syncMergeOrderChecks({ db, hosts: deps.hosts }, seed);
+      expect(verdicts()).toEqual([`${repoD} completed/success`]);
+      expect(summaryFor(repoD)).toContain(`Merged: [${repoD}#50]`);
+    }
+    await db.run.update({ where: { id: id("fix") }, data: { status: "succeeded", finishedAt: new Date() } });
+  });
+
   it("the lowest step still succeeds while the delegating run runs", async () => {
     await db.run.update({ where: { id: id("lead") }, data: { status: "running", finishedAt: null } });
     for (const key of [`${repoA}#1`, `${repoB}#2`]) Object.assign(prs.get(key)!, { state: "open", merged: false });

@@ -202,9 +202,13 @@ export async function syncMergeOrderChecks(
       ...new Set(group.pullRequests.flatMap((pr) => (pr.mergeOrder !== undefined ? [pr.mergeOrder] : []))),
     ].sort((a, b) => a - b);
     if (steps.length < 2) return;
-    // A property of the set, whichever root it was seeded from: any of its run trees' roots (the
-    // original request, or a follow-up that continued one of its PRs) still running may change steps.
-    const leadRunning = (group.roots ?? []).some((r) => r.status === "pending" || r.status === "running");
+    // A property of the set, whichever root it was seeded from: only a native lead (a root that is
+    // not itself a coding run) declares merge order, so only one still running may change steps. A
+    // top-level coding run that continued one of the PRs never holds the check: its own later pushes
+    // re-sync through pr_updated, and nothing re-syncs when it ends.
+    const leadRunning = (group.roots ?? []).some(
+      (r) => !r.codingRun && (r.status === "pending" || r.status === "running"),
+    );
 
     const reused = opts.origin ? safeRepository(opts.origin.repository) : undefined;
     const closed = opts.closed ? safeRepository(opts.closed.repository) : undefined;

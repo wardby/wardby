@@ -53,12 +53,15 @@ number doesn't change as earlier steps merge.
 
 ### Waiting for the delegating run to finish
 
-While any run of the request that produced this set — the original
-delegating run, or a later run that continued one of its pull requests — is
-still running, it may still add or reorder steps. So, for every pull
-request above the set's **lowest** step, a would-be `success` is held back:
-the check stays `in_progress` with the title "Waiting for the delegating
-run to finish" until that run ends, however it ends. The lowest step still
+While the delegating (lead) agent's run that produced this set is still
+running, it may still add or reorder steps. So, for every pull request
+above the set's **lowest** step, a would-be `success` is held back: the
+check stays `in_progress` with the title "Waiting for the delegating run
+to finish" until that run ends, however it ends. Only a lead agent's run
+holds later steps this way: a coding run that continues one of the set's
+pull requests on its own (a review fix round, or an `@` mention picked up
+by a coding link) never does, and its pushes update the check as they
+land. The lowest step still
 reports `success` right away ("First step: nothing to wait for") — it has
 no dependency this hold could change. A pull request already `in_progress`
 on an unmerged dependency, or `failure` on a closed one, is reported as
@@ -69,8 +72,7 @@ such regardless of whether the delegating run is still running.
 The check is recomputed and reposted, reading every member's current state
 live from GitHub:
 
-- when the delegating run (or a run that continued one of the set's pull
-  requests) finishes;
+- when the delegating (lead) agent's run finishes;
 - when any pull request in the set is closed or merged;
 - on a new head or a reopen of any pull request in
   the set, on every open or draft pull request Wardby's own GitHub App

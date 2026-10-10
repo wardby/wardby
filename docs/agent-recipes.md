@@ -472,8 +472,9 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
   (or there is none), and `failure` if an earlier step was closed without
   merging. Above the set's lowest step, a would-be `success` stays
   `in_progress` ("waiting for the delegating run to finish") while the
-  delegating run, or a follow-up that continued one of its pull requests,
-  is still running — it may still add or reorder steps. Posting it never
+  delegating (lead) agent's run is still running — it may still add or
+  reorder steps. A coding run that continues one of the pull requests on
+  its own (a review fix round, an `@` mention) never holds it. Posting it never
   blocks a merge by itself: add `wardby merge order` as a required status
   check in branch protection to gate on it. See
   [The wardby merge order check](../help/merge-order-check.md).

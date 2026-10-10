@@ -73,9 +73,12 @@ export interface RelatedPullRequestGroup {
   /**
    * The top-level run of every run tree the walk visited (the original
    * request and each follow-up tree that continued one of its pull
-   * requests), with its status; absent when none was read.
+   * requests), with its status; absent when none was read. `codingRun` is
+   * true when the root is itself a coding run (a top-level follow-up such
+   * as a review fix round or an @mention picked up by a coding link), not a
+   * native lead agent's run.
    */
-  roots?: Array<{ id: string; status: RunStatus }>;
+  roots?: Array<{ id: string; status: RunStatus; codingRun: boolean }>;
 }
 
 interface TreeCodingRun {
@@ -89,6 +92,8 @@ interface TreeCodingRun {
   /** The top-level run of the tree this row was found in, and its status. */
   treeRootId?: string;
   treeRootStatus?: RunStatus;
+  /** True when that top-level run is itself a coding run. */
+  treeRootIsCodingRun?: boolean;
 }
 
 /** Every coding run in the top-level trees containing `seeds` (walks up parentRunId, then down). */
@@ -105,7 +110,8 @@ async function treeCodingRuns(db: RelatedPullRequestsDb, seeds: string[]): Promi
       SELECT c."id", d."rootId" FROM "Run" c JOIN down d ON c."parentRunId" = d."id"
     )
     SELECT cr."runId", cr."result", cr."rootCodingRunId", cr."issueProvider", cr."issueKey", cr."mergeOrder", r."startedAt",
-      d."rootId" AS "treeRootId", root."status"::text AS "treeRootStatus"
+      d."rootId" AS "treeRootId", root."status"::text AS "treeRootStatus",
+      EXISTS (SELECT 1 FROM "CodingRun" rc WHERE rc."runId" = d."rootId") AS "treeRootIsCodingRun"
     FROM "CodingRun" cr
     JOIN down d ON cr."runId" = d."id"
     JOIN "Run" r ON r."id" = cr."runId"
@@ -311,12 +317,16 @@ export async function collectRelatedPullRequests(
         `${a.repository}#${a.number}`.localeCompare(`${b.repository}#${b.number}`),
     )
     .slice(0, MAX_RELATED_GROUP);
-  const roots = new Map<string, RunStatus>();
-  for (const r of rows) if (r.treeRootId && r.treeRootStatus) roots.set(r.treeRootId, r.treeRootStatus);
+  const roots = new Map<string, { status: RunStatus; codingRun: boolean }>();
+  for (const r of rows) {
+    if (r.treeRootId && r.treeRootStatus) {
+      roots.set(r.treeRootId, { status: r.treeRootStatus, codingRun: r.treeRootIsCodingRun === true });
+    }
+  }
   return {
     pullRequests,
     ...(issue ? { issue } : {}),
-    ...(roots.size > 0 ? { roots: [...roots].map(([id, status]) => ({ id, status })) } : {}),
+    ...(roots.size > 0 ? { roots: [...roots].map(([id, root]) => ({ id, ...root })) } : {}),
   };
 }
 
