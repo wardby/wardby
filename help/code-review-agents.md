@@ -76,7 +76,7 @@ on the review check instead.
 Commit statuses need the App's **Commit statuses: Read** permission; without
 it only check runs are shown.
 
-From Wardby 0.6.0, `repo_pr_read` also returns `relatedPullRequests`: this
+With Wardby 0.6.0 or later, `repo_pr_read` also returns `relatedPullRequests`: this
 request's pull requests (`repository`, `number`, `state`, `mergeOrder`,
 `self`), computed fresh at call time; empty on a human pull request, one
 with no recognized Wardby marker, or a pull request on a local repository

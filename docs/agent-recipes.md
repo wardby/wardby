@@ -441,7 +441,7 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
   pushes to one of them, every open one is rewritten with the full list. Text
   you add inside the section is replaced; the rest of the description is not
   touched. Only pull requests the App opened and that are still open are
-  edited. From Wardby 0.6.0, a reviewer linked to one of these repositories
+  edited. With Wardby 0.6.0 or later, a reviewer linked to one of these repositories
   also holds its review of such a pull request until the lead run finishes,
   however it ends, so every pull request of the request is open by the time
   any of them is reviewed. When the lead finishes normally the section above

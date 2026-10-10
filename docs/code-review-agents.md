@@ -501,7 +501,7 @@ the full desired state. Two common shapes:
 }
 ```
 
-From Wardby 0.6.0, a `pull_request` reviewer's review of a pull request
+With Wardby 0.6.0 or later, a `pull_request` reviewer's review of a pull request
 opened by a delegated coding run is held until the run that delegated it
 finishes, whether or not this link sets `waitForCi` — see [Reviewing a pull request a delegated run
 opened](#reviewing-a-pull-request-a-delegated-run-opened) below.
@@ -718,7 +718,7 @@ internal marker to the model:
   `note` telling the agent to follow CI over the description's **Tests**.
   Reading CI never makes `repo_pr_read` fail: an unreadable result is
   `state: "unavailable"` with `unavailableReason`. At most 50 results are
-  listed; names are capped at 100 characters. From Wardby 0.6.0 it also
+  listed; names are capped at 100 characters. With Wardby 0.6.0 or later it also
   returns `relatedPullRequests`: this request's pull requests (`repository`,
   `number`, `state`, `mergeOrder`, `self`), computed fresh at call time from
   Wardby's own run records; empty on a human pull request, one with no

@@ -30,7 +30,7 @@ included, plus that run tree's own siblings.
   section on every open pull request of the request with the full list and
   current states. A later run that pushes to any pull request in the set
   refreshes the section on all of them the same way, and never removes it.
-  From Wardby 0.6.0, a reviewer linked to one of these pull requests does
+  With Wardby 0.6.0 or later, a reviewer linked to one of these pull requests does
   not review it until that same lead run finishes, however it ends. When the
   lead finishes normally the section has already been rewritten by then;
   when it is ended another way, such as being cancelled, reviews start
@@ -71,7 +71,7 @@ Reviewers see the section in the pull request description, so a reviewer
 agent can tell that a field, route, or schema a change relies on is added by
 a sibling pull request rather than missing. Because the description is only
 rewritten at the points above, a sibling opened (or merged, or closed) since
-then can be missing from it or shown with an old state. From Wardby 0.6.0,
+then can be missing from it or shown with an old state. With Wardby 0.6.0 or later,
 `repo_pr_read`'s `relatedPullRequests` field lists the request's pull
 requests fresh on every call instead, so a reviewer should prefer it over
 the description's section when they disagree. Its entry for the pull request
