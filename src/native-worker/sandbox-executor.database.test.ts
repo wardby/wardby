@@ -12,6 +12,7 @@ import { NativeSandboxExecutor, type ManagedWorkerLauncher } from "./sandbox-exe
 import { PrismaGatewayLedger } from "./ledger.js";
 import { PooledWorkerLauncher, type WarmWorkerLauncher } from "./warm-pool.js";
 import { PrismaWarmPoolLedger } from "./warm-pool-ledger.js";
+import { lockWarmPoolTable, LOCK_WAIT_MS } from "./warm-pool-lock.test-support.js";
 
 /** A launcher whose workers exit only when the test says so. */
 function fakeLauncher() {
@@ -59,17 +60,21 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
   };
   const gatewayUrl = "http://wardby-native-gateway:8790/native-gateway/v1/call";
 
+  let release: (() => Promise<void>) | undefined;
+
   beforeAll(async () => {
+    release = await lockWarmPoolTable();
     await db.principal.create({ data: { id: ownerId, subject: ownerId } });
     await db.agent.create({
       data: { id: agentId, name: agentId, systemPrompt: "s", model: MODEL, budgetUsd: 1, maxTurns: 3, ownerId },
     });
-  });
+  }, LOCK_WAIT_MS);
   afterAll(async () => {
     await db.run.deleteMany({ where: { agentId } });
     await db.agent.deleteMany({ where: { id: agentId } });
     await db.principal.deleteMany({ where: { id: ownerId } });
     await db.$disconnect();
+    await release?.();
   });
 
   const sandboxRun = () => db.run.create({ data: { agentId, nativeExecutionMode: "sandbox", executionManaged: true } });
@@ -252,8 +257,10 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
     // The worker exits without a result: the run fails, and the worker and its row are removed.
     exits.get(token)?.(1);
     await vi.waitFor(async () => expect((await row(run.id)).status).toBe("failed"));
-    await vi.waitFor(() => expect(warm.has(token)).toBe(false));
-    expect(await db.nativeWarmWorker.findUnique({ where: { id: token } })).toBeNull();
+    await vi.waitFor(async () => {
+      expect(warm.has(token)).toBe(false);
+      expect(await db.nativeWarmWorker.findUnique({ where: { id: token } })).toBeNull();
+    });
     pool.stop();
     await pool.settled();
     await db.nativeWarmWorker.deleteMany({ where: { specHash: { startsWith: `exec-test-${tag}` } } });
