@@ -370,7 +370,7 @@ describe("a lead run's finalizer releases the reviews waiting for its request (#
     expect(order).toEqual(["related", "release"]);
   });
 
-  it("syncs the merge order checks after the related sections and before the release, with the review hosts", async () => {
+  it("syncs the merge order checks after the related sections and the release, with the review hosts", async () => {
     vi.mocked(syncMergeOrderChecksAfterRun).mockClear();
     const order: string[] = [];
     vi.mocked(updateRelatedPullRequests).mockImplementationOnce(async () => void order.push("related"));
@@ -383,7 +383,7 @@ describe("a lead run's finalizer releases the reviews waiting for its request (#
     const [deps, finished] = vi.mocked(syncMergeOrderChecksAfterRun).mock.calls[0];
     expect(deps.hosts).toEqual({ github: host });
     expect(finished.id).toBe(run.id);
-    expect(order).toEqual(["related", "merge-order", "release"]);
+    expect(order).toEqual(["related", "release", "merge-order"]);
   });
 
   it("releases when the lead run failed, too", async () => {

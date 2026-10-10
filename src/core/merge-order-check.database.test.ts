@@ -140,11 +140,18 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby merge order check (database)"
     for (const a of [agentId, reviewer]) {
       await db.agent.create({ data: { id: a, name: a, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: owner } });
     }
+    // A lead still running whose step 1 already merged: step 2 waits for the lead, not for step 1.
+    await run(id("hold"), "running");
+    await coder("hx", id("hold"), repoD, 20, 1);
+    await coder("hy", id("hold"), repoD, 21, 2);
+    prs.get(`${repoD}#20`)!.state = "closed";
+    prs.get(`${repoD}#20`)!.merged = true;
     // Lead with three ordered steps: A#1 (1) -> B#2 (2) -> C#3 (3).
     await run(id("lead"), "running");
     await coder("ca", id("lead"), repoA, 1, 1);
     await coder("cb", id("lead"), repoB, 2, 2);
     await coder("cc", id("lead"), repoC, 3, 3);
+    await coder("cn", id("lead"), repoD, 30, null); // no order: never read, never checked
     // A lead whose two PRs share one step: nothing to gate.
     await run(id("flat"), "succeeded");
     await coder("fa", id("flat"), repoD, 10, 1);
@@ -186,6 +193,8 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby merge order check (database)"
     expect(posted.every((p) => p.input.name === MERGE_ORDER_CHECK_NAME && p.input.headSha === SHA)).toBe(true);
     expect(summaryFor(repoB)).toContain(`[${repoA}#1](https://github.com/${repoA}/pull/1)`);
     expect(summaryFor(repoC)).toContain(`[${repoB}#2](https://github.com/${repoB}/pull/2)`);
+    const reads = vi.mocked(host.pullRequestOrigin!).mock.calls.map((c) => `${c[0]}#${c[1]}`);
+    expect(reads).not.toContain(`${repoD}#30`);
   });
 
   it("a delegated (non-root) run's end posts nothing", async () => {
@@ -214,6 +223,22 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby merge order check (database)"
     expect(verdicts()).toEqual([`${repoB} completed/failure`, `${repoC} completed/failure`]);
     expect(summaryFor(repoB)).toContain(`[${repoA}#1](https://github.com/${repoA}/pull/1)`);
     expect(summaryFor(repoC)).toContain(`[${repoA}#1](https://github.com/${repoA}/pull/1)`);
+  });
+
+  it("a reopened dependency (pr_updated) takes its dependents from failure back to in_progress", async () => {
+    prs.get(`${repoA}#1`)!.state = "open";
+    const reopened: HostEvent = {
+      kind: "pr_updated",
+      provider: "github",
+      repository: repoA,
+      prNumber: 1,
+      headSha: SHA,
+      isFork: false,
+    };
+    const routed = await routeHostEvent(reopened, deps);
+    for (const followUp of routed.followUps) await followUp();
+    expect(verdicts()).toEqual([`${repoA} completed/success`, `${repoB} in_progress`, `${repoC} in_progress`]);
+    expect(summaryFor(repoB)).toContain(`Waiting for: [${repoA}#1]`);
   });
 
   it("re-posts on a new head (pr_updated), also when the head's review is held for the delegating run", async () => {
@@ -260,11 +285,32 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby merge order check (database)"
     prs.get(`${repoB}#2`)!.merged = true;
     resetMergeOrderSweepForTests();
     await sweepMergeOrderChecks({ db, hosts: deps.hosts });
-    expect(verdicts()).toEqual([`${repoC} completed/success`]);
+    // The finished hold set is swept too; of this set only C is still open.
+    expect(verdicts().filter((v) => !v.startsWith(repoD))).toEqual([`${repoC} completed/success`]);
     // Throttled: a second pass right away does nothing.
     posted.length = 0;
     await sweepMergeOrderChecks({ db, hosts: deps.hosts });
     expect(posted).toEqual([]);
+  });
+
+  it("holds a later step's success as in_progress while the delegating run runs; the lead's end posts success", async () => {
+    await syncMergeOrderChecks({ db, hosts: deps.hosts }, id("hold"));
+    expect(verdicts()).toEqual([`${repoD} in_progress`]);
+    expect(posted[0].input.headSha).toBe(SHA);
+    expect(summaryFor(repoD)).toContain("delegating run is still running");
+    expect(summaryFor(repoD)).toContain(`Merged: [${repoD}#20]`);
+    posted.length = 0;
+    await db.run.update({ where: { id: id("hold") }, data: { status: "succeeded", finishedAt: new Date() } });
+    await syncMergeOrderChecksAfterRun({ db, hosts: deps.hosts }, { id: id("hold"), parentRunId: null });
+    expect(verdicts()).toEqual([`${repoD} completed/success`]);
+  });
+
+  it("the lowest step still succeeds while the delegating run runs", async () => {
+    await db.run.update({ where: { id: id("lead") }, data: { status: "running", finishedAt: null } });
+    for (const key of [`${repoA}#1`, `${repoB}#2`]) Object.assign(prs.get(key)!, { state: "open", merged: false });
+    await syncMergeOrderChecks({ db, hosts: deps.hosts }, id("lead"));
+    expect(verdicts()).toEqual([`${repoA} completed/success`, `${repoB} in_progress`, `${repoC} in_progress`]);
+    await db.run.update({ where: { id: id("lead") }, data: { status: "succeeded", finishedAt: new Date() } });
   });
 
   it("posts nothing, and reads nothing, for a set with one distinct order", async () => {

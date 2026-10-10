@@ -18,7 +18,7 @@
  * missed events. State is read fresh from the host each time; nothing is
  * stored. Best effort: none of these ever throws.
  */
-import type { Run } from "#prisma";
+import type { Run, RunStatus } from "#prisma";
 import { CODING_CODE_PROVIDER, normalizeGitHubRepository } from "../coding/protocol.js";
 import type { PullRequestOrigin, ReviewHostRegistry, UpsertNamedCheckInput } from "../providers/review-host/types.js";
 import { logger, type Logger } from "./logger.js";
@@ -80,6 +80,11 @@ export interface MergeOrderSyncOptions {
   origin?: { repository: string; number: number; read: () => Promise<PullRequestOrigin> };
   /** A pull request this event reports closed: its state comes from the event, and it is not read. */
   closed?: { repository: string; number: number; merged: boolean };
+  /**
+   * Status of the run tree's root (the delegating run), when the caller
+   * already has it; otherwise read from `seedRunId` when that is a root.
+   */
+  rootStatus?: RunStatus;
 }
 
 interface LiveMember {
@@ -109,16 +114,33 @@ function originState(origin: PullRequestOrigin): MergeOrderMember["state"] {
   return origin.draft ? "draft" : "open";
 }
 
-/** The check run's text for one verdict: step label, then the pull requests it depends on, as links. */
+/**
+ * The check run's text for one verdict: step label, then the pull requests
+ * it depends on, as links. While the delegating run is still running
+ * (`leadRunning`) it may still add or reorder steps, so a success for any
+ * step above the set's lowest is posted as in_progress, waiting for it.
+ */
 export function mergeOrderCheckInput(
   self: MergeOrderMember,
   verdict: Exclude<MergeOrderVerdict, { status: "skip" }>,
   steps: readonly number[],
   headSha: string,
+  leadRunning = false,
 ): UpsertNamedCheckInput {
   const step = `Step ${steps.indexOf(self.mergeOrder!) + 1} of ${steps.length} in the merge order set by the delegating agent.`;
   const base = { headSha, name: MERGE_ORDER_CHECK_NAME };
   const lines = (members: MergeOrderMember[]) => members.map(prLink).join(", ");
+  if (verdict.status === "success" && leadRunning && self.mergeOrder !== steps[0]) {
+    return {
+      ...base,
+      status: "in_progress",
+      title: "Waiting for the delegating run to finish",
+      summary:
+        `${step}\n\nEvery earlier step has merged, but the delegating run is still running and may change ` +
+        `the steps; waiting for it to finish.` +
+        (verdict.dependencies.length > 0 ? `\n\nMerged: ${lines(verdict.dependencies)}` : ""),
+    };
+  }
   switch (verdict.status) {
     case "success":
       return {
@@ -171,6 +193,15 @@ export async function syncMergeOrderChecks(
       ...new Set(group.pullRequests.flatMap((pr) => (pr.mergeOrder !== undefined ? [pr.mergeOrder] : []))),
     ].sort((a, b) => a - b);
     if (steps.length < 2) return;
+    let rootStatus = opts.rootStatus;
+    if (rootStatus === undefined) {
+      const seed = await deps.db.run.findUnique({
+        where: { id: seedRunId },
+        select: { status: true, parentRunId: true },
+      });
+      if (seed && seed.parentRunId === null) rootStatus = seed.status;
+    }
+    const leadRunning = rootStatus === "pending" || rootStatus === "running";
 
     const reused = opts.origin ? safeRepository(opts.origin.repository) : undefined;
     const closed = opts.closed ? safeRepository(opts.closed.repository) : undefined;
@@ -185,6 +216,11 @@ export async function syncMergeOrderChecks(
       }
       if (pr.state === "merged") {
         members.push({ member: { ...base, state: "merged" }, known: true });
+        continue;
+      }
+      // No order: never a dependency and never checked, so its state is never needed: no read.
+      if (base.mergeOrder === null) {
+        members.push({ member: { ...base, state: "open" }, known: true });
         continue;
       }
       try {
@@ -225,7 +261,10 @@ export async function syncMergeOrderChecks(
       const verdict = mergeOrderVerdict(self, set);
       if (verdict.status === "skip") continue;
       try {
-        await host.upsertNamedCheck(self.repository, mergeOrderCheckInput(self, verdict, steps, target.headSha));
+        await host.upsertNamedCheck(
+          self.repository,
+          mergeOrderCheckInput(self, verdict, steps, target.headSha, leadRunning),
+        );
         log.info(
           { seedRunId, repository: self.repository, number: self.number, status: verdict.status },
           "merge order check posted",
@@ -297,18 +336,18 @@ export async function syncMergeOrderChecksForPullRequest(
   if (!host?.upsertNamedCheck || !host.pullRequestOrigin) return;
   const repository = safeRepository(pr.repository);
   if (!repository || !Number.isSafeInteger(pr.number) || pr.number <= 0) return;
-  let roots: string[];
+  let roots: Array<{ id: string; status: RunStatus }>;
   try {
     roots = [];
     for (const seed of await orderedSeeds(deps.db, repository, pr.number)) {
       const root = await runTreeRoot(deps.db, seed, repository);
-      if (root && !roots.includes(root.id)) roots.push(root.id);
+      if (root && !roots.some((r) => r.id === root.id)) roots.push(root);
     }
   } catch (err) {
     log.warn({ err, repository, number: pr.number }, "could not find the merge-ordered sets of a pull request");
     return;
   }
-  for (const root of roots) await syncMergeOrderChecks(deps, root, opts);
+  for (const root of roots) await syncMergeOrderChecks(deps, root.id, { ...opts, rootStatus: root.status });
 }
 
 /** The sweep runs at most this often per process (the reconciler ticks every 15 s). */
@@ -344,8 +383,10 @@ export async function sweepMergeOrderChecks(deps: MergeOrderSyncDeps, now: Date 
   lastSweepAt = now.getTime();
   const since = new Date(now.getTime() - MERGE_ORDER_SWEEP_MAX_AGE_MS);
   for (const [root, at] of lastSyncedAt) if (at < since.getTime()) lastSyncedAt.delete(root);
-  let roots: string[];
+  let roots: Array<{ id: string; status: RunStatus }>;
   try {
+    // Covers the MERGE_ORDER_SWEEP_SEEDS most recently updated coding runs with a merge order
+    // within the last 7 days; older sets rely on their pr_closed/pr_updated events alone.
     const rows = await deps.db.$queryRaw<Array<{ runId: string; repository: string }>>`
       SELECT cr."runId", cr."repository"
       FROM "CodingRun" cr
@@ -357,19 +398,19 @@ export async function sweepMergeOrderChecks(deps: MergeOrderSyncDeps, now: Date 
     roots = [];
     for (const row of rows) {
       const root = await runTreeRoot(deps.db, row.runId, row.repository);
-      if (root && !roots.includes(root.id)) roots.push(root.id);
+      if (root && !roots.some((r) => r.id === root.id)) roots.push(root);
     }
   } catch (err) {
     log.warn({ err }, "merge order check sweep failed");
     return 0;
   }
   const batch = roots
-    .map((root, index) => ({ root, index, at: lastSyncedAt.get(root) ?? Number.NEGATIVE_INFINITY }))
+    .map((root, index) => ({ root, index, at: lastSyncedAt.get(root.id) ?? Number.NEGATIVE_INFINITY }))
     .sort((a, b) => a.at - b.at || a.index - b.index)
     .slice(0, MERGE_ORDER_SWEEP_BATCH);
   for (const { root } of batch) {
-    lastSyncedAt.set(root, now.getTime());
-    await syncMergeOrderChecks(deps, root);
+    lastSyncedAt.set(root.id, now.getTime());
+    await syncMergeOrderChecks(deps, root.id, { rootStatus: root.status });
   }
   return batch.length;
 }

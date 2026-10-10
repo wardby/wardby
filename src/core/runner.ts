@@ -1436,10 +1436,6 @@ async function settleFinishedNativeRun(ctx: NativeRunFinishContext, finished: Ru
   await completeIssueStatus(db, finished, issueTrackers);
   // After the issue status, so IssuePullRequest rows for this run exist. Bounded and never throws.
   if (claimed) await updateRelatedPullRequests(db, finished, reviewHosts, issueTrackers);
-  // A lead's end posts the `wardby merge order` check on each open pull request of its set,
-  // once every delegated coding run has opened its PR (#261). Only for a tree root that
-  // delegated; a lead another finalizer ended is left to the reconciler sweep. Never throws.
-  if (claimed) await syncMergeOrderChecksAfterRun({ db, hosts: reviewHosts }, finished);
   // A tree root is the lead of a request: once it is terminal every coding run it delegated is
   // too, so the reviews of their pull requests that waited for it start now, after the related
   // sections above are current (#259). Not gated on `claimed`: release is claimed per row, and a
@@ -1451,6 +1447,11 @@ async function settleFinishedNativeRun(ctx: NativeRunFinishContext, finished: Ru
       runId,
     ).catch((err: unknown) => runnerLog.warn({ err, runId }, "could not start the reviews waiting for this run"));
   }
+  // A lead's end posts the `wardby merge order` check on each open pull request of its set,
+  // once every delegated coding run has opened its PR (#261); after the release above, so no
+  // review waits on it. Only for a tree root that delegated. Not gated on `claimed`: the sync is
+  // idempotent (an unchanged check writes nothing). Never throws.
+  await syncMergeOrderChecksAfterRun({ db, hosts: reviewHosts }, finished);
   if (claimed && providers.executor && reviewHosts && repoAccess) {
     await startReviewFixAfterReview(runId, {
       db,

@@ -879,7 +879,8 @@ export class GitHubReviewHost implements CodeReviewHost {
    * allow reopening a completed check run): a fresh one is created instead.
    */
   async upsertNamedCheck(repository: string, input: UpsertNamedCheckInput): Promise<void> {
-    if (!SAFE_SHA.test(input.headSha)) throw new ReviewHostError("host_invalid_response");
+    // A caller's bad input, like path_invalid: never interpolated into the URL.
+    if (!SAFE_SHA.test(input.headSha)) throw new ReviewHostError("host_api_error", "head_sha_invalid");
     const base = repoPath(repository);
     const output = {
       title: input.title.slice(0, CHECK_TITLE_LIMIT),

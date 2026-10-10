@@ -834,7 +834,7 @@ describe("GitHubReviewHost writes", () => {
         title: "t",
         summary: "s",
       }),
-    ).rejects.toMatchObject({ code: "host_invalid_response" });
+    ).rejects.toMatchObject({ code: "host_api_error", message: "head_sha_invalid" });
     expect(calls).toEqual([]);
   });
 
