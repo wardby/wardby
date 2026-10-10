@@ -160,6 +160,7 @@ describe("handleReviewHostTool", () => {
         labels: [],
         markerRunId: "run_lead",
       }));
+      h.readPullRequest = vi.fn(async () => ({ number: 7, state: "open", merged: false, draft: false }) as never);
       const c = ctx({ hosts: { github: h } });
       vi.mocked(collectRelatedPullRequests).mockResolvedValueOnce({
         pullRequests: [
@@ -251,7 +252,49 @@ describe("handleReviewHostTool", () => {
       expect(collectRelatedPullRequests).not.toHaveBeenCalled();
     });
 
-    it("sets the self entry's state to draft when the pull request just read is a draft", async () => {
+    it.each([
+      { view: { state: "closed", merged: true, draft: false }, expected: "merged" },
+      { view: { state: "closed", merged: false, draft: false }, expected: "closed" },
+      { view: { state: "closed", merged: false, draft: true }, expected: "closed" },
+      { view: { state: "open", merged: false, draft: true }, expected: "draft" },
+      { view: { state: "open", merged: false, draft: false }, expected: "open" },
+    ])(
+      "derives the self entry's state ($expected) from the pull request just read, not the stored state",
+      async ({ view, expected }) => {
+        const h = fakeHost();
+        h.pullRequestOrigin = vi.fn(async () => ({
+          headSha: SHA,
+          isFork: false,
+          state: "open",
+          labels: [],
+          markerRunId: "run_lead",
+        }));
+        h.readPullRequest = vi.fn(async () => ({ number: 7, ...view }) as never);
+        const c = ctx({ hosts: { github: h } });
+        vi.mocked(collectRelatedPullRequests).mockResolvedValueOnce({
+          pullRequests: [
+            // A stored state that disagrees with the live view: the view wins for self.
+            { repository: WRITE.repository, number: 7, openedAt: new Date(), openedByRunId: "run_a", state: "open" },
+            {
+              repository: "chfields/other-repo",
+              number: 9,
+              openedAt: new Date(),
+              openedByRunId: "run_b",
+              state: "merged",
+            },
+          ],
+        });
+        const out = JSON.parse(
+          await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c),
+        );
+        expect(out.relatedPullRequests).toEqual([
+          { repository: WRITE.repository, number: 7, state: expected, self: true },
+          { repository: "chfields/other-repo", number: 9, state: "merged", self: false },
+        ]);
+      },
+    );
+
+    it("gives the self entry a state even with none stored, and omits it on a sibling with none stored", async () => {
       const h = fakeHost();
       h.pullRequestOrigin = vi.fn(async () => ({
         headSha: SHA,
@@ -260,27 +303,22 @@ describe("handleReviewHostTool", () => {
         labels: [],
         markerRunId: "run_lead",
       }));
-      h.readPullRequest = vi.fn(async () => ({ number: 7, draft: true }) as never);
+      h.readPullRequest = vi.fn(async () => ({ number: 7, state: "open", merged: false, draft: false }) as never);
       const c = ctx({ hosts: { github: h } });
       vi.mocked(collectRelatedPullRequests).mockResolvedValueOnce({
         pullRequests: [
-          { repository: WRITE.repository, number: 7, openedAt: new Date(), openedByRunId: "run_a", state: "open" },
-          {
-            repository: "chfields/other-repo",
-            number: 9,
-            openedAt: new Date(),
-            openedByRunId: "run_b",
-            state: "merged",
-          },
+          { repository: WRITE.repository, number: 7, openedAt: new Date(), openedByRunId: "run_a" },
+          { repository: "chfields/other-repo", number: 9, openedAt: new Date(), openedByRunId: "run_b" },
         ],
       });
       const out = JSON.parse(
         await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c),
       );
       expect(out.relatedPullRequests).toEqual([
-        { repository: WRITE.repository, number: 7, state: "draft", self: true },
-        { repository: "chfields/other-repo", number: 9, state: "merged", self: false },
+        { repository: WRITE.repository, number: 7, state: "open", self: true },
+        { repository: "chfields/other-repo", number: 9, self: false },
       ]);
+      expect(h.readPullRequest).toHaveBeenCalledTimes(1);
     });
   });
 
