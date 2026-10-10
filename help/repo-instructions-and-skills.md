@@ -84,5 +84,7 @@ never loaded in either mode.
 - [Choose a native or coding agent](creating-agents.md) for `codingProfile`
   basics and the other fields it accepts.
 - [Bring-Your-Own Coding-Worker Images](../docs/coding-worker-byo-images.md)
-  — a `workerImageRef` image must be rebuilt on a current driver base to
-  accept `repoSkills: false` and to stop offering Codex's built-in skills.
+  — a Codex agent's `workerImageRef` image must be rebuilt on a current driver
+  base to accept `repoSkills: false` and to stop offering Codex's built-in
+  skills; on a Claude Code agent, `workerImageRef` must be this release's
+  Claude Code worker image.
