@@ -287,6 +287,16 @@ const profileJsonSchema = {
       maximum: MAX_CODING_TURNS,
       description: `Claude Code runs only: the most agent turns (model calls) a run may take before it stops with coding_turn_limit. Null uses the worker default (${DEFAULT_CLAUDE_MAX_TURNS}). The run's budget and timeout still apply. Codex runs have no turn limit.`,
     },
+    repoSkills: {
+      type: "boolean",
+      description:
+        "Load the repository's agent skills into runs (Codex: .agents/skills and .codex/skills; Claude Code: .claude/skills). Default true. Repository instructions (AGENTS.md for Codex, CLAUDE.md for Claude Code) load either way.",
+    },
+    claudeBareMode: {
+      type: "boolean",
+      description:
+        "Claude Code runs only. Default true: Claude Code runs in bare mode and wardby adds the repository's CLAUDE.md and its skill list to the system prompt; the model reads a skill's SKILL.md with run_command. False: bare mode is off and Claude Code loads CLAUDE.md and skills itself (native Skill tool). Repository settings, hooks, and MCP config are never loaded either way.",
+    },
     packageAllowlist: {
       type: "object",
       description:
@@ -417,6 +427,8 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
     packageAllowlist: profile.packageAllowlist,
     packagePolicy: profile.packagePolicy,
     services: profile.services,
+    repoSkills: profile.repoSkills,
+    claudeBareMode: profile.claudeBareMode,
   });
 }
 
