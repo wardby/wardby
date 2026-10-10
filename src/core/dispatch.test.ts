@@ -131,6 +131,16 @@ function fakeDb(
         return data;
       },
       findUnique: async ({ where }: any) => codingRuns.find((row) => row.runId === where.runId) ?? null,
+      // effectiveMergeOrder: newest non-null mergeOrder among a root and its continuations.
+      findFirst: async ({ where }: any) => {
+        const [{ runId: rootId }] = where.OR;
+        const startedAt = (row: any) =>
+          (row.startedAt ?? runs.find((r) => r.id === row.runId)?.startedAt ?? new Date(0)).getTime();
+        const matches = codingRuns
+          .filter((row) => (row.runId === rootId || row.rootCodingRunId === rootId) && row.mergeOrder != null)
+          .sort((a, b) => startedAt(b) - startedAt(a) || String(b.runId).localeCompare(String(a.runId)));
+        return matches[0] ? { mergeOrder: matches[0].mergeOrder } : null;
+      },
     },
     task: {
       create: async ({ data }: any) => {
@@ -1291,6 +1301,41 @@ describe("dispatchRun", () => {
       });
 
       expect(state.codingRuns).toContainEqual(expect.objectContaining({ runId: result?.run.id, mergeOrder: 3 }));
+    });
+
+    it("a continuation with no mergeOrder keeps an earlier continuation's override", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent, [
+        openPrCodingRun("root_run", { mergeOrder: 2, startedAt: new Date(1_000) }),
+        openPrCodingRun("cont_1", { rootCodingRunId: "root_run", mergeOrder: 1, startedAt: new Date(2_000) }),
+      ]);
+
+      const result = await dispatchRun({
+        db: state.db,
+        executor: { async start() {}, async stop() {} },
+        agentId: agent.id,
+        continuesCodingRunId: "root_run",
+      });
+
+      expect(state.codingRuns).toContainEqual(expect.objectContaining({ runId: result?.run.id, mergeOrder: 1 }));
+    });
+
+    it("a continuation with no mergeOrder stays null when nothing in the chain set one", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent, [
+        openPrCodingRun("root_run", { startedAt: new Date(1_000) }),
+        openPrCodingRun("cont_1", { rootCodingRunId: "root_run", startedAt: new Date(2_000) }),
+      ]);
+
+      const result = await dispatchRun({
+        db: state.db,
+        executor: { async start() {}, async stop() {} },
+        agentId: agent.id,
+        continuesCodingRunId: "cont_1",
+      });
+
+      const row = state.codingRuns.find((r: any) => r.runId === result?.run.id);
+      expect(row?.mergeOrder ?? null).toBeNull();
     });
 
     it("a continuation's own mergeOrder overrides the root's", async () => {

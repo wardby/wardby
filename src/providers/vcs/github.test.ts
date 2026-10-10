@@ -1045,6 +1045,35 @@ describe("related pull requests section", () => {
     expect(block.indexOf("Not ordered:")).toBeLessThan(block.indexOf("Already merged"));
   });
 
+  it("counts steps over merged and closed entries too, so labels stay the same as pull requests merge", () => {
+    const block = renderRelatedSection({
+      entries: [
+        { repository: "acme/a", number: 1, state: "merged", mergeOrder: 1 },
+        { repository: "acme/b", number: 2, state: "open", mergeOrder: 2 },
+        { repository: "acme/c", number: 3, state: "open", mergeOrder: 3 },
+        { repository: "acme/d", number: 4, state: "closed" },
+      ],
+    })!;
+    expect(block).toContain("1. [acme/b#2](https://github.com/acme/b/pull/2) — open — step 2 of 3");
+    expect(block).toContain("2. [acme/c#3](https://github.com/acme/c/pull/3) — open — step 3 of 3");
+    expect(block).toContain("- [acme/a#1](https://github.com/acme/a/pull/1) — merged — step 1 of 3");
+    expect(block).toContain("- [acme/d#4](https://github.com/acme/d/pull/4) — closed\n");
+    expect(block).not.toContain("Suggested merge order");
+  });
+
+  it("lists open entries under 'Not ordered:' when only a merged entry has a mergeOrder", () => {
+    const block = renderRelatedSection({
+      entries: [
+        { repository: "acme/a", number: 1, state: "merged", mergeOrder: 1 },
+        { repository: "acme/b", number: 2, state: "open" },
+      ],
+    })!;
+    expect(block).not.toContain("Merge order (set by the delegating agent");
+    expect(block).not.toContain("Suggested merge order");
+    expect(block).toContain("Not ordered:\n\n- [acme/b#2](https://github.com/acme/b/pull/2) — open");
+    expect(block).toContain("- [acme/a#1](https://github.com/acme/a/pull/1) — merged — step 1 of 1");
+  });
+
   it("stable-sorts ordered entries by mergeOrder regardless of input order (self listed before a lower-step sibling)", () => {
     const block = renderRelatedSection({
       entries: [
@@ -1057,7 +1086,7 @@ describe("related pull requests section", () => {
     expect(block.indexOf("1. **This pull request**")).toBeLessThan(block.indexOf("2. [acme/b#2]"));
   });
 
-  it("renders the unordered heading with today's exact wording when no open entry has a mergeOrder", () => {
+  it("renders the unordered heading with today's exact wording when no entry has a mergeOrder", () => {
     const block = renderRelatedSection({
       entries: [
         { repository: "acme/a", number: 1, state: "open" },

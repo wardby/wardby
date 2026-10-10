@@ -58,10 +58,10 @@ export interface RelatedPullRequest {
   /** Only when stored (IssuePullRequest.state, kept current by pr_closed); otherwise unknown. */
   state?: StoredPullRequestState;
   /**
-   * Step in the delegating agent's merge order (CodingRun.mergeOrder, 1-99),
-   * from the coding run that opened it. Absent when that run set none, or
-   * when the entry only came from IssuePullRequest (no CodingRun to read it
-   * from).
+   * Step in the delegating agent's merge order (CodingRun.mergeOrder, 1-99):
+   * the newest non-null value among the coding run that opened it and its
+   * continuations. Absent when none of them set one, or when the entry only
+   * came from IssuePullRequest (no CodingRun to read it from).
    */
   mergeOrder?: number;
 }
@@ -197,8 +197,9 @@ export async function collectRelatedPullRequests(
       });
     }
   }
-  // A continuation's own mergeOrder (which can override the root's, Task 1)
-  // is set after the opener's; the entry's mergeOrder is the newest non-null
+  // A continuation dispatched with its own mergeOrder overrides the opener's
+  // (one that omits it stores the value it inherited), and it starts after
+  // the opener; the entry's mergeOrder is the newest non-null
   // value among the opener row and every continuation row (same PR key,
   // "pull_request_opened" or "pull_request_updated") found in the tree walk.
   const newestMergeOrder = new Map<string, { startedAt: Date; mergeOrder: number }>();

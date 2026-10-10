@@ -243,7 +243,8 @@ export interface RelatedPullRequestEntry {
   /**
    * Step in the delegating agent's declared merge order (1-99), from
    * CodingRun.mergeOrder; absent = the delegating agent set no order
-   * (listed under "Not ordered:" when any other open entry has one).
+   * (an open entry is listed under "Not ordered:" when any other entry,
+   * open or done, has one).
    */
   mergeOrder?: number;
 }
@@ -285,11 +286,14 @@ const isDone = (entry: RelatedPullRequestEntry) => entry.state === "merged" || e
  * Undefined when no other valid pull request is left after validation: a
  * set of one is not a set.
  *
- * When any open entry carries a `mergeOrder` (set by the delegating agent),
- * the open entries that have one are numbered and labelled with their step
- * (equal `mergeOrder` values share a step label), and any open entry
- * without one is listed after under "Not ordered:". Otherwise every open
- * entry is numbered in today's unordered "Suggested merge order" list.
+ * When any valid entry (open, merged or closed) carries a `mergeOrder` (set
+ * by the delegating agent), steps are counted over all of them, so a
+ * label never changes as pull requests merge: the open entries that have
+ * one are numbered under "Merge order" and labelled with their step (equal
+ * `mergeOrder` values share a step label), any open entry without one is
+ * listed after under "Not ordered:", and a merged or closed entry that has
+ * one carries its step label in the context list too. Otherwise every open
+ * entry is numbered in the unordered "Suggested merge order" list.
  */
 export function renderRelatedSection(input: RelatedPullRequestsInput): string | undefined {
   const valid = input.entries.filter((entry) => relatedLine(entry, "-") !== undefined);
@@ -300,7 +304,11 @@ export function renderRelatedSection(input: RelatedPullRequestsInput): string | 
   const done = valid.filter(isDone).slice(0, MAX_RELATED_PULL_REQUESTS - open.length);
   const more = valid.length - open.length - done.length;
   const isNumber = (value: number | undefined): value is number => Number.isSafeInteger(value);
-  const steps = [...new Set(open.map((entry) => entry.mergeOrder).filter(isNumber))].sort((a, b) => a - b);
+  // Over every valid entry, done ones included, so "step 2 of 3" stays the
+  // same label after step 1 merges.
+  const steps = [...new Set(valid.map((entry) => entry.mergeOrder).filter(isNumber))].sort((a, b) => a - b);
+  const stepLabel = (entry: RelatedPullRequestEntry) =>
+    isNumber(entry.mergeOrder) ? ` — step ${steps.indexOf(entry.mergeOrder) + 1} of ${steps.length}` : "";
   // Stable-sorted by mergeOrder so numbering and step labels are correct
   // regardless of the caller's input order; unordered entries keep input order.
   const ordered =
@@ -315,13 +323,14 @@ export function renderRelatedSection(input: RelatedPullRequestsInput): string | 
     `Wardby opened these pull requests for the same request${issueText}.`,
     ...(steps.length > 0
       ? [
-          "",
-          "Merge order (set by the delegating agent; equal steps can merge in either order):",
-          "",
-          ...ordered.map(
-            (entry, index) =>
-              `${relatedLine(entry, `${index + 1}.`)!} — step ${steps.indexOf(entry.mergeOrder!) + 1} of ${steps.length}`,
-          ),
+          ...(ordered.length > 0
+            ? [
+                "",
+                "Merge order (set by the delegating agent; equal steps can merge in either order):",
+                "",
+                ...ordered.map((entry, index) => `${relatedLine(entry, `${index + 1}.`)!}${stepLabel(entry)}`),
+              ]
+            : []),
           ...(unordered.length > 0
             ? ["", "Not ordered:", "", ...unordered.map((entry) => relatedLine(entry, "-")!)]
             : []),
@@ -335,7 +344,12 @@ export function renderRelatedSection(input: RelatedPullRequestsInput): string | 
           ]
         : []),
     ...(done.length > 0
-      ? ["", "Already merged or closed (context only):", "", ...done.map((entry) => relatedLine(entry, "-")!)]
+      ? [
+          "",
+          "Already merged or closed (context only):",
+          "",
+          ...done.map((entry) => `${relatedLine(entry, "-")!}${stepLabel(entry)}`),
+        ]
       : []),
     ...(more > 0 ? ["", `…and ${more} more`] : []),
     "",

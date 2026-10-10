@@ -84,11 +84,12 @@ export interface DispatchRunOptions {
   /**
    * The step in the delegating agent's declared merge order for this coding
    * run (1 = merge first; equal numbers mean no order between them). Integer
-   * 1-99, validated by the caller (delegate_to_* tool argument, Task 2 of
-   * #260); throws `Error("invalid_merge_order")` otherwise. Coding agents
+   * 1-99, validated by the caller (the delegate_to_* tool's mergeOrder
+   * argument); throws `Error("invalid_merge_order")` otherwise. Coding agents
    * only; ignored for a native agent (no CodingRun to store it on). A
-   * continuation (`continuesCodingRunId`) that omits this inherits the root
-   * coding run's `mergeOrder`.
+   * continuation (`continuesCodingRunId`) that omits this inherits the pull
+   * request's effective value: the newest non-null `mergeOrder` among the
+   * root coding run and its continuations.
    */
   mergeOrder?: number;
   now?: Date;
@@ -309,7 +310,7 @@ interface CodingBranch {
   headRef?: string;
   continuationOf?: { runId: string };
   rootCodingRunId?: string;
-  /** The continuation root's mergeOrder, inherited unless this dispatch sets its own. Undefined for a fresh branch. */
+  /** The pull request's effective mergeOrder (effectiveMergeOrder), inherited unless this dispatch sets its own. Undefined for a fresh branch. */
   mergeOrder?: number | null;
 }
 
@@ -331,16 +332,7 @@ export class ContinuationRefusedError extends Error {
 }
 
 export type ContinuationCheck =
-  | {
-      ok: true;
-      root: {
-        runId: string;
-        baseRef: string;
-        headRef: string;
-        pullRequestNumber: number;
-        mergeOrder: number | null;
-      };
-    }
+  | { ok: true; root: { runId: string; baseRef: string; headRef: string; pullRequestNumber: number } }
   | { ok: false; reason: ContinuationRefusal };
 
 /** Carries the root's opening agent's owner along with the row, for the same-owner check below. */
@@ -400,7 +392,6 @@ export async function checkContinuation(
       baseRef: root.baseRef,
       headRef: root.headRef,
       pullRequestNumber: rootResult.pullRequestNumber,
-      mergeOrder: root.mergeOrder ?? null,
     },
   };
 }
@@ -428,14 +419,30 @@ async function resolveCodingBranch(
     headRef: root.headRef,
     continuationOf: { runId: root.runId },
     rootCodingRunId: root.runId,
-    mergeOrder: root.mergeOrder,
+    mergeOrder: await effectiveMergeOrder(reader, root.runId),
   };
 }
 
 /**
+ * The pull request's current merge step: the newest non-null mergeOrder
+ * (by run start) among the root coding run and every continuation of it
+ * (CodingRun.rootCodingRunId, indexed), or null when none set one. A
+ * continuation that omits mergeOrder inherits this, so an earlier
+ * continuation's override is kept rather than reverting to the root's.
+ */
+async function effectiveMergeOrder(reader: Pick<DispatchTx, "codingRun">, rootRunId: string): Promise<number | null> {
+  const newest = await reader.codingRun.findFirst({
+    where: { OR: [{ runId: rootRunId }, { rootCodingRunId: rootRunId }], mergeOrder: { not: null } },
+    orderBy: [{ run: { startedAt: "desc" } }, { runId: "desc" }],
+    select: { mergeOrder: true },
+  });
+  return newest?.mergeOrder ?? null;
+}
+
+/**
  * Resolves the CodingRun's mergeOrder: the caller's own value if given (an
- * integer 1-99; anything else throws), else the continuation root's
- * inherited value (undefined for a fresh branch), else null (no order).
+ * integer 1-99; anything else throws), else the inherited effective value
+ * (undefined for a fresh branch), else null (no order).
  */
 function resolveMergeOrder(options: DispatchRunOptions, inherited: number | null | undefined): number | null {
   if (options.mergeOrder === undefined) return inherited ?? null;

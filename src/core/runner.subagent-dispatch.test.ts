@@ -114,6 +114,15 @@ function fakeDb(
         return data;
       }) as any,
       findUnique: (async ({ where }: any) => codingRuns.get(where.runId) ?? null) as any,
+      // dispatch's effectiveMergeOrder: newest non-null mergeOrder among a root and its continuations.
+      findFirst: (async ({ where }: any) => {
+        const [{ runId: rootId }] = where.OR;
+        const matches = [...codingRuns.values()].filter(
+          (row) => (row.runId === rootId || row.rootCodingRunId === rootId) && row.mergeOrder != null,
+        );
+        const newest = matches.at(-1);
+        return newest ? { mergeOrder: newest.mergeOrder } : null;
+      }) as any,
     },
     run: {
       create: (async ({ data }: any) => {
