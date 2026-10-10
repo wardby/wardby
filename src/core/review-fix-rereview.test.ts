@@ -240,9 +240,31 @@ describe("reReviewAfterNoChangeFix", () => {
     expect(startReviews).toHaveBeenCalledTimes(1);
   });
 
-  it("does not re-review when recording the round fails (fails closed)", async () => {
-    const { deps } = setup({ recordFails: true });
+  it("does not re-review when recording the round fails (fails closed), and releases only its own claim", async () => {
+    const { deps, claim } = setup({ recordFails: true });
     await reReviewAfterNoChangeFix("coding-1", deps);
+    expect(startReviews).not.toHaveBeenCalled();
+    // A transient failure must not burn the one-time re-review: the claim is put back, guarded on
+    // the exact timestamp this call wrote.
+    expect(claim).toHaveBeenCalledTimes(2);
+    const [[taken], [released]] = claim.mock.calls as unknown as Array<
+      [{ where: { runId: string; noChangeRereviewAt: Date | null }; data: { noChangeRereviewAt: Date | null } }]
+    >;
+    expect(released).toEqual({
+      where: { runId: "review-run-1", noChangeRereviewAt: taken.data.noChangeRereviewAt },
+      data: { noChangeRereviewAt: null },
+    });
+    expect(taken.data.noChangeRereviewAt).toBeInstanceOf(Date);
+  });
+
+  it("a failed claim release is logged, never thrown", async () => {
+    const { deps, claim } = setup({ recordFails: true });
+    claim
+      .mockImplementationOnce(async () => ({ count: 1 }))
+      .mockImplementationOnce(async () => {
+        throw new Error("db down");
+      });
+    await expect(reReviewAfterNoChangeFix("coding-1", deps)).resolves.toBeUndefined();
     expect(startReviews).not.toHaveBeenCalled();
   });
 

@@ -458,9 +458,10 @@ async function reReview(runId: string, deps: ReReviewDeps): Promise<ReReviewResu
 
   // Once per requesting review, whichever terminal write, replay, or instance gets here: the
   // claim is taken on that review's check row, atomically, before the round is recorded.
+  const claimedAt = new Date();
   const claimed = await deps.db.runHostCheck.updateMany({
     where: { runId: check.runId, noChangeRereviewAt: null },
-    data: { noChangeRereviewAt: new Date() },
+    data: { noChangeRereviewAt: claimedAt },
   });
   if (claimed.count === 0) return skip("claimed");
 
@@ -475,6 +476,16 @@ async function reReview(runId: string, deps: ReReviewDeps): Promise<ReReviewResu
     await ledger.recordRound(repository, prNumber, origin);
   } catch (err) {
     log.warn({ err, repository, number: prNumber }, "could not record the re-review round; not re-reviewing");
+    // A transient failure must not burn the one-time re-review: release the claim, but only the
+    // one this call took (a later claim by anyone else is left alone).
+    await deps.db.runHostCheck
+      .updateMany({
+        where: { runId: check.runId, noChangeRereviewAt: claimedAt },
+        data: { noChangeRereviewAt: null },
+      })
+      .catch((releaseErr: unknown) =>
+        log.warn({ err: releaseErr, repository, number: prNumber }, "could not release the re-review claim"),
+      );
     return skip("record_failed");
   }
   const target: ReviewTarget = { agentId: reviewer.agentId, checkName: reviewer.checkName };
