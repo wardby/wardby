@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LlmProvider, LlmRequest, LlmStreamEvent } from "../providers/index.js";
-import type { EngineProgress, EngineRunContext, StepRunner } from "../providers/engine/types.js";
+import {
+  RunOwnershipLostError,
+  type EngineProgress,
+  type EngineRunContext,
+  type StepRunner,
+} from "../providers/engine/types.js";
 import { NativeEngine } from "./engine-native.js";
 
 /** Records each step's JSON result; on a later run replays it without calling fn. */
@@ -721,6 +726,29 @@ describe("NativeEngine concurrent tool calls (runsConcurrently)", () => {
       new NativeEngine().run(makeContext({ llm, runSandboxTool: run, runsConcurrently: isDelegation })),
     ).rejects.toThrow(/^boom$/);
     expect(slowFinished).toBe(true);
+  });
+
+  it("rethrows an ownership loss in a concurrent batch ahead of an earlier call's ordinary failure", async () => {
+    const llm = scriptedLlm(
+      [calls("d_a", "d_b"), final],
+      () => 0.001,
+      () => 10,
+    );
+    const run = vi.fn(async (name: string) => {
+      if (name === "d_a") throw new Error("tool broke");
+      return "{}";
+    });
+    const lost = new RunOwnershipLostError("turn:1:tool:1");
+    const step: StepRunner = async (name, fn) => {
+      if (name === "turn:1:tool:1") {
+        await fn();
+        throw lost;
+      }
+      return fn();
+    };
+    await expect(
+      new NativeEngine().run(makeContext({ llm, runSandboxTool: run, runsConcurrently: isDelegation, step })),
+    ).rejects.toBe(lost);
   });
 
   it("replays a recorded concurrent batch without running any tool again", async () => {
