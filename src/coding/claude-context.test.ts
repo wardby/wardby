@@ -2,7 +2,13 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { AGENTS_BRIDGE, buildClaudeContext, importsOf } from "./claude-context.js";
+import {
+  AGENTS_BRIDGE,
+  MAX_IMPORTS_PER_FILE,
+  MAX_RECORDED_SKIPS,
+  buildClaudeContext,
+  importsOf,
+} from "./claude-context.js";
 import { CLAUDE_CONTEXT_LIMITS } from "./protocol.js";
 
 const roots: string[] = [];
@@ -25,6 +31,31 @@ describe("importsOf", () => {
     expect(importsOf(md)).toEqual(["docs/a.md", "b.md"]);
   });
 
+  it("hides @imports inside inline code spans of any backtick length", () => {
+    const md = "a `@one.md` b ``@two.md ` x`` c ```@three.md``` @four.md";
+    expect(importsOf(md)).toEqual(["four.md"]);
+  });
+
+  it("treats an unmatched backtick run as literal text", () => {
+    expect(importsOf("a `` b `@x.md` @y.md")).toEqual(["y.md"]);
+    expect(importsOf("stray ` here @x.md")).toEqual(["x.md"]);
+  });
+
+  it("does not let an inline code span cross a blank line", () => {
+    expect(importsOf("open ` span\n\n@x.md and ` close")).toEqual(["x.md"]);
+  });
+
+  it("handles pathological backtick and punctuation runs in linear time", () => {
+    let backticks = "x";
+    for (let k = 1; backticks.length < 64 * 1024; k++) backticks += "`".repeat(k) + "a";
+    const punctuation = "@a" + ".".repeat(64 * 1024) + "x";
+    const start = performance.now();
+    importsOf(backticks);
+    importsOf(punctuation);
+    importsOf(" @a" + ".".repeat(64 * 1024));
+    expect(performance.now() - start).toBeLessThan(500);
+  });
+
   it("ignores ~~~ fences, e-mail addresses, and bare @", () => {
     const md = "~~~\n@fenced.md\n~~~\nmail me@example.com or @ alone; @y.md; @z.md)";
     expect(importsOf(md)).toEqual(["y.md", "z.md"]);
@@ -36,6 +67,7 @@ describe("buildClaudeContext", () => {
     expect(await buildClaudeContext(await repo({ "README.md": "x" }), { skills: true })).toEqual({
       files: [],
       skipped: [],
+      skippedOverflow: 0,
     });
   });
 
@@ -199,5 +231,24 @@ describe("buildClaudeContext", () => {
       { path: ".claude/skills/s200/SKILL.md", reason: "limit" },
       { path: ".claude/skills/s201/SKILL.md", reason: "limit" },
     ]);
+  });
+
+  it("caps recorded skips and counts the rest", async () => {
+    const imports = Array.from({ length: 80 }, (_, i) => `@/abs${i}`).join(" ");
+    const ctx = await buildClaudeContext(await repo({ "CLAUDE.md": imports }), { skills: false });
+    expect(ctx.skipped).toHaveLength(MAX_RECORDED_SKIPS);
+    expect(ctx.skipped[0]).toEqual({ path: "/abs0", reason: "outside_repo" });
+    expect(ctx.skippedOverflow).toBe(80 - MAX_RECORDED_SKIPS);
+  });
+
+  it("considers only the first imports of each file and counts the rest", async () => {
+    const extra = 7;
+    const names = Array.from({ length: MAX_IMPORTS_PER_FILE + extra }, (_, i) => `i${i}.md`);
+    const files: Record<string, string> = { "CLAUDE.md": names.map((n) => `@${n}`).join(" ") };
+    for (const n of names) files[n] = "x";
+    const ctx = await buildClaudeContext(await repo(files), { skills: false });
+    expect(paths(ctx)).toEqual(["CLAUDE.md", ...names.slice(0, MAX_IMPORTS_PER_FILE)]);
+    expect(ctx.skipped).toEqual([]);
+    expect(ctx.skippedOverflow).toBe(extra);
   });
 });

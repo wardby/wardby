@@ -16,7 +16,9 @@
  *   files and 256 KiB in total; `@imports` are followed at most 5 levels deep.
  *
  * A file that breaks a rule is left out and reported in `skipped` with the
- * reason; nothing a repository contains makes this function throw.
+ * reason (the first 50; further ones are only counted in `skippedOverflow`,
+ * as are imports beyond the first 100 of a file, which are not followed);
+ * nothing a repository contains makes this function throw.
  *
  * If a repository has no `CLAUDE.md` or `.claude/CLAUDE.md` but does have an
  * `AGENTS.md`, a one-line `CLAUDE.md` that imports it is synthesized, so
@@ -34,7 +36,14 @@ export interface ClaudeContextSkip {
 
 export interface ClaudeContext {
   files: ClaudeContextFile[];
+  /** Files left out and why, at most `MAX_RECORDED_SKIPS` entries. */
   skipped: ClaudeContextSkip[];
+  /**
+   * How many further files were left out without an entry in `skipped`: skips
+   * beyond `MAX_RECORDED_SKIPS`, plus `@imports` beyond `MAX_IMPORTS_PER_FILE`
+   * in a single file, which are not followed at all. 0 when nothing overflowed.
+   */
+  skippedOverflow: number;
 }
 
 /** Content of the `CLAUDE.md` synthesized for a repository that only has `AGENTS.md`. */
@@ -44,18 +53,78 @@ const ROOTS = ["CLAUDE.md", ".claude/CLAUDE.md"] as const;
 const SKILLS_DIR = ".claude/skills";
 const MAX_IMPORT_DEPTH = 5;
 
+/** At most this many `skipped` entries are recorded; the rest are only counted in `skippedOverflow`. */
+export const MAX_RECORDED_SKIPS = 50;
+/** Only the first this-many distinct `@imports` of each file are followed; the rest are counted in `skippedOverflow`. */
+export const MAX_IMPORTS_PER_FILE = 100;
+
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
-const INLINE_CODE = /(`+)[\s\S]*?(?<!`)\1(?!`)/g;
 const IMPORT = /(?:^|\s)@([^\s`]+)/gm;
-const TRAILING_PUNCTUATION = /[.,;:)]+$/;
+const TRAILING_PUNCTUATION = new Set([".", ",", ";", ":", ")"]);
+
+/**
+ * Removes inline code spans from one paragraph in a single linear pass. A run
+ * of backticks opens a span that ends at the next run of exactly the same
+ * length; a run with no closing partner is kept as literal text. Spans never
+ * cross paragraphs because the caller passes one paragraph at a time.
+ */
+function stripInlineCode(paragraph: string): string {
+  const runs: { start: number; end: number }[] = [];
+  for (let i = 0; i < paragraph.length;) {
+    if (paragraph[i] !== "`") {
+      i++;
+      continue;
+    }
+    const start = i;
+    while (i < paragraph.length && paragraph[i] === "`") i++;
+    runs.push({ start, end: i });
+  }
+  if (runs.length === 0) return paragraph;
+  // Indexes of the runs of each length, in order, with a pointer that only
+  // moves forward, so finding every closer costs linear time overall.
+  const byLength = new Map<number, { indexes: number[]; next: number }>();
+  runs.forEach((run, index) => {
+    const length = run.end - run.start;
+    const entry = byLength.get(length) ?? { indexes: [], next: 0 };
+    entry.indexes.push(index);
+    byLength.set(length, entry);
+  });
+  let output = "";
+  let copied = 0;
+  for (let i = 0; i < runs.length;) {
+    const entry = byLength.get(runs[i].end - runs[i].start)!;
+    while (entry.next < entry.indexes.length && entry.indexes[entry.next] <= i) entry.next++;
+    if (entry.next >= entry.indexes.length) {
+      i++;
+      continue;
+    }
+    const closer = entry.indexes[entry.next];
+    output += paragraph.slice(copied, runs[i].start);
+    copied = runs[closer].end;
+    i = closer + 1;
+  }
+  return output + paragraph.slice(copied);
+}
+
+function trimTrailingPunctuation(token: string): string {
+  let end = token.length;
+  while (end > 0 && TRAILING_PUNCTUATION.has(token[end - 1])) end--;
+  return token.slice(0, end);
+}
 
 /**
  * Returns the `@path` imports in a Markdown instruction file, in order and
  * de-duplicated. Imports inside fenced code blocks and inline code spans are
- * ignored, as is an `@` not preceded by whitespace (an e-mail address).
+ * ignored, as is an `@` not preceded by whitespace (an e-mail address). Runs
+ * in time linear in the input, whatever the repository puts in it.
  */
 export function importsOf(markdown: string): string[] {
-  const prose: string[] = [];
+  const paragraphs: string[] = [];
+  let paragraph: string[] = [];
+  const endParagraph = () => {
+    if (paragraph.length > 0) paragraphs.push(stripInlineCode(paragraph.join("\n")));
+    paragraph = [];
+  };
   let fence: string | undefined;
   for (const line of markdown.split("\n")) {
     const marker = FENCE.exec(line)?.[1];
@@ -64,16 +133,20 @@ export function importsOf(markdown: string): string[] {
       continue;
     }
     if (marker !== undefined) {
+      endParagraph();
       fence = marker;
       continue;
     }
-    prose.push(line);
+    if (line.trim() === "") endParagraph();
+    else paragraph.push(line);
   }
-  const text = prose.join("\n").replace(INLINE_CODE, "");
+  endParagraph();
   const found = new Set<string>();
-  for (const match of text.matchAll(IMPORT)) {
-    const target = match[1].replace(TRAILING_PUNCTUATION, "");
-    if (target.length > 0) found.add(target);
+  for (const text of paragraphs) {
+    for (const match of text.matchAll(IMPORT)) {
+      const target = trimTrailingPunctuation(match[1]);
+      if (target.length > 0) found.add(target);
+    }
   }
   return [...found];
 }
@@ -201,8 +274,17 @@ export async function buildClaudeContext(workspace: string, options: { skills: b
   const seen = new Set<string>();
   let totalBytes = 0;
   let limitReached = false;
+  let skippedOverflow = 0;
 
-  const skip = (path: string, reason: ClaudeContextSkip["reason"]) => skipped.push({ path, reason });
+  const skip = (path: string, reason: ClaudeContextSkip["reason"]) => {
+    if (skipped.length < MAX_RECORDED_SKIPS) skipped.push({ path, reason });
+    else skippedOverflow++;
+  };
+  const importsToFollow = (content: string): string[] => {
+    const targets = importsOf(content);
+    skippedOverflow += Math.max(0, targets.length - MAX_IMPORTS_PER_FILE);
+    return targets.slice(0, MAX_IMPORTS_PER_FILE);
+  };
 
   const add = (path: string, content: string): boolean => {
     const size = Buffer.byteLength(content);
@@ -259,7 +341,7 @@ export async function buildClaudeContext(workspace: string, options: { skills: b
       // The bridge goes first, as the file that imports AGENTS.md.
       files.unshift({ path: "CLAUDE.md", content: AGENTS_BRIDGE });
       totalBytes += Buffer.byteLength(AGENTS_BRIDGE);
-      for (const target of importsOf(agents)) enqueue("AGENTS.md", target, 2);
+      for (const target of importsToFollow(agents)) enqueue("AGENTS.md", target, 2);
     }
   }
 
@@ -275,7 +357,7 @@ export async function buildClaudeContext(workspace: string, options: { skills: b
   for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
     const content = await load(next.path);
     if (content === undefined || next.depth >= MAX_IMPORT_DEPTH) continue;
-    for (const target of importsOf(content)) enqueue(next.path, target, next.depth + 1);
+    for (const target of importsToFollow(content)) enqueue(next.path, target, next.depth + 1);
   }
 
   if (options.skills) {
@@ -288,7 +370,7 @@ export async function buildClaudeContext(workspace: string, options: { skills: b
     }
   }
 
-  return { files, skipped };
+  return { files, skipped, skippedOverflow };
 }
 
 /**
