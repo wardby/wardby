@@ -673,6 +673,89 @@ describe("GitHubReviewHost writes", () => {
     expect((calls[1].body as { output: { text: string } }).output.text.length).toBe(65_535);
   });
 
+  it("upsertNamedCheck creates a new named check when none of this App's exists on the head commit", async () => {
+    const { client, calls, grants } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path === `${BASE}/commits/${SHA}/check-runs?check_name=wardby%20merge%20order`) {
+        return json({
+          total_count: 1,
+          check_runs: [{ id: 1, name: "wardby merge order", app: { id: 999, slug: "someone-else" } }],
+        });
+      }
+      if (method === "POST" && path === `${BASE}/check-runs`) return json({ id: 30 }, 201);
+      return undefined;
+    });
+    await new GitHubReviewHost(client).upsertNamedCheck(REPO, {
+      headSha: SHA,
+      name: "wardby merge order",
+      status: "in_progress",
+      title: "Waiting",
+      summary: "waiting for: a/b#1",
+    });
+    expect(grants).toEqual([{ checks: "write" }]);
+    const created = calls.find((c) => c.method === "POST" && c.path === `${BASE}/check-runs`)!;
+    expect(created.body).toMatchObject({
+      name: "wardby merge order",
+      head_sha: SHA,
+      status: "in_progress",
+      output: { title: "Waiting", summary: "waiting for: a/b#1" },
+    });
+    expect((created.body as Record<string, unknown>).conclusion).toBeUndefined();
+  });
+
+  it("upsertNamedCheck patches this App's own existing named check instead of creating a second one", async () => {
+    const { client, calls, grants } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path === `${BASE}/commits/${SHA}/check-runs?check_name=wardby%20merge%20order`) {
+        return json({
+          total_count: 2,
+          check_runs: [
+            { id: 1, name: "wardby merge order", app: { id: 999, slug: "someone-else" } },
+            { id: 42, name: "wardby merge order", app: { id: APP_ID, slug: "wardby" } },
+          ],
+        });
+      }
+      if (method === "PATCH" && path === `${BASE}/check-runs/42`) return json({ id: 42 });
+      return undefined;
+    });
+    await new GitHubReviewHost(client).upsertNamedCheck(REPO, {
+      headSha: SHA,
+      name: "wardby merge order",
+      status: "completed",
+      conclusion: "success",
+      title: "All dependencies merged",
+      summary: "dependencies: a/b#1",
+    });
+    expect(grants).toEqual([{ checks: "write" }]);
+    const patched = calls.find((c) => c.method === "PATCH" && c.path === `${BASE}/check-runs/42`)!;
+    expect(patched.body).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      output: { title: "All dependencies merged", summary: "dependencies: a/b#1" },
+    });
+    expect(calls.some((c) => c.method === "POST" && c.path === `${BASE}/check-runs`)).toBe(false);
+  });
+
+  it("upsertNamedCheck caps the output summary at GitHub's text limit", async () => {
+    const { client, calls } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path === `${BASE}/commits/${SHA}/check-runs?check_name=wardby%20merge%20order`) {
+        return json({ total_count: 0, check_runs: [] });
+      }
+      if (method === "POST" && path === `${BASE}/check-runs`) return json({ id: 30 }, 201);
+      return undefined;
+    });
+    await new GitHubReviewHost(client).upsertNamedCheck(REPO, {
+      headSha: SHA,
+      name: "wardby merge order",
+      status: "completed",
+      conclusion: "failure",
+      title: "x".repeat(2000),
+      summary: "y".repeat(70_000),
+    });
+    const created = calls.find((c) => c.method === "POST" && c.path === `${BASE}/check-runs`)!;
+    const output = (created.body as { output: { title: string; summary: string } }).output;
+    expect(output.title.length).toBeLessThanOrEqual(1024);
+    expect(output.summary.length).toBe(65_535);
+  });
+
   it("adds a label (created if missing) with issues+pull_requests write", async () => {
     const { client, calls, grants } = fakeGitHub(({ method, path }) => {
       if (method === "POST" && path === `${BASE}/issues/7/labels`) return json([{ name: "wardby-autofix-2" }], 200);

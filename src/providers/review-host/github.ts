@@ -39,6 +39,7 @@ import {
   type PullRequestView,
   type ReviewThreadView,
   type StartCheckInput,
+  type UpsertNamedCheckInput,
 } from "./types.js";
 
 const READ = { contents: "read", pull_requests: "read" } as const;
@@ -52,6 +53,8 @@ export function skippedInListing(path: string): boolean {
   return VENDORED.test(path) || path.endsWith("package-lock.json");
 }
 const CHECK_TEXT_LIMIT = 65_535;
+/** GitHub's documented limit on a check run's output.title. */
+const CHECK_TITLE_LIMIT = 1024;
 const COMMENT_WRITE = { issues: "write", pull_requests: "write" } as const;
 const REVIEW_WRITE = { pull_requests: "write", checks: "write" } as const;
 /** Always implicitly granted to an installation token; enough for the collaborator-permission endpoint. */
@@ -861,5 +864,45 @@ export class GitHubReviewHost implements CodeReviewHost {
   async completeCheck(repository: string, input: CompleteCheckInput): Promise<void> {
     const base = repoPath(repository);
     await this.withToken(repository, { checks: "write" }, (get) => this.patchCheck(get, base, input));
+  }
+
+  /**
+   * Creates or updates, by fixed name, a check run on `input.headSha` that
+   * this App owns: lists the commit's check runs filtered to that name,
+   * patches the one `fromApp` owns, else creates one.
+   */
+  async upsertNamedCheck(repository: string, input: UpsertNamedCheckInput): Promise<void> {
+    const base = repoPath(repository);
+    const { id: appId } = await this.client.appIdentity();
+    const output = {
+      title: input.title.slice(0, CHECK_TITLE_LIMIT),
+      summary: input.summary.slice(0, CHECK_TEXT_LIMIT),
+    };
+    await this.withToken(repository, { checks: "write" }, async (get) => {
+      const payload = record(
+        await (
+          await get(`${base}/commits/${input.headSha}/check-runs?check_name=${encodeURIComponent(input.name)}`)
+        ).json(),
+      );
+      const existing = list(payload.check_runs ?? []).find((r) => fromApp(r, appId));
+      const body = {
+        status: input.status,
+        ...(input.conclusion ? { conclusion: input.conclusion } : {}),
+        output,
+      };
+      if (existing) {
+        await get(
+          `${base}/check-runs/${encodeURIComponent(String(num(existing.id)))}`,
+          { method: "PATCH", body: JSON.stringify(body) },
+          [200],
+        );
+      } else {
+        await get(
+          `${base}/check-runs`,
+          { method: "POST", body: JSON.stringify({ name: input.name, head_sha: input.headSha, ...body }) },
+          [201],
+        );
+      }
+    });
   }
 }
