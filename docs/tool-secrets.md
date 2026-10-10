@@ -1,5 +1,8 @@
 # Secrets and tools
 
+> **Brokered secrets require Wardby 0.6.0 or later.** The readable-secret
+> guidance applies to earlier releases.
+
 A native agent's tools can use secrets such as API keys. This guide covers how
 secrets reach tools, the difference between readable and brokered secrets, and
 how to make a secret brokered so a tool can send it to hosts you choose without

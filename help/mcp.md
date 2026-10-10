@@ -19,9 +19,7 @@ your intended ingress and authentication boundary.
 
 MCP clients use Wardby to manage agents, budgets, tools, schedules, secrets,
 datastores, and runs. They do not receive the provider or GitHub App
-credentials held by Wardby's trusted components. Secret tools include
-`create_secret` (with an optional `broker` config), `set_secret_broker`, and
-`list_secrets`; see [Brokered secrets](brokered-secrets.md).
+credentials held by Wardby's trusted components.
 
 With the existing `agents:read` scope, clients can also use `search_help` to
 find bundled self-hosted guidance with fuzzy matching and `get_help_article`

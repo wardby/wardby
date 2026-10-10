@@ -40,6 +40,15 @@ repository-scoped GitHub App installation, and a deliberately small budget.
 Verify the requested diff, terminal outcome, cost, resource cleanup, and branch
 cleanup. See [local coding-agent setup](coding-agent-setup.md).
 
+The bundled help catalog is built for the version in `package.json`.
+`appliesTo` on each help article must name its minimum release; later articles
+stay in source but are omitted from that release's CLI and MCP help. The build
+fails when an included article links to an omitted one. When adding a newer
+feature to an older article, move its guidance into a suitably versioned
+article or update the older article so it remains accurate for its stated
+minimum release. Mark newer features in the public `docs/` guides with their
+minimum release as well.
+
 Before production deployment, review [runtime architecture](architecture-runtime.md),
 [coding-worker isolation](coding-worker-isolation.md), and the
 [security deployment guide](security-deployment.md). A self-hosted operator is

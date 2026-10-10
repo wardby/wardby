@@ -545,6 +545,8 @@ Do not claim these per-invocation caps establish a whole-process memory ceiling.
 
 ## Slack workflow notifications
 
+This integration requires Wardby 0.6.0 or later.
+
 Optional Slack workflow notifications add no inbound endpoint: wardby only
 ever calls out to Slack's `chat.postMessage`/`chat.update`/`conversations.info`,
 and the app manifest requests no event subscriptions or interactivity, so

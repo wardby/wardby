@@ -18,9 +18,6 @@ isolated workers with bounded resources and a trusted proxy. Workers do not
 receive provider credentials or the GitHub App private key. Coding finalization
 creates a draft pull request; it does not grant the worker merge authority.
 
-Secrets can be brokered so tools send them only to hosts the owner chose and
-never read the value; see [Brokered secrets](brokered-secrets.md).
-
 Treat the deployment boundary as part of the security model. Restrict Docker or
 Kubernetes administrator access, protect secrets, constrain network egress,
 and read the deployment guide before enabling a production repository.
@@ -28,5 +25,3 @@ and read the deployment guide before enabling a production repository.
 See [`docs/security-deployment.md`](../docs/security-deployment.md) and
 [`docs/coding-worker-isolation.md`](../docs/coding-worker-isolation.md) for
 the detailed operational model.
-
-Sandbox mode runs a native agent's loop and tools in an isolated container; see [Run native agents in a sandbox](native-sandbox.md).

@@ -179,7 +179,7 @@ seeded: add it to the control plane's `env` in
 need it.
 
 To post [workflow notifications to Slack](slack-notifications.md), also add the
-Slack app's bot token. It is optional:
+Slack app's bot token. This requires Wardby 0.6.0 or later. It is optional:
 
 ```dotenv
 WARDBY_SLACK_BOT_TOKEN="xoxb-..."
@@ -604,6 +604,8 @@ A PriorityClass's value and preemption policy cannot be changed in place:
 delete the class and re-run `up.sh` to change them.
 
 ### Native sandbox
+
+Native sandbox requires Wardby 0.5.4 or later.
 
 `up.sh` deploys everything the [native sandbox](native-sandbox.md) needs on
 this cluster. It builds and pushes the `native-worker` image, checks it (Node is
