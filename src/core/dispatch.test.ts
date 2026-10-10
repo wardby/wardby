@@ -411,6 +411,54 @@ describe("dispatchRun", () => {
     expect(state.runs[0]).not.toHaveProperty("pricingVersion");
   });
 
+  describe("mergeOrder", () => {
+    function mergeOrderCodingAgent() {
+      return {
+        ...nativeAgent(),
+        kind: "coding",
+        budgetUsd: 1.25,
+        codingProfile: {
+          provider: "codex",
+          repository: "openai/wardby",
+          baseRef: "main",
+          defaultTask: "Fix the failing tests",
+          timeoutSec: 900,
+          protectedPaths: [],
+        },
+      };
+    }
+    const executor: Executor = { async start() {}, async stop() {} };
+
+    it("persists the caller's mergeOrder onto the coding run", async () => {
+      const agent = mergeOrderCodingAgent();
+      const state = fakeDb(agent);
+      await dispatchRun({ db: state.db, executor, agentId: agent.id, mergeOrder: 2 });
+      expect(state.codingRuns[0]).toMatchObject({ mergeOrder: 2 });
+    });
+
+    it("leaves mergeOrder null when the caller gives none", async () => {
+      const agent = mergeOrderCodingAgent();
+      const state = fakeDb(agent);
+      await dispatchRun({ db: state.db, executor, agentId: agent.id });
+      expect(state.codingRuns[0].mergeOrder ?? null).toBeNull();
+    });
+
+    it("ignores mergeOrder for a native agent (no CodingRun to store it on)", async () => {
+      const state = fakeDb(nativeAgent());
+      const result = await dispatchRun({ db: state.db, executor, agentId: "agent_1", mergeOrder: 5 });
+      expect(result?.run).toBeTruthy();
+      expect(state.codingRuns).toHaveLength(0);
+    });
+
+    it.each([0, 100, 1.5, -1])("rejects an out-of-range or non-integer mergeOrder (%s)", async (mergeOrder) => {
+      const agent = mergeOrderCodingAgent();
+      const state = fakeDb(agent);
+      await expect(dispatchRun({ db: state.db, executor, agentId: agent.id, mergeOrder })).rejects.toThrow(
+        "invalid_merge_order",
+      );
+    });
+  });
+
   describe("budget groups (E-01)", () => {
     const groupedCodingAgent = () => ({
       ...nativeAgent(),
@@ -1229,6 +1277,35 @@ describe("dispatchRun", () => {
       expect(state.codingRuns).toContainEqual(
         expect.objectContaining({ runId: result?.run.id, rootCodingRunId: "root_run" }),
       );
+    });
+
+    it("a continuation with no mergeOrder inherits the root's", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent, [openPrCodingRun("root_run", { mergeOrder: 3 })]);
+
+      const result = await dispatchRun({
+        db: state.db,
+        executor: { async start() {}, async stop() {} },
+        agentId: agent.id,
+        continuesCodingRunId: "root_run",
+      });
+
+      expect(state.codingRuns).toContainEqual(expect.objectContaining({ runId: result?.run.id, mergeOrder: 3 }));
+    });
+
+    it("a continuation's own mergeOrder overrides the root's", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent, [openPrCodingRun("root_run", { mergeOrder: 3 })]);
+
+      const result = await dispatchRun({
+        db: state.db,
+        executor: { async start() {}, async stop() {} },
+        agentId: agent.id,
+        continuesCodingRunId: "root_run",
+        mergeOrder: 1,
+      });
+
+      expect(state.codingRuns).toContainEqual(expect.objectContaining({ runId: result?.run.id, mergeOrder: 1 }));
     });
 
     it("rejects continuing a coding run from a different repository", async () => {

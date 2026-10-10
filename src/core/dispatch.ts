@@ -81,6 +81,16 @@ export interface DispatchRunOptions {
    * exclusive with `codingBaseRef`. Coding agents only.
    */
   continuesCodingRunId?: string;
+  /**
+   * The step in the delegating agent's declared merge order for this coding
+   * run (1 = merge first; equal numbers mean no order between them). Integer
+   * 1-99, validated by the caller (delegate_to_* tool argument, Task 2 of
+   * #260); throws `Error("invalid_merge_order")` otherwise. Coding agents
+   * only; ignored for a native agent (no CodingRun to store it on). A
+   * continuation (`continuesCodingRunId`) that omits this inherits the root
+   * coding run's `mergeOrder`.
+   */
+  mergeOrder?: number;
   now?: Date;
   lockAgent?: boolean;
   task?: { principalId: string; ttlMs: number };
@@ -299,6 +309,8 @@ interface CodingBranch {
   headRef?: string;
   continuationOf?: { runId: string };
   rootCodingRunId?: string;
+  /** The continuation root's mergeOrder, inherited unless this dispatch sets its own. Undefined for a fresh branch. */
+  mergeOrder?: number | null;
 }
 
 export type ContinuationRefusal = "unknown_run" | "other_repository" | "no_pull_request" | "other_owner";
@@ -319,7 +331,16 @@ export class ContinuationRefusedError extends Error {
 }
 
 export type ContinuationCheck =
-  | { ok: true; root: { runId: string; baseRef: string; headRef: string; pullRequestNumber: number } }
+  | {
+      ok: true;
+      root: {
+        runId: string;
+        baseRef: string;
+        headRef: string;
+        pullRequestNumber: number;
+        mergeOrder: number | null;
+      };
+    }
   | { ok: false; reason: ContinuationRefusal };
 
 /** Carries the root's opening agent's owner along with the row, for the same-owner check below. */
@@ -379,6 +400,7 @@ export async function checkContinuation(
       baseRef: root.baseRef,
       headRef: root.headRef,
       pullRequestNumber: rootResult.pullRequestNumber,
+      mergeOrder: root.mergeOrder ?? null,
     },
   };
 }
@@ -406,7 +428,21 @@ async function resolveCodingBranch(
     headRef: root.headRef,
     continuationOf: { runId: root.runId },
     rootCodingRunId: root.runId,
+    mergeOrder: root.mergeOrder,
   };
+}
+
+/**
+ * Resolves the CodingRun's mergeOrder: the caller's own value if given (an
+ * integer 1-99; anything else throws), else the continuation root's
+ * inherited value (undefined for a fresh branch), else null (no order).
+ */
+function resolveMergeOrder(options: DispatchRunOptions, inherited: number | null | undefined): number | null {
+  if (options.mergeOrder === undefined) return inherited ?? null;
+  if (!Number.isInteger(options.mergeOrder) || options.mergeOrder < 1 || options.mergeOrder > 99) {
+    throw new Error("invalid_merge_order");
+  }
+  return options.mergeOrder;
 }
 
 /** What dispatch learned about a coding run's .wardby/services.yaml before its transaction. */
@@ -713,8 +749,9 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           // Resolved once: before the transaction when the declaration was read from it.
           const branch =
             declarationRead?.branch ?? (await resolveCodingBranch(tx, options, agent.codingProfile, agent.ownerId));
-          const { baseRef, continuationOf, rootCodingRunId } = branch;
+          const { baseRef, continuationOf, rootCodingRunId, mergeOrder: inheritedMergeOrder } = branch;
           const headRef = branch.headRef ?? `wardby/run-${run.id}`;
+          const mergeOrder = resolveMergeOrder(options, inheritedMergeOrder);
 
           const input = CodingTaskInputSchema.parse({
             schemaVersion: CODING_PROTOCOL_VERSION,
@@ -759,6 +796,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               toolImage,
               budgetReservedUsd: budgetUsd,
               rootCodingRunId,
+              mergeOrder,
               workspaceDiskMb: agent.codingProfile.workspaceDiskMb,
               maxTurns: agent.codingProfile.maxTurns,
               // Fixed here so a run's tracing never changes mid-run.

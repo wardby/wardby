@@ -517,6 +517,8 @@ model CodingRun {
   resultBranch      String?
   /// The commit the run started from (the base ref's tip when the workspace was prepared).
   baseSha           String?
+  /// Step in the request's merge order set by the delegating agent (1 = first); null = no order.
+  mergeOrder        Int?
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt
   proxySession      CodingProxySession?
