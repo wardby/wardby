@@ -833,6 +833,41 @@ describe("dispatchRun", () => {
     ]);
   });
 
+  it("snapshots a Claude agent's workerImageRef as its toolImage, never its workerImage", async () => {
+    const CUSTOM = "sha256:customtools".padEnd(71, "0");
+    const STANDARD = "sha256:standardagent".padEnd(71, "0");
+    const DEFAULT_TOOL = "sha256:defaulttools".padEnd(71, "0");
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      model: "claude-sonnet-5",
+      codingProfile: {
+        provider: "claude-code",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        protectedPaths: [],
+        toolchain: "node",
+        toolchainVersion: null,
+        workerImageRef: CUSTOM,
+      },
+    };
+    const state = fakeDb(agent);
+    const executor: Executor = {
+      async start() {},
+      async stop() {},
+      resolveCodingWorkerImage: () => STANDARD,
+      resolveCodingToolImage: (s) => s.workerImageRef ?? DEFAULT_TOOL,
+    };
+
+    await dispatchRun({ db: state.db, executor, agentId: agent.id });
+
+    expect(state.codingRuns).toEqual([
+      expect.objectContaining({ provider: "claude-code", workerImage: STANDARD, toolImage: CUSTOM }),
+    ]);
+  });
+
   it("fails, at dispatch, a run whose model does not belong to the selected coding provider", async () => {
     const agent = {
       ...nativeAgent(),
