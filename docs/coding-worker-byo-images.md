@@ -114,11 +114,16 @@ isn't enough: the caller must also hold the admin role (see
 
 ## Codex only
 
-`workerImageRef` applies to Codex agents. A Claude Code agent's commands run in
-the Claude tool runner, which `workerImageRef` does not change, so Claude Code
-agents cannot use a custom toolchain yet. They can use wardby's curated
-`node-python` toolchain (set the matching
+Custom toolchains through `workerImageRef` are for Codex agents. A Claude Code
+agent's commands run in the Claude tool runner, which `workerImageRef` does not
+change, so Claude Code agents cannot use a custom toolchain yet. They can use
+wardby's curated `node-python` toolchain (set the matching
 `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` image).
+
+If `workerImageRef` is set on a Claude Code agent anyway, it replaces that
+agent's Claude Code worker image (the image that runs the agent, in place of
+`CODING_CLAUDE_WORKER_IMAGE`), not the tool runner. Point it only at a Claude
+Code worker image from the same wardby release as your control plane.
 
 ## Running services with a BYO image
 
@@ -132,10 +137,10 @@ driver image" above) before allowing any service on an agent that uses it.
 
 ## Repository skills need a current driver
 
-A `workerImageRef` image runs Codex agents only (see "Codex only" above), so
-it never receives Claude Code's repository context (`claudeContext`) or
-`claudeBareMode`. The one new input key it can see is `repoSkills`, which
-wardby writes only when an agent sets `repoSkills: false`. A worker built on
+On a Codex agent, a `workerImageRef` image never receives Claude Code's
+repository context (`claudeContext`) or `claudeBareMode`. The one new input key
+it can see is `repoSkills`, which wardby writes only when an agent sets
+`repoSkills: false`. A worker built on
 an older driver base validates its input with a strict schema, so it rejects
 runs of agents with `repoSkills: false` (the run fails with
 `worker_input_failed`), and it keeps offering Codex's built-in skills
@@ -143,6 +148,11 @@ runs of agents with `repoSkills: false` (the run fails with
 current driver always disables. Rebuild any `workerImageRef` image on a
 current `driver-vN` digest (see "The driver image" above) before relying on
 either behavior.
+
+If a Claude Code agent's `workerImageRef` is set (see "Codex only" above), that
+image replaces the Claude Code worker and receives `claudeContext` and
+`claudeBareMode` too. It must be the Claude Code worker image from this
+release; an older one rejects those runs with `worker_input_failed`.
 
 ## What this doesn't cover
 
