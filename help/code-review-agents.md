@@ -108,7 +108,7 @@ Add this to a reviewer's system prompt:
     pending checks as pending. If the description has a "Related pull requests"
     section, a field, route or schema the change relies on may be added by one
     of those pull requests: do not report it as missing; note the dependency
-    and the suggested merge order instead.
+    and the listed merge order instead.
 
 Wardby also writes that section: see
 [Related pull requests across repositories](related-pull-requests.md).

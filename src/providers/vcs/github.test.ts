@@ -1022,6 +1022,95 @@ describe("related pull requests section", () => {
     expect(block).not.toContain("http://x");
   });
 
+  it("renders the merge-order heading and step labels when any open entry has a mergeOrder, with unordered entries after under 'Not ordered:'", () => {
+    const block = renderRelatedSection({
+      entries: [
+        { repository: "acme/a", number: 1, state: "open", mergeOrder: 1 },
+        { repository: "acme/b", number: 2, state: "open", mergeOrder: 2 },
+        { repository: "acme/c", number: 3, state: "open", mergeOrder: 2 },
+        { repository: "acme/d", number: 4, state: "open" },
+        { repository: "acme/bff", number: 3, state: "merged" },
+      ],
+    })!;
+    expect(block).toContain("Merge order (set by the delegating agent; equal steps can merge in either order):");
+    expect(block).not.toContain("Suggested merge order (the order Wardby's agent opened them in");
+    expect(block).toContain("1. [acme/a#1](https://github.com/acme/a/pull/1) — open — step 1 of 2");
+    expect(block).toContain("2. [acme/b#2](https://github.com/acme/b/pull/2) — open — step 2 of 2");
+    expect(block).toContain("3. [acme/c#3](https://github.com/acme/c/pull/3) — open — step 2 of 2");
+    expect(block).toContain("Not ordered:");
+    expect(block).toContain("- [acme/d#4](https://github.com/acme/d/pull/4) — open");
+    expect(block).toContain("Already merged or closed (context only):");
+    expect(block).toContain("- [acme/bff#3](https://github.com/acme/bff/pull/3) — merged");
+    expect(block.indexOf("Merge order")).toBeLessThan(block.indexOf("Not ordered:"));
+    expect(block.indexOf("Not ordered:")).toBeLessThan(block.indexOf("Already merged"));
+  });
+
+  it("counts steps over merged and closed entries too, so labels stay the same as pull requests merge", () => {
+    const block = renderRelatedSection({
+      entries: [
+        { repository: "acme/a", number: 1, state: "merged", mergeOrder: 1 },
+        { repository: "acme/b", number: 2, state: "open", mergeOrder: 2 },
+        { repository: "acme/c", number: 3, state: "open", mergeOrder: 3 },
+        { repository: "acme/d", number: 4, state: "closed" },
+      ],
+    })!;
+    expect(block).toContain("1. [acme/b#2](https://github.com/acme/b/pull/2) — open — step 2 of 3");
+    expect(block).toContain("2. [acme/c#3](https://github.com/acme/c/pull/3) — open — step 3 of 3");
+    expect(block).toContain("- [acme/a#1](https://github.com/acme/a/pull/1) — merged — step 1 of 3");
+    expect(block).toContain("- [acme/d#4](https://github.com/acme/d/pull/4) — closed\n");
+    expect(block).not.toContain("Suggested merge order");
+  });
+
+  it("lists open entries under 'Not ordered:' when only a merged entry has a mergeOrder", () => {
+    const block = renderRelatedSection({
+      entries: [
+        { repository: "acme/a", number: 1, state: "merged", mergeOrder: 1 },
+        { repository: "acme/b", number: 2, state: "open" },
+      ],
+    })!;
+    expect(block).not.toContain("Merge order (set by the delegating agent");
+    expect(block).not.toContain("Suggested merge order");
+    expect(block).toContain("Not ordered:\n\n- [acme/b#2](https://github.com/acme/b/pull/2) — open");
+    expect(block).toContain("- [acme/a#1](https://github.com/acme/a/pull/1) — merged — step 1 of 1");
+  });
+
+  it("stable-sorts ordered entries by mergeOrder regardless of input order (self listed before a lower-step sibling)", () => {
+    const block = renderRelatedSection({
+      entries: [
+        { repository: "acme/b", number: 2, state: "open", mergeOrder: 2 },
+        { repository: "acme/a", self: true, mergeOrder: 1 },
+      ],
+    })!;
+    expect(block).toContain("1. **This pull request** — step 1 of 2");
+    expect(block).toContain("2. [acme/b#2](https://github.com/acme/b/pull/2) — open — step 2 of 2");
+    expect(block.indexOf("1. **This pull request**")).toBeLessThan(block.indexOf("2. [acme/b#2]"));
+  });
+
+  it("renders the unordered heading with today's exact wording when no entry has a mergeOrder", () => {
+    const block = renderRelatedSection({
+      entries: [
+        { repository: "acme/a", number: 1, state: "open" },
+        { repository: "acme/b", number: 2, state: "open" },
+      ],
+    });
+    expect(block).toBe(
+      [
+        RELATED_SECTION_START,
+        "**Related pull requests**",
+        "",
+        "Wardby opened these pull requests for the same request.",
+        "",
+        "Suggested merge order (the order Wardby's agent opened them in; not a guarantee, so check dependencies before merging):",
+        "",
+        "1. [acme/a#1](https://github.com/acme/a/pull/1) — open",
+        "2. [acme/b#2](https://github.com/acme/b/pull/2) — open",
+        "",
+        "<sub>Written by Wardby from its run records; this section is replaced when the request's runs finish.</sub>",
+        RELATED_SECTION_END,
+      ].join("\n"),
+    );
+  });
+
   it("caps the list and counts the rest", () => {
     const many = Array.from({ length: 25 }, (_, i) => ({ repository: `acme/r${i}`, number: i + 1 }));
     const block = renderRelatedSection({ entries: many })!;
