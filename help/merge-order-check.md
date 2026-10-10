@@ -104,7 +104,11 @@ add `wardby merge order` as a required status check in the repository's
 branch protection rules (or, on a repository using rulesets, its ruleset's
 required status checks): **Settings → Branches** (or **Rules → Rulesets**)
 **→ require status checks to pass → `wardby merge order`**. GitHub matches
-required checks by name, so it must be exactly that string. A request
+required checks by name, so it must be exactly that string. Also set the
+required check's expected source to your Wardby GitHub App, so a check of
+the same name reported by anything else (another App, or a workflow in the
+repository — any workflow with `checks: write`, such as one running on a
+pull request author's `GITHUB_TOKEN`) cannot satisfy it. A request
 without a `mergeOrder` on more than one pull request never posts this
 check, so don't require it on a repository whose pull requests are never
 ordered this way — GitHub would then wait on a check that never arrives.

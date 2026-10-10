@@ -837,7 +837,8 @@ order](../help/related-pull-requests.md#setting-a-merge-order)) also gets a
 check named exactly `wardby merge order` on each pull request, independent
 of any reviewer link, tracking whether the pull requests it depends on have
 merged yet. Require it the same way — add `wardby merge order` as a
-required status check — to block a merge until they have. See
+required status check, with its expected source set to the wardby GitHub
+App — to block a merge until they have. See
 [The wardby merge order check](../help/merge-order-check.md).
 
 ## Accepted gap: a run that fails outside its normal finish path leaves its check open
