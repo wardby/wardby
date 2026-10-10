@@ -153,6 +153,15 @@ function delegateToolDef(boundName: string, parallel: boolean): LoadedTool {
           description:
             "Coding sub-agents only. The run id of a prior coding run whose branch/PR this dispatch should push a new commit onto, instead of opening a fresh one — use when the task is a revision to an existing PR (a plan/spec update, or a code-review follow-up), even across a different sub-agent than the one that opened it.",
         },
+        mergeOrder: {
+          type: "integer",
+          minimum: 1,
+          maximum: 99,
+          description:
+            "Coding sub-agents only. This repository's step in the merge order of the whole request (1 = merge first). " +
+            "Give dependencies lower numbers than the changes that use them (e.g. a service 1, the API that calls it 2, the client 3); " +
+            "equal numbers have no order between them. Set it whenever one change spans several repositories.",
+        },
       },
       required: ["task"],
       additionalProperties: false,
@@ -160,14 +169,26 @@ function delegateToolDef(boundName: string, parallel: boolean): LoadedTool {
   };
 }
 
+/** Every mergeOrder validation failure (wrong type, non-integer, or out of range) names the same bound. */
+const MERGE_ORDER_RANGE_MESSAGE = "mergeOrder must be an integer from 1 to 99.";
+
 const DelegateArgs = z
   .object({
     task: z.string(),
     datastoreRef: z.object({ name: z.string(), key: z.string() }).strict().optional(),
     grantParentMemoryKeys: z.array(z.string()).optional(),
     continuePriorRun: z.string().optional(),
+    mergeOrder: z
+      .number({ invalid_type_error: MERGE_ORDER_RANGE_MESSAGE })
+      .int(MERGE_ORDER_RANGE_MESSAGE)
+      .min(1, MERGE_ORDER_RANGE_MESSAGE)
+      .max(99, MERGE_ORDER_RANGE_MESSAGE)
+      .optional(),
   })
   .strict();
+
+/** The tool result note for a native child's delegation when the caller passed mergeOrder: it does not apply. */
+const MERGE_ORDER_IGNORED_NOTE = "mergeOrder applies only to coding sub-agents; ignored";
 
 /** A delegate_to_* call's arguments, or the tool result refusing them. */
 export function parseDelegateArgs(argsJson: string): { args: z.infer<typeof DelegateArgs> } | { refusal: string } {
@@ -317,9 +338,10 @@ export function delegationTaskOverride(args: z.infer<typeof DelegateArgs>): stri
       : undefined;
 }
 
-/** The tool result a native child's terminal run reports to its parent. */
+/** The tool result a native child's terminal run reports to its parent. `note` surfaces e.g. an ignored mergeOrder. */
 export function nativeChildResult(
   run: Pick<Run, "status" | "finalText" | "costUsd" | "tokensIn" | "tokensOut" | "error">,
+  note?: string,
 ) {
   return JSON.stringify({
     status: run.status,
@@ -328,6 +350,7 @@ export function nativeChildResult(
     tokensIn: run.tokensIn,
     tokensOut: run.tokensOut,
     ...(run.error ? { error: run.error } : {}),
+    ...(note ? { note } : {}),
   });
 }
 
@@ -1084,6 +1107,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                 trigger: "subagent",
                 codingTask: args.task,
                 continuesCodingRunId: args.continuePriorRun,
+                mergeOrder: args.mergeOrder,
                 parentRunId: runId,
                 // The child's result flows back into this run, which the
                 // triggerer sees, so the child is visible to them too.
@@ -1164,6 +1188,11 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
           }
 
           const taskOverride = delegationTaskOverride(args);
+          // mergeOrder is a coding-only concept (it orders CodingRuns within a merge); a native
+          // child has no CodingRun to store it on, so it's never passed to dispatchRun/executeRun
+          // below -- only surfaced back to the model as a note, so a lead that set it on the wrong
+          // kind of sub-agent notices rather than silently losing it.
+          const mergeOrderNote = args.mergeOrder !== undefined ? MERGE_ORDER_IGNORED_NOTE : undefined;
 
           if (childAgent.nativeExecutionMode === "sandbox") {
             // A sandbox-mode child must run where its snapshot says, so it goes through
@@ -1233,7 +1262,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                 message: "This run was cancelled while waiting for the sandbox sub-agent; the sub-agent was stopped.",
               });
             }
-            return nativeChildResult(waited.run);
+            return nativeChildResult(waited.run, mergeOrderNote);
           }
 
           const childRun = await db.run.create({
@@ -1266,13 +1295,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
             },
             "delegation finished",
           );
-          return JSON.stringify({
-            status: childResult.status,
-            finalText: childResult.finalText,
-            costUsd: Number(childResult.costUsd),
-            tokensIn: childResult.tokensIn,
-            tokensOut: childResult.tokensOut,
-          });
+          return nativeChildResult(childResult, mergeOrderNote);
         } finally {
           finishSibling();
           release();
@@ -1618,7 +1641,7 @@ export async function durableDelegate(
         agentId: edge.childAgentId,
         trigger: "subagent",
         ...(coding
-          ? { codingTask: args.task, continuesCodingRunId: args.continuePriorRun }
+          ? { codingTask: args.task, continuesCodingRunId: args.continuePriorRun, mergeOrder: args.mergeOrder }
           : { taskOverride: delegationTaskOverride(args), grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [] }),
         parentRunId: runId,
         // The child's result flows back into this run, which the triggerer sees, so the child is visible to them too.
@@ -1663,7 +1686,9 @@ export async function durableDelegate(
     const child = await db.run.findUniqueOrThrow({ where: { id: childRunId } });
     if (!DRIVABLE.includes(child.status as (typeof DRIVABLE)[number])) {
       runnerLog.info({ runId, childRunId, boundName, outcome: child.status, durable: true }, "delegation finished");
-      if (!coding) return finish(nativeChildResult(child));
+      if (!coding) {
+        return finish(nativeChildResult(child, args.mergeOrder !== undefined ? MERGE_ORDER_IGNORED_NOTE : undefined));
+      }
       const stored = await db.codingRun
         .findUnique({ where: { runId: childRunId }, select: { result: true } })
         .catch(() => null);

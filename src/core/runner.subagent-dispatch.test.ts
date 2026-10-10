@@ -5,7 +5,14 @@ import type { LlmProvider, LlmRequest, LlmStreamEvent } from "../providers/llm/t
 import type { SecretCipher } from "../providers/secrets/types.js";
 import { NativeEngine } from "./engine-native.js";
 import { mentionTaskText } from "./host-events.js";
-import { executeRun, type RunnerDb } from "./runner.js";
+import {
+  durableDelegate,
+  executeRun,
+  parseDelegateArgs,
+  type DelegationLedger,
+  type LoadedNativeRun,
+  type RunnerDb,
+} from "./runner.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "./grants.test-support.js";
 
 // End-to-end coverage of the delegate_to_<boundName> dispatch tool: a real
@@ -107,6 +114,15 @@ function fakeDb(
         return data;
       }) as any,
       findUnique: (async ({ where }: any) => codingRuns.get(where.runId) ?? null) as any,
+      // dispatch's effectiveMergeOrder: newest non-null mergeOrder among a root and its continuations.
+      findFirst: (async ({ where }: any) => {
+        const [{ runId: rootId }] = where.OR;
+        const matches = [...codingRuns.values()].filter(
+          (row) => (row.runId === rootId || row.rootCodingRunId === rootId) && row.mergeOrder != null,
+        );
+        const newest = matches.at(-1);
+        return newest ? { mergeOrder: newest.mergeOrder } : null;
+      }) as any,
     },
     run: {
       create: (async ({ data }: any) => {
@@ -164,7 +180,11 @@ function fakeDb(
           return all.filter((r) => where.agentId.in.includes(r.agentId) && r.startedAt >= where.startedAt.gte);
         }
         if (where.parentRunId) {
-          return all.filter((r) => where.parentRunId.in.includes(r.parentRunId));
+          // Most callers filter by a set ({in: [...]}); durableDelegate's own admission
+          // check (refusalNow) filters by one parent id directly.
+          return typeof where.parentRunId === "string"
+            ? all.filter((r) => r.parentRunId === where.parentRunId)
+            : all.filter((r) => where.parentRunId.in.includes(r.parentRunId));
         }
         if (where.id) {
           return all.filter((r) => where.id.in.includes(r.id));
@@ -204,6 +224,8 @@ function fakeDb(
   db.$transaction = async (callback: (tx: unknown) => unknown) => callback(db);
   // The grouped-dispatch advisory lock: nothing to serialize in a single-threaded fake.
   db.$executeRawUnsafe = async () => 0;
+  // durableDelegate's own admission lock (pg_advisory_xact_lock): nothing to serialize here either.
+  db.$queryRaw = async () => [];
   return db;
 }
 
@@ -587,6 +609,233 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     // a long-running container crash mid-dispatch is exactly what the
     // reconciler exists for.
     expect(childRuns[0].executionManaged).toBe(true);
+  });
+
+  describe("mergeOrder", () => {
+    it("parseDelegateArgs accepts an integer 1-99", () => {
+      const parsed = parseDelegateArgs(JSON.stringify({ task: "x", mergeOrder: 2 }));
+      expect(parsed).toEqual({ args: expect.objectContaining({ task: "x", mergeOrder: 2 }) });
+    });
+
+    it("parseDelegateArgs is fine with no mergeOrder at all (absent = no order)", () => {
+      const parsed = parseDelegateArgs(JSON.stringify({ task: "x" }));
+      expect(parsed).toEqual({ args: expect.objectContaining({ task: "x" }) });
+      expect("refusal" in parsed).toBe(false);
+    });
+
+    it.each([0, 100, 1.5, "2"])("parseDelegateArgs refuses %j, naming mergeOrder and the 1-99 range", (badValue) => {
+      const parsed = parseDelegateArgs(JSON.stringify({ task: "x", mergeOrder: badValue }));
+      expect("refusal" in parsed).toBe(true);
+      const refusal = (parsed as { refusal: string }).refusal;
+      expect(refusal).toContain("mergeOrder");
+      expect(refusal).toContain("1");
+      expect(refusal).toContain("99");
+    });
+
+    const codingAgent = (id: string): FakeAgent => ({
+      id,
+      name: `wmd-${id}`,
+      systemPrompt: "unused for coding agents",
+      model: "gpt-5.6-luna",
+      budgetUsd: 5,
+      maxTurns: 10,
+      kind: "coding",
+      codingProfile,
+    });
+
+    it("a coding child delegated with mergeOrder reaches dispatchRun (in-process/serial path)", async () => {
+      const dispatcher: FakeAgent = {
+        id: "dispatcher-agent",
+        name: "knock-knock-delivery",
+        systemPrompt: "You classify and delegate.",
+        model: "m",
+        budgetUsd: 5,
+        maxTurns: 10,
+      };
+      const implementer = codingAgent("implement-agent");
+      const db = fakeDb(
+        [dispatcher, implementer],
+        [{ parentAgentId: "dispatcher-agent", childAgentId: "implement-agent", boundName: "implement" }],
+      );
+      const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+      const executor = fakeCodingExecutor(db, { status: "succeeded", finalText: "done", costUsd: 0.02 });
+
+      const llm = scriptedLlm([
+        toolCall("delegate_to_implement", JSON.stringify({ task: "add the feature", mergeOrder: 2 })),
+        finalAnswer("delegated, done"),
+      ]);
+      await executeRun(parentRun.id, providers(llm, executor), db);
+
+      const [child] = (await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })) as Array<{
+        id: string;
+      }>;
+      const codingRun = await db.codingRun.findUnique({ where: { runId: child.id } });
+      expect((codingRun as { mergeOrder: number | null } | null)?.mergeOrder).toBe(2);
+    });
+
+    it("rejects an out-of-range mergeOrder as a tool refusal, never reaching dispatchRun", async () => {
+      const dispatcher: FakeAgent = {
+        id: "dispatcher-agent",
+        name: "knock-knock-delivery",
+        systemPrompt: "You classify and delegate.",
+        model: "m",
+        budgetUsd: 5,
+        maxTurns: 10,
+      };
+      const implementer = codingAgent("implement-agent");
+      const db = fakeDb(
+        [dispatcher, implementer],
+        [{ parentAgentId: "dispatcher-agent", childAgentId: "implement-agent", boundName: "implement" }],
+      );
+      const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+      const started: string[] = [];
+      const executor = {
+        async start(runId: string) {
+          started.push(runId);
+        },
+        async stop() {},
+      };
+
+      const llm = scriptedLlm([
+        toolCall("delegate_to_implement", JSON.stringify({ task: "add the feature", mergeOrder: 0 })),
+        finalAnswer("noticed the refusal and stopped"),
+      ]);
+      await executeRun(parentRun.id, providers(llm, executor), db);
+
+      expect(started).toEqual([]);
+      expect(await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })).toHaveLength(0);
+      expect(toolResultSeen(llm, 1)).toMatchObject({ error: "validation_failed" });
+    });
+
+    it("a native child delegated with mergeOrder is dispatched without it, with a note in the tool result", async () => {
+      const orchestrator: FakeAgent = {
+        id: "parent-agent",
+        name: "orchestrator",
+        systemPrompt: "You orchestrate.",
+        model: "m",
+        budgetUsd: 10,
+        maxTurns: 10,
+      };
+      const researcher: FakeAgent = {
+        id: "child-agent",
+        name: "researcher",
+        systemPrompt: "You research.",
+        model: "m",
+        budgetUsd: 10,
+        maxTurns: 10,
+      };
+      const db = fakeDb(
+        [orchestrator, researcher],
+        [{ parentAgentId: "parent-agent", childAgentId: "child-agent", boundName: "researcher" }],
+      );
+      const parentRun = await db.run.create({ data: { agentId: "parent-agent" } });
+
+      const llm = scriptedLlm([
+        toolCall("delegate_to_researcher", JSON.stringify({ task: "find the answer", mergeOrder: 2 })),
+        finalAnswer("the child found it"),
+        finalAnswer("done"),
+      ]);
+      await executeRun(parentRun.id, providers(llm), db);
+
+      const [childRun] = (await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })) as Array<{
+        id: string;
+      }>;
+      // No CodingRun exists for a native child at all, so mergeOrder plainly never reached dispatch.
+      expect(await db.codingRun.findUnique({ where: { runId: childRun.id } })).toBeNull();
+      // Index 2: the child's own inline turn (index 1) consumes a script slot before the
+      // parent's second turn sees the tool result.
+      expect(toolResultSeen(llm, 2)).toMatchObject({
+        status: "succeeded",
+        note: "mergeOrder applies only to coding sub-agents; ignored",
+      });
+    });
+
+    /** A minimal in-memory DelegationLedger, mirroring PrismaGatewayLedger's row semantics for one call. */
+    function fakeDelegationLedger(): DelegationLedger {
+      const rows = new Map<
+        string,
+        {
+          status: "pending" | "waiting_budget" | "completed";
+          childAgentId: string | null;
+          childRunId: string | null;
+          createdAt: Date;
+        }
+      >();
+      return {
+        async claim(_sessionId, callId) {
+          if (!rows.has(callId)) {
+            rows.set(callId, { status: "pending", childAgentId: null, childRunId: null, createdAt: new Date() });
+          }
+          return { outcome: "claimed" };
+        },
+        async recordResult(_sessionId, callId) {
+          const row = rows.get(callId);
+          if (row) row.status = "completed";
+        },
+        async setDelegation(_sessionId, callId, state) {
+          const existing = rows.get(callId);
+          rows.set(callId, {
+            status: state.status,
+            childAgentId: state.childAgentId,
+            childRunId: state.childRunId ?? existing?.childRunId ?? null,
+            createdAt: existing?.createdAt ?? new Date(),
+          });
+        },
+        async delegation(_sessionId, callId) {
+          const row = rows.get(callId);
+          return row ? { ...row } : null;
+        },
+        async waitingChildAgentIds() {
+          return [];
+        },
+      };
+    }
+
+    it("a coding child delegated with mergeOrder reaches dispatchRun via the sandboxed-gateway (durableDelegate/parallel) path too", async () => {
+      const dispatcher: FakeAgent = {
+        id: "dispatcher-agent",
+        name: "knock-knock-delivery",
+        systemPrompt: "You classify and delegate.",
+        model: "m",
+        budgetUsd: 5,
+        maxTurns: 10,
+      };
+      const implementer = codingAgent("implement-agent");
+      const db = fakeDb(
+        [dispatcher, implementer],
+        [{ parentAgentId: "dispatcher-agent", childAgentId: "implement-agent", boundName: "implement" }],
+      );
+      const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+      const executor = fakeCodingExecutor(db, { status: "succeeded", finalText: "done", costUsd: 0.02 });
+
+      const loaded = {
+        agentId: "dispatcher-agent",
+        subAgentEdges: [{ childAgentId: "implement-agent", boundName: "implement" }],
+      } as unknown as LoadedNativeRun;
+
+      const outcome = await durableDelegate(
+        {
+          runId: parentRun.id,
+          existingRun: parentRun,
+          loaded,
+          providers: providers(scriptedLlm([]), executor),
+          db,
+          issueTrackers: undefined,
+          ledger: fakeDelegationLedger(),
+          sessionId: "session-1",
+        },
+        "call-1",
+        "delegate_to_implement",
+        JSON.stringify({ task: "add the feature", mergeOrder: 2 }),
+      );
+
+      expect("result" in outcome).toBe(true);
+      const [child] = (await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })) as Array<{
+        id: string;
+      }>;
+      const codingRun = await db.codingRun.findUnique({ where: { runId: child.id } });
+      expect((codingRun as { mergeOrder: number | null } | null)?.mergeOrder).toBe(2);
+    });
   });
 
   describe("a sandbox-mode native child", () => {
