@@ -1,0 +1,8 @@
+# Example custom tool runner for a Claude Code agent: start FROM the tool-runner image of the same
+# wardby release, add your tools as root, then switch back to the tool runner's user. Keep the ENTRYPOINT.
+ARG TOOL_RUNNER_IMAGE=wardby-claude-tool-runner:phase5
+FROM ${TOOL_RUNNER_IMAGE}
+USER root
+RUN printf '#!/bin/sh\necho wardby-custom-tool-ok\n' > /usr/local/bin/wardby-custom-tool \
+    && chmod 0755 /usr/local/bin/wardby-custom-tool
+USER 10001:10001

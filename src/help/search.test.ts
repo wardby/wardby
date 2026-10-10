@@ -221,6 +221,28 @@ describe("build worker image help", () => {
       expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("build-worker-image");
     }
   });
+
+  it("is found for workerImageRef", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const ids = searchHelp(catalog, "workerImageRef")
+      .slice(0, 3)
+      .map((result) => result.page.id);
+    expect(ids).toContain("build-worker-image");
+    expect(ids).toContain("build-claude-code-image");
+  });
+});
+
+describe("build Claude Code image help", () => {
+  it("is found for the obvious queries", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const query of ["custom image claude code", "ruby", "tool runner"]) {
+      expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("build-claude-code-image");
+    }
+  });
 });
 
 describe("repository instructions and skills help", () => {

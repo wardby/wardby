@@ -40,9 +40,12 @@ import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
 
 // workerImageRef is the BYO-arbitrary-image escape hatch (see
-// resolveCodingWorkerImage in container.ts) — setting or changing it
-// requires a step-up beyond agents:write, the same pattern make_owner below
-// uses for its own sensitive, ownership-bypassing mutation.
+// resolveCodingWorkerImage/resolveCodingToolImage in container.ts). For a Codex agent it
+// replaces the one container that runs the whole agent; for a Claude Code agent it replaces
+// only the tool-runner container that runs the agent's commands, never the agent container
+// (which always stays the deployment's standard Claude Code image). Either way, setting or
+// changing it requires a step-up beyond agents:write, the same pattern make_owner below uses
+// for its own sensitive, ownership-bypassing mutation.
 function requireWorkerImageRefScope(ctx: McpRequestContext): void {
   requireScope(ctx, ctx.canonicalUri, "agents:admin");
 }
@@ -273,7 +276,11 @@ const profileJsonSchema = {
     collectExclude: { type: "array", maxItems: 64, items: { type: "string" } },
     toolchain: { type: "string", enum: ["node", "node-python"] },
     toolchainVersion: { type: ["string", "null"] },
-    workerImageRef: { type: ["string", "null"] },
+    workerImageRef: {
+      type: ["string", "null"],
+      description:
+        "A digest-pinned custom image that this agent's commands run in, for your own languages and tools. Codex: build it FROM the coding-worker driver image; it runs the whole agent. Claude Code: build it FROM this release's wardby-claude-tool-runner image; it runs the agent's commands, while Claude Code itself stays on the standard image. Needs agents:admin. Null uses the toolchain's standard image.",
+    },
     workspaceDiskMb: {
       type: ["integer", "null"],
       minimum: 64,

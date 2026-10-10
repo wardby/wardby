@@ -26,8 +26,8 @@ runs recorded it) when `CODING_WORKER_IMAGE` has since been unset.
   a toolchain with its own image (such as `CODING_WORKER_IMAGE_NODE_PYTHON_3_12`),
   still runs without `CODING_WORKER_IMAGE`.
 - **`coding_provider_not_configured:claude-code`**: `CODING_CLAUDE_WORKER_IMAGE`
-  or `CODING_CLAUDE_TOOL_RUNNER_IMAGE` isn't set. Claude Code needs both, and
-  even an agent's own `workerImageRef` doesn't replace the tool runner.
+  or `CODING_CLAUDE_TOOL_RUNNER_IMAGE` isn't set. Claude Code needs both, even
+  for an agent with its own `workerImageRef`.
 
 This error is about images, not API keys. A missing or invalid model API key
 fails later, when the run calls the model.

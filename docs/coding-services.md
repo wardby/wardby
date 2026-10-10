@@ -194,7 +194,9 @@ to an agent that allows at least one service.
 
 A [bring-your-own worker image](coding-worker-byo-images.md) must be built on
 driver v11 or later to run with services; an agent whose `workerImageRef`
-predates driver v11 rejects the run input once services are on it.
+predates driver v11 rejects the run input once services are on it. For a
+Claude Code agent, build the custom image `FROM` the tool runner image of the
+same wardby release.
 
 ## Letting a coding agent change the declaration
 

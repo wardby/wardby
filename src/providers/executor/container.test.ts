@@ -1872,6 +1872,40 @@ describe("resolveCodingToolImage", () => {
     ).toBeNull();
   });
 
+  const CUSTOM_IMAGE = `registry.example/my-tools@sha256:${"f".repeat(64)}`;
+
+  it("runs a Claude agent's commands in its workerImageRef, keeping the standard agent image", async () => {
+    const { executor } = await claudeHarness();
+    const selector = { ...claude("node", null), workerImageRef: CUSTOM_IMAGE };
+    expect(executor.resolveCodingToolImage?.(selector)).toBe(CUSTOM_IMAGE);
+    expect(executor.resolveCodingWorkerImage?.(selector)).toBe(CLAUDE_IMAGE);
+  });
+
+  it("uses the custom image whatever the toolchain says", async () => {
+    const { executor } = await claudeHarness();
+    const selector = { ...claude("node-python", "2.7"), workerImageRef: CUSTOM_IMAGE };
+    expect(executor.resolveCodingToolImage?.(selector)).toBe(CUSTOM_IMAGE);
+    expect(executor.resolveCodingWorkerImage?.(selector)).toBe(CLAUDE_IMAGE);
+  });
+
+  it("refuses a mutable custom image reference for Claude", async () => {
+    const { executor } = await claudeHarness();
+    const selector = { ...claude("node", null), workerImageRef: "registry.example/my-tools:latest" };
+    expect(() => executor.resolveCodingToolImage?.(selector)).toThrow("coding_worker_image_invalid");
+  });
+
+  it("returns a Codex workerImageRef unchanged from resolveCodingWorkerImage, with no tool-runner image", async () => {
+    const { executor } = await claudeHarness();
+    const selector = {
+      provider: "codex" as const,
+      toolchain: "node",
+      toolchainVersion: null,
+      workerImageRef: CUSTOM_IMAGE,
+    };
+    expect(executor.resolveCodingWorkerImage?.(selector)).toBe(CUSTOM_IMAGE);
+    expect(executor.resolveCodingToolImage?.(selector)).toBeNull();
+  });
+
   it("launches a Claude run with the tool-runner image fixed on it at dispatch", async () => {
     const created = await harness(
       { provider: "claude-code", model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_PY_TOOL_IMAGE },

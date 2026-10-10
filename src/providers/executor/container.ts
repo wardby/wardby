@@ -1243,8 +1243,10 @@ export class ContainerExecutor implements Executor {
 
   resolveCodingWorkerImage(selector: CodingImageSelector): string {
     if (selector.provider === "claude-code") {
+      // workerImageRef never replaces the Claude Code agent image (the container that holds the
+      // run's key); on a Claude Code agent it selects the tool runner (claudeToolImage).
       this.claudeToolImage(selector);
-      const image = selector.workerImageRef ?? this.options.claudeWorkerImage;
+      const image = this.options.claudeWorkerImage;
       if (!image) throw new Error("coding_provider_not_configured:claude-code");
       if (!isImmutableDockerImage(image)) throw new Error("coding_worker_image_invalid");
       return image;
@@ -1252,7 +1254,7 @@ export class ContainerExecutor implements Executor {
     if (selector.provider !== "codex") {
       throw new Error(`coding_provider_unsupported:${String(selector.provider)}`);
     }
-    if (selector.workerImageRef) {
+    if (selector.workerImageRef !== null) {
       if (!isImmutableDockerImage(selector.workerImageRef)) throw new Error("coding_worker_image_invalid");
       return selector.workerImageRef;
     }
@@ -1275,9 +1277,18 @@ export class ContainerExecutor implements Executor {
     return selector.provider === "claude-code" ? this.claudeToolImage(selector) : null;
   }
 
-  /** The tool runner is what runs a Claude agent's commands, so it is what the toolchain selects. */
+  /**
+   * The tool runner is what runs a Claude agent's commands, so it is what the toolchain selects —
+   * unless the agent has a BYO workerImageRef, which replaces the tool runner directly (never the
+   * agent image; see resolveCodingWorkerImage).
+   */
   private claudeToolImage(selector: CodingImageSelector): string {
     if (!this.options.claudeToolRunnerImage) throw new Error("coding_provider_not_configured:claude-code");
+    // An admin-set custom image (workerImageRef) is where this agent's commands run.
+    if (selector.workerImageRef !== null) {
+      if (!isImmutableDockerImage(selector.workerImageRef)) throw new Error("coding_worker_image_invalid");
+      return selector.workerImageRef;
+    }
     const image =
       selector.toolchain === "node" && selector.toolchainVersion === null
         ? this.options.claudeToolRunnerImage

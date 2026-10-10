@@ -336,7 +336,9 @@ toolchain, build your own image on Wardby's driver base image and point the
 agent at it with `workerImageRef`, a digest-pinned reference (a mutable tag is
 rejected). Setting it needs the `agents:admin` scope and the admin role. The
 Dockerfile shape, the driver image, and what Wardby does and does not verify are
-in [Bring-your-own worker images](coding-worker-byo-images.md).
+in [Bring-your-own worker images](coding-worker-byo-images.md). For a Claude
+Code agent, build the image on the release's tool runner image instead; see
+[Codex and Claude Code](coding-worker-byo-images.md#codex-and-claude-code).
 
 ```json
 {

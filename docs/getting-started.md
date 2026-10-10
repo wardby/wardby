@@ -162,8 +162,9 @@ any local branch.
 Wardby's worker images have Node, or Node and Python 3.12. For a Go, Java, Rust
 or other project, build a worker image with that toolchain on Wardby's driver
 base image, and point the builder at it with `codingProfile.workerImageRef`.
-This works for **Codex** agents only today: a Claude Code agent runs its
-commands in its tool runner, which a custom worker image does not change.
+These steps are for a **Codex** builder. For a Claude Code builder, the image
+starts from Wardby's tool runner image instead; see
+[Codex and Claude Code](coding-worker-byo-images.md#codex-and-claude-code).
 
 1. Complete path A with Codex (`--coding-provider codex`).
 2. Run `npx @wardby/cli@latest doctor`. It prints the base image to build on:
@@ -347,8 +348,8 @@ Python tests. Upgrade, or set the variable above.
 Other languages (Go, Rust, Java and so on) are not detected. Use a
 bring-your-own image through `workerImageRef`; see
 [Path D](#path-d-another-language-build-your-own-image) and
-[Bring-your-own worker images](coding-worker-byo-images.md). That is Codex-only
-today: a Claude Code agent cannot use a custom toolchain yet.
+[Bring-your-own worker images](coding-worker-byo-images.md), for Codex or
+Claude Code.
 
 #### Packages the repository declares
 

@@ -219,10 +219,12 @@ jobs:
       - run: docker build -f src/claude-coding-worker/Dockerfile -t wardby-claude-coding-worker:${{ github.sha }} .
       - run: docker build -f src/claude-tool-runner/Dockerfile -t wardby-claude-tool-runner:${{ github.sha }} .
       - run: docker build -f src/claude-tool-runner/Dockerfile --target node-python -t wardby-claude-tool-runner-node-python:${{ github.sha }} .
+      - run: docker build -f src/claude-tool-runner/Dockerfile.custom-example --build-arg TOOL_RUNNER_IMAGE=wardby-claude-tool-runner:${{ github.sha }} -t wardby-claude-tool-runner-custom:${{ github.sha }} .
       - run: npm run test:claude-docker
         env:
           WARDBY_CLAUDE_WORKER_IMAGE: wardby-claude-coding-worker:${{ github.sha }}
           WARDBY_CLAUDE_TOOL_RUNNER_IMAGE: wardby-claude-tool-runner:${{ github.sha }}
+          WARDBY_CLAUDE_CUSTOM_TOOL_RUNNER_IMAGE: wardby-claude-tool-runner-custom:${{ github.sha }}
           WARDBY_DOCKER_SEED_DEBUG: "1"
           WARDBY_CLAUDE_KEEPER_PROBE: "1"
       - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3

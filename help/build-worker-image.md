@@ -15,12 +15,9 @@ on top of Wardby's driver base image and set the coding agent's
 `codingProfile.workerImageRef` to it. The long-form guide is
 [`docs/coding-worker-byo-images.md`](../docs/coding-worker-byo-images.md).
 
-**Codex agents only.** A Claude Code agent runs its commands in Claude's tool
-runner, which `workerImageRef` does not change, so a custom image gives a Claude
-Code agent no new tools. If the agent's `codingProfile.provider` is
-`claude-code`, say so and stop; the user can switch the agent to Codex (the
-quickstart sets Codex up with `--coding-provider codex` and an
-`OPENAI_API_KEY`).
+These steps build on the driver image (`codingProfile.provider: codex`). For a
+`claude-code` agent, search help for a Claude Code image article for this
+version; if there is none, tell the user and stop.
 
 If you are an assistant connected to Wardby over MCP, follow these steps. Do
 them in order, ask the user instead of guessing, and stop at the first failed

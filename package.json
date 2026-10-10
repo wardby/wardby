@@ -89,7 +89,7 @@
     "test:docker-isolation": "node scripts/docker-isolation-acceptance.mjs",
     "test:docker-job": "node scripts/docker-job-acceptance.mjs",
     "test:docker-services": "node scripts/docker-services-acceptance.mjs",
-    "claude:images:local": "docker build -f src/claude-coding-worker/Dockerfile -t wardby-claude-coding-worker:phase5 . && docker build -f src/claude-tool-runner/Dockerfile -t wardby-claude-tool-runner:phase5 . && docker build -f src/claude-tool-runner/Dockerfile --target node-python -t wardby-claude-tool-runner:phase5-node-python .",
+    "claude:images:local": "docker build -f src/claude-coding-worker/Dockerfile -t wardby-claude-coding-worker:phase5 . && docker build -f src/claude-tool-runner/Dockerfile -t wardby-claude-tool-runner:phase5 . && docker build -f src/claude-tool-runner/Dockerfile --target node-python -t wardby-claude-tool-runner:phase5-node-python . && docker build -f src/claude-tool-runner/Dockerfile.custom-example -t wardby-claude-tool-runner-custom:phase5 .",
     "test:claude-compatibility": "docker build -f src/claude-coding-worker/Dockerfile.compatibility -t wardby-claude-compat:phase5 . && docker run --rm wardby-claude-compat:phase5",
     "test:claude-docker": "node scripts/claude-docker-acceptance.mjs",
     "test:production-boundary": "node scripts/production-boundary-policy.mjs",
