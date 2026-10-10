@@ -13,6 +13,8 @@ function config(signal = new AbortController().signal): ClaudeQueryOptions {
     relayEnvironment: { PATH: "/usr/bin:/bin" },
     outputSchema: {},
     developerInstructions: "Fixed security instructions",
+    contextDirectory: null,
+    skills: false,
   };
 }
 
@@ -45,6 +47,42 @@ describe("Claude SDK configuration", () => {
         alwaysLoad: true,
       },
     });
+  });
+
+  it("keeps today's isolation when there is no native context", () => {
+    expect(buildClaudeSdkOptions(config())).toMatchObject({
+      cwd: "/opt/wardby/empty-workspace",
+      tools: [],
+      allowedTools: ["mcp__wardby_tools__run_command"],
+      settingSources: [],
+    });
+  });
+
+  it("loads project memory from the context directory, without the Skill tool when there are no skills", () => {
+    expect(buildClaudeSdkOptions({ ...config(), contextDirectory: "/tmp/wardby-context" })).toMatchObject({
+      cwd: "/tmp/wardby-context",
+      tools: [],
+      allowedTools: ["mcp__wardby_tools__run_command"],
+      settingSources: ["project"],
+      strictMcpConfig: true,
+    });
+  });
+
+  it("restricts hooks to managed ones in native mode only", () => {
+    expect(buildClaudeSdkOptions(config())).not.toHaveProperty("managedSettings");
+    expect(buildClaudeSdkOptions({ ...config(), contextDirectory: "/tmp/wardby-context" }).managedSettings).toEqual({
+      allowManagedHooksOnly: true,
+    });
+  });
+
+  it("adds the Skill tool when the native context has skills", () => {
+    expect(buildClaudeSdkOptions({ ...config(), contextDirectory: "/tmp/wardby-context", skills: true })).toMatchObject(
+      {
+        tools: ["Skill"],
+        allowedTools: ["mcp__wardby_tools__run_command", "Skill"],
+        settingSources: ["project"],
+      },
+    );
   });
 
   it("bridges host cancellation to the SDK abort controller", () => {

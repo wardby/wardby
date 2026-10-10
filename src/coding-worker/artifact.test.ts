@@ -3,6 +3,7 @@ import { lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { MAX_CODING_INPUT_BYTES } from "../coding/protocol.js";
 import { readBoundedRegularFile, readCodingInput, writeCodingOutputAtomic } from "./artifact.js";
 
 const roots: string[] = [];
@@ -43,7 +44,7 @@ describe("coding worker artifacts", () => {
     await import("node:fs/promises").then(({ symlink }) => symlink(target, link));
     await expect(readCodingInput(link)).rejects.toThrow("coding_input_invalid_file");
     const oversized = join(directory, "oversized");
-    await writeFile(oversized, "x".repeat(64 * 1024 + 1));
+    await writeFile(oversized, "x".repeat(MAX_CODING_INPUT_BYTES + 1));
     await expect(readCodingInput(oversized)).rejects.toThrow("coding_input_invalid_file");
   });
 

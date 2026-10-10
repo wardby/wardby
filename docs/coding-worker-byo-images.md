@@ -130,6 +130,20 @@ a worker built on an older driver base doesn't recognize the input's
 without them. Rebuild your image on a current `driver-vN` digest (see "The
 driver image" above) before allowing any service on an agent that uses it.
 
+## Repository skills need a current driver
+
+A `workerImageRef` image runs Codex agents only (see "Codex only" above), so
+it never receives Claude Code's repository context (`claudeContext`) or
+`claudeBareMode`. The one new input key it can see is `repoSkills`, which
+wardby writes only when an agent sets `repoSkills: false`. A worker built on
+an older driver base validates its input with a strict schema, so it rejects
+runs of agents with `repoSkills: false` (the run fails with
+`worker_input_failed`), and it keeps offering Codex's built-in skills
+(`imagegen`, `openai-docs`, `skill-creator`, `skill-installer`), which a
+current driver always disables. Rebuild any `workerImageRef` image on a
+current `driver-vN` digest (see "The driver image" above) before relying on
+either behavior.
+
 ## What this doesn't cover
 
 wardby does not re-validate the contents of your built image beyond the

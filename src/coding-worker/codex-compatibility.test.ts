@@ -18,6 +18,7 @@ import type { ProxyAuditEvent } from "../providers/coding-proxy/types.js";
 import { CODING_OUTPUT_JSON_SCHEMA, WORKER_SECURITY_INSTRUCTIONS } from "./driver.js";
 import { recordCodexRequests } from "./codex-recorder.test-support.js";
 import { createCodexSdkClient } from "./sdk.js";
+import { CODEX_BUILTIN_SKILLS } from "./skills.js";
 
 const require = createRequire(import.meta.url);
 const RECORD = process.env.CODEX_RECORD === "1";
@@ -254,6 +255,7 @@ describe.skipIf(RECORD || !codexBinaryInstalled())("pinned Codex CLI against the
           ALL_PROXY: blocked,
           NO_PROXY: "127.0.0.1,localhost",
         },
+        disabledSkills: [...CODEX_BUILTIN_SKILLS],
       });
       const thread = client.startThread({
         model,

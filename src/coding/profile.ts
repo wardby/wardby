@@ -154,6 +154,8 @@ const codingProfileFields = {
   packagePolicy: packagePolicySchema,
   /** Coding-run services this agent's runs may start: catalog names, any version (docs/coding-services.md). */
   services: AllowedServiceNamesSchema,
+  repoSkills: z.boolean(),
+  claudeBareMode: z.boolean(),
 };
 
 export const CodingProfileSchema = z
@@ -174,6 +176,8 @@ export const CodingProfileSchema = z
     packageAllowlist: codingProfileFields.packageAllowlist.default({}),
     packagePolicy: codingProfileFields.packagePolicy.default({}),
     services: codingProfileFields.services.default([]),
+    repoSkills: codingProfileFields.repoSkills.default(true),
+    claudeBareMode: codingProfileFields.claudeBareMode.default(true),
   })
   .strict();
 
@@ -195,6 +199,8 @@ export const CodingProfilePatchSchema = z
     packageAllowlist: codingProfileFields.packageAllowlist.optional(),
     packagePolicy: codingProfileFields.packagePolicy.optional(),
     services: codingProfileFields.services.optional(),
+    repoSkills: codingProfileFields.repoSkills.optional(),
+    claudeBareMode: codingProfileFields.claudeBareMode.optional(),
   })
   .strict();
 

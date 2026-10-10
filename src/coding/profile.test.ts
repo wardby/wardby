@@ -27,6 +27,8 @@ describe("CodingProfileSchema", () => {
       packageAllowlist: {},
       packagePolicy: {},
       services: [],
+      repoSkills: true,
+      claudeBareMode: true,
     });
   });
 
@@ -132,6 +134,24 @@ describe("services", () => {
     ).toEqual(["postgres", "redis"]);
     expect(CodingProfileSchema.safeParse({ repository: "openai/example", services: ["Postgres"] }).success).toBe(false);
     expect(CodingProfilePatchSchema.parse({ services: ["redis"] })).toEqual({ services: ["redis"] });
+  });
+});
+
+describe("repoSkills", () => {
+  it("defaults repoSkills to true and accepts false", () => {
+    expect(CodingProfileSchema.parse({ repository: "o/r" }).repoSkills).toBe(true);
+    expect(CodingProfileSchema.parse({ repository: "o/r", repoSkills: false }).repoSkills).toBe(false);
+    expect(CodingProfilePatchSchema.parse({ repoSkills: false })).toEqual({ repoSkills: false });
+    expect(() => CodingProfileSchema.parse({ repository: "o/r", repoSkills: "no" })).toThrow();
+  });
+});
+
+describe("claudeBareMode", () => {
+  it("defaults claudeBareMode to true and accepts false", () => {
+    expect(CodingProfileSchema.parse({ repository: "o/r" }).claudeBareMode).toBe(true);
+    expect(CodingProfileSchema.parse({ repository: "o/r", claudeBareMode: false }).claudeBareMode).toBe(false);
+    expect(CodingProfilePatchSchema.parse({ claudeBareMode: false })).toEqual({ claudeBareMode: false });
+    expect(() => CodingProfileSchema.parse({ repository: "o/r", claudeBareMode: "no" })).toThrow();
   });
 });
 

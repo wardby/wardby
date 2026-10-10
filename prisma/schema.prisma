@@ -456,6 +456,12 @@ model CodingAgentProfile {
   /// (CodingService.name) this agent's runs may start, any version the catalog
   /// has. Empty = none. Owner-set through update_agent.
   services                 Json      @default("[]")
+  /// Load the repository's agent skills into coding runs (Codex: .agents/skills, .codex/skills;
+  /// Claude Code: .claude/skills). Repo instructions (AGENTS.md / CLAUDE.md) load regardless.
+  repoSkills               Boolean   @default(true)
+  /// Claude Code runs only: keep Claude Code's bare mode (CLAUDE_CODE_SIMPLE=1); wardby injects
+  /// repo instructions and the skill list into the system prompt. False = Claude Code's native loading.
+  claudeBareMode           Boolean   @default(true)
 
   /// How `repository` was authorized for this agent (see AgentRepository.authorizedVia):
   /// "host_permission", "admin", or "grandfathered". Null = never authorized; runs are refused.
@@ -506,6 +512,10 @@ model CodingRun {
   debugTrace        Boolean             @default(false)
   /// Fixed at dispatch from the profile's maxTurns: the Claude Code worker's turn limit. Null = the worker default.
   maxTurns          Int?
+  /// Fixed at dispatch from the profile's repoSkills.
+  repoSkills        Boolean             @default(true)
+  /// Fixed at dispatch from the profile's claudeBareMode.
+  claudeBareMode    Boolean             @default(true)
   /// Coding-run services resolved at dispatch from the base branch's
   /// .wardby/services.yaml: one snapshot per service (the catalog entry minus
   /// kind), fixed for the run's lifetime. Empty = none.

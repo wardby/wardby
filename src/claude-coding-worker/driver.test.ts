@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { access, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CodingTaskInput } from "../coding/protocol.js";
 import {
   CLAUDE_OUTPUT_JSON_SCHEMA,
@@ -238,5 +241,136 @@ describe("runClaudeCodingWorker", () => {
     expect(CLAUDE_WORKER_SECURITY_INSTRUCTIONS).toContain(
       "npm installs in that tool, and pip installs inside a Python virtual environment where the tool has Python, already go through Wardby's package registry; don't configure registries or proxies.",
     );
+  });
+
+  describe("repository context", () => {
+    const parents: string[] = [];
+    afterEach(async () => Promise.all(parents.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))));
+
+    async function contextRoot(): Promise<string> {
+      const dir = await mkdtemp(join(tmpdir(), "wardby-driver-ctx-"));
+      parents.push(dir);
+      return join(dir, "ctx");
+    }
+
+    /** Runs the worker against a fake query that records the options it was given. */
+    async function capture(runInput: CodingTaskInput, root: string): Promise<ClaudeQueryOptions> {
+      let captured: ClaudeQueryOptions | undefined;
+      await runClaudeCodingWorker({
+        input: runInput,
+        proxyBaseUrl: "http://proxy",
+        capability: "cap",
+        signal: new AbortController().signal,
+        contextRoot: root,
+        createQuery: (options) => {
+          captured = options;
+          return (async function* () {
+            yield {
+              type: "result",
+              subtype: "success",
+              result: JSON.stringify({
+                schemaVersion: 1,
+                runId: runInput.runId,
+                outcome: "no_changes",
+                summary: "ok",
+                tests: [],
+              }),
+            };
+          })();
+        },
+      });
+      return captured!;
+    }
+
+    const instructions = { path: "CLAUDE.md", content: "Use pnpm." };
+
+    it("stays in bare mode with only the security instructions when there is no context", async () => {
+      const config = await capture(input, await contextRoot());
+      expect(config.contextDirectory).toBeNull();
+      expect(config.skills).toBe(false);
+      expect(config.environment.CLAUDE_CODE_SIMPLE).toBe("1");
+      expect(config.developerInstructions).toBe(CLAUDE_WORKER_SECURITY_INSTRUCTIONS);
+      expect(config.environment.CLAUDE_CODE_DISABLE_BUNDLED_SKILLS).toBe("1");
+    });
+
+    it("injects the context into the system prompt in bare mode and writes nothing", async () => {
+      const root = await contextRoot();
+      const config = await capture({ ...input, claudeContext: { files: [instructions] } }, root);
+      expect(config.contextDirectory).toBeNull();
+      expect(config.environment.CLAUDE_CODE_SIMPLE).toBe("1");
+      expect(config.developerInstructions.startsWith(CLAUDE_WORKER_SECURITY_INSTRUCTIONS)).toBe(true);
+      expect(config.developerInstructions).toContain("Use pnpm.");
+      await expect(access(root)).rejects.toThrow();
+    });
+
+    it("writes the context to disk and drops bare mode in native mode", async () => {
+      const root = await contextRoot();
+      const config = await capture(
+        {
+          ...input,
+          claudeBareMode: false,
+          claudeContext: { files: [instructions, { path: ".claude/skills/a/SKILL.md", content: "s" }] },
+        },
+        root,
+      );
+      expect(config.contextDirectory).toBe(root);
+      expect(config.skills).toBe(true);
+      expect(config.environment).not.toHaveProperty("CLAUDE_CODE_SIMPLE");
+      expect(config.environment.CLAUDE_CODE_DISABLE_BUNDLED_SKILLS).toBe("1");
+      expect(config.developerInstructions).toBe(CLAUDE_WORKER_SECURITY_INSTRUCTIONS);
+    });
+
+    it("falls back to bare mode with the context injected when it cannot be written", async () => {
+      const root = await contextRoot();
+      await mkdir(root);
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        const config = await capture(
+          { ...input, claudeBareMode: false, claudeContext: { files: [instructions] } },
+          root,
+        );
+        expect(config.contextDirectory).toBeNull();
+        expect(config.skills).toBe(false);
+        expect(config.environment.CLAUDE_CODE_SIMPLE).toBe("1");
+        expect(config.developerInstructions.startsWith(CLAUDE_WORKER_SECURITY_INSTRUCTIONS)).toBe(true);
+        expect(config.developerInstructions).toContain("Use pnpm.");
+        const written = stderr.mock.calls.map((call) => String(call[0])).join("");
+        expect(written).toContain('"warning":"claude_context_unavailable"');
+        expect(written).not.toContain("Use pnpm.");
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it("removes a partly written context directory before falling back", async () => {
+      const root = await contextRoot();
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        // A file and a directory at the same path: the second write fails after the first succeeded.
+        const config = await capture(
+          {
+            ...input,
+            claudeBareMode: false,
+            claudeContext: {
+              files: [
+                { path: "docs/a.md", content: "A" },
+                { path: "docs/a.md/b.md", content: "B" },
+              ],
+            },
+          },
+          root,
+        );
+        expect(config.contextDirectory).toBeNull();
+        await expect(readdir(root)).rejects.toThrow();
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it("drops bare mode in native mode even without context", async () => {
+      const config = await capture({ ...input, claudeBareMode: false }, await contextRoot());
+      expect(config.contextDirectory).toBeNull();
+      expect(config.environment).not.toHaveProperty("CLAUDE_CODE_SIMPLE");
+    });
   });
 });

@@ -262,6 +262,108 @@ See [release verification](release-verification.md) for the complete gate.
 If the repository has `docs/knowledge/index.md`, every coding run's prompt
 includes it. See [Architecture knowledge bundles](knowledge.md).
 
+## Repository instructions
+
+Every coding run loads the repository's own instructions; there is no
+`codingProfile` setting to turn this off. Codex reads the repository's
+`AGENTS.md` itself, directly from the checkout. Claude Code is handed
+`CLAUDE.md`, `.claude/CLAUDE.md`, and whatever either file pulls in with
+`@path` imports, up to 5 import levels deep; a repository that only has
+`AGENTS.md` gets a one-line `CLAUDE.md` that imports it, so a repository
+written for another coding agent still has its instructions in Claude Code.
+Subdirectory `CLAUDE.md` files (anything other than the repository root and
+`.claude/CLAUDE.md`) are not loaded unless an imported file pulls them in.
+
+Claude Code's instructions and skills are read from the checkout and bounded:
+at most 64 KiB per file, 200 files, and 256 KiB combined; symlinks and
+non-UTF-8 files are refused. A file that doesn't pass, or that would push
+the run's input past its 512 KiB size limit once encoded (skills and the
+deepest imports are dropped first), is left out and logged as
+`coding.claude_context_skipped` (the first 50 individually, then one
+aggregate line with an overflow count); when the repository's context can't
+be read at all, the run continues without it and logs
+`coding.claude_context_unavailable`. A run never fails because its
+repository context couldn't be loaded.
+
+Claude Code never receives the repository's `.claude/settings.json`, hooks,
+`.mcp.json`, agents, or commands — only Markdown instruction files and
+`.claude/skills/<name>/SKILL.md` files pass the allowlist, whatever an
+instruction file imports. Repository instructions and skills are untrusted
+guidance: they can shape a run's work but never relax the worker's sandbox
+rules.
+
+## Claude Code loading mode
+
+`codingProfile.claudeBareMode` controls how Claude Code uses the repository
+instructions above. It defaults to `true` and only affects Claude Code
+agents.
+
+- **`true` (default, bare mode).** Claude Code keeps its hardened bare mode.
+  Wardby adds the repository's instruction files to the system prompt in
+  full, and lists each skill by name, description, and path; the model reads
+  a skill's full `SKILL.md` itself with `run_command`.
+- **`false`.** Bare mode is off. Claude Code loads `CLAUDE.md` and skills
+  itself, through its native Skill tool, instead of reading them from the
+  system prompt. Repository settings, hooks, MCP configuration, agents, and
+  commands are still never loaded in either mode; native loading also locks
+  Claude Code's own hooks to wardby's managed set.
+
+If the worker can't write the native-mode context to disk for a run, that
+run falls back to bare mode instead of failing, and the worker logs a
+`claude_context_unavailable` warning.
+
+The agent owner or an admin can change it:
+
+```json
+{ "id": "<agent-id>", "codingProfile": { "claudeBareMode": false } }
+```
+
+## Repository skills
+
+`codingProfile.repoSkills` loads the repository's own agent skills into a
+run. It defaults to `true`.
+
+| Builder     | Reads skills from                   | `repoSkills: true` (default)                        | `repoSkills: false`                |
+| ----------- | ----------------------------------- | --------------------------------------------------- | ---------------------------------- |
+| Codex       | `.agents/skills/`, `.codex/skills/` | Repository skills load                              | Every repository skill is disabled |
+| Claude Code | `.claude/skills/<name>/SKILL.md`    | Repository skills load (bare or native mode, above) | No skill context is collected      |
+
+Codex's own four built-in skills (`imagegen`, `openai-docs`, `skill-creator`,
+`skill-installer`) are always disabled, whatever `repoSkills` is set to —
+wardby's coding runs never offer them. With `repoSkills: false`, the Codex
+worker scans both roots for the skill names to disable; that scan stops after
+2000 directory entries, to bound the work an adversarial skills tree could
+cause, logs `codex_skill_scan_truncated`, and disables whatever names it found
+so far rather than failing the run.
+
+Claude Code skills ship to the worker as their `SKILL.md` only. A skill's
+other files (scripts, references, data) stay in the repository checkout and
+are read or run through the command runner at
+`/workspace/.claude/skills/<name>/`.
+
+Turn repository skills off for an agent:
+
+```json
+{ "id": "<agent-id>", "codingProfile": { "repoSkills": false } }
+```
+
+**Upgrading.** `repoSkills` and `claudeBareMode` both default to `true`, so
+upgrading changes behavior for existing agents: Claude Code agents start
+loading `CLAUDE.md` and `.claude/skills/` (previously neither was loaded),
+and Codex agents stop getting Codex's own built-in skills (previously always
+offered). Set `repoSkills: false` on an agent to keep its repository's
+skills out of its runs; there is no setting that keeps repository
+instructions themselves out, for either builder.
+
+Use the worker images (`CODING_WORKER_IMAGE` and `CODING_CLAUDE_WORKER_IMAGE`)
+from the same release as the control plane. On an older Claude Code worker
+image, runs fail with `worker_input_failed` once the repository has a
+`CLAUDE.md`, `AGENTS.md`, or skill to load, or the agent sets `repoSkills` or
+`claudeBareMode` to `false`; on an older Codex worker image, runs of agents with
+`repoSkills: false` fail the same way. A `workerImageRef` image must also be
+rebuilt on this release's driver base — see
+[Bring-Your-Own Coding-Worker Images](coding-worker-byo-images.md).
+
 ## Budgets
 
 A coding run's budget is reserved when it is dispatched: the agent's own

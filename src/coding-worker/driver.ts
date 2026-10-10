@@ -10,6 +10,7 @@ import { normalizeRegistryLockfiles } from "../coding/registry/lockfiles.js";
 import { registryWorkerSetup } from "../coding/registry/worker-config.js";
 import { describeError } from "./debug-trace.js";
 import { safeWorkerErrorCode } from "./errors.js";
+import { disabledCodexSkills } from "./skills.js";
 import type { WorkerEvent, WorkerProgressEvent, WorkerRunOptions } from "./types.js";
 
 export const WORKER_SECURITY_INSTRUCTIONS = `You are running inside an isolated Wardby coding worker.
@@ -159,6 +160,7 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
       ...workerEnvironment(options.workspace),
       ...registry.env,
     },
+    disabledSkills: await disabledCodexSkills(options.workspace, options.input.repoSkills !== false),
   });
   const thread = client.startThread({
     model: options.input.model,

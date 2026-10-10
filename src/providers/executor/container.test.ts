@@ -1,10 +1,11 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryCodingRunObserver } from "../../coding/observability.js";
 import { CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
+import { MAX_CODING_INPUT_BYTES } from "../../coding/protocol.js";
 import type { CodingProvider } from "../../coding/provider.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
 import { resolvedFromDefinition } from "../../coding/services/catalog.js";
@@ -60,6 +61,25 @@ vi.mock("../../core/logger.js", () => {
     };
   };
   return { logger: make() };
+});
+
+/**
+ * Lets a test make buildClaudeContext reject deterministically (an
+ * inaccessible workspace, EACCES, ...) without touching the real filesystem;
+ * every other test falls through to the real implementation.
+ */
+const claudeContextOverride = vi.hoisted(() => ({
+  reject: undefined as Error | undefined,
+}));
+vi.mock("../../coding/claude-context.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../coding/claude-context.js")>();
+  return {
+    ...actual,
+    buildClaudeContext: (...args: Parameters<typeof actual.buildClaudeContext>) => {
+      if (claudeContextOverride.reject) return Promise.reject(claudeContextOverride.reject);
+      return actual.buildClaudeContext(...args);
+    },
+  };
 });
 
 const IMAGE = `registry.example/worker@sha256:${"a".repeat(64)}`;
@@ -326,6 +346,9 @@ class FakeVcs implements VcsProvider {
     this.lastPrepareInput = input;
     this.events.push("prepare");
     this.workspace = this.makeWorkspace(input);
+    // Mirrors a real VCS provider, which always creates the workspace directory on disk: callers
+    // that read a Claude Code run's repository (buildClaudeContext) need a real path to realpath().
+    await mkdir(this.workspace.workspacePath, { recursive: true });
     return this.workspace;
   }
   async recoverWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace | null> {
@@ -474,7 +497,7 @@ async function harness(
     repoAccess: gateWith().gate,
     ...extra,
   });
-  return { executor, store, jobs, vcs, sessions, capabilities, events, observer };
+  return { executor, store, jobs, vcs, sessions, capabilities, events, observer, root };
 }
 
 afterEach(async () => {
@@ -483,6 +506,7 @@ afterEach(async () => {
 
 beforeEach(() => {
   logged.length = 0;
+  claudeContextOverride.reject = undefined;
 });
 
 describe("ContainerExecutor", () => {
@@ -654,6 +678,130 @@ describe("ContainerExecutor", () => {
         expect.objectContaining({ status: "failed", audit: expect.objectContaining({ failureCategory: "preflight" }) }),
       ]);
     });
+
+    it("ships CLAUDE.md and skills to a Claude Code run, and only the instructions when skills are off", async () => {
+      const launched = async (repoSkills: boolean) => {
+        const created = await harness(
+          { ...claudeRun, repoSkills },
+          IMAGE,
+          new InMemoryCodingRunObserver(),
+          claudeImages,
+        );
+        const workspace = join(created.root, "vcs", "run-1", "workspace");
+        await mkdir(join(workspace, ".claude", "skills", "lint"), { recursive: true });
+        await writeFile(join(workspace, "CLAUDE.md"), "Use pnpm.");
+        await writeFile(join(workspace, ".claude", "skills", "lint", "SKILL.md"), "---\nname: lint\n---\n");
+        let input: Record<string, unknown> | undefined;
+        created.jobs.onLaunch = () => {
+          input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+        };
+        await created.executor.start("run-1");
+        return input!;
+      };
+      expect((await launched(true)).claudeContext).toEqual({
+        files: [
+          { path: "CLAUDE.md", content: "Use pnpm." },
+          { path: ".claude/skills/lint/SKILL.md", content: "---\nname: lint\n---\n" },
+        ],
+      });
+      expect((await launched(false)).claudeContext).toEqual({ files: [{ path: "CLAUDE.md", content: "Use pnpm." }] });
+    });
+
+    it("logs one further warn line, with the overflow count, for skips beyond the first 50", async () => {
+      const created = await harness(claudeRun, IMAGE, new InMemoryCodingRunObserver(), claudeImages);
+      const workspace = join(created.root, "vcs", "run-1", "workspace");
+      await mkdir(workspace, { recursive: true });
+      // 51 distinct home-relative imports: each is refused as "outside_repo" without ever being
+      // read, so this is a cheap way to drive skippedOverflow past 0 (MAX_RECORDED_SKIPS = 50).
+      const imports = Array.from({ length: 51 }, (_, i) => `@~${i}`).join("\n");
+      await writeFile(join(workspace, "CLAUDE.md"), imports);
+      await created.executor.start("run-1");
+      const skipLogs = logged.filter((entry) => entry.payload.event === "coding.claude_context_skipped");
+      expect(skipLogs).toHaveLength(51);
+      expect(skipLogs.filter((entry) => "overflow" in entry.payload)).toEqual([
+        {
+          level: "warn",
+          payload: { event: "coding.claude_context_skipped", runId: "run-1", overflow: 1 },
+          message: "further repository context files were not loaded",
+        },
+      ]);
+    });
+
+    it("drops context files from the tail, as limit skips, until the serialized input fits", async () => {
+      const created = await harness(claudeRun, IMAGE, new InMemoryCodingRunObserver(), claudeImages);
+      const workspace = join(created.root, "vcs", "run-1", "workspace");
+      await mkdir(join(workspace, "docs"), { recursive: true });
+      // Each file fits the content limits (≤ 64 KiB, ≤ 256 KiB in total), but a control character
+      // serializes to six JSON bytes ("\u0001"), so the four together are ~1.5 MB of input.json.
+      const filler = "\u0001".repeat(60 * 1024);
+      await writeFile(join(workspace, "CLAUDE.md"), `@docs/a.md @docs/b.md @docs/c.md\n${filler}`);
+      for (const name of ["a", "b", "c"]) await writeFile(join(workspace, "docs", `${name}.md`), filler);
+      let input: { claudeContext?: { files: { path: string }[] } } | undefined;
+      let size = 0;
+      created.jobs.onLaunch = () => {
+        const text = readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8");
+        size = Buffer.byteLength(text);
+        input = JSON.parse(text) as typeof input;
+      };
+      await created.executor.start("run-1");
+      expect(created.jobs.launches).toBe(1);
+      expect(size).toBeLessThanOrEqual(MAX_CODING_INPUT_BYTES);
+      expect(input!.claudeContext!.files.map((file) => file.path)).toEqual(["CLAUDE.md"]);
+      expect(
+        logged.filter((entry) => entry.payload.event === "coding.claude_context_skipped").map((entry) => entry.payload),
+      ).toEqual([
+        { event: "coding.claude_context_skipped", runId: "run-1", path: "docs/c.md", reason: "limit" },
+        { event: "coding.claude_context_skipped", runId: "run-1", path: "docs/b.md", reason: "limit" },
+        { event: "coding.claude_context_skipped", runId: "run-1", path: "docs/a.md", reason: "limit" },
+      ]);
+    });
+
+    it("truncates a logged skip path to 256 characters", async () => {
+      const created = await harness(claudeRun, IMAGE, new InMemoryCodingRunObserver(), claudeImages);
+      const workspace = join(created.root, "vcs", "run-1", "workspace");
+      await mkdir(workspace, { recursive: true });
+      await writeFile(join(workspace, "CLAUDE.md"), `@~${"x".repeat(4096)}`);
+      await created.executor.start("run-1");
+      const skips = logged.filter((entry) => entry.payload.event === "coding.claude_context_skipped");
+      expect(skips).toHaveLength(1);
+      expect(skips[0].payload).toMatchObject({ reason: "outside_repo" });
+      expect(String(skips[0].payload.path)).toHaveLength(256);
+      expect(String(skips[0].payload.path).startsWith("~xxx")).toBe(true);
+    });
+
+    it("still launches a Claude Code run whose repository context could not be read, without claudeContext", async () => {
+      const created = await harness(claudeRun, IMAGE, new InMemoryCodingRunObserver(), claudeImages);
+      const error = new Error("permission denied") as NodeJS.ErrnoException;
+      error.code = "EACCES";
+      claudeContextOverride.reject = error;
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      expect(created.jobs.launches).toBe(1);
+      expect(input).not.toHaveProperty("claudeContext");
+      expect(logged.filter((entry) => entry.payload.event === "coding.claude_context_unavailable")).toEqual([
+        {
+          level: "warn",
+          payload: { event: "coding.claude_context_unavailable", runId: "run-1", code: "EACCES" },
+          message: "repository context could not be read; continuing without it",
+        },
+      ]);
+    });
+
+    it("never ships claudeContext to a Codex run", async () => {
+      const created = await harness({});
+      const workspace = join(created.root, "vcs", "run-1", "workspace");
+      await mkdir(workspace, { recursive: true });
+      await writeFile(join(workspace, "CLAUDE.md"), "x");
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      expect(input).not.toHaveProperty("claudeContext");
+    });
   });
 
   it("calls onSlotReleased once after a run reaches a terminal status, never for a queued run", async () => {
@@ -694,6 +842,39 @@ describe("ContainerExecutor", () => {
     };
     expect(await launchedInput({ maxTurns: 120 })).toMatchObject({ runId: "run-1", maxTurns: 120 });
     expect(await launchedInput({ maxTurns: null })).not.toHaveProperty("maxTurns");
+  });
+
+  it("hands the worker repoSkills only when the run turned skills off", async () => {
+    const launchedInput = async (overrides: Partial<ContainerRunSnapshot>) => {
+      const created = await harness(overrides);
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return input!;
+    };
+    expect(await launchedInput({ repoSkills: false })).toMatchObject({ runId: "run-1", repoSkills: false });
+    expect(await launchedInput({ repoSkills: true })).not.toHaveProperty("repoSkills");
+    expect(await launchedInput({})).not.toHaveProperty("repoSkills");
+  });
+
+  it("hands the worker claudeBareMode only when the run turned bare mode off", async () => {
+    const launchedInput = async (overrides: Partial<ContainerRunSnapshot>) => {
+      const created = await harness(overrides);
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return input!;
+    };
+    expect(await launchedInput({ claudeBareMode: false })).toMatchObject({
+      runId: "run-1",
+      claudeBareMode: false,
+    });
+    expect(await launchedInput({ claudeBareMode: true })).not.toHaveProperty("claudeBareMode");
+    expect(await launchedInput({})).not.toHaveProperty("claudeBareMode");
   });
 
   it("hands the worker debugTrace only for a traced run, leaving other inputs unchanged", async () => {

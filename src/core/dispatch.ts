@@ -806,6 +806,8 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               mergeOrder,
               workspaceDiskMb: agent.codingProfile.workspaceDiskMb,
               maxTurns: agent.codingProfile.maxTurns,
+              repoSkills: agent.codingProfile.repoSkills,
+              claudeBareMode: agent.codingProfile.claudeBareMode,
               // Fixed here so a run's tracing never changes mid-run.
               debugTrace:
                 agent.codingProfile.debugTraceUntil != null &&

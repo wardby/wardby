@@ -7,6 +7,7 @@ export function codexSdkOptions(config: WorkerClientConfig) {
     env: config.environment,
     config: {
       developer_instructions: config.developerInstructions,
+      skills: { config: config.disabledSkills.map((name) => ({ name, enabled: false })) },
       shell_environment_policy: {
         inherit: "none",
         ignore_default_excludes: false,
