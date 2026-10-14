@@ -972,6 +972,10 @@ async function restore(context, project, id, maxBytes, { consistency, manifest }
     if (skip.detail) context.log("archive_refused", skip.detail);
     throw skip;
   };
+  // A manifest (the scan recorded at upload, bound to the digest download()
+  // just verified) stands in for a second scan. Its unpackedBytes only feeds
+  // the early estimate below and context.known: extractArchive's budgetBytes
+  // remains the real bound, and it applies every scan rule again.
   const scan =
     manifest ?? (await measure("scan", () => scanArchive(archive, { budgetBytes: limit, signal })).catch(refused));
   // This project's tree size and compression, for the estimates below (a cold

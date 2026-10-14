@@ -88,7 +88,17 @@ function send(response: ServerResponse, status: number, body: unknown, close = f
   response.end(JSON.stringify(body));
 }
 
-/** Optional so workers deployed before validation metadata remain compatible. */
+/**
+ * The archive scan the worker ran before uploading, recorded with the
+ * snapshot. Protocol: an upload carries `x-wardby-archive-scan-version`,
+ * `x-wardby-archive-entries` and `x-wardby-archive-unpacked-bytes`, all three
+ * or none (a partial or malformed set is refused). Only an upload accepted
+ * before the run's seal stores them, so they come from trusted pre-agent
+ * worker code, never from the agent. A lookup returns them as `manifest` (and
+ * `nearest.manifest`) with the sha256 this proxy computed and recorded for the
+ * row, so a worker trusts them only for bytes that verify against that digest.
+ * Optional so workers deployed before validation metadata remain compatible.
+ */
 function verifiedArchiveHeaders(headers: IncomingMessage["headers"]): VerifiedArchive | null {
   const version = headers["x-wardby-archive-scan-version"];
   const entries = headers["x-wardby-archive-entries"];
