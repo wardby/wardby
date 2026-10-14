@@ -587,7 +587,10 @@ before the agent starts.
   comes from the checksum the proxy holds, not from this comparison. Any
   failure removes the temporary tree, and the project is installed `cold`
   instead (except when the run's time is up or the tree would not fit the
-  run's disk).
+  run's disk). The worker records that scan's result with each snapshot it
+  uploads; a restore whose downloaded bytes match the recorded digest skips
+  the separate scan, and extraction still enforces every archive rule above
+  and the disk budget.
 - **Install scripts are not cached.** Every preparation step runs npm with
   `--ignore-scripts`. After the upload window is sealed, and only for a project
   whose committed lockfile lists a package with an install script, the worker
@@ -785,7 +788,9 @@ that a `hit` or `nearest` restore rejects (`download_failed`, `size_mismatch`,
 `sha_mismatch`, `too_large`, `unsafe_archive`, `inconsistent`) is not reported
 as the project's reason: the project installs `cold` instead, and a traced
 Codex run's worker log records the code as `hit_rejected` or
-`nearest_rejected`.
+`nearest_rejected`. The same log times each restore's stages as
+`restore_phase` events (`stage` is `download`, `scan`, `extract`,
+`verify_tree` or `check_consistency`, with `ms`), for finding a slow restore.
 
 | Reason                                                        | Meaning and what to do                                                                                                                                                                                           |
 | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

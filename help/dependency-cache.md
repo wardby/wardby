@@ -48,6 +48,9 @@ for folders restored from a snapshot.
   SHA-256 and size the proxy recorded (that is the integrity check), the
   archive is scanned, and the tree's recorded package versions are compared
   with the lockfile before use. A damaged snapshot is deleted and rebuilt.
+  A restore skips re-scanning an archive whose scan result was recorded at
+  upload and whose digest matches; extraction still enforces every archive
+  rule.
 - The packages are the ones the agent's policy approves; the cache doesn't vet
   their contents beyond what a normal install through the registry does.
 - Install scripts are not cached. Snapshots are built with `--ignore-scripts`;
