@@ -938,26 +938,26 @@ model RegistryPlanRefusal {
 /// Outlives the run that created it (createdByRunId is cleared when that run is
 /// deleted); evicted least-recently-used.
 model DependencySnapshot {
-  id             String     @id @default(cuid())
-  ecosystem      String
-  repository     String
+  id                 String     @id @default(cuid())
+  ecosystem          String
+  repository         String
   /// The project's folder relative to the repository root; "." = the root.
-  projectPath    String     @default(".")
-  lockHash       String
-  workerImage    String
-  policyHash     String
-  blobKey        String     @unique
-  sha256         String
-  sizeBytes      BigInt
+  projectPath        String     @default(".")
+  lockHash           String
+  workerImage        String
+  policyHash         String
+  blobKey            String     @unique
+  sha256             String
+  sizeBytes          BigInt
   /// The format/version and bounds trusted worker code verified before upload.
   /// Null on snapshots made before validation metadata was introduced.
   archiveScanVersion Int?
   archiveEntries     Int?
   unpackedBytes      BigInt?
-  createdAt      DateTime   @default(now())
-  lastUsedAt     DateTime   @default(now())
-  createdByRunId String?
-  createdByRun   CodingRun? @relation(fields: [createdByRunId], references: [runId], onDelete: SetNull)
+  createdAt          DateTime   @default(now())
+  lastUsedAt         DateTime   @default(now())
+  createdByRunId     String?
+  createdByRun       CodingRun? @relation(fields: [createdByRunId], references: [runId], onDelete: SetNull)
 
   @@unique([ecosystem, repository, projectPath, lockHash, workerImage, policyHash])
   @@index([ecosystem, repository, projectPath, workerImage, policyHash, createdAt])
