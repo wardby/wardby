@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   lstat,
@@ -892,6 +892,103 @@ describe("untrusted archives", () => {
     expect(result.result).toBe("cold");
     expect(state.uploads).toHaveLength(0);
     expect(events.some((entry) => entry.event === "snapshot_skipped" && entry.reason === "unsafe_archive")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------- archive manifest
+
+/** The scan result the proxy returns as `manifest` for a snapshot uploaded with it. */
+async function manifestFor(blob: Buffer) {
+  const archive = join(root, `manifest-${randomUUID()}.tgz`);
+  await writeFile(archive, blob);
+  const { entries, unpackedBytes } = await scanArchive(archive, { budgetBytes: Number.MAX_SAFE_INTEGER });
+  await rm(archive);
+  return { scanVersion: 1, sha256: sha256(blob), entries, unpackedBytes };
+}
+
+function hitWithManifest(blob: Buffer, manifest: unknown, id = "a".repeat(64)) {
+  state.blobs.set(id, blob);
+  state.lookupAnswer = () => ({ status: 200, body: { key: id, hit: true, maxBytes: 64 * 1024 * 1024, manifest } });
+}
+
+/** The restore stages logged, in order. */
+const restoreStages = () => events.filter((event) => event.event === "restore_phase").map((event) => event.stage);
+
+describe("archive manifest (scan recorded at upload)", () => {
+  it("logs each restore stage with its duration", async () => {
+    hitWith(await realTarSnapshot(LOCKFILE));
+    expect(await prepare()).toMatchObject({ result: "hit" });
+    expect(restoreStages()).toEqual(["download", "scan", "extract", "verify_tree", "check_consistency"]);
+    for (const event of events.filter((entry) => entry.event === "restore_phase"))
+      expect(typeof event.ms).toBe("number");
+  });
+
+  it("a lookup without a manifest (a legacy snapshot) runs the full scan", async () => {
+    hitWith(await realTarSnapshot(LOCKFILE));
+    expect(await prepare()).toMatchObject({ result: "hit" });
+    expect(restoreStages()).toContain("scan");
+  });
+
+  it("refuses a manifest bound to another digest: download_failed, nothing scanned or extracted", async () => {
+    const blob = await realTarSnapshot(LOCKFILE);
+    hitWithManifest(blob, { ...(await manifestFor(blob)), sha256: "0".repeat(64) });
+    expect(await prepareRefusedHit()).toBe("download_failed");
+    // The refused hit's restore stopped at the download; the cold install's tree is the only one.
+    expect(restoreStages()).toEqual(["download"]);
+    expect(await cacheLeftovers()).toEqual([]);
+  });
+
+  it.each([
+    ["a wrong scanVersion", { scanVersion: 2 }],
+    ["a sha256 that is not lowercase hex", { sha256: "Z".repeat(64) }],
+    ["a short sha256", { sha256: "a".repeat(63) }],
+    ["non-integer entries", { entries: 1.5 }],
+    ["zero entries", { entries: 0 }],
+    ["entries as a string", { entries: "3" }],
+    ["negative unpackedBytes", { unpackedBytes: -1 }],
+    ["non-integer unpackedBytes", { unpackedBytes: 0.5 }],
+  ])("ignores a manifest with %s and runs the full scan", async (_label, change) => {
+    const blob = await realTarSnapshot(LOCKFILE);
+    hitWithManifest(blob, { ...(await manifestFor(blob)), ...change });
+    expect(await prepare()).toMatchObject({ result: "hit" });
+    expect(restoreStages()).toContain("scan");
+  });
+
+  it.each([
+    ["null", null],
+    ["an array", []],
+    ["a string", "manifest"],
+  ])("ignores a manifest that is %s and runs the full scan", async (_label, manifest) => {
+    hitWithManifest(await realTarSnapshot(LOCKFILE), manifest);
+    expect(await prepare()).toMatchObject({ result: "hit" });
+    expect(restoreStages()).toContain("scan");
+  });
+
+  it("nearest: uses nearest.manifest when the digest matches (no second scan)", async () => {
+    const nearest = await realTarSnapshot(LOCKFILE);
+    await writeRepo(LOCKFILE_V2);
+    state.blobs.set("b".repeat(64), nearest);
+    const manifest = await manifestFor(nearest);
+    state.lookupAnswer = () => ({
+      status: 200,
+      body: { key: "c".repeat(64), hit: false, nearest: { id: "b".repeat(64), manifest }, maxBytes: 64 * 1024 * 1024 },
+    });
+    expect(await prepare()).toMatchObject({ result: "nearest" });
+    expect(restoreStages()).toEqual(["download", "extract", "verify_tree"]);
+  });
+
+  it("a manifest understating unpackedBytes does not lift the bound: extraction still refuses over_budget", async () => {
+    // Claims one small file; the archive holds a 7 GiB entry.
+    const blob = rawTar([
+      { name: "node_modules/", type: "5" },
+      { name: "node_modules/big", size: 7 * 1024 * 1024 * 1024 },
+    ]);
+    hitWithManifest(blob, { scanVersion: 1, sha256: sha256(blob), entries: 2, unpackedBytes: 1 });
+    expect(await prepare({ budgetBytes: 1024 * 1024 * 1024 })).toEqual({ result: "skipped", reason: "over_budget" });
+    // The scan was skipped (the manifest was trusted), so extractArchive's budget refused it.
+    expect(restoreStages()).toEqual(["download", "extract"]);
+    expect(await exists(join(workspace, "node_modules"))).toBe(false);
+    expect(await cacheLeftovers()).toEqual([]);
   });
 });
 

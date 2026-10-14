@@ -324,6 +324,57 @@ describe("dependency cache upload and download", () => {
     });
   });
 
+  it("returns no manifest for a row without validation metadata (a legacy snapshot), hit or nearest", async () => {
+    const { upload, lookup, store } = await setup({ lockHashes: [LOCK, LOCK_TWO] });
+    expect((await upload(archive)).status).toBe(201);
+    expect(store.rows[0]).toMatchObject({ archiveScanVersion: null, archiveEntries: null, unpackedBytes: null });
+    const hit = (await lookup()).body;
+    expect(hit.hit).toBe(true);
+    expect(hit).not.toHaveProperty("manifest");
+    const near = (await lookup({ lock: LOCK_TWO })).body;
+    expect(near).toMatchObject({ hit: false, nearest: { id: store.rows[0].id } });
+    expect(near).not.toHaveProperty("manifest");
+    expect(near.nearest).not.toHaveProperty("manifest");
+  });
+
+  it("returns nearest.manifest for a nearest row uploaded with validation metadata", async () => {
+    const { upload, lookup, store } = await setup({ lockHashes: [LOCK, LOCK_TWO] });
+    const headers = {
+      "x-wardby-archive-scan-version": "1",
+      "x-wardby-archive-entries": "7",
+      "x-wardby-archive-unpacked-bytes": "4096",
+    };
+    expect((await upload(archive, { lock: LOCK_TWO }, undefined, headers)).status).toBe(201);
+    const { body } = await lookup({ lock: LOCK });
+    expect(body).toMatchObject({
+      hit: false,
+      nearest: {
+        id: store.rows[0].id,
+        manifest: { scanVersion: 1, sha256: hex(archive), entries: 7, unpackedBytes: 4096 },
+      },
+    });
+    // The manifest belongs to the nearest snapshot, not to the (missing) hit.
+    expect(body).not.toHaveProperty("manifest");
+  });
+
+  it("binds the manifest to the row's recorded sha256, never to a client value", async () => {
+    const { upload, lookup, store } = await setup();
+    const headers = {
+      "x-wardby-archive-scan-version": "1",
+      "x-wardby-archive-entries": "3",
+      "x-wardby-archive-unpacked-bytes": "10",
+      // Not part of the protocol: a client cannot choose the digest.
+      "x-wardby-archive-sha256": "0".repeat(64),
+      "x-wardby-sha256": "0".repeat(64),
+    };
+    expect((await upload(archive, { lock: LOCK }, undefined, headers)).status).toBe(201);
+    expect(store.rows[0].sha256).toBe(hex(archive));
+    expect((await lookup()).body.manifest.sha256).toBe(hex(archive));
+    // The manifest follows what the database recorded for the row.
+    store.rows[0].sha256 = "f".repeat(64);
+    expect((await lookup()).body.manifest.sha256).toBe("f".repeat(64));
+  });
+
   it("refuses partial or malformed validation metadata", async () => {
     const { upload, store } = await setup();
     expect(await upload(archive, { lock: LOCK }, undefined, { "x-wardby-archive-scan-version": "1" })).toEqual({
