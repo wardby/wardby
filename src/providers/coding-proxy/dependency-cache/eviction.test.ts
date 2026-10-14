@@ -58,6 +58,9 @@ describe("dependency cache eviction order", () => {
         lockHash: id,
         workerImage: "img",
         sha256: "x",
+        archiveScanVersion: null,
+        archiveEntries: null,
+        unpackedBytes: null,
         createdByRunId: null,
       });
     }
@@ -87,6 +90,9 @@ describe("dependency cache eviction order", () => {
         lockHash: "lock",
         workerImage: "img",
         sha256: "x",
+        archiveScanVersion: null,
+        archiveEntries: null,
+        unpackedBytes: null,
         createdByRunId: null,
       };
       store.rows.push(

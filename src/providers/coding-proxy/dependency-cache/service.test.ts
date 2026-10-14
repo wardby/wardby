@@ -328,10 +328,10 @@ describe("dependency cache upload and download", () => {
     const { upload, lookup, store } = await setup({ lockHashes: [LOCK, LOCK_TWO] });
     expect((await upload(archive)).status).toBe(201);
     expect(store.rows[0]).toMatchObject({ archiveScanVersion: null, archiveEntries: null, unpackedBytes: null });
-    const hit = (await lookup()).body;
+    const hit = (await lookup()).body as Record<string, unknown>;
     expect(hit.hit).toBe(true);
     expect(hit).not.toHaveProperty("manifest");
-    const near = (await lookup({ lock: LOCK_TWO })).body;
+    const near = (await lookup({ lock: LOCK_TWO })).body as { nearest: Record<string, unknown> };
     expect(near).toMatchObject({ hit: false, nearest: { id: store.rows[0].id } });
     expect(near).not.toHaveProperty("manifest");
     expect(near.nearest).not.toHaveProperty("manifest");
@@ -358,6 +358,7 @@ describe("dependency cache upload and download", () => {
   });
 
   it("binds the manifest to the row's recorded sha256, never to a client value", async () => {
+    const manifestSha256 = (body: unknown) => (body as { manifest: { sha256: string } }).manifest.sha256;
     const { upload, lookup, store } = await setup();
     const headers = {
       "x-wardby-archive-scan-version": "1",
@@ -369,10 +370,10 @@ describe("dependency cache upload and download", () => {
     };
     expect((await upload(archive, { lock: LOCK }, undefined, headers)).status).toBe(201);
     expect(store.rows[0].sha256).toBe(hex(archive));
-    expect((await lookup()).body.manifest.sha256).toBe(hex(archive));
+    expect(manifestSha256((await lookup()).body)).toBe(hex(archive));
     // The manifest follows what the database recorded for the row.
     store.rows[0].sha256 = "f".repeat(64);
-    expect((await lookup()).body.manifest.sha256).toBe("f".repeat(64));
+    expect(manifestSha256((await lookup()).body)).toBe("f".repeat(64));
   });
 
   it("refuses partial or malformed validation metadata", async () => {

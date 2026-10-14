@@ -257,9 +257,9 @@ function startProxy(): Promise<void> {
         state.uploads.push({
           body,
           contentLength: request.headers["content-length"],
-          scanVersion: request.headers["x-wardby-archive-scan-version"],
-          entries: request.headers["x-wardby-archive-entries"],
-          unpackedBytes: request.headers["x-wardby-archive-unpacked-bytes"],
+          scanVersion: request.headers["x-wardby-archive-scan-version"] as string | undefined,
+          entries: request.headers["x-wardby-archive-entries"] as string | undefined,
+          unpackedBytes: request.headers["x-wardby-archive-unpacked-bytes"] as string | undefined,
         });
         json(201, { stored: true, sha256: sha256(body), sizeBytes: body.length });
         return;
