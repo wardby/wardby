@@ -5,6 +5,7 @@
  * package), refusals on ecosystem + name + reason.
  */
 import { ACCEPTED_ADVISORY_ID } from "./allowlist.js";
+import { refusalHint } from "./refusal-hints.js";
 export interface RegistryFetchRow {
   ecosystem: string;
   name: string;
@@ -67,6 +68,8 @@ export interface RegistryRefusalSummary {
   ecosystem: string;
   name: string;
   reason: string;
+  /** Static guidance for the code (shared with the proxy message and the PR banner); absent for unknown codes. */
+  hint?: string;
 }
 
 export function summarizeRegistryFetches(rows: readonly RegistryFetchRow[]): {
@@ -91,7 +94,10 @@ export function summarizeRegistryFetches(rows: readonly RegistryFetchRow[]): {
     } else if (row.outcome === "refused") {
       const reason = row.reason ?? "refused";
       const key = `${row.ecosystem}\0${row.name}\0${reason}`;
-      if (!refusals.has(key)) refusals.set(key, { ecosystem: row.ecosystem, name: row.name, reason });
+      if (!refusals.has(key)) {
+        const hint = refusalHint(reason);
+        refusals.set(key, { ecosystem: row.ecosystem, name: row.name, reason, ...(hint ? { hint } : {}) });
+      }
     }
   }
   return { packages: [...packages.values()], packageRefusals: [...refusals.values()] };

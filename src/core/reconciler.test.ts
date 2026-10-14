@@ -578,6 +578,11 @@ describe("reconcileOnce orphaned status comments", () => {
           data,
         ),
       ),
+      updateMany: vi.fn(async ({ where, data }: any) => {
+        const row = rows.find((r) => r.runId === where.runId && r.completedAt === where.completedAt);
+        if (row) Object.assign(row, data);
+        return { count: row ? 1 : 0 };
+      }),
     };
     const runHostCheck = { findMany: vi.fn(async () => []) };
     const run = {
@@ -645,6 +650,11 @@ describe("reconcileOnce orphaned issue status comments", () => {
       findMany: vi.fn(async () => [{ run: { id: "lost1", status: "lost", finalText: null } }]),
       findUnique: vi.fn(async () => ({ ...row })),
       update: vi.fn(async ({ data }: any) => Object.assign(row, data)),
+      updateMany: vi.fn(async ({ where, data }: any) => {
+        if (row.completedAt !== where.completedAt) return { count: 0 };
+        Object.assign(row, data);
+        return { count: 1 };
+      }),
     };
     // No stale runs to reap; collectRunOutcome's child-run query finds none either.
     const run = {

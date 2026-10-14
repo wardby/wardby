@@ -122,4 +122,52 @@ describe.skipIf(!process.env.DATABASE_URL)("Phase 5 coding schema (PostgreSQL)",
       db.$executeRaw`UPDATE "CodingRun" SET "provider" = ${"unknown"} WHERE "runId" = ${run.id}`,
     ).rejects.toThrow();
   });
+
+  it("CodingRun stores prDescriptionSha256/RunId/Outcome as nullable text", async () => {
+    const columns = await db.$queryRaw<{ column_name: string; data_type: string; is_nullable: string }[]>`
+      SELECT column_name, data_type, is_nullable FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'CodingRun'
+        AND column_name IN ('prDescriptionSha256', 'prDescriptionRunId', 'prDescriptionOutcome')
+      ORDER BY column_name`;
+    expect(columns).toEqual([
+      { column_name: "prDescriptionOutcome", data_type: "text", is_nullable: "YES" },
+      { column_name: "prDescriptionRunId", data_type: "text", is_nullable: "YES" },
+      { column_name: "prDescriptionSha256", data_type: "text", is_nullable: "YES" },
+    ]);
+
+    const agent = await db.agent.create({
+      data: { name: `pr-description-${randomUUID()}`, systemPrompt: "x", model: "m", budgetUsd: 1, kind: "coding" },
+    });
+    agentIds.push(agent.id);
+    const run = await db.run.create({ data: { agentId: agent.id, status: "cancelled", executionManaged: true } });
+    runIds.push(run.id);
+    await db.codingRun.create({
+      data: {
+        runId: run.id,
+        task: "Fix the unit test.",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: `wardby/run-${run.id}`,
+        provider: "codex",
+        model: "m",
+        timeoutSec: 1800,
+        allowedEgress: [],
+        protectedPaths: [],
+        budgetReservedUsd: 0.25,
+      },
+    });
+    const fresh = await db.codingRun.findUniqueOrThrow({ where: { runId: run.id } });
+    expect(fresh).toMatchObject({ prDescriptionSha256: null, prDescriptionRunId: null, prDescriptionOutcome: null });
+
+    const sha = "a".repeat(64);
+    const updated = await db.codingRun.update({
+      where: { runId: run.id },
+      data: { prDescriptionSha256: sha, prDescriptionRunId: run.id, prDescriptionOutcome: "written" },
+    });
+    expect(updated).toMatchObject({
+      prDescriptionSha256: sha,
+      prDescriptionRunId: run.id,
+      prDescriptionOutcome: "written",
+    });
+  });
 });

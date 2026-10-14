@@ -3,6 +3,7 @@ import type { RepositoryFileInput } from "./github.js";
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
+  DescriptionWriteOutcome,
   FinalizeChangesDetails,
   FinalizeChangesResult,
   PreparedWorkspace,
@@ -79,6 +80,13 @@ export class RoutingVcsProvider implements VcsProvider {
     details?: ContinuationFinishedDetails,
   ): Promise<void> {
     await this.optionalTarget(workspace.repository)?.notifyContinuationFinished?.(workspace, outcome, details);
+  }
+
+  async refreshPullRequestDescription(
+    workspace: PreparedWorkspace,
+    details: FinalizeChangesDetails,
+  ): Promise<DescriptionWriteOutcome | undefined> {
+    return this.optionalTarget(workspace.repository)?.refreshPullRequestDescription?.(workspace, details);
   }
 
   async readRepositoryFile(input: RepositoryFileInput): Promise<string | null> {

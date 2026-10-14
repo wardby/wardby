@@ -3,6 +3,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import { registerRunTools } from "./runs.js";
+import { refusalHint } from "../../coding/registry/refusal-hints.js";
 import type { McpRequestContext } from "../context.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 
@@ -36,6 +37,7 @@ interface FakeRunRow {
     resultBranch?: string | null;
     baseSha?: string | null;
     dependencyCacheResult?: unknown;
+    prDescriptionOutcome?: string | null;
     failureCategory?: string | null;
     diagnosticId?: string | null;
     debugTrace?: boolean;
@@ -399,7 +401,7 @@ describe("run observability tools", () => {
     await client.close();
   });
 
-  it("get_run returns deduplicated served packages and refusals for a coding run", async () => {
+  it("get_run returns packageRefusals with hint, deduplicated, and served packages for a coding run", async () => {
     const now = new Date();
     const db = fakeDb(
       [{ id: "a1", ownerId: "p1" }],
@@ -496,17 +498,19 @@ describe("run observability tools", () => {
     const codingResult = await client.callTool({ name: "get_run", arguments: { runId: "r1" } });
     const codingBody = parseText(codingResult as never) as {
       packages: Array<{ ecosystem: string; name: string; version: string; size: number | null }>;
-      packageRefusals: Array<{ ecosystem: string; name: string; reason: string }>;
+      packageRefusals: Array<{ ecosystem: string; name: string; reason: string; hint?: string }>;
       packagePlan: { approved: number; refused: number };
     };
     expect(codingBody.packages).toEqual([
       { ecosystem: "npm", name: "@heroui/react", version: "3.2.6", size: 482_113 },
       { ecosystem: "pypi", name: "flask", version: "3.0.0", size: null },
     ]);
+    const hint = refusalHint("wardby_package_not_allowed");
+    expect(hint).toBeDefined();
     expect(codingBody.packageRefusals).toEqual([
-      { ecosystem: "npm", name: "left-pad", reason: "wardby_package_not_allowed" },
-      { ecosystem: "npm", name: "evil", reason: "wardby_package_not_allowed" },
-      { ecosystem: "npm", name: "stray", reason: "wardby_package_not_allowed" },
+      { ecosystem: "npm", name: "left-pad", reason: "wardby_package_not_allowed", hint },
+      { ecosystem: "npm", name: "evil", reason: "wardby_package_not_allowed", hint },
+      { ecosystem: "npm", name: "stray", reason: "wardby_package_not_allowed", hint },
     ]);
     expect(codingBody.packagePlan).toEqual({ approved: 42, refused: 2 });
 
@@ -551,6 +555,39 @@ describe("run observability tools", () => {
     expect((await get("r1")).dependencyCache).toEqual(report);
     expect(await get("r2")).not.toHaveProperty("dependencyCache");
     expect((await get("r3")).dependencyCache).toEqual({ projects: [], reason: "report_invalid" });
+    await client.close();
+  });
+
+  it("get_run returns coding.prDescriptionOutcome when set and omits it when null", async () => {
+    const now = new Date();
+    const base = {
+      agentId: "a1",
+      status: "succeeded",
+      trigger: "manual",
+      turns: 1,
+      tokensIn: 1,
+      tokensOut: 1,
+      costUsd: 0,
+      finalText: "x",
+      error: null,
+      startedAt: now,
+      finishedAt: now,
+    };
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [
+        { ...base, id: "r1", codingRun: { result: null, prDescriptionOutcome: "refreshed:no_marker" } },
+        { ...base, id: "r2", codingRun: { result: null, prDescriptionOutcome: null } },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+    const get = async (runId: string) =>
+      parseText((await client.callTool({ name: "get_run", arguments: { runId } })) as never) as any;
+    expect((await get("r1")).prDescriptionOutcome).toBe("refreshed:no_marker");
+    expect(await get("r2")).not.toHaveProperty("prDescriptionOutcome");
     await client.close();
   });
 

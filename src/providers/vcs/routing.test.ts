@@ -95,6 +95,61 @@ describe("RoutingVcsProvider", () => {
   });
 });
 
+describe("RoutingVcsProvider pull request descriptions", () => {
+  const baseline = { recordedSha256: "a".repeat(64), previousAgentText: "Original.", agentTextRunId: "root" };
+  const details = { summary: "Fixed.", tests: [], description: { baseline } };
+
+  it("forwards refreshPullRequestDescription to the target that has it", async () => {
+    const github = {
+      ...fake("github"),
+      refreshPullRequestDescription: vi.fn(async () => ({
+        kind: "unchanged" as const,
+        sha256: "a".repeat(64),
+        agentTextRunId: "root",
+      })),
+    };
+    const routing = new RoutingVcsProvider({ github, local: fake("local") });
+    const w = { repository: "owner/repo" } as PreparedWorkspace;
+    await expect(routing.refreshPullRequestDescription(w, details)).resolves.toEqual({
+      kind: "unchanged",
+      sha256: "a".repeat(64),
+      agentTextRunId: "root",
+    });
+    expect(github.refreshPullRequestDescription).toHaveBeenCalledWith(w, details);
+  });
+
+  it("returns undefined when the target lacks it or is not configured", async () => {
+    const routing = new RoutingVcsProvider({ github: null, local: fake("local") });
+    await expect(
+      routing.refreshPullRequestDescription({ repository: "local:/srv/a" } as PreparedWorkspace, details),
+    ).resolves.toBeUndefined();
+    await expect(
+      routing.refreshPullRequestDescription({ repository: "owner/repo" } as PreparedWorkspace, details),
+    ).resolves.toBeUndefined();
+  });
+
+  it("passes finalizeChanges' description details through and returns the target's description outcome", async () => {
+    const github = fake("github");
+    github.finalizeChanges = vi.fn(async (w: PreparedWorkspace) => ({
+      outcome: "pull_request_updated" as const,
+      repository: w.repository,
+      baseRef: "main",
+      baseCommit: "a".repeat(40),
+      headRef: "wardby/run-root",
+      commitSha: "b".repeat(40),
+      pullRequestNumber: 7,
+      pullRequestUrl: "https://github.com/owner/repo/pull/7",
+      description: { kind: "edited_by_hand" as const, commentPosted: true },
+    }));
+    const routing = new RoutingVcsProvider({ github, local: null });
+    const w = { repository: "owner/repo" } as PreparedWorkspace;
+    await expect(routing.finalizeChanges(w, details)).resolves.toMatchObject({
+      description: { kind: "edited_by_hand", commentPosted: true },
+    });
+    expect(github.finalizeChanges).toHaveBeenCalledWith(w, details);
+  });
+});
+
 describe("buildVcsProvider", () => {
   it("does not throw when only LOCAL_REPO_ROOTS is set, and fails GitHub repositories lazily", async () => {
     const provider = buildVcsProvider({ vcs: "github" }, {}, { LOCAL_REPO_ROOTS: "/tmp" });

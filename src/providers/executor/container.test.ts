@@ -18,16 +18,22 @@ import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } f
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
+  DescriptionWriteOutcome,
   FinalizeChangesDetails,
   FinalizeChangesResult,
   PreparedWorkspace,
   VcsPrepareInput,
   VcsProvider,
 } from "../vcs/types.js";
-import type { RelatedPullRequestEntry } from "../vcs/github.js";
+import { pullRequestBody, type DescriptionBaseline, type RelatedPullRequestEntry } from "../vcs/github.js";
+import { descriptionSha256 } from "../vcs/pr-description.js";
 import {
   ContainerExecutor,
+  DESCRIPTION_REFRESH_TIMEOUT_MS,
   RunCapabilityVault,
+  type LinkedIssueRef,
+  type LinkedIssueSource,
+  type StoredDescriptionBaseline,
   describeFailure,
   normalizeCollectedLockfiles,
   type CodingSessionController,
@@ -87,6 +93,7 @@ const IMAGE = `registry.example/worker@sha256:${"a".repeat(64)}`;
 const CLAUDE_IMAGE = `registry.example/claude-worker@sha256:${"b".repeat(64)}`;
 const CLAUDE_TOOL_IMAGE = `registry.example/claude-tools@sha256:${"c".repeat(64)}`;
 const roots: string[] = [];
+const LOCAL_REPOSITORY = "local:/srv/repos/example";
 
 function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSnapshot {
   return {
@@ -169,6 +176,17 @@ class FakeStore implements ContainerExecutionStore {
     if (this.related instanceof Error) throw this.related;
     return this.related ?? [];
   }
+
+  /** Fix-round description store methods; tests that need them assign them. */
+  pullRequestDescriptionBaseline?: (rootRunId: string) => Promise<StoredDescriptionBaseline>;
+  pullRequestRunIds?: (rootRunId: string) => Promise<string[]>;
+  linkedIssueSource?: (rootRunId: string) => Promise<LinkedIssueSource>;
+  recordPullRequestDescription?: (input: {
+    rootRunId: string;
+    expectedSha256: string | null;
+    sha256: string;
+    agentTextRunId: string;
+  }) => Promise<boolean>;
 
   constructor(public run: ContainerRunSnapshot) {}
 
@@ -326,6 +344,15 @@ class FakeVcs implements VcsProvider {
   lastPrepareInput?: VcsPrepareInput;
   /** Make finalize report a pushed branch (a local repository) instead of a pull request. */
   pushBranchOnly = false;
+  /** Make finalize report an empty diff (no_changes) even though the worker said changes_ready. */
+  finalizeEmpty = false;
+  /** The description outcome finalize reports on a pull request, when set. */
+  finalizeDescription?: DescriptionWriteOutcome;
+  /** The no-push description refresh; tests that need it assign it. */
+  refreshPullRequestDescription?: (
+    workspace: PreparedWorkspace,
+    details: FinalizeChangesDetails,
+  ) => Promise<DescriptionWriteOutcome | undefined>;
   notifyStartedCalls = 0;
   lastNotifyStartedAgentName?: string;
   notifyFinishedCalls: Array<{
@@ -362,6 +389,9 @@ class FakeVcs implements VcsProvider {
     this.finalized += 1;
     this.lastFinalizeDetails = details;
     this.events.push("finalize");
+    if (this.finalizeEmpty) {
+      return { outcome: "no_changes", repository: workspace.repository, baseRef: "main", baseCommit: "a".repeat(40) };
+    }
     if (this.pushBranchOnly) {
       return {
         outcome: "branch_pushed",
@@ -381,6 +411,7 @@ class FakeVcs implements VcsProvider {
       commitSha: "b".repeat(40),
       pullRequestNumber: 42,
       pullRequestUrl: "https://github.com/openai/example/pull/42",
+      ...(this.finalizeDescription ? { description: structuredClone(this.finalizeDescription) } : {}),
     };
   }
   async cleanup(): Promise<void> {
@@ -533,6 +564,161 @@ describe("ContainerExecutor", () => {
           `\n\nBase commit: ${"a".repeat(40)} (the commit this workspace was checked out at; the workspace has no git metadata).`,
         ),
       ).toBe(true);
+    });
+
+    it("appends the current PR description to a continuation's task", async () => {
+      const created = await harness({ rootCodingRunId: "root-run", headRef: "wardby/run-root-run" });
+      let input: Record<string, unknown> | undefined;
+      created.store.pullRequestDescriptionBaseline = async () => ({
+        recordedSha256: null,
+        previousAgentText: "Previous body",
+        agentTextRunId: "root-run",
+      });
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      expect(input!.task as string).toContain("your final summary replaces it");
+      expect((input!.task as string).includes("Previous body")).toBe(true);
+    });
+
+    describe("the linked issue", () => {
+      const ISSUE = { title: "Jokes endpoint", body: "## Acceptance\n- [ ] GET /jokes lists jokes" };
+
+      async function continuation(
+        source: LinkedIssueSource | (() => Promise<LinkedIssueSource>),
+        read: (ref: LinkedIssueRef) => Promise<{ title: string; body: string } | null>,
+        overrides: Partial<ContainerRunSnapshot> = {},
+        extra: Partial<ContainerExecutorOptions> = {},
+      ) {
+        const reads: LinkedIssueRef[] = [];
+        const created = await harness(
+          { rootCodingRunId: "root-run", headRef: "wardby/run-root-run", ...overrides },
+          IMAGE,
+          undefined,
+          undefined,
+          {
+            readLinkedIssue: async (ref) => {
+              reads.push(ref);
+              return read(ref);
+            },
+            ...extra,
+          },
+        );
+        created.store.pullRequestDescriptionBaseline = async () => ({
+          recordedSha256: null,
+          previousAgentText: "Previous body. Resolves #31",
+          agentTextRunId: "root-run",
+        });
+        created.store.linkedIssueSource = typeof source === "function" ? source : async () => source;
+        let input: Record<string, unknown> | undefined;
+        created.jobs.onLaunch = () => {
+          input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+        };
+        await created.executor.start("run-1");
+        return { created, reads, task: input!.task as string };
+      }
+
+      it("reads the GitHub issue the root run's mention came from and fences it in the task", async () => {
+        const { created, reads, task } = await continuation(
+          { hostStatus: { provider: "github", repository: "openai/example", number: 12 } },
+          async () => ISSUE,
+        );
+        expect(created.store.run.status).toBe("succeeded");
+        expect(reads).toEqual([{ provider: "github", repository: "openai/example", number: 12 }]);
+        expect(task).toContain("acceptance criteria as written are what the description's checklist should reflect");
+        expect(task).toContain("`Resolves #12`");
+        expect(task).toContain(
+          "<untrusted_issue>\nIssue #12: Jokes endpoint\n\n## Acceptance\n- [ ] GET /jokes lists jokes\n</untrusted_issue>",
+        );
+        // Before the description note, so both fit and the ticket comes first.
+        expect(task.indexOf("<untrusted_issue>")).toBeLessThan(task.indexOf("<untrusted_pr_description>"));
+      });
+
+      it("reads the root run's Jira issue first", async () => {
+        const { reads, task } = await continuation(
+          {
+            issueProvider: "jira",
+            issueKey: "ABC-12",
+            hostStatus: { provider: "github", repository: "openai/example", number: 12 },
+          },
+          async () => ISSUE,
+        );
+        expect(reads).toEqual([{ provider: "jira", key: "ABC-12" }]);
+        expect(task).toContain("<untrusted_issue>\nJira issue ABC-12: Jokes endpoint");
+      });
+
+      it("falls back to the closing keyword in the description wardby last wrote", async () => {
+        // The mention was on a pull request, not an issue: the host says so and the next candidate is read.
+        const { reads, task } = await continuation(
+          { hostStatus: { provider: "github", repository: "openai/example", number: 40 } },
+          async (ref) => (ref.provider === "github" && ref.number === 31 ? ISSUE : null),
+        );
+        expect(reads).toEqual([
+          { provider: "github", repository: "openai/example", number: 40 },
+          { provider: "github", repository: "openai/example", number: 31 },
+        ]);
+        expect(task).toContain("<untrusted_issue>\nIssue #31: Jokes endpoint");
+      });
+
+      it("ignores a mention status in another repository", async () => {
+        const { reads } = await continuation(
+          { hostStatus: { provider: "github", repository: "other/repo", number: 12 } },
+          async () => null,
+        );
+        expect(reads).toEqual([{ provider: "github", repository: "openai/example", number: 31 }]);
+      });
+
+      it("never fails the run when the issue can't be read or the source can't be loaded", async () => {
+        for (const [source, read] of [
+          [
+            { hostStatus: { provider: "github", repository: "openai/example", number: 12 } },
+            async () => Promise.reject(new Error("github down")),
+          ],
+          [async () => Promise.reject(new Error("db down")), async () => ISSUE],
+        ] as const) {
+          const { created, task } = await continuation(source, read);
+          expect(created.store.run.status).toBe("succeeded");
+          expect(task).not.toContain("<untrusted_issue>");
+          expect(task).toContain("<untrusted_pr_description>");
+        }
+      });
+
+      it("a fresh run and a local continuation read no issue", async () => {
+        const fresh = await continuation({ issueProvider: "jira", issueKey: "ABC-12" }, async () => ISSUE, {
+          rootCodingRunId: null,
+          headRef: "wardby/run-run-1",
+        });
+        expect(fresh.reads).toEqual([]);
+        expect(fresh.task).not.toContain("<untrusted_issue>");
+        const local = await continuation(
+          { issueProvider: "jira", issueKey: "ABC-12" },
+          async () => ISSUE,
+          { repository: LOCAL_REPOSITORY, profileRepository: LOCAL_REPOSITORY },
+          { repoAccess: { authorizeUse: async () => ({ ok: true }) } as never },
+        );
+        expect(local.reads).toEqual([]);
+      });
+    });
+
+    it("leaves a fresh run's task without the description note", async () => {
+      const { input } = await launched({});
+      expect(input.task).toBe(
+        `Fix the bug and test it.\n\nBase commit: ${"a".repeat(40)} (the commit this workspace was checked out at; the workspace has no git metadata).`,
+      );
+    });
+
+    it("skips the note when the baseline cannot be loaded", async () => {
+      const created = await harness({ rootCodingRunId: "root-run", headRef: "wardby/run-root-run" });
+      let input: Record<string, unknown> | undefined;
+      created.store.pullRequestDescriptionBaseline = async () => {
+        throw new Error("db down");
+      };
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      expect(input!.task as string).not.toContain("your final summary replaces it");
     });
 
     it("hands the launcher the run's services and the worker only their names, versions and variables", async () => {
@@ -1118,6 +1304,525 @@ describe("ContainerExecutor", () => {
     expect(created.vcs.notifyFinishedCalls).toEqual([
       { outcome: "succeeded", summary: "Fixed it.", agentName: "knock-knock-implement" },
     ]);
+  });
+
+  describe("pull request description", () => {
+    const RECORDED = "a".repeat(64);
+    const NEW_SHA = "c".repeat(64);
+    const baseline: DescriptionBaseline = {
+      recordedSha256: RECORDED,
+      previousAgentText: "The original description text.",
+      agentTextRunId: "root-run",
+    };
+
+    /** A fix round on root-run's PR, with the description store methods and call order recorded in events. */
+    async function fixRound(
+      overrides: Partial<ContainerRunSnapshot> = {},
+      extra: Partial<ContainerExecutorOptions> = {},
+    ) {
+      const created = await harness(
+        { rootCodingRunId: "root-run", headRef: "wardby/run-root-run", ...overrides },
+        IMAGE,
+        undefined,
+        undefined,
+        extra,
+      );
+      const recorded: unknown[] = [];
+      created.store.pullRequestDescriptionBaseline = async (rootRunId) => {
+        created.events.push(`baseline:${rootRunId}`);
+        return structuredClone(baseline);
+      };
+      created.store.recordPullRequestDescription = async (input) => {
+        created.events.push("record");
+        recorded.push(input);
+        return true;
+      };
+      const complete = created.store.complete.bind(created.store);
+      created.store.complete = async (...args) => {
+        created.events.push("complete");
+        return complete(...args);
+      };
+      return { ...created, recorded };
+    }
+
+    function noChanges(created: Awaited<ReturnType<typeof harness>>) {
+      created.jobs.result.resultArtifact = JSON.stringify({
+        schemaVersion: 1,
+        runId: "run-1",
+        outcome: "no_changes",
+        summary: "Already correct.",
+        tests: [],
+      });
+    }
+
+    const descriptionWarnings = () =>
+      logged.filter((line) => line.level === "warn" && /description/.test(line.message));
+
+    it("fresh PR run records written hash on its own row", async () => {
+      const created = await harness();
+      const baselines: string[] = [];
+      created.store.pullRequestDescriptionBaseline = async (rootRunId) => {
+        baselines.push(rootRunId);
+        return structuredClone(baseline);
+      };
+      created.vcs.finalizeDescription = { kind: "written", sha256: NEW_SHA };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("succeeded");
+      expect(baselines).toEqual([]);
+      expect(created.vcs.lastFinalizeDetails).not.toHaveProperty("description");
+      expect(created.store.completions[0]?.record).toEqual({
+        baseSha: "a".repeat(40),
+        prDescriptionOutcome: "written",
+        prDescriptionSha256: NEW_SHA,
+        prDescriptionRunId: "run-1",
+      });
+    });
+
+    it("review_fix continuation passes the baseline and records replaced + new hash on the root", async () => {
+      const created = await fixRound();
+      created.vcs.finalizeDescription = { kind: "replaced", sha256: NEW_SHA, agentTextRunId: "run-1" };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.vcs.lastFinalizeDetails?.description).toEqual({ baseline });
+      expect(created.recorded).toEqual([
+        { rootRunId: "root-run", expectedSha256: RECORDED, sha256: NEW_SHA, agentTextRunId: "run-1" },
+      ]);
+      const record = created.store.completions[0]?.record;
+      expect(record).toMatchObject({ prDescriptionOutcome: "replaced" });
+      // The hash and author run belong to the root row, written by the compare-and-set alone.
+      expect(record).not.toHaveProperty("prDescriptionSha256");
+      expect(record).not.toHaveProperty("prDescriptionRunId");
+      expect(created.events.filter((e) => ["baseline:root-run", "finalize", "record", "complete"].includes(e))).toEqual(
+        ["baseline:root-run", "baseline:root-run", "finalize", "record", "complete"],
+      );
+    });
+
+    it("records refreshed:<reason> and unchanged outcomes with the compare-and-set", async () => {
+      for (const [outcome, label] of [
+        [
+          { kind: "refreshed", reason: "too_short", sha256: NEW_SHA, agentTextRunId: "root-run" },
+          "refreshed:too_short",
+        ],
+        [{ kind: "unchanged", sha256: RECORDED, agentTextRunId: "root-run" }, "unchanged"],
+      ] as const) {
+        const created = await fixRound();
+        created.vcs.finalizeDescription = outcome;
+        await created.executor.start("run-1");
+        expect(created.recorded).toEqual([
+          { rootRunId: "root-run", expectedSha256: RECORDED, sha256: outcome.sha256, agentTextRunId: "root-run" },
+        ]);
+        expect(created.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: label });
+      }
+    });
+
+    it("no_changes continuation refreshes the description before store.complete (call order asserted)", async () => {
+      const created = await fixRound();
+      noChanges(created);
+      let refreshed: FinalizeChangesDetails | undefined;
+      created.vcs.refreshPullRequestDescription = async (workspace, details) => {
+        created.events.push("refresh");
+        expect(workspace.runId).toBe("run-1");
+        refreshed = details;
+        return { kind: "refreshed", reason: "too_short", sha256: NEW_SHA, agentTextRunId: "root-run" };
+      };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.store.run.result).toMatchObject({ outcome: "no_changes" });
+      expect(created.vcs.finalized).toBe(0);
+      expect(refreshed).toMatchObject({ summary: "Already correct.", tests: [], description: { baseline } });
+      expect(created.recorded).toEqual([
+        { rootRunId: "root-run", expectedSha256: RECORDED, sha256: NEW_SHA, agentTextRunId: "root-run" },
+      ]);
+      expect(created.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "refreshed:too_short" });
+      // The terminal hook (reReviewAfterNoChangeFix) must see the new body, so all of it lands before complete.
+      expect(
+        created.events.filter((e) => ["baseline:root-run", "refresh", "record", "complete", "cleanup"].includes(e)),
+      ).toEqual(["baseline:root-run", "baseline:root-run", "refresh", "record", "complete", "cleanup"]);
+    });
+
+    it("changes_ready continuation with an empty diff refreshes the description before store.complete", async () => {
+      const created = await fixRound();
+      created.vcs.finalizeEmpty = true;
+      let refreshed: FinalizeChangesDetails | undefined;
+      created.vcs.refreshPullRequestDescription = async (workspace, details) => {
+        created.events.push("refresh");
+        expect(workspace.runId).toBe("run-1");
+        refreshed = details;
+        return { kind: "refreshed", reason: "empty", sha256: NEW_SHA, agentTextRunId: "root-run" };
+      };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.store.run.result).toMatchObject({ outcome: "no_changes" });
+      expect(created.vcs.finalized).toBe(1);
+      expect(refreshed).toMatchObject({ description: { baseline } });
+      expect(created.recorded).toEqual([
+        { rootRunId: "root-run", expectedSha256: RECORDED, sha256: NEW_SHA, agentTextRunId: "root-run" },
+      ]);
+      expect(created.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "refreshed:empty" });
+      expect(
+        created.events.filter((e) => ["finalize", "refresh", "record", "complete", "cleanup"].includes(e)),
+      ).toEqual(["finalize", "refresh", "record", "complete", "cleanup"]);
+    });
+
+    it("a local continuation gets no description note and records no outcome", async () => {
+      for (const empty of [false, true]) {
+        // A stand-in gate: the real one resolves local paths against LOCAL_REPO_ROOTS on disk.
+        const created = await fixRound(
+          { repository: LOCAL_REPOSITORY, profileRepository: LOCAL_REPOSITORY },
+          { repoAccess: { authorizeUse: async () => ({ ok: true }) } as never },
+        );
+        created.vcs.pushBranchOnly = true;
+        created.vcs.finalizeEmpty = empty;
+        let refreshes = 0;
+        created.vcs.refreshPullRequestDescription = async () => {
+          refreshes += 1;
+          return { kind: "refreshed", reason: "empty", sha256: NEW_SHA, agentTextRunId: "root-run" };
+        };
+        let input: Record<string, unknown> | undefined;
+        created.jobs.onLaunch = () => {
+          input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+        };
+        await created.executor.start("run-1");
+
+        expect(created.store.run.status).toBe("succeeded");
+        expect(input!.task as string).not.toContain("your final summary replaces it");
+        expect(created.events.filter((e) => e.startsWith("baseline:"))).toEqual([]);
+        expect(refreshes).toBe(0);
+        expect(created.recorded).toEqual([]);
+        expect(created.store.completions[0]?.record).not.toHaveProperty("prDescriptionOutcome");
+      }
+    });
+
+    it("lists every package installed across the pull request's runs, refusals from this run only", async () => {
+      const reports: Record<string, { packages: unknown[]; packageRefusals: unknown[] }> = {
+        "root-run": {
+          packages: [
+            { ecosystem: "npm", name: "zod", version: "4.0.0" },
+            { ecosystem: "npm", name: "vitest", version: "3.2.0", acceptedAdvisories: ["GHSA-aaaa-bbbb-cccc"] },
+          ],
+          packageRefusals: [{ ecosystem: "npm", name: "left-pad", reason: "wardby_package_not_allowed" }],
+        },
+        "round-1": {
+          packages: [
+            { ecosystem: "npm", name: "zod", version: "4.0.0" },
+            { ecosystem: "pypi", name: "zod", version: "4.0.0" },
+          ],
+          packageRefusals: [{ ecosystem: "npm", name: "is-odd", reason: "wardby_version_filtered" }],
+        },
+        "run-1": {
+          packages: [
+            { ecosystem: "npm", name: "vitest", version: "3.2.0", acceptedAdvisories: ["GHSA-dddd-eeee-ffff"] },
+            { ecosystem: "npm", name: "zod", version: "4.1.0" },
+          ],
+          packageRefusals: [{ ecosystem: "npm", name: "is-even", reason: "wardby_package_not_allowed" }],
+        },
+      };
+      const created = await fixRound({}, { registryReport: async (runId) => reports[runId] as never });
+      created.store.pullRequestRunIds = async () => ["root-run", "round-1", "run-1"];
+      created.vcs.finalizeDescription = { kind: "replaced", sha256: NEW_SHA, agentTextRunId: "run-1" };
+      await created.executor.start("run-1");
+
+      expect(created.vcs.lastFinalizeDetails?.packages).toEqual([
+        { ecosystem: "npm", name: "zod", version: "4.0.0" },
+        {
+          ecosystem: "npm",
+          name: "vitest",
+          version: "3.2.0",
+          acceptedAdvisories: ["GHSA-aaaa-bbbb-cccc", "GHSA-dddd-eeee-ffff"],
+        },
+        { ecosystem: "pypi", name: "zod", version: "4.0.0" },
+        { ecosystem: "npm", name: "zod", version: "4.1.0" },
+      ]);
+      expect(created.vcs.lastFinalizeDetails?.packageRefusals).toEqual([
+        { ecosystem: "npm", name: "is-even", reason: "wardby_package_not_allowed" },
+      ]);
+    });
+
+    it("a no-change round's refresh lists the pull request's packages too", async () => {
+      const created = await fixRound(
+        {},
+        {
+          registryReport: async (runId) => ({
+            packages: [{ ecosystem: "npm", name: `pkg-${runId}`, version: "1.0.0" }],
+            packageRefusals: [],
+          }),
+        },
+      );
+      created.store.pullRequestRunIds = async () => ["root-run"];
+      noChanges(created);
+      let refreshed: FinalizeChangesDetails | undefined;
+      created.vcs.refreshPullRequestDescription = async (_workspace, details) => {
+        refreshed = details;
+        return { kind: "unchanged", sha256: RECORDED, agentTextRunId: "root-run" };
+      };
+      await created.executor.start("run-1");
+      expect(refreshed?.packages).toEqual([
+        { ecosystem: "npm", name: "pkg-root-run", version: "1.0.0" },
+        { ecosystem: "npm", name: "pkg-run-1", version: "1.0.0" },
+      ]);
+      expect(refreshed).not.toHaveProperty("packageRefusals");
+    });
+
+    it("a failed run listing falls back to this run's packages", async () => {
+      const created = await fixRound(
+        {},
+        {
+          registryReport: async (runId) => ({
+            packages: [{ ecosystem: "npm", name: `pkg-${runId}`, version: "1.0.0" }],
+            packageRefusals: [],
+          }),
+        },
+      );
+      created.store.pullRequestRunIds = async () => {
+        throw new Error("db down");
+      };
+      created.vcs.finalizeDescription = { kind: "replaced", sha256: NEW_SHA, agentTextRunId: "run-1" };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.vcs.lastFinalizeDetails?.packages).toEqual([
+        { ecosystem: "npm", name: "pkg-run-1", version: "1.0.0" },
+      ]);
+    });
+
+    it("a legacy pull request's baseline carries the hash of the rebuilt root description", async () => {
+      const rootReport = {
+        packages: [{ ecosystem: "npm", name: "zod", version: "4.0.0" }],
+        packageRefusals: [],
+      };
+      const created = await fixRound(
+        {},
+        {
+          registryReport: async (runId) => (runId === "root-run" ? rootReport : { packages: [], packageRefusals: [] }),
+          issueUrl: (_provider, key) => `https://acme.atlassian.net/browse/${key}`,
+        },
+      );
+      const legacySource = {
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "wardby/run-root-run",
+        summary: "The original description text.",
+        tests: [{ command: "npm test", outcome: "passed" as const }],
+        dependencyCache: { projects: [{ path: ".", result: "hit" }] },
+        issueProvider: "jira",
+        issueKey: "ABC-12",
+      };
+      created.store.pullRequestDescriptionBaseline = async () => ({
+        recordedSha256: null,
+        previousAgentText: "The original description text.",
+        agentTextRunId: "root-run",
+        legacySource: legacySource,
+      });
+      created.vcs.finalizeDescription = { kind: "replaced", sha256: NEW_SHA, agentTextRunId: "run-1" };
+      await created.executor.start("run-1");
+
+      const expected = pullRequestBody({
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "wardby/run-root-run",
+        runId: "root-run",
+        summary: "The original description text.",
+        tests: [{ command: "npm test", outcome: "passed" }],
+        packages: rootReport.packages,
+        restoredDependencies: ["."],
+        issue: { key: "ABC-12", url: "https://acme.atlassian.net/browse/ABC-12", trackerName: "Jira" },
+      });
+      expect(expected).toContain("Resolves Jira issue");
+      expect(expected).toContain("Dependency cache: restored");
+      expect(created.vcs.lastFinalizeDetails?.description).toEqual({
+        baseline: {
+          recordedSha256: null,
+          legacySha256: descriptionSha256(expected),
+          previousAgentText: "The original description text.",
+          agentTextRunId: "root-run",
+        },
+      });
+      // The compare-and-set expects no hash yet (the legacy row has none).
+      expect(created.recorded).toEqual([
+        { rootRunId: "root-run", expectedSha256: null, sha256: NEW_SHA, agentTextRunId: "run-1" },
+      ]);
+    });
+
+    it("a legacy rebuild matches a description written out by hand, as a fresh run's pull request carried it", async () => {
+      const created = await fixRound(
+        {},
+        {
+          registryReport: async (runId) =>
+            runId === "root-run"
+              ? { packages: [{ ecosystem: "npm", name: "zod", version: "4.0.0" }], packageRefusals: [] }
+              : { packages: [], packageRefusals: [] },
+          issueUrl: (_provider, key) => `https://acme.atlassian.net/browse/${key}`,
+        },
+      );
+      created.store.pullRequestDescriptionBaseline = async () => ({
+        recordedSha256: null,
+        previousAgentText: "The original description text.",
+        agentTextRunId: "root-run",
+        legacySource: {
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: "wardby/run-root-run",
+          summary: "The original description text.",
+          tests: [{ command: "npm test", outcome: "passed" }],
+          dependencyCache: { projects: [{ path: ".", result: "hit" }] },
+          issueProvider: "jira",
+          issueKey: "ABC-12",
+        },
+      });
+      created.vcs.finalizeDescription = { kind: "replaced", sha256: NEW_SHA, agentTextRunId: "run-1" };
+      await created.executor.start("run-1");
+
+      // Written independently of pullRequestBody: what such a pull request's description looked like.
+      const byHand = [
+        "<!-- wardby:root-run -->",
+        "",
+        "Resolves Jira issue [ABC-12](https://acme.atlassian.net/browse/ABC-12)",
+        "",
+        "The original description text.",
+        "",
+        "**Tests:**",
+        "- `npm test`: passed",
+        "",
+        "Dependency cache: restored `node_modules` for the repo root.",
+        "",
+        "<details>",
+        "<summary>Packages installed during this run (1)</summary>",
+        "",
+        "- npm `zod@4.0.0`",
+        "</details>",
+      ].join("\n");
+      expect(created.vcs.lastFinalizeDetails?.description?.baseline.legacySha256).toBe(descriptionSha256(byHand));
+    });
+
+    it("a legacy pull request whose root run stored no summary gets no rebuilt hash", async () => {
+      const created = await fixRound();
+      created.store.pullRequestDescriptionBaseline = async () => ({
+        recordedSha256: null,
+        agentTextRunId: "root-run",
+        legacySource: { repository: "openai/example", baseRef: "main", headRef: "wardby/run-root-run" },
+      });
+      created.vcs.finalizeDescription = { kind: "edited_by_hand", commentPosted: true };
+      await created.executor.start("run-1");
+      expect(created.vcs.lastFinalizeDetails?.description).toEqual({
+        baseline: { recordedSha256: null, agentTextRunId: "root-run" },
+      });
+    });
+
+    it("a fresh no_changes run never refreshes a description", async () => {
+      const created = await harness();
+      noChanges(created);
+      let refreshes = 0;
+      created.vcs.refreshPullRequestDescription = async () => {
+        refreshes += 1;
+        return undefined;
+      };
+      await created.executor.start("run-1");
+      expect(refreshes).toBe(0);
+      expect(created.store.completions[0]?.record).toEqual({});
+    });
+
+    it("caps the no_changes refresh at 60 seconds, recording skipped:error", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const created = await fixRound();
+        noChanges(created);
+        let called!: () => void;
+        const refreshStarted = new Promise<void>((resolve) => (called = resolve));
+        created.vcs.refreshPullRequestDescription = () => {
+          called();
+          return new Promise(() => undefined);
+        };
+        const started = created.executor.start("run-1");
+        await refreshStarted;
+        await vi.advanceTimersByTimeAsync(DESCRIPTION_REFRESH_TIMEOUT_MS - 1);
+        expect(created.store.completions).toEqual([]);
+        await vi.advanceTimersByTimeAsync(1);
+        await started;
+
+        expect(DESCRIPTION_REFRESH_TIMEOUT_MS).toBe(60_000);
+        expect(created.store.run.status).toBe("succeeded");
+        expect(created.store.run.result).toMatchObject({ outcome: "no_changes" });
+        expect(created.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "skipped:error" });
+        expect(created.recorded).toEqual([]);
+        expect(
+          logged.filter((line) => line.level === "warn" && line.message.includes("timed out")).map((l) => l.payload),
+        ).toEqual([{ runId: "run-1", timeoutMs: 60_000 }]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("edited_by_hand leaves the root hash untouched and records the outcome on the run", async () => {
+      const created = await fixRound();
+      created.vcs.finalizeDescription = { kind: "edited_by_hand", commentPosted: true };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.recorded).toEqual([]);
+      expect(created.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "edited_by_hand" });
+    });
+
+    it("records skipped:<reason> from the remote without a compare-and-set", async () => {
+      const created = await fixRound();
+      created.vcs.finalizeDescription = { kind: "skipped", reason: "too_long" };
+      await created.executor.start("run-1");
+      expect(created.recorded).toEqual([]);
+      expect(created.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "skipped:too_long" });
+    });
+
+    it("CAS miss logs and keeps the run succeeded", async () => {
+      const created = await fixRound();
+      created.store.recordPullRequestDescription = async () => false;
+      created.vcs.finalizeDescription = { kind: "replaced", sha256: NEW_SHA, agentTextRunId: "run-1" };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.store.run.result).toMatchObject({ outcome: "pull_request_updated" });
+      expect(created.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "replaced" });
+      expect(descriptionWarnings()).toHaveLength(1);
+    });
+
+    it("description failure never changes the run's outcome", async () => {
+      // The baseline cannot be loaded: the PR is pushed without a description update.
+      const noBaseline = await fixRound();
+      noBaseline.store.pullRequestDescriptionBaseline = async () => {
+        throw new Error("db down");
+      };
+      await noBaseline.executor.start("run-1");
+      expect(noBaseline.store.run.status).toBe("succeeded");
+      expect(noBaseline.store.run.result).toMatchObject({ outcome: "pull_request_updated" });
+      expect(noBaseline.vcs.lastFinalizeDetails).not.toHaveProperty("description");
+      expect(noBaseline.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "skipped:error" });
+
+      // The compare-and-set throws after the description was written.
+      const noRecord = await fixRound();
+      noRecord.vcs.finalizeDescription = { kind: "replaced", sha256: NEW_SHA, agentTextRunId: "run-1" };
+      noRecord.store.recordPullRequestDescription = async () => {
+        throw new Error("db down");
+      };
+      await noRecord.executor.start("run-1");
+      expect(noRecord.store.run.status).toBe("succeeded");
+      expect(noRecord.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "skipped:error" });
+
+      // The no-push refresh throws.
+      const noRefresh = await fixRound();
+      noChanges(noRefresh);
+      noRefresh.vcs.refreshPullRequestDescription = async () => {
+        throw new Error("github down");
+      };
+      await noRefresh.executor.start("run-1");
+      expect(noRefresh.store.run.status).toBe("succeeded");
+      expect(noRefresh.store.run.result).toMatchObject({ outcome: "no_changes" });
+      expect(noRefresh.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "skipped:error" });
+      expect(noRefresh.vcs.notifyFinishedCalls).toEqual([
+        { outcome: "succeeded", summary: "Already correct.", agentName: "knock-knock-implement" },
+      ]);
+
+      expect(descriptionWarnings()).toHaveLength(3);
+    });
   });
 
   describe("originating issue on the pull request", () => {

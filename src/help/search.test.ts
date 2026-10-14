@@ -307,3 +307,28 @@ describe("durable executor ownership-loss help", () => {
     }
   });
 });
+
+describe("allowlist refusal help", () => {
+  it('finds each allowlist refusal code\'s article, and "allowlist" finds them', async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+
+    const codes = [
+      "wardby_package_not_allowed",
+      "wardby_package_not_allowed_pending",
+      "wardby_graph_incomplete",
+      "wardby_graph_limit",
+    ];
+    for (const code of codes) {
+      const id = `errors/${code.replace(/^wardby_/, "").replaceAll("_", "-")}`;
+      expect(searchHelp(catalog, code)[0]?.page.id, code).toBe(id);
+      expect(catalog.pages.find((entry) => entry.id === id)?.markdown, id).toContain(`\`${code}\``);
+    }
+
+    const ids = searchHelp(catalog, "allowlist").map((result) => result.page.id);
+    for (const code of codes) {
+      expect(ids, code).toContain(`errors/${code.replace(/^wardby_/, "").replaceAll("_", "-")}`);
+    }
+  });
+});

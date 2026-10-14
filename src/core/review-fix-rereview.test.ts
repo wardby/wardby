@@ -268,6 +268,14 @@ describe("reReviewAfterNoChangeFix", () => {
     expect(startReviews).not.toHaveBeenCalled();
   });
 
+  it("a pushed fix round (pull_request_updated) starts no re-review from the no-change path", async () => {
+    // A pushed fix is reviewed by the pull_request synchronize event alone; this path adds none.
+    const { deps, addLabel } = setup({ outcome: "pull_request_updated" });
+    await reReviewAfterNoChangeFix("coding-1", deps);
+    expect(startReviews).not.toHaveBeenCalled();
+    expect(addLabel).not.toHaveBeenCalled();
+  });
+
   it("starts nothing when the claim was already taken (a replay or a duplicate terminal write)", async () => {
     const { deps, addLabel } = setup({ claimCount: 0 });
     await reReviewAfterNoChangeFix("coding-1", deps);

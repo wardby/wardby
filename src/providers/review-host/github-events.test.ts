@@ -54,6 +54,12 @@ describe("normalizeGitHubEvent", () => {
     }
   });
 
+  it("normalizeGitHubEvent ignores a pull_request edited event (description update by the bot)", () => {
+    // A description PATCH by wardby fires `edited`; it must never be a review trigger.
+    const edited = { ...pr("edited"), changes: { body: { from: "old" } }, sender: { login: "wardby[bot]" } };
+    expect(normalizeGitHubEvent("pull_request", edited, APP)).toBeNull();
+  });
+
   it("maps a closed PR to pr_closed, merged or not", () => {
     const closed = (merged: unknown) => ({ ...pr("closed"), pull_request: { ...pr("closed").pull_request, merged } });
     expect(normalizeGitHubEvent("pull_request", closed(true), APP)).toEqual({

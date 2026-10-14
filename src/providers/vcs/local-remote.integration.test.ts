@@ -103,6 +103,17 @@ async function prepareAndChange(f: Fixture, overrides: Partial<VcsPrepareInput> 
 }
 
 describe("LocalRemote (real git, no Docker)", { timeout: 20_000 }, () => {
+  it("has no description refresh (a local repository has no pull requests), and the provider answers undefined", async () => {
+    const f = await fixture();
+    expect(new LocalRemote({ roots: () => [] })).not.toHaveProperty("refreshDescription");
+    const workspace = await prepareAndChange(f);
+    await expect(
+      f.provider.refreshPullRequestDescription?.(workspace, {
+        description: { baseline: { recordedSha256: null, agentTextRunId: "r1" } },
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   it("clones a local repository and pushes the run's branch back to it", async () => {
     const f = await fixture();
     const workspace = await prepareAndChange(f);

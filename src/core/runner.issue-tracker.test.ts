@@ -184,6 +184,12 @@ function harness(opts: {
         state.status = { ...state.status, ...data };
         return state.status;
       },
+      updateMany: async ({ where, data }: any) => {
+        if (!state.status || state.status.runId !== where.runId) return { count: 0 };
+        if (state.status.completedAt !== where.completedAt) return { count: 0 };
+        state.status = { ...state.status, ...data };
+        return { count: 1 };
+      },
     },
   };
 

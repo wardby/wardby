@@ -1,4 +1,4 @@
-import type { FinalizeChangesDetails, PreparedWorkspace, VcsProvider } from "./types.js";
+import type { DescriptionWriteOutcome, FinalizeChangesDetails, PreparedWorkspace, VcsProvider } from "./types.js";
 
 /** What a remote needs to publish a pushed commit (GitHub: open or find the draft PR). */
 export interface PublishInput {
@@ -7,9 +7,13 @@ export interface PublishInput {
   details?: FinalizeChangesDetails;
   /** Every path the commit changes relative to baseCommit (already validated). */
   changedPaths: readonly string[];
+  /** The commit just pushed (the pull request's new head). */
+  commitSha?: string;
 }
 
-export type PublishResult = { kind: "pull_request"; number: number; url: string } | { kind: "branch"; branch: string };
+export type PublishResult =
+  | { kind: "pull_request"; number: number; url: string; description?: DescriptionWriteOutcome }
+  | { kind: "branch"; branch: string };
 
 /**
  * The remote-specific half of GitVcsProvider: where a repository is cloned
@@ -49,4 +53,12 @@ export interface GitRemote {
   notifyContinuationStarted?: VcsProvider["notifyContinuationStarted"];
   notifyContinuationFinished?: VcsProvider["notifyContinuationFinished"];
   readRepositoryFile?: VcsProvider["readRepositoryFile"];
+  /**
+   * Optional: called after the commit and before the push, with the commit
+   * about to become the head. GitHub writes a continuation's description
+   * comment here, so it exists before the push starts a review. Never throws.
+   */
+  proposeDescriptionBeforePush?(input: PublishInput & { commitSha: string }): Promise<void>;
+  /** Optional: re-derive a continuation's PR description without a push (GitHub only). Never throws. */
+  refreshDescription?: VcsProvider["refreshPullRequestDescription"];
 }

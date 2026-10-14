@@ -543,6 +543,15 @@ model CodingRun {
   /// When Wardby marked this run's pull request ready for review (at most once;
   /// a person moving it back to draft is final). Only set on a root coding run.
   markedReadyAt         DateTime?
+  /// Root coding run only: SHA-256 (hex) of the pull request description Wardby last wrote,
+  /// normalized (CRLF→LF, Related pull requests section removed, blank lines collapsed, trimmed).
+  /// Null = never recorded (pull requests opened before this column, or a lost first write).
+  prDescriptionSha256   String?
+  /// Root coding run only: the coding run whose final message is that description's agent-written part.
+  prDescriptionRunId    String?
+  /// This run's description update: written | replaced | refreshed:<reason> | unchanged |
+  /// edited_by_hand | skipped:<reason>. Null = not attempted.
+  prDescriptionOutcome  String?
   /// Fixed at dispatch from the profile's dependencyCache.
   dependencyCache       Boolean             @default(false)
   /// What the run's dependency cache did, written by the control plane when it collects the run:

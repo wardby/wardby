@@ -3,6 +3,8 @@ import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import { withBaseCommit } from "../../coding/base-commit.js";
+import { withPullRequestDescription } from "../../coding/pr-description-note.js";
+import { withLinkedIssue, type LinkedIssueText } from "../../coding/linked-issue-note.js";
 import { buildClaudeContext, MAX_RECORDED_SKIPS, type ClaudeContext } from "../../coding/claude-context.js";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { codingProviderForModelProvider, type CodingProvider } from "../../coding/provider.js";
@@ -41,9 +43,11 @@ import {
   CodingRunResultSchema,
   CodingTaskInputSchema,
   MAX_CODING_INPUT_BYTES,
+  isLocalRepository,
   parseCodingWorkerOutputJson,
   redactAndTruncate,
   restoredDependencyFolders,
+  sanitizeDependencyCacheReport,
   type ClaudeContextFile,
   type CodingAgentOutput,
   type CodingRunResult,
@@ -56,12 +60,25 @@ import { CODING_PROXY_ALIAS, CODING_PROXY_PORT, isImmutableDockerImage } from ".
 import { normalizeRegistryLockfiles } from "../../coding/registry/lockfiles.js";
 import type { ProxyModelTerms, ProxyProtocol } from "../coding-proxy/types.js";
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
-import type { ContinuationOutcome, PreparedWorkspace, VcsPrepareInput, VcsProvider } from "../vcs/types.js";
+import type {
+  ContinuationOutcome,
+  DescriptionWriteOutcome,
+  FinalizeChangesDetails,
+  PreparedWorkspace,
+  VcsPrepareInput,
+  VcsProvider,
+} from "../vcs/types.js";
 import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
 import { ISSUE_KEY, ISSUE_TRACKER_NAMES, type IssueTrackerProvider } from "../issue-tracker/types.js";
 import { HEARTBEAT_TIMEOUT_MS } from "../../core/timing.js";
 import { collectRelatedPullRequests } from "../../core/related-pull-requests.js";
-import type { RelatedPullRequestEntry, RelatedPullRequestsInput } from "../vcs/github.js";
+import {
+  pullRequestBody,
+  type DescriptionBaseline,
+  type RelatedPullRequestEntry,
+  type RelatedPullRequestsInput,
+} from "../vcs/github.js";
+import { closingIssueNumber, descriptionSha256 } from "../vcs/pr-description.js";
 
 const containerLog = logger.child({ module: "container-executor" });
 /** A logged context skip path is cut to this many characters: a refused import is reported as written. */
@@ -71,6 +88,10 @@ const MAX_LOGGED_SKIP_PATH_CHARS = 256;
 const CAPACITY_PROBE_INPUT = "/dev/null";
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "refused", "lost", "budget_exhausted", "cancelled"]);
 const PROVISIONING_BACKEND = "provisioning";
+/** The longest a no-change fix round's description refresh may hold up the run's terminal write. */
+export const DESCRIPTION_REFRESH_TIMEOUT_MS = 60_000;
+/** How many runs above a root coding run are searched for the mention that started it. */
+const MAX_LINKED_ISSUE_RUN_DEPTH = 8;
 /** Serializes concurrency-slot claims across replicas. Distinct from the OAuth client lock (7412901). */
 const CODING_SLOT_LOCK_SQL = "SELECT 1 AS locked FROM pg_advisory_xact_lock(7412902)";
 
@@ -123,7 +144,67 @@ export interface CodingRunRecord {
   baseSha?: string;
   /** The worker's dependency cache report (CodingWorkerOutput.dependencyCache), on a run that used it. */
   dependencyCacheResult?: DependencyCacheReport;
+  /** This run's pull request description outcome (descriptionOutcomeLabel); absent = not attempted. */
+  prDescriptionOutcome?: string;
+  /** A fresh run that wrote its PR's description: the hash, on its own (root) row. */
+  prDescriptionSha256?: string;
+  /** With prDescriptionSha256: the run whose text the description carries (the fresh run itself). */
+  prDescriptionRunId?: string;
 }
+
+/** The stored form of a description outcome: written, replaced, refreshed:<reason>, unchanged, edited_by_hand, skipped:<reason>. */
+export function descriptionOutcomeLabel(outcome: DescriptionWriteOutcome): string {
+  if (outcome.kind === "refreshed" || outcome.kind === "skipped") return `${outcome.kind}:${outcome.reason}`;
+  return outcome.kind;
+}
+
+/** A local repository has no pull request: its runs get no description note and record no description outcome. */
+function hasPullRequestDescription(run: { repository: string }): boolean {
+  return !isLocalRepository(run.repository);
+}
+
+/**
+ * What the root run of a legacy pull request (no recorded description hash)
+ * stored, from which the description it wrote is rebuilt. Raw stored values:
+ * the executor validates them.
+ */
+export interface LegacyDescriptionSource {
+  repository: string;
+  baseRef: string;
+  headRef: string;
+  /** The root run's final message (CodingRun.result.summary); absent = nothing to rebuild. */
+  summary?: string;
+  /** CodingRun.result.tests, as stored. */
+  tests?: unknown;
+  /** CodingRun.dependencyCacheResult, as stored. */
+  dependencyCache?: unknown;
+  issueProvider?: string | null;
+  issueKey?: string | null;
+}
+
+/**
+ * Where a continuation's pull request came from, to find the issue it was
+ * opened for: the root run's tracker issue, and the mention status (issue or
+ * pull request number) of the nearest run above the root that has one.
+ */
+export interface LinkedIssueSource {
+  issueProvider?: string | null;
+  issueKey?: string | null;
+  hostStatus?: { provider: string; repository: string; number: number } | null;
+}
+
+/** An issue to read for a continuation's task. */
+export type LinkedIssueRef =
+  { provider: "github"; repository: string; number: number } | { provider: "jira"; key: string };
+
+/** The longest reading the linked issue may hold up a continuation's launch. */
+export const LINKED_ISSUE_READ_TIMEOUT_MS = 15_000;
+
+/** The store's description baseline; `legacySource` only on a legacy pull request. */
+export type StoredDescriptionBaseline = DescriptionBaseline & { legacySource?: LegacyDescriptionSource };
+
+/** A fix round's description state: the baseline to update against, or that it could not be loaded. */
+type DescriptionState = { baseline: DescriptionBaseline } | { failed: true } | null;
 
 export interface ContainerRunSnapshot {
   runId: string;
@@ -216,6 +297,34 @@ export interface ContainerExecutionStore {
    * Related pull requests section. Optional: without it no section is written.
    */
   relatedPullRequests?(runId: string): Promise<RelatedPullRequestEntry[]>;
+  /**
+   * The root run's record of the PR description wardby last wrote, for a fix
+   * round's description update. Optional: without it fix rounds leave the
+   * description alone.
+   */
+  pullRequestDescriptionBaseline?(rootRunId: string): Promise<StoredDescriptionBaseline>;
+  /**
+   * The runs that pushed to the root run's pull request (the root, then its
+   * continuations whose result pushed, oldest first), for the cumulative
+   * Packages section. Optional: without it the section lists this run's only.
+   */
+  pullRequestRunIds?(rootRunId: string): Promise<string[]>;
+  /**
+   * Where the root run's pull request came from (see LinkedIssueSource).
+   * Optional: without it continuations get no issue text.
+   */
+  linkedIssueSource?(rootRunId: string): Promise<LinkedIssueSource>;
+  /**
+   * Compare-and-set of the root run's description hash and author run: writes
+   * only while the root still records `expectedSha256` (null = none). False
+   * when another write got there first.
+   */
+  recordPullRequestDescription?(input: {
+    rootRunId: string;
+    expectedSha256: string | null;
+    sha256: string;
+    agentTextRunId: string;
+  }): Promise<boolean>;
   complete(
     runId: string,
     status: "succeeded" | "budget_exhausted",
@@ -330,6 +439,104 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       ...(pr.state ? { state: pr.state } : {}),
       ...(pr.mergeOrder !== undefined ? { mergeOrder: pr.mergeOrder } : {}),
     }));
+  }
+
+  async pullRequestDescriptionBaseline(rootRunId: string): Promise<StoredDescriptionBaseline> {
+    const root = await this.db.codingRun.findUnique({
+      where: { runId: rootRunId },
+      select: {
+        prDescriptionSha256: true,
+        prDescriptionRunId: true,
+        result: true,
+        repository: true,
+        baseRef: true,
+        headRef: true,
+        dependencyCacheResult: true,
+        issueProvider: true,
+        issueKey: true,
+      },
+    });
+    if (!root) throw new Error("coding_run_not_found");
+    // Legacy pull requests (no recorded author run) carry the root run's own text.
+    const agentTextRunId = root.prDescriptionRunId ?? rootRunId;
+    const source =
+      agentTextRunId === rootRunId
+        ? root.result
+        : (await this.db.codingRun.findUnique({ where: { runId: agentTextRunId }, select: { result: true } }))?.result;
+    const previousAgentText = storedSummary(source);
+    const rootSummary = storedSummary(root.result);
+    const legacySource: LegacyDescriptionSource | undefined =
+      root.prDescriptionSha256 === null
+        ? {
+            repository: root.repository,
+            baseRef: root.baseRef,
+            headRef: root.headRef,
+            ...(rootSummary !== undefined ? { summary: rootSummary } : {}),
+            ...(storedField(root.result, "tests") !== undefined ? { tests: storedField(root.result, "tests") } : {}),
+            ...(root.dependencyCacheResult != null ? { dependencyCache: root.dependencyCacheResult } : {}),
+            issueProvider: root.issueProvider,
+            issueKey: root.issueKey,
+          }
+        : undefined;
+    return {
+      recordedSha256: root.prDescriptionSha256,
+      ...(previousAgentText !== undefined ? { previousAgentText } : {}),
+      agentTextRunId,
+      ...(legacySource ? { legacySource } : {}),
+    };
+  }
+
+  async linkedIssueSource(rootRunId: string): Promise<LinkedIssueSource> {
+    const root = await this.db.codingRun.findUnique({
+      where: { runId: rootRunId },
+      select: { issueProvider: true, issueKey: true, run: { select: { parentRunId: true } } },
+    });
+    if (!root) throw new Error("coding_run_not_found");
+    // The mention that started the work is on the root's delegating run, or a run above it.
+    let hostStatus: LinkedIssueSource["hostStatus"] = null;
+    let parentRunId = root.run.parentRunId;
+    for (let depth = 0; parentRunId && depth < MAX_LINKED_ISSUE_RUN_DEPTH; depth++) {
+      const parent = await this.db.run.findUnique({
+        where: { id: parentRunId },
+        select: { parentRunId: true, hostStatus: { select: { provider: true, repository: true, number: true } } },
+      });
+      if (!parent) break;
+      if (parent.hostStatus) {
+        hostStatus = parent.hostStatus;
+        break;
+      }
+      parentRunId = parent.parentRunId;
+    }
+    return { issueProvider: root.issueProvider, issueKey: root.issueKey, hostStatus };
+  }
+
+  async pullRequestRunIds(rootRunId: string): Promise<string[]> {
+    const rows = await this.db.codingRun.findMany({
+      where: { OR: [{ runId: rootRunId }, { rootCodingRunId: rootRunId }] },
+      select: { runId: true, result: true },
+      orderBy: { run: { startedAt: "asc" } },
+    });
+    const pushed = rows.filter((row) => {
+      const outcome = storedField(row.result, "outcome");
+      return outcome === "pull_request_opened" || outcome === "pull_request_updated";
+    });
+    // The root first, whatever the clock says.
+    return [...pushed.filter((row) => row.runId === rootRunId), ...pushed.filter((row) => row.runId !== rootRunId)].map(
+      (row) => row.runId,
+    );
+  }
+
+  async recordPullRequestDescription(input: {
+    rootRunId: string;
+    expectedSha256: string | null;
+    sha256: string;
+    agentTextRunId: string;
+  }): Promise<boolean> {
+    const written = await this.db.codingRun.updateMany({
+      where: { runId: input.rootRunId, prDescriptionSha256: input.expectedSha256 },
+      data: { prDescriptionSha256: input.sha256, prDescriptionRunId: input.agentTextRunId },
+    });
+    return written.count === 1;
   }
 
   async claimProvisioning(runId: string, claimId: string): Promise<ProvisioningClaim> {
@@ -476,6 +683,10 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
           ...(record.resultBranch ? { resultBranch: record.resultBranch } : {}),
           ...(record.baseSha ? { baseSha: record.baseSha } : {}),
           ...(record.dependencyCacheResult ? { dependencyCacheResult: record.dependencyCacheResult } : {}),
+          ...(record.prDescriptionOutcome ? { prDescriptionOutcome: record.prDescriptionOutcome } : {}),
+          ...(record.prDescriptionSha256 && record.prDescriptionRunId
+            ? { prDescriptionSha256: record.prDescriptionSha256, prDescriptionRunId: record.prDescriptionRunId }
+            : {}),
         },
       });
       await tx.run.update({
@@ -619,6 +830,13 @@ export interface ContainerExecutorOptions {
    * reporting failure must never fail the run itself.
    */
   registryReport?: (runId: string) => Promise<RegistryReport>;
+  /**
+   * Reads an issue's title and body for a continuation's task (composition
+   * wires the review host's issue read and the issue tracker). Null when it
+   * isn't an issue (a pull request number) or can't be found. Optional:
+   * without it continuations get no issue text.
+   */
+  readLinkedIssue?: (ref: LinkedIssueRef) => Promise<{ title: string; body: string } | null>;
   /** Browse URL for an issue of a tracker provider (composition wires the issue-tracker registry); undefined when unconfigured. */
   issueUrl?: (provider: string, key: string) => string | undefined;
   /**
@@ -952,7 +1170,9 @@ export class ContainerExecutor implements Executor {
   }
 
   /** The originating issue for the PR title/body: control-plane data from the CodingRun row, key re-validated. */
-  private issueFor(run: ContainerRunSnapshot): { issue?: { key: string; url?: string; trackerName?: string } } {
+  private issueFor(run: Pick<ContainerRunSnapshot, "issueProvider" | "issueKey">): {
+    issue?: { key: string; url?: string; trackerName?: string };
+  } {
     const { issueProvider, issueKey } = run;
     if (!issueProvider || !issueKey || !ISSUE_KEY.test(issueKey)) return {};
     let url: string | undefined;
@@ -975,7 +1195,7 @@ export class ContainerExecutor implements Executor {
 
   /** The new PR's Related pull requests input: earlier PRs of the same request, then this one. Never throws. */
   private async relatedFor(run: ContainerRunSnapshot): Promise<{ related?: RelatedPullRequestsInput }> {
-    // A continuation pushes onto an existing PR, whose body is never rewritten here.
+    // A continuation's Related block is preserved from the current body (the description update keeps it).
     if (run.rootCodingRunId || !this.options.store.relatedPullRequests) return {};
     try {
       const earlier = await this.options.store.relatedPullRequests(run.runId);
@@ -1120,12 +1340,12 @@ export class ContainerExecutor implements Executor {
         return;
       }
       if (output.outcome === "no_changes") {
-        await this.options.store.complete(
-          run.runId,
-          "succeeded",
-          this.resultFor(output, current),
-          dependencyCacheRecord(output),
-        );
+        // Before complete: the terminal hook (a no-change fix round's re-review) reads the refreshed body.
+        const description = await this.refreshDescriptionInTime(current, output, existingWorkspace);
+        await this.options.store.complete(run.runId, "succeeded", this.resultFor(output, current), {
+          ...dependencyCacheRecord(output),
+          ...description,
+        });
         this.terminal(current, "succeeded");
         outcome = "succeeded";
         finishedSummary = output.summary;
@@ -1153,7 +1373,8 @@ export class ContainerExecutor implements Executor {
       // One more (usually cached) check right before anything is pushed: access
       // revoked while the run was working stops the push.
       await this.authorizeRepository(current, { inFlight: true });
-      const report = await this.loadRegistryReport(run.runId);
+      const report = await this.pullRequestRegistryReport(current);
+      const descriptionState = await this.descriptionStateFor(current);
       const finalized = await this.options.vcs.finalizeChanges(workspace, {
         summary: output.summary,
         tests: output.tests,
@@ -1162,7 +1383,22 @@ export class ContainerExecutor implements Executor {
         ...restoredDependenciesFor(output),
         ...this.issueFor(current),
         ...(await this.relatedFor(current)),
+        ...(descriptionState && "baseline" in descriptionState
+          ? { description: { baseline: descriptionState.baseline } }
+          : {}),
       });
+      // An empty diff pushes nothing, so it refreshes the description the way a
+      // worker no_changes does, before complete (the terminal hook reads the body).
+      const description =
+        finalized.outcome === "no_changes"
+          ? await this.refreshDescriptionInTime(current, output, workspace)
+          : await this.recordDescription(
+              current,
+              descriptionState,
+              finalized.outcome === "pull_request_opened" || finalized.outcome === "pull_request_updated"
+                ? finalized.description
+                : undefined,
+            );
       // A pushed branch (local repository) is a successful run with no pull
       // request; its branch is recorded on the run for the operator to merge.
       const result = this.resultFor(output, current, finalized.outcome, finalized);
@@ -1170,6 +1406,7 @@ export class ContainerExecutor implements Executor {
         ...dependencyCacheRecord(output),
         baseSha: finalized.baseCommit,
         ...(finalized.outcome === "branch_pushed" ? { resultBranch: finalized.headRef } : {}),
+        ...description,
       });
       if (
         finalized.outcome === "pull_request_opened" ||
@@ -1213,6 +1450,295 @@ export class ContainerExecutor implements Executor {
       await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
       this.emit({ stage: "cleanup", runId: run.runId, jobId: handle.id, cleanupSucceeded: true });
       await this.notifyTerminal(run.runId);
+    }
+  }
+
+  /**
+   * The pull request description a continuation run is about to replace, for
+   * its task. Undefined for a fresh run or when it cannot be loaded: the run
+   * goes ahead without the note.
+   */
+  private async currentDescriptionText(run: ContainerRunSnapshot): Promise<string | undefined> {
+    const store = this.options.store;
+    if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !store.pullRequestDescriptionBaseline) {
+      return undefined;
+    }
+    try {
+      return (await store.pullRequestDescriptionBaseline(run.rootCodingRunId)).previousAgentText;
+    } catch (err) {
+      containerLog.debug({ err, runId: run.runId }, "could not load the pull request description for the task");
+      return undefined;
+    }
+  }
+
+  /**
+   * The issue a continuation's pull request was opened for, read for its task
+   * the way the first run had it: the root run's Jira issue, else the GitHub
+   * issue whose mention started the work (same repository), else the issue the
+   * description wardby last wrote closes (same repository). Each candidate is
+   * read in turn until one is an issue. Undefined for a fresh or local run, or
+   * on any failure: the run goes ahead without it.
+   */
+  private async linkedIssueFor(
+    run: ContainerRunSnapshot,
+    description: string | undefined,
+  ): Promise<LinkedIssueText | undefined> {
+    const store = this.options.store;
+    const read = this.options.readLinkedIssue;
+    if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !read || !store.linkedIssueSource) return undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => {
+        containerLog.warn({ runId: run.runId }, "reading the linked issue timed out; continuing without it");
+        resolve(undefined);
+      }, LINKED_ISSUE_READ_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([this.readLinkedIssue(run, run.rootCodingRunId, description, read), timedOut]);
+    } catch (err) {
+      containerLog.warn({ err, runId: run.runId }, "could not read the linked issue; continuing without it");
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async readLinkedIssue(
+    run: ContainerRunSnapshot,
+    rootRunId: string,
+    description: string | undefined,
+    read: NonNullable<ContainerExecutorOptions["readLinkedIssue"]>,
+  ): Promise<LinkedIssueText | undefined> {
+    const source = await this.options.store.linkedIssueSource!(rootRunId);
+    const candidates: LinkedIssueRef[] = [];
+    if (source.issueProvider === "jira" && source.issueKey && ISSUE_KEY.test(source.issueKey)) {
+      candidates.push({ provider: "jira", key: source.issueKey });
+    }
+    const status = source.hostStatus;
+    if (
+      status?.provider === "github" &&
+      status.repository.toLowerCase() === run.repository.toLowerCase() &&
+      Number.isSafeInteger(status.number) &&
+      status.number > 0
+    ) {
+      candidates.push({ provider: "github", repository: run.repository, number: status.number });
+    }
+    const closed = closingIssueNumber(description, run.repository);
+    if (closed !== undefined && !candidates.some((ref) => ref.provider === "github" && ref.number === closed)) {
+      candidates.push({ provider: "github", repository: run.repository, number: closed });
+    }
+    for (const ref of candidates) {
+      let issue: { title: string; body: string } | null;
+      try {
+        issue = await read(ref);
+      } catch (err) {
+        // The next candidate may still be readable.
+        containerLog.warn({ err, runId: run.runId, issue: ref }, "could not read a linked issue candidate");
+        continue;
+      }
+      if (!issue) continue;
+      return ref.provider === "github"
+        ? { kind: "github", number: ref.number, title: issue.title, body: issue.body }
+        : { kind: "jira", key: ref.key, title: issue.title, body: issue.body };
+    }
+    return undefined;
+  }
+
+  /**
+   * A fix round's description baseline (null: no description flow -- a fresh
+   * run, or a store without it). Never throws: a load failure is recorded as
+   * skipped:error and the push goes ahead without a description update.
+   */
+  private async descriptionStateFor(run: ContainerRunSnapshot): Promise<DescriptionState> {
+    const store = this.options.store;
+    if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !store.pullRequestDescriptionBaseline) return null;
+    let stored: StoredDescriptionBaseline;
+    try {
+      stored = await store.pullRequestDescriptionBaseline(run.rootCodingRunId);
+    } catch (err) {
+      containerLog.warn({ err, runId: run.runId }, "could not load the pull request description baseline");
+      return { failed: true };
+    }
+    const { legacySource, ...baseline } = stored;
+    if (baseline.recordedSha256 !== null || !legacySource) return { baseline };
+    const legacySha256 = await this.legacyDescriptionSha256(run.rootCodingRunId, legacySource);
+    return { baseline: legacySha256 ? { ...baseline, legacySha256 } : baseline };
+  }
+
+  /**
+   * A legacy pull request's description as its root run wrote it, rebuilt from
+   * stored records (the final message, tests, packages, dependency cache line
+   * and issue line; the Related section is not hashed), and hashed. Undefined
+   * when the root stored no final message, or on any failure: the description
+   * then counts as edited, the safe direction. A lock file line the root's
+   * refusal warning may have carried is not stored, so such a description
+   * never matches.
+   */
+  private async legacyDescriptionSha256(
+    rootRunId: string,
+    source: LegacyDescriptionSource,
+  ): Promise<string | undefined> {
+    if (!source.summary) return undefined;
+    try {
+      const tests = storedTests(source.tests);
+      const restored =
+        source.dependencyCache === undefined
+          ? []
+          : restoredDependencyFolders(sanitizeDependencyCacheReport(source.dependencyCache));
+      const body = pullRequestBody({
+        repository: source.repository,
+        baseRef: source.baseRef,
+        headRef: source.headRef,
+        runId: rootRunId,
+        summary: source.summary,
+        ...(tests.length > 0 ? { tests } : {}),
+        ...(await this.loadRegistryReport(rootRunId)),
+        ...(restored.length > 0 ? { restoredDependencies: restored } : {}),
+        ...this.issueFor({ issueProvider: source.issueProvider ?? null, issueKey: source.issueKey ?? null }),
+      });
+      return descriptionSha256(body);
+    } catch (err) {
+      containerLog.debug({ err, rootRunId }, "could not rebuild a legacy pull request description");
+      return undefined;
+    }
+  }
+
+  /**
+   * The Packages section's input: on a continuation, every package installed
+   * by the runs that pushed to the pull request plus this run (merged in run
+   * order); refusals are this run's only, since they describe the current
+   * state. A fresh run, or a failed listing, reports this run's alone.
+   */
+  private async pullRequestRegistryReport(
+    run: ContainerRunSnapshot,
+  ): Promise<{ packages?: RegistryReport["packages"]; packageRefusals?: RegistryReport["packageRefusals"] }> {
+    const own = await this.loadRegistryReport(run.runId);
+    const store = this.options.store;
+    if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !store.pullRequestRunIds) return own;
+    let earlier: string[];
+    try {
+      earlier = (await store.pullRequestRunIds(run.rootCodingRunId)).filter((id) => id !== run.runId);
+    } catch (err) {
+      containerLog.warn(
+        { err, runId: run.runId },
+        "could not list the pull request's runs; listing this run's packages",
+      );
+      return own;
+    }
+    const reports = await Promise.all(earlier.map((id) => this.loadRegistryReport(id)));
+    const packages = mergePackages([...reports.map((report) => report.packages ?? []), own.packages ?? []]);
+    return {
+      ...(packages.length > 0 ? { packages } : {}),
+      ...(own.packageRefusals ? { packageRefusals: own.packageRefusals } : {}),
+    };
+  }
+
+  /**
+   * The run's description columns for store.complete. A fresh run that wrote
+   * its PR records the hash on its own (root) row; a fix round that wrote or
+   * kept wardby's text compare-and-sets the root's hash. Never throws.
+   */
+  private async recordDescription(
+    run: ContainerRunSnapshot,
+    state: DescriptionState,
+    outcome: DescriptionWriteOutcome | undefined,
+  ): Promise<CodingRunRecord> {
+    if (!hasPullRequestDescription(run)) return {};
+    if (!run.rootCodingRunId) {
+      return outcome?.kind === "written"
+        ? { prDescriptionOutcome: "written", prDescriptionSha256: outcome.sha256, prDescriptionRunId: run.runId }
+        : {};
+    }
+    if (!state) return {};
+    if ("failed" in state) return { prDescriptionOutcome: "skipped:error" };
+    if (!outcome || outcome.kind === "written") return {};
+    const label = descriptionOutcomeLabel(outcome);
+    if (outcome.kind !== "replaced" && outcome.kind !== "refreshed" && outcome.kind !== "unchanged") {
+      return { prDescriptionOutcome: label };
+    }
+    const store = this.options.store;
+    if (!store.recordPullRequestDescription) return { prDescriptionOutcome: label };
+    try {
+      const won = await store.recordPullRequestDescription({
+        rootRunId: run.rootCodingRunId,
+        expectedSha256: state.baseline.recordedSha256,
+        sha256: outcome.sha256,
+        agentTextRunId: outcome.agentTextRunId,
+      });
+      // A lost race leaves the root's hash as the other write left it: the next
+      // round sees a mismatch and falls back to a comment, the safe direction.
+      if (!won) {
+        containerLog.warn(
+          { runId: run.runId, rootRunId: run.rootCodingRunId },
+          "pull request description hash changed meanwhile; not recorded",
+        );
+      }
+      return { prDescriptionOutcome: label };
+    } catch (err) {
+      containerLog.warn({ err, runId: run.runId }, "could not record the pull request description hash");
+      return { prDescriptionOutcome: "skipped:error" };
+    }
+  }
+
+  /**
+   * refreshDescriptionWithoutPush, capped at DESCRIPTION_REFRESH_TIMEOUT_MS so a
+   * slow host cannot hold up store.complete; a timeout is skipped:error.
+   */
+  private async refreshDescriptionInTime(
+    run: ContainerRunSnapshot,
+    output: CodingWorkerOutput,
+    existingWorkspace: PreparedWorkspace | null | undefined,
+  ): Promise<CodingRunRecord> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<CodingRunRecord>((resolve) => {
+      timer = setTimeout(() => {
+        containerLog.warn(
+          { runId: run.runId, timeoutMs: DESCRIPTION_REFRESH_TIMEOUT_MS },
+          "pull request description refresh timed out",
+        );
+        resolve({ prDescriptionOutcome: "skipped:error" });
+      }, DESCRIPTION_REFRESH_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([this.refreshDescriptionWithoutPush(run, output, existingWorkspace), timedOut]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * A fix round that changed nothing still re-derives its PR description (no
+   * push). Never throws: any failure is recorded as skipped:error.
+   */
+  private async refreshDescriptionWithoutPush(
+    run: ContainerRunSnapshot,
+    output: CodingWorkerOutput,
+    existingWorkspace: PreparedWorkspace | null | undefined,
+  ): Promise<CodingRunRecord> {
+    const vcs = this.options.vcs;
+    if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !vcs.refreshPullRequestDescription) return {};
+    const state = await this.descriptionStateFor(run);
+    if (!state || "failed" in state) return this.recordDescription(run, state, undefined);
+    try {
+      const input = this.preflightForCleanup(run);
+      const workspace = existingWorkspace ?? (input ? await vcs.recoverWorkspace(input) : null);
+      if (!workspace) throw new Error("coding_workspace_lost");
+      // The same in-flight access check a push gets: a revoked owner's run edits nothing.
+      await this.authorizeRepository(run, { inFlight: true });
+      const details: FinalizeChangesDetails = {
+        summary: output.summary,
+        tests: output.tests,
+        tag: output.tag,
+        ...(await this.pullRequestRegistryReport(run)),
+        ...restoredDependenciesFor(output),
+        ...this.issueFor(run),
+        description: { baseline: state.baseline },
+      };
+      const outcome = await vcs.refreshPullRequestDescription(workspace, details);
+      return await this.recordDescription(run, state, outcome);
+    } catch (err) {
+      containerLog.warn({ err, runId: run.runId }, "could not refresh the pull request description");
+      return { prDescriptionOutcome: "skipped:error" };
     }
   }
 
@@ -1443,8 +1969,14 @@ export class ContainerExecutor implements Executor {
     const destination = join(directory, "input.json");
     const temporary = join(directory, `.input-${randomUUID()}.tmp`);
     const services = parseStoredServices(run.services);
-    const task = withBaseCommit(run.task, workspace.baseCommit);
-    if (task === run.task && /^[0-9a-f]{40}$/.test(workspace.baseCommit)) {
+    const withCommit = withBaseCommit(run.task, workspace.baseCommit);
+    const description = await this.currentDescriptionText(run);
+    // The ticket first, then the description: each is cut to what's left of the task's budget.
+    const task = withPullRequestDescription(
+      withLinkedIssue(withCommit, await this.linkedIssueFor(run, description)),
+      description,
+    );
+    if (withCommit === run.task && /^[0-9a-f]{40}$/.test(workspace.baseCommit)) {
       containerLog.warn(
         { event: "coding.base_commit_omitted", runId: run.runId },
         "the coding task left no room for the base commit line",
@@ -1836,6 +2368,55 @@ function failureCategory(error: unknown): string {
   if (message.includes("job") || message.includes("container")) return "job";
   if (message.includes("cancel")) return "cancelled";
   return "executor";
+}
+
+/** A stored CodingRun result's summary (the agent-written description text), when it has one. */
+function storedSummary(result: unknown): string | undefined {
+  const summary = storedField(result, "summary");
+  return typeof summary === "string" ? summary : undefined;
+}
+
+/** One field of a stored JSON object; undefined when it isn't an object. */
+function storedField(value: unknown, key: string): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return (value as Record<string, unknown>)[key];
+}
+
+/** Stored test results the PR body can list (command + outcome); anything else is dropped. */
+function storedTests(value: unknown): Array<{ command: string; outcome: "passed" | "failed" | "skipped" }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((test) => {
+    const command = storedField(test, "command");
+    const outcome = storedField(test, "outcome");
+    return typeof command === "string" && (outcome === "passed" || outcome === "failed" || outcome === "skipped")
+      ? [{ command, outcome }]
+      : [];
+  });
+}
+
+/**
+ * Packages from several runs' reports, in order: one entry per ecosystem +
+ * name + version, first appearance first, accepted advisories merged.
+ */
+function mergePackages(lists: ReadonlyArray<RegistryReport["packages"]>): RegistryReport["packages"] {
+  const merged = new Map<string, RegistryReport["packages"][number]>();
+  for (const list of lists) {
+    for (const pkg of list) {
+      const key = `${pkg.ecosystem}\0${pkg.name}\0${pkg.version}`;
+      const existing = merged.get(key);
+      if (!existing) {
+        merged.set(key, {
+          ...pkg,
+          ...(pkg.acceptedAdvisories ? { acceptedAdvisories: [...pkg.acceptedAdvisories] } : {}),
+        });
+        continue;
+      }
+      if (pkg.acceptedAdvisories?.length) {
+        existing.acceptedAdvisories = [...new Set([...(existing.acceptedAdvisories ?? []), ...pkg.acceptedAdvisories])];
+      }
+    }
+  }
+  return [...merged.values()];
 }
 
 function stableJson(value: unknown): string {

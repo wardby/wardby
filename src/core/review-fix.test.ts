@@ -326,3 +326,20 @@ describe("review fix workflow events", () => {
     expect(events).toEqual([]);
   });
 });
+
+describe("reviewFixTaskText description", () => {
+  it("mentions the description", () => {
+    const text = reviewFixTaskText({
+      repository: REPO,
+      prNumber: 7,
+      headSha: SHA,
+      round: 1,
+      maxRounds: 3,
+      priorRunId: "run_1",
+      reviewBody: "needs work",
+    });
+    expect(text).toContain(
+      "If the review asks for changes to the pull request description, delegate them too: the coding run's final summary becomes the full description.",
+    );
+  });
+});

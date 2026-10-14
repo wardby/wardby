@@ -65,13 +65,24 @@ the `Jira acting as` startup line to confirm the account.
 Beyond reading, searching and commenting, linked agents get
 `jira_list_transitions`, `jira_transition`, `jira_update_fields`,
 `jira_link_issues`, and `jira_get_property` / `jira_set_property` for
-per-issue state, plus `jira_create_issue` and `jira_read_attachment`. Each authorizes against the issue's own project and the
-agent's live link. Properties are not allowlisted: any `write` link can set
-them and any link can read them. They are stored as `wardby.<agentId>.<name>`,
-and anyone with Jira API access to the issue can read or overwrite them, so
-never store secrets there. Run status comments include an `Agent spend: $...`
-line. To see what work on a card, epic, or project cost, read
+per-issue state, plus `jira_create_issue` and `jira_read_attachment`. Each
+authorizes against the issue's own project and the agent's live link.
+Properties are not allowlisted: any `write` link can set them and any link can
+read them. They are stored as `wardby.<agentId>.<name>`, and anyone with Jira
+API access to the issue can read or overwrite them, so never store secrets
+there. Run status comments include an `Agent spend: $...` line. To see what
+work on a card, epic, or project cost, read
 [Attribute agent spend to issues](cost-attribution.md).
+
+When a run succeeds, opens no pull request, has no failed sub-run, and its
+reply is longer than about 2,000 characters (for example a plan), the status
+comment says "✅ The full reply follows in the next comment(s)." and the reply
+follows in up to four numbered comments ("Reply, part i of n") of about 15,000
+characters each, split at headings, paragraphs or lines. Anything beyond is
+cut with a note, and the full text stays on the run (`get_run`, `finalText`).
+`@`-mentions are defused. Each part is posted once; if one cannot be posted,
+the rest are skipped. Shorter replies stay in the status comment.
+
 If the token belongs to a person, Wardby refuses to act: startup logs an error
 and the webhook answers 503 `jira_personal_account`. Deliveries with a
 timestamp older than two hours (or more than five minutes ahead) are ignored.

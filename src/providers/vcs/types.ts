@@ -1,4 +1,12 @@
-import type { RelatedPullRequestsInput, RepositoryFileInput } from "./github.js";
+import type {
+  DescriptionBaseline,
+  DescriptionUpdateResult,
+  RelatedPullRequestsInput,
+  RepositoryFileInput,
+} from "./github.js";
+
+/** What happened to a pull request description: wardby just wrote it (a new PR) or updated a fix round's. */
+export type DescriptionWriteOutcome = { kind: "written"; sha256: string } | DescriptionUpdateResult;
 
 export interface VcsPrepareInput {
   runId: string;
@@ -65,6 +73,8 @@ export interface FinalizeChangesDetails {
   issue?: { key: string; url?: string; trackerName?: string };
   /** The request's other pull requests (control-plane rows): the PR body's Related pull requests section. */
   related?: RelatedPullRequestsInput;
+  /** Fix rounds: the control plane's record of the description wardby last wrote; enables the description update. */
+  description?: { baseline: DescriptionBaseline };
 }
 
 export type FinalizeChangesResult =
@@ -83,6 +93,7 @@ export type FinalizeChangesResult =
       commitSha: string;
       pullRequestNumber: number;
       pullRequestUrl: string;
+      description?: DescriptionWriteOutcome;
     }
   | {
       /** Revision-in-place: pushed a new commit onto an existing open PR's
@@ -95,6 +106,7 @@ export type FinalizeChangesResult =
       commitSha: string;
       pullRequestNumber: number;
       pullRequestUrl: string;
+      description?: DescriptionWriteOutcome;
     }
   | {
       /** Pushed the run's branch to a remote with no pull requests (a local
@@ -157,6 +169,15 @@ export interface VcsProvider {
    * provider (or test double) without it gives runs no services.
    */
   readRepositoryFile?(input: RepositoryFileInput): Promise<string | null>;
+  /**
+   * Re-derive a continuation's pull request description without pushing (a fix
+   * round that made no changes). Undefined when there is nothing to refresh
+   * (no description details, or a remote without pull requests). Never throws.
+   */
+  refreshPullRequestDescription?(
+    workspace: PreparedWorkspace,
+    details: FinalizeChangesDetails,
+  ): Promise<DescriptionWriteOutcome | undefined>;
 }
 
 export type ContinuationOutcome = "succeeded" | "failed" | "budget_exhausted";

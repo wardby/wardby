@@ -10,6 +10,7 @@ import {
   type ProviderConfig,
 } from "../../config/providers.js";
 import { summarizeRegistryFetches } from "../../coding/registry/report.js";
+import { linkedIssueReader } from "./linked-issue-reader.js";
 import { drainCodingQueue } from "../../core/coding-queue.js";
 import { prismaServiceStateReporter } from "../../core/coding-service-status.js";
 import { logger } from "../../core/logger.js";
@@ -204,6 +205,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     limits: { cpus: config.cpus, memoryMb: config.memoryMb, pids: config.pids, diskMb: config.diskMb },
     maxDiskMb: config.maxDiskMb,
     repoAccess,
+    readLinkedIssue: linkedIssueReader({ hosts: reviewHosts, issueTrackers }),
     issueUrl: (provider, key) => (provider === "jira" ? issueTrackers.jira?.issueUrl(key) : undefined),
     registryReport: async (runId) => {
       const rows = await options.db.registryFetch.findMany({ where: { runId }, orderBy: { createdAt: "asc" } });

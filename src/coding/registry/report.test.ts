@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { refusalHint } from "./refusal-hints.js";
 import { acceptedAdvisoriesReason, parseAcceptedAdvisories, summarizeRegistryFetches } from "./report.js";
 
 describe("summarizeRegistryFetches", () => {
@@ -17,9 +18,31 @@ describe("summarizeRegistryFetches", () => {
       { ecosystem: "pypi", name: "react", version: "19.0.0", size: null },
     ]);
     expect(summary.packageRefusals).toEqual([
-      { ecosystem: "npm", name: "left-pad", reason: "wardby_package_not_allowed" },
+      {
+        ecosystem: "npm",
+        name: "left-pad",
+        reason: "wardby_package_not_allowed",
+        hint: refusalHint("wardby_package_not_allowed"),
+      },
       { ecosystem: "npm", name: "left-pad", reason: "wardby_version_filtered" },
     ]);
+  });
+
+  it("adds the shared hint to each refusal whose code has one, and none for unknown codes", () => {
+    const row = { reason: null, sizeBytes: null, version: null };
+    const { packageRefusals } = summarizeRegistryFetches([
+      { ...row, ecosystem: "npm", name: "a", outcome: "refused", reason: "wardby_package_not_allowed_pending" },
+      { ...row, ecosystem: "npm", name: "b", outcome: "refused", reason: "wardby_version_filtered" },
+    ]);
+    expect(packageRefusals[0]).toEqual({
+      ecosystem: "npm",
+      name: "a",
+      reason: "wardby_package_not_allowed_pending",
+      hint: refusalHint("wardby_package_not_allowed_pending"),
+    });
+    expect(packageRefusals[0]?.hint).toContain("owner must allowlist");
+    expect(packageRefusals[1]).toEqual({ ecosystem: "npm", name: "b", reason: "wardby_version_filtered" });
+    expect(packageRefusals[1]).not.toHaveProperty("hint");
   });
 
   it("carries a served row's accepted-advisories reason onto its package, each id once", () => {

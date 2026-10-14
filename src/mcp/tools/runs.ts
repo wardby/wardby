@@ -88,6 +88,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
           resultBranch: true,
           baseSha: true,
           dependencyCacheResult: true,
+          prDescriptionOutcome: true,
         },
       });
       const localPr = await ctx.db.localPullRequest.findUnique({
@@ -139,6 +140,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         ...(codingRun?.resultBranch ? { resultBranch: codingRun.resultBranch } : {}),
         ...(codingRun?.baseSha ? { baseSha: codingRun.baseSha } : {}),
         ...(dependencyCache ? { dependencyCache } : {}),
+        ...(codingRun?.prDescriptionOutcome ? { prDescriptionOutcome: codingRun.prDescriptionOutcome } : {}),
         ...(localPr
           ? {
               review: {

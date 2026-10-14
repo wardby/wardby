@@ -2,7 +2,24 @@ import { createPrivateKey } from "node:crypto";
 import { importPKCS8, SignJWT } from "jose";
 import { isGitHubLogin } from "../../config/github-allowed-accounts.js";
 import { ACCEPTED_ADVISORY_ID } from "../../coding/registry/allowlist.js";
+import { refusalMeaning } from "../../coding/registry/refusal-hints.js";
 import { DEPENDENCY_CACHE_PATH, normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
+import {
+  LATEST_RUN_MARKER_PREFIX,
+  RELATED_SECTION_END,
+  RELATED_SECTION_START,
+  assessFinalMessage,
+  descriptionAppliedComment,
+  descriptionFallbackComment,
+  descriptionSha256,
+  extractRelatedBlock,
+  findDescriptionComments,
+  isUneditedDescription,
+  supersededDescriptionComment,
+  type DescriptionCommentRecord,
+} from "./pr-description.js";
+
+export { RELATED_SECTION_END, RELATED_SECTION_START };
 
 const DEFAULT_API_BASE_URL = "https://api.github.com";
 const DEFAULT_API_VERSION = "2026-03-10";
@@ -82,12 +99,75 @@ export interface PullRequestInput {
    * the marked "Related pull requests" section. Rendering failures omit it.
    */
   related?: RelatedPullRequestsInput;
+  /**
+   * The run that last wrote this description (a fix round), rendered as the
+   * hidden `<!-- wardby-latest:<runId> -->` last line. The root run marker
+   * stays first. Dropped when it isn't a safe run id.
+   */
+  latestRunId?: string;
+  /**
+   * What the packages list covers: this run (the default), or every run on
+   * the pull request (a later run's description update, whose `packages` are
+   * cumulative). Only the section title differs.
+   */
+  packagesScope?: "run" | "pull_request";
 }
 
 export interface PullRequestResult {
   number: number;
   url: string;
+  /**
+   * Hash (descriptionSha256) of the body in GitHub's create response. Set only
+   * when this call created the pull request; absent when it found one.
+   */
+  descriptionSha256?: string;
 }
+
+/** What wardby last wrote into a pull request description (control-plane records). */
+export interface DescriptionBaseline {
+  /** Null = legacy pull request (no recorded write). */
+  recordedSha256: string | null;
+  /**
+   * Legacy pull requests only: the hash of the body wardby would have written
+   * for the root run, rebuilt from stored records. A current body with this
+   * hash is unedited. Absent when the records can't rebuild it (then the
+   * description counts as edited).
+   */
+  legacySha256?: string;
+  /** Stored summary of the run whose text the description carries (root run for legacy). */
+  previousAgentText?: string;
+  /** That run's id. */
+  agentTextRunId: string;
+}
+
+/**
+ * A fix round's description update. `runId` is this (latest) run; the pull
+ * request is re-found by `rootRunId`'s marker. `related` is ignored: the
+ * current body's Related block is kept verbatim.
+ */
+export interface UpdateDescriptionInput extends Omit<PullRequestInput, "runId" | "acceptReadyForReview"> {
+  rootRunId: string;
+  runId: string;
+  baseline: DescriptionBaseline;
+  /**
+   * The head commit this description describes (the run's pushed commit, or
+   * the unchanged head of a no-change round); stamped on the fallback
+   * comment so a reviewer only trusts a proposal for the head it reviews.
+   */
+  headSha?: string;
+}
+
+/** `agentTextRunId` is the run whose summary the description now carries. */
+export type DescriptionUpdateResult =
+  | { kind: "replaced" | "unchanged"; sha256: string; agentTextRunId: string }
+  | {
+      kind: "refreshed";
+      reason: "empty" | "too_short" | "missing_closing_keyword";
+      sha256: string;
+      agentTextRunId: string;
+    }
+  | { kind: "edited_by_hand"; commentPosted: boolean }
+  | { kind: "skipped"; reason: "not_open" | "too_long" | "error" };
 
 /** See VcsProvider.notifyContinuationStarted/Finished (types.ts) — these back that GitHub-specific mechanism. */
 export interface ContinuationStatusCommentInput {
@@ -138,6 +218,20 @@ export interface GitHubRepositoryAccess {
     baseRef: string;
     headRef: string;
   }): Promise<PullRequestResult | null>;
+  /**
+   * Rewrites the root run's open pull request description for a fix round,
+   * or, when a person edited it since wardby last wrote it, upserts a comment
+   * carrying the proposed description instead. Never throws. Optional:
+   * without it, descriptions are not updated after the first run.
+   */
+  updatePullRequestDescription?(input: UpdateDescriptionInput): Promise<DescriptionUpdateResult>;
+  /**
+   * Before a fix round's push: when wardby can't write the description
+   * directly, writes (or updates) the fallback comment stamped with the head
+   * about to be pushed, so it already exists when the push starts a review.
+   * True when it wrote one. Never throws. Optional.
+   */
+  proposeDescriptionComment?(input: UpdateDescriptionInput): Promise<boolean>;
   /** Creates the status comment if none exists yet for this run, else updates it. */
   upsertContinuationStatusComment(input: ContinuationStatusCommentInput): Promise<void>;
   /** Updates the status comment if one already exists for this run; a no-op otherwise (never creates). */
@@ -229,8 +323,20 @@ function isSafeMarkdownFragment(value: string): boolean {
   return !value.includes("`") && !value.includes("\n") && !value.includes("\r");
 }
 
-export const RELATED_SECTION_START = "<!-- wardby-related:start -->";
-export const RELATED_SECTION_END = "<!-- wardby-related:end -->";
+/** Whether a comment was written by this GitHub App (its bot user, through this App's id). */
+function isThisAppsComment(comment: Record<string, unknown>, appId: number): boolean {
+  const user = comment.user;
+  const app = comment.performed_via_github_app;
+  return (
+    !!user &&
+    typeof user === "object" &&
+    (user as Record<string, unknown>).type === "Bot" &&
+    !!app &&
+    typeof app === "object" &&
+    (app as Record<string, unknown>).id === appId
+  );
+}
+
 /** At most this many pull requests are listed; the rest are counted. */
 export const MAX_RELATED_PULL_REQUESTS = 20;
 /** GitHub rejects a pull request body longer than this. */
@@ -473,7 +579,9 @@ function packagesSection(input: PullRequestInput): string | undefined {
   return [
     ...(restored ? [restored, ""] : []),
     "<details>",
-    `<summary>Packages installed during this run (${packages.length})</summary>`,
+    input.packagesScope === "pull_request"
+      ? `<summary>Packages installed by wardby's runs on this pull request (${packages.length})</summary>`
+      : `<summary>Packages installed during this run (${packages.length})</summary>`,
     "",
     ...cappedList(packages.map((pkg) => `- ${pkg.ecosystem} \`${pkg.name}@${pkg.version}\``)),
     ...(refusals.length > 0
@@ -509,16 +617,6 @@ export function isLockfilePath(path: string): boolean {
   return LOCKFILE_NAMES.has(path.slice(path.lastIndexOf("/") + 1));
 }
 
-/** What each refusal code means to someone reading the PR, without the registry's internals. */
-const REFUSAL_MEANING: Record<string, string> = {
-  wardby_package_not_allowed: "not on the allowlist, or only reachable through a refused package",
-  wardby_version_filtered: "withheld: newer than the release-age limit, or a high-severity advisory",
-  wardby_graph_incomplete: "its dependencies could not be confirmed (usually transient)",
-  wardby_lockfile_integrity_mismatch: "the lock file's integrity does not match the registry's",
-  wardby_upstream_error: "the upstream registry failed (transient)",
-  wardby_audit_unavailable: "the advisory check was unavailable (transient)",
-};
-
 /** At most this many refused packages are named in the warning; the full list stays in the details. */
 const MAX_WARNING_NAMES = 8;
 
@@ -551,7 +649,7 @@ function refusalWarning(input: PullRequestInput): string | undefined {
     const listed = [...names];
     const shown = listed.slice(0, MAX_WARNING_NAMES).join(", ");
     const more = listed.length > MAX_WARNING_NAMES ? ` and ${listed.length - MAX_WARNING_NAMES} more` : "";
-    const meaning = REFUSAL_MEANING[reason];
+    const meaning = refusalMeaning(reason);
     lines.push(`> - ${shown}${more}: \`${reason}\`${meaning ? ` (${meaning})` : ""}`);
   }
   const lockfiles = (input.changedLockfiles ?? []).filter(isSafeMarkdownFragment);
@@ -564,7 +662,7 @@ function refusalWarning(input: PullRequestInput): string | undefined {
 }
 
 /** The hidden run marker stays first and unconditional: createOrFindDraftPullRequest's idempotent lookup depends on it. */
-export function pullRequestBody(input: PullRequestInput): string {
+export function pullRequestBody(input: PullRequestInput, options: { omitPackages?: boolean } = {}): string {
   const sections = [`${RUN_MARKER_PREFIX}${input.runId} -->`];
   // Hidden marker stays first; the issue link is the first visible line.
   const issue = issueLine(input);
@@ -588,10 +686,13 @@ export function pullRequestBody(input: PullRequestInput): string {
   // The packages section is informational: a failure rendering it (e.g. a
   // malformed report) omits the section and never fails finalization.
   try {
-    const packages = packagesSection(input);
+    const packages = options.omitPackages ? undefined : packagesSection(input);
     if (packages) sections.push(packages);
   } catch {
     // omitted
+  }
+  if (input.latestRunId && SAFE_RUN_ID.test(input.latestRunId)) {
+    sections.push(`${LATEST_RUN_MARKER_PREFIX}${input.latestRunId} -->`);
   }
   return sections.join("\n\n");
 }
@@ -920,7 +1021,14 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
         },
         [201, 422],
       );
-      if (response.status === 201) return this.parsePullRequest(await response.json(), repository);
+      if (response.status === 201) {
+        const payload = record(await response.json());
+        const created = this.parsePullRequest(payload, repository);
+        // Hash what GitHub stored, not what was sent.
+        return typeof payload.body === "string"
+          ? { ...created, descriptionSha256: descriptionSha256(payload.body) }
+          : created;
+      }
 
       const raced = await this.findPullRequest(token, { ...input, repository, baseRef, headRef });
       if (raced) return raced;
@@ -946,6 +1054,294 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     if (!SAFE_RUN_ID.test(input.runId)) throw new Error("github_pull_request_input_invalid");
     return this.withRepositoryToken(repository, (token) =>
       this.findPullRequest(token, { runId: input.runId, repository, baseRef, headRef, acceptReadyForReview: true }),
+    );
+  }
+
+  /**
+   * A fix round's description update (see GitHubRepositoryAccess). One
+   * repository token; every failure becomes `skipped:error`.
+   */
+  async updatePullRequestDescription(input: UpdateDescriptionInput): Promise<DescriptionUpdateResult> {
+    try {
+      const target = this.descriptionTarget(input);
+      return await this.withRepositoryToken(target.repository, async (token) => {
+        const state = await this.descriptionState(token, input, target);
+        if (!state) return { kind: "skipped", reason: "not_open" } as const;
+        const { pr, verdict, full, proposed } = state;
+        const { repository } = target;
+        if (!state.writable) {
+          // The comment truncates a body too long for it, so the full one goes in.
+          const commentPosted = await this.upsertDescriptionComment(token, repository, pr.number, input, full, state)
+            .then(() => true)
+            .catch(() => false);
+          return { kind: "edited_by_hand", commentPosted } as const;
+        }
+        if (proposed === undefined) return { kind: "skipped", reason: "too_long" } as const;
+
+        const agentTextRunId = verdict.ok ? input.runId : input.baseline.agentTextRunId;
+        const outcome = verdict.ok
+          ? ({ kind: "replaced" } as const)
+          : ({ kind: "refreshed", reason: verdict.reason } as const);
+        const proposedSha256 = descriptionSha256(proposed);
+        if (proposedSha256 === input.baseline.recordedSha256) {
+          return { kind: "unchanged", sha256: proposedSha256, agentTextRunId: input.baseline.agentTextRunId } as const;
+        }
+        const [owner, name] = repository.split("/");
+        // Known, accepted race: a person editing between our read and this PATCH is overwritten (GitHub has no If-Match); the store's compare-and-set only covers wardby runs racing each other.
+        const response = await this.requestJson(
+          `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls/${pr.number}`,
+          token,
+          { method: "PATCH", body: JSON.stringify({ body: proposed }) },
+          [200],
+        );
+        const written = record(await response.json()).body;
+        if (typeof written !== "string") throw new Error("github_api_invalid_response");
+        // A proposal left from an earlier round is stale now; a failure here never undoes the write.
+        await this.markDescriptionCommentApplied(token, repository, pr.number, input.runId, state).catch(
+          () => undefined,
+        );
+        return { ...outcome, sha256: descriptionSha256(written), agentTextRunId };
+      });
+    } catch {
+      return { kind: "skipped", reason: "error" };
+    }
+  }
+
+  /** See GitHubRepositoryAccess.proposeDescriptionComment. */
+  async proposeDescriptionComment(input: UpdateDescriptionInput): Promise<boolean> {
+    try {
+      if (!input.headSha || !/^[0-9a-f]{40}$/.test(input.headSha)) return false;
+      const target = this.descriptionTarget(input);
+      return await this.withRepositoryToken(target.repository, async (token) => {
+        const state = await this.descriptionState(token, input, target);
+        if (!state || state.writable) return false;
+        await this.upsertDescriptionComment(token, target.repository, state.pr.number, input, state.full, state);
+        return true;
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  /** The validated repository and refs; throws unless this is wardby's own pull request branch. */
+  private descriptionTarget(input: UpdateDescriptionInput): { repository: string; baseRef: string; headRef: string } {
+    const repository = normalizeGitHubRepository(input.repository);
+    const baseRef = normalizeGitRef(input.baseRef);
+    const headRef = normalizeGitRef(input.headRef);
+    if (
+      !SAFE_RUN_ID.test(input.runId) ||
+      !SAFE_RUN_ID.test(input.rootRunId) ||
+      !SAFE_RUN_ID.test(input.baseline.agentTextRunId) ||
+      (input.headSha !== undefined && !/^[0-9a-f]{40}$/.test(input.headSha)) ||
+      // Only wardby's own pull request: its branch is the root run's.
+      headRef !== `wardby/run-${input.rootRunId}`
+    ) {
+      throw new Error("github_pull_request_description_input_invalid");
+    }
+    return { repository, baseRef, headRef };
+  }
+
+  /**
+   * The open pull request, the description this run proposes, and whether
+   * wardby may write it directly: it is unedited (recorded or rebuilt hash),
+   * or a person copied wardby's latest proposal in (taken back). Null when
+   * the pull request isn't open. `comments` is set when it was read.
+   */
+  private async descriptionState(
+    token: string,
+    input: UpdateDescriptionInput,
+    target: { repository: string; baseRef: string; headRef: string },
+  ): Promise<{
+    pr: PullRequestResult;
+    currentBody: string;
+    verdict: ReturnType<typeof assessFinalMessage>;
+    full: string;
+    proposed: string | undefined;
+    writable: boolean;
+    comments?: { newest: DescriptionCommentRecord | null; older: DescriptionCommentRecord[] };
+  } | null> {
+    const { repository, baseRef, headRef } = target;
+    const found = await this.findMarkedPullRequest(token, {
+      runId: input.rootRunId,
+      repository,
+      baseRef,
+      headRef,
+      acceptReadyForReview: true,
+    });
+    if (!found) return null;
+    const { pr, body: currentBody } = found;
+    const verdict = assessFinalMessage(input.summary, input.baseline.previousAgentText);
+    const summary = verdict.ok ? input.summary : input.baseline.previousAgentText;
+    const { full, proposed } = this.proposedDescription(input, repository, baseRef, headRef, summary, currentBody);
+    const unedited = isUneditedDescription({
+      currentBody,
+      rootRunId: input.rootRunId,
+      recordedSha256: input.baseline.recordedSha256,
+      ...(input.baseline.legacySha256 ? { legacySha256: input.baseline.legacySha256 } : {}),
+      previousAgentText: input.baseline.previousAgentText,
+    });
+    if (unedited) return { pr, currentBody, verdict, full, proposed, writable: true };
+    const comments = await this.findDescriptionComments(token, repository, pr.number);
+    const latest = comments.newest?.parsed.proposed;
+    // The author copied wardby's latest proposal in: the description is wardby's again.
+    const takenBack =
+      latest !== undefined &&
+      isUneditedDescription({
+        currentBody,
+        rootRunId: input.rootRunId,
+        recordedSha256: descriptionSha256(latest),
+      });
+    return { pr, currentBody, verdict, full, proposed, writable: takenBack, comments };
+  }
+
+  /**
+   * The rebuilt description: the generated sections from this run with
+   * `summary` as the agent text, the latest-run marker last, and the current
+   * body's Related block re-inserted verbatim. `proposed` drops the Packages
+   * section when `full` exceeds GitHub's limit, and is undefined when it still
+   * would.
+   */
+  private proposedDescription(
+    input: UpdateDescriptionInput,
+    repository: string,
+    baseRef: string,
+    headRef: string,
+    summary: string | undefined,
+    currentBody: string,
+  ): { full: string; proposed: string | undefined } {
+    const related = extractRelatedBlock(currentBody.replace(/\r\n/g, "\n"));
+    const build = (omitPackages: boolean) => {
+      const body = pullRequestBody(
+        {
+          repository,
+          baseRef,
+          headRef,
+          runId: input.rootRunId,
+          latestRunId: input.runId,
+          summary,
+          tests: input.tests,
+          tag: input.tag,
+          packages: input.packages,
+          packagesScope: "pull_request",
+          packageRefusals: input.packageRefusals,
+          restoredDependencies: input.restoredDependencies,
+          changedLockfiles: input.changedLockfiles,
+          issue: input.issue,
+        },
+        { omitPackages },
+      );
+      return related ? (upsertRelatedSection(body, related) ?? body) : body;
+    };
+    const full = build(false);
+    if (full.length <= MAX_PULL_REQUEST_BODY_CHARS) return { full, proposed: full };
+    const trimmed = build(true);
+    return { full, proposed: trimmed.length <= MAX_PULL_REQUEST_BODY_CHARS ? trimmed : undefined };
+  }
+
+  /**
+   * Creates the pull request's one description comment, or edits the newest
+   * one this App wrote (unchanged text is not re-sent); older duplicates are
+   * rewritten to point at it. A comment anyone else wrote is never edited.
+   */
+  private async upsertDescriptionComment(
+    token: string,
+    repository: string,
+    pullRequestNumber: number,
+    input: UpdateDescriptionInput,
+    proposedBody: string,
+    state: { comments?: { newest: DescriptionCommentRecord | null; older: DescriptionCommentRecord[] } },
+  ): Promise<void> {
+    const body = descriptionFallbackComment(input.runId, proposedBody, input.headSha);
+    const { newest, older } =
+      state.comments ?? (await this.findDescriptionComments(token, repository, pullRequestNumber));
+    const [owner, name] = repository.split("/");
+    const commentPath = (id: number) =>
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issues/comments/${id}`;
+    let url = newest?.url;
+    if (newest) {
+      if (newest.body.replace(/\r\n/g, "\n") !== body) {
+        await this.requestJson(
+          commentPath(newest.id),
+          token,
+          { method: "PATCH", body: JSON.stringify({ body }) },
+          [200],
+        );
+      }
+    } else {
+      const response = await this.requestJson(
+        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issues/${pullRequestNumber}/comments`,
+        token,
+        { method: "POST", body: JSON.stringify({ body }) },
+        [201],
+      );
+      const created = record(await response.json()).html_url;
+      url = typeof created === "string" ? created : undefined;
+    }
+    await this.supersedeDescriptionComments(token, commentPath, older, url);
+  }
+
+  /** Once a run applied its description, a pending proposal in the description comment is marked applied. */
+  private async markDescriptionCommentApplied(
+    token: string,
+    repository: string,
+    pullRequestNumber: number,
+    runId: string,
+    state: { comments?: { newest: DescriptionCommentRecord | null; older: DescriptionCommentRecord[] } },
+  ): Promise<void> {
+    const { newest, older } =
+      state.comments ?? (await this.findDescriptionComments(token, repository, pullRequestNumber));
+    if (!newest) return;
+    const [owner, name] = repository.split("/");
+    const commentPath = (id: number) =>
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issues/comments/${id}`;
+    if (!newest.parsed.applied) {
+      await this.requestJson(
+        commentPath(newest.id),
+        token,
+        { method: "PATCH", body: JSON.stringify({ body: descriptionAppliedComment(runId) }) },
+        [200],
+      );
+    }
+    await this.supersedeDescriptionComments(token, commentPath, older, newest.url);
+  }
+
+  /** Rewrites duplicate description comments to a pointer at the one in use. */
+  private async supersedeDescriptionComments(
+    token: string,
+    commentPath: (id: number) => string,
+    older: readonly DescriptionCommentRecord[],
+    url: string | undefined,
+  ): Promise<void> {
+    for (const duplicate of older) {
+      await this.requestJson(
+        commentPath(duplicate.id),
+        token,
+        { method: "PATCH", body: JSON.stringify({ body: supersededDescriptionComment(url) }) },
+        [200],
+      );
+    }
+  }
+
+  /** The description comments this App wrote (see findDescriptionComments; the reviewer reads them the same way). */
+  private async findDescriptionComments(
+    token: string,
+    repository: string,
+    pullRequestNumber: number,
+  ): Promise<{ newest: DescriptionCommentRecord | null; older: DescriptionCommentRecord[] }> {
+    const { id: appId } = await this.appIdentity();
+    const [owner, name] = repository.split("/");
+    return findDescriptionComments(
+      async (page) => {
+        const response = await this.requestJson(
+          `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issues/${pullRequestNumber}/comments?per_page=100&page=${page}`,
+          token,
+        );
+        const payload: unknown = await response.json();
+        if (!Array.isArray(payload)) throw new Error("github_api_invalid_response");
+        return payload as unknown[];
+      },
+      // Only this App's own comments: never a person's, nor another App's or bot's.
+      (comment) => isThisAppsComment(comment, appId),
     );
   }
 
@@ -1042,6 +1438,14 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
   }
 
   private async findPullRequest(token: string, input: PullRequestInput): Promise<PullRequestResult | null> {
+    return (await this.findMarkedPullRequest(token, input))?.pr ?? null;
+  }
+
+  /** findPullRequest, plus the matched pull request's raw body. */
+  private async findMarkedPullRequest(
+    token: string,
+    input: PullRequestInput,
+  ): Promise<{ pr: PullRequestResult; body: string } | null> {
     const [owner, name] = input.repository.split("/");
     const query = new URLSearchParams({
       state: "open",
@@ -1059,7 +1463,10 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     for (const item of payload) {
       const candidate = record(item);
       if (typeof candidate.body === "string" && candidate.body.includes(marker)) {
-        return this.parsePullRequest(candidate, input.repository, input.acceptReadyForReview === true);
+        return {
+          pr: this.parsePullRequest(candidate, input.repository, input.acceptReadyForReview === true),
+          body: candidate.body,
+        };
       }
     }
     return null;
@@ -1098,6 +1505,17 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     pullRequestNumber: number,
     runId: string,
   ): Promise<{ id: number } | null> {
+    const marker = `${STATUS_COMMENT_MARKER_PREFIX}${runId} -->`;
+    return this.findMarkedComment(token, repository, pullRequestNumber, (body) => body.includes(marker));
+  }
+
+  /** The first comment on the pull request (first page) whose body `matches`. */
+  private async findMarkedComment(
+    token: string,
+    repository: string,
+    pullRequestNumber: number,
+    matches: (body: string) => boolean,
+  ): Promise<{ id: number; body: string } | null> {
     const [owner, name] = repository.split("/");
     const response = await this.requestJson(
       `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issues/${pullRequestNumber}/comments?per_page=100`,
@@ -1105,12 +1523,10 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     );
     const payload: unknown = await response.json();
     if (!Array.isArray(payload)) throw new Error("github_api_invalid_response");
-    const marker = `${STATUS_COMMENT_MARKER_PREFIX}${runId} -->`;
     for (const item of payload) {
       const candidate = record(item);
-      if (typeof candidate.body === "string" && candidate.body.includes(marker)) {
-        return { id: positiveInteger(candidate.id) };
-      }
+      if (typeof candidate.body !== "string" || !matches(candidate.body)) continue;
+      return { id: positiveInteger(candidate.id), body: candidate.body };
     }
     return null;
   }

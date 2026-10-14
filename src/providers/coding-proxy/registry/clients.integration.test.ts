@@ -127,6 +127,8 @@ interface TestRegistry {
   store: MemoryRegistryStore;
   token: string;
   registryUrl: (ecosystem: string) => string;
+  /** Whether any graph walk ran for the run (its walk state exists). */
+  walked: () => boolean;
 }
 
 /** Starts a real coding-proxy HTTP server backed by a real RegistryService,
@@ -134,7 +136,8 @@ interface TestRegistry {
  *  instead of the real npm/PyPI hosts. */
 async function startTestRegistry(
   allowlist: PackageAllowlist,
-  routes: Map<string, () => Response>,
+  routes: Map<string, () => Response | Promise<Response>>,
+  options: { graphTimeoutMs?: number } = {},
 ): Promise<TestRegistry> {
   const port = await freePort();
   const store = new MemoryRegistryStore();
@@ -172,10 +175,20 @@ async function startTestRegistry(
     upstream,
     proxyBase: `http://127.0.0.1:${port}/registry/`,
     limits: { maxFileBytes: 50 * 1024 * 1024, maxTotalBytes: 200 * 1024 * 1024, maxFiles: 100, idleTimeoutMs: 30_000 },
+    graphTimeoutMs: options.graphTimeoutMs,
   });
   const proxy = new CodingProxy({ ledger: new MemoryProxyLedger(), credentials: { resolve: async () => "UNUSED" } });
   const server = await startCodingProxyServer(proxy, { host: "127.0.0.1", port, registry });
-  return { server, store, token, registryUrl: (ecosystem) => `http://127.0.0.1:${port}/registry/${ecosystem}/` };
+  const walked = () =>
+    ((registry as unknown as { tallies: Map<string, { graphs?: Map<string, unknown> }> }).tallies.get(context.runId)
+      ?.graphs?.size ?? 0) > 0;
+  return {
+    server,
+    store,
+    token,
+    registryUrl: (ecosystem) => `http://127.0.0.1:${port}/registry/${ecosystem}/`,
+    walked,
+  };
 }
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -284,6 +297,7 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
       store,
       token,
       registryUrl: registryUrlFor,
+      walked,
     } = await startTestRegistry({ npm: ["wardby-lock-root"] }, routes);
     cleanups.push(() => server.close());
 
@@ -332,14 +346,17 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
         .sort(),
     ).toEqual(["wardby-lock-child", "wardby-lock-root"]);
     expect(await store.isAllowedDependency("client-integration-run", "npm", "wardby-lock-child")).toBe(true);
+    // Without a plan, the child's tarball was found by a graph walk.
+    expect(walked()).toBe(true);
   });
 
   it("verifies a committed package-lock.json through the npm shim, then installs the approved versions without a walk", async () => {
     // The worker's npm is the driver image's shim (npm-shim.mjs, linked as
     // npm ahead of the real one on PATH): `npm ci` first sends the lockfile
     // to POST /-/plan, which checks every entry against the (fake) registry
-    // and approves its exact versions, so the tarball requests that follow
-    // are served from the approvals, with no graph walk (no allowances).
+    // and approves its exact versions (and their names as allowances), so
+    // the tarball requests that follow are served from the approvals, with
+    // no graph walk.
     const fixtureDir = new URL("./fixtures/npm-lockfile/", import.meta.url);
     const lock = JSON.parse(await readFile(new URL("package-lock.json", fixtureDir), "utf8"));
     const routes = new Map<string, () => Response>();
@@ -372,6 +389,7 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
       store,
       token,
       registryUrl: registryUrlFor,
+      walked,
     } = await startTestRegistry({ npm: ["wardby-lock-root"] }, routes);
     cleanups.push(() => server.close());
 
@@ -415,15 +433,18 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
         .map((fetch) => fetch.name)
         .sort(),
     ).toEqual(["wardby-lock-child", "wardby-lock-root"]);
-    // No graph walk ran: it would have recorded the child as an allowance.
-    expect(store.allowances.size).toBe(0);
+    // No graph walk ran, and the only allowances are the plan's approved names.
+    expect(walked()).toBe(false);
+    expect([...store.allowances].map((key) => key.split("\0")[2]).sort()).toEqual([
+      "wardby-lock-child",
+      "wardby-lock-root",
+    ]);
   });
 
   it("refuses a package not on the allowlist and surfaces the reason to npm", async () => {
-    // The root's metadata must be reachable: before refusing, the proxy
-    // resolves the approved graph from it, and an unreadable graph is
-    // answered "unavailable, try again" (502), never "not allowed". The
-    // fixture's dependencies are dropped so the graph is just the root.
+    // npm asks for the name's metadata, which is refused at once: a
+    // metadata request never walks the graph. The root is served anyway in
+    // case npm reads it; its dependencies are dropped.
     const npmDoc = JSON.parse(
       await readFile(new URL("../../../coding/registry/fixtures/npm-left-pad.json", import.meta.url), "utf8"),
     );
@@ -468,6 +489,70 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
     );
     expect(result.code).not.toBe(0);
     expect(result.stderr).toContain("wardby_package_not_allowed");
+  });
+
+  it("real npm gets the final refusal for an unreached name at once, with no walk, and does not retry a 403", async () => {
+    // The root's one dependency never answers: a graph walk would be cut
+    // short. A metadata request never starts one, so npm gets the final
+    // answer at once.
+    const npmDoc = JSON.parse(
+      await readFile(new URL("../../../coding/registry/fixtures/npm-left-pad.json", import.meta.url), "utf8"),
+    );
+    for (const version of Object.values(npmDoc.versions as Record<string, { dependencies?: unknown }>))
+      version.dependencies = { "slow-dependency": "^1.0.0" };
+    const {
+      server,
+      store,
+      token,
+      registryUrl: registryUrlFor,
+    } = await startTestRegistry(
+      { npm: ["left-pad"] },
+      new Map<string, () => Response | Promise<Response>>([
+        ["https://registry.npmjs.org/left-pad", () => Response.json(npmDoc)],
+        ["https://registry.npmjs.org/slow-dependency", () => new Promise<Response>(() => {})],
+      ]),
+      { graphTimeoutMs: 200 },
+    );
+    cleanups.push(() => server.close());
+
+    const cacheDir = await tmpDir("wardby-npm-cache-pending-");
+    const projectDir = await tmpDir("wardby-npm-proj-pending-");
+    cleanups.push(() => rm(cacheDir, { recursive: true, force: true }));
+    cleanups.push(() => rm(projectDir, { recursive: true, force: true }));
+
+    const registryUrl = registryUrlFor("npm");
+    const config = npmAdapter.workerConfig({ registryUrl, token, cacheDir });
+    const npmrcPath = config.files[0].path;
+    for (const file of config.files) await writeFile(file.path, file.content, { mode: file.mode });
+
+    const result = await run(
+      "npm",
+      [
+        "install",
+        "not-allowed-package",
+        "--registry",
+        registryUrl,
+        "--userconfig",
+        npmrcPath,
+        "--cache",
+        join(cacheDir, "cache"),
+        "--ignore-scripts",
+        "--no-audit",
+        "--no-fund",
+      ],
+      { cwd: projectDir, env: process.env },
+    );
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("wardby_package_not_allowed:");
+    expect(result.stderr).not.toContain("wardby_package_not_allowed_pending");
+    expect(result.stderr).toContain("owner must allowlist it");
+    // A 403 is final to npm: one request for the name, no retries.
+    const refused = (await store.listFetches("client-integration-run")).filter(
+      (fetch) => fetch.name === "not-allowed-package",
+    );
+    expect(refused).toMatchObject([{ outcome: "refused", reason: "wardby_package_not_allowed" }]);
+    // No walk: nothing was recorded as an allowance.
+    expect(store.allowances.size).toBe(0);
   });
 
   it.skipIf(!hasPip)("installs a real pip package end to end through the proxy", async () => {

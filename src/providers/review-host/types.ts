@@ -92,6 +92,8 @@ export interface PullRequestView {
   openThreads: ReviewThreadView[];
   /** CI on headSha (check runs and commit statuses, minus wardby's own); absent on hosts that can't read CI. */
   ci?: CiView;
+  /** Only on a wardby pull request with a pending proposal in its description comment. */
+  descriptionProposal?: DescriptionProposalView;
 }
 
 export interface PullRequestHead {
@@ -156,6 +158,16 @@ export interface IssueView {
   /** Anything was cut: the body, a comment, or older comments left out. */
   truncated: boolean;
 }
+
+/**
+ * wardby's proposed description on a pull request whose description wardby
+ * couldn't confirm as its own (from its description comment). `current`: the
+ * proposal is for the head being read; `not_for_this_head`: it isn't yet;
+ * `unavailable`: the comments couldn't be read.
+ */
+export type DescriptionProposalView =
+  | { state: "current"; forHead: string; runId?: string; text: string; truncated: boolean; note: string }
+  | { state: "not_for_this_head" | "unavailable"; note: string };
 
 export type IssueReadResult =
   ({ kind: "issue" } & IssueView) | { kind: "pull_request"; number: number } | { kind: "not_found"; number: number };
@@ -327,7 +339,8 @@ export interface CodeReviewHost {
   ): Promise<FileReadResult>;
   listFiles(repository: string, ref: string | undefined, pathPrefix?: string): Promise<FileListView>;
   /** An issue and its most recent comments, read-only. Hosts without issues (a local repository) leave it out. */
-  readIssue?(repository: string, number: number): Promise<IssueReadResult>;
+  /** `comments: false` reads the issue alone (title, body, labels), without its comments. */
+  readIssue?(repository: string, number: number, opts?: { comments?: boolean }): Promise<IssueReadResult>;
   publishReview(repository: string, input: PublishReviewInput): Promise<PublishReviewResult>;
   /** `id` identifies the new comment for editComment; a reply is an "inline" comment, anything else "conversation". */
   comment(repository: string, input: CommentInput): Promise<{ url: string; id: string }>;

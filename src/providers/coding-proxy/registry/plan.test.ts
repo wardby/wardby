@@ -625,6 +625,18 @@ describe("downloads of approved versions", () => {
     expect(store.fetches.at(-1)).toMatchObject({ name: "c", version: "2.0.3", outcome: "served" });
   });
 
+  it("allows a metadata request for a name the plan approved, with no graph walk", async () => {
+    // npm re-reads the metadata of packages already in the lockfile (e.g.
+    // on `npm install <new package>`); c is reachable only through a and b.
+    const { plan, service, store, calls } = setup(chain);
+    await plan(chainLock);
+    calls.length = 0;
+    const response = await service.handle({ ...download("c", "2.0.3"), subpath: "c" });
+    expect(response.status).toBe(200);
+    expect(calls).toEqual(["https://registry.npmjs.org/c"]);
+    expect(await store.isAllowedDependency("run-1", "npm", "c")).toBe(true);
+  });
+
   it("checks the download against the approved integrity", async () => {
     const npm = fakeNpm(chain);
     let tamper = false;
@@ -653,7 +665,8 @@ describe("downloads of approved versions", () => {
       ]);
     }
     expect(calls).toEqual([]);
-    expect(store.allowances.size).toBe(0);
+    // Only the approved name became an allowance; nothing walked.
+    expect([...store.allowances].map((key) => key.split("\0")[2])).toEqual(["a"]);
     // Recorded as a download refusal, the retried one once.
     expect(store.fetches.slice(fetchesBefore).map((fetch) => [fetch.name, fetch.version, fetch.reason])).toEqual([
       ["b", "1.1.0", "wardby_version_filtered"],
@@ -770,17 +783,11 @@ describe("downloads of approved versions", () => {
     await plan(chainLock);
     calls.length = 0;
     const response = await service.handle(download("c", "3.0.0"));
-    // Not approved: the allowlist, the graph walk and the version filter
-    // decide it from metadata, as for any install without a plan (the walk
-    // approves names, so c's other kept versions are served).
+    // Not approved: the version filter decides it from metadata. The plan
+    // approved the name c, which made it an allowance (as a walk would), so
+    // c's other kept versions are served with no walk.
     expect(response.status).toBe(200);
-    expect(calls).toEqual(
-      expect.arrayContaining([
-        "https://registry.npmjs.org/a",
-        "https://registry.npmjs.org/c",
-        tarballUrl("c", "3.0.0"),
-      ]),
-    );
+    expect(calls).toEqual(["https://registry.npmjs.org/c", tarballUrl("c", "3.0.0")]);
   });
 });
 
@@ -909,5 +916,83 @@ describe("lockfile plans and the dependency cache", () => {
     full.cacheSessions.set("run-1", { lockHashes: [...eight], sealedAt: null, createdAt: NOW });
     await setup(chain, { dependencyCache: true, store: full }).plan(chainLock);
     expect(hashesOf(full)).toEqual(eight);
+  });
+});
+
+describe("metadata misses and the run's lockfile plans", () => {
+  // a also declares d, which no lockfile below installs: d is reachable in
+  // the approved graph but never approved by a plan.
+  const withD: FakeRegistry = { ...chain, a: { "1.0.0": { deps: { b: "^1.0.0", d: "^1.0.0" } } }, d: { "1.0.0": {} } };
+  const metadata = (name: string) => ({
+    method: "GET",
+    ecosystem: "npm",
+    subpath: name,
+    token: "rrg_token",
+    signal: new AbortController().signal,
+  });
+  const v1Lock = JSON.stringify({ lockfileVersion: 1, dependencies: {} });
+
+  it("with no plan, refuses a reachable name at once, with no walk", async () => {
+    const { service, store, calls } = setup(withD);
+    const response = await service.handle(metadata("d"));
+    expect([response.status, await drain(response)]).toEqual([
+      403,
+      expect.stringContaining("wardby_package_not_allowed:"),
+    ]);
+    expect(calls).toEqual([]);
+    expect(store.fetches).toMatchObject([{ name: "d", outcome: "refused", reason: "wardby_package_not_allowed" }]);
+  });
+
+  it("after a clean plan, refuses a reachable name the plan did not approve at once, with no walk", async () => {
+    const { plan, service, calls } = setup(withD);
+    expect((await plan(chainLock)).json).toEqual({ approved: 3, refused: [] });
+    calls.length = 0;
+    const response = await service.handle(metadata("d"));
+    expect(response.status).toBe(403);
+    expect(calls).toEqual([]);
+  });
+
+  it("after a plan with a refusal, walks for a metadata miss and finds a reachable name", async () => {
+    // overrides forced c to 3.0.0 under b's ~2.0.0: the plan refuses it.
+    const registry: FakeRegistry = { ...withD, c: { "2.0.3": {}, "3.0.0": {} } };
+    const lock = JSON.parse(chainLock);
+    lock.packages["node_modules/c"] = locked("c", "3.0.0");
+    const { plan, service, calls } = setup(registry);
+    expect(refusedOf((await plan(JSON.stringify(lock))).json)).toEqual({ "c@3.0.0": "wardby_package_not_allowed" });
+    calls.length = 0;
+    const response = await service.handle(metadata("d"));
+    expect(response.status).toBe(200);
+    // The walk read a (its trimmed packument) to find d.
+    expect(calls).toContain("https://registry.npmjs.org/a");
+  });
+
+  it("after a plan refused as an unsupported lockfile (400), walks for a metadata miss", async () => {
+    const { plan, service, calls } = setup(withD);
+    expect((await plan(v1Lock)).status).toBe(400);
+    const response = await service.handle(metadata("c"));
+    expect(response.status).toBe(200);
+    expect(calls).toContain("https://registry.npmjs.org/b");
+  });
+
+  it("after a plan that timed out, walks for a metadata miss", async () => {
+    const npm = fakeNpm(withD);
+    let hang = true;
+    const upstream: UpstreamFetch = async (url, init) =>
+      hang && url === "https://registry.npmjs.org/b/1.1.0"
+        ? new Promise<Response>((_, reject) =>
+            init?.signal?.addEventListener("abort", () => reject(init.signal!.reason as Error), { once: true }),
+          )
+        : npm.upstream(url, init);
+    const { plan, service } = setup(withD, { upstream, planTimeoutMs: 50 });
+    expect((await plan(chainLock)).status).toBe(503);
+    hang = false;
+    await expect(service.handle(metadata("d"))).resolves.toMatchObject({ status: 200 });
+  });
+
+  it("keeps the fallback for the run: a clean plan after a failed one does not reset it", async () => {
+    const { plan, service } = setup(withD);
+    expect((await plan(v1Lock)).status).toBe(400);
+    expect((await plan(chainLock)).json).toEqual({ approved: 3, refused: [] });
+    await expect(service.handle(metadata("d"))).resolves.toMatchObject({ status: 200 });
   });
 });

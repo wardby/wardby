@@ -554,6 +554,19 @@ the run; the pull request description says which. A person
 reviews and merges; Wardby never merges for you. A later mention on that pull
 request continues the same branch.
 
+When a mention run finishes without opening a pull request or failing a
+sub-run and its reply is longer than about 2,000 characters (for example a
+plan), the status comment does not cut the reply short. It says "✅ Finished
+without opening a pull request. The full reply follows in the next
+comment(s)." (in a review thread: "...follows in this pull request's
+conversation."), and the reply is posted in up to four numbered comments
+("Reply, part i of n") of about 60,000 characters each, split at headings,
+paragraphs or lines. Anything beyond four parts is cut with a note; the full
+text stays on the run (`get_run`, `finalText`). `@`-mentions in the reply are
+defused. Each part is posted once; if one cannot be posted, the rest are
+skipped. Shorter replies, and runs that opened a pull request or had a failed
+sub-run, keep the status comment that quotes up to 2,000 characters.
+
 ## Next steps
 
 - [Architecture knowledge bundles](knowledge.md)

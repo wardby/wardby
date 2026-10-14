@@ -554,7 +554,9 @@ the model, and a tag that breaks it is normalized to a lowercase slug (or
 dropped) instead of failing an otherwise finished run. GitHub finalization
 re-validates the tag independently. Linking an issue is not the tag's job: put
 a closing keyword such as `Resolves #37` in the task so the worker includes it
-in the summary, which becomes the pull request body.
+in the summary, which becomes the pull request body on every run,
+including follow-ups (see
+[How the pull request description is kept current](code-review-agents.md#how-the-pull-request-description-is-kept-current)).
 
 Some workspace folders are never collected from a run: `node_modules`, `.venv`,
 `venv`, `__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`, `.tox`,

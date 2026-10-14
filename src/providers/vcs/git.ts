@@ -19,6 +19,7 @@ import type { GitRemote } from "./remote.js";
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
+  DescriptionWriteOutcome,
   FinalizeChangesDetails,
   FinalizeChangesResult,
   PreparedWorkspace,
@@ -511,8 +512,12 @@ export class GitVcsProvider implements VcsProvider {
     }
 
     await this.remote.assertContinuationOpen(prepared);
+    // Before the push: a description comment must already exist when the push starts a review.
+    await this.remote
+      .proposeDescriptionBeforePush?.({ workspace: prepared, details, changedPaths: changed, commitSha })
+      .catch(() => undefined);
     await this.pushOnce(prepared, commitSha);
-    const published = await this.remote.publish({ workspace: prepared, details, changedPaths: changed });
+    const published = await this.remote.publish({ workspace: prepared, details, changedPaths: changed, commitSha });
     if (published.kind === "branch") {
       if (published.branch !== prepared.headRef) throw new Error("vcs_head_ref_mismatch");
       return {
@@ -533,7 +538,20 @@ export class GitVcsProvider implements VcsProvider {
       commitSha,
       pullRequestNumber: published.number,
       pullRequestUrl: published.url,
+      ...(published.description ? { description: published.description } : {}),
     };
+  }
+
+  /** Re-derive a continuation's PR description without a push, delegated to the remote; never throws. */
+  async refreshPullRequestDescription(
+    workspace: PreparedWorkspace,
+    details: FinalizeChangesDetails,
+  ): Promise<DescriptionWriteOutcome | undefined> {
+    try {
+      return await this.remote.refreshDescription?.(workspace, details);
+    } catch {
+      return { kind: "skipped", reason: "error" };
+    }
   }
 
   async cleanup(workspace: PreparedWorkspace): Promise<void> {

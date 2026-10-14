@@ -260,8 +260,9 @@ export interface RegistryAdapter {
   /** Whether fetchMetadata's VersionInfo.dependencies is complete (npm's
    *  packuments carry every version's dependencies). When true, the core
    *  may resolve a run's approved dependency graph from metadata alone,
-   *  on demand, before refusing a name (a lockfile install requests
-   *  tarballs without first requesting each parent's metadata). False for
+   *  on demand, before refusing a download (a lockfile install requests
+   *  tarballs without first requesting each parent's metadata; a metadata
+   *  request never walks). False for
    *  ecosystems whose indexes omit dependencies (PyPI), where such a walk
    *  would only make upstream calls and find nothing. */
   readonly dependenciesInMetadata: boolean;

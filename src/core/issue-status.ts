@@ -5,8 +5,23 @@
  * text. Best effort throughout: nothing here throws.
  */
 import { Prisma, type PrismaClient } from "#prisma";
-import { projectOf, type IssueTrackerProvider, type IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
-import { collectRunOutcome, outcomeBody, runLine, workingBody, type FinishedRun } from "./host-status.js";
+import {
+  projectOf,
+  type IssueTracker,
+  type IssueTrackerProvider,
+  type IssueTrackerRegistry,
+} from "../providers/issue-tracker/types.js";
+import {
+  collectRunOutcome,
+  fullReplyComments,
+  fullReplyOf,
+  JIRA_REPLY_MAX_CHARS,
+  outcomeBody,
+  REPLY_MAX_PARTS,
+  runLine,
+  workingBody,
+  type FinishedRun,
+} from "./host-status.js";
 import { recordPullRequests } from "./issue-bridge.js";
 import { logger } from "./logger.js";
 
@@ -201,6 +216,7 @@ export async function completeIssueStatus(
     const writable = link?.access === "write";
     const project = projectOf(status.issueKey);
     let body: string;
+    let fullReply: string | null = null;
     if (writable) {
       const { pullRequests, failedChildren, budgetSentence } = await collectRunOutcome(db, run);
       const foreign = await continuedForAnotherIssue(
@@ -238,8 +254,10 @@ export async function completeIssueStatus(
               pullRequests: bridged,
             })
           : { notes: [] };
+      fullReply = fullReplyOf(run, pullRequests, failedChildren);
       const outcome = outcomeBody(run, "", pullRequests, failedChildren, {
         budgetSentence,
+        fullReplyFollows: true,
         noPullRequestText: "Done.",
         // One comment per request: this status comment carries the agent's answer.
         replyAsAnswer: true,
@@ -268,9 +286,60 @@ export async function completeIssueStatus(
     }
     // Unlinked or read-only with no status comment yet: complete the row
     // without posting; never create content where the agent may not write.
-    await db.runIssueStatus.update({ where: { runId: run.id }, data: { commentId, completedAt: new Date() } });
+    // Claims the row in one step, saving a posted comment's id at once so a retry edits it instead of
+    // posting a second one. Only the completion that claims it posts the full reply, so two racing
+    // completions (the run's own and the reconciler's) never post it twice.
+    const claimed = await db.runIssueStatus.updateMany({
+      where: { runId: run.id, completedAt: null },
+      data: { commentId, completedAt: new Date() },
+    });
+    if (claimed.count !== 1) {
+      log.warn(
+        { runId: run.id },
+        "the issue status comment was completed meanwhile; leaving any full reply to that completion",
+      );
+      return;
+    }
+    if (writable && fullReply !== null) {
+      await postFullReply(tracker, status.issueKey, run.id, fullReply, issueKeyProjects, link.commentVisibilityRole);
+    }
   } catch (err) {
     log.warn({ err, runId: run.id }, "could not complete the issue status comment");
+  }
+}
+
+/**
+ * Posts the full reply's parts in order, each at most once: the status comment already points to them,
+ * so a failed part is logged and the rest skipped (a gap would misnumber the reply), and the row is still
+ * completed. The full text stays on the run. Never throws.
+ */
+async function postFullReply(
+  tracker: IssueTracker,
+  issueKey: string,
+  runId: string,
+  reply: string,
+  issueKeyProjects: string[],
+  visibilityRole: string | null | undefined,
+): Promise<void> {
+  // Converted first, then split: the conversion lengthens `owner/repo#N` references, and the parts must fit after it.
+  const bodies = fullReplyComments(toJiraMarkdown(reply), {
+    maxChars: JIRA_REPLY_MAX_CHARS,
+    maxParts: REPLY_MAX_PARTS,
+  });
+  for (const [i, body] of bodies.entries()) {
+    try {
+      await tracker.comment(issueKey, {
+        markdown: body,
+        issueKeyProjects,
+        ...(visibilityRole ? { visibilityRole } : {}),
+      });
+    } catch (err) {
+      log.warn(
+        { err, runId, part: i + 1, parts: bodies.length },
+        "could not post a part of the run's full reply; the rest is skipped, the full text stays on the run",
+      );
+      return;
+    }
   }
 }
 

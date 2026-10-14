@@ -154,4 +154,269 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
       await db.run.deleteMany({ where: { id: alreadyFailedRunId } });
     }
   });
+  /** A succeeded coding run with a stored result summary; extra CodingRun columns from `data`. */
+  async function codingRunWith(runId: string, summary: string, data: Record<string, unknown> = {}) {
+    await db.run.create({ data: { id: runId, agentId, executionManaged: true, status: "succeeded" } });
+    await db.codingRun.create({
+      data: {
+        runId,
+        task: "Fix it.",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: `wardby/run-${runId}`,
+        provider: "codex",
+        model: "gpt-5.6-luna",
+        timeoutSec: 900,
+        allowedEgress: [],
+        protectedPaths: ["CODEOWNERS"],
+        budgetReservedUsd: 1,
+        result: { outcome: "pull_request_opened", summary },
+        ...data,
+      },
+    });
+  }
+
+  it("recordPullRequestDescription only updates when the expected hash matches (null for legacy)", async () => {
+    const legacy = `container-desc-legacy-${randomUUID()}`;
+    const recorded = `container-desc-recorded-${randomUUID()}`;
+    const [h1, h2, h3] = ["1", "2", "3"].map((c) => c.repeat(64));
+    try {
+      await codingRunWith(legacy, "Legacy text.");
+      await codingRunWith(recorded, "Root text.", { prDescriptionSha256: h1, prDescriptionRunId: recorded });
+      const store = new PrismaContainerExecutionStore(db);
+      const row = (runId: string) =>
+        db.codingRun.findUniqueOrThrow({
+          where: { runId },
+          select: { prDescriptionSha256: true, prDescriptionRunId: true },
+        });
+
+      // A legacy row (no hash) only matches an expected null.
+      await expect(
+        store.recordPullRequestDescription({ rootRunId: legacy, expectedSha256: h1, sha256: h2, agentTextRunId: "x" }),
+      ).resolves.toBe(false);
+      await expect(row(legacy)).resolves.toEqual({ prDescriptionSha256: null, prDescriptionRunId: null });
+      await expect(
+        store.recordPullRequestDescription({
+          rootRunId: legacy,
+          expectedSha256: null,
+          sha256: h2,
+          agentTextRunId: "x",
+        }),
+      ).resolves.toBe(true);
+      await expect(row(legacy)).resolves.toEqual({ prDescriptionSha256: h2, prDescriptionRunId: "x" });
+
+      // A recorded row matches only its current hash; a stale expectation (a lost race) writes nothing.
+      await expect(
+        store.recordPullRequestDescription({
+          rootRunId: recorded,
+          expectedSha256: null,
+          sha256: h2,
+          agentTextRunId: "y",
+        }),
+      ).resolves.toBe(false);
+      await expect(
+        store.recordPullRequestDescription({
+          rootRunId: recorded,
+          expectedSha256: h1,
+          sha256: h2,
+          agentTextRunId: "y",
+        }),
+      ).resolves.toBe(true);
+      await expect(
+        store.recordPullRequestDescription({
+          rootRunId: recorded,
+          expectedSha256: h1,
+          sha256: h3,
+          agentTextRunId: "z",
+        }),
+      ).resolves.toBe(false);
+      await expect(row(recorded)).resolves.toEqual({ prDescriptionSha256: h2, prDescriptionRunId: "y" });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: [legacy, recorded] } } });
+      await db.run.deleteMany({ where: { id: { in: [legacy, recorded] } } });
+    }
+  });
+
+  it("pullRequestDescriptionBaseline reads the root's hash and the author run's stored summary", async () => {
+    const root = `container-desc-root-${randomUUID()}`;
+    const author = `container-desc-author-${randomUUID()}`;
+    const legacy = `container-desc-legacy-${randomUUID()}`;
+    const hash = "4".repeat(64);
+    try {
+      await codingRunWith(author, "Fix round text.");
+      await codingRunWith(root, "Root text.", { prDescriptionSha256: hash, prDescriptionRunId: author });
+      await codingRunWith(legacy, "Legacy text.");
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.pullRequestDescriptionBaseline(root)).resolves.toEqual({
+        recordedSha256: hash,
+        previousAgentText: "Fix round text.",
+        agentTextRunId: author,
+      });
+      await expect(store.pullRequestDescriptionBaseline(legacy)).resolves.toEqual({
+        recordedSha256: null,
+        previousAgentText: "Legacy text.",
+        agentTextRunId: legacy,
+        // What rebuilds the description the legacy root wrote.
+        legacySource: {
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${legacy}`,
+          summary: "Legacy text.",
+          issueProvider: null,
+          issueKey: null,
+        },
+      });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: [root, author, legacy] } } });
+      await db.run.deleteMany({ where: { id: { in: [root, author, legacy] } } });
+    }
+  });
+
+  it("pullRequestDescriptionBaseline's legacy source carries the root's stored tests, cache report and issue", async () => {
+    const legacy = `container-desc-legacy-src-${randomUUID()}`;
+    try {
+      await codingRunWith(legacy, "Legacy text.", {
+        result: {
+          outcome: "pull_request_opened",
+          summary: "Legacy text.",
+          tests: [{ command: "npm test", outcome: "passed" }],
+        },
+        dependencyCacheResult: { projects: [{ path: ".", result: "hit" }] },
+        issueProvider: "jira",
+        issueKey: "ABC-12",
+      });
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.pullRequestDescriptionBaseline(legacy)).resolves.toMatchObject({
+        legacySource: {
+          summary: "Legacy text.",
+          tests: [{ command: "npm test", outcome: "passed" }],
+          dependencyCache: { projects: [{ path: ".", result: "hit" }] },
+          issueProvider: "jira",
+          issueKey: "ABC-12",
+        },
+      });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: legacy } });
+      await db.run.deleteMany({ where: { id: legacy } });
+    }
+  });
+
+  it("linkedIssueSource returns the root's issue and the nearest mention status above it", async () => {
+    const top = `container-issue-top-${randomUUID()}`;
+    const middle = `container-issue-mid-${randomUUID()}`;
+    const root = `container-issue-root-${randomUUID()}`;
+    const bare = `container-issue-bare-${randomUUID()}`;
+    try {
+      await db.run.create({ data: { id: top, agentId, status: "succeeded" } });
+      await db.runHostStatus.create({
+        data: { runId: top, provider: "github", repository: "openai/example", number: 12, commentKind: "conversation" },
+      });
+      await db.run.create({ data: { id: middle, agentId, status: "succeeded", parentRunId: top } });
+      await codingRunWith(root, "Root text.", { issueProvider: "jira", issueKey: "ABC-12" });
+      await db.run.update({ where: { id: root }, data: { parentRunId: middle } });
+      await codingRunWith(bare, "Bare text.");
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.linkedIssueSource(root)).resolves.toEqual({
+        issueProvider: "jira",
+        issueKey: "ABC-12",
+        hostStatus: { provider: "github", repository: "openai/example", number: 12 },
+      });
+      await expect(store.linkedIssueSource(bare)).resolves.toEqual({
+        issueProvider: null,
+        issueKey: null,
+        hostStatus: null,
+      });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: [root, bare] } } });
+      await db.runHostStatus.deleteMany({ where: { runId: top } });
+      await db.run.deleteMany({ where: { id: { in: [root, bare] } } });
+      await db.run.deleteMany({ where: { id: middle } });
+      await db.run.deleteMany({ where: { id: top } });
+    }
+  });
+
+  it("pullRequestRunIds lists the root, then continuations that pushed, oldest first", async () => {
+    const root = `container-desc-runs-root-${randomUUID()}`;
+    const pushedLater = `container-desc-runs-b-${randomUUID()}`;
+    const pushedEarlier = `container-desc-runs-a-${randomUUID()}`;
+    const noChange = `container-desc-runs-c-${randomUUID()}`;
+    const ids = [root, pushedLater, pushedEarlier, noChange];
+    try {
+      await codingRunWith(root, "Root text.");
+      const continuation = async (runId: string, outcome: string, startedAt: Date) => {
+        await codingRunWith(runId, "Round text.", {
+          rootCodingRunId: root,
+          result: { outcome, summary: "Round text." },
+        });
+        await db.run.update({ where: { id: runId }, data: { startedAt } });
+      };
+      // The root started last here: it is still listed first.
+      await db.run.update({ where: { id: root }, data: { startedAt: new Date("2026-01-03T00:00:00Z") } });
+      await continuation(pushedLater, "pull_request_updated", new Date("2026-01-02T00:00:00Z"));
+      await continuation(pushedEarlier, "pull_request_updated", new Date("2026-01-01T00:00:00Z"));
+      await continuation(noChange, "no_changes", new Date("2026-01-01T12:00:00Z"));
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.pullRequestRunIds(root)).resolves.toEqual([root, pushedEarlier, pushedLater]);
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: ids } } });
+      await db.run.deleteMany({ where: { id: { in: ids } } });
+    }
+  });
+
+  it("complete records the outcome on the run, and a fresh run's written hash on its own row", async () => {
+    const fresh = `container-desc-fresh-${randomUUID()}`;
+    const round = `container-desc-round-${randomUUID()}`;
+    try {
+      for (const runId of [fresh, round]) {
+        await db.run.create({ data: { id: runId, agentId, executionManaged: true, status: "running" } });
+        await db.codingRun.create({
+          data: {
+            runId,
+            task: "Fix it.",
+            repository: "openai/example",
+            baseRef: "main",
+            headRef: `wardby/run-${runId}`,
+            provider: "codex",
+            model: "gpt-5.6-luna",
+            timeoutSec: 900,
+            allowedEgress: [],
+            protectedPaths: ["CODEOWNERS"],
+            budgetReservedUsd: 1,
+          },
+        });
+      }
+      const store = new PrismaContainerExecutionStore(db);
+      const result = (runId: string) => ({
+        schemaVersion: 1 as const,
+        outcome: "no_changes" as const,
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: `wardby/run-${runId}`,
+        summary: "Done.",
+        tests: [],
+        usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+      });
+      const hash = "5".repeat(64);
+      await store.complete(fresh, "succeeded", result(fresh), {
+        prDescriptionOutcome: "written",
+        prDescriptionSha256: hash,
+        prDescriptionRunId: fresh,
+      });
+      await store.complete(round, "succeeded", result(round), { prDescriptionOutcome: "edited_by_hand" });
+      const select = { prDescriptionSha256: true, prDescriptionRunId: true, prDescriptionOutcome: true };
+      await expect(db.codingRun.findUniqueOrThrow({ where: { runId: fresh }, select })).resolves.toEqual({
+        prDescriptionSha256: hash,
+        prDescriptionRunId: fresh,
+        prDescriptionOutcome: "written",
+      });
+      await expect(db.codingRun.findUniqueOrThrow({ where: { runId: round }, select })).resolves.toEqual({
+        prDescriptionSha256: null,
+        prDescriptionRunId: null,
+        prDescriptionOutcome: "edited_by_hand",
+      });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: [fresh, round] } } });
+      await db.run.deleteMany({ where: { id: { in: [fresh, round] } } });
+    }
+  });
 });

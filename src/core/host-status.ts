@@ -22,11 +22,29 @@ import type { CodeReviewHost, ReviewHostProvider, ReviewHostRegistry } from "../
 import { loadBudgetSentence } from "./budget-wording.js";
 import { logger } from "./logger.js";
 import { providerClassOfCategory, providerSentence, type ProviderFailureClass } from "./provider-wording.js";
+import { defuseMentions, splitReply } from "./reply-parts.js";
 
 const log = logger.child({ module: "host-status" });
 
-/** Keeps the edited comment readable; the full reply stays on the run. */
+/** Keeps the edited comment readable; a longer reply goes out in full as follow-up comments (fullReplyOf). */
 const MAX_REPLY_CHARS = 2000;
+/** The most a GitHub follow-up comment holds, header and cut note included (GitHub's limit is 65,536). */
+export const GITHUB_REPLY_MAX_CHARS = 60_000;
+/** The most follow-up comments a full reply is posted as; the rest is cut, and stays on the run. */
+export const REPLY_MAX_PARTS = 4;
+/**
+ * The most a Jira follow-up comment holds, header and cut note included. Jira Cloud's limit is 32,767
+ * characters, but it may apply to the serialized ADF body markdownToAdf produces rather than to this
+ * Markdown (unverified), and ADF's JSON is longer than the text; so keep a wide margin.
+ */
+export const JIRA_REPLY_MAX_CHARS = 15_000;
+/** The status comment's line when the full reply follows. */
+const FULL_REPLY_FOLLOWS = "The full reply follows in the next comment(s).";
+/** The same, for a status in a review thread: the follow-ups go to the pull request's conversation. */
+const FULL_REPLY_FOLLOWS_IN_CONVERSATION = "The full reply follows in this pull request's conversation.";
+/** Ends the last follow-up when the reply did not fit in REPLY_MAX_PARTS comments. */
+const REPLY_CUT_NOTE =
+  "\n\n---\n\n*The rest of the reply was cut: it was too long to post in full. The full text is on the run (`get_run` → `finalText`).*";
 /** The run statuses a run never leaves. */
 export const TERMINAL_RUN_STATUSES: readonly RunStatus[] = [
   "succeeded",
@@ -121,11 +139,42 @@ const cutReply = (text: string): string =>
   text.length > MAX_REPLY_CHARS ? `${text.slice(0, MAX_REPLY_CHARS)}…` : text;
 
 function quoteReply(text: string): string {
-  return cutReply(text)
-    .replace(/@(?=[\w-])/g, "@​")
+  return defuseMentions(cutReply(text))
     .split("\n")
     .map((line) => `> ${line}`)
     .join("\n");
+}
+
+/**
+ * The reply to post in full as follow-up comments, or null when the ordinary quote applies: only for a
+ * run that succeeded with no pull request and no failed sub-run, whose trimmed reply is longer than the
+ * status comment's quote holds.
+ */
+export function fullReplyOf(
+  run: FinishedRun,
+  pullRequests: PullRequestOutcome[],
+  failedChildren: FailedChild[],
+): string | null {
+  if (run.status !== "succeeded" || pullRequests.length > 0 || failedChildren.length > 0) return null;
+  const reply = run.finalText?.trim();
+  return reply && reply.length > MAX_REPLY_CHARS ? reply : null;
+}
+
+const partHeader = (i: number, n: number): string => `**Reply, part ${i} of ${n}**\n\n`;
+
+/**
+ * Numbered comment bodies for a full reply: "**Reply, part i of n**" then the part, the last ending with
+ * the cut note when the reply did not fit in `maxParts`. Each body, header and note included, is at most
+ * `maxChars`. @-mentions are defused (splitReply).
+ */
+export function fullReplyComments(reply: string, opts: { maxChars: number; maxParts: number }): string[] {
+  const maxParts = Math.max(1, Math.floor(opts.maxParts));
+  const reserve = partHeader(maxParts, maxParts).length + REPLY_CUT_NOTE.length;
+  const { parts, truncated } = splitReply(reply, { maxChars: opts.maxChars - reserve, maxParts });
+  return parts.map(
+    (part, i) =>
+      `${partHeader(i + 1, parts.length)}${part}${truncated && i === parts.length - 1 ? REPLY_CUT_NOTE : ""}`,
+  );
 }
 
 export function outcomeBody(
@@ -138,6 +187,13 @@ export function outcomeBody(
     noPullRequestText?: string;
     /** The agent's reply IS the answer (no separate reply comment): shown as written, not quoted. */
     replyAsAnswer?: boolean;
+    /**
+     * The caller posts the full reply as follow-up comments when fullReplyOf is not null (see
+     * completeHostStatus): the ✅ no-pull-request body then points to them instead of quoting the reply.
+     */
+    fullReplyFollows?: boolean;
+    /** The status comment is in a review thread, so the follow-ups land in the conversation instead. */
+    statusInThread?: boolean;
   } = {},
 ): string {
   const links = pullRequests.map((pr) => {
@@ -221,6 +277,12 @@ export function outcomeBody(
     return `⚠️ ${links.join(", ")}, but ${checks} failed in the run: see the pull request's description before merging.\n\n${footer}`;
   }
   if (links.length > 0) return `✅ ${links.join(", ")}.\n\n${footer}`;
+  if (opts.fullReplyFollows && fullReplyOf(run, pullRequests, failedChildren) !== null) {
+    const follows = opts.statusInThread ? FULL_REPLY_FOLLOWS_IN_CONVERSATION : FULL_REPLY_FOLLOWS;
+    return opts.replyAsAnswer
+      ? `✅ ${follows}\n\n${footer}`
+      : `✅ Finished without opening a pull request. ${follows}\n\n${footer}`;
+  }
   if (opts.replyAsAnswer && reply) return `✅ ${cutReply(reply)}\n\n${footer}`;
   return `✅ ${opts.noPullRequestText ?? "Finished without opening a pull request."}${quoted}\n\n${footer}`;
 }
@@ -271,7 +333,8 @@ export async function collectRunOutcome(
  * outcome as a new comment only if `postIfMissing` (the reconciler, well after
  * the run ended), and otherwise leaves the row for postMentionStatus, which
  * is about to post it. A failed host call leaves the row open for the
- * reconciler to retry.
+ * reconciler to retry. The row is then claimed (completed) in one step, and
+ * only the claiming call posts a full reply's follow-up comments.
  */
 export async function completeHostStatus(
   db: HostStatusDb,
@@ -287,7 +350,12 @@ export async function completeHostStatus(
     const host = hosts[status.provider as ReviewHostProvider];
     if (!host) return;
     const { pullRequests, failedChildren, budgetSentence } = await collectRunOutcome(db, run);
-    const body = outcomeBody(run, status.repository, pullRequests, failedChildren, { budgetSentence });
+    const fullReply = fullReplyOf(run, pullRequests, failedChildren);
+    const body = outcomeBody(run, status.repository, pullRequests, failedChildren, {
+      budgetSentence,
+      fullReplyFollows: true,
+      statusInThread: status.commentKind === "inline",
+    });
     let commentId = status.commentId;
     if (commentId) {
       await host.editComment(status.repository, {
@@ -304,9 +372,48 @@ export async function completeHostStatus(
         })
       ).id;
     }
-    await db.runHostStatus.update({ where: { runId: run.id }, data: { commentId, completedAt: new Date() } });
+    // Claims the row in one step, saving a posted comment's id at once so a retry edits it instead of
+    // posting a second one. Only the completion that claims it posts the full reply, so two racing
+    // completions (the run's own and the reconciler's) never post it twice.
+    const claimed = await db.runHostStatus.updateMany({
+      where: { runId: run.id, completedAt: null },
+      data: { commentId, completedAt: new Date() },
+    });
+    if (claimed.count !== 1) {
+      log.warn(
+        { runId: run.id },
+        "the run's status comment was completed meanwhile; leaving any full reply to that completion",
+      );
+      return;
+    }
+    if (fullReply !== null) await postFullReply(host, status, run.id, fullReply);
   } catch (err) {
     log.warn({ err, runId: run.id }, "could not complete the run's status comment");
+  }
+}
+
+/**
+ * Posts the full reply's parts in order, each at most once: the status comment already points to them,
+ * so a failed part is logged and the rest skipped (a gap would misnumber the reply), and the row is still
+ * completed. The full text stays on the run (`get_run` → `finalText`). Never throws.
+ */
+async function postFullReply(
+  host: CodeReviewHost,
+  status: { repository: string; number: number },
+  runId: string,
+  reply: string,
+): Promise<void> {
+  const bodies = fullReplyComments(reply, { maxChars: GITHUB_REPLY_MAX_CHARS, maxParts: REPLY_MAX_PARTS });
+  for (const [i, body] of bodies.entries()) {
+    try {
+      await host.comment(status.repository, { number: status.number, body });
+    } catch (err) {
+      log.warn(
+        { err, runId, part: i + 1, parts: bodies.length },
+        "could not post a part of the run's full reply; the rest is skipped, the full text stays on the run",
+      );
+      return;
+    }
   }
 }
 
