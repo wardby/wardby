@@ -118,7 +118,12 @@ async function setup(
       params: Record<string, string | undefined> = { lock: LOCK },
       token?: string,
       headers: Record<string, string> = {},
-    ) => fetch(`${base}/cache/npm/blob${query(params)}`, { method: "PUT", headers: { ...auth(token), ...headers }, body }).then(json),
+    ) =>
+      fetch(`${base}/cache/npm/blob${query(params)}`, {
+        method: "PUT",
+        headers: { ...auth(token), ...headers },
+        body,
+      }).then(json),
     download: (id: string, params: Record<string, string | undefined> = { lock: LOCK }, token?: string) =>
       fetch(`${base}/cache/npm/blob/${id}${query(params)}`, { headers: auth(token) }),
     seal: (token?: string) => fetch(`${base}/cache/npm/seal`, { method: "POST", headers: auth(token) }).then(json),
@@ -321,9 +326,10 @@ describe("dependency cache upload and download", () => {
 
   it("refuses partial or malformed validation metadata", async () => {
     const { upload, store } = await setup();
-    expect(
-      await upload(archive, { lock: LOCK }, undefined, { "x-wardby-archive-scan-version": "1" }),
-    ).toEqual({ status: 400, body: { error: "bad_request" } });
+    expect(await upload(archive, { lock: LOCK }, undefined, { "x-wardby-archive-scan-version": "1" })).toEqual({
+      status: 400,
+      body: { error: "bad_request" },
+    });
     expect(
       await upload(archive, { lock: LOCK }, undefined, {
         "x-wardby-archive-scan-version": "1",

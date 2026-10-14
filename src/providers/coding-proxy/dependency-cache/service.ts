@@ -111,7 +111,9 @@ function verifiedArchiveHeaders(headers: IncomingMessage["headers"]): VerifiedAr
   return { archiveScanVersion: parsedVersion, archiveEntries: parsedEntries, unpackedBytes: parsedUnpackedBytes };
 }
 
-function lookupManifest(row: SnapshotRow): { scanVersion: 1; sha256: string; entries: number; unpackedBytes: number } | undefined {
+function lookupManifest(
+  row: SnapshotRow,
+): { scanVersion: 1; sha256: string; entries: number; unpackedBytes: number } | undefined {
   const { archiveScanVersion, archiveEntries, unpackedBytes } = row;
   if (
     archiveScanVersion !== ARCHIVE_SCAN_VERSION ||
