@@ -38,6 +38,14 @@ import {
 import type { DependencyCacheStore, SnapshotRow } from "./store.js";
 
 const cacheLog = logger.child({ module: "dependency-cache" });
+const ARCHIVE_SCAN_VERSION = 1;
+const MAX_ARCHIVE_ENTRIES = 1_000_000;
+
+interface VerifiedArchive {
+  archiveScanVersion: number;
+  archiveEntries: number;
+  unpackedBytes: number;
+}
 
 /** Uploads streaming at once across every run. */
 export const DEFAULT_MAX_CONCURRENT_UPLOADS = 4;
@@ -78,6 +86,45 @@ function send(response: ServerResponse, status: number, body: unknown, close = f
     ...(close ? { connection: "close" } : {}),
   });
   response.end(JSON.stringify(body));
+}
+
+/** Optional so workers deployed before validation metadata remain compatible. */
+function verifiedArchiveHeaders(headers: IncomingMessage["headers"]): VerifiedArchive | null {
+  const version = headers["x-wardby-archive-scan-version"];
+  const entries = headers["x-wardby-archive-entries"];
+  const unpackedBytes = headers["x-wardby-archive-unpacked-bytes"];
+  if (version === undefined && entries === undefined && unpackedBytes === undefined) return null;
+  if (typeof version !== "string" || typeof entries !== "string" || typeof unpackedBytes !== "string")
+    throw new CacheRefusal(400, "bad_request");
+  const parsedVersion = Number(version);
+  const parsedEntries = Number(entries);
+  const parsedUnpackedBytes = Number(unpackedBytes);
+  if (
+    parsedVersion !== ARCHIVE_SCAN_VERSION ||
+    !Number.isSafeInteger(parsedEntries) ||
+    parsedEntries < 1 ||
+    parsedEntries > MAX_ARCHIVE_ENTRIES ||
+    !Number.isSafeInteger(parsedUnpackedBytes) ||
+    parsedUnpackedBytes < 0
+  )
+    throw new CacheRefusal(400, "bad_request");
+  return { archiveScanVersion: parsedVersion, archiveEntries: parsedEntries, unpackedBytes: parsedUnpackedBytes };
+}
+
+function lookupManifest(row: SnapshotRow): { scanVersion: 1; sha256: string; entries: number; unpackedBytes: number } | undefined {
+  const { archiveScanVersion, archiveEntries, unpackedBytes } = row;
+  if (
+    archiveScanVersion !== ARCHIVE_SCAN_VERSION ||
+    archiveEntries === null ||
+    unpackedBytes === null ||
+    !Number.isSafeInteger(archiveEntries) ||
+    archiveEntries < 1 ||
+    archiveEntries > MAX_ARCHIVE_ENTRIES ||
+    !Number.isSafeInteger(unpackedBytes) ||
+    unpackedBytes < 0
+  )
+    return undefined;
+  return { scanVersion: ARCHIVE_SCAN_VERSION, sha256: row.sha256, entries: archiveEntries, unpackedBytes };
 }
 
 export interface DependencyCacheServiceOptions {
@@ -195,10 +242,13 @@ export class DependencyCacheService {
   private async lookup(key: SnapshotKey, sessionCreatedAt: Date, response: ServerResponse): Promise<void> {
     const row = await this.options.store.findByIdentity(key);
     const nearest = row ? null : await this.options.store.findNearest(key, key.lockHash);
+    const manifest = row ? lookupManifest(row) : undefined;
+    const nearestManifest = nearest ? lookupManifest(nearest) : undefined;
     send(response, 200, {
       key: key.keyId,
       hit: row !== null,
-      ...(nearest ? { nearest: { id: nearest.id } } : {}),
+      ...(manifest ? { manifest } : {}),
+      ...(nearest ? { nearest: { id: nearest.id, ...(nearestManifest ? { manifest: nearestManifest } : {}) } } : {}),
       maxBytes: this.options.maxSnapshotBytes,
       uploadExpiresInMs: Math.max(0, Math.floor(this.uploadDeadline(sessionCreatedAt) - this.now().getTime())),
     });
@@ -309,6 +359,7 @@ export class DependencyCacheService {
     const length = request.headers["content-length"];
     if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > this.options.maxSnapshotBytes))
       throw new CacheRefusal(413, "too_large");
+    const verifiedArchive = verifiedArchiveHeaders(request.headers);
     const projectSlot = `${context.runId}\0${key.projectPath}`;
     if (this.uploading.has(projectSlot) || this.uploading.has(key.keyId))
       throw new CacheRefusal(409, "upload_in_progress");
@@ -328,7 +379,7 @@ export class DependencyCacheService {
     this.activeUploads += 1;
     releaseBodyTimer();
     try {
-      await this.storeUpload(context, deadline, key, request, response);
+      await this.storeUpload(context, deadline, key, request, response, verifiedArchive);
     } finally {
       this.uploading.delete(projectSlot);
       this.uploading.delete(key.keyId);
@@ -342,6 +393,7 @@ export class DependencyCacheService {
     key: SnapshotKey,
     request: IncomingMessage,
     response: ServerResponse,
+    verifiedArchive: VerifiedArchive | null,
   ): Promise<void> {
     const blobKey = newBlobKey(key);
     let expired = false;
@@ -387,6 +439,9 @@ export class DependencyCacheService {
         blobKey,
         sha256: stored.sha256,
         sizeBytes: stored.sizeBytes,
+        archiveScanVersion: verifiedArchive?.archiveScanVersion ?? null,
+        archiveEntries: verifiedArchive?.archiveEntries ?? null,
+        unpackedBytes: verifiedArchive?.unpackedBytes ?? null,
         createdByRunId: context.runId,
       });
     } catch (error) {

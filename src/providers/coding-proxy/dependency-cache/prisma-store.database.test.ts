@@ -86,6 +86,9 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaDependencyCacheStore (database
     blobKey: `dependency-cache/npm/${hex(repository)}/${hex(lock)}-${randomUUID()}.tgz`,
     sha256: hex(`${lock} bytes`),
     sizeBytes: 3_000_000_000,
+    archiveScanVersion: null,
+    archiveEntries: null,
+    unpackedBytes: null,
     createdByRunId: runId,
     ...extra,
   });

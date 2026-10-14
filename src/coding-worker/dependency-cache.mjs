@@ -877,8 +877,28 @@ async function readProject(projectDir) {
   return { bytes, lockfile, manifestBytes: await readFile(join(projectDir, "package.json")) };
 }
 
+/** Metadata from a trusted pre-agent upload is usable only when the downloaded
+ * archive also verifies against its recorded digest. Legacy snapshots omit it
+ * and deliberately retain the full scan before extraction. */
+function archiveManifest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value;
+  if (
+    record.scanVersion !== 1 ||
+    typeof record.sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(record.sha256) ||
+    !Number.isSafeInteger(record.entries) ||
+    record.entries < 1 ||
+    record.entries > MAX_ARCHIVE_ENTRIES ||
+    !Number.isSafeInteger(record.unpackedBytes) ||
+    record.unpackedBytes < 0
+  )
+    return undefined;
+  return { sha256: record.sha256, entries: record.entries, unpackedBytes: record.unpackedBytes };
+}
+
 /** Streams a snapshot to `file`, checking its length and sha256 on the way. */
-async function download(context, id, file, maxBytes) {
+async function download(context, id, file, maxBytes, manifest) {
   const { cacheBase, query, token, signal, timeouts } = context;
   const url = new URL(`blob/${id}?${query}`, cacheBase);
   // The size is unknown until the headers arrive: bound by maxBytes.
@@ -897,6 +917,10 @@ async function download(context, id, file, maxBytes) {
   const length = Number(response.headers["content-length"]);
   const expected = String(response.headers["x-wardby-sha256"] ?? "");
   if (!Number.isSafeInteger(length) || length < 0 || !/^[0-9a-f]{64}$/.test(expected)) {
+    response.destroy();
+    throw new Skip("download_failed");
+  }
+  if (manifest && expected !== manifest.sha256) {
     response.destroy();
     throw new Skip("download_failed");
   }
@@ -928,19 +952,28 @@ async function download(context, id, file, maxBytes) {
 
 /** Download, scan, extract into a temp folder, re-check the written tree,
  *  optionally check it against the lockfile, then rename into place. */
-async function restore(context, project, id, maxBytes, { consistency }) {
+async function restore(context, project, id, maxBytes, { consistency, manifest }) {
   const { cacheDir, signal, budget } = context;
   const archive = join(cacheDir, `${randomName("dep")}.tgz`);
   const temp = join(cacheDir, randomName("dep-restore"));
   track(context, archive, temp);
-  const sizeBytes = await download(context, id, archive, maxBytes);
+  const measure = async (stage, action) => {
+    const started = Date.now();
+    try {
+      return await action();
+    } finally {
+      context.log("restore_phase", { stage, ms: Date.now() - started });
+    }
+  };
+  const sizeBytes = await measure("download", () => download(context, id, archive, maxBytes, manifest));
   const limit = Math.max(0, budget.remaining - sizeBytes);
   const refused = (error) => {
     const skip = asSkip(error, "unsafe_archive");
     if (skip.detail) context.log("archive_refused", skip.detail);
     throw skip;
   };
-  const scan = await scanArchive(archive, { budgetBytes: limit, signal }).catch(refused);
+  const scan =
+    manifest ?? (await measure("scan", () => scanArchive(archive, { budgetBytes: limit, signal })).catch(refused));
   // This project's tree size and compression, for the estimates below (a cold
   // install after a rejected restore, the snapshot's archive size). Recorded
   // only from a snapshot that passed every check up to the point it was
@@ -954,15 +987,15 @@ async function restore(context, project, id, maxBytes, { consistency }) {
     throw new Skip("budget_too_small");
   }
   await mkdir(temp, { mode: 0o700 });
-  await extractArchive(archive, temp, { budgetBytes: limit, signal }).catch(refused);
+  await measure("extract", () => extractArchive(archive, temp, { budgetBytes: limit, signal })).catch(refused);
   await removeTemp(context.workspace, archive);
-  await verifyTree(temp, signal);
+  await measure("verify_tree", () => verifyTree(temp, signal));
   context.known = measured;
   // A sanity check that this is the tree for this lockfile, not an
   // integrity control: integrity is the sha256 the proxy recorded in its
   // database at upload time, verified above against the bytes received.
   if (consistency) {
-    const check = await checkConsistency(temp, project.lockfile, signal);
+    const check = await measure("check_consistency", () => checkConsistency(temp, project.lockfile, signal));
     if (!check.ok) {
       context.log("inconsistent", { detail: check.detail });
       throw new Skip("inconsistent");
@@ -1105,9 +1138,12 @@ async function snapshot(context, project, maxBytes) {
     }
     const { size } = await stat(archive);
     if (size > maxBytes) return skip("too_large");
-    // Upload only what a restore would accept.
+    // Upload only what a restore would accept. The proxy binds these measured
+    // bounds to its digest, so a later restore that verifies that digest may
+    // safely avoid parsing the same archive a second time.
+    let validation;
     try {
-      await scanArchive(archive, { budgetBytes: Number.MAX_SAFE_INTEGER, signal });
+      validation = await scanArchive(archive, { budgetBytes: Number.MAX_SAFE_INTEGER, signal });
     } catch (error) {
       return skip(asSkip(error, "unsafe_archive").reason);
     }
@@ -1124,6 +1160,9 @@ async function snapshot(context, project, maxBytes) {
           authorization: `Bearer ${token}`,
           "content-type": "application/gzip",
           "content-length": String(size),
+          "x-wardby-archive-scan-version": "1",
+          "x-wardby-archive-entries": String(validation.entries),
+          "x-wardby-archive-unpacked-bytes": String(validation.unpackedBytes),
         },
         body: createReadStream(archive),
         signal,
@@ -1345,7 +1384,10 @@ export async function prepareProject(options) {
     if (answer.hit) {
       const started = Date.now();
       try {
-        const sizeBytes = await restore(context, project, key, answer.maxBytes, { consistency: true });
+        const sizeBytes = await restore(context, project, key, answer.maxBytes, {
+          consistency: true,
+          manifest: archiveManifest(answer.manifest),
+        });
         context.created = undefined; // a verified hit stays
         return { result: "hit", key, sizeBytes, restoreMs: Date.now() - started };
       } catch (error) {
@@ -1363,7 +1405,10 @@ export async function prepareProject(options) {
     if (nearestId) {
       const started = Date.now();
       try {
-        await restore(context, project, nearestId, answer.maxBytes, { consistency: false });
+        await restore(context, project, nearestId, answer.maxBytes, {
+          consistency: false,
+          manifest: archiveManifest(answer.nearest?.manifest),
+        });
         restoreMs = Date.now() - started;
         result = "nearest";
       } catch (error) {

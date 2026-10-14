@@ -13,7 +13,11 @@ import {
 /** How long one eviction pass may hold the lock (its transaction) before Postgres releases it. */
 const EVICTION_LOCK_MS = 15 * 60_000;
 
-type Row = Omit<SnapshotRow, "sizeBytes"> & { sizeBytes: bigint; policyHash: string };
+type Row = Omit<SnapshotRow, "sizeBytes" | "unpackedBytes"> & {
+  sizeBytes: bigint;
+  unpackedBytes: bigint | null;
+  policyHash: string;
+};
 
 /**
  * Only the scope's own fields (callers may pass a wider object, such as a
@@ -30,6 +34,7 @@ const scopeOf = ({ ecosystem, repository, projectPath, workerImage }: SnapshotSc
 const toSnapshot = ({ policyHash: _policyHash, ...row }: Row): SnapshotRow => ({
   ...row,
   sizeBytes: Number(row.sizeBytes),
+  unpackedBytes: row.unpackedBytes === null ? null : Number(row.unpackedBytes),
 });
 
 export class PrismaDependencyCacheStore implements DependencyCacheStore {
@@ -100,6 +105,9 @@ export class PrismaDependencyCacheStore implements DependencyCacheStore {
           blobKey: snapshot.blobKey,
           sha256: snapshot.sha256,
           sizeBytes: BigInt(snapshot.sizeBytes),
+          archiveScanVersion: snapshot.archiveScanVersion,
+          archiveEntries: snapshot.archiveEntries,
+          unpackedBytes: snapshot.unpackedBytes === null ? null : BigInt(snapshot.unpackedBytes),
           createdByRunId: snapshot.createdByRunId,
         },
       });

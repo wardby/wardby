@@ -149,7 +149,13 @@ interface ProxyState {
   blobs: Map<string, Buffer>;
   shaOverride?: string;
   lengthOverride?: number;
-  uploads: { body: Buffer; contentLength: string | undefined }[];
+  uploads: {
+    body: Buffer;
+    contentLength: string | undefined;
+    scanVersion: string | undefined;
+    entries: string | undefined;
+    unpackedBytes: string | undefined;
+  }[];
   sealed: boolean;
   hang?: string;
   /** Delays the plan answer (a slow proxy with a cold package-fact cache). */
@@ -248,7 +254,13 @@ function startProxy(): Promise<void> {
       }
       if (route === "PUT /cache/npm/blob") {
         const body = await readBody(request);
-        state.uploads.push({ body, contentLength: request.headers["content-length"] });
+        state.uploads.push({
+          body,
+          contentLength: request.headers["content-length"],
+          scanVersion: request.headers["x-wardby-archive-scan-version"],
+          entries: request.headers["x-wardby-archive-entries"],
+          unpackedBytes: request.headers["x-wardby-archive-unpacked-bytes"],
+        });
         json(201, { stored: true, sha256: sha256(body), sizeBytes: body.length });
         return;
       }
@@ -468,6 +480,30 @@ describe("prepareDependencies", () => {
     expect(JSON.stringify(events)).not.toContain("run-token");
   });
 
+  it("hit: skips the duplicate scan only with manifest metadata bound to the archive digest", async () => {
+    const blob = await realTarSnapshot(LOCKFILE);
+    const archive = join(root, "validated.tgz");
+    await writeFile(archive, blob);
+    const validation = await scanArchive(archive, { budgetBytes: Number.MAX_SAFE_INTEGER });
+    hitWith(blob);
+    state.lookupAnswer = () => ({
+      status: 200,
+      body: {
+        key: "a".repeat(64),
+        hit: true,
+        maxBytes: 64 * 1024 * 1024,
+        manifest: {
+          scanVersion: 1,
+          sha256: sha256(blob),
+          entries: validation.entries,
+          unpackedBytes: validation.unpackedBytes,
+        },
+      },
+    });
+    expect(await prepare()).toMatchObject({ result: "hit" });
+    expect(events.some((event) => event.event === "restore_phase" && event.stage === "scan")).toBe(false);
+  });
+
   it("cold: npm ci through the shim, consistency, snapshot uploaded with content-length, then seal", async () => {
     const result = await prepare();
     expect(result).toMatchObject({ result: "cold" });
@@ -475,6 +511,11 @@ describe("prepareDependencies", () => {
     expect(await npmCalls()).toEqual([["ci", "--ignore-scripts", "--no-audit", "--no-fund"]]);
     expect(state.uploads).toHaveLength(1);
     expect(state.uploads[0].contentLength).toBe(String(state.uploads[0].body.length));
+    expect(state.uploads[0]).toMatchObject({
+      scanVersion: "1",
+      entries: expect.any(String),
+      unpackedBytes: expect.any(String),
+    });
     expect(result.sizeBytes).toBe(state.uploads[0].body.length);
     expect(state.calls.slice(-2)).toEqual(["PUT /cache/npm/blob", "POST /cache/npm/seal"]);
     expect(await exists(join(workspace, "node_modules/alpha/package.json"))).toBe(true);

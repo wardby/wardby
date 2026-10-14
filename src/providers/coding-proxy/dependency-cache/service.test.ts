@@ -113,8 +113,12 @@ async function setup(
     startPod,
     lookup: (params: Record<string, string | undefined> = { lock: LOCK }, token?: string) =>
       fetch(`${base}/cache/npm/lookup${query(params)}`, { headers: auth(token) }).then(json),
-    upload: (body: Uint8Array, params: Record<string, string | undefined> = { lock: LOCK }, token?: string) =>
-      fetch(`${base}/cache/npm/blob${query(params)}`, { method: "PUT", headers: auth(token), body }).then(json),
+    upload: (
+      body: Uint8Array,
+      params: Record<string, string | undefined> = { lock: LOCK },
+      token?: string,
+      headers: Record<string, string> = {},
+    ) => fetch(`${base}/cache/npm/blob${query(params)}`, { method: "PUT", headers: { ...auth(token), ...headers }, body }).then(json),
     download: (id: string, params: Record<string, string | undefined> = { lock: LOCK }, token?: string) =>
       fetch(`${base}/cache/npm/blob/${id}${query(params)}`, { headers: auth(token) }),
     seal: (token?: string) => fetch(`${base}/cache/npm/seal`, { method: "POST", headers: auth(token) }).then(json),
@@ -298,6 +302,36 @@ describe("dependency cache upload and download", () => {
     expect(response.headers.get("content-length")).toBe(String(archive.byteLength));
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(archive);
     expect(store.rows[0].lastUsedAt.getTime()).toBeGreaterThan(before.getTime());
+  });
+
+  it("returns a digest-bound manifest only for uploads with complete validated metadata", async () => {
+    const { upload, lookup, store } = await setup();
+    const headers = {
+      "x-wardby-archive-scan-version": "1",
+      "x-wardby-archive-entries": "42",
+      "x-wardby-archive-unpacked-bytes": "123456",
+    };
+    expect((await upload(archive, { lock: LOCK }, undefined, headers)).status).toBe(201);
+    expect(store.rows[0]).toMatchObject({ archiveScanVersion: 1, archiveEntries: 42, unpackedBytes: 123456 });
+    expect((await lookup()).body).toMatchObject({
+      hit: true,
+      manifest: { scanVersion: 1, sha256: hex(archive), entries: 42, unpackedBytes: 123456 },
+    });
+  });
+
+  it("refuses partial or malformed validation metadata", async () => {
+    const { upload, store } = await setup();
+    expect(
+      await upload(archive, { lock: LOCK }, undefined, { "x-wardby-archive-scan-version": "1" }),
+    ).toEqual({ status: 400, body: { error: "bad_request" } });
+    expect(
+      await upload(archive, { lock: LOCK }, undefined, {
+        "x-wardby-archive-scan-version": "1",
+        "x-wardby-archive-entries": "0",
+        "x-wardby-archive-unpacked-bytes": "1",
+      }),
+    ).toEqual({ status: 400, body: { error: "bad_request" } });
+    expect(store.rows).toEqual([]);
   });
 
   it("accepts one upload per project per run; another project is allowed", async () => {

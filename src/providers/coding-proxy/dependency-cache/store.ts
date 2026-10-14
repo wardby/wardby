@@ -26,6 +26,9 @@ export interface NewSnapshot extends SnapshotIdentity {
   blobKey: string;
   sha256: string;
   sizeBytes: number;
+  archiveScanVersion: number | null;
+  archiveEntries: number | null;
+  unpackedBytes: number | null;
   createdByRunId: string;
 }
 
@@ -34,6 +37,9 @@ export interface SnapshotRow extends SnapshotIdentity {
   blobKey: string;
   sha256: string;
   sizeBytes: number;
+  archiveScanVersion: number | null;
+  archiveEntries: number | null;
+  unpackedBytes: number | null;
   createdAt: Date;
   lastUsedAt: Date;
   createdByRunId: string | null;

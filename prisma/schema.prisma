@@ -940,6 +940,11 @@ model DependencySnapshot {
   blobKey        String     @unique
   sha256         String
   sizeBytes      BigInt
+  /// The format/version and bounds trusted worker code verified before upload.
+  /// Null on snapshots made before validation metadata was introduced.
+  archiveScanVersion Int?
+  archiveEntries     Int?
+  unpackedBytes      BigInt?
   createdAt      DateTime   @default(now())
   lastUsedAt     DateTime   @default(now())
   createdByRunId String?
