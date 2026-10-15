@@ -188,4 +188,91 @@ describe("InProcessExecutor", () => {
     expect(finalRun?.status).toBe("failed");
     expect(finalRun?.error).toBe("boom");
   });
+  it("stop records a pending run cancelled, and starting it afterwards runs nothing", async () => {
+    const agent: FakeAgent = { id: "a1", name: "never", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 };
+    const db = fakeDb([agent], { run_1: { id: "run_1", agentId: "a1", status: "pending", heartbeatAt: null } });
+    let calls = 0;
+    const base = slowLlm(["x"], 0);
+    const llm: LlmProvider = {
+      ...base,
+      stream: (...args: Parameters<LlmProvider["stream"]>) => {
+        calls += 1;
+        return base.stream(...args);
+      },
+    };
+    const executor = new InProcessExecutor(
+      {
+        llm,
+        engine: new NativeEngine(),
+        datastore: fakeDatastore(),
+        secrets: {} as SecretCipher,
+        memory: {} as AgentMemoryStore,
+      },
+      db,
+      5,
+    );
+    await executor.stop("run_1", "Stopped by p1 with stop_run.");
+    await executor.start("run_1");
+    const finalRun = await db.run.findUnique({ where: { id: "run_1" } });
+    expect(finalRun).toMatchObject({ status: "cancelled", error: "Stopped by p1 with stop_run." });
+    expect(calls).toBe(0);
+  });
+
+  it("stops a running run at its next step boundary, keeping the stop's reason", async () => {
+    const agent: FakeAgent = { id: "a1", name: "looper", systemPrompt: "sys", model: "m", budgetUsd: 10, maxTurns: 10 };
+    const db = fakeDb([agent], { run_1: { id: "run_1", agentId: "a1", status: "pending", heartbeatAt: null } });
+    let calls = 0;
+    const ref: { executor?: InProcessExecutor } = {};
+    const llm: LlmProvider = {
+      async *stream() {
+        calls += 1;
+        // The stop lands while this turn is in flight (from another process, in production).
+        await ref.executor!.stop("run_1", "operator stopped it");
+        yield { type: "tool_call" as const, id: "c1", name: "anything", argsJson: "{}" };
+        yield {
+          type: "done" as const,
+          stopReason: "tool_use",
+          usage: { inputTokens: 9, outputTokens: 1, costUsd: 0.0001 },
+        };
+      },
+      async countTokens(_model, messages) {
+        return messages.reduce((sum, m) => sum + m.content.length, 0);
+      },
+      priceUsd() {
+        return 0.0001;
+      },
+    };
+    const executor = (ref.executor = new InProcessExecutor(
+      {
+        llm,
+        engine: new NativeEngine(),
+        datastore: fakeDatastore(),
+        secrets: {} as SecretCipher,
+        memory: {} as AgentMemoryStore,
+      },
+      db,
+      5,
+    ));
+    await executor.start("run_1");
+    const finalRun = await db.run.findUnique({ where: { id: "run_1" } });
+    expect(finalRun).toMatchObject({ status: "cancelled", error: "operator stopped it" });
+    // The tool call and any later turn never ran.
+    expect(calls).toBe(1);
+  });
+
+  it("stop leaves a finished run alone", async () => {
+    const db = fakeDb([], { run_1: { id: "run_1", agentId: "a1", status: "succeeded", error: null } });
+    const executor = new InProcessExecutor(
+      {
+        llm: slowLlm([], 0),
+        engine: new NativeEngine(),
+        datastore: fakeDatastore(),
+        secrets: {} as SecretCipher,
+        memory: {} as AgentMemoryStore,
+      },
+      db,
+    );
+    await executor.stop("run_1", "too late");
+    expect(await db.run.findUnique({ where: { id: "run_1" } })).toMatchObject({ status: "succeeded", error: null });
+  });
 });

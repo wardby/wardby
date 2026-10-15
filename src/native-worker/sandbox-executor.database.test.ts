@@ -78,8 +78,11 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
   });
 
   const sandboxRun = () => db.run.create({ data: { agentId, nativeExecutionMode: "sandbox", executionManaged: true } });
-  const executorWith = (launcher: ManagedWorkerLauncher, now?: () => number) =>
-    new NativeSandboxExecutor({ db, providers, launcher, gatewayUrl, now });
+  const executorWith = (
+    launcher: ManagedWorkerLauncher,
+    now?: () => number,
+    stop: { stopGraceMs?: number; sleep?: (ms: number) => Promise<void> } = { stopGraceMs: 0 },
+  ) => new NativeSandboxExecutor({ db, providers, launcher, gatewayUrl, now, ...stop });
   const row = (id: string) => db.run.findUniqueOrThrow({ where: { id } });
 
   it("starts: session and backend recorded before launch, the worker given the gateway URL and a capability", async () => {
@@ -167,6 +170,61 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
     expect(fake.killed).toContain(run.id);
     expect(fake.removed).toContain(run.id);
     expect((await db.nativeGatewaySession.findUniqueOrThrow({ where: { runId: run.id } })).status).toBe("cancelled");
+  });
+
+  it("stops a pending sandbox run before any worker exists: cancelled, nothing to kill, and a later start launches nothing", async () => {
+    const fake = fakeLauncher();
+    const run = await sandboxRun();
+    const executor = executorWith(fake.launcher, undefined, { stopGraceMs: 5_000 });
+    await executor.stop(run.id, "stopped while pending");
+    expect(await row(run.id)).toMatchObject({ status: "cancelled", error: "stopped while pending" });
+    expect(fake.killed).toEqual([]);
+    await executor.start(run.id);
+    expect(fake.launched).toHaveLength(0);
+  });
+
+  it("stops a running sandbox run cooperatively: the worker exits on its own within the grace and is not killed", async () => {
+    const fake = fakeLauncher();
+    const run = await sandboxRun();
+    const sleeps: number[] = [];
+    const executor = executorWith(fake.launcher, undefined, {
+      stopGraceMs: 5_000,
+      // The worker's next gateway call is refused (its session is ended), so it exits.
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        fake.states.set(run.id, { state: "exited", exitCode: 1 });
+      },
+    });
+    await executor.start(run.id);
+    await executor.stop(run.id, "operator stopped it");
+    expect(await row(run.id)).toMatchObject({ status: "cancelled", error: "operator stopped it" });
+    expect((await db.nativeGatewaySession.findUniqueOrThrow({ where: { runId: run.id } })).status).toBe("cancelled");
+    expect(sleeps).toHaveLength(1);
+    expect(fake.killed).not.toContain(run.id);
+    expect(fake.removed).toContain(run.id);
+  });
+
+  it("kills a stopped sandbox run's worker that is still running when its grace runs out", async () => {
+    const fake = fakeLauncher();
+    const run = await sandboxRun();
+    let clock = Date.now();
+    const executor = executorWith(fake.launcher, () => clock, {
+      stopGraceMs: 1_000,
+      sleep: async (ms) => void (clock += ms),
+    });
+    await executor.start(run.id);
+    await executor.stop(run.id, "operator stopped it");
+    expect(fake.killed).toContain(run.id);
+    expect(fake.removed).toContain(run.id);
+    expect((await row(run.id)).status).toBe("cancelled");
+  });
+
+  it("leaves a finished sandbox run's result alone when stopped late", async () => {
+    const fake = fakeLauncher();
+    const run = await sandboxRun();
+    await db.run.update({ where: { id: run.id }, data: { status: "succeeded", finishedAt: new Date() } });
+    await executorWith(fake.launcher).stop(run.id, "too late");
+    expect(await row(run.id)).toMatchObject({ status: "succeeded", error: null });
   });
 
   it("recovers from the container's state and never relaunches", async () => {
@@ -264,5 +322,46 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
     pool.stop();
     await pool.settled();
     await db.nativeWarmWorker.deleteMany({ where: { specHash: { startsWith: `exec-test-${tag}` } } });
+  });
+  it("stops a run on a claimed warm worker: the worker is discarded with its row, never returned to the pool", async () => {
+    const fake = fakeLauncher();
+    let tokens = 900;
+    const warm = new Map<string, WorkerInput | undefined>();
+    const warmOps: WarmWorkerLauncher = {
+      warmSpecHash: (waitMs) => `stop-test-${tag}:${waitMs}`,
+      startWarm: async (token) => void warm.set(token, undefined),
+      reattestWarm: async (token) => warm.has(token),
+      deliver: async (token, input) => void warm.set(token, input),
+      warmHandle: () => ({ exited: new Promise(() => {}), kill: () => {} }),
+      inspectWarm: async (token) => (warm.has(token) ? { state: "running" } : { state: "missing" }),
+      killWarm: async (token) => void fake.killed.push(token),
+      removeWarm: async (token) => void warm.delete(token),
+      listWarm: async () => [...warm.keys()],
+    };
+    const pool = new PooledWorkerLauncher({
+      ledger: new PrismaWarmPoolLedger(db),
+      launcher: { ...fake.launcher, ...warmOps, networkReadyAtLaunch: false },
+      size: 1,
+      maxAgeMs: 60_000,
+      warmTimeoutMs: 10_000,
+      onDelivered: (runId) => new PrismaGatewayLedger(db).markNetworkReadyForRun(runId),
+      newToken: () => `${tag}${String((tokens += 1)).padStart(12, "0")}`,
+    });
+    await pool.tick();
+    await pool.settled();
+    const token = `${tag}${"901".padStart(12, "0")}`;
+    expect(warm.has(token)).toBe(true);
+    const run = await sandboxRun();
+    const executor = executorWith(pool);
+    await executor.start(run.id);
+    expect(warm.get(token)?.runId).toBe(run.id);
+    await executor.stop(run.id, "operator stopped it");
+    expect((await row(run.id)).status).toBe("cancelled");
+    expect(fake.killed).toContain(token);
+    expect(warm.has(token)).toBe(false);
+    expect(await db.nativeWarmWorker.findUnique({ where: { id: token } })).toBeNull();
+    pool.stop();
+    await pool.settled();
+    await db.nativeWarmWorker.deleteMany({ where: { specHash: { startsWith: `stop-test-${tag}` } } });
   });
 });

@@ -104,6 +104,10 @@ are in [Native sandbox](../docs/native-sandbox.md#warm-pool).
   leader on its next tick (about every 10 seconds), so the server or scheduler
   must be running.
 - A sandbox run has a 60-minute maximum lifetime.
+- `stop_run` stops a sandbox run: its gateway session ends so the worker exits
+  at its next call, and a worker still running after 5 seconds is killed and
+  removed (a warm pool worker is discarded, never reused). Search help for
+  "stop run" (article `stop-run`, Wardby 0.6.1 and later).
 
 ## Roll back
 

@@ -2632,6 +2632,41 @@ describe("ContainerExecutor", () => {
     expect(created.jobs.removals).toBe(2);
     expect(created.vcs.cleaned).toBe(1);
   });
+
+  it("stops a run queued for a slot: cancelled before it ever launches, and a later start launches nothing", async () => {
+    const created = await harness({ status: "pending" });
+    created.store.slotsFull = true;
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("pending");
+    expect(created.jobs.launches).toBe(0);
+
+    await created.executor.stop("run-1", "stop_run");
+    expect(created.store.run.status).toBe("cancelled");
+    expect(created.jobs.stops).toBe(0);
+
+    // The queue drain starting it afterwards finds it terminal.
+    created.store.slotsFull = false;
+    await created.executor.start("run-1");
+    expect(created.jobs.launches).toBe(0);
+    expect(created.store.run.status).toBe("cancelled");
+  });
+
+  it("pushes nothing and opens no pull request when the run was stopped while its result was collected", async () => {
+    const created = await harness();
+    const collect = created.jobs.collect.bind(created.jobs);
+    created.jobs.collect = async () => {
+      // A stop_run from another process lands here: the cancellation fence is written first.
+      created.store.run.status = "cancelled";
+      return collect();
+    };
+    await created.executor.start("run-1");
+    expect(created.vcs.finalized).toBe(0);
+    expect(created.events).not.toContain("finalize");
+    expect(created.store.completions).toEqual([]);
+    expect(created.store.run.status).toBe("cancelled");
+    expect(created.store.terminations).toEqual([]);
+    expect(created.jobs.removals).toBe(1);
+  });
 });
 
 describe("resolveCodingToolImage", () => {

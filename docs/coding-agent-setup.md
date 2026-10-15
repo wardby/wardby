@@ -408,8 +408,10 @@ all beat every 10 seconds. A coding run also holds until its
 `CODING_QUEUE_TIMEOUT_SEC` + its `timeoutSec` + 60 seconds have passed since
 dispatch, because it does not beat while it waits in the coding queue. Its
 recorded cost always counts. `wardby run` records the run as `cancelled` on
-Ctrl-C or SIGTERM. If a row is still stuck in `running` for another reason,
-only its real cost counts once its hold lapses.
+Ctrl-C or SIGTERM, and the MCP tool `stop_run` records any pending, queued,
+or running run as `cancelled` (see [Stop or cancel a run](../help/stop-run.md)),
+which ends its hold at once. If a row is still stuck in `running` for another
+reason, only its real cost counts once its hold lapses.
 
 ## Turn limit (Claude Code)
 

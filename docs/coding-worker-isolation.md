@@ -473,6 +473,12 @@ it starts, oldest first, when a slot frees (immediately in the process whose
 run finished, or on the scheduler leader's next tick). A newly dispatched run
 never takes a free slot ahead of an older queued run. A run still queued after
 `CODING_QUEUE_TIMEOUT_SEC` (default `3600`) fails with `coding_queue_timeout`.
+To end a queued run sooner, or a running one, call `stop_run` with its id: a
+queued run is recorded `cancelled` and never starts; a running run is recorded
+`cancelled` first, then its proxy session is cancelled and its job is stopped
+and removed. The cancelled state is checked again before anything is pushed,
+so a stopped run opens or updates no pull request, even when its worker had
+already finished (see [Stop or cancel a run](../help/stop-run.md)).
 Slot usage is derived from run state, so a crashed replica cannot leak slots:
 its runs are reconciled to `lost`, which frees them.
 

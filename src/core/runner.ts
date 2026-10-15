@@ -513,6 +513,23 @@ async function finishRunClaimed(
 }
 
 /**
+ * The inline step runner, made to notice a stop. An inline step has no durable runtime that could
+ * interrupt it (DbosExecutor's steps are interrupted by DBOS itself), so before each step this reads
+ * the run's own row: once anything else has made it terminal (stop_run, an MCP task's cancel, a
+ * parent run's stop, the reconciler), the run stops at this boundary with a RunCancelledError. The
+ * terminal row is never rewritten (finishRunClaimed matches zero rows), so the stop keeps its reason.
+ */
+export function stopAwareStep(db: Pick<RunnerDb, "run">, runId: string, inner: StepRunner = runStepInline): StepRunner {
+  return async (name, fn) => {
+    const row = await db.run.findUnique({ where: { id: runId }, select: { status: true } });
+    if (row && !DRIVABLE.includes(row.status as (typeof DRIVABLE)[number])) {
+      throw new RunCancelledError(`Run ${row.status}: stopped before step "${name}".`);
+    }
+    return inner(name, fn);
+  };
+}
+
+/**
  * Why a sandbox-mode native run is not executed here. The runner only ever
  * executes native runs in the control plane; a run whose snapshot says
  * `sandbox` reaches it only when no native sandbox executor is composed in
@@ -1402,11 +1419,13 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
  * tree's shared budget (computeRunTreeSpend) then counts a running parent's spend so far, as it
  * already does for coding runs, whose proxy ledger writes their totals live. Best-effort: a
  * failed write only delays what observers see, and finishRun writes the final totals anyway.
+ * A cancelled run takes them too: a stop lands mid-step, and that step's spend is real, while the
+ * cancelled run's terminal write (failNativeRun) records no totals of its own.
  */
 export async function recordNativeRunProgress(db: RunnerDb, runId: string, progress: EngineProgress): Promise<void> {
   try {
     await db.run.updateMany({
-      where: { id: runId, status: "running" },
+      where: { id: runId, status: { in: ["running", "cancelled"] } },
       data: {
         turns: progress.turns,
         tokensIn: progress.usage.tokensIn,
@@ -1916,6 +1935,9 @@ async function executeTrackedRun(
     ? (providers.repoAccess ?? createRepoAccessGate({ db, hosts: reviewHosts }))
     : undefined;
   const issueTrackers = configuredIssueTrackers(providers.issueTrackers);
+  // Inline execution checks for a stop before every step (stopAwareStep); a durable executor's own
+  // step runner is interrupted by its runtime instead.
+  if (step === runStepInline) step = stopAwareStep(db, runId);
 
   // Fails a run that ends before its engine starts, closing what its trigger opened (the review
   // check, the host and issue status comments) exactly as the normal and catch paths below do.
