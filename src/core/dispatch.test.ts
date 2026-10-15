@@ -2026,4 +2026,73 @@ describe("coding-run services", () => {
     await dispatchRun({ db: state.db, executor, agentId: "agent_1" });
     expect(reads).toEqual([]);
   });
+
+  describe("an executor that defers coding resolution", () => {
+    function resolvingExecutor(defers: boolean) {
+      const spies = {
+        resolveCodingWorkerImage: vi.fn(() => "worker@sha256:abc"),
+        resolveCodingToolImage: vi.fn(() => null),
+        readCodingServiceDeclaration: vi.fn(async () => DECLARATION),
+        readCodingRepositoryFile: vi.fn(async () => "# Knowledge index\n"),
+      };
+      const executor: Executor = {
+        start: vi.fn(async () => {}),
+        async stop() {},
+        supportsCodingServices: () => true,
+        ...spies,
+        ...(defers ? { defersCodingResolution: true } : {}),
+      };
+      return { executor, spies };
+    }
+
+    it("defers images, services and the knowledge note, storing the raw request", async () => {
+      const agent = servicesAgent(["postgres"], "Run the tests first.");
+      const state = fakeDb(agent, [], {}, CATALOG);
+      const { executor, spies } = resolvingExecutor(true);
+
+      const result = await dispatchRun({ db: state.db, executor, agentId: agent.id, codingTask: "Add 20 jokes" });
+
+      expect(spies.resolveCodingWorkerImage).not.toHaveBeenCalled();
+      expect(spies.resolveCodingToolImage).not.toHaveBeenCalled();
+      expect(spies.readCodingServiceDeclaration).not.toHaveBeenCalled();
+      expect(spies.readCodingRepositoryFile).not.toHaveBeenCalled();
+      expect(result?.run.status).toBe("pending");
+      expect(state.codingRuns[0]).toMatchObject({
+        task: "Add 20 jokes",
+        workerImage: null,
+        toolImage: null,
+        services: [],
+        budgetReservedUsd: 2,
+      });
+    });
+
+    it("still refuses, at dispatch, a request too long for the agent's instructions", async () => {
+      const agent = servicesAgent(["postgres"], "x".repeat(MAX_CODING_TASK_BYTES - 10));
+      const state = fakeDb(agent, [], {}, CATALOG);
+      const { executor } = resolvingExecutor(true);
+      await expect(dispatchRun({ db: state.db, executor, agentId: agent.id })).rejects.toThrow(
+        /exceed the 16384-byte coding task limit/,
+      );
+      expect(state.codingRuns).toEqual([]);
+    });
+
+    it("resolves everything at dispatch when the executor never defers", async () => {
+      const agent = servicesAgent(["postgres"], "Run the tests first.");
+      const state = fakeDb(agent, [], {}, CATALOG);
+      const { executor, spies } = resolvingExecutor(false);
+
+      await dispatchRun({ db: state.db, executor, agentId: agent.id, codingTask: "Add 20 jokes" });
+
+      expect(spies.resolveCodingWorkerImage).toHaveBeenCalled();
+      expect(spies.resolveCodingToolImage).toHaveBeenCalled();
+      expect(spies.readCodingServiceDeclaration).toHaveBeenCalled();
+      expect(spies.readCodingRepositoryFile).toHaveBeenCalled();
+      expect(state.codingRuns[0]).toMatchObject({
+        workerImage: "worker@sha256:abc",
+        services: [resolvedFromDefinition(POSTGRES_16)],
+      });
+      expect(state.codingRuns[0].task).toMatch(/^Standing instructions for this coding agent:\nRun the tests first\./);
+      expect(state.codingRuns[0].task).toMatch(/\n\nRequest:\nAdd 20 jokes$/);
+    });
+  });
 });

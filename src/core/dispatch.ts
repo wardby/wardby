@@ -453,7 +453,7 @@ function resolveMergeOrder(options: DispatchRunOptions, inherited: number | null
 }
 
 /** What dispatch learned about a coding run's .wardby/services.yaml before its transaction. */
-type DeclarationOutcome =
+export type DeclarationOutcome =
   { kind: "none" } | { kind: "declared"; services: DeclaredService[] } | { kind: "refused"; refusal: string };
 
 interface ServiceDeclarationRead {
@@ -485,27 +485,39 @@ async function readKnowledgeIndex(
   resolvedBranch: { baseRef: string } | undefined,
   ownerId: string | null,
 ): Promise<KnowledgeNoteInput | undefined> {
-  const executor = options.executor;
-  if (!executor.readCodingRepositoryFile) return undefined;
+  if (!options.executor.readCodingRepositoryFile) return undefined;
+  let baseRef: string;
   try {
     // Resolved here, inside the try: a branch problem is the transaction's to report, not the note's.
-    const branch = resolvedBranch ?? (await resolveCodingBranch(options.db, options, profile, ownerId));
+    baseRef = (resolvedBranch ?? (await resolveCodingBranch(options.db, options, profile, ownerId))).baseRef;
+  } catch (err) {
+    dispatchLog.warn({ err, repository: profile.repository }, "knowledge index read failed; dispatching without it");
+    return undefined;
+  }
+  return readKnowledgeIndexAt(options.executor, profile.repository, baseRef);
+}
+
+/** The bundle index at a known base ref; also how a deferred coding run reads it when it starts. */
+export async function readKnowledgeIndexAt(
+  executor: Executor,
+  repository: string,
+  baseRef: string,
+): Promise<KnowledgeNoteInput | undefined> {
+  if (!executor.readCodingRepositoryFile) return undefined;
+  try {
     const indexText = await executor.readCodingRepositoryFile({
-      repository: profile.repository,
-      baseRef: normalizeGitRef(branch.baseRef),
+      repository,
+      baseRef: normalizeGitRef(baseRef),
       path: `${DEFAULT_KNOWLEDGE_BUNDLE_PATH}/index.md`,
       maxBytes: KNOWLEDGE_INDEX_READ_MAX_BYTES,
     });
     return indexText ? { bundlePath: DEFAULT_KNOWLEDGE_BUNDLE_PATH, indexText } : undefined;
   } catch (err) {
     if (err instanceof Error && err.message in UNREADABLE_DECLARATION) {
-      dispatchLog.info(
-        { repository: profile.repository, reason: err.message },
-        "knowledge index unreadable; dispatching without it",
-      );
+      dispatchLog.info({ repository, reason: err.message }, "knowledge index unreadable; dispatching without it");
       return undefined;
     }
-    dispatchLog.warn({ err, repository: profile.repository }, "knowledge index read failed; dispatching without it");
+    dispatchLog.warn({ err, repository }, "knowledge index read failed; dispatching without it");
     return undefined;
   }
 }
@@ -522,53 +534,56 @@ async function readServiceDeclaration(
   ownerId: string | null,
 ): Promise<ServiceDeclarationRead> {
   const branch = await resolveCodingBranch(options.db, options, profile, ownerId);
-  const read = { repository: profile.repository, profileBaseRef: profile.baseRef, branch };
-  const executor = options.executor;
-  if (!executor.readCodingServiceDeclaration) return { ...read, outcome: { kind: "none" } };
+  return {
+    repository: profile.repository,
+    profileBaseRef: profile.baseRef,
+    branch,
+    outcome: await readServiceDeclarationAt(options.executor, profile.repository, branch.baseRef),
+  };
+}
+
+/** The declaration at a known base ref, parsed; also how a deferred coding run reads it when it starts. */
+export async function readServiceDeclarationAt(
+  executor: Executor,
+  repository: string,
+  baseRef: string,
+): Promise<DeclarationOutcome> {
+  if (!executor.readCodingServiceDeclaration) return { kind: "none" };
   let text: string | null;
   try {
-    text = await executor.readCodingServiceDeclaration({
-      repository: profile.repository,
-      baseRef: normalizeGitRef(branch.baseRef),
-    });
+    text = await executor.readCodingServiceDeclaration({ repository, baseRef: normalizeGitRef(baseRef) });
   } catch (err) {
     const reason = UNREADABLE_DECLARATION[err instanceof Error ? err.message : ""];
     if (reason) {
       return {
-        ...read,
-        outcome: {
-          kind: "refused",
-          refusal: serviceRefusal("service_declaration_invalid", invalidDeclarationSentence(reason)),
-        },
+        kind: "refused",
+        refusal: serviceRefusal("service_declaration_invalid", invalidDeclarationSentence(reason)),
       };
     }
-    dispatchLog.warn({ err, agentId: options.agentId }, "could not read the repository's service declaration");
+    dispatchLog.warn({ err, repository }, "could not read the repository's service declaration");
     return {
-      ...read,
-      outcome: {
-        kind: "refused",
-        refusal: serviceRefusal("service_declaration_unavailable", DECLARATION_UNAVAILABLE_SENTENCE),
-      },
+      kind: "refused",
+      refusal: serviceRefusal("service_declaration_unavailable", DECLARATION_UNAVAILABLE_SENTENCE),
     };
   }
-  if (text === null) return { ...read, outcome: { kind: "none" } };
+  if (text === null) return { kind: "none" };
   try {
-    return { ...read, outcome: { kind: "declared", services: parseServiceDeclaration(text) } };
+    return { kind: "declared", services: parseServiceDeclaration(text) };
   } catch (err) {
     if (!(err instanceof ServiceDeclarationError)) throw err;
     return {
-      ...read,
-      outcome: {
-        kind: "refused",
-        refusal: serviceRefusal("service_declaration_invalid", invalidDeclarationSentence(err.reason)),
-      },
+      kind: "refused",
+      refusal: serviceRefusal("service_declaration_invalid", invalidDeclarationSentence(err.reason)),
     };
   }
 }
 
-/** Inside the transaction: the run's services, or the refusal that stops it. */
-async function resolveDispatchServices(
-  tx: DispatchTx,
+/**
+ * Inside the transaction: the run's services, or the refusal that stops it. Takes only the
+ * catalog, so a deferred coding run's start resolves them the same way with a plain client.
+ */
+export async function resolveDispatchServices(
+  tx: Pick<Prisma.TransactionClient, "codingService">,
   outcome: DeclarationOutcome,
   allowed: unknown,
   executor: Executor,
@@ -612,9 +627,13 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
     },
   });
   const lockGroups = preview?.kind === "coding" && preview.budgetGroupId != null;
+  // The native gateway's executor has no coding configuration: the run is recorded
+  // unresolved and the process that starts it reads and resolves (resolveDeferredCodingRun).
+  const deferCoding = options.executor.defersCodingResolution === true;
   // Only an agent allowed some service reads the repository's declaration; any
   // other coding agent never calls the host for it and gets no services.
   const declarationRead =
+    !deferCoding &&
     preview?.kind === "coding" &&
     preview.codingProfile &&
     parseAllowedServiceNames(preview.codingProfile.services).length > 0
@@ -622,7 +641,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
       : undefined;
   // The knowledge note's input: the repository's bundle index at the run's base (a network call).
   const knowledgeIndex =
-    preview?.kind === "coding" && preview.codingProfile && options.executor.readCodingRepositoryFile
+    !deferCoding && preview?.kind === "coding" && preview.codingProfile && options.executor.readCodingRepositoryFile
       ? await readKnowledgeIndex(options, preview.codingProfile, declarationRead?.branch, preview.ownerId ?? null)
       : undefined;
   const persistOnce = () =>
@@ -744,13 +763,17 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           const request = options.codingTask ?? agent.codingProfile.defaultTask;
           if (!request) throw new Error(`Coding agent "${agent.id}" requires a task.`);
           // The worker sees only the task text, so the agent's own instructions, and the
-          // services note, ride in it.
-          const task = composeCodingTask(
-            agent.systemPrompt,
-            request,
-            servicesInstructionNote(services),
-            knowledgeIndex ? knowledgeSection(knowledgeIndex) : undefined,
-          );
+          // services note, ride in it. Deferred, the task is stored raw and composed when the
+          // run starts; composing here only checks its size, so it throws exactly as today.
+          if (deferCoding) composeCodingTask(agent.systemPrompt, request);
+          const task = deferCoding
+            ? request
+            : composeCodingTask(
+                agent.systemPrompt,
+                request,
+                servicesInstructionNote(services),
+                knowledgeIndex ? knowledgeSection(knowledgeIndex) : undefined,
+              );
           const budgetUsd = codingBudget.budgetUsd;
 
           // Resolved once: before the transaction when the declaration was read from it.
@@ -779,10 +802,11 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             toolchainVersion: agent.codingProfile.toolchainVersion,
             workerImageRef: agent.codingProfile.workerImageRef,
           };
-          const workerImage = options.executor.resolveCodingWorkerImage?.(imageSelector);
+          // Deferred, both stay null until the starting process resolves them.
+          const workerImage = deferCoding ? null : options.executor.resolveCodingWorkerImage?.(imageSelector);
           // Claude Code's commands run in its tool runner, so the toolchain picks that image too; fixed
           // here with the worker image so the run keeps both however the deployment changes later.
-          const toolImage = options.executor.resolveCodingToolImage?.(imageSelector) ?? null;
+          const toolImage = deferCoding ? null : (options.executor.resolveCodingToolImage?.(imageSelector) ?? null);
           const traced =
             agent.codingProfile.debugTraceUntil != null &&
             now.getTime() < agent.codingProfile.debugTraceUntil.getTime();

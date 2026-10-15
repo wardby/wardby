@@ -90,5 +90,10 @@ export interface Executor {
    * in). MCP refuses to set an agent to sandbox mode where it cannot (docs/native-sandbox.md).
    */
   supportsNativeSandbox?(): boolean;
+  /**
+   * true: this executor cannot resolve coding inputs; dispatch records the coding run unresolved
+   * and the process that starts it resolves them (resolveDeferredCodingRun).
+   */
+  defersCodingResolution?: boolean;
 }
 import type { CodingProvider } from "../../coding/provider.js";
