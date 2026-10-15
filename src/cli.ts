@@ -959,8 +959,7 @@ async function nativeGateway(): Promise<void> {
     reviewHosts,
     issueTrackers: buildIssueTrackers(),
     repoAccess: createRepoAccessGate({ db: prisma, hosts: reviewHosts }),
-    // Coding resolution only (worker image, service declaration): never started or stopped here.
-    executor: new DeferredExecutor(prisma, buildConfiguredExecutor({ native: noopExecutor(), db: prisma })),
+    executor: new DeferredExecutor(prisma),
   };
   const server = await startGatewayServer(listen, { db: prisma, providers });
   // The deny port (NATIVE_GATEWAY_DENY_PORT, default 8791) serves nothing: a worker that can reach the

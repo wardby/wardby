@@ -6,27 +6,23 @@
  * stop it needs only requested (Run.stopRequestedAt). The scheduler leader
  * carries both out through the server's own executor (`drainDeferredRuns`).
  *
- * Coding dispatch still needs the worker image and the repository's service
- * declaration and knowledge files, resolved at dispatch: those come from a
- * resolve-only view of the configured coding executor, whose start/stop are
- * never called here.
+ * Coding dispatch is recorded unresolved (`defersCodingResolution`): the worker image,
+ * service declaration and knowledge files are resolved by the process that starts the run
+ * (the drain's `beforeStart` hook), not here.
  */
 
 import type { PrismaClient } from "#prisma";
 import { logger } from "../../core/logger.js";
-import type { CodingImageSelector, Executor } from "./types.js";
-import type { CodingProvider } from "../../coding/provider.js";
+import type { Executor } from "./types.js";
 
 const deferredLog = logger.child({ module: "deferred-executor" });
 
 export type DeferredExecutorDb = Pick<PrismaClient, "run">;
 
 export class DeferredExecutor implements Executor {
-  constructor(
-    private readonly db: DeferredExecutorDb,
-    /** Coding resolution only (image, service declaration, repository files); never started or stopped. */
-    private readonly resolver?: Executor,
-  ) {}
+  readonly defersCodingResolution = true;
+
+  constructor(private readonly db: DeferredExecutorDb) {}
 
   async start(runId: string): Promise<void> {
     await this.db.run.updateMany({ where: { id: runId, status: "pending" }, data: { startDeferredAt: new Date() } });
@@ -49,33 +45,6 @@ export class DeferredExecutor implements Executor {
       data: { stopRequestedAt: new Date(), stopRequestReason: reason ?? null },
     });
   }
-
-  resolveCodingWorkerImage(selector: CodingImageSelector): string {
-    if (!this.resolver?.resolveCodingWorkerImage) throw new Error("coding_execution_not_configured");
-    return this.resolver.resolveCodingWorkerImage(selector);
-  }
-
-  resolveCodingToolImage(selector: CodingImageSelector): string | null {
-    if (!this.resolver?.resolveCodingToolImage) throw new Error("coding_execution_not_configured");
-    return this.resolver.resolveCodingToolImage(selector);
-  }
-
-  async readCodingServiceDeclaration(input: { repository: string; baseRef: string }): Promise<string | null> {
-    return this.resolver?.readCodingServiceDeclaration?.(input) ?? null;
-  }
-
-  async readCodingRepositoryFile(input: {
-    repository: string;
-    baseRef: string;
-    path: string;
-    maxBytes: number;
-  }): Promise<string | null> {
-    return this.resolver?.readCodingRepositoryFile?.(input) ?? null;
-  }
-
-  supportsCodingServices(provider: CodingProvider): boolean {
-    return this.resolver?.supportsCodingServices?.(provider) === true;
-  }
 }
 
 export interface DrainDeferredRunsOptions {
@@ -83,6 +52,12 @@ export interface DrainDeferredRunsOptions {
   executor: Executor;
   /** Where a start failure is recorded; defaults to marking the run failed with the error. */
   onStartFailed?: (runId: string, err: unknown) => Promise<void>;
+  /**
+   * Runs after a row is claimed and before `executor.start`. Resolves inputs the deferring process
+   * could not; false means the hook ended the run itself so it must not start. A throw is handled
+   * like a start failure.
+   */
+  beforeStart?: (runId: string) => Promise<boolean>;
   limit?: number;
 }
 
@@ -113,7 +88,10 @@ export async function drainDeferredRuns(
     if (claimed.count === 0) continue;
     started += 1;
     // Not awaited: an in-process executor's start runs the whole run.
-    void executor.start(id).catch(async (err: unknown) => {
+    void (async () => {
+      if (options.beforeStart && !(await options.beforeStart(id))) return;
+      await executor.start(id);
+    })().catch(async (err: unknown) => {
       deferredLog.error({ err, runId: id }, "deferred run failed to start");
       await (options.onStartFailed?.(id, err) ??
         db.run.updateMany({
