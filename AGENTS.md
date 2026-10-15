@@ -31,3 +31,8 @@ points to it and adds notes about the coding-run sandbox.
 
 - If a check can't run in the sandbox, say which and why in the pull request; never
   report it as passing.
+
+## Architecture knowledge
+
+See [the architecture knowledge index](docs/knowledge/index.md) for cited
+contracts and pitfalls relevant to repository changes.
