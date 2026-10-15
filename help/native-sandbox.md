@@ -102,7 +102,11 @@ are in [Native sandbox](../docs/native-sandbox.md#warm-pool).
   run `budget_exhausted`.
 - Sub-agents of a sandboxed run are managed runs started by the scheduler
   leader on its next tick (about every 10 seconds), so the server or scheduler
-  must be running.
+  must be running. A coding agent child is resolved by the server when it
+  starts (worker image, services, knowledge), so the gateway needs no `CODING_*`
+  settings; a problem there shows as the child run `failed` or `refused`, and the
+  parent's `delegate_to_*` call receives that result. Upgrade `wardby serve` and
+  `wardby scheduler` before or together with the gateway.
 - A sandbox run has a 60-minute maximum lifetime.
 - `stop_run` stops a sandbox run: its gateway session ends so the worker exits
   at its next call, and a worker still running after 5 seconds is killed and
@@ -124,6 +128,7 @@ codes:
 
 - [native_sandbox_unavailable](errors/native-sandbox-unavailable.md)
 - [native_sandbox_worker_exited](errors/native-sandbox-worker-exited.md)
+- [native_sandbox_gateway_error](errors/native-sandbox-gateway-error.md)
 - [native_sandbox_deadline_exceeded](errors/native-sandbox-deadline-exceeded.md)
 - [native_sandbox_worker_lost](errors/native-sandbox-worker-lost.md)
 - [native_sandbox_image_not_pinned](errors/native-sandbox-image-not-pinned.md)

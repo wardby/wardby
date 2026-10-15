@@ -233,6 +233,8 @@ Protected-path entries also accept a leading `!` for your own exceptions:
 | A service never became ready                   | Launch   | failed, category `service_unready`         | "The `<name>` service didn't become ready, so the run couldn't start."                                                                                                                |
 | The run's changes touched a protected path     | Collect  | failed, category `protected_path`          | "its changes include `<path>`, which this agent may not edit, so none of its changes were kept. Ask again without changing that file, or have the repository owner make that change." |
 
+For a coding sub-agent of a sandboxed run, these refusals appear when the run starts instead of at dispatch, and the parent's delegation call receives the result.
+
 A refused run's `error` (from `get_run`) is the code followed by that sentence.
 The sentence reaches the requester on the run's status comment and, for a
 coding run started by another agent, in that agent's tool result. A
