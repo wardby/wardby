@@ -46,5 +46,7 @@ The access helpers default to `ctx.db`; callers inside a mutation transaction mu
 **Why:** checking access only before a mutation, or using the default client within it, lets a concurrent grant revocation escape the transaction’s conflict detection. The operator-facing revocation behavior is described in [Security deployment, Sharing agents](../security-deployment.md); this concept records the transaction contract behind that behavior.
 
 [^access]: src/mcp/auth/access.ts, lines 47-70.
+
 [^mutation]: src/mcp/tools/agents.ts, lines 789-799.
+
 [^isolation]: src/mcp/tools/agents.ts, lines 894-904.

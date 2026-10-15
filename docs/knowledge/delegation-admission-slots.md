@@ -46,5 +46,7 @@ Parallel delegation uses a per-attempt admission gate to keep the prior-child an
 **What to do:** preserve the waiting-child reservation when changing retry or dispatch paths; releasing it early can admit the same child twice or exceed the delegation count. Holding the gate through child execution instead serializes the batch. [Coding-agent setup, budgets](../coding-agent-setup.md) already describes sibling budget waits; this concept records the admission consequence rather than repeating that behavior.
 
 [^admission]: src/core/runner.ts, lines 1033-1051.
+
 [^wait]: src/core/runner.ts, lines 1064-1087.
+
 [^persist]: src/core/runner.ts, lines 1140-1147.
