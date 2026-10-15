@@ -407,8 +407,10 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
 - Each coding sub-agent's result tells the lead its `status`, its summary
   (`finalText`), cost and tokens, and, when it opened or pushed to a pull
   request, `pullRequest` (`outcome` `opened` or `updated`, `repository`,
-  `number`, `url`) taken from Wardby's own record of the run. A lead prompt can
-  ask the agent to report those links.
+  `number`, `url`) taken from Wardby's own record of the run. A failed builder's
+  result also carries `errorCode`, the leading code of its error (such as
+  `coding_queue_timeout`); the full error stays on the run (`get_run`). A lead
+  prompt can ask the agent to report those links and codes.
 - The whole run tree shares one budget: give the lead a `budgetUsd` that
   covers every builder it may start, plus its own planning. Builders started
   together each reserve their own `budgetUsd` up front, so the ones admitted
