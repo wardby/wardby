@@ -76,18 +76,61 @@ describe.skipIf(!process.env.DATABASE_URL)("DeferredExecutor and drainDeferredRu
     });
   });
 
-  it("delegates coding resolution to its resolve-only executor, and refuses without one", () => {
-    const resolver: Executor = {
-      start: async () => {
-        throw new Error("must never start");
-      },
-      stop: async () => {},
-      resolveCodingWorkerImage: () => "image@sha256:abc",
+  it("defers coding resolution and carries no resolver methods", () => {
+    const deferred = new DeferredExecutor(db);
+    expect(deferred.defersCodingResolution).toBe(true);
+    for (const method of [
+      "resolveCodingWorkerImage",
+      "resolveCodingToolImage",
+      "readCodingServiceDeclaration",
+      "readCodingRepositoryFile",
+      "supportsCodingServices",
+    ]) {
+      expect(method in deferred).toBe(false);
+    }
+  });
+
+  describe("beforeStart hook", () => {
+    const deferredRun = async () => {
+      const run = await pendingRun();
+      await new DeferredExecutor(db).start(run.id);
+      return run;
     };
-    const selector = { provider: "codex" as const, toolchain: "node", toolchainVersion: null, workerImageRef: null };
-    expect(new DeferredExecutor(db, resolver).resolveCodingWorkerImage(selector)).toBe("image@sha256:abc");
-    expect(() => new DeferredExecutor(db).resolveCodingWorkerImage(selector)).toThrow(
-      /coding_execution_not_configured/,
-    );
+
+    it("does not start the run when the hook returns false", async () => {
+      const run = await deferredRun();
+      const { executor } = server();
+      const beforeStart = vi.fn(async () => false);
+      await drainDeferredRuns({ db, executor, beforeStart });
+      expect(beforeStart).toHaveBeenCalledWith(run.id);
+      expect(executor.start).not.toHaveBeenCalledWith(run.id);
+    });
+
+    it("starts the run once when the hook returns true", async () => {
+      const run = await deferredRun();
+      const { executor } = server();
+      await drainDeferredRuns({ db, executor, beforeStart: async () => true });
+      await vi.waitFor(() => expect(executor.start).toHaveBeenCalledWith(run.id));
+      expect(vi.mocked(executor.start).mock.calls.filter(([id]) => id === run.id)).toHaveLength(1);
+    });
+
+    it("fails the run with the hook's error and does not start it", async () => {
+      const run = await deferredRun();
+      const { executor } = server();
+      await drainDeferredRuns({
+        db,
+        executor,
+        beforeStart: async () => {
+          throw new Error("coding_worker_image_invalid: x");
+        },
+      });
+      await vi.waitFor(async () => {
+        expect(await db.run.findUniqueOrThrow({ where: { id: run.id } })).toMatchObject({
+          status: "failed",
+          error: "coding_worker_image_invalid: x",
+        });
+      });
+      expect(executor.start).not.toHaveBeenCalledWith(run.id);
+    });
   });
 });

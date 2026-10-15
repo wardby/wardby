@@ -52,6 +52,7 @@ import {
 import { startModelCatalog, type CatalogStore } from "./providers/llm/catalog-store.js";
 import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/index.js";
 import { DeferredExecutor, drainDeferredRuns } from "./providers/executor/deferred.js";
+import { resolveDeferredCodingRun } from "./core/deferred-coding.js";
 import { parseGatewayListen, startGatewayServer } from "./native-worker/http-server.js";
 import { NATIVE_GATEWAY_DENY_PORT } from "./native-worker/docker-isolation.js";
 import { startDenyPortListener } from "./providers/coding-proxy/deny-port.js";
@@ -70,6 +71,7 @@ import { buildReviewHosts } from "./providers/review-host/index.js";
 import { createRepoAccessGate } from "./core/repo-access.js";
 import { validateCronExpression } from "./core/cron.js";
 import { assertAgentModelAvailable } from "./core/run-pricing.js";
+import { markRunFailedFromExecutorError } from "./core/dispatch.js";
 import { startScheduler } from "./core/scheduler.js";
 import { startReconciler } from "./core/reconciler.js";
 import { startNotifications } from "./core/notifications.js";
@@ -908,7 +910,12 @@ async function scheduler(args: string[]): Promise<void> {
     onLeaderTick: async () => {
       await drainCodingQueue({ db: prisma, executor, ...concurrency, selfDefects });
       // Runs the native sandbox gateway dispatched (or asked to stop): it holds no executor of its own.
-      await drainDeferredRuns({ db: prisma, executor });
+      await drainDeferredRuns({
+        db: prisma,
+        executor,
+        beforeStart: (runId) => resolveDeferredCodingRun({ db: prisma, executor, runId }),
+        onStartFailed: (runId, err) => markRunFailedFromExecutorError(prisma, runId, err, selfDefects),
+      });
       await power.sleepIfIdle().catch((err) => cliLog.warn({ err }, "power_sleep_failed"));
     },
   });
@@ -959,8 +966,7 @@ async function nativeGateway(): Promise<void> {
     reviewHosts,
     issueTrackers: buildIssueTrackers(),
     repoAccess: createRepoAccessGate({ db: prisma, hosts: reviewHosts }),
-    // Coding resolution only (worker image, service declaration): never started or stopped here.
-    executor: new DeferredExecutor(prisma, buildConfiguredExecutor({ native: noopExecutor(), db: prisma })),
+    executor: new DeferredExecutor(prisma),
   };
   const server = await startGatewayServer(listen, { db: prisma, providers });
   // The deny port (NATIVE_GATEWAY_DENY_PORT, default 8791) serves nothing: a worker that can reach the
