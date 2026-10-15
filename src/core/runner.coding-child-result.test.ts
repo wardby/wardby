@@ -45,6 +45,25 @@ describe("codingChildResult", () => {
     ).toEqual({ outcome: "updated", repository: "acme/api", number: 7 });
   });
 
+  it("tells the parent why a sub-run failed by its error code only, never the raw message", () => {
+    const failed = JSON.parse(
+      codingChildResult({
+        ...base,
+        status: "failed",
+        error: "coding_worker_image_invalid: registry.internal:5000/img is not pinned by digest",
+      }),
+    );
+    expect(failed.errorCode).toBe("coding_worker_image_invalid");
+    expect(JSON.stringify(failed)).not.toContain("registry.internal");
+    // An error without a leading code adds nothing; only a failed run carries one.
+    expect(
+      JSON.parse(codingChildResult({ ...base, status: "failed", error: "Something broke at 10.0.0.1" })),
+    ).not.toHaveProperty("errorCode");
+    expect(
+      JSON.parse(codingChildResult({ ...base, status: "cancelled", error: "stopped_by_user: no longer needed" })),
+    ).not.toHaveProperty("errorCode");
+  });
+
   it("adds no pull request when the sub-run opened none or its result is malformed", () => {
     for (const stored of [
       undefined,

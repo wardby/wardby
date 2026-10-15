@@ -572,9 +572,9 @@ A problem with those, such as a `workerImageRef` that is not pinned by digest,
 a toolchain with no image, an invalid or unavailable services declaration, an
 unknown service, or a launcher that cannot run services, shows as the child run
 ending `failed` or `refused` when it starts, with the same error code as at
-dispatch. The error code is recorded on the child run (see it with `get_run`).
-The parent's `delegate_to_*` call receives the child's result instead:
-`status: "failed"`, or for a refused child the refusal sentence. For agents not
+dispatch. The parent's `delegate_to_*` call receives the child's result: for a
+failed child `status: "failed"` with the `errorCode`, for a refused child the
+refusal sentence. The full error is on the child run (see it with `get_run`). For agents not
 in sandbox mode these errors still appear at dispatch. If creating a sub-agent
 run fails unexpectedly during a sandboxed run's delegation, the delegating agent
 receives a tool result `{"error":"dispatch_failed","message":"The sub-agent run

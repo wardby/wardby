@@ -105,9 +105,9 @@ are in [Native sandbox](../docs/native-sandbox.md#warm-pool).
   must be running. A coding agent child is resolved by the server when it
   starts (worker image, services, knowledge), so the gateway needs no `CODING_*`
   settings; a problem there (such as a `workerImageRef` that is not pinned by digest)
-  shows as the child run `failed` or `refused`, with the error code recorded on
-  the child run (see it with `get_run`); the parent's `delegate_to_*` call
-  receives `status: "failed"`, or for a refused child the refusal sentence.
+  shows as the child run `failed` or `refused`; the parent's `delegate_to_*`
+  call receives `status: "failed"` with the `errorCode`, or for a refused child
+  the refusal sentence, and the full error is on the child run (`get_run`).
   Upgrade `wardby serve` and `wardby scheduler` before or together with the
   gateway: an older server starts the child unresolved (a Codex child on the
   default image without its instructions, a Claude Code child failing with
