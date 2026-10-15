@@ -6,7 +6,7 @@
 - [Budget-waiting delegations retain admission slots](delegation-admission-slots.md) — Releasing the delegation gate during a budget wait must preserve duplicate-child and delegation-limit accounting.
 - [Schedule deduplication belongs to the transaction](schedule-claim-transaction.md) — A scheduler lease cannot replace the atomic schedule-window claim and run creation.
 - [Terminal run state belongs to the first writer](terminal-run-first-writer.md) — Run completion must conditionally write pending or running rows and read back the persisted winner.
-- [Task cancellation takes precedence over run status](mcp-task-cancellation-stamp.md) — A cancelled task remains cancelled even if its underlying run finishes with a different terminal outcome.
+- [Task cancellation takes precedence over run status](mcp-cancelled-task-precedence.md) — A cancelled task remains cancelled even if its underlying run finishes with a different terminal outcome.
 - [Secret entry replicas must share token verification](secret-entry-replica-contract.md) — A shared outcome database cannot complete a secret-entry round trip when replicas use independent signing keys.
 
 ## Decisions
