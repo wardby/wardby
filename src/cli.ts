@@ -52,6 +52,7 @@ import {
 import { startModelCatalog, type CatalogStore } from "./providers/llm/catalog-store.js";
 import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/index.js";
 import { DeferredExecutor, drainDeferredRuns } from "./providers/executor/deferred.js";
+import { resolveDeferredCodingRun } from "./core/deferred-coding.js";
 import { parseGatewayListen, startGatewayServer } from "./native-worker/http-server.js";
 import { NATIVE_GATEWAY_DENY_PORT } from "./native-worker/docker-isolation.js";
 import { startDenyPortListener } from "./providers/coding-proxy/deny-port.js";
@@ -908,7 +909,11 @@ async function scheduler(args: string[]): Promise<void> {
     onLeaderTick: async () => {
       await drainCodingQueue({ db: prisma, executor, ...concurrency, selfDefects });
       // Runs the native sandbox gateway dispatched (or asked to stop): it holds no executor of its own.
-      await drainDeferredRuns({ db: prisma, executor });
+      await drainDeferredRuns({
+        db: prisma,
+        executor,
+        beforeStart: (runId) => resolveDeferredCodingRun({ db: prisma, executor, runId }),
+      });
       await power.sleepIfIdle().catch((err) => cliLog.warn({ err }, "power_sleep_failed"));
     },
   });

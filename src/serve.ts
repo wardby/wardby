@@ -26,6 +26,7 @@ import { startReconciler } from "./core/reconciler.js";
 import { createRepoAccessGate } from "./core/repo-access.js";
 import { startScheduler } from "./core/scheduler.js";
 import { drainDeferredRuns } from "./providers/executor/deferred.js";
+import { resolveDeferredCodingRun } from "./core/deferred-coding.js";
 import type { McpProviders } from "./mcp/context.js";
 import { buildMcpProviders, startMcp } from "./mcp/index.js";
 
@@ -94,7 +95,11 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
     onLeaderTick: async () => {
       await drainCodingQueue({ db: prisma, executor: providers.executor, ...concurrency, selfDefects });
       // Runs the native sandbox gateway dispatched (or asked to stop): it holds no executor of its own.
-      await drainDeferredRuns({ db: prisma, executor: providers.executor });
+      await drainDeferredRuns({
+        db: prisma,
+        executor: providers.executor,
+        beforeStart: (runId) => resolveDeferredCodingRun({ db: prisma, executor: providers.executor, runId }),
+      });
       // Scale idle coding-proxy/native-gateway Deployments to zero (no-op unless WARDBY_LOW_POWER=1).
       await power.sleepIfIdle().catch((err) => serveLog.warn({ err }, "power_sleep_failed"));
     },
