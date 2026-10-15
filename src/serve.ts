@@ -24,6 +24,7 @@ import { DISABLED_POWER } from "./core/power.js";
 import { startNotifications } from "./core/notifications.js";
 import { startReconciler } from "./core/reconciler.js";
 import { createRepoAccessGate } from "./core/repo-access.js";
+import { markRunFailedFromExecutorError } from "./core/dispatch.js";
 import { startScheduler } from "./core/scheduler.js";
 import { drainDeferredRuns } from "./providers/executor/deferred.js";
 import { resolveDeferredCodingRun } from "./core/deferred-coding.js";
@@ -99,6 +100,7 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
         db: prisma,
         executor: providers.executor,
         beforeStart: (runId) => resolveDeferredCodingRun({ db: prisma, executor: providers.executor, runId }),
+        onStartFailed: (runId, err) => markRunFailedFromExecutorError(prisma, runId, err, selfDefects),
       });
       // Scale idle coding-proxy/native-gateway Deployments to zero (no-op unless WARDBY_LOW_POWER=1).
       await power.sleepIfIdle().catch((err) => serveLog.warn({ err }, "power_sleep_failed"));

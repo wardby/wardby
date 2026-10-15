@@ -71,6 +71,7 @@ import { buildReviewHosts } from "./providers/review-host/index.js";
 import { createRepoAccessGate } from "./core/repo-access.js";
 import { validateCronExpression } from "./core/cron.js";
 import { assertAgentModelAvailable } from "./core/run-pricing.js";
+import { markRunFailedFromExecutorError } from "./core/dispatch.js";
 import { startScheduler } from "./core/scheduler.js";
 import { startReconciler } from "./core/reconciler.js";
 import { startNotifications } from "./core/notifications.js";
@@ -913,6 +914,7 @@ async function scheduler(args: string[]): Promise<void> {
         db: prisma,
         executor,
         beforeStart: (runId) => resolveDeferredCodingRun({ db: prisma, executor, runId }),
+        onStartFailed: (runId, err) => markRunFailedFromExecutorError(prisma, runId, err, selfDefects),
       });
       await power.sleepIfIdle().catch((err) => cliLog.warn({ err }, "power_sleep_failed"));
     },

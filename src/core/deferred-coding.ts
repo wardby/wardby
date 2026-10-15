@@ -31,21 +31,16 @@ export async function resolveDeferredCodingRun({ db, executor, runId }: ResolveD
   if (!profile) throw new Error(`coding_profile_missing: coding agent "${run.agentId}" has no coding profile.`);
   assertCodingProvider(coding.provider);
   // The provider is the run's own (fixed at dispatch); the toolchain and image ref are the profile's,
-  // as dispatch would have read them.
+  // read as they are when the run starts.
   const selector = {
     provider: coding.provider,
     toolchain: profile.toolchain,
     toolchainVersion: profile.toolchainVersion,
     workerImageRef: profile.workerImageRef,
   };
-  if (!executor.resolveCodingWorkerImage) {
-    throw new Error("coding_execution_not_configured: this process cannot start coding runs.");
-  }
-  const workerImage = executor.resolveCodingWorkerImage(selector);
-  const toolImage = executor.resolveCodingToolImage?.(selector) ?? null;
-
-  // As at dispatch: only an agent allowed some service reads the declaration, and any refusal
-  // dispatch would have raised refuses the run here instead.
+  // Services before images, in dispatch's order: a run with both a refused declaration and a bad
+  // image ends refused. As at dispatch, only an agent allowed some service reads the declaration,
+  // and any refusal dispatch would have raised refuses the run here instead.
   let services: ResolvedCodingService[] = [];
   if (parseAllowedServiceNames(profile.services).length > 0) {
     const outcome = await readServiceDeclarationAt(executor, coding.repository, coding.baseRef);
@@ -67,6 +62,11 @@ export async function resolveDeferredCodingRun({ db, executor, runId }: ResolveD
     }
     services = resolved.services;
   }
+  if (!executor.resolveCodingWorkerImage) {
+    throw new Error("coding_execution_not_configured: this process cannot start coding runs.");
+  }
+  const workerImage = executor.resolveCodingWorkerImage(selector);
+  const toolImage = executor.resolveCodingToolImage?.(selector) ?? null;
   const knowledge = await readKnowledgeIndexAt(executor, coding.repository, coding.baseRef);
   const task = composeCodingTask(
     run.agent.systemPrompt,

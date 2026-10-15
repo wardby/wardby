@@ -104,9 +104,14 @@ are in [Native sandbox](../docs/native-sandbox.md#warm-pool).
   leader on its next tick (about every 10 seconds), so the server or scheduler
   must be running. A coding agent child is resolved by the server when it
   starts (worker image, services, knowledge), so the gateway needs no `CODING_*`
-  settings; a problem there shows as the child run `failed` or `refused`, and the
-  parent's `delegate_to_*` call receives that result. Upgrade `wardby serve` and
-  `wardby scheduler` before or together with the gateway.
+  settings; a problem there (such as a `workerImageRef` that is not pinned by digest)
+  shows as the child run `failed` or `refused`, with the error code recorded on
+  the child run (see it with `get_run`); the parent's `delegate_to_*` call
+  receives `status: "failed"`, or for a refused child the refusal sentence.
+  Upgrade `wardby serve` and `wardby scheduler` before or together with the
+  gateway: an older server starts the child unresolved (a Codex child on the
+  default image without its instructions, a Claude Code child failing with
+  `coding_provider_not_configured:claude-code`).
 - A sandbox run has a 60-minute maximum lifetime.
 - `stop_run` stops a sandbox run: its gateway session ends so the worker exits
   at its next call, and a worker still running after 5 seconds is killed and

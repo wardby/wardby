@@ -568,19 +568,24 @@ server resolves its worker image (and the Claude Code tool-runner image), reads
 index, and composes the final task. The gateway therefore needs no `CODING_*`
 settings, and a gateway that sets them can drop them.
 
-A problem with those, such as an unapproved or invalid `workerImageRef`, a
-toolchain with no image, an invalid or unavailable services declaration, an
+A problem with those, such as a `workerImageRef` that is not pinned by digest,
+a toolchain with no image, an invalid or unavailable services declaration, an
 unknown service, or a launcher that cannot run services, shows as the child run
 ending `failed` or `refused` when it starts, with the same error code as at
-dispatch. The parent's `delegate_to_*` call receives that result. For agents not
+dispatch. The error code is recorded on the child run (see it with `get_run`).
+The parent's `delegate_to_*` call receives the child's result instead:
+`status: "failed"`, or for a refused child the refusal sentence. For agents not
 in sandbox mode these errors still appear at dispatch. If creating a sub-agent
 run fails unexpectedly during a sandboxed run's delegation, the delegating agent
 receives a tool result `{"error":"dispatch_failed","message":"The sub-agent run
 could not be created (<code>)."}` instead of the run failing.
 
 **Upgrading:** upgrade `wardby serve` and `wardby scheduler` before or together
-with the gateway. An older server starts such a child without resolving it, so
-it runs with the default image and without its standing instructions.
+with the gateway. An older server starts such a child without resolving it: a Codex child
+then runs on the deployment's default Codex image (ignoring its toolchain and
+`workerImageRef`) and without its standing instructions, services, or knowledge
+note, and a Claude Code child fails to start with
+`coding_provider_not_configured:claude-code`.
 
 ## Budget behavior
 

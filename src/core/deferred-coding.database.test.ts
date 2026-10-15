@@ -24,6 +24,7 @@ describe.skipIf(!process.env.DATABASE_URL)("resolveDeferredCodingRun (database)"
   const suffix = randomUUID().slice(0, 8);
   const agentId = `defcode-agent-${suffix}`;
   const nativeAgentId = `defcode-native-${suffix}`;
+  const noServicesAgentId = `defcode-noservices-${suffix}`;
 
   beforeAll(async () => {
     await db.agent.create({
@@ -40,18 +41,31 @@ describe.skipIf(!process.env.DATABASE_URL)("resolveDeferredCodingRun (database)"
       },
     });
     await db.agent.create({
+      data: {
+        id: noServicesAgentId,
+        name: noServicesAgentId,
+        kind: "coding",
+        systemPrompt: "No services.",
+        model: "gpt-5.6-luna",
+        budgetUsd: 1,
+        codingProfile: { create: { repository: "openai/example", protectedPaths: ["CODEOWNERS"], services: [] } },
+      },
+    });
+    await db.agent.create({
       data: { id: nativeAgentId, name: nativeAgentId, systemPrompt: "s", model: "m", budgetUsd: 1 },
     });
   });
   afterAll(async () => {
-    await db.run.deleteMany({ where: { agentId: { in: [agentId, nativeAgentId] } } });
-    await db.agent.deleteMany({ where: { id: { in: [agentId, nativeAgentId] } } });
+    await db.run.deleteMany({ where: { agentId: { in: [agentId, nativeAgentId, noServicesAgentId] } } });
+    await db.agent.deleteMany({ where: { id: { in: [agentId, nativeAgentId, noServicesAgentId] } } });
     await db.$disconnect();
   });
 
   /** A pending run as the gateway's dispatch records it: images null, no services, the raw request. */
-  async function unresolvedRun(task = "Add 20 jokes", workerImage: string | null = null) {
-    const run = await db.run.create({ data: { agentId, executionManaged: true, startDeferredAt: new Date() } });
+  async function unresolvedRun(task = "Add 20 jokes", workerImage: string | null = null, forAgent = agentId) {
+    const run = await db.run.create({
+      data: { agentId: forAgent, executionManaged: true, startDeferredAt: new Date() },
+    });
     await db.codingRun.create({
       data: {
         runId: run.id,
@@ -129,6 +143,28 @@ describe.skipIf(!process.env.DATABASE_URL)("resolveDeferredCodingRun (database)"
     await expect(resolveDeferredCodingRun({ db, executor, runId: run.id })).resolves.toBe(true);
 
     for (const spy of Object.values(spies)) expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("never reads the declaration for a profile that allows no services", async () => {
+    const run = await unresolvedRun("Add 20 jokes", null, noServicesAgentId);
+    const { executor, spies } = fakeExecutor();
+
+    await expect(resolveDeferredCodingRun({ db, executor, runId: run.id })).resolves.toBe(true);
+
+    expect(spies.readCodingServiceDeclaration).not.toHaveBeenCalled();
+    expect(await codingRunOf(run.id)).toMatchObject({ workerImage: WORKER, services: [] });
+  });
+
+  it("refuses over services before an image fault is raised, as dispatch orders them", async () => {
+    const run = await unresolvedRun();
+    const { executor } = fakeExecutor('services:\n  postgres: "99"\n');
+    executor.resolveCodingWorkerImage = () => {
+      throw new Error("coding_worker_image_invalid");
+    };
+
+    await expect(resolveDeferredCodingRun({ db, executor, runId: run.id })).resolves.toBe(false);
+
+    expect(await runOf(run.id)).toMatchObject({ status: "refused" });
   });
 
   it("propagates an image resolution failure, leaving the run for the drain to fail", async () => {
