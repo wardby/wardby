@@ -396,6 +396,16 @@ async function main() {
     process.exit(127);
   }
   let restore;
+  let child;
+  // Installed before the lockfile is rewritten: a signal that lands before
+  // the real tool starts must still put the public URLs back, then die of it.
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"])
+    process.on(signal, () => {
+      if (child) return void child.kill(signal);
+      restore?.();
+      process.removeAllListeners(signal);
+      process.kill(process.pid, signal);
+    });
   if (process.env[ACTIVE] !== "1" && TOOLS[tool].installs.has(commandOf(args, tool))) {
     const lockfile = findLockfile(project, tool);
     const auth = lockfile && registryAuth();
@@ -404,7 +414,7 @@ async function main() {
       if (tool === "yarn") restore = routeClassicLockfile(lockfile, auth.base);
     }
   }
-  const child = spawn(real.file, [...real.prefix, ...args], {
+  child = spawn(real.file, [...real.prefix, ...args], {
     stdio: "inherit",
     env: {
       ...process.env,
@@ -412,7 +422,6 @@ async function main() {
       ...toolSettings(tool),
     },
   });
-  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => child.kill(signal));
   child.on("error", (error) => {
     restore?.();
     say(`could not run ${tool}: ${error.message}`);

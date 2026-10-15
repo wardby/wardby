@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { watch } from "node:fs";
 import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -387,6 +388,25 @@ describe("package-manager shim for yarn", () => {
     expect(signal).toBe("SIGTERM");
     expect(await readFile(join(project, "yarn.lock"), "utf8")).toBe(original);
   }, 15_000);
+
+  it("restores the lockfile when killed the moment it is rewritten", async () => {
+    const { shim, project, env } = await toolLayout("yarn", ["yarn"]);
+    const original = classic("https://registry.yarnpkg.com/");
+    // A signal right after the rewrite, before the real tool starts, must
+    // still put the public URLs back. Repeat: the gap is short.
+    for (let attempt = 0; attempt < 15; attempt++) {
+      await writeFile(join(project, "yarn.lock"), original);
+      const child = spawn(shim, ["install"], { cwd: project, env: { ...env, FAKE_SLEEP_MS: "5000" } });
+      const closed = new Promise((resolve) => child.once("close", (_code, signal) => resolve(signal)));
+      const watcher = watch(project, () => {
+        watcher.close();
+        child.kill("SIGTERM");
+      });
+      expect(await closed).toBe("SIGTERM");
+      watcher.close();
+      expect(await readFile(join(project, "yarn.lock"), "utf8")).toBe(original);
+    }
+  }, 60_000);
 
   it("reads packageManager from the workspace root when run from a workspace package", async () => {
     const { shim, project, env, calls } = await toolLayout("yarn", ["yarn", "corepack"]);
