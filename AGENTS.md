@@ -31,3 +31,9 @@ points to it and adds notes about the coding-run sandbox.
 
 - If a check can't run in the sandbox, say which and why in the pull request; never
   report it as passing.
+
+## Architecture knowledge
+
+Non-obvious, cited architecture knowledge lives in
+[docs/knowledge/index.md](docs/knowledge/index.md). Read the concepts covering
+the files you will touch before changing them.
