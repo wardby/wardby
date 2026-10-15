@@ -145,7 +145,11 @@ export async function runNativeWorker(input: WorkerInput, transport: GatewayTran
       status: "failed",
       finalText: "",
       turns: 0,
-      error: `native_sandbox_gateway_error: ${err.code}: ${err.message.slice(0, 1024)}`,
+      // `internal` wraps raw exception text on some transports, so only its code is persisted.
+      error:
+        err.code === "internal"
+          ? "native_sandbox_gateway_error: internal"
+          : `native_sandbox_gateway_error: ${err.code}: ${err.message.slice(0, 1024)}`,
     });
     return;
   }

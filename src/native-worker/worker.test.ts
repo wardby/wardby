@@ -41,22 +41,30 @@ function transportRejecting(err: Error) {
 
 describe("runNativeWorker gateway errors", () => {
   it("reports a failed gateway call as a failed run instead of throwing", async () => {
-    const { transport, finishes } = transportRejecting(new GatewayError("internal", "boom"));
+    const { transport, finishes } = transportRejecting(new GatewayError("not_allowed", "boom"));
     await expect(runNativeWorker(input, transport)).resolves.toBeUndefined();
     expect(finishes).toHaveLength(1);
     expect(finishes[0].params).toEqual({
       status: "failed",
       finalText: "",
       turns: 0,
-      error: "native_sandbox_gateway_error: internal: boom",
+      error: "native_sandbox_gateway_error: not_allowed: boom",
     });
   });
 
   it("truncates a long gateway message", async () => {
-    const { transport, finishes } = transportRejecting(new GatewayError("internal", "x".repeat(5000)));
+    const { transport, finishes } = transportRejecting(new GatewayError("not_allowed", "x".repeat(5000)));
     await runNativeWorker(input, transport);
     const error = (finishes[0].params as { error: string }).error;
-    expect(error).toBe(`native_sandbox_gateway_error: internal: ${"x".repeat(1024)}`);
+    expect(error).toBe(`native_sandbox_gateway_error: not_allowed: ${"x".repeat(1024)}`);
+  });
+
+  it("reports only the code of an internal gateway error, never its message", async () => {
+    const { transport, finishes } = transportRejecting(
+      new GatewayError("internal", "connect ECONNREFUSED postgresql://user:pw@10.0.0.1:5432/db"),
+    );
+    await runNativeWorker(input, transport);
+    expect((finishes[0].params as { error: string }).error).toBe("native_sandbox_gateway_error: internal");
   });
 
   it("keeps a run that already ended quiet: no finish, the error still propagates", async () => {
