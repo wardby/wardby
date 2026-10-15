@@ -580,10 +580,16 @@ export interface WaitForCodingChildOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
+/** The leading snake_case code of an error message (`code: sentence`); messages can carry internals. */
+function errorCodeOf(message: string | null | undefined): string | undefined {
+  return message ? /^([a-z][a-z0-9_]*)(:|$)/.exec(message)?.[1] : undefined;
+}
+
 /**
  * What a coding sub-agent's run tells the parent run's model. A run refused
  * over its services carries the host sentence (never the raw Run.error), so
- * the parent can pass it on — for a mention, that is the requester.
+ * the parent can pass it on — for a mention, that is the requester. A failed
+ * run carries only its error code, so the parent can say why without seeing internals.
  */
 export function codingChildResult(
   run: {
@@ -606,6 +612,7 @@ export function codingChildResult(
     : run.status === "refused"
       ? serviceRefusalSentence(run.error)
       : null;
+  const errorCode = run.status === "failed" ? errorCodeOf(run.error) : undefined;
   return JSON.stringify({
     status: run.status,
     finalText: run.finalText,
@@ -613,6 +620,7 @@ export function codingChildResult(
     tokensIn: run.tokensIn,
     tokensOut: run.tokensOut,
     ...(refusal ? { refusal } : {}),
+    ...(errorCode ? { errorCode } : {}),
     ...pullRequestOf(codingResult),
   });
 }
@@ -1718,13 +1726,24 @@ export async function durableDelegate(
         },
       });
     } catch (err) {
-      if (!(err instanceof ContinuationRefusedError)) throw err;
+      if (err instanceof ContinuationRefusedError) {
+        return finish(
+          JSON.stringify({
+            error: "continuation_refused",
+            message:
+              `${err.message} No sub-agent run was started. Do not open a new pull request in its place: ` +
+              "tell the requester that this wardby deployment cannot continue that pull request's branch.",
+          }),
+        );
+      }
+      // Recorded as the call's result, so the model can report it and a retried callId never
+      // dispatches twice. Only the leading code is exposed: messages can carry internals.
+      const code = err instanceof Error ? errorCodeOf(err.message) : undefined;
+      runnerLog.error({ err, runId, boundName }, "delegation dispatch failed");
       return finish(
         JSON.stringify({
-          error: "continuation_refused",
-          message:
-            `${err.message} No sub-agent run was started. Do not open a new pull request in its place: ` +
-            "tell the requester that this wardby deployment cannot continue that pull request's branch.",
+          error: "dispatch_failed",
+          message: `The sub-agent run could not be created${code ? ` (${code})` : ""}.`,
         }),
       );
     }

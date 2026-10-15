@@ -133,7 +133,26 @@ export async function runNativeWorker(input: WorkerInput, transport: GatewayTran
     },
   };
 
-  const result = await new NativeEngine().run(ctx);
+  let result: Awaited<ReturnType<NativeEngine["run"]>>;
+  try {
+    result = await new NativeEngine().run(ctx);
+  } catch (err) {
+    // A gateway failure (a delegation that could not be created, say) ends the run as failed with
+    // its code, not as an opaque worker exit. run_not_drivable means the run already ended.
+    if (!(err instanceof GatewayError) || err.code === "run_not_drivable") throw err;
+    await textSent;
+    await call("finish", {
+      status: "failed",
+      finalText: "",
+      turns: 0,
+      // `internal` wraps raw exception text on some transports, so only its code is persisted.
+      error:
+        err.code === "internal"
+          ? "native_sandbox_gateway_error: internal"
+          : `native_sandbox_gateway_error: ${err.code}: ${err.message.slice(0, 1024)}`,
+    });
+    return;
+  }
   // Live text reaches observers before the run is reported finished.
   await textSent;
   await call("finish", {
