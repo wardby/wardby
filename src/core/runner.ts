@@ -479,23 +479,6 @@ export class RunCancelledError extends Error {
   }
 }
 
-/**
- * The inline step runner, made to notice a stop. An inline step has no durable runtime that could
- * interrupt it (DbosExecutor's steps are interrupted by DBOS itself), so before each step this reads
- * the run's own row: once anything else has made it terminal (stop_run, an MCP task's cancel, a
- * parent run's stop, the reconciler), the run stops at this boundary with a RunCancelledError. The
- * terminal row is never rewritten (finishRunClaimed matches zero rows), so the stop keeps its reason.
- */
-export function stopAwareStep(db: Pick<RunnerDb, "run">, runId: string, inner: StepRunner = runStepInline): StepRunner {
-  return async (name, fn) => {
-    const row = await db.run.findUnique({ where: { id: runId }, select: { status: true } });
-    if (row && !DRIVABLE.includes(row.status as (typeof DRIVABLE)[number])) {
-      throw new RunCancelledError(`Run ${row.status}: stopped before step "${name}".`);
-    }
-    return inner(name, fn);
-  };
-}
-
 /** Re-exported beside RunCancelledError: thrown by a step runner when another attempt owns the run. */
 export { RunOwnershipLostError };
 
@@ -527,6 +510,23 @@ async function finishRunClaimed(
 ): Promise<{ run: Run; claimed: boolean }> {
   const updated = await db.run.updateMany({ where: { id: runId, status: { in: [...DRIVABLE] } }, data });
   return { run: await db.run.findUniqueOrThrow({ where: { id: runId } }), claimed: updated.count > 0 };
+}
+
+/**
+ * The inline step runner, made to notice a stop. An inline step has no durable runtime that could
+ * interrupt it (DbosExecutor's steps are interrupted by DBOS itself), so before each step this reads
+ * the run's own row: once anything else has made it terminal (stop_run, an MCP task's cancel, a
+ * parent run's stop, the reconciler), the run stops at this boundary with a RunCancelledError. The
+ * terminal row is never rewritten (finishRunClaimed matches zero rows), so the stop keeps its reason.
+ */
+export function stopAwareStep(db: Pick<RunnerDb, "run">, runId: string, inner: StepRunner = runStepInline): StepRunner {
+  return async (name, fn) => {
+    const row = await db.run.findUnique({ where: { id: runId }, select: { status: true } });
+    if (row && !DRIVABLE.includes(row.status as (typeof DRIVABLE)[number])) {
+      throw new RunCancelledError(`Run ${row.status}: stopped before step "${name}".`);
+    }
+    return inner(name, fn);
+  };
 }
 
 /**
