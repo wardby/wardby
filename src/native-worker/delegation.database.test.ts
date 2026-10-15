@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createPrismaClient } from "../core/db.js";
 import { NativeEngine } from "../core/engine-native.js";
 import { durableDelegate, loadNativeRun, type LoadedNativeRun, type NativeRunProviders } from "../core/runner.js";
@@ -11,6 +11,13 @@ import type { AgentMemoryStore } from "../providers/memory/types.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import type { Datastore } from "../providers/datastore/types.js";
 import { PrismaGatewayLedger } from "./ledger.js";
+
+// Passes through to the real dispatchRun unless a test queues a rejection.
+vi.mock("../core/dispatch.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../core/dispatch.js")>();
+  return { ...actual, dispatchRun: vi.fn(actual.dispatchRun) };
+});
+const { dispatchRun } = await import("../core/dispatch.js");
 
 const MODEL = "claude-haiku-4-5";
 
@@ -179,6 +186,34 @@ describe.skipIf(!process.env.DATABASE_URL)("durableDelegate (database)", () => {
     expect(ex.started).toEqual([]);
     expect(await db.run.count({ where: { parentRunId: l.run.id } })).toBe(1);
     expect(orphan.id).toBeTruthy();
+  });
+
+  it("turns an unexpected dispatch error into a recorded result naming only its code, and replays it", async () => {
+    const l = await lead();
+    const ex = controlledExecutor();
+    const ctx = ctxFor(l, ex.executor);
+    vi.mocked(dispatchRun).mockRejectedValueOnce(new Error("coding_execution_not_configured: secret detail"));
+    const args = JSON.stringify({ task: "x" });
+    const outcome = await durableDelegate(ctx, "d-1", "delegate_to_a", args);
+    expect(outcome).toEqual({
+      result: JSON.stringify({
+        error: "dispatch_failed",
+        message: "The sub-agent run could not be created (coding_execution_not_configured).",
+      }),
+    });
+    // The retried callId replays the recorded result and does not dispatch again.
+    const calls = vi.mocked(dispatchRun).mock.calls.length;
+    expect(await durableDelegate(ctx, "d-1", "delegate_to_a", args)).toEqual(outcome);
+    expect(vi.mocked(dispatchRun).mock.calls.length).toBe(calls);
+  });
+
+  it("omits the code from the message when the dispatch error has none", async () => {
+    const l = await lead();
+    const ctx = ctxFor(l, controlledExecutor().executor);
+    vi.mocked(dispatchRun).mockRejectedValueOnce(new Error("Connection refused to db at 10.0.0.1"));
+    expect(await durableDelegate(ctx, "d-1", "delegate_to_a", JSON.stringify({ task: "x" }))).toEqual({
+      result: JSON.stringify({ error: "dispatch_failed", message: "The sub-agent run could not be created." }),
+    });
   });
 
   it("refuses a delegation past the per-run limit with the in-process message", async () => {

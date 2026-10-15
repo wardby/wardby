@@ -1718,13 +1718,24 @@ export async function durableDelegate(
         },
       });
     } catch (err) {
-      if (!(err instanceof ContinuationRefusedError)) throw err;
+      if (err instanceof ContinuationRefusedError) {
+        return finish(
+          JSON.stringify({
+            error: "continuation_refused",
+            message:
+              `${err.message} No sub-agent run was started. Do not open a new pull request in its place: ` +
+              "tell the requester that this wardby deployment cannot continue that pull request's branch.",
+          }),
+        );
+      }
+      // Recorded as the call's result, so the model can report it and a retried callId never
+      // dispatches twice. Only the leading code is exposed: messages can carry internals.
+      const code = err instanceof Error ? /^([a-z][a-z0-9_]*)(:|$)/.exec(err.message)?.[1] : undefined;
+      runnerLog.error({ err, runId, boundName }, "delegation dispatch failed");
       return finish(
         JSON.stringify({
-          error: "continuation_refused",
-          message:
-            `${err.message} No sub-agent run was started. Do not open a new pull request in its place: ` +
-            "tell the requester that this wardby deployment cannot continue that pull request's branch.",
+          error: "dispatch_failed",
+          message: `The sub-agent run could not be created${code ? ` (${code})` : ""}.`,
         }),
       );
     }
