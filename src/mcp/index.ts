@@ -65,6 +65,7 @@ import { registerTriggerTool } from "./tools/trigger.js";
 import { registerToolAuthoringTools } from "./tools/tools.js";
 import { registerSchedulingTools } from "./tools/scheduling.js";
 import { registerRunTools } from "./tools/runs.js";
+import { registerStopRunTool } from "./tools/stop-run.js";
 import { registerCostReportTools } from "./tools/cost-report.js";
 import { registerDatastoreTools } from "./tools/datastore.js";
 import { registerSubAgentTools } from "./tools/subagents.js";
@@ -145,6 +146,7 @@ export function registerAllTools(
   registerToolAuthoringTools(mcp);
   registerSchedulingTools(mcp);
   registerRunTools(mcp);
+  registerStopRunTool(mcp);
   registerCostReportTools(mcp);
   registerDatastoreTools(mcp);
   registerSubAgentTools(mcp);

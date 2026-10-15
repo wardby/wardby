@@ -1326,7 +1326,7 @@ export class ContainerExecutor implements Executor {
       if (collected.reason !== "completed" || !collected.resultArtifact) throw new Error("coding_result_missing");
       const output = parseCodingWorkerOutputJson(collected.resultArtifact);
       if (output.runId !== run.runId) throw new Error("coding_result_run_mismatch");
-      let current = await this.requireCurrent(run.runId);
+      let current = this.requireActive(await this.requireCurrent(run.runId));
       if (current.costUsd > current.budgetUsd || output.outcome === "budget_exhausted") {
         this.emit({ stage: "budget_cutoff", runId: run.runId, jobId: handle.id });
         await this.options.store.complete(
@@ -1373,6 +1373,8 @@ export class ContainerExecutor implements Executor {
       // One more (usually cached) check right before anything is pushed: access
       // revoked while the run was working stops the push.
       await this.authorizeRepository(current, { inFlight: true });
+      // And a run stopped while its result was collected (stop_run, a cancelled task) pushes nothing.
+      this.requireActive(await this.requireCurrent(run.runId));
       const report = await this.pullRequestRegistryReport(current);
       const descriptionState = await this.descriptionStateFor(current);
       const finalized = await this.options.vcs.finalizeChanges(workspace, {
@@ -1419,7 +1421,10 @@ export class ContainerExecutor implements Executor {
       outcome = "succeeded";
       finishedSummary = output.summary;
     } catch (error) {
-      if (await this.outOfBudget(sessionId)) {
+      if (error instanceof Error && error.message === "coding_run_no_longer_active") {
+        // Stopped while its result was collected: the stop already wrote the terminal row.
+        containerLog.info({ runId: run.runId }, "coding run was stopped before its result was published");
+      } else if (await this.outOfBudget(sessionId)) {
         const failure = this.budgetFailure(error);
         await this.options.store.terminate(run.runId, "budget_exhausted", failure.error, failure.audit);
         this.terminal(run, "budget_exhausted", failure.audit);
@@ -1896,6 +1901,15 @@ export class ContainerExecutor implements Executor {
   /** Delegates to the job launcher's own warm-up (Executor.warmUp); a no-op for a launcher without one. */
   async warmUp(): Promise<void> {
     await this.options.jobs.warmUp?.();
+  }
+
+  /**
+   * Throws coding_run_no_longer_active once something else made the run terminal (a stop's
+   * cancellation fence): nothing may then be pushed, opened, or rewritten on the host for it.
+   */
+  private requireActive(run: ContainerRunSnapshot): ContainerRunSnapshot {
+    if (TERMINAL_STATUSES.has(run.status)) throw new Error("coding_run_no_longer_active");
+    return run;
   }
 
   private async requireCurrent(runId: string): Promise<ContainerRunSnapshot> {

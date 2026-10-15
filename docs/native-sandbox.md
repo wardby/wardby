@@ -535,6 +535,23 @@ set on the gateway, not the server.
   stopped and the run fails with `native_sandbox_deadline_exceeded`.
 - The agent's own turn and budget limits still apply as for any native agent.
 
+## Stopping a run
+
+`stop_run` (or cancelling the MCP task that started the run) stops a sandboxed
+run whether it is still waiting for a worker or already running:
+
+1. The run is recorded `cancelled` with the caller's reason, unless it already
+   finished (the first terminal state wins; a finished run is not changed).
+2. Its gateway session ends. The worker's next call (a model turn, a tool, or
+   its result) is refused, and the worker exits on its own.
+3. A worker still running 5 seconds later is killed. Either way the worker is
+   then removed; a worker claimed from the warm pool is discarded with its pool
+   row and never returned to the pool.
+4. Sub-agent runs it delegated that are still open are stopped too.
+
+A run stopped before its worker started never starts one. See
+[Stop or cancel a run](../help/stop-run.md).
+
 ## Sub-agents
 
 A sandboxed run can delegate to sub-agents, including several in parallel.

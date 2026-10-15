@@ -1640,8 +1640,11 @@ describe("delegate_to_<boundName> dispatch tool", () => {
         const children = (await db.run.findMany({
           where: { parentRunId: { in: [parentRun.id] } },
         })) as unknown as FakeRun[];
-        const toolMessages = llm.calls[1].messages.filter((m) => m.role === "tool").map((m) => String(m.content));
-        return { finished, children, executor, toolMessages, parentRun: parentRun as unknown as FakeRun };
+        // No second turn when the parent was stopped meanwhile: it ends at that step boundary.
+        const toolMessages = (llm.calls[1]?.messages ?? [])
+          .filter((m) => m.role === "tool")
+          .map((m) => String(m.content));
+        return { finished, children, executor, toolMessages, llm, parentRun: parentRun as unknown as FakeRun };
       }
 
       it("waits until the sibling holding the group's budget finishes, then is admitted", async () => {
@@ -1784,7 +1787,7 @@ describe("delegate_to_<boundName> dispatch tool", () => {
           },
           async stop() {},
         });
-        const { children, toolMessages } = await runGrouped({
+        const { children, finished, llm } = await runGrouped({
           parallel: true,
           agents: [coder("order", { budgetGroupId: "g-wmd" }), coder("bff", { budgetGroupId: "g-wmd" })],
           dailyBudgetUsd: 3,
@@ -1792,8 +1795,9 @@ describe("delegate_to_<boundName> dispatch tool", () => {
           executor: cancellingExecutor,
         });
         expect(children.map((c) => c.agentId)).toEqual(["order"]);
-        expect(toolMessages[1]).toContain("parent_cancelled");
-        expect(toolMessages[1]).toContain("no sub-agent run was started");
+        // The cancelled parent itself stops at its next step boundary: no further turn reports back.
+        expect(finished.status).toBe("cancelled");
+        expect(llm.calls).toHaveLength(1);
       });
 
       it("does not wait when the agent has not opted in", async () => {

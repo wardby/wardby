@@ -23,7 +23,14 @@ import pg from "pg";
 import type { PrismaClient } from "#prisma";
 import type { DbosConfig } from "../../config/providers.js";
 import { RunOwnershipLostError, type StepRunner } from "../engine/types.js";
-import { executeRun, RunCancelledError, type NativeRunProviders, type RunnerDb } from "../../core/runner.js";
+import {
+  executeRun,
+  failNativeRun,
+  nativeRunIntegrations,
+  RunCancelledError,
+  type NativeRunProviders,
+  type RunnerDb,
+} from "../../core/runner.js";
 import { markRunFailedFromExecutorError } from "../../core/dispatch.js";
 import type { SelfDefectSink } from "../../core/self-defects.js";
 import { prisma as defaultDb } from "../../core/db.js";
@@ -315,6 +322,17 @@ export class DbosExecutor implements Executor {
     // another instance is executing).
     if (!this.launched) await this.launch();
     dbosLog.info({ runId, reason }, "cancelling durable run");
+    // The terminal write comes first and is conditional (the first writer wins), so the run is
+    // cancelled with the caller's reason even when its workflow runs in another process (where the
+    // reason map below is empty) or has no workflow at all yet (cancelWorkflow then matches
+    // nothing). The workflow's next step then throws, and its own terminal write matches no row.
+    const row = await this.db.run.findUnique({ where: { id: runId }, select: { status: true } });
+    if (row && (row.status === "pending" || row.status === "running")) {
+      await failNativeRun(
+        { runId, db: this.db, providers: this.providers, ...nativeRunIntegrations(this.providers, this.db) },
+        new RunCancelledError(reason ?? "The run was cancelled."),
+      );
+    }
     // Recorded before the cancel so the workflow's next step boundary can
     // find it: DBOS only reports "cancelled", never why.
     if (reason) cancellationReasons.set(runId, reason);

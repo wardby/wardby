@@ -7,8 +7,10 @@
  *   worker, and returns. Whichever gateway replica serves the worker's
  *   `finish` makes the terminal write; this executor only watches for a
  *   worker that exits without one, and for its deadline.
- * - stop: ends the session (every further gateway call is refused), kills the
- *   worker, records the run cancelled, and stops its open delegations.
+ * - stop: records the run cancelled, ends the session (every further gateway
+ *   call is refused, so the worker exits at its next one), gives the worker a
+ *   short grace to exit, then kills and removes it (a warm pool worker is
+ *   discarded, never reused), and stops its open delegations.
  * - recover: answers the reconciler from the worker's container state, and
  *   never launches one.
  * - launch: the janitor removes workers whose runs have ended.
@@ -59,8 +61,14 @@ export interface NativeSandboxExecutorOptions {
   gatewayUrl: string;
   /** NATIVE_SANDBOX_MAX_CONCURRENT: a start past this many active sessions fails with native_sandbox_capacity. */
   maxConcurrent?: number;
+  /** How long a stopped run's worker gets to exit on its own before it is killed (default NATIVE_SANDBOX_STOP_GRACE_MS). */
+  stopGraceMs?: number;
   now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
 }
+
+/** A stopped sandbox run's worker exits at its next (refused) gateway call; past this it is killed. */
+export const NATIVE_SANDBOX_STOP_GRACE_MS = 5_000;
 
 export const NATIVE_SANDBOX_WORKER_EXITED = "native_sandbox_worker_exited";
 export const NATIVE_SANDBOX_DEADLINE = "native_sandbox_deadline_exceeded";
@@ -175,8 +183,14 @@ export class NativeSandboxExecutor implements Executor {
     // worker exit, and its exit watcher must then find the run already ended (and leave it
     // cancelled) rather than record the exit as a failure.
     await failNativeRun(this.finishContext(runId), new RunCancelledError(reason ?? "The run was cancelled."));
+    // The stop reaches the worker through the gateway: with its run cancelled and its session ended,
+    // its next call (a model turn, a tool, its result) is refused and it exits on its own. It gets a
+    // bounded grace for that, then is killed either way.
     const sessionId = await this.endSession(runId, "cancelled");
-    await this.options.launcher.kill(runId).catch(() => {});
+    if (!(await this.awaitWorkerExit(runId))) {
+      executorLog.info({ runId }, "a stopped sandbox run's worker did not exit within its grace; killing it");
+      await this.options.launcher.kill(runId).catch(() => {});
+    }
     if (sessionId) {
       // Its delegations' children belong to the server's executor; a child left running would
       // spend on behalf of a parent that no longer waits for it.
@@ -186,7 +200,23 @@ export class NativeSandboxExecutor implements Executor {
         });
       }
     }
+    // Removed, never returned to a warm pool: a claimed pool worker is discarded with its row.
     await this.options.launcher.remove(runId).catch(() => {});
+  }
+
+  /** Waits up to stopGraceMs for the run's worker to exit or be gone; false when it still runs. Never throws. */
+  private async awaitWorkerExit(runId: string): Promise<boolean> {
+    const graceMs = this.options.stopGraceMs ?? NATIVE_SANDBOX_STOP_GRACE_MS;
+    const sleep = this.options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    const until = this.now() + graceMs;
+    for (;;) {
+      const state = await this.options.launcher.inspect(runId).catch(() => undefined);
+      // An unreadable state counts as still running: the kill below is the safe default.
+      if (state && state.state !== "running") return true;
+      const left = until - this.now();
+      if (left <= 0) return false;
+      await sleep(Math.min(250, left));
+    }
   }
 
   async recover(handle: PersistedExecutionHandle): Promise<ExecutionRecoveryResult> {

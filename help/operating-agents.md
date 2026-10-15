@@ -32,5 +32,10 @@ A running run's cost, token counts, and turn count update after each model
 call, so `get_run` and `list_runs` show spend so far rather than zero until the
 run finishes.
 
+To stop a run that is pending, queued, or running (for example one a schedule
+started that you did not want), call `stop_run` with its id. It ends as
+`cancelled`, along with the sub-agent runs it still has in flight. Search help
+for "stop run" (article `stop-run`, Wardby 0.6.1 and later).
+
 For the full lifecycle and the controls applied to every managed run, read
 [`README.md`](../README.md).
