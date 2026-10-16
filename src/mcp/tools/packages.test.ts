@@ -152,32 +152,34 @@ const auditedRun = () => ({
 });
 
 describe("approve_audited_packages", () => {
-  it("adds the run's top-level and unknown names as bare entries, deduplicated, and logs it", async () => {
+  it("adds the run's top-level names as bare entries, deduplicated, and logs it; unknown ones are listed apart", async () => {
     logged.length = 0;
     const { call, agentRows, close } = await setup("owner", APPROVER, auditedRun());
     const result = await call({ runId: "r1" });
     expect(result.isError).toBe(false);
     expect(agentRows.get("a1")!.codingProfile!.packageAllowlist).toEqual({
-      npm: ["react", "expo-dev-client", "left-pad"],
+      npm: ["react", "expo-dev-client"],
       pypi: ["flask"],
     });
     expect(JSON.parse(result.text)).toMatchObject({
-      agents: [{ agentId: "a1", added: { npm: ["expo-dev-client", "left-pad"], pypi: ["flask"] } }],
+      agents: [{ agentId: "a1", added: { npm: ["expo-dev-client"], pypi: ["flask"] } }],
+      unknown: [{ ecosystem: "npm", name: "left-pad" }],
     });
+    expect(JSON.parse(result.text).unknownNote).toMatch(/relation unknown/);
     expect(logged.map((entry) => entry.payload)).toContainEqual({
       event: "coding.package_audit.promoted",
       agentId: "a1",
       runId: "r1",
-      added: 3,
+      added: 2,
       by: "owner",
     });
     // Approving again adds nothing.
     expect(JSON.parse((await call({ runId: "r1" })).text)).toMatchObject({ agents: [{ agentId: "a1", added: {} }] });
-    expect(agentRows.get("a1")!.codingProfile!.packageAllowlist.npm).toEqual(["react", "expo-dev-client", "left-pad"]);
+    expect(agentRows.get("a1")!.codingProfile!.packageAllowlist.npm).toEqual(["react", "expo-dev-client"]);
     await close();
   });
 
-  it("approves only the names given", async () => {
+  it("approves only the names given, including an unknown one named explicitly", async () => {
     const { call, agentRows, close } = await setup("owner", APPROVER, auditedRun());
     await call({ runId: "r1", names: ["left-pad", "lodash"] });
     expect(agentRows.get("a1")!.codingProfile!.packageAllowlist).toEqual({ npm: ["react", "left-pad"] });
@@ -196,6 +198,33 @@ describe("approve_audited_packages", () => {
     expect((await call({ runId: "parent" })).isError).toBe(false);
     expect(agentRows.get("a1")!.codingProfile!.packageAllowlist.npm).toEqual(["react", "expo-dev-client"]);
     await close();
+  });
+
+  it("changes no allowlist when any target agent is refused", async () => {
+    const seconds: AgentRow[] = [
+      { id: "a2", ownerId: "someone-else", kind: "coding" as const, codingProfile: { packageAllowlist: {} } },
+      {
+        id: "a2",
+        ownerId: "owner",
+        kind: "coding" as const,
+        codingProfile: { packageAllowlist: { npm: Array.from({ length: 256 }, (_, i) => `pkg-${i}`) } },
+      },
+    ];
+    for (const second of seconds) {
+      const { call, agentRows, close } = await setup("owner", APPROVER, {
+        agents: [{ id: "lead", ownerId: "owner", kind: "native", codingProfile: null }, coder(), second],
+        runs: [
+          { id: "parent", agentId: "lead" },
+          { id: "r1", agentId: "a1", parentRunId: "parent", coding: true },
+          { id: "r2", agentId: "a2", parentRunId: "parent", coding: true },
+        ],
+        audits: [audit("expo-dev-client", "top-level"), audit("left-pad", "top-level", { runId: "r2" })],
+      });
+      expect((await call({ runId: "parent" })).isError).toBe(true);
+      expect(agentRows.get("a1")!.codingProfile!.packageAllowlist).toEqual({ npm: ["react"] });
+      expect(agentRows.get("a2")!.codingProfile!.packageAllowlist).toEqual(second.codingProfile!.packageAllowlist);
+      await close();
+    }
   });
 
   it("needs packages:approve or agents:admin", async () => {

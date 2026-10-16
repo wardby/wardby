@@ -63,8 +63,14 @@ anything.
 ## Keep the packages
 
 Approve the names a run recorded with `approve_audited_packages`
-(`{ "runId": "<run id>" }`, optionally `names`), or add them to
-`codingProfile.packageAllowlist` with `update_agent`. Then turn the mode off.
+(`{ "runId": "<run id>" }`), or add them to `codingProfile.packageAllowlist`
+with `update_agent`. Then turn the mode off.
+
+Without `names`, the tool adds only `top-level` packages. A package recorded
+as `unknown` (installed with no metadata or plan to show its parent) may be a
+dependency of an allowlisted package, so every report lists it apart as
+"Relation unknown — may be a dependency; approve only if needed directly".
+Add one only if the project uses it directly, by listing it in `names`.
 
 ## Risks
 

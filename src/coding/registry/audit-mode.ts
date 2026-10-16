@@ -162,8 +162,11 @@ export function parsePackageAuditVerdict(value: unknown): PackageAuditVerdict | 
 
 export interface PackageAuditSummary {
   entries: PackageAuditEntry[];
-  /** Names to add to the allowlist: top-level + unknown, per ecosystem, first-seen order. */
+  /** Names to add to the allowlist: top-level, per ecosystem, first-seen order. */
   toApprove: { ecosystem: string; name: string; dependencies: number }[];
+  /** Names recorded only with relation `unknown` (a direct download, or after a plan fallback): they
+   *  may be dependencies of allowlisted packages, so they are listed apart and approved only by name. */
+  unknown: { ecosystem: string; name: string; dependencies: number }[];
   advisoryRows: { ecosystem: string; name: string; version: string; advisory: AuditAdvisory }[];
 }
 
@@ -203,15 +206,23 @@ export function summarizePackageAudit(rows: readonly PackageAuditRow[]): Package
   const entries = [...byKey.values()].sort((a, b) => RELATIONS.indexOf(a.relation) - RELATIONS.indexOf(b.relation));
 
   const toApprove = new Map<string, { ecosystem: string; name: string; dependencies: number }>();
+  const unknown = new Map<string, { ecosystem: string; name: string; dependencies: number }>();
+  // Entries are ordered top-level first, so a name recorded both ways is listed to approve.
   for (const entry of entries) {
     if (entry.relation !== "top-level" && entry.relation !== "unknown") continue;
     const key = `${entry.ecosystem}\0${entry.name}`;
-    if (!toApprove.has(key)) toApprove.set(key, { ecosystem: entry.ecosystem, name: entry.name, dependencies: 0 });
+    if (toApprove.has(key) || unknown.has(key)) continue;
+    (entry.relation === "top-level" ? toApprove : unknown).set(key, {
+      ecosystem: entry.ecosystem,
+      name: entry.name,
+      dependencies: 0,
+    });
   }
   const counted = new Set<string>();
   for (const entry of entries) {
     if (entry.relation !== "transitive" || !entry.via) continue;
-    const parent = toApprove.get(`${entry.ecosystem}\0${entry.via}`);
+    const parentKey = `${entry.ecosystem}\0${entry.via}`;
+    const parent = toApprove.get(parentKey) ?? unknown.get(parentKey);
     const key = `${entry.ecosystem}\0${entry.via}\0${entry.name}`;
     if (!parent || counted.has(key)) continue;
     counted.add(key);
@@ -226,8 +237,11 @@ export function summarizePackageAudit(rows: readonly PackageAuditRow[]): Package
       advisory,
     })),
   );
-  return { entries, toApprove: [...toApprove.values()], advisoryRows };
+  return { entries, toApprove: [...toApprove.values()], unknown: [...unknown.values()], advisoryRows };
 }
+
+/** How a name recorded with relation `unknown` is labelled wherever it is listed. */
+export const UNKNOWN_RELATION_LABEL = "Relation unknown — may be a dependency; approve only if needed directly";
 
 /** At most this many names in a status comment or Slack message, and table rows in a PR body. */
 const MAX_STATUS_NAMES = 10;
@@ -271,7 +285,21 @@ function prWording(mode: PackageAuditMode, summary: PackageAuditSummary): string
         ...capped(lines),
       ].join("\n"),
     );
-  } else if (!nothing && summary.entries.some((e) => e.relation === "transitive")) {
+  }
+  if (summary.unknown.length > 0) {
+    const lines = summary.unknown.map(
+      (pkg) => `- ${codeSpan(pkg.ecosystem).slice(1, -1)} ${codeSpan(pkg.name)}${dependencies(pkg.dependencies)}`,
+    );
+    sections.push(
+      [`**Relation unknown** — may be a dependency; approve only if needed directly:`, ...capped(lines)].join("\n"),
+    );
+  }
+  if (
+    !nothing &&
+    summary.toApprove.length === 0 &&
+    summary.unknown.length === 0 &&
+    summary.entries.some((e) => e.relation === "transitive")
+  ) {
     // Every audited package came in as a dependency whose parent was not itself recorded.
     sections.push(
       `**Packages outside the allowlist:** ${summary.entries.filter((e) => e.relation === "transitive").length} dependencies of audited packages.`,
@@ -316,6 +344,9 @@ export type PackageAuditDigest = {
   toApprove: { ecosystem: string; name: string }[];
   /** Names to approve beyond those listed. */
   moreToApprove: number;
+  /** Names with relation `unknown`, at most 10, listed apart (see PackageAuditSummary.unknown). */
+  unknown: { ecosystem: string; name: string }[];
+  moreUnknown: number;
   /** Dependencies of audited packages, recorded transitive. */
   transitive: number;
   /** Advisories full mode served past (0 in audit mode). */
@@ -327,6 +358,8 @@ export function packageAuditDigest(mode: PackageAuditMode, summary: PackageAudit
   return {
     toApprove: listed.map(({ ecosystem, name }) => ({ ecosystem, name })),
     moreToApprove: summary.toApprove.length - listed.length,
+    unknown: summary.unknown.slice(0, MAX_STATUS_NAMES).map(({ ecosystem, name }) => ({ ecosystem, name })),
+    moreUnknown: Math.max(0, summary.unknown.length - MAX_STATUS_NAMES),
     transitive: summary.entries.filter((e) => e.relation === "transitive").length,
     advisories: mode === "full" ? summary.advisoryRows.length : 0,
   };
@@ -338,19 +371,25 @@ export function packageAuditStatusText(mode: PackageAuditMode, digest: PackageAu
   const head = `🔎 ${bold(`Package audit mode (\`${mode}\`) was on:`)}`;
   const advisoryText = digest.advisories > 0 ? ` ${digest.advisories} served despite advisories.` : "";
   let text: string;
-  if (digest.toApprove.length === 0 && digest.transitive === 0) {
+  // Older stored payloads (before unknown names were listed apart) have no `unknown`.
+  const unknown = digest.unknown ?? [];
+  const nameList = (list: readonly { ecosystem: string; name: string }[], more: number) =>
+    list
+      .slice(0, MAX_STATUS_NAMES)
+      .map((pkg) => `${codeSpan(pkg.name)} (${codeSpan(pkg.ecosystem).slice(1, -1)})`)
+      .join(", ") + (more > 0 ? ` and ${more} more` : "");
+  if (digest.toApprove.length === 0 && unknown.length === 0 && digest.transitive === 0) {
     text = `${head} nothing outside the allowlist was installed.${advisoryText}`;
   } else {
-    const names = digest.toApprove
-      .slice(0, MAX_STATUS_NAMES)
-      .map((pkg) => `${codeSpan(pkg.name)} (${codeSpan(pkg.ecosystem).slice(1, -1)})`);
-    const more = digest.moreToApprove > 0 ? ` and ${digest.moreToApprove} more` : "";
-    const listed = names.length > 0 ? `${names.join(", ")}${more}` : "no top-level names";
+    const listed =
+      digest.toApprove.length > 0 ? nameList(digest.toApprove, digest.moreToApprove) : "no top-level names";
     const transitive = digest.transitive;
+    const unknownText =
+      unknown.length > 0 ? ` ${UNKNOWN_RELATION_LABEL}: ${nameList(unknown, digest.moreUnknown ?? 0)}.` : "";
     text =
       `${head} installed outside the allowlist: ${listed}` +
       `${transitive > 0 ? ` (plus ${transitive} ${transitive === 1 ? "dependency" : "dependencies"})` : ""}.` +
-      `${advisoryText} Add them with \`update_agent\` (codingProfile.packageAllowlist) to keep them.`;
+      `${unknownText}${advisoryText} Add them with \`update_agent\` (codingProfile.packageAllowlist) to keep them.`;
   }
   // Slack's three control characters; codeSpan already removed < and > from names.
   return slack ? text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : text;

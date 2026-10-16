@@ -89,16 +89,16 @@ const row = (
 });
 
 describe("summarizePackageAudit", () => {
-  it("lists top-level and unknown names to approve, counting their dependencies", () => {
+  it("lists top-level names to approve and unknown ones apart, counting their dependencies", () => {
     const summary = summarizePackageAudit([
       row("expo-dev-client", "top-level"),
       row("expo-dev-launcher", "transitive", { via: "expo-dev-client" }),
       row("left-pad", "unknown"),
+      row("pad-dep", "transitive", { via: "left-pad" }),
+      row("expo-dev-client", "unknown", { version: "2.0.0" }),
     ]);
-    expect(summary.toApprove).toEqual([
-      { ecosystem: "npm", name: "expo-dev-client", dependencies: 1 },
-      { ecosystem: "npm", name: "left-pad", dependencies: 0 },
-    ]);
+    expect(summary.toApprove).toEqual([{ ecosystem: "npm", name: "expo-dev-client", dependencies: 1 }]);
+    expect(summary.unknown).toEqual([{ ecosystem: "npm", name: "left-pad", dependencies: 1 }]);
   });
   it("orders entries top-level, unknown, transitive, allowed and dedups versions", () => {
     const summary = summarizePackageAudit([
@@ -189,6 +189,26 @@ describe("packageAuditWording", () => {
     expect(empty).toContain("> [!CAUTION]");
     expect(empty).toContain("nothing outside the allowlist was installed");
     expect(empty).not.toContain("Packages outside the allowlist");
+  });
+
+  it("labels unknown names apart from the names to approve, in the PR body and the status", () => {
+    const mixed = summarizePackageAudit([row("expo-dev-client", "top-level"), row("left-pad", "unknown")]);
+    const pr = packageAuditWording("audit", mixed, { format: "pr" });
+    expect(pr).toContain("- npm `expo-dev-client`");
+    expect(pr).toContain(
+      "**Relation unknown** — may be a dependency; approve only if needed directly:\n- npm `left-pad`",
+    );
+    expect(pr.indexOf("left-pad")).toBeGreaterThan(pr.indexOf("Relation unknown"));
+    const status = packageAuditWording("audit", mixed, { format: "status" });
+    expect(status).toContain("installed outside the allowlist: `expo-dev-client` (npm)");
+    expect(status).toContain(
+      "Relation unknown — may be a dependency; approve only if needed directly: `left-pad` (npm).",
+    );
+    const onlyUnknown = packageAuditWording("audit", summarizePackageAudit([row("left-pad", "unknown")]), {
+      format: "status",
+    });
+    expect(onlyUnknown).not.toContain("nothing outside the allowlist");
+    expect(onlyUnknown).toContain("`left-pad` (npm)");
   });
 
   it("renders a short status block with the names and the advisory count", () => {

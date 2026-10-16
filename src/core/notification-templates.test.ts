@@ -220,6 +220,8 @@ describe("packages_audited", () => {
       { ecosystem: "npm", name: "a<b>&c" },
     ],
     moreToApprove: 2,
+    unknown: [{ ecosystem: "pypi", name: "flask" }],
+    moreUnknown: 0,
     transitive: 4,
     advisories: 1,
   };
@@ -233,6 +235,7 @@ describe("packages_audited", () => {
     expect(text).toContain("and 2 more");
     expect(text).toContain("plus 4 dependencies");
     expect(text).toContain("1 served despite advisories");
+    expect(text).toContain("Relation unknown — may be a dependency; approve only if needed directly: `flask` (pypi)");
   });
 
   it("leaves the thread status unchanged, names the agent, and does not broadcast", () => {

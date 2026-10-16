@@ -112,6 +112,7 @@ describe("emitRunFinishedEvents", () => {
       const rows = [
         row("expo-dev-client", "top-level"),
         row("expo-dev-launcher", "transitive", { via: "expo-dev-client" }),
+        row("left-pad", "unknown"),
         row("lodash", "allowed", { advisories: [{ id: "GHSA-35jh-r3h4-6jhm", severity: "HIGH", summary: "" }] }),
       ];
       for (const status of ["succeeded", "failed"]) {
@@ -128,6 +129,8 @@ describe("emitRunFinishedEvents", () => {
               mode: "full",
               toApprove: [{ ecosystem: "npm", name: "expo-dev-client" }],
               moreToApprove: 0,
+              unknown: [{ ecosystem: "npm", name: "left-pad" }],
+              moreUnknown: 0,
               transitive: 1,
               advisories: 1,
             },

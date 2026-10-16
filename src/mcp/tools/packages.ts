@@ -1,17 +1,22 @@
 /**
  * approve_audited_packages: promotes what package audit mode recorded on a
  * run (docs/coding-packages.md#package-audit-mode) into the agent's package
- * allowlist, as bare names. Only `top-level` and `unknown` records are
- * promoted: a `transitive` one follows its parent once that is allowlisted,
+ * allowlist, as bare names. Only `top-level` records are promoted by
+ * default; an `unknown` one (a direct download, or after a plan fallback)
+ * may really be a dependency of an allowlisted package, so it is promoted
+ * only when `names` lists it. A `transitive` one follows its parent once that is allowlisted,
  * and an `allowed` one is already on the allowlist graph (it was recorded
  * only for the advisories full mode served past, which approving cannot
  * waive). For a parent run, each coding sub-run's names go to that sub-run's
  * own agent. Same gate as packageAllowlist: packages:approve or agents:admin,
- * and only the agent's owner. Package audit mode itself is left as it is.
+ * and only the agent's owner. Every agent is checked before any is written,
+ * and all are written in one transaction, so a refusal changes nothing.
+ * Package audit mode itself is left as it is.
  */
 import { Prisma } from "#prisma";
 import { z } from "zod";
 import { matchRoot, parseAllowlist, type PackageAllowlist } from "../../coding/registry/allowlist.js";
+import { UNKNOWN_RELATION_LABEL } from "../../coding/registry/audit-mode.js";
 import { REGISTRY_ADAPTERS } from "../../coding/registry/adapters.js";
 import { logger } from "../../core/logger.js";
 import { agentAccess } from "../auth/access.js";
@@ -38,10 +43,12 @@ export function registerPackageTools(mcp: WardbyMcpServer): void {
     scope: "agents:write",
     description:
       "Add the packages a run installed under package audit mode to its agent's codingProfile.packageAllowlist, as " +
-      "bare names (top-level and unknown records from get_run's packageAudit; their dependencies then follow through " +
-      "the allowlist graph). For a parent run, each coding sub-run's packages go to that sub-run's agent. `names` " +
-      "limits it to those names. Needs packages:approve or agents:admin, and only the agent's owner may use it. " +
-      "Does not turn package audit mode off.",
+      "bare names (the top-level records in get_run's packageAudit; their dependencies then follow through the " +
+      "allowlist graph). Records with relation unknown may be dependencies of allowlisted packages: they are added only " +
+      "when `names` lists them, and are returned as `unknown` otherwise. For a parent run, each coding sub-run's " +
+      "packages go to that sub-run's agent; nothing is changed unless every agent can be. `names` limits it to those " +
+      "names. Needs packages:approve or agents:admin, and only the agent's owner may use it. Does not turn package " +
+      "audit mode off.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -50,7 +57,8 @@ export function registerPackageTools(mcp: WardbyMcpServer): void {
         names: {
           type: "array",
           items: { type: "string" },
-          description: "Only these package names (as get_run lists them); omitted means every one to approve.",
+          description:
+            "Only these package names (as get_run lists them), including any with relation unknown to add; omitted means every top-level one.",
         },
       },
       required: ["runId"],
@@ -101,19 +109,33 @@ export function registerPackageTools(mcp: WardbyMcpServer): void {
       const wanted = names ? new Set(names) : null;
       /** agentId -> ecosystem -> names to add, first-seen order. */
       const byAgent = new Map<string, Map<string, Set<string>>>();
+      /** Unknown-relation names left out (not named), per ecosystem + name. */
+      const skippedUnknown = new Map<string, { ecosystem: string; name: string }>();
+      const topLevel = new Set(
+        records.filter((r) => r.relation === "top-level").map((r) => `${r.runId}\0${r.ecosystem}\0${r.name}`),
+      );
       for (const record of records) {
         if (record.relation !== "top-level" && record.relation !== "unknown") continue;
-        if (wanted && !wanted.has(record.name)) continue;
+        if (wanted ? !wanted.has(record.name) : record.relation !== "top-level") {
+          if (!wanted && !topLevel.has(`${record.runId}\0${record.ecosystem}\0${record.name}`))
+            skippedUnknown.set(`${record.ecosystem}\0${record.name}`, {
+              ecosystem: record.ecosystem,
+              name: record.name,
+            });
+          continue;
+        }
         const agentId = agentOf.get(record.runId)!;
         const ecosystems = byAgent.get(agentId) ?? new Map<string, Set<string>>();
         byAgent.set(agentId, ecosystems);
         ecosystems.set(record.ecosystem, (ecosystems.get(record.ecosystem) ?? new Set()).add(record.name));
       }
 
-      const results: { agentId: string; added: Record<string, string[]>; packageAllowlist: PackageAllowlist }[] = [];
-      for (const [agentId, ecosystems] of byAgent) {
-        const result = await ctx.db.$transaction(
-          async (tx) => {
+      type AgentResult = { agentId: string; added: Record<string, string[]>; packageAllowlist: PackageAllowlist };
+      // One transaction: every agent is checked (owner, coding, the cap) before any is written.
+      const results = await ctx.db.$transaction(
+        async (tx) => {
+          const planned: AgentResult[] = [];
+          for (const [agentId, ecosystems] of byAgent) {
             const agent = await tx.agent.findUnique({ where: { id: agentId }, include: { codingProfile: true } });
             if (!agent?.codingProfile || agent.kind !== "coding") {
               throw new McpError(400, `Agent "${agentId}" is not a coding agent.`);
@@ -142,33 +164,52 @@ export function registerPackageTools(mcp: WardbyMcpServer): void {
               if (list.length > MAX_ALLOWLIST_ENTRIES) {
                 throw new McpError(
                   400,
-                  `Agent "${agentId}": approving these would put ${list.length} ${ecosystem} entries on its allowlist; the limit is ${MAX_ALLOWLIST_ENTRIES}. Approve fewer with \`names\`, or replace some entries with a scope wildcard.`,
+                  `Agent "${agentId}": approving these would put ${list.length} ${ecosystem} entries on its allowlist; the limit is ${MAX_ALLOWLIST_ENTRIES}. Approve fewer with \`names\`, or replace some entries with a scope wildcard. Nothing was changed.`,
                 );
               }
               if (list.length > 0) next[ecosystem] = list;
             }
             // Every added name is a registry name the proxy normalized: still parsed, so the stored allowlist stays valid.
             parseAllowlist(next, REGISTRY_ADAPTERS);
-            if (Object.keys(added).length > 0) {
-              await tx.codingAgentProfile.update({
-                where: { agentId },
-                data: { packageAllowlist: next },
-              });
-            }
-            return { agentId, added, packageAllowlist: next };
-          },
-          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-        );
+            planned.push({ agentId, added, packageAllowlist: next });
+          }
+          for (const result of planned) {
+            if (Object.keys(result.added).length === 0) continue;
+            await tx.codingAgentProfile.update({
+              where: { agentId: result.agentId },
+              data: { packageAllowlist: result.packageAllowlist },
+            });
+          }
+          return planned;
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+      for (const result of results) {
         const count = Object.values(result.added).reduce((sum, list) => sum + list.length, 0);
         if (count > 0) {
           packagesLog.info(
-            { event: "coding.package_audit.promoted", agentId, runId, added: count, by: ctx.principal.id },
+            {
+              event: "coding.package_audit.promoted",
+              agentId: result.agentId,
+              runId,
+              added: count,
+              by: ctx.principal.id,
+            },
             "audited packages added to the allowlist",
           );
         }
-        results.push(result);
       }
-      return textResult({ runId, agents: results });
+      const unknown = [...skippedUnknown.values()];
+      return textResult({
+        runId,
+        agents: results,
+        ...(unknown.length > 0
+          ? {
+              unknown,
+              unknownNote: `${UNKNOWN_RELATION_LABEL.toLowerCase()}. List one in \`names\` to add it.`,
+            }
+          : {}),
+      });
     },
   });
 }

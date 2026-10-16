@@ -692,12 +692,14 @@ installed unrecorded. The record shows up in:
 - `get_run`: `packageAuditMode` and `packageAudit` (an empty list when the mode
   was on and nothing was recorded; both absent when it was off).
 - The pull request body: a `[!CAUTION]` banner above the agent's summary,
-  **Packages outside the allowlist** (the names to approve, each with a count
-  of its dependencies), and in `full` mode **Served despite advisories**. When
+  **Packages outside the allowlist** (the `top-level` names to approve, each
+  with a count of its dependencies), a separate **Relation unknown** list (see
+  below), and in `full` mode **Served despite advisories**. When
   the mode was on and nothing was recorded, the banner says so in one line. A
   later run on the same pull request merges the lists across its runs, and the
   banner is kept when the **Packages** section is dropped for size.
-- The run's GitHub or Jira status comment: a short block above the run line.
+- The run's GitHub or Jira status comment: a short block above the run line,
+  with `unknown` names in their own labelled sentence.
 - Slack: a `packages_audited` event for the top-level run (see
   [Slack notifications](slack-notifications.md)).
 - The proxy log: `registry.audited`, one line per version, with the run,
@@ -732,7 +734,11 @@ installed unrecorded. The record shows up in:
 package reached the run (a direct tarball download, or a metadata request
 after a lockfile plan fell back). A dependency that an audited package
 declared first stays recorded as audited even if an allowlisted package
-declares it later. Both errors over-report, never under-report.
+declares it later. Both errors over-report, never under-report. Because an
+`unknown` package may really be a dependency of an allowlisted package that
+was installed without its parent's metadata, every surface lists `unknown`
+names apart, labelled "Relation unknown — may be a dependency; approve only
+if needed directly", and they aren't approved unless you name them.
 
 ### Lockfile plans and the dependency cache
 
@@ -753,13 +759,16 @@ instead, and no snapshot of that lockfile is saved from it.
 ### Promoting audited packages
 
 Add what a run recorded to the allowlist with `approve_audited_packages`
-(`{ "runId": "<run id>" }`, optionally `"names": [...]`). It adds the
-`top-level` and `unknown` names as bare entries to the agent's
-`packageAllowlist`; their dependencies then follow through the allowlist
-graph. For a parent run, each coding sub-run's names go to that sub-run's own
+(`{ "runId": "<run id>" }`, optionally `"names": [...]`). Without `names` it
+adds the `top-level` names as bare entries to the agent's `packageAllowlist`;
+their dependencies then follow through the allowlist graph. It adds an
+`unknown` name only when `names` lists it, and otherwise returns those names
+as `unknown` for you to judge. For a parent run, each coding sub-run's names go to that sub-run's own
 agent. It needs the same access as `packageAllowlist` (`packages:approve` or
 `agents:admin`, owner only), skips names already allowed, keeps the 256-entry
 limit per ecosystem, and is logged as `coding.package_audit.promoted`. It
+checks every agent before writing any, so a refusal (another owner's agent, a
+full allowlist) changes nothing. It
 doesn't turn the mode off. You can also edit `packageAllowlist` with
 `update_agent` yourself, for example to pin a range.
 
