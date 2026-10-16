@@ -210,6 +210,39 @@ describe("renderEvent", () => {
   });
 });
 
+describe("packages_audited", () => {
+  const payload = {
+    kind: "packages_audited" as const,
+    agentName: "lead",
+    mode: "full" as const,
+    toApprove: [
+      { ecosystem: "npm", name: "expo-dev-client" },
+      { ecosystem: "npm", name: "a<b>&c" },
+    ],
+    moreToApprove: 2,
+    transitive: 4,
+    advisories: 1,
+  };
+
+  it("renders the names to approve, escaped, with the counts", () => {
+    const { text } = renderEvent(payload, null);
+    expect(text).toContain("🔎 *Package audit mode (`full`) was on:*");
+    expect(text).toContain("`expo-dev-client` (npm)");
+    expect(text).toContain("`a b &amp;c` (npm)");
+    expect(text).not.toMatch(/<b>/);
+    expect(text).toContain("and 2 more");
+    expect(text).toContain("plus 4 dependencies");
+    expect(text).toContain("1 served despite advisories");
+  });
+
+  it("leaves the thread status unchanged, names the agent, and does not broadcast", () => {
+    expect(nextStatus("PR open", payload)).toBe("PR open");
+    expect(nextStatus("merged ✅", payload)).toBe("merged ✅");
+    expect(senderName(payload)).toBe("lead");
+    expect(broadcasts(payload)).toBe(false);
+  });
+});
+
 describe("broadcasts", () => {
   it("only merges and failures", () => {
     expect(broadcasts({ kind: "pr_closed", ...pr, merged: true, movedTo: null })).toBe(true);

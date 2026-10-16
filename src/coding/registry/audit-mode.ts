@@ -306,21 +306,47 @@ function capped(lines: readonly string[]): string[] {
 }
 
 function statusWording(mode: PackageAuditMode, summary: PackageAuditSummary, slack: boolean): string {
+  return packageAuditStatusText(mode, packageAuditDigest(mode, summary), slack);
+}
+
+/** What a short audit notice needs (a status comment, a Slack message): a bounded, count-only digest.
+ *  A type alias, not an interface, so it stays assignable to a stored JSON payload. */
+export type PackageAuditDigest = {
+  /** Names to approve, at most 10. */
+  toApprove: { ecosystem: string; name: string }[];
+  /** Names to approve beyond those listed. */
+  moreToApprove: number;
+  /** Dependencies of audited packages, recorded transitive. */
+  transitive: number;
+  /** Advisories full mode served past (0 in audit mode). */
+  advisories: number;
+};
+
+export function packageAuditDigest(mode: PackageAuditMode, summary: PackageAuditSummary): PackageAuditDigest {
+  const listed = summary.toApprove.slice(0, MAX_STATUS_NAMES);
+  return {
+    toApprove: listed.map(({ ecosystem, name }) => ({ ecosystem, name })),
+    moreToApprove: summary.toApprove.length - listed.length,
+    transitive: summary.entries.filter((e) => e.relation === "transitive").length,
+    advisories: mode === "full" ? summary.advisoryRows.length : 0,
+  };
+}
+
+/** The short audit notice as GitHub/Jira Markdown or, with `slack`, Slack mrkdwn (already escaped). */
+export function packageAuditStatusText(mode: PackageAuditMode, digest: PackageAuditDigest, slack: boolean): string {
   const bold = (text: string) => (slack ? `*${text}*` : `**${text}**`);
   const head = `🔎 ${bold(`Package audit mode (\`${mode}\`) was on:`)}`;
-  const advisories = mode === "full" ? summary.advisoryRows.length : 0;
-  const advisoryText = advisories > 0 ? ` ${advisories} served despite advisories.` : "";
+  const advisoryText = digest.advisories > 0 ? ` ${digest.advisories} served despite advisories.` : "";
   let text: string;
-  if (summary.toApprove.length === 0 && summary.entries.every((e) => e.relation === "allowed")) {
+  if (digest.toApprove.length === 0 && digest.transitive === 0) {
     text = `${head} nothing outside the allowlist was installed.${advisoryText}`;
   } else {
-    const names = summary.toApprove
+    const names = digest.toApprove
       .slice(0, MAX_STATUS_NAMES)
       .map((pkg) => `${codeSpan(pkg.name)} (${codeSpan(pkg.ecosystem).slice(1, -1)})`);
-    const more = summary.toApprove.length - names.length;
-    const transitive = summary.entries.filter((e) => e.relation === "transitive").length;
-    const listed =
-      names.length > 0 ? `${names.join(", ")}${more > 0 ? ` and ${more} more` : ""}` : "no top-level names";
+    const more = digest.moreToApprove > 0 ? ` and ${digest.moreToApprove} more` : "";
+    const listed = names.length > 0 ? `${names.join(", ")}${more}` : "no top-level names";
+    const transitive = digest.transitive;
     text =
       `${head} installed outside the allowlist: ${listed}` +
       `${transitive > 0 ? ` (plus ${transitive} ${transitive === 1 ? "dependency" : "dependencies"})` : ""}.` +

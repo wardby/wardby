@@ -1,3 +1,4 @@
+import type { PackageAuditDigest, PackageAuditMode } from "../coding/registry/audit-mode.js";
 import type { RegistryRefusalSummary } from "../coding/registry/report.js";
 import { logger } from "./logger.js";
 
@@ -9,6 +10,7 @@ export const WORKFLOW_EVENT_KINDS = [
   "review_posted",
   "review_fix",
   "pr_closed",
+  "packages_audited",
 ] as const;
 export type WorkflowEventKind = (typeof WORKFLOW_EVENT_KINDS)[number];
 
@@ -32,7 +34,8 @@ export type WorkflowPayload =
       ciPending: boolean;
     }
   | { kind: "review_fix"; prLabel: string; round: number; maxRounds: number; state: "started" | "capped" }
-  | { kind: "pr_closed"; prLabel: string; prUrl: string; merged: boolean; movedTo: string | null };
+  | { kind: "pr_closed"; prLabel: string; prUrl: string; merged: boolean; movedTo: string | null }
+  | ({ kind: "packages_audited"; agentName: string; mode: PackageAuditMode } & PackageAuditDigest);
 
 /** What a thread's parent message shows about its subject. */
 export interface ThreadSubject {
@@ -51,6 +54,7 @@ export const dedupeKeys = {
   reviewFix: (repository: string, n: number, round: number, state: "started" | "capped") =>
     `review_fix:${repository}#${n}:${round}:${state}`,
   prClosed: (codeProvider: string, repository: string, n: number) => `pr_closed:${codeProvider}:${repository}#${n}`,
+  packagesAudited: (runId: string) => `packages_audited:${runId}`,
 };
 
 export const threadKeys = {

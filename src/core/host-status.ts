@@ -335,6 +335,40 @@ export function outcomeBody(
   return `✅ ${opts.noPullRequestText ?? "Finished without opening a pull request."}${quoted}\n\n${footer}`;
 }
 
+/** Package audit mode on a run's coding sub-runs: the strongest mode, and what it recorded across them. */
+export type PackageAuditOutcome = { mode: PackageAuditMode; summary: PackageAuditSummary };
+
+/** The package audit of these children (best effort, like the refusals: a read failure reports none). */
+async function loadPackageAudit(
+  db: Pick<PrismaClient, "registryAuditRecord">,
+  children: readonly { id: string; codingRun: { packageAuditMode: string | null } | null }[],
+): Promise<PackageAuditOutcome | undefined> {
+  const audited = children.filter((c) => isPackageAuditMode(c.codingRun?.packageAuditMode));
+  if (audited.length === 0) return undefined;
+  try {
+    const rows = await db.registryAuditRecord.findMany({
+      where: { runId: { in: audited.map((c) => c.id) } },
+      orderBy: { createdAt: "asc" },
+    });
+    const mode = audited.some((c) => c.codingRun?.packageAuditMode === "full") ? "full" : "audit";
+    return { mode, summary: summarizePackageAudit(rows) };
+  } catch {
+    return undefined;
+  }
+}
+
+/** A run's package audit alone, for a run whose other outcome is not read (one that did not succeed). */
+export async function collectPackageAudit(
+  db: Pick<PrismaClient, "run" | "registryAuditRecord">,
+  runId: string,
+): Promise<PackageAuditOutcome | undefined> {
+  const children = await db.run.findMany({
+    where: { parentRunId: runId },
+    select: { id: true, codingRun: { select: { packageAuditMode: true } } },
+  });
+  return loadPackageAudit(db, children);
+}
+
 /** What collectRunOutcome reads: a run's children and, when out of budget, its budget facts. */
 export type RunOutcomeDb = Pick<PrismaClient, "run" | "registryFetch" | "registryAuditRecord">;
 
@@ -348,7 +382,7 @@ export async function collectRunOutcome(
   packageRefusals: RegistryRefusalSummary[];
   noChanges: boolean;
   budgetSentence?: string;
-  packageAudit?: { mode: PackageAuditMode; summary: PackageAuditSummary };
+  packageAudit?: PackageAuditOutcome;
 }> {
   const children = await db.run.findMany({
     where: { parentRunId: run.id },
@@ -389,22 +423,7 @@ export async function collectRunOutcome(
       // Registry reporting is best effort; keep the existing status on read failure.
     }
   }
-  // Package audit mode on any coding sub-run: the strongest mode, and what
-  // it recorded across them (best effort, like the refusals).
-  let packageAudit: { mode: PackageAuditMode; summary: PackageAuditSummary } | undefined;
-  const audited = children.filter((c) => isPackageAuditMode(c.codingRun?.packageAuditMode));
-  if (audited.length > 0) {
-    try {
-      const rows = await db.registryAuditRecord.findMany({
-        where: { runId: { in: audited.map((c) => c.id) } },
-        orderBy: { createdAt: "asc" },
-      });
-      const mode = audited.some((c) => c.codingRun?.packageAuditMode === "full") ? "full" : "audit";
-      packageAudit = { mode, summary: summarizePackageAudit(rows) };
-    } catch {
-      // Best effort: the status comment still reports everything else.
-    }
-  }
+  const packageAudit = await loadPackageAudit(db, children);
   const budgetSentence =
     run.status === "budget_exhausted" || run.status === "refused"
       ? await loadBudgetSentence(db, run.id, run.status)

@@ -1,12 +1,14 @@
 /**
  * Workflow notifications a run's finalizer emits: run_failed for a top-level
  * run that did not succeed, run_blocked for package refusals without changes
- * (children are summarized by their parent), and
+ * (children are summarized by their parent), packages_audited when its coding
+ * children installed anything under package audit mode, and
  * review_posted when the run published a verdict on its own check. Called
  * only by the finalizer that made the run terminal. Never throws.
  */
 import type { PrismaClient } from "#prisma";
-import { collectRunOutcome, isBlockedByRefusals } from "./host-status.js";
+import { packageAuditDigest } from "../coding/registry/audit-mode.js";
+import { collectPackageAudit, collectRunOutcome, isBlockedByRefusals } from "./host-status.js";
 import { logger } from "./logger.js";
 import { dedupeKeys, emitWorkflowEvent, shortReason } from "./workflow-events.js";
 
@@ -38,6 +40,21 @@ export async function emitRunFinishedEvents(
             runId: run.id,
             agentId: run.agentId,
             payload: { kind: "run_blocked", agentName, packageRefusals: outcome.packageRefusals },
+          });
+        }
+        // Any terminal status: what audit mode let in is worth knowing whether or not the run succeeded.
+        const audit = outcome ? outcome.packageAudit : await collectPackageAudit(db, run.id);
+        if (audit && audit.summary.entries.length > 0) {
+          await emitWorkflowEvent({
+            dedupeKey: dedupeKeys.packagesAudited(run.id),
+            runId: run.id,
+            agentId: run.agentId,
+            payload: {
+              kind: "packages_audited",
+              agentName,
+              mode: audit.mode,
+              ...packageAuditDigest(audit.mode, audit.summary),
+            },
           });
         }
       } catch {
