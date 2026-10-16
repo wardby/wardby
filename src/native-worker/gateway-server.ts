@@ -256,9 +256,26 @@ async function* streamModel(
     }
   } catch (err) {
     if (!settled) {
-      // Refused before anything streamed: the provider billed nothing. Mid-stream: unknown, keep the hold.
-      if (sawEvent) await ledger.markUncertain(ctx.session.id, callId);
-      else await ledger.release(ctx.session.id, callId);
+      // Refused before anything streamed: the provider billed nothing. Mid-stream: settle at an estimate.
+      if (sawEvent) {
+        // Bill the input and the output seen so far, never more than the hold. Estimating must
+        // never mask the stream error: on any failure, keep the full hold and rethrow the original.
+        try {
+          const output = streamedText
+            ? await ctx.llm.countTokens(req.model, [{ role: "assistant", content: streamedText }]).catch(() => 0)
+            : 0;
+          const costUsd = Math.min(reservationUsd, ctx.llm.priceUsd(req.model, { inputTokens, outputTokens: output }));
+          await ledger.markUncertain(ctx.session.id, callId, {
+            inputTokens,
+            outputTokens: output,
+            cachedInputTokens: 0,
+            cacheWriteTokens: 0,
+            costUsd,
+          });
+        } catch {
+          await ledger.markUncertain(ctx.session.id, callId).catch(() => undefined);
+        }
+      } else await ledger.release(ctx.session.id, callId);
       settled = true;
     }
     throw err;

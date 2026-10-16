@@ -83,6 +83,22 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaGatewayLedger (database)", () 
     expect((await ledger.totals(created.id)).heldUsd).toBeCloseTo(0.4, 10);
   });
 
+  it("counts an interrupted call at its estimate, not its hold", async () => {
+    const created = (await session(1, new Date(Date.now() + 60_000))).created;
+    await ledger.reserve({ sessionId: created.id, callId: "cut", reservationUsd: 0.4, now: new Date() });
+    await ledger.markUncertain(created.id, "cut", {
+      inputTokens: 1_000,
+      outputTokens: 50,
+      cachedInputTokens: 0,
+      cacheWriteTokens: 0,
+      costUsd: 0.01,
+    });
+    const totals = await ledger.totals(created.id);
+    expect(totals.heldUsd).toBeCloseTo(0.01, 10);
+    expect(totals.costUsd).toBeCloseTo(0.01, 10);
+    expect(totals.tokensIn).toBe(1_000);
+  });
+
   it("never overspends under concurrent reservations", async () => {
     const { created } = await session(1);
     const outcomes = await Promise.all(
