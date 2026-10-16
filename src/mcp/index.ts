@@ -75,6 +75,7 @@ import { registerIssueProjectTools } from "./tools/issue-projects.js";
 import { registerNotificationChannelTools } from "./tools/notification-channels.js";
 import { registerHostAccountTools } from "./tools/host-accounts.js";
 import { registerMemoryTools } from "./tools/memory.js";
+import { registerPackageTools } from "./tools/packages.js";
 import { registerSecretsTools, type SecretElicitationUrlBuilder } from "./tools/secrets.js";
 import { registerWebhookTools } from "./tools/webhooks.js";
 import { createStdioSecretElicitationHost } from "./tools/secret-elicitation-server.js";
@@ -156,6 +157,7 @@ export function registerAllTools(
   registerNotificationChannelTools(mcp);
   registerHostAccountTools(mcp);
   registerMemoryTools(mcp);
+  registerPackageTools(mcp);
   registerSecretsTools(mcp, {
     buildElicitationUrl: opts.secretElicitationUrl,
     protocolElicitation: opts.secretElicitationProtocol,
