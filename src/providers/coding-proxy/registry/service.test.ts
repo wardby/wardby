@@ -2752,6 +2752,37 @@ describe("RegistryService: an allowlist entry's own range holds in every package
               ]),
             ),
           });
+        // bar is outside the allowlist and declares foo outside the entry's range.
+        if (url === "https://registry.npmjs.org/bar")
+          return Response.json({
+            name: "bar",
+            "dist-tags": { latest: "1.0.0" },
+            time: { "1.0.0": old },
+            versions: {
+              "1.0.0": {
+                name: "bar",
+                version: "1.0.0",
+                dependencies: { foo: "^2.0.0" },
+                dist: { tarball: "https://registry.npmjs.org/bar/-/bar-1.0.0.tgz", integrity: npmIntegrity },
+              },
+            },
+          });
+        if (url === "https://pypi.org/simple/bar/")
+          return Response.json({
+            name: "bar",
+            files: [
+              {
+                filename: "bar-1.0-py3-none-any.whl",
+                url: "https://files.pythonhosted.org/packages/xx/bar-1.0-py3-none-any.whl",
+                hashes: { sha256: wheelSha },
+                "upload-time": old,
+                size: wheelBody.byteLength,
+                "core-metadata": true,
+              },
+            ],
+          });
+        if (url.endsWith("bar-1.0-py3-none-any.whl.metadata"))
+          return new Response("Name: bar\nRequires-Dist: foo>=2\n");
         if (url === "https://pypi.org/simple/foo/")
           return Response.json({
             name: "foo",
@@ -2771,6 +2802,37 @@ describe("RegistryService: an allowlist entry's own range holds in every package
     });
     const get = (subpath: string) => registry.handle({ ...request(subpath), ecosystem });
     return { get, store };
+  }
+
+  for (const packageAudit of ["audit", "full"] as const) {
+    it(`npm: an audited package declaring foo@^2 does not widen foo@^1 (${packageAudit})`, async () => {
+      const { get, store } = rangedService("npm", packageAudit);
+      await expect(get("bar")).resolves.toMatchObject({ status: 200 });
+      const metadata = await get("foo");
+      if (!("body" in metadata)) throw new Error("expected a body");
+      expect(Object.keys((JSON.parse(metadata.body) as { versions: object }).versions)).toEqual(["1.0.0"]);
+      const download = await get("-/tarball/foo/2.0.0");
+      expect(download).toMatchObject({ status: 404 });
+      expect("body" in download && download.body).toContain("wardby_version_filtered");
+      expect(store.audits).toEqual([]);
+    });
+
+    it(`pypi: an audited package requiring foo>=2 does not widen foo>=1,<2 (${packageAudit})`, async () => {
+      const { get, store } = rangedService("pypi", packageAudit);
+      await expect(get("simple/bar/")).resolves.toMatchObject({ status: 200 });
+      const file = await get("files/bar/bar-1.0-py3-none-any.whl.metadata");
+      if ("stream" in file) await new Response(file.stream).text();
+      expect(store.audits).toMatchObject([{ name: "bar", relation: "top-level" }]);
+      const index = await get("simple/foo/");
+      if (!("body" in index)) throw new Error("expected a body");
+      expect((JSON.parse(index.body) as { files: { filename: string }[] }).files.map((f) => f.filename)).toEqual([
+        pypiWheel("1.0"),
+      ]);
+      const download = await get(`files/foo/${pypiWheel("2.0")}`);
+      expect(download).toMatchObject({ status: 404 });
+      expect("body" in download && download.body).toContain("wardby_version_filtered");
+      expect(store.audits.map((a) => a.name)).toEqual(["bar"]);
+    });
   }
 
   for (const packageAudit of [null, "audit", "full"] as const) {
