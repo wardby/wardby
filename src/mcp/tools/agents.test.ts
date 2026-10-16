@@ -1801,6 +1801,198 @@ describe("agent CRUD tools", () => {
     });
   });
 
+  describe("packageAuditMode", () => {
+    const text = (result: { content: unknown }) => (result.content as { text: string }[])[0].text;
+    const HOUR = 3_600_000;
+    async function as(
+      scopes: string[],
+      options: { principal?: string; profile?: Record<string, unknown>; kind?: "coding" | "native" } = {},
+    ) {
+      const seed = codingAgentSeed();
+      const agent =
+        options.kind === "native"
+          ? { ...seed, kind: "native" as const, codingProfile: undefined }
+          : { ...seed, codingProfile: { ...seed.codingProfile, ...options.profile } };
+      const db = fakeDb(
+        [agent],
+        [],
+        ["p2"],
+        [],
+        [{ resourceType: "agent", resourceId: "a1", level: "write", principalId: "p2" }],
+      );
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, options.principal ?? "p1", scopes, ["admin"]));
+      registerAgentTools(mcp);
+      return { db, client: await connectClient(mcp) };
+    }
+    const update = (codingProfile: Record<string, unknown>) => ({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile },
+    });
+    type Shown = {
+      codingProfile: { packageAuditMode: string | null; packageAuditUntil: string | null; packageAuditActive: boolean };
+      warnings?: string[];
+    };
+    const APPROVER = ["agents:read", "agents:write", "packages:approve"];
+
+    it("turns audit on for 24 hours by default, shows it as active with a warning, and is audited", async () => {
+      logged.length = 0;
+      const { db, client } = await as(APPROVER);
+      const before = Date.now();
+      const result = await client.callTool(update({ packageAuditMode: "audit" }));
+      expect(result.isError).toBeFalsy();
+      const body = JSON.parse(text(result)) as Shown;
+      const until = Date.parse(body.codingProfile.packageAuditUntil!);
+      expect(until).toBeGreaterThanOrEqual(before + 24 * HOUR);
+      expect(until).toBeLessThanOrEqual(Date.now() + 24 * HOUR);
+      expect(body.codingProfile).toMatchObject({ packageAuditMode: "audit", packageAuditActive: true });
+      expect(body.warnings).toEqual([
+        `Package audit mode (\`audit\`) is on until ${body.codingProfile.packageAuditUntil}: this agent's coding runs install packages outside the allowlist.`,
+      ]);
+      const shown = JSON.parse(text(await client.callTool({ name: "get_agent", arguments: { id: "a1" } }))) as Shown;
+      expect(shown.codingProfile).toMatchObject({ packageAuditMode: "audit", packageAuditActive: true });
+      expect(shown.warnings).toEqual(body.warnings);
+      const stored = (await db.agent.findUnique({ where: { id: "a1" } })) as unknown as {
+        codingProfile: { packageAuditMode: string; packageAuditUntil: Date };
+      };
+      expect(stored.codingProfile.packageAuditUntil.getTime()).toBe(until);
+      expect(logged.filter((entry) => entry.payload.event === "coding.package_audit.set")).toEqual([
+        {
+          level: "info",
+          payload: {
+            event: "coding.package_audit.set",
+            agentId: "a1",
+            mode: "audit",
+            until: body.codingProfile.packageAuditUntil,
+            by: "p1",
+          },
+          message: expect.any(String),
+        },
+      ]);
+      await client.close();
+    });
+
+    it("full with explicit minutes; agents:admin is enough too", async () => {
+      const { client } = await as(["agents:read", "agents:write", "agents:admin"]);
+      const before = Date.now();
+      const body = JSON.parse(
+        text(await client.callTool(update({ packageAuditMode: "full", packageAuditMinutes: 90 }))),
+      ) as Shown;
+      expect(body.codingProfile.packageAuditMode).toBe("full");
+      expect(Date.parse(body.codingProfile.packageAuditUntil!)).toBeGreaterThanOrEqual(before + 90 * 60_000);
+      expect(Date.parse(body.codingProfile.packageAuditUntil!)).toBeLessThan(before + 91 * 60_000);
+      await client.close();
+    });
+
+    it.each([0, 10081, 1.5, "30"])("rejects %j minutes", async (minutes) => {
+      const { client } = await as(APPROVER);
+      const result = await client.callTool(update({ packageAuditMode: "audit", packageAuditMinutes: minutes }));
+      expect(result.isError).toBe(true);
+      await client.close();
+    });
+
+    it("rejects an unknown mode", async () => {
+      const { client } = await as(APPROVER);
+      expect((await client.callTool(update({ packageAuditMode: "off" }))).isError).toBe(true);
+      await client.close();
+    });
+
+    it.each([{ packageAuditMode: "audit" }, { packageAuditMode: null }, { packageAuditMinutes: 30 }])(
+      "%j needs packages:approve or agents:admin, not just agents:write",
+      async (patch) => {
+        const { client } = await as(["agents:read", "agents:write"]);
+        const result = await client.callTool(update(patch));
+        expect(result.isError).toBe(true);
+        expect(text(result)).toMatch(/Insufficient scope/);
+        await client.close();
+      },
+    );
+
+    it("is owner-only: a write-grantee with packages:approve is refused", async () => {
+      const { client } = await as(APPROVER, { principal: "p2" });
+      const result = await client.callTool(update({ packageAuditMode: "audit" }));
+      expect(result.isError).toBe(true);
+      expect(text(result)).toMatch(/only its owner/);
+      await client.close();
+    });
+
+    it("null clears the mode and window", async () => {
+      logged.length = 0;
+      const { client } = await as(APPROVER, {
+        profile: { packageAuditMode: "full", packageAuditUntil: new Date(Date.now() + HOUR) },
+      });
+      const body = JSON.parse(text(await client.callTool(update({ packageAuditMode: null })))) as Shown;
+      expect(body.codingProfile).toMatchObject({
+        packageAuditMode: null,
+        packageAuditUntil: null,
+        packageAuditActive: false,
+      });
+      expect(body).not.toHaveProperty("warnings");
+      expect(logged.at(-1)?.payload).toEqual({
+        event: "coding.package_audit.set",
+        agentId: "a1",
+        mode: null,
+        until: null,
+        by: "p1",
+      });
+      await client.close();
+    });
+
+    it("minutes alone re-arm the stored mode, and are refused with no stored mode or alongside null", async () => {
+      const stored = await as(APPROVER, {
+        profile: { packageAuditMode: "audit", packageAuditUntil: new Date(Date.now() - HOUR) },
+      });
+      const before = Date.now();
+      const body = JSON.parse(text(await stored.client.callTool(update({ packageAuditMinutes: 60 })))) as Shown;
+      expect(body.codingProfile).toMatchObject({ packageAuditMode: "audit", packageAuditActive: true });
+      expect(Date.parse(body.codingProfile.packageAuditUntil!)).toBeGreaterThanOrEqual(before + HOUR);
+      const withNull = await stored.client.callTool(update({ packageAuditMode: null, packageAuditMinutes: 5 }));
+      expect(withNull.isError).toBe(true);
+      expect(text(withNull)).toMatch(/packageAuditMinutes/);
+      await stored.client.close();
+
+      const none = await as(APPROVER);
+      const result = await none.client.callTool(update({ packageAuditMinutes: 60 }));
+      expect(result.isError).toBe(true);
+      expect(text(result)).toMatch(/packageAuditMode/);
+      await none.client.close();
+    });
+
+    it("shows an expired window as inactive, with no warning, keeping the stored mode", async () => {
+      const { client } = await as(APPROVER, {
+        profile: { packageAuditMode: "audit", packageAuditUntil: new Date(Date.now() - 1000) },
+      });
+      const shown = JSON.parse(text(await client.callTool({ name: "get_agent", arguments: { id: "a1" } }))) as Shown;
+      expect(shown.codingProfile).toMatchObject({ packageAuditMode: "audit", packageAuditActive: false });
+      expect(shown).not.toHaveProperty("warnings");
+      await client.close();
+    });
+
+    it("is refused on a native agent", async () => {
+      const { client } = await as(APPROVER, { kind: "native" });
+      const result = await client.callTool(update({ packageAuditMode: "audit" }));
+      expect(result.isError).toBe(true);
+      await client.close();
+    });
+
+    it("is not accepted by create_agent", async () => {
+      const { client } = await as([...APPROVER, "agents:admin"]);
+      const result = await client.callTool({
+        name: "create_agent",
+        arguments: {
+          name: "audited",
+          systemPrompt: "x",
+          model: "gpt-5.6-luna",
+          budgetUsd: 1,
+          kind: "coding",
+          codingProfile: { repository: "openai/example", packageAuditMode: "audit" },
+        },
+      });
+      expect(result.isError).toBe(true);
+      await client.close();
+    });
+  });
+
   it("update_agent can patch other coding-profile fields without agents:admin", async () => {
     const db = fakeDb([
       {

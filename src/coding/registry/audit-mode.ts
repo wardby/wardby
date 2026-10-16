@@ -76,6 +76,11 @@ export function isPackageAuditActive(
   return isPackageAuditMode(mode) && !!until && until.getTime() > now.getTime();
 }
 
+/** The get_agent / update_agent warning while a mode is in force. */
+export function packageAuditActiveWarning(mode: PackageAuditMode, until: Date): string {
+  return `Package audit mode (\`${mode}\`) is on until ${until.toISOString()}: this agent's coding runs install packages outside the allowlist.`;
+}
+
 /**
  * update_agent's packageAuditMode / packageAuditMinutes semantics: a mode
  * opens a window of the given minutes (24 hours by default), minutes alone
