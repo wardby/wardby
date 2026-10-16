@@ -2,6 +2,7 @@ import {
   normalizeProxyModelTerms,
   type CreateProxySessionInput,
   type ProxyLedger,
+  type ProxyRefusalRecord,
   type ProxyRequest,
   type ProxySession,
   type ProxyUsage,
@@ -15,6 +16,7 @@ function cloneSession(session: ProxySession): ProxySession {
     allowedModels: [...session.allowedModels],
     deadlineAt: new Date(session.deadlineAt),
     budgetExhaustedAt: session.budgetExhaustedAt ? new Date(session.budgetExhaustedAt) : null,
+    budgetRefusal: session.budgetRefusal ? { ...session.budgetRefusal } : null,
     upstreamFailure: session.upstreamFailure ?? null,
     terms: session.terms
       ? { version: session.terms.version, entry: { ...session.terms.entry, efforts: [...session.terms.entry.efforts] } }
@@ -66,18 +68,36 @@ export class MemoryProxyLedger implements ProxyLedger {
     const existingId = this.requestBySessionKey.get(lookupKey);
     if (existingId) return { outcome: "duplicate", request: cloneRequest(this.requests.get(existingId)!) };
 
-    let committedOrHeld = 0;
+    let spent = 0;
+    let heldReserved = 0;
+    let heldUncertain = 0;
+    let done = 0;
     for (const request of this.requests.values()) {
       if (request.sessionId !== input.sessionId) continue;
       // An uncertain request settled at an estimate counts at it; one without an estimate keeps its hold.
       const settled = request.status === "completed" || (request.status === "uncertain" && request.costEstimated);
-      if (settled) committedOrHeld += request.actualCostUsd!;
-      else if (request.status === "reserved" || request.status === "uncertain")
-        committedOrHeld += request.reservationUsd;
+      if (settled) {
+        spent += request.actualCostUsd!;
+        done += 1;
+      } else if (request.status === "reserved") heldReserved += request.reservationUsd;
+      else if (request.status === "uncertain") heldUncertain += request.reservationUsd;
     }
+    const committedOrHeld = spent + heldReserved + heldUncertain;
     if (committedOrHeld + input.reservationUsd >= session.budgetUsd) {
-      session.budgetExhaustedAt ??= new Date(input.now);
-      return { outcome: "budget_exhausted" };
+      const details = {
+        budgetUsd: session.budgetUsd,
+        spentUsd: spent,
+        heldReservedUsd: heldReserved,
+        heldUncertainUsd: heldUncertain,
+        refusedHoldUsd: input.reservationUsd,
+        model: input.model,
+        turn: done + 1,
+      };
+      if (!session.budgetExhaustedAt) {
+        session.budgetExhaustedAt = new Date(input.now);
+        session.budgetRefusal = { source: "proxy", ...details };
+      }
+      return { outcome: "budget_exhausted", details };
     }
 
     const request: ProxyRequest = { ...input, pricing: { ...input.pricing }, status: "reserved" };
@@ -158,6 +178,11 @@ export class MemoryProxyLedger implements ProxyLedger {
 
   async budgetExhausted(sessionId: string): Promise<boolean> {
     return Boolean(this.sessions.get(sessionId)?.budgetExhaustedAt);
+  }
+
+  async budgetRefusal(sessionId: string): Promise<ProxyRefusalRecord | null> {
+    const refusal = this.sessions.get(sessionId)?.budgetRefusal;
+    return refusal ? { ...refusal } : null;
   }
 
   async recordUpstreamFailure(sessionId: string, code: string): Promise<void> {

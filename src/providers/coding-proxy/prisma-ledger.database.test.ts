@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createPrismaClient } from "../../core/db.js";
 import { afterAll, describe, expect, it } from "vitest";
 import { PrismaProxyLedger } from "./prisma-ledger.js";
+import { PrismaContainerExecutionStore } from "../executor/container.js";
 import { CodingProxy, type ProxyResponseSink } from "./proxy.js";
 import { shippedCatalog } from "../llm/catalog.js";
 import { entryOf } from "../llm/catalog-types.js";
@@ -39,6 +40,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
         allowedEgress: [],
         protectedPaths: [],
         budgetReservedUsd: 0.0002,
+        budgetLimitedBy: "week",
       },
     });
     const ledger = new PrismaProxyLedger(db);
@@ -90,6 +92,32 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
     const later = await ledger.reserve({ ...request("c"), now: new Date(Date.now() + 5_000) });
     expect(later.outcome).toBe("budget_exhausted");
     expect((await ledger.findSessionByCapabilityHash(`hash-${suffix}`))?.budgetExhaustedAt).toEqual(refusedAt);
+
+    // The proxy records the first refusal's numbers on its session only (it has no access to
+    // RunBudgetEvent); the control plane copies them into the run's budget events, once.
+    const refusal = await ledger.budgetRefusal(sessionId);
+    expect(refusal).toEqual({
+      source: "proxy",
+      budgetUsd: 0.0002,
+      spentUsd: 0,
+      heldReservedUsd: 0.0001,
+      heldUncertainUsd: 0,
+      refusedHoldUsd: 0.0001,
+      model: "gpt-5.6-luna",
+      turn: 1,
+    });
+    expect(await ledger.budgetRefusal(`missing-${suffix}`)).toBeNull();
+    expect(await db.runBudgetEvent.count({ where: { runId } })).toBe(0);
+    const store = new PrismaContainerExecutionStore(db);
+    await store.recordBudgetRefusal(runId, sessionId);
+    await store.recordBudgetRefusal(runId, sessionId);
+    expect(await db.runBudgetEvent.findMany({ where: { runId } })).toEqual([
+      expect.objectContaining({
+        kind: "refused",
+        limit: "week",
+        details: expect.objectContaining({ source: "proxy", turn: 1, refusedHoldUsd: 0.0001 }),
+      }),
+    ]);
 
     const requestId = admitted[0].outcome === "reserved" ? admitted[0].request.id : "";
     const usage = { inputTokens: 10, outputTokens: 4, cachedInputTokens: 2, cacheWriteTokens: 0, reasoningTokens: 1 };

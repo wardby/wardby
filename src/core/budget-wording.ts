@@ -20,7 +20,7 @@ const MAX_GROUP_NAME_CHARS = 64;
 const usd = (amount: number): string => `$${amount.toFixed(2)}`;
 
 /** A group name is operator-chosen text; keep it to one short, quote-free line. */
-function groupName(name: string | null | undefined): string | null {
+export function groupName(name: string | null | undefined): string | null {
   const cleaned = (name ?? "").replace(/["`]/g, "").replace(/\s+/g, " ").trim().slice(0, MAX_GROUP_NAME_CHARS);
   return cleaned || null;
 }

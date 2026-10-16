@@ -107,6 +107,13 @@ describe.skipIf(!process.env.DATABASE_URL)("budget groups (database)", () => {
     expect(Number(run.costUsd)).toBe(0);
     expect(await reservedUsd(run.id)).toBeNull();
     expect(started).not.toContain(run.id);
+    expect(await db.runBudgetEvent.findMany({ where: { runId: run.id } })).toEqual([
+      expect.objectContaining({
+        kind: "refused",
+        limit: "day",
+        details: expect.objectContaining({ source: "dispatch", heldRuns: expect.any(Number) }),
+      }),
+    ]);
   });
 
   it("E-01: a partially spent group caps the coding run's reservation", async () => {
@@ -120,6 +127,9 @@ describe.skipIf(!process.env.DATABASE_URL)("budget groups (database)", () => {
     expect(result!.run.status).toBe("pending");
     expect(await reservedUsd(result!.run.id)).toBeCloseTo(0.75, 6);
     expect(started).toContain(result!.run.id);
+    // The group's remainder, not the agent's own budget, bound this reservation.
+    const coding = await db.codingRun.findUniqueOrThrow({ where: { runId: result!.run.id } });
+    expect(coding.budgetLimitedBy).toBe("day");
   });
 
   it("an ungrouped coding run still reserves its own full budget", async () => {
@@ -287,6 +297,13 @@ describe.skipIf(!process.env.DATABASE_URL)("budget groups (database)", () => {
     const refused = await db.run.findUniqueOrThrow({ where: { id: again!.run.id } });
     expect(refused.status).toBe("refused");
     expect(refused.error).toMatch(/^run_tree_exhausted\b/);
+    expect(await db.runBudgetEvent.findMany({ where: { runId: refused.id } })).toEqual([
+      expect.objectContaining({
+        kind: "refused",
+        limit: "run-tree",
+        details: expect.objectContaining({ source: "dispatch", heldRuns: 0 }),
+      }),
+    ]);
 
     await db.run.update({ where: { id: parent.id }, data: { status: "succeeded", finishedAt: new Date() } });
   });

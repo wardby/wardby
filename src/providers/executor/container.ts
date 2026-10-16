@@ -59,6 +59,7 @@ import { resolveCodingEntry } from "../../core/run-pricing.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT, isImmutableDockerImage } from "../jobs/docker-isolation.js";
 import { normalizeRegistryLockfiles } from "../../coding/registry/lockfiles.js";
 import type { ProxyModelTerms, ProxyProtocol } from "../coding-proxy/types.js";
+import { recordBudgetEvent, type BudgetLimit, type ProxyRefusalDetails } from "../../core/budget-events.js";
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
 import type {
   ContinuationOutcome,
@@ -337,6 +338,12 @@ export interface ContainerExecutionStore {
     error: string,
     audit?: CodingFailureAudit,
   ): Promise<void>;
+  /**
+   * Copies the proxy session's first budget refusal (CodingProxySession.budgetRefusal, written by the
+   * proxy, which has no access to RunBudgetEvent) into the run's budget events, once per run. A session
+   * that never recorded one adds nothing. Optional: without it no event is written.
+   */
+  recordBudgetRefusal?(runId: string, sessionId: string): Promise<void>;
 }
 
 export interface CodingFailureAudit {
@@ -704,6 +711,30 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     if (finished && status === "budget_exhausted") {
       await this.selfDefect({ ...finished, status, error: null, finishedAt });
     }
+  }
+
+  async recordBudgetRefusal(runId: string, sessionId: string): Promise<void> {
+    const session = await this.db.codingProxySession.findUnique({
+      where: { id: sessionId },
+      select: { budgetRefusal: true },
+    });
+    const refusal = session?.budgetRefusal;
+    if (!refusal || typeof refusal !== "object" || Array.isArray(refusal)) return;
+    const existing = await this.db.runBudgetEvent.findFirst({
+      where: { runId, details: { path: ["source"], equals: "proxy" } },
+      select: { id: true },
+    });
+    if (existing) return;
+    const coding = await this.db.codingRun.findUnique({ where: { runId }, select: { budgetLimitedBy: true } });
+    await recordBudgetEvent(
+      this.db,
+      runId,
+      (coding?.budgetLimitedBy ?? "run") as BudgetLimit,
+      {
+        ...(refusal as Record<string, unknown>),
+        source: "proxy",
+      } as ProxyRefusalDetails,
+    );
   }
 
   async terminate(
@@ -1086,6 +1117,7 @@ export class ContainerExecutor implements Executor {
           ? "refused"
           : "failed";
       const failure = outOfBudget ? this.budgetFailure(error) : this.failure(error);
+      if (outOfBudget) await this.recordRefusal(runId, sessionId);
       this.emit({
         stage: "stopping",
         runId,
@@ -1306,6 +1338,7 @@ export class ContainerExecutor implements Executor {
         // request for budget; the session records that refusal.
         if (await this.outOfBudget(sessionId)) {
           const failure = this.budgetFailure(`job_${reason}`, { issues: collected?.diagnosticIssues });
+          await this.recordRefusal(run.runId, sessionId);
           await this.options.store.terminate(run.runId, "budget_exhausted", failure.error, failure.audit);
           this.terminal(run, "budget_exhausted", failure.audit);
           outcome = "budget_exhausted";
@@ -1329,6 +1362,7 @@ export class ContainerExecutor implements Executor {
       let current = this.requireActive(await this.requireCurrent(run.runId));
       if (current.costUsd > current.budgetUsd || output.outcome === "budget_exhausted") {
         this.emit({ stage: "budget_cutoff", runId: run.runId, jobId: handle.id });
+        await this.recordRefusal(run.runId, sessionId);
         await this.options.store.complete(
           run.runId,
           "budget_exhausted",
@@ -1426,6 +1460,7 @@ export class ContainerExecutor implements Executor {
         containerLog.info({ runId: run.runId }, "coding run was stopped before its result was published");
       } else if (await this.outOfBudget(sessionId)) {
         const failure = this.budgetFailure(error);
+        await this.recordRefusal(run.runId, sessionId);
         await this.options.store.terminate(run.runId, "budget_exhausted", failure.error, failure.audit);
         this.terminal(run, "budget_exhausted", failure.audit);
         outcome = "budget_exhausted";
@@ -2166,6 +2201,12 @@ export class ContainerExecutor implements Executor {
     }
     await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
     this.emit({ stage: "cleanup", runId: run.runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
+  }
+
+  /** Records the session's budget refusal on the run before it ends. Best effort; never throws. */
+  private async recordRefusal(runId: string, sessionId: string | null | undefined): Promise<void> {
+    if (!sessionId) return;
+    await this.options.store.recordBudgetRefusal?.(runId, sessionId).catch(() => undefined);
   }
 
   /** Whether the proxy refused this run's session for budget. Never throws. */

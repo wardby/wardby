@@ -23,6 +23,7 @@ import type {
   ProxyLedger,
   ProxyModelTerms,
   ProxyProtocol,
+  ProxyRefusalRecord,
   ProxyRequest,
   ProxySession,
   ProxyUsage,
@@ -1025,6 +1026,11 @@ export class CodingProxy {
     return this.ledger.budgetExhausted(sessionId);
   }
 
+  /** The numbers behind this session's first budget refusal, if any. */
+  budgetRefusal(sessionId: string): Promise<ProxyRefusalRecord | null> {
+    return this.ledger.budgetRefusal(sessionId);
+  }
+
   /** The code of the first upstream failure relayed for this session's run, if any. */
   upstreamFailure(sessionId: string): Promise<string | null> {
     return this.ledger.upstreamFailure(sessionId);
@@ -1091,6 +1097,11 @@ export class CodingProxy {
         model: parsed.model,
         reason: "budget_exhausted",
         reservationUsd,
+        budgetUsd: reservation.details.budgetUsd,
+        spentUsd: reservation.details.spentUsd,
+        heldReservedUsd: reservation.details.heldReservedUsd,
+        heldUncertainUsd: reservation.details.heldUncertainUsd,
+        turn: reservation.details.turn,
       });
       throw new CodingProxyError(429, "wardby_budget_exhausted");
     }

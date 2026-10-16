@@ -506,6 +506,16 @@ export interface EffectiveBudgetResult {
   constrainedBy: BudgetConstraint[];
   /** The first constraint with nothing left (< MIN_RESERVATION_USD), set only when there is one. */
   exhaustedBy?: BudgetConstraint;
+  /** The constraint whose value equals effectiveBudgetUsd, when that is below the agent's own budget. */
+  limitedBy?: BudgetConstraint;
+  /** The numbers behind exhaustedBy, for the dispatch refusal record. */
+  exhaustedDetail?: { capUsd: number; spentUsd: number; heldUsd: number; heldRuns: number };
+}
+
+interface BudgetCandidate {
+  value: number;
+  reason: BudgetConstraint;
+  detail: { capUsd: number; spentUsd: number; heldUsd: number; heldRuns: number };
 }
 
 export interface EffectiveBudgetOptions {
@@ -551,7 +561,16 @@ export async function effectiveBudgetForRun(
   const spend: SpendOptions = sharesRootGroup
     ? { excludeReservationRunIds: [...tree.treeRunIds, ...(self ? [self.id] : [])], holdsBefore: tree.root }
     : ownSpend;
-  return groupCappedBudget(db, agent, now, spend, { value: tree.remainingUsd, reason: "run-tree" });
+  return groupCappedBudget(db, agent, now, spend, {
+    value: tree.remainingUsd,
+    reason: "run-tree",
+    detail: {
+      capUsd: tree.capUsd,
+      spentUsd: tree.spentUsd,
+      heldUsd: tree.capUsd - tree.spentUsd - tree.remainingUsd,
+      heldRuns: 0,
+    },
+  });
 }
 
 async function groupCappedBudget(
@@ -559,10 +578,10 @@ async function groupCappedBudget(
   agent: Pick<Agent, "id" | "budgetGroupId" | "budgetUsd">,
   now: Date,
   spendOptions: SpendOptions,
-  extra?: { value: number; reason: BudgetConstraint },
+  extra?: BudgetCandidate,
 ): Promise<EffectiveBudgetResult> {
   const ownBudgetUsd = Number(agent.budgetUsd);
-  const candidates: { value: number; reason: BudgetConstraint }[] = [];
+  const candidates: BudgetCandidate[] = [];
 
   if (agent.budgetGroupId) {
     const group = await db.budgetGroup.findUnique({
@@ -573,7 +592,11 @@ async function groupCappedBudget(
       const spend = await computeGroupSpend(db, group, group.agents, now, spendOptions);
       const warnThresholdRatio = Number(group.warnThresholdRatio);
       for (const s of spend) {
-        candidates.push({ value: s.remainingUsd, reason: s.period });
+        candidates.push({
+          value: s.remainingUsd,
+          reason: s.period,
+          detail: { capUsd: s.capUsd, spentUsd: s.spentUsd, heldUsd: s.reservedUsd, heldRuns: s.heldRuns },
+        });
         if (s.spentUsd >= s.capUsd * warnThresholdRatio) {
           budgetGroupLog.warn(
             { groupId: group.id, groupName: group.name, period: s.period, capUsd: s.capUsd, spentUsd: s.spentUsd },
@@ -593,5 +616,12 @@ async function groupCappedBudget(
   const effectiveBudgetUsd = Math.min(ownBudgetUsd, ...candidates.map((c) => c.value));
   // Less than the smallest reservable amount is nothing left.
   const exhausted = candidates.find((c) => c.value < MIN_RESERVATION_USD);
-  return { effectiveBudgetUsd, constrainedBy, ...(exhausted ? { exhaustedBy: exhausted.reason } : {}) };
+  const limiting =
+    effectiveBudgetUsd < ownBudgetUsd ? candidates.find((c) => c.value === effectiveBudgetUsd) : undefined;
+  return {
+    effectiveBudgetUsd,
+    constrainedBy,
+    ...(limiting ? { limitedBy: limiting.reason } : {}),
+    ...(exhausted ? { exhaustedBy: exhausted.reason, exhaustedDetail: exhausted.detail } : {}),
+  };
 }

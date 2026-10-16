@@ -41,6 +41,7 @@ function fakeDb(
 ) {
   let transactionActive = false;
   const rawStatements: string[] = [];
+  const budgetEvents: Record<string, any>[] = [];
   let runNumber = 0;
   const runs: Record<string, any>[] = [];
   const codingRuns: Record<string, any>[] = [...seedCodingRuns];
@@ -125,6 +126,12 @@ function fakeDb(
         return ensureItem(provider, key, exists ? update : create);
       },
     },
+    runBudgetEvent: {
+      create: async ({ data }: any) => {
+        budgetEvents.push(data);
+        return data;
+      },
+    },
     codingRun: {
       create: async ({ data }: any) => {
         codingRuns.push(data);
@@ -180,6 +187,7 @@ function fakeDb(
     attributions,
     workItems,
     rawStatements,
+    budgetEvents,
     transactionActive: () => transactionActive,
   };
 }
@@ -515,6 +523,14 @@ describe("dispatchRun", () => {
       expect(state.codingRuns).toHaveLength(0);
       expect(start).not.toHaveBeenCalled();
       expect(state.rawStatements).toEqual(['LOCK TABLE "BudgetGroup" IN SHARE ROW EXCLUSIVE MODE']);
+      expect(state.budgetEvents).toEqual([
+        expect.objectContaining({
+          runId: result?.run.id,
+          kind: "refused",
+          limit: "day",
+          details: expect.objectContaining({ source: "dispatch", capUsd: 5, spentUsd: 5 }),
+        }),
+      ]);
     });
 
     it("caps a top-level grouped coding run's reservation at the group's remainder", async () => {

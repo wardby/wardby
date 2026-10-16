@@ -5,6 +5,7 @@ import type {
   CreateProxySessionInput,
   PricingSnapshot,
   ProxyLedger,
+  ProxyRefusalRecord,
   ProxyRequest,
   ProxyRequestStatus,
   ProxySession,
@@ -200,23 +201,47 @@ export class PrismaProxyLedger implements ProxyLedger {
         `;
       if (duplicate[0]) return { outcome: "duplicate", request: requestFromRow(duplicate[0]) } as const;
 
-      const totals = await tx.$queryRaw<{ held: unknown }[]>`
-          SELECT COALESCE(SUM(
-            CASE
+      const totals = await tx.$queryRaw<
+        { spent: unknown; heldReserved: unknown; heldUncertain: unknown; done: unknown }[]
+      >`
+          SELECT
+            COALESCE(SUM(CASE
               WHEN "status" = 'completed' THEN "actualCostUsd"
               WHEN "status" = 'uncertain' AND "costEstimated" THEN "actualCostUsd"
-              WHEN "status" IN ('reserved', 'uncertain') THEN "reservationUsd"
               ELSE 0
-            END
-          ), 0) AS "held"
+            END), 0) AS "spent",
+            COALESCE(SUM(CASE WHEN "status" = 'reserved' THEN "reservationUsd" ELSE 0 END), 0) AS "heldReserved",
+            COALESCE(SUM(CASE
+              WHEN "status" = 'uncertain' AND NOT "costEstimated" THEN "reservationUsd"
+              ELSE 0
+            END), 0) AS "heldUncertain",
+            COUNT(*) FILTER (
+              WHERE "status" = 'completed' OR ("status" = 'uncertain' AND "costEstimated")
+            ) AS "done"
           FROM "CodingProxyRequest" WHERE "sessionId" = ${input.sessionId}
         `;
-      if (Number(totals[0]?.held ?? 0) + input.reservationUsd >= Number(row.budgetUsd)) {
+      const spentUsd = Number(totals[0]?.spent ?? 0);
+      const heldReservedUsd = Number(totals[0]?.heldReserved ?? 0);
+      const heldUncertainUsd = Number(totals[0]?.heldUncertain ?? 0);
+      if (spentUsd + heldReservedUsd + heldUncertainUsd + input.reservationUsd >= Number(row.budgetUsd)) {
+        const details = {
+          budgetUsd: Number(row.budgetUsd),
+          spentUsd,
+          heldReservedUsd,
+          heldUncertainUsd,
+          refusedHoldUsd: input.reservationUsd,
+          model: input.model,
+          turn: Number(totals[0]?.done ?? 0) + 1,
+        };
+        // The numbers of the session's first refusal only; the control plane copies them into the
+        // run's budget event (this role has no access to that table).
+        const detailsJson = JSON.stringify({ source: "proxy", ...details });
         await tx.$executeRaw`
-            UPDATE "CodingProxySession" SET "budgetExhaustedAt" = COALESCE("budgetExhaustedAt", ${input.now})
-            WHERE "id" = ${input.sessionId}
+            UPDATE "CodingProxySession"
+            SET "budgetExhaustedAt" = ${input.now}, "budgetRefusal" = ${detailsJson}::jsonb
+            WHERE "id" = ${input.sessionId} AND "budgetExhaustedAt" IS NULL
           `;
-        return { outcome: "budget_exhausted" } as const;
+        return { outcome: "budget_exhausted", details } as const;
       }
       const pricing = JSON.stringify({
         encoding: input.pricing.encoding,
@@ -425,6 +450,14 @@ export class PrismaProxyLedger implements ProxyLedger {
       SELECT "id" FROM "CodingProxySession" WHERE "id" = ${sessionId} AND "budgetExhaustedAt" IS NOT NULL
     `;
     return rows.length > 0;
+  }
+
+  async budgetRefusal(sessionId: string): Promise<ProxyRefusalRecord | null> {
+    const rows = await this.db.$queryRaw<{ budgetRefusal: unknown }[]>`
+      SELECT "budgetRefusal" FROM "CodingProxySession" WHERE "id" = ${sessionId}
+    `;
+    const value = rows[0]?.budgetRefusal;
+    return value && typeof value === "object" ? (value as ProxyRefusalRecord) : null;
   }
 
   async recordUpstreamFailure(sessionId: string, code: string): Promise<void> {

@@ -108,6 +108,7 @@ function fakeDb(
         return a;
       }) as any,
     },
+    runBudgetEvent: { create: async ({ data }: any) => data },
     codingRun: {
       create: (async ({ data }: any) => {
         codingRuns.set(data.runId, data);

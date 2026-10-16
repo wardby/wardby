@@ -609,7 +609,7 @@ describe("effectiveBudgetForRun", () => {
       [{ agentId: "a1", costUsd: 8, startedAt: TODAY_START }],
     );
     const result = await effectiveBudgetForRun(db, { id: "a1", budgetGroupId: "g1", budgetUsd: 5 } as never, NOW);
-    expect(result).toEqual({ effectiveBudgetUsd: 2, constrainedBy: ["day"] });
+    expect(result).toEqual({ effectiveBudgetUsd: 2, constrainedBy: ["day"], limitedBy: "day" });
   });
 
   it("returns an effective budget of 0 once the group's period cap is fully spent — the engine's existing zero-budget refuse then applies", async () => {
@@ -662,7 +662,7 @@ describe("effectiveBudgetForRun", () => {
       { self: { id: "self", startedAt: TODAY_START } },
     );
     // $10 cap - a2's $7 held by its in-flight run = $3; a1's own run is not counted against itself.
-    expect(result).toEqual({ effectiveBudgetUsd: 3, constrainedBy: ["day"] });
+    expect(result).toEqual({ effectiveBudgetUsd: 3, constrainedBy: ["day"], limitedBy: "day" });
   });
 
   it("uses the tightest of multiple configured periods, not just the first one checked", async () => {
@@ -769,7 +769,7 @@ describe("computeRunTreeSpend", () => {
       NOW,
       "run-root",
     );
-    expect(child).toEqual({ effectiveBudgetUsd: 2.5, constrainedBy: ["run-tree"] });
+    expect(child).toEqual({ effectiveBudgetUsd: 2.5, constrainedBy: ["run-tree"], limitedBy: "run-tree" });
   });
 
   it("E-04: the tree's own in-flight reservations don't shrink its ceiling; another member's do", async () => {
@@ -1020,7 +1020,7 @@ describe("effectiveBudgetForRun with parentRunId (sub-agent dispatch)", () => {
       NOW,
       "run-root",
     );
-    expect(result).toEqual({ effectiveBudgetUsd: 5, constrainedBy: ["run-tree"] });
+    expect(result).toEqual({ effectiveBudgetUsd: 5, constrainedBy: ["run-tree"], limitedBy: "run-tree" });
   });
 
   it("M1: a child in a different group than the root counts the tree's holds in its own group", async () => {
@@ -1076,7 +1076,13 @@ describe("effectiveBudgetForRun with parentRunId (sub-agent dispatch)", () => {
       NOW,
       "run-root",
     );
-    expect(result).toEqual({ effectiveBudgetUsd: 0, constrainedBy: ["run-tree"], exhaustedBy: "run-tree" });
+    expect(result).toEqual({
+      effectiveBudgetUsd: 0,
+      constrainedBy: ["run-tree"],
+      limitedBy: "run-tree",
+      exhaustedBy: "run-tree",
+      exhaustedDetail: { capUsd: 2, spentUsd: 2, heldUsd: 0, heldRuns: 0 },
+    });
   });
 
   it("a top-level run (no parentRunId) is unaffected by run-tree logic entirely", async () => {
