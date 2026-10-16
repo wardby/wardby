@@ -424,8 +424,9 @@ The first request of a conversation, and every fallback below, holds the worst
 case: the whole request body as new input written to the cache (one token per
 byte) plus `maxOutputTokens` at the output rate.
 
-After a reply in the same conversation that read at least half of its prompt
-from the cache, the next request holds that cached part at the cache-read rate,
+After a reply in the same conversation that read from or wrote to the prompt
+cache at least half of its prompt (on OpenAI models only cache reads count),
+the next request holds that cached part at the cache-read rate,
 and the rest (including whatever the body has grown by) at the input and
 cache-write rates, plus the output allowance. It never holds more than the
 worst case. A conversation is the main agent or one of its sub-agents.
@@ -436,14 +437,16 @@ The hold falls back to the worst case when:
 - the model changed;
 - the previous reply was interrupted (settled at an estimate) or did not
   complete;
-- less than half of the previous reply's prompt was cached;
+- less than half of the previous reply's prompt was read from or written to
+  the cache;
 - the request body got smaller; or
-- the previous reply finished more than 5 minutes earlier, the lifetime of the
-  prompt cache.
+- the previous request in the conversation was sent more than 5 minutes
+  earlier, the lifetime of the prompt cache.
 
 If the cache misses, a reply can cost more than its hold. It is still settled
 when it costs no more than the worst case, so a run can exceed its budget by at
-most one request's uncached input for each request in flight. A reply that
+most the difference between a request's worst case and its hold, for each
+request in flight. A reply that
 costs more than the worst case cancels the run's model access
 (`reservation_invariant_violated`).
 
@@ -460,7 +463,7 @@ at an estimate instead of leaving its whole hold in place. The estimate is the
 input usage the proxy already read; failing that, the input of the run's
 previous completed reply; failing that, the input part of the request's hold.
 It adds the output relayed so far, counted high, and is never more than the
-request's hold. An estimated request is flagged `costEstimated`, counts in the
+request's worst case. An estimated request is flagged `costEstimated`, counts in the
 run's cost at the estimate, and is recorded as `uncertain` in the proxy's
 request ledger. If the estimate cannot be computed or recorded, the request
 keeps its full hold. A run can therefore exceed

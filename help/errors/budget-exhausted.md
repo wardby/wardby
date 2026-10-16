@@ -18,8 +18,9 @@ allows, priced at the model's output rate. After a mostly cached reply in the
 same conversation, the cached part of the prompt is held at the cache-read
 rate instead, so the hold is much smaller. A request whose hold does not fit in what is
 left is refused, and the run ends `budget_exhausted` (its error reads
-`coding_budget_exhausted: <sentence>`). The run did not overspend; it stopped
-before a request it might not have been able to pay for.
+`coding_budget_exhausted: <sentence>`). The run stopped before a request whose
+hold did not fit. A cache miss can make a settled reply cost more than its
+hold, up to its worst case (see [Holds vs actual spend](#holds-vs-actual-spend)).
 
 ## Find out why
 
@@ -52,8 +53,14 @@ is released when the reply is settled. A hold is larger than a typical reply
 because it must cover the whole output allowance (`maxOutputTokens`), and
 because the first request of a conversation, and any fallback, assumes the whole
 body is new input. Fallbacks apply when there is no previous reply in the
-conversation, the model changed, the previous reply was interrupted, mostly
-uncached or more than 5 minutes old, or the body got smaller.
+conversation, the model changed, the previous reply was interrupted or mostly
+uncached, the previous request in the conversation was sent more than 5 minutes
+earlier, or the body got smaller.
+
+If the cache misses, a reply can cost more than its hold. It is still settled
+when it costs no more than its worst case, so a run can exceed its budget by at
+most the difference between a request's worst case and its hold, for each
+request in flight.
 
 Read `refusedHoldBasis`: `full` means the hold was a fallback, so the next
 request in a warm conversation would likely hold less; `cached` means it
@@ -75,7 +82,8 @@ A refused run is not resumed automatically; trigger a new one.
 When a reply breaks off before its final usage, the proxy settles the request
 at an estimate instead of keeping its whole hold: the usage it already read,
 else the run's previous reply's input, else the input part of the hold, plus
-the output relayed so far counted high, and never more than the hold. The
+the output relayed so far counted high, and never more than the request's
+worst case. The
 request is flagged as estimated and counted in the run's cost. If the
 estimate cannot be computed or recorded, the request keeps its full hold. A run can exceed its budget by at
 most the gap between the estimate and the real cost.
