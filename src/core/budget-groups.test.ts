@@ -495,8 +495,9 @@ describe("a delegated tree is held once", () => {
   });
 
   it("a root whose hold is not counted (excluded, or after holdsBefore) leaves its children their own holds", async () => {
+    // C's own reservation ($10) differs from what the root would hold ($21 - $1 = $20).
     const runs = [
-      { id: "L", agentId: "lead", costUsd: 1, startedAt: LATER, status: "running" },
+      { id: "L", agentId: "lead", costUsd: 1, startedAt: TODAY_START, status: "running" },
       {
         id: "C",
         agentId: "builder",
@@ -504,18 +505,48 @@ describe("a delegated tree is held once", () => {
         startedAt: TODAY_START,
         status: "running",
         parentRunId: "L",
-        codingRun: { budgetReservedUsd: 20 },
+        codingRun: { budgetReservedUsd: 10 },
       },
     ];
     const excluded = await computeGroupSpend(fakeDb([], runs), group, members, NOW, {
       excludeReservationRunIds: ["L"],
     });
-    expect(excluded[0]).toMatchObject({ spentUsd: 1, reservedUsd: 20, heldRuns: 1 });
-    // C started before the asking run; L did not, so only C's own hold counts.
+    expect(excluded[0]).toMatchObject({ spentUsd: 1, reservedUsd: 10, heldRuns: 1 });
+    // Ordered by (startedAt, id): C < K < L, so C's hold counts and L's does not.
     const before = await computeGroupSpend(fakeDb([], runs), group, members, NOW, {
-      holdsBefore: { id: "self", startedAt: LATER },
+      holdsBefore: { id: "K", startedAt: TODAY_START },
     });
-    expect(before[0]).toMatchObject({ spentUsd: 1, reservedUsd: 20, heldRuns: 1 });
+    expect(before[0]).toMatchObject({ spentUsd: 1, reservedUsd: 10, heldRuns: 1 });
+    // Neither option: the root holds the tree once.
+    const [whole] = await computeGroupSpend(fakeDb([], runs), group, members, NOW);
+    expect(whole).toMatchObject({ spentUsd: 1, reservedUsd: 20, heldRuns: 1 });
+  });
+
+  it("a root that started in an earlier period: the child holds its own reservation in a period the root is not in", async () => {
+    const yesterday = new Date("2026-09-08T12:00:00.000Z"); // Tuesday, same ISO week as NOW
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 1, startedAt: yesterday, status: "running" },
+        {
+          id: "C",
+          agentId: "builder",
+          costUsd: 0,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 20 },
+        },
+      ],
+    );
+    const [day, week] = await computeGroupSpend(
+      db,
+      { dailyBudgetUsd: 25, weeklyBudgetUsd: 25, monthlyBudgetUsd: null } as never,
+      members,
+      NOW,
+    );
+    expect(day).toMatchObject({ period: "day", spentUsd: 0, reservedUsd: 20, heldRuns: 1 });
+    expect(week).toMatchObject({ period: "week", spentUsd: 1, reservedUsd: 20, heldRuns: 1 });
   });
 
   it("a dropped tree is invisible", async () => {

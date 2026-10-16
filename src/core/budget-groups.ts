@@ -175,7 +175,10 @@ function isOrderedBefore(run: RunOrder, other: RunOrder): boolean {
  * root's hold, so it holds nothing (its cost still counts as spent), and the
  * root holds its reservation minus the cost of every run in its tree. A sub-run
  * whose root is in another group, has finished, or whose hold is left out
- * here (excludeReservationRunIds, holdsBefore) holds its own reservation.
+ * here (excludeReservationRunIds, holdsBefore) holds its own reservation. So
+ * does a sub-run in a period its root did not start in (a root that started
+ * yesterday, a child today: today's daily cap still holds the child's own
+ * reservation, since the root's hold falls in yesterday's bucket).
  */
 export async function computeGroupSpend(
   db: BudgetGroupsDb,
@@ -256,21 +259,29 @@ export async function computeGroupSpend(
   const accounted = counted.map((r) => {
     const costUsd = Number(r.costUsd);
     const rootId = rootOf.get(r.id);
-    const insideHeldTree = rootId !== undefined && rootId !== r.id && heldRoots.has(rootId);
-    let reservedUsd = 0;
-    if (insideHeldTree) {
-      // Spends inside its root's hold: holds nothing itself.
-    } else if (heldRoots.has(r.id)) {
-      reservedUsd = Math.max(0, reservationOf(r) - (treeCostByRoot.get(r.id) ?? 0));
+    let ownReservedUsd = 0;
+    if (heldRoots.has(r.id)) {
+      ownReservedUsd = Math.max(0, reservationOf(r) - (treeCostByRoot.get(r.id) ?? 0));
     } else if (holds(r)) {
-      reservedUsd = Math.max(0, reservationOf(r) - costUsd);
+      ownReservedUsd = Math.max(0, reservationOf(r) - costUsd);
     }
-    return { startedAt: r.startedAt, costUsd, reservedUsd };
+    // Set when the run spends inside its root's hold: the root's startedAt.
+    const heldRootStartedAt =
+      rootId !== undefined && rootId !== r.id && heldRoots.has(rootId) ? countedById.get(rootId)!.startedAt : null;
+    return { startedAt: r.startedAt, costUsd, ownReservedUsd, heldRootStartedAt };
   });
 
   return configured.map(({ period, capUsd }) => {
     const start = periodStart(period, now);
-    const inPeriod = accounted.filter((r) => r.startedAt >= start);
+    // A run inside a held tree holds nothing in a period only when its root's
+    // hold is counted in that period too (the root started in it); otherwise
+    // the period would see the run's spend but no hold for it.
+    const inPeriod = accounted
+      .filter((r) => r.startedAt >= start)
+      .map((r) => ({
+        costUsd: r.costUsd,
+        reservedUsd: r.heldRootStartedAt !== null && r.heldRootStartedAt >= start ? 0 : r.ownReservedUsd,
+      }));
     const spentUsd = inPeriod.reduce((sum, r) => sum + r.costUsd, 0);
     const reservedUsd = inPeriod.reduce((sum, r) => sum + r.reservedUsd, 0);
     const heldRuns = inPeriod.filter((r) => r.reservedUsd > 0).length;
