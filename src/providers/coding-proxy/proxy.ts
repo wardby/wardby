@@ -1466,6 +1466,7 @@ export class CodingProxy {
           ...hints,
           reservationUsd: request.reservationUsd,
           maxOutputTokens: progress.maxOutputTokens,
+          ceilingUsd: request.ceilingUsd ?? request.reservationUsd,
         },
         request.pricing,
       );

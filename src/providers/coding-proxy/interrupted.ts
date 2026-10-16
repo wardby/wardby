@@ -15,6 +15,8 @@ export interface InterruptedFacts {
   /** The request's hold and the output tokens it reserved for. */
   reservationUsd: number;
   maxOutputTokens: number;
+  /** The request's worst case (its ceiling); the estimate never exceeds it. Defaults to the hold. */
+  ceilingUsd?: number;
 }
 
 export interface InterruptedEstimate {
@@ -30,11 +32,11 @@ export function relayedOutputTokens(bytes: number): number {
 /**
  * The best known cost of a reply that broke before its final usage (spec PR 1
  * › 1b): usage already read, else the previous reply's input, else the input
- * part of the hold; plus the output seen so far. Never more than the hold.
+ * part of the hold; plus the output seen so far. Never more than the request's worst case.
  */
 export function estimateInterrupted(facts: InterruptedFacts, pricing: ModelPricing): InterruptedEstimate {
   const relayed = relayedOutputTokens(facts.relayedOutputBytes);
-  const clamp = (cost: number) => Math.max(0, Math.min(cost, facts.reservationUsd));
+  const clamp = (cost: number) => Math.max(0, Math.min(cost, facts.ceilingUsd ?? facts.reservationUsd));
   if (facts.readUsage) {
     const usage: ProxyUsage = {
       ...facts.readUsage,

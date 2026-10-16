@@ -469,10 +469,10 @@ export class PrismaProxyLedger implements ProxyLedger {
         | "cacheWriteTokens"
         | "reasoningTokens"
         | "requestBytes"
-      > & { completedAt: Date | null })[]
+      > & { createdAt: Date })[]
     >`
       SELECT "model", "status", "costEstimated", "inputTokens", "outputTokens", "cachedInputTokens",
-             "cacheWriteTokens", "reasoningTokens", "requestBytes", "completedAt"
+             "cacheWriteTokens", "reasoningTokens", "requestBytes", "createdAt"
       FROM "CodingProxyRequest"
       WHERE "sessionId" = ${sessionId} AND "conversationKey" = ${conversationKey}
         AND "status" IN ('completed', 'uncertain')
@@ -496,7 +496,7 @@ export class PrismaProxyLedger implements ProxyLedger {
       costEstimated: row.costEstimated === true,
       ...(usage ? { usage } : {}),
       requestBytes: row.requestBytes,
-      completedAt: row.completedAt,
+      startedAt: row.createdAt,
     };
   }
 

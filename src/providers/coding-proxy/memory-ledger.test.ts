@@ -143,7 +143,7 @@ describe("MemoryProxyLedger previousReply", () => {
     return { ledger, reserve };
   };
 
-  it("returns the latest finished request of the conversation, with its size and completion time", async () => {
+  it("returns the latest finished request of the conversation, with its size and reservation time", async () => {
     const clock = new Date("2026-10-16T12:00:00Z");
     const { ledger, reserve } = await setup(clock);
     const first = await reserve("a", 1000, "k1");
@@ -156,7 +156,7 @@ describe("MemoryProxyLedger previousReply", () => {
       costEstimated: false,
       usage,
       requestBytes: 1000,
-      completedAt: clock,
+      startedAt: clock,
     });
     // b is still reserved, so k2 has no finished request yet; an unknown key has none either.
     expect(await ledger.previousReply("s", "k2")).toBeNull();
@@ -164,7 +164,8 @@ describe("MemoryProxyLedger previousReply", () => {
   });
 
   it("reports an interrupted request settled at an estimate as such", async () => {
-    const { ledger, reserve } = await setup(new Date("2026-10-16T12:00:00Z"));
+    const clock = new Date("2026-10-16T12:00:00Z");
+    const { ledger, reserve } = await setup(clock);
     const reserved = await reserve("c", 700, "k1");
     if (reserved.outcome !== "reserved") throw new Error(reserved.outcome);
     await ledger.markUncertain("c", 200, { usage, costUsd: 0.02 });
@@ -174,7 +175,7 @@ describe("MemoryProxyLedger previousReply", () => {
       costEstimated: true,
       usage,
       requestBytes: 700,
-      completedAt: null,
+      startedAt: clock,
     });
   });
 });

@@ -87,7 +87,8 @@ export interface PreviousReply {
   usage?: ProxyUsage;
   /** UTF-8 bytes of the request body the proxy forwarded; null on rows from before cache-aware holds. */
   requestBytes: number | null;
-  completedAt: Date | null;
+  /** When the previous request was reserved: the prompt cache was last refreshed around then. */
+  startedAt: Date;
 }
 
 export interface CreateProxySessionInput {

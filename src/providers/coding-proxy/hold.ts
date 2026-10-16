@@ -10,7 +10,10 @@ import type { ModelPricing } from "../llm/pricing-core.js";
 import { estimateReservationUsd } from "./metering.js";
 import type { PreviousReply, ProxyProtocol, ReservationBasis } from "./types.js";
 
-/** Anthropic's prompt cache lives 5 minutes; an older previous reply says nothing about the cache. */
+/**
+ * Anthropic's prompt cache lives 5 minutes from when a request is processed, not from when its reply
+ * finishes: a previous request sent longer ago than this says nothing about the cache.
+ */
 export const CACHE_WINDOW_MS = 5 * 60_000;
 export const MIN_CACHED_SHARE = 0.5;
 
@@ -53,6 +56,8 @@ export function conversationKey(protocol: ProxyProtocol, body: Record<string, un
   if (protocol === "anthropic-messages") {
     const messages = body.messages;
     if (!Array.isArray(messages) || messages.length === 0) return null;
+    // Claude Code's first message can carry the date, so a conversation crossing midnight starts a
+    // new key (its next request falls back to the worst case once).
     basis = ["anthropic", withoutCacheControl(messages[0])];
   } else if (typeof body.prompt_cache_key === "string" && body.prompt_cache_key) {
     basis = ["openai-key", body.prompt_cache_key];
@@ -82,9 +87,7 @@ export function estimateHold(input: {
   if (previous.costEstimated) return full("previous_estimated");
   if (previous.status !== "completed" || !previous.usage) return full("previous_not_completed");
   if (previous.requestBytes === null) return full("no_request_bytes");
-  if (!previous.completedAt || input.now.getTime() - previous.completedAt.getTime() > CACHE_WINDOW_MS) {
-    return full("cache_expired");
-  }
+  if (input.now.getTime() - previous.startedAt.getTime() > CACHE_WINDOW_MS) return full("cache_expired");
   if (input.bodyBytes < previous.requestBytes) return full("body_shrank");
   const usage = previous.usage;
   const prevPrompt = usage.inputTokens + usage.cacheWriteTokens;

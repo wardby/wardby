@@ -698,7 +698,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
         usage,
         requestBytes: 1000,
       });
-      expect(Math.abs(Date.now() - reply!.completedAt!.getTime())).toBeLessThan(60_000);
+      expect(Math.abs(Date.now() - reply!.startedAt.getTime())).toBeLessThan(60_000);
     });
 
     it("returns an interrupted request settled at an estimate as the latest", async () => {

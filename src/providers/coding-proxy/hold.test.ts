@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { CACHE_WINDOW_MS, conversationKey, estimateHold } from "./hold.js";
 import { estimateReservationUsd } from "./metering.js";
@@ -24,7 +25,7 @@ const prev = (change: Partial<PreviousReply> = {}): PreviousReply => ({
     reasoningTokens: 0,
   },
   requestBytes: 400_000,
-  completedAt: new Date(NOW.getTime() - 60_000),
+  startedAt: new Date(NOW.getTime() - 60_000),
   ...change,
 });
 const base = {
@@ -78,8 +79,9 @@ describe("estimateHold", () => {
     ["previous_estimated", prev({ status: "uncertain", costEstimated: true })],
     ["previous_not_completed", prev({ status: "uncertain", usage: undefined })],
     ["no_request_bytes", prev({ requestBytes: null })],
-    ["cache_expired", prev({ completedAt: new Date(NOW.getTime() - CACHE_WINDOW_MS - 1) })],
-    ["cache_expired", prev({ completedAt: null })],
+    ["cache_expired", prev({ startedAt: new Date(NOW.getTime() - CACHE_WINDOW_MS - 1) })],
+    // Finished a minute ago but sent 6 minutes ago: the cache was last refreshed when it was sent.
+    ["cache_expired", prev({ startedAt: new Date(NOW.getTime() - 6 * 60_000) })],
     ["body_shrank", prev({ requestBytes: 406_001 })],
     [
       "low_cache_share",
@@ -129,6 +131,22 @@ describe("conversationKey", () => {
     expect(a).toBe(b);
     expect(conversationKey("anthropic-messages", { messages: [{ role: "user", content: "other" }] })).not.toBe(a);
     expect(conversationKey("anthropic-messages", { messages: [] })).toBeNull();
+  });
+
+  it("keeps a real Claude Code conversation's key when the cache marker moves to a later message", async () => {
+    type Message = { role: string; content: { type: string; text: string; cache_control?: unknown }[] };
+    const turn1 = JSON.parse(
+      await readFile(new URL("./fixtures/anthropic-sdk-request.json", import.meta.url), "utf8"),
+    ) as { messages: Message[] };
+    const turn2 = structuredClone(turn1);
+    for (const block of turn2.messages[1].content) delete block.cache_control;
+    turn2.messages.push(
+      { role: "assistant", content: [{ type: "text", text: "OK" }] },
+      { role: "user", content: [{ type: "text", text: "Again.", cache_control: { type: "ephemeral" } }] },
+    );
+    const key = conversationKey("anthropic-messages", turn1);
+    expect(key).not.toBeNull();
+    expect(conversationKey("anthropic-messages", turn2)).toBe(key);
   });
 
   it("keys an OpenAI conversation by prompt_cache_key, else instructions and the first input item", () => {

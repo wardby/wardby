@@ -39,7 +39,7 @@ export class MemoryProxyLedger implements ProxyLedger {
   private readonly sessionByCapability = new Map<string, string>();
   private readonly requests = new Map<string, ProxyRequest>();
   private readonly requestBySessionKey = new Map<string, string>();
-  private readonly completedAt = new Map<string, Date>();
+  private readonly startedAt = new Map<string, Date>();
 
   constructor(private readonly options: { now?: () => Date } = {}) {}
 
@@ -109,6 +109,7 @@ export class MemoryProxyLedger implements ProxyLedger {
     const request: ProxyRequest = { ...input, pricing: { ...input.pricing }, status: "reserved" };
     this.requests.set(request.id, request);
     this.requestBySessionKey.set(lookupKey, request.id);
+    this.startedAt.set(request.id, new Date(input.now));
     return { outcome: "reserved", request: cloneRequest(request) };
   }
 
@@ -131,7 +132,6 @@ export class MemoryProxyLedger implements ProxyLedger {
     request.usage = { ...usage };
     request.upstreamStatus = upstreamStatus;
     request.costEstimated = false;
-    this.completedAt.set(requestId, this.options.now?.() ?? new Date());
     return cloneRequest(request);
   }
 
@@ -192,7 +192,7 @@ export class MemoryProxyLedger implements ProxyLedger {
       costEstimated: latest.costEstimated === true,
       ...(latest.usage ? { usage: { ...latest.usage } } : {}),
       requestBytes: latest.requestBytes ?? null,
-      completedAt: this.completedAt.get(latest.id) ?? null,
+      startedAt: this.startedAt.get(latest.id) ?? new Date(0),
     };
   }
 

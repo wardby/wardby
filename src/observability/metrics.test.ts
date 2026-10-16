@@ -30,6 +30,14 @@ describe("Prometheus metrics", () => {
       inputTokens: 10,
       outputTokens: 20,
     });
+    // A refused hold was never reserved.
+    metrics.observeProxyAudit({
+      type: "request.rejected",
+      runId: "run-sensitive",
+      model: "private-model-name",
+      reason: "budget_exhausted",
+      reservationUsd: 5,
+    });
     metrics.observeProxyRequest({ protocol: "openai-responses", status: 403, durationMs: 250 });
 
     const exposition = await metrics.registry.metrics();
