@@ -309,6 +309,28 @@ describe.skipIf(!process.env.DATABASE_URL)("budget groups (database)", () => {
     });
   });
 
+  it("a delegated tree is held once: a lead and its child leave the rest of the group its true headroom", async () => {
+    const g = await db.budgetGroup.create({
+      data: { id: id("tree-once"), name: id("tree-once"), ownerId: owner, weeklyBudgetUsd: 25 },
+    });
+    const lead = await nativeAgent("once-lead", 21, g.id);
+    const builder = await codingAgent("once-builder", 20, g.id);
+    const other = await codingAgent("once-other", 4, g.id);
+    const parent = await db.run.create({ data: { agentId: lead, status: "running", costUsd: 1 } });
+    const child = await dispatchRun({ db, executor, agentId: builder, trigger: "subagent", parentRunId: parent.id });
+
+    // The tree holds $21 - $1 = $20 once, not the lead's $20 and the child's $20 separately.
+    const result = await dispatchRun({ db, executor, agentId: other });
+    const run = result!.run;
+    expect(run.status).not.toBe("refused");
+    expect(await reservedUsd(run.id)).toBeCloseTo(4, 6);
+
+    await db.run.updateMany({
+      where: { id: { in: [parent.id, child!.run.id, run.id] } },
+      data: { status: "cancelled", finishedAt: new Date() },
+    });
+  });
+
   it("parallel delegations: concurrent coding children of one parent never reserve more than the tree has left", async () => {
     const parentAgent = await nativeAgent("par-parent", 10, null);
     const children = await Promise.all([0, 1, 2, 3].map((i) => codingAgent(`par-child-${i}`, 4, null)));

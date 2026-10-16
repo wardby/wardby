@@ -158,8 +158,22 @@ describe("computeGroupSpend", () => {
       NOW,
     );
     const byPeriod = Object.fromEntries(spend.map((s) => [s.period, s]));
-    expect(byPeriod.day).toEqual({ period: "day", capUsd: 10, spentUsd: 3, reservedUsd: 0, remainingUsd: 7 });
-    expect(byPeriod.month).toEqual({ period: "month", capUsd: 20, spentUsd: 8, reservedUsd: 0, remainingUsd: 12 });
+    expect(byPeriod.day).toEqual({
+      period: "day",
+      capUsd: 10,
+      spentUsd: 3,
+      reservedUsd: 0,
+      remainingUsd: 7,
+      heldRuns: 0,
+    });
+    expect(byPeriod.month).toEqual({
+      period: "month",
+      capUsd: 20,
+      spentUsd: 8,
+      reservedUsd: 0,
+      remainingUsd: 12,
+      heldRuns: 0,
+    });
     expect(byPeriod.week).toBeUndefined();
   });
 
@@ -171,7 +185,7 @@ describe("computeGroupSpend", () => {
       [{ id: "a1", budgetUsd: 5 }],
       NOW,
     );
-    expect(spend[0]).toEqual({ period: "day", capUsd: 10, spentUsd: 15, reservedUsd: 0, remainingUsd: 0 });
+    expect(spend[0]).toEqual({ period: "day", capUsd: 10, spentUsd: 15, reservedUsd: 0, remainingUsd: 0, heldRuns: 0 });
   });
 
   it("E-04: counts every in-flight run's unspent reservation, native and coding, clamped at zero", async () => {
@@ -213,7 +227,14 @@ describe("computeGroupSpend", () => {
       ],
       NOW,
     );
-    expect(spend[0]).toEqual({ period: "day", capUsd: 20, spentUsd: 5, reservedUsd: 8.5, remainingUsd: 6.5 });
+    expect(spend[0]).toEqual({
+      period: "day",
+      capUsd: 20,
+      spentUsd: 5,
+      reservedUsd: 8.5,
+      remainingUsd: 6.5,
+      heldRuns: 3,
+    });
   });
 
   it("E-04: leaves out the reservations of excluded runs but still counts their real cost", async () => {
@@ -225,7 +246,7 @@ describe("computeGroupSpend", () => {
       NOW,
       { excludeReservationRunIds: ["self"] },
     );
-    expect(spend[0]).toEqual({ period: "day", capUsd: 10, spentUsd: 1, reservedUsd: 0, remainingUsd: 9 });
+    expect(spend[0]).toEqual({ period: "day", capUsd: 10, spentUsd: 1, reservedUsd: 0, remainingUsd: 9, heldRuns: 0 });
   });
 });
 
@@ -331,6 +352,187 @@ describe("hold liveness (I2) and first come, first served (I3)", () => {
     });
     expect(first.effectiveBudgetUsd).toBe(5);
     expect(second.effectiveBudgetUsd).toBe(0);
+  });
+});
+
+describe("a delegated tree is held once", () => {
+  const group = { dailyBudgetUsd: null, weeklyBudgetUsd: 25, monthlyBudgetUsd: null } as never;
+  const members = [
+    { id: "lead", budgetUsd: 21 },
+    { id: "builder", budgetUsd: 20 },
+    { id: "other", budgetUsd: 4 },
+  ];
+
+  it("lead running with a child: holds the lead's budget minus the tree's cost", async () => {
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 1, startedAt: NOW, status: "running" },
+        {
+          id: "C",
+          agentId: "builder",
+          costUsd: 0,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 20 },
+        },
+      ],
+    );
+    const [week] = await computeGroupSpend(db, group, members, NOW);
+    expect(week).toMatchObject({ spentUsd: 1, reservedUsd: 20, remainingUsd: 4, heldRuns: 1 });
+  });
+
+  it("child has spent $8: tree holds $12", async () => {
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 1, startedAt: NOW, status: "running" },
+        {
+          id: "C",
+          agentId: "builder",
+          costUsd: 8,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 20 },
+        },
+      ],
+    );
+    const [week] = await computeGroupSpend(db, group, members, NOW);
+    expect(week).toMatchObject({ spentUsd: 9, reservedUsd: 12, remainingUsd: 4 });
+  });
+
+  it("two parallel children: still one hold of $21", async () => {
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 0, startedAt: NOW, status: "running" },
+        {
+          id: "C1",
+          agentId: "builder",
+          costUsd: 0,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 20 },
+        },
+        {
+          id: "C2",
+          agentId: "builder",
+          costUsd: 0,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 20 },
+        },
+      ],
+    );
+    const [week] = await computeGroupSpend(db, group, members, NOW);
+    expect(week).toMatchObject({ reservedUsd: 21, remainingUsd: 4, heldRuns: 1 });
+  });
+
+  it("root finished: the child holds its own reservation", async () => {
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 1, startedAt: NOW, status: "succeeded" },
+        {
+          id: "C",
+          agentId: "builder",
+          costUsd: 2,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 20 },
+        },
+      ],
+    );
+    const [week] = await computeGroupSpend(db, group, members, NOW);
+    expect(week).toMatchObject({ spentUsd: 3, reservedUsd: 18 });
+  });
+
+  it("root in another group: the child holds its own reservation here", async () => {
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "outsider", costUsd: 0, startedAt: NOW, status: "running" },
+        {
+          id: "C",
+          agentId: "builder",
+          costUsd: 0,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 20 },
+        },
+      ],
+    );
+    const [week] = await computeGroupSpend(db, group, members, NOW);
+    expect(week).toMatchObject({ reservedUsd: 20 });
+  });
+
+  it("a grandchild under a native child is inside the root's hold; tree cost includes runs in other groups", async () => {
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 1, startedAt: NOW, status: "running" },
+        { id: "N", agentId: "outsider", costUsd: 3, startedAt: NOW, status: "running", parentRunId: "L" },
+        {
+          id: "G",
+          agentId: "builder",
+          costUsd: 2,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "N",
+          codingRun: { budgetReservedUsd: 20 },
+        },
+      ],
+    );
+    const [week] = await computeGroupSpend(db, group, members, NOW);
+    // Spent counts only members (L, G); the hold is 21 - (1 + 3 + 2).
+    expect(week).toMatchObject({ spentUsd: 3, reservedUsd: 15, heldRuns: 1 });
+  });
+
+  it("a root whose hold is not counted (excluded, or after holdsBefore) leaves its children their own holds", async () => {
+    const runs = [
+      { id: "L", agentId: "lead", costUsd: 1, startedAt: LATER, status: "running" },
+      {
+        id: "C",
+        agentId: "builder",
+        costUsd: 0,
+        startedAt: TODAY_START,
+        status: "running",
+        parentRunId: "L",
+        codingRun: { budgetReservedUsd: 20 },
+      },
+    ];
+    const excluded = await computeGroupSpend(fakeDb([], runs), group, members, NOW, {
+      excludeReservationRunIds: ["L"],
+    });
+    expect(excluded[0]).toMatchObject({ spentUsd: 1, reservedUsd: 20, heldRuns: 1 });
+    // C started before the asking run; L did not, so only C's own hold counts.
+    const before = await computeGroupSpend(fakeDb([], runs), group, members, NOW, {
+      holdsBefore: { id: "self", startedAt: LATER },
+    });
+    expect(before[0]).toMatchObject({ spentUsd: 1, reservedUsd: 20, heldRuns: 1 });
+  });
+
+  it("a dropped tree is invisible", async () => {
+    const runs = [
+      { id: "L", agentId: "lead", costUsd: 1, startedAt: NOW, status: "running" },
+      {
+        id: "C",
+        agentId: "builder",
+        costUsd: 2,
+        startedAt: NOW,
+        status: "running",
+        parentRunId: "L",
+        codingRun: { budgetReservedUsd: 20 },
+      },
+    ];
+    const [week] = await computeGroupSpend(fakeDb([], runs), group, members, NOW, { excludeRunIds: ["L", "C"] });
+    expect(week).toMatchObject({ spentUsd: 0, reservedUsd: 0, remainingUsd: 25, heldRuns: 0 });
   });
 });
 

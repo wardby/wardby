@@ -75,6 +75,8 @@ export interface PeriodSpend {
   reservedUsd: number;
   /** capUsd - spentUsd - reservedUsd, never below zero. */
   remainingUsd: number;
+  /** How many of the period's runs hold something (reservedUsd > 0 each). */
+  heldRuns: number;
 }
 
 /** A group member as computeGroupSpend needs it: a native run in flight holds its agent's budgetUsd. */
@@ -167,6 +169,13 @@ function isOrderedBefore(run: RunOrder, other: RunOrder): boolean {
  * returned with a null cap. One query at the widest configured window
  * (month contains week contains day), bucketed in JS, rather than a
  * separate DB round trip per period.
+ *
+ * A delegated run tree is held once, at its root. A sub-run whose tree root
+ * is a counted run of this group with a live, counted hold spends inside the
+ * root's hold, so it holds nothing (its cost still counts as spent), and the
+ * root holds its reservation minus the cost of every run in its tree. A sub-run
+ * whose root is in another group, has finished, or whose hold is left out
+ * here (excludeReservationRunIds, holdsBefore) holds its own reservation.
  */
 export async function computeGroupSpend(
   db: BudgetGroupsDb,
@@ -205,25 +214,56 @@ export async function computeGroupSpend(
             costUsd: true,
             startedAt: true,
             heartbeatAt: true,
+            parentRunId: true,
             codingRun: { select: { budgetReservedUsd: true, timeoutSec: true } },
           },
         });
 
   const counted = runs.filter((r) => !dropped.has(r.id));
+  const countedById = new Map(counted.map((r) => [r.id, r]));
+  const holds = (r: (typeof counted)[number]): boolean =>
+    !excluded.has(r.id) &&
+    (options.holdsBefore === undefined || isOrderedBefore(r, options.holdsBefore)) &&
+    isHoldLive(r, now, queueTimeoutSec);
+  // A coding run holds exactly what dispatch reserved. A native run (or a
+  // coding run whose CodingRun row is missing) holds its agent's per-run
+  // budget: never less than what it can actually spend.
+  const reservationOf = (r: (typeof counted)[number]): number =>
+    r.codingRun != null ? Number(r.codingRun.budgetReservedUsd) : (memberBudgets.get(r.agentId) ?? 0);
+
+  // A run inside the tree of a counted, holding root in this group spends
+  // inside that root's hold, so it holds nothing of its own.
+  const rootOf = await resolveRootRunIds(db, counted);
+  const heldRoots = new Set<string>();
+  for (const r of counted) {
+    const rootId = rootOf.get(r.id);
+    if (rootId === undefined || rootId === r.id) continue;
+    const root = countedById.get(rootId);
+    if (root && holds(root)) heldRoots.add(rootId);
+  }
+  // Such a root holds its reservation minus the cost of its whole tree, every
+  // run in it included (also runs in other groups: they spend the tree too).
+  const treeCostByRoot = new Map<string, number>();
+  for (const rootId of heldRoots) {
+    const treeRunIds = await collectTreeRunIds(db, rootId);
+    const treeRuns = await db.run.findMany({ where: { id: { in: treeRunIds } }, select: { costUsd: true } });
+    treeCostByRoot.set(
+      rootId,
+      treeRuns.reduce((sum, t) => sum + Number(t.costUsd), 0),
+    );
+  }
+
   const accounted = counted.map((r) => {
     const costUsd = Number(r.costUsd);
+    const rootId = rootOf.get(r.id);
+    const insideHeldTree = rootId !== undefined && rootId !== r.id && heldRoots.has(rootId);
     let reservedUsd = 0;
-    const holds =
-      !excluded.has(r.id) &&
-      (options.holdsBefore === undefined || isOrderedBefore(r, options.holdsBefore)) &&
-      isHoldLive(r, now, queueTimeoutSec);
-    if (holds) {
-      // A coding run holds exactly what dispatch reserved. A native run (or
-      // a coding run whose CodingRun row is missing) holds its agent's
-      // per-run budget: never less than what it can actually spend.
-      const reservation =
-        r.codingRun != null ? Number(r.codingRun.budgetReservedUsd) : (memberBudgets.get(r.agentId) ?? 0);
-      reservedUsd = Math.max(0, reservation - costUsd);
+    if (insideHeldTree) {
+      // Spends inside its root's hold: holds nothing itself.
+    } else if (heldRoots.has(r.id)) {
+      reservedUsd = Math.max(0, reservationOf(r) - (treeCostByRoot.get(r.id) ?? 0));
+    } else if (holds(r)) {
+      reservedUsd = Math.max(0, reservationOf(r) - costUsd);
     }
     return { startedAt: r.startedAt, costUsd, reservedUsd };
   });
@@ -233,8 +273,58 @@ export async function computeGroupSpend(
     const inPeriod = accounted.filter((r) => r.startedAt >= start);
     const spentUsd = inPeriod.reduce((sum, r) => sum + r.costUsd, 0);
     const reservedUsd = inPeriod.reduce((sum, r) => sum + r.reservedUsd, 0);
-    return { period, capUsd, spentUsd, reservedUsd, remainingUsd: Math.max(0, capUsd - spentUsd - reservedUsd) };
+    const heldRuns = inPeriod.filter((r) => r.reservedUsd > 0).length;
+    return {
+      period,
+      capUsd,
+      spentUsd,
+      reservedUsd,
+      remainingUsd: Math.max(0, capUsd - spentUsd - reservedUsd),
+      heldRuns,
+    };
   });
+}
+
+/** Deepest parentRunId chain resolveRootRunIds follows: a guard against a cycle. */
+const MAX_TREE_DEPTH = 32;
+
+/**
+ * Each run's tree root (the ancestor with parentRunId null), walking
+ * parentRunId upward in one batched query per level. A run whose chain cannot
+ * be resolved (a missing ancestor, or deeper than MAX_TREE_DEPTH) is left out.
+ */
+async function resolveRootRunIds(
+  db: Pick<BudgetGroupsDb, "run">,
+  runs: readonly { id: string; parentRunId: string | null }[],
+): Promise<Map<string, string>> {
+  const parentOf = new Map<string, string | null>(runs.map((r) => [r.id, r.parentRunId ?? null]));
+  const missing = new Set<string>();
+  for (let level = 0; level < MAX_TREE_DEPTH; level++) {
+    const unresolved = new Set<string>();
+    for (const parentId of parentOf.values()) {
+      if (parentId !== null && !parentOf.has(parentId) && !missing.has(parentId)) unresolved.add(parentId);
+    }
+    if (unresolved.size === 0) break;
+    const parents = await db.run.findMany({
+      where: { id: { in: [...unresolved] } },
+      select: { id: true, parentRunId: true, agentId: true },
+    });
+    for (const p of parents) parentOf.set(p.id, p.parentRunId ?? null);
+    for (const id of unresolved) if (!parentOf.has(id)) missing.add(id);
+  }
+
+  const rootOf = new Map<string, string>();
+  for (const r of runs) {
+    let id = r.id;
+    let parentId = parentOf.get(id);
+    for (let depth = 0; parentId != null && depth < MAX_TREE_DEPTH; depth++) {
+      id = parentId;
+      parentId = parentOf.get(id);
+    }
+    // parentId undefined: a missing ancestor; non-null: too deep or a cycle.
+    if (parentId === null) rootOf.set(r.id, id);
+  }
+  return rootOf;
 }
 
 export interface RunTreeSpend {
