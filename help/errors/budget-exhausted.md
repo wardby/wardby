@@ -31,7 +31,10 @@ Call `get_run` and read `budgetEvents`. Each event has:
 - `details`: for a refused model request, the budget, the amount spent, the
   holds of requests in flight, the refused hold, the model and the turn. For a
   refusal at dispatch, the cap, the amount spent, the amount held and
-  `heldRuns`, the number of runs holding budget.
+  `heldRuns`, the number of runs holding budget. Both also carry
+  `groupName` (the agent's budget group, when it has one) and, for a
+  `run-tree` limit, `leadAgentName`. A refused model request also carries
+  `agentBudgetUsd`, the agent's own `budgetUsd`.
 
 The run's error, and a lead's sub-agent result (in its `budget` field), carry
 the same facts as one sentence. Pull request and issue comments and check

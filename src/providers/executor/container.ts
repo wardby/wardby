@@ -63,10 +63,10 @@ import {
   hostBudgetSentence,
   loadBudgetEvent,
   ownerBudgetSentence,
+  proxyRefusalDetails,
   recordBudgetEvent,
   type BudgetEventView,
   type BudgetLimit,
-  type ProxyRefusalDetails,
 } from "../../core/budget-events.js";
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
 import type {
@@ -728,23 +728,16 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       where: { id: sessionId },
       select: { budgetRefusal: true },
     });
-    const refusal = session?.budgetRefusal;
-    if (!refusal || typeof refusal !== "object" || Array.isArray(refusal)) return;
+    // The proxy (a less-trusted role) wrote this: keep only well-formed amounts, model and turn.
+    const refusal = proxyRefusalDetails(session?.budgetRefusal);
+    if (!refusal) return;
     const existing = await this.db.runBudgetEvent.findFirst({
       where: { runId, details: { path: ["source"], equals: "proxy" } },
       select: { id: true },
     });
     if (existing) return;
     const coding = await this.db.codingRun.findUnique({ where: { runId }, select: { budgetLimitedBy: true } });
-    await recordBudgetEvent(
-      this.db,
-      runId,
-      (coding?.budgetLimitedBy ?? "run") as BudgetLimit,
-      {
-        ...(refusal as Record<string, unknown>),
-        source: "proxy",
-      } as ProxyRefusalDetails,
-    );
+    await recordBudgetEvent(this.db, runId, (coding?.budgetLimitedBy ?? "run") as BudgetLimit, refusal);
   }
 
   budgetEvent(runId: string): Promise<{ event: BudgetEventView; agentName: string } | null> {
@@ -1408,6 +1401,7 @@ export class ContainerExecutor implements Executor {
       current = await this.requireCurrent(run.runId);
       if (current.costUsd > current.budgetUsd) {
         this.emit({ stage: "budget_cutoff", runId: run.runId, jobId: handle.id });
+        await this.recordRefusal(run.runId, sessionId);
         await this.options.store.complete(
           run.runId,
           "budget_exhausted",

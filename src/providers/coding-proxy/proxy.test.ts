@@ -416,6 +416,22 @@ describe("CodingProxy", () => {
     expect(JSON.stringify(h.events)).not.toContain("private text");
   });
 
+  it("audits an upstream failure followed by a malformed frame as uncertain exactly once", async () => {
+    const failed =
+      'event: response.failed\ndata: {"type":"response.failed","response":{"usage":null,"error":{"code":"server_error"}}}';
+    const malformed = 'event: response.completed\ndata: {"type":"response.completed","response":{"usage":null}}';
+    const h = await harness({
+      fetch: async () =>
+        new Response(`${failed}\n\n${malformed}\n\n`, { headers: { "content-type": "text/event-stream" } }),
+    });
+    await expect(execute(h, "failed-then-malformed", new TestSink(), requestBody(true))).rejects.toBeInstanceOf(
+      CodingProxyError,
+    );
+    expect((await h.ledger.getRequest(reservedRequestId(h.events)))?.status).toBe("uncertain");
+    const uncertain = h.events.filter((event) => event.type === "request.uncertain");
+    expect(uncertain).toEqual([expect.objectContaining({ reason: "upstream_failed:server_error" })]);
+  });
+
   it("records the first relayed upstream failure's code on the session, for the executor", async () => {
     const failing = (code: string) =>
       new Response(

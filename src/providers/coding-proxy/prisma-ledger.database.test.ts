@@ -134,6 +134,73 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
     expect(run.turns).toBe(1);
   });
 
+  it("copies only a refusal's well-formed amounts, model and turn, and records nothing for a malformed one", async () => {
+    const fRun = `forged-run-${suffix}`;
+    const fSession = `forged-session-${suffix}`;
+    const fAgent = `forged-agent-${suffix}`;
+    const ledger = new PrismaProxyLedger(db);
+    const store = new PrismaContainerExecutionStore(db);
+    await db.agent.create({
+      data: { id: fAgent, name: fAgent, systemPrompt: "x", model: "gpt-5.6-luna", budgetUsd: 1 },
+    });
+    await db.run.create({ data: { id: fRun, agentId: fAgent, executionManaged: true } });
+    try {
+      await db.codingRun.create({
+        data: {
+          runId: fRun,
+          task: "test",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${fRun}`,
+          provider: "codex",
+          model: "gpt-5.6-luna",
+          timeoutSec: 60,
+          allowedEgress: [],
+          protectedPaths: [],
+          budgetReservedUsd: 1,
+        },
+      });
+      await ledger.createSession({
+        id: fSession,
+        runId: fRun,
+        capabilityHash: `forged-hash-${suffix}`,
+        credentialRef: "openai/test",
+        protocol: "openai-responses",
+        allowedModels: ["gpt-5.6-luna"],
+        deadlineAt: new Date(Date.now() + 60_000),
+        budgetUsd: 1,
+        registryTokenHash: `forged-registry-${suffix}`,
+      });
+      const amounts = {
+        budgetUsd: 1,
+        spentUsd: 0.5,
+        heldReservedUsd: 0.1,
+        heldUncertainUsd: 0,
+        refusedHoldUsd: 0.6,
+        model: "gpt-5.6-luna",
+        turn: 3,
+      };
+      const forge = (refusal: unknown) =>
+        db.$executeRaw`UPDATE "CodingProxySession" SET "budgetRefusal" = ${JSON.stringify(refusal)}::jsonb WHERE "id" = ${fSession}`;
+
+      await forge({ ...amounts, refusedHoldUsd: undefined, groupName: "forged" });
+      await store.recordBudgetRefusal(fRun, fSession);
+      await forge({ ...amounts, model: "<script>" });
+      await store.recordBudgetRefusal(fRun, fSession);
+      expect(await db.runBudgetEvent.count({ where: { runId: fRun } })).toBe(0);
+
+      await forge({ ...amounts, source: "dispatch", groupName: "forged", leadAgentName: "forged", note: "x" });
+      await store.recordBudgetRefusal(fRun, fSession);
+      const events = await db.runBudgetEvent.findMany({ where: { runId: fRun } });
+      expect(events.map((e) => e.details)).toEqual([{ ...amounts, source: "proxy" }]);
+    } finally {
+      await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "id" = ${fSession}`;
+      await db.codingRun.deleteMany({ where: { runId: fRun } });
+      await db.run.deleteMany({ where: { id: fRun } });
+      await db.agent.deleteMany({ where: { id: fAgent } });
+    }
+  });
+
   describe("model terms", () => {
     const tAgent = `terms-agent-${suffix}`;
     const tRun = `terms-run-${suffix}`;

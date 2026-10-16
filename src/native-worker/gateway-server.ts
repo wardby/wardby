@@ -211,7 +211,8 @@ async function rebuild(deps: GatewayServerDeps, session: GatewaySessionRecord): 
   };
 }
 
-async function* streamModel(
+/** Exported for its unit test; the HTTP handler is its only production caller. */
+export async function* streamModel(
   ctx: RebuiltRun,
   ledger: PrismaGatewayLedger,
   callId: string,

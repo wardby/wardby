@@ -196,6 +196,12 @@ class FakeStore implements ContainerExecutionStore {
 
   constructor(public run: ContainerRunSnapshot) {}
 
+  /** (runId, sessionId) of every recordBudgetRefusal call. */
+  recordedRefusals: Array<[string, string]> = [];
+  async recordBudgetRefusal(runId: string, sessionId: string): Promise<void> {
+    this.recordedRefusals.push([runId, sessionId]);
+  }
+
   async load(runId: string): Promise<ContainerRunSnapshot | null> {
     return runId === this.run.runId ? structuredClone(this.run) : null;
   }
@@ -2182,6 +2188,19 @@ describe("ContainerExecutor", () => {
       expect(created.store.run.status).toBe("failed");
       expect((created.store.terminations[0] as { error: string }).error).toMatch(/^coding_failure_/);
       expect(created.vcs.notifyFinishedCalls[0]).not.toHaveProperty("providerSentence");
+    });
+
+    it("records the proxy's refusal when the run goes over budget only after its workspace is materialized", async () => {
+      const created = await harness();
+      created.jobs.materializeWorkspace = async () => {
+        created.store.run.costUsd = created.store.run.budgetUsd + 0.01;
+      };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.observer.events.some((event) => event.stage === "budget_cutoff")).toBe(true);
+      expect(created.vcs.finalized).toBe(0);
+      expect(created.store.recordedRefusals).toEqual([["run-1", "session-1"]]);
     });
 
     it("ends a run whose result could not be finalized as budget_exhausted when its session was refused", async () => {

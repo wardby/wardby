@@ -57,6 +57,9 @@ interface FakeRunRow {
   approvedVersions?: number;
   budgetEvents?: Array<{ kind: string; limit: string; at: Date; details: unknown }>;
   localPullRequest?: Record<string, unknown> | null;
+  /** What a select of parentRunId + agent (name, budget, group) sees. */
+  parentRunId?: string | null;
+  budgetAgent?: { name: string; budgetUsd: number; budgetGroup: { name: string } | null } | null;
 }
 
 function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSeed[] = []) {
@@ -70,6 +73,8 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSee
       registryFetches: _registryFetches,
       approvedVersions: _approved,
       budgetEvents: _budgetEvents,
+      parentRunId: _parentRunId,
+      budgetAgent: _budgetAgent,
       ...row
     } = run;
     return row;
@@ -80,7 +85,11 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSee
       findUnique: async ({ where }: { where: { id: string } }) => agentRows.get(where.id) ?? null,
     },
     run: {
-      findUnique: async ({ where }: { where: { id: string } }) => publicRun(runRows.get(where.id)),
+      findUnique: async ({ where, select }: { where: { id: string }; select?: { agent?: unknown } }) => {
+        const run = runRows.get(where.id);
+        if (select?.agent) return run ? { parentRunId: run.parentRunId ?? null, agent: run.budgetAgent ?? null } : null;
+        return publicRun(run);
+      },
       findMany: async ({ where }: { where: { agentId: string; status?: string; triggeredById?: string } }) =>
         [...runRows.values()]
           .filter(
@@ -322,7 +331,7 @@ describe("run observability tools", () => {
     await client.close();
   });
 
-  it("get_run lists a run's recorded budget refusals, and omits the key when there are none", async () => {
+  it("get_run lists a run's recorded budget refusals with names filled, and omits the key when there are none", async () => {
     const now = new Date("2026-01-02T03:04:05.000Z");
     const row = {
       agentId: "a1",
@@ -337,11 +346,32 @@ describe("run observability tools", () => {
       startedAt: now,
       finishedAt: now,
     };
-    const details = { source: "proxy", budgetUsd: 3, spentUsd: 2.9, turn: 7 };
+    const proxy = {
+      source: "proxy",
+      budgetUsd: 3,
+      spentUsd: 2.9,
+      heldReservedUsd: 0,
+      heldUncertainUsd: 0,
+      refusedHoldUsd: 0.2,
+      model: "gpt-6",
+      turn: 7,
+    };
+    const dispatch = { source: "dispatch", capUsd: 5, spentUsd: 5, heldUsd: 0, heldRuns: 0 };
+    const later = new Date(now.getTime() + 1000);
     const db = fakeDb(
       [{ id: "a1", ownerId: "p1" }],
       [
-        { ...row, id: "r1", budgetEvents: [{ kind: "refused", limit: "run", at: now, details }] },
+        {
+          ...row,
+          id: "r1",
+          parentRunId: "lead-run",
+          budgetAgent: { name: "child-agent", budgetUsd: 9, budgetGroup: { name: "mobile" } },
+          budgetEvents: [
+            { kind: "refused", limit: "run-tree", at: now, details: { ...proxy, groupName: "forged" } },
+            { kind: "refused", limit: "week", at: later, details: dispatch },
+          ],
+        },
+        { ...row, id: "lead-run", budgetAgent: { name: "lead-agent", budgetUsd: 20, budgetGroup: null } },
         { ...row, id: "r2" },
       ],
     );
@@ -352,8 +382,20 @@ describe("run observability tools", () => {
 
     const withEvent = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r1" } })) as never);
     expect(withEvent).toMatchObject({
-      budgetEvents: [{ kind: "refused", limit: "run", at: now.toISOString(), details }],
+      budgetEvents: [
+        {
+          kind: "refused",
+          limit: "run-tree",
+          at: now.toISOString(),
+          details: { ...proxy, agentBudgetUsd: 9, groupName: "mobile", leadAgentName: "lead-agent" },
+        },
+        { kind: "refused", limit: "week", at: later.toISOString(), details: { ...dispatch, groupName: "mobile" } },
+      ],
     });
+    const [, dispatched] = (withEvent as { budgetEvents: Array<{ details: Record<string, unknown> }> }).budgetEvents;
+    expect(dispatched.details).not.toHaveProperty("agentBudgetUsd");
+    expect(dispatched.details).not.toHaveProperty("leadAgentName");
+    expect(dispatched.details).not.toHaveProperty("groupCapUsd");
     const without = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r2" } })) as never);
     expect(without).not.toHaveProperty("budgetEvents");
     await client.close();

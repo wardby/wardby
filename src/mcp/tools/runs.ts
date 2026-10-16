@@ -6,6 +6,7 @@ import { publicCodingRunResult, sanitizeDependencyCacheReport } from "../../codi
 import { countPlanRefusals, summarizeRegistryFetches } from "../../coding/registry/report.js";
 import { storedServiceLabels } from "../../coding/services/catalog.js";
 import { textResult } from "./text-result.js";
+import { loadBudgetEvents } from "../../core/budget-events.js";
 
 /**
  * Run visibility (resource-sharing grants spec §3.5, A6): a run's output is
@@ -127,19 +128,11 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         codingRun?.dependencyCacheResult !== null && codingRun?.dependencyCacheResult !== undefined
           ? sanitizeDependencyCacheReport(codingRun.dependencyCacheResult)
           : undefined;
-      const budgetEvents = await ctx.db.runBudgetEvent.findMany({ where: { runId: run.id }, orderBy: { at: "asc" } });
+      // Well-formed refusals only, with group, lead and agent budget filled as the run error's are.
+      const budgetEvents = await loadBudgetEvents(ctx.db, run.id);
       return textResult({
         ...withOperatorMode(run),
-        ...(budgetEvents.length > 0
-          ? {
-              budgetEvents: budgetEvents.map((e) => ({
-                kind: e.kind,
-                limit: e.limit,
-                at: e.at.toISOString(),
-                details: e.details,
-              })),
-            }
-          : {}),
+        ...(budgetEvents.length > 0 ? { budgetEvents } : {}),
         ...(codingResult ? { codingResult } : {}),
         ...(failureCategory ? { failureCategory } : {}),
         ...(diagnosticId ? { diagnosticId } : {}),

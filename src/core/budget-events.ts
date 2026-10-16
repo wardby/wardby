@@ -23,7 +23,7 @@ export interface ProxyRefusalDetails {
   model: string;
   /** Completed (incl. estimated) requests + 1. */
   turn: number;
-  /** Filled at read time by loadBudgetEvent (Task 7); not stored by the proxy. */
+  /** Filled at read time (budget event names); never stored, and dropped if a stored row has them. */
   agentBudgetUsd?: number;
   groupName?: string;
   leadAgentName?: string;
@@ -66,7 +66,7 @@ function groupPhrase(details: BudgetEventDetails): string {
 /** What the proxy refused, and what was left: `{subject} needed a $X hold, but only $Y of ... was left (...)`. */
 function proxyFacts(details: ProxyRefusalDetails, subject: string): string {
   const held = details.heldReservedUsd + details.heldUncertainUsd;
-  const left = details.budgetUsd - details.spentUsd - held;
+  const left = Math.max(0, details.budgetUsd - details.spentUsd - held);
   const heldPart = held > 0 ? `, ${usd(held)} held by requests in flight` : "";
   return (
     `${subject} needed a ${usd(details.refusedHoldUsd)} hold, but only ${usd(left)} of this run's ` +
@@ -139,40 +139,133 @@ export async function recordBudgetEvent(
   }
 }
 
-/** The run's latest budget event, or null. Never throws. */
+const BUDGET_LIMITS: ReadonlySet<string> = new Set<BudgetLimit>(["run", "run-tree", "day", "week", "month"]);
+const MODEL_ID = /^[A-Za-z0-9._:/-]{1,128}$/;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+const isFiniteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+const isCount = (value: unknown): value is number => Number.isInteger(value) && (value as number) >= 0;
+
+/**
+ * A proxy refusal rebuilt from only its stored amounts, model and turn, or
+ * null when any is missing or malformed. The proxy (a less-trusted role)
+ * writes the source record, so nothing else it wrote is kept: names are
+ * filled at read time from the database.
+ */
+export function proxyRefusalDetails(raw: unknown): ProxyRefusalDetails | null {
+  if (!isRecord(raw)) return null;
+  const { budgetUsd, spentUsd, heldReservedUsd, heldUncertainUsd, refusedHoldUsd, turn, model } = raw;
+  if (![budgetUsd, spentUsd, heldReservedUsd, heldUncertainUsd, refusedHoldUsd].every(isFiniteNumber)) return null;
+  if (!isCount(turn) || typeof model !== "string" || !MODEL_ID.test(model)) return null;
+  return {
+    source: "proxy",
+    budgetUsd: budgetUsd as number,
+    spentUsd: spentUsd as number,
+    heldReservedUsd: heldReservedUsd as number,
+    heldUncertainUsd: heldUncertainUsd as number,
+    refusedHoldUsd: refusedHoldUsd as number,
+    model,
+    turn,
+  };
+}
+
+/** A dispatch refusal rebuilt from only its stored amounts, or null when any is missing or malformed. */
+function dispatchRefusalDetails(raw: Record<string, unknown>): DispatchRefusalDetails | null {
+  const { capUsd, spentUsd, heldUsd, heldRuns } = raw;
+  if (![capUsd, spentUsd, heldUsd].every(isFiniteNumber) || !isCount(heldRuns)) return null;
+  return {
+    source: "dispatch",
+    capUsd: capUsd as number,
+    spentUsd: spentUsd as number,
+    heldUsd: heldUsd as number,
+    heldRuns,
+  };
+}
+
+/** A stored row as a view, or null when its limit or details fail the shape check (so no sentence can throw). */
+function budgetEventView(row: { limit: string; at: Date; details: unknown }): BudgetEventView | null {
+  if (!BUDGET_LIMITS.has(row.limit) || !isRecord(row.details)) return null;
+  const details =
+    row.details.source === "proxy"
+      ? proxyRefusalDetails(row.details)
+      : row.details.source === "dispatch"
+        ? dispatchRefusalDetails(row.details)
+        : null;
+  if (!details) return null;
+  return { kind: "refused", limit: row.limit as BudgetLimit, at: row.at.toISOString(), details };
+}
+
+/** The run's latest well-formed budget event, or null. Never throws. */
 export async function latestBudgetEvent(
   db: Pick<PrismaClient, "runBudgetEvent">,
   runId: string,
 ): Promise<BudgetEventView | null> {
   try {
     const row = await db.runBudgetEvent.findFirst({ where: { runId }, orderBy: { at: "desc" } });
-    if (!row) return null;
-    return {
-      kind: "refused",
-      limit: row.limit as BudgetLimit,
-      at: row.at.toISOString(),
-      details: row.details as unknown as BudgetEventDetails,
-    };
+    return row ? budgetEventView(row) : null;
   } catch (err) {
     log.warn({ err, runId }, "could not read the latest budget event");
     return null;
   }
 }
 
-/** The tree root's agent name: walks `parentRunId` (bounded) from the run. */
-async function rootAgentName(db: Pick<PrismaClient, "run">, runId: string): Promise<string | undefined> {
-  let id: string | null = runId;
-  let name: string | undefined;
-  for (let hops = 0; id && hops < 32; hops++) {
-    const row: { parentRunId: string | null; agent: { name: string } | null } | null = await db.run.findUnique({
-      where: { id },
-      select: { parentRunId: true, agent: { select: { name: true } } },
-    });
-    if (!row) break;
-    name = row.agent?.name ?? name;
-    id = row.parentRunId;
+/** What fills an event's names: the run's agent, its budget group, and (when asked for) the tree root. */
+interface BudgetEventNames {
+  agentName?: string;
+  agentBudgetUsd?: number;
+  groupName?: string;
+  leadAgentName?: string;
+}
+
+/**
+ * Loads the run, its agent and budget group once and, when `withLead`, walks
+ * `parentRunId` (bounded) to the tree root once.
+ */
+async function budgetEventNames(
+  db: Pick<PrismaClient, "run">,
+  runId: string,
+  withLead: boolean,
+): Promise<BudgetEventNames> {
+  const run = await db.run.findUnique({
+    where: { id: runId },
+    select: {
+      parentRunId: true,
+      agent: { select: { name: true, budgetUsd: true, budgetGroup: { select: { name: true } } } },
+    },
+  });
+  const names: BudgetEventNames = {};
+  if (!run) return names;
+  if (run.agent) {
+    names.agentName = run.agent.name;
+    const budget = Number(run.agent.budgetUsd);
+    if (Number.isFinite(budget)) names.agentBudgetUsd = budget;
+    if (run.agent.budgetGroup?.name) names.groupName = run.agent.budgetGroup.name;
   }
-  return name;
+  if (withLead) {
+    let lead = run.agent?.name;
+    let id: string | null = run.parentRunId;
+    for (let hops = 1; id && hops < 32; hops++) {
+      const row: { parentRunId: string | null; agent: { name: string } | null } | null = await db.run.findUnique({
+        where: { id },
+        select: { parentRunId: true, agent: { select: { name: true } } },
+      });
+      if (!row) break;
+      lead = row.agent?.name ?? lead;
+      id = row.parentRunId;
+    }
+    if (lead) names.leadAgentName = lead;
+  }
+  return names;
+}
+
+/** The event with its names filled: the group, the agent budget (proxy refusals) and the lead (run-tree). */
+function withNames(event: BudgetEventView, names: BudgetEventNames): BudgetEventView {
+  const details: BudgetEventDetails = { ...event.details };
+  if (names.groupName) details.groupName = names.groupName;
+  if (details.source === "proxy" && names.agentBudgetUsd !== undefined) details.agentBudgetUsd = names.agentBudgetUsd;
+  if (event.limit === "run-tree" && names.leadAgentName) details.leadAgentName = names.leadAgentName;
+  return { ...event, details };
 }
 
 /**
@@ -187,24 +280,35 @@ export async function loadBudgetEvent(
   try {
     const event = await latestBudgetEvent(db, runId);
     if (!event) return null;
-    const run = await db.run.findUnique({
-      where: { id: runId },
-      select: { agent: { select: { name: true, budgetUsd: true, budgetGroup: { select: { name: true } } } } },
-    });
-    const details: BudgetEventDetails = { ...event.details };
-    const group = run?.agent?.budgetGroup?.name;
-    if (group && details.groupName === undefined) details.groupName = group;
-    if (details.source === "proxy" && run?.agent && details.agentBudgetUsd === undefined) {
-      const budget = Number(run.agent.budgetUsd);
-      if (Number.isFinite(budget)) details.agentBudgetUsd = budget;
-    }
-    if (event.limit === "run-tree" && details.leadAgentName === undefined) {
-      const lead = await rootAgentName(db, runId);
-      if (lead) details.leadAgentName = lead;
-    }
-    return { event: { ...event, details }, agentName: run?.agent?.name ?? "this agent" };
+    const names = await budgetEventNames(db, runId, event.limit === "run-tree");
+    return { event: withNames(event, names), agentName: names.agentName ?? "this agent" };
   } catch (err) {
     log.warn({ err, runId }, "could not load the budget event");
     return null;
+  }
+}
+
+/**
+ * Every well-formed budget event of the run, oldest first, with names filled
+ * in as loadBudgetEvent does (the run and tree are read once for all of
+ * them). If the names cannot be read the events are returned without them.
+ */
+export async function loadBudgetEvents(
+  db: Pick<PrismaClient, "run" | "runBudgetEvent">,
+  runId: string,
+): Promise<BudgetEventView[]> {
+  const rows = await db.runBudgetEvent.findMany({ where: { runId }, orderBy: { at: "asc" } });
+  const events = rows.map(budgetEventView).filter((event): event is BudgetEventView => event !== null);
+  if (events.length === 0) return events;
+  try {
+    const names = await budgetEventNames(
+      db,
+      runId,
+      events.some((event) => event.limit === "run-tree"),
+    );
+    return events.map((event) => withNames(event, names));
+  } catch (err) {
+    log.warn({ err, runId }, "could not read the budget event names");
+    return events;
   }
 }

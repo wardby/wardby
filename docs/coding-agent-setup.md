@@ -446,7 +446,10 @@ lead had left), or `day`, `week` or `month` (the budget group's cap for that
 period). For a refused model request, `details` holds the budget, the amount
 spent, the holds of requests in flight, the refused hold, the model and the
 turn. For a refusal at dispatch it holds the cap, the amount spent, the amount
-held and the number of holding runs (`heldRuns`).
+held and the number of holding runs (`heldRuns`). Both also name the agent's
+budget group (`groupName`) when it has one, and the lead agent
+(`leadAgentName`) for a `run-tree` limit; a refused model request also gives
+the agent's own `budgetUsd` (`agentBudgetUsd`).
 
 The run's error carries the same facts in one sentence after the code, for
 example `coding_budget_exhausted: <sentence>`. A lead's sub-agent result

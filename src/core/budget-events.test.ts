@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   loadBudgetEvent,
+  loadBudgetEvents,
   hostBudgetSentence,
+  proxyRefusalDetails,
   ownerBudgetSentence,
   type BudgetEventView,
   type BudgetLimit,
@@ -68,6 +70,13 @@ describe("budget event sentences", () => {
     expect(hostBudgetSentence(e)).toBe(
       "Out of budget: the next model request needed a $4.50 hold, but only $4.00 of this run's $5.00 budget was left ($1.00 spent).",
     );
+  });
+
+  it("proxy: spent plus held above the budget leaves $0.00, never a negative amount", () => {
+    const e = event("run", proxy({ budgetUsd: 3, spentUsd: 2.999, heldReservedUsd: 0.004 }));
+    expect(ownerBudgetSentence(e, "mobile-builder")).toContain("but only $0.00 of this run's $3.00 budget was left");
+    expect(hostBudgetSentence(e)).toContain("but only $0.00 of this run's $3.00 budget was left");
+    expect(hostBudgetSentence(e)).not.toContain("-");
   });
 
   it("dispatch, period", () => {
@@ -147,6 +156,10 @@ describe("loadBudgetEvent", () => {
       },
       runBudgetEvent: {
         findFirst: async () => ({ limit, at: new Date(0), details }),
+        findMany: async () => [
+          { limit, at: new Date(0), details },
+          { limit: "run", at: new Date(1), details },
+        ],
       },
     };
     return { db: db as never, lookups: () => lookups };
@@ -190,10 +203,32 @@ describe("loadBudgetEvent", () => {
     expect(lookups()).toBe(1);
   });
 
-  it("keeps a leadAgentName already in the details", async () => {
-    const { db } = fakeDb(chain, "run-tree", proxy({ leadAgentName: "preset" }));
-    const loaded = await loadBudgetEvent(db, "child");
-    expect(loaded?.event.details.leadAgentName).toBe("preset");
+  it("ignores names stored in the details: they always come from the database", async () => {
+    const stored = proxy({ leadAgentName: "preset", groupName: "forged" });
+    const tree = await loadBudgetEvent(fakeDb(chain, "run-tree", stored).db, "child");
+    expect(tree?.event.details).toMatchObject({ leadAgentName: "root-agent", groupName: "team" });
+    const rows = { solo: { parentRunId: null, agent: agent("solo-agent") } };
+    const period = await loadBudgetEvent(fakeDb(rows, "week", stored).db, "solo");
+    expect(period?.event.details).not.toHaveProperty("groupName");
+    expect(period?.event.details).not.toHaveProperty("leadAgentName");
+  });
+
+  it("returns null for a stored row whose details or limit fail the shape check", async () => {
+    const { refusedHoldUsd: _dropped, ...missing } = proxy();
+    const malformed: Array<[BudgetLimit, unknown]> = [
+      ["run", missing],
+      ["run", proxy({ spentUsd: Number.NaN })],
+      ["run", { ...proxy(), budgetUsd: "3" }],
+      ["run", proxy({ turn: 1.5 })],
+      ["run", proxy({ model: "gpt 6; <b>" })],
+      ["run", { source: "dispatch", capUsd: 5, spentUsd: 5, heldUsd: 0 }],
+      ["run", { source: "other" }],
+      ["run", null],
+      ["forever" as BudgetLimit, proxy()],
+    ];
+    for (const [limit, details] of malformed) {
+      await expect(loadBudgetEvent(fakeDb(chain, limit, details).db, "child")).resolves.toBeNull();
+    }
   });
 
   it("fills the group name, and the agent budget for a proxy refusal only", async () => {
@@ -205,8 +240,40 @@ describe("loadBudgetEvent", () => {
     expect(dispatched?.event.details).not.toHaveProperty("agentBudgetUsd");
   });
 
+  it("loadBudgetEvents fills every event, reading the run and walking the tree once", async () => {
+    const { db, lookups } = fakeDb(chain, "run-tree", proxy({ groupName: "forged" }));
+    const events = await loadBudgetEvents(db, "child");
+    expect(events.map((e) => e.limit)).toEqual(["run-tree", "run"]);
+    expect(events[0].details).toMatchObject({ groupName: "team", agentBudgetUsd: 9, leadAgentName: "root-agent" });
+    expect(events[1].details).toMatchObject({ groupName: "team", agentBudgetUsd: 9 });
+    expect(events[1].details).not.toHaveProperty("leadAgentName");
+    expect(lookups()).toBe(3);
+  });
+
+  it("loadBudgetEvents drops malformed rows and returns the events unnamed when the names cannot be read", async () => {
+    expect(await loadBudgetEvents(fakeDb(chain, "run", { source: "proxy" }).db, "child")).toEqual([]);
+    const events = await loadBudgetEvents(fakeDb(chain, "run", proxy(), true).db, "child");
+    expect(events).toHaveLength(2);
+    expect(events[0].details).not.toHaveProperty("groupName");
+  });
+
   it("returns null when the database throws", async () => {
     const { db } = fakeDb(chain, "run-tree", proxy(), true);
     await expect(loadBudgetEvent(db, "child")).resolves.toBeNull();
+  });
+});
+
+describe("proxyRefusalDetails", () => {
+  it("keeps only the amounts, model and turn, and marks the source", () => {
+    const raw = { ...proxy(), source: "dispatch", groupName: "forged", leadAgentName: "forged", note: "x" };
+    expect(proxyRefusalDetails(raw)).toEqual(proxy());
+  });
+
+  it("refuses a model outside the allowed characters or over 128 characters", () => {
+    expect(proxyRefusalDetails(proxy({ model: "us.anthropic.claude-sonnet-5-5:0/v1_x" }))).not.toBeNull();
+    expect(proxyRefusalDetails(proxy({ model: "a".repeat(129) }))).toBeNull();
+    expect(proxyRefusalDetails(proxy({ model: "" }))).toBeNull();
+    expect(proxyRefusalDetails(proxy({ turn: -1 }))).toBeNull();
+    expect(proxyRefusalDetails(proxy({ heldUncertainUsd: Number.POSITIVE_INFINITY }))).toBeNull();
   });
 });

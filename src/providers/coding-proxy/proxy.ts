@@ -144,6 +144,8 @@ interface RelayProgress {
   relayedOutputBytes: number;
   /** The Anthropic stream's usage tracker, once a stream is being relayed. */
   anthropic?: AnthropicSseUsageTracker;
+  /** Set once the request is marked uncertain: a later failure must not mark (and audit) it again. */
+  marked?: boolean;
 }
 
 export function capabilityHash(capability: string): string {
@@ -1392,6 +1394,8 @@ export class CodingProxy {
     headers: { contentType?: string; contentEncoding?: string },
     progress: RelayProgress,
   ): Promise<void> {
+    if (progress.marked) return;
+    progress.marked = true;
     let estimate = await this.estimateInterrupted(session, request, progress);
     if (estimate) {
       try {
