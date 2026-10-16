@@ -3,7 +3,6 @@ import type {
   AuditAdvisory,
   AuditRelation,
   PackageAuditMode,
-  PackageAuditRow,
   PackageAuditVerdict,
 } from "../../../coding/registry/audit-mode.js";
 import type { DeclaredDependency, FileDependency } from "../../../coding/registry/types.js";
@@ -133,8 +132,6 @@ export interface RegistryStore {
   addAuditedAllowances(runId: string, ecosystem: string, names: readonly string[], auditedVia: string): Promise<void>;
   /** Insert-only; a row for the same run/ecosystem/name/version already present is kept. */
   recordAudit(record: RegistryAuditInsert): Promise<void>;
-  /** The run's audit records, oldest first. */
-  listAudits(runId: string): Promise<PackageAuditRow[]>;
   /** The extras the run allows for `name` (normalized, sorted). */
   allowedExtras(runId: string, ecosystem: string, name: string): Promise<string[]>;
   /** Records extras the run allows for each package (an existing one is kept). */
@@ -236,20 +233,6 @@ export class MemoryRegistryStore implements RegistryStore {
       row.name === record.name &&
       row.version === record.version;
     if (!this.audits.some(same)) this.audits.push({ ...record, createdAt: new Date() });
-  }
-
-  async listAudits(runId: string): Promise<PackageAuditRow[]> {
-    return this.audits
-      .filter((row) => row.runId === runId)
-      .map((row) => ({
-        ecosystem: row.ecosystem,
-        name: row.name,
-        version: row.version,
-        relation: row.relation,
-        via: row.via ?? null,
-        sizeBytes: row.sizeBytes ?? null,
-        advisories: [...row.advisories],
-      }));
   }
 
   async allowedExtras(runId: string, ecosystem: string, name: string): Promise<string[]> {

@@ -1,10 +1,6 @@
 import type { PrismaClient } from "#prisma";
 import type { PackageAllowlist } from "../../../coding/registry/allowlist.js";
-import {
-  isPackageAuditMode,
-  parsePackageAuditVerdict,
-  type PackageAuditRow,
-} from "../../../coding/registry/audit-mode.js";
+import { isPackageAuditMode, parsePackageAuditVerdict } from "../../../coding/registry/audit-mode.js";
 import type { DeclaredDependency, FileDependency } from "../../../coding/registry/types.js";
 import { extraAllowanceName, extraOfAllowanceName } from "./store.js";
 import type {
@@ -114,22 +110,6 @@ export class PrismaRegistryStore implements RegistryStore {
         },
       ],
       skipDuplicates: true,
-    });
-  }
-
-  async listAudits(runId: string): Promise<PackageAuditRow[]> {
-    return this.db.registryAuditRecord.findMany({
-      where: { runId },
-      orderBy: { createdAt: "asc" },
-      select: {
-        ecosystem: true,
-        name: true,
-        version: true,
-        relation: true,
-        via: true,
-        sizeBytes: true,
-        advisories: true,
-      },
     });
   }
 

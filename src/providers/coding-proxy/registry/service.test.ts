@@ -263,7 +263,6 @@ describe("RegistryService", () => {
       addAllowances: (runId, ecosystem, names) => inner.addAllowances(runId, ecosystem, names),
       addAuditedAllowances: (runId, ecosystem, names, via) => inner.addAuditedAllowances(runId, ecosystem, names, via),
       recordAudit: (record) => inner.recordAudit(record),
-      listAudits: (runId) => inner.listAudits(runId),
       allowedExtras: (runId, ecosystem, name) => inner.allowedExtras(runId, ecosystem, name),
       addExtraAllowances: (runId, ecosystem, dependencies) => inner.addExtraAllowances(runId, ecosystem, dependencies),
       recordFetch: async () => {

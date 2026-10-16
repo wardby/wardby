@@ -27,18 +27,16 @@ describe("MemoryRegistryStore package audit mode", () => {
     };
     await store.recordAudit(record);
     await store.recordAudit({ ...record, sizeBytes: 1 });
-    expect(await store.listAudits("r")).toEqual([
+    expect(store.audits.map(({ runId: _r, createdAt: _c, ...row }) => row)).toEqual([
       {
         ecosystem: "npm",
         name: "expo-dev-client",
         version: "5.1.2",
         relation: "top-level",
-        via: null,
         sizeBytes: 41210,
         advisories: [],
       },
     ]);
-    expect(await store.listAudits("other")).toEqual([]);
 
     await store.putVersionFacts("npm", [
       {

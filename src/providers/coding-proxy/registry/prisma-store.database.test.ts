@@ -230,7 +230,21 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaRegistryStore (database)", () 
       relation: "allowed",
       advisories: [{ id: "GHSA-35jh-r3h4-6jhm", severity: "HIGH", summary: "Command injection" }],
     });
-    expect(await store.listAudits(runId)).toEqual([
+    expect(
+      await db.registryAuditRecord.findMany({
+        where: { runId },
+        orderBy: { createdAt: "asc" },
+        select: {
+          ecosystem: true,
+          name: true,
+          version: true,
+          relation: true,
+          via: true,
+          sizeBytes: true,
+          advisories: true,
+        },
+      }),
+    ).toEqual([
       {
         ecosystem: "npm",
         name: "expo-dev-client",
