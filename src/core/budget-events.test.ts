@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  loadBudgetEvent,
   hostBudgetSentence,
   ownerBudgetSentence,
   type BudgetEventView,
@@ -121,5 +122,91 @@ describe("budget event sentences", () => {
       expect(sentence).not.toContain("wardby-delivery");
       expect(sentence).not.toContain("turn");
     }
+  });
+});
+
+describe("loadBudgetEvent", () => {
+  interface RunRow {
+    parentRunId: string | null;
+    agent: { name: string; budgetUsd: number; budgetGroup: { name: string } | null } | null;
+  }
+  const agent = (name: string, group: string | null = null) => ({
+    name,
+    budgetUsd: 9,
+    budgetGroup: group ? { name: group } : null,
+  });
+  const fakeDb = (rows: Record<string, RunRow>, limit: BudgetLimit, details: unknown, throws = false) => {
+    let lookups = 0;
+    const db = {
+      run: {
+        findUnique: async ({ where }: { where: { id: string } }) => {
+          lookups++;
+          if (throws) throw new Error("db down");
+          return rows[where.id] ?? null;
+        },
+      },
+      runBudgetEvent: {
+        findFirst: async () => ({ limit, at: new Date(0), details }),
+      },
+    };
+    return { db: db as never, lookups: () => lookups };
+  };
+  const chain: Record<string, RunRow> = {
+    child: { parentRunId: "mid", agent: agent("child-agent", "team") },
+    mid: { parentRunId: "root", agent: agent("mid-agent") },
+    root: { parentRunId: null, agent: agent("root-agent") },
+  };
+
+  it("names the tree root, not the immediate parent, as the lead", async () => {
+    const { db } = fakeDb(chain, "run-tree", proxy());
+    const loaded = await loadBudgetEvent(db, "child");
+    expect(loaded?.event.details.leadAgentName).toBe("root-agent");
+    expect(loaded?.agentName).toBe("child-agent");
+    expect(ownerBudgetSentence(loaded!.event, loaded!.agentName)).toContain("root-agent");
+  });
+
+  it("stops a parent cycle at the hop cap", async () => {
+    const cyclic = {
+      a: { parentRunId: "b", agent: agent("agent-a") },
+      b: { parentRunId: "a", agent: agent("agent-b") },
+    };
+    const { db, lookups } = fakeDb(cyclic, "run-tree", proxy());
+    const loaded = await loadBudgetEvent(db, "a");
+    expect(loaded?.event.details.leadAgentName).toBeDefined();
+    expect(lookups()).toBeLessThanOrEqual(40);
+  });
+
+  it("stops the walk at a missing row", async () => {
+    const rows = { child: { parentRunId: "gone", agent: agent("child-agent") } };
+    const { db } = fakeDb(rows, "run-tree", proxy());
+    const loaded = await loadBudgetEvent(db, "child");
+    expect(loaded?.event.details.leadAgentName).toBe("child-agent");
+  });
+
+  it("does not walk the tree for a limit other than run-tree", async () => {
+    const { db, lookups } = fakeDb(chain, "run", proxy());
+    const loaded = await loadBudgetEvent(db, "child");
+    expect(loaded?.event.details.leadAgentName).toBeUndefined();
+    expect(lookups()).toBe(1);
+  });
+
+  it("keeps a leadAgentName already in the details", async () => {
+    const { db } = fakeDb(chain, "run-tree", proxy({ leadAgentName: "preset" }));
+    const loaded = await loadBudgetEvent(db, "child");
+    expect(loaded?.event.details.leadAgentName).toBe("preset");
+  });
+
+  it("fills the group name, and the agent budget for a proxy refusal only", async () => {
+    const proxied = await loadBudgetEvent(fakeDb(chain, "day", proxy()).db, "child");
+    expect(proxied?.event.details).toMatchObject({ groupName: "team", agentBudgetUsd: 9 });
+    const dispatch = { source: "dispatch", capUsd: 5, spentUsd: 5, heldUsd: 0, heldRuns: 0 };
+    const dispatched = await loadBudgetEvent(fakeDb(chain, "day", dispatch).db, "child");
+    expect(dispatched?.event.details).toMatchObject({ groupName: "team" });
+    expect(dispatched?.event.details).not.toHaveProperty("agentBudgetUsd");
+  });
+
+  it("returns null when the database throws", async () => {
+    const { db } = fakeDb(chain, "run-tree", proxy(), true);
+    await expect(loadBudgetEvent(db, "child")).resolves.toBeNull();
   });
 });
