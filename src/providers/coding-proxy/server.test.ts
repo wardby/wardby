@@ -405,6 +405,7 @@ describe("coding proxy registry routing", () => {
         repository: "owner/repo",
         cacheImage: null,
         dependencyCache: false,
+        packageAudit: null,
       });
       let upstreamCalls = 0;
       let cancelled: () => void = () => {};

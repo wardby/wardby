@@ -1,4 +1,11 @@
 import { randomUUID } from "node:crypto";
+import {
+  isPackageAuditMode,
+  mergePackageAuditReports,
+  type PackageAuditEntry,
+  type PackageAuditMode,
+  type PackageAuditReport,
+} from "../../coding/registry/audit-mode.js";
 import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
@@ -59,6 +66,15 @@ import { resolveCodingEntry } from "../../core/run-pricing.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT, isImmutableDockerImage } from "../jobs/docker-isolation.js";
 import { normalizeRegistryLockfiles } from "../../coding/registry/lockfiles.js";
 import type { ProxyModelTerms, ProxyProtocol } from "../coding-proxy/types.js";
+import {
+  hostBudgetSentence,
+  loadBudgetEvent,
+  ownerBudgetSentence,
+  proxyRefusalDetails,
+  recordBudgetEvent,
+  type BudgetEventView,
+  type BudgetLimit,
+} from "../../core/budget-events.js";
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
 import type {
   ContinuationOutcome,
@@ -337,6 +353,15 @@ export interface ContainerExecutionStore {
     error: string,
     audit?: CodingFailureAudit,
   ): Promise<void>;
+  /**
+   * Copies the proxy session's first budget refusal (CodingProxySession.budgetRefusal, written by the
+   * proxy, which has no access to RunBudgetEvent) into the run's budget events, once per run, whatever
+   * status the run ends with. A session that never recorded one adds nothing. Optional: without it no
+   * event is written.
+   */
+  recordBudgetRefusal?(runId: string, sessionId: string): Promise<void>;
+  /** The run's recorded budget refusal with names filled in, or null. Optional: without it no event is shown. */
+  budgetEvent?(runId: string): Promise<{ event: BudgetEventView; agentName: string } | null>;
 }
 
 export interface CodingFailureAudit {
@@ -706,6 +731,27 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     }
   }
 
+  async recordBudgetRefusal(runId: string, sessionId: string): Promise<void> {
+    const session = await this.db.codingProxySession.findUnique({
+      where: { id: sessionId },
+      select: { budgetRefusal: true },
+    });
+    // The proxy (a less-trusted role) wrote this: keep only well-formed amounts, model and turn.
+    const refusal = proxyRefusalDetails(session?.budgetRefusal);
+    if (!refusal) return;
+    const existing = await this.db.runBudgetEvent.findFirst({
+      where: { runId, details: { path: ["source"], equals: "proxy" } },
+      select: { id: true },
+    });
+    if (existing) return;
+    const coding = await this.db.codingRun.findUnique({ where: { runId }, select: { budgetLimitedBy: true } });
+    await recordBudgetEvent(this.db, runId, (coding?.budgetLimitedBy ?? "run") as BudgetLimit, refusal);
+  }
+
+  budgetEvent(runId: string): Promise<{ event: BudgetEventView; agentName: string } | null> {
+    return loadBudgetEvent(this.db, runId);
+  }
+
   async terminate(
     runId: string,
     status: "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
@@ -847,11 +893,22 @@ export interface ContainerExecutorOptions {
   repoAccess: RepoAccessGate;
 }
 
-/** A run's deduplicated served packages and refusals (see summarizeRegistryFetches). */
+/** A run's deduplicated served packages and refusals (see summarizeRegistryFetches), and its package audit. */
 export interface RegistryReport {
   packages: Array<{ ecosystem: string; name: string; version: string; acceptedAdvisories?: string[] }>;
   packageRefusals: Array<{ ecosystem: string; name: string; reason: string }>;
+  /** The run's package audit mode (CodingRun.packageAuditMode); absent when it was off. */
+  packageAuditMode?: PackageAuditMode;
+  /** What the registry served only because of it (summarizePackageAudit entries). */
+  packageAudit?: PackageAuditEntry[];
 }
+
+/** The part of a registry report the PR body reads. */
+type LoadedRegistryReport = {
+  packages?: RegistryReport["packages"];
+  packageRefusals?: RegistryReport["packageRefusals"];
+  packageAudit?: PackageAuditReport;
+};
 
 class PreflightError extends Error {}
 
@@ -936,6 +993,7 @@ export class ContainerExecutor implements Executor {
     // Persist the cancellation fence first so a concurrent finisher cannot publish.
     const failure = this.failure("cancelled", { cancelled: true });
     await this.options.store.terminate(runId, "cancelled", failure.error, failure.audit);
+    await this.recordRefusal(runId, run.proxySessionId);
     this.terminal(run, "cancelled", failure.audit);
     if (run.proxySessionId) await this.options.sessions.cancelSession(run.proxySessionId).catch(() => undefined);
     if (run.jobHandle) {
@@ -1085,7 +1143,8 @@ export class ContainerExecutor implements Executor {
         : !spendEnabled && error instanceof PreflightError
           ? "refused"
           : "failed";
-      const failure = outOfBudget ? this.budgetFailure(error) : this.failure(error);
+      await this.recordRefusal(runId, sessionId);
+      const failure = outOfBudget ? await this.budgetFailure(runId, error) : this.failure(error);
       this.emit({
         stage: "stopping",
         runId,
@@ -1103,7 +1162,7 @@ export class ContainerExecutor implements Executor {
         await this.options.vcs.cleanup(workspace).catch(() => undefined);
         await this.options.vcs.notifyContinuationFinished?.(workspace, outOfBudget ? "budget_exhausted" : "failed", {
           agentName: run.agentName,
-          ...(outOfBudget ? { budgetSentence: this.budgetSentence(run) } : {}),
+          ...(outOfBudget ? { budgetSentence: await this.budgetSentence(run) } : {}),
           ...(unreadyService ? { serviceSentence: serviceUnreadySentence([unreadyService]) } : {}),
           ...(protectedPath ? { protectedPathSentence: protectedPathSentence(protectedPath) } : {}),
         });
@@ -1305,7 +1364,8 @@ export class ContainerExecutor implements Executor {
         // The worker usually fails outright when the proxy refuses a model
         // request for budget; the session records that refusal.
         if (await this.outOfBudget(sessionId)) {
-          const failure = this.budgetFailure(`job_${reason}`, { issues: collected?.diagnosticIssues });
+          await this.recordRefusal(run.runId, sessionId);
+          const failure = await this.budgetFailure(run.runId, `job_${reason}`, { issues: collected?.diagnosticIssues });
           await this.options.store.terminate(run.runId, "budget_exhausted", failure.error, failure.audit);
           this.terminal(run, "budget_exhausted", failure.audit);
           outcome = "budget_exhausted";
@@ -1317,6 +1377,7 @@ export class ContainerExecutor implements Executor {
           ? this.providerFailureOf(run, provider, `job_${reason}`, { issues: collected?.diagnosticIssues })
           : this.failure(`job_${reason}`, { issues: collected?.diagnosticIssues });
         providerClass = provider?.class;
+        await this.recordRefusal(run.runId, sessionId);
         await this.options.store.terminate(run.runId, status, failure.error, failure.audit);
         this.terminal(run, status, failure.audit);
         return;
@@ -1329,6 +1390,7 @@ export class ContainerExecutor implements Executor {
       let current = this.requireActive(await this.requireCurrent(run.runId));
       if (current.costUsd > current.budgetUsd || output.outcome === "budget_exhausted") {
         this.emit({ stage: "budget_cutoff", runId: run.runId, jobId: handle.id });
+        await this.recordRefusal(run.runId, sessionId);
         await this.options.store.complete(
           run.runId,
           "budget_exhausted",
@@ -1342,6 +1404,7 @@ export class ContainerExecutor implements Executor {
       if (output.outcome === "no_changes") {
         // Before complete: the terminal hook (a no-change fix round's re-review) reads the refreshed body.
         const description = await this.refreshDescriptionInTime(current, output, existingWorkspace);
+        await this.recordRefusal(run.runId, sessionId);
         await this.options.store.complete(run.runId, "succeeded", this.resultFor(output, current), {
           ...dependencyCacheRecord(output),
           ...description,
@@ -1360,6 +1423,7 @@ export class ContainerExecutor implements Executor {
       current = await this.requireCurrent(run.runId);
       if (current.costUsd > current.budgetUsd) {
         this.emit({ stage: "budget_cutoff", runId: run.runId, jobId: handle.id });
+        await this.recordRefusal(run.runId, sessionId);
         await this.options.store.complete(
           run.runId,
           "budget_exhausted",
@@ -1404,6 +1468,7 @@ export class ContainerExecutor implements Executor {
       // A pushed branch (local repository) is a successful run with no pull
       // request; its branch is recorded on the run for the operator to merge.
       const result = this.resultFor(output, current, finalized.outcome, finalized);
+      await this.recordRefusal(run.runId, sessionId);
       await this.options.store.complete(run.runId, "succeeded", result, {
         ...dependencyCacheRecord(output),
         baseSha: finalized.baseCommit,
@@ -1425,11 +1490,13 @@ export class ContainerExecutor implements Executor {
         // Stopped while its result was collected: the stop already wrote the terminal row.
         containerLog.info({ runId: run.runId }, "coding run was stopped before its result was published");
       } else if (await this.outOfBudget(sessionId)) {
-        const failure = this.budgetFailure(error);
+        await this.recordRefusal(run.runId, sessionId);
+        const failure = await this.budgetFailure(run.runId, error);
         await this.options.store.terminate(run.runId, "budget_exhausted", failure.error, failure.audit);
         this.terminal(run, "budget_exhausted", failure.audit);
         outcome = "budget_exhausted";
       } else {
+        await this.recordRefusal(run.runId, sessionId);
         const failure = this.failure(error);
         await this.options.store.terminate(run.runId, "failed", failure.error, failure.audit);
         this.terminal(run, "failed", failure.audit);
@@ -1445,7 +1512,7 @@ export class ContainerExecutor implements Executor {
         await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, {
           summary: finishedSummary,
           agentName: run.agentName,
-          ...(outcome === "budget_exhausted" ? { budgetSentence: this.budgetSentence(run) } : {}),
+          ...(outcome === "budget_exhausted" ? { budgetSentence: await this.budgetSentence(run) } : {}),
           ...(outcome === "failed" && providerClass ? { providerSentence: providerSentence(providerClass) } : {}),
           ...(outcome === "failed" && protectedPath
             ? { protectedPathSentence: protectedPathSentence(protectedPath) }
@@ -1614,9 +1681,7 @@ export class ContainerExecutor implements Executor {
    * order); refusals are this run's only, since they describe the current
    * state. A fresh run, or a failed listing, reports this run's alone.
    */
-  private async pullRequestRegistryReport(
-    run: ContainerRunSnapshot,
-  ): Promise<{ packages?: RegistryReport["packages"]; packageRefusals?: RegistryReport["packageRefusals"] }> {
+  private async pullRequestRegistryReport(run: ContainerRunSnapshot): Promise<LoadedRegistryReport> {
     const own = await this.loadRegistryReport(run.runId);
     const store = this.options.store;
     if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !store.pullRequestRunIds) return own;
@@ -1632,9 +1697,13 @@ export class ContainerExecutor implements Executor {
     }
     const reports = await Promise.all(earlier.map((id) => this.loadRegistryReport(id)));
     const packages = mergePackages([...reports.map((report) => report.packages ?? []), own.packages ?? []]);
+    // Package audit mode is cumulative like packages: the banner stays on the
+    // pull request once any of its runs had the mode.
+    const packageAudit = mergePackageAuditReports([...reports.map((report) => report.packageAudit), own.packageAudit]);
     return {
       ...(packages.length > 0 ? { packages } : {}),
       ...(own.packageRefusals ? { packageRefusals: own.packageRefusals } : {}),
+      ...(packageAudit ? { packageAudit } : {}),
     };
   }
 
@@ -1761,16 +1830,18 @@ export class ContainerExecutor implements Executor {
   /** The package report is informational: any failure loading it (a
    *  rejection, a synchronous throw, or a malformed result) yields no
    *  package section rather than failing finalization. */
-  private async loadRegistryReport(
-    runId: string,
-  ): Promise<{ packages?: RegistryReport["packages"]; packageRefusals?: RegistryReport["packageRefusals"] }> {
+  private async loadRegistryReport(runId: string): Promise<LoadedRegistryReport> {
     try {
       const report = await this.options.registryReport?.(runId);
       const packages = Array.isArray(report?.packages) ? report.packages : [];
       const packageRefusals = Array.isArray(report?.packageRefusals) ? report.packageRefusals : [];
+      const packageAudit = isPackageAuditMode(report?.packageAuditMode)
+        ? { mode: report.packageAuditMode, entries: Array.isArray(report.packageAudit) ? report.packageAudit : [] }
+        : undefined;
       return {
         ...(packages.length > 0 ? { packages } : {}),
         ...(packageRefusals.length > 0 ? { packageRefusals } : {}),
+        ...(packageAudit ? { packageAudit } : {}),
       };
     } catch {
       return {};
@@ -2111,6 +2182,7 @@ export class ContainerExecutor implements Executor {
     const failure = this.failure(reason);
     await this.options.store.terminate(run.runId, "lost", failure.error, failure.audit);
     this.terminal(run, "lost", failure.audit);
+    await this.recordRefusal(run.runId, run.proxySessionId);
     if (run.proxySessionId) await this.options.sessions.cancelSession(run.proxySessionId).catch(() => undefined);
     if (run.jobHandle) {
       await this.options.jobs.stop(run.jobHandle, reason).catch(() => undefined);
@@ -2128,6 +2200,8 @@ export class ContainerExecutor implements Executor {
   }
 
   private async cleanupTerminal(run: ContainerRunSnapshot): Promise<void> {
+    // A run another path ended (or one recovered after a crash) still gets its refusal; the copy is idempotent.
+    await this.recordRefusal(run.runId, run.proxySessionId);
     if (run.proxySessionId) await this.options.sessions.cancelSession(run.proxySessionId).catch(() => undefined);
     if (run.jobHandle) {
       const status = await this.options.jobs.status(run.jobHandle).catch(() => null);
@@ -2158,7 +2232,7 @@ export class ContainerExecutor implements Executor {
       const protectedPathFailed = run.status === "failed" && run.failureCategory === PROTECTED_PATH_CATEGORY;
       await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, {
         agentName: run.agentName,
-        ...(outcome === "budget_exhausted" ? { budgetSentence: this.budgetSentence(run) } : {}),
+        ...(outcome === "budget_exhausted" ? { budgetSentence: await this.budgetSentence(run) } : {}),
         ...(providerClass ? { providerSentence: providerSentence(providerClass) } : {}),
         ...(unreadyServices ? { serviceSentence: serviceUnreadySentence(unreadyServices) } : {}),
         ...(protectedPathFailed ? { protectedPathSentence: protectedPathSentence(null) } : {}),
@@ -2166,6 +2240,16 @@ export class ContainerExecutor implements Executor {
     }
     await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
     this.emit({ stage: "cleanup", runId: run.runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
+  }
+
+  /**
+   * Records the session's budget refusal on the run, at every ending: a run the proxy refused once may
+   * still finish, fail for another reason, or be stopped. A session with no refusal adds nothing.
+   * Best effort; never throws.
+   */
+  private async recordRefusal(runId: string, sessionId: string | null | undefined): Promise<void> {
+    if (!sessionId) return;
+    await this.options.store.recordBudgetRefusal?.(runId, sessionId).catch(() => undefined);
   }
 
   /** Whether the proxy refused this run's session for budget. Never throws. */
@@ -2207,7 +2291,9 @@ export class ContainerExecutor implements Executor {
   }
 
   /** The host-safe sentence for a run that ran out of budget. */
-  private budgetSentence(run: ContainerRunSnapshot): string {
+  private async budgetSentence(run: ContainerRunSnapshot): Promise<string> {
+    const loaded = await this.options.store.budgetEvent?.(run.runId).catch(() => null);
+    if (loaded) return hostBudgetSentence(loaded.event);
     return budgetSentence({
       runBudgetUsd: run.budgetUsd,
       agentBudgetUsd: run.agentBudgetUsd ?? run.budgetUsd,
@@ -2219,13 +2305,17 @@ export class ContainerExecutor implements Executor {
    * A failure the proxy's budget refusal caused. The failure itself is still
    * logged under its diagnostic id, so the operator keeps the real reason.
    */
-  private budgetFailure(
+  private async budgetFailure(
+    runId: string,
     error: unknown,
     options: { issues?: string[] } = {},
-  ): { error: string; audit: CodingFailureAudit } {
+  ): Promise<{ error: string; audit: CodingFailureAudit }> {
     const logged = this.failure(error, options);
+    const loaded = await this.options.store.budgetEvent?.(runId).catch(() => null);
     return {
-      error: "coding_budget_exhausted",
+      error: loaded
+        ? `coding_budget_exhausted: ${ownerBudgetSentence(loaded.event, loaded.agentName)}`
+        : "coding_budget_exhausted",
       audit: { failureCategory: "budget", diagnosticId: logged.audit.diagnosticId },
     };
   }

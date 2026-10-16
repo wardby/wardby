@@ -19,12 +19,22 @@
  *   (one the run's accepted set waives does not count; malware always does).
  *
  * A refused entry refuses itself and whatever is reachable only through it;
- * everything else is approved, as exact name@version pairs. The work is
+ * everything else is approved, as exact name@version pairs. In package
+ * audit mode every registry entry is a start as well: one the allowlist does
+ * not reach is approved when it passes every other check, marked with its
+ * audit verdict (and, in `full`, a version kept only past non-malware
+ * blocking advisories is approved and marked too). The work is
  * bounded: facts are fetched only for entries reached (so a lockfile of
  * unrelated packages costs nothing upstream), with bounded concurrency and a
  * deadline.
  */
 import { matchRoot } from "../../../coding/registry/allowlist.js";
+import type {
+  AuditAdvisory,
+  AuditRelation,
+  PackageAuditMode,
+  PackageAuditVerdict,
+} from "../../../coding/registry/audit-mode.js";
 import {
   RegistryError,
   type AllowlistEntry,
@@ -35,7 +45,7 @@ import {
   type UpstreamFetch,
   type VersionFact,
 } from "../../../coding/registry/types.js";
-import { splitWaived, versionKey, type AuditedVersion, type WithheldVersions } from "./audit.js";
+import { auditAdvisoryOf, splitWaived, versionKey, type AuditedVersion, type WithheldVersions } from "./audit.js";
 import type { ApprovedVersion, StoredVersionFact } from "./store.js";
 
 export const DEFAULT_PLAN_MAX_ENTRIES = 5000;
@@ -67,6 +77,8 @@ export interface PlanRefusal {
 export interface PlanResult {
   approved: ApprovedVersion[];
   refused: PlanRefusal[];
+  /** Approvals carrying an audit verdict (package audit mode only; 0 otherwise). */
+  audited: number;
 }
 
 export interface PlanFacts {
@@ -91,6 +103,8 @@ export interface PlanInput {
    *  blocking advisories they waive do not refuse a version (see
    *  `isWaived`; malware is never waived). Absent or empty waives nothing. */
   accepted?: ReadonlySet<string>;
+  /** The run's package audit mode (CodingRun.packageAuditMode); absent or null = normal enforcement. */
+  auditMode?: PackageAuditMode | null;
   hostAllowed(url: string): boolean;
   signal: AbortSignal;
   factConcurrency?: number;
@@ -116,6 +130,9 @@ async function withRetry<T>(signal: AbortSignal, read: () => Promise<T>): Promis
     return read();
   }
 }
+
+/** An audited approval's relation and parent (PackageAuditVerdict without advisories). */
+type AuditRelationOf = { relation: AuditRelation; via?: string };
 
 type FactOutcome = { fact: StoredVersionFact } | { refusal: Omit<PlanRefusal, "name" | "version"> };
 
@@ -154,8 +171,27 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
   const edges = new Map<LockfileEntry, LockfileEntry[]>();
   const candidates = new Set<LockfileEntry>();
   const visited = new Set<LockfileEntry>(starts);
+  // Package audit mode: every other registry entry starts too, except an
+  // allowlisted name outside its entry's own range (an owner's explicit
+  // restriction, never widened by audit mode). Visited after the roots'
+  // graph, so facts load in the same bounded layers.
+  const auditStarts = input.auditMode
+    ? lockfile.entries.filter(
+        (entry) =>
+          entry.kind === "registry" &&
+          !starts.has(entry) &&
+          !outsideRootRange(input, adapter.normalizeName(entry.name), entry.version),
+      )
+    : [];
   let layer = [...starts];
-  while (layer.length > 0) {
+  let auditSeeded = false;
+  while (layer.length > 0 || (!auditSeeded && auditStarts.length > 0)) {
+    if (layer.length === 0) {
+      auditSeeded = true;
+      layer = auditStarts.filter((entry) => !visited.has(entry));
+      for (const entry of layer) visited.add(entry);
+      continue;
+    }
     signal.throwIfAborted();
     await loadFacts(input, layer, outcomes);
     const next: LockfileEntry[] = [];
@@ -209,11 +245,14 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
     ),
     signal,
   );
-  // Advisories the run's accepted set waived, per approved name@version.
+  // Advisories the run's accepted set waived, per approved name@version,
+  // and (full mode) the blocking ones served past.
   const waivers = new Map<string, string[]>();
+  const auditAdvisories = new Map<string, AuditAdvisory[]>();
   for (const entry of candidates) {
     const key = versionKey(entry.name, entry.version);
-    const split = splitWaived(withheld.get(key) ?? [], input.accepted);
+    const split = splitWaived(withheld.get(key) ?? [], input.accepted, { auditAll: input.auditMode === "full" });
+    if (split.audited.length > 0) auditAdvisories.set(key, split.audited.map(auditAdvisoryOf));
     if (split.withheld.length > 0) {
       candidates.delete(entry);
       refusals.set(entry, {
@@ -243,19 +282,36 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
     }
   }
 
+  // Package audit mode: every other entry that passed every check is
+  // approved too, marked with how it reached the lockfile.
+  const relations = input.auditMode
+    ? auditRelations(input, approvedEntries, candidates, edges)
+    : new Map<LockfileEntry, AuditRelationOf>();
+
   const approved = new Map<string, ApprovedVersion>();
-  for (const entry of approvedEntries) {
+  const approve = (entry: LockfileEntry, relation: AuditRelationOf | undefined) => {
     const key = versionKey(entry.name, entry.version);
     const outcome = outcomes.get(key);
+    if (!outcome || !("fact" in outcome) || approved.has(key)) return;
     const acceptedAdvisories = waivers.get(key);
-    if (outcome && "fact" in outcome)
-      approved.set(key, {
-        name: entry.name,
-        version: entry.version,
-        integrity: outcome.fact.integrity,
-        ...(acceptedAdvisories ? { acceptedAdvisories } : {}),
-      });
-  }
+    const advisories = auditAdvisories.get(key);
+    const audit: PackageAuditVerdict | undefined = relation
+      ? { ...relation, ...(advisories ? { advisories } : {}) }
+      : advisories
+        ? { relation: "allowed", advisories }
+        : undefined;
+    approved.set(key, {
+      name: entry.name,
+      version: entry.version,
+      integrity: outcome.fact.integrity,
+      ...(acceptedAdvisories ? { acceptedAdvisories } : {}),
+      ...(audit ? { audit } : {}),
+    });
+  };
+  // Approvals through the allowlist first: an exact version approved both
+  // ways is not audited.
+  for (const entry of approvedEntries) approve(entry, undefined);
+  for (const [entry, relation] of relations) approve(entry, relation);
   const refused = new Map<string, PlanRefusal>();
   for (const entry of lockfile.entries) {
     if (entry.kind === "bundled") continue;
@@ -269,7 +325,67 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
   }
   // An entry refused at one place in the tree but approved at another (the
   // same name@version) is approved: approvals are per exact version.
-  return { approved: [...approved.values()], refused: [...refused.values()] };
+  const approvals = [...approved.values()];
+  return {
+    approved: approvals,
+    refused: [...refused.values()],
+    audited: approvals.filter((approval) => approval.audit).length,
+  };
+}
+
+/** Whether `name@version` is an allowlisted name at a version its entry's range excludes. */
+function outsideRootRange(input: PlanInput, name: string, version: string): boolean {
+  const root = matchRoot(input.roots, name);
+  return !!root?.range && !safeSatisfies(input.adapter, version, root.range);
+}
+
+/**
+ * How each candidate the allowlist does not reach came into the lockfile
+ * (package audit mode): `top-level` when a lockfile project declares it,
+ * `transitive` when an audited top-level entry reaches it over verified
+ * edges (`via` its nearest such ancestor, breadth first), otherwise
+ * `unknown`. Best effort: it decides only what a reviewer is shown.
+ */
+function auditRelations(
+  input: PlanInput,
+  approvedEntries: ReadonlySet<LockfileEntry>,
+  candidates: ReadonlySet<LockfileEntry>,
+  edges: ReadonlyMap<LockfileEntry, readonly LockfileEntry[]>,
+): Map<LockfileEntry, AuditRelationOf> {
+  const { lockfile } = input;
+  // An allowlisted name outside its entry's range is never audited in,
+  // even when an audited package declares it.
+  const audited = new Set(
+    [...candidates].filter(
+      (entry) =>
+        !approvedEntries.has(entry) && !outsideRootRange(input, input.adapter.normalizeName(entry.name), entry.version),
+    ),
+  );
+  const relations = new Map<LockfileEntry, AuditRelationOf>();
+  const declared = new Set<LockfileEntry>();
+  for (const project of lockfile.projects)
+    for (const dependency of project.dependencies) {
+      const entry = lockfile.resolve(project.path, dependency.key);
+      if (entry) declared.add(entry);
+    }
+  const queue: LockfileEntry[] = [];
+  for (const entry of audited)
+    if (declared.has(entry)) {
+      relations.set(entry, { relation: "top-level" });
+      queue.push(entry);
+    }
+  const via = new Map<LockfileEntry, string>(queue.map((entry) => [entry, entry.name]));
+  while (queue.length > 0) {
+    const entry = queue.shift()!;
+    for (const child of edges.get(entry) ?? []) {
+      if (via.has(child) || !audited.has(child)) continue;
+      via.set(child, via.get(entry)!);
+      relations.set(child, { relation: "transitive", via: via.get(entry)! });
+      queue.push(child);
+    }
+  }
+  for (const entry of audited) if (!relations.has(entry)) relations.set(entry, { relation: "unknown" });
+  return relations;
 }
 
 function safeSatisfies(adapter: RegistryAdapter, version: string, range: string): boolean {

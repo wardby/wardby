@@ -5,6 +5,7 @@
  * text, token counts, or ids.
  */
 import type { PrismaClient } from "#prisma";
+import { hostBudgetSentence, loadBudgetEvent } from "./budget-events.js";
 
 export interface BudgetFacts {
   /** The run's own budget (a coding run's reservation); falls back to the agent's. */
@@ -20,7 +21,7 @@ const MAX_GROUP_NAME_CHARS = 64;
 const usd = (amount: number): string => `$${amount.toFixed(2)}`;
 
 /** A group name is operator-chosen text; keep it to one short, quote-free line. */
-function groupName(name: string | null | undefined): string | null {
+export function groupName(name: string | null | undefined): string | null {
   const cleaned = (name ?? "").replace(/["`]/g, "").replace(/\s+/g, " ").trim().slice(0, MAX_GROUP_NAME_CHARS);
   return cleaned || null;
 }
@@ -48,10 +49,12 @@ export function budgetSentence(facts: BudgetFacts): string {
  * amounts when they cannot be read. Never throws.
  */
 export async function loadBudgetSentence(
-  db: Pick<PrismaClient, "run">,
+  db: Pick<PrismaClient, "run" | "runBudgetEvent">,
   runId: string,
   status: string,
 ): Promise<string> {
+  const loaded = await loadBudgetEvent(db, runId);
+  if (loaded) return hostBudgetSentence(loaded.event);
   const refused = status === "refused";
   try {
     const row = await db.run.findUnique({

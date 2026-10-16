@@ -4,8 +4,10 @@ import { McpError } from "../errors.js";
 import { agentAccess, requireAgentAccess } from "../auth/access.js";
 import { publicCodingRunResult, sanitizeDependencyCacheReport } from "../../coding/protocol.js";
 import { countPlanRefusals, summarizeRegistryFetches } from "../../coding/registry/report.js";
+import { summarizePackageAudit } from "../../coding/registry/audit-mode.js";
 import { storedServiceLabels } from "../../coding/services/catalog.js";
 import { textResult } from "./text-result.js";
+import { loadBudgetEvents } from "../../core/budget-events.js";
 
 /**
  * Run visibility (resource-sharing grants spec §3.5, A6): a run's output is
@@ -89,6 +91,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
           baseSha: true,
           dependencyCacheResult: true,
           prDescriptionOutcome: true,
+          packageAuditMode: true,
         },
       });
       const localPr = await ctx.db.localPullRequest.findUnique({
@@ -114,6 +117,14 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
             refused: countPlanRefusals(registryFetches),
           }
         : undefined;
+      // Package audit mode, fixed at dispatch: what the registry served only
+      // because of it (empty when nothing was), read only for a run that had it.
+      const packageAuditMode = codingRun?.packageAuditMode ?? null;
+      const packageAudit = packageAuditMode
+        ? summarizePackageAudit(
+            await ctx.db.registryAuditRecord.findMany({ where: { runId: run.id }, orderBy: { createdAt: "asc" } }),
+          ).entries
+        : undefined;
       // A failed coding run's error is only an opaque id; these two say which
       // stage failed and are the key an operator searches the control-plane
       // log for (the real reason is logged there, never persisted). Both are
@@ -127,8 +138,11 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         codingRun?.dependencyCacheResult !== null && codingRun?.dependencyCacheResult !== undefined
           ? sanitizeDependencyCacheReport(codingRun.dependencyCacheResult)
           : undefined;
+      // Well-formed refusals only, with group, lead and agent budget filled as the run error's are.
+      const budgetEvents = await loadBudgetEvents(ctx.db, run.id);
       return textResult({
         ...withOperatorMode(run),
+        ...(budgetEvents.length > 0 ? { budgetEvents } : {}),
         ...(codingResult ? { codingResult } : {}),
         ...(failureCategory ? { failureCategory } : {}),
         ...(diagnosticId ? { diagnosticId } : {}),
@@ -157,6 +171,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
             }
           : {}),
         ...(codingRun ? { packages, packageRefusals, packagePlan } : {}),
+        ...(packageAuditMode ? { packageAuditMode, packageAudit } : {}),
       });
     },
   });

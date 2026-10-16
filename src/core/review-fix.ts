@@ -45,9 +45,11 @@ export const DEFAULT_MAX_FIX_ROUNDS = 2;
 export type ReviewFixDb = DispatchDb &
   Pick<
     PrismaClient,
+    | "runBudgetEvent"
     | "agentRepository"
     | "codingRun"
     | "registryFetch"
+    | "registryAuditRecord"
     | "runHostStatus"
     | "runHostCheck"
     | "agentIssueProject"

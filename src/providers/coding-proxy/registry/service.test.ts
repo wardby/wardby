@@ -11,7 +11,7 @@ import {
 import { npmAdapter } from "../../../coding/registry/npm.js";
 import { pypiAdapter } from "../../../coding/registry/pypi.js";
 import { capabilityHash } from "../proxy.js";
-import { splitWaived, type WithheldAdvisory } from "./audit.js";
+import { auditAdvisoryOf, splitWaived, type WithheldAdvisory } from "./audit.js";
 import { MemoryRegistryStore, type RegistryFetchRecord, type RegistryStore } from "./store.js";
 import { RegistryService } from "./service.js";
 
@@ -59,6 +59,11 @@ const catalog: Record<string, PackageMetadata> = {
   // branch can't be the thing masking a removed guard, because there is no
   // hash check at all.
   noint: meta("noint", { "1.0.0": { ageDays: 10, integrity: null } }),
+  // Not allowlisted, too new to pass the default release age.
+  fresh: meta("fresh", { "1.0.0": { ageDays: 1 } }),
+  // Not allowlisted, with a dependency of its own.
+  parent: meta("parent", { "1.0.0": { ageDays: 10, deps: ["child"] } }),
+  child: meta("child", { "1.0.0": { ageDays: 10 } }),
 };
 
 const fakeAdapter: RegistryAdapter = {
@@ -84,9 +89,13 @@ const fakeAdapter: RegistryAdapter = {
 };
 
 type AdvisoryIndex = {
-  withheld: (version: string, accepted?: ReadonlySet<string>) => readonly string[];
+  withheld: (version: string, accepted?: ReadonlySet<string>, auditAll?: boolean) => readonly string[];
   waived: (version: string, accepted: ReadonlySet<string>) => readonly string[];
   reported: (version: string) => readonly string[];
+  audited?: (
+    version: string,
+    accepted: ReadonlySet<string>,
+  ) => readonly { id: string; severity: string; summary: string }[];
 };
 const NO_ADVISORIES: AdvisoryIndex = { withheld: () => [], waived: () => [], reported: () => [] };
 
@@ -106,6 +115,8 @@ function service(
     allowlist?: Record<string, string[]>;
     audit?: (adapter: unknown, name: string) => Promise<AdvisoryIndex>;
     policy?: unknown;
+    packageAudit?: "audit" | "full" | null;
+    adapter?: RegistryAdapter;
   } = {},
 ) {
   const store = overrides.store ?? new MemoryRegistryStore();
@@ -117,9 +128,10 @@ function service(
     repository: "owner/repo",
     cacheImage: null,
     dependencyCache: false,
+    packageAudit: overrides.packageAudit ?? null,
   });
   const registry = new RegistryService({
-    adapters: new Map([["fake", fakeAdapter]]),
+    adapters: new Map([["fake", overrides.adapter ?? fakeAdapter]]),
     store,
     audit: {
       audit:
@@ -242,11 +254,15 @@ describe("RegistryService", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const store: RegistryStore = {
       findRunByRegistryTokenHash: (hash, now) => inner.findRunByRegistryTokenHash(hash, now),
       isAllowedDependency: (runId, ecosystem, name) => inner.isAllowedDependency(runId, ecosystem, name),
+      findAllowance: (runId, ecosystem, name) => inner.findAllowance(runId, ecosystem, name),
       addAllowances: (runId, ecosystem, names) => inner.addAllowances(runId, ecosystem, names),
+      addAuditedAllowances: (runId, ecosystem, names, via) => inner.addAuditedAllowances(runId, ecosystem, names, via),
+      recordAudit: (record) => inner.recordAudit(record),
       allowedExtras: (runId, ecosystem, name) => inner.allowedExtras(runId, ecosystem, name),
       addExtraAllowances: (runId, ecosystem, dependencies) => inner.addExtraAllowances(runId, ecosystem, dependencies),
       recordFetch: async () => {
@@ -385,6 +401,7 @@ describe("RegistryService", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const registry = new RegistryService({
       adapters: new Map([["fake", fakeAdapter]]),
@@ -438,6 +455,7 @@ describe("RegistryService file-metadata misses", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const registry = new RegistryService({
       adapters: new Map([["fake", adapter]]),
@@ -695,6 +713,7 @@ describe("RegistryService metadata fetch safety and cache", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const registry = new RegistryService({
       adapters: new Map([["fake", adapter]]),
@@ -759,6 +778,7 @@ describe("RegistryService metadata fetch safety and cache", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const registry = new RegistryService({
       adapters: new Map([["npm", npmAdapter]]),
@@ -786,6 +806,7 @@ describe("RegistryService metadata fetch safety and cache", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const registry = new RegistryService({
       adapters: new Map([["npm", npmAdapter]]),
@@ -824,6 +845,7 @@ describe("RegistryService served-byte tally and per-adapter hosts", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const undeclared: RegistryAdapter = {
       ...fakeAdapter,
@@ -895,6 +917,7 @@ describe("RegistryService served-byte tally and per-adapter hosts", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const elsewhere: RegistryAdapter = {
       ...fakeAdapter,
@@ -937,6 +960,7 @@ describe("RegistryService with the PyPI adapter: malformed paths", () => {
         repository: "owner/repo",
         cacheImage: null,
         dependencyCache: false,
+        packageAudit: null,
       });
       const registry = new RegistryService({
         adapters: new Map([["pypi", pypiAdapter]]),
@@ -977,6 +1001,7 @@ describe("RegistryService with the npm adapter: names are case-exact", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const urls: string[] = [];
     const registry = new RegistryService({
@@ -1048,6 +1073,7 @@ describe("RegistryService with the PyPI adapter: release age applies per file", 
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const urls: string[] = [];
     const registry = new RegistryService({
@@ -1144,6 +1170,7 @@ describe("RegistryService with the PyPI adapter: allowlisted extras", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const registry = new RegistryService({
       adapters: new Map([["pypi", pypiAdapter]]),
@@ -1354,6 +1381,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     for (const [token, allowlist] of Object.entries(overrides.otherRuns ?? {})) {
       store.contexts.set(capabilityHash(token), {
@@ -1364,6 +1392,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
         repository: "owner/repo",
         cacheImage: null,
         dependencyCache: false,
+        packageAudit: null,
       });
     }
     const urls: string[] = [];
@@ -1974,6 +2003,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const urls: string[] = [];
     const registry = new RegistryService({
@@ -2011,6 +2041,7 @@ describe("RegistryService graph walk hardening", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const urls: string[] = [];
     const registry = new RegistryService({
@@ -2054,6 +2085,7 @@ describe("RegistryService metadata path dependency names", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const registry = new RegistryService({
       adapters: new Map([["npm", npmAdapter]]),
@@ -2123,6 +2155,7 @@ describe("RegistryService memory: nothing retains a parsed packument, and run st
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const registry = new RegistryService({
       adapters: new Map([["npm", npmAdapter]]),
@@ -2317,6 +2350,7 @@ describe("RegistryService graph walk at scale", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const clock = { ms: NOW.getTime() };
     const counts = { loads: 0 };
@@ -2426,4 +2460,404 @@ describe("RegistryService graph walk at scale", () => {
     expect(scale.counts.loads - before).toBeLessThanOrEqual(2);
     scale.registry.close();
   });
+});
+
+describe("RegistryService package audit mode", () => {
+  /** Fixed blocking advisories per `name@version`, split by audit.ts's own
+   *  splitWaived (malware is never waived or audited). */
+  const advisoryIndex =
+    (byVersion: Record<string, WithheldAdvisory[]>) =>
+    async (_adapter: unknown, name: string): Promise<AdvisoryIndex> => {
+      const of = (version: string) => byVersion[`${name}@${version}`] ?? [];
+      return {
+        withheld: (version, accepted, auditAll) =>
+          splitWaived(of(version), accepted, { auditAll }).withheld.map(({ id }) => id),
+        waived: (version, accepted) => splitWaived(of(version), accepted).waived.map(({ id }) => id),
+        reported: () => [],
+        audited: (version, accepted) =>
+          splitWaived(of(version), accepted, { auditAll: true }).audited.map(auditAdvisoryOf),
+      };
+    };
+  const high: WithheldAdvisory = { id: "GHSA-high", malware: false, aliases: [], severity: "HIGH", summary: "bad" };
+  const drain = async (response: Awaited<ReturnType<RegistryService["handle"]>>) => {
+    if (!("stream" in response)) throw new Error(`expected a stream, got ${response.status}`);
+    return new Uint8Array(await new Response(response.stream).arrayBuffer());
+  };
+  /** The fake adapter, counting the metadata it reads: a graph walk reads the roots'. */
+  const counted = () => {
+    const reads: string[] = [];
+    const adapter: RegistryAdapter = {
+      ...fakeAdapter,
+      fetchMetadata: async (name, ...rest) => {
+        reads.push(name);
+        return fakeAdapter.fetchMetadata(name, ...rest);
+      },
+    };
+    return { adapter, reads };
+  };
+
+  it("audit: serves a package outside the allowlist without a walk and records it top-level", async () => {
+    const { adapter, reads } = counted();
+    const { registry, store } = service({ packageAudit: "audit", adapter });
+    await expect(registry.handle(request("stranger"))).resolves.toMatchObject({ status: 200 });
+    expect(await drain(await registry.handle(request("dl/stranger/1.0.0")))).toEqual(tarball);
+    expect(store.audits).toEqual([
+      {
+        runId: "run-1",
+        ecosystem: "fake",
+        name: "stranger",
+        version: "1.0.0",
+        relation: "top-level",
+        sizeBytes: tarball.byteLength,
+        advisories: [],
+        createdAt: expect.any(Date),
+      },
+    ]);
+    expect(store.fetches.some((fetch) => fetch.outcome === "refused")).toBe(false);
+    // Only stranger's own metadata was read: no walk from the allowlist root.
+    expect(reads).not.toContain("app");
+  });
+
+  it("audit: a dependency of an audited package is allowed via it and recorded transitive", async () => {
+    const { registry, store } = service({ packageAudit: "audit" });
+    await expect(registry.handle(request("parent"))).resolves.toMatchObject({ status: 200 });
+    expect(await store.findAllowance("run-1", "fake", "child")).toEqual({ auditedVia: "parent" });
+    await expect(registry.handle(request("child"))).resolves.toMatchObject({ status: 200 });
+    await drain(await registry.handle(request("dl/child/1.0.0")));
+    expect(store.audits).toMatchObject([{ name: "child", relation: "transitive", via: "parent" }]);
+  });
+
+  it("audit: a download with no metadata first is recorded unknown, without a walk", async () => {
+    const { adapter, reads } = counted();
+    const { registry, store } = service({ packageAudit: "audit", adapter });
+    await drain(await registry.handle(request("dl/stranger/1.0.0")));
+    expect(store.audits).toMatchObject([{ name: "stranger", relation: "unknown" }]);
+    expect(store.audits[0]).not.toHaveProperty("via");
+    expect(reads).toEqual(["stranger"]);
+  });
+
+  it("audit: a HIGH advisory still withholds the version unless the policy accepts it", async () => {
+    const audit = advisoryIndex({ "stranger@1.0.0": [high] });
+    const refused = service({ packageAudit: "audit", audit });
+    const response = await refused.registry.handle(request("dl/stranger/1.0.0"));
+    expect(response).toMatchObject({ status: 404 });
+    expect("body" in response && response.body).toContain("wardby_version_filtered");
+    expect(refused.store.audits).toEqual([]);
+
+    const accepted = service({ packageAudit: "audit", audit, policy: { acceptedAdvisories: ["GHSA-high"] } });
+    await drain(await accepted.registry.handle(request("dl/stranger/1.0.0")));
+    expect(accepted.store.fetches.at(-1)).toMatchObject({
+      outcome: "served",
+      reason: "accepted advisories: GHSA-high",
+    });
+    expect(accepted.store.audits).toMatchObject([{ name: "stranger", relation: "unknown", advisories: [] }]);
+  });
+
+  it("full: serves past a HIGH advisory and records it, on an audited and on an allowlisted package", async () => {
+    const audit = advisoryIndex({ "stranger@1.0.0": [high], "app@1.0.0": [high] });
+    const { registry, store } = service({ packageAudit: "full", audit });
+    await drain(await registry.handle(request("dl/stranger/1.0.0")));
+    await drain(await registry.handle(request("dl/app/1.0.0")));
+    expect(store.audits).toMatchObject([
+      {
+        name: "stranger",
+        relation: "unknown",
+        advisories: [{ id: "GHSA-high", severity: "HIGH", summary: "bad" }],
+      },
+      {
+        name: "app",
+        relation: "allowed",
+        advisories: [{ id: "GHSA-high", severity: "HIGH", summary: "bad" }],
+      },
+    ]);
+    // The served rows themselves carry no waiver reason: full mode is not an accepted advisory.
+    expect(store.fetches.filter((fetch) => fetch.outcome === "served").map((fetch) => fetch.reason)).toEqual([
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it("never serves malware, in any mode, on an audited or an allowlisted package", async () => {
+    const flagged: WithheldAdvisory = { id: "GHSA-mal", malware: true, aliases: [] };
+    const aliased: WithheldAdvisory = { id: "GHSA-mal2", malware: false, aliases: ["MAL-2026-1"] };
+    for (const packageAudit of [null, "audit", "full"] as const)
+      for (const malware of [flagged, aliased]) {
+        const audit = advisoryIndex({ "stranger@1.0.0": [malware], "app@1.0.0": [malware] });
+        const { registry, store } = service({ packageAudit, audit, policy: { acceptedAdvisories: [malware.id] } });
+        for (const name of ["stranger", "app"]) {
+          const response = await registry.handle(request(`dl/${name}/1.0.0`));
+          expect(response, `${packageAudit} ${name} ${malware.id}`).not.toHaveProperty("stream");
+          expect(response.status).toBeGreaterThanOrEqual(400);
+        }
+        expect(store.fetches.some((fetch) => fetch.outcome === "served")).toBe(false);
+        expect(store.audits).toEqual([]);
+      }
+  });
+
+  it("enforces the release age in every mode", async () => {
+    for (const packageAudit of [null, "audit", "full"] as const) {
+      const { registry, store } = service({ packageAudit });
+      await expect(registry.handle(request("dl/app/2.0.0"))).resolves.toMatchObject({ status: 404 });
+      if (packageAudit) {
+        await expect(registry.handle(request("fresh"))).resolves.toMatchObject({ status: 404 });
+        await expect(registry.handle(request("dl/fresh/1.0.0"))).resolves.toMatchObject({ status: 404 });
+      }
+      expect(store.audits).toEqual([]);
+    }
+  });
+
+  it("leaves normal enforcement unchanged when the mode is off", async () => {
+    const { registry, store } = service({ packageAudit: null });
+    const response = await registry.handle(request("stranger"));
+    expect(response).toMatchObject({ status: 403 });
+    expect("body" in response && response.body).toContain("wardby_package_not_allowed");
+    expect(store.audits).toEqual([]);
+  });
+
+  it("records nothing for a package allowed through the allowlist graph in an audit-mode run", async () => {
+    const { registry, store } = service({ packageAudit: "audit" });
+    await expect(registry.handle(request("app"))).resolves.toMatchObject({ status: 200 });
+    await drain(await registry.handle(request("dl/dep/1.0.0")));
+    await drain(await registry.handle(request("dl/app/1.0.0")));
+    expect(store.fetches.filter((fetch) => fetch.outcome === "served")).toHaveLength(2);
+    expect(store.audits).toEqual([]);
+  });
+
+  it("records nothing for HEAD", async () => {
+    const { registry, store } = service({ packageAudit: "audit" });
+    await expect(registry.handle({ ...request("dl/stranger/1.0.0"), method: "HEAD" })).resolves.toMatchObject({
+      status: 200,
+    });
+    expect(store.audits).toEqual([]);
+  });
+
+  it("errors the stream when the audit record cannot be written (never installed unrecorded)", async () => {
+    class FailingAudit extends MemoryRegistryStore {
+      override async recordAudit(): Promise<void> {
+        throw new Error("simulated database error");
+      }
+    }
+    const { registry } = service({ packageAudit: "audit", store: new FailingAudit() });
+    const response = await registry.handle(request("dl/stranger/1.0.0"));
+    if (!("stream" in response)) throw new Error("expected a stream");
+    await expect(new Response(response.stream).arrayBuffer()).rejects.toThrow();
+  });
+});
+
+describe("RegistryService package audit mode with the PyPI adapter", () => {
+  const body = new TextEncoder().encode("wheel bytes");
+  const sha256 = createHash("sha256").update(body).digest("hex");
+  const wheel = (name: string) => `${name.replace(/-/g, "_")}-1.0-py3-none-any.whl`;
+
+  function auditService() {
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { pypi: ["app"] },
+      policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
+      packageAudit: "audit",
+    });
+    const registry = new RegistryService({
+      adapters: new Map([["pypi", pypiAdapter]]),
+      store,
+      audit: { audit: async () => NO_ADVISORIES },
+      upstream: async (url) => {
+        const index = url.match(/^https:\/\/pypi\.org\/simple\/([^/]+)\/$/);
+        if (index)
+          return Response.json({
+            name: index[1],
+            files: [
+              {
+                filename: wheel(index[1]),
+                url: `https://files.pythonhosted.org/packages/xx/${wheel(index[1])}`,
+                hashes: { sha256 },
+                "upload-time": new Date(NOW.getTime() - 100 * DAY).toISOString(),
+                size: body.byteLength,
+                "core-metadata": true,
+              },
+            ],
+          });
+        if (url.endsWith(".metadata")) return new Response("Name: stranger\nRequires-Dist: werkzeug>=3\n");
+        return new Response(body);
+      },
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 20, idleTimeoutMs: 1_000 },
+      now: () => NOW,
+    });
+    const get = async (subpath: string) => {
+      const response = await registry.handle({ ...request(subpath), ecosystem: "pypi" });
+      if ("stream" in response) await new Response(response.stream).arrayBuffer();
+      return response;
+    };
+    return { get, store };
+  }
+
+  it("serves a wheel outside the allowlist, records it top-level, and allows its Requires-Dist via it", async () => {
+    const { get, store } = auditService();
+    await expect(get("simple/stranger/")).resolves.toMatchObject({ status: 200 });
+    await expect(get(`files/stranger/${wheel("stranger")}.metadata`)).resolves.toMatchObject({ status: 200 });
+    await expect(get(`files/stranger/${wheel("stranger")}`)).resolves.toMatchObject({ status: 200 });
+    expect(store.audits).toMatchObject([
+      { ecosystem: "pypi", name: "stranger", version: "1.0", relation: "top-level" },
+    ]);
+    expect(await store.findAllowance("run-1", "pypi", "werkzeug")).toEqual({ auditedVia: "stranger" });
+    await expect(get("simple/werkzeug/")).resolves.toMatchObject({ status: 200 });
+    await expect(get(`files/werkzeug/${wheel("werkzeug")}`)).resolves.toMatchObject({ status: 200 });
+    expect(store.audits.at(-1)).toMatchObject({ name: "werkzeug", relation: "transitive", via: "stranger" });
+  });
+});
+
+describe("RegistryService: an allowlist entry's own range holds in every package audit mode", () => {
+  const old = new Date(NOW.getTime() - 30 * DAY).toISOString();
+  const npmBody = new TextEncoder().encode("npm bytes");
+  const npmIntegrity = `sha512-${createHash("sha512").update(npmBody).digest("base64")}`;
+  const wheelBody = new TextEncoder().encode("wheel bytes");
+  const wheelSha = createHash("sha256").update(wheelBody).digest("hex");
+  const pypiWheel = (version: string) => `foo-${version}-py3-none-any.whl`;
+
+  function rangedService(ecosystem: "npm" | "pypi", packageAudit: "audit" | "full" | null) {
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: ecosystem === "npm" ? { npm: ["foo@^1"] } : { pypi: ["foo>=1,<2"] },
+      policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
+      packageAudit,
+    });
+    const registry = new RegistryService({
+      adapters: new Map(ecosystem === "npm" ? [["npm", npmAdapter]] : [["pypi", pypiAdapter]]),
+      store,
+      audit: { audit: async () => NO_ADVISORIES },
+      upstream: async (url) => {
+        if (url === "https://registry.npmjs.org/foo")
+          return Response.json({
+            name: "foo",
+            "dist-tags": { latest: "2.0.0" },
+            time: { "1.0.0": old, "2.0.0": old },
+            versions: Object.fromEntries(
+              ["1.0.0", "2.0.0"].map((version) => [
+                version,
+                {
+                  name: "foo",
+                  version,
+                  dist: { tarball: `https://registry.npmjs.org/foo/-/foo-${version}.tgz`, integrity: npmIntegrity },
+                },
+              ]),
+            ),
+          });
+        // bar is outside the allowlist and declares foo outside the entry's range.
+        if (url === "https://registry.npmjs.org/bar")
+          return Response.json({
+            name: "bar",
+            "dist-tags": { latest: "1.0.0" },
+            time: { "1.0.0": old },
+            versions: {
+              "1.0.0": {
+                name: "bar",
+                version: "1.0.0",
+                dependencies: { foo: "^2.0.0" },
+                dist: { tarball: "https://registry.npmjs.org/bar/-/bar-1.0.0.tgz", integrity: npmIntegrity },
+              },
+            },
+          });
+        if (url === "https://pypi.org/simple/bar/")
+          return Response.json({
+            name: "bar",
+            files: [
+              {
+                filename: "bar-1.0-py3-none-any.whl",
+                url: "https://files.pythonhosted.org/packages/xx/bar-1.0-py3-none-any.whl",
+                hashes: { sha256: wheelSha },
+                "upload-time": old,
+                size: wheelBody.byteLength,
+                "core-metadata": true,
+              },
+            ],
+          });
+        if (url.endsWith("bar-1.0-py3-none-any.whl.metadata"))
+          return new Response("Name: bar\nRequires-Dist: foo>=2\n");
+        if (url === "https://pypi.org/simple/foo/")
+          return Response.json({
+            name: "foo",
+            files: ["1.0", "2.0"].map((version) => ({
+              filename: pypiWheel(version),
+              url: `https://files.pythonhosted.org/packages/xx/${pypiWheel(version)}`,
+              hashes: { sha256: wheelSha },
+              "upload-time": old,
+              size: wheelBody.byteLength,
+            })),
+          });
+        return new Response(ecosystem === "npm" ? npmBody : wheelBody);
+      },
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 20, idleTimeoutMs: 1_000 },
+      now: () => NOW,
+    });
+    const get = (subpath: string) => registry.handle({ ...request(subpath), ecosystem });
+    return { get, store };
+  }
+
+  for (const packageAudit of ["audit", "full"] as const) {
+    it(`npm: an audited package declaring foo@^2 does not widen foo@^1 (${packageAudit})`, async () => {
+      const { get, store } = rangedService("npm", packageAudit);
+      await expect(get("bar")).resolves.toMatchObject({ status: 200 });
+      const metadata = await get("foo");
+      if (!("body" in metadata)) throw new Error("expected a body");
+      expect(Object.keys((JSON.parse(metadata.body) as { versions: object }).versions)).toEqual(["1.0.0"]);
+      const download = await get("-/tarball/foo/2.0.0");
+      expect(download).toMatchObject({ status: 404 });
+      expect("body" in download && download.body).toContain("wardby_version_filtered");
+      expect(store.audits).toEqual([]);
+    });
+
+    it(`pypi: an audited package requiring foo>=2 does not widen foo>=1,<2 (${packageAudit})`, async () => {
+      const { get, store } = rangedService("pypi", packageAudit);
+      await expect(get("simple/bar/")).resolves.toMatchObject({ status: 200 });
+      const file = await get("files/bar/bar-1.0-py3-none-any.whl.metadata");
+      if ("stream" in file) await new Response(file.stream).text();
+      expect(store.audits).toMatchObject([{ name: "bar", relation: "top-level" }]);
+      const index = await get("simple/foo/");
+      if (!("body" in index)) throw new Error("expected a body");
+      expect((JSON.parse(index.body) as { files: { filename: string }[] }).files.map((f) => f.filename)).toEqual([
+        pypiWheel("1.0"),
+      ]);
+      const download = await get(`files/foo/${pypiWheel("2.0")}`);
+      expect(download).toMatchObject({ status: 404 });
+      expect("body" in download && download.body).toContain("wardby_version_filtered");
+      expect(store.audits.map((a) => a.name)).toEqual(["bar"]);
+    });
+  }
+
+  for (const packageAudit of [null, "audit", "full"] as const) {
+    it(`npm foo@^1 in mode ${packageAudit}: hides 2.0.0 from metadata and refuses its download`, async () => {
+      const { get, store } = rangedService("npm", packageAudit);
+      const metadata = await get("foo");
+      if (!("body" in metadata)) throw new Error("expected a body");
+      expect(Object.keys((JSON.parse(metadata.body) as { versions: object }).versions)).toEqual(["1.0.0"]);
+      const download = await get("-/tarball/foo/2.0.0");
+      expect(download).toMatchObject({ status: 404 });
+      expect("body" in download && download.body).toContain("wardby_version_filtered");
+      expect(store.audits).toEqual([]);
+    });
+
+    it(`pypi foo>=1,<2 in mode ${packageAudit}: hides 2.0 from the index and refuses its wheel`, async () => {
+      const { get, store } = rangedService("pypi", packageAudit);
+      const index = await get("simple/foo/");
+      if (!("body" in index)) throw new Error("expected a body");
+      expect((JSON.parse(index.body) as { files: { filename: string }[] }).files.map((f) => f.filename)).toEqual([
+        pypiWheel("1.0"),
+      ]);
+      const download = await get(`files/foo/${pypiWheel("2.0")}`);
+      expect(download).toMatchObject({ status: 404 });
+      expect("body" in download && download.body).toContain("wardby_version_filtered");
+      expect(store.audits).toEqual([]);
+    });
+  }
 });

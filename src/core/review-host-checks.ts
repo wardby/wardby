@@ -14,7 +14,7 @@ const log = logger.child({ module: "review-host-checks" });
  * check's Re-run button still works. Never throws.
  */
 export async function closeOpenHostCheck(
-  db: Pick<PrismaClient, "runHostCheck" | "run">,
+  db: Pick<PrismaClient, "runHostCheck" | "run" | "runBudgetEvent">,
   run: Pick<Run, "id" | "status">,
   hosts: ReviewHostRegistry | undefined,
 ): Promise<void> {

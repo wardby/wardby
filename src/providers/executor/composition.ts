@@ -9,6 +9,7 @@ import {
   loadProviderConfig,
   type ProviderConfig,
 } from "../../config/providers.js";
+import { summarizePackageAudit } from "../../coding/registry/audit-mode.js";
 import { summarizeRegistryFetches } from "../../coding/registry/report.js";
 import { linkedIssueReader } from "./linked-issue-reader.js";
 import { drainCodingQueue } from "../../core/coding-queue.js";
@@ -209,7 +210,15 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     issueUrl: (provider, key) => (provider === "jira" ? issueTrackers.jira?.issueUrl(key) : undefined),
     registryReport: async (runId) => {
       const rows = await options.db.registryFetch.findMany({ where: { runId }, orderBy: { createdAt: "asc" } });
-      return summarizeRegistryFetches(rows);
+      const coding = await options.db.codingRun.findUnique({ where: { runId }, select: { packageAuditMode: true } });
+      const packageAuditMode = coding?.packageAuditMode ?? null;
+      if (!packageAuditMode) return summarizeRegistryFetches(rows);
+      const audits = await options.db.registryAuditRecord.findMany({ where: { runId }, orderBy: { createdAt: "asc" } });
+      return {
+        ...summarizeRegistryFetches(rows),
+        packageAuditMode,
+        packageAudit: summarizePackageAudit(audits).entries,
+      };
     },
     onCodingRunTerminal: reReviewOnCodingRunTerminal((): ReReviewDeps => ({
       db: options.db,

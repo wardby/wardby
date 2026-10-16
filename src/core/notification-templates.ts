@@ -4,6 +4,7 @@
  * (titles, agent names, reasons) is escaped so it cannot become a link or a
  * mention; only canonical tracker/host URLs are formatted as links.
  */
+import { packageAuditStatusText } from "../coding/registry/audit-mode.js";
 import { packageRefusalWording } from "../coding/registry/refusal-wording.js";
 import type { ThreadSubject, WorkflowPayload } from "./workflow-events.js";
 
@@ -53,6 +54,9 @@ export function nextStatus(prev: ThreadStatus | null, p: WorkflowPayload): Threa
       return "blocked ⛔";
     case "run_failed":
       return "failed ❌";
+    case "packages_audited":
+      // A report about the run, not a step in its workflow.
+      return prev ?? "picked up";
   }
 }
 
@@ -110,6 +114,9 @@ export function renderEvent(p: WorkflowPayload, spend: string | null): { text: s
     case "run_blocked":
       line = packageRefusalWording(p.packageRefusals, { slack: true });
       break;
+    case "packages_audited":
+      line = packageAuditStatusText(p.mode, p, true);
+      break;
     case "run_failed": {
       const who = `*${escapeMrkdwn(p.agentName)}*`;
       line =
@@ -138,6 +145,7 @@ export function senderName(p: WorkflowPayload): string {
     case "run_blocked":
     case "run_failed":
     case "review_posted":
+    case "packages_audited":
       return p.agentName;
     default:
       return "wardby";

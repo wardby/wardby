@@ -167,6 +167,7 @@ export class PrismaGatewayLedger {
         outputTokens: usage.outputTokens,
         cachedInputTokens: usage.cachedInputTokens,
         cacheWriteTokens: usage.cacheWriteTokens,
+        costEstimated: false,
         completedAt: new Date(),
       },
     });
@@ -180,17 +181,36 @@ export class PrismaGatewayLedger {
     });
   }
 
-  /** The outcome is unknown (the connection broke mid-call): the reservation stays held. */
-  async markUncertain(sessionId: string, callId: string): Promise<void> {
+  /**
+   * The outcome is unknown (the connection broke mid-call). Without an estimate the
+   * reservation stays held; with one, the call counts at the estimate instead.
+   */
+  async markUncertain(sessionId: string, callId: string, estimate?: SettledUsage): Promise<void> {
     await this.db.nativeGatewayCall.updateMany({
       where: { sessionId, callId, status: "reserved" },
-      data: { status: "uncertain" },
+      data: {
+        status: "uncertain",
+        ...(estimate
+          ? {
+              actualCostUsd: estimate.costUsd,
+              inputTokens: estimate.inputTokens,
+              outputTokens: estimate.outputTokens,
+              cachedInputTokens: estimate.cachedInputTokens,
+              cacheWriteTokens: estimate.cacheWriteTokens,
+              costEstimated: true,
+            }
+          : {}),
+      },
     });
   }
 
   async totals(sessionId: string): Promise<GatewayTotals> {
     const completed = await this.db.nativeGatewayCall.aggregate({
-      where: { sessionId, status: "completed", method: "llm.stream" },
+      where: {
+        sessionId,
+        method: "llm.stream",
+        OR: [{ status: "completed" }, { status: "uncertain", costEstimated: true }],
+      },
       _sum: {
         inputTokens: true,
         outputTokens: true,
@@ -276,6 +296,7 @@ async function heldUsd(db: Pick<PrismaClient, "$queryRaw">, sessionId: string): 
     SELECT COALESCE(SUM(
       CASE
         WHEN "status" = 'completed' THEN COALESCE("actualCostUsd", 0)
+        WHEN "status" = 'uncertain' AND "costEstimated" THEN COALESCE("actualCostUsd", 0)
         WHEN "status" IN ('reserved', 'uncertain') THEN COALESCE("reservationUsd", 0)
         ELSE 0
       END

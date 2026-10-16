@@ -9,6 +9,7 @@ import {
   composeCodingTask,
 } from "../coding/protocol.js";
 import { assertCodingProvider, assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
+import { isPackageAuditActive } from "../coding/registry/audit-mode.js";
 import { ModelUnavailableError, entryOf, type ResolvedCatalogEntry } from "../providers/llm/catalog-types.js";
 import { parseAllowedServiceNames, workerServices, type ResolvedCodingService } from "../coding/services/catalog.js";
 import {
@@ -26,7 +27,12 @@ import {
   serviceRefusal,
 } from "../coding/services/wording.js";
 import { attributeRun, type AttributionIntent } from "./attribution.js";
-import { effectiveBudgetForRun, MIN_RESERVATION_USD, type BudgetConstraint } from "./budget-groups.js";
+import {
+  effectiveBudgetForRun,
+  MIN_RESERVATION_USD,
+  type BudgetConstraint,
+  type EffectiveBudgetResult,
+} from "./budget-groups.js";
 import { DEFAULT_KNOWLEDGE_BUNDLE_PATH } from "../knowledge/concept.js";
 import { KNOWLEDGE_INDEX_READ_MAX_BYTES, knowledgeSection, type KnowledgeNoteInput } from "../knowledge/note.js";
 import { logger } from "./logger.js";
@@ -266,6 +272,15 @@ export function budgetExhaustedError(constraint: BudgetConstraint): string {
  */
 const GROUP_DISPATCH_LOCK_SQL = 'LOCK TABLE "BudgetGroup" IN SHARE ROW EXCLUSIVE MODE';
 
+interface CodingBudgetReservation {
+  budgetUsd: number;
+  /** The group period or run tree that held the reservation below the agent's own budget. */
+  limitedBy?: BudgetConstraint;
+  refusal?: string;
+  /** What a refusal is recorded from. */
+  refusalDetail?: { limit: BudgetConstraint; detail: NonNullable<EffectiveBudgetResult["exhaustedDetail"]> };
+}
+
 /**
  * A coding run's budget reservation: the requested ceiling (override or the
  * agent's budgetUsd) tightened by its budget group and run tree, where every
@@ -277,15 +292,21 @@ async function reserveCodingBudget(
   agent: DispatchAgent,
   now: Date,
   options: DispatchRunOptions,
-): Promise<{ budgetUsd: number; refusal?: string }> {
+): Promise<CodingBudgetReservation> {
   const effective = await effectiveBudgetForRun(tx, agent, now, options.parentRunId);
   const requested = options.budgetUsdOverride ?? Number(agent.budgetUsd);
   const budgetUsd =
     Math.floor(Math.min(requested, effective.effectiveBudgetUsd) / MIN_RESERVATION_USD) * MIN_RESERVATION_USD;
   if (budgetUsd < MIN_RESERVATION_USD && effective.exhaustedBy) {
-    return { budgetUsd: 0, refusal: budgetExhaustedError(effective.exhaustedBy) };
+    return {
+      budgetUsd: 0,
+      refusal: budgetExhaustedError(effective.exhaustedBy),
+      ...(effective.exhaustedDetail
+        ? { refusalDetail: { limit: effective.exhaustedBy, detail: effective.exhaustedDetail } }
+        : {}),
+    };
   }
-  return { budgetUsd };
+  return { budgetUsd, ...(effective.limitedBy ? { limitedBy: effective.limitedBy } : {}) };
 }
 
 /**
@@ -670,7 +691,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
         // at dispatch (E-01): the container only ever checks the run's own
         // reservation. A native run computes its effective budget in
         // executeRun's load step instead.
-        let codingBudget: { budgetUsd: number; refusal?: string } | undefined;
+        let codingBudget: CodingBudgetReservation | undefined;
         let codingEntry: ResolvedCatalogEntry | undefined;
         let modelFailure: string | undefined;
         let services: ResolvedCodingService[] = [];
@@ -745,6 +766,14 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           },
         });
 
+        if (refusal && codingBudget?.refusalDetail && refusal === codingBudget.refusal) {
+          const { limit, detail } = codingBudget.refusalDetail;
+          // Group and lead names are filled at read time.
+          await tx.runBudgetEvent.create({
+            data: { runId: run.id, kind: "refused", limit, details: { source: "dispatch", ...detail } },
+          });
+        }
+
         if (options.afterPersist) await options.afterPersist(tx, run);
         const attributed = await attributeRun(
           tx,
@@ -810,9 +839,11 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           const traced =
             agent.codingProfile.debugTraceUntil != null &&
             now.getTime() < agent.codingProfile.debugTraceUntil.getTime();
+          const { packageAuditMode, packageAuditUntil } = agent.codingProfile;
           await tx.codingRun.create({
             data: {
               runId: run.id,
+              budgetLimitedBy: codingBudget.limitedBy ?? null,
               issueProvider: attributed?.provider ?? null,
               issueKey: attributed?.key ?? null,
               task: input.task,
@@ -840,6 +871,11 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               // Fixed here so a run's tracing never changes mid-run.
               debugTrace: traced,
               debugTraceMaxMb: traced ? agent.codingProfile.debugTraceMaxMb : null,
+              // Fixed here too: a run keeps the mode its dispatch saw for its
+              // whole life, however the window moves afterwards.
+              packageAuditMode: isPackageAuditActive(packageAuditMode, packageAuditUntil, now)
+                ? packageAuditMode
+                : null,
               services,
             },
           });

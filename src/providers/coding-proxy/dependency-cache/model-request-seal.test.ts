@@ -74,6 +74,7 @@ async function setup(options: { sealOnModel?: boolean; cacheOff?: boolean } = {}
     repository: "owner/repo",
     cacheImage: "worker:1",
     dependencyCache: !options.cacheOff,
+    packageAudit: null,
   });
   registry.cacheSessions.set("run-1", { lockHashes: [LOCK], sealedAt: null, createdAt: new Date() });
   if (options.cacheOff) store.cacheOff.add("run-1");

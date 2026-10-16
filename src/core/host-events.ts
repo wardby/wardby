@@ -48,6 +48,7 @@ const HOST_NAMES: Record<HostEvent["provider"], string> = { github: "GitHub", lo
 
 export type HostEventDb = Pick<
   PrismaClient,
+  | "runBudgetEvent"
   | "agentRepository"
   | "deferredReview"
   | "agent"
@@ -56,6 +57,7 @@ export type HostEventDb = Pick<
   | "runHostStatus"
   | "codingRun"
   | "registryFetch"
+  | "registryAuditRecord"
   | "task"
   | "webhook"
   | "budgetGroup"

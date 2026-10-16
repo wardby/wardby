@@ -7,11 +7,11 @@ status: stable
 generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-15T10:20:14.397Z }
 sources:
   - id: admission
-    url: https://github.com/wardby/wardby/blob/9c0f910f919dec4f1a2149bae78612cda41f6007/src/core/runner.ts#L1033-L1051
+    url: https://github.com/wardby/wardby/blob/0cd83fece6e5dafbb229aee4c293953e354cb42d/src/core/runner.ts#L1053-L1071
   - id: wait
-    url: https://github.com/wardby/wardby/blob/9c0f910f919dec4f1a2149bae78612cda41f6007/src/core/runner.ts#L1064-L1087
+    url: https://github.com/wardby/wardby/blob/0cd83fece6e5dafbb229aee4c293953e354cb42d/src/core/runner.ts#L1080-L1103
   - id: persist
-    url: https://github.com/wardby/wardby/blob/9c0f910f919dec4f1a2149bae78612cda41f6007/src/core/runner.ts#L1140-L1147
+    url: https://github.com/wardby/wardby/blob/0cd83fece6e5dafbb229aee4c293953e354cb42d/src/core/runner.ts#L1157-L1164
 wardby:
   schema: 1
   roles: [builder, reviewer]
@@ -20,23 +20,23 @@ wardby:
     - id: admission
       repo: github:wardby/wardby
       path: src/core/runner.ts
-      lines: [1033, 1051]
+      lines: [1053, 1071]
       symbol: createNativeRunTools
-      sha: 9c0f910f919dec4f1a2149bae78612cda41f6007
-      spanHash: sha256:24aa5858bb84f9930463cef67a2eebc9b1a331c55f2a38a31182bc874aa787dd
+      sha: 0cd83fece6e5dafbb229aee4c293953e354cb42d
+      spanHash: sha256:3b01bdf1c2104b1ce1256bff22b131b94943ce8fae5ff755da9b1ecabb225734
     - id: wait
       repo: github:wardby/wardby
       path: src/core/runner.ts
-      lines: [1064, 1087]
+      lines: [1080, 1103]
       symbol: createNativeRunTools
-      sha: 9c0f910f919dec4f1a2149bae78612cda41f6007
-      spanHash: sha256:0d807898cdcc3348b5509500c2beb2179fb6e755d2a58b12adfaf08ea28d7ee8
+      sha: 0cd83fece6e5dafbb229aee4c293953e354cb42d
+      spanHash: sha256:095375a8e7a54af34aa1e4661fce4b44a2e500487c164d1c5c4dcd8d577e9bd5
     - id: persist
       repo: github:wardby/wardby
       path: src/core/runner.ts
-      lines: [1140, 1147]
+      lines: [1157, 1164]
       symbol: onPersisted
-      sha: 9c0f910f919dec4f1a2149bae78612cda41f6007
+      sha: 0cd83fece6e5dafbb229aee4c293953e354cb42d
       spanHash: sha256:dbee201f976e3b74fffa64b5812e39c55bf86481e47abba414772f2deeb3c085
   confidence: high
 ---
@@ -45,8 +45,8 @@ Parallel delegation uses a per-attempt admission gate to keep the prior-child an
 
 **What to do:** preserve the waiting-child reservation when changing retry or dispatch paths; releasing it early can admit the same child twice or exceed the delegation count. Holding the gate through child execution instead serializes the batch. [Coding-agent setup, budgets](../coding-agent-setup.md) already describes sibling budget waits; this concept records the admission consequence rather than repeating that behavior.
 
-[^admission]: src/core/runner.ts, lines 1033-1051.
+[^admission]: src/core/runner.ts, lines 1053-1071.
 
-[^wait]: src/core/runner.ts, lines 1064-1087.
+[^wait]: src/core/runner.ts, lines 1080-1103.
 
-[^persist]: src/core/runner.ts, lines 1140-1147.
+[^persist]: src/core/runner.ts, lines 1157-1164.

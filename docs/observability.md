@@ -49,5 +49,9 @@ the coding-proxy coverage, so verify required signals before production use.
 - Alert on request failures, budget cutoffs, cleanup failures, stalled runs,
   and sustained latency or memory growth.
 - Confirm alerts reach an owned channel and rehearse one response path.
+- Watch the logs for package audit mode: the control plane logs
+  `coding.package_audit.set` when an owner turns it on, off or extends it, and
+  the coding proxy logs `registry.audited` for each package it installs
+  because of it (see [Package audit mode](coding-packages.md#package-audit-mode)).
 - Treat telemetry as operational evidence, not as a replacement for Wardby's
   accounting database.

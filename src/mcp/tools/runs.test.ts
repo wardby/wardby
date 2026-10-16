@@ -43,7 +43,18 @@ interface FakeRunRow {
     debugTrace?: boolean;
     debugTraceMaxMb?: number | null;
     services?: unknown;
+    packageAuditMode?: "audit" | "full" | null;
   } | null;
+  auditRecords?: Array<{
+    ecosystem: string;
+    name: string;
+    version: string;
+    relation: string;
+    via: string | null;
+    sizeBytes: number | null;
+    advisories: unknown;
+    createdAt: Date;
+  }>;
   registryFetches?: Array<{
     ecosystem: string;
     name: string;
@@ -55,7 +66,11 @@ interface FakeRunRow {
     createdAt: Date;
   }>;
   approvedVersions?: number;
+  budgetEvents?: Array<{ kind: string; limit: string; at: Date; details: unknown }>;
   localPullRequest?: Record<string, unknown> | null;
+  /** What a select of parentRunId + agent (name, budget, group) sees. */
+  parentRunId?: string | null;
+  budgetAgent?: { name: string; budgetUsd: number; budgetGroup: { name: string } | null } | null;
 }
 
 function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSeed[] = []) {
@@ -68,6 +83,10 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSee
       localPullRequest: _lpr,
       registryFetches: _registryFetches,
       approvedVersions: _approved,
+      budgetEvents: _budgetEvents,
+      parentRunId: _parentRunId,
+      budgetAgent: _budgetAgent,
+      auditRecords: _audits,
       ...row
     } = run;
     return row;
@@ -78,7 +97,11 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSee
       findUnique: async ({ where }: { where: { id: string } }) => agentRows.get(where.id) ?? null,
     },
     run: {
-      findUnique: async ({ where }: { where: { id: string } }) => publicRun(runRows.get(where.id)),
+      findUnique: async ({ where, select }: { where: { id: string }; select?: { agent?: unknown } }) => {
+        const run = runRows.get(where.id);
+        if (select?.agent) return run ? { parentRunId: run.parentRunId ?? null, agent: run.budgetAgent ?? null } : null;
+        return publicRun(run);
+      },
       findMany: async ({ where }: { where: { agentId: string; status?: string; triggeredById?: string } }) =>
         [...runRows.values()]
           .filter(
@@ -99,12 +122,21 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSee
     localPullRequest: {
       findUnique: async ({ where }: { where: { runId: string } }) => runRows.get(where.runId)?.localPullRequest ?? null,
     },
+    runBudgetEvent: {
+      findMany: async ({ where }: { where: { runId: string } }) => runRows.get(where.runId)?.budgetEvents ?? [],
+    },
     registryApprovedVersion: {
       count: async ({ where }: { where: { runId: string } }) => runRows.get(where.runId)?.approvedVersions ?? 0,
     },
     registryFetch: {
       findMany: async ({ where }: { where: { runId: string } }) =>
         [...(runRows.get(where.runId)?.registryFetches ?? [])].sort(
+          (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
+        ),
+    },
+    registryAuditRecord: {
+      findMany: async ({ where }: { where: { runId: string } }) =>
+        [...(runRows.get(where.runId)?.auditRecords ?? [])].sort(
           (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
         ),
     },
@@ -317,6 +349,76 @@ describe("run observability tools", () => {
     await client.close();
   });
 
+  it("get_run lists a run's recorded budget refusals with names filled, and omits the key when there are none", async () => {
+    const now = new Date("2026-01-02T03:04:05.000Z");
+    const row = {
+      agentId: "a1",
+      status: "budget_exhausted",
+      trigger: "manual",
+      turns: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      costUsd: 0,
+      finalText: null,
+      error: null,
+      startedAt: now,
+      finishedAt: now,
+    };
+    const proxy = {
+      source: "proxy",
+      budgetUsd: 3,
+      spentUsd: 2.9,
+      heldReservedUsd: 0,
+      heldUncertainUsd: 0,
+      refusedHoldUsd: 0.2,
+      model: "gpt-6",
+      turn: 7,
+    };
+    const dispatch = { source: "dispatch", capUsd: 5, spentUsd: 5, heldUsd: 0, heldRuns: 0 };
+    const later = new Date(now.getTime() + 1000);
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [
+        {
+          ...row,
+          id: "r1",
+          parentRunId: "lead-run",
+          budgetAgent: { name: "child-agent", budgetUsd: 9, budgetGroup: { name: "mobile" } },
+          budgetEvents: [
+            { kind: "refused", limit: "run-tree", at: now, details: { ...proxy, groupName: "forged" } },
+            { kind: "refused", limit: "week", at: later, details: dispatch },
+          ],
+        },
+        { ...row, id: "lead-run", budgetAgent: { name: "lead-agent", budgetUsd: 20, budgetGroup: null } },
+        { ...row, id: "r2" },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+
+    const withEvent = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r1" } })) as never);
+    expect(withEvent).toMatchObject({
+      budgetEvents: [
+        {
+          kind: "refused",
+          limit: "run-tree",
+          at: now.toISOString(),
+          details: { ...proxy, agentBudgetUsd: 9, groupName: "mobile", leadAgentName: "lead-agent" },
+        },
+        { kind: "refused", limit: "week", at: later.toISOString(), details: { ...dispatch, groupName: "mobile" } },
+      ],
+    });
+    const [, dispatched] = (withEvent as { budgetEvents: Array<{ details: Record<string, unknown> }> }).budgetEvents;
+    expect(dispatched.details).not.toHaveProperty("agentBudgetUsd");
+    expect(dispatched.details).not.toHaveProperty("leadAgentName");
+    expect(dispatched.details).not.toHaveProperty("groupCapUsd");
+    const without = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r2" } })) as never);
+    expect(without).not.toHaveProperty("budgetEvents");
+    await client.close();
+  });
+
   it("get_run says a coding run was traced only when it was", async () => {
     const now = new Date();
     const row = (id: string, debugTrace: boolean, debugTraceMaxMb: number | null = null) => ({
@@ -519,6 +621,89 @@ describe("run observability tools", () => {
     expect(nonCodingBody).not.toHaveProperty("packages");
     expect(nonCodingBody).not.toHaveProperty("packageRefusals");
     expect(nonCodingBody).not.toHaveProperty("packagePlan");
+    await client.close();
+  });
+
+  it("get_run reports packageAuditMode and packageAudit only for a run that had the mode", async () => {
+    const now = new Date();
+    const base = {
+      agentId: "a1",
+      status: "succeeded",
+      trigger: "manual",
+      turns: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      costUsd: 0,
+      finalText: null,
+      error: null,
+      startedAt: now,
+      finishedAt: now,
+    };
+    const record = (name: string, relation: string, extra: Record<string, unknown> = {}, offset = 0) => ({
+      ecosystem: "npm",
+      name,
+      version: "1.0.0",
+      relation,
+      via: null,
+      sizeBytes: 100,
+      advisories: [],
+      createdAt: new Date(now.getTime() + offset),
+      ...extra,
+    });
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [
+        { ...base, id: "off", codingRun: { result: null } },
+        { ...base, id: "quiet", codingRun: { result: null, packageAuditMode: "audit" } },
+        {
+          ...base,
+          id: "full",
+          codingRun: { result: null, packageAuditMode: "full" },
+          auditRecords: [
+            record("expo-dev-launcher", "transitive", { via: "expo-dev-client" }, 2),
+            record("expo-dev-client", "top-level", {}, 1),
+            record(
+              "lodash",
+              "allowed",
+              { advisories: [{ id: "GHSA-35jh-r3h4-6jhm", severity: "HIGH", summary: "Command injection" }] },
+              3,
+            ),
+          ],
+        },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+    const get = async (runId: string) =>
+      parseText((await client.callTool({ name: "get_run", arguments: { runId } })) as never) as Record<string, unknown>;
+
+    const off = await get("off");
+    expect(off).not.toHaveProperty("packageAuditMode");
+    expect(off).not.toHaveProperty("packageAudit");
+    expect(await get("quiet")).toMatchObject({ packageAuditMode: "audit", packageAudit: [] });
+    const full = await get("full");
+    expect(full.packageAuditMode).toBe("full");
+    expect(full.packageAudit).toEqual([
+      { ecosystem: "npm", name: "expo-dev-client", version: "1.0.0", size: 100, relation: "top-level" },
+      {
+        ecosystem: "npm",
+        name: "expo-dev-launcher",
+        version: "1.0.0",
+        size: 100,
+        relation: "transitive",
+        via: "expo-dev-client",
+      },
+      {
+        ecosystem: "npm",
+        name: "lodash",
+        version: "1.0.0",
+        size: 100,
+        relation: "allowed",
+        advisories: [{ id: "GHSA-35jh-r3h4-6jhm", severity: "HIGH", summary: "Command injection" }],
+      },
+    ]);
     await client.close();
   });
 

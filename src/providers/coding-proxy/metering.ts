@@ -187,6 +187,23 @@ export class AnthropicSseUsageTracker {
         return { terminal: false };
     }
   }
+
+  /** What a cut stream reported before its message_stop: start usage (input incl. cache reads) and output so far. */
+  partial(): {
+    readUsage?: { inputTokens: number; cachedInputTokens: number; cacheWriteTokens: number };
+    reportedOutputTokens?: number;
+  } {
+    if (!this.startUsage) return this.outputTokens === undefined ? {} : { reportedOutputTokens: this.outputTokens };
+    const cached = tokenCount(this.startUsage.cache_read_input_tokens ?? 0, "cache_read_input_tokens");
+    return {
+      readUsage: {
+        inputTokens: tokenCount(this.startUsage.input_tokens, "input_tokens") + cached,
+        cachedInputTokens: cached,
+        cacheWriteTokens: tokenCount(this.startUsage.cache_creation_input_tokens ?? 0, "cache_creation_input_tokens"),
+      },
+      ...(this.outputTokens !== undefined ? { reportedOutputTokens: this.outputTokens } : {}),
+    };
+  }
 }
 
 /** The rates a request is billed at, tagged with their version. Picks only the price fields: a catalog entry's routing/shape fields stay out of the ledger. */

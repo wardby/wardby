@@ -63,6 +63,11 @@ or refused an entry. Otherwise a metadata request never walks. A
 lockfileVersion 1 lockfile can't be planned, so regenerate it with a current
 npm to avoid the slower walk.
 
+To find out which packages a task needs without a round of refusals for each
+one, turn on package audit mode for a limited time (from Wardby 0.6.1): the
+registry installs packages outside the allowlist and records them for you to
+approve. Read the `package-audit-mode` help article, "Package audit mode".
+
 ## pnpm and yarn
 
 From Wardby 0.6.1, pnpm, yarn classic (1.x) and yarn 2 or later (Berry, with

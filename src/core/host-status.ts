@@ -11,6 +11,13 @@
 import type { Prisma, PrismaClient, Run, RunStatus } from "#prisma";
 import { summarizeRegistryFetches, type RegistryRefusalSummary } from "../coding/registry/report.js";
 import { packageRefusalWording } from "../coding/registry/refusal-wording.js";
+import {
+  isPackageAuditMode,
+  packageAuditWording,
+  summarizePackageAudit,
+  type PackageAuditMode,
+  type PackageAuditSummary,
+} from "../coding/registry/audit-mode.js";
 import { CODING_CODE_PROVIDER } from "../coding/protocol.js";
 import { storedServiceNames } from "../coding/services/catalog.js";
 import {
@@ -58,7 +65,10 @@ export const TERMINAL_RUN_STATUSES: readonly RunStatus[] = [
 ];
 const TERMINAL = new Set<string>(TERMINAL_RUN_STATUSES);
 
-export type HostStatusDb = Pick<PrismaClient, "runHostStatus" | "run" | "registryFetch">;
+export type HostStatusDb = Pick<
+  PrismaClient,
+  "runHostStatus" | "run" | "runBudgetEvent" | "registryFetch" | "registryAuditRecord"
+>;
 
 export type FinishedRun = Pick<Run, "id" | "status" | "finalText">;
 
@@ -220,6 +230,8 @@ export function outcomeBody(
     fullReplyFollows?: boolean;
     /** The status comment is in a review thread, so the follow-ups land in the conversation instead. */
     statusInThread?: boolean;
+    /** Package audit mode on any coding sub-run: a short block above the run line, whatever the outcome. */
+    packageAudit?: { mode: PackageAuditMode; summary: PackageAuditSummary };
   } = {},
 ): string {
   const links = pullRequests.map((pr) => {
@@ -241,7 +253,8 @@ export function outcomeBody(
     !blocked && (links.length > 0 || run.status === "succeeded") && refusals.length > 0
       ? packageRefusalWording(refusals, { blocked: false })
       : "";
-  const footer = warning + (warning ? "\n\n" : "") + runLine(run.id);
+  const audit = opts.packageAudit ? packageAuditWording(opts.packageAudit.mode, opts.packageAudit.summary) : "";
+  const footer = warning + (warning ? "\n\n" : "") + audit + (audit ? "\n\n" : "") + runLine(run.id);
   if (blocked) return packageRefusalWording(refusals) + "\n\n" + footer;
   if (run.status === "lost") {
     return `❌ Interrupted before it finished (for example, wardby restarted). Repeat your request to retry.${partial}\n\n${footer}`;
@@ -325,8 +338,42 @@ export function outcomeBody(
   return `✅ ${opts.noPullRequestText ?? "Finished without opening a pull request."}${quoted}\n\n${footer}`;
 }
 
+/** Package audit mode on a run's coding sub-runs: the strongest mode, and what it recorded across them. */
+export type PackageAuditOutcome = { mode: PackageAuditMode; summary: PackageAuditSummary };
+
+/** The package audit of these children (best effort, like the refusals: a read failure reports none). */
+async function loadPackageAudit(
+  db: Pick<PrismaClient, "registryAuditRecord">,
+  children: readonly { id: string; codingRun: { packageAuditMode: string | null } | null }[],
+): Promise<PackageAuditOutcome | undefined> {
+  const audited = children.filter((c) => isPackageAuditMode(c.codingRun?.packageAuditMode));
+  if (audited.length === 0) return undefined;
+  try {
+    const rows = await db.registryAuditRecord.findMany({
+      where: { runId: { in: audited.map((c) => c.id) } },
+      orderBy: { createdAt: "asc" },
+    });
+    const mode = audited.some((c) => c.codingRun?.packageAuditMode === "full") ? "full" : "audit";
+    return { mode, summary: summarizePackageAudit(rows) };
+  } catch {
+    return undefined;
+  }
+}
+
+/** A run's package audit alone, for a run whose other outcome is not read (one that did not succeed). */
+export async function collectPackageAudit(
+  db: Pick<PrismaClient, "run" | "registryAuditRecord">,
+  runId: string,
+): Promise<PackageAuditOutcome | undefined> {
+  const children = await db.run.findMany({
+    where: { parentRunId: runId },
+    select: { id: true, codingRun: { select: { packageAuditMode: true } } },
+  });
+  return loadPackageAudit(db, children);
+}
+
 /** What collectRunOutcome reads: a run's children and, when out of budget, its budget facts. */
-export type RunOutcomeDb = Pick<PrismaClient, "run" | "registryFetch">;
+export type RunOutcomeDb = Pick<PrismaClient, "run" | "runBudgetEvent" | "registryFetch" | "registryAuditRecord">;
 
 /** The parts of a finished run's outcome a status comment reports; shared by GitHub and Jira status comments. */
 export async function collectRunOutcome(
@@ -338,6 +385,7 @@ export async function collectRunOutcome(
   packageRefusals: RegistryRefusalSummary[];
   noChanges: boolean;
   budgetSentence?: string;
+  packageAudit?: PackageAuditOutcome;
 }> {
   const children = await db.run.findMany({
     where: { parentRunId: run.id },
@@ -345,7 +393,7 @@ export async function collectRunOutcome(
       id: true,
       status: true,
       error: true,
-      codingRun: { select: { result: true, failureCategory: true, services: true } },
+      codingRun: { select: { result: true, failureCategory: true, services: true, packageAuditMode: true } },
     },
     orderBy: { startedAt: "asc" },
   });
@@ -378,6 +426,7 @@ export async function collectRunOutcome(
       // Registry reporting is best effort; keep the existing status on read failure.
     }
   }
+  const packageAudit = await loadPackageAudit(db, children);
   const budgetSentence =
     run.status === "budget_exhausted" || run.status === "refused"
       ? await loadBudgetSentence(db, run.id, run.status)
@@ -386,7 +435,14 @@ export async function collectRunOutcome(
     const result = c.codingRun?.result;
     return result && typeof result === "object" && !Array.isArray(result) && result.outcome === "no_changes";
   });
-  return { pullRequests, failedChildren, packageRefusals, noChanges, ...(budgetSentence ? { budgetSentence } : {}) };
+  return {
+    pullRequests,
+    failedChildren,
+    packageRefusals,
+    noChanges,
+    ...(budgetSentence ? { budgetSentence } : {}),
+    ...(packageAudit ? { packageAudit } : {}),
+  };
 }
 
 /**
@@ -411,10 +467,8 @@ export async function completeHostStatus(
     if (!status.commentId && !opts.postIfMissing) return;
     const host = hosts[status.provider as ReviewHostProvider];
     if (!host) return;
-    const { pullRequests, failedChildren, budgetSentence, packageRefusals, noChanges } = await collectRunOutcome(
-      db,
-      run,
-    );
+    const { pullRequests, failedChildren, budgetSentence, packageRefusals, noChanges, packageAudit } =
+      await collectRunOutcome(db, run);
     // A blocked status is built from the refusals alone, so the agent's reply is not posted after it.
     const fullReply = isBlockedByRefusals(run, { pullRequests, failedChildren, packageRefusals, noChanges })
       ? null
@@ -422,6 +476,7 @@ export async function completeHostStatus(
     const body = outcomeBody(run, status.repository, pullRequests, failedChildren, {
       budgetSentence,
       packageRefusals,
+      packageAudit,
       noChanges,
       fullReplyFollows: true,
       statusInThread: status.commentKind === "inline",

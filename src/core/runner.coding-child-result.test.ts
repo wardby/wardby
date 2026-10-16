@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CONTINUATION_CLOSED_SENTENCE } from "../coding/continuation-wording.js";
+import { ownerBudgetSentence } from "./budget-events.js";
 import { codingChildResult } from "./runner.js";
 
 const base = { finalText: null, costUsd: "0.25", tokensIn: 10, tokensOut: 5 };
@@ -125,5 +126,46 @@ describe("codingChildResult", () => {
     );
     expect(out).toMatchObject({ status: "refused", refusal: CONTINUATION_CLOSED_SENTENCE });
     expect(JSON.stringify(out)).not.toContain("coding_diag_2");
+  });
+
+  it("tells the lead why a budget-exhausted or refused child stopped, from the recorded event", () => {
+    const proxyEvent = {
+      kind: "refused" as const,
+      limit: "run" as const,
+      at: new Date(0).toISOString(),
+      details: {
+        source: "proxy" as const,
+        budgetUsd: 3,
+        spentUsd: 2.9,
+        heldReservedUsd: 0,
+        heldUncertainUsd: 0,
+        refusedHoldUsd: 0.4,
+        model: "m",
+        turn: 7,
+      },
+    };
+    const dispatchEvent = {
+      kind: "refused" as const,
+      limit: "run-tree" as const,
+      at: new Date(0).toISOString(),
+      details: { source: "dispatch" as const, capUsd: 5, spentUsd: 5, heldUsd: 0, heldRuns: 0, leadAgentName: "lead" },
+    };
+    const exhausted = JSON.parse(
+      codingChildResult({ ...base, status: "budget_exhausted", error: null }, undefined, {
+        event: proxyEvent,
+        agentName: "builder",
+      }),
+    );
+    expect(exhausted.budget).toBe(ownerBudgetSentence(proxyEvent, "builder"));
+    const refused = JSON.parse(
+      codingChildResult({ ...base, status: "refused", error: "run_tree_exhausted: spent" }, undefined, {
+        event: dispatchEvent,
+        agentName: "builder",
+      }),
+    );
+    expect(refused.budget).toBe(ownerBudgetSentence(dispatchEvent, "builder"));
+    expect(refused.budget).toContain("Could not start");
+    const none = JSON.parse(codingChildResult({ ...base, status: "budget_exhausted", error: null }));
+    expect(none).not.toHaveProperty("budget");
   });
 });

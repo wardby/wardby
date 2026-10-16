@@ -166,6 +166,7 @@ function fakeDb(
         return updated;
       },
     },
+    runBudgetEvent: { create: async ({ data }: { data: unknown }) => data },
     codingRun: { create: async ({ data }: { data: unknown }) => data },
     webhook: {},
     $queryRaw: async () => [],
