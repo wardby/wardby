@@ -110,6 +110,7 @@ function setup(
     advisories?: Record<string, WithheldAdvisory[]>;
     policy?: unknown;
     dependencyCache?: boolean;
+    packageAudit?: "audit" | "full" | null;
   } = {},
 ) {
   const npm = fakeNpm(registry);
@@ -122,7 +123,7 @@ function setup(
     repository: "owner/repo",
     cacheImage: null,
     dependencyCache: options.dependencyCache ?? false,
-    packageAudit: null,
+    packageAudit: options.packageAudit ?? null,
   });
   const audited: AuditedVersion[][] = [];
   const service = new RegistryService({
@@ -1264,5 +1265,149 @@ describe("version documents (corepack's /<name>/<version>)", () => {
     const response = await service.handle(get("stranger/1.0.0"));
     expect(response.status).toBe(403);
     expect((response as { body: string }).body).toContain("wardby_package_not_allowed");
+  });
+});
+
+describe("lockfile plans in package audit mode", () => {
+  // a is allowlisted; b is not, and declares c.
+  const registry: FakeRegistry = {
+    a: { "1.0.0": {}, "2.0.0": {} },
+    b: { "1.0.0": { deps: { c: "^1" } } },
+    c: { "1.0.0": {} },
+  };
+  const lock = lockfileOf(
+    { a: "^1", b: "^1" },
+    {
+      "node_modules/a": locked("a", "1.0.0"),
+      "node_modules/b": locked("b", "1.0.0", { dependencies: { c: "^1" } }),
+      "node_modules/c": locked("c", "1.0.0"),
+    },
+  );
+  const approvalOf = (store: MemoryRegistryStore, name: string) =>
+    [...store.approvals.values()].find((approval) => approval.name === name);
+  const high: WithheldAdvisory = { id: "GHSA-high", malware: false, aliases: [], severity: "HIGH", summary: "bad" };
+  const download = (name: string, version: string) => ({
+    method: "GET",
+    ecosystem: "npm",
+    subpath: `${name}/-/${name}-${version}.tgz`,
+    token: "rrg_token",
+    signal: new AbortController().signal,
+  });
+
+  it("off: refuses what the allowlist does not reach", async () => {
+    const { plan } = setup(registry);
+    const { json } = await plan(lock);
+    expect(refusedOf(json)).toEqual({
+      "b@1.0.0": "wardby_package_not_allowed",
+      "c@1.0.0": "wardby_package_not_allowed",
+    });
+    expect(json).not.toHaveProperty("audited");
+  });
+
+  it("audit: approves unreachable entries that pass every check, marking each with its relation", async () => {
+    const { plan, store } = setup(registry, { packageAudit: "audit" });
+    const { json } = await plan(lock);
+    expect(json).toEqual({ approved: 3, refused: [], audited: 2 });
+    expect(approvalOf(store, "a")).not.toHaveProperty("audit");
+    expect(approvalOf(store, "b")?.audit).toEqual({ relation: "top-level" });
+    expect(approvalOf(store, "c")?.audit).toEqual({ relation: "transitive", via: "b" });
+    // Their names are allowances tagged with the audited package that brought them.
+    expect(await store.findAllowance("run-1", "npm", "b")).toEqual({ auditedVia: "b" });
+    expect(await store.findAllowance("run-1", "npm", "c")).toEqual({ auditedVia: "b" });
+    expect(await store.findAllowance("run-1", "npm", "a")).toEqual({ auditedVia: null });
+  });
+
+  it("audit: an entry no project declares and no audited package reaches is unknown", async () => {
+    const stray = lockfileOf(
+      { a: "^1" },
+      { "node_modules/a": locked("a", "1.0.0"), "node_modules/c": locked("c", "1.0.0") },
+    );
+    const { plan, store } = setup(registry, { packageAudit: "audit" });
+    expect((await plan(stray)).json).toEqual({ approved: 2, refused: [], audited: 1 });
+    expect(approvalOf(store, "c")?.audit).toEqual({ relation: "unknown" });
+  });
+
+  it("never approves malware, in audit or full mode", async () => {
+    for (const packageAudit of ["audit", "full"] as const) {
+      const { plan, store } = setup(registry, {
+        packageAudit,
+        advisories: { "b@1.0.0": [{ id: "GHSA-mal", malware: true, aliases: ["MAL-2026-1"] }] },
+      });
+      const { json } = await plan(lock);
+      expect(refusedOf(json)["b@1.0.0"]).toBe("wardby_version_filtered");
+      expect(approvalOf(store, "b")).toBeUndefined();
+    }
+  });
+
+  it("refuses a version newer than the release age in every mode", async () => {
+    const fresh: FakeRegistry = { ...registry, b: { "1.0.0": { deps: { c: "^1" }, published: NEW } } };
+    for (const packageAudit of [null, "audit", "full"] as const) {
+      const { plan, store } = setup(fresh, { packageAudit });
+      const { json } = await plan(lock);
+      // Off, the allowlist never reaches b at all.
+      expect(refusedOf(json)["b@1.0.0"]).toBe(packageAudit ? "wardby_version_filtered" : "wardby_package_not_allowed");
+      expect(approvalOf(store, "b")).toBeUndefined();
+    }
+  });
+
+  it("audit refuses a HIGH advisory; full approves it and records the advisory, even on the allowlist", async () => {
+    const withheld = setup(registry, { packageAudit: "audit", advisories: { "a@1.0.0": [high] } });
+    expect(refusedOf((await withheld.plan(lock)).json)["a@1.0.0"]).toBe("wardby_version_filtered");
+
+    const full = setup(registry, { packageAudit: "full", advisories: { "a@1.0.0": [high], "b@1.0.0": [high] } });
+    const { json } = await full.plan(lock);
+    expect(json).toEqual({ approved: 3, refused: [], audited: 3 });
+    expect(approvalOf(full.store, "a")?.audit).toEqual({
+      relation: "allowed",
+      advisories: [{ id: "GHSA-high", severity: "HIGH", summary: "bad" }],
+    });
+    expect(approvalOf(full.store, "b")?.audit).toEqual({
+      relation: "top-level",
+      advisories: [{ id: "GHSA-high", severity: "HIGH", summary: "bad" }],
+    });
+  });
+
+  it("never approves an allowlisted name outside its entry's range, in any mode", async () => {
+    const pinned = lockfileOf({ a: "^2" }, { "node_modules/a": locked("a", "2.0.0") });
+    for (const packageAudit of [null, "audit", "full"] as const) {
+      const { plan, store } = setup(registry, { packageAudit, allowlist: ["a@^1"] });
+      const { json } = await plan(pinned);
+      expect(Object.keys(refusedOf(json))).toEqual(["a@2.0.0"]);
+      expect(approvalOf(store, "a")).toBeUndefined();
+    }
+  });
+
+  it("never audits in an allowlisted name outside its range, even as an audited package's dependency", async () => {
+    const nested: FakeRegistry = { ...registry, b: { "1.0.0": { deps: { a: "^2" } } } };
+    const viaB = lockfileOf(
+      { a: "^1", b: "^1" },
+      {
+        "node_modules/a": locked("a", "1.0.0"),
+        "node_modules/b": locked("b", "1.0.0", { dependencies: { a: "^2" } }),
+        "node_modules/b/node_modules/a": locked("a", "2.0.0"),
+      },
+    );
+    const { plan, store } = setup(nested, { packageAudit: "audit", allowlist: ["a@^1"] });
+    const { json } = await plan(viaB);
+    expect(refusedOf(json)).toEqual({ "a@2.0.0": "wardby_package_not_allowed" });
+    expect(approvedOf(store)).toEqual(["a@1.0.0", "b@1.0.0"]);
+  });
+
+  it("records no dependency-cache lock hash for a plan that audited anything, and its downloads record the verdict", async () => {
+    const { plan, service, store } = setup(registry, { packageAudit: "audit", dependencyCache: true });
+    expect((await plan(lock)).json.audited).toBe(2);
+    expect(store.cacheSessions.get("run-1")?.lockHashes ?? []).toEqual([]);
+    const response = await service.handle(download("c", "1.0.0"));
+    expect([response.status, await drain(response)]).toEqual([200, "tarball c@1.0.0"]);
+    expect(store.audits).toMatchObject([
+      { ecosystem: "npm", name: "c", version: "1.0.0", relation: "transitive", via: "b" },
+    ]);
+  });
+
+  it("records the lock hash for an audit-mode plan that audited nothing", async () => {
+    const allowed = lockfileOf({ a: "^1" }, { "node_modules/a": locked("a", "1.0.0") });
+    const { plan, store } = setup(registry, { packageAudit: "audit", dependencyCache: true });
+    expect((await plan(allowed)).json).toEqual({ approved: 1, refused: [], audited: 0 });
+    expect(store.cacheSessions.get("run-1")?.lockHashes).toHaveLength(1);
   });
 });

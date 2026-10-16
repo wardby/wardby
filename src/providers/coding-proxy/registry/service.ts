@@ -680,6 +680,7 @@ export class RegistryService {
         streamUpstream: this.options.upstream,
         audit: (versions, auditSignal) => auditVersions(adapter, versions, auditSignal),
         accepted: new Set(acceptedAdvisories),
+        auditMode: context.packageAudit,
         hostAllowed: (url) => this.hostAllowed(adapter, url),
         signal,
       });
@@ -699,7 +700,17 @@ export class RegistryService {
     // in the lockfile) is served without a graph walk. Written before the
     // approvals: a name allowance left behind by a failed approval write is
     // only what a walk would conclude.
-    await store.addAllowances(context.runId, adapter.id, [...new Set(result.approved.map((v) => v.name))]);
+    // In package audit mode an approval outside the allowlist is an audited
+    // allowance, tagged with the top-level audited package that brought it.
+    const plain = result.approved.filter((v) => !v.audit || v.audit.relation === "allowed");
+    await store.addAllowances(context.runId, adapter.id, [...new Set(plain.map((v) => v.name))]);
+    const byVia = new Map<string, Set<string>>();
+    for (const v of result.approved) {
+      if (!v.audit || v.audit.relation === "allowed") continue;
+      const via = v.audit.via ?? v.name;
+      byVia.set(via, (byVia.get(via) ?? new Set()).add(v.name));
+    }
+    for (const [via, names] of byVia) await store.addAuditedAllowances(context.runId, adapter.id, [...names], via);
     await store.approveVersions(context.runId, adapter.id, result.approved);
     // A plan that refused anything leaves some lockfile packages without an
     // allowance: metadata misses walk for the rest of the run.
@@ -717,8 +728,10 @@ export class RegistryService {
     );
     await this.recordPlanRefusals(context, adapter, result.refused);
     // Only a lockfile approved whole may be restored from the dependency
-    // cache; the store ignores it once the session is sealed or full.
-    if (lockHash && result.refused.length === 0)
+    // cache; the store ignores it once the session is sealed or full. A plan
+    // that audited anything is never cached: a restore downloads nothing,
+    // so nothing it installs would be recorded.
+    if (lockHash && result.refused.length === 0 && result.audited === 0)
       await store.recordDependencyCacheLockHash(context.runId, lockHash, MAX_DEPENDENCY_CACHE_LOCK_HASHES);
     return {
       status: 200,
@@ -726,6 +739,7 @@ export class RegistryService {
       body: JSON.stringify({
         approved: result.approved.length,
         refused: result.refused.map(({ name, version, code, reason }) => ({ name, version, code, reason })),
+        ...(context.packageAudit ? { audited: result.audited } : {}),
       }),
     };
   }
