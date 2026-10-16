@@ -1,5 +1,6 @@
 import {
   normalizeProxyModelTerms,
+  type PreviousReply,
   type CreateProxySessionInput,
   type ProxyLedger,
   type ProxyRefusalRecord,
@@ -38,6 +39,9 @@ export class MemoryProxyLedger implements ProxyLedger {
   private readonly sessionByCapability = new Map<string, string>();
   private readonly requests = new Map<string, ProxyRequest>();
   private readonly requestBySessionKey = new Map<string, string>();
+  private readonly completedAt = new Map<string, Date>();
+
+  constructor(private readonly options: { now?: () => Date } = {}) {}
 
   async createSession(input: CreateProxySessionInput): Promise<void> {
     if ([...this.sessions.values()].some((session) => session.runId === input.runId)) {
@@ -125,6 +129,7 @@ export class MemoryProxyLedger implements ProxyLedger {
     request.usage = { ...usage };
     request.upstreamStatus = upstreamStatus;
     request.costEstimated = false;
+    this.completedAt.set(requestId, this.options.now?.() ?? new Date());
     return cloneRequest(request);
   }
 
@@ -168,6 +173,24 @@ export class MemoryProxyLedger implements ProxyLedger {
       ...(previous ? { previous: { ...previous } } : {}),
       // The lower middle for an even count, as Postgres's percentile_disc(0.5).
       ...(outputs.length > 0 ? { medianOutputTokens: outputs[Math.ceil(outputs.length / 2) - 1] } : {}),
+    };
+  }
+
+  async previousReply(sessionId: string, conversationKey: string): Promise<PreviousReply | null> {
+    let latest: ProxyRequest | undefined;
+    // Map iteration follows insertion order: the last match is the latest request.
+    for (const request of this.requests.values()) {
+      if (request.sessionId !== sessionId || request.conversationKey !== conversationKey) continue;
+      if (request.status === "completed" || request.status === "uncertain") latest = request;
+    }
+    if (!latest) return null;
+    return {
+      model: latest.model,
+      status: latest.status as "completed" | "uncertain",
+      costEstimated: latest.costEstimated === true,
+      ...(latest.usage ? { usage: { ...latest.usage } } : {}),
+      requestBytes: latest.requestBytes ?? null,
+      completedAt: this.completedAt.get(latest.id) ?? null,
     };
   }
 

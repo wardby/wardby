@@ -3,6 +3,7 @@ import { logger } from "../../core/logger.js";
 import { normalizeProxyModelTerms } from "./types.js";
 import type {
   CreateProxySessionInput,
+  PreviousReply,
   PricingSnapshot,
   ProxyLedger,
   ProxyRefusalRecord,
@@ -71,6 +72,10 @@ interface RequestRow {
   reasoningTokens: number | null;
   upstreamStatus: number | null;
   costEstimated: boolean | null;
+  requestBytes: number | null;
+  ceilingUsd: unknown;
+  reservationBasis: string | null;
+  conversationKey: string | null;
 }
 
 function sessionFromRow(row: SessionRow): ProxySession {
@@ -133,6 +138,12 @@ function requestFromRow(row: RequestRow): ProxyRequest {
       : undefined,
     upstreamStatus: row.upstreamStatus ?? undefined,
     costEstimated: row.costEstimated === true,
+    ...(row.requestBytes !== null ? { requestBytes: row.requestBytes } : {}),
+    ...(row.ceilingUsd !== null && row.ceilingUsd !== undefined ? { ceilingUsd: Number(row.ceilingUsd) } : {}),
+    ...(row.reservationBasis === "cached" || row.reservationBasis === "full"
+      ? { reservationBasis: row.reservationBasis }
+      : {}),
+    ...(row.conversationKey !== null ? { conversationKey: row.conversationKey } : {}),
   };
 }
 
@@ -141,7 +152,8 @@ async function requestById(db: PrismaProxyLedgerTx | PrismaProxyLedgerDb, id: st
     SELECT "id", "sessionId", "requestKey", "requestFingerprint", "model", "status",
            "reservationUsd", "actualCostUsd", "pricingVersion", "pricingSnapshot",
            "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteTokens",
-           "reasoningTokens", "upstreamStatus", "costEstimated"
+           "reasoningTokens", "upstreamStatus", "costEstimated",
+           "requestBytes", "ceilingUsd", "reservationBasis", "conversationKey"
     FROM "CodingProxyRequest" WHERE "id" = ${id}
   `;
   return rows[0] ? requestFromRow(rows[0]) : null;
@@ -195,7 +207,8 @@ export class PrismaProxyLedger implements ProxyLedger {
           SELECT "id", "sessionId", "requestKey", "requestFingerprint", "model", "status",
                  "reservationUsd", "actualCostUsd", "pricingVersion", "pricingSnapshot",
                  "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteTokens",
-                 "reasoningTokens", "upstreamStatus", "costEstimated"
+                 "reasoningTokens", "upstreamStatus", "costEstimated",
+                 "requestBytes", "ceilingUsd", "reservationBasis", "conversationKey"
           FROM "CodingProxyRequest"
           WHERE "sessionId" = ${input.sessionId} AND "requestKey" = ${input.requestKey}
         `;
@@ -253,11 +266,13 @@ export class PrismaProxyLedger implements ProxyLedger {
       await tx.$executeRaw`
           INSERT INTO "CodingProxyRequest"
             ("id", "sessionId", "requestKey", "requestFingerprint", "model", "status",
-             "reservationUsd", "pricingVersion", "pricingSnapshot", "createdAt", "updatedAt")
+             "reservationUsd", "pricingVersion", "pricingSnapshot", "requestBytes", "ceilingUsd",
+             "reservationBasis", "conversationKey", "createdAt", "updatedAt")
           VALUES
             (${input.id}, ${input.sessionId}, ${input.requestKey}, ${input.requestFingerprint}, ${input.model},
              'reserved', ${input.reservationUsd}, ${input.pricing.version}, ${pricing}::jsonb,
-             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+             ${input.requestBytes ?? null}, ${input.ceilingUsd ?? null}, ${input.reservationBasis ?? null},
+             ${input.conversationKey ?? null}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         `;
       const request = await requestById(tx, input.id);
       if (!request) throw new Error("proxy_reservation_not_persisted");
@@ -281,7 +296,8 @@ export class PrismaProxyLedger implements ProxyLedger {
           SELECT "id", "sessionId", "requestKey", "requestFingerprint", "model", "status",
                  "reservationUsd", "actualCostUsd", "pricingVersion", "pricingSnapshot",
                  "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteTokens",
-                 "reasoningTokens", "upstreamStatus", "costEstimated"
+                 "reasoningTokens", "upstreamStatus", "costEstimated",
+                 "requestBytes", "ceilingUsd", "reservationBasis", "conversationKey"
           FROM "CodingProxyRequest" WHERE "id" = ${requestId} FOR UPDATE
         `;
       const prior = locked[0] ? requestFromRow(locked[0]) : null;
@@ -435,6 +451,50 @@ export class PrismaProxyLedger implements ProxyLedger {
     return {
       ...(previous ? { previous } : {}),
       ...(medianOutputTokens !== null ? { medianOutputTokens: Number(medianOutputTokens) } : {}),
+    };
+  }
+
+  async previousReply(sessionId: string, conversationKey: string): Promise<PreviousReply | null> {
+    const rows = await this.db.$queryRaw<
+      (Pick<
+        RequestRow,
+        | "model"
+        | "status"
+        | "costEstimated"
+        | "inputTokens"
+        | "outputTokens"
+        | "cachedInputTokens"
+        | "cacheWriteTokens"
+        | "reasoningTokens"
+        | "requestBytes"
+      > & { completedAt: Date | null })[]
+    >`
+      SELECT "model", "status", "costEstimated", "inputTokens", "outputTokens", "cachedInputTokens",
+             "cacheWriteTokens", "reasoningTokens", "requestBytes", "completedAt"
+      FROM "CodingProxyRequest"
+      WHERE "sessionId" = ${sessionId} AND "conversationKey" = ${conversationKey}
+        AND "status" IN ('completed', 'uncertain')
+      ORDER BY "createdAt" DESC LIMIT 1
+    `;
+    const row = rows[0];
+    if (!row) return null;
+    const usage =
+      row.inputTokens !== null && row.outputTokens !== null
+        ? {
+            inputTokens: row.inputTokens,
+            outputTokens: row.outputTokens,
+            cachedInputTokens: row.cachedInputTokens ?? 0,
+            cacheWriteTokens: row.cacheWriteTokens ?? 0,
+            reasoningTokens: row.reasoningTokens ?? 0,
+          }
+        : undefined;
+    return {
+      model: row.model,
+      status: row.status as "completed" | "uncertain",
+      costEstimated: row.costEstimated === true,
+      ...(usage ? { usage } : {}),
+      requestBytes: row.requestBytes,
+      completedAt: row.completedAt,
     };
   }
 
