@@ -14,7 +14,10 @@ const log = logger.child({ module: "workflow-run-events" });
 const FAILED = new Set(["failed", "budget_exhausted", "cancelled", "lost", "refused"]);
 const VERDICTS = new Set(["APPROVE", "CHANGES_REQUESTED", "COMMENT"]);
 
-export type RunEventsDb = Pick<PrismaClient, "agent" | "runHostCheck" | "run" | "registryFetch">;
+export type RunEventsDb = Pick<
+  PrismaClient,
+  "agent" | "runHostCheck" | "run" | "registryFetch" | "registryAuditRecord"
+>;
 
 /** Emits top-level run outcomes and published review verdicts. Never throws. */
 export async function emitRunFinishedEvents(

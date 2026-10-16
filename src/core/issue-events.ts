@@ -22,7 +22,10 @@ const log = logger.child({ module: "issue-events" });
 const MAX_TASK_BODY = 8000;
 
 export type IssueEventDb = DispatchDb &
-  Pick<PrismaClient, "registryFetch" | "agentIssueProject" | "runIssueStatus" | "issuePullRequest" | "workItem">;
+  Pick<
+    PrismaClient,
+    "registryFetch" | "registryAuditRecord" | "agentIssueProject" | "runIssueStatus" | "issuePullRequest" | "workItem"
+  >;
 
 export interface RouteIssueEventDeps {
   db: IssueEventDb;

@@ -329,3 +329,39 @@ function statusWording(mode: PackageAuditMode, summary: PackageAuditSummary, sla
   // Slack's three control characters; codeSpan already removed < and > from names.
   return slack ? text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : text;
 }
+
+/** A run's (or a pull request's runs') package audit: the mode and what it recorded. */
+export interface PackageAuditReport {
+  mode: PackageAuditMode;
+  entries: readonly PackageAuditEntry[];
+}
+
+/** Entries back as rows, so several runs' entries summarize (dedup, order) like one run's. */
+export function packageAuditRows(entries: readonly PackageAuditEntry[]): PackageAuditRow[] {
+  return entries.map((entry) => ({
+    ecosystem: entry.ecosystem,
+    name: entry.name,
+    version: entry.version,
+    relation: entry.relation,
+    via: entry.via ?? null,
+    sizeBytes: entry.size,
+    advisories: entry.advisories ?? [],
+  }));
+}
+
+/**
+ * Several runs' audit reports as one (a pull request's runs): entries merged
+ * on ecosystem + name + version with advisories unioned, and the strongest
+ * mode seen (`full` over `audit`). Undefined when no run had the mode.
+ */
+export function mergePackageAuditReports(
+  reports: readonly (PackageAuditReport | undefined)[],
+): PackageAuditReport | undefined {
+  const present = reports.filter((report): report is PackageAuditReport => !!report && isPackageAuditMode(report.mode));
+  if (present.length === 0) return undefined;
+  const mode: PackageAuditMode = present.some((report) => report.mode === "full") ? "full" : "audit";
+  return {
+    mode,
+    entries: summarizePackageAudit(present.flatMap((report) => packageAuditRows(report.entries))).entries,
+  };
+}

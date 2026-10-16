@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_PACKAGE_AUDIT_MINUTES,
   isPackageAuditActive,
+  mergePackageAuditReports,
   MAX_PACKAGE_AUDIT_MINUTES,
   PackageAuditPatchError,
   packageAuditWording,
@@ -233,5 +234,47 @@ describe("parsePackageAuditVerdict", () => {
     expect(parsePackageAuditVerdict(null)).toBeNull();
     expect(parsePackageAuditVerdict({ relation: "sideways" })).toBeNull();
     expect(parsePackageAuditVerdict([])).toBeNull();
+  });
+});
+
+describe("mergePackageAuditReports", () => {
+  it("merges entries across runs, unions advisories, and keeps the strongest mode", () => {
+    const advisory = (id: string) => ({ id, severity: "HIGH", summary: "" });
+    const merged = mergePackageAuditReports([
+      undefined,
+      {
+        mode: "audit",
+        entries: [{ ecosystem: "npm", name: "a", version: "1.0.0", size: 1, relation: "top-level" }],
+      },
+      {
+        mode: "full",
+        entries: [
+          {
+            ecosystem: "npm",
+            name: "a",
+            version: "1.0.0",
+            size: 1,
+            relation: "top-level",
+            advisories: [advisory("GHSA-aaaa-bbbb-cccc")],
+          },
+          { ecosystem: "npm", name: "b", version: "2.0.0", size: 2, relation: "transitive", via: "a" },
+        ],
+      },
+    ]);
+    expect(merged).toEqual({
+      mode: "full",
+      entries: [
+        {
+          ecosystem: "npm",
+          name: "a",
+          version: "1.0.0",
+          size: 1,
+          relation: "top-level",
+          advisories: [advisory("GHSA-aaaa-bbbb-cccc")],
+        },
+        { ecosystem: "npm", name: "b", version: "2.0.0", size: 2, relation: "transitive", via: "a" },
+      ],
+    });
+    expect(mergePackageAuditReports([undefined])).toBeUndefined();
   });
 });

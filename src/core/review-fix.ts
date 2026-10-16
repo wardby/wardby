@@ -48,6 +48,7 @@ export type ReviewFixDb = DispatchDb &
     | "agentRepository"
     | "codingRun"
     | "registryFetch"
+    | "registryAuditRecord"
     | "runHostStatus"
     | "runHostCheck"
     | "agentIssueProject"
