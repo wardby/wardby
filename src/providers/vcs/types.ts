@@ -1,3 +1,4 @@
+import type { PackageAuditReport } from "../../coding/registry/audit-mode.js";
 import type {
   DescriptionBaseline,
   DescriptionUpdateResult,
@@ -67,6 +68,9 @@ export interface FinalizeChangesDetails {
     acceptedAdvisories?: readonly string[];
   }[];
   packageRefusals?: readonly { ecosystem: string; name: string; reason: string }[];
+  /** Package audit mode (control-plane records): the mode the run(s) had and what the registry served only
+   *  because of it, for the PR body's caution banner. Absent when the mode was off. */
+  packageAudit?: PackageAuditReport;
   /** Folders whose node_modules the run's dependency cache restored from a snapshot ("." for the root), for the PR body. */
   restoredDependencies?: readonly string[];
   /** Originating issue (control-plane data): named in the PR title and body. Provider-neutral. */

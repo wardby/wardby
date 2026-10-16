@@ -16,6 +16,7 @@
  * - a version or event the comparator cannot parse counts as affected
  *   (fail closed).
  */
+import { sanitizeAuditSummary, type AuditAdvisory } from "../../../coding/registry/audit-mode.js";
 import { RegistryError, type RegistryAdapter, type UpstreamFetch } from "../../../coding/registry/types.js";
 import { boundedMetadataFetch, DEFAULT_MAX_METADATA_BYTES, DEFAULT_METADATA_TIMEOUT_MS } from "./bounded-fetch.js";
 
@@ -49,6 +50,7 @@ interface OsvAffected {
 }
 interface OsvVuln {
   id: string;
+  summary?: unknown;
   aliases?: string[];
   affected?: (OsvAffected & { database_specific?: Record<string, unknown> })[];
   database_specific?: { severity?: string; cwe_ids?: unknown; [key: string]: unknown };
@@ -72,9 +74,22 @@ export function isMalware(vuln: OsvVuln): boolean {
   });
 }
 
+/** An advisory's OSV severity (database_specific.severity), upper-cased; "" when it has none. */
+function severityOf(vuln: OsvVuln): string {
+  const severity = vuln.database_specific?.severity;
+  return typeof severity === "string" ? severity.toUpperCase() : "";
+}
+
 /** Whether an advisory withholds the versions it affects. */
 function blocks(vuln: OsvVuln): boolean {
-  return BLOCKING.has(vuln.database_specific?.severity?.toUpperCase() ?? "") || isMalware(vuln);
+  return BLOCKING.has(severityOf(vuln)) || isMalware(vuln);
+}
+
+/** What package audit mode records of an advisory: its severity, and its summary bounded at the source. */
+function auditDetail(vuln: OsvVuln): { severity?: string; summary?: string } {
+  const severity = severityOf(vuln);
+  const summary = sanitizeAuditSummary(vuln.summary);
+  return { ...(severity ? { severity } : {}), ...(summary ? { summary } : {}) };
 }
 
 /** What the audit needs from an adapter: which OSV ecosystem to query, how
@@ -84,13 +99,18 @@ export type AuditAdapter = Pick<RegistryAdapter, "osvEcosystem" | "normalizeName
 export interface AdvisoryIndex {
   /** Ids of the blocking advisories (HIGH, CRITICAL or malware) that affect
    *  `version`, minus those waived by `accepted` (see `isWaived`). Without
-   *  `accepted`, or with an empty set, every blocking advisory. */
-  withheld(version: string, accepted?: ReadonlySet<string>): readonly string[];
+   *  `accepted`, or with an empty set, every blocking advisory. With
+   *  `auditAll` (package audit mode `full`), only those that can never be
+   *  served past: malware. */
+  withheld(version: string, accepted?: ReadonlySet<string>, auditAll?: boolean): readonly string[];
   /** Ids of the blocking advisories affecting `version` that `accepted`
    *  waives: exactly those `withheld` subtracts. For reporting. */
   waived(version: string, accepted: ReadonlySet<string>): readonly string[];
   /** Advisory ids of any other severity that affect `version`. */
   reported(version: string): readonly string[];
+  /** Blocking, non-malware, non-accepted advisories that `auditAll` lets
+   *  through, with detail: what a full-mode run records when it serves `version`. */
+  audited?(version: string, accepted: ReadonlySet<string>): readonly AuditAdvisory[];
 }
 
 /** A blocking advisory, with what deciding a waiver needs. */
@@ -100,6 +120,10 @@ export interface WithheldAdvisory {
   malware: boolean;
   /** The advisory's OSV aliases (CVE ids, other GHSA ids, …). */
   aliases: readonly string[];
+  /** OSV severity, upper-cased (HIGH, CRITICAL, …); absent when OSV gives none (malware). */
+  severity?: string;
+  /** OSV summary as plain bounded text; absent when OSV gives none. */
+  summary?: string;
 }
 
 /** Whether `accepted` waives a blocking advisory: it is not malware, and
@@ -112,17 +136,34 @@ export function isWaived(advisory: WithheldAdvisory, accepted?: ReadonlySet<stri
   return accepted.has(advisory.id) || advisory.aliases.some((alias) => accepted.has(alias));
 }
 
+/** Whether a blocking advisory reports, or may report, malicious code: never served in any mode. */
+function isMalwareAdvisory(advisory: WithheldAdvisory): boolean {
+  return advisory.malware || [advisory.id, ...advisory.aliases].some((id) => id.startsWith("MAL-"));
+}
+
 /** Splits the blocking advisories affecting one version into those still
- *  withholding it and those `accepted` waives. The version is withheld
- *  while `withheld` is non-empty. */
+ *  withholding it, those `accepted` waives, and (package audit mode `full`,
+ *  `auditAll`) those served past and recorded. Malware is always withheld.
+ *  The version is withheld while `withheld` is non-empty. */
 export function splitWaived<T extends WithheldAdvisory>(
   advisories: readonly T[],
   accepted?: ReadonlySet<string>,
-): { withheld: T[]; waived: T[] } {
+  options: { auditAll?: boolean } = {},
+): { withheld: T[]; waived: T[]; audited: T[] } {
   const withheld: T[] = [];
   const waived: T[] = [];
-  for (const advisory of advisories) (isWaived(advisory, accepted) ? waived : withheld).push(advisory);
-  return { withheld, waived };
+  const audited: T[] = [];
+  for (const advisory of advisories) {
+    if (isWaived(advisory, accepted)) waived.push(advisory);
+    else if (options.auditAll && !isMalwareAdvisory(advisory)) audited.push(advisory);
+    else withheld.push(advisory);
+  }
+  return { withheld, waived, audited };
+}
+
+/** A blocking advisory as package audit mode records it. */
+export function auditAdvisoryOf(advisory: WithheldAdvisory): AuditAdvisory {
+  return { id: advisory.id, severity: advisory.severity ?? "UNKNOWN", summary: advisory.summary ?? "" };
 }
 
 interface Advisory extends WithheldAdvisory {
@@ -198,13 +239,16 @@ function indexOf(advisories: readonly Advisory[], adapter: AuditAdapter): Adviso
       .filter((advisory) => advisory.affected.some((affected) => affects(version, affected, compare)));
   const ids = (list: readonly Advisory[]) => list.map((advisory) => advisory.id);
   return {
-    withheld: (version, accepted) => ids(splitWaived(matching(version, true), accepted).withheld),
+    withheld: (version, accepted, auditAll) =>
+      ids(splitWaived(matching(version, true), accepted, { auditAll }).withheld),
     waived: (version, accepted) => ids(splitWaived(matching(version, true), accepted).waived),
     reported: (version) => ids(matching(version, false)),
+    audited: (version, accepted) =>
+      splitWaived(matching(version, true), accepted, { auditAll: true }).audited.map(auditAdvisoryOf),
   };
 }
 
-const EMPTY_INDEX: AdvisoryIndex = { withheld: () => [], waived: () => [], reported: () => [] };
+const EMPTY_INDEX: AdvisoryIndex = { withheld: () => [], waived: () => [], reported: () => [], audited: () => [] };
 
 export const DEFAULT_AUDIT_CACHE_ENTRIES = 5000;
 
@@ -224,6 +268,8 @@ interface VulnDetail {
   blocking: boolean;
   malware: boolean;
   aliases: readonly string[];
+  severity?: string;
+  summary?: string;
 }
 
 export const versionKey = (name: string, version: string) => `${name}@${version}`;
@@ -411,7 +457,13 @@ export class OsvAudit {
         const advisory = found.get(id)!;
         const detail = await this.detail(id, advisory.modified, signal);
         if (!detail.blocking) continue;
-        const entry: WithheldAdvisory = { id, malware: detail.malware, aliases: detail.aliases };
+        const entry: WithheldAdvisory = {
+          id,
+          malware: detail.malware,
+          aliases: detail.aliases,
+          ...(detail.severity ? { severity: detail.severity } : {}),
+          ...(detail.summary ? { summary: detail.summary } : {}),
+        };
         for (const key of advisory.versions) withheld.set(key, [...(withheld.get(key) ?? []), entry]);
       }
     };
@@ -450,6 +502,7 @@ export class OsvAudit {
       blocking: blocks(vuln),
       malware: isMalware(vuln),
       aliases: aliasesOf(vuln),
+      ...auditDetail(vuln),
     };
     this.vulns.delete(id);
     while (this.vulns.size >= (this.options.maxVulnEntries ?? DEFAULT_VULN_CACHE_ENTRIES)) {
@@ -489,6 +542,7 @@ export class OsvAudit {
         blocking: blocks(vuln),
         malware: isMalware(vuln),
         aliases: aliasesOf(vuln),
+        ...auditDetail(vuln),
         affected,
       });
     }

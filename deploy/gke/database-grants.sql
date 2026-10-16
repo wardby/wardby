@@ -109,17 +109,23 @@ DO $$ BEGIN
   -- allowances and fetches of that run. It never updates or deletes either.
   -- The dependency cache derives its keys from the run's repository and
   -- images and checks the run's cache flag; the run's cache result is the
-  -- control plane's to write, so the proxy never writes CodingRun.
+  -- control plane's to write, so the proxy never writes CodingRun. Package
+  -- audit mode is fixed on the run at dispatch (packageAuditMode); the proxy
+  -- only reads it, and records what it served under it in
+  -- RegistryAuditRecord, which it never updates.
   IF to_regclass('public."CodingRun"') IS NOT NULL THEN
-    EXECUTE format('GRANT SELECT (%I, %I, %I, %I, %I, %I, %I) ON public.%I TO wardby_proxy',
+    EXECUTE format('GRANT SELECT (%I, %I, %I, %I, %I, %I, %I, %I) ON public.%I TO wardby_proxy',
       'runId', 'packageAllowlist', 'packagePolicy', 'repository', 'workerImage', 'toolImage', 'dependencyCache',
-      'CodingRun');
+      'packageAuditMode', 'CodingRun');
   END IF;
   IF to_regclass('public."RegistryAllowance"') IS NOT NULL THEN
     EXECUTE format('GRANT SELECT, INSERT ON public.%I TO wardby_proxy', 'RegistryAllowance');
   END IF;
   IF to_regclass('public."RegistryFetch"') IS NOT NULL THEN
     EXECUTE format('GRANT SELECT, INSERT ON public.%I TO wardby_proxy', 'RegistryFetch');
+  END IF;
+  IF to_regclass('public."RegistryAuditRecord"') IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT, INSERT ON public.%I TO wardby_proxy', 'RegistryAuditRecord');
   END IF;
   -- Lockfile verification: immutable per-version facts (reused forever, never
   -- changed) and the exact versions a run's plan approved or refused.

@@ -64,6 +64,12 @@ Wardby's coding sandbox, which may have had an incomplete install (see the
 **Dependency install incomplete** warning). Checks still running are reported
 as pending.
 
+From Wardby 0.6.1, a Wardby pull request whose run had package audit mode on
+(the `package-audit-mode` help article) carries a caution banner: **Packages outside the allowlist** lists what the
+registry installed that the agent's allowlist doesn't cover, and **Served
+despite advisories** (in `full` mode) lists versions with high or critical
+advisories. Reviewers should check those packages before approving.
+
 If a review publishes only a comment while CI on the head is still running (or
 has not reported yet), Wardby runs that review again once CI on the same head
 has finished, so it can approve or request changes against the real result.

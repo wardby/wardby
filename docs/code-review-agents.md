@@ -1090,6 +1090,23 @@ step.
 Check names and the description are repository content: treat them as data,
 as for every `repo_*` result.
 
+### Reviewer step: package audit mode
+
+From Wardby 0.6.1, a pull request whose coding run had
+[package audit mode](coding-packages.md#package-audit-mode) on opens with a
+`[!CAUTION]` banner. **Packages outside the allowlist** names what the
+registry installed that the agent's allowlist doesn't cover, and in `full`
+mode **Served despite advisories** lists versions with high or critical
+advisories. Wardby writes both from the registry's records, not from the
+agent. Add this to a reviewer's system prompt:
+
+    Reviewer step (package audit mode). If the description has a "Package
+    audit mode" caution banner, check every package under "Packages outside
+    the allowlist" (is it the package the change needs, spelled as its
+    upstream publishes it, and is it used?) and every row under "Served
+    despite advisories" (is the vulnerable code reachable?). Name any you
+    can't justify in your review.
+
 ## Branch protection
 
 To require a passing review before merge, add the link's `checkName` (e.g.

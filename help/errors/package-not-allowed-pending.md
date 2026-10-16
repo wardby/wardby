@@ -48,4 +48,5 @@ Allowlisting the packages the project needs directly avoids the walk for them.
 - [Not allowed: `wardby_package_not_allowed`](package-not-allowed.md)
 - [Graph limit: `wardby_graph_limit`](graph-limit.md)
 - [Still being checked: `wardby_graph_incomplete`](graph-incomplete.md)
+- [Package audit mode](../package-audit-mode.md): find out which packages a task needs without refusals, for a limited time.
 - [Coding packages](../coding-packages.md)

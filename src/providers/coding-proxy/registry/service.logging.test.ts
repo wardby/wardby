@@ -77,6 +77,7 @@ describe("RegistryService failure logging", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     // The root's metadata never arrives, so the walk times out before it
     // reaches the name: a definite (pending) 403, not an outage.
@@ -110,6 +111,7 @@ describe("RegistryService failure logging", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     let release: () => void = () => {};
     const held = new Promise<void>((resolve) => {
@@ -153,6 +155,75 @@ describe("RegistryService failure logging", () => {
     expect(log.info).toHaveBeenLastCalledWith(
       expect.objectContaining({ event: "registry.graph_walk", end: "complete", walked: 2, queued: 0, queuedEdges: 0 }),
       "coding registry graph walk stopped",
+    );
+  });
+});
+
+describe("RegistryService package audit mode logging", () => {
+  it("logs one registry.audited line per audited download", async () => {
+    const { createHash } = await import("node:crypto");
+    const tarball = new TextEncoder().encode("stranger bytes");
+    const integrity = `sha512-${createHash("sha512").update(tarball).digest("base64")}`;
+    const old = new Date(Date.now() - 30 * 86_400_000).toISOString();
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_x"), {
+      runId: "run-1",
+      deadlineAt: new Date(Date.now() + 86_400_000),
+      allowlist: { npm: ["app"] },
+      policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
+      packageAudit: "audit",
+    });
+    const registry = new RegistryService({
+      adapters: new Map([["npm", npmAdapter]]),
+      store,
+      audit: { audit: async () => ({ withheld: () => [], waived: () => [], reported: () => [], audited: () => [] }) },
+      upstream: async (url) =>
+        url === "https://registry.npmjs.org/stranger"
+          ? Response.json({
+              name: "stranger",
+              time: { "1.0.0": old },
+              versions: {
+                "1.0.0": {
+                  name: "stranger",
+                  version: "1.0.0",
+                  dist: { tarball: "https://registry.npmjs.org/stranger/-/stranger-1.0.0.tgz", integrity },
+                },
+              },
+            })
+          : new Response(tarball),
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
+    });
+    log.info.mockClear();
+    const response = await registry.handle({ ...request, subpath: "stranger/-/stranger-1.0.0.tgz" });
+    if (!("stream" in response)) throw new Error(`expected a stream, got ${response.status}`);
+    await new Response(response.stream).arrayBuffer();
+    registry.close();
+    const audited = log.info.mock.calls.filter(
+      ([fields]) => (fields as { event?: string }).event === "registry.audited",
+    );
+    expect(audited).toEqual([
+      [
+        {
+          event: "registry.audited",
+          runId: "run-1",
+          ecosystem: "npm",
+          name: "stranger",
+          version: "1.0.0",
+          sizeBytes: tarball.byteLength,
+          relation: "unknown",
+          mode: "audit",
+          advisories: [],
+        },
+        expect.any(String),
+      ],
+    ]);
+    // Never a walk in an audit-mode run.
+    expect(log.info.mock.calls.some(([fields]) => (fields as { event?: string }).event === "registry.graph_walk")).toBe(
+      false,
     );
   });
 });

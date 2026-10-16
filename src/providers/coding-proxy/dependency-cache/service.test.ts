@@ -36,6 +36,7 @@ function context(overrides: Partial<RegistryRunContext> = {}): RegistryRunContex
     repository: "owner/repo",
     cacheImage: IMAGE,
     dependencyCache: true,
+    packageAudit: null,
     ...overrides,
   };
 }

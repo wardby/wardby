@@ -43,7 +43,18 @@ interface FakeRunRow {
     debugTrace?: boolean;
     debugTraceMaxMb?: number | null;
     services?: unknown;
+    packageAuditMode?: "audit" | "full" | null;
   } | null;
+  auditRecords?: Array<{
+    ecosystem: string;
+    name: string;
+    version: string;
+    relation: string;
+    via: string | null;
+    sizeBytes: number | null;
+    advisories: unknown;
+    createdAt: Date;
+  }>;
   registryFetches?: Array<{
     ecosystem: string;
     name: string;
@@ -68,6 +79,7 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSee
       localPullRequest: _lpr,
       registryFetches: _registryFetches,
       approvedVersions: _approved,
+      auditRecords: _audits,
       ...row
     } = run;
     return row;
@@ -105,6 +117,12 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSee
     registryFetch: {
       findMany: async ({ where }: { where: { runId: string } }) =>
         [...(runRows.get(where.runId)?.registryFetches ?? [])].sort(
+          (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
+        ),
+    },
+    registryAuditRecord: {
+      findMany: async ({ where }: { where: { runId: string } }) =>
+        [...(runRows.get(where.runId)?.auditRecords ?? [])].sort(
           (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
         ),
     },
@@ -519,6 +537,89 @@ describe("run observability tools", () => {
     expect(nonCodingBody).not.toHaveProperty("packages");
     expect(nonCodingBody).not.toHaveProperty("packageRefusals");
     expect(nonCodingBody).not.toHaveProperty("packagePlan");
+    await client.close();
+  });
+
+  it("get_run reports packageAuditMode and packageAudit only for a run that had the mode", async () => {
+    const now = new Date();
+    const base = {
+      agentId: "a1",
+      status: "succeeded",
+      trigger: "manual",
+      turns: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      costUsd: 0,
+      finalText: null,
+      error: null,
+      startedAt: now,
+      finishedAt: now,
+    };
+    const record = (name: string, relation: string, extra: Record<string, unknown> = {}, offset = 0) => ({
+      ecosystem: "npm",
+      name,
+      version: "1.0.0",
+      relation,
+      via: null,
+      sizeBytes: 100,
+      advisories: [],
+      createdAt: new Date(now.getTime() + offset),
+      ...extra,
+    });
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [
+        { ...base, id: "off", codingRun: { result: null } },
+        { ...base, id: "quiet", codingRun: { result: null, packageAuditMode: "audit" } },
+        {
+          ...base,
+          id: "full",
+          codingRun: { result: null, packageAuditMode: "full" },
+          auditRecords: [
+            record("expo-dev-launcher", "transitive", { via: "expo-dev-client" }, 2),
+            record("expo-dev-client", "top-level", {}, 1),
+            record(
+              "lodash",
+              "allowed",
+              { advisories: [{ id: "GHSA-35jh-r3h4-6jhm", severity: "HIGH", summary: "Command injection" }] },
+              3,
+            ),
+          ],
+        },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+    const get = async (runId: string) =>
+      parseText((await client.callTool({ name: "get_run", arguments: { runId } })) as never) as Record<string, unknown>;
+
+    const off = await get("off");
+    expect(off).not.toHaveProperty("packageAuditMode");
+    expect(off).not.toHaveProperty("packageAudit");
+    expect(await get("quiet")).toMatchObject({ packageAuditMode: "audit", packageAudit: [] });
+    const full = await get("full");
+    expect(full.packageAuditMode).toBe("full");
+    expect(full.packageAudit).toEqual([
+      { ecosystem: "npm", name: "expo-dev-client", version: "1.0.0", size: 100, relation: "top-level" },
+      {
+        ecosystem: "npm",
+        name: "expo-dev-launcher",
+        version: "1.0.0",
+        size: 100,
+        relation: "transitive",
+        via: "expo-dev-client",
+      },
+      {
+        ecosystem: "npm",
+        name: "lodash",
+        version: "1.0.0",
+        size: 100,
+        relation: "allowed",
+        advisories: [{ id: "GHSA-35jh-r3h4-6jhm", severity: "HIGH", summary: "Command injection" }],
+      },
+    ]);
     await client.close();
   });
 

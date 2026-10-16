@@ -428,29 +428,29 @@ model Run {
 /// Phase 5: owner-configured coding behavior. Runtime credentials and opaque
 /// launcher handles never live on the reusable profile.
 model CodingAgentProfile {
-  agentId                  String    @id
-  agent                    Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  provider                 String    @default("codex")
+  agentId                  String            @id
+  agent                    Agent             @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  provider                 String            @default("codex")
   repository               String
-  baseRef                  String    @default("main")
+  baseRef                  String            @default("main")
   defaultTask              String?
-  allowWebhookTaskOverride Boolean   @default(false)
-  timeoutSec               Int       @default(1800)
+  allowWebhookTaskOverride Boolean           @default(false)
+  timeoutSec               Int               @default(1800)
   /// Claude Code runs only: the most agent turns a run may take. Null = the worker default (200).
   maxTurns                 Int?
   /// Claude Code runs only: the most output tokens per model reply (1024-128000). Null = the worker default (32000).
   maxOutputTokens          Int?
   /// Unused; dropped after rollout (see the package-registry plan, Task 14).
-  allowedEgress            Json      @default("[]")
+  allowedEgress            Json              @default("[]")
   protectedPaths           Json
-  collectExclude           Json      @default("[]")
-  toolchain                String    @default("node")
+  collectExclude           Json              @default("[]")
+  toolchain                String            @default("node")
   toolchainVersion         String?
   workerImageRef           String?
   /// Per-agent workspace size in MiB; null = CODING_DISK_MB.
   workspaceDiskMb          Int?
-  packageAllowlist         Json      @default("{}")
-  packagePolicy            Json      @default("{}")
+  packageAllowlist         Json              @default("{}")
+  packagePolicy            Json              @default("{}")
   /// Admin-requested debug trace: while now < debugTraceUntil, every coding
   /// run of this agent is dispatched with CodingRun.debugTrace set. Null = off.
   debugTraceUntil          DateTime?
@@ -459,16 +459,20 @@ model CodingAgentProfile {
   /// Coding-run services (docs/coding-services.md): the catalog names
   /// (CodingService.name) this agent's runs may start, any version the catalog
   /// has. Empty = none. Owner-set through update_agent.
-  services                 Json      @default("[]")
+  services                 Json              @default("[]")
   /// Load the repository's agent skills into coding runs (Codex: .agents/skills, .codex/skills;
   /// Claude Code: .claude/skills). Repo instructions (AGENTS.md / CLAUDE.md) load regardless.
-  repoSkills               Boolean   @default(true)
+  repoSkills               Boolean           @default(true)
   /// Claude Code runs only: keep Claude Code's bare mode (CLAUDE_CODE_SIMPLE=1); wardby injects
   /// repo instructions and the skill list into the system prompt. False = Claude Code's native loading.
-  claudeBareMode           Boolean   @default(true)
+  claudeBareMode           Boolean           @default(true)
   /// Restore node_modules from a cached snapshot (written only by trusted wardby code before the
   /// agent starts) instead of a full install. Owner-set; off by default.
-  dependencyCache          Boolean   @default(false)
+  dependencyCache          Boolean           @default(false)
+  /// Owner-set package audit mode (docs/coding-packages.md#package-audit-mode); active while now < packageAuditUntil.
+  packageAuditMode         PackageAuditMode?
+  /// End of the audit window; null = off.
+  packageAuditUntil        DateTime?
 
   /// How `repository` was authorized for this agent (see AgentRepository.authorizedVia):
   /// "host_permission", "admin", or "grandfathered". Null = never authorized; runs are refused.
@@ -557,6 +561,8 @@ model CodingRun {
   /// What the run's dependency cache did, written by the control plane when it collects the run:
   /// { result, key?, sizeBytes?, restoreMs?, installMs?, reason? }. Null = not used or not reported.
   dependencyCacheResult Json?
+  /// Fixed at dispatch: the profile's packageAuditMode when its window was open, else null.
+  packageAuditMode      PackageAuditMode?
   createdAt             DateTime            @default(now())
   updatedAt             DateTime            @updatedAt
   proxySession          CodingProxySession?
@@ -575,6 +581,7 @@ model CodingRun {
   registryFetches          RegistryFetch[]
   registryApprovedVersions RegistryApprovedVersion[]
   registryPlanRefusals     RegistryPlanRefusal[]
+  registryAuditRecords     RegistryAuditRecord[]
   dependencySnapshots      DependencySnapshot[]
 
   @@index([jobBackend, jobHandle])
@@ -838,6 +845,32 @@ model CodingProxyRequest {
   @@index([sessionId, status])
 }
 
+/// Package audit mode (docs/coding-packages.md#package-audit-mode).
+enum PackageAuditMode {
+  audit
+  full
+}
+
+/// One package version a run's registry served only because of package audit mode (or, in full mode,
+/// served despite blocking advisories). Insert-only for the proxy.
+model RegistryAuditRecord {
+  runId      String
+  ecosystem  String
+  name       String
+  version    String
+  /// "top-level" | "transitive" | "unknown" | "allowed" (allowed = on the allowlist graph, recorded only for advisories)
+  relation   String
+  /// The top-level audited package that pulled it in (transitive only).
+  via        String?
+  sizeBytes  Int?
+  /// Full mode: [{ id, severity, summary }] served past; [] otherwise.
+  advisories Json      @default("[]")
+  createdAt  DateTime  @default(now())
+  run        CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
+
+  @@id([runId, ecosystem, name, version])
+}
+
 enum RegistryFetchOutcome {
   served
   refused
@@ -847,11 +880,14 @@ enum RegistryFetchOutcome {
 /// once at dispatch (see CodingRun.packageAllowlist) and used to gate every
 /// proxy fetch for the run's lifetime.
 model RegistryAllowance {
-  runId     String
-  ecosystem String
-  name      String
-  createdAt DateTime  @default(now())
-  run       CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
+  runId      String
+  ecosystem  String
+  name       String
+  /// Set only in an audit-mode run: the top-level audited package whose metadata or file declared this
+  /// name (its own name for a top-level audited package). Null = a normal allowance.
+  auditedVia String?
+  createdAt  DateTime  @default(now())
+  run        CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
 
   @@id([runId, ecosystem, name])
 }
@@ -906,6 +942,9 @@ model RegistryApprovedVersion {
   /// for this version: empty unless the plan kept it only by that waiver. A
   /// download of it records them on its served RegistryFetch row.
   acceptedAdvisories String[]  @default([])
+  /// Audit-mode plans only: { relation, via?, advisories? } for an approval outside the allowlist, or
+  /// one kept past advisories in full mode. Null = a normal approval.
+  audit              Json?
   createdAt          DateTime  @default(now())
   run                CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
 

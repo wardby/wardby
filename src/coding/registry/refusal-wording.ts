@@ -15,7 +15,7 @@ const TRANSIENT = new Set([
 ]);
 
 /** Untrusted names stay bounded code spans with mentions and markup defused. */
-function codeSpan(value: string): string {
+export function codeSpan(value: string): string {
   // eslint-disable-next-line no-control-regex -- stripping untrusted control characters.
   const withoutControls = value.replace(/[`\u0000-\u001f\u007f<>]/g, " ");
   const safe = withoutControls.replace(/\s+/g, " ").replace(/@/g, "@​").slice(0, 120);
