@@ -3,7 +3,7 @@ id: errors/budget-exhausted
 title: Run stopped out of budget (budget_exhausted)
 summary: A coding run stopped because its next model request did not fit what was left of its budget; get_run's budgetEvents says which limit and why.
 audience: operator
-tags: [error, budget, budget_exhausted, coding_budget_exhausted, reservations]
+tags: [error, budget, budget_exhausted, coding_budget_exhausted, reservations, holds, prompt-cache]
 appliesTo: ">=0.6.1"
 ---
 
@@ -11,9 +11,12 @@ appliesTo: ">=0.6.1"
 
 ## What happened
 
-Before each model request the coding proxy holds a worst-case amount against
-the run's budget: the input estimate plus the largest reply the request allows,
-priced at the model's output rate. A request whose hold does not fit in what is
+Before each model request the coding proxy holds an amount against the run's
+budget. The first request of a conversation (and any fallback) holds the worst
+case: the whole request body as new input plus the largest reply the request
+allows, priced at the model's output rate. After a mostly cached reply in the
+same conversation, the cached part of the prompt is held at the cache-read
+rate instead, so the hold is much smaller. A request whose hold does not fit in what is
 left is refused, and the run ends `budget_exhausted` (its error reads
 `coding_budget_exhausted: <sentence>`). The run did not overspend; it stopped
 before a request it might not have been able to pay for.
@@ -31,7 +34,9 @@ Call `get_run` and read `budgetEvents`. Each event has:
 - `details`: for a refused model request, the budget, the amount spent, the
   holds of requests in flight, the refused hold, the model and the turn. For a
   refusal at dispatch, the cap, the amount spent, the amount held and
-  `heldRuns`, the number of runs holding budget. Both also carry
+  `heldRuns`, the number of runs holding budget. A refused model request also
+  carries `refusedHoldBasis` (`cached` or `full`) and `refusedHoldCeilingUsd`
+  (the worst-case hold for that request). Both also carry
   `groupName` (the agent's budget group, when it has one) and, for a
   `run-tree` limit, `leadAgentName`. A refused model request also carries
   `agentBudgetUsd`, the agent's own `budgetUsd`.
@@ -39,6 +44,21 @@ Call `get_run` and read `budgetEvents`. Each event has:
 The run's error, and a lead's sub-agent result (in its `budget` field), carry
 the same facts as one sentence. Pull request and issue comments and check
 summaries show the amounts and the budget group's name only.
+
+## Holds vs actual spend
+
+A hold is not a charge. The run is charged the reply's real cost, and the hold
+is released when the reply is settled. A hold is larger than a typical reply
+because it must cover the whole output allowance (`maxOutputTokens`), and
+because the first request of a conversation, and any fallback, assumes the whole
+body is new input. Fallbacks apply when there is no previous reply in the
+conversation, the model changed, the previous reply was interrupted, mostly
+uncached or more than 5 minutes old, or the body got smaller.
+
+Read `refusedHoldBasis`: `full` means the hold was a fallback, so the next
+request in a warm conversation would likely hold less; `cached` means it
+already used the cache-read rate, so the budget is simply low for the request.
+`refusedHoldCeilingUsd` is the most the request could ever hold.
 
 ## What to do
 
@@ -66,4 +86,4 @@ A lead and the sub-agents it starts in the same budget group hold the lead's
 budget once, at the lead (its reservation minus what the whole tree has spent),
 decided per period. `get_budget_group` reports `heldRuns` for each period.
 
-See also [Troubleshoot budgets and reservations](../troubleshooting/budgets.md).
+See also [Troubleshoot budgets and reservations, holds, prompt-cache](../troubleshooting/budgets.md).
