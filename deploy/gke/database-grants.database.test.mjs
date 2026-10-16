@@ -242,6 +242,28 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
       await expect(proxy.$executeRawUnsafe(`DELETE FROM "${table}" WHERE false`)).rejects.toThrow(/permission denied/);
     }
 
+    // Package audit mode: the proxy reads the run's fixed mode and records
+    // what it served under it, and never changes a record.
+    expect(await proxy.$queryRawUnsafe(`SELECT "packageAuditMode" FROM "CodingRun" WHERE "runId" = $1`, runId)).toEqual(
+      [{ packageAuditMode: null }],
+    );
+    await proxy.$executeRawUnsafe(
+      `INSERT INTO "RegistryAuditRecord" ("runId", "ecosystem", "name", "version", "relation") VALUES ($1, 'npm', 'left-pad', '1.3.0', 'top-level')`,
+      runId,
+    );
+    expect(
+      await proxy.$queryRawUnsafe(`SELECT "name", "relation" FROM "RegistryAuditRecord" WHERE "runId" = $1`, runId),
+    ).toEqual([{ name: "left-pad", relation: "top-level" }]);
+    await expect(
+      proxy.$executeRawUnsafe(`UPDATE "RegistryAuditRecord" SET "relation" = 'x' WHERE false`),
+    ).rejects.toThrow(/permission denied/);
+    await expect(proxy.$executeRawUnsafe(`DELETE FROM "RegistryAuditRecord" WHERE false`)).rejects.toThrow(
+      /permission denied/,
+    );
+    await expect(
+      proxy.$executeRawUnsafe(`UPDATE "CodingRun" SET "packageAuditMode" = NULL WHERE false`),
+    ).rejects.toThrow(/permission denied/);
+
     // The dependency cache: the proxy reads the run's cache inputs, keeps the
     // session's approved lock hashes and seal, and owns the snapshot metadata.
     await admin.codingRun.update({
@@ -412,13 +434,14 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
         .replace(/\bCodingRun\b/g, `CodingRun${missing}`)
         .replace(/\bRegistryAllowance\b/g, `RegistryAllowance${missing}`)
         .replace(/\bRegistryFetch\b/g, `RegistryFetch${missing}`)
+        .replace(/\bRegistryAuditRecord\b/g, `RegistryAuditRecord${missing}`)
         .replace(/\bRegistryVersionFact\b/g, `RegistryVersionFact${missing}`)
         .replace(/\bRegistryApprovedVersion\b/g, `RegistryApprovedVersion${missing}`)
         .replace(/\bRegistryPlanRefusal\b/g, `RegistryPlanRefusal${missing}`)
         .replace(/\bDependencySnapshot\b/g, `DependencySnapshot${missing}`)
         .replace(/\b_prisma_migrations\b/g, `_prisma_migrations${missing}`);
       expect(sql).not.toMatch(
-        /"(CodingProxySession|CodingProxyRequest|Run|RunModelUsage|CodingRun|RegistryAllowance|RegistryFetch|RegistryVersionFact|RegistryApprovedVersion|RegistryPlanRefusal|DependencySnapshot|_prisma_migrations)"/,
+        /"(CodingProxySession|CodingProxyRequest|Run|RunModelUsage|CodingRun|RegistryAllowance|RegistryFetch|RegistryAuditRecord|RegistryVersionFact|RegistryApprovedVersion|RegistryPlanRefusal|DependencySnapshot|_prisma_migrations)"/,
       );
       for (const st of statements(sql)) await admin.$executeRawUnsafe(st);
       const [{ tables, columns }] = await admin.$queryRawUnsafe(
