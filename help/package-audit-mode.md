@@ -49,7 +49,7 @@ with it.
 
 - `get_run`: `packageAuditMode` and `packageAudit`, one entry per version
   with its `relation` (`top-level`, `transitive` with `via`, `unknown`, or
-  `allowed`) and, in `full` mode, its `advisories`.
+  `allowed`) and, in `full` mode, its `advisories` (the high and critical ones it was served despite).
 - The pull request body: a caution banner, **Packages outside the
   allowlist**, and in `full` mode **Served despite advisories**.
 - The run's status comment on GitHub or Jira, and a `packages_audited` Slack
