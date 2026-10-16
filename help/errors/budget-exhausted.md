@@ -86,4 +86,4 @@ A lead and the sub-agents it starts in the same budget group hold the lead's
 budget once, at the lead (its reservation minus what the whole tree has spent),
 decided per period. `get_budget_group` reports `heldRuns` for each period.
 
-See also [Troubleshoot budgets and reservations, holds, prompt-cache](../troubleshooting/budgets.md).
+See also [Troubleshoot budgets and reservations](../troubleshooting/budgets.md).
