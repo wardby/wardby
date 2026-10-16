@@ -324,7 +324,8 @@ and each approved package name is allowed for the run, so npm can read its
 metadata again (as `npm install <new-package>` does for the packages already in
 the lockfile).
 The response is `{ "approved": <count>, "refused": [{ "name", "version",
-"code", "reason" }] }`, and each refusal is recorded like any other (within
+"code", "reason" }] }` (plus `"audited": <count>` in a
+[package audit mode](#package-audit-mode) run), and each refusal is recorded like any other (within
 the 500-per-run cap). A tarball request for an approved `name@version` is then served directly,
 checked against the approved integrity, with no graph walk.
 
@@ -578,7 +579,8 @@ optional and peer dependencies, its graph is usually several times larger than
 the graph of one install. The walk runs only while a request waits for it; its
 state is per run, so it resumes within the run and starts again in a new run.
 Each time a walk ends, the proxy logs `registry.graph_walk` with how far it
-got.
+got. (A run in [package audit mode](#package-audit-mode) never walks; it logs
+`registry.audited` for each package it installs outside the allowlist.)
 
 A request the walk could not settle gets one of four answers (a metadata
 request gets the last three only after a failed or partial lockfile plan,
@@ -619,6 +621,176 @@ largest memory user: a measured `npm ci` of a ~220-package lockfile (React
 why the GKE overlay gives the proxy 3Gi. A lockfile the shim verified
 avoids the walk for every version the plan approved, and for every version it
 refused for a reason about the version itself (too new, an advisory, ...).
+
+## Package audit mode
+
+From Wardby 0.6.1, an agent's owner can switch its coding runs' registry into
+package audit mode for a limited time. A package outside the allowlist is then
+installed instead of refused, and recorded so it can be approved afterwards.
+Use it to find out which packages a task actually needs (a new framework, a
+large toolchain) without a round of refusals for each one, then approve them
+and let the mode lapse.
+
+### What each mode does
+
+"Outside the allowlist" means a name that is neither an allowlist entry nor
+allowed for the run as a dependency of one.
+
+| Situation                                                    | Off (default)                      | `audit`                                                                                                   | `full`                                                                |
+| ------------------------------------------------------------ | ---------------------------------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Metadata for a package outside the allowlist                 | `403 wardby_package_not_allowed`   | served; the package is recorded as `top-level` (`unknown` after a failed or partial lockfile plan)        | same as `audit`                                                       |
+| Download of a package outside the allowlist                  | lockfile plan, graph walk, refusal | served with no walk; recorded as `unknown` unless its metadata or a plan said more                        | same as `audit`                                                       |
+| A dependency an audited package declares                     | not applicable                     | allowed for the run; recorded as `transitive`, with the top-level audited package that brought it (`via`) | same as `audit`                                                       |
+| A version outside an allowlist entry's own range (`foo@^1`)  | `wardby_version_filtered`          | unchanged: an entry's range is the owner's explicit restriction                                           | unchanged                                                             |
+| A high or critical advisory, not accepted                    | withheld                           | withheld                                                                                                  | served, and every advisory recorded (also for an allowlisted package) |
+| An advisory in `packagePolicy.acceptedAdvisories`            | waived, recorded on the served row | same                                                                                                      | same                                                                  |
+| Malware (`MAL-…`, an alias of one, CWE-506)                  | withheld                           | withheld                                                                                                  | withheld                                                              |
+| Release age (`minReleaseAgeDays`, per file)                  | enforced                           | enforced                                                                                                  | enforced                                                              |
+| OSV unreachable                                              | `503 wardby_audit_unavailable`     | same                                                                                                      | same                                                                  |
+| Source distributions, size and file limits, integrity, hosts | enforced                           | enforced                                                                                                  | enforced                                                              |
+
+No graph walk runs in an audit-mode run, so `wardby_graph_limit`,
+`wardby_graph_incomplete` and `wardby_package_not_allowed_pending` can't
+occur there.
+
+### Turning it on
+
+The agent's owner sets it with `update_agent`. It needs `packages:approve` or
+`agents:admin` (the gate for `packageAllowlist`), and `create_agent` doesn't
+accept it:
+
+```json
+{ "id": "<agent id>", "codingProfile": { "packageAuditMode": "audit", "packageAuditMinutes": 1440 } }
+```
+
+| Input                                         | Effect                                                         |
+| --------------------------------------------- | -------------------------------------------------------------- |
+| `packageAuditMode: "audit"` or `"full"`       | on for 24 hours                                                |
+| …with `packageAuditMinutes: <m>` (1 to 10080) | on for `m` minutes (at most 7 days)                            |
+| `packageAuditMinutes: <m>` alone              | re-arms the stored mode for `m` minutes (an error without one) |
+| `packageAuditMode: null`                      | off                                                            |
+
+Each change is logged as `coding.package_audit.set` with the agent, mode,
+end time and who set it. `get_agent` and `update_agent` return
+`codingProfile.packageAuditMode`, `packageAuditUntil` and
+`packageAuditActive`, plus a warning while the window is open. An expired
+window keeps the stored mode but is inactive.
+
+A coding run takes the mode when it is dispatched and keeps it for its whole
+life, queued or long-running. A run dispatched just before the window ends
+runs with the mode for up to the agent's `timeoutSec`. Continuations and
+review fix rounds are new dispatches and read the window again.
+
+### What is recorded, and where
+
+Each package version served only because of the mode (or, in `full`, served
+despite a blocking advisory) is recorded once per run, when its first file
+finishes downloading. A HEAD request, a metadata request or a refusal records
+nothing. If the record can't be written, the download fails instead of being
+installed unrecorded. The record shows up in:
+
+- `get_run`: `packageAuditMode` and `packageAudit` (an empty list when the mode
+  was on and nothing was recorded; both absent when it was off).
+- The pull request body: a `[!CAUTION]` banner above the agent's summary,
+  **Packages outside the allowlist** (the names to approve, each with a count
+  of its dependencies), and in `full` mode **Served despite advisories**. When
+  the mode was on and nothing was recorded, the banner says so in one line. A
+  later run on the same pull request merges the lists across its runs, and the
+  banner is kept when the **Packages** section is dropped for size.
+- The run's GitHub or Jira status comment: a short block above the run line.
+- Slack: a `packages_audited` event for the top-level run (see
+  [Slack notifications](slack-notifications.md)).
+- The proxy log: `registry.audited`, one line per version, with the run,
+  ecosystem, name, version, size, relation, `via`, mode and advisory ids.
+
+```json
+{
+  "packageAuditMode": "full",
+  "packageAudit": [
+    { "ecosystem": "npm", "name": "vite-plugin-pwa", "version": "1.0.3", "size": 41210, "relation": "top-level" },
+    {
+      "ecosystem": "npm",
+      "name": "workbox-build",
+      "version": "7.3.0",
+      "size": 90231,
+      "relation": "transitive",
+      "via": "vite-plugin-pwa"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "lodash",
+      "version": "4.17.20",
+      "size": 1200,
+      "relation": "allowed",
+      "advisories": [{ "id": "GHSA-35jh-r3h4-6jhm", "severity": "HIGH", "summary": "Command injection in lodash" }]
+    }
+  ]
+}
+```
+
+`relation` is best effort. `unknown` means the registry couldn't tell how the
+package reached the run (a direct tarball download, or a metadata request
+after a lockfile plan fell back). A dependency that an audited package
+declared first stays recorded as audited even if an allowlisted package
+declares it later. Both errors over-report, never under-report.
+
+### Lockfile plans and the dependency cache
+
+In audit mode a lockfile plan (`POST /registry/<ecosystem>/-/plan`) also
+approves the lockfile entries the allowlist doesn't reach, when they pass
+every other check. An entry a lockfile project declares is `top-level`, one
+an audited top-level entry reaches is `transitive`, and anything else is
+`unknown`. An allowlisted name at a version outside its entry's range is never
+approved this way. The plan's response adds `audited`, the number of
+approvals carrying an audit record, and each download of such an approval is
+recorded like any other audited package.
+
+A plan that audited anything never records its lockfile for the
+[dependency cache](#dependency-cache). A restore installs packages without
+downloading them, so they would go unrecorded. The run installs normally
+instead, and no snapshot of that lockfile is saved from it.
+
+### Promoting audited packages
+
+Add what a run recorded to the allowlist with `approve_audited_packages`
+(`{ "runId": "<run id>" }`, optionally `"names": [...]`). It adds the
+`top-level` and `unknown` names as bare entries to the agent's
+`packageAllowlist`; their dependencies then follow through the allowlist
+graph. For a parent run, each coding sub-run's names go to that sub-run's own
+agent. It needs the same access as `packageAllowlist` (`packages:approve` or
+`agents:admin`, owner only), skips names already allowed, keeps the 256-entry
+limit per ecosystem, and is logged as `coding.package_audit.promoted`. It
+doesn't turn the mode off. You can also edit `packageAllowlist` with
+`update_agent` yourself, for example to pin a range.
+
+### Risks
+
+Package audit mode weakens the supply-chain guard while it is on:
+
+- `audit` keeps the malware, advisory and release-age checks. `full` keeps
+  only malware and release age. A confused or prompt-injected agent can
+  install a lookalike package that has no advisory yet and is older than the
+  release age.
+- npm runs with `--ignore-scripts` and pip installs only wheels, so nothing
+  runs at install time, but the run's tests and builds still execute what was
+  installed.
+- A scheduled agent can run many times inside one window. Keep windows short,
+  turn the mode off once you've approved what you need, and read the caution
+  banner on every affected pull request before merging.
+
+The mode is never on by default, needs an approver's scope and the agent's
+owner, lasts at most 7 days, is logged when set, and is reported on every
+run it affected.
+
+### Upgrading
+
+The coding proxy reads each run's mode from `CodingRun.packageAuditMode` and
+writes `RegistryAuditRecord` rows. The GKE `up.sh` applies these grants from
+`deploy/gke/database-grants.sql` after its migrations. If you manage the proxy
+database role yourself, grant it `SELECT` on `CodingRun.packageAuditMode` and
+`SELECT, INSERT` on `RegistryAuditRecord` before upgrading the proxy.
+Without them, every registry request fails with `502 wardby_upstream_error`
+and the proxy logs `registry.failed` with a permission error.
 
 ## Dependency cache
 
@@ -1083,7 +1255,10 @@ present for the allowlist codes below and omitted for codes without guidance.
 `size` is the number of bytes served, or `null` if none was recorded.
 `get_run` also returns `packagePlan: { "approved": <n>, "refused": <n> }`:
 the exact versions lockfile plans approved for the run, and the distinct
-entries they refused (each refusal is also in `packageRefusals`).
+entries they refused (each refusal is also in `packageRefusals`). A run with
+[package audit mode](#package-audit-mode) on also returns `packageAuditMode`
+and `packageAudit`, and its pull request opens with a caution banner listing
+the packages installed outside the allowlist.
 
 The pull request finalization also appends a collapsed **Packages installed
 during this run** section listing the same information, so a reviewer

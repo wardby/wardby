@@ -39,4 +39,5 @@ coding proxy. A higher limit uses more proxy memory and walk time.
 - [Package not reached: `wardby_package_not_allowed_pending`](package-not-allowed-pending.md)
 - [Not allowed: `wardby_package_not_allowed`](package-not-allowed.md)
 - [Still being checked: `wardby_graph_incomplete`](graph-incomplete.md)
+- [Package audit mode](../package-audit-mode.md): find out which packages a task needs without refusals, for a limited time.
 - [Coding packages](../../docs/coding-packages.md#operator-limits)

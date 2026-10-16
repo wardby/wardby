@@ -47,4 +47,5 @@ packages will not help; change or drop the refused dependency.
 - [Pending answer: `wardby_package_not_allowed_pending`](package-not-allowed-pending.md): the walk stopped before reaching the name.
 - [Graph limit: `wardby_graph_limit`](graph-limit.md)
 - [Still being checked: `wardby_graph_incomplete`](graph-incomplete.md)
+- [Package audit mode](../package-audit-mode.md): find out which packages a task needs without refusals, for a limited time.
 - [Coding packages](../coding-packages.md): the allowlist, the walk and the full error table.
