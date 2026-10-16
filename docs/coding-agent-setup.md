@@ -384,7 +384,8 @@ Every live run still pending or running holds its unspent reservation
 (reservation minus cost so far) against its group; a native run holds its
 agent's per-run `budgetUsd`. So overlapping scheduled, webhook and manual runs
 share one cap rather than each seeing the full remainder, and
-`get_budget_group` reports those holds as `reservedUsd` next to `spentUsd`.
+`get_budget_group` reports those holds as `reservedUsd` next to `spentUsd`, and
+each `spend[]` entry's `heldRuns` counts the runs holding budget in that period.
 Native runs are served first come, first served: a native run only counts the
 holds of runs that started before it, so members dispatched on the same tick
 don't starve each other.
@@ -412,6 +413,45 @@ Ctrl-C or SIGTERM, and the MCP tool `stop_run` records any pending, queued,
 or running run as `cancelled` (see [Stop or cancel a run](../help/stop-run.md)),
 which ends its hold at once. If a row is still stuck in `running` for another
 reason, only its real cost counts once its hold lapses.
+
+### Interrupted replies
+
+When a model reply breaks off before its final usage arrives (a dropped
+connection, a worker that is stopped mid-reply), the proxy settles the request
+at an estimate instead of leaving its whole hold in place. The estimate is the
+input usage the proxy already read; failing that, the input of the run's
+previous completed reply; failing that, the input part of the request's hold.
+It adds the output relayed so far, counted high, and is never more than the
+request's hold. An estimated request is flagged `costEstimated`, counts in the
+run's cost, and leaves the run's status `uncertain`. An interrupted request
+with nothing to estimate from keeps its full hold. A run can therefore exceed
+its budget by at most the difference between an estimate and the real cost of
+the interrupted request.
+
+### Delegated runs in a budget group
+
+A lead and the sub-agents it starts in the same budget group hold the lead's
+budget once, at the lead: the lead's reservation minus what the whole run tree
+has spent. This is decided per period: a sub-agent run holds nothing in a
+period only when its lead started in that same period. So a delegating lead
+does not count against its group several times over.
+
+### Why a run stopped
+
+`get_run` returns `budgetEvents` for a run that was refused for budget. Each
+event has `kind` (`refused`), `limit`, `at` and `details`. `limit` says which
+cap bound the run: `run` (the agent's own `budgetUsd`), `run-tree` (what the
+lead had left), or `day`, `week` or `month` (the budget group's cap for that
+period). For a refused model request, `details` holds the budget, the amount
+spent, the holds of requests in flight, the refused hold, the model and the
+turn. For a refusal at dispatch it holds the cap, the amount spent, the amount
+held and the number of holding runs (`heldRuns`).
+
+The run's error carries the same facts in one sentence after the code, for
+example `coding_budget_exhausted: <sentence>`. A lead's sub-agent result
+carries the sentence in a `budget` field. Pull request and issue comments and
+check summaries show the amounts and the budget group's name only. See
+[Run stopped out of budget](../help/errors/budget-exhausted.md).
 
 ## Turn limit (Claude Code)
 
@@ -450,7 +490,8 @@ price (plus the request's input estimate) against the run's budget for every
 model request, so a higher cap needs a larger `budgetUsd`: at a $25/MTok output
 price, 32000 tokens reserve $0.80 per request and 128000 reserve $3.20. A
 request whose reservation does not fit in what is left of the budget is
-refused and the run ends as `budget_exhausted`, so a higher value makes a run
+refused and the run ends as `budget_exhausted` (see
+[Why a run stopped](#why-a-run-stopped)), so a higher value makes a run
 with a small budget end sooner. Only Claude Code agents take
 `maxOutputTokens`; `create_agent` and `update_agent` refuse it on a Codex
 agent, and changing an agent's provider to `codex` needs it set to `null` in

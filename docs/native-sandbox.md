@@ -594,7 +594,9 @@ it reserves that call's worst-case cost against the run's budget (and any
 budget group), calls the provider, then settles at the actual usage. A call the
 remaining budget cannot cover is refused and the run ends `budget_exhausted`
 instead of overspending. The worker cannot raise or bypass its budget because it
-never talks to the provider directly.
+never talks to the provider directly. A call that breaks off before its final
+usage is settled at an estimate (never more than its reservation), flagged as
+estimated and included in the run's cost.
 
 ## Failure modes
 
