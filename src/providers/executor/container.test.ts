@@ -2203,6 +2203,46 @@ describe("ContainerExecutor", () => {
       expect(created.store.recordedRefusals).toEqual([["run-1", "session-1"]]);
     });
 
+    // The proxy cannot write budget events; the control plane copies its refusal at every ending.
+    it("copies the proxy's refusal for a run that still succeeded", async () => {
+      const created = await harness();
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.store.recordedRefusals).toEqual([["run-1", "session-1"]]);
+    });
+
+    it("copies the proxy's refusal for a run that failed for another reason", async () => {
+      const created = await harness();
+      created.jobs.statusValue = { state: "failed" };
+      created.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_stream_failed" };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("failed");
+      expect(created.store.recordedRefusals).toEqual([["run-1", "session-1"]]);
+    });
+
+    it("copies the proxy's refusal for a stopped run and again when an ended run is cleaned up", async () => {
+      const created = await harness({ proxySessionId: "session-1" });
+      await created.executor.stop("run-1", "requested");
+      await created.executor.stop("run-1", "requested");
+
+      expect(created.store.run.status).toBe("cancelled");
+      // The store's copy is once per run; calling it twice adds nothing.
+      expect(created.store.recordedRefusals).toEqual([
+        ["run-1", "session-1"],
+        ["run-1", "session-1"],
+      ]);
+    });
+
+    it("copies nothing for a run that never had a proxy session", async () => {
+      const created = await harness();
+      await created.executor.stop("run-1", "requested");
+
+      expect(created.store.run.status).toBe("cancelled");
+      expect(created.store.recordedRefusals).toEqual([]);
+    });
+
     it("ends a run whose result could not be finalized as budget_exhausted when its session was refused", async () => {
       const created = await harness();
       created.sessions.exhausted.add("session-1");

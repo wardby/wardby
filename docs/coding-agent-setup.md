@@ -439,8 +439,10 @@ does not count against its group several times over.
 
 ### Why a run stopped
 
-`get_run` returns `budgetEvents` for a run that was refused for budget. Each
-event has `kind` (`refused`), `limit`, `at` and `details`. `limit` says which
+`get_run` returns `budgetEvents` for a run that was refused for budget,
+including a run whose model request was refused but that still finished,
+failed for another reason, or was stopped. The event is recorded when the run
+ends. Each event has `kind` (`refused`), `limit`, `at` and `details`. `limit` says which
 cap bound the run: `run` (the agent's own `budgetUsd`), `run-tree` (what the
 lead had left), or `day`, `week` or `month` (the budget group's cap for that
 period). For a refused model request, `details` holds the budget, the amount

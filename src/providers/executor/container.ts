@@ -348,8 +348,9 @@ export interface ContainerExecutionStore {
   ): Promise<void>;
   /**
    * Copies the proxy session's first budget refusal (CodingProxySession.budgetRefusal, written by the
-   * proxy, which has no access to RunBudgetEvent) into the run's budget events, once per run. A session
-   * that never recorded one adds nothing. Optional: without it no event is written.
+   * proxy, which has no access to RunBudgetEvent) into the run's budget events, once per run, whatever
+   * status the run ends with. A session that never recorded one adds nothing. Optional: without it no
+   * event is written.
    */
   recordBudgetRefusal?(runId: string, sessionId: string): Promise<void>;
   /** The run's recorded budget refusal with names filled in, or null. Optional: without it no event is shown. */
@@ -974,6 +975,7 @@ export class ContainerExecutor implements Executor {
     // Persist the cancellation fence first so a concurrent finisher cannot publish.
     const failure = this.failure("cancelled", { cancelled: true });
     await this.options.store.terminate(runId, "cancelled", failure.error, failure.audit);
+    await this.recordRefusal(runId, run.proxySessionId);
     this.terminal(run, "cancelled", failure.audit);
     if (run.proxySessionId) await this.options.sessions.cancelSession(run.proxySessionId).catch(() => undefined);
     if (run.jobHandle) {
@@ -1123,7 +1125,7 @@ export class ContainerExecutor implements Executor {
         : !spendEnabled && error instanceof PreflightError
           ? "refused"
           : "failed";
-      if (outOfBudget) await this.recordRefusal(runId, sessionId);
+      await this.recordRefusal(runId, sessionId);
       const failure = outOfBudget ? await this.budgetFailure(runId, error) : this.failure(error);
       this.emit({
         stage: "stopping",
@@ -1357,6 +1359,7 @@ export class ContainerExecutor implements Executor {
           ? this.providerFailureOf(run, provider, `job_${reason}`, { issues: collected?.diagnosticIssues })
           : this.failure(`job_${reason}`, { issues: collected?.diagnosticIssues });
         providerClass = provider?.class;
+        await this.recordRefusal(run.runId, sessionId);
         await this.options.store.terminate(run.runId, status, failure.error, failure.audit);
         this.terminal(run, status, failure.audit);
         return;
@@ -1383,6 +1386,7 @@ export class ContainerExecutor implements Executor {
       if (output.outcome === "no_changes") {
         // Before complete: the terminal hook (a no-change fix round's re-review) reads the refreshed body.
         const description = await this.refreshDescriptionInTime(current, output, existingWorkspace);
+        await this.recordRefusal(run.runId, sessionId);
         await this.options.store.complete(run.runId, "succeeded", this.resultFor(output, current), {
           ...dependencyCacheRecord(output),
           ...description,
@@ -1446,6 +1450,7 @@ export class ContainerExecutor implements Executor {
       // A pushed branch (local repository) is a successful run with no pull
       // request; its branch is recorded on the run for the operator to merge.
       const result = this.resultFor(output, current, finalized.outcome, finalized);
+      await this.recordRefusal(run.runId, sessionId);
       await this.options.store.complete(run.runId, "succeeded", result, {
         ...dependencyCacheRecord(output),
         baseSha: finalized.baseCommit,
@@ -1473,6 +1478,7 @@ export class ContainerExecutor implements Executor {
         this.terminal(run, "budget_exhausted", failure.audit);
         outcome = "budget_exhausted";
       } else {
+        await this.recordRefusal(run.runId, sessionId);
         const failure = this.failure(error);
         await this.options.store.terminate(run.runId, "failed", failure.error, failure.audit);
         this.terminal(run, "failed", failure.audit);
@@ -2154,6 +2160,7 @@ export class ContainerExecutor implements Executor {
     const failure = this.failure(reason);
     await this.options.store.terminate(run.runId, "lost", failure.error, failure.audit);
     this.terminal(run, "lost", failure.audit);
+    await this.recordRefusal(run.runId, run.proxySessionId);
     if (run.proxySessionId) await this.options.sessions.cancelSession(run.proxySessionId).catch(() => undefined);
     if (run.jobHandle) {
       await this.options.jobs.stop(run.jobHandle, reason).catch(() => undefined);
@@ -2171,6 +2178,8 @@ export class ContainerExecutor implements Executor {
   }
 
   private async cleanupTerminal(run: ContainerRunSnapshot): Promise<void> {
+    // A run another path ended (or one recovered after a crash) still gets its refusal; the copy is idempotent.
+    await this.recordRefusal(run.runId, run.proxySessionId);
     if (run.proxySessionId) await this.options.sessions.cancelSession(run.proxySessionId).catch(() => undefined);
     if (run.jobHandle) {
       const status = await this.options.jobs.status(run.jobHandle).catch(() => null);
@@ -2211,7 +2220,11 @@ export class ContainerExecutor implements Executor {
     this.emit({ stage: "cleanup", runId: run.runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
   }
 
-  /** Records the session's budget refusal on the run before it ends. Best effort; never throws. */
+  /**
+   * Records the session's budget refusal on the run, at every ending: a run the proxy refused once may
+   * still finish, fail for another reason, or be stopped. A session with no refusal adds nothing.
+   * Best effort; never throws.
+   */
   private async recordRefusal(runId: string, sessionId: string | null | undefined): Promise<void> {
     if (!sessionId) return;
     await this.options.store.recordBudgetRefusal?.(runId, sessionId).catch(() => undefined);
