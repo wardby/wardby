@@ -140,7 +140,10 @@ export class WardbyMetrics implements CodingRunObserver {
 
   observeProxyAudit = (event: ProxyAuditEvent): void => {
     this.proxyAuditEvents.inc({ event: event.type });
-    if (event.reservationUsd !== undefined) this.proxyBudgetReserved.inc(event.reservationUsd);
+    // A completed reply repeats its request's hold (for the overshoot audit): count it once, when held.
+    if (event.reservationUsd !== undefined && event.type !== "response.completed") {
+      this.proxyBudgetReserved.inc(event.reservationUsd);
+    }
     if (event.type !== "response.completed") return;
     if (event.costUsd !== undefined) this.proxyCost.inc(event.costUsd);
     if (event.inputTokens !== undefined) this.proxyTokens.inc({ kind: "input" }, event.inputTokens);

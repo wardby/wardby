@@ -97,7 +97,7 @@ async function harness(
     terms?: ProxyModelTerms;
   } = {},
 ): Promise<Harness> {
-  const ledger = overrides.ledger ?? new MemoryProxyLedger();
+  const ledger = overrides.ledger ?? new MemoryProxyLedger({ now: overrides.now ?? (() => NOW) });
   const events: ProxyAuditEvent[] = [];
   const fetchImpl: typeof globalThis.fetch =
     overrides.fetch ?? (async () => Response.json({ id: "resp", usage: USAGE }, { status: 200 }));
@@ -1726,5 +1726,134 @@ describe("interrupted replies settle at an estimate", () => {
     expect(reserved.outcome).toBe("reserved");
     await expect(execute(h, "after-crash", new TestSink(), raw)).rejects.toMatchObject({ status: 429 });
     expect(h.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("cache-aware holds", () => {
+  // One conversation (codexBody's prompt_cache_key): a ~100 KB base that grows 2 KB per turn.
+  const turnBody = (turn: number, maxOutput = 32_000) =>
+    JSON.stringify({
+      ...codexBody(),
+      input: [
+        ...(codexBody().input as unknown[]),
+        { type: "message", id: "msg_base", role: "user", content: [{ type: "input_text", text: "b".repeat(100_000) }] },
+        ...Array.from({ length: turn }, (_, i) => ({
+          type: "message",
+          id: `msg_t${i}`,
+          role: "user",
+          content: [{ type: "input_text", text: "x".repeat(2_000) }],
+        })),
+      ],
+      stream: false,
+      max_output_tokens: maxOutput,
+    });
+  // A realistic cached reply: ~30k prompt tokens growing 600/turn, all but 1.5k read from cache.
+  const cachedUsage = (turn: number) => {
+    const input = 30_000 + turn * 600;
+    return { input_tokens: input, input_tokens_details: { cached_tokens: input - 1_500 }, output_tokens: 2_000 };
+  };
+
+  it("holds the second request of a conversation at the cache rate, and audits why", async () => {
+    let turn = 0;
+    const h = await harness({
+      budgetUsd: 10,
+      fetch: async () => Response.json({ id: "r", usage: cachedUsage(turn++) }),
+    });
+    await execute(h, "t0", new TestSink(), turnBody(0));
+    await execute(h, "t1", new TestSink(), turnBody(1));
+    const reserved = h.events.filter((e) => e.type === "request.reserved");
+    expect(reserved[0]).toMatchObject({ reservationBasis: "full", holdFallback: "no_previous" });
+    expect(reserved[1]).toMatchObject({ reservationBasis: "cached" });
+    expect(reserved[1].reservationUsd!).toBeLessThan(reserved[1].ceilingUsd! / 2);
+  });
+
+  it("lets a long cached conversation run until only a cached hold no longer fits", async () => {
+    let turn = 0;
+    const h = await harness({
+      budgetUsd: 1,
+      fetch: async () => Response.json({ id: "r", usage: cachedUsage(turn++) }),
+    });
+    let refused: unknown;
+    for (let t = 0; t < 200 && !refused; t++) {
+      await execute(h, `t${t}`, new TestSink(), turnBody(t)).catch((error) => (refused = error));
+    }
+    expect(refused).toMatchObject({ status: 429 });
+    const spent = h.events.filter((e) => e.type === "response.completed").reduce((sum, e) => sum + e.costUsd!, 0);
+    const rejected = h.events.filter((e) => e.type === "request.rejected").at(-1)!;
+    expect(rejected).toMatchObject({ reason: "budget_exhausted", reservationBasis: "cached" });
+    // Refused only once the cached hold no longer fits, and later than the ceiling would have allowed.
+    expect(spent + rejected.reservationUsd!).toBeGreaterThanOrEqual(1);
+    expect(spent).toBeGreaterThan(1 - rejected.ceilingUsd!);
+  });
+
+  it("settles a reply costing more than its hold but not its ceiling, and audits the overshoot", async () => {
+    let turn = 0;
+    // Turn 1's cache misses: everything is fresh input, far above the cached hold, below the ceiling.
+    const h = await harness({
+      budgetUsd: 10,
+      fetch: async () =>
+        Response.json({
+          id: "r",
+          usage: turn++ === 0 ? cachedUsage(0) : { input_tokens: 31_000, output_tokens: 30_000 },
+        }),
+    });
+    await execute(h, "t0", new TestSink(), turnBody(0));
+    await expect(execute(h, "t1", new TestSink(), turnBody(1))).resolves.toBeDefined();
+    const completed = h.events.filter((e) => e.type === "response.completed")[1];
+    expect(completed).toMatchObject({ reason: "reservation_exceeded" });
+    expect(completed.overshootUsd!).toBeGreaterThan(0);
+    expect(completed.costUsd!).toBeLessThanOrEqual(
+      h.events.filter((e) => e.type === "request.reserved")[1].ceilingUsd!,
+    );
+    // The next request falls back: the miss left less than half of the prompt cached.
+    await execute(h, "t2", new TestSink(), turnBody(2));
+    expect(h.events.filter((e) => e.type === "request.reserved")[2]).toMatchObject({
+      reservationBasis: "full",
+      holdFallback: "low_cache_share",
+    });
+  });
+
+  it("still cancels the session when a reply costs more than its ceiling", async () => {
+    const h = await harness({
+      budgetUsd: 10,
+      fetch: async () => Response.json({ id: "r", usage: { input_tokens: 10_000_000, output_tokens: 1 } }),
+    });
+    await expect(execute(h, "huge", new TestSink(), turnBody(0, 1_024))).rejects.toMatchObject({
+      status: 502,
+      code: "reservation_invariant_violated",
+    });
+  });
+
+  it("records the refused hold's basis and ceiling on the session's refusal", async () => {
+    let turn = 0;
+    const h = await harness({
+      budgetUsd: 0.3,
+      fetch: async () => Response.json({ id: "r", usage: cachedUsage(turn++) }),
+    });
+    for (let t = 0; t < 200; t++) {
+      const ok = await execute(h, `t${t}`, new TestSink(), turnBody(t)).then(
+        () => true,
+        () => false,
+      );
+      if (!ok) break;
+    }
+    expect(await h.ledger.budgetRefusal(h.session.id)).toMatchObject({
+      refusedHoldBasis: expect.stringMatching(/^(cached|full)$/),
+      refusedHoldCeilingUsd: expect.any(Number),
+    });
+  });
+
+  it("falls back to the ceiling when the previous-reply lookup fails", async () => {
+    const ledger = new MemoryProxyLedger({ now: () => NOW });
+    ledger.previousReply = async () => {
+      throw new Error("ledger unavailable");
+    };
+    const h = await harness({
+      ledger,
+      budgetUsd: 10,
+      fetch: async () => Response.json({ id: "r", usage: cachedUsage(0) }),
+    });
+    await execute(h, "t0", new TestSink(), turnBody(0));
+    expect(h.events.find((e) => e.type === "request.reserved")).toMatchObject({ reservationBasis: "full" });
   });
 });

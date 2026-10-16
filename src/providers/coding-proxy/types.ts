@@ -176,6 +176,16 @@ export interface ProxyAuditEvent {
   status?: number;
   reason?: string;
   reservationUsd?: number;
+  /** For request.reserved and a budget refusal: the worst-case hold and how the hold was priced. */
+  ceilingUsd?: number;
+  reservationBasis?: ReservationBasis;
+  /** Why the hold fell back to the ceiling (basis "full"). */
+  holdFallback?: string;
+  /** Basis "cached": tokens priced at the cache-read rate, and at the input + cache-write rates. */
+  holdCachedTokens?: number;
+  holdUncachedTokens?: number;
+  /** For response.completed: how much the reply cost above its hold (reason "reservation_exceeded"). */
+  overshootUsd?: number;
   /** For a budget refusal: the numbers behind it. */
   budgetUsd?: number;
   spentUsd?: number;

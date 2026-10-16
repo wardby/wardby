@@ -94,6 +94,8 @@ export class MemoryProxyLedger implements ProxyLedger {
         heldReservedUsd: heldReserved,
         heldUncertainUsd: heldUncertain,
         refusedHoldUsd: input.reservationUsd,
+        ...(input.reservationBasis ? { refusedHoldBasis: input.reservationBasis } : {}),
+        ...(input.ceilingUsd !== undefined ? { refusedHoldCeilingUsd: input.ceilingUsd } : {}),
         model: input.model,
         turn: done + 1,
       };

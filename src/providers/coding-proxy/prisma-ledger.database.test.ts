@@ -78,6 +78,8 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       requestFingerprint: `fingerprint-${id}`,
       model: "gpt-5.6-luna",
       reservationUsd: 0.0001,
+      ceilingUsd: 0.0003,
+      reservationBasis: "cached" as const,
       pricing: { version: "test", encoding: "o200k_base" as const, inputPerMTok: 1, outputPerMTok: 1 },
       now: new Date(),
     });
@@ -103,6 +105,8 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       heldReservedUsd: 0.0001,
       heldUncertainUsd: 0,
       refusedHoldUsd: 0.0001,
+      refusedHoldBasis: "cached",
+      refusedHoldCeilingUsd: 0.0003,
       model: "gpt-5.6-luna",
       turn: 1,
     });
@@ -115,7 +119,13 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       expect.objectContaining({
         kind: "refused",
         limit: "week",
-        details: expect.objectContaining({ source: "proxy", turn: 1, refusedHoldUsd: 0.0001 }),
+        details: expect.objectContaining({
+          source: "proxy",
+          turn: 1,
+          refusedHoldUsd: 0.0001,
+          refusedHoldBasis: "cached",
+          refusedHoldCeilingUsd: 0.0003,
+        }),
       }),
     ]);
 

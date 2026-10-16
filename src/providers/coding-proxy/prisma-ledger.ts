@@ -243,6 +243,8 @@ export class PrismaProxyLedger implements ProxyLedger {
           heldReservedUsd,
           heldUncertainUsd,
           refusedHoldUsd: input.reservationUsd,
+          ...(input.reservationBasis ? { refusedHoldBasis: input.reservationBasis } : {}),
+          ...(input.ceilingUsd !== undefined ? { refusedHoldCeilingUsd: input.ceilingUsd } : {}),
           model: input.model,
           turn: Number(totals[0]?.done ?? 0) + 1,
         };
