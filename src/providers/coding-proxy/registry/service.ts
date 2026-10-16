@@ -11,6 +11,7 @@
 import { createHash } from "node:crypto";
 import { logger } from "../../../core/logger.js";
 import { matchRoot, parseAllowlist, resolvePolicy } from "../../../coding/registry/allowlist.js";
+import type { AuditAdvisory, AuditRelation, PackageAuditVerdict } from "../../../coding/registry/audit-mode.js";
 import { acceptedAdvisoriesReason, PLAN_REFUSAL_FILENAME } from "../../../coding/registry/report.js";
 import {
   GRAPH_INCOMPLETE,
@@ -316,6 +317,14 @@ type GraphAnswer =
  *  loop, folding a rejection (`ok: false`) into the same shape as a
  *  resolution so the pending-read race can be checked once, uniformly. */
 type ReadOutcome = { ok: false } | { ok: true; done: true } | { ok: true; done: false; value: Uint8Array };
+
+/** Why a request may proceed: an allowlist root (or none, for an allowance),
+ *  and, in a package audit mode run, whether it is audited and how the
+ *  package reached the run. */
+interface Authorization {
+  root: AllowlistEntry | undefined;
+  audit?: { relation: AuditRelation; via?: string };
+}
 
 export interface RegistryLimits {
   maxFileBytes: number;
@@ -795,7 +804,8 @@ export class RegistryService {
           );
         }
         if (request.method === "HEAD") return { status: 200, contentType: contentTypeOf(route), body: "" };
-        // The plan's waiver (if any) is recorded on the served row.
+        // The plan's waiver (if any) is recorded on the served row, and its
+        // audit verdict (audit-mode plans only) as the run's audit record.
         return this.download(
           adapter,
           context,
@@ -804,6 +814,7 @@ export class RegistryService {
           file,
           request.signal,
           acceptedAdvisoriesReason(approved.acceptedAdvisories),
+          approved.audit,
         );
       }
       // A version the plan definitively refused is answered from the plan,
@@ -829,7 +840,7 @@ export class RegistryService {
         );
       }
     }
-    const root = await this.authorize(adapter, context, name, route.kind);
+    const { root, audit } = await this.authorize(adapter, context, name, route.kind);
     let meta: PackageMetadata;
     try {
       // Only a metadata request renders a document; a download, the version
@@ -846,8 +857,9 @@ export class RegistryService {
     let keep: Set<string>;
     let keptFiles: Set<string>;
     let waivers: Map<string, readonly string[]>;
+    let auditAdvisories: Map<string, AuditAdvisory[]>;
     try {
-      ({ keep, keptFiles, waivers } = await this.keptVersions(adapter, context, meta, root));
+      ({ keep, keptFiles, waivers, auditAdvisories } = await this.keptVersions(adapter, context, meta, root));
     } catch (error) {
       // Every refusal gets a row, including one the run never chose: the
       // audit being unreachable (fail-closed) still stops this request.
@@ -874,11 +886,7 @@ export class RegistryService {
           `"${name}" ${route.version} is outside the allowlisted range, newer than the release-age limit, has a high-severity advisory, or is not published`,
         );
       }
-      await this.options.store.addAllowances(
-        context.runId,
-        adapter.id,
-        keptDependencies(adapter, meta, new Set([route.version])),
-      );
+      await this.allowServed(context, adapter, name, keptDependencies(adapter, meta, new Set([route.version])), audit);
       return { status: 200, contentType: document.contentType, body: document.body };
     }
     if (route.kind === "metadata") {
@@ -890,7 +898,7 @@ export class RegistryService {
           `every matching version of "${name}" is outside the allowlisted range, newer than the release-age limit, or has a high-severity advisory`,
         );
       }
-      await this.options.store.addAllowances(context.runId, adapter.id, keptDependencies(adapter, meta, keep));
+      await this.allowServed(context, adapter, name, keptDependencies(adapter, meta, keep), audit);
       const document = adapter.renderMetadata(meta, keep, keptFiles, `${this.options.proxyBase}${adapter.id}/`);
       return { status: 200, contentType: document.contentType, body: document.body };
     }
@@ -931,7 +939,15 @@ export class RegistryService {
     // reservation, nothing recorded as served.
     if (request.method === "HEAD") return { status: 200, contentType: contentTypeOf(route), body: "" };
     // A version kept only by waiving accepted advisories records them on
-    // its served row.
+    // its served row. In package audit mode, a package outside the
+    // allowlist, or a version kept only past advisories (full), is recorded
+    // as the run's audit record.
+    const advisories = auditAdvisories.get(file.version) ?? [];
+    const verdict: PackageAuditVerdict | undefined = audit
+      ? { ...audit, ...(advisories.length > 0 ? { advisories } : {}) }
+      : advisories.length > 0
+        ? { relation: "allowed", advisories }
+        : undefined;
     return this.download(
       adapter,
       context,
@@ -940,7 +956,26 @@ export class RegistryService {
       file,
       request.signal,
       acceptedAdvisoriesReason(waivers.get(file.version) ?? []),
+      verdict,
     );
+  }
+
+  /** The allowances serving a package's metadata grows: its kept versions'
+   *  dependencies, and, for an audited package, each tagged with the
+   *  top-level audited package that declared it (its own name for a
+   *  top-level one, which is also recorded for itself so its later
+   *  downloads read as top-level). */
+  private async allowServed(
+    context: RegistryRunContext,
+    adapter: RegistryAdapter,
+    name: string,
+    dependencies: readonly string[],
+    audit: Authorization["audit"],
+  ): Promise<void> {
+    const store = this.options.store;
+    if (!audit) return store.addAllowances(context.runId, adapter.id, dependencies);
+    if (audit.relation === "top-level") await store.addAuditedAllowances(context.runId, adapter.id, [name], name);
+    await store.addAuditedAllowances(context.runId, adapter.id, dependencies, audit.via ?? name);
   }
 
   private hostAllowed(adapter: RegistryAdapter, url: string): boolean {
@@ -968,10 +1003,27 @@ export class RegistryService {
     context: RegistryRunContext,
     name: string,
     kind: RegistryRoute["kind"],
-  ): Promise<AllowlistEntry | undefined> {
+  ): Promise<Authorization> {
     const entries = parseAllowlist(context.allowlist, this.options.adapters).get(adapter.id) ?? [];
+    // A root keeps its own range in every mode: audit mode never serves a
+    // version an entry's range excludes (keptVersions applies root.range).
     const root = matchRoot(entries, name);
-    if (root || (await this.options.store.isAllowedDependency(context.runId, adapter.id, name))) return root;
+    if (root) return { root };
+    const allowance = await this.options.store.findAllowance(context.runId, adapter.id, name);
+    if (allowance) {
+      if (allowance.auditedVia === null) return { root: undefined };
+      return allowance.auditedVia === name
+        ? { root: undefined, audit: { relation: "top-level" } }
+        : { root: undefined, audit: { relation: "transitive", via: allowance.auditedVia } };
+    }
+    if (context.packageAudit) {
+      // Package audit mode: a miss is never refused and never walks; it is
+      // served (through every other check) and recorded. A download with
+      // no metadata first, or a metadata miss once a lockfile plan of the
+      // run fell back, cannot say how the package reached the run.
+      const fellBack = this.tally(context).planFallback?.has(adapter.id) ?? false;
+      return { root: undefined, audit: { relation: kind === "download" || fellBack ? "unknown" : "top-level" } };
+    }
     // A package manager resolves top-down: it reads a parent's metadata,
     // which records the parent's declared dependencies as allowances,
     // before it asks for a child. A metadata request for a name that is
@@ -988,7 +1040,7 @@ export class RegistryService {
     // parent's metadata (a lockfile install requests tarballs directly).
     // Resolve the graph before refusing.
     const graph = await this.resolveInGraph(adapter, context, entries, name);
-    if (graph === "found") return undefined;
+    if (graph === "found") return { root: undefined };
     if (typeof graph === "object" && "cutShort" in graph) {
       if (graph.cutShort === "limit") {
         // The bound is permanent for the rest of the run, so a retry can
@@ -1414,8 +1466,17 @@ export class RegistryService {
     context: RegistryRunContext,
     meta: PackageMetadata,
     root: AllowlistEntry | undefined,
-  ): Promise<{ keep: Set<string>; keptFiles: Set<string>; waivers: Map<string, readonly string[]> }> {
+  ): Promise<{
+    keep: Set<string>;
+    keptFiles: Set<string>;
+    waivers: Map<string, readonly string[]>;
+    /** Kept version -> the blocking advisories full mode served it past (only non-empty). */
+    auditAdvisories: Map<string, AuditAdvisory[]>;
+  }> {
     const { minReleaseAgeDays, acceptedAdvisories } = resolvePolicy(context.policy);
+    // Package audit mode `full` lets non-malware blocking advisories through;
+    // malware is withheld whatever the mode (audit.ts splitWaived).
+    const auditAll = context.packageAudit === "full";
     const cutoff = this.now().getTime() - minReleaseAgeDays * DAY_MS;
     // The run's accepted advisories waive the blocking ones they name
     // (never malware); fixed for the run (snapshotted at dispatch).
@@ -1425,6 +1486,7 @@ export class RegistryService {
     const keptFiles = new Set<string>();
     /** Kept version -> the advisories waived to keep it (only non-empty). */
     const waivers = new Map<string, readonly string[]>();
+    const auditAdvisories = new Map<string, AuditAdvisory[]>();
     for (const info of meta.versions.values()) {
       if (root?.range && !adapter.satisfies(info.version, root.range)) continue;
       // Per-file release age: a file with an unknown or too-recent publish
@@ -1432,15 +1494,19 @@ export class RegistryService {
       // files does.
       const oldEnough = info.files.filter((file) => file.publishedAt && file.publishedAt.getTime() <= cutoff);
       if (oldEnough.length === 0) continue;
-      if (advisories.withheld(info.version, accepted).length > 0) continue;
+      if (advisories.withheld(info.version, accepted, auditAll).length > 0) continue;
       keep.add(info.version);
+      if (auditAll) {
+        const audited = advisories.audited?.(info.version, accepted) ?? [];
+        if (audited.length > 0) auditAdvisories.set(info.version, [...audited]);
+      }
       for (const file of oldEnough) keptFiles.add(file.filename);
       if (accepted.size > 0) {
         const waived = advisories.waived(info.version, accepted);
         if (waived.length > 0) waivers.set(info.version, waived);
       }
     }
-    return { keep, keptFiles, waivers };
+    return { keep, keptFiles, waivers, auditAdvisories };
   }
 
   private tally(context: RegistryRunContext): RunTally {
@@ -1562,6 +1628,44 @@ export class RegistryService {
     return [...extras].sort();
   }
 
+  /** One RegistryAuditRecord (the first served file of a version wins) and
+   *  its `registry.audited` log line. */
+  private async recordAudit(
+    context: RegistryRunContext,
+    adapter: RegistryAdapter,
+    name: string,
+    version: string,
+    sizeBytes: number,
+    audit: PackageAuditVerdict,
+  ): Promise<void> {
+    const advisories = audit.advisories ?? [];
+    await this.options.store.recordAudit({
+      runId: context.runId,
+      ecosystem: adapter.id,
+      name,
+      version,
+      relation: audit.relation,
+      ...(audit.via ? { via: audit.via } : {}),
+      sizeBytes,
+      advisories,
+    });
+    registryLog.info(
+      {
+        event: "registry.audited",
+        runId: context.runId,
+        ecosystem: adapter.id,
+        name,
+        version,
+        sizeBytes,
+        relation: audit.relation,
+        ...(audit.via ? { via: audit.via } : {}),
+        mode: context.packageAudit,
+        advisories: advisories.map((advisory) => advisory.id),
+      },
+      "coding registry served a package under package audit mode",
+    );
+  }
+
   private async download(
     adapter: RegistryAdapter,
     context: RegistryRunContext,
@@ -1572,6 +1676,9 @@ export class RegistryService {
     /** The served row's reason: set only when serving it waived accepted
      *  advisories (`accepted advisories: <ids>`). */
     servedReason?: string,
+    /** Set when package audit mode is why it is served: recorded once the
+     *  file completes, beside its served row. */
+    audit?: PackageAuditVerdict,
   ): Promise<RegistryResponse> {
     const { limits, store } = this.options;
     const runId = context.runId;
@@ -1713,17 +1820,23 @@ export class RegistryService {
               const dependencies = (await adapter.dependenciesFromFile(route, body, extras).catch(() => [])).map(
                 (dependency) => ({ name: adapter.normalizeName(dependency.name), extras: dependency.extras }),
               );
-              await store.addAllowances(
-                context.runId,
-                adapter.id,
-                dependencies.map((dependency) => dependency.name),
-              );
+              const names = dependencies.map((dependency) => dependency.name);
+              // A file's dependencies are audited too when the package is
+              // outside the allowlist (never for one kept only past advisories).
+              if (audit && audit.relation !== "allowed") {
+                if (audit.relation === "top-level")
+                  await store.addAuditedAllowances(context.runId, adapter.id, [name], name);
+                await store.addAuditedAllowances(context.runId, adapter.id, names, audit.via ?? name);
+              } else await store.addAllowances(context.runId, adapter.id, names);
               // Dependency extras are followed only below a package the run
               // allows with extras (an entry naming extras, or a dependency
               // such a package asked for with extras): a plain entry follows
               // no extras, its own or its dependencies'.
               if (extras.length > 0) await store.addExtraAllowances(context.runId, adapter.id, dependencies);
             }
+            // Recorded before the stream closes: a failed write errors it
+            // like a failed served row, so nothing is installed unrecorded.
+            if (audit) await this.recordAudit(context, adapter, name, file.version, bytes, audit);
             controller.close();
           } catch (error) {
             controller.error(
