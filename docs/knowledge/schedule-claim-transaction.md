@@ -9,7 +9,7 @@ sources:
   - id: claim
     url: https://github.com/wardby/wardby/blob/9c0f910f919dec4f1a2149bae78612cda41f6007/src/core/scheduler.ts#L50-L82
   - id: lock
-    url: https://github.com/wardby/wardby/blob/9c0f910f919dec4f1a2149bae78612cda41f6007/src/core/dispatch.ts#L627-L644
+    url: https://github.com/wardby/wardby/blob/744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be/src/core/dispatch.ts#L667-L684
 wardby:
   schema: 1
   roles: [builder, reviewer, planner]
@@ -25,9 +25,9 @@ wardby:
     - id: lock
       repo: github:wardby/wardby
       path: src/core/dispatch.ts
-      lines: [627, 644]
+      lines: [667, 684]
       symbol: dispatchRun
-      sha: 9c0f910f919dec4f1a2149bae78612cda41f6007
+      sha: 744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be
       spanHash: sha256:88f506bcf07c8b1df9dfd039c4a694fbdd658c9d93948eab6db9575626af0515
   confidence: high
 ---
@@ -38,4 +38,4 @@ The scheduler rechecks the due window under an agent row lock, advances `lastSch
 
 [^claim]: src/core/scheduler.ts, lines 50-82.
 
-[^lock]: src/core/dispatch.ts, lines 627-644.
+[^lock]: src/core/dispatch.ts, lines 667-684.
