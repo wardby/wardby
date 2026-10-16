@@ -423,8 +423,9 @@ input usage the proxy already read; failing that, the input of the run's
 previous completed reply; failing that, the input part of the request's hold.
 It adds the output relayed so far, counted high, and is never more than the
 request's hold. An estimated request is flagged `costEstimated`, counts in the
-run's cost, and leaves the run's status `uncertain`. An interrupted request
-with nothing to estimate from keeps its full hold. A run can therefore exceed
+run's cost at the estimate, and is recorded as `uncertain` in the proxy's
+request ledger. If the estimate cannot be computed or recorded, the request
+keeps its full hold. A run can therefore exceed
 its budget by at most the difference between an estimate and the real cost of
 the interrupted request.
 

@@ -4,7 +4,7 @@ title: Run stopped out of budget (budget_exhausted)
 summary: A coding run stopped because its next model request did not fit what was left of its budget; get_run's budgetEvents says which limit and why.
 audience: operator
 tags: [error, budget, budget_exhausted, coding_budget_exhausted, reservations]
-appliesTo: ">=0.7.0"
+appliesTo: ">=0.6.1"
 ---
 
 # Run stopped out of budget
@@ -53,8 +53,8 @@ When a reply breaks off before its final usage, the proxy settles the request
 at an estimate instead of keeping its whole hold: the usage it already read,
 else the run's previous reply's input, else the input part of the hold, plus
 the output relayed so far counted high, and never more than the hold. The
-request is flagged as estimated and counted in the run's cost. A request with
-nothing to estimate from keeps its full hold. A run can exceed its budget by at
+request is flagged as estimated and counted in the run's cost. If the
+estimate cannot be computed or recorded, the request keeps its full hold. A run can exceed its budget by at
 most the gap between the estimate and the real cost.
 
 ## Group holds for delegated runs
