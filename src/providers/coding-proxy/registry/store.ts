@@ -1,4 +1,11 @@
 import type { PackageAllowlist } from "../../../coding/registry/allowlist.js";
+import type {
+  AuditAdvisory,
+  AuditRelation,
+  PackageAuditMode,
+  PackageAuditRow,
+  PackageAuditVerdict,
+} from "../../../coding/registry/audit-mode.js";
 import type { DeclaredDependency, FileDependency } from "../../../coding/registry/types.js";
 
 export interface RegistryRunContext {
@@ -12,6 +19,8 @@ export interface RegistryRunContext {
   cacheImage: string | null;
   /** Whether the run's agent enabled the dependency cache, fixed at dispatch (CodingRun.dependencyCache). */
   dependencyCache: boolean;
+  /** Package audit mode, fixed at dispatch (CodingRun.packageAuditMode); null = normal enforcement. */
+  packageAudit: PackageAuditMode | null;
 }
 
 /** A coding proxy session's dependency cache state (CodingProxySession). */
@@ -54,6 +63,9 @@ export interface ApprovedVersion {
   /** Blocking advisories the run's accepted set waived for this version,
    *  when the plan kept it only by that waiver; absent or empty otherwise. */
   acceptedAdvisories?: readonly string[];
+  /** Audit-mode plans only: why this approval is audited (outside the
+   *  allowlist, or kept past advisories in full mode). Absent = a normal approval. */
+  audit?: PackageAuditVerdict;
 }
 
 /** What a download of a plan-approved version needs. */
@@ -62,6 +74,20 @@ export interface ApprovedDownload {
   downloadUrl: string;
   /** Advisories the approval waived (empty when none). */
   acceptedAdvisories: string[];
+  /** The approval's audit verdict; absent for a normal approval. */
+  audit?: PackageAuditVerdict;
+}
+
+/** One RegistryAuditRecord: a version a run's registry served only because of package audit mode. */
+export interface RegistryAuditInsert {
+  runId: string;
+  ecosystem: string;
+  name: string;
+  version: string;
+  relation: AuditRelation;
+  via?: string;
+  sizeBytes?: number;
+  advisories: readonly AuditAdvisory[];
 }
 
 /** One exact version a lockfile plan definitively refused for a run. */
@@ -100,7 +126,15 @@ export function extraOfAllowanceName(rowName: string, name: string): string | nu
 export interface RegistryStore {
   findRunByRegistryTokenHash(hash: string, now: Date): Promise<RegistryRunContext | null>;
   isAllowedDependency(runId: string, ecosystem: string, name: string): Promise<boolean>;
+  /** The run's allowance of `name` (null = none): `auditedVia` is the audited package that declared it, or null. */
+  findAllowance(runId: string, ecosystem: string, name: string): Promise<{ auditedVia: string | null } | null>;
   addAllowances(runId: string, ecosystem: string, names: readonly string[]): Promise<void>;
+  /** Like addAllowances, each name tagged with the audited package that declared it; existing rows are kept. */
+  addAuditedAllowances(runId: string, ecosystem: string, names: readonly string[], auditedVia: string): Promise<void>;
+  /** Insert-only; a row for the same run/ecosystem/name/version already present is kept. */
+  recordAudit(record: RegistryAuditInsert): Promise<void>;
+  /** The run's audit records, oldest first. */
+  listAudits(runId: string): Promise<PackageAuditRow[]>;
   /** The extras the run allows for `name` (normalized, sorted). */
   allowedExtras(runId: string, ecosystem: string, name: string): Promise<string[]>;
   /** Records extras the run allows for each package (an existing one is kept). */
@@ -148,6 +182,9 @@ export interface RegistryStore {
 export class MemoryRegistryStore implements RegistryStore {
   readonly contexts = new Map<string, RegistryRunContext>();
   readonly allowances = new Set<string>();
+  /** `runId\0ecosystem\0name` -> the audited package that declared the allowance (first writer). */
+  readonly auditedVia = new Map<string, string>();
+  readonly audits: (RegistryAuditInsert & { createdAt: Date })[] = [];
   readonly fetches: (RegistryFetchRecord & { createdAt: Date })[] = [];
   /** `ecosystem\0name\0version` -> fact. */
   readonly facts = new Map<string, StoredVersionFact>();
@@ -169,8 +206,50 @@ export class MemoryRegistryStore implements RegistryStore {
     return this.allowances.has(`${runId}\0${ecosystem}\0${name}`);
   }
 
+  async findAllowance(runId: string, ecosystem: string, name: string): Promise<{ auditedVia: string | null } | null> {
+    if (!(await this.isAllowedDependency(runId, ecosystem, name))) return null;
+    return { auditedVia: this.auditedVia.get(`${runId}\0${ecosystem}\0${name}`) ?? null };
+  }
+
   async addAllowances(runId: string, ecosystem: string, names: readonly string[]): Promise<void> {
     for (const name of names) this.allowances.add(`${runId}\0${ecosystem}\0${name}`);
+  }
+
+  async addAuditedAllowances(
+    runId: string,
+    ecosystem: string,
+    names: readonly string[],
+    auditedVia: string,
+  ): Promise<void> {
+    for (const name of names) {
+      const key = `${runId}\0${ecosystem}\0${name}`;
+      if (this.allowances.has(key)) continue;
+      this.allowances.add(key);
+      this.auditedVia.set(key, auditedVia);
+    }
+  }
+
+  async recordAudit(record: RegistryAuditInsert): Promise<void> {
+    const same = (row: RegistryAuditInsert) =>
+      row.runId === record.runId &&
+      row.ecosystem === record.ecosystem &&
+      row.name === record.name &&
+      row.version === record.version;
+    if (!this.audits.some(same)) this.audits.push({ ...record, createdAt: new Date() });
+  }
+
+  async listAudits(runId: string): Promise<PackageAuditRow[]> {
+    return this.audits
+      .filter((row) => row.runId === runId)
+      .map((row) => ({
+        ecosystem: row.ecosystem,
+        name: row.name,
+        version: row.version,
+        relation: row.relation,
+        via: row.via ?? null,
+        sizeBytes: row.sizeBytes ?? null,
+        advisories: [...row.advisories],
+      }));
   }
 
   async allowedExtras(runId: string, ecosystem: string, name: string): Promise<string[]> {
@@ -243,6 +322,7 @@ export class MemoryRegistryStore implements RegistryStore {
           integrity: approval.integrity,
           downloadUrl: fact.downloadUrl,
           acceptedAdvisories: [...(approval.acceptedAdvisories ?? [])],
+          ...(approval.audit ? { audit: approval.audit } : {}),
         }
       : null;
   }

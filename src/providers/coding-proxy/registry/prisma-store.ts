@@ -1,11 +1,17 @@
 import type { PrismaClient } from "#prisma";
 import type { PackageAllowlist } from "../../../coding/registry/allowlist.js";
+import {
+  isPackageAuditMode,
+  parsePackageAuditVerdict,
+  type PackageAuditRow,
+} from "../../../coding/registry/audit-mode.js";
 import type { DeclaredDependency, FileDependency } from "../../../coding/registry/types.js";
 import { extraAllowanceName, extraOfAllowanceName } from "./store.js";
 import type {
   ApprovedDownload,
   ApprovedVersion,
   PlanRefusedVersion,
+  RegistryAuditInsert,
   RegistryFetchRecord,
   RegistryRunContext,
   RegistryStore,
@@ -34,6 +40,7 @@ export class PrismaRegistryStore implements RegistryStore {
             workerImage: true,
             toolImage: true,
             dependencyCache: true,
+            packageAuditMode: true,
           },
         },
       },
@@ -47,6 +54,7 @@ export class PrismaRegistryStore implements RegistryStore {
       repository: session.run.repository,
       cacheImage: session.run.toolImage ?? session.run.workerImage,
       dependencyCache: session.run.dependencyCache,
+      packageAudit: isPackageAuditMode(session.run.packageAuditMode) ? session.run.packageAuditMode : null,
     };
   }
 
@@ -60,11 +68,68 @@ export class PrismaRegistryStore implements RegistryStore {
     return row !== null;
   }
 
+  async findAllowance(runId: string, ecosystem: string, name: string): Promise<{ auditedVia: string | null } | null> {
+    // An extra's row (`name[extra]`) is never a package allowance.
+    if (name.includes("[")) return null;
+    return this.db.registryAllowance.findUnique({
+      where: { runId_ecosystem_name: { runId, ecosystem, name } },
+      select: { auditedVia: true },
+    });
+  }
+
   async addAllowances(runId: string, ecosystem: string, names: readonly string[]): Promise<void> {
     if (names.length === 0) return;
     await this.db.registryAllowance.createMany({
       data: [...new Set(names)].map((name) => ({ runId, ecosystem, name })),
       skipDuplicates: true,
+    });
+  }
+
+  async addAuditedAllowances(
+    runId: string,
+    ecosystem: string,
+    names: readonly string[],
+    auditedVia: string,
+  ): Promise<void> {
+    if (names.length === 0) return;
+    // Insert-only (the proxy has no UPDATE): an existing row keeps its first writer.
+    await this.db.registryAllowance.createMany({
+      data: [...new Set(names)].map((name) => ({ runId, ecosystem, name, auditedVia })),
+      skipDuplicates: true,
+    });
+  }
+
+  async recordAudit(record: RegistryAuditInsert): Promise<void> {
+    await this.db.registryAuditRecord.createMany({
+      data: [
+        {
+          runId: record.runId,
+          ecosystem: record.ecosystem,
+          name: record.name,
+          version: record.version,
+          relation: record.relation,
+          via: record.via ?? null,
+          sizeBytes: record.sizeBytes ?? null,
+          advisories: record.advisories.map(({ id, severity, summary }) => ({ id, severity, summary })),
+        },
+      ],
+      skipDuplicates: true,
+    });
+  }
+
+  async listAudits(runId: string): Promise<PackageAuditRow[]> {
+    return this.db.registryAuditRecord.findMany({
+      where: { runId },
+      orderBy: { createdAt: "asc" },
+      select: {
+        ecosystem: true,
+        name: true,
+        version: true,
+        relation: true,
+        via: true,
+        sizeBytes: true,
+        advisories: true,
+      },
     });
   }
 
@@ -165,13 +230,24 @@ export class PrismaRegistryStore implements RegistryStore {
   async approveVersions(runId: string, ecosystem: string, versions: readonly ApprovedVersion[]): Promise<void> {
     if (versions.length === 0) return;
     await this.db.registryApprovedVersion.createMany({
-      data: versions.map(({ name, version, integrity, acceptedAdvisories }) => ({
+      data: versions.map(({ name, version, integrity, acceptedAdvisories, audit }) => ({
         runId,
         ecosystem,
         name,
         version,
         integrity,
         acceptedAdvisories: [...(acceptedAdvisories ?? [])],
+        ...(audit
+          ? {
+              audit: {
+                relation: audit.relation,
+                ...(audit.via ? { via: audit.via } : {}),
+                ...(audit.advisories?.length
+                  ? { advisories: audit.advisories.map(({ id, severity, summary }) => ({ id, severity, summary })) }
+                  : {}),
+              },
+            }
+          : {}),
       })),
       skipDuplicates: true,
     });
@@ -185,18 +261,20 @@ export class PrismaRegistryStore implements RegistryStore {
   ): Promise<ApprovedDownload | null> {
     const approval = await this.db.registryApprovedVersion.findUnique({
       where: { runId_ecosystem_name_version: { runId, ecosystem, name, version } },
-      select: { integrity: true, acceptedAdvisories: true },
+      select: { integrity: true, acceptedAdvisories: true, audit: true },
     });
     if (!approval) return null;
     const fact = await this.db.registryVersionFact.findUnique({
       where: { ecosystem_name_version: { ecosystem, name, version } },
       select: { downloadUrl: true },
     });
+    const audit = parsePackageAuditVerdict(approval.audit);
     return fact
       ? {
           integrity: approval.integrity,
           downloadUrl: fact.downloadUrl,
           acceptedAdvisories: approval.acceptedAdvisories,
+          ...(audit ? { audit } : {}),
         }
       : null;
   }

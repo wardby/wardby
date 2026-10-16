@@ -117,6 +117,7 @@ function service(
     repository: "owner/repo",
     cacheImage: null,
     dependencyCache: false,
+    packageAudit: null,
   });
   const registry = new RegistryService({
     adapters: new Map([["fake", fakeAdapter]]),
@@ -242,11 +243,16 @@ describe("RegistryService", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const store: RegistryStore = {
       findRunByRegistryTokenHash: (hash, now) => inner.findRunByRegistryTokenHash(hash, now),
       isAllowedDependency: (runId, ecosystem, name) => inner.isAllowedDependency(runId, ecosystem, name),
+      findAllowance: (runId, ecosystem, name) => inner.findAllowance(runId, ecosystem, name),
       addAllowances: (runId, ecosystem, names) => inner.addAllowances(runId, ecosystem, names),
+      addAuditedAllowances: (runId, ecosystem, names, via) => inner.addAuditedAllowances(runId, ecosystem, names, via),
+      recordAudit: (record) => inner.recordAudit(record),
+      listAudits: (runId) => inner.listAudits(runId),
       allowedExtras: (runId, ecosystem, name) => inner.allowedExtras(runId, ecosystem, name),
       addExtraAllowances: (runId, ecosystem, dependencies) => inner.addExtraAllowances(runId, ecosystem, dependencies),
       recordFetch: async () => {
@@ -385,6 +391,7 @@ describe("RegistryService", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const registry = new RegistryService({
       adapters: new Map([["fake", fakeAdapter]]),
@@ -438,6 +445,7 @@ describe("RegistryService file-metadata misses", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const registry = new RegistryService({
       adapters: new Map([["fake", adapter]]),
@@ -695,6 +703,7 @@ describe("RegistryService metadata fetch safety and cache", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const registry = new RegistryService({
       adapters: new Map([["fake", adapter]]),
@@ -759,6 +768,7 @@ describe("RegistryService metadata fetch safety and cache", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const registry = new RegistryService({
       adapters: new Map([["npm", npmAdapter]]),
@@ -786,6 +796,7 @@ describe("RegistryService metadata fetch safety and cache", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const registry = new RegistryService({
       adapters: new Map([["npm", npmAdapter]]),
@@ -824,6 +835,7 @@ describe("RegistryService served-byte tally and per-adapter hosts", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const undeclared: RegistryAdapter = {
       ...fakeAdapter,
@@ -895,6 +907,7 @@ describe("RegistryService served-byte tally and per-adapter hosts", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const elsewhere: RegistryAdapter = {
       ...fakeAdapter,
@@ -937,6 +950,7 @@ describe("RegistryService with the PyPI adapter: malformed paths", () => {
         repository: "owner/repo",
         cacheImage: null,
         dependencyCache: false,
+        packageAudit: null,
       });
       const registry = new RegistryService({
         adapters: new Map([["pypi", pypiAdapter]]),
@@ -977,6 +991,7 @@ describe("RegistryService with the npm adapter: names are case-exact", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const urls: string[] = [];
     const registry = new RegistryService({
@@ -1048,6 +1063,7 @@ describe("RegistryService with the PyPI adapter: release age applies per file", 
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const urls: string[] = [];
     const registry = new RegistryService({
@@ -1144,6 +1160,7 @@ describe("RegistryService with the PyPI adapter: allowlisted extras", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const registry = new RegistryService({
       adapters: new Map([["pypi", pypiAdapter]]),
@@ -1354,6 +1371,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     for (const [token, allowlist] of Object.entries(overrides.otherRuns ?? {})) {
       store.contexts.set(capabilityHash(token), {
@@ -1364,6 +1382,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
         repository: "owner/repo",
         cacheImage: null,
         dependencyCache: false,
+        packageAudit: null,
       });
     }
     const urls: string[] = [];
@@ -1974,6 +1993,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const urls: string[] = [];
     const registry = new RegistryService({
@@ -2011,6 +2031,7 @@ describe("RegistryService graph walk hardening", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const urls: string[] = [];
     const registry = new RegistryService({
@@ -2054,6 +2075,7 @@ describe("RegistryService metadata path dependency names", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const registry = new RegistryService({
       adapters: new Map([["npm", npmAdapter]]),
@@ -2123,6 +2145,7 @@ describe("RegistryService memory: nothing retains a parsed packument, and run st
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const registry = new RegistryService({
       adapters: new Map([["npm", npmAdapter]]),
@@ -2317,6 +2340,7 @@ describe("RegistryService graph walk at scale", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const clock = { ms: NOW.getTime() };
     const counts = { loads: 0 };

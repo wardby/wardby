@@ -77,6 +77,7 @@ describe("RegistryService failure logging", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     // The root's metadata never arrives, so the walk times out before it
     // reaches the name: a definite (pending) 403, not an outage.
@@ -110,6 +111,7 @@ describe("RegistryService failure logging", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     let release: () => void = () => {};
     const held = new Promise<void>((resolve) => {

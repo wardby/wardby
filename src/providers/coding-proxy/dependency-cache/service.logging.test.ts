@@ -35,6 +35,7 @@ async function setup() {
     repository: "owner/repo",
     cacheImage: "worker:1",
     dependencyCache: true,
+    packageAudit: null,
   });
   registry.cacheSessions.set("run-1", { lockHashes: [LOCK], sealedAt: null, createdAt: new Date() });
   const store = new MemoryDependencyCacheStore(registry.cacheSessions);

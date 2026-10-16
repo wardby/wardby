@@ -161,6 +161,7 @@ async function startTestRegistry(
     repository: "owner/repo",
     cacheImage: null,
     dependencyCache: false,
+    packageAudit: null,
   };
   store.contexts.set(capabilityHash(token), context);
 

@@ -5,7 +5,11 @@ import { PrismaRegistryStore } from "./prisma-store.js";
 
 const db = createPrismaClient();
 
-async function seedRun(options: { registryTokenHash: string; allowlist: Record<string, string[]> }) {
+async function seedRun(options: {
+  registryTokenHash: string;
+  allowlist: Record<string, string[]>;
+  packageAuditMode?: "audit" | "full";
+}) {
   const suffix = randomUUID();
   const agentId = `registry-agent-${suffix}`;
   const runId = `registry-run-${suffix}`;
@@ -27,6 +31,7 @@ async function seedRun(options: { registryTokenHash: string; allowlist: Record<s
       protectedPaths: [],
       budgetReservedUsd: 0.0002,
       packageAllowlist: options.allowlist,
+      packageAuditMode: options.packageAuditMode ?? null,
     },
   });
   await db.codingProxySession.create({
@@ -70,6 +75,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaRegistryStore (database)", () 
       repository: "openai/example",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
 
     expect(await store.isAllowedDependency(runId, "npm", "loose-envify")).toBe(false);
@@ -180,6 +186,94 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaRegistryStore (database)", () 
     } finally {
       await db.registryVersionFact.deleteMany({ where: { name } });
       await db.run.deleteMany({ where: { id: runId } });
+    }
+  });
+
+  it("reads the run's package audit mode and keeps audited allowances, approvals and records", async () => {
+    const hash = `h3-${randomUUID()}`;
+    const { runId, agentId } = await seedRun({ registryTokenHash: hash, allowlist: {}, packageAuditMode: "full" });
+    runIds.push(runId);
+    agentIds.push(agentId);
+    const store = new PrismaRegistryStore(db);
+    expect(await store.findRunByRegistryTokenHash(hash, new Date())).toMatchObject({ runId, packageAudit: "full" });
+
+    expect(await store.findAllowance(runId, "npm", "expo-dev-client")).toBeNull();
+    await store.addAuditedAllowances(runId, "npm", ["expo-dev-client"], "expo-dev-client");
+    await store.addAuditedAllowances(runId, "npm", ["expo-dev-launcher", "expo-dev-launcher"], "expo-dev-client");
+    expect(await store.findAllowance(runId, "npm", "expo-dev-launcher")).toEqual({ auditedVia: "expo-dev-client" });
+    expect(await store.isAllowedDependency(runId, "npm", "expo-dev-launcher")).toBe(true);
+    // The first writer wins: a later plain allowance (or another audited parent) keeps auditedVia.
+    await store.addAllowances(runId, "npm", ["expo-dev-launcher", "react"]);
+    await store.addAuditedAllowances(runId, "npm", ["expo-dev-launcher", "react"], "other");
+    expect(await store.findAllowance(runId, "npm", "expo-dev-launcher")).toEqual({ auditedVia: "expo-dev-client" });
+    expect(await store.findAllowance(runId, "npm", "react")).toEqual({ auditedVia: null });
+    // An extra's row is never a package allowance.
+    await store.addExtraAllowances(runId, "pypi", [{ name: "uvicorn", extras: ["standard"] }]);
+    expect(await store.findAllowance(runId, "pypi", "uvicorn[standard]")).toBeNull();
+
+    const record = {
+      runId,
+      ecosystem: "npm",
+      name: "expo-dev-client",
+      version: "5.1.2",
+      relation: "top-level" as const,
+      sizeBytes: 41210,
+      advisories: [],
+    };
+    await store.recordAudit(record);
+    await store.recordAudit({ ...record, sizeBytes: 1 });
+    await store.recordAudit({
+      runId,
+      ecosystem: "npm",
+      name: "lodash",
+      version: "4.17.20",
+      relation: "allowed",
+      advisories: [{ id: "GHSA-35jh-r3h4-6jhm", severity: "HIGH", summary: "Command injection" }],
+    });
+    expect(await store.listAudits(runId)).toEqual([
+      {
+        ecosystem: "npm",
+        name: "expo-dev-client",
+        version: "5.1.2",
+        relation: "top-level",
+        via: null,
+        sizeBytes: 41210,
+        advisories: [],
+      },
+      {
+        ecosystem: "npm",
+        name: "lodash",
+        version: "4.17.20",
+        relation: "allowed",
+        via: null,
+        sizeBytes: null,
+        advisories: [{ id: "GHSA-35jh-r3h4-6jhm", severity: "HIGH", summary: "Command injection" }],
+      },
+    ]);
+
+    const name = `audited-fact-${randomUUID()}`;
+    try {
+      await store.putVersionFacts("npm", [
+        {
+          name,
+          version: "1.0.0",
+          publishedAt: new Date("2020-01-01T00:00:00Z"),
+          integrity: "sha512-a",
+          downloadUrl: `https://registry.npmjs.org/${name}/-/${name}-1.0.0.tgz`,
+          dependencies: [],
+        },
+      ]);
+      await store.approveVersions(runId, "npm", [
+        { name, version: "1.0.0", integrity: "sha512-a", audit: { relation: "transitive", via: "b" } },
+      ]);
+      expect(await store.findApprovedVersion(runId, "npm", name, "1.0.0")).toEqual({
+        integrity: "sha512-a",
+        downloadUrl: `https://registry.npmjs.org/${name}/-/${name}-1.0.0.tgz`,
+        acceptedAdvisories: [],
+        audit: { relation: "transitive", via: "b" },
+      });
+    } finally {
+      await db.registryVersionFact.deleteMany({ where: { name } });
     }
   });
 });

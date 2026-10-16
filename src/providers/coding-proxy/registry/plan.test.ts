@@ -122,6 +122,7 @@ function setup(
     repository: "owner/repo",
     cacheImage: null,
     dependencyCache: options.dependencyCache ?? false,
+    packageAudit: null,
   });
   const audited: AuditedVersion[][] = [];
   const service = new RegistryService({
@@ -556,6 +557,7 @@ describe("lockfile plan verification", () => {
       repository: "owner/repo",
       cacheImage: null,
       dependencyCache: false,
+      packageAudit: null,
     });
     const reads: string[] = [];
     const planFor = (token: string) =>

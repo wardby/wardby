@@ -142,6 +142,19 @@ export function sanitizeAuditAdvisories(value: unknown): AuditAdvisory[] {
   return [...out.values()];
 }
 
+/** A stored verdict (RegistryApprovedVersion.audit, untrusted JSON) read back; null when absent or malformed. */
+export function parsePackageAuditVerdict(value: unknown): PackageAuditVerdict | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { relation, via, advisories } = value as Record<string, unknown>;
+  if (typeof relation !== "string" || !(RELATIONS as readonly string[]).includes(relation)) return null;
+  const list = sanitizeAuditAdvisories(advisories);
+  return {
+    relation: relation as AuditRelation,
+    ...(relation === "transitive" && typeof via === "string" && via !== "" ? { via } : {}),
+    ...(list.length > 0 ? { advisories: list } : {}),
+  };
+}
+
 export interface PackageAuditSummary {
   entries: PackageAuditEntry[];
   /** Names to add to the allowlist: top-level + unknown, per ecosystem, first-seen order. */

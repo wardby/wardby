@@ -5,6 +5,7 @@ import {
   MAX_PACKAGE_AUDIT_MINUTES,
   PackageAuditPatchError,
   packageAuditWording,
+  parsePackageAuditVerdict,
   resolvePackageAuditPatch,
   sanitizeAuditAdvisories,
   summarizePackageAudit,
@@ -213,5 +214,24 @@ describe("packageAuditWording", () => {
     expect(text).toContain("`pkg-9`");
     expect(text).not.toContain("`pkg-10`");
     expect(text).toContain("and 4 more");
+  });
+});
+
+describe("parsePackageAuditVerdict", () => {
+  it("reads a stored verdict back and rejects malformed ones", () => {
+    expect(parsePackageAuditVerdict({ relation: "transitive", via: "b" })).toEqual({
+      relation: "transitive",
+      via: "b",
+    });
+    expect(
+      parsePackageAuditVerdict({
+        relation: "allowed",
+        via: "ignored",
+        advisories: [{ id: "GHSA-aaaa-bbbb-cccc", severity: "HIGH", summary: "s" }, { id: "MAL-1" }],
+      }),
+    ).toEqual({ relation: "allowed", advisories: [{ id: "GHSA-aaaa-bbbb-cccc", severity: "HIGH", summary: "s" }] });
+    expect(parsePackageAuditVerdict(null)).toBeNull();
+    expect(parsePackageAuditVerdict({ relation: "sideways" })).toBeNull();
+    expect(parsePackageAuditVerdict([])).toBeNull();
   });
 });
