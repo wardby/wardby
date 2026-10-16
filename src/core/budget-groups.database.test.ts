@@ -107,6 +107,13 @@ describe.skipIf(!process.env.DATABASE_URL)("budget groups (database)", () => {
     expect(Number(run.costUsd)).toBe(0);
     expect(await reservedUsd(run.id)).toBeNull();
     expect(started).not.toContain(run.id);
+    expect(await db.runBudgetEvent.findMany({ where: { runId: run.id } })).toEqual([
+      expect.objectContaining({
+        kind: "refused",
+        limit: "day",
+        details: expect.objectContaining({ source: "dispatch", heldRuns: expect.any(Number) }),
+      }),
+    ]);
   });
 
   it("E-01: a partially spent group caps the coding run's reservation", async () => {
@@ -120,6 +127,9 @@ describe.skipIf(!process.env.DATABASE_URL)("budget groups (database)", () => {
     expect(result!.run.status).toBe("pending");
     expect(await reservedUsd(result!.run.id)).toBeCloseTo(0.75, 6);
     expect(started).toContain(result!.run.id);
+    // The group's remainder, not the agent's own budget, bound this reservation.
+    const coding = await db.codingRun.findUniqueOrThrow({ where: { runId: result!.run.id } });
+    expect(coding.budgetLimitedBy).toBe("day");
   });
 
   it("an ungrouped coding run still reserves its own full budget", async () => {
@@ -287,6 +297,13 @@ describe.skipIf(!process.env.DATABASE_URL)("budget groups (database)", () => {
     const refused = await db.run.findUniqueOrThrow({ where: { id: again!.run.id } });
     expect(refused.status).toBe("refused");
     expect(refused.error).toMatch(/^run_tree_exhausted\b/);
+    expect(await db.runBudgetEvent.findMany({ where: { runId: refused.id } })).toEqual([
+      expect.objectContaining({
+        kind: "refused",
+        limit: "run-tree",
+        details: expect.objectContaining({ source: "dispatch", heldRuns: 0 }),
+      }),
+    ]);
 
     await db.run.update({ where: { id: parent.id }, data: { status: "succeeded", finishedAt: new Date() } });
   });
@@ -305,6 +322,28 @@ describe.skipIf(!process.env.DATABASE_URL)("budget groups (database)", () => {
 
     await db.run.updateMany({
       where: { id: { in: [parent.id, result!.run.id] } },
+      data: { status: "cancelled", finishedAt: new Date() },
+    });
+  });
+
+  it("a delegated tree is held once: a lead and its child leave the rest of the group its true headroom", async () => {
+    const g = await db.budgetGroup.create({
+      data: { id: id("tree-once"), name: id("tree-once"), ownerId: owner, weeklyBudgetUsd: 25 },
+    });
+    const lead = await nativeAgent("once-lead", 21, g.id);
+    const builder = await codingAgent("once-builder", 20, g.id);
+    const other = await codingAgent("once-other", 4, g.id);
+    const parent = await db.run.create({ data: { agentId: lead, status: "running", costUsd: 1 } });
+    const child = await dispatchRun({ db, executor, agentId: builder, trigger: "subagent", parentRunId: parent.id });
+
+    // The tree holds $21 - $1 = $20 once, not the lead's $20 and the child's $20 separately.
+    const result = await dispatchRun({ db, executor, agentId: other });
+    const run = result!.run;
+    expect(run.status).not.toBe("refused");
+    expect(await reservedUsd(run.id)).toBeCloseTo(4, 6);
+
+    await db.run.updateMany({
+      where: { id: { in: [parent.id, child!.run.id, run.id] } },
       data: { status: "cancelled", finishedAt: new Date() },
     });
   });

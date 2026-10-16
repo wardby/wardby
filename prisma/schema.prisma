@@ -372,6 +372,7 @@ model Run {
   attribution          RunAttribution?
   modelUsage           RunModelUsage[]
   serviceStatuses      CodingRunServiceStatus[]
+  budgetEvents         RunBudgetEvent[]
   /// A manual review of a local branch: this run is the review run dispatched for it.
   localPullRequest     LocalPullRequest?
   /// A sandbox-mode native run's gateway session (native sandbox phase 3).
@@ -510,6 +511,9 @@ model CodingRun {
   /// Claude Code's tool-runner image, resolved from the agent's toolchain at dispatch; null for Codex runs.
   toolImage             String?
   budgetReservedUsd     Decimal             @db.Decimal(10, 6)
+  /// What set budgetReservedUsd below the agent's own budget at dispatch:
+  /// run-tree, day, week or month. Null = the agent's own budget.
+  budgetLimitedBy       String?
   /// Phase 12 concurrency queue: set when start() found every coding slot
   /// taken (CODING_MAX_CONCURRENT), cleared when the run claims a slot. A
   /// pending run with queuedAt set is waiting, not orphaned.
@@ -670,6 +674,26 @@ enum CodingProxyRequestStatus {
   uncertain
 }
 
+enum RunBudgetEventKind {
+  refused
+}
+
+/// One budget decision about a run: a refusal by the coding proxy or at
+/// dispatch, with the numbers behind it. `limit` names what refused it:
+/// run, run-tree, day, week or month. `details` holds amounts, the model and
+/// the turn; never secrets or message text.
+model RunBudgetEvent {
+  id      String             @id @default(cuid())
+  runId   String
+  run     Run                @relation(fields: [runId], references: [id], onDelete: Cascade)
+  kind    RunBudgetEventKind
+  limit   String
+  at      DateTime           @default(now())
+  details Json
+
+  @@index([runId, at])
+}
+
 enum NativeGatewaySessionStatus {
   active
   finished
@@ -759,6 +783,8 @@ model NativeGatewayCall {
   status            NativeGatewayCallStatus
   reservationUsd    Decimal?                @db.Decimal(18, 10)
   actualCostUsd     Decimal?                @db.Decimal(18, 10)
+  /// actualCostUsd is an estimate for an interrupted call, not provider usage.
+  costEstimated     Boolean                 @default(false)
   inputTokens       Int?
   outputTokens      Int?
   cachedInputTokens Int?
@@ -798,6 +824,8 @@ model CodingProxySession {
   /// Set the first time the proxy refuses a request of this session for
   /// budget; lets the executor report the run as out of budget.
   budgetExhaustedAt         DateTime?
+  /// The numbers behind the first budget refusal of this session (budget, spent, holds, refused hold, model, turn); the control plane copies them into RunBudgetEvent. Never secrets.
+  budgetRefusal             Json?
   /// The upstream error code (a fixed identifier, never a message) of the
   /// first provider failure the proxy relayed for this session; lets the
   /// executor say the model provider refused the run.
@@ -817,8 +845,9 @@ model CodingProxySession {
   @@index([deadlineAt])
 }
 
-/// Monotonic per-upstream-call ledger. Uncertain reservations remain held so a
-/// crash or truncated provider stream can never create new spendable budget.
+/// Monotonic per-upstream-call ledger. An uncertain request without an
+/// estimate stays held in full; one the proxy estimated (costEstimated) counts
+/// at that estimate.
 model CodingProxyRequest {
   id                 String                   @id @default(cuid())
   sessionId          String
@@ -829,6 +858,9 @@ model CodingProxyRequest {
   status             CodingProxyRequestStatus @default(reserved)
   reservationUsd     Decimal                  @db.Decimal(18, 10)
   actualCostUsd      Decimal?                 @db.Decimal(18, 10)
+  /// actualCostUsd is the proxy's estimate for an interrupted (uncertain)
+  /// reply, not provider-reported usage.
+  costEstimated      Boolean                  @default(false)
   pricingVersion     String
   pricingSnapshot    Json
   inputTokens        Int?

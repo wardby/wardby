@@ -158,8 +158,22 @@ describe("computeGroupSpend", () => {
       NOW,
     );
     const byPeriod = Object.fromEntries(spend.map((s) => [s.period, s]));
-    expect(byPeriod.day).toEqual({ period: "day", capUsd: 10, spentUsd: 3, reservedUsd: 0, remainingUsd: 7 });
-    expect(byPeriod.month).toEqual({ period: "month", capUsd: 20, spentUsd: 8, reservedUsd: 0, remainingUsd: 12 });
+    expect(byPeriod.day).toEqual({
+      period: "day",
+      capUsd: 10,
+      spentUsd: 3,
+      reservedUsd: 0,
+      remainingUsd: 7,
+      heldRuns: 0,
+    });
+    expect(byPeriod.month).toEqual({
+      period: "month",
+      capUsd: 20,
+      spentUsd: 8,
+      reservedUsd: 0,
+      remainingUsd: 12,
+      heldRuns: 0,
+    });
     expect(byPeriod.week).toBeUndefined();
   });
 
@@ -171,7 +185,7 @@ describe("computeGroupSpend", () => {
       [{ id: "a1", budgetUsd: 5 }],
       NOW,
     );
-    expect(spend[0]).toEqual({ period: "day", capUsd: 10, spentUsd: 15, reservedUsd: 0, remainingUsd: 0 });
+    expect(spend[0]).toEqual({ period: "day", capUsd: 10, spentUsd: 15, reservedUsd: 0, remainingUsd: 0, heldRuns: 0 });
   });
 
   it("E-04: counts every in-flight run's unspent reservation, native and coding, clamped at zero", async () => {
@@ -213,7 +227,14 @@ describe("computeGroupSpend", () => {
       ],
       NOW,
     );
-    expect(spend[0]).toEqual({ period: "day", capUsd: 20, spentUsd: 5, reservedUsd: 8.5, remainingUsd: 6.5 });
+    expect(spend[0]).toEqual({
+      period: "day",
+      capUsd: 20,
+      spentUsd: 5,
+      reservedUsd: 8.5,
+      remainingUsd: 6.5,
+      heldRuns: 3,
+    });
   });
 
   it("E-04: leaves out the reservations of excluded runs but still counts their real cost", async () => {
@@ -225,7 +246,7 @@ describe("computeGroupSpend", () => {
       NOW,
       { excludeReservationRunIds: ["self"] },
     );
-    expect(spend[0]).toEqual({ period: "day", capUsd: 10, spentUsd: 1, reservedUsd: 0, remainingUsd: 9 });
+    expect(spend[0]).toEqual({ period: "day", capUsd: 10, spentUsd: 1, reservedUsd: 0, remainingUsd: 9, heldRuns: 0 });
   });
 });
 
@@ -334,6 +355,218 @@ describe("hold liveness (I2) and first come, first served (I3)", () => {
   });
 });
 
+describe("a delegated tree is held once", () => {
+  const group = { dailyBudgetUsd: null, weeklyBudgetUsd: 25, monthlyBudgetUsd: null } as never;
+  const members = [
+    { id: "lead", budgetUsd: 21 },
+    { id: "builder", budgetUsd: 20 },
+    { id: "other", budgetUsd: 4 },
+  ];
+
+  it("lead running with a child: holds the lead's budget minus the tree's cost", async () => {
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 1, startedAt: NOW, status: "running" },
+        {
+          id: "C",
+          agentId: "builder",
+          costUsd: 0,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 20 },
+        },
+      ],
+    );
+    const [week] = await computeGroupSpend(db, group, members, NOW);
+    expect(week).toMatchObject({ spentUsd: 1, reservedUsd: 20, remainingUsd: 4, heldRuns: 1 });
+  });
+
+  it("child has spent $8: tree holds $12", async () => {
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 1, startedAt: NOW, status: "running" },
+        {
+          id: "C",
+          agentId: "builder",
+          costUsd: 8,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 20 },
+        },
+      ],
+    );
+    const [week] = await computeGroupSpend(db, group, members, NOW);
+    expect(week).toMatchObject({ spentUsd: 9, reservedUsd: 12, remainingUsd: 4 });
+  });
+
+  it("two parallel children: still one hold of $21", async () => {
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 0, startedAt: NOW, status: "running" },
+        {
+          id: "C1",
+          agentId: "builder",
+          costUsd: 0,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 20 },
+        },
+        {
+          id: "C2",
+          agentId: "builder",
+          costUsd: 0,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 20 },
+        },
+      ],
+    );
+    const [week] = await computeGroupSpend(db, group, members, NOW);
+    expect(week).toMatchObject({ reservedUsd: 21, remainingUsd: 4, heldRuns: 1 });
+  });
+
+  it("root finished: the child holds its own reservation", async () => {
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 1, startedAt: NOW, status: "succeeded" },
+        {
+          id: "C",
+          agentId: "builder",
+          costUsd: 2,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 20 },
+        },
+      ],
+    );
+    const [week] = await computeGroupSpend(db, group, members, NOW);
+    expect(week).toMatchObject({ spentUsd: 3, reservedUsd: 18 });
+  });
+
+  it("root in another group: the child holds its own reservation here", async () => {
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "outsider", costUsd: 0, startedAt: NOW, status: "running" },
+        {
+          id: "C",
+          agentId: "builder",
+          costUsd: 0,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 20 },
+        },
+      ],
+    );
+    const [week] = await computeGroupSpend(db, group, members, NOW);
+    expect(week).toMatchObject({ reservedUsd: 20 });
+  });
+
+  it("a grandchild under a native child is inside the root's hold; tree cost includes runs in other groups", async () => {
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 1, startedAt: NOW, status: "running" },
+        { id: "N", agentId: "outsider", costUsd: 3, startedAt: NOW, status: "running", parentRunId: "L" },
+        {
+          id: "G",
+          agentId: "builder",
+          costUsd: 2,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "N",
+          codingRun: { budgetReservedUsd: 20 },
+        },
+      ],
+    );
+    const [week] = await computeGroupSpend(db, group, members, NOW);
+    // Spent counts only members (L, G); the hold is 21 - (1 + 3 + 2).
+    expect(week).toMatchObject({ spentUsd: 3, reservedUsd: 15, heldRuns: 1 });
+  });
+
+  it("a root whose hold is not counted (excluded, or after holdsBefore) leaves its children their own holds", async () => {
+    // C's own reservation ($10) differs from what the root would hold ($21 - $1 = $20).
+    const runs = [
+      { id: "L", agentId: "lead", costUsd: 1, startedAt: TODAY_START, status: "running" },
+      {
+        id: "C",
+        agentId: "builder",
+        costUsd: 0,
+        startedAt: TODAY_START,
+        status: "running",
+        parentRunId: "L",
+        codingRun: { budgetReservedUsd: 10 },
+      },
+    ];
+    const excluded = await computeGroupSpend(fakeDb([], runs), group, members, NOW, {
+      excludeReservationRunIds: ["L"],
+    });
+    expect(excluded[0]).toMatchObject({ spentUsd: 1, reservedUsd: 10, heldRuns: 1 });
+    // Ordered by (startedAt, id): C < K < L, so C's hold counts and L's does not.
+    const before = await computeGroupSpend(fakeDb([], runs), group, members, NOW, {
+      holdsBefore: { id: "K", startedAt: TODAY_START },
+    });
+    expect(before[0]).toMatchObject({ spentUsd: 1, reservedUsd: 10, heldRuns: 1 });
+    // Neither option: the root holds the tree once.
+    const [whole] = await computeGroupSpend(fakeDb([], runs), group, members, NOW);
+    expect(whole).toMatchObject({ spentUsd: 1, reservedUsd: 20, heldRuns: 1 });
+  });
+
+  it("a root that started in an earlier period: the child holds its own reservation in a period the root is not in", async () => {
+    const yesterday = new Date("2026-09-08T12:00:00.000Z"); // Tuesday, same ISO week as NOW
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 1, startedAt: yesterday, status: "running" },
+        {
+          id: "C",
+          agentId: "builder",
+          costUsd: 0,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 20 },
+        },
+      ],
+    );
+    const [day, week] = await computeGroupSpend(
+      db,
+      { dailyBudgetUsd: 25, weeklyBudgetUsd: 25, monthlyBudgetUsd: null } as never,
+      members,
+      NOW,
+    );
+    expect(day).toMatchObject({ period: "day", spentUsd: 0, reservedUsd: 20, heldRuns: 1 });
+    expect(week).toMatchObject({ period: "week", spentUsd: 1, reservedUsd: 20, heldRuns: 1 });
+  });
+
+  it("a dropped tree is invisible", async () => {
+    const runs = [
+      { id: "L", agentId: "lead", costUsd: 1, startedAt: NOW, status: "running" },
+      {
+        id: "C",
+        agentId: "builder",
+        costUsd: 2,
+        startedAt: NOW,
+        status: "running",
+        parentRunId: "L",
+        codingRun: { budgetReservedUsd: 20 },
+      },
+    ];
+    const [week] = await computeGroupSpend(fakeDb([], runs), group, members, NOW, { excludeRunIds: ["L", "C"] });
+    expect(week).toMatchObject({ spentUsd: 0, reservedUsd: 0, remainingUsd: 25, heldRuns: 0 });
+  });
+});
+
 describe("effectiveBudgetForRun", () => {
   it("returns the agent's own budgetUsd unchanged when it has no budgetGroupId", async () => {
     const db = fakeDb([], []);
@@ -376,7 +609,7 @@ describe("effectiveBudgetForRun", () => {
       [{ agentId: "a1", costUsd: 8, startedAt: TODAY_START }],
     );
     const result = await effectiveBudgetForRun(db, { id: "a1", budgetGroupId: "g1", budgetUsd: 5 } as never, NOW);
-    expect(result).toEqual({ effectiveBudgetUsd: 2, constrainedBy: ["day"] });
+    expect(result).toEqual({ effectiveBudgetUsd: 2, constrainedBy: ["day"], limitedBy: "day" });
   });
 
   it("returns an effective budget of 0 once the group's period cap is fully spent — the engine's existing zero-budget refuse then applies", async () => {
@@ -429,7 +662,7 @@ describe("effectiveBudgetForRun", () => {
       { self: { id: "self", startedAt: TODAY_START } },
     );
     // $10 cap - a2's $7 held by its in-flight run = $3; a1's own run is not counted against itself.
-    expect(result).toEqual({ effectiveBudgetUsd: 3, constrainedBy: ["day"] });
+    expect(result).toEqual({ effectiveBudgetUsd: 3, constrainedBy: ["day"], limitedBy: "day" });
   });
 
   it("uses the tightest of multiple configured periods, not just the first one checked", async () => {
@@ -536,7 +769,7 @@ describe("computeRunTreeSpend", () => {
       NOW,
       "run-root",
     );
-    expect(child).toEqual({ effectiveBudgetUsd: 2.5, constrainedBy: ["run-tree"] });
+    expect(child).toEqual({ effectiveBudgetUsd: 2.5, constrainedBy: ["run-tree"], limitedBy: "run-tree" });
   });
 
   it("E-04: the tree's own in-flight reservations don't shrink its ceiling; another member's do", async () => {
@@ -787,7 +1020,7 @@ describe("effectiveBudgetForRun with parentRunId (sub-agent dispatch)", () => {
       NOW,
       "run-root",
     );
-    expect(result).toEqual({ effectiveBudgetUsd: 5, constrainedBy: ["run-tree"] });
+    expect(result).toEqual({ effectiveBudgetUsd: 5, constrainedBy: ["run-tree"], limitedBy: "run-tree" });
   });
 
   it("M1: a child in a different group than the root counts the tree's holds in its own group", async () => {
@@ -843,7 +1076,13 @@ describe("effectiveBudgetForRun with parentRunId (sub-agent dispatch)", () => {
       NOW,
       "run-root",
     );
-    expect(result).toEqual({ effectiveBudgetUsd: 0, constrainedBy: ["run-tree"], exhaustedBy: "run-tree" });
+    expect(result).toEqual({
+      effectiveBudgetUsd: 0,
+      constrainedBy: ["run-tree"],
+      limitedBy: "run-tree",
+      exhaustedBy: "run-tree",
+      exhaustedDetail: { capUsd: 2, spentUsd: 2, heldUsd: 0, heldRuns: 0 },
+    });
   });
 
   it("a top-level run (no parentRunId) is unaffected by run-tree logic entirely", async () => {

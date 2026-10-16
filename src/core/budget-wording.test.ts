@@ -64,6 +64,38 @@ describe("loadBudgetSentence", () => {
     expect(db.run.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "r1" } }));
   });
 
+  it("uses the recorded budget refusal when the run has one", async () => {
+    const db = {
+      run: {
+        findUnique: vi.fn(async () => ({
+          parentRunId: null,
+          agent: { name: "builder", budgetUsd: "3", budgetGroup: { name: "reviewers" } },
+        })),
+      },
+      runBudgetEvent: {
+        findFirst: vi.fn(async () => ({
+          limit: "day",
+          at: new Date(0),
+          details: {
+            source: "proxy",
+            budgetUsd: 0.5,
+            spentUsd: 0.4,
+            heldReservedUsd: 0,
+            heldUncertainUsd: 0,
+            refusedHoldUsd: 0.2,
+            model: "m",
+            turn: 3,
+          },
+        })),
+      },
+    };
+    const sentence = await loadBudgetSentence(db as never, "r1", "budget_exhausted");
+    expect(sentence).toContain('The "reviewers" group');
+    expect(sentence).toContain("$0.20 hold");
+    expect(sentence).not.toContain("builder");
+    expect(sentence).not.toContain("turn");
+  });
+
   it("uses the agent's budget for a native run", async () => {
     const db = {
       run: { findUnique: vi.fn(async () => ({ agent: { budgetUsd: 1.5, budgetGroup: null }, codingRun: null })) },

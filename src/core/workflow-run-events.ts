@@ -18,7 +18,7 @@ const VERDICTS = new Set(["APPROVE", "CHANGES_REQUESTED", "COMMENT"]);
 
 export type RunEventsDb = Pick<
   PrismaClient,
-  "agent" | "runHostCheck" | "run" | "registryFetch" | "registryAuditRecord"
+  "agent" | "runHostCheck" | "run" | "runBudgetEvent" | "registryFetch" | "registryAuditRecord"
 >;
 
 /** Emits top-level run outcomes and published review verdicts. Never throws. */

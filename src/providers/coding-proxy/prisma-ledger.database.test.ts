@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createPrismaClient } from "../../core/db.js";
 import { afterAll, describe, expect, it } from "vitest";
 import { PrismaProxyLedger } from "./prisma-ledger.js";
+import { PrismaContainerExecutionStore } from "../executor/container.js";
 import { CodingProxy, type ProxyResponseSink } from "./proxy.js";
 import { shippedCatalog } from "../llm/catalog.js";
 import { entryOf } from "../llm/catalog-types.js";
@@ -39,6 +40,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
         allowedEgress: [],
         protectedPaths: [],
         budgetReservedUsd: 0.0002,
+        budgetLimitedBy: "week",
       },
     });
     const ledger = new PrismaProxyLedger(db);
@@ -91,6 +93,32 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
     expect(later.outcome).toBe("budget_exhausted");
     expect((await ledger.findSessionByCapabilityHash(`hash-${suffix}`))?.budgetExhaustedAt).toEqual(refusedAt);
 
+    // The proxy records the first refusal's numbers on its session only (it has no access to
+    // RunBudgetEvent); the control plane copies them into the run's budget events, once.
+    const refusal = await ledger.budgetRefusal(sessionId);
+    expect(refusal).toEqual({
+      source: "proxy",
+      budgetUsd: 0.0002,
+      spentUsd: 0,
+      heldReservedUsd: 0.0001,
+      heldUncertainUsd: 0,
+      refusedHoldUsd: 0.0001,
+      model: "gpt-5.6-luna",
+      turn: 1,
+    });
+    expect(await ledger.budgetRefusal(`missing-${suffix}`)).toBeNull();
+    expect(await db.runBudgetEvent.count({ where: { runId } })).toBe(0);
+    const store = new PrismaContainerExecutionStore(db);
+    await store.recordBudgetRefusal(runId, sessionId);
+    await store.recordBudgetRefusal(runId, sessionId);
+    expect(await db.runBudgetEvent.findMany({ where: { runId } })).toEqual([
+      expect.objectContaining({
+        kind: "refused",
+        limit: "week",
+        details: expect.objectContaining({ source: "proxy", turn: 1, refusedHoldUsd: 0.0001 }),
+      }),
+    ]);
+
     const requestId = admitted[0].outcome === "reserved" ? admitted[0].request.id : "";
     const usage = { inputTokens: 10, outputTokens: 4, cachedInputTokens: 2, cacheWriteTokens: 0, reasoningTokens: 1 };
     await ledger.complete(requestId, usage, 0.00005, 200);
@@ -104,6 +132,73 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
     expect(Number(run.costUsd)).toBe(0.00005);
     // One completed proxied call (completed twice, idempotently) is one turn.
     expect(run.turns).toBe(1);
+  });
+
+  it("copies only a refusal's well-formed amounts, model and turn, and records nothing for a malformed one", async () => {
+    const fRun = `forged-run-${suffix}`;
+    const fSession = `forged-session-${suffix}`;
+    const fAgent = `forged-agent-${suffix}`;
+    const ledger = new PrismaProxyLedger(db);
+    const store = new PrismaContainerExecutionStore(db);
+    await db.agent.create({
+      data: { id: fAgent, name: fAgent, systemPrompt: "x", model: "gpt-5.6-luna", budgetUsd: 1 },
+    });
+    await db.run.create({ data: { id: fRun, agentId: fAgent, executionManaged: true } });
+    try {
+      await db.codingRun.create({
+        data: {
+          runId: fRun,
+          task: "test",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${fRun}`,
+          provider: "codex",
+          model: "gpt-5.6-luna",
+          timeoutSec: 60,
+          allowedEgress: [],
+          protectedPaths: [],
+          budgetReservedUsd: 1,
+        },
+      });
+      await ledger.createSession({
+        id: fSession,
+        runId: fRun,
+        capabilityHash: `forged-hash-${suffix}`,
+        credentialRef: "openai/test",
+        protocol: "openai-responses",
+        allowedModels: ["gpt-5.6-luna"],
+        deadlineAt: new Date(Date.now() + 60_000),
+        budgetUsd: 1,
+        registryTokenHash: `forged-registry-${suffix}`,
+      });
+      const amounts = {
+        budgetUsd: 1,
+        spentUsd: 0.5,
+        heldReservedUsd: 0.1,
+        heldUncertainUsd: 0,
+        refusedHoldUsd: 0.6,
+        model: "gpt-5.6-luna",
+        turn: 3,
+      };
+      const forge = (refusal: unknown) =>
+        db.$executeRaw`UPDATE "CodingProxySession" SET "budgetRefusal" = ${JSON.stringify(refusal)}::jsonb WHERE "id" = ${fSession}`;
+
+      await forge({ ...amounts, refusedHoldUsd: undefined, groupName: "forged" });
+      await store.recordBudgetRefusal(fRun, fSession);
+      await forge({ ...amounts, model: "<script>" });
+      await store.recordBudgetRefusal(fRun, fSession);
+      expect(await db.runBudgetEvent.count({ where: { runId: fRun } })).toBe(0);
+
+      await forge({ ...amounts, source: "dispatch", groupName: "forged", leadAgentName: "forged", note: "x" });
+      await store.recordBudgetRefusal(fRun, fSession);
+      const events = await db.runBudgetEvent.findMany({ where: { runId: fRun } });
+      expect(events.map((e) => e.details)).toEqual([{ ...amounts, source: "proxy" }]);
+    } finally {
+      await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "id" = ${fSession}`;
+      await db.codingRun.deleteMany({ where: { runId: fRun } });
+      await db.run.deleteMany({ where: { id: fRun } });
+      await db.agent.deleteMany({ where: { id: fAgent } });
+    }
   });
 
   describe("model terms", () => {
@@ -382,6 +477,132 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
         await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${fn}" ON "RunModelUsage"`);
         await db.$executeRawUnsafe(`DROP FUNCTION IF EXISTS "${fn}"()`);
       }
+    });
+  });
+
+  describe("interrupted replies settled at an estimate", () => {
+    const eAgent = `estimate-agent-${suffix}`;
+    const eRun = `estimate-run-${suffix}`;
+    const eSession = `estimate-session-${suffix}`;
+    const model = "estimate-model";
+    const otherModel = "estimate-other-model";
+    const ledger = new PrismaProxyLedger(db);
+    const u = (inputTokens: number, cachedInputTokens: number, cacheWriteTokens: number, outputTokens: number) => ({
+      inputTokens,
+      outputTokens,
+      cachedInputTokens,
+      cacheWriteTokens,
+      reasoningTokens: 0,
+    });
+    const reserveOn = (key: string, reservationUsd: number, onModel = model) =>
+      ledger.reserve({
+        id: `${key}-${suffix}`,
+        sessionId: eSession,
+        requestKey: key,
+        requestFingerprint: `fingerprint-${key}`,
+        model: onModel,
+        reservationUsd,
+        pricing: { version: "test", encoding: "o200k_base" as const, inputPerMTok: 1, outputPerMTok: 1 },
+        now: new Date(),
+      });
+    const reserved = async (key: string, reservationUsd: number, onModel = model) => {
+      const result = await reserveOn(key, reservationUsd, onModel);
+      if (result.outcome !== "reserved") throw new Error(`unexpected ${result.outcome}`);
+      return result.request.id;
+    };
+
+    afterAll(async () => {
+      await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "id" = ${eSession}`;
+      await db.runModelUsage.deleteMany({ where: { runId: eRun } });
+      await db.codingRun.deleteMany({ where: { runId: eRun } });
+      await db.run.deleteMany({ where: { id: eRun } });
+      await db.agent.deleteMany({ where: { id: eAgent } });
+    });
+
+    it("counts an estimated uncertain request at its estimate, in the ledger and the run's totals", async () => {
+      await db.agent.create({ data: { id: eAgent, name: eAgent, systemPrompt: "x", model, budgetUsd: 1 } });
+      await db.run.create({ data: { id: eRun, agentId: eAgent, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId: eRun,
+          task: "test",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${eRun}`,
+          provider: "codex",
+          model,
+          timeoutSec: 60,
+          allowedEgress: [],
+          protectedPaths: [],
+          budgetReservedUsd: 0.001,
+        },
+      });
+      await ledger.createSession({
+        id: eSession,
+        runId: eRun,
+        capabilityHash: `estimate-hash-${suffix}`,
+        credentialRef: "openai/test",
+        protocol: "openai-responses",
+        allowedModels: [model, otherModel],
+        deadlineAt: new Date(Date.now() + 60_000),
+        budgetUsd: 0.001,
+        registryTokenHash: `estimate-registry-hash-${suffix}`,
+      });
+
+      const cut = await reserved("cut", 0.0001);
+      await ledger.markUncertain(cut, 200, { usage: u(120, 20, 10, 5), costUsd: 0.00003 });
+      expect(await ledger.getRequest(cut)).toMatchObject({
+        status: "uncertain",
+        costEstimated: true,
+        actualCostUsd: 0.00003,
+        upstreamStatus: 200,
+        usage: u(120, 20, 10, 5),
+      });
+      // A second mark (the request is no longer reserved) changes nothing.
+      await ledger.markUncertain(cut, 502, { usage: u(1, 0, 0, 1), costUsd: 0.00009 });
+      expect(await ledger.getRequest(cut)).toMatchObject({ actualCostUsd: 0.00003, upstreamStatus: 200 });
+
+      const run = await db.run.findUniqueOrThrow({ where: { id: eRun } });
+      expect(Number(run.costUsd)).toBeCloseTo(0.00003, 10);
+      expect(run).toMatchObject({ turns: 1, tokensIn: 120, tokensOut: 5 });
+      const usage = await db.runModelUsage.findUniqueOrThrow({ where: { runId_model: { runId: eRun, model } } });
+      expect(usage).toMatchObject({
+        freshInputTokens: 100,
+        cachedInputTokens: 20,
+        cacheWriteTokens: 10,
+        outputTokens: 5,
+      });
+      expect(Number(usage.costUsd)).toBeCloseTo(0.00003, 10);
+
+      // Fits only because the estimate (0.00003), not the hold (0.0001), is counted: 0.00099 < 0.001.
+      const big = await reserveOn("big", 0.00096);
+      expect(big.outcome).toBe("reserved");
+      if (big.outcome === "reserved") await ledger.release(big.request.id, 500);
+    });
+
+    it("keeps the full hold of an uncertain request without an estimate", async () => {
+      const held = await reserved("held", 0.0001);
+      await ledger.markUncertain(held, 502);
+      const request = await ledger.getRequest(held);
+      expect(request).toMatchObject({ status: "uncertain", costEstimated: false });
+      expect(request?.actualCostUsd).toBeUndefined();
+      expect(request?.usage).toBeUndefined();
+      const run = await db.run.findUniqueOrThrow({ where: { id: eRun } });
+      expect(run.turns).toBe(1);
+      // Held: 0.00003 (estimate) + 0.0001 (hold) + 0.00087 = 0.001 — refused.
+      expect((await reserveOn("over", 0.00087)).outcome).toBe("budget_exhausted");
+    });
+
+    it("hints the latest completed, non-estimated reply of the model and the median output", async () => {
+      await ledger.complete(await reserved("c1", 0.0001), u(100, 20, 5, 8), 0.00001, 200);
+      await ledger.complete(await reserved("c2", 0.0001), u(200, 0, 0, 30), 0.00002, 200);
+      await ledger.complete(await reserved("c3", 0.0001, otherModel), u(300, 0, 0, 12), 0.00001, 200);
+      expect(await ledger.settlementHints(eSession, model)).toEqual({
+        previous: u(200, 0, 0, 30),
+        medianOutputTokens: 12,
+      });
+      expect(await ledger.settlementHints(eSession, "no-such-model")).toEqual({ medianOutputTokens: 12 });
+      expect(await ledger.settlementHints(`missing-${suffix}`, model)).toEqual({});
     });
   });
 });

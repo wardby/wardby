@@ -1,5 +1,6 @@
 import { parseStoredEntry, type CatalogEntry } from "../llm/catalog-types.js";
 import type { ModelPricing } from "../llm/pricing-core.js";
+import type { ProxyRefusalDetails } from "../../core/budget-events.js";
 
 export type ProxySessionStatus = "active" | "cancelled";
 export type ProxyRequestStatus = "reserved" | "completed" | "released" | "uncertain";
@@ -48,6 +49,8 @@ export interface ProxySession {
   registryTokenHash?: string | null;
   /** When the ledger first refused a request of this session for budget. */
   budgetExhaustedAt?: Date | null;
+  /** The numbers behind the first budget refusal, set with budgetExhaustedAt. */
+  budgetRefusal?: ProxyRefusalRecord | null;
   /** The code of the first upstream failure the proxy relayed for this session. */
   upstreamFailure?: string | null;
   /** The run's catalog entry, copied at session creation; null on sessions from before the catalog. */
@@ -66,6 +69,8 @@ export interface ProxyRequest {
   pricing: PricingSnapshot;
   usage?: ProxyUsage;
   upstreamStatus?: number;
+  /** An uncertain request settled at an estimate: actualCostUsd and usage are estimated, not reported. */
+  costEstimated?: boolean;
 }
 
 export interface CreateProxySessionInput {
@@ -92,10 +97,13 @@ export interface ReserveProxyRequestInput {
   now: Date;
 }
 
+/** What the proxy knows about a refusal: the numbers only; names and the binding limit are the control plane's. */
+export type ProxyRefusalRecord = Omit<ProxyRefusalDetails, "agentBudgetUsd" | "groupName" | "leadAgentName">;
+
 export type ReserveProxyRequestResult =
   | { outcome: "reserved"; request: ProxyRequest }
   | { outcome: "duplicate"; request: ProxyRequest }
-  | { outcome: "budget_exhausted" }
+  | { outcome: "budget_exhausted"; details: Omit<ProxyRefusalRecord, "source"> }
   | { outcome: "inactive"; reason: "cancelled" | "expired" };
 
 export interface ProxyLedger {
@@ -104,10 +112,25 @@ export interface ProxyLedger {
   reserve(input: ReserveProxyRequestInput): Promise<ReserveProxyRequestResult>;
   complete(requestId: string, usage: ProxyUsage, actualCostUsd: number, upstreamStatus: number): Promise<ProxyRequest>;
   release(requestId: string, upstreamStatus: number): Promise<void>;
-  markUncertain(requestId: string, upstreamStatus?: number): Promise<void>;
+  /**
+   * Marks a reserved request uncertain. With an estimate it is also settled at that cost (and
+   * counts at it, not at its hold); without one it keeps its full hold.
+   */
+  markUncertain(
+    requestId: string,
+    upstreamStatus?: number,
+    estimate?: { usage: ProxyUsage; costUsd: number },
+  ): Promise<void>;
+  /**
+   * What an interrupted reply can be estimated from: the usage of the session's latest completed,
+   * non-estimated reply for this model, and the median output tokens of its completed replies.
+   */
+  settlementHints(sessionId: string, model: string): Promise<{ previous?: ProxyUsage; medianOutputTokens?: number }>;
   cancelSession(sessionId: string): Promise<void>;
   /** Whether a request of this session was ever refused for budget. */
   budgetExhausted(sessionId: string): Promise<boolean>;
+  /** The numbers behind the session's first budget refusal, if any. */
+  budgetRefusal(sessionId: string): Promise<ProxyRefusalRecord | null>;
   /** Records an upstream failure code on the session; only the first one is kept. */
   recordUpstreamFailure(sessionId: string, code: string): Promise<void>;
   /** The first upstream failure code relayed for this session, if any. */
@@ -130,7 +153,15 @@ export interface ProxyAuditEvent {
   status?: number;
   reason?: string;
   reservationUsd?: number;
+  /** For a budget refusal: the numbers behind it. */
+  budgetUsd?: number;
+  spentUsd?: number;
+  heldReservedUsd?: number;
+  heldUncertainUsd?: number;
+  turn?: number;
   costUsd?: number;
+  /** For request.uncertain: the estimated cost it was settled at, when one could be made. */
+  estimatedCostUsd?: number;
   inputTokens?: number;
   outputTokens?: number;
   cachedInputTokens?: number;

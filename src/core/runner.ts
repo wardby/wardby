@@ -93,6 +93,7 @@ import { RoutingLlmProvider } from "../providers/llm/routing.js";
 import { ModelUnavailableError } from "../providers/llm/catalog-types.js";
 import { trackRun } from "./in-flight-runs.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
+import { loadBudgetEvent, ownerBudgetSentence, type BudgetEventView } from "./budget-events.js";
 
 const runnerLog = logger.child({ module: "runner" });
 
@@ -383,6 +384,7 @@ export type RunnerDb = Pick<
   | "agentRepository"
   | "runModelUsage"
   | "runHostCheck"
+  | "runBudgetEvent"
   | "runHostStatus"
   | "hostIdentity"
   | "agentIssueProject"
@@ -602,6 +604,8 @@ export function codingChildResult(
     error: string | null;
   },
   codingResult?: unknown,
+  /** The child's recorded budget refusal (loadBudgetEvent), if any. */
+  budgetEvent?: { event: BudgetEventView; agentName: string } | null,
 ): string {
   // Checked before the "refused" branch: a continuation whose PR closed
   // before the run ever spent anything is stored as "refused" (a preflight
@@ -614,6 +618,10 @@ export function codingChildResult(
       ? serviceRefusalSentence(run.error)
       : null;
   const errorCode = run.status === "failed" ? errorCodeOf(run.error) : undefined;
+  const budget =
+    budgetEvent && (run.status === "budget_exhausted" || run.status === "refused")
+      ? ownerBudgetSentence(budgetEvent.event, budgetEvent.agentName)
+      : undefined;
   return JSON.stringify({
     status: run.status,
     finalText: run.finalText,
@@ -622,6 +630,7 @@ export function codingChildResult(
     tokensOut: run.tokensOut,
     ...(refusal ? { refusal } : {}),
     ...(errorCode ? { errorCode } : {}),
+    ...(budget ? { budget } : {}),
     ...pullRequestOf(codingResult),
   });
 }
@@ -1234,7 +1243,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                 runnerLog.warn({ err, childRunId }, "could not read the coding sub-run's result");
                 return null;
               });
-            return codingChildResult(waited.run, stored?.result);
+            return codingChildResult(waited.run, stored?.result, await loadBudgetEvent(db, childRunId));
           }
 
           const taskOverride = delegationTaskOverride(args);
@@ -1776,7 +1785,7 @@ export async function durableDelegate(
       const stored = await db.codingRun
         .findUnique({ where: { runId: childRunId }, select: { result: true } })
         .catch(() => null);
-      return finish(codingChildResult(child, stored?.result));
+      return finish(codingChildResult(child, stored?.result, await loadBudgetEvent(db, childRunId)));
     }
     if (now() - startedAt >= boundMs) {
       await executor.stop(childRunId, "sub-agent wait timed out").catch((err: unknown) => {

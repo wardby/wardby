@@ -66,6 +66,7 @@ export type ReconcilerDb = Pick<
   PrismaClient,
   | "run"
   | "runHostCheck"
+  | "runBudgetEvent"
   | "runHostStatus"
   | "runIssueStatus"
   | "agentIssueProject"
@@ -100,7 +101,7 @@ export const ORPHANED_CHECK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  * no host is configured. `closeOpenHostCheck` is best-effort and never throws.
  */
 export async function closeOrphanedHostChecks(
-  db: Pick<PrismaClient, "runHostCheck" | "run">,
+  db: Pick<PrismaClient, "runHostCheck" | "run" | "runBudgetEvent">,
   hosts: ReviewHostRegistry | undefined,
   now: Date = new Date(),
 ): Promise<void> {
@@ -133,7 +134,7 @@ export async function closeOrphanedHostChecks(
  * pass. `completeHostStatus` is best-effort and never throws.
  */
 export async function closeOrphanedHostStatuses(
-  db: Pick<PrismaClient, "runHostStatus" | "run" | "registryFetch" | "registryAuditRecord">,
+  db: Pick<PrismaClient, "runHostStatus" | "run" | "registryFetch" | "runBudgetEvent" | "registryAuditRecord">,
   hosts: ReviewHostRegistry | undefined,
   now: Date = new Date(),
 ): Promise<void> {

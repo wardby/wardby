@@ -5,6 +5,7 @@ import type {
   CreateProxySessionInput,
   PricingSnapshot,
   ProxyLedger,
+  ProxyRefusalRecord,
   ProxyRequest,
   ProxyRequestStatus,
   ProxySession,
@@ -69,6 +70,7 @@ interface RequestRow {
   cacheWriteTokens: number | null;
   reasoningTokens: number | null;
   upstreamStatus: number | null;
+  costEstimated: boolean | null;
 }
 
 function sessionFromRow(row: SessionRow): ProxySession {
@@ -130,6 +132,7 @@ function requestFromRow(row: RequestRow): ProxyRequest {
         }
       : undefined,
     upstreamStatus: row.upstreamStatus ?? undefined,
+    costEstimated: row.costEstimated === true,
   };
 }
 
@@ -138,7 +141,7 @@ async function requestById(db: PrismaProxyLedgerTx | PrismaProxyLedgerDb, id: st
     SELECT "id", "sessionId", "requestKey", "requestFingerprint", "model", "status",
            "reservationUsd", "actualCostUsd", "pricingVersion", "pricingSnapshot",
            "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteTokens",
-           "reasoningTokens", "upstreamStatus"
+           "reasoningTokens", "upstreamStatus", "costEstimated"
     FROM "CodingProxyRequest" WHERE "id" = ${id}
   `;
   return rows[0] ? requestFromRow(rows[0]) : null;
@@ -192,28 +195,53 @@ export class PrismaProxyLedger implements ProxyLedger {
           SELECT "id", "sessionId", "requestKey", "requestFingerprint", "model", "status",
                  "reservationUsd", "actualCostUsd", "pricingVersion", "pricingSnapshot",
                  "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteTokens",
-                 "reasoningTokens", "upstreamStatus"
+                 "reasoningTokens", "upstreamStatus", "costEstimated"
           FROM "CodingProxyRequest"
           WHERE "sessionId" = ${input.sessionId} AND "requestKey" = ${input.requestKey}
         `;
       if (duplicate[0]) return { outcome: "duplicate", request: requestFromRow(duplicate[0]) } as const;
 
-      const totals = await tx.$queryRaw<{ held: unknown }[]>`
-          SELECT COALESCE(SUM(
-            CASE
+      const totals = await tx.$queryRaw<
+        { spent: unknown; heldReserved: unknown; heldUncertain: unknown; done: unknown }[]
+      >`
+          SELECT
+            COALESCE(SUM(CASE
               WHEN "status" = 'completed' THEN "actualCostUsd"
-              WHEN "status" IN ('reserved', 'uncertain') THEN "reservationUsd"
+              WHEN "status" = 'uncertain' AND "costEstimated" THEN "actualCostUsd"
               ELSE 0
-            END
-          ), 0) AS "held"
+            END), 0) AS "spent",
+            COALESCE(SUM(CASE WHEN "status" = 'reserved' THEN "reservationUsd" ELSE 0 END), 0) AS "heldReserved",
+            COALESCE(SUM(CASE
+              WHEN "status" = 'uncertain' AND NOT "costEstimated" THEN "reservationUsd"
+              ELSE 0
+            END), 0) AS "heldUncertain",
+            COUNT(*) FILTER (
+              WHERE "status" = 'completed' OR ("status" = 'uncertain' AND "costEstimated")
+            ) AS "done"
           FROM "CodingProxyRequest" WHERE "sessionId" = ${input.sessionId}
         `;
-      if (Number(totals[0]?.held ?? 0) + input.reservationUsd >= Number(row.budgetUsd)) {
+      const spentUsd = Number(totals[0]?.spent ?? 0);
+      const heldReservedUsd = Number(totals[0]?.heldReserved ?? 0);
+      const heldUncertainUsd = Number(totals[0]?.heldUncertain ?? 0);
+      if (spentUsd + heldReservedUsd + heldUncertainUsd + input.reservationUsd >= Number(row.budgetUsd)) {
+        const details = {
+          budgetUsd: Number(row.budgetUsd),
+          spentUsd,
+          heldReservedUsd,
+          heldUncertainUsd,
+          refusedHoldUsd: input.reservationUsd,
+          model: input.model,
+          turn: Number(totals[0]?.done ?? 0) + 1,
+        };
+        // The numbers of the session's first refusal only; the control plane copies them into the
+        // run's budget event (this role has no access to that table).
+        const detailsJson = JSON.stringify({ source: "proxy", ...details });
         await tx.$executeRaw`
-            UPDATE "CodingProxySession" SET "budgetExhaustedAt" = COALESCE("budgetExhaustedAt", ${input.now})
-            WHERE "id" = ${input.sessionId}
+            UPDATE "CodingProxySession"
+            SET "budgetExhaustedAt" = ${input.now}, "budgetRefusal" = ${detailsJson}::jsonb
+            WHERE "id" = ${input.sessionId} AND "budgetExhaustedAt" IS NULL
           `;
-        return { outcome: "budget_exhausted" } as const;
+        return { outcome: "budget_exhausted", details } as const;
       }
       const pricing = JSON.stringify({
         encoding: input.pricing.encoding,
@@ -253,7 +281,7 @@ export class PrismaProxyLedger implements ProxyLedger {
           SELECT "id", "sessionId", "requestKey", "requestFingerprint", "model", "status",
                  "reservationUsd", "actualCostUsd", "pricingVersion", "pricingSnapshot",
                  "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteTokens",
-                 "reasoningTokens", "upstreamStatus"
+                 "reasoningTokens", "upstreamStatus", "costEstimated"
           FROM "CodingProxyRequest" WHERE "id" = ${requestId} FOR UPDATE
         `;
       const prior = locked[0] ? requestFromRow(locked[0]) : null;
@@ -274,63 +302,71 @@ export class PrismaProxyLedger implements ProxyLedger {
               "inputTokens" = ${usage.inputTokens}, "outputTokens" = ${usage.outputTokens},
               "cachedInputTokens" = ${usage.cachedInputTokens}, "cacheWriteTokens" = ${usage.cacheWriteTokens},
               "reasoningTokens" = ${usage.reasoningTokens}, "upstreamStatus" = ${upstreamStatus},
+              "costEstimated" = false,
               "completedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP
           WHERE "id" = ${requestId} AND "status" IN ('reserved', 'uncertain')
         `;
-      const [updatedRun] = await tx.$queryRaw<{ id: string }[]>`
-          UPDATE "Run" AS r
-          SET "tokensIn" = totals."tokensIn", "tokensOut" = totals."tokensOut", "costUsd" = totals."costUsd",
-              "turns" = totals."turns"
-          FROM (
-            SELECT s."runId", COALESCE(SUM(q."inputTokens"), 0)::integer AS "tokensIn",
-                   COALESCE(SUM(q."outputTokens"), 0)::integer AS "tokensOut",
-                   COALESCE(SUM(q."actualCostUsd"), 0) AS "costUsd",
-                   COUNT(*)::integer AS "turns"
-            FROM "CodingProxySession" s
-            JOIN "CodingProxyRequest" q ON q."sessionId" = s."id" AND q."status" = 'completed'
-            WHERE s."id" = ${prior.sessionId}
-            GROUP BY s."runId"
-          ) AS totals
-          WHERE r."id" = totals."runId"
-          RETURNING r."id"
-        `;
-      // Per-model usage (RunModelUsage), recomputed for this request's model and set, never incremented.
-      // Best effort inside a savepoint: Run totals and the ledger are the budget truth, so a failed
-      // write here (e.g. a role without the RunModelUsage grant) must never fail the completion.
-      await tx.$executeRaw`SAVEPOINT run_model_usage`;
-      try {
-        await tx.$executeRaw`
-            INSERT INTO "RunModelUsage"
-              ("runId", "model", "freshInputTokens", "cachedInputTokens", "cacheWriteTokens", "outputTokens", "costUsd")
-            SELECT s."runId", q."model",
-                   COALESCE(SUM(COALESCE(q."inputTokens", 0) - COALESCE(q."cachedInputTokens", 0)), 0)::integer,
-                   COALESCE(SUM(q."cachedInputTokens"), 0)::integer,
-                   COALESCE(SUM(q."cacheWriteTokens"), 0)::integer,
-                   COALESCE(SUM(q."outputTokens"), 0)::integer,
-                   COALESCE(SUM(q."actualCostUsd"), 0)
-            FROM "CodingProxySession" s
-            JOIN "CodingProxyRequest" q ON q."sessionId" = s."id" AND q."status" = 'completed'
-            WHERE s."id" = ${prior.sessionId} AND q."model" = ${prior.model}
-            GROUP BY s."runId", q."model"
-            ON CONFLICT ("runId", "model") DO UPDATE SET
-              "freshInputTokens" = EXCLUDED."freshInputTokens",
-              "cachedInputTokens" = EXCLUDED."cachedInputTokens",
-              "cacheWriteTokens" = EXCLUDED."cacheWriteTokens",
-              "outputTokens" = EXCLUDED."outputTokens",
-              "costUsd" = EXCLUDED."costUsd"
-          `;
-        await tx.$executeRaw`RELEASE SAVEPOINT run_model_usage`;
-      } catch (err) {
-        await tx.$executeRaw`ROLLBACK TO SAVEPOINT run_model_usage`;
-        log.warn(
-          { err, runId: updatedRun?.id, sessionId: prior.sessionId, model: prior.model },
-          "could not record the run's model usage",
-        );
-      }
+      await this.recomputeRunTotals(tx, prior.sessionId, prior.model);
       const request = await requestById(tx, requestId);
       if (!request) throw new Error("proxy_completion_not_persisted");
       return request;
     });
+  }
+
+  /**
+   * Recomputes the run's totals (Run) and this model's usage (RunModelUsage) from its settled
+   * requests: completed ones and uncertain ones settled at an estimate. Set, never incremented.
+   */
+  private async recomputeRunTotals(tx: PrismaProxyLedgerTx, sessionId: string, model: string): Promise<void> {
+    const [updatedRun] = await tx.$queryRaw<{ id: string }[]>`
+        UPDATE "Run" AS r
+        SET "tokensIn" = totals."tokensIn", "tokensOut" = totals."tokensOut", "costUsd" = totals."costUsd",
+            "turns" = totals."turns"
+        FROM (
+          SELECT s."runId", COALESCE(SUM(q."inputTokens"), 0)::integer AS "tokensIn",
+                 COALESCE(SUM(q."outputTokens"), 0)::integer AS "tokensOut",
+                 COALESCE(SUM(q."actualCostUsd"), 0) AS "costUsd",
+                 COUNT(*)::integer AS "turns"
+          FROM "CodingProxySession" s
+          JOIN "CodingProxyRequest" q ON q."sessionId" = s."id"
+            AND (q."status" = 'completed' OR (q."status" = 'uncertain' AND q."costEstimated"))
+          WHERE s."id" = ${sessionId}
+          GROUP BY s."runId"
+        ) AS totals
+        WHERE r."id" = totals."runId"
+        RETURNING r."id"
+      `;
+    // Per-model usage (RunModelUsage), recomputed for this request's model and set, never incremented.
+    // Best effort inside a savepoint: Run totals and the ledger are the budget truth, so a failed
+    // write here (e.g. a role without the RunModelUsage grant) must never fail the completion.
+    await tx.$executeRaw`SAVEPOINT run_model_usage`;
+    try {
+      await tx.$executeRaw`
+          INSERT INTO "RunModelUsage"
+            ("runId", "model", "freshInputTokens", "cachedInputTokens", "cacheWriteTokens", "outputTokens", "costUsd")
+          SELECT s."runId", q."model",
+                 COALESCE(SUM(COALESCE(q."inputTokens", 0) - COALESCE(q."cachedInputTokens", 0)), 0)::integer,
+                 COALESCE(SUM(q."cachedInputTokens"), 0)::integer,
+                 COALESCE(SUM(q."cacheWriteTokens"), 0)::integer,
+                 COALESCE(SUM(q."outputTokens"), 0)::integer,
+                 COALESCE(SUM(q."actualCostUsd"), 0)
+          FROM "CodingProxySession" s
+          JOIN "CodingProxyRequest" q ON q."sessionId" = s."id"
+            AND (q."status" = 'completed' OR (q."status" = 'uncertain' AND q."costEstimated"))
+          WHERE s."id" = ${sessionId} AND q."model" = ${model}
+          GROUP BY s."runId", q."model"
+          ON CONFLICT ("runId", "model") DO UPDATE SET
+            "freshInputTokens" = EXCLUDED."freshInputTokens",
+            "cachedInputTokens" = EXCLUDED."cachedInputTokens",
+            "cacheWriteTokens" = EXCLUDED."cacheWriteTokens",
+            "outputTokens" = EXCLUDED."outputTokens",
+            "costUsd" = EXCLUDED."costUsd"
+        `;
+      await tx.$executeRaw`RELEASE SAVEPOINT run_model_usage`;
+    } catch (err) {
+      await tx.$executeRaw`ROLLBACK TO SAVEPOINT run_model_usage`;
+      log.warn({ err, runId: updatedRun?.id, sessionId, model }, "could not record the run's model usage");
+    }
   }
 
   async release(requestId: string, upstreamStatus: number): Promise<void> {
@@ -341,12 +377,65 @@ export class PrismaProxyLedger implements ProxyLedger {
     `;
   }
 
-  async markUncertain(requestId: string, upstreamStatus?: number): Promise<void> {
-    await this.db.$executeRaw`
-      UPDATE "CodingProxyRequest"
-      SET "status" = 'uncertain', "upstreamStatus" = ${upstreamStatus ?? null}, "updatedAt" = CURRENT_TIMESTAMP
-      WHERE "id" = ${requestId} AND "status" = 'reserved'
+  async markUncertain(
+    requestId: string,
+    upstreamStatus?: number,
+    estimate?: { usage: ProxyUsage; costUsd: number },
+  ): Promise<void> {
+    await this.transaction(async (tx) => {
+      const initial = await requestById(tx, requestId);
+      if (!initial) return;
+      await tx.$queryRaw<{ id: string }[]>`
+          SELECT "id" FROM "CodingProxySession" WHERE "id" = ${initial.sessionId} FOR UPDATE
+        `;
+      const updated = await tx.$executeRaw`
+          UPDATE "CodingProxyRequest"
+          SET "status" = 'uncertain', "upstreamStatus" = ${upstreamStatus ?? null},
+              "actualCostUsd" = ${estimate?.costUsd ?? null},
+              "inputTokens" = ${estimate?.usage.inputTokens ?? null}, "outputTokens" = ${estimate?.usage.outputTokens ?? null},
+              "cachedInputTokens" = ${estimate?.usage.cachedInputTokens ?? null},
+              "cacheWriteTokens" = ${estimate?.usage.cacheWriteTokens ?? null},
+              "reasoningTokens" = ${estimate ? 0 : null},
+              "costEstimated" = ${estimate !== undefined}, "updatedAt" = CURRENT_TIMESTAMP
+          WHERE "id" = ${requestId} AND "status" = 'reserved'
+        `;
+      if (estimate && updated > 0) await this.recomputeRunTotals(tx, initial.sessionId, initial.model);
+    });
+  }
+
+  async settlementHints(
+    sessionId: string,
+    model: string,
+  ): Promise<{ previous?: ProxyUsage; medianOutputTokens?: number }> {
+    const latest = await this.db.$queryRaw<
+      Pick<RequestRow, "inputTokens" | "outputTokens" | "cachedInputTokens" | "cacheWriteTokens" | "reasoningTokens">[]
+    >`
+      SELECT "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteTokens", "reasoningTokens"
+      FROM "CodingProxyRequest"
+      WHERE "sessionId" = ${sessionId} AND "model" = ${model} AND "status" = 'completed' AND NOT "costEstimated"
+      ORDER BY "completedAt" DESC NULLS LAST LIMIT 1
     `;
+    const median = await this.db.$queryRaw<{ median: number | null }[]>`
+      SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY "outputTokens") AS "median"
+      FROM "CodingProxyRequest"
+      WHERE "sessionId" = ${sessionId} AND "status" = 'completed' AND "outputTokens" IS NOT NULL
+    `;
+    const row = latest[0];
+    const previous: ProxyUsage | undefined =
+      row && row.inputTokens !== null && row.outputTokens !== null
+        ? {
+            inputTokens: row.inputTokens,
+            outputTokens: row.outputTokens,
+            cachedInputTokens: row.cachedInputTokens ?? 0,
+            cacheWriteTokens: row.cacheWriteTokens ?? 0,
+            reasoningTokens: row.reasoningTokens ?? 0,
+          }
+        : undefined;
+    const medianOutputTokens = median[0]?.median ?? null;
+    return {
+      ...(previous ? { previous } : {}),
+      ...(medianOutputTokens !== null ? { medianOutputTokens: Number(medianOutputTokens) } : {}),
+    };
   }
 
   async cancelSession(sessionId: string): Promise<void> {
@@ -361,6 +450,14 @@ export class PrismaProxyLedger implements ProxyLedger {
       SELECT "id" FROM "CodingProxySession" WHERE "id" = ${sessionId} AND "budgetExhaustedAt" IS NOT NULL
     `;
     return rows.length > 0;
+  }
+
+  async budgetRefusal(sessionId: string): Promise<ProxyRefusalRecord | null> {
+    const rows = await this.db.$queryRaw<{ budgetRefusal: unknown }[]>`
+      SELECT "budgetRefusal" FROM "CodingProxySession" WHERE "id" = ${sessionId}
+    `;
+    const value = rows[0]?.budgetRefusal;
+    return value && typeof value === "object" ? (value as ProxyRefusalRecord) : null;
   }
 
   async recordUpstreamFailure(sessionId: string, code: string): Promise<void> {

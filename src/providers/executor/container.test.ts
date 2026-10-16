@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { hostBudgetSentence, ownerBudgetSentence, type BudgetEventView } from "../../core/budget-events.js";
 import { InMemoryCodingRunObserver } from "../../coding/observability.js";
 import { CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
 import { MAX_CODING_INPUT_BYTES } from "../../coding/protocol.js";
@@ -172,6 +173,11 @@ class FakeStore implements ContainerExecutionStore {
   heartbeats = 0;
   /** Answers relatedPullRequests when set; left undefined, the store has no such method behavior. */
   related?: RelatedPullRequestEntry[] | Error;
+  /** Answers budgetEvent when set (the recorded budget refusal). */
+  recordedBudgetEvent?: { event: BudgetEventView; agentName: string } | null;
+  async budgetEvent(): Promise<{ event: BudgetEventView; agentName: string } | null> {
+    return this.recordedBudgetEvent ?? null;
+  }
   async relatedPullRequests(): Promise<RelatedPullRequestEntry[]> {
     if (this.related instanceof Error) throw this.related;
     return this.related ?? [];
@@ -189,6 +195,12 @@ class FakeStore implements ContainerExecutionStore {
   }) => Promise<boolean>;
 
   constructor(public run: ContainerRunSnapshot) {}
+
+  /** (runId, sessionId) of every recordBudgetRefusal call. */
+  recordedRefusals: Array<[string, string]> = [];
+  async recordBudgetRefusal(runId: string, sessionId: string): Promise<void> {
+    this.recordedRefusals.push([runId, sessionId]);
+  }
 
   async load(runId: string): Promise<ContainerRunSnapshot | null> {
     return runId === this.run.runId ? structuredClone(this.run) : null;
@@ -2012,6 +2024,36 @@ describe("ContainerExecutor", () => {
       ]);
     });
 
+    it("explains the recorded budget refusal in the run error and the host sentence", async () => {
+      const created = await harness();
+      const event: BudgetEventView = {
+        kind: "refused",
+        limit: "run",
+        at: new Date().toISOString(),
+        details: {
+          source: "proxy",
+          budgetUsd: 3,
+          spentUsd: 2.9,
+          heldReservedUsd: 0,
+          heldUncertainUsd: 0,
+          refusedHoldUsd: 0.4,
+          model: "m",
+          turn: 7,
+        },
+      };
+      created.store.recordedBudgetEvent = { event, agentName: "knock-knock-implement" };
+      created.sessions.exhausted.add("session-1");
+      created.jobs.statusValue = { state: "failed" };
+      created.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_stream_failed" };
+      await created.executor.start("run-1");
+
+      expect(created.store.terminations[0]).toMatchObject({
+        status: "budget_exhausted",
+        error: `coding_budget_exhausted: ${ownerBudgetSentence(event, "knock-knock-implement")}`,
+      });
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({ budgetSentence: hostBudgetSentence(event) });
+    });
+
     it("ends a failed job as failed when the proxy never refused its session for budget", async () => {
       const created = await harness();
       created.jobs.statusValue = { state: "failed" };
@@ -2180,6 +2222,59 @@ describe("ContainerExecutor", () => {
       expect(created.store.run.status).toBe("failed");
       expect((created.store.terminations[0] as { error: string }).error).toMatch(/^coding_failure_/);
       expect(created.vcs.notifyFinishedCalls[0]).not.toHaveProperty("providerSentence");
+    });
+
+    it("records the proxy's refusal when the run goes over budget only after its workspace is materialized", async () => {
+      const created = await harness();
+      created.jobs.materializeWorkspace = async () => {
+        created.store.run.costUsd = created.store.run.budgetUsd + 0.01;
+      };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.observer.events.some((event) => event.stage === "budget_cutoff")).toBe(true);
+      expect(created.vcs.finalized).toBe(0);
+      expect(created.store.recordedRefusals).toEqual([["run-1", "session-1"]]);
+    });
+
+    // The proxy cannot write budget events; the control plane copies its refusal at every ending.
+    it("copies the proxy's refusal for a run that still succeeded", async () => {
+      const created = await harness();
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.store.recordedRefusals).toEqual([["run-1", "session-1"]]);
+    });
+
+    it("copies the proxy's refusal for a run that failed for another reason", async () => {
+      const created = await harness();
+      created.jobs.statusValue = { state: "failed" };
+      created.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_stream_failed" };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("failed");
+      expect(created.store.recordedRefusals).toEqual([["run-1", "session-1"]]);
+    });
+
+    it("copies the proxy's refusal for a stopped run and again when an ended run is cleaned up", async () => {
+      const created = await harness({ proxySessionId: "session-1" });
+      await created.executor.stop("run-1", "requested");
+      await created.executor.stop("run-1", "requested");
+
+      expect(created.store.run.status).toBe("cancelled");
+      // The store's copy is once per run; calling it twice adds nothing.
+      expect(created.store.recordedRefusals).toEqual([
+        ["run-1", "session-1"],
+        ["run-1", "session-1"],
+      ]);
+    });
+
+    it("copies nothing for a run that never had a proxy session", async () => {
+      const created = await harness();
+      await created.executor.stop("run-1", "requested");
+
+      expect(created.store.run.status).toBe("cancelled");
+      expect(created.store.recordedRefusals).toEqual([]);
     });
 
     it("ends a run whose result could not be finalized as budget_exhausted when its session was refused", async () => {

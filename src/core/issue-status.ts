@@ -38,6 +38,7 @@ export type IssueStatusDb = Pick<
   | "registryAuditRecord"
   | "runIssueStatus"
   | "run"
+  | "runBudgetEvent"
   | "agentIssueProject"
   | "issuePullRequest"
   | "codingRun"
