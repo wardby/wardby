@@ -10,7 +10,7 @@
  * for the whole deployment, no per-user OAuth), so link/unlink/test need
  * agents:admin with the admin role, and the approver is stamped on the
  * link. Exactly one of projectKey/agentId is the link's subject (enforced
- * again by a DB CHECK constraint); `events` narrows which of the six
+ * again by a DB CHECK constraint); `events` narrows which of the
  * workflow event kinds post to it (empty/omitted = all); private Slack
  * channels always need /invite @<app> before the bot can see or post to
  * them. See docs/private/2026-10-08-slack-workflow-notifications-design.md §8.
@@ -67,7 +67,7 @@ export function registerNotificationChannelTools(mcp: WardbyMcpServer): void {
       "matches events for issues in that project; an agent link matches events for that agent's runs. " +
       "channel is the Slack channel id (C… for public, G… for private), never a #name — find it in the channel's " +
       "details in Slack. Private channels always need /invite @<app> before the bot can see or post to them. " +
-      "events narrows which of the six workflow event kinds post to this link; empty or omitted means all. " +
+      "events narrows which of the workflow event kinds post to this link; empty or omitted means all. " +
       "includeCost appends the run's spend line to messages. Re-linking the same channel + subject replaces events and " +
       "includeCost and clears any previously recorded delivery error — always send the full desired state.",
     inputSchema: {

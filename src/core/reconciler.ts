@@ -73,6 +73,7 @@ export type ReconcilerDb = Pick<
   | "issuePullRequest"
   | "codingRun"
   | "registryFetch"
+  | "registryAuditRecord"
   | "agent"
   | "agentRepository"
   | "$transaction"
@@ -133,7 +134,7 @@ export async function closeOrphanedHostChecks(
  * pass. `completeHostStatus` is best-effort and never throws.
  */
 export async function closeOrphanedHostStatuses(
-  db: Pick<PrismaClient, "runHostStatus" | "run" | "registryFetch" | "runBudgetEvent">,
+  db: Pick<PrismaClient, "runHostStatus" | "run" | "registryFetch" | "runBudgetEvent" | "registryAuditRecord">,
   hosts: ReviewHostRegistry | undefined,
   now: Date = new Date(),
 ): Promise<void> {

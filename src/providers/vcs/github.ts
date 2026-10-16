@@ -2,6 +2,12 @@ import { createPrivateKey } from "node:crypto";
 import { importPKCS8, SignJWT } from "jose";
 import { isGitHubLogin } from "../../config/github-allowed-accounts.js";
 import { ACCEPTED_ADVISORY_ID } from "../../coding/registry/allowlist.js";
+import {
+  packageAuditRows,
+  packageAuditWording,
+  summarizePackageAudit,
+  type PackageAuditReport,
+} from "../../coding/registry/audit-mode.js";
 import { refusalMeaning } from "../../coding/registry/refusal-hints.js";
 import { DEPENDENCY_CACHE_PATH, normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
 import {
@@ -73,6 +79,13 @@ export interface PullRequestInput {
   /** Deduplicated by the caller isn't required — pullRequestBody dedupes itself (ecosystem+name+version / +reason). */
   packages?: readonly PackageReport[];
   packageRefusals?: readonly PackageRefusal[];
+  /**
+   * Package audit mode (control-plane records, never model output): rendered
+   * as a [!CAUTION] banner with the packages installed outside the allowlist
+   * (and, in full mode, versions served past advisories). Kept when the
+   * packages section is dropped for size.
+   */
+  packageAudit?: PackageAuditReport;
   /** Folders whose node_modules the dependency cache restored from a snapshot ("." for the root); control-plane data. */
   restoredDependencies?: readonly string[];
   /** Lock files the run changed (repository paths); with refusals, the PR body warns they may be incomplete. */
@@ -661,6 +674,21 @@ function refusalWarning(input: PullRequestInput): string | undefined {
   return lines.join("\n");
 }
 
+/** The banner when the audit report can't be rendered: fixed text, no record data. */
+const PACKAGE_AUDIT_FALLBACK_BANNER =
+  "> [!CAUTION]\n> **Package audit mode was on for this run.** Wardby's registry may have installed packages outside this agent's allowlist; see `get_run` (`packageAudit`) before merging.";
+
+/**
+ * The package audit block: built only from registry records (names and
+ * versions through codeSpan, advisory ids by their policy shape), so neither
+ * the model nor a package's metadata can remove or soften it.
+ */
+function packageAuditSection(input: PullRequestInput): string | undefined {
+  if (!input.packageAudit) return undefined;
+  const summary = summarizePackageAudit(packageAuditRows(input.packageAudit.entries));
+  return packageAuditWording(input.packageAudit.mode, summary, { format: "pr" });
+}
+
 /** The hidden run marker stays first and unconditional: createOrFindDraftPullRequest's idempotent lookup depends on it. */
 export function pullRequestBody(input: PullRequestInput, options: { omitPackages?: boolean } = {}): string {
   const sections = [`${RUN_MARKER_PREFIX}${input.runId} -->`];
@@ -678,6 +706,14 @@ export function pullRequestBody(input: PullRequestInput, options: { omitPackages
     if (warning) sections.push(warning);
   } catch {
     // omitted, like the packages section
+  }
+  try {
+    const audit = packageAuditSection(input);
+    if (audit) sections.push(audit);
+  } catch {
+    // Unlike the packages section, the audit banner fails closed: a report
+    // that can't be rendered still says the mode was on.
+    if (input.packageAudit) sections.push(PACKAGE_AUDIT_FALLBACK_BANNER);
   }
   if (input.summary) sections.push(input.summary);
   if (input.tests?.length) {
@@ -1224,6 +1260,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
           packages: input.packages,
           packagesScope: "pull_request",
           packageRefusals: input.packageRefusals,
+          packageAudit: input.packageAudit,
           restoredDependencies: input.restoredDependencies,
           changedLockfiles: input.changedLockfiles,
           issue: input.issue,

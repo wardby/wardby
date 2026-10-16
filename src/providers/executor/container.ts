@@ -1,4 +1,11 @@
 import { randomUUID } from "node:crypto";
+import {
+  isPackageAuditMode,
+  mergePackageAuditReports,
+  type PackageAuditEntry,
+  type PackageAuditMode,
+  type PackageAuditReport,
+} from "../../coding/registry/audit-mode.js";
 import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
@@ -886,11 +893,22 @@ export interface ContainerExecutorOptions {
   repoAccess: RepoAccessGate;
 }
 
-/** A run's deduplicated served packages and refusals (see summarizeRegistryFetches). */
+/** A run's deduplicated served packages and refusals (see summarizeRegistryFetches), and its package audit. */
 export interface RegistryReport {
   packages: Array<{ ecosystem: string; name: string; version: string; acceptedAdvisories?: string[] }>;
   packageRefusals: Array<{ ecosystem: string; name: string; reason: string }>;
+  /** The run's package audit mode (CodingRun.packageAuditMode); absent when it was off. */
+  packageAuditMode?: PackageAuditMode;
+  /** What the registry served only because of it (summarizePackageAudit entries). */
+  packageAudit?: PackageAuditEntry[];
 }
+
+/** The part of a registry report the PR body reads. */
+type LoadedRegistryReport = {
+  packages?: RegistryReport["packages"];
+  packageRefusals?: RegistryReport["packageRefusals"];
+  packageAudit?: PackageAuditReport;
+};
 
 class PreflightError extends Error {}
 
@@ -1663,9 +1681,7 @@ export class ContainerExecutor implements Executor {
    * order); refusals are this run's only, since they describe the current
    * state. A fresh run, or a failed listing, reports this run's alone.
    */
-  private async pullRequestRegistryReport(
-    run: ContainerRunSnapshot,
-  ): Promise<{ packages?: RegistryReport["packages"]; packageRefusals?: RegistryReport["packageRefusals"] }> {
+  private async pullRequestRegistryReport(run: ContainerRunSnapshot): Promise<LoadedRegistryReport> {
     const own = await this.loadRegistryReport(run.runId);
     const store = this.options.store;
     if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !store.pullRequestRunIds) return own;
@@ -1681,9 +1697,13 @@ export class ContainerExecutor implements Executor {
     }
     const reports = await Promise.all(earlier.map((id) => this.loadRegistryReport(id)));
     const packages = mergePackages([...reports.map((report) => report.packages ?? []), own.packages ?? []]);
+    // Package audit mode is cumulative like packages: the banner stays on the
+    // pull request once any of its runs had the mode.
+    const packageAudit = mergePackageAuditReports([...reports.map((report) => report.packageAudit), own.packageAudit]);
     return {
       ...(packages.length > 0 ? { packages } : {}),
       ...(own.packageRefusals ? { packageRefusals: own.packageRefusals } : {}),
+      ...(packageAudit ? { packageAudit } : {}),
     };
   }
 
@@ -1810,16 +1830,18 @@ export class ContainerExecutor implements Executor {
   /** The package report is informational: any failure loading it (a
    *  rejection, a synchronous throw, or a malformed result) yields no
    *  package section rather than failing finalization. */
-  private async loadRegistryReport(
-    runId: string,
-  ): Promise<{ packages?: RegistryReport["packages"]; packageRefusals?: RegistryReport["packageRefusals"] }> {
+  private async loadRegistryReport(runId: string): Promise<LoadedRegistryReport> {
     try {
       const report = await this.options.registryReport?.(runId);
       const packages = Array.isArray(report?.packages) ? report.packages : [];
       const packageRefusals = Array.isArray(report?.packageRefusals) ? report.packageRefusals : [];
+      const packageAudit = isPackageAuditMode(report?.packageAuditMode)
+        ? { mode: report.packageAuditMode, entries: Array.isArray(report.packageAudit) ? report.packageAudit : [] }
+        : undefined;
       return {
         ...(packages.length > 0 ? { packages } : {}),
         ...(packageRefusals.length > 0 ? { packageRefusals } : {}),
+        ...(packageAudit ? { packageAudit } : {}),
       };
     } catch {
       return {};

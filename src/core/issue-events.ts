@@ -24,7 +24,13 @@ const MAX_TASK_BODY = 8000;
 export type IssueEventDb = DispatchDb &
   Pick<
     PrismaClient,
-    "registryFetch" | "runBudgetEvent" | "agentIssueProject" | "runIssueStatus" | "issuePullRequest" | "workItem"
+    | "registryFetch"
+    | "registryAuditRecord"
+    | "runBudgetEvent"
+    | "agentIssueProject"
+    | "runIssueStatus"
+    | "issuePullRequest"
+    | "workItem"
   >;
 
 export interface RouteIssueEventDeps {

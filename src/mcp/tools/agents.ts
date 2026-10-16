@@ -21,6 +21,16 @@ import {
 import { loadContainerExecutorConfig } from "../../config/providers.js";
 import { codingProviderSupportsModel } from "../../coding/provider.js";
 import { ACCEPTED_ADVISORY_ID, MAX_ACCEPTED_ADVISORIES } from "../../coding/registry/allowlist.js";
+import {
+  DEFAULT_PACKAGE_AUDIT_MINUTES,
+  isPackageAuditActive,
+  isPackageAuditMode,
+  MAX_PACKAGE_AUDIT_MINUTES,
+  PACKAGE_AUDIT_MODES,
+  PackageAuditPatchError,
+  packageAuditActiveWarning,
+  resolvePackageAuditPatch,
+} from "../../coding/registry/audit-mode.js";
 import { assertAgentModelAvailable } from "../../core/run-pricing.js";
 import { ModelUnavailableError } from "../../providers/llm/catalog-types.js";
 import { currentModelCatalog } from "../../providers/llm/catalog-store.js";
@@ -122,16 +132,37 @@ function withOperatorMode<T extends { kind: string; nativeExecutionMode?: Native
 export const DEPENDENCY_CACHE_IMAGE_WARNING =
   "dependencyCache is on and this agent runs its own worker image (workerImageRef): rebuild that image FROM the wardby release that includes the dependency cache before its next run, or the run fails at input (worker_input_failed). See the dependency-cache help article.";
 
-/** Non-blocking warnings about an agent's coding profile as stored. */
-function profileWarnings(profile: { dependencyCache: boolean; workerImageRef: string | null } | null): string[] {
-  return profile?.dependencyCache && profile.workerImageRef ? [DEPENDENCY_CACHE_IMAGE_WARNING] : [];
+/** The stored coding-profile fields the output warnings read. */
+interface WarnedProfile {
+  dependencyCache: boolean;
+  workerImageRef: string | null;
+  packageAuditMode?: string | null;
+  packageAuditUntil?: Date | null;
 }
 
-function withProfileWarnings<
-  T extends { codingProfile: { dependencyCache: boolean; workerImageRef: string | null } | null },
->(agent: T): T & { warnings?: string[] } {
-  const warnings = profileWarnings(agent.codingProfile);
-  return warnings.length ? { ...agent, warnings } : agent;
+/** Non-blocking warnings about an agent's coding profile as stored. */
+function profileWarnings(profile: WarnedProfile | null, now: Date): string[] {
+  const warnings = profile?.dependencyCache && profile.workerImageRef ? [DEPENDENCY_CACHE_IMAGE_WARNING] : [];
+  if (profile && isPackageAuditActive(profile.packageAuditMode, profile.packageAuditUntil, now))
+    warnings.push(packageAuditActiveWarning(profile.packageAuditMode, profile.packageAuditUntil!));
+  return warnings;
+}
+
+/** An agent as returned to operators: profile warnings, and whether package audit mode is in force now. */
+function withProfileWarnings<T extends { codingProfile: WarnedProfile | null }>(agent: T): T & { warnings?: string[] } {
+  const now = new Date();
+  const profile = agent.codingProfile;
+  const shown = profile
+    ? {
+        ...agent,
+        codingProfile: {
+          ...profile,
+          packageAuditActive: isPackageAuditActive(profile.packageAuditMode, profile.packageAuditUntil, now),
+        },
+      }
+    : agent;
+  const warnings = profileWarnings(profile, now);
+  return warnings.length ? { ...shown, warnings } : shown;
 }
 
 const agentFields = {
@@ -258,6 +289,10 @@ const UpdateAgentSchema = z
       debugTraceMinutes: z.number().int().min(1).max(MAX_DEBUG_TRACE_MINUTES).nullable().optional(),
       /** Admin-only like debugTraceMinutes: CodingAgentProfile.debugTraceMaxMb (null = the default). */
       debugTraceMaxMb: z.number().int().min(1).max(MAX_DEBUG_TRACE_MAX_MB).nullable().optional(),
+      /** Not stored as given: sets CodingAgentProfile.packageAuditMode and packageAuditUntil (null clears both). */
+      packageAuditMode: z.enum(PACKAGE_AUDIT_MODES).nullable().optional(),
+      /** Not a stored field: the audit window, in minutes from now (default 24 hours). */
+      packageAuditMinutes: z.number().int().min(1).max(MAX_PACKAGE_AUDIT_MINUTES).optional(),
     }).optional(),
     repositoryAdminOverride: z.boolean().optional(),
   })
@@ -685,6 +720,22 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
               maximum: MAX_DEBUG_TRACE_MAX_MB,
               description: `Admins only (agents:admin): cap on one traced run's trace output, in MiB (default ${DEFAULT_DEBUG_TRACE_MAX_MB}); the trace stops with a limit_reached line once it is reached. Null restores the default.`,
             },
+            packageAuditMode: {
+              type: ["string", "null"],
+              enum: [...PACKAGE_AUDIT_MODES, null],
+              description:
+                "Package audit mode, for a limited time (packageAuditMinutes). Needs packages:approve or agents:admin, and only the agent's owner may set it. " +
+                '"audit": the registry installs packages outside this agent\'s allowlist instead of refusing them, and records each one; ' +
+                '"full": also installs versions withheld only by high or critical advisories. Malware is refused and the release-age limit enforced in every mode. ' +
+                "This weakens the supply-chain guard while it is on: use it to find out which packages a task needs, then add them to packageAllowlist. " +
+                "Fixed per run when the run is dispatched. Null turns it off.",
+            },
+            packageAuditMinutes: {
+              type: "integer",
+              minimum: 1,
+              maximum: MAX_PACKAGE_AUDIT_MINUTES,
+              description: `How long package audit mode stays on, in minutes from now (default ${DEFAULT_PACKAGE_AUDIT_MINUTES}, at most ${MAX_PACKAGE_AUDIT_MINUTES}: 7 days). Given alone, it re-arms the stored mode. Needs packages:approve or agents:admin.`,
+            },
           },
         },
         repositoryAdminOverride: REPOSITORY_ADMIN_OVERRIDE,
@@ -697,10 +748,16 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       const debugTraceMinutes = args.codingProfile?.debugTraceMinutes;
       const debugTraceMaxMb = args.codingProfile?.debugTraceMaxMb;
       if (debugTraceMinutes !== undefined || debugTraceMaxMb !== undefined) requireDebugTraceScope(ctx);
+      const auditPatch = {
+        packageAuditMode: args.codingProfile?.packageAuditMode,
+        packageAuditMinutes: args.codingProfile?.packageAuditMinutes,
+      };
       if (
         args.codingProfile?.packageAllowlist !== undefined ||
         args.codingProfile?.packagePolicy !== undefined ||
-        args.codingProfile?.dependencyCache !== undefined
+        args.codingProfile?.dependencyCache !== undefined ||
+        auditPatch.packageAuditMode !== undefined ||
+        auditPatch.packageAuditMinutes !== undefined
       )
         requirePackageApproval(ctx);
 
@@ -786,6 +843,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             ? null
             : new Date(Date.now() + debugTraceMinutes * 60_000);
 
+      let auditSet: { mode: string | null; until: Date | null } | undefined;
       const agent = await ctx.db.$transaction(
         async (tx) => {
           const existing = await tx.agent.findUnique({ where: { id: args.id }, include: { codingProfile: true } });
@@ -838,7 +896,13 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
               throw new McpError(400, "Detach all native sandbox tools before changing an agent to coding.");
             }
             const currentProfile = existing.codingProfile ? storedProfile(existing.codingProfile) : undefined;
-            const { debugTraceMinutes: _minutes, debugTraceMaxMb: _maxMb, ...profilePatch } = args.codingProfile ?? {};
+            const {
+              debugTraceMinutes: _minutes,
+              debugTraceMaxMb: _maxMb,
+              packageAuditMode: _auditMode,
+              packageAuditMinutes: _auditMinutes,
+              ...profilePatch
+            } = args.codingProfile ?? {};
             const profileResult = CodingProfileSchema.safeParse({ ...currentProfile, ...profilePatch });
             if (!profileResult.success) throw invalidArguments("coding profile", profileResult.error);
             nextProfile = profileResult.data;
@@ -858,6 +922,22 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
               );
             }
           }
+
+          // Package audit mode: resolved against the stored mode inside the
+          // transaction, so minutes alone re-arm what is stored now.
+          let audit: { mode: (typeof PACKAGE_AUDIT_MODES)[number] | null; until: Date | null } | undefined;
+          try {
+            const storedMode = existing.codingProfile?.packageAuditMode;
+            audit = resolvePackageAuditPatch(
+              { mode: isPackageAuditMode(storedMode) ? storedMode : null },
+              auditPatch,
+              new Date(),
+            );
+          } catch (error) {
+            if (error instanceof PackageAuditPatchError) throw new McpError(400, error.message);
+            throw error;
+          }
+          auditSet = audit;
 
           const nextSchedule = args.schedule !== undefined ? args.schedule : existing.schedule;
           const nextTimezone = args.timezone ?? existing.timezone;
@@ -882,6 +962,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           const trace = {
             ...(debugTraceUntil === undefined ? {} : { debugTraceUntil }),
             ...(debugTraceMaxMb === undefined ? {} : { debugTraceMaxMb }),
+            ...(audit === undefined ? {} : { packageAuditMode: audit.mode, packageAuditUntil: audit.until }),
           };
           const profileMutation =
             nextKind === "native"
@@ -912,6 +993,18 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             by: ctx.principal.id,
           },
           "coding debug trace set",
+        );
+      }
+      if (auditSet !== undefined) {
+        agentsLog.info(
+          {
+            event: "coding.package_audit.set",
+            agentId: agent.id,
+            mode: auditSet.mode,
+            until: auditSet.until?.toISOString() ?? null,
+            by: ctx.principal.id,
+          },
+          "coding package audit mode set",
         );
       }
       return textResult(withProfileWarnings(withOperatorMode(agent)));
@@ -951,7 +1044,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       // A7: a tool's code and schema are its owner's, whoever can read the
       // agent (the agent's owner included). Capabilities stay visible: config.
       return textResult({
-        ...withOperatorMode(agent),
+        ...withProfileWarnings(withOperatorMode(agent)),
         access,
         tools: agent.tools.map((attachment) => ({
           ...attachment,

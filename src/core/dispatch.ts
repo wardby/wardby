@@ -9,6 +9,7 @@ import {
   composeCodingTask,
 } from "../coding/protocol.js";
 import { assertCodingProvider, assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
+import { isPackageAuditActive } from "../coding/registry/audit-mode.js";
 import { ModelUnavailableError, entryOf, type ResolvedCatalogEntry } from "../providers/llm/catalog-types.js";
 import { parseAllowedServiceNames, workerServices, type ResolvedCodingService } from "../coding/services/catalog.js";
 import {
@@ -838,6 +839,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           const traced =
             agent.codingProfile.debugTraceUntil != null &&
             now.getTime() < agent.codingProfile.debugTraceUntil.getTime();
+          const { packageAuditMode, packageAuditUntil } = agent.codingProfile;
           await tx.codingRun.create({
             data: {
               runId: run.id,
@@ -869,6 +871,11 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               // Fixed here so a run's tracing never changes mid-run.
               debugTrace: traced,
               debugTraceMaxMb: traced ? agent.codingProfile.debugTraceMaxMb : null,
+              // Fixed here too: a run keeps the mode its dispatch saw for its
+              // whole life, however the window moves afterwards.
+              packageAuditMode: isPackageAuditActive(packageAuditMode, packageAuditUntil, now)
+                ? packageAuditMode
+                : null,
               services,
             },
           });

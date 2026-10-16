@@ -929,6 +929,91 @@ describe("pullRequestBody refusal warning", () => {
   });
 });
 
+describe("pullRequestBody package audit mode", () => {
+  const base = { runId: "run-1", repository: "openai/example", baseRef: "main", headRef: "wardby/run-run-1" };
+  const entries = [
+    { ecosystem: "npm", name: "expo-dev-client", version: "5.1.2", size: 41210, relation: "top-level" as const },
+    {
+      ecosystem: "npm",
+      name: "expo-dev-launcher",
+      version: "5.1.1",
+      size: 90231,
+      relation: "transitive" as const,
+      via: "expo-dev-client",
+    },
+  ];
+  const lodash = {
+    ecosystem: "npm",
+    name: "lodash",
+    version: "4.17.20",
+    size: 1200,
+    relation: "allowed" as const,
+    advisories: [{ id: "GHSA-35jh-r3h4-6jhm", severity: "HIGH", summary: "Command injection in lodash" }],
+  };
+
+  it("puts a caution banner above the summary and lists the names to approve", () => {
+    const body = pullRequestBody({ ...base, summary: "Added a dev client.", packageAudit: { mode: "audit", entries } });
+    const banner = body.indexOf("> [!CAUTION]");
+    expect(banner).toBeGreaterThan(-1);
+    expect(banner).toBeLessThan(body.indexOf("Added a dev client."));
+    expect(body).toContain("**Package audit mode (`audit`) was on for this run.**");
+    expect(body).toContain("**Packages outside the allowlist**");
+    expect(body).toContain("- npm `expo-dev-client` (and 1 dependency)");
+    expect(body).not.toContain("Served despite advisories");
+  });
+
+  it("adds the advisory table in full mode", () => {
+    const body = pullRequestBody({ ...base, packageAudit: { mode: "full", entries: [...entries, lodash] } });
+    expect(body).toContain("**Served despite advisories:**");
+    expect(body).toContain("| npm `lodash` | `4.17.20` | `GHSA-35jh-r3h4-6jhm` | HIGH |");
+  });
+
+  it("says so in one line when the mode was on and nothing was audited", () => {
+    const body = pullRequestBody({ ...base, packageAudit: { mode: "audit", entries: [] } });
+    expect(body).toContain("> [!CAUTION]");
+    expect(body).toContain("nothing outside the allowlist was installed");
+  });
+
+  it("has no banner when the mode was off", () => {
+    expect(pullRequestBody({ ...base, summary: "x" })).not.toContain("[!CAUTION]");
+  });
+
+  it("neutralises a hostile name", () => {
+    const body = pullRequestBody({
+      ...base,
+      packageAudit: {
+        mode: "audit",
+        entries: [{ ecosystem: "npm", name: "evil`](x) @team", version: "1.0.0", size: 1, relation: "top-level" }],
+      },
+    });
+    expect(body).toContain("- npm `evil ](x) @\u200bteam`");
+    expect(body).not.toContain("@team");
+  });
+
+  it("falls back to a fixed banner when the audit report cannot be rendered", () => {
+    const body = pullRequestBody({
+      ...base,
+      summary: "x",
+      packageAudit: { mode: "audit", entries: null as never },
+    });
+    expect(body).toContain("> [!CAUTION]\n> **Package audit mode was on for this run.**");
+    expect(body.indexOf("[!CAUTION]")).toBeLessThan(body.indexOf("x"));
+  });
+
+  it("is kept when the packages section is dropped for size", () => {
+    const body = pullRequestBody(
+      {
+        ...base,
+        packages: [{ ecosystem: "npm", name: "zod", version: "4.0.0" }],
+        packageAudit: { mode: "audit", entries },
+      },
+      { omitPackages: true },
+    );
+    expect(body).toContain("**Packages outside the allowlist**");
+    expect(body).not.toContain("Packages installed during this run");
+  });
+});
+
 describe("pullRequestBody dependency cache line", () => {
   const base = { runId: "run-1", repository: "openai/example", baseRef: "main", headRef: "wardby/run-run-1" };
 

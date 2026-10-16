@@ -1554,6 +1554,40 @@ describe("ContainerExecutor", () => {
       ]);
     });
 
+    it("merges package audit mode across the pull request's runs, strongest mode first", async () => {
+      const entry = (name: string, relation: string) => ({
+        ecosystem: "npm",
+        name,
+        version: "1.0.0",
+        size: 1,
+        relation,
+      });
+      const reports: Record<string, unknown> = {
+        "root-run": {
+          packages: [],
+          packageRefusals: [],
+          packageAuditMode: "full",
+          packageAudit: [entry("expo-dev-client", "top-level")],
+        },
+        "round-1": { packages: [], packageRefusals: [] },
+        "run-1": {
+          packages: [],
+          packageRefusals: [],
+          packageAuditMode: "audit",
+          packageAudit: [entry("expo-dev-client", "top-level"), entry("left-pad", "unknown")],
+        },
+      };
+      const created = await fixRound({}, { registryReport: async (runId) => reports[runId] as never });
+      created.store.pullRequestRunIds = async () => ["root-run", "round-1", "run-1"];
+      created.vcs.finalizeDescription = { kind: "replaced", sha256: NEW_SHA, agentTextRunId: "run-1" };
+      await created.executor.start("run-1");
+
+      expect(created.vcs.lastFinalizeDetails?.packageAudit).toEqual({
+        mode: "full",
+        entries: [entry("expo-dev-client", "top-level"), entry("left-pad", "unknown")],
+      });
+    });
+
     it("a no-change round's refresh lists the pull request's packages too", async () => {
       const created = await fixRound(
         {},

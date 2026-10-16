@@ -603,6 +603,62 @@ describe("collectRunOutcome", () => {
   });
 });
 
+describe("package audit mode in the outcome", () => {
+  const child = (id: string, status: string, packageAuditMode: string | null, result: unknown = null) => ({
+    id,
+    status,
+    error: null,
+    codingRun: { result, failureCategory: null, services: [], packageAuditMode },
+  });
+  const auditDb = (children: unknown[], rows: unknown[]) =>
+    ({
+      run: { findMany: vi.fn(async () => children) },
+      registryFetch: { findMany: vi.fn(async () => []) },
+      registryAuditRecord: { findMany: vi.fn(async () => rows) },
+    }) as never;
+  const row = (name: string, relation: string, extra: Record<string, unknown> = {}) => ({
+    ecosystem: "npm",
+    name,
+    version: "1.0.0",
+    relation,
+    via: null,
+    sizeBytes: 1,
+    advisories: [],
+    ...extra,
+  });
+
+  it("collects the coding children's audit rows and the strongest mode", async () => {
+    const database = auditDb(
+      [child("c1", "succeeded", "audit"), child("c2", "succeeded", "full"), child("c3", "succeeded", null)],
+      [row("expo-dev-client", "top-level")],
+    );
+    const out = await collectRunOutcome(database, { id: "r1", status: "succeeded", finalText: null });
+    expect(out.packageAudit?.mode).toBe("full");
+    expect(out.packageAudit?.summary.toApprove).toEqual([
+      { ecosystem: "npm", name: "expo-dev-client", dependencies: 0 },
+    ]);
+  });
+
+  it("collects nothing when no child had the mode", async () => {
+    const database = auditDb([child("c1", "succeeded", null)], [row("x", "top-level")]);
+    const out = await collectRunOutcome(database, { id: "r1", status: "succeeded", finalText: null });
+    expect(out.packageAudit).toBeUndefined();
+  });
+
+  it("puts the audit block above the run line, whatever the outcome", async () => {
+    const database = auditDb([child("c1", "failed", "audit")], [row("expo-dev-client", "top-level")]);
+    const run = { id: "r1", status: "succeeded" as const, finalText: null };
+    const out = await collectRunOutcome(database, run);
+    const body = outcomeBody(run, REPO, out.pullRequests, out.failedChildren, { packageAudit: out.packageAudit });
+    const block = body.indexOf("🔎 **Package audit mode (`audit`) was on:**");
+    expect(block).toBeGreaterThan(-1);
+    expect(body).toContain("`expo-dev-client` (npm)");
+    expect(block).toBeLessThan(body.indexOf("r1"));
+    const lost = outcomeBody({ ...run, status: "lost" }, REPO, [], [], { packageAudit: out.packageAudit });
+    expect(lost).toContain("🔎 **Package audit mode (`audit`) was on:**");
+  });
+});
+
 describe("full replies", () => {
   const POINTER = "✅ Finished without opening a pull request. The full reply follows in the next comment(s).";
   const pr = {
