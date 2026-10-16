@@ -674,6 +674,10 @@ function refusalWarning(input: PullRequestInput): string | undefined {
   return lines.join("\n");
 }
 
+/** The banner when the audit report can't be rendered: fixed text, no record data. */
+const PACKAGE_AUDIT_FALLBACK_BANNER =
+  "> [!CAUTION]\n> **Package audit mode was on for this run.** Wardby's registry may have installed packages outside this agent's allowlist; see `get_run` (`packageAudit`) before merging.";
+
 /**
  * The package audit block: built only from registry records (names and
  * versions through codeSpan, advisory ids by their policy shape), so neither
@@ -707,7 +711,9 @@ export function pullRequestBody(input: PullRequestInput, options: { omitPackages
     const audit = packageAuditSection(input);
     if (audit) sections.push(audit);
   } catch {
-    // omitted, like the packages section
+    // Unlike the packages section, the audit banner fails closed: a report
+    // that can't be rendered still says the mode was on.
+    if (input.packageAudit) sections.push(PACKAGE_AUDIT_FALLBACK_BANNER);
   }
   if (input.summary) sections.push(input.summary);
   if (input.tests?.length) {

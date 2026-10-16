@@ -990,6 +990,16 @@ describe("pullRequestBody package audit mode", () => {
     expect(body).not.toContain("@team");
   });
 
+  it("falls back to a fixed banner when the audit report cannot be rendered", () => {
+    const body = pullRequestBody({
+      ...base,
+      summary: "x",
+      packageAudit: { mode: "audit", entries: null as never },
+    });
+    expect(body).toContain("> [!CAUTION]\n> **Package audit mode was on for this run.**");
+    expect(body.indexOf("[!CAUTION]")).toBeLessThan(body.indexOf("x"));
+  });
+
   it("is kept when the packages section is dropped for size", () => {
     const body = pullRequestBody(
       {
