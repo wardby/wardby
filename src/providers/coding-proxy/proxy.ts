@@ -15,6 +15,7 @@ import {
   safeUpstreamErrorCode,
   terminalUsageFromSseFrame,
 } from "./metering.js";
+import { estimateInterrupted, type InterruptedEstimate } from "./interrupted.js";
 import { createPinnedProxyFetch } from "./secure-fetch.js";
 import type {
   CredentialResolver,
@@ -132,6 +133,16 @@ interface ParsedRequest {
   stream: boolean;
   fingerprint: string;
   anthropicBeta?: string;
+}
+
+/** What an in-flight request's relay has seen so far, to settle it at an estimate if it breaks. */
+interface RelayProgress {
+  /** The output tokens the request reserved for. */
+  maxOutputTokens: number;
+  /** UTF-8 bytes of output text relayed to the client. */
+  relayedOutputBytes: number;
+  /** The Anthropic stream's usage tracker, once a stream is being relayed. */
+  anthropic?: AnthropicSseUsageTracker;
 }
 
 export function capabilityHash(capability: string): string {
@@ -1120,6 +1131,7 @@ export class CodingProxy {
     const deadlineTimer = setTimeout(() => controller.abort(), remainingMs);
     deadlineTimer.unref();
     this.trackActive(session.id, controller);
+    const progress: RelayProgress = { maxOutputTokens: parsed.maxOutputTokens, relayedOutputBytes: 0 };
     const cleanupActive = () => {
       clearTimeout(deadlineTimer);
       const active = this.activeRequests.get(session.id);
@@ -1157,6 +1169,8 @@ export class CodingProxy {
         request,
         undefined,
         controller.signal.aborted ? "upstream_aborted" : "upstream_transport",
+        {},
+        progress,
       );
       throw new CodingProxyError(502, controller.signal.aborted ? "upstream_aborted" : "upstream_transport_error");
     }
@@ -1181,10 +1195,17 @@ export class CodingProxy {
     }
 
     try {
-      if (parsed.stream) await this.forwardStream(session, request, upstream, sink);
+      if (parsed.stream) await this.forwardStream(session, request, upstream, sink, progress);
       else await this.forwardJson(session, request, upstream, sink);
     } catch (error) {
-      await this.markUncertain(session, request, upstream.status, failureReason(error), responseHeadersOf(upstream));
+      await this.markUncertain(
+        session,
+        request,
+        upstream.status,
+        failureReason(error),
+        responseHeadersOf(upstream),
+        progress,
+      );
       sink.destroy();
       throw error instanceof CodingProxyError ? error : new CodingProxyError(502, "invalid_upstream_response");
     } finally {
@@ -1289,6 +1310,7 @@ export class CodingProxy {
     request: ProxyRequest,
     upstream: Response,
     sink: ProxyResponseSink,
+    progress: RelayProgress,
   ): Promise<void> {
     if (!upstream.body) throw new Error("missing_upstream_body");
     sink.start(upstream.status, { "content-type": "text/event-stream", "cache-control": "no-store" });
@@ -1298,7 +1320,8 @@ export class CodingProxy {
     let receivedBytes = 0;
     let completed = false;
     let failedWithoutUsage = false;
-    const anthropicUsage = session.protocol === "anthropic-messages" ? new AnthropicSseUsageTracker() : undefined;
+    const anthropicUsage =
+      session.protocol === "anthropic-messages" ? (progress.anthropic = new AnthropicSseUsageTracker()) : undefined;
     const body = upstream.body as unknown as AsyncIterable<Uint8Array>;
     for await (const chunk of body) {
       receivedBytes += chunk.byteLength;
@@ -1311,6 +1334,7 @@ export class CodingProxy {
         buffer = buffer.slice(boundary + 2);
         const terminal = anthropicUsage ? anthropicUsage.consume(frame) : terminalUsageFromSseFrame(frame);
         if (!terminal.terminal) {
+          progress.relayedOutputBytes += relayedTextBytes(frame, session.protocol);
           await safeWrite(sink, Buffer.from(`${frame}\n\n`), connected);
           continue;
         }
@@ -1326,6 +1350,7 @@ export class CodingProxy {
               upstream.status,
               `upstream_failed:${terminal.failure}`,
               responseHeadersOf(upstream),
+              progress,
             );
           }
           failedWithoutUsage = true;
@@ -1353,10 +1378,75 @@ export class CodingProxy {
     request: ProxyRequest,
     status: number | undefined,
     reason: string,
-    headers: { contentType?: string; contentEncoding?: string } = {},
+    headers: { contentType?: string; contentEncoding?: string },
+    progress: RelayProgress,
   ): Promise<void> {
-    await this.ledger.markUncertain(request.id, status);
-    this.audit({ type: "request.uncertain", runId: session.runId, requestId: request.id, status, reason, ...headers });
+    let estimate = await this.estimateInterrupted(session, request, progress);
+    if (estimate) {
+      try {
+        await this.ledger.markUncertain(request.id, status, estimate);
+      } catch {
+        // Settling at the estimate failed: mark it uncertain without one, so it keeps its full hold.
+        estimate = undefined;
+      }
+    }
+    if (!estimate) await this.ledger.markUncertain(request.id, status);
+    this.audit({
+      type: "request.uncertain",
+      runId: session.runId,
+      requestId: request.id,
+      status,
+      reason,
+      ...(estimate ? { estimatedCostUsd: estimate.costUsd } : {}),
+      ...headers,
+    });
+  }
+
+  /**
+   * The best known cost of a request that broke before its final usage (interrupted.ts), or
+   * undefined when none can be made: the request then keeps its full hold. Never throws.
+   */
+  private async estimateInterrupted(
+    session: ProxySession,
+    request: ProxyRequest,
+    progress: RelayProgress,
+  ): Promise<InterruptedEstimate | undefined> {
+    try {
+      const hints = await this.ledger.settlementHints(session.id, request.model);
+      const estimate = estimateInterrupted(
+        {
+          ...progress.anthropic?.partial(),
+          relayedOutputBytes: progress.relayedOutputBytes,
+          ...hints,
+          reservationUsd: request.reservationUsd,
+          maxOutputTokens: progress.maxOutputTokens,
+        },
+        request.pricing,
+      );
+      return Number.isFinite(estimate.costUsd) ? estimate : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+/** UTF-8 bytes of output text in a relayed SSE frame: OpenAI text deltas, Anthropic text_delta blocks. */
+function relayedTextBytes(frame: string, protocol: ProxyProtocol): number {
+  const type = protocol === "anthropic-messages" ? "content_block_delta" : "response.output_text.delta";
+  if (!frame.includes(type)) return 0;
+  try {
+    const data = frame
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n");
+    const value = JSON.parse(data) as Record<string, unknown> | null;
+    if (!value || value.type !== type) return 0;
+    if (protocol === "openai-responses") return typeof value.delta === "string" ? Buffer.byteLength(value.delta) : 0;
+    const delta = value.delta as Record<string, unknown> | undefined;
+    return delta?.type === "text_delta" && typeof delta.text === "string" ? Buffer.byteLength(delta.text) : 0;
+  } catch {
+    return 0;
   }
 }
 

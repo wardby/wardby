@@ -66,6 +66,8 @@ export interface ProxyRequest {
   pricing: PricingSnapshot;
   usage?: ProxyUsage;
   upstreamStatus?: number;
+  /** An uncertain request settled at an estimate: actualCostUsd and usage are estimated, not reported. */
+  costEstimated?: boolean;
 }
 
 export interface CreateProxySessionInput {
@@ -104,7 +106,20 @@ export interface ProxyLedger {
   reserve(input: ReserveProxyRequestInput): Promise<ReserveProxyRequestResult>;
   complete(requestId: string, usage: ProxyUsage, actualCostUsd: number, upstreamStatus: number): Promise<ProxyRequest>;
   release(requestId: string, upstreamStatus: number): Promise<void>;
-  markUncertain(requestId: string, upstreamStatus?: number): Promise<void>;
+  /**
+   * Marks a reserved request uncertain. With an estimate it is also settled at that cost (and
+   * counts at it, not at its hold); without one it keeps its full hold.
+   */
+  markUncertain(
+    requestId: string,
+    upstreamStatus?: number,
+    estimate?: { usage: ProxyUsage; costUsd: number },
+  ): Promise<void>;
+  /**
+   * What an interrupted reply can be estimated from: the usage of the session's latest completed,
+   * non-estimated reply for this model, and the median output tokens of its completed replies.
+   */
+  settlementHints(sessionId: string, model: string): Promise<{ previous?: ProxyUsage; medianOutputTokens?: number }>;
   cancelSession(sessionId: string): Promise<void>;
   /** Whether a request of this session was ever refused for budget. */
   budgetExhausted(sessionId: string): Promise<boolean>;
@@ -131,6 +146,8 @@ export interface ProxyAuditEvent {
   reason?: string;
   reservationUsd?: number;
   costUsd?: number;
+  /** For request.uncertain: the estimated cost it was settled at, when one could be made. */
+  estimatedCostUsd?: number;
   inputTokens?: number;
   outputTokens?: number;
   cachedInputTokens?: number;

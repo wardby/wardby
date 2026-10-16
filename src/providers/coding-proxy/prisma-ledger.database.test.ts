@@ -384,4 +384,130 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       }
     });
   });
+
+  describe("interrupted replies settled at an estimate", () => {
+    const eAgent = `estimate-agent-${suffix}`;
+    const eRun = `estimate-run-${suffix}`;
+    const eSession = `estimate-session-${suffix}`;
+    const model = "estimate-model";
+    const otherModel = "estimate-other-model";
+    const ledger = new PrismaProxyLedger(db);
+    const u = (inputTokens: number, cachedInputTokens: number, cacheWriteTokens: number, outputTokens: number) => ({
+      inputTokens,
+      outputTokens,
+      cachedInputTokens,
+      cacheWriteTokens,
+      reasoningTokens: 0,
+    });
+    const reserveOn = (key: string, reservationUsd: number, onModel = model) =>
+      ledger.reserve({
+        id: `${key}-${suffix}`,
+        sessionId: eSession,
+        requestKey: key,
+        requestFingerprint: `fingerprint-${key}`,
+        model: onModel,
+        reservationUsd,
+        pricing: { version: "test", encoding: "o200k_base" as const, inputPerMTok: 1, outputPerMTok: 1 },
+        now: new Date(),
+      });
+    const reserved = async (key: string, reservationUsd: number, onModel = model) => {
+      const result = await reserveOn(key, reservationUsd, onModel);
+      if (result.outcome !== "reserved") throw new Error(`unexpected ${result.outcome}`);
+      return result.request.id;
+    };
+
+    afterAll(async () => {
+      await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "id" = ${eSession}`;
+      await db.runModelUsage.deleteMany({ where: { runId: eRun } });
+      await db.codingRun.deleteMany({ where: { runId: eRun } });
+      await db.run.deleteMany({ where: { id: eRun } });
+      await db.agent.deleteMany({ where: { id: eAgent } });
+    });
+
+    it("counts an estimated uncertain request at its estimate, in the ledger and the run's totals", async () => {
+      await db.agent.create({ data: { id: eAgent, name: eAgent, systemPrompt: "x", model, budgetUsd: 1 } });
+      await db.run.create({ data: { id: eRun, agentId: eAgent, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId: eRun,
+          task: "test",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${eRun}`,
+          provider: "codex",
+          model,
+          timeoutSec: 60,
+          allowedEgress: [],
+          protectedPaths: [],
+          budgetReservedUsd: 0.001,
+        },
+      });
+      await ledger.createSession({
+        id: eSession,
+        runId: eRun,
+        capabilityHash: `estimate-hash-${suffix}`,
+        credentialRef: "openai/test",
+        protocol: "openai-responses",
+        allowedModels: [model, otherModel],
+        deadlineAt: new Date(Date.now() + 60_000),
+        budgetUsd: 0.001,
+        registryTokenHash: `estimate-registry-hash-${suffix}`,
+      });
+
+      const cut = await reserved("cut", 0.0001);
+      await ledger.markUncertain(cut, 200, { usage: u(120, 20, 10, 5), costUsd: 0.00003 });
+      expect(await ledger.getRequest(cut)).toMatchObject({
+        status: "uncertain",
+        costEstimated: true,
+        actualCostUsd: 0.00003,
+        upstreamStatus: 200,
+        usage: u(120, 20, 10, 5),
+      });
+      // A second mark (the request is no longer reserved) changes nothing.
+      await ledger.markUncertain(cut, 502, { usage: u(1, 0, 0, 1), costUsd: 0.00009 });
+      expect(await ledger.getRequest(cut)).toMatchObject({ actualCostUsd: 0.00003, upstreamStatus: 200 });
+
+      const run = await db.run.findUniqueOrThrow({ where: { id: eRun } });
+      expect(Number(run.costUsd)).toBeCloseTo(0.00003, 10);
+      expect(run).toMatchObject({ turns: 1, tokensIn: 120, tokensOut: 5 });
+      const usage = await db.runModelUsage.findUniqueOrThrow({ where: { runId_model: { runId: eRun, model } } });
+      expect(usage).toMatchObject({
+        freshInputTokens: 100,
+        cachedInputTokens: 20,
+        cacheWriteTokens: 10,
+        outputTokens: 5,
+      });
+      expect(Number(usage.costUsd)).toBeCloseTo(0.00003, 10);
+
+      // Fits only because the estimate (0.00003), not the hold (0.0001), is counted: 0.00099 < 0.001.
+      const big = await reserveOn("big", 0.00096);
+      expect(big.outcome).toBe("reserved");
+      if (big.outcome === "reserved") await ledger.release(big.request.id, 500);
+    });
+
+    it("keeps the full hold of an uncertain request without an estimate", async () => {
+      const held = await reserved("held", 0.0001);
+      await ledger.markUncertain(held, 502);
+      const request = await ledger.getRequest(held);
+      expect(request).toMatchObject({ status: "uncertain", costEstimated: false });
+      expect(request?.actualCostUsd).toBeUndefined();
+      expect(request?.usage).toBeUndefined();
+      const run = await db.run.findUniqueOrThrow({ where: { id: eRun } });
+      expect(run.turns).toBe(1);
+      // Held: 0.00003 (estimate) + 0.0001 (hold) + 0.00087 = 0.001 — refused.
+      expect((await reserveOn("over", 0.00087)).outcome).toBe("budget_exhausted");
+    });
+
+    it("hints the latest completed, non-estimated reply of the model and the median output", async () => {
+      await ledger.complete(await reserved("c1", 0.0001), u(100, 20, 5, 8), 0.00001, 200);
+      await ledger.complete(await reserved("c2", 0.0001), u(200, 0, 0, 30), 0.00002, 200);
+      await ledger.complete(await reserved("c3", 0.0001, otherModel), u(300, 0, 0, 12), 0.00001, 200);
+      expect(await ledger.settlementHints(eSession, model)).toEqual({
+        previous: u(200, 0, 0, 30),
+        medianOutputTokens: 12,
+      });
+      expect(await ledger.settlementHints(eSession, "no-such-model")).toEqual({ medianOutputTokens: 12 });
+      expect(await ledger.settlementHints(`missing-${suffix}`, model)).toEqual({});
+    });
+  });
 });

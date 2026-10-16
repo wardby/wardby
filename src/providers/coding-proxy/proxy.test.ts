@@ -313,17 +313,24 @@ describe("CodingProxy", () => {
     expect(h.events.some((event) => event.type === "response.completed")).toBe(true);
   });
 
-  it("retains an unresolved reservation after a truncated stream", async () => {
+  it("settles a truncated stream at an estimate and keeps it uncertain", async () => {
     const raw = requestBody(true);
     const normalized = JSON.stringify({ ...JSON.parse(raw), store: false, background: false });
     const one = estimateReservationUsd(Buffer.byteLength(normalized), 10, PRICE);
+    let call = 0;
     const h = await harness({
       budgetUsd: one * 2,
-      fetch: async () => new Response('event: response.output_text.delta\ndata: {"delta":"x"}\n\n'),
+      fetch: async () => {
+        call += 1;
+        if (call === 1) return new Response('event: response.output_text.delta\ndata: {"delta":"x"}\n\n');
+        return new Response(completedSse(USAGE), { headers: { "content-type": "text/event-stream" } });
+      },
     });
     await expect(execute(h, "truncated", new TestSink(), raw)).rejects.toMatchObject({ status: 502 });
-    expect((await h.ledger.getRequest(reservedRequestId(h.events)))?.status).toBe("uncertain");
-    await expect(execute(h, "after-truncated", new TestSink(), raw)).rejects.toMatchObject({ status: 429 });
+    const request = (await h.ledger.getRequest(reservedRequestId(h.events)))!;
+    expect(request.status).toBe("uncertain");
+    expect(request.costEstimated).toBe(true);
+    await expect(execute(h, "after-truncated", new TestSink(), raw)).resolves.toBeDefined();
   });
 
   it("uses the reservation's pricing snapshot if registry rates change in flight", async () => {
@@ -1599,6 +1606,109 @@ describe("CodingProxy OpenAI Responses allowlist", () => {
       code: "request_nesting_too_deep",
     });
     expect(resolve).not.toHaveBeenCalled();
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("interrupted replies settle at an estimate", () => {
+  it("does not refuse the #323 run: two interrupted replies, little spent", async () => {
+    // Hold per request is fixed by body size; budget fits ~2.5 holds. As in #323, a
+    // completed reply comes first, then two cut streams: they used to keep 2 holds,
+    // so the next request was refused. Now each is priced from the completed
+    // reply's input plus the relayed output.
+    const raw = requestBody(true);
+    const normalized = JSON.stringify({ ...JSON.parse(raw), store: false, background: false });
+    const hold = estimateReservationUsd(Buffer.byteLength(normalized), 10, PRICE);
+    let call = 0;
+    const h = await harness({
+      budgetUsd: hold * 2.5,
+      fetch: async () => {
+        call += 1;
+        if (call === 2 || call === 3)
+          return new Response(
+            'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"x"}\n\n',
+          );
+        return new Response(completedSse(USAGE), { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    await expect(execute(h, "first", new TestSink(), raw)).resolves.toBeDefined();
+    await expect(execute(h, "cut-1", new TestSink(), raw)).rejects.toMatchObject({ status: 502 });
+    await expect(execute(h, "cut-2", new TestSink(), raw)).rejects.toMatchObject({ status: 502 });
+    await expect(execute(h, "next", new TestSink(), raw)).resolves.toBeDefined();
+    const cut = h.events.filter((e) => e.type === "request.uncertain");
+    expect(cut).toHaveLength(2);
+    for (const e of cut) expect(e.estimatedCostUsd).toBeLessThan(hold);
+  });
+
+  it("prices an Anthropic reply cut after message_start from the usage it read", async () => {
+    const stream = (await fixture("anthropic-message-stream.txt")).split("event: message_delta")[0];
+    const body = await fixture("anthropic-sdk-request.json");
+    const h = await harness({
+      protocol: "anthropic-messages",
+      fetch: async () => new Response(stream, { headers: { "content-type": "text/event-stream" } }),
+    });
+    await expect(execute(h, "anthropic-cut", new TestSink(), body)).rejects.toMatchObject({ status: 502 });
+    const request = await h.ledger.getRequest(reservedRequestId(h.events));
+    expect(request).toMatchObject({
+      status: "uncertain",
+      costEstimated: true,
+      usage: { inputTokens: 125, cachedInputTokens: 25, cacheWriteTokens: 10 },
+    });
+    expect(request!.actualCostUsd!).toBeLessThan(request!.reservationUsd);
+  });
+
+  it("keeps refusing a retry of the same body with duplicate_uncertain", async () => {
+    const raw = requestBody(true);
+    const h = await harness({
+      budgetUsd: 10,
+      fetch: async () =>
+        new Response('event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"x"}\n\n'),
+    });
+    await expect(execute(h, "same", new TestSink(), raw)).rejects.toMatchObject({ status: 502 });
+    await expect(execute(h, "same", new TestSink(), raw)).rejects.toMatchObject({ status: 409 });
+    expect(h.events.at(-1)).toMatchObject({ type: "request.rejected", reason: "duplicate_uncertain" });
+  });
+
+  it("keeps the full hold when no estimate can be made, without breaking the relay", async () => {
+    const ledger = new MemoryProxyLedger();
+    ledger.settlementHints = async () => {
+      throw new Error("ledger unavailable");
+    };
+    const h = await harness({
+      ledger,
+      fetch: async () =>
+        new Response('event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"x"}\n\n'),
+    });
+    await expect(execute(h, "no-estimate", new TestSink(), requestBody(true))).rejects.toMatchObject({ status: 502 });
+    const request = await h.ledger.getRequest(reservedRequestId(h.events));
+    expect(request).toMatchObject({ status: "uncertain" });
+    expect(request?.costEstimated).toBeFalsy();
+    expect(request?.actualCostUsd).toBeUndefined();
+    const uncertain = h.events.find((e) => e.type === "request.uncertain");
+    expect(uncertain).toMatchObject({ reason: "terminal_usage_missing" });
+    expect(uncertain).not.toHaveProperty("estimatedCostUsd");
+  });
+
+  it("still holds a request left reserved (a proxy crash mid-request) in full", async () => {
+    const raw = requestBody(true);
+    const normalized = JSON.stringify({ ...JSON.parse(raw), store: false, background: false });
+    const hold = estimateReservationUsd(Buffer.byteLength(normalized), 10, PRICE);
+    const h = await harness({
+      budgetUsd: hold * 1.5,
+      fetch: async () => new Response(completedSse(USAGE), { headers: { "content-type": "text/event-stream" } }),
+    });
+    const reserved = await h.ledger.reserve({
+      id: "crashed",
+      sessionId: h.session.id,
+      requestKey: "crashed",
+      requestFingerprint: "crashed",
+      model: "test-model",
+      reservationUsd: hold,
+      pricing: { ...PRICE, version: "test-v1" },
+      now: NOW,
+    });
+    expect(reserved.outcome).toBe("reserved");
+    await expect(execute(h, "after-crash", new TestSink(), raw)).rejects.toMatchObject({ status: 429 });
     expect(h.fetch).not.toHaveBeenCalled();
   });
 });

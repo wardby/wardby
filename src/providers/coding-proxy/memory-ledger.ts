@@ -69,8 +69,11 @@ export class MemoryProxyLedger implements ProxyLedger {
     let committedOrHeld = 0;
     for (const request of this.requests.values()) {
       if (request.sessionId !== input.sessionId) continue;
-      if (request.status === "completed") committedOrHeld += request.actualCostUsd!;
-      if (request.status === "reserved" || request.status === "uncertain") committedOrHeld += request.reservationUsd;
+      // An uncertain request settled at an estimate counts at it; one without an estimate keeps its hold.
+      const settled = request.status === "completed" || (request.status === "uncertain" && request.costEstimated);
+      if (settled) committedOrHeld += request.actualCostUsd!;
+      else if (request.status === "reserved" || request.status === "uncertain")
+        committedOrHeld += request.reservationUsd;
     }
     if (committedOrHeld + input.reservationUsd >= session.budgetUsd) {
       session.budgetExhaustedAt ??= new Date(input.now);
@@ -101,6 +104,7 @@ export class MemoryProxyLedger implements ProxyLedger {
     request.actualCostUsd = actualCostUsd;
     request.usage = { ...usage };
     request.upstreamStatus = upstreamStatus;
+    request.costEstimated = false;
     return cloneRequest(request);
   }
 
@@ -111,11 +115,40 @@ export class MemoryProxyLedger implements ProxyLedger {
     request.upstreamStatus = upstreamStatus;
   }
 
-  async markUncertain(requestId: string, upstreamStatus?: number): Promise<void> {
+  async markUncertain(
+    requestId: string,
+    upstreamStatus?: number,
+    estimate?: { usage: ProxyUsage; costUsd: number },
+  ): Promise<void> {
     const request = this.requiredRequest(requestId);
     if (request.status !== "reserved") return;
     request.status = "uncertain";
     request.upstreamStatus = upstreamStatus;
+    if (estimate) {
+      request.actualCostUsd = estimate.costUsd;
+      request.usage = { ...estimate.usage };
+      request.costEstimated = true;
+    }
+  }
+
+  async settlementHints(
+    sessionId: string,
+    model: string,
+  ): Promise<{ previous?: ProxyUsage; medianOutputTokens?: number }> {
+    let previous: ProxyUsage | undefined;
+    const outputs: number[] = [];
+    // Map iteration follows insertion order, so the last match is the latest completed reply.
+    for (const request of this.requests.values()) {
+      if (request.sessionId !== sessionId || request.status !== "completed" || !request.usage) continue;
+      outputs.push(request.usage.outputTokens);
+      if (request.model === model && !request.costEstimated) previous = request.usage;
+    }
+    outputs.sort((a, b) => a - b);
+    return {
+      ...(previous ? { previous: { ...previous } } : {}),
+      // The lower middle for an even count, as Postgres's percentile_disc(0.5).
+      ...(outputs.length > 0 ? { medianOutputTokens: outputs[Math.ceil(outputs.length / 2) - 1] } : {}),
+    };
   }
 
   async cancelSession(sessionId: string): Promise<void> {
