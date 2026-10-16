@@ -34,7 +34,14 @@ const ORPHAN_BATCH = 20;
 
 export type IssueStatusDb = Pick<
   PrismaClient,
-  "registryFetch" | "runIssueStatus" | "run" | "agentIssueProject" | "issuePullRequest" | "codingRun" | "$queryRaw"
+  | "registryFetch"
+  | "runIssueStatus"
+  | "run"
+  | "runBudgetEvent"
+  | "agentIssueProject"
+  | "issuePullRequest"
+  | "codingRun"
+  | "$queryRaw"
 >;
 
 export function toJiraMarkdown(text: string): string {

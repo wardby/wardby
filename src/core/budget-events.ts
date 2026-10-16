@@ -158,3 +158,53 @@ export async function latestBudgetEvent(
     return null;
   }
 }
+
+/** The tree root's agent name: walks `parentRunId` (bounded) from the run. */
+async function rootAgentName(db: Pick<PrismaClient, "run">, runId: string): Promise<string | undefined> {
+  let id: string | null = runId;
+  let name: string | undefined;
+  for (let hops = 0; id && hops < 32; hops++) {
+    const row: { parentRunId: string | null; agent: { name: string } | null } | null = await db.run.findUnique({
+      where: { id },
+      select: { parentRunId: true, agent: { select: { name: true } } },
+    });
+    if (!row) break;
+    name = row.agent?.name ?? name;
+    id = row.parentRunId;
+  }
+  return name;
+}
+
+/**
+ * The run's latest budget event with names filled in from its agent, budget
+ * group and (for a run-tree limit) the tree root. Never throws; null when
+ * there is none.
+ */
+export async function loadBudgetEvent(
+  db: Pick<PrismaClient, "run" | "runBudgetEvent">,
+  runId: string,
+): Promise<{ event: BudgetEventView; agentName: string } | null> {
+  try {
+    const event = await latestBudgetEvent(db, runId);
+    if (!event) return null;
+    const run = await db.run.findUnique({
+      where: { id: runId },
+      select: { agent: { select: { name: true, budgetUsd: true, budgetGroup: { select: { name: true } } } } },
+    });
+    const details: BudgetEventDetails = { ...event.details };
+    const group = run?.agent?.budgetGroup?.name;
+    if (group && details.groupName === undefined) details.groupName = group;
+    if (details.source === "proxy" && run?.agent && details.agentBudgetUsd === undefined) {
+      const budget = Number(run.agent.budgetUsd);
+      if (Number.isFinite(budget)) details.agentBudgetUsd = budget;
+    }
+    if (event.limit === "run-tree" && details.leadAgentName === undefined) {
+      const lead = await rootAgentName(db, runId);
+      if (lead) details.leadAgentName = lead;
+    }
+    return { event: { ...event, details }, agentName: run?.agent?.name ?? "this agent" };
+  } catch (err) {
+    log.warn({ err, runId }, "could not load the budget event");
+    return null;
+  }
+}

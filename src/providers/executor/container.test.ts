@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { hostBudgetSentence, ownerBudgetSentence, type BudgetEventView } from "../../core/budget-events.js";
 import { InMemoryCodingRunObserver } from "../../coding/observability.js";
 import { CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
 import { MAX_CODING_INPUT_BYTES } from "../../coding/protocol.js";
@@ -172,6 +173,11 @@ class FakeStore implements ContainerExecutionStore {
   heartbeats = 0;
   /** Answers relatedPullRequests when set; left undefined, the store has no such method behavior. */
   related?: RelatedPullRequestEntry[] | Error;
+  /** Answers budgetEvent when set (the recorded budget refusal). */
+  recordedBudgetEvent?: { event: BudgetEventView; agentName: string } | null;
+  async budgetEvent(): Promise<{ event: BudgetEventView; agentName: string } | null> {
+    return this.recordedBudgetEvent ?? null;
+  }
   async relatedPullRequests(): Promise<RelatedPullRequestEntry[]> {
     if (this.related instanceof Error) throw this.related;
     return this.related ?? [];
@@ -1976,6 +1982,36 @@ describe("ContainerExecutor", () => {
             'Out of budget: this run\'s $0.52 budget was used up (the "reviewers" budget group had only that much left of its limit).',
         },
       ]);
+    });
+
+    it("explains the recorded budget refusal in the run error and the host sentence", async () => {
+      const created = await harness();
+      const event: BudgetEventView = {
+        kind: "refused",
+        limit: "run",
+        at: new Date().toISOString(),
+        details: {
+          source: "proxy",
+          budgetUsd: 3,
+          spentUsd: 2.9,
+          heldReservedUsd: 0,
+          heldUncertainUsd: 0,
+          refusedHoldUsd: 0.4,
+          model: "m",
+          turn: 7,
+        },
+      };
+      created.store.recordedBudgetEvent = { event, agentName: "knock-knock-implement" };
+      created.sessions.exhausted.add("session-1");
+      created.jobs.statusValue = { state: "failed" };
+      created.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_stream_failed" };
+      await created.executor.start("run-1");
+
+      expect(created.store.terminations[0]).toMatchObject({
+        status: "budget_exhausted",
+        error: `coding_budget_exhausted: ${ownerBudgetSentence(event, "knock-knock-implement")}`,
+      });
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({ budgetSentence: hostBudgetSentence(event) });
     });
 
     it("ends a failed job as failed when the proxy never refused its session for budget", async () => {

@@ -127,8 +127,19 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         codingRun?.dependencyCacheResult !== null && codingRun?.dependencyCacheResult !== undefined
           ? sanitizeDependencyCacheReport(codingRun.dependencyCacheResult)
           : undefined;
+      const budgetEvents = await ctx.db.runBudgetEvent.findMany({ where: { runId: run.id }, orderBy: { at: "asc" } });
       return textResult({
         ...withOperatorMode(run),
+        ...(budgetEvents.length > 0
+          ? {
+              budgetEvents: budgetEvents.map((e) => ({
+                kind: e.kind,
+                limit: e.limit,
+                at: e.at.toISOString(),
+                details: e.details,
+              })),
+            }
+          : {}),
         ...(codingResult ? { codingResult } : {}),
         ...(failureCategory ? { failureCategory } : {}),
         ...(diagnosticId ? { diagnosticId } : {}),

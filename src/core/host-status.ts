@@ -58,7 +58,7 @@ export const TERMINAL_RUN_STATUSES: readonly RunStatus[] = [
 ];
 const TERMINAL = new Set<string>(TERMINAL_RUN_STATUSES);
 
-export type HostStatusDb = Pick<PrismaClient, "runHostStatus" | "run" | "registryFetch">;
+export type HostStatusDb = Pick<PrismaClient, "runHostStatus" | "run" | "runBudgetEvent" | "registryFetch">;
 
 export type FinishedRun = Pick<Run, "id" | "status" | "finalText">;
 
@@ -326,7 +326,7 @@ export function outcomeBody(
 }
 
 /** What collectRunOutcome reads: a run's children and, when out of budget, its budget facts. */
-export type RunOutcomeDb = Pick<PrismaClient, "run" | "registryFetch">;
+export type RunOutcomeDb = Pick<PrismaClient, "run" | "runBudgetEvent" | "registryFetch">;
 
 /** The parts of a finished run's outcome a status comment reports; shared by GitHub and Jira status comments. */
 export async function collectRunOutcome(

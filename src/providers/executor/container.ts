@@ -59,7 +59,15 @@ import { resolveCodingEntry } from "../../core/run-pricing.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT, isImmutableDockerImage } from "../jobs/docker-isolation.js";
 import { normalizeRegistryLockfiles } from "../../coding/registry/lockfiles.js";
 import type { ProxyModelTerms, ProxyProtocol } from "../coding-proxy/types.js";
-import { recordBudgetEvent, type BudgetLimit, type ProxyRefusalDetails } from "../../core/budget-events.js";
+import {
+  hostBudgetSentence,
+  loadBudgetEvent,
+  ownerBudgetSentence,
+  recordBudgetEvent,
+  type BudgetEventView,
+  type BudgetLimit,
+  type ProxyRefusalDetails,
+} from "../../core/budget-events.js";
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
 import type {
   ContinuationOutcome,
@@ -344,6 +352,8 @@ export interface ContainerExecutionStore {
    * that never recorded one adds nothing. Optional: without it no event is written.
    */
   recordBudgetRefusal?(runId: string, sessionId: string): Promise<void>;
+  /** The run's recorded budget refusal with names filled in, or null. Optional: without it no event is shown. */
+  budgetEvent?(runId: string): Promise<{ event: BudgetEventView; agentName: string } | null>;
 }
 
 export interface CodingFailureAudit {
@@ -737,6 +747,10 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     );
   }
 
+  budgetEvent(runId: string): Promise<{ event: BudgetEventView; agentName: string } | null> {
+    return loadBudgetEvent(this.db, runId);
+  }
+
   async terminate(
     runId: string,
     status: "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
@@ -1116,8 +1130,8 @@ export class ContainerExecutor implements Executor {
         : !spendEnabled && error instanceof PreflightError
           ? "refused"
           : "failed";
-      const failure = outOfBudget ? this.budgetFailure(error) : this.failure(error);
       if (outOfBudget) await this.recordRefusal(runId, sessionId);
+      const failure = outOfBudget ? await this.budgetFailure(runId, error) : this.failure(error);
       this.emit({
         stage: "stopping",
         runId,
@@ -1135,7 +1149,7 @@ export class ContainerExecutor implements Executor {
         await this.options.vcs.cleanup(workspace).catch(() => undefined);
         await this.options.vcs.notifyContinuationFinished?.(workspace, outOfBudget ? "budget_exhausted" : "failed", {
           agentName: run.agentName,
-          ...(outOfBudget ? { budgetSentence: this.budgetSentence(run) } : {}),
+          ...(outOfBudget ? { budgetSentence: await this.budgetSentence(run) } : {}),
           ...(unreadyService ? { serviceSentence: serviceUnreadySentence([unreadyService]) } : {}),
           ...(protectedPath ? { protectedPathSentence: protectedPathSentence(protectedPath) } : {}),
         });
@@ -1337,8 +1351,8 @@ export class ContainerExecutor implements Executor {
         // The worker usually fails outright when the proxy refuses a model
         // request for budget; the session records that refusal.
         if (await this.outOfBudget(sessionId)) {
-          const failure = this.budgetFailure(`job_${reason}`, { issues: collected?.diagnosticIssues });
           await this.recordRefusal(run.runId, sessionId);
+          const failure = await this.budgetFailure(run.runId, `job_${reason}`, { issues: collected?.diagnosticIssues });
           await this.options.store.terminate(run.runId, "budget_exhausted", failure.error, failure.audit);
           this.terminal(run, "budget_exhausted", failure.audit);
           outcome = "budget_exhausted";
@@ -1459,8 +1473,8 @@ export class ContainerExecutor implements Executor {
         // Stopped while its result was collected: the stop already wrote the terminal row.
         containerLog.info({ runId: run.runId }, "coding run was stopped before its result was published");
       } else if (await this.outOfBudget(sessionId)) {
-        const failure = this.budgetFailure(error);
         await this.recordRefusal(run.runId, sessionId);
+        const failure = await this.budgetFailure(run.runId, error);
         await this.options.store.terminate(run.runId, "budget_exhausted", failure.error, failure.audit);
         this.terminal(run, "budget_exhausted", failure.audit);
         outcome = "budget_exhausted";
@@ -1480,7 +1494,7 @@ export class ContainerExecutor implements Executor {
         await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, {
           summary: finishedSummary,
           agentName: run.agentName,
-          ...(outcome === "budget_exhausted" ? { budgetSentence: this.budgetSentence(run) } : {}),
+          ...(outcome === "budget_exhausted" ? { budgetSentence: await this.budgetSentence(run) } : {}),
           ...(outcome === "failed" && providerClass ? { providerSentence: providerSentence(providerClass) } : {}),
           ...(outcome === "failed" && protectedPath
             ? { protectedPathSentence: protectedPathSentence(protectedPath) }
@@ -2193,7 +2207,7 @@ export class ContainerExecutor implements Executor {
       const protectedPathFailed = run.status === "failed" && run.failureCategory === PROTECTED_PATH_CATEGORY;
       await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, {
         agentName: run.agentName,
-        ...(outcome === "budget_exhausted" ? { budgetSentence: this.budgetSentence(run) } : {}),
+        ...(outcome === "budget_exhausted" ? { budgetSentence: await this.budgetSentence(run) } : {}),
         ...(providerClass ? { providerSentence: providerSentence(providerClass) } : {}),
         ...(unreadyServices ? { serviceSentence: serviceUnreadySentence(unreadyServices) } : {}),
         ...(protectedPathFailed ? { protectedPathSentence: protectedPathSentence(null) } : {}),
@@ -2248,7 +2262,9 @@ export class ContainerExecutor implements Executor {
   }
 
   /** The host-safe sentence for a run that ran out of budget. */
-  private budgetSentence(run: ContainerRunSnapshot): string {
+  private async budgetSentence(run: ContainerRunSnapshot): Promise<string> {
+    const loaded = await this.options.store.budgetEvent?.(run.runId).catch(() => null);
+    if (loaded) return hostBudgetSentence(loaded.event);
     return budgetSentence({
       runBudgetUsd: run.budgetUsd,
       agentBudgetUsd: run.agentBudgetUsd ?? run.budgetUsd,
@@ -2260,13 +2276,17 @@ export class ContainerExecutor implements Executor {
    * A failure the proxy's budget refusal caused. The failure itself is still
    * logged under its diagnostic id, so the operator keeps the real reason.
    */
-  private budgetFailure(
+  private async budgetFailure(
+    runId: string,
     error: unknown,
     options: { issues?: string[] } = {},
-  ): { error: string; audit: CodingFailureAudit } {
+  ): Promise<{ error: string; audit: CodingFailureAudit }> {
     const logged = this.failure(error, options);
+    const loaded = await this.options.store.budgetEvent?.(runId).catch(() => null);
     return {
-      error: "coding_budget_exhausted",
+      error: loaded
+        ? `coding_budget_exhausted: ${ownerBudgetSentence(loaded.event, loaded.agentName)}`
+        : "coding_budget_exhausted",
       audit: { failureCategory: "budget", diagnosticId: logged.audit.diagnosticId },
     };
   }

@@ -5,6 +5,7 @@
  * text, token counts, or ids.
  */
 import type { PrismaClient } from "#prisma";
+import { hostBudgetSentence, loadBudgetEvent } from "./budget-events.js";
 
 export interface BudgetFacts {
   /** The run's own budget (a coding run's reservation); falls back to the agent's. */
@@ -48,10 +49,12 @@ export function budgetSentence(facts: BudgetFacts): string {
  * amounts when they cannot be read. Never throws.
  */
 export async function loadBudgetSentence(
-  db: Pick<PrismaClient, "run">,
+  db: Pick<PrismaClient, "run" | "runBudgetEvent">,
   runId: string,
   status: string,
 ): Promise<string> {
+  const loaded = await loadBudgetEvent(db, runId);
+  if (loaded) return hostBudgetSentence(loaded.event);
   const refused = status === "refused";
   try {
     const row = await db.run.findUnique({

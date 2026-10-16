@@ -55,6 +55,7 @@ interface FakeRunRow {
     createdAt: Date;
   }>;
   approvedVersions?: number;
+  budgetEvents?: Array<{ kind: string; limit: string; at: Date; details: unknown }>;
   localPullRequest?: Record<string, unknown> | null;
 }
 
@@ -68,6 +69,7 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSee
       localPullRequest: _lpr,
       registryFetches: _registryFetches,
       approvedVersions: _approved,
+      budgetEvents: _budgetEvents,
       ...row
     } = run;
     return row;
@@ -98,6 +100,9 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSee
     },
     localPullRequest: {
       findUnique: async ({ where }: { where: { runId: string } }) => runRows.get(where.runId)?.localPullRequest ?? null,
+    },
+    runBudgetEvent: {
+      findMany: async ({ where }: { where: { runId: string } }) => runRows.get(where.runId)?.budgetEvents ?? [],
     },
     registryApprovedVersion: {
       count: async ({ where }: { where: { runId: string } }) => runRows.get(where.runId)?.approvedVersions ?? 0,
@@ -314,6 +319,43 @@ describe("run observability tools", () => {
     const result = await client.callTool({ name: "get_run", arguments: { runId: "r1" } });
     const body = parseText(result as never) as Record<string, unknown>;
     expect(body).toMatchObject({ status: "failed", failureCategory: "github", diagnosticId: "coding_diag_1234" });
+    await client.close();
+  });
+
+  it("get_run lists a run's recorded budget refusals, and omits the key when there are none", async () => {
+    const now = new Date("2026-01-02T03:04:05.000Z");
+    const row = {
+      agentId: "a1",
+      status: "budget_exhausted",
+      trigger: "manual",
+      turns: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      costUsd: 0,
+      finalText: null,
+      error: null,
+      startedAt: now,
+      finishedAt: now,
+    };
+    const details = { source: "proxy", budgetUsd: 3, spentUsd: 2.9, turn: 7 };
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [
+        { ...row, id: "r1", budgetEvents: [{ kind: "refused", limit: "run", at: now, details }] },
+        { ...row, id: "r2" },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+
+    const withEvent = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r1" } })) as never);
+    expect(withEvent).toMatchObject({
+      budgetEvents: [{ kind: "refused", limit: "run", at: now.toISOString(), details }],
+    });
+    const without = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r2" } })) as never);
+    expect(without).not.toHaveProperty("budgetEvents");
     await client.close();
   });
 
