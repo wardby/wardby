@@ -14,7 +14,10 @@ import {
   CodingTaskInputSchema,
   MAX_CODING_ARTIFACT_BYTES,
   MAX_CODING_INPUT_BYTES,
+  CLAUDE_CONTEXT_LIMITS,
   MAX_CODING_SUMMARY_BYTES,
+  SUMMARY_TRUNCATED_MARKER,
+  truncateText,
   MAX_CODING_TASK_BYTES,
   MAX_CODING_TEST_COMMAND_BYTES,
   MAX_CODING_TESTS,
@@ -202,10 +205,26 @@ describe("CodingTaskInputSchema", () => {
 });
 
 describe("CodingAgentOutputSchema", () => {
-  it("bounds summary, test count, and command bytes", () => {
-    expect(() =>
-      CodingAgentOutputSchema.parse({ ...output, summary: "x".repeat(MAX_CODING_SUMMARY_BYTES + 1) }),
-    ).toThrow();
+  it("truncates an over-long summary instead of refusing it", () => {
+    const long = Array.from({ length: 4000 }, (_, i) => `line ${i} ${"x".repeat(20)}`).join("\n");
+    const parsed = CodingAgentOutputSchema.parse({ ...output, summary: long });
+    expect(Buffer.byteLength(parsed.summary)).toBeLessThanOrEqual(MAX_CODING_SUMMARY_BYTES);
+    expect(parsed.summary.endsWith(SUMMARY_TRUNCATED_MARKER)).toBe(true);
+    // Cut at a line boundary: the kept text is whole lines of the original.
+    expect(long.startsWith(parsed.summary.slice(0, -SUMMARY_TRUNCATED_MARKER.length))).toBe(true);
+    expect(parsed.summary.slice(0, -SUMMARY_TRUNCATED_MARKER.length)).toMatch(/x{20}$/);
+  });
+
+  it("redacts a credential that straddles the summary cut", () => {
+    const secret = `ghs_${"a".repeat(36)}`;
+    const room = MAX_CODING_SUMMARY_BYTES - Buffer.byteLength(SUMMARY_TRUNCATED_MARKER);
+    const summary = `${"x".repeat(room - 10)}${secret}${"y".repeat(100)}`;
+    const parsed = CodingAgentOutputSchema.parse({ ...output, summary });
+    expect(parsed.summary).not.toContain("ghs_");
+    expect(parsed.summary).not.toContain("aaaaaaaaaa");
+  });
+
+  it("bounds test count and command bytes", () => {
     expect(() =>
       CodingAgentOutputSchema.parse({ ...output, tests: Array(MAX_CODING_TESTS + 1).fill(output.tests[0]) }),
     ).toThrow();
@@ -425,11 +444,11 @@ describe("repo context input fields", () => {
   });
 
   it("parses an input larger than the output limit but within the input limit", () => {
-    const content = "x".repeat(60 * 1024);
-    const files = [0, 1, 2].map((i) => ({ path: `docs/f${i}.md`, content }));
+    const content = "x".repeat(CLAUDE_CONTEXT_LIMITS.maxFileBytes);
+    const files = [0, 1, 2, 3].map((i) => ({ path: `docs/f${i}.md`, content }));
     const text = JSON.stringify({ ...base, claudeContext: { files } });
     expect(Buffer.byteLength(text)).toBeGreaterThan(MAX_CODING_ARTIFACT_BYTES);
-    expect(parseCodingTaskInputJson(text).claudeContext?.files).toHaveLength(3);
+    expect(parseCodingTaskInputJson(text).claudeContext?.files).toHaveLength(4);
   });
 });
 
@@ -694,5 +713,30 @@ describe("protocol.ts is shipped to workers as a single file", () => {
   it("has no relative imports", () => {
     const source = readFileSync(new URL("./protocol.ts", import.meta.url), "utf8");
     expect(source).not.toMatch(/from\s+["']\.\.?\//);
+  });
+});
+
+describe("truncateText", () => {
+  it("returns text that fits unchanged", () => {
+    expect(truncateText("short", 100)).toBe("short");
+  });
+
+  it("cuts at the last line break in the second half and appends the marker", () => {
+    expect(truncateText("aaaa\nbbbb\ncccc", 12, (v) => v.length, "[cut]")).toBe("aaaa[cut]");
+  });
+
+  it("hard-cuts a single long line", () => {
+    expect(truncateText("x".repeat(50), 20, (v) => v.length, "[cut]")).toBe(`${"x".repeat(15)}[cut]`);
+  });
+
+  it("never splits a surrogate pair", () => {
+    const cut = truncateText("😀".repeat(10), 9, (v) => v.length, "[c]");
+    expect(cut).toBe("😀😀😀[c]");
+  });
+
+  it("measures UTF-8 bytes by default", () => {
+    const cut = truncateText("é".repeat(100), 40);
+    expect(Buffer.byteLength(cut)).toBeLessThanOrEqual(40);
+    expect(cut.endsWith(SUMMARY_TRUNCATED_MARKER)).toBe(true);
   });
 });

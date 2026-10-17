@@ -861,6 +861,14 @@ model CodingProxyRequest {
   /// actualCostUsd is the proxy's estimate for an interrupted (uncertain)
   /// reply, not provider-reported usage.
   costEstimated      Boolean                  @default(false)
+  /// UTF-8 bytes of the forwarded request body; the next request's hold compares against it.
+  requestBytes       Int?
+  /// The worst-case hold (whole body as uncached input); a reply costing more cancels the session.
+  ceilingUsd         Decimal?                 @db.Decimal(18, 10)
+  /// "cached" (priced from the conversation's previous reply) or "full" (= ceilingUsd).
+  reservationBasis   String?
+  /// sha256 of what identifies the conversation (first message, or OpenAI prompt_cache_key).
+  conversationKey    String?
   pricingVersion     String
   pricingSnapshot    Json
   inputTokens        Int?
@@ -875,6 +883,7 @@ model CodingProxyRequest {
 
   @@unique([sessionId, requestKey])
   @@index([sessionId, status])
+  @@index([sessionId, conversationKey])
 }
 
 /// Package audit mode (docs/coding-packages.md#package-audit-mode).

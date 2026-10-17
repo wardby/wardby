@@ -87,7 +87,20 @@ describe("estimateInterrupted", () => {
     expect(usd(costUsd)).toBe(usd(2.12 - (32_000 * 10) / 1e6 + (relayedOutputTokens(300) * 10) / 1e6));
   });
 
-  it("never exceeds the request's hold", () => {
+  it("prices usage read from message_start above the hold, up to the worst case", () => {
+    const facts = {
+      readUsage: { inputTokens: 100_000, cachedInputTokens: 0, cacheWriteTokens: 0 },
+      reportedOutputTokens: 0,
+      relayedOutputBytes: 0,
+      reservationUsd: 0.05,
+      maxOutputTokens: 1_000,
+    };
+    // 100k fresh input × 2 per million = 0.2: more than the 0.05 hold, less than the 1.0 worst case.
+    expect(usd(estimateInterrupted({ ...facts, ceilingUsd: 1 }, PRICE).costUsd)).toBe(0.2);
+    expect(estimateInterrupted({ ...facts, ceilingUsd: 0.1 }, PRICE).costUsd).toBe(0.1);
+  });
+
+  it("without a worst case, never exceeds the request's hold", () => {
     const { costUsd } = estimateInterrupted(
       {
         readUsage: { inputTokens: 10_000_000, cachedInputTokens: 0, cacheWriteTokens: 0 },

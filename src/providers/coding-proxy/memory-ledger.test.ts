@@ -110,3 +110,72 @@ describe("MemoryProxyLedger interrupted replies", () => {
     expect(await ledger.settlementHints("s1", "none")).toEqual({ medianOutputTokens: 20 });
   });
 });
+
+describe("MemoryProxyLedger previousReply", () => {
+  const usage = { inputTokens: 100, outputTokens: 5, cachedInputTokens: 90, cacheWriteTokens: 0, reasoningTokens: 0 };
+  const PRICING = { version: "v", encoding: "o200k_base" as const, inputPerMTok: 1, outputPerMTok: 1 };
+  const setup = async (clock: Date) => {
+    const ledger = new MemoryProxyLedger({ now: () => clock });
+    await ledger.createSession({
+      id: "s",
+      runId: "r",
+      capabilityHash: "hash",
+      credentialRef: "openai/test",
+      protocol: "openai-responses",
+      allowedModels: ["m"],
+      deadlineAt: new Date(clock.getTime() + 60_000),
+      budgetUsd: 10,
+      registryTokenHash: "registry-hash",
+    });
+    const base = { sessionId: "s", model: "m", pricing: PRICING, now: clock };
+    const reserve = (id: string, requestBytes: number, conversationKey: string) =>
+      ledger.reserve({
+        ...base,
+        id,
+        requestKey: id,
+        requestFingerprint: id,
+        reservationUsd: 0.1,
+        requestBytes,
+        ceilingUsd: 0.1,
+        reservationBasis: "full",
+        conversationKey,
+      });
+    return { ledger, reserve };
+  };
+
+  it("returns the latest finished request of the conversation, with its size and reservation time", async () => {
+    const clock = new Date("2026-10-16T12:00:00Z");
+    const { ledger, reserve } = await setup(clock);
+    const first = await reserve("a", 1000, "k1");
+    if (first.outcome !== "reserved") throw new Error(first.outcome);
+    await ledger.complete("a", usage, 0.01, 200);
+    await reserve("b", 500, "k2");
+    expect(await ledger.previousReply("s", "k1")).toEqual({
+      model: "m",
+      status: "completed",
+      costEstimated: false,
+      usage,
+      requestBytes: 1000,
+      startedAt: clock,
+    });
+    // b is still reserved, so k2 has no finished request yet; an unknown key has none either.
+    expect(await ledger.previousReply("s", "k2")).toBeNull();
+    expect(await ledger.previousReply("s", "none")).toBeNull();
+  });
+
+  it("reports an interrupted request settled at an estimate as such", async () => {
+    const clock = new Date("2026-10-16T12:00:00Z");
+    const { ledger, reserve } = await setup(clock);
+    const reserved = await reserve("c", 700, "k1");
+    if (reserved.outcome !== "reserved") throw new Error(reserved.outcome);
+    await ledger.markUncertain("c", 200, { usage, costUsd: 0.02 });
+    expect(await ledger.previousReply("s", "k1")).toEqual({
+      model: "m",
+      status: "uncertain",
+      costEstimated: true,
+      usage,
+      requestBytes: 700,
+      startedAt: clock,
+    });
+  });
+});

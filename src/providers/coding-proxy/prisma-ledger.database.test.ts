@@ -78,6 +78,8 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       requestFingerprint: `fingerprint-${id}`,
       model: "gpt-5.6-luna",
       reservationUsd: 0.0001,
+      ceilingUsd: 0.0003,
+      reservationBasis: "cached" as const,
       pricing: { version: "test", encoding: "o200k_base" as const, inputPerMTok: 1, outputPerMTok: 1 },
       now: new Date(),
     });
@@ -103,6 +105,8 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       heldReservedUsd: 0.0001,
       heldUncertainUsd: 0,
       refusedHoldUsd: 0.0001,
+      refusedHoldBasis: "cached",
+      refusedHoldCeilingUsd: 0.0003,
       model: "gpt-5.6-luna",
       turn: 1,
     });
@@ -115,7 +119,13 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       expect.objectContaining({
         kind: "refused",
         limit: "week",
-        details: expect.objectContaining({ source: "proxy", turn: 1, refusedHoldUsd: 0.0001 }),
+        details: expect.objectContaining({
+          source: "proxy",
+          turn: 1,
+          refusedHoldUsd: 0.0001,
+          refusedHoldBasis: "cached",
+          refusedHoldCeilingUsd: 0.0003,
+        }),
       }),
     ]);
 
@@ -603,6 +613,111 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       });
       expect(await ledger.settlementHints(eSession, "no-such-model")).toEqual({ medianOutputTokens: 12 });
       expect(await ledger.settlementHints(`missing-${suffix}`, model)).toEqual({});
+    });
+  });
+
+  describe("previous reply for cache-aware holds", () => {
+    const pAgent = `prev-agent-${suffix}`;
+    const pRun = `prev-run-${suffix}`;
+    const pSession = `prev-session-${suffix}`;
+    const model = "prev-model";
+    const ledger = new PrismaProxyLedger(db);
+    const usage = { inputTokens: 100, outputTokens: 5, cachedInputTokens: 90, cacheWriteTokens: 0, reasoningTokens: 0 };
+    const reserveIn = async (key: string, extra: Partial<Parameters<typeof ledger.reserve>[0]> = {}) => {
+      const result = await ledger.reserve({
+        id: `prev-${key}-${suffix}`,
+        sessionId: pSession,
+        requestKey: key,
+        requestFingerprint: `fingerprint-${key}`,
+        model,
+        reservationUsd: 0.0001,
+        pricing: { version: "test", encoding: "o200k_base" as const, inputPerMTok: 1, outputPerMTok: 1 },
+        now: new Date(),
+        ...extra,
+      });
+      if (result.outcome !== "reserved") throw new Error(`unexpected ${result.outcome}`);
+      return result.request.id;
+    };
+
+    afterAll(async () => {
+      await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "id" = ${pSession}`;
+      await db.runModelUsage.deleteMany({ where: { runId: pRun } });
+      await db.codingRun.deleteMany({ where: { runId: pRun } });
+      await db.run.deleteMany({ where: { id: pRun } });
+      await db.agent.deleteMany({ where: { id: pAgent } });
+    });
+
+    it("stores the request size, ceiling, basis and conversation, and returns the finished reply", async () => {
+      await db.agent.create({ data: { id: pAgent, name: pAgent, systemPrompt: "x", model, budgetUsd: 1 } });
+      await db.run.create({ data: { id: pRun, agentId: pAgent, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId: pRun,
+          task: "test",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${pRun}`,
+          provider: "codex",
+          model,
+          timeoutSec: 60,
+          allowedEgress: [],
+          protectedPaths: [],
+          budgetReservedUsd: 0.001,
+        },
+      });
+      await ledger.createSession({
+        id: pSession,
+        runId: pRun,
+        capabilityHash: `prev-hash-${suffix}`,
+        credentialRef: "openai/test",
+        protocol: "openai-responses",
+        allowedModels: [model],
+        deadlineAt: new Date(Date.now() + 60_000),
+        budgetUsd: 1,
+        registryTokenHash: `prev-registry-hash-${suffix}`,
+      });
+
+      const a = await reserveIn("a", {
+        requestBytes: 1000,
+        ceilingUsd: 0.5,
+        reservationBasis: "full",
+        conversationKey: "k1",
+      });
+      expect(await ledger.getRequest(a)).toMatchObject({
+        requestBytes: 1000,
+        ceilingUsd: 0.5,
+        reservationBasis: "full",
+        conversationKey: "k1",
+      });
+      await ledger.complete(a, usage, 0.00001, 200);
+      const reply = await ledger.previousReply(pSession, "k1");
+      expect(reply).toMatchObject({
+        model,
+        status: "completed",
+        costEstimated: false,
+        usage,
+        requestBytes: 1000,
+      });
+      expect(Math.abs(Date.now() - reply!.startedAt.getTime())).toBeLessThan(60_000);
+    });
+
+    it("returns an interrupted request settled at an estimate as the latest", async () => {
+      const b = await reserveIn("b", {
+        requestBytes: 2000,
+        ceilingUsd: 0.5,
+        reservationBasis: "cached",
+        conversationKey: "k1",
+      });
+      await ledger.markUncertain(b, 200, { usage, costUsd: 0.00002 });
+      expect(await ledger.previousReply(pSession, "k1")).toMatchObject({
+        status: "uncertain",
+        costEstimated: true,
+        requestBytes: 2000,
+      });
+    });
+
+    it("has no previous reply for an unknown conversation", async () => {
+      expect(await ledger.previousReply(pSession, "other")).toBeNull();
     });
   });
 });

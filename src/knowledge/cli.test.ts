@@ -2,11 +2,11 @@ import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadBundle, parseKnowledgeArgs } from "./cli.js";
+import { bundleDirFromConfig, loadBundle, parseKnowledgeArgs } from "./cli.js";
 
 describe("parseKnowledgeArgs", () => {
   it("defaults the dir and root", () => {
-    expect(parseKnowledgeArgs(["check"])).toEqual({ dir: "docs/knowledge", root: ".", strict: false, json: false });
+    expect(parseKnowledgeArgs(["check"])).toEqual({ dir: undefined, root: ".", strict: false, json: false });
   });
   it("reads flags and an explicit dir", () => {
     expect(parseKnowledgeArgs(["check", "kb", "--root", "/r", "--strict", "--json"])).toEqual({
@@ -40,5 +40,31 @@ describe("loadBundle", () => {
     symlinkSync(join(outside, "secret.md"), join(dir, "linked.md"));
     symlinkSync(join(dir, "missing.md"), join(dir, "dangling.md"));
     expect([...loadBundle(dir).keys()]).toEqual(["index.md"]);
+  });
+});
+
+describe("bundleDirFromConfig", () => {
+  const repo = (config?: string) => {
+    const root = mkdtempSync(join(tmpdir(), "kb-root-"));
+    if (config !== undefined) {
+      mkdirSync(join(root, ".wardby"));
+      writeFileSync(join(root, ".wardby", "knowledge.yaml"), config);
+    }
+    return root;
+  };
+
+  it("uses the default when there is no .wardby/knowledge.yaml", () => {
+    expect(bundleDirFromConfig(repo())).toEqual({ dir: "docs/knowledge" });
+  });
+
+  it("uses the folder the file names", () => {
+    expect(bundleDirFromConfig(repo("path: .okf\n"))).toEqual({ dir: ".okf" });
+  });
+
+  it("reports an invalid file and checks the default", () => {
+    expect(bundleDirFromConfig(repo("path: ../outside\n"))).toEqual({
+      dir: "docs/knowledge",
+      configError: expect.stringContaining("`..` segments"),
+    });
   });
 });

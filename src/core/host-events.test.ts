@@ -907,11 +907,11 @@ describe("routeHostEvent push (merge watcher)", () => {
   });
   const concept = (path: string) =>
     `---\ntype: invariant\nwardby:\n  schema: 1\n  citations:\n    - { repo: github:o/r, path: ${path}, sha: ${"c".repeat(40)}, spanHash: sha256:${"d".repeat(64)} }\n---\nBody.\n`;
-  function bundleHost(files: Record<string, string> | null) {
+  function bundleHost(files: Record<string, string> | null, bundle = "docs/knowledge", config?: string) {
     const h = host();
     vi.mocked(h.listFiles).mockImplementation(async () => {
       if (files === null) throw new Error("boom");
-      const names = Object.keys(files).map((f) => `docs/knowledge/${f}`);
+      const names = Object.keys(files).map((f) => `${bundle}/${f}`);
       return {
         ref: AFTER,
         count: names.length,
@@ -921,7 +921,8 @@ describe("routeHostEvent push (merge watcher)", () => {
       };
     });
     vi.mocked(h.readFile).mockImplementation(async (_r, path) => {
-      const text = files?.[path.replace("docs/knowledge/", "")] ?? "";
+      if (path === ".wardby/knowledge.yaml" && config === undefined) return { kind: "not_found", path };
+      const text = path === ".wardby/knowledge.yaml" ? config! : (files?.[path.replace(`${bundle}/`, "")] ?? "");
       // Like GitHubReviewHost.readFile: `content` is the numbered display form, `text` the raw window.
       const lines = text.split("\n");
       return {
@@ -1030,6 +1031,30 @@ describe("routeHostEvent push (merge watcher)", () => {
     expect(h.listFiles).toHaveBeenCalledWith(REPO, AFTER, "docs/knowledge/");
   });
 
+  it("reads the bundle from the folder .wardby/knowledge.yaml names", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const h = bundleHost({ "seed.md": concept("src/a.ts") }, ".okf", "path: .okf\n");
+    await routeHostEvent(push(["src/a.ts"]), deps([link("w1")], h));
+    expect(h.readFile).toHaveBeenCalledWith(REPO, ".wardby/knowledge.yaml", AFTER, expect.any(Object));
+    expect(h.listFiles).toHaveBeenCalledWith(REPO, AFTER, ".okf/");
+    expect(splitTaskOverride(taskOf()).untrustedContext).toContain("- .okf/seed.md");
+  });
+
+  it("counts a merge that changes only the configured bundle as knowledge-only", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const h = bundleHost({ "seed.md": concept("src/a.ts") }, ".okf", "path: .okf\n");
+    await routeHostEvent(push([".okf/seed.md"]), deps([link("w1")], h));
+    expect(splitTaskOverride(taskOf()).task).toContain("Only knowledge files changed: yes.");
+  });
+
+  it("falls back to docs/knowledge/ when .wardby/knowledge.yaml is invalid", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const h = bundleHost({ "seed.md": concept("src/a.ts") }, "docs/knowledge", "path: /etc\n");
+    await routeHostEvent(push(["src/a.ts"]), deps([link("w1")], h));
+    expect(h.listFiles).toHaveBeenCalledWith(REPO, AFTER, "docs/knowledge/");
+    expect(splitTaskOverride(taskOf()).untrustedContext).toContain("- docs/knowledge/seed.md");
+  });
+
   it("still dispatches when the bundle cannot be read", async () => {
     vi.mocked(dispatchRun).mockClear();
     const d = deps([link("w1")], bundleHost(null));
@@ -1096,8 +1121,8 @@ describe("routeHostEvent push (merge watcher)", () => {
     });
     await routeHostEvent(push(["src/f29.ts"]), deps([link("w1")], h));
     expect(max).toBe(8);
-    // 30 bundle files, plus the one cited file of the one affected concept.
-    expect(h.readFile).toHaveBeenCalledTimes(31);
+    // .wardby/knowledge.yaml, 30 bundle files, and the one cited file of the one affected concept.
+    expect(h.readFile).toHaveBeenCalledTimes(32);
     expect(splitTaskOverride(taskOf()).untrustedContext).toContain("- docs/knowledge/c29.md");
   });
 
@@ -1141,7 +1166,8 @@ describe("routeHostEvent push (merge watcher)", () => {
     const files = Object.fromEntries(Array.from({ length: 201 }, (_, i) => [`c${i}.md`, concept(`src/f${i}.ts`)]));
     const h = bundleHost(files);
     await routeHostEvent(push(["README.md"]), deps([link("w1")], h));
-    expect(h.readFile).toHaveBeenCalledTimes(200);
+    // .wardby/knowledge.yaml, then the first 200 bundle files.
+    expect(h.readFile).toHaveBeenCalledTimes(201);
     expect(splitTaskOverride(taskOf()).untrustedContext).toContain("could not be fully read");
   });
 
@@ -1240,7 +1266,9 @@ describe("routeHostEvent push (merge watcher)", () => {
       return h;
     }
     const codeReads = (h: CodeReviewHost) =>
-      vi.mocked(h.readFile).mock.calls.filter((c) => !String(c[1]).startsWith("docs/knowledge/"));
+      vi
+        .mocked(h.readFile)
+        .mock.calls.filter((c) => !String(c[1]).startsWith("docs/knowledge/") && c[1] !== ".wardby/knowledge.yaml");
     const run = async (h: CodeReviewHost, paths: string[]) => {
       vi.mocked(dispatchRun).mockClear();
       await routeHostEvent(push(paths), deps([link("w1")], h));

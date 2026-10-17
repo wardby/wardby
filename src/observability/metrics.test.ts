@@ -13,6 +13,14 @@ describe("Prometheus metrics", () => {
     metrics.emit({ stage: "terminal", runId: "run-sensitive", outcome: "succeeded", durationMs: 1_200 });
     metrics.emit({ stage: "cleanup", runId: "run-sensitive", cleanupSucceeded: false, budgetActualUsd: 0.2 });
     metrics.observeProxyAudit({
+      type: "request.reserved",
+      runId: "run-sensitive",
+      requestId: "request-sensitive",
+      model: "private-model-name",
+      reservationUsd: 0.3,
+    });
+    // The completed reply repeats its hold; the reserved total counts it once.
+    metrics.observeProxyAudit({
       type: "response.completed",
       runId: "run-sensitive",
       requestId: "request-sensitive",
@@ -21,6 +29,14 @@ describe("Prometheus metrics", () => {
       costUsd: 0.2,
       inputTokens: 10,
       outputTokens: 20,
+    });
+    // A refused hold was never reserved.
+    metrics.observeProxyAudit({
+      type: "request.rejected",
+      runId: "run-sensitive",
+      model: "private-model-name",
+      reason: "budget_exhausted",
+      reservationUsd: 5,
     });
     metrics.observeProxyRequest({ protocol: "openai-responses", status: 403, durationMs: 250 });
 

@@ -298,7 +298,11 @@ push happened, nothing else would otherwise replace the failed check.
 
 Every coding run's final message is the full pull request description: what
 changed, the checklist, how to try it, and any closing line such as
-`Resolves #N`. That holds for follow-ups too: review fix rounds, mention
+`Resolves #N`. It may be up to 64 KiB; a longer one is cut at a line boundary
+with a `[summary truncated]` marker instead of failing the run. When the whole
+description would pass GitHub's 65,536-character limit, wardby first drops the
+**Packages** section, then truncates the final message, keeping a closing
+`Resolves #N` last line. That holds for follow-ups too: review fix rounds, mention
 follow-ups, and continuations. Agents launched for a follow-up receive the
 description text wardby last wrote (its agent-written part, not the live pull
 request body) as quoted, untrusted context, so they can carry forward what
@@ -393,7 +397,8 @@ pushed commit.
   when it can.
 - `skipped:<reason>`: the description was not updated. The reason is
   `not_open` (the pull request is not open or was not found), `too_long` (the
-  description is still over 65,536 characters after dropping **Packages**), or
+  description is still over 65,536 characters after dropping **Packages** and
+  truncating the final message), or
   `error` (any failure, including a failed update request, a failed load of
   wardby's last-written text, a failed hash record or access re-check, or the
   60-second timeout; the update may still have landed).

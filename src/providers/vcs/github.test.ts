@@ -5,6 +5,7 @@ import { ISSUE_KEY } from "../issue-tracker/types.js";
 import {
   DEPENDENCY_INSTALL_INCOMPLETE,
   GitHubAppClient,
+  MAX_PULL_REQUEST_BODY_CHARS,
   PR_ISSUE_KEY,
   RELATED_SECTION_END,
   RELATED_SECTION_START,
@@ -853,6 +854,26 @@ describe("GitHubAppClient.deleteInstallation", () => {
     const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
     await expect(client.deleteInstallation(0)).rejects.toThrow();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("pullRequestBody length", () => {
+  const base = { runId: "run-1", repository: "openai/example", baseRef: "main", headRef: "wardby/run-run-1" };
+
+  it("truncates a long summary so the body fits GitHub's limit, keeping the other sections", () => {
+    const summary = Array.from({ length: 3000 }, (_, i) => `line ${i} ${"x".repeat(20)}`).join("\n");
+    const tests = [{ command: "npm test", outcome: "passed" as const }];
+    const body = pullRequestBody({ ...base, summary, tests });
+    expect(body.length).toBeLessThanOrEqual(MAX_PULL_REQUEST_BODY_CHARS);
+    expect(body).toContain("[summary truncated]");
+    expect(body.startsWith("<!-- wardby:run-1 -->")).toBe(true);
+    expect(body).toContain("- `npm test`: passed");
+  });
+
+  it("leaves a body within the limit unchanged", () => {
+    const body = pullRequestBody({ ...base, summary: "Added a cart." });
+    expect(body).toContain("Added a cart.");
+    expect(body).not.toContain("[summary truncated]");
   });
 });
 
@@ -2100,7 +2121,7 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
     expect(commentPosts).toHaveLength(0);
   });
 
-  it("body over 65,536 drops Packages, then skips too_long", async () => {
+  it("body over 65,536 drops Packages, then truncates the summary keeping its closing line", async () => {
     const current = originalBody();
     const packages = Array.from({ length: 100 }, (_, i) => ({
       ecosystem: "npm",
@@ -2109,7 +2130,7 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
     }));
     const { client, pulls } = fake({ prBody: current });
 
-    const fits = `${"x".repeat(63_000)} Resolves #12`;
+    const fits = `${"x".repeat(63_000)}\nResolves #12`;
     const dropped = await client.updatePullRequestDescription({
       ...base,
       rootRunId: ROOT,
@@ -2118,25 +2139,25 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
       packages,
       baseline: baseline(current),
     });
-    expect(pullRequestBody({ ...base, runId: ROOT, summary: fits, packages, latestRunId: RUN }).length).toBeGreaterThan(
-      65_536,
-    );
     expect(dropped.kind).toBe("replaced");
     expect(pulls).toHaveLength(1);
     expect(pulls[0].length).toBeLessThanOrEqual(65_536);
     expect(pulls[0]).not.toContain("Packages installed");
+    expect(pulls[0]).not.toContain("[summary truncated]");
     expect(pulls[0].endsWith(`<!-- wardby-latest:${RUN} -->`)).toBe(true);
 
-    const tooLong = await client.updatePullRequestDescription({
+    const long = await client.updatePullRequestDescription({
       ...base,
       rootRunId: ROOT,
       runId: RUN,
-      summary: `${"x".repeat(70_000)} Resolves #12`,
+      summary: `${Array.from({ length: 4000 }, (_, i) => `line ${i} ${"x".repeat(20)}`).join("\n")}\nResolves #12`,
       packages,
       baseline: baseline(current),
     });
-    expect(tooLong).toEqual({ kind: "skipped", reason: "too_long" });
-    expect(pulls).toHaveLength(1);
+    expect(long.kind).toBe("replaced");
+    expect(pulls).toHaveLength(2);
+    expect(pulls[1].length).toBeLessThanOrEqual(65_536);
+    expect(pulls[1]).toContain("[summary truncated]\n\nResolves #12");
   });
 
   it("never PATCHes a PR whose body doesn't start with the root marker", async () => {

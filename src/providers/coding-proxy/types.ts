@@ -71,6 +71,24 @@ export interface ProxyRequest {
   upstreamStatus?: number;
   /** An uncertain request settled at an estimate: actualCostUsd and usage are estimated, not reported. */
   costEstimated?: boolean;
+  requestBytes?: number;
+  ceilingUsd?: number;
+  reservationBasis?: ReservationBasis;
+  conversationKey?: string | null;
+}
+
+export type ReservationBasis = "cached" | "full";
+
+/** The latest finished (completed or uncertain) request of a conversation, for the next request's hold. */
+export interface PreviousReply {
+  model: string;
+  status: "completed" | "uncertain";
+  costEstimated: boolean;
+  usage?: ProxyUsage;
+  /** UTF-8 bytes of the request body the proxy forwarded; null on rows from before cache-aware holds. */
+  requestBytes: number | null;
+  /** When the previous request was reserved: the prompt cache was last refreshed around then. */
+  startedAt: Date;
 }
 
 export interface CreateProxySessionInput {
@@ -95,6 +113,10 @@ export interface ReserveProxyRequestInput {
   reservationUsd: number;
   pricing: PricingSnapshot;
   now: Date;
+  requestBytes?: number;
+  ceilingUsd?: number;
+  reservationBasis?: ReservationBasis;
+  conversationKey?: string | null;
 }
 
 /** What the proxy knows about a refusal: the numbers only; names and the binding limit are the control plane's. */
@@ -126,6 +148,8 @@ export interface ProxyLedger {
    * non-estimated reply for this model, and the median output tokens of its completed replies.
    */
   settlementHints(sessionId: string, model: string): Promise<{ previous?: ProxyUsage; medianOutputTokens?: number }>;
+  /** The latest completed or uncertain request of a conversation, or null when it has none. */
+  previousReply(sessionId: string, conversationKey: string): Promise<PreviousReply | null>;
   cancelSession(sessionId: string): Promise<void>;
   /** Whether a request of this session was ever refused for budget. */
   budgetExhausted(sessionId: string): Promise<boolean>;
@@ -153,6 +177,16 @@ export interface ProxyAuditEvent {
   status?: number;
   reason?: string;
   reservationUsd?: number;
+  /** For request.reserved and a budget refusal: the worst-case hold and how the hold was priced. */
+  ceilingUsd?: number;
+  reservationBasis?: ReservationBasis;
+  /** Why the hold fell back to the ceiling (basis "full"). */
+  holdFallback?: string;
+  /** Basis "cached": tokens priced at the cache-read rate, and at the input + cache-write rates. */
+  holdCachedTokens?: number;
+  holdUncachedTokens?: number;
+  /** For response.completed: how much the reply cost above its hold (reason "reservation_exceeded"). */
+  overshootUsd?: number;
   /** For a budget refusal: the numbers behind it. */
   budgetUsd?: number;
   spentUsd?: number;

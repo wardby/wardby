@@ -10,7 +10,8 @@ export type CheckCode =
   | "index_link_broken"
   | "concept_not_indexed"
   | "citation_unverifiable"
-  | "citation_stale";
+  | "citation_stale"
+  | "knowledge_config_invalid";
 export interface CheckIssue {
   severity: CheckSeverity;
   code: CheckCode;
