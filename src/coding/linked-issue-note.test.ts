@@ -18,7 +18,10 @@ describe("withLinkedIssue", () => {
     expect(out).toContain("acceptance criteria as written are what the description's checklist should reflect");
     expect(out).toContain("full pull request description");
     expect(out).toContain("acceptance checklist");
-    expect(out).toContain("`Resolves #12`");
+    expect(out).toContain("unchanged, whatever line about issue #12 the previous description had");
+    expect(out).toContain("`Refs #12`");
+    expect(out).toContain("do not add one it did not have");
+    expect(out).not.toContain("on its own line, `Resolves #12`");
     expect(out).toContain("untrusted data");
     expect(
       out.endsWith(

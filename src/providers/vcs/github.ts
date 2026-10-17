@@ -116,8 +116,10 @@ export interface PullRequestInput {
   /**
    * The issue in this pull request's own repository the run came from (a
    * mention on a GitHub issue; control-plane data, never model output): the
-   * body's first visible line is `Resolves #N`, the GitHub issue's form of
-   * the issue line above. Used only when `issue` renders no line.
+   * body's first visible line is `From issue #N`, the GitHub issue's form of
+   * the issue line above. It links the issue but never closes it: whether
+   * merging closes it is the agent's choice (`Resolves #N` or `Refs #N` in
+   * its summary). Used only when `issue` renders no line.
    */
   issueNumber?: number;
   /**
@@ -357,7 +359,7 @@ function issueLine(input: PullRequestInput): string | undefined {
   const parts = issueParts(input.issue);
   if (parts?.url) return `Resolves ${parts.tracker}issue [${parts.key}](${parts.url})`;
   const number = input.issueNumber;
-  return typeof number === "number" && Number.isSafeInteger(number) && number > 0 ? `Resolves #${number}` : undefined;
+  return typeof number === "number" && Number.isSafeInteger(number) && number > 0 ? `From issue #${number}` : undefined;
 }
 
 /**
@@ -520,9 +522,9 @@ export function renderRelatedSection(input: RelatedPullRequestsInput): string | 
   ].join("\n");
 }
 
-/** The run marker, then optionally blank lines and the "Resolves …" line: the section goes right after. */
+/** The run marker, then optionally blank lines and the issue line ("Resolves … issue …" or "From issue #N"): the section goes right after. */
 const BODY_HEAD =
-  /^[^\S\n]*<!-- (?:wardby|reevo-run):\S+ -->[^\S\n]*(?:\n|$)(?:[^\S\n]*\n)*(?:Resolves [^\n]*(?:\n|$))?/;
+  /^[^\S\n]*<!-- (?:wardby|reevo-run):\S+ -->[^\S\n]*(?:\n|$)(?:[^\S\n]*\n)*(?:(?:Resolves |From issue #\d)[^\n]*(?:\n|$))?/;
 
 /**
  * The body with `block` in place of the existing marked section, or inserted
