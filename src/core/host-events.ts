@@ -18,13 +18,15 @@ import { linkedPullRequestAttribution, openingRunAttribution, RESPONSE_PATH_SNAP
 import { headStoppedAtBudget, pushingRunInFlight } from "./budget-stopped-head.js";
 import { checkContinuation, dispatchRun } from "./dispatch.js";
 import { mentionStatusRow, postMentionStatus } from "./host-status.js";
-import { handlePullRequestClosed } from "./issue-bridge.js";
+import { githubIssueKey, handlePullRequestClosed } from "./issue-bridge.js";
 import { logger } from "./logger.js";
 import { maybeMarkReady } from "./mark-ready.js";
 import { syncMergeOrderChecksForPullRequest } from "./merge-order-check.js";
 import {
   MAX_SIBLING_HINTS,
+  openPullRequestHints,
   openSiblings,
+  openSiblingsForIssue,
   runTreeRoot,
   SIBLING_GUIDANCE,
   type OpenSibling,
@@ -449,6 +451,10 @@ export function mentionTaskText(event: MentionEvent, siblings: readonly OpenSibl
   if (event.priorRunId) {
     sections.push(continuationHint(event.number, event.priorRunId));
     const hints = siblingContinuationHints(siblings);
+    if (hints) sections.push(hints);
+  } else if (!event.isPullRequest) {
+    // An issue mention: the issue's open wardby pull requests, worded as a Jira issue's are.
+    const hints = openPullRequestHints(siblings);
     if (hints) sections.push(hints);
   }
   const title = event.subject?.title.replace(/\s+/g, " ").trim().slice(0, MAX_TITLE);
@@ -1636,10 +1642,15 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
         return { runIds: [], followUps: [react, reply] };
       }
       // Seeded from the PR's validated marker run: the request it belongs to. Stored state only.
-      const siblings =
-        event.isPullRequest && event.priorRunId
+      // An issue mention is seeded from the issue's recorded pull requests instead.
+      const siblings = event.isPullRequest
+        ? event.priorRunId
           ? await openSiblings(deps.db, event.priorRunId, { repository: event.repository, number: event.number })
-          : [];
+          : []
+        : await openSiblingsForIssue(deps.db, {
+            provider: "github",
+            key: githubIssueKey(event.repository, event.number),
+          });
       const dispatched = await dispatchRun({
         db: deps.db,
         executor: deps.executor,

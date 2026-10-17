@@ -250,6 +250,7 @@ export async function completeIssueStatus(
         noChanges,
         fullReplyFollows: true,
         noPullRequestText: "Done.",
+        fromIssue: true,
         // One comment per request: this status comment carries the agent's answer.
         replyAsAnswer: true,
       });

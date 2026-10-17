@@ -232,6 +232,8 @@ export function outcomeBody(
     packageRefusals?: RegistryRefusalSummary[];
     noChanges?: boolean;
     budgetSentence?: string;
+    /** The run came from an issue (GitHub or Jira): a budget-stopped draft can be continued from the issue too. */
+    fromIssue?: boolean;
     noPullRequestText?: string;
     /** The agent's reply IS the answer (no separate reply comment): shown as written, not quoted. */
     replyAsAnswer?: boolean;
@@ -327,6 +329,7 @@ export function outcomeBody(
         `A sub-run ran out of budget before finishing. ${budgetStoppedChangesSentence(
           refOf(pr),
           pr.outcome === "pull_request_opened",
+          opts.fromIssue === true,
         )}`,
     );
     if (outOfBudget.length > 0) {
@@ -494,6 +497,22 @@ export function isIssueMentionTask(taskOverride: string | null, repository: stri
   return (first === `${opener}]` || first.startsWith(`${opener}: `)) && second === `Repository: ${repository}`;
 }
 
+/** Whether the run was started by a mention on a GitHub issue (not a pull request). Never throws. */
+async function runCameFromGitHubIssue(
+  db: HostStatusDb,
+  status: { provider: string; repository: string; number: number },
+  runId: string,
+): Promise<boolean> {
+  if (status.provider !== "github") return false;
+  try {
+    const run = await db.run.findUnique({ where: { id: runId }, select: { taskOverride: true } });
+    return !!run && isIssueMentionTask(run.taskOverride, status.repository, status.number);
+  } catch (err) {
+    log.warn({ err, runId }, "could not tell whether the run came from an issue");
+    return false;
+  }
+}
+
 /**
  * A GitHub issue's run records the pull requests its coding sub-runs opened
  * or continued, exactly as a Jira issue's does (recordIssuePullRequests, key
@@ -573,6 +592,9 @@ export async function completeHostStatus(
       : fullReplyOf(run, pullRequests, failedChildren);
     const body = outcomeBody(run, status.repository, pullRequests, failedChildren, {
       budgetSentence,
+      fromIssue: failedChildren.some((c) => c.status === "budget_exhausted")
+        ? await runCameFromGitHubIssue(db, status, run.id)
+        : false,
       packageRefusals,
       packageAudit,
       noChanges,

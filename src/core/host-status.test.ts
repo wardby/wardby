@@ -189,6 +189,21 @@ describe("outcomeBody", () => {
     expect(mixed).toMatch(/^❌ A sub-run ran out of budget: `c9`\. A sub-run did not succeed: `c10` \(`failed`\)\./);
   });
 
+  it("points an issue's run to the issue as well as the pull request when its changes were kept", () => {
+    const opened = {
+      outcome: "pull_request_opened" as const,
+      repository: REPO,
+      pullRequestNumber: 42,
+      codeProvider: "github",
+      runId: "c9",
+    };
+    const body = (fromIssue?: boolean) =>
+      outcomeBody(run("succeeded", "done"), REPO, [opened], [{ id: "c9", status: "budget_exhausted" }], { fromIssue });
+    expect(body(true)).toContain("in draft PR #42; comment `@wardby` on it or on the issue it came from to continue.");
+    expect(body(false)).toContain("in draft PR #42; comment `@wardby` on it to continue.");
+    expect(body()).toContain("in draft PR #42; comment `@wardby` on it to continue.");
+  });
+
   it("says a sub-run stopped at its budget kept its changes in a pull request it can be continued from", () => {
     const opened = {
       outcome: "pull_request_opened" as const,
@@ -637,6 +652,19 @@ describe("completeHostStatus records a GitHub issue's pull requests", () => {
         openedByRunId: "c1",
       },
     });
+  });
+
+  it("the budget-stopped note names the issue only when the run came from an issue", async () => {
+    const issueNote = "on it or on the issue it came from to continue";
+    const forIssue = recordingDb(issueTask);
+    const issueHost = host();
+    await completeHostStatus(forIssue as never, finished, { github: issueHost });
+    expect(JSON.stringify(issueHost.editComment.mock.calls)).toContain(issueNote);
+    const forPr = recordingDb(prTask);
+    const prHost = host();
+    await completeHostStatus(forPr as never, finished, { github: prHost });
+    expect(JSON.stringify(prHost.editComment.mock.calls)).not.toContain(issueNote);
+    expect(JSON.stringify(prHost.editComment.mock.calls)).toContain("on it to continue");
   });
 
   it("a pull request mention records nothing", async () => {

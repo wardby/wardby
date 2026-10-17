@@ -71,10 +71,11 @@ export function budgetStoppedTaskSection(request: string): string {
 /**
  * How to continue a budget-stopped run's pushed changes, after "ran out of
  * budget before finishing". `ref` names the pull request (`#42`,
- * `owner/repo#42`), `draft` when this run opened it. Status comments are
+ * `owner/repo#42`), `draft` when this run opened it, `fromIssue` when the
+ * run came from an issue (GitHub or Jira), which can be mentioned too. Status comments are
  * posted by the App, and a bot-authored comment never starts a run, so the
  * mention here is safe.
  */
-export function budgetStoppedChangesSentence(ref: string, draft: boolean): string {
-  return `The changes so far are in ${draft ? "draft PR " : ""}${ref}; comment \`@wardby\` on it to continue.`;
+export function budgetStoppedChangesSentence(ref: string, draft: boolean, fromIssue = false): string {
+  return `The changes so far are in ${draft ? "draft PR " : ""}${ref}; comment \`@wardby\` on it${fromIssue ? " or on the issue it came from" : ""} to continue.`;
 }

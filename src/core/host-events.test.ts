@@ -19,8 +19,10 @@ import { spanHash } from "../knowledge/span-hash.js";
 vi.mock("./related-pull-requests.js", async (orig) => ({
   ...(await orig<typeof import("./related-pull-requests.js")>()),
   openSiblings: vi.fn(async () => []),
+  openSiblingsForIssue: vi.fn(async () => []),
 }));
-import { openSiblings } from "./related-pull-requests.js";
+import { openPullRequestHints, openSiblings, openSiblingsForIssue } from "./related-pull-requests.js";
+import { githubIssueKey } from "./issue-bridge.js";
 vi.mock("./mark-ready.js", () => ({ maybeMarkReady: vi.fn(async () => "off") }));
 import { maybeMarkReady } from "./mark-ready.js";
 import { mentionTaskText, siblingContinuationHints } from "./host-events.js";
@@ -354,6 +356,38 @@ describe("routeHostEvent mention task text", () => {
     expect(isIssueMentionTask(mentionTaskText(issue), REPO, 8)).toBe(false);
     expect(isIssueMentionTask(mentionTaskText(base), REPO, 7)).toBe(false);
     expect(isIssueMentionTask(mentionTaskText({ ...base, priorRunId: "run_1" }), REPO, 7)).toBe(false);
+  });
+
+  describe("a GitHub issue mention's continuation hint", () => {
+    const issue = { ...base, isPullRequest: false };
+    const open = [{ repository: "acme/bff", number: 3, openedByRunId: "run_bff-1" }];
+
+    it("carries the shared open pull request hint before the header, and still reads back as an issue mention", () => {
+      const text = mentionTaskText(issue, open);
+      const hint = openPullRequestHints(open);
+      expect(hint).toContain('continuePriorRun set to exactly "run_bff-1"');
+      expect(splitTaskOverride(text).task.startsWith(`${hint}\n\n[GitHub issue #7]`)).toBe(true);
+      expect(isIssueMentionTask(text, REPO, 7)).toBe(true);
+    });
+
+    it("is unchanged with no open pull request", () => {
+      expect(mentionTaskText(issue, [])).toBe(mentionTaskText(issue));
+      expect(mentionTaskText(issue)).not.toContain("continuePriorRun");
+    });
+
+    it("is looked up from the issue's key and dispatched; a pull request mention never looks it up", async () => {
+      vi.mocked(openSiblingsForIssue).mockClear();
+      vi.mocked(openSiblingsForIssue).mockResolvedValueOnce(open);
+      const { task } = await taskFor(issue);
+      expect(vi.mocked(openSiblingsForIssue).mock.calls[0][1]).toEqual({
+        provider: "github",
+        key: githubIssueKey(REPO, 7),
+      });
+      expect(task).toContain('continuePriorRun set to exactly "run_bff-1"');
+      vi.mocked(openSiblingsForIssue).mockClear();
+      await taskFor(base);
+      expect(openSiblingsForIssue).not.toHaveBeenCalled();
+    });
   });
 
   describe("sibling continuation hints", () => {

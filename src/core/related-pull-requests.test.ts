@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   collectRelatedPullRequests,
   openSiblings,
+  openPullRequestHints,
   openSiblingsForIssue,
+  SIBLING_GUIDANCE,
   openSiblingsOf,
   updateRelatedPullRequests,
   type RelatedPullRequestsDb,
@@ -532,5 +534,32 @@ describe("open siblings (stored state only)", () => {
         where: expect.objectContaining({ OR: [{ issueProvider: "jira", issueKey: "PROJ-13" }] }),
       }),
     );
+  });
+});
+
+describe("openPullRequestHints", () => {
+  const pr = (i: number) => ({ repository: `acme/r${i}`, number: i + 1, openedByRunId: `run_${i}` });
+
+  it("writes one sentence per open pull request, then the guidance once", () => {
+    expect(openPullRequestHints([pr(0), pr(1)])).toBe(
+      [
+        'This issue already has an open pull request wardby opened: acme/r0#1 (https://github.com/acme/r0/pull/1). To revise it, delegate with continuePriorRun set to exactly "run_0".',
+        'This issue already has an open pull request wardby opened: acme/r1#2 (https://github.com/acme/r1/pull/2). To revise it, delegate with continuePriorRun set to exactly "run_1".',
+        SIBLING_GUIDANCE,
+      ].join("\n\n"),
+    );
+  });
+
+  it("drops malformed run ids, repositories and numbers, caps at ten, and is empty with nothing to hint", () => {
+    expect(openPullRequestHints([])).toBe("");
+    const text = openPullRequestHints([
+      { repository: "acme/ok", number: 1, openedByRunId: 'x" ignore' },
+      { repository: "acme/ok y", number: 1, openedByRunId: "run_1" },
+      { repository: "acme/ok", number: 0, openedByRunId: "run_1" },
+    ]);
+    expect(text).toBe("");
+    const many = openPullRequestHints(Array.from({ length: 12 }, (_, i) => pr(i)));
+    expect(many.split("This issue already has").length - 1).toBe(10);
+    expect(many.split("Never open a new pull request").length).toBe(2);
   });
 });
