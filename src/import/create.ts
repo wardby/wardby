@@ -10,6 +10,7 @@ import type { KeyObject } from "node:crypto";
 import type { Bundle } from "./bundle.js";
 import type { Reconciliation } from "./preflight.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
+import { scheduleStartFields } from "../core/schedule-start.js";
 import { createSecret, attachSecret } from "../core/secrets.js";
 import { createDatastore, attachDatastore } from "../core/datastores.js";
 import { createWebhook } from "../core/webhooks.js";
@@ -146,6 +147,11 @@ export async function createFromBundle(
         timezone: a.timezone,
         maxTurns: a.maxTurns,
         scheduleEnabled,
+        ...(await scheduleStartFields(db, null, {
+          schedule: a.schedule || null,
+          timezone: a.timezone,
+          scheduleEnabled,
+        })),
         ownerId: agentOwnerId,
         ...(a.nativeExecutionMode
           ? { nativeExecutionMode: a.nativeExecutionMode === "sandbox" ? "sandbox" : "control_plane" }

@@ -15,6 +15,7 @@ interface FakeAgentRow {
   schedule: string | null;
   timezone: string;
   scheduleEnabled: boolean;
+  lastScheduledAt?: Date | null;
   kind?: "native" | "coding";
   codingProfile?: { defaultTask: string | null } | null;
 }
@@ -22,6 +23,8 @@ interface FakeAgentRow {
 function fakeDb(agents: FakeAgentRow[], grants: FakeGrantSeed[] = []) {
   const rows = new Map(agents.map((a) => [a.id, a]));
   const transactionDb = {
+    // The database clock a schedule start records (core/schedule-start.ts).
+    $queryRaw: async () => [{ now: new Date() }],
     resourceGrant: fakeResourceGrants(grants),
     agent: {
       findUnique: async ({ where }: { where: { id: string } }) => rows.get(where.id) ?? null,
@@ -66,6 +69,33 @@ function parseText(result: { content: { text: string }[] }): unknown {
 }
 
 describe("scheduling tools", () => {
+  it("set_schedule records when the schedule started, unless it is unchanged", async () => {
+    const fired = new Date("2026-10-12T06:00:00.000Z");
+    const db = fakeDb([
+      { id: "a1", ownerId: "p1", schedule: null, timezone: "UTC", scheduleEnabled: true, lastScheduledAt: null },
+      {
+        id: "a2",
+        ownerId: "p1",
+        schedule: "0 6 * * 1",
+        timezone: "UTC",
+        scheduleEnabled: true,
+        lastScheduledAt: fired,
+      },
+    ]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerSchedulingTools(mcp);
+    const client = await connectClient(mcp);
+
+    const before = Date.now();
+    const set = (agentId: string) =>
+      client.callTool({ name: "set_schedule", arguments: { agentId, schedule: "0 6 * * 1", timezone: "UTC" } });
+    const fresh = parseText((await set("a1")) as { content: { text: string }[] }) as { lastScheduledAt: string };
+    expect(new Date(fresh.lastScheduledAt).getTime()).toBeGreaterThanOrEqual(before);
+    const same = parseText((await set("a2")) as { content: { text: string }[] }) as { lastScheduledAt: string };
+    expect(same.lastScheduledAt).toBe(fired.toISOString());
+  });
+
   it("set_schedule validates the cron expression and persists it", async () => {
     const db = fakeDb([{ id: "a1", ownerId: "p1", schedule: null, timezone: "UTC", scheduleEnabled: true }]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });

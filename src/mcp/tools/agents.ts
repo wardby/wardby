@@ -35,6 +35,7 @@ import { assertAgentModelAvailable } from "../../core/run-pricing.js";
 import { ModelUnavailableError } from "../../providers/llm/catalog-types.js";
 import { currentModelCatalog } from "../../providers/llm/catalog-store.js";
 import { validateCronExpression } from "../../core/cron.js";
+import { scheduleStartFields } from "../../core/schedule-start.js";
 import { modelSupportedEfforts } from "../../providers/llm/routing.js";
 import { PROJECT_KEY } from "../../providers/issue-tracker/types.js";
 import { LLM_EFFORT_LEVELS, isLlmEffort } from "../../providers/llm/types.js";
@@ -653,6 +654,11 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       const agent = await ctx.db.agent.create({
         data: {
           ...agentData,
+          ...(await scheduleStartFields(ctx.db, null, {
+            schedule: agentData.schedule ?? null,
+            timezone: agentData.timezone ?? "UTC",
+            scheduleEnabled: agentData.scheduleEnabled ?? true,
+          })),
           ownerId: ctx.principal.id,
           ...(codingProfile && authorization
             ? { codingProfile: { create: { ...codingProfile, ...profileStamp(authorization) } } }
@@ -989,10 +995,16 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
               : existing.codingProfile
                 ? { update: { ...nextProfile!, ...stamp, ...trace } }
                 : { create: { ...nextProfile!, ...stamp, ...trace } };
+          const scheduleStart = await scheduleStartFields(tx, existing, {
+            schedule: nextSchedule,
+            timezone: nextTimezone,
+            scheduleEnabled: nextScheduleEnabled,
+          });
           return tx.agent.update({
             where: { id },
             data: {
               ...updates,
+              ...scheduleStart,
               ...(profileMutation ? { codingProfile: profileMutation } : {}),
             },
             include: { codingProfile: true },
