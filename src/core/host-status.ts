@@ -33,9 +33,11 @@ import {
 } from "../coding/continuation-wording.js";
 import type { CodeReviewHost, ReviewHostProvider, ReviewHostRegistry } from "../providers/review-host/types.js";
 import { loadBudgetSentence } from "./budget-wording.js";
+import { continuedForAnotherIssue, githubIssueKey, recordIssuePullRequests } from "./issue-bridge.js";
 import { logger } from "./logger.js";
 import { providerClassOfCategory, providerSentence, type ProviderFailureClass } from "./provider-wording.js";
 import { defuseMentions, splitReply } from "./reply-parts.js";
+import { splitTaskOverride } from "./untrusted-content.js";
 
 const log = logger.child({ module: "host-status" });
 
@@ -71,7 +73,13 @@ const TERMINAL = new Set<string>(TERMINAL_RUN_STATUSES);
 
 export type HostStatusDb = Pick<
   PrismaClient,
-  "runHostStatus" | "run" | "runBudgetEvent" | "registryFetch" | "registryAuditRecord"
+  | "runHostStatus"
+  | "run"
+  | "runBudgetEvent"
+  | "registryFetch"
+  | "registryAuditRecord"
+  | "issuePullRequest"
+  | "codingRun"
 >;
 
 export type FinishedRun = Pick<Run, "id" | "status" | "finalText">;
@@ -467,6 +475,73 @@ export async function collectRunOutcome(
 }
 
 /**
+ * Whether a mention run's stored task is a mention on GitHub issue `number`
+ * of `repository`, not on a pull request. Read from the task's header block
+ * (mentionTaskText's "[GitHub issue #n…]" then "Repository: …"), which only
+ * wardby writes: the first section that opens with "[GitHub " is that header
+ * (any continuation hints before it are wardby's too), and everything a
+ * person wrote comes after it, so a comment cannot pass for an issue header.
+ * A review fix round's header names a PR.
+ */
+export function isIssueMentionTask(taskOverride: string | null, repository: string, number: number): boolean {
+  if (!taskOverride) return false;
+  const header = splitTaskOverride(taskOverride)
+    .task.split("\n\n")
+    .find((section) => section.startsWith("[GitHub "));
+  if (!header) return false;
+  const [first = "", second] = header.split("\n");
+  const opener = `[GitHub issue #${number}`;
+  return (first === `${opener}]` || first.startsWith(`${opener}: `)) && second === `Repository: ${repository}`;
+}
+
+/**
+ * A GitHub issue's run records the pull requests its coding sub-runs opened
+ * or continued, exactly as a Jira issue's does (recordIssuePullRequests, key
+ * githubIssueKey): a later mention on the issue continues them. Only for a
+ * mention on an issue (isIssueMentionTask), never on a pull request; a pull
+ * request continued from another tracked issue's run stays that issue's.
+ * Safe to repeat (a retried completion adds no row). Never throws.
+ */
+async function recordGitHubIssuePullRequests(
+  db: HostStatusDb,
+  status: { provider: string; repository: string; number: number },
+  runId: string,
+  pullRequests: PullRequestOutcome[],
+): Promise<void> {
+  if (status.provider !== "github") return;
+  const recordable = pullRequests.filter(
+    (pr): pr is PullRequestOutcome & { runId: string; pullRequestUrl: string } => !!pr.pullRequestUrl && !!pr.runId,
+  );
+  if (recordable.length === 0) return;
+  try {
+    const run = await db.run.findUnique({ where: { id: runId }, select: { agentId: true, taskOverride: true } });
+    if (!run || !isIssueMentionTask(run.taskOverride, status.repository, status.number)) return;
+    const issue = { provider: "github", key: githubIssueKey(status.repository, status.number) };
+    const foreign = await continuedForAnotherIssue(
+      db,
+      recordable.map((pr) => pr.runId),
+      issue,
+    );
+    await recordIssuePullRequests(
+      db,
+      issue,
+      recordable
+        .filter((pr) => !foreign.has(pr.runId))
+        .map((pr) => ({
+          codeProvider: pr.codeProvider,
+          repository: pr.repository,
+          number: pr.pullRequestNumber,
+          url: pr.pullRequestUrl,
+          agentId: run.agentId,
+          openedByRunId: pr.runId,
+        })),
+    );
+  } catch (err) {
+    log.warn({ err, runId }, "could not record the GitHub issue's pull requests");
+  }
+}
+
+/**
  * Writes a finished run's outcome to its status comment and marks it
  * complete: edits the comment when it exists; when it does not yet, posts the
  * outcome as a new comment only if `postIfMissing` (the reconciler, well after
@@ -490,6 +565,7 @@ export async function completeHostStatus(
     if (!host) return;
     const { pullRequests, failedChildren, budgetSentence, packageRefusals, noChanges, packageAudit } =
       await collectRunOutcome(db, run);
+    await recordGitHubIssuePullRequests(db, status, run.id, pullRequests);
     // A blocked status is built from the refusals alone, so the agent's reply is not posted after it.
     const fullReply = isBlockedByRefusals(run, { pullRequests, failedChildren, packageRefusals, noChanges })
       ? null

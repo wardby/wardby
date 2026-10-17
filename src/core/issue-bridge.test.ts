@@ -1,8 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setWorkflowEventSink, type WorkflowEventInput } from "./workflow-events.js";
 import { Prisma } from "#prisma";
-import type { IssueTracker } from "../providers/issue-tracker/types.js";
-import { handlePullRequestClosed, recordPullRequests, type BridgedPullRequest } from "./issue-bridge.js";
+import { projectOf, type IssueTracker } from "../providers/issue-tracker/types.js";
+import {
+  githubIssueKey,
+  handlePullRequestClosed,
+  recordIssuePullRequests,
+  recordPullRequests,
+  type BridgedPullRequest,
+} from "./issue-bridge.js";
 
 function tracker(): IssueTracker {
   return {
@@ -170,10 +176,30 @@ describe("handlePullRequestClosed", () => {
     expect(vi.mocked(t.comment).mock.calls[1][0]).toBe("PROJ-8");
   });
 
-  it("no trackers: no-op", async () => {
+  it("no trackers: still marks the row, and calls no tracker", async () => {
     const d = db();
     await handlePullRequestClosed(d as never, undefined, closed(true));
-    expect(d.issuePullRequest.findMany).not.toHaveBeenCalled();
+    expect(d.issuePullRequest.updateMany).toHaveBeenCalledWith({
+      where: { id: "ipr-1", state: "open" },
+      data: { state: "merged" },
+    });
+    expect(d.agentIssueProject.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("a GitHub issue's pair is marked on merge and on close, with or without trackers", async () => {
+    const githubRow = { ...ROW, issueProvider: "github", issueKey: `${REPO}#5` };
+    for (const [trackers, merged] of [
+      [undefined, true],
+      [{ jira: tracker() }, false],
+    ] as const) {
+      const d = db([githubRow]);
+      await handlePullRequestClosed(d as never, trackers, closed(merged));
+      expect(d.issuePullRequest.updateMany).toHaveBeenCalledWith({
+        where: { id: "ipr-1", state: "open" },
+        data: { state: merged ? "merged" : "closed" },
+      });
+      expect(d.agentIssueProject.findUnique).not.toHaveBeenCalled();
+    }
   });
 
   it("a failing lookup (before any row is claimed) throws, so the delivery is rolled back and redelivered", async () => {
@@ -319,6 +345,52 @@ describe("recordPullRequests", () => {
     store.issuePullRequest.findUnique.mockRejectedValue(new Error("db"));
     await expect(recordPullRequests(store as never, t, recordInput([opened(12)]))).resolves.toEqual({ notes: [] });
     expect(t.transitionTo).not.toHaveBeenCalled();
+  });
+});
+
+describe("githubIssueKey", () => {
+  it("is <owner>/<repo>#<number>, the repository normalised", () => {
+    expect(githubIssueKey("Your-Org/Your-Repo", 5)).toBe("your-org/your-repo#5");
+    expect(githubIssueKey(`https://github.com/${REPO}`, 12)).toBe(`${REPO}#12`);
+  });
+
+  it("its project is the repository (a Jira key's stays its project key)", () => {
+    expect(projectOf(githubIssueKey("my-org/my-repo", 5))).toBe("my-org/my-repo");
+    expect(projectOf("PROJ-7")).toBe("PROJ");
+    expect(projectOf("MY_PROJ-12")).toBe("MY_PROJ");
+  });
+});
+
+describe("recordIssuePullRequests", () => {
+  const pr = (n: number) => ({
+    codeProvider: "github",
+    repository: REPO,
+    number: n,
+    url: `https://github.com/${REPO}/pull/${n}`,
+    agentId: "a1",
+    openedByRunId: `r-code-${n}`,
+  });
+  const issue = { provider: "github", key: `${REPO}#5` };
+
+  it("records one open row per pair, and a repeat adds none", async () => {
+    const store = pairStore();
+    await recordIssuePullRequests(store as never, issue, [pr(12), pr(13)]);
+    await recordIssuePullRequests(store as never, issue, [pr(12)]);
+    expect(store.rows).toEqual([
+      expect.objectContaining({ issueProvider: "github", issueKey: `${REPO}#5`, number: 12, state: "open" }),
+      expect.objectContaining({ issueProvider: "github", issueKey: `${REPO}#5`, number: 13, state: "open" }),
+    ]);
+    expect(store.rows[0]).toMatchObject({ codeProvider: "github", repository: REPO, agentId: "a1" });
+    expect(store.rows[0].openedByRunId).toBe("r-code-12");
+  });
+
+  it("never reopens a settled pair; never throws", async () => {
+    const store = pairStore([{ ...ROW, issueProvider: "github", issueKey: `${REPO}#5`, state: "merged" }]);
+    await recordIssuePullRequests(store as never, issue, [pr(12)]);
+    expect(store.rows).toHaveLength(1);
+    expect(store.rows[0].state).toBe("merged");
+    store.issuePullRequest.findUnique.mockRejectedValue(new Error("db"));
+    await expect(recordIssuePullRequests(store as never, issue, [pr(14)])).resolves.toBeUndefined();
   });
 });
 

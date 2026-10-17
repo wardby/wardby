@@ -1643,12 +1643,14 @@ model IssueFingerprint {
   @@index([createdByRunId])
 }
 
-/// A pull request wardby opened for a tracker issue (the Jira -> code bridge). Provider-neutral on both sides.
+/// A pull request wardby opened for an issue (a Jira issue, a GitHub issue): one shape for every issue
+/// provider. Provider-neutral on both sides.
 /// Deliberately no foreign keys to Agent or Run: audit-style rows that survive agent/run deletion.
 model IssuePullRequest {
   id            String   @id @default(cuid())
-  /// "jira"
+  /// "jira" or "github" (an issue on a repository).
   issueProvider String
+  /// A Jira key ("PROJ-7"), or a GitHub issue's "<owner>/<repo>#<number>" (githubIssueKey).
   issueKey      String
   /// "github" today; "bitbucket" next.
   codeProvider  String

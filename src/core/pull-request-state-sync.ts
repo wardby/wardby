@@ -27,8 +27,8 @@ export async function syncOpenPullRequestStates(
   trackers: IssueTrackerRegistry | undefined,
   now: Date = new Date(),
 ): Promise<number> {
-  // handlePullRequestClosed needs trackers; without them no IssuePullRequest rows are written anyway.
-  if (!hosts || !trackers) return 0;
+  // Without trackers the rows (a GitHub issue's, say) are still settled; only tracker actions are skipped.
+  if (!hosts) return 0;
   let settled = 0;
   try {
     const rows = await db.issuePullRequest.findMany({

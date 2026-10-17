@@ -1,9 +1,11 @@
 /**
  * Links a run's pull requests to the issue that started it: records each
- * issue/PR pair, puts a web link on the issue, and applies the link's
- * configured status move. Provider-neutral: a code host is only ever
- * { provider, repository, number }. The issue key comes from the run tree
- * (RunIssueStatus), never from model output. The status move is a control-plane
+ * issue/PR pair (recordIssuePullRequests, the same for a Jira issue and a
+ * GitHub issue), and for a tracker issue puts a web link on the issue and
+ * applies the link's configured status move. Provider-neutral: a code host is
+ * only ever { provider, repository, number }. The issue key comes from the run
+ * tree (RunIssueStatus, or a GitHub mention's RunHostStatus), never from model
+ * output. The status move is a control-plane
  * action (not gated by allowedTransitions). Nothing here throws, except
  * handlePullRequestClosed's lookup before it has claimed anything (so the
  * webhook delivery is rolled back and redelivered).
@@ -15,6 +17,7 @@ import {
   type IssueTrackerProvider,
   type IssueTrackerRegistry,
 } from "../providers/issue-tracker/types.js";
+import { normalizeGitHubRepository } from "../coding/protocol.js";
 import { logger } from "./logger.js";
 import { dedupeKeys, emitWorkflowEvent } from "./workflow-events.js";
 
@@ -46,24 +49,43 @@ export const pullRequestGlobalId = (pr: Pick<BridgedPullRequest, "codeProvider" 
 
 type PairState = "created" | "open" | "settled" | "unknown";
 
+/** The issue side of an IssuePullRequest row: { provider: "jira", key: "PROJ-7" } or githubIssueKey's. */
+export interface RecordedIssue {
+  provider: string;
+  key: string;
+}
+
+/** One pull request to record against an issue. */
+export interface IssuePullRequestRecord {
+  codeProvider: string;
+  repository: string;
+  number: number;
+  url: string;
+  /** The issue-linked agent whose run tree opened it. */
+  agentId: string;
+  /** The coding run that opened it (the continuePriorRun target for follow-ups). */
+  openedByRunId: string;
+}
+
+/** A GitHub issue's IssuePullRequest key: "<owner>/<repo>#<number>", the repository normalised. */
+export function githubIssueKey(repository: string, number: number): string {
+  return `${normalizeGitHubRepository(repository)}#${number}`;
+}
+
 /**
  * Makes sure the issue/PR pair has a row, without ever overwriting one: a new
  * row is "created"; an existing open one gets its url refreshed ("open"); a
  * merged or closed one is left alone ("settled"). A lost create race (P2002)
  * reads back the winner's row. "unknown" when the store could not be read.
  */
-async function ensurePair(
-  db: IssueBridgeDb,
-  input: RecordPullRequestsInput,
-  pr: BridgedPullRequest,
-): Promise<PairState> {
+async function ensurePair(db: IssueBridgeDb, issue: RecordedIssue, pr: IssuePullRequestRecord): Promise<PairState> {
   const where = {
     codeProvider_repository_number_issueProvider_issueKey: {
       codeProvider: pr.codeProvider,
       repository: pr.repository,
       number: pr.number,
-      issueProvider: input.issueProvider,
-      issueKey: input.issueKey,
+      issueProvider: issue.provider,
+      issueKey: issue.key,
     },
   };
   try {
@@ -72,13 +94,13 @@ async function ensurePair(
       try {
         await db.issuePullRequest.create({
           data: {
-            issueProvider: input.issueProvider,
-            issueKey: input.issueKey,
+            issueProvider: issue.provider,
+            issueKey: issue.key,
             codeProvider: pr.codeProvider,
             repository: pr.repository,
             number: pr.number,
             url: pr.url,
-            agentId: input.agentId,
+            agentId: pr.agentId,
             openedByRunId: pr.openedByRunId,
           },
         });
@@ -94,11 +116,63 @@ async function ensurePair(
     return "open";
   } catch (err) {
     log.warn(
-      { err, issueKey: input.issueKey, repository: pr.repository, number: pr.number },
+      { err, issueKey: issue.key, repository: pr.repository, number: pr.number },
       "could not record the issue/PR pair",
     );
     return "unknown";
   }
+}
+
+/** Records each pair (ensurePair), in order; each state lines up with its pull request. Never throws. */
+async function recordPairs(
+  db: IssueBridgeDb,
+  issue: RecordedIssue,
+  prs: readonly IssuePullRequestRecord[],
+): Promise<PairState[]> {
+  const states: PairState[] = [];
+  for (const pr of prs) states.push(await ensurePair(db, issue, pr));
+  return states;
+}
+
+/**
+ * Records the pull requests a run opened or continued for an issue, the same
+ * for every issue provider (a Jira issue, a GitHub issue): one IssuePullRequest
+ * row per issue/PR pair, state "open", never duplicated or overwritten (a
+ * merged or closed pair stays so; an open one gets its url refreshed). These
+ * rows are what a later request on the issue continues from, and what
+ * handlePullRequestClosed settles. Safe to repeat; never throws.
+ */
+export async function recordIssuePullRequests(
+  db: IssueBridgeDb,
+  issue: RecordedIssue,
+  prs: readonly IssuePullRequestRecord[],
+): Promise<void> {
+  await recordPairs(db, issue, prs);
+}
+
+/**
+ * The coding runs (of `runIds`) that continued a pull request opened for a
+ * different tracked issue: their PR belongs to that issue, not this one. A
+ * continued PR with no issue, or this same issue, is fine.
+ */
+export async function continuedForAnotherIssue(
+  db: Pick<PrismaClient, "codingRun">,
+  runIds: string[],
+  issue: RecordedIssue,
+): Promise<Set<string>> {
+  if (runIds.length === 0) return new Set();
+  const rows = await db.codingRun.findMany({
+    where: { runId: { in: runIds } },
+    select: { runId: true, rootCodingRun: { select: { issueProvider: true, issueKey: true } } },
+  });
+  return new Set(
+    rows
+      .filter(({ rootCodingRun: root }) => {
+        if (!root?.issueKey) return false;
+        return root.issueKey !== issue.key || root.issueProvider !== issue.provider;
+      })
+      .map((row) => row.runId),
+  );
 }
 
 /**
@@ -118,8 +192,13 @@ export async function recordPullRequests(
   try {
     let newlyOpened = false;
     const opened: BridgedPullRequest[] = [];
-    for (const pr of input.pullRequests) {
-      const state = await ensurePair(db, input, pr);
+    const states = await recordPairs(
+      db,
+      { provider: input.issueProvider, key: input.issueKey },
+      input.pullRequests.map((pr) => ({ ...pr, agentId: input.agentId })),
+    );
+    for (const [i, pr] of input.pullRequests.entries()) {
+      const state = states[i];
       if (state === "created" && pr.outcome === "pull_request_opened") {
         newlyOpened = true;
         opened.push(pr);
@@ -175,8 +254,9 @@ export interface ClosedPullRequest {
 
 /**
  * A pull request wardby recorded against an issue was merged or closed: marks
- * each still-open pair, and, where the agent's link to the issue's project is
- * still write, comments on the issue (and on merge resolves the web link and
+ * each still-open pair (every issue provider, configured tracker or not),
+ * and, for an issue in a configured tracker where the agent's link to the
+ * issue's project is still write, comments on the issue (and on merge resolves the web link and
  * applies the link's onPullRequestMerged move). Only rows wardby wrote are
  * touched, matched by the host's own identity for the PR — nothing from the
  * PR's text. The row is claimed first (open → merged/closed), so a duplicate
@@ -189,7 +269,6 @@ export async function handlePullRequestClosed(
   trackers: IssueTrackerRegistry | undefined,
   pr: ClosedPullRequest,
 ): Promise<void> {
-  if (!trackers) return;
   const where = { codeProvider: pr.codeProvider, repository: pr.repository, number: pr.number };
   // Not caught: nothing is claimed yet, and a throw rolls back the delivery so it is redelivered.
   const rows = await db.issuePullRequest.findMany({ where: { ...where, state: "open" } });
@@ -219,7 +298,8 @@ export async function handlePullRequestClosed(
       });
       if (claimed.count === 0) continue;
       claimedRow = true;
-      const tracker = trackers[row.issueProvider as IssueTrackerProvider];
+      // A pair with no configured tracker (a GitHub issue's, say) is only marked.
+      const tracker = trackers?.[row.issueProvider as IssueTrackerProvider];
       if (!tracker) continue;
       const link = await db.agentIssueProject.findUnique({
         where: {
