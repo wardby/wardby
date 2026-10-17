@@ -29,6 +29,7 @@ import {
 import type { ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "../providers/executor/types.js";
 import { nativeRunLabel } from "./docker-isolation.js";
 import type { NativeWorkerState } from "./docker-launcher.js";
+import { HEARTBEAT_TIMEOUT_MS } from "../core/timing.js";
 import { startSandboxRun, type DetachedWorkerLauncher, type WorkerHandle } from "./launch.js";
 import { NATIVE_SANDBOX_CAPACITY } from "./kubernetes-launcher.js";
 import { PrismaGatewayLedger, type GatewayLedgerDb } from "./ledger.js";
@@ -63,6 +64,8 @@ export interface NativeSandboxExecutorOptions {
   maxConcurrent?: number;
   /** How long a stopped run's worker gets to exit on its own before it is killed (default NATIVE_SANDBOX_STOP_GRACE_MS). */
   stopGraceMs?: number;
+  /** How often a launching run's heartbeat is refreshed (default a third of HEARTBEAT_TIMEOUT_MS). */
+  heartbeatIntervalMs?: number;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -110,7 +113,19 @@ export class NativeSandboxExecutor implements Executor {
     let outcome: Awaited<ReturnType<typeof startSandboxRun>>;
     try {
       const url = launcher.resolveGatewayUrl ? await launcher.resolveGatewayUrl() : gatewayUrl;
-      outcome = await startSandboxRun({ runId, providers, db, gatewayUrl: url, launcher });
+      // A cold launch (a low-power gateway wake, a sandbox node scale-up) can outlast the reconciler's
+      // heartbeat timeout, and the worker has no pod to find yet: beat for it until it exists. The
+      // launch's own timeouts bound this (wake, pod ready, isolation proof), each failing the run.
+      outcome = await this.whileHeartbeating(runId, () =>
+        startSandboxRun({
+          runId,
+          providers,
+          db,
+          gatewayUrl: url,
+          launcher,
+          stillWanted: () => this.stillWanted(runId),
+        }),
+      );
     } catch (err) {
       // A concurrent start won the race for the run's one session: attach to its worker.
       if (!isUniqueViolation(err)) {
@@ -129,6 +144,38 @@ export class NativeSandboxExecutor implements Executor {
       select: { deadlineAt: true },
     });
     this.watch(runId, outcome.handle, session.deadlineAt);
+  }
+
+  /** Refreshes a still-live run's heartbeat while `work` runs. */
+  private async whileHeartbeating<T>(runId: string, work: () => Promise<T>): Promise<T> {
+    const beat = () =>
+      this.options.db.run
+        .updateMany({
+          where: { id: runId, status: { in: ["pending", "running"] } },
+          data: { heartbeatAt: new Date(this.now()) },
+        })
+        .catch((err: unknown) => executorLog.warn({ err, runId }, "could not refresh a launching run's heartbeat"));
+    const timer = setInterval(
+      () => void beat(),
+      this.options.heartbeatIntervalMs ?? Math.floor(HEARTBEAT_TIMEOUT_MS / 3),
+    );
+    // Never hold the process open for a heartbeat: shutdown should not wait on one.
+    timer.unref?.();
+    try {
+      return await work();
+    } finally {
+      clearInterval(timer);
+    }
+  }
+
+  /** The run is still live and its session open: a worker launched now would have work to do. */
+  private async stillWanted(runId: string): Promise<boolean> {
+    const { db } = this.options;
+    const [run, session] = await Promise.all([
+      db.run.findUnique({ where: { id: runId }, select: { status: true } }),
+      db.nativeGatewaySession.findUnique({ where: { runId }, select: { status: true } }),
+    ]);
+    return !!run && (run.status === "pending" || run.status === "running") && session?.status === "active";
   }
 
   /** Watches one worker in this process: its exit, and its deadline. */

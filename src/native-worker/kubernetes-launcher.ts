@@ -37,7 +37,7 @@ import {
   nativeKubernetesNames,
   nativeWarmWorkerName,
 } from "./kubernetes-isolation.js";
-import type { WorkerHandle } from "./launch.js";
+import { NATIVE_SANDBOX_LAUNCH_ABANDONED, type WorkerHandle, type WorkerLaunchOptions } from "./launch.js";
 import type { WorkerInput } from "./protocol.js";
 import type { ManagedWorkerLauncher } from "./sandbox-executor.js";
 import { warmDeliveryCommand } from "./warm-delivery.js";
@@ -148,7 +148,7 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher, Wa
     }
   }
 
-  async launch(input: WorkerInput): Promise<WorkerHandle> {
+  async launch(input: WorkerInput, launchOptions: WorkerLaunchOptions = {}): Promise<WorkerHandle> {
     const runId = input.runId;
     // Low-power mode: the gateway may be scaled to zero; wake it before anything is created. Guarded
     // so mode off adds no await.
@@ -157,6 +157,12 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher, Wa
         timeoutMs: wakeTimeoutMs(this.options.readyTimeoutMs ?? 120_000),
         runId,
       });
+    }
+    // A wake can take minutes: a run stopped meanwhile gets no pod.
+    if (launchOptions.stillWanted && !(await launchOptions.stillWanted())) {
+      throw new Error(
+        `${NATIVE_SANDBOX_LAUNCH_ABANDONED}: the run ended while its worker was launching; no worker was started.`,
+      );
     }
     const names = nativeKubernetesNames(runId);
     if ((await this.inspect(runId)).state === "missing") {

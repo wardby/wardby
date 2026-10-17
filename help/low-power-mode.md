@@ -46,7 +46,11 @@ only when `WARDBY_LOW_POWER=1`.
   a sandbox run does the same for the gateway. The wait is at least 5 minutes.
   A `KUBERNETES_READY_TIMEOUT_MS` (proxy) or `NATIVE_SANDBOX_READY_TIMEOUT_MS`
   (gateway) above that, set on the control-plane Deployment, raises it. Expect
-  about 1 to 2 minutes extra on a cold node. Log: `power: proxy woke`.
+  about 1 to 2 minutes extra on a cold node. Log: `power: proxy woke`. A
+  sandbox run woken this way may then wait for a gVisor node for its worker
+  pod, so its first model call can come several minutes after it started. From
+  0.6.1 it shows as running the whole time and is not reaped as orphaned; only
+  the wake and pod-start limits above can fail it.
 - **Preflight.** The first coding run after a control-plane restart also runs
   the cluster preflight canary, because start-up preflight is deferred while the
   proxy sleeps (`kubernetes_preflight_deferred`).
@@ -107,6 +111,8 @@ full table.
 
 - [`low_power_wake_timeout`](errors/low-power-wake-timeout.md): the target did
   not become ready in time, or its Deployment does not exist.
+- `native_sandbox_launch_abandoned` (0.6.1 and later): a sandbox run was
+  stopped while the gateway woke, so no worker pod was made.
 - [`low_power_disabled`](errors/low-power-disabled.md): `power_sleep` was
   called while the mode is off.
 - [`low_power_scale_forbidden`](errors/low-power-scale-forbidden.md): the

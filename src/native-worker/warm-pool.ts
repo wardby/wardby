@@ -15,7 +15,7 @@ import { randomBytes } from "node:crypto";
 import { logger } from "../core/logger.js";
 import { nativeWarmWorkerName } from "./docker-isolation.js";
 import type { NativeWorkerState } from "./docker-launcher.js";
-import type { WorkerHandle } from "./launch.js";
+import type { WorkerHandle, WorkerLaunchOptions } from "./launch.js";
 import type { WorkerInput } from "./protocol.js";
 import type { ManagedWorkerLauncher } from "./sandbox-executor.js";
 import type { PrismaWarmPoolLedger, WarmWorkerRow } from "./warm-pool-ledger.js";
@@ -104,7 +104,7 @@ export class PooledWorkerLauncher implements ManagedWorkerLauncher {
     return (this.options.sleep ?? ((t) => new Promise((resolve) => setTimeout(resolve, t))))(ms);
   }
 
-  async launch(input: WorkerInput): Promise<WorkerHandle> {
+  async launch(input: WorkerInput, launchOptions?: WorkerLaunchOptions): Promise<WorkerHandle> {
     const runId = input.runId;
     const claimed =
       this.options.size > 0
@@ -118,7 +118,7 @@ export class PooledWorkerLauncher implements ManagedWorkerLauncher {
     if (!claimed) {
       if (this.options.size > 0) poolLog.info({ runId, event: "miss" }, "no idle warm worker; launching cold");
       this.nudge();
-      return this.cold.launch(input);
+      return this.cold.launch(input, launchOptions);
     }
     const token = claimed.id;
     this.nudge();
@@ -126,7 +126,7 @@ export class PooledWorkerLauncher implements ManagedWorkerLauncher {
     if (!intact) {
       poolLog.warn({ runId, worker: claimed.name, event: "fallback" }, "claimed warm worker failed re-attest");
       await this.discard(token);
-      return this.cold.launch(input);
+      return this.cold.launch(input, launchOptions);
     }
     try {
       await this.cold.deliver(token, input);
@@ -142,7 +142,7 @@ export class PooledWorkerLauncher implements ManagedWorkerLauncher {
         );
       }
       await this.options.ledger.remove(token);
-      return this.cold.launch(input);
+      return this.cold.launch(input, launchOptions);
     }
     if (this.networkReadyAtLaunch === false) await this.options.onDelivered?.(runId);
     poolLog.info({ runId, worker: claimed.name, event: "claimed" }, "run claimed a warm worker");
