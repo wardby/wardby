@@ -199,6 +199,7 @@ function nativeAgent() {
     codingProfile: null,
     model: "gpt-5.6-luna",
     budgetUsd: 2,
+    allowedOverrunPercent: 0,
     // Continuation's same-owner check (checkContinuation): most fixtures
     // simulate one owner's deployment, so a continuation root's mock row
     // carries the same ownerId by default (see openPrCodingRun/priorPrRun).
@@ -562,6 +563,60 @@ describe("dispatchRun", () => {
       await dispatchRun({ db: state.db, executor: { async start() {}, async stop() {} }, agentId: "agent_1" });
       expect(state.rawStatements).toEqual([]);
       expect(state.codingRuns[0].budgetReservedUsd).toBe(2);
+    });
+
+    describe("allowed overrun", () => {
+      const overrunAgent = (allowedOverrunPercent: number, budgetGroupId: string | null = null) => ({
+        ...groupedCodingAgent(),
+        budgetUsd: 1,
+        budgetGroupId,
+        allowedOverrunPercent,
+      });
+      const dispatch = (state: ReturnType<typeof fakeDb>, budgetUsdOverride?: number) =>
+        dispatchRun({
+          db: state.db,
+          executor: { async start() {}, async stop() {} },
+          agentId: "agent_1",
+          ...(budgetUsdOverride === undefined ? {} : { budgetUsdOverride }),
+        });
+
+      it("no group, p=10: reserves the limit (1.10) and records the base (1.00)", async () => {
+        const state = fakeDb(overrunAgent(10));
+        await dispatch(state);
+        expect(state.codingRuns[0].budgetReservedUsd).toBeCloseTo(1.1, 6);
+        expect(state.codingRuns[0].budgetBaseUsd).toBe(1);
+        expect(state.codingRuns[0].budgetLimitedBy).toBeNull();
+      });
+
+      it("p=0: reservation and base are both today's 1.00", async () => {
+        const state = fakeDb(overrunAgent(0));
+        await dispatch(state);
+        expect(state.codingRuns[0].budgetReservedUsd).toBe(1);
+        expect(state.codingRuns[0].budgetBaseUsd).toBe(1);
+      });
+
+      it("group day remaining 1.05, p=10: the limit is 1.05 (limited by day), the base 1.00", async () => {
+        const state = fakeDb(overrunAgent(10, "group_1"), [], { group: group(1.05) });
+        await dispatch(state);
+        expect(state.codingRuns[0].budgetReservedUsd).toBeCloseTo(1.05, 6);
+        expect(state.codingRuns[0].budgetBaseUsd).toBe(1);
+        expect(state.codingRuns[0].budgetLimitedBy).toBe("day");
+      });
+
+      it("group remaining 0.80, p=10: limit and base are both 0.80", async () => {
+        const state = fakeDb(overrunAgent(10, "group_1"), [], { group: group(0.8) });
+        await dispatch(state);
+        expect(state.codingRuns[0].budgetReservedUsd).toBeCloseTo(0.8, 6);
+        expect(state.codingRuns[0].budgetBaseUsd).toBeCloseTo(0.8, 6);
+        expect(state.codingRuns[0].budgetLimitedBy).toBe("day");
+      });
+
+      it("budgetUsdOverride is the requested base: the limit raises it by the overrun", async () => {
+        const state = fakeDb({ ...overrunAgent(10), budgetUsd: 2 });
+        await dispatch(state, 0.5);
+        expect(state.codingRuns[0].budgetReservedUsd).toBeCloseTo(0.55, 6);
+        expect(state.codingRuns[0].budgetBaseUsd).toBe(0.5);
+      });
     });
   });
 

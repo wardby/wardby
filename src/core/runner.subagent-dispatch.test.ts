@@ -49,6 +49,7 @@ interface FakeAgent {
   nativeExecutionMode?: "control_plane" | "sandbox";
   codingProfile?: FakeCodingProfile;
   ownerId?: string | null;
+  allowedOverrunPercent?: number;
 }
 
 interface FakeRun {
@@ -94,6 +95,9 @@ function fakeDb(
   grants: FakeGrantSeed[] = [],
   groups: FakeBudgetGroup[] = [],
 ): RunnerDb {
+  // Like the real column, allowedOverrunPercent defaults to 0. Set in place:
+  // tests mutate their agent objects mid-run and expect the db to see it.
+  for (const a of agents) a.allowedOverrunPercent ??= 0;
   const agentsById = new Map(agents.map((a) => [a.id, a]));
   const runs = new Map(priorRuns.map((r) => [r.id, r]));
   const codingRuns = new Map(seedCodingRuns.map((r) => [r.runId, r]));

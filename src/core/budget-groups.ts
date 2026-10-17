@@ -450,11 +450,17 @@ function siblingHoldsUsd(rows: readonly TreeRow[], parentRunId: string, now: Dat
   return total;
 }
 
+/**
+ * With `withOverrun` (coding dispatch), the tree's ceiling is the root
+ * agent's budgetUsd raised by its own allowedOverrunPercent, still capped by
+ * the root's budget group; without it (native callers), today's ceiling.
+ */
 async function runTreeSpend(
   db: BudgetGroupsDb,
   parentRunId: string,
   now: Date,
   self?: RunOrder,
+  withOverrun = false,
 ): Promise<TreeSpendDetail> {
   const root = await findRootRun(db, parentRunId);
   const treeRunIds = await collectTreeRunIds(db, root.id);
@@ -476,15 +482,19 @@ async function runTreeSpend(
 
   const rootAgent = await db.agent.findUniqueOrThrow({
     where: { id: root.agentId },
-    select: { id: true, budgetGroupId: true, budgetUsd: true },
+    select: { id: true, budgetGroupId: true, budgetUsd: true, allowedOverrunPercent: true },
   });
   const rootOrder = { id: root.id, startedAt: root.startedAt };
   // Root has no parentRunId of its own, so this terminates in one level —
   // no unbounded recursion regardless of how deep `parentRunId` itself was.
-  const rootCeiling = await groupCappedBudget(db, rootAgent, now, {
-    excludeRunIds: treeRunIds,
-    holdsBefore: rootOrder,
-  });
+  const rootCeiling = await groupCappedBudget(
+    db,
+    rootAgent,
+    now,
+    { excludeRunIds: treeRunIds, holdsBefore: rootOrder },
+    undefined,
+    withOverrun ? rootAgent.allowedOverrunPercent : undefined,
+  );
 
   const capUsd = rootCeiling.effectiveBudgetUsd;
   return {
@@ -501,7 +511,16 @@ async function runTreeSpend(
 export type BudgetConstraint = Period | "run-tree";
 
 export interface EffectiveBudgetResult {
+  /**
+   * The ceiling to use. With EffectiveBudgetOptions.overrunPercent this is the
+   * run's limit: its own budgetUsd raised by the overrun, then tightened.
+   */
   effectiveBudgetUsd: number;
+  /**
+   * Set only when an overrun was requested: the agent's own budgetUsd
+   * tightened by the same constraints, without the overrun (<= effectiveBudgetUsd).
+   */
+  baseBudgetUsd?: number;
   /** Which constraint(s), if any, are tighter than the agent's own budgetUsd right now. */
   constrainedBy: BudgetConstraint[];
   /** The first constraint with nothing left (< MIN_RESERVATION_USD), set only when there is one. */
@@ -525,6 +544,14 @@ export interface EffectiveBudgetOptions {
    * the holds of runs that started after it (first come, first served).
    */
   self?: RunOrder;
+  /**
+   * Coding dispatch only: the agent's allowedOverrunPercent. The limit
+   * (effectiveBudgetUsd) starts from budgetUsd x (1 + p/100) instead of
+   * budgetUsd, the run tree's ceiling takes the root agent's own overrun, and
+   * baseBudgetUsd reports the budget without it. Group and run-tree remainders
+   * still cap both. Omitted (native callers): today's numbers exactly.
+   */
+  overrunPercent?: number;
 }
 
 /**
@@ -552,25 +579,32 @@ export async function effectiveBudgetForRun(
   parentRunId?: string,
   options: EffectiveBudgetOptions = {},
 ): Promise<EffectiveBudgetResult> {
-  const self = options.self;
+  const { self, overrunPercent } = options;
   const ownSpend: SpendOptions = { excludeReservationRunIds: self ? [self.id] : [], holdsBefore: self };
-  if (!parentRunId) return groupCappedBudget(db, agent, now, ownSpend);
+  if (!parentRunId) return groupCappedBudget(db, agent, now, ownSpend, undefined, overrunPercent);
 
-  const tree = await runTreeSpend(db, parentRunId, now, self);
+  const tree = await runTreeSpend(db, parentRunId, now, self, overrunPercent !== undefined);
   const sharesRootGroup = agent.budgetGroupId !== null && agent.budgetGroupId === tree.rootBudgetGroupId;
   const spend: SpendOptions = sharesRootGroup
     ? { excludeReservationRunIds: [...tree.treeRunIds, ...(self ? [self.id] : [])], holdsBefore: tree.root }
     : ownSpend;
-  return groupCappedBudget(db, agent, now, spend, {
-    value: tree.remainingUsd,
-    reason: "run-tree",
-    detail: {
-      capUsd: tree.capUsd,
-      spentUsd: tree.spentUsd,
-      heldUsd: tree.capUsd - tree.spentUsd - tree.remainingUsd,
-      heldRuns: 0,
+  return groupCappedBudget(
+    db,
+    agent,
+    now,
+    spend,
+    {
+      value: tree.remainingUsd,
+      reason: "run-tree",
+      detail: {
+        capUsd: tree.capUsd,
+        spentUsd: tree.spentUsd,
+        heldUsd: tree.capUsd - tree.spentUsd - tree.remainingUsd,
+        heldRuns: 0,
+      },
     },
-  });
+    overrunPercent,
+  );
 }
 
 async function groupCappedBudget(
@@ -579,8 +613,13 @@ async function groupCappedBudget(
   now: Date,
   spendOptions: SpendOptions,
   extra?: BudgetCandidate,
+  overrunPercent?: number,
 ): Promise<EffectiveBudgetResult> {
   const ownBudgetUsd = Number(agent.budgetUsd);
+  // The limit the candidates tighten: own raised by the overrun, when one was requested.
+  const ownLimitUsd = overrunPercent === undefined ? ownBudgetUsd : (ownBudgetUsd * (100 + overrunPercent)) / 100;
+  const base = (values: number[]) =>
+    overrunPercent === undefined ? {} : { baseBudgetUsd: Math.min(ownBudgetUsd, ...values) };
   const candidates: BudgetCandidate[] = [];
 
   if (agent.budgetGroupId) {
@@ -610,16 +649,18 @@ async function groupCappedBudget(
 
   if (extra) candidates.push(extra);
 
-  if (candidates.length === 0) return { effectiveBudgetUsd: ownBudgetUsd, constrainedBy: [] };
+  if (candidates.length === 0) return { effectiveBudgetUsd: ownLimitUsd, ...base([]), constrainedBy: [] };
 
-  const constrainedBy = candidates.filter((c) => c.value < ownBudgetUsd).map((c) => c.reason);
-  const effectiveBudgetUsd = Math.min(ownBudgetUsd, ...candidates.map((c) => c.value));
+  const values = candidates.map((c) => c.value);
+  const constrainedBy = candidates.filter((c) => c.value < ownLimitUsd).map((c) => c.reason);
+  const effectiveBudgetUsd = Math.min(ownLimitUsd, ...values);
   // Less than the smallest reservable amount is nothing left.
   const exhausted = candidates.find((c) => c.value < MIN_RESERVATION_USD);
   const limiting =
-    effectiveBudgetUsd < ownBudgetUsd ? candidates.find((c) => c.value === effectiveBudgetUsd) : undefined;
+    effectiveBudgetUsd < ownLimitUsd ? candidates.find((c) => c.value === effectiveBudgetUsd) : undefined;
   return {
     effectiveBudgetUsd,
+    ...base(values),
     constrainedBy,
     ...(limiting ? { limitedBy: limiting.reason } : {}),
     ...(exhausted ? { exhaustedBy: exhausted.reason, exhaustedDetail: exhausted.detail } : {}),
