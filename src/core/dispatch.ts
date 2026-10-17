@@ -868,6 +868,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               issueProvider: attributed?.provider ?? null,
               issueKey: attributed?.key ?? null,
               task: input.task,
+              request,
               repository: input.repository,
               baseRef: input.baseRef,
               headRef: input.headRef,

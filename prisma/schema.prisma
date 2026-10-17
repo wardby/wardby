@@ -491,6 +491,8 @@ model CodingRun {
   runId                 String              @id
   run                   Run                 @relation(fields: [runId], references: [id], onDelete: Cascade)
   task                  String
+  /// The run's own request (the trigger's task or the agent's default task), without the agent's standing instructions. Null on older runs.
+  request               String?             @db.Text
   repository            String
   baseRef               String
   headRef               String
