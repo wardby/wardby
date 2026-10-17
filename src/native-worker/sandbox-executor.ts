@@ -155,8 +155,11 @@ export class NativeSandboxExecutor implements Executor {
           data: { heartbeatAt: new Date(this.now()) },
         })
         .catch((err: unknown) => executorLog.warn({ err, runId }, "could not refresh a launching run's heartbeat"));
+    let inFlight: Promise<unknown> = Promise.resolve();
     const timer = setInterval(
-      () => void beat(),
+      () => {
+        inFlight = beat();
+      },
       this.options.heartbeatIntervalMs ?? Math.floor(HEARTBEAT_TIMEOUT_MS / 3),
     );
     // Never hold the process open for a heartbeat: shutdown should not wait on one.
@@ -165,6 +168,8 @@ export class NativeSandboxExecutor implements Executor {
       return await work();
     } finally {
       clearInterval(timer);
+      // A beat already sent lands before the launch returns, never after the worker's own beats.
+      await inFlight;
     }
   }
 
