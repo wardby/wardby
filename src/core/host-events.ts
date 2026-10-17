@@ -19,6 +19,7 @@ import { checkContinuation, dispatchRun } from "./dispatch.js";
 import { mentionStatusRow, postMentionStatus } from "./host-status.js";
 import { handlePullRequestClosed } from "./issue-bridge.js";
 import { logger } from "./logger.js";
+import { withoutMarkdownCode } from "./markdown-code.js";
 import { maybeMarkReady } from "./mark-ready.js";
 import { syncMergeOrderChecksForPullRequest } from "./merge-order-check.js";
 import {
@@ -102,8 +103,11 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** A `@app review` outside code: quoting the command in code documents it. */
 export function isReviewCommand(body: string, mentionHandle: string): boolean {
-  return new RegExp(`(^|[^\\w-])@${escapeRegExp(mentionHandle)}\\s+review(?![\\w-])`, "i").test(body);
+  return new RegExp(`(^|[^\\w-])@${escapeRegExp(mentionHandle)}\\s+review(?![\\w-])`, "i").test(
+    withoutMarkdownCode(body),
+  );
 }
 
 type PushEvent = Extract<HostEvent, { kind: "push" }>;

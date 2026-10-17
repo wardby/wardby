@@ -157,7 +157,9 @@ export async function handleGitHubEventIngress(
         : {}),
     };
   }
-  const event = normalizeGitHubEvent(eventName, payload, app);
+  const event = normalizeGitHubEvent(eventName, payload, app, (dropped) =>
+    log.info({ ...dropped, deliveryId }, "mention ignored: its author did not pass the pre-filter"),
+  );
   // An event we don't act on must never claim the delivery id: recording it
   // here would let a later, real delivery of the same id (GitHub does reuse
   // ids across distinct redeliveries of what it considers the same event)

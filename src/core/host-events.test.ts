@@ -547,6 +547,9 @@ describe("isReviewCommand", () => {
     expect(isReviewCommand("@wardby review", "wardby")).toBe(true);
     expect(isReviewCommand("hey @Wardby Review this", "wardby")).toBe(true);
     expect(isReviewCommand("@wardby reviewer?", "wardby")).toBe(false);
+    // Quoting the command in code documents it; it is not a review request.
+    expect(isReviewCommand("@wardby fix this; `@wardby review` re-reviews later", "wardby")).toBe(false);
+    expect(isReviewCommand("@wardby fix\n\n```\n@wardby review\n```", "wardby")).toBe(false);
     expect(isReviewCommand("@wardby-dev review", "wardby")).toBe(false);
   });
 });
