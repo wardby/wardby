@@ -40,14 +40,8 @@ describe("GitHubReviewHost reads", () => {
       baseMergedSince: false,
     });
     expect(view.files[0]).toMatchObject({ patch: PATCH, patchTruncated: false, patchStatus: "complete" });
-    // The budget ends inside the first line of b.py, so its part is cut at the budget.
-    expect(view.files[1]).toMatchObject({
-      patch: PATCH.slice(0, 5),
-      patchTruncated: true,
-      patchStatus: "partial",
-      patchOffset: 0,
-      patchContinues: true,
-    });
+    // Five characters do not hold a line of b.py, so it waits for the next page.
+    expect(view.files[1]).toMatchObject({ patch: "", patchTruncated: true, patchStatus: "later_page" });
     expect(view).toMatchObject({ patchesComplete: false, truncatedFiles: ["b.py"], remainingPatchFiles: 1 });
     expect(view.nextPatchCursor).toMatch(/^v1\./);
   });
@@ -79,7 +73,19 @@ describe("GitHubReviewHost reads", () => {
       patchCursor: first.nextPatchCursor!,
     });
     expect(second.files.find((f) => f.filename === "src/app.ts")!.patchStatus).toBe("earlier_page");
-    expect(second.nextPatchCursor).not.toBeNull();
+    let text = first.files.find((f) => f.filename === "docs/guide.md")!.patch;
+    let page = second;
+    for (;;) {
+      text += page.files.find((f) => f.filename === "docs/guide.md")!.patch;
+      if (!page.nextPatchCursor) break;
+      page = await host.readPullRequest(REPO, 7, {
+        maxPatchChars: 1_000,
+        agentMarker: "a",
+        patchCursor: page.nextPatchCursor,
+      });
+    }
+    expect(text).toBe(DOC);
+    expect(page.patchesComplete).toBe(true);
   });
 
   it("reads CI on the head with separate checks/statuses tokens, dropping the App's own checks", async () => {

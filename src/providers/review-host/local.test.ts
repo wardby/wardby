@@ -117,7 +117,7 @@ describe.skipIf(!process.env.DATABASE_URL)("LocalReviewHost (database)", () => {
 
   it("flags truncated patches once the shared budget runs out", async () => {
     const view = await host.readPullRequest(repository, prNumber, { maxPatchChars: 10, agentMarker: "agent-x" });
-    // The budget ends inside the first hunk header line, so the part is cut at the budget.
+    // Ten characters hold no whole line, so the first file alone on the page is cut at the budget.
     expect(view.files[0].patch).toHaveLength(10);
     expect(view.files[0]).toMatchObject({ patchTruncated: true, patchStatus: "partial", patchContinues: true });
     expect(view.files[1].patch).toBe("");
@@ -165,7 +165,8 @@ describe.skipIf(!process.env.DATABASE_URL)("LocalReviewHost (database)", () => {
       cursor = next.nextPatchCursor;
       if (!cursor) expect(next.patchesComplete).toBe(true);
     }
-    expect(text.split("\n").filter((l) => l.startsWith("+")).length).toBeGreaterThan(300);
+    const added = text.split("\n").filter((l) => l.startsWith("+"));
+    expect(added).toEqual(Array.from({ length: 400 }, (_, i) => `+line ${i}`));
   });
 
   it("compares from sinceSha", async () => {

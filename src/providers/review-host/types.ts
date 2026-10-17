@@ -118,7 +118,7 @@ export interface PullRequestView {
   truncatedFiles: string[];
   /** Pass as repo_pr_read's patchCursor for the next page; null when nothing is left to page. */
   nextPatchCursor: string | null;
-  /** Files with patch content still to come after this page (a partial file counts once). */
+  /** Estimate of files with patch content still to come after this page (a partial file counts once); a later_page file may turn out empty or unavailable once loaded. */
   remainingPatchFiles: number;
   /** This agent's own unresolved review threads on the PR (the first 100 threads are searched). */
   openThreads: ReviewThreadView[];

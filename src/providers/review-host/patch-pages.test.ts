@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PatchCursorError } from "./types.js";
-import { pagePatches, reviewGroup, reviewOrder, type PatchSource } from "./patch-pages.js";
+import { MAX_PATCH_CURSOR_CHARS, pagePatches, reviewGroup, reviewOrder, type PatchSource } from "./patch-pages.js";
 
 const HEAD = "a".repeat(40);
 const file = (filename: string, changes = 1): PatchSource => ({
@@ -24,6 +24,11 @@ describe("reviewGroup", () => {
       "tests/test_app.py",
       "Dockerfile",
       "prisma/migrations/1_x/migration.sql",
+      "src/help/search.ts",
+      "src/build/x.ts",
+      "requirements.txt",
+      "requirements-dev.txt",
+      "CMakeLists.txt",
     ]) {
       expect(reviewGroup(path)).toBe("code");
     }
@@ -153,5 +158,54 @@ describe("pagePatches", () => {
     );
     await expect(moved).rejects.toEqual(new PatchCursorError("stale"));
     await expect(page([file("src/a.ts", 100)], 30, "nonsense")).rejects.toEqual(new PatchCursorError("malformed"));
+  });
+
+  it("keeps reporting a file found unavailable on an earlier page", async () => {
+    delete patches["src/gen.ts"];
+    patches["src/big.ts"] = Array.from({ length: 100 }, (_, i) => `+line ${i}\n`).join("");
+    const files = [file("src/gen.ts", 9_000), file("src/big.ts", 100)];
+    const first = await page(files, 200);
+    expect(first.files[0].patchStatus).toBe("unavailable");
+    let cursor = first.nextPatchCursor;
+    let last = first;
+    while (cursor) {
+      last = await page(files, 200, cursor);
+      expect(last.files[0]).toMatchObject({ patchStatus: "unavailable", patchTruncated: true });
+      cursor = last.nextPatchCursor;
+    }
+    expect(last.patchesComplete).toBe(false);
+    expect(last.truncatedFiles).toEqual(["src/gen.ts"]);
+    expect(MAX_PATCH_CURSOR_CHARS).toBe(4000);
+  });
+
+  it("defers a file whose first line does not fit the rest of the page instead of cutting it", async () => {
+    patches["src/a.ts"] = "+a\n".repeat(10);
+    patches["src/b.ts"] = "+".padEnd(100, "b") + "\n";
+    const files = [file("src/a.ts", 10), file("src/b.ts", 1)];
+    const result = await page(files, 50);
+    expect(result.files.map((f) => [f.filename, f.patchStatus])).toEqual([
+      ["src/a.ts", "complete"],
+      ["src/b.ts", "later_page"],
+    ]);
+    // Alone on a page, the same over-long line is cut at the budget so paging always progresses.
+    const second = await page(files, 50, result.nextPatchCursor!);
+    expect(second.files[1]).toMatchObject({ patchStatus: "partial", patchOffset: 0, patchContinues: true });
+    expect(second.files[1].patch).toHaveLength(50);
+  });
+
+  it("refuses a cursor whose offset is beyond the patch, or whose unavailable list is invalid", async () => {
+    patches["src/a.ts"] = "+x\n".repeat(10);
+    const cursor = (tail: string) => `v1.${HEAD}.-.${tail}`;
+    await expect(page([file("src/a.ts", 10)], 30, cursor("0.999999.-"))).rejects.toEqual(
+      new PatchCursorError("malformed"),
+    );
+    delete patches["src/gone.ts"];
+    await expect(page([file("src/gone.ts", 10)], 30, cursor("0.5.-"))).rejects.toEqual(
+      new PatchCursorError("malformed"),
+    );
+    await expect(page([file("src/a.ts", 10)], 30, cursor("0.0.0"))).rejects.toEqual(new PatchCursorError("malformed"));
+    await expect(page([file("src/a.ts", 10)], 30, cursor("1.0.0,0"))).rejects.toEqual(
+      new PatchCursorError("malformed"),
+    );
   });
 });

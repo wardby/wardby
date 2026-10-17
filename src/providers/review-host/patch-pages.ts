@@ -40,13 +40,18 @@ const LOCKFILES = new Set([
   "pubspec.lock",
 ]);
 const OTHER_EXTENSIONS = /\.(md|mdx|rst|adoc|txt|snap|svg|png|jpe?g|gif|webp|ico|pdf|lock)$/i;
+// docs/ and help/ are the repository's own documentation folders (root only); the rest can be anywhere.
 const OTHER_DIRECTORY =
-  /(^|\/)(docs?|help|generated|__generated__|dist|build|vendor|fixtures|__fixtures__|__snapshots__|testdata)\//i;
+  /^(docs?|help)\/|(^|\/)(generated|__generated__|dist|vendor|fixtures|__fixtures__|__snapshots__|testdata)\//i;
 const MINIFIED = /\.min\.(js|css)$/i;
+
+/** The longest patchCursor this module issues or accepts; callers use it as the tool schema's maximum. */
+export const MAX_PATCH_CURSOR_CHARS = 4000;
 
 /** "code" (source, tests, config, migrations) is filled first; "other" is everything a review can skim. */
 export function reviewGroup(path: string): "code" | "other" {
   const base = path.slice(path.lastIndexOf("/") + 1);
+  if (/^requirements.*\.txt$/i.test(base) || base === "CMakeLists.txt") return "code";
   if (LOCKFILES.has(base) || OTHER_EXTENSIONS.test(base) || MINIFIED.test(base) || OTHER_DIRECTORY.test(path))
     return "other";
   return "code";
@@ -60,28 +65,47 @@ export function reviewOrder<T extends { filename: string }>(files: T[]): T[] {
   ];
 }
 
-const CURSOR = /^v1\.([0-9a-f]{40})\.([0-9a-f]{40}|-)\.(\d{1,6})\.(\d{1,9})$/;
+const CURSOR = /^v1\.([0-9a-f]{40})\.([0-9a-f]{40}|-)\.(\d{1,6})\.(\d{1,9})\.(-|\d{1,6}(?:,\d{1,6})*)$/;
 
-function encodeCursor(headSha: string, comparedFrom: string | null, fileIndex: number, offset: number): string {
-  return `v1.${headSha}.${comparedFrom ?? "-"}.${fileIndex}.${offset}`;
+interface CursorPosition {
+  fileIndex: number;
+  offset: number;
+  /** Indexes (review order, ascending, all before fileIndex) of files found unavailable on earlier pages. */
+  unavailable: number[];
 }
 
-function parseCursor(
-  cursor: string,
-  headSha: string,
-  comparedFrom: string | null,
-): { fileIndex: number; offset: number } {
-  const m = CURSOR.exec(cursor);
+function encodeCursor(headSha: string, comparedFrom: string | null, pos: CursorPosition): string {
+  const u = pos.unavailable.length ? pos.unavailable.join(",") : "-";
+  return `v1.${headSha}.${comparedFrom ?? "-"}.${pos.fileIndex}.${pos.offset}.${u}`;
+}
+
+function parseCursor(cursor: string, headSha: string, comparedFrom: string | null, fileCount: number): CursorPosition {
+  const m = cursor.length <= MAX_PATCH_CURSOR_CHARS ? CURSOR.exec(cursor) : null;
   if (!m) throw new PatchCursorError("malformed");
   if (m[1] !== headSha || m[2] !== (comparedFrom ?? "-")) throw new PatchCursorError("stale");
-  return { fileIndex: Number(m[3]), offset: Number(m[4]) };
+  const pos: CursorPosition = {
+    fileIndex: Number(m[3]),
+    offset: Number(m[4]),
+    unavailable: m[5] === "-" ? [] : m[5].split(",").map(Number),
+  };
+  if (pos.fileIndex > fileCount) throw new PatchCursorError("malformed");
+  let previous = -1;
+  for (const index of pos.unavailable) {
+    if (index <= previous || index >= pos.fileIndex) throw new PatchCursorError("malformed");
+    previous = index;
+  }
+  return pos;
 }
 
-/** The longest prefix of `text` within `max` characters that ends at a line break; a single longer line is cut at `max`. */
-function cutAtLine(text: string, max: number): string {
+/**
+ * The longest prefix of `text` within `max` characters that ends at a line break. With no break
+ * in range, a single longer line is cut at `max` when `hardCut`, else nothing is returned.
+ */
+function cutAtLine(text: string, max: number, hardCut: boolean): string {
   if (text.length <= max) return text;
   const cut = text.lastIndexOf("\n", max - 1);
-  return cut >= 0 ? text.slice(0, cut + 1) : text.slice(0, max);
+  if (cut >= 0) return text.slice(0, cut + 1);
+  return hardCut ? text.slice(0, max) : "";
 }
 
 /**
@@ -95,8 +119,11 @@ export async function pagePatches(
   load: (file: PatchSource) => Promise<string | undefined>,
 ): Promise<PatchPage> {
   const ordered = reviewOrder(sources);
-  const start = opts.cursor ? parseCursor(opts.cursor, opts.headSha, opts.comparedFrom) : { fileIndex: 0, offset: 0 };
-  if (start.fileIndex > ordered.length) throw new PatchCursorError("malformed");
+  const start: CursorPosition = opts.cursor
+    ? parseCursor(opts.cursor, opts.headSha, opts.comparedFrom, ordered.length)
+    : { fileIndex: 0, offset: 0, unavailable: [] };
+  const earlierUnavailable = new Set(start.unavailable);
+  const unavailable = [...start.unavailable];
   let budget = opts.budget;
   let next: { fileIndex: number; offset: number } | null = null;
   const files: PullRequestFileView[] = [];
@@ -114,7 +141,7 @@ export async function pagePatches(
       ...(part ? { patchOffset: part.offset, patchContinues: part.continues } : {}),
     });
     if (index < start.fileIndex) {
-      files.push(out(changes === 0 ? "empty" : "earlier_page"));
+      files.push(out(changes === 0 ? "empty" : earlierUnavailable.has(index) ? "unavailable" : "earlier_page"));
       continue;
     }
     if (next) {
@@ -122,11 +149,18 @@ export async function pagePatches(
       continue;
     }
     const patch = await load(source);
+    const offset = index === start.fileIndex ? start.offset : 0;
     if (patch === undefined || patch === "") {
-      files.push(out(changes === 0 ? "empty" : "unavailable"));
+      if (offset > 0) throw new PatchCursorError("malformed");
+      if (changes === 0) {
+        files.push(out("empty"));
+      } else {
+        files.push(out("unavailable"));
+        unavailable.push(index);
+      }
       continue;
     }
-    const offset = index === start.fileIndex ? start.offset : 0;
+    if (offset > patch.length) throw new PatchCursorError("malformed");
     const rest = patch.slice(offset);
     if (rest.length <= budget) {
       files.push(offset === 0 ? out("complete", rest) : out("partial", rest, { offset, continues: false }));
@@ -134,7 +168,10 @@ export async function pagePatches(
       if (budget <= 0 && index + 1 < ordered.length) next = { fileIndex: index + 1, offset: 0 };
       continue;
     }
-    const part = budget > 0 ? cutAtLine(rest, budget) : "";
+    // A single line longer than the whole budget is cut only when nothing else is on the page;
+    // otherwise the file waits for the next page.
+    const firstContent = !files.some((f) => f.patchStatus === "complete" || f.patchStatus === "partial");
+    const part = budget > 0 ? cutAtLine(rest, budget, firstContent) : "";
     if (part.length === 0) {
       files.push(out("later_page"));
       next = { fileIndex: index, offset };
@@ -144,13 +181,19 @@ export async function pagePatches(
     next = { fileIndex: index, offset: offset + part.length };
   }
   const truncatedFiles = files.filter((f) => f.patchTruncated).map((f) => f.filename);
-  const remainingPatchFiles =
-    files.filter((f) => f.patchStatus === "later_page").length + (next && next.offset > 0 ? 1 : 0);
+  const remainingPatchFiles = files.filter(
+    (f) => f.patchStatus === "later_page" || (f.patchStatus === "partial" && f.patchContinues),
+  ).length;
   return {
     files,
     truncatedFiles,
     remainingPatchFiles,
-    nextPatchCursor: next ? encodeCursor(opts.headSha, opts.comparedFrom, next.fileIndex, next.offset) : null,
-    patchesComplete: next === null && !files.some((f) => f.patchStatus === "unavailable"),
+    nextPatchCursor: next
+      ? encodeCursor(opts.headSha, opts.comparedFrom, {
+          ...next,
+          unavailable: unavailable.filter((i) => i < next.fileIndex),
+        })
+      : null,
+    patchesComplete: next === null && unavailable.length === 0,
   };
 }
