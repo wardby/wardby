@@ -8,7 +8,6 @@
  * a check id, or a marker. Never throws — failures are JSON tool results.
  * See docs/private/2026-09-25-code-review-host-design.md §7.
  */
-import type { ReviewReadLedger } from "./review-reads.js";
 import { z } from "zod";
 import type { LoadedTool } from "../providers/engine/types.js";
 import { FAILING_CONCLUSIONS } from "../providers/review-host/ci.js";
@@ -27,6 +26,7 @@ import type { RelatedPullRequestState } from "../providers/vcs/github.js";
 import { isLocalRepository, normalizeGitHubRepository, normalizeLocalRepository } from "../coding/protocol.js";
 import { ciForAgent } from "./ci-context.js";
 import { logger } from "./logger.js";
+import type { ReviewReadLedger } from "./review-reads.js";
 import { collectRelatedPullRequests, type RelatedPullRequestsDb } from "./related-pull-requests.js";
 import { describeDenial, type RepoAccessDecision } from "./repo-access.js";
 
@@ -482,7 +482,7 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
           }
           throw err;
         }
-        ctx.reads?.recordPage(link.repository, a.prNumber, view);
+        ctx.reads?.recordPage(link.repository, a.prNumber, view, a.patchCursor !== undefined);
         const relatedPullRequests = await relatedPullRequestsFor(ctx, host, link.repository, a.prNumber, view);
         return JSON.stringify({ ...view, relatedPullRequests, ci: ciForAgent(view) });
       }
@@ -530,7 +530,8 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
               "unread_files",
               `You have not read ${unread.length} source, test or config file(s) of this head: ${shown.join(", ")}${unread.length > shown.length ? ", …" : ""}. ` +
                 "Page through repo_pr_read with patchCursor, or read them with repo_read_file at headSha, before an APPROVE or CHANGES_REQUESTED verdict. " +
-                "If you cannot read them, publish COMMENT and name the files you did not review.",
+                "If you cannot read them, publish COMMENT and name the files you did not review. " +
+                "If the pull request has moved on, repo_pr_read returns the new headSha; review that head instead.",
             );
           }
         }

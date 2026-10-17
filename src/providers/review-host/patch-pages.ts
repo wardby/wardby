@@ -160,7 +160,8 @@ export async function pagePatches(
       }
       continue;
     }
-    if (offset > patch.length) throw new PatchCursorError("malformed");
+    // A cursor never points at the end: the part that reaches it does not continue.
+    if (offset >= patch.length && offset > 0) throw new PatchCursorError("malformed");
     const rest = patch.slice(offset);
     if (rest.length <= budget) {
       files.push(offset === 0 ? out("complete", rest) : out("partial", rest, { offset, continues: false }));

@@ -199,6 +199,8 @@ describe("pagePatches", () => {
     await expect(page([file("src/a.ts", 10)], 30, cursor("0.999999.-"))).rejects.toEqual(
       new PatchCursorError("malformed"),
     );
+    // Exactly at the end: no page ever issues it (a part that reaches the end does not continue).
+    await expect(page([file("src/a.ts", 10)], 30, cursor("0.30.-"))).rejects.toEqual(new PatchCursorError("malformed"));
     delete patches["src/gone.ts"];
     await expect(page([file("src/gone.ts", 10)], 30, cursor("0.5.-"))).rejects.toEqual(
       new PatchCursorError("malformed"),

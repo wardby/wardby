@@ -1007,6 +1007,7 @@ describe("handleReviewHostTool unread-files publish guard", () => {
       );
       expect(out).toMatchObject({ error: "unread_files" });
       expect(JSON.stringify(out)).toContain("src/a.ts");
+      expect(out.message).toContain("If the pull request has moved on, repo_pr_read returns the new headSha");
     }
     const comment = JSON.parse(
       await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("COMMENT")), c),
@@ -1063,6 +1064,19 @@ describe("handleReviewHostTool unread-files publish guard", () => {
       const out = JSON.parse(await handleReviewHostTool("repo_publish_review", JSON.stringify(args), c));
       expect(out.error).toBeUndefined();
     }
+  });
+
+  it("does not gate a head whose first page this attempt never read (only a cursor page reached it)", async () => {
+    const c = ctx({ hosts: { github: pageHost() }, reads: new ReviewReadLedger() });
+    await handleReviewHostTool(
+      "repo_pr_read",
+      JSON.stringify({ repository: WRITE.repository, prNumber: 7, patchCursor: "v1.c" }),
+      c,
+    );
+    const out = JSON.parse(
+      await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("APPROVE")), c),
+    );
+    expect(out.error).toBeUndefined();
   });
 
   it("does not block APPROVE on a removed code file without a patch", async () => {
