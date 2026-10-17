@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ReviewHostError, type CiView, type CodeReviewHost } from "../providers/review-host/types.js";
+import { PatchCursorError, ReviewHostError, type CiView, type CodeReviewHost } from "../providers/review-host/types.js";
 import { collectRelatedPullRequests } from "./related-pull-requests.js";
 import { handleReviewHostTool, resolveLink, type RepositoryLink, type ReviewToolContext } from "./review-host-tools.js";
 
@@ -126,6 +126,43 @@ describe("handleReviewHostTool", () => {
       maxPatchChars: 60_000,
       agentMarker: "agent1",
     });
+  });
+
+  it("passes patchCursor to the host and returns its page fields", async () => {
+    const c = ctx();
+    vi.mocked(c.hosts.github!.readPullRequest).mockResolvedValue({
+      number: 7,
+      nextPatchCursor: "v1.next",
+      truncatedFiles: ["docs/a.md"],
+      patchesComplete: false,
+      remainingPatchFiles: 1,
+    } as never);
+    const out = JSON.parse(
+      await handleReviewHostTool(
+        "repo_pr_read",
+        JSON.stringify({ repository: WRITE.repository, prNumber: 7, patchCursor: "v1.prev" }),
+        c,
+      ),
+    );
+    expect(c.hosts.github!.readPullRequest).toHaveBeenCalledWith(
+      WRITE.repository,
+      7,
+      expect.objectContaining({ patchCursor: "v1.prev" }),
+    );
+    expect(out).toMatchObject({ nextPatchCursor: "v1.next", truncatedFiles: ["docs/a.md"], patchesComplete: false });
+  });
+
+  it.each(["stale", "malformed"] as const)("turns a %s cursor into a patch_cursor_%s tool error", async (reason) => {
+    const c = ctx();
+    vi.mocked(c.hosts.github!.readPullRequest).mockRejectedValue(new PatchCursorError(reason));
+    const out = JSON.parse(
+      await handleReviewHostTool(
+        "repo_pr_read",
+        JSON.stringify({ repository: WRITE.repository, prNumber: 7, patchCursor: "v1.x" }),
+        c,
+      ),
+    );
+    expect(out).toMatchObject({ error: `patch_cursor_${reason}` });
   });
 
   it("adds the CI view with its note to repo_pr_read output", async () => {
