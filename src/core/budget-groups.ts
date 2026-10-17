@@ -521,11 +521,17 @@ export interface EffectiveBudgetResult {
    * tightened by the same constraints, without the overrun (<= effectiveBudgetUsd).
    */
   baseBudgetUsd?: number;
-  /** Which constraint(s), if any, are tighter than the agent's own budgetUsd right now. */
+  /**
+   * Which constraint(s), if any, are tighter right now than the agent's own
+   * budgetUsd, or its overrun-raised limit when overrunPercent is given.
+   */
   constrainedBy: BudgetConstraint[];
   /** The first constraint with nothing left (< MIN_RESERVATION_USD), set only when there is one. */
   exhaustedBy?: BudgetConstraint;
-  /** The constraint whose value equals effectiveBudgetUsd, when that is below the agent's own budget. */
+  /**
+   * The constraint whose value equals effectiveBudgetUsd, when that is below the
+   * agent's own budgetUsd, or its overrun-raised limit when overrunPercent is given.
+   */
   limitedBy?: BudgetConstraint;
   /** The numbers behind exhaustedBy, for the dispatch refusal record. */
   exhaustedDetail?: { capUsd: number; spentUsd: number; heldUsd: number; heldRuns: number };
