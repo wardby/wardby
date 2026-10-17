@@ -7,9 +7,9 @@ status: stable
 generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-15T10:22:57.651Z }
 sources:
   - id: states
-    url: https://github.com/wardby/wardby/blob/9c0f910f919dec4f1a2149bae78612cda41f6007/src/core/runner.ts#L457-L469
+    url: https://github.com/wardby/wardby/blob/744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be/src/core/runner.ts#L460-L472
   - id: finish
-    url: https://github.com/wardby/wardby/blob/9c0f910f919dec4f1a2149bae78612cda41f6007/src/core/runner.ts#L496-L513
+    url: https://github.com/wardby/wardby/blob/744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be/src/core/runner.ts#L499-L516
 wardby:
   schema: 1
   roles: [builder, reviewer, planner]
@@ -18,16 +18,16 @@ wardby:
     - id: states
       repo: github:wardby/wardby
       path: src/core/runner.ts
-      lines: [457, 469]
+      lines: [460, 472]
       symbol: DRIVABLE
-      sha: 9c0f910f919dec4f1a2149bae78612cda41f6007
+      sha: 744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be
       spanHash: sha256:77bd85d5b8025e9319afba8477923d068afa0e9bfaea46be28d68b2c41996e7b
     - id: finish
       repo: github:wardby/wardby
       path: src/core/runner.ts
-      lines: [496, 513]
+      lines: [499, 516]
       symbol: finishRunClaimed
-      sha: 9c0f910f919dec4f1a2149bae78612cda41f6007
+      sha: 744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be
       spanHash: sha256:258b0ccb1bf328fef95a5e459858eb3f02ecc3d600f6ff4a7aae562a6416936c
   confidence: high
 ---
@@ -36,6 +36,6 @@ wardby:
 
 **What to do:** preserve the status predicate and read-back when adding completion paths. An unconditional write can overwrite a completed or lost run; returning a locally assembled result can report an outcome that never became authoritative.
 
-[^states]: src/core/runner.ts, lines 457-469.
+[^states]: src/core/runner.ts, lines 460-472.
 
-[^finish]: src/core/runner.ts, lines 496-513.
+[^finish]: src/core/runner.ts, lines 499-516.

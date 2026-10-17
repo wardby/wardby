@@ -9,9 +9,9 @@ sources:
   - id: access
     url: https://github.com/wardby/wardby/blob/9c0f910f919dec4f1a2149bae78612cda41f6007/src/mcp/auth/access.ts#L47-L70
   - id: mutation
-    url: https://github.com/wardby/wardby/blob/9c0f910f919dec4f1a2149bae78612cda41f6007/src/mcp/tools/agents.ts#L789-L799
+    url: https://github.com/wardby/wardby/blob/744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be/src/mcp/tools/agents.ts#L847-L857
   - id: isolation
-    url: https://github.com/wardby/wardby/blob/9c0f910f919dec4f1a2149bae78612cda41f6007/src/mcp/tools/agents.ts#L894-L904
+    url: https://github.com/wardby/wardby/blob/744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be/src/mcp/tools/agents.ts#L975-L985
 wardby:
   schema: 1
   roles: [builder, reviewer]
@@ -27,16 +27,16 @@ wardby:
     - id: mutation
       repo: github:wardby/wardby
       path: src/mcp/tools/agents.ts
-      lines: [789, 799]
+      lines: [847, 857]
       symbol: update_agent
-      sha: 9c0f910f919dec4f1a2149bae78612cda41f6007
+      sha: 744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be
       spanHash: sha256:f6b5789fc562f8de5ad3e905513cd239c4ac447229ee1ee6bf4378cadffaeaa6
     - id: isolation
       repo: github:wardby/wardby
       path: src/mcp/tools/agents.ts
-      lines: [894, 904]
+      lines: [975, 985]
       symbol: update_agent
-      sha: 9c0f910f919dec4f1a2149bae78612cda41f6007
+      sha: 744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be
       spanHash: sha256:d3c25b8684e11ec56311649d617f6e933d380d4d063257e2f21804f502b2b832
   confidence: high
 ---
@@ -47,6 +47,6 @@ The access helpers default to `ctx.db`; callers inside a mutation transaction mu
 
 [^access]: src/mcp/auth/access.ts, lines 47-70.
 
-[^mutation]: src/mcp/tools/agents.ts, lines 789-799.
+[^mutation]: src/mcp/tools/agents.ts, lines 847-857.
 
-[^isolation]: src/mcp/tools/agents.ts, lines 894-904.
+[^isolation]: src/mcp/tools/agents.ts, lines 975-985.
