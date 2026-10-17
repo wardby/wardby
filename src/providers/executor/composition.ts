@@ -15,6 +15,7 @@ import { linkedIssueReader } from "./linked-issue-reader.js";
 import { drainCodingQueue } from "../../core/coding-queue.js";
 import { prismaServiceStateReporter } from "../../core/coding-service-status.js";
 import { logger } from "../../core/logger.js";
+import { outsideRunContext } from "../../core/async-context.js";
 import { DISABLED_POWER, type Power } from "../../core/power.js";
 import { startDeferredForRequest } from "../../core/host-events.js";
 import { reReviewAfterNoChangeFix, type ReReviewDeps } from "../../core/review-fix.js";
@@ -46,20 +47,23 @@ const compositionLog = logger.child({ module: "executor-composition" });
  * draft's head it may have pushed before recording its result, core/host-events.ts) are
  * released. Started in the background so the executor's terminal path (and the slot release
  * after it) never waits on the host; idempotent (released rows are claimed), and never throws.
- * `deps` is read only when a run finishes, after composition returned.
+ * Started outside the caller's async context: a delegated coding run finishes inside its lead's
+ * delegation step, and a review started from there would be refused by DBOS as a workflow
+ * started from inside a step. `deps` is read only when a run finishes, after composition returned.
  */
 export function reReviewOnCodingRunTerminal(deps: () => ReReviewDeps): (runId: string) => void {
-  return (runId) => {
-    void Promise.resolve()
-      .then(() => reReviewAfterNoChangeFix(runId, deps()))
-      .catch((err: unknown) => compositionLog.warn({ err, runId }, "no-change re-review hook failed"));
-    // Never throws (logs its own failures).
-    void Promise.resolve()
-      .then(() => startDeferredForRequest(deps(), runId))
-      .catch((err: unknown) =>
-        compositionLog.warn({ err, runId }, "could not release the reviews waiting for this run"),
-      );
-  };
+  return (runId) =>
+    outsideRunContext(() => {
+      void Promise.resolve()
+        .then(() => reReviewAfterNoChangeFix(runId, deps()))
+        .catch((err: unknown) => compositionLog.warn({ err, runId }, "no-change re-review hook failed"));
+      // Never throws (logs its own failures).
+      void Promise.resolve()
+        .then(() => startDeferredForRequest(deps(), runId))
+        .catch((err: unknown) =>
+          compositionLog.warn({ err, runId }, "could not release the reviews waiting for this run"),
+        );
+    });
 }
 
 export interface ConfiguredExecutorOptions {

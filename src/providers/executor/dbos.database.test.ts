@@ -12,6 +12,7 @@ import { DBOS } from "@dbos-inc/dbos-sdk";
 import { DBOS_BACKEND, DbosExecutor } from "./dbos.js";
 import { inFlightRunIds } from "../../core/in-flight-runs.js";
 import { setWorkflowEventSink, type WorkflowEventInput } from "../../core/workflow-events.js";
+import { outsideRunContext } from "../../core/async-context.js";
 
 /** One scripted event list per stream() call; `gate` lets a test hold a turn open. */
 function scriptedLlm(scripts: LlmStreamEvent[][], gate?: { turn: number; open: Promise<void> }) {
@@ -493,6 +494,53 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     await db.agentSubAgent.deleteMany({ where: { parentAgentId: lead } });
     await db.run.deleteMany({ where: { agentId: lead } });
     await db.agent.deleteMany({ where: { id: { in: [lead, ...kids] } } });
+  }, 30_000);
+
+  it("a run started in the background from inside another run's step fails, unless started outside its context", async () => {
+    // What a coding child's terminal hook does when it finishes inside its lead's delegation
+    // step: it starts a held review in the background. The background work keeps the step's
+    // async context, and DBOS refuses a workflow started from inside a step.
+    await executor?.close();
+    const inside = await db.run.create({ data: { agentId, executionManaged: true } });
+    const outside = await db.run.create({ data: { agentId, executionManaged: true } });
+    let started: Promise<[unknown, unknown]> | undefined;
+    let leadTurns = 0;
+    const llm: LlmProvider = {
+      async *stream() {
+        if (leadTurns++ === 0) {
+          // The first call is the lead's, inside its turn:1:llm step.
+          expect(DBOS.isInStep()).toBe(true);
+          started = Promise.all([
+            executor!.start(inside.id).then(
+              () => "started",
+              (err: unknown) => err,
+            ),
+            outsideRunContext(() => executor!.start(outside.id)).then(
+              () => "started",
+              (err: unknown) => err,
+            ),
+          ]);
+        }
+        for (const event of finalAnswer("done")) yield event;
+      },
+      async countTokens() {
+        return 10;
+      },
+      priceUsd(_model, usage) {
+        return (usage.inputTokens + usage.outputTokens) / 1000;
+      },
+    };
+    executor = build(llm);
+    await executor.launch();
+    const lead = await db.run.create({ data: { agentId, executionManaged: true } });
+
+    await executor.start(lead.id);
+    const [fromInside, fromOutside] = await started!;
+
+    // dispatchRun marks such a run failed; started directly, it stays pending.
+    expect(String(fromInside)).toContain("Invalid call to a `workflow` function from within a `step`");
+    expect(fromOutside).toBe("started");
+    expect((await db.run.findUniqueOrThrow({ where: { id: outside.id } })).status).toBe("succeeded");
   }, 30_000);
 
   it("refuses to launch a second executor with a different id in a process where DBOS is already launched", async () => {
