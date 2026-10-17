@@ -20,6 +20,7 @@ import {
   descriptionAppliedComment,
   descriptionFallbackComment,
   descriptionSha256,
+  hasClosingKeyword,
   supersededDescriptionComment,
 } from "./pr-description.js";
 
@@ -1272,20 +1273,30 @@ describe("pull request issue reference", () => {
     expect(pullRequestBody({ ...base, summary: "Did it." })).not.toContain("Resolves");
   });
 
-  it("names a same-repository GitHub issue as `Resolves #N` in the same place", () => {
+  it("names a same-repository GitHub issue as `From issue #N` in the same place, never as a closing keyword", () => {
     const body = pullRequestBody({ ...base, summary: "Did it.", issueNumber: 12 });
-    expect(body.split("\n\n").slice(0, 3)).toEqual(["<!-- wardby:run-1 -->", "Resolves #12", "Did it."]);
+    expect(body.split("\n\n").slice(0, 3)).toEqual(["<!-- wardby:run-1 -->", "From issue #12", "Did it."]);
+    expect(hasClosingKeyword(body)).toBe(false);
     expect(pullRequestTitle({ ...base, issueNumber: 12 })).toBe("Wardby run run-1");
     // A tracker issue's line wins; a bad number renders nothing.
-    expect(pullRequestBody({ ...base, summary: "Did it.", issue, issueNumber: 12 })).not.toContain("Resolves #12");
+    expect(pullRequestBody({ ...base, summary: "Did it.", issue, issueNumber: 12 })).not.toContain("issue #12");
     for (const issueNumber of [0, -1, 1.5, Number.NaN]) {
-      expect(pullRequestBody({ ...base, summary: "Did it.", issueNumber })).not.toContain("Resolves");
+      expect(pullRequestBody({ ...base, summary: "Did it.", issueNumber })).not.toContain("From issue");
     }
     // The Related section still goes right after the issue line.
     const block = `${RELATED_SECTION_START}\nA\n${RELATED_SECTION_END}`;
     expect(upsertRelatedSection(body, block)).toBe(
-      `<!-- wardby:run-1 -->\n\nResolves #12\n\n${block}\n\n${body.split("\n\n").slice(2).join("\n\n")}`,
+      `<!-- wardby:run-1 -->\n\nFrom issue #12\n\n${block}\n\n${body.split("\n\n").slice(2).join("\n\n")}`,
     );
+  });
+
+  it("leaves closing to the agent: a plan's `Refs #N` stays non-closing, a `Resolves #N` it writes still closes", () => {
+    const plan = pullRequestBody({ ...base, summary: "Plan only.\n\nRefs #12", issueNumber: 12 });
+    expect(plan).toContain("From issue #12");
+    expect(hasClosingKeyword(plan)).toBe(false);
+    const build = pullRequestBody({ ...base, summary: "Built it.\n\nResolves #12", issueNumber: 12 });
+    expect(build.match(/Resolves #12/g)).toHaveLength(1);
+    expect(hasClosingKeyword(build)).toBe(true);
   });
 
   it("drops a malformed key from both title and body", () => {

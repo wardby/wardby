@@ -1315,7 +1315,7 @@ export class ContainerExecutor implements Executor {
   /**
    * The PR title/body's originating issue, whichever system it is in: the
    * CodingRun's tracker issue (issueFor), else the GitHub issue in the same
-   * repository whose mention started the run tree (`Resolves #N`). Read from
+   * repository whose mention started the run tree (`From issue #N`). Read from
    * the root run, so a continuation's rebuilt body keeps the root's line.
    * Never throws: a failed lookup gives no issue line.
    */
