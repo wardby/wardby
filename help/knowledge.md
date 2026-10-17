@@ -1,9 +1,9 @@
 ---
 id: knowledge
 title: Architecture knowledge bundles
-summary: Keep cited, non-obvious architecture knowledge in docs/knowledge/ so coding runs, reviewers, and live sessions (through the AGENTS.md pointer) use it; validate it with wardby knowledge check.
+summary: Keep cited, non-obvious architecture knowledge in docs/knowledge/ (or a folder you pick in .wardby/knowledge.yaml) so coding runs, reviewers, and live sessions (through the AGENTS.md pointer) use it; validate it with wardby knowledge check.
 audience: operator
-tags: [knowledge, architecture, coding-agents, okf, cli, drift, push]
+tags: [knowledge, architecture, coding-agents, okf, cli, drift, push, knowledge.yaml, bundle-path]
 appliesTo: >=0.4.0
 ---
 
@@ -16,9 +16,18 @@ their reasons, and cross-module contracts. It uses the Open Knowledge Format
 for, the paths it affects, and citations to the code it describes. Each citation
 carries a commit `sha` and a `spanHash` so staleness can be detected.
 
-- `docs/knowledge/index.md` lists every concept in one line; `log.md` records
-  changes to the bundle.
-- When `docs/knowledge/index.md` exists on a coding run's base branch, the run's
+- `index.md` lists every concept in one line; `log.md` records changes to the
+  bundle.
+- **Pick your own folder:** add `.wardby/knowledge.yaml` with one line,
+  `path: .okf` (any repo-relative folder outside `.wardby/` and `.git/`). Wardby
+  then reads the bundle there for the coding-run note, merge-watcher drift runs,
+  and `wardby knowledge check`. Without the file it uses `docs/knowledge/`; an
+  invalid file is ignored with a warning (`knowledge_config_invalid` from the
+  check). Or skip wardby's reading entirely: tell your agents where knowledge
+  lives in their prompts or `AGENTS.md`, and they use that folder; you lose
+  only the automatic note and drift scoping on merge. Update any prompt that
+  names `docs/knowledge/` to your folder.
+- When the bundle's `index.md` exists on a coding run's base branch, the run's
   task includes the index automatically (up to 8 KiB). It never fails a
   dispatch; an unreadable index just means no note.
 - When the run's commit is known (it always is for a normal clone) and the
@@ -26,8 +35,8 @@ carries a commit `sha` and a `spanHash` so staleness can be detected.
   has no git metadata, so use that value for citation `sha` fields.
 - Validate the bundle with `wardby knowledge check` (add `--strict` to fail on
   warnings, `--json` for machine output, `--root` to point at the repository).
-  Errors are `concept_invalid`, `concept_secret`, `index_missing`, and
-  `index_link_broken`; warnings are `concept_not_indexed`,
+  Errors are `concept_invalid`, `concept_secret`, `index_missing`,
+  `index_link_broken`, and `knowledge_config_invalid`; warnings are `concept_not_indexed`,
   `citation_unverifiable`, and `citation_stale`.
 - Builders may edit concept prose. Citations can go stale afterward; the
   architecture agent re-anchors them.

@@ -36,6 +36,7 @@ import {
   RESERVED_BUNDLE_FILES,
   type ParsedConcept,
 } from "../knowledge/concept.js";
+import { KNOWLEDGE_CONFIG_MAX_BYTES, KNOWLEDGE_CONFIG_PATH, resolveKnowledgeLocation } from "../knowledge/location.js";
 import { driftScope, type DriftScope } from "../knowledge/relevance.js";
 import { spanHash } from "../knowledge/span-hash.js";
 
@@ -108,6 +109,8 @@ export function isReviewCommand(body: string, mentionHandle: string): boolean {
 type PushEvent = Extract<HostEvent, { kind: "push" }>;
 const MAX_BUNDLE_FILES = 200;
 const BUNDLE_FILE_LINES = 2000;
+/** `.wardby/knowledge.yaml` is one short key; a longer read is refused as too large. */
+const KNOWLEDGE_CONFIG_MAX_LINES = 200;
 const MAX_LISTED_CHANGES = 200;
 
 /** The whole bundle load (listing plus reads) must finish inside GitHub's ~10 s webhook window. */
@@ -132,6 +135,7 @@ export function mergeTaskText(
   scope: DriftScope | null,
   bundleComplete = true,
   citations: ReadonlyMap<string, ConceptCitationStatus> = new Map(),
+  bundlePath: string = DEFAULT_KNOWLEDGE_BUNDLE_PATH,
 ): string {
   const statusOf = (concept: string): ConceptCitationStatus => citations.get(concept) ?? { state: "unverified" };
   const changed = event.changedPathsComplete
@@ -144,7 +148,7 @@ export function mergeTaskText(
     : "The changed-file list is incomplete (GitHub includes at most 2048 commits per push and the list is capped at 1000 paths); treat every knowledge concept as possibly affected.";
   const listed = scope
     ? `Knowledge concepts whose citations, affects globs, or files changed (${scope.reason}):\n` +
-      scope.concepts.map((p) => `- ${DEFAULT_KNOWLEDGE_BUNDLE_PATH}/${p} — ${describeStatus(statusOf(p))}`).join("\n")
+      scope.concepts.map((p) => `- ${bundlePath}/${p} — ${describeStatus(statusOf(p))}`).join("\n")
     : null;
   let context: string;
   if (!bundleComplete) context = [changed, listed, BUNDLE_INCOMPLETE_TEXT].filter(Boolean).join("\n\n");
@@ -155,8 +159,7 @@ export function mergeTaskText(
   if (scope && scope.concepts.length > 0) {
     const states = scope.concepts.map((p) => statusOf(p).state);
     const count = (state: string) => states.filter((x) => x === state).length;
-    const onlyKnowledge =
-      event.changedPathsComplete && event.changedPaths.every((p) => p.startsWith(`${DEFAULT_KNOWLEDGE_BUNDLE_PATH}/`));
+    const onlyKnowledge = event.changedPathsComplete && event.changedPaths.every((p) => p.startsWith(`${bundlePath}/`));
     summary =
       `Citation check at ${event.after.slice(0, 12)}: ${count("verified")} of ${states.length} affected concepts verified, ` +
       `${count("stale")} stale, ${count("unverified")} not verified. Only knowledge files changed: ${onlyKnowledge ? "yes" : "no"}.`;
@@ -196,6 +199,27 @@ function startBudget(ms: number): Budget {
   return { promise, expired: () => expired, clear: () => clearTimeout(timer) };
 }
 
+/**
+ * `.wardby/knowledge.yaml` at the pushed commit, or null when it does not
+ * exist. Reads within the shared budget; a deadline or a host error throws,
+ * which resolveKnowledgeLocation turns into the default bundle with a warning.
+ */
+async function readKnowledgeConfig(host: CodeReviewHost, event: PushEvent, budget: Budget): Promise<string | null> {
+  const read = await Promise.race([
+    host.readFile(event.repository, KNOWLEDGE_CONFIG_PATH, event.after, {
+      startLine: 1,
+      maxLines: KNOWLEDGE_CONFIG_MAX_LINES,
+    }),
+    budget.promise,
+  ]);
+  if (read === "deadline") throw new Error("the read hit its deadline");
+  if (read.kind === "not_found") return null;
+  if (read.kind !== "file") throw new Error("it is not a file");
+  if (read.truncated || Buffer.byteLength(read.text, "utf8") > KNOWLEDGE_CONFIG_MAX_BYTES)
+    throw new Error(`it is larger than ${KNOWLEDGE_CONFIG_MAX_BYTES} bytes`);
+  return read.text;
+}
+
 interface LoadedBundle {
   concepts: ParsedConcept[];
   /** False when any part of the bundle may be missing from `concepts`. */
@@ -207,8 +231,13 @@ interface LoadedBundle {
  * under one overall deadline. A failure never fails the route; it yields an
  * incomplete result so the watcher treats every concept as possibly affected.
  */
-async function loadBundle(host: CodeReviewHost, event: PushEvent, budget: Budget): Promise<LoadedBundle> {
-  const prefix = `${DEFAULT_KNOWLEDGE_BUNDLE_PATH}/`;
+async function loadBundle(
+  host: CodeReviewHost,
+  event: PushEvent,
+  budget: Budget,
+  bundlePath: string,
+): Promise<LoadedBundle> {
+  const prefix = `${bundlePath}/`;
   const concepts: ParsedConcept[] = [];
   const where = { repository: event.repository, after: event.after };
   let filesRead = 0;
@@ -1276,11 +1305,13 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       const budget = startBudget(BUNDLE_LOAD_DEADLINE_MS);
       let taskOverride: string;
       try {
-        const { concepts, complete } = await loadBundle(host, event, budget);
+        const { bundlePath, warning } = await resolveKnowledgeLocation(() => readKnowledgeConfig(host, event, budget));
+        if (warning) log.warn({ repository: event.repository, after: event.after }, warning);
+        const { concepts, complete } = await loadBundle(host, event, budget, bundlePath);
         const scope = driftScope({
           changedPaths: event.changedPaths,
           changedPathsComplete: event.changedPathsComplete,
-          bundlePath: DEFAULT_KNOWLEDGE_BUNDLE_PATH,
+          bundlePath,
           concepts,
         });
         // Only the concepts the merge affects are checked, and only against a bundle that was fully read.
@@ -1293,7 +1324,7 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
               budget,
             )
           : new Map<string, ConceptCitationStatus>();
-        taskOverride = mergeTaskText(event, scope, complete, citations);
+        taskOverride = mergeTaskText(event, scope, complete, citations, bundlePath);
       } finally {
         budget.clear();
       }

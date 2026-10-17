@@ -33,7 +33,7 @@ import {
   type BudgetConstraint,
   type EffectiveBudgetResult,
 } from "./budget-groups.js";
-import { DEFAULT_KNOWLEDGE_BUNDLE_PATH } from "../knowledge/concept.js";
+import { KNOWLEDGE_CONFIG_MAX_BYTES, KNOWLEDGE_CONFIG_PATH, resolveKnowledgeLocation } from "../knowledge/location.js";
 import { KNOWLEDGE_INDEX_READ_MAX_BYTES, knowledgeSection, type KnowledgeNoteInput } from "../knowledge/note.js";
 import { logger } from "./logger.js";
 import { CodingModelProviderMismatchError, resolveCodingEntry } from "./run-pricing.js";
@@ -497,7 +497,8 @@ const UNREADABLE_DECLARATION: Readonly<Record<string, string>> = {
 
 /**
  * The knowledge note's input (docs/knowledge.md): the repository's bundle
- * index at the run's base, read before the transaction like the services
+ * index at the run's base (in the folder .wardby/knowledge.yaml names, else
+ * docs/knowledge/), read before the transaction like the services
  * declaration. Any failure means no note, never a failed dispatch.
  */
 async function readKnowledgeIndex(
@@ -524,15 +525,22 @@ export async function readKnowledgeIndexAt(
   repository: string,
   baseRef: string,
 ): Promise<KnowledgeNoteInput | undefined> {
-  if (!executor.readCodingRepositoryFile) return undefined;
+  const readFile = executor.readCodingRepositoryFile?.bind(executor);
+  if (!readFile) return undefined;
+  const ref = normalizeGitRef(baseRef);
+  // The repository may name its bundle folder in .wardby/knowledge.yaml; anything wrong with that file falls back to the default.
+  const { bundlePath, warning } = await resolveKnowledgeLocation(() =>
+    readFile({ repository, baseRef: ref, path: KNOWLEDGE_CONFIG_PATH, maxBytes: KNOWLEDGE_CONFIG_MAX_BYTES }),
+  );
+  if (warning) dispatchLog.warn({ repository, baseRef: ref }, warning);
   try {
-    const indexText = await executor.readCodingRepositoryFile({
+    const indexText = await readFile({
       repository,
-      baseRef: normalizeGitRef(baseRef),
-      path: `${DEFAULT_KNOWLEDGE_BUNDLE_PATH}/index.md`,
+      baseRef: ref,
+      path: `${bundlePath}/index.md`,
       maxBytes: KNOWLEDGE_INDEX_READ_MAX_BYTES,
     });
-    return indexText ? { bundlePath: DEFAULT_KNOWLEDGE_BUNDLE_PATH, indexText } : undefined;
+    return indexText ? { bundlePath, indexText } : undefined;
   } catch (err) {
     if (err instanceof Error && err.message in UNREADABLE_DECLARATION) {
       dispatchLog.info({ repository, reason: err.message }, "knowledge index unreadable; dispatching without it");
