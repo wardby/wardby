@@ -3,7 +3,7 @@ id: errors/budget-exhausted
 title: Run stopped out of budget (budget_exhausted)
 summary: A coding run stopped because its next model request did not fit what was left of its budget; get_run's budgetEvents says which limit and why.
 audience: operator
-tags: [error, budget, budget_exhausted, coding_budget_exhausted, reservations, holds, prompt-cache]
+tags: [error, budget, budget_exhausted, coding_budget_exhausted, holds, prompt-cache, overrun, allowedOverrunPercent]
 appliesTo: ">=0.6.1"
 ---
 
@@ -69,13 +69,48 @@ already used the cache-read rate, so the budget is simply low for the request.
 
 ## What to do
 
-- `run`: raise `budgetUsd` on the agent, or lower `codingProfile.maxOutputTokens`
+- `run`: raise `budgetUsd` on the agent, set `allowedOverrunPercent` (see
+  below), or lower `codingProfile.maxOutputTokens`
   so each request holds less.
 - `run-tree`: raise `budgetUsd` on the lead agent; its sub-agents draw on it.
 - `day`, `week`, `month`: raise the budget group's cap for that period, or wait
   for the period to reset. See [Budget group exhausted](budget-group-exhausted.md).
 
 A refused run is not resumed automatically; trigger a new one.
+
+## Allowed overrun
+
+A coding agent's `allowedOverrunPercent` (integer 0 to 100, default 0; set with
+`create_agent` or `update_agent`, same permission as `budgetUsd`) lets a run
+spend up to that percent beyond `budgetUsd`. On a lead agent that delegates,
+it raises its run tree's ceiling for coding sub-agents instead; native runs' own
+model calls are not affected. The run's limit is `budgetUsd` raised by the percent, trimmed to the room its
+budget group and run tree still have, so group caps stay hard and the percent a
+run got can be lower than the setting. A delegated run tree's ceiling uses the
+lead agent's percent. `get_run` shows `budgetBaseUsd` (before the overrun) and
+`budgetReservedUsd` (the limit). The sentence then names both, for example
+"this run's $1.00 budget and its 10% allowed overrun ($1.10 in all)".
+
+A worker that finishes is delivered even when it ended over the limit: the run
+is `succeeded` and its status comment says, for example, "Spent $1.04, $0.04
+(4%) over its $1.00 budget, within its allowed overrun."
+
+## Keeping the work of a stopped run
+
+When a run is stopped for budget and its worker ended cleanly, its changes so
+far are pushed as the usual draft pull request (or added to the one it was
+continuing). A new pull request's description starts "Stopped at its budget
+before finishing; the changes so far are in this draft." A continuation leaves
+the existing description alone. The run stays `budget_exhausted` and
+keeps its `budgetEvents`. A comment mentioning the App on that pull request
+continues the work with a fresh budget. The pull request is not marked ready
+automatically until a later continuation finishes.
+
+If a push check refuses (protected paths, diff limits, access) or there are no
+changes, the run ends as above with nothing pushed. So does a continuation of a
+pull request that is no longer a draft (marked ready for review): unfinished
+work is never pushed onto it. A worker that crashed, timed out or was stopped
+is not kept.
 
 ## Interrupted replies
 

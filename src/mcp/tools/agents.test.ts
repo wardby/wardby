@@ -70,6 +70,8 @@ interface FakeAgentRow {
   budgetGroupId: string | null;
   effort?: string | null;
   nativeExecutionMode?: string;
+  /** Defaults to 0 on create, as the column does. */
+  allowedOverrunPercent?: number;
 }
 
 interface FakeLink {
@@ -151,6 +153,7 @@ function fakeDb(
           kind: "native",
           codingProfile: codingProfile?.create ?? null,
           budgetGroupId: null,
+          allowedOverrunPercent: 0,
           ...agentData,
         };
         rows.set(row.id, row);
@@ -722,6 +725,48 @@ describe("agent CRUD tools", () => {
       const refused = await client.callTool({
         name: "update_agent",
         arguments: { id: plainAgent.id, maxDelegationsPerRun: bad },
+      });
+      expect(refused.isError, String(bad)).toBe(true);
+    }
+    await client.close();
+  });
+
+  it("allowedOverrunPercent defaults to 0, round-trips, and stays within 0..100", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const base = { systemPrompt: "Build it.", model: "gpt-5.6-luna", budgetUsd: 5 };
+
+    const plain = await client.callTool({ name: "create_agent", arguments: { name: "plain", ...base } });
+    expect(plain.isError).toBeFalsy();
+    const plainAgent = JSON.parse((plain.content as { text: string }[])[0].text);
+    expect(plainAgent.allowedOverrunPercent).toBe(0);
+
+    const flexible = await client.callTool({
+      name: "create_agent",
+      arguments: { name: "flexible", ...base, allowedOverrunPercent: 15 },
+    });
+    expect(flexible.isError).toBeFalsy();
+    const flexibleAgent = JSON.parse((flexible.content as { text: string }[])[0].text);
+    expect(flexibleAgent.allowedOverrunPercent).toBe(15);
+    const fetched = await client.callTool({ name: "get_agent", arguments: { id: flexibleAgent.id } });
+    expect(JSON.parse((fetched.content as { text: string }[])[0].text).allowedOverrunPercent).toBe(15);
+
+    for (const ok of [100, 0]) {
+      const set = await client.callTool({
+        name: "update_agent",
+        arguments: { id: flexibleAgent.id, allowedOverrunPercent: ok },
+      });
+      expect(set.isError, String(ok)).toBeFalsy();
+      expect(JSON.parse((set.content as { text: string }[])[0].text).allowedOverrunPercent).toBe(ok);
+    }
+
+    for (const bad of [-1, 101, 2.5, "10"]) {
+      const refused = await client.callTool({
+        name: "update_agent",
+        arguments: { id: flexibleAgent.id, allowedOverrunPercent: bad },
       });
       expect(refused.isError, String(bad)).toBe(true);
     }

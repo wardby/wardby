@@ -248,6 +248,17 @@ export interface GitHubRepositoryAccess {
     headRef: string;
   }): Promise<PullRequestResult | null>;
   /**
+   * Whether the root run's marked open pull request is still a draft: true or
+   * false, or null when it is not open (merged, closed, or gone). Optional:
+   * without it a caller treats the draft state as unknown.
+   */
+  openPullRequestDraft?(input: {
+    runId: string;
+    repository: string;
+    baseRef: string;
+    headRef: string;
+  }): Promise<boolean | null>;
+  /**
    * Rewrites the root run's open pull request description for a fix round,
    * or, when a person edited it since wardby last wrote it, upserts a comment
    * carrying the proposed description instead. Never throws. Optional:
@@ -1141,6 +1152,29 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     );
   }
 
+  /** See GitHubRepositoryAccess.openPullRequestDraft: GitHub's own `draft` flag on the marked open PR. */
+  async openPullRequestDraft(input: {
+    runId: string;
+    repository: string;
+    baseRef: string;
+    headRef: string;
+  }): Promise<boolean | null> {
+    const repository = normalizeGitHubRepository(input.repository);
+    const baseRef = normalizeGitRef(input.baseRef);
+    const headRef = normalizeGitRef(input.headRef);
+    if (!SAFE_RUN_ID.test(input.runId)) throw new Error("github_pull_request_input_invalid");
+    return this.withRepositoryToken(repository, async (token) => {
+      const found = await this.findMarkedPullRequest(token, {
+        runId: input.runId,
+        repository,
+        baseRef,
+        headRef,
+        acceptReadyForReview: true,
+      });
+      return found ? found.draft : null;
+    });
+  }
+
   /**
    * A fix round's description update (see GitHubRepositoryAccess). One
    * repository token; every failure becomes `skipped:error`.
@@ -1530,7 +1564,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
   private async findMarkedPullRequest(
     token: string,
     input: PullRequestInput,
-  ): Promise<{ pr: PullRequestResult; body: string } | null> {
+  ): Promise<{ pr: PullRequestResult; body: string; draft: boolean } | null> {
     const [owner, name] = input.repository.split("/");
     const query = new URLSearchParams({
       state: "open",
@@ -1551,6 +1585,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
         return {
           pr: this.parsePullRequest(candidate, input.repository, input.acceptReadyForReview === true),
           body: candidate.body,
+          draft: candidate.draft === true,
         };
       }
     }

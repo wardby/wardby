@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { budgetSentence, loadBudgetSentence } from "./budget-wording.js";
+import { budgetSentence, loadBudgetSentence, overrunSentence } from "./budget-wording.js";
 
 describe("budgetSentence", () => {
   it("names the run's budget with two decimals", () => {
@@ -114,5 +114,43 @@ describe("loadBudgetSentence", () => {
     await expect(loadBudgetSentence(missing as never, "r1", "refused")).resolves.toBe(
       "Out of budget: this run could not start within its budget.",
     );
+  });
+});
+
+describe("budgetSentence with an allowed overrun", () => {
+  it("names the base budget and the overrun when they differ", () => {
+    expect(budgetSentence({ runBudgetUsd: 1.1, baseBudgetUsd: 1, agentBudgetUsd: 1 })).toBe(
+      "Out of budget: this run's $1.00 budget and its 10% allowed overrun ($1.10 in all) were used up.",
+    );
+  });
+
+  it("treats an overrun that rounds to 0% as none", () => {
+    expect(budgetSentence({ runBudgetUsd: 1.001, baseBudgetUsd: 1, agentBudgetUsd: 1 })).toBe(
+      "Out of budget: this run's $1.00 budget was used up.",
+    );
+  });
+
+  it("keeps today's sentence without a base or when base equals the limit", () => {
+    const today = "Out of budget: this run's $1.00 budget was used up.";
+    expect(budgetSentence({ runBudgetUsd: 1, agentBudgetUsd: 1 })).toBe(today);
+    expect(budgetSentence({ runBudgetUsd: 1, baseBudgetUsd: 1, agentBudgetUsd: 1 })).toBe(today);
+    expect(budgetSentence({ runBudgetUsd: 1, baseBudgetUsd: null, agentBudgetUsd: 1 })).toBe(today);
+  });
+});
+
+describe("overrunSentence", () => {
+  it("says a run stayed within its allowed overrun", () => {
+    expect(overrunSentence(1.04, 1, 1.1)).toBe(
+      "Spent $1.04, $0.04 (4%) over its $1.00 budget, within its allowed overrun.",
+    );
+  });
+
+  it("omits the allowance note when spend passed the limit", () => {
+    expect(overrunSentence(1.12, 1, 1.1)).toBe("Spent $1.12, $0.12 (12%) over its $1.00 budget.");
+  });
+
+  it("is undefined within the base budget", () => {
+    expect(overrunSentence(0.9, 1, 1.1)).toBeUndefined();
+    expect(overrunSentence(1, 1, 1.1)).toBeUndefined();
   });
 });

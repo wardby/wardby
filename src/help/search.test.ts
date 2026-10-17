@@ -361,4 +361,16 @@ describe("pnpm and yarn help", () => {
       expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("coding-packages");
     }
   });
+
+  it("finds the budget-exhausted article for the allowed overrun setting", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const query of ["allowedOverrunPercent", "budget overrun"]) {
+      const ids = searchHelp(catalog, query)
+        .slice(0, 3)
+        .map((result) => result.page.id);
+      expect(ids).toContain("errors/budget-exhausted");
+    }
+  });
 });

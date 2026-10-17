@@ -29,6 +29,30 @@ const event = (limit: BudgetLimit, details: BudgetEventView["details"]): BudgetE
 });
 
 describe("budget event sentences", () => {
+  it("proxy, run, with an allowed overrun", () => {
+    const e = event("run", proxy({ budgetUsd: 3.3, baseBudgetUsd: 3 }));
+    expect(ownerBudgetSentence(e, "mobile-builder")).toContain(
+      "To continue, raise budgetUsd or allowedOverrunPercent on mobile-builder.",
+    );
+  });
+
+  it("names the base budget and overrun in both sentences when the run had one", () => {
+    const e = event("run", proxy({ budgetUsd: 1.1, baseBudgetUsd: 1, spentUsd: 1.05, refusedHoldUsd: 0.2 }));
+    const facts =
+      "needed a $0.20 hold, but only $0.05 of this run's $1.00 budget and its 10% allowed overrun ($1.10 in all) was left ($1.05 spent).";
+    expect(hostBudgetSentence(e)).toBe(`Out of budget: the next model request ${facts}`);
+    expect(ownerBudgetSentence(e, "a")).toContain(`the next request ${facts}`);
+  });
+
+  it("keeps today's text without a base, with base == limit, or when the overrun rounds to 0%", () => {
+    const today = hostBudgetSentence(event("run", proxy()));
+    expect(hostBudgetSentence(event("run", proxy({ baseBudgetUsd: 3 })))).toBe(today);
+    expect(hostBudgetSentence(event("run", proxy({ baseBudgetUsd: 2.999 })))).toBe(today);
+    expect(ownerBudgetSentence(event("run", proxy({ baseBudgetUsd: 2.999 })), "a")).toBe(
+      ownerBudgetSentence(event("run", proxy()), "a"),
+    );
+  });
+
   it("proxy, run", () => {
     const e = event("run", proxy());
     expect(ownerBudgetSentence(e, "mobile-builder")).toBe(

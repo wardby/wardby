@@ -52,6 +52,13 @@ class FakeGitHub implements GitHubRepositoryAccess {
   /** Thrown this many times in a row (then answers `openPullRequest` normally) -- simulates a transient GitHub failure. */
   openPullRequestFailuresRemaining = 0;
 
+  /** What openPullRequestDraft answers; an Error is thrown. */
+  openPullRequestDraftAnswer: boolean | null | Error = true;
+  async openPullRequestDraft(): Promise<boolean | null> {
+    if (this.openPullRequestDraftAnswer instanceof Error) throw this.openPullRequestDraftAnswer;
+    return this.openPullRequestDraftAnswer;
+  }
+
   async findOpenPullRequest(input: unknown): Promise<PullRequestResult | null> {
     this.openPullRequestCalls.push(structuredClone(input));
     if (this.openPullRequestFailuresRemaining > 0) {
@@ -629,6 +636,21 @@ describe("GitVcsProvider", () => {
       await expect(provider.refreshPullRequestDescription?.(prepared, {})).resolves.toBeUndefined();
     });
 
+    it("continuationPullRequestDraft reports the host's draft state, and undefined when it is unknown", async () => {
+      const { provider, github } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      github.openPullRequestDraftAnswer = true;
+      await expect(provider.continuationPullRequestDraft?.(prepared)).resolves.toBe(true);
+      github.openPullRequestDraftAnswer = false;
+      await expect(provider.continuationPullRequestDraft?.(prepared)).resolves.toBe(false);
+      github.openPullRequestDraftAnswer = null;
+      await expect(provider.continuationPullRequestDraft?.(prepared)).resolves.toBeUndefined();
+      github.openPullRequestDraftAnswer = new Error("github_api_error:503");
+      await expect(provider.continuationPullRequestDraft?.(prepared)).resolves.toBeUndefined();
+      const { continuation: _continuation, ...fresh } = prepared;
+      await expect(provider.continuationPullRequestDraft?.(fresh)).resolves.toBeUndefined();
+    });
+
     it("refuses to prepare a continuation whose PR is no longer open, before cloning", async () => {
       const { provider, github, git } = await harness();
       github.openPullRequest = null;
@@ -846,6 +868,20 @@ describe("GitVcsProvider", () => {
         );
       });
 
+      it("puts the overrun sentence in the done comment", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationFinished(prepared, "succeeded", {
+          overrunSentence: "Spent $1.04, $0.04 (4%) over its $1.00 budget, within its allowed overrun.",
+          summary: "Done.",
+        });
+
+        expect(github.statusCommentCalls[0].input.body).toBe(
+          "✅ wardby run run-2 finished. Spent $1.04, $0.04 (4%) over its $1.00 budget, within its allowed overrun.\n\nDone.",
+        );
+      });
+
       it("omits the summary suffix entirely when none is given", async () => {
         const { provider, github } = await harness();
         const prepared = await provider.prepareWorkspace(continuationInput());
@@ -876,6 +912,24 @@ describe("GitVcsProvider", () => {
 
         expect(github.statusCommentCalls[0].input.body).toBe(
           "❌ builder (wardby run run-2) ran out of budget. Out of budget: this run's $3.00 budget was used up.",
+        );
+        expect(github.checkRunCalls[0].input).toMatchObject({ outcome: "failed" });
+      });
+
+      it("says a budget-stopped run's changes were pushed and how to continue it", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationFinished(prepared, "budget_exhausted", {
+          agentName: "builder",
+          budgetSentence: "Out of budget: this run's $3.00 budget was used up.",
+          changesPushed: { pullRequestNumber: 42 },
+          summary: "Half done.",
+        });
+
+        expect(github.statusCommentCalls[0].input.body).toBe(
+          "⚠️ builder (wardby run run-2) ran out of budget before finishing. Out of budget: this run's $3.00 budget was used up. " +
+            "The changes so far are in #42; comment `@wardby` on it to continue.\n\nHalf done.",
         );
         expect(github.checkRunCalls[0].input).toMatchObject({ outcome: "failed" });
       });

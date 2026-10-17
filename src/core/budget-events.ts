@@ -6,7 +6,7 @@
  */
 import type { Prisma, PrismaClient } from "#prisma";
 import { logger } from "./logger.js";
-import { groupName } from "./budget-wording.js";
+import { groupName, overrunPercent } from "./budget-wording.js";
 
 const log = logger.child({ module: "budget-events" });
 
@@ -28,6 +28,8 @@ export interface ProxyRefusalDetails {
   turn: number;
   /** Filled at read time (budget event names); never stored, and dropped if a stored row has them. */
   agentBudgetUsd?: number;
+  /** Filled at read time: the run's budget before its allowed overrun, when the agent had one. */
+  baseBudgetUsd?: number;
   groupName?: string;
   leadAgentName?: string;
 }
@@ -71,9 +73,14 @@ function proxyFacts(details: ProxyRefusalDetails, subject: string): string {
   const held = details.heldReservedUsd + details.heldUncertainUsd;
   const left = Math.max(0, details.budgetUsd - details.spentUsd - held);
   const heldPart = held > 0 ? `, ${usd(held)} held by requests in flight` : "";
+  const percent = overrunPercent(details.baseBudgetUsd, details.budgetUsd);
+  const budget =
+    percent !== null && details.baseBudgetUsd !== undefined
+      ? `${usd(details.baseBudgetUsd)} budget and its ${percent}% allowed overrun (${usd(details.budgetUsd)} in all)`
+      : `${usd(details.budgetUsd)} budget`;
   return (
     `${subject} needed a ${usd(details.refusedHoldUsd)} hold, but only ${usd(left)} of this run's ` +
-    `${usd(details.budgetUsd)} budget was left (${usd(details.spentUsd)} spent${heldPart}).`
+    `${budget} was left (${usd(details.spentUsd)} spent${heldPart}).`
   );
 }
 
@@ -101,7 +108,10 @@ export function ownerBudgetSentence(event: BudgetEventView, agentName: string): 
     return `Could not start: ${dispatchPeriodSentence(limit, details)}`;
   }
   const first = `Stopped before turn ${details.turn}: ${proxyFacts(details, "the next request")}`;
-  if (limit === "run") return `${first} To continue, raise budgetUsd on ${agentName}.`;
+  if (limit === "run") {
+    const overran = overrunPercent(details.baseBudgetUsd, details.budgetUsd) !== null;
+    return `${first} To continue, raise ${overran ? "budgetUsd or allowedOverrunPercent" : "budgetUsd"} on ${agentName}.`;
+  }
   if (limit === "run-tree") {
     const lead = details.leadAgentName ?? "lead agent";
     return (
@@ -224,6 +234,7 @@ export async function latestBudgetEvent(
 interface BudgetEventNames {
   agentName?: string;
   agentBudgetUsd?: number;
+  baseBudgetUsd?: number;
   groupName?: string;
   leadAgentName?: string;
 }
@@ -242,6 +253,7 @@ async function budgetEventNames(
     select: {
       parentRunId: true,
       agent: { select: { name: true, budgetUsd: true, budgetGroup: { select: { name: true } } } },
+      codingRun: { select: { budgetBaseUsd: true } },
     },
   });
   const names: BudgetEventNames = {};
@@ -252,6 +264,8 @@ async function budgetEventNames(
     if (Number.isFinite(budget)) names.agentBudgetUsd = budget;
     if (run.agent.budgetGroup?.name) names.groupName = run.agent.budgetGroup.name;
   }
+  const base = run.codingRun?.budgetBaseUsd == null ? NaN : Number(run.codingRun.budgetBaseUsd);
+  if (Number.isFinite(base)) names.baseBudgetUsd = base;
   if (withLead) {
     let lead = run.agent?.name;
     let id: string | null = run.parentRunId;
@@ -274,6 +288,7 @@ function withNames(event: BudgetEventView, names: BudgetEventNames): BudgetEvent
   const details: BudgetEventDetails = { ...event.details };
   if (names.groupName) details.groupName = names.groupName;
   if (details.source === "proxy" && names.agentBudgetUsd !== undefined) details.agentBudgetUsd = names.agentBudgetUsd;
+  if (details.source === "proxy" && names.baseBudgetUsd !== undefined) details.baseBudgetUsd = names.baseBudgetUsd;
   if (event.limit === "run-tree" && names.leadAgentName) details.leadAgentName = names.leadAgentName;
   return { ...event, details };
 }

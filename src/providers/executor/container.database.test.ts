@@ -237,6 +237,22 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
     }
   });
 
+  it("pullRequestMarkedReady reads whether the root's pull request was marked ready", async () => {
+    const marked = `container-ready-marked-${randomUUID()}`;
+    const draft = `container-ready-draft-${randomUUID()}`;
+    try {
+      await codingRunWith(marked, "Marked.", { markedReadyAt: new Date() });
+      await codingRunWith(draft, "Draft.");
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.pullRequestMarkedReady(marked)).resolves.toBe(true);
+      await expect(store.pullRequestMarkedReady(draft)).resolves.toBe(false);
+      await expect(store.pullRequestMarkedReady(`container-ready-missing-${randomUUID()}`)).resolves.toBe(false);
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: [marked, draft] } } });
+      await db.run.deleteMany({ where: { id: { in: [marked, draft] } } });
+    }
+  });
+
   it("pullRequestDescriptionBaseline reads the root's hash and the author run's stored summary", async () => {
     const root = `container-desc-root-${randomUUID()}`;
     const author = `container-desc-author-${randomUUID()}`;

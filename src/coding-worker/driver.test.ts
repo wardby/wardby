@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { WORKER_BUDGET_EXHAUSTED_SUMMARY } from "../coding/continuation-wording.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
 import type { CodingTaskInput } from "../coding/protocol.js";
 import { CODING_OUTPUT_JSON_SCHEMA, runCodingWorker, WORKER_SECURITY_INSTRUCTIONS } from "./driver.js";
@@ -274,7 +275,12 @@ describe("runCodingWorker", () => {
         {},
       ),
     });
-    expect(result).toMatchObject({ runId: input.runId, outcome: "budget_exhausted", tests: [] });
+    expect(result).toMatchObject({
+      runId: input.runId,
+      outcome: "budget_exhausted",
+      summary: WORKER_BUDGET_EXHAUSTED_SUMMARY,
+      tests: [],
+    });
     expect(JSON.stringify(result)).not.toContain("SECRET_PROVIDER_BODY");
   });
 

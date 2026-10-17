@@ -11,6 +11,8 @@ export interface BudgetFacts {
   /** The run's own budget (a coding run's reservation); falls back to the agent's. */
   runBudgetUsd?: number | null;
   agentBudgetUsd: number;
+  /** The run's budget before the agent's allowed overrun; absent for runs from before the setting. */
+  baseBudgetUsd?: number | null;
   budgetGroupName?: string | null;
   /** The run was refused before it started. */
   refused?: boolean;
@@ -26,6 +28,13 @@ export function groupName(name: string | null | undefined): string | null {
   return cleaned || null;
 }
 
+/** The allowed overrun as a whole percent, or null when the run had none (no base, or it rounds to 0%). */
+export function overrunPercent(baseUsd: number | null | undefined, limitUsd: number): number | null {
+  if (baseUsd == null || !(baseUsd > 0) || !(baseUsd < limitUsd)) return null;
+  const percent = Math.round((limitUsd / baseUsd - 1) * 100);
+  return percent > 0 ? percent : null;
+}
+
 export function budgetSentence(facts: BudgetFacts): string {
   const group = groupName(facts.budgetGroupName);
   if (facts.refused) {
@@ -35,12 +44,30 @@ export function budgetSentence(facts: BudgetFacts): string {
       : `Out of budget: ${within}.`;
   }
   const runBudget = facts.runBudgetUsd ?? facts.agentBudgetUsd;
+  const base = facts.baseBudgetUsd;
+  const percent = overrunPercent(base, runBudget);
+  if (base != null && percent !== null) {
+    return `Out of budget: this run's ${usd(base)} budget and its ${percent}% allowed overrun (${usd(runBudget)} in all) were used up.`;
+  }
   const used = `Out of budget: this run's ${usd(runBudget)} budget was used up`;
   // A run reserved less than the agent's own budget: its group had only that much left.
   if (group && runBudget < facts.agentBudgetUsd) {
     return `${used} (the "${group}" budget group had only that much left of its limit).`;
   }
   return `${used}.`;
+}
+
+/**
+ * For a run that finished over its base budget: what it spent and by how much
+ * it went over, and whether that stayed inside the allowed overrun. Undefined
+ * when the spend is within the base budget.
+ */
+export function overrunSentence(costUsd: number, baseUsd: number, limitUsd: number): string | undefined {
+  if (!(baseUsd > 0) || !(costUsd > baseUsd)) return undefined;
+  const over = costUsd - baseUsd;
+  const percent = Math.round((over / baseUsd) * 100);
+  const within = costUsd <= limitUsd ? ", within its allowed overrun" : "";
+  return `Spent ${usd(costUsd)}, ${usd(over)} (${percent}%) over its ${usd(baseUsd)} budget${within}.`;
 }
 
 /**
@@ -61,14 +88,16 @@ export async function loadBudgetSentence(
       where: { id: runId },
       select: {
         agent: { select: { budgetUsd: true, budgetGroup: { select: { name: true } } } },
-        codingRun: { select: { budgetReservedUsd: true } },
+        codingRun: { select: { budgetReservedUsd: true, budgetBaseUsd: true } },
       },
     });
     const agentBudgetUsd = Number(row?.agent?.budgetUsd);
     if (!row?.agent || !Number.isFinite(agentBudgetUsd)) throw new Error("budget_facts_unavailable");
     const reserved = row.codingRun ? Number(row.codingRun.budgetReservedUsd) : NaN;
+    const base = row.codingRun?.budgetBaseUsd == null ? NaN : Number(row.codingRun.budgetBaseUsd);
     return budgetSentence({
       runBudgetUsd: Number.isFinite(reserved) ? reserved : null,
+      baseBudgetUsd: Number.isFinite(base) ? base : null,
       agentBudgetUsd,
       budgetGroupName: row.agent.budgetGroup?.name ?? null,
       refused,

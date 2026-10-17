@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hostBudgetSentence, ownerBudgetSentence, type BudgetEventView } from "../../core/budget-events.js";
 import { InMemoryCodingRunObserver } from "../../coding/observability.js";
-import { CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
+import { CONTINUATION_CLOSED_ERROR, WORKER_BUDGET_EXHAUSTED_SUMMARY } from "../../coding/continuation-wording.js";
 import { MAX_CODING_INPUT_BYTES } from "../../coding/protocol.js";
 import type { CodingProvider } from "../../coding/provider.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
@@ -187,6 +187,7 @@ class FakeStore implements ContainerExecutionStore {
   /** Fix-round description store methods; tests that need them assign them. */
   pullRequestDescriptionBaseline?: (rootRunId: string) => Promise<StoredDescriptionBaseline>;
   pullRequestRunIds?: (rootRunId: string) => Promise<string[]>;
+  pullRequestMarkedReady?: (rootRunId: string) => Promise<boolean>;
   linkedIssueSource?: (rootRunId: string) => Promise<LinkedIssueSource>;
   recordPullRequestDescription?: (input: {
     rootRunId: string;
@@ -366,6 +367,8 @@ class FakeVcs implements VcsProvider {
     workspace: ContinuationTarget,
     details: FinalizeChangesDetails,
   ) => Promise<DescriptionWriteOutcome | undefined>;
+  /** The host's draft state of a continuation's pull request; tests that need it assign it. */
+  continuationPullRequestDraft?: (workspace: PreparedWorkspace) => Promise<boolean | undefined>;
   notifyStartedCalls = 0;
   lastNotifyStartedAgentName?: string;
   notifyFinishedTargets: ContinuationTarget[] = [];
@@ -374,8 +377,10 @@ class FakeVcs implements VcsProvider {
     summary?: string;
     agentName?: string;
     budgetSentence?: string;
+    overrunSentence?: string;
     serviceSentence?: string;
     protectedPathSentence?: string;
+    changesPushed?: { pullRequestNumber?: number };
   }> = [];
 
   constructor(
@@ -449,9 +454,11 @@ class FakeVcs implements VcsProvider {
       summary: details?.summary,
       agentName: details?.agentName,
       ...(details?.budgetSentence ? { budgetSentence: details.budgetSentence } : {}),
+      ...(details?.overrunSentence ? { overrunSentence: details.overrunSentence } : {}),
       ...(details?.providerSentence ? { providerSentence: details.providerSentence } : {}),
       ...(details?.serviceSentence ? { serviceSentence: details.serviceSentence } : {}),
       ...(details?.protectedPathSentence ? { protectedPathSentence: details.protectedPathSentence } : {}),
+      ...(details?.changesPushed ? { changesPushed: details.changesPushed } : {}),
     });
     this.events.push(`notifyFinished:${outcome}`);
   }
@@ -2012,8 +2019,49 @@ describe("ContainerExecutor", () => {
       ]);
     });
 
+    it("tells the host when a succeeded run spent past its base budget", async () => {
+      const created = await harness({ budgetUsd: 0.1, budgetBaseUsd: 0.005 });
+      await created.executor.start("run-1");
+
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({
+        outcome: "succeeded",
+        overrunSentence: "Spent $0.01, $0.01 (100%) over its $0.01 budget, within its allowed overrun.",
+      });
+    });
+
+    it("adds no overrun sentence for a run without a base budget or within it", async () => {
+      const none = await harness({ budgetUsd: 0.1 });
+      await none.executor.start("run-1");
+      expect(none.vcs.notifyFinishedCalls[0]).not.toHaveProperty("overrunSentence");
+
+      const within = await harness({ budgetUsd: 0.1, budgetBaseUsd: 0.05 });
+      await within.executor.start("run-1");
+      expect(within.vcs.notifyFinishedCalls[0]).not.toHaveProperty("overrunSentence");
+    });
+
+    it("names the base budget and allowed overrun when a run with an overrun is out of budget", async () => {
+      const created = await harness({ budgetUsd: 1.1, budgetBaseUsd: 1 });
+      created.sessions.exhausted.add("session-1");
+      created.jobs.statusValue = { state: "failed" };
+      created.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_stream_failed" };
+      await created.executor.start("run-1");
+
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({
+        budgetSentence:
+          "Out of budget: this run's $1.00 budget and its 10% allowed overrun ($1.10 in all) were used up.",
+      });
+    });
+
     it("notifies finished with 'budget_exhausted' when the budget is exhausted", async () => {
       const created = await harness({ budgetUsd: 0.005 });
+      created.jobs.result.resultArtifact = JSON.stringify({
+        schemaVersion: 1,
+        runId: "run-1",
+        outcome: "budget_exhausted",
+        summary: "Ran out.",
+        tests: [],
+      });
+      created.vcs.finalizeEmpty = true;
       await created.executor.start("run-1");
 
       expect(created.vcs.notifyStartedCalls).toBe(1);
@@ -2257,16 +2305,16 @@ describe("ContainerExecutor", () => {
       expect(created.vcs.notifyFinishedCalls[0]).not.toHaveProperty("providerSentence");
     });
 
-    it("records the proxy's refusal when the run goes over budget only after its workspace is materialized", async () => {
+    it("still delivers finished work that went over budget only after its workspace is materialized", async () => {
       const created = await harness();
       created.jobs.materializeWorkspace = async () => {
         created.store.run.costUsd = created.store.run.budgetUsd + 0.01;
       };
       await created.executor.start("run-1");
 
-      expect(created.store.run.status).toBe("budget_exhausted");
-      expect(created.observer.events.some((event) => event.stage === "budget_cutoff")).toBe(true);
-      expect(created.vcs.finalized).toBe(0);
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.observer.events.some((event) => event.stage === "budget_cutoff")).toBe(false);
+      expect(created.vcs.finalized).toBe(1);
       expect(created.store.recordedRefusals).toEqual([["run-1", "session-1"]]);
     });
 
@@ -2459,6 +2507,8 @@ describe("ContainerExecutor", () => {
       for (const outcome of ["no_changes", "budget_exhausted"]) {
         const created = await harness();
         created.jobs.result.resultArtifact = artifact(outcome);
+        // A budget stop with changes would push them; with none it ends without a push.
+        created.vcs.finalizeEmpty = true;
         await created.executor.start("run-1");
         expect(created.store.completions[0]?.record).toEqual({ dependencyCacheResult: report });
       }
@@ -2596,15 +2646,378 @@ describe("ContainerExecutor", () => {
     expect(created.store.run.result).toMatchObject({ outcome: "no_changes" });
   });
 
-  it("stops before VCS finalization when authoritative usage exceeds the budget", async () => {
-    const created = await harness({ budgetUsd: 0.005 });
-    await created.executor.start("run-1");
-    expect(created.jobs.materializations).toBe(0);
-    expect(created.vcs.finalized).toBe(0);
-    expect(created.store.run.status).toBe("budget_exhausted");
-    expect(created.store.run.result).toMatchObject({ outcome: "budget_exhausted", usage: { costUsd: 0.01 } });
-    expect(created.observer.events.map((event) => event.stage)).toContain("budget_cutoff");
-    expect(created.observer.metrics.snapshot().terminalOutcomes).toEqual({ budget_exhausted: 1 });
+  describe("budget overruns and budget stops", () => {
+    const stoppedArtifact = JSON.stringify({
+      schemaVersion: 1,
+      runId: "run-1",
+      outcome: "budget_exhausted",
+      summary: "Added the endpoint; tests still to write.",
+      tests: [],
+    });
+    const PREFIX = "Stopped at its budget before finishing; the changes so far are in this draft.";
+
+    it("delivers finished work that cost more than its limit, saying so on the host", async () => {
+      const created = await harness({ budgetUsd: 1, budgetBaseUsd: 1 });
+      const cancel = created.sessions.cancelSession.bind(created.sessions);
+      created.sessions.cancelSession = async () => {
+        await cancel();
+        created.store.run.costUsd = 1.05;
+      };
+      await created.executor.start("run-1");
+
+      expect(created.vcs.finalized).toBe(1);
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.store.run.result).toMatchObject({ outcome: "pull_request_opened", pullRequestNumber: 42 });
+      expect(created.observer.events.map((event) => event.stage)).not.toContain("budget_cutoff");
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({
+        outcome: "succeeded",
+        overrunSentence: "Spent $1.05, $0.05 (5%) over its $1.00 budget.",
+      });
+    });
+
+    it("finishes a no-change run that cost more than its limit as succeeded", async () => {
+      const created = await harness({ budgetUsd: 0.005 });
+      created.jobs.result.resultArtifact = JSON.stringify({
+        schemaVersion: 1,
+        runId: "run-1",
+        outcome: "no_changes",
+        summary: "Already correct.",
+        tests: [],
+      });
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.store.run.result).toMatchObject({ outcome: "no_changes" });
+    });
+
+    it("pushes a budget-stopped run's changes as a draft pull request it can be continued from", async () => {
+      const created = await harness({ budgetUsd: 0.005 });
+      created.jobs.result.resultArtifact = stoppedArtifact;
+      await created.executor.start("run-1");
+
+      expect(created.jobs.materializations).toBe(1);
+      expect(created.vcs.finalized).toBe(1);
+      expect(created.vcs.lastFinalizeDetails?.summary).toBe(`${PREFIX}\n\nAdded the endpoint; tests still to write.`);
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.store.completions).toHaveLength(1);
+      expect(created.store.completions[0]).toMatchObject({
+        status: "budget_exhausted",
+        record: { baseSha: "a".repeat(40) },
+      });
+      const result = created.store.run.result as { outcome: string; summary: string; pullRequestNumber: number };
+      expect(result).toMatchObject({ outcome: "pull_request_opened", pullRequestNumber: 42, usage: { costUsd: 0.01 } });
+      expect(result.summary.startsWith(PREFIX)).toBe(true);
+      expect(result.summary).toContain("Added the endpoint; tests still to write.");
+      expect(created.store.recordedRefusals).toEqual([["run-1", "session-1"]]);
+      const stages = created.observer.events.map((event) => event.stage);
+      expect(stages).toContain("budget_cutoff");
+      expect(stages).toContain("pull_request_opened");
+      expect(created.observer.metrics.snapshot().terminalOutcomes).toEqual({ budget_exhausted: 1 });
+      expect(created.vcs.notifyFinishedCalls).toEqual([
+        {
+          outcome: "budget_exhausted",
+          agentName: "knock-knock-implement",
+          summary: "Added the endpoint; tests still to write.",
+          budgetSentence: "Out of budget: this run's $0.01 budget was used up.",
+          changesPushed: { pullRequestNumber: 42 },
+        },
+      ]);
+    });
+
+    it("ends a budget-stopped run without a push when it made no changes", async () => {
+      const created = await harness({ budgetUsd: 0.005 });
+      created.jobs.result.resultArtifact = stoppedArtifact;
+      created.vcs.finalizeEmpty = true;
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.store.run.result).toMatchObject({ outcome: "budget_exhausted", usage: { costUsd: 0.01 } });
+      expect(created.store.run.result).not.toHaveProperty("pullRequestNumber");
+      expect((created.store.run.result as { summary: string }).summary).toBe(
+        "Added the endpoint; tests still to write.",
+      );
+      expect(created.store.recordedRefusals).toEqual([["run-1", "session-1"]]);
+      expect(created.vcs.notifyFinishedCalls[0]).not.toHaveProperty("changesPushed");
+    });
+
+    it("ends a budget-stopped run out of budget, not failed, when its changes cannot be pushed", async () => {
+      const created = await harness({ budgetUsd: 0.005 });
+      created.jobs.result.resultArtifact = stoppedArtifact;
+      created.vcs.finalizeChanges = async () => {
+        throw new Error("vcs_protected_path:x");
+      };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.store.terminations).toEqual([]);
+      expect(created.store.run.result).toMatchObject({ outcome: "budget_exhausted" });
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({ outcome: "budget_exhausted" });
+      expect(created.vcs.notifyFinishedCalls[0]).not.toHaveProperty("changesPushed");
+      expect(created.vcs.notifyFinishedCalls[0]).not.toHaveProperty("protectedPathSentence");
+    });
+
+    it("pushes nothing for a budget-stopped run that was stopped while its result was collected", async () => {
+      const created = await harness({ budgetUsd: 0.005 });
+      created.jobs.result.resultArtifact = stoppedArtifact;
+      created.jobs.materializeWorkspace = async () => {
+        created.store.run.status = "cancelled";
+      };
+      await created.executor.start("run-1");
+
+      expect(created.vcs.finalized).toBe(0);
+      expect(created.store.run.status).toBe("cancelled");
+      expect(created.store.completions).toEqual([]);
+    });
+
+    it("pushes a budget-stopped continuation's changes to its pull request", async () => {
+      const created = await harness({ budgetUsd: 0.005, rootCodingRunId: "root-run", headRef: "wardby/run-root-run" });
+      created.jobs.result.resultArtifact = stoppedArtifact;
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.store.run.result).toMatchObject({ outcome: "pull_request_updated", pullRequestNumber: 42 });
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({
+        outcome: "budget_exhausted",
+        changesPushed: { pullRequestNumber: 42 },
+      });
+    });
+
+    it("records the pushed outcome when a step after the push fails", async () => {
+      const created = await harness({ budgetUsd: 0.005 });
+      created.jobs.result.resultArtifact = stoppedArtifact;
+      const executor = created.executor as unknown as { resultFor: (...args: unknown[]) => unknown };
+      const real = executor.resultFor.bind(created.executor);
+      let calls = 0;
+      executor.resultFor = (...args: unknown[]) => {
+        calls += 1;
+        if (calls === 1) throw new Error("result_build_failed");
+        return real(...args);
+      };
+      await created.executor.start("run-1");
+
+      expect(created.vcs.finalized).toBe(1);
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.store.run.result).toMatchObject({
+        outcome: "pull_request_opened",
+        pullRequestNumber: 42,
+        summary: PREFIX,
+        tests: [],
+      });
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({ changesPushed: { pullRequestNumber: 42 } });
+    });
+
+    it("still refuses to launch a run that has already spent past its limit", async () => {
+      const created = await harness({ budgetUsd: 1, costUsd: 1.05 });
+      await created.executor.start("run-1");
+
+      expect(created.jobs.launches).toBe(0);
+      expect(created.sessions.creates).toBe(0);
+      expect(created.store.run.status).toBe("refused");
+      expect(created.store.terminations[0]).toMatchObject({ audit: { failureCategory: "budget" } });
+      expect(logged.some((line) => String(line.payload.reason).includes("coding_run_budget_invalid"))).toBe(true);
+    });
+
+    describe("a budget stop with the workers' own budget summary", () => {
+      const workerStoppedArtifact = JSON.stringify({
+        schemaVersion: 1,
+        runId: "run-1",
+        outcome: "budget_exhausted",
+        summary: WORKER_BUDGET_EXHAUSTED_SUMMARY,
+        tests: [],
+      });
+      const CONTINUATION = { budgetUsd: 0.005, rootCodingRunId: "root-run", headRef: "wardby/run-root-run" };
+
+      it("leaves a continuation's pull request description untouched", async () => {
+        const created = await harness(CONTINUATION);
+        created.jobs.result.resultArtifact = workerStoppedArtifact;
+        created.store.pullRequestDescriptionBaseline = async () => ({
+          recordedSha256: "f".repeat(64),
+          previousAgentText: "The original description text.",
+          agentTextRunId: "root-run",
+        });
+        created.store.recordPullRequestDescription = async () => {
+          throw new Error("must not record a description");
+        };
+        created.vcs.continuationPullRequestDraft = async () => true;
+        created.vcs.finalizeDescription = { kind: "replaced", sha256: "e".repeat(64), agentTextRunId: "run-1" };
+        await created.executor.start("run-1");
+
+        expect(created.vcs.finalized).toBe(1);
+        expect(created.vcs.lastFinalizeDetails).not.toHaveProperty("description");
+        expect(created.store.run.status).toBe("budget_exhausted");
+        expect(created.store.run.result).toMatchObject({ outcome: "pull_request_updated", pullRequestNumber: 42 });
+        expect(created.store.completions[0]?.record).not.toHaveProperty("prDescriptionOutcome");
+        expect(created.store.completions[0]?.record).not.toHaveProperty("prDescriptionSha256");
+        expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({
+          outcome: "budget_exhausted",
+          changesPushed: { pullRequestNumber: 42 },
+        });
+      });
+
+      it("starts a fresh pull request's description with the stopped note alone", async () => {
+        const created = await harness({ budgetUsd: 0.005 });
+        created.jobs.result.resultArtifact = workerStoppedArtifact;
+        let askedDraft = false;
+        created.vcs.continuationPullRequestDraft = async () => {
+          askedDraft = true;
+          return false;
+        };
+        await created.executor.start("run-1");
+
+        expect(askedDraft).toBe(false);
+        expect(created.vcs.finalized).toBe(1);
+        expect(created.vcs.lastFinalizeDetails?.summary).toBe(PREFIX);
+        expect(created.store.run.status).toBe("budget_exhausted");
+        expect(created.store.run.result).toMatchObject({ outcome: "pull_request_opened", summary: PREFIX });
+      });
+    });
+
+    describe("a continuation whose pull request is no longer a draft", () => {
+      const CONTINUATION = { budgetUsd: 0.005, rootCodingRunId: "root-run", headRef: "wardby/run-root-run" };
+
+      function expectNothingPushed(created: Awaited<ReturnType<typeof harness>>) {
+        expect(created.jobs.materializations).toBe(0);
+        expect(created.vcs.finalized).toBe(0);
+        expect(created.store.run.status).toBe("budget_exhausted");
+        expect(created.store.terminations).toEqual([]);
+        expect(created.store.run.result).toMatchObject({ outcome: "budget_exhausted" });
+        expect(created.store.run.result).not.toHaveProperty("pullRequestNumber");
+        expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({ outcome: "budget_exhausted" });
+        expect(created.vcs.notifyFinishedCalls[0]).not.toHaveProperty("changesPushed");
+      }
+
+      it("pushes nothing when the host says it is ready for review", async () => {
+        const created = await harness(CONTINUATION);
+        created.jobs.result.resultArtifact = stoppedArtifact;
+        created.vcs.continuationPullRequestDraft = async () => false;
+        created.store.pullRequestMarkedReady = async () => false;
+        await created.executor.start("run-1");
+        expectNothingPushed(created);
+      });
+
+      it("falls back to wardby's mark-ready record when the host's state is unknown", async () => {
+        const created = await harness(CONTINUATION);
+        created.jobs.result.resultArtifact = stoppedArtifact;
+        created.vcs.continuationPullRequestDraft = async () => undefined;
+        const asked: string[] = [];
+        created.store.pullRequestMarkedReady = async (rootRunId) => {
+          asked.push(rootRunId);
+          return true;
+        };
+        await created.executor.start("run-1");
+        expect(asked).toEqual(["root-run"]);
+        expectNothingPushed(created);
+      });
+
+      it("still pushes to a draft pull request", async () => {
+        const host = await harness(CONTINUATION);
+        host.jobs.result.resultArtifact = stoppedArtifact;
+        host.vcs.continuationPullRequestDraft = async () => true;
+        host.store.pullRequestMarkedReady = async () => true;
+        await host.executor.start("run-1");
+        expect(host.vcs.finalized).toBe(1);
+        expect(host.store.run.result).toMatchObject({ outcome: "pull_request_updated", pullRequestNumber: 42 });
+
+        const record = await harness(CONTINUATION);
+        record.jobs.result.resultArtifact = stoppedArtifact;
+        record.vcs.continuationPullRequestDraft = async () => undefined;
+        record.store.pullRequestMarkedReady = async () => false;
+        await record.executor.start("run-1");
+        expect(record.vcs.finalized).toBe(1);
+        expect(record.store.run.result).toMatchObject({ outcome: "pull_request_updated", pullRequestNumber: 42 });
+      });
+    });
+
+    it("re-notifies a recovered budget-stopped run with the changes it pushed", async () => {
+      const handle = { backend: "fake", id: "job-1" };
+      const created = await harness({
+        status: "budget_exhausted",
+        jobHandle: handle,
+        proxySessionId: "session-1",
+        budgetUsd: 0.005,
+        result: {
+          schemaVersion: 1,
+          outcome: "pull_request_opened",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: "wardby/run-run-1",
+          commitSha: "b".repeat(40),
+          pullRequestUrl: "https://github.com/openai/example/pull/42",
+          pullRequestNumber: 42,
+          summary: PREFIX,
+          tests: [],
+          usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.01 },
+        },
+      });
+      await created.vcs.prepareWorkspace({
+        runId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "wardby/run-run-1",
+        protectedPaths: ["CODEOWNERS"],
+      });
+      await expect(created.executor.recover({ runId: "run-1", ...handle })).resolves.toEqual({ state: "terminal" });
+      expect(created.vcs.notifyFinishedCalls).toHaveLength(1);
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({
+        outcome: "budget_exhausted",
+        changesPushed: { pullRequestNumber: 42 },
+      });
+    });
+
+    it("re-notifies a recovered budget-stopped run that pushed nothing without changes", async () => {
+      const created = await harness({
+        status: "budget_exhausted",
+        budgetUsd: 0.005,
+        result: {
+          schemaVersion: 1,
+          outcome: "budget_exhausted",
+          repository: "openai/example",
+          baseRef: "main",
+          summary: "Ran out.",
+          tests: [],
+          usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.01 },
+        },
+      });
+      await created.vcs.prepareWorkspace({
+        runId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "wardby/run-run-1",
+        protectedPaths: ["CODEOWNERS"],
+      });
+      await created.executor.start("run-1");
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({ outcome: "budget_exhausted" });
+      expect(created.vcs.notifyFinishedCalls[0]).not.toHaveProperty("changesPushed");
+    });
+
+    it("delivers a resumed launched run whose cost is already past its limit, as recover() does", async () => {
+      const handle = { backend: "fake", id: "job-1" };
+      const created = await harness({ jobHandle: handle, proxySessionId: "session-1", budgetUsd: 1, costUsd: 1.05 });
+      await created.vcs.prepareWorkspace({
+        runId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "wardby/run-run-1",
+        protectedPaths: ["CODEOWNERS"],
+      });
+      await created.executor.start("run-1");
+
+      expect(created.jobs.launches).toBe(0);
+      expect(created.vcs.finalized).toBe(1);
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.store.run.result).toMatchObject({ outcome: "pull_request_opened", pullRequestNumber: 42 });
+    });
+
+    it("pushes a budget-stopped local run's changes to its branch", async () => {
+      const created = await harness({ budgetUsd: 0.005 });
+      created.jobs.result.resultArtifact = stoppedArtifact;
+      created.vcs.pushBranchOnly = true;
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.store.run.result).toMatchObject({ outcome: "branch_pushed", headRef: "wardby/run-run-1" });
+      expect(created.store.completions[0]?.record).toMatchObject({ resultBranch: "wardby/run-run-1" });
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({ changesPushed: {} });
+    });
   });
 
   it("refuses invalid ownership before creating a workspace, session, or job", async () => {

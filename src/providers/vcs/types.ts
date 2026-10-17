@@ -169,7 +169,8 @@ export interface VcsProvider {
    * `FinalizeChangesDetails.summary`) so the "done" status reflects what
    * actually happened instead of a caller having to go find out.
    * `budget_exhausted` is a failure that ran out of budget;
-   * `details.budgetSentence` then says how (see core/budget-wording.ts).
+   * `details.budgetSentence` then says how (see core/budget-wording.ts), and
+   * `details.changesPushed` says its changes so far were pushed anyway.
    * A `failed` run the model provider refused carries `details.providerSentence`.
    * A `failed` run whose changes touched a protected path carries
    * `details.protectedPathSentence` (see coding/protected-path-wording.ts).
@@ -196,6 +197,13 @@ export interface VcsProvider {
     workspace: ContinuationTarget,
     details: FinalizeChangesDetails,
   ): Promise<DescriptionWriteOutcome | undefined>;
+  /**
+   * Whether the pull request a continuation pushes to is still a draft, per
+   * the host: true or false, or undefined when unknown (a fresh run, a remote
+   * without pull requests, a pull request no longer open, or a failed
+   * lookup). Optional; never throws.
+   */
+  continuationPullRequestDraft?(workspace: PreparedWorkspace): Promise<boolean | undefined>;
 }
 
 export type ContinuationOutcome = "succeeded" | "failed" | "budget_exhausted";
@@ -205,10 +213,17 @@ export interface ContinuationFinishedDetails {
   agentName?: string;
   /** Host-safe sentence naming the run's budget; used with `budget_exhausted`. */
   budgetSentence?: string;
+  /** Host-safe sentence for a run that finished over its base budget (core/budget-wording.ts); used with `succeeded`. */
+  overrunSentence?: string;
   /** Host-safe sentence naming a model-provider refusal (see core/provider-wording.ts); used with `failed`. */
   providerSentence?: string;
   /** Host-safe sentence naming a coding-run service that never became ready (coding/services/wording.ts); used with `failed`. */
   serviceSentence?: string;
   /** Host-safe sentence naming a protected path the run's changes touched (coding/protected-path-wording.ts); used with `failed`. */
   protectedPathSentence?: string;
+  /**
+   * Set with `budget_exhausted` when the run's changes so far were pushed anyway
+   * (the pull request it opened or continued, or a branch with no number).
+   */
+  changesPushed?: { pullRequestNumber?: number };
 }

@@ -90,6 +90,10 @@ export class RoutingVcsProvider implements VcsProvider {
     return this.optionalTarget(workspace.repository)?.refreshPullRequestDescription?.(workspace, details);
   }
 
+  async continuationPullRequestDraft(workspace: PreparedWorkspace): Promise<boolean | undefined> {
+    return this.optionalTarget(workspace.repository)?.continuationPullRequestDraft?.(workspace);
+  }
+
   async readRepositoryFile(input: RepositoryFileInput): Promise<string | null> {
     return (await this.optionalTarget(input.repository)?.readRepositoryFile?.(input)) ?? null;
   }
