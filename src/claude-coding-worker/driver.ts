@@ -194,6 +194,19 @@ function budgetExhausted(input: CodingTaskInput): CodingAgentOutput {
   };
 }
 
+// The proxy's own budget refusal (HTTP 429 with code wardby_budget_exhausted), as the SDK relays it in
+// a result message's text or in a thrown error. Only this fixed marker is matched; the text is never kept.
+const BUDGET_REFUSAL = /wardby_budget_exhausted/;
+
+function isBudgetRefusal(text: unknown): boolean {
+  return typeof text === "string" && BUDGET_REFUSAL.test(text);
+}
+
+function resultRefusedForBudget(message: { result?: unknown; errors?: unknown }): boolean {
+  if (isBudgetRefusal(message.result)) return true;
+  return Array.isArray(message.errors) && message.errors.some(isBudgetRefusal);
+}
+
 export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Promise<CodingWorkerOutput> {
   // The workspace is seeded before this container starts (the launcher's input gate); the agent
   // does not exist yet, so the tool runner has run no command.
@@ -244,6 +257,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   let failed = false;
   let turnLimit = false;
   let streamFailed = false;
+  let budgetRefused = false;
   let toolUnreachable = false;
   try {
     for await (const message of stream) {
@@ -264,7 +278,9 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
           status: "in_progress",
         });
       } else if (message.type === "result") {
-        if (message.subtype === "success" && typeof message.result === "string") finalJson = message.result;
+        const errored = message.subtype !== "success" || (message as { is_error?: unknown }).is_error === true;
+        if (errored && resultRefusedForBudget(message)) budgetRefused = true;
+        else if (message.subtype === "success" && typeof message.result === "string") finalJson = message.result;
         else if (message.subtype === "error_max_budget_usd") return withCache(budgetExhausted(options.input));
         else if (message.subtype === "error_max_turns") turnLimit = true;
         else failed = true;
@@ -274,9 +290,11 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     options.trace?.record("stream_error", describeError(err));
     // The SDK can also end the stream by throwing at the turn limit. Only that
     // is read from the error; its text (which can carry provider content) is never kept.
-    if (err instanceof Error && MAX_TURNS_MESSAGE.test(err.message)) turnLimit = true;
+    if (err instanceof Error && isBudgetRefusal(err.message)) budgetRefused = true;
+    else if (err instanceof Error && MAX_TURNS_MESSAGE.test(err.message)) turnLimit = true;
     else streamFailed = true;
   }
+  if (budgetRefused) return withCache(budgetExhausted(options.input));
   if (streamFailed) throw new Error("coding_stream_failed");
   if (turnLimit) throw new Error("coding_turn_limit");
   if (toolUnreachable) throw new Error("worker_tool_runner_unreachable");

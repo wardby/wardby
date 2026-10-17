@@ -158,6 +158,53 @@ describe("runClaudeCodingWorker", () => {
     expect(result).toMatchObject({ runId: input.runId, outcome: "budget_exhausted", tests: [] });
   });
 
+  it("ends cleanly when the proxy refuses a request for budget", async () => {
+    const run = (createQuery: () => AsyncIterable<unknown>) =>
+      runClaudeCodingWorker({
+        input,
+        proxyBaseUrl: "http://proxy",
+        capability: "cap",
+        signal: new AbortController().signal,
+        createQuery: createQuery as ClaudeQueryFactory,
+      });
+    const refusal = 'API Error: 429 {"error":{"code":"wardby_budget_exhausted"}}';
+    const results = [
+      { type: "result", subtype: "error_during_execution", result: refusal },
+      { type: "result", subtype: "error_during_execution", errors: [refusal] },
+      { type: "result", subtype: "success", is_error: true, result: refusal },
+    ];
+    for (const message of results) {
+      const out = await run(() =>
+        (async function* () {
+          yield message;
+        })(),
+      );
+      expect(out).toMatchObject({ runId: input.runId, outcome: "budget_exhausted", tests: [] });
+    }
+    const thrown = await run(() =>
+      (async function* () {
+        yield { type: "system" };
+        throw new Error(refusal);
+      })(),
+    );
+    expect(thrown).toMatchObject({ outcome: "budget_exhausted" });
+    await expect(
+      run(() =>
+        (async function* () {
+          yield { type: "result", subtype: "error_during_execution", result: "API Error: 429 rate limited" };
+        })(),
+      ),
+    ).rejects.toThrow("coding_turn_failed");
+    await expect(
+      run(() =>
+        (async function* () {
+          yield { type: "system" };
+          throw new Error("API Error: 500");
+        })(),
+      ),
+    ).rejects.toThrow("coding_stream_failed");
+  });
+
   it("fails closed when cancellation interrupts the provider stream", async () => {
     const controller = new AbortController();
     const run = runClaudeCodingWorker({
