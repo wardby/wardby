@@ -869,7 +869,10 @@ const PEM_PRIVATE_KEY =
   /-----BEGIN (?:[A-Z ]{1,32} )?PRIVATE KEY-----[\s\S]{0,6144}?-----END (?:[A-Z ]{1,32} )?PRIVATE KEY-----/g;
 
 const TOKEN_PATTERNS = [
-  /sk-(?:ant-)?[A-Za-z0-9_-]{16,}/gi,
+  // Not after a letter or digit: "task-…", "risk-…" and "disk-…" words are
+  // not keys, and redacting them garbled run output and failed knowledge
+  // checks on file names such as "mcp-task-cancellation-stamp.md".
+  /(?<![A-Za-z0-9])sk-(?:ant-)?[A-Za-z0-9_-]{16,}/gi,
   /github_pat_[A-Za-z0-9_]{20,}/g,
   /gh[pousr]_[A-Za-z0-9]{20,}/g,
   /AKIA[0-9A-Z]{16}/g,

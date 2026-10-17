@@ -619,6 +619,25 @@ describe("redactTokenShapedValues", () => {
     );
     expect(redactTokenShapedValues("npm test failed: 3 of 12 assertions")).toBe("npm test failed: 3 of 12 assertions");
   });
+
+  it("does not take a word ending in sk for an sk- key", () => {
+    for (const text of [
+      "docs/knowledge/mcp-task-cancellation-stamp.md",
+      "a risk-assessment-procedure-for-releases note",
+      "the disk-usage-threshold-exceeded event",
+    ])
+      expect(redactTokenShapedValues(text)).toBe(text);
+  });
+
+  it("still redacts sk- keys at a word start or after punctuation", () => {
+    const key = `sk-proj-${"a".repeat(32)}`;
+    const ant = `sk-ant-api03-${"b".repeat(32)}`;
+    expect(redactTokenShapedValues(key)).toBe("[REDACTED]");
+    expect(redactTokenShapedValues(`OPENAI_API_KEY=${key}`)).toBe("OPENAI_API_KEY=[REDACTED]");
+    expect(redactTokenShapedValues(`"${ant}"`)).toBe('"[REDACTED]"');
+    expect(redactTokenShapedValues(`key:${ant} rejected`)).toBe("key:[REDACTED] rejected");
+    expect(redactTokenShapedValues(`SK-${"C".repeat(20)}`)).toBe("[REDACTED]");
+  });
 });
 
 const knowledgeStub = (text: string): FittedSection => ({
