@@ -163,6 +163,7 @@ describe("handleReviewHostTool", () => {
       ),
     );
     expect(out).toMatchObject({ error: `patch_cursor_${reason}` });
+    if (reason === "stale") expect(JSON.stringify(out)).toContain("without patchCursor");
   });
 
   it("adds the CI view with its note to repo_pr_read output", async () => {
