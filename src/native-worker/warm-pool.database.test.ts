@@ -262,8 +262,14 @@ describe.skipIf(!process.env.DATABASE_URL)("PooledWorkerLauncher (database)", ()
     // The old replica, still running at size 2, refills after the new one's start-up pass.
     await warmed(other);
     expect(launcher.warm.size).toBe(2);
-    await vi.waitFor(() => expect(launcher.warm.size).toBe(0), { timeout: 2_000, interval: 20 });
-    expect(await db.nativeWarmWorker.count({ where: { specHash: other.specHash } })).toBe(0);
+    // A worker is removed before its row is deleted: wait for both, not just the workers.
+    await vi.waitFor(
+      async () => {
+        expect(launcher.warm.size).toBe(0);
+        expect(await db.nativeWarmWorker.count({ where: { specHash: other.specHash } })).toBe(0);
+      },
+      { timeout: 2_000, interval: 20 },
+    );
     // A live pool passes over every row: stop it before other tests run.
     shrunk.stop();
   });

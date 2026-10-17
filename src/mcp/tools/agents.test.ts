@@ -478,37 +478,44 @@ describe("agent CRUD tools", () => {
   });
 
   it("workspaceDiskMb round-trips through create_agent, get_agent, and update_agent(null)", async () => {
-    const db = fakeDb();
-    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read"]));
-    registerAgentTools(mcp);
-    const client = await connectClient(mcp);
+    // A fixed cap above the size it sets: the deployment's own CODING_DISK_MB must not decide this.
+    vi.stubEnv("CODING_DISK_MB", "1024");
+    vi.stubEnv("CODING_MAX_DISK_MB", "4096");
+    try {
+      const db = fakeDb();
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read"]));
+      registerAgentTools(mcp);
+      const client = await connectClient(mcp);
 
-    const created = await client.callTool({
-      name: "create_agent",
-      arguments: {
-        name: "coder",
-        systemPrompt: "Make the requested change.",
-        model: "gpt-5.6-luna",
-        budgetUsd: 0.25,
-        kind: "coding",
-        codingProfile: { repository: "openai/example", workspaceDiskMb: 2048 },
-      },
-    });
-    expect(created.isError).toBeFalsy();
-    const createdAgent = JSON.parse((created.content as { text: string }[])[0].text);
-    expect(createdAgent.codingProfile.workspaceDiskMb).toBe(2048);
+      const created = await client.callTool({
+        name: "create_agent",
+        arguments: {
+          name: "coder",
+          systemPrompt: "Make the requested change.",
+          model: "gpt-5.6-luna",
+          budgetUsd: 0.25,
+          kind: "coding",
+          codingProfile: { repository: "openai/example", workspaceDiskMb: 2048 },
+        },
+      });
+      expect(created.isError).toBeFalsy();
+      const createdAgent = JSON.parse((created.content as { text: string }[])[0].text);
+      expect(createdAgent.codingProfile.workspaceDiskMb).toBe(2048);
 
-    const fetched = await client.callTool({ name: "get_agent", arguments: { id: createdAgent.id } });
-    expect(JSON.parse((fetched.content as { text: string }[])[0].text).codingProfile.workspaceDiskMb).toBe(2048);
+      const fetched = await client.callTool({ name: "get_agent", arguments: { id: createdAgent.id } });
+      expect(JSON.parse((fetched.content as { text: string }[])[0].text).codingProfile.workspaceDiskMb).toBe(2048);
 
-    const updated = await client.callTool({
-      name: "update_agent",
-      arguments: { id: createdAgent.id, codingProfile: { workspaceDiskMb: null } },
-    });
-    expect(updated.isError).toBeFalsy();
-    expect(JSON.parse((updated.content as { text: string }[])[0].text).codingProfile.workspaceDiskMb).toBeNull();
-    await client.close();
+      const updated = await client.callTool({
+        name: "update_agent",
+        arguments: { id: createdAgent.id, codingProfile: { workspaceDiskMb: null } },
+      });
+      expect(updated.isError).toBeFalsy();
+      expect(JSON.parse((updated.content as { text: string }[])[0].text).codingProfile.workspaceDiskMb).toBeNull();
+      await client.close();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("codingProfile.maxTurns round-trips through create_agent, get_agent, and update_agent(null)", async () => {
