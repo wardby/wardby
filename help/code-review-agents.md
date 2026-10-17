@@ -58,7 +58,9 @@ opened](#reviewing-a-pull-request-a-delegated-run-opened) below), and, on a
 link set up for it, CI on the pushed head still running (see [Review after
 CI (`waitForCi`)](#review-after-ci-waitforci) below). Either can delay the
 check that reports the review's result; neither changes what the review
-itself reports once it runs.
+itself reports once it runs. From Wardby 0.6.1, a push to a draft is also held
+while the coding run that pushed it is still running, and, when a lead
+delegated that run (a follow-up request, say), until that lead finishes.
 
 ## Drafts stopped at their budget
 

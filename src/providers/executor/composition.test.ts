@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "#prisma";
 import type { Power } from "../../core/power.js";
@@ -299,6 +300,26 @@ describe("reReviewOnCodingRunTerminal", () => {
     const deps = { db, executor: native, hosts: {}, repoAccess: {} } as never;
     expect(reReviewOnCodingRunTerminal(() => deps)("run-2")).toBeUndefined();
     await vi.waitFor(() => expect(release).toHaveBeenCalledWith(deps, "run-2"));
+    reReview.mockRestore();
+    release.mockRestore();
+  });
+
+  it("runs both outside the caller's async context, so a coding run finishing inside its lead's step can start a review", async () => {
+    // A stand-in for the DBOS step context a delegated coding run finishes in.
+    const step = new AsyncLocalStorage<string>();
+    const seen: Array<string | undefined> = [];
+    const review = await import("../../core/review-fix.js");
+    const events = await import("../../core/host-events.js");
+    const reReview = vi.spyOn(review, "reReviewAfterNoChangeFix").mockImplementationOnce(async () => {
+      seen.push(step.getStore());
+    });
+    const release = vi.spyOn(events, "startDeferredForRequest").mockImplementationOnce(async () => {
+      seen.push(step.getStore());
+    });
+    const deps = { db, executor: native, hosts: {}, repoAccess: {} } as never;
+    step.run("turn:1:tool:0", () => reReviewOnCodingRunTerminal(() => deps)("run-3"));
+    await vi.waitFor(() => expect(seen).toHaveLength(2));
+    expect(seen).toEqual([undefined, undefined]);
     reReview.mockRestore();
     release.mockRestore();
   });
