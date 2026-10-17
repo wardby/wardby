@@ -21,7 +21,43 @@ docs/knowledge/
 ```
 
 `index.md` and `log.md` are reserved names and are never concepts. The default
-bundle path is `docs/knowledge`.
+bundle path is `docs/knowledge`; a repository can choose another folder (see
+[Where the bundle lives](#where-the-bundle-lives)).
+
+## Where the bundle lives
+
+Wardby itself reads the bundle in three places: the knowledge note it adds to
+every coding run, the merge watcher's drift scoping, and `wardby knowledge
+check`. For those, it uses the first of these that applies:
+
+1. **`.wardby/knowledge.yaml` on the branch names a folder.** The file has one
+   key:
+
+   ```yaml
+   path: .okf
+   ```
+
+   `path` is a folder relative to the repository root (a leading `./` and a
+   trailing `/` are ignored). It may not be absolute, contain `..`, or point
+   into `.wardby/` or `.git/`.
+
+2. **Otherwise, `docs/knowledge/`.** This is also used when
+   `.wardby/knowledge.yaml` cannot be used (invalid YAML, an unknown key, or a
+   path that breaks the rules above): Wardby logs a warning and falls back to
+   `docs/knowledge/`, and `wardby knowledge check` reports
+   `knowledge_config_invalid`. A bad file never fails a run or a dispatch.
+
+3. **No bundle at either place.** Wardby adds no knowledge note and the merge
+   watcher finds no concepts. Your agents can still keep knowledge in any folder
+   you like: say where in their system prompts or in `AGENTS.md`, and they read
+   and write it there. You give up only the automatic note and drift scoping on
+   merge; a scheduled architecture agent still re-verifies every citation on
+   its next run.
+
+Coding runs cannot change `.wardby/knowledge.yaml` (everything under `.wardby/`
+except `.wardby/services.yaml` is protected), so a person sets it, in a normal
+commit. Prompts that name the bundle folder, such as the architecture agent's
+below, should use the folder you chose.
 
 ## Concept format
 
@@ -108,7 +144,9 @@ The `spanHash` above is a placeholder; compute the real one from the cited lines
 
 ## How coding runs use the bundle
 
-When `docs/knowledge/index.md` exists on the run's base branch, Wardby adds a
+When the bundle's `index.md` (in `docs/knowledge/`, or the folder
+[`.wardby/knowledge.yaml`](#where-the-bundle-lives) names) exists on the run's
+base branch, Wardby adds a
 knowledge note to the coding run's task automatically. The note tells the agent
 that the knowledge is recalled context rather than authority (the repository's
 own instructions, such as `AGENTS.md`, win on conflict), includes the index, and
@@ -116,8 +154,8 @@ asks the agent to read the concepts covering files it will touch and to update a
 concept's prose if its change alters the behavior the concept describes.
 
 - The note is capped at 8 KiB. When the index does not fit it is cut at a line
-  boundary and a `[index truncated — list docs/knowledge/ for the rest]` marker
-  is added. The note always ends with an `[end of architecture knowledge]` line.
+  boundary and an `[index truncated — list <bundle folder>/ for the rest]`
+  marker is added. The note always ends with an `[end of architecture knowledge]` line.
 - It is dropped when the task leaves no room for it.
 - It never fails or changes a dispatch: an unreadable or oversized index, or any
   problem reading the branch, simply means no note.
@@ -138,21 +176,23 @@ Anything that writes citations must take the `sha` value from this line.
 wardby knowledge check [dir] [--root <repo root>] [--strict] [--json]
 ```
 
-`dir` defaults to `docs/knowledge` and `--root` to the current directory;
+`dir` defaults to the folder `.wardby/knowledge.yaml` under `--root` names, else
+`docs/knowledge`, and `--root` to the current directory;
 citation paths resolve against `--root`. The command prints one line per issue
 (`<severity> <code> <file>: <message>`) and a summary. It exits 1 when there is
 any error, or, with `--strict`, any warning. `--json` prints
 `{ "issues": [...] }` instead.
 
-| Code                    | Severity | Meaning                                                         | Fix                                                |
-| ----------------------- | -------- | --------------------------------------------------------------- | -------------------------------------------------- |
-| `concept_invalid`       | error    | Front-matter is missing, is not valid YAML, or fails the schema | Fix the field the message names                    |
-| `concept_secret`        | error    | The file contains a secret-shaped value                         | Remove it and rotate the credential                |
-| `index_missing`         | error    | The bundle has no root `index.md`                               | Create it                                          |
-| `index_link_broken`     | error    | An index links to a file that does not exist                    | Fix or remove the link                             |
-| `concept_not_indexed`   | warning  | A concept is not linked from any `index.md`                     | Add its line to the index                          |
-| `citation_unverifiable` | warning  | The cited file is missing or the lines are out of range         | Re-anchor the citation, or deprecate the concept   |
-| `citation_stale`        | warning  | The cited span no longer matches `spanHash`                     | Re-read the code, update the claim, then re-anchor |
+| Code                       | Severity | Meaning                                                                           | Fix                                                |
+| -------------------------- | -------- | --------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `concept_invalid`          | error    | Front-matter is missing, is not valid YAML, or fails the schema                   | Fix the field the message names                    |
+| `concept_secret`           | error    | The file contains a secret-shaped value                                           | Remove it and rotate the credential                |
+| `index_missing`            | error    | The bundle has no root `index.md`                                                 | Create it                                          |
+| `index_link_broken`        | error    | An index links to a file that does not exist                                      | Fix or remove the link                             |
+| `concept_not_indexed`      | warning  | A concept is not linked from any `index.md`                                       | Add its line to the index                          |
+| `citation_unverifiable`    | warning  | The cited file is missing or the lines are out of range                           | Re-anchor the citation, or deprecate the concept   |
+| `citation_stale`           | warning  | The cited span no longer matches `spanHash`                                       | Re-read the code, update the claim, then re-anchor |
+| `knowledge_config_invalid` | error    | `.wardby/knowledge.yaml` cannot be used, so `docs/knowledge/` was checked instead | Fix the file as the message says                   |
 
 Use plain `wardby knowledge check` while editing and `--strict` for the agent or
 CI job that maintains the bundle.

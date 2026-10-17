@@ -385,6 +385,47 @@ describe.skipIf(!databaseUrl)("claimDueRun (database)", () => {
     );
   });
 
+  it("reads the index from the folder .wardby/knowledge.yaml names", async () => {
+    const agent = await makeCodingAgent();
+    const files: Record<string, string> = {
+      ".wardby/knowledge.yaml": "path: .okf\n",
+      ".okf/index.md": "# Pitfalls\n\n* [B](b.md) - b\n",
+      "docs/knowledge/index.md": "# Pitfalls\n\n* [A](a.md) - a\n",
+    };
+    const readCodingRepositoryFile = vi.fn(async (input: { path: string }) => files[input.path] ?? null);
+
+    const runId = await claimDueRun(
+      db,
+      { ...executor, readCodingRepositoryFile },
+      agent.id,
+      new Date("2026-09-05T12:16:00.000Z"),
+    );
+
+    const run = await db.run.findUnique({ where: { id: runId! }, include: { codingRun: true } });
+    expect(run?.codingRun?.task).toContain("files live in .okf/.");
+    expect(run?.codingRun?.task).toContain(".okf/index.md:\n# Pitfalls\n\n* [B](b.md) - b");
+    expect(run?.codingRun?.task).not.toContain("[A](a.md)");
+  });
+
+  it("falls back to docs/knowledge/ when .wardby/knowledge.yaml is invalid", async () => {
+    const agent = await makeCodingAgent();
+    const files: Record<string, string> = {
+      ".wardby/knowledge.yaml": "path: ../outside\n",
+      "docs/knowledge/index.md": "# Pitfalls\n\n* [A](a.md) - a\n",
+    };
+    const readCodingRepositoryFile = vi.fn(async (input: { path: string }) => files[input.path] ?? null);
+
+    const runId = await claimDueRun(
+      db,
+      { ...executor, readCodingRepositoryFile },
+      agent.id,
+      new Date("2026-09-05T12:16:00.000Z"),
+    );
+
+    const run = await db.run.findUnique({ where: { id: runId! }, include: { codingRun: true } });
+    expect(run?.codingRun?.task).toContain("docs/knowledge/index.md:\n# Pitfalls\n\n* [A](a.md) - a");
+  });
+
   it("still dispatches a coding run, without the note, when the index read fails", async () => {
     const agent = await makeCodingAgent();
     const readCodingRepositoryFile = vi.fn(async () => {
