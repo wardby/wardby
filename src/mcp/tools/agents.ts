@@ -171,6 +171,7 @@ const agentFields = {
   model: z.string().trim().min(1).max(MAX_MODEL_CHARS),
   budgetUsd: z.number().finite().positive().max(MAX_BUDGET_USD),
   maxTurns: z.number().int().min(1).max(100),
+  allowedOverrunPercent: z.number().int().min(0).max(100),
   maxDelegationsPerRun: z.number().int().min(1).max(MAX_DELEGATIONS_PER_RUN),
   parallelDelegations: z.boolean(),
   schedule: z.string().trim().min(1).max(256),
@@ -212,6 +213,7 @@ const CreateAgentSchema = z
     model: agentFields.model,
     budgetUsd: agentFields.budgetUsd,
     maxTurns: agentFields.maxTurns.optional(),
+    allowedOverrunPercent: agentFields.allowedOverrunPercent.optional(),
     maxDelegationsPerRun: agentFields.maxDelegationsPerRun.optional(),
     parallelDelegations: agentFields.parallelDelegations.optional(),
     schedule: agentFields.schedule.optional(),
@@ -272,6 +274,7 @@ const UpdateAgentSchema = z
     model: agentFields.model.optional(),
     budgetUsd: agentFields.budgetUsd.optional(),
     maxTurns: agentFields.maxTurns.optional(),
+    allowedOverrunPercent: agentFields.allowedOverrunPercent.optional(),
     maxDelegationsPerRun: agentFields.maxDelegationsPerRun.optional(),
     parallelDelegations: agentFields.parallelDelegations.optional(),
     schedule: agentFields.schedule.nullable().optional(),
@@ -570,6 +573,13 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         model: { type: "string" },
         budgetUsd: { type: "number" },
         maxTurns: { type: "integer" },
+        allowedOverrunPercent: {
+          type: "integer",
+          minimum: 0,
+          maximum: 100,
+          description:
+            "Coding runs may spend up to this percent above budgetUsd before they are stopped (budget group caps still apply). 0 = stop at budgetUsd.",
+        },
         maxDelegationsPerRun: {
           type: "integer",
           minimum: 1,
@@ -667,6 +677,13 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         model: { type: "string" },
         budgetUsd: { type: "number" },
         maxTurns: { type: "integer" },
+        allowedOverrunPercent: {
+          type: "integer",
+          minimum: 0,
+          maximum: 100,
+          description:
+            "Coding runs may spend up to this percent above budgetUsd before they are stopped (budget group caps still apply). 0 = stop at budgetUsd.",
+        },
         maxDelegationsPerRun: {
           type: "integer",
           minimum: 1,
