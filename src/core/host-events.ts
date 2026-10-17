@@ -15,6 +15,7 @@ import type {
   ReviewHostRegistry,
 } from "../providers/review-host/types.js";
 import { linkedPullRequestAttribution, openingRunAttribution, RESPONSE_PATH_SNAPSHOT_BUDGET } from "./attribution.js";
+import { headStoppedAtBudget } from "./budget-stopped-head.js";
 import { checkContinuation, dispatchRun } from "./dispatch.js";
 import { mentionStatusRow, postMentionStatus } from "./host-status.js";
 import { handlePullRequestClosed } from "./issue-bridge.js";
@@ -641,6 +642,61 @@ export async function startReviews(
 }
 
 /**
+ * An automatic review (a push, a deferred review starting, the re-review after CI) of a draft
+ * whose head is still the push of a run that stopped at its budget: that work is unfinished, so
+ * reviewing it now only repeats findings the continuation addresses. Completes a neutral check
+ * per reviewer instead and returns true; no review run, so no RunHostCheck and no fix round.
+ * Only drafts: a neutral check counts as passing for branch protection, so a pull request
+ * someone means to merge (marked ready) is always reviewed, as is a later commit a person
+ * pushed. Explicit requests (a check re-run, a review comment) never come here. A failed read
+ * reviews as usual. A reviewer that already reviewed this commit (an explicit request) keeps
+ * that review's check: a neutral one over it would stand, unreviewed again, once the draft is
+ * marked ready (that automatic review skips a reviewed commit).
+ */
+async function skipBudgetStoppedDraft(
+  deps: ReviewStartDeps,
+  host: CodeReviewHost,
+  repository: string,
+  prNumber: number,
+  headSha: string,
+  targets: ReviewTarget[],
+  /** The pull request's origin, when the caller already reads it once per event. */
+  readOrigin?: () => Promise<PullRequestOrigin>,
+): Promise<boolean> {
+  const read = readOrigin ?? (host.pullRequestOrigin ? () => host.pullRequestOrigin!(repository, prNumber) : undefined);
+  if (!read || targets.length === 0) return false;
+  let origin: PullRequestOrigin;
+  try {
+    origin = await read();
+  } catch (err) {
+    log.warn({ err, repository, prNumber }, "could not read the pull request's origin; reviewing as usual");
+    return false;
+  }
+  if (origin.draft !== true) return false;
+  if (!(await headStoppedAtBudget(deps.db, { markerRunId: origin.markerRunId, prNumber, headSha }))) return false;
+  log.info(
+    { repository, prNumber, headSha, agentIds: targets.map((t) => t.agentId) },
+    "review skipped: the draft's last push stopped at its budget",
+  );
+  for (const target of targets) {
+    try {
+      if (await alreadyReviewed(deps, repository, prNumber, headSha, target.agentId)) continue;
+      const { checkId } = await host.startCheck(repository, { headSha, name: target.checkName });
+      await host.completeCheck(repository, {
+        checkId,
+        conclusion: "neutral",
+        title: "Skipped: stopped at its budget",
+        summary:
+          "The last push came from a run that stopped at its budget before finishing. This draft is reviewed when the work continues or when it is marked ready for review.",
+      });
+    } catch (err) {
+      log.warn({ err, repository, prNumber, agentId: target.agentId }, "could not post the skipped review check");
+    }
+  }
+  return true;
+}
+
+/**
  * CI finished on a pull request's head: re-runs, once per head, each review
  * that published only a COMMENT while CI there was still running or had not
  * reported (RunHostCheck.ciPendingAtReview). Waits for the last suite: while
@@ -698,6 +754,7 @@ async function rereviewAfterCi(
       { repository: event.repository, prNumber, headSha: event.headSha, ci: ci.state },
       "CI finished: re-running the review",
     );
+    if (await skipBudgetStoppedDraft(deps, host, event.repository, prNumber, event.headSha, targets)) return [];
     return await startReviews(deps, host, event.repository, prNumber, event.headSha, targets);
   } catch (err) {
     log.warn({ err, repository: event.repository, prNumber }, "could not re-run the review after CI finished");
@@ -892,6 +949,7 @@ async function startDeferred(
   if (targets.length === 0) return [];
   log.info({ ...where, agentIds: targets.map((t) => t.agentId), reason }, "starting the deferred review");
   try {
+    if (await skipBudgetStoppedDraft(deps, host, key.repository, key.prNumber, key.headSha, targets)) return [];
     return await startReviews(deps, host, key.repository, key.prNumber, key.headSha, targets, true);
   } catch (err) {
     // The rows are already claimed (at most once): make the lost start visible.
@@ -1401,7 +1459,18 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       const startNow = new Set(deferral.startNow);
       const reviewers = reviewTargets(allowed.filter((l) => !l.waitForCi || startNow.has(l)));
       const runIds = [...deferral.runIds];
-      if (reviewers.length > 0) {
+      if (
+        reviewers.length > 0 &&
+        !(await skipBudgetStoppedDraft(
+          deps,
+          host,
+          event.repository,
+          event.prNumber,
+          event.headSha,
+          reviewers,
+          readOrigin,
+        ))
+      ) {
         runIds.push(
           ...(await startReviews(deps, host, event.repository, event.prNumber, event.headSha, reviewers, true)),
         );

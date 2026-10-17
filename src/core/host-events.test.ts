@@ -2017,3 +2017,184 @@ describe("delegated pull requests wait for the request (#259)", () => {
     expect(db.$queryRaw).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("a draft whose last push stopped at its budget", () => {
+  const TITLE = "Skipped: stopped at its budget";
+  const SUMMARY =
+    "The last push came from a run that stopped at its budget before finishing. This draft is reviewed when the work continues or when it is marked ready for review.";
+  const reviewers = [
+    { agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" },
+    { agentId: "a2", triggers: ["pull_request"], checkName: "security" },
+  ];
+  const stoppedRoot = {
+    runId: "coder",
+    rootCodingRunId: null,
+    result: {
+      outcome: "pull_request_opened",
+      repository: REPO,
+      pullRequestNumber: 7,
+      pullRequestUrl: `https://github.com/${REPO}/pull/7`,
+      commitSha: SHA,
+    },
+    run: { status: "budget_exhausted" },
+  };
+  function setup(
+    opts: { draft?: boolean; links?: Parameters<typeof deps>[0]; head?: string; root?: typeof stoppedRoot } = {},
+  ) {
+    vi.mocked(dispatchRun).mockClear();
+    txStub.runHostCheck.create.mockClear();
+    const h = host();
+    let checkIds = 0;
+    h.startCheck = vi.fn(async () => ({ checkId: `c${++checkIds}` }));
+    h.pullRequestOrigin = vi.fn(async () => ({
+      headSha: opts.head ?? SHA,
+      isFork: false,
+      state: "open",
+      labels: [],
+      markerRunId: "coder",
+      draft: opts.draft ?? true,
+    }));
+    h.pullRequestHead = vi.fn(async () => ({ headSha: opts.head ?? SHA, isFork: false, state: "open" }));
+    h.readCi = vi.fn(
+      async () =>
+        ({ headSha: SHA, state: "passing", checks: [], truncated: false, statusesUnavailable: false }) as never,
+    );
+    const d = deps(opts.links ?? reviewers, h);
+    const root = opts.root ?? stoppedRoot;
+    Object.assign(d.db, {
+      codingRun: {
+        findUnique: vi.fn(async ({ where }: { where: { runId: string } }) =>
+          where.runId === root.runId ? root : null,
+        ),
+        findMany: vi.fn(async () => []),
+      },
+    });
+    return { d, h };
+  }
+  const expectSkipped = (h: CodeReviewHost, names: string[]) => {
+    expect(dispatchRun).not.toHaveBeenCalled();
+    expect(txStub.runHostCheck.create).not.toHaveBeenCalled();
+    names.forEach((name, i) => {
+      expect(h.startCheck).toHaveBeenCalledWith(REPO, { headSha: SHA, name });
+      expect(h.completeCheck).toHaveBeenCalledWith(REPO, {
+        checkId: `c${i + 1}`,
+        conclusion: "neutral",
+        title: TITLE,
+        summary: SUMMARY,
+      });
+    });
+    expect(h.completeCheck).toHaveBeenCalledTimes(names.length);
+  };
+
+  it("on a push, completes a neutral check per reviewer and dispatches no review (so no fix round)", async () => {
+    const { d, h } = setup();
+    await expect(routeHostEvent(pr, d)).resolves.toEqual({ runIds: [], followUps: [] });
+    expectSkipped(h, ["wardby review", "security"]);
+  });
+
+  it("reviews as usual once the pull request is not a draft (marked ready for review)", async () => {
+    const { d, h } = setup({ draft: false });
+    await expect(routeHostEvent(pr, d)).resolves.toEqual({ runIds: ["run-a1", "run-a2"], followUps: [] });
+    expect(h.completeCheck).not.toHaveBeenCalled();
+  });
+
+  it("reviews as usual when a later commit is the head (a person pushed)", async () => {
+    const { d, h } = setup();
+    const LATER = "f".repeat(40);
+    await expect(routeHostEvent({ ...pr, headSha: LATER }, d)).resolves.toEqual({
+      runIds: ["run-a1", "run-a2"],
+      followUps: [],
+    });
+    expect(h.completeCheck).not.toHaveBeenCalled();
+  });
+
+  it("reviews as usual when the last pusher finished its work", async () => {
+    const { d } = setup({ root: { ...stoppedRoot, run: { status: "succeeded" } } });
+    await expect(routeHostEvent(pr, d)).resolves.toEqual({ runIds: ["run-a1", "run-a2"], followUps: [] });
+  });
+
+  it("skips the re-review after CI finished", async () => {
+    const { d, h } = setup({ links: [reviewers[0]] });
+    Object.assign((d.db as unknown as { runHostCheck: object }).runHostCheck, {
+      findMany: vi.fn(async () => [
+        { runId: "r1", verdict: "COMMENT", ciPendingAtReview: true, ciRereviewAt: null, run: { agentId: "a1" } },
+      ]),
+      updateMany: vi.fn(async () => ({ count: 1 })),
+    });
+    const ci: HostEvent = { kind: "ci_completed", provider: "github", repository: REPO, headSha: SHA, prNumbers: [7] };
+    const result = await routeHostEvent(ci, d);
+    expect(result.runIds).toEqual([]);
+    expectSkipped(h, ["wardby review"]);
+  });
+
+  it("skips a deferred review when it starts", async () => {
+    const { d, h } = setup({ links: [{ ...reviewers[0], waitForCi: true }] });
+    const db = d.db as unknown as {
+      deferredReview: { findMany: ReturnType<typeof vi.fn> };
+      runHostCheck: Record<string, unknown>;
+    };
+    db.runHostCheck.findMany = vi.fn(async () => []);
+    db.deferredReview.findMany.mockResolvedValue([
+      {
+        id: "d1",
+        provider: "github",
+        repository: REPO,
+        prNumber: 7,
+        headSha: SHA,
+        agentId: "a1",
+        checkName: "wardby review",
+      },
+    ]);
+    const ci: HostEvent = { kind: "ci_completed", provider: "github", repository: REPO, headSha: SHA, prNumbers: [7] };
+    const result = await routeHostEvent(ci, d);
+    expect(result.runIds).toEqual([]);
+    expectSkipped(h, ["wardby review"]);
+  });
+
+  it("leaves a reviewer's earlier review of the commit standing, posting no neutral check over it", async () => {
+    const { d, h } = setup();
+    d.reviewLookup.mockImplementation(async (args?: unknown) =>
+      (args as { where: { run: { agentId: string } } }).where.run.agentId === "a1" ? { runId: "earlier" } : null,
+    );
+    await expect(routeHostEvent(pr, d)).resolves.toEqual({ runIds: [], followUps: [] });
+    expect(dispatchRun).not.toHaveBeenCalled();
+    expect(h.startCheck).toHaveBeenCalledTimes(1);
+    expect(h.startCheck).toHaveBeenCalledWith(REPO, { headSha: SHA, name: "security" });
+    expect(h.completeCheck).toHaveBeenCalledWith(
+      REPO,
+      expect.objectContaining({ checkId: "c1", conclusion: "neutral" }),
+    );
+  });
+
+  it("still reviews on an explicit request: a check re-run or a review comment", async () => {
+    const { d, h } = setup({ links: [reviewers[0]] });
+    const rerun = await routeHostEvent(
+      {
+        kind: "check_rerun",
+        provider: "github",
+        repository: REPO,
+        prNumber: 7,
+        headSha: SHA,
+        checkName: "wardby review",
+      },
+      d,
+    );
+    expect(rerun.runIds).toEqual(["run-a1"]);
+    const asked = await routeHostEvent(
+      {
+        kind: "mention",
+        provider: "github",
+        repository: REPO,
+        number: 7,
+        isPullRequest: true,
+        comment: { kind: "conversation", id: "4" },
+        body: `@${d.mentionHandle} review`,
+        author: "chfields",
+        authorId: "1001",
+      },
+      d,
+    );
+    expect(asked.runIds).toEqual(["run-a1"]);
+    expect(h.completeCheck).not.toHaveBeenCalled();
+  });
+});
