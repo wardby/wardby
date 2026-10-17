@@ -10,6 +10,15 @@ const INDENTED = /^(?: {4}|\t)/;
 const LIST_ITEM = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:\s|$)/;
 const BLANK = /^\s*$/;
 
+/** Up to three spaces, at least the opening run of the fence's character, then only whitespace. */
+function closesFence(line: string, fence: { char: string; length: number }): boolean {
+  let index = 0;
+  while (index < 3 && line[index] === " ") index += 1;
+  const start = index;
+  while (line[index] === fence.char) index += 1;
+  return index - start >= fence.length && line.slice(index).trim() === "";
+}
+
 /** Fenced and indented code blocks blanked out, line count kept. */
 function withoutCodeBlocks(markdown: string): string[] {
   const out: string[] = [];
@@ -21,8 +30,7 @@ function withoutCodeBlocks(markdown: string): string[] {
   let inList = false;
   for (const line of markdown.split(/\r?\n/)) {
     if (fence) {
-      const close = new RegExp(`^ {0,3}${fence.char === "`" ? "`" : "~"}{${fence.length},}\\s*$`);
-      if (close.test(line)) fence = null;
+      if (closesFence(line, fence)) fence = null;
       out.push("");
       continue;
     }
@@ -57,27 +65,34 @@ function withoutCodeBlocks(markdown: string): string[] {
 
 /** Inline code spans in one paragraph replaced by a space; an unmatched run of backticks is literal. */
 function withoutCodeSpans(paragraph: string): string {
-  let result = "";
-  let index = 0;
-  while (index < paragraph.length) {
-    const start = paragraph.indexOf("`", index);
-    if (start === -1) break;
-    let runEnd = start;
-    while (paragraph[runEnd] === "`") runEnd += 1;
-    const run = paragraph.slice(start, runEnd);
-    // The closing run has exactly the opening run's length.
-    const closing = new RegExp(`(?<!\`)${run}(?!\`)`, "g");
-    closing.lastIndex = runEnd;
-    const close = closing.exec(paragraph);
-    if (!close) {
-      result += paragraph.slice(index, runEnd);
-      index = runEnd;
+  const runs: Array<{ start: number; end: number }> = [];
+  for (let index = 0; index < paragraph.length;) {
+    if (paragraph[index] !== "`") {
+      index += 1;
       continue;
     }
-    result += `${paragraph.slice(index, start)} `;
-    index = close.index + run.length;
+    const start = index;
+    while (paragraph[index] === "`") index += 1;
+    runs.push({ start, end: index });
   }
-  return result + paragraph.slice(index);
+  // A span closes at the next run of exactly the opening run's length.
+  const closer = new Array<number>(runs.length).fill(-1);
+  const nextOfLength = new Map<number, number>();
+  for (let i = runs.length - 1; i >= 0; i--) {
+    const length = runs[i].end - runs[i].start;
+    closer[i] = nextOfLength.get(length) ?? -1;
+    nextOfLength.set(length, i);
+  }
+  let result = "";
+  let copied = 0;
+  for (let i = 0; i < runs.length; i++) {
+    const close = closer[i];
+    if (close === -1) continue;
+    result += `${paragraph.slice(copied, runs[i].start)} `;
+    copied = runs[close].end;
+    i = close;
+  }
+  return result + paragraph.slice(copied);
 }
 
 /** `markdown` without its code blocks and inline code spans. */
