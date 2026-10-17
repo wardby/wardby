@@ -51,10 +51,11 @@ describe("budgetStoppedTaskSection", () => {
   });
 
   it("never splits a code point at the 4 KiB cut", () => {
-    const section = budgetStoppedTaskSection(`${"x".repeat(4094)}\u{1F600}${"y".repeat(100)}`);
+    const section = budgetStoppedTaskSection(`${"x".repeat(4075)}\u{1F600}${"y".repeat(100)}`);
     expect(section).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
     expect(section).not.toContain("\uFFFD");
     expect(section).toContain("[task truncated]");
+    expect(section.split("\n>\n> [task truncated]")[0]!.endsWith("x")).toBe(true);
   });
 
   it("defuses mentions", () => {
