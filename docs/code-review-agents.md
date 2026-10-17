@@ -945,6 +945,43 @@ Turning `waitForCi` off (re-linking without it, or with it set to `false`)
 only changes how future pushes are handled; it never retroactively starts or
 drops a review already being held.
 
+### Large pull requests
+
+From Wardby 0.6.1, `repo_pr_read` returns a large pull request's diff in pages.
+All changed files share one character budget per call (`maxPatchChars`,
+default 60,000, at most 200,000). Source, test and configuration files get it
+first, then documentation under the repository root's `docs/`, `doc/` or
+`help/`, lockfiles, generated, vendored and fixture files, and documents and
+images. Patches are split on line boundaries, and a file that does not fit on
+the page after other content moves to the next page. Each file has a
+`patchStatus`: `complete`, `partial`, `later_page`, `earlier_page`,
+`unavailable` (the host has no patch, for example a very large file; read it
+with `repo_read_file`) or `empty`. A `partial` file also reports
+`patchOffset`, where its part starts, and `patchContinues`, which is `true`
+when the next page carries more of the same file.
+
+When `patchesComplete` is `false`, the result lists `truncatedFiles`, gives
+`nextPatchCursor`, and estimates the files still to come in
+`remainingPatchFiles`. Call `repo_pr_read` again with the same arguments plus
+`patchCursor` to get the next page. A file the host found `unavailable` stays
+reported as such on later pages, and `patchesComplete` stays `false`. A cursor
+only works for the head and compare it was issued for: after a new push,
+`patch_cursor_stale` says to call again without it, and a damaged or oversized
+cursor returns `patch_cursor_malformed`.
+
+`repo_publish_review` refuses `APPROVE` and `CHANGES_REQUESTED` with
+`unread_files` while a source, test or config file of that head that
+`repo_pr_read` listed in the run is neither fully delivered nor read with
+`repo_read_file` at the head (one read of the path at the head counts).
+Removed files, documentation, lockfiles, generated files and fixtures are not
+gated, `COMMENT` is always allowed, and the refusal changes nothing, so the
+agent can read the files and publish again. A run that never read the head's
+file list (a resumed run, for example) is not gated. A reviewer that cannot
+read everything should publish `COMMENT` and name the files it did not review.
+Reviewer prompts written before 0.6.1 still work, because the refusal tells
+the agent what to do; update them with the paging step from the shipped
+reviewer prompt.
+
 ### Mark ready when passing (`markReadyWhenPassing`)
 
 With Wardby 0.7.0 or later, `markReadyWhenPassing` (boolean, default
@@ -1027,7 +1064,8 @@ A linked agent gets these built-in tools automatically — they are not
 attached like ordinary tools, and never expose a token, check id, or
 internal marker to the model:
 
-- `repo_pr_read` — a pull request's metadata, per-file diff patches, the
+- `repo_pr_read` — a pull request's metadata, per-file diff patches (paged; see
+  [Large pull requests](#large-pull-requests)), the
   agent's own unresolved inline threads (`openThreads`), and `ci`: the head
   commit's check runs and commit statuses, excluding every check the wardby
   App itself reported (review checks, `wardby/continuation`), with `state`
