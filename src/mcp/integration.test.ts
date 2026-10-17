@@ -400,7 +400,11 @@ function buildFakeDb() {
 
   (
     db as unknown as { $transaction: (callback: (tx: PrismaClient) => Promise<unknown>) => Promise<unknown> }
-  ).$transaction = async (callback) => callback(db);
+  ).$transaction = async (callback) =>
+    // Only the transaction client answers raw SQL: the database clock a schedule
+    // start records (core/schedule-start.ts). The secrets accessor takes raw SQL
+    // when it is offered, so the top-level fake does not offer it.
+    callback({ ...db, $queryRaw: async () => [{ now: new Date() }] } as unknown as PrismaClient);
 
   return { db, runs };
 }

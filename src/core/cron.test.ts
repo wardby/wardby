@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dueWindow, isDue, scheduleStartFields, validateCronExpression } from "./cron.js";
+import { dueWindow, isDue, startsSchedule, validateCronExpression } from "./cron.js";
 
 describe("dueWindow", () => {
   it("is due when never scheduled and a window has already passed", () => {
@@ -58,38 +58,27 @@ describe("dueWindow", () => {
   });
 });
 
-describe("scheduleStartFields", () => {
-  const now = new Date("2026-10-14T15:00:00.000Z"); // a Wednesday
+describe("startsSchedule", () => {
   const weekly = { schedule: "0 6 * * 1", timezone: "UTC", scheduleEnabled: true };
 
-  it("records now for a new, changed or re-enabled schedule", () => {
-    expect(scheduleStartFields(null, weekly, now)).toEqual({ lastScheduledAt: now });
-    expect(scheduleStartFields({ ...weekly, schedule: null }, weekly, now)).toEqual({ lastScheduledAt: now });
-    expect(scheduleStartFields({ ...weekly, schedule: "0 6 * * *" }, weekly, now)).toEqual({ lastScheduledAt: now });
-    expect(scheduleStartFields({ ...weekly, timezone: "Europe/Paris" }, weekly, now)).toEqual({
-      lastScheduledAt: now,
-    });
-    expect(scheduleStartFields({ ...weekly, scheduleEnabled: false }, weekly, now)).toEqual({
-      lastScheduledAt: now,
-    });
+  it("starts a new, changed or re-enabled schedule", () => {
+    expect(startsSchedule(null, weekly)).toBe(true);
+    expect(startsSchedule({ ...weekly, schedule: null }, weekly)).toBe(true);
+    expect(startsSchedule({ ...weekly, schedule: "0 6 * * *" }, weekly)).toBe(true);
+    expect(startsSchedule({ ...weekly, timezone: "Europe/Paris" }, weekly)).toBe(true);
+    expect(startsSchedule({ ...weekly, scheduleEnabled: false }, weekly)).toBe(true);
   });
 
-  it("records nothing when the schedule is unchanged, off, or removed", () => {
-    expect(scheduleStartFields(weekly, weekly, now)).toEqual({});
-    expect(scheduleStartFields(weekly, { ...weekly, scheduleEnabled: false }, now)).toEqual({});
-    expect(scheduleStartFields(null, { ...weekly, scheduleEnabled: false }, now)).toEqual({});
-    expect(scheduleStartFields(weekly, { ...weekly, schedule: null }, now)).toEqual({});
+  it("does not start a schedule that is unchanged, off, or removed", () => {
+    expect(startsSchedule(weekly, weekly)).toBe(false);
+    expect(startsSchedule(weekly, { ...weekly, scheduleEnabled: false })).toBe(false);
+    expect(startsSchedule(null, { ...weekly, scheduleEnabled: false })).toBe(false);
+    expect(startsSchedule(weekly, { ...weekly, schedule: null })).toBe(false);
   });
 
-  it("makes a new schedule fire first at its next window, not the one that passed before it existed", () => {
-    const start = scheduleStartFields(null, weekly, now);
-    const at = (iso: string) =>
-      dueWindow({
-        ...weekly,
-        schedule: "0 6 * * 1",
-        lastScheduledAt: start.lastScheduledAt ?? null,
-        now: new Date(iso),
-      });
+  it("a schedule started now fires first at its next window, not the one that passed before it existed", () => {
+    const started = new Date("2026-10-14T15:00:00.000Z"); // a Wednesday
+    const at = (iso: string) => dueWindow({ ...weekly, lastScheduledAt: started, now: new Date(iso) });
     expect(at("2026-10-14T15:00:30.000Z")).toBeNull(); // last Monday 06:00 is not backfilled
     expect(at("2026-10-19T06:00:30.000Z")).toEqual(new Date("2026-10-19T06:00:00.000Z"));
   });

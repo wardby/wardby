@@ -23,6 +23,8 @@ interface FakeAgentRow {
 function fakeDb(agents: FakeAgentRow[], grants: FakeGrantSeed[] = []) {
   const rows = new Map(agents.map((a) => [a.id, a]));
   const transactionDb = {
+    // The database clock a schedule start records (core/schedule-start.ts).
+    $queryRaw: async () => [{ now: new Date() }],
     resourceGrant: fakeResourceGrants(grants),
     agent: {
       findUnique: async ({ where }: { where: { id: string } }) => rows.get(where.id) ?? null,

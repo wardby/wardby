@@ -10,7 +10,7 @@ export interface DueCheckInput {
   timezone: string;
   /**
    * Start of the most recent window this agent already fired for, or the
-   * moment its schedule was set (see scheduleStartFields); null only for a
+   * moment its schedule was set (see startsSchedule); null only for a
    * schedule set before that was recorded.
    */
   lastScheduledAt: Date | null;
@@ -53,25 +53,21 @@ export interface ScheduleState {
 }
 
 /**
- * The `lastScheduledAt` to write with a schedule change. Setting, changing
- * (expression or timezone) or re-enabling a schedule records `now`, so the
- * schedule first fires at its next window after that, never for one that
- * passed before it existed or while it was off. Saving the schedule it
- * already has records nothing, keeping its firing history. `before` is null
- * for a new agent.
+ * Whether a schedule change starts the schedule afresh. Setting, changing
+ * (expression or timezone) or re-enabling a schedule does, so it first fires
+ * at its next window after that, never for one that passed before it existed
+ * or while it was off (see scheduleStartFields). Saving the schedule it
+ * already has does not, keeping its firing history. `before` is null for a
+ * new agent.
  */
-export function scheduleStartFields(
-  before: ScheduleState | null,
-  after: ScheduleState,
-  now: Date,
-): { lastScheduledAt: Date } | Record<string, never> {
-  if (!after.schedule || !after.scheduleEnabled) return {};
+export function startsSchedule(before: ScheduleState | null, after: ScheduleState): boolean {
+  if (!after.schedule || !after.scheduleEnabled) return false;
   const unchanged =
     before !== null &&
     before.scheduleEnabled &&
     before.schedule === after.schedule &&
     before.timezone === after.timezone;
-  return unchanged ? {} : { lastScheduledAt: now };
+  return !unchanged;
 }
 
 export function isDue(input: DueCheckInput): boolean {

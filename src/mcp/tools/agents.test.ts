@@ -122,6 +122,8 @@ function fakeDb(
   const groupsById = new Map(budgetGroups.map((g) => [g.id, g]));
   let counter = rows.size;
   const transactionDb = {
+    // The database clock a schedule start records (core/schedule-start.ts).
+    $queryRaw: async () => [{ now: new Date() }],
     // The coding-run service catalog: the built-in names only.
     codingService: {
       findMany: async ({ where }: { where: { name: { in: string[] } } }) =>

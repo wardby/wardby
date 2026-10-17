@@ -1,5 +1,6 @@
 import { Prisma } from "#prisma";
-import { scheduleStartFields, validateCronExpression } from "../../core/cron.js";
+import { validateCronExpression } from "../../core/cron.js";
+import { scheduleStartFields } from "../../core/schedule-start.js";
 import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { assertAgentAccess, requireAgentAccess } from "../auth/access.js";
@@ -35,7 +36,7 @@ export function registerSchedulingTools(mcp: WardbyMcpServer): void {
           const next = { schedule: args.schedule, timezone: args.timezone, scheduleEnabled: true };
           return tx.agent.update({
             where: { id: args.agentId },
-            data: { ...next, ...scheduleStartFields(existing, next, new Date()) },
+            data: { ...next, ...(await scheduleStartFields(tx, existing, next)) },
           });
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
