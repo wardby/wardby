@@ -276,4 +276,9 @@ describe("proxyRefusalDetails", () => {
     expect(proxyRefusalDetails(proxy({ turn: -1 }))).toBeNull();
     expect(proxyRefusalDetails(proxy({ heldUncertainUsd: Number.POSITIVE_INFINITY }))).toBeNull();
   });
+  it("keeps a valid refused hold basis and ceiling and drops malformed ones", () => {
+    const kept = proxy({ refusedHoldBasis: "cached", refusedHoldCeilingUsd: 0.44 });
+    expect(proxyRefusalDetails(kept)).toEqual(kept);
+    expect(proxyRefusalDetails({ ...proxy(), refusedHoldBasis: "bogus", refusedHoldCeilingUsd: "1" })).toEqual(proxy());
+  });
 });

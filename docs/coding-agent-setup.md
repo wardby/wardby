@@ -414,6 +414,47 @@ or running run as `cancelled` (see [Stop or cancel a run](../help/stop-run.md)),
 which ends its hold at once. If a row is still stuck in `running` for another
 reason, only its real cost counts once its hold lapses.
 
+### How a request's hold is estimated
+
+Before each model request the proxy holds an amount against the run's budget.
+A request whose hold does not fit in what is left is refused. The hold is not
+a charge: the run pays the reply's real cost.
+
+The first request of a conversation, and every fallback below, holds the worst
+case: the whole request body as new input written to the cache (one token per
+byte) plus `maxOutputTokens` at the output rate.
+
+After a reply in the same conversation that read from or wrote to the prompt
+cache at least half of its prompt (on OpenAI models only cache reads count),
+the next request holds that cached part at the cache-read rate,
+and the rest (including whatever the body has grown by) at the input and
+cache-write rates, plus the output allowance. It never holds more than the
+worst case. A conversation is the main agent or one of its sub-agents.
+
+The hold falls back to the worst case when:
+
+- there is no previous reply in the conversation;
+- the model changed;
+- the previous reply was interrupted (settled at an estimate) or did not
+  complete;
+- less than half of the previous reply's prompt was read from or written to
+  the cache;
+- the request body got smaller; or
+- the previous request in the conversation was sent more than 5 minutes
+  earlier, the lifetime of the prompt cache.
+
+If the cache misses, a reply can cost more than its hold. It is still settled
+when it costs no more than the worst case, so a run can exceed its budget by at
+most the difference between a request's worst case and its hold, for each
+request in flight. A reply that
+costs more than the worst case cancels the run's model access
+(`reservation_invariant_violated`).
+
+When a request is refused, `budgetEvents` in `get_run` shows the basis of the
+refused hold (`refusedHoldBasis`: `cached` or `full`) and the worst case for
+that request (`refusedHoldCeilingUsd`); see
+[Why a run stopped](#why-a-run-stopped).
+
 ### Interrupted replies
 
 When a model reply breaks off before its final usage arrives (a dropped
@@ -422,7 +463,7 @@ at an estimate instead of leaving its whole hold in place. The estimate is the
 input usage the proxy already read; failing that, the input of the run's
 previous completed reply; failing that, the input part of the request's hold.
 It adds the output relayed so far, counted high, and is never more than the
-request's hold. An estimated request is flagged `costEstimated`, counts in the
+request's worst case. An estimated request is flagged `costEstimated`, counts in the
 run's cost at the estimate, and is recorded as `uncertain` in the proxy's
 request ledger. If the estimate cannot be computed or recorded, the request
 keeps its full hold. A run can therefore exceed
@@ -447,7 +488,8 @@ cap bound the run: `run` (the agent's own `budgetUsd`), `run-tree` (what the
 lead had left), or `day`, `week` or `month` (the budget group's cap for that
 period). For a refused model request, `details` holds the budget, the amount
 spent, the holds of requests in flight, the refused hold, the model and the
-turn. For a refusal at dispatch it holds the cap, the amount spent, the amount
+turn, plus the basis of the refused hold (`refusedHoldBasis`) and its worst case
+(`refusedHoldCeilingUsd`). For a refusal at dispatch it holds the cap, the amount spent, the amount
 held and the number of holding runs (`heldRuns`). Both also name the agent's
 budget group (`groupName`) when it has one, and the lead agent
 (`leadAgentName`) for a `run-tree` limit; a refused model request also gives
@@ -492,7 +534,8 @@ failure. Raise the cap per agent:
 `maxOutputTokens` is 1024 to 128000; `null` restores the default. Pick a value
 the agent's model supports. It is fixed on each run when the run is
 dispatched. The coding proxy reserves `maxOutputTokens` × the model's output
-price (plus the request's input estimate) against the run's budget for every
+price (plus the request's input, see
+[How a request's hold is estimated](#how-a-requests-hold-is-estimated)) against the run's budget for every
 model request, so a higher cap needs a larger `budgetUsd`: at a $25/MTok output
 price, 32000 tokens reserve $0.80 per request and 128000 reserve $3.20. A
 request whose reservation does not fit in what is left of the budget is

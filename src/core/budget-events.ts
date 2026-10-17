@@ -20,6 +20,9 @@ export interface ProxyRefusalDetails {
   heldReservedUsd: number;
   heldUncertainUsd: number;
   refusedHoldUsd: number;
+  /** How the refused hold was priced, and its worst case; absent on records from before cache-aware holds. */
+  refusedHoldBasis?: "cached" | "full";
+  refusedHoldCeilingUsd?: number;
   model: string;
   /** Completed (incl. estimated) requests + 1. */
   turn: number;
@@ -158,7 +161,7 @@ export function proxyRefusalDetails(raw: unknown): ProxyRefusalDetails | null {
   const { budgetUsd, spentUsd, heldReservedUsd, heldUncertainUsd, refusedHoldUsd, turn, model } = raw;
   if (![budgetUsd, spentUsd, heldReservedUsd, heldUncertainUsd, refusedHoldUsd].every(isFiniteNumber)) return null;
   if (!isCount(turn) || typeof model !== "string" || !MODEL_ID.test(model)) return null;
-  return {
+  const result: ProxyRefusalDetails = {
     source: "proxy",
     budgetUsd: budgetUsd as number,
     spentUsd: spentUsd as number,
@@ -167,6 +170,13 @@ export function proxyRefusalDetails(raw: unknown): ProxyRefusalDetails | null {
     refusedHoldUsd: refusedHoldUsd as number,
     model,
     turn,
+  };
+  const basis = raw.refusedHoldBasis;
+  const ceiling = raw.refusedHoldCeilingUsd;
+  return {
+    ...result,
+    ...(basis === "cached" || basis === "full" ? { refusedHoldBasis: basis } : {}),
+    ...(isFiniteNumber(ceiling) ? { refusedHoldCeilingUsd: ceiling } : {}),
   };
 }
 

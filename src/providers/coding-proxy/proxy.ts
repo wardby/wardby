@@ -7,7 +7,6 @@ import { deriveRegistryToken } from "../../coding/registry/token.js";
 import {
   AnthropicSseUsageTracker,
   actualCostUsd,
-  estimateReservationUsd,
   fingerprintRequest,
   parseAnthropicAuthoritativeUsage,
   parseAuthoritativeUsage,
@@ -15,6 +14,7 @@ import {
   safeUpstreamErrorCode,
   terminalUsageFromSseFrame,
 } from "./metering.js";
+import { conversationKey, estimateHold } from "./hold.js";
 import { estimateInterrupted, type InterruptedEstimate } from "./interrupted.js";
 import { createPinnedProxyFetch } from "./secure-fetch.js";
 import type {
@@ -1077,7 +1077,29 @@ export class CodingProxy {
     }
     const requestKey = safeRequestKey(input.requestKey, parsed.fingerprint);
     const snapshot = pricingSnapshot(terms.version, terms.pricing);
-    const reservationUsd = estimateReservationUsd(Buffer.byteLength(parsed.encoded), parsed.maxOutputTokens, snapshot);
+    const bodyBytes = Buffer.byteLength(parsed.encoded);
+    const conversation = conversationKey(session.protocol, parsed.body);
+    // A failed lookup holds the ceiling: never a reason to fail the request.
+    const previous = conversation ? await this.ledger.previousReply(session.id, conversation).catch(() => null) : null;
+    const hold = estimateHold({
+      protocol: session.protocol,
+      model: parsed.model,
+      bodyBytes,
+      maxOutputTokens: parsed.maxOutputTokens,
+      pricing: snapshot,
+      previous,
+      now: this.now(),
+    });
+    const reservationUsd = hold.holdUsd;
+    const holdAudit = {
+      reservationUsd,
+      ceilingUsd: hold.ceilingUsd,
+      reservationBasis: hold.basis,
+      ...(hold.fallback ? { holdFallback: hold.fallback } : {}),
+      ...(hold.cachedTokens !== undefined
+        ? { holdCachedTokens: hold.cachedTokens, holdUncachedTokens: hold.uncachedTokens }
+        : {}),
+    };
     const reservation = await this.ledger.reserve({
       id: randomUUID(),
       sessionId: session.id,
@@ -1085,6 +1107,10 @@ export class CodingProxy {
       requestFingerprint: parsed.fingerprint,
       model: parsed.model,
       reservationUsd,
+      requestBytes: bodyBytes,
+      ceilingUsd: hold.ceilingUsd,
+      reservationBasis: hold.basis,
+      conversationKey: conversation,
       pricing: snapshot,
       now: this.now(),
     });
@@ -1098,7 +1124,7 @@ export class CodingProxy {
         runId: session.runId,
         model: parsed.model,
         reason: "budget_exhausted",
-        reservationUsd,
+        ...holdAudit,
         budgetUsd: reservation.details.budgetUsd,
         spentUsd: reservation.details.spentUsd,
         heldReservedUsd: reservation.details.heldReservedUsd,
@@ -1116,7 +1142,7 @@ export class CodingProxy {
       runId: session.runId,
       requestId: request.id,
       model: request.model,
-      reservationUsd,
+      ...holdAudit,
     });
 
     let key: string;
@@ -1272,6 +1298,7 @@ export class CodingProxy {
   ): Promise<void> {
     const costUsd = actualCostUsd(usage, request.pricing);
     await this.ledger.complete(request.id, usage, costUsd, upstreamStatus);
+    const overshootUsd = costUsd - request.reservationUsd;
     this.audit({
       type: "response.completed",
       runId: session.runId,
@@ -1279,13 +1306,17 @@ export class CodingProxy {
       model: request.model,
       status: upstreamStatus,
       costUsd,
+      reservationUsd: request.reservationUsd,
+      ...(overshootUsd > Number.EPSILON ? { reason: "reservation_exceeded", overshootUsd } : {}),
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       cachedInputTokens: usage.cachedInputTokens,
       cacheWriteTokens: usage.cacheWriteTokens,
       reasoningTokens: usage.reasoningTokens,
     });
-    if (costUsd > request.reservationUsd + Number.EPSILON) {
+    // A cached hold may be exceeded when the cache misses (settled, audited above); the ceiling may not.
+    const ceilingUsd = request.ceilingUsd ?? request.reservationUsd;
+    if (costUsd > ceilingUsd + Number.EPSILON) {
       await this.ledger.cancelSession(session.id);
       throw new CodingProxyError(502, "reservation_invariant_violated");
     }
@@ -1435,6 +1466,7 @@ export class CodingProxy {
           ...hints,
           reservationUsd: request.reservationUsd,
           maxOutputTokens: progress.maxOutputTokens,
+          ceilingUsd: request.ceilingUsd ?? request.reservationUsd,
         },
         request.pricing,
       );
