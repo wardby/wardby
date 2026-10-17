@@ -8,6 +8,7 @@
  * a check id, or a marker. Never throws — failures are JSON tool results.
  * See docs/private/2026-09-25-code-review-host-design.md §7.
  */
+import type { ReviewReadLedger } from "./review-reads.js";
 import { z } from "zod";
 import type { LoadedTool } from "../providers/engine/types.js";
 import { FAILING_CONCLUSIONS } from "../providers/review-host/ci.js";
@@ -79,6 +80,8 @@ export interface ReviewToolContext {
    * throw refuses the call.
    */
   authorize: (link: RepositoryLink) => Promise<RepoAccessDecision>;
+  /** Per attempt: what this run has read (core/review-reads.ts); absent, nothing is gated. */
+  reads?: ReviewReadLedger;
   /** Backs repo_pr_read's relatedPullRequests lookup (collectRelatedPullRequests). */
   db: RelatedPullRequestsDb;
 }
@@ -240,7 +243,7 @@ export const REVIEW_HOST_TOOL_DEFS: LoadedTool[] = [
   {
     name: "repo_publish_review",
     description:
-      "Publishes your review of one pull request head, in one call: inline comments on diff lines (a ```suggestion block in a comment body becomes a one-click fix; comments on lines outside the diff move to the summary automatically), one summary comment that is edited in place on later reviews, and — only on the pull request this run was started for, by an agent linked with a check name — the check conclusion (APPROVE = success, CHANGES_REQUESTED = failure, COMMENT = neutral). Pass resolveThreadIds with the ids of your openThreads that this head fixes; only your own open threads on this PR are resolved, and the result lists resolvedThreadIds and skippedThreadIds. Returns published:false with reason stale_head if the PR moved on; then stop. On a link configured with waitForCi, nothing is published and an APPROVE is refused with a tool error — ci_failing while CI on this head is failing, ci_pending while it is still running — publish CHANGES_REQUESTED or COMMENT instead.",
+      "Publishes your review of one pull request head, in one call: inline comments on diff lines (a ```suggestion block in a comment body becomes a one-click fix; comments on lines outside the diff move to the summary automatically), one summary comment that is edited in place on later reviews, and — only on the pull request this run was started for, by an agent linked with a check name — the check conclusion (APPROVE = success, CHANGES_REQUESTED = failure, COMMENT = neutral). Pass resolveThreadIds with the ids of your openThreads that this head fixes; only your own open threads on this PR are resolved, and the result lists resolvedThreadIds and skippedThreadIds. Returns published:false with reason stale_head if the PR moved on; then stop. On a link configured with waitForCi, nothing is published and an APPROVE is refused with a tool error — ci_failing while CI on this head is failing, ci_pending while it is still running — publish CHANGES_REQUESTED or COMMENT instead. APPROVE and CHANGES_REQUESTED are refused with unread_files while a source or test file of this head that repo_pr_read listed has not been fully delivered or read with repo_read_file at headSha; COMMENT is always allowed.",
     jsonSchema: {
       type: "object",
       properties: {
@@ -479,6 +482,7 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
           }
           throw err;
         }
+        ctx.reads?.recordPage(link.repository, a.prNumber, view);
         const relatedPullRequests = await relatedPullRequestsFor(ctx, host, link.repository, a.prNumber, view);
         return JSON.stringify({ ...view, relatedPullRequests, ci: ciForAgent(view) });
       }
@@ -488,6 +492,7 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
           startLine: a.startLine ?? 1,
           maxLines: a.maxLines ?? 400,
         });
+        if (read.kind === "file") ctx.reads?.recordFileRead(link.repository, a.ref, a.path);
         // `text` is the raw window for machine callers; agents get only the numbered `content`.
         if (read.kind === "file") {
           const { text: _text, ...shown } = read;
@@ -539,6 +544,18 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
             await markCompleted(ctx);
           } catch (err) {
             log.warn({ err, agentId: ctx.agentId }, "could not supersede the run's check");
+          }
+        }
+        if (a.verdict !== "COMMENT") {
+          const unread = ctx.reads?.unreadCode(link.repository, a.prNumber, a.headSha) ?? null;
+          if (unread && unread.length > 0) {
+            const shown = unread.slice(0, 20);
+            return error(
+              "unread_files",
+              `You have not read ${unread.length} source or test file(s) of this head: ${shown.join(", ")}${unread.length > shown.length ? ", …" : ""}. ` +
+                "Page through repo_pr_read with patchCursor, or read them with repo_read_file at headSha, before an APPROVE or CHANGES_REQUESTED verdict. " +
+                "If you cannot read them, publish COMMENT and name the files you did not review.",
+            );
           }
         }
         // An APPROVE on a waitForCi link's own check gates on CI, read
