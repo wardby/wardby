@@ -27,6 +27,7 @@ import {
   ReviewHostError,
   type CodeReviewHost,
   type CommentInput,
+  type AcknowledgeOutcome,
   type CommentRef,
   type CompleteCheckInput,
   type EditCommentInput,
@@ -508,7 +509,7 @@ export class LocalReviewHost implements CodeReviewHost {
 
   async editComment(_repository: string, _input: EditCommentInput): Promise<void> {}
 
-  async acknowledge(_repository: string, _target: CommentRef): Promise<void> {}
+  async acknowledge(_repository: string, _target: CommentRef, _outcome?: AcknowledgeOutcome): Promise<void> {}
 
   async startCheck(_repository: string, _input: StartCheckInput): Promise<{ checkId: string }> {
     return { checkId: "local" };
