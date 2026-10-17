@@ -30,6 +30,7 @@ import {
   protectedPathSentence,
 } from "../../coding/protected-path-wording.js";
 import {
+  BUDGET_STOPPED_SUMMARY_PREFIX,
   budgetStoppedSummary,
   CONTINUATION_CLOSED_CATEGORY,
   CONTINUATION_CLOSED_ERROR,
@@ -1576,8 +1577,9 @@ export class ContainerExecutor implements Executor {
    * A run stopped at its budget whose worker exited cleanly keeps its changes so
    * far: they are pushed as the usual draft (or branch), with a summary that says
    * the work is unfinished. Null when there was nothing to push or the push
-   * failed for any reason: the run then ends out of budget without them. Throws
-   * only when the run was stopped meanwhile (the stop wrote its terminal row).
+   * failed for any reason: the run then ends out of budget without them. Once
+   * pushed, the pushed outcome is always returned. Throws only when the run was
+   * stopped meanwhile (the stop wrote its terminal row).
    */
   private async keepStoppedChanges(
     run: ContainerRunSnapshot,
@@ -1592,23 +1594,9 @@ export class ContainerExecutor implements Executor {
     record: CodingRunRecord;
   } | null> {
     const summary = budgetStoppedSummary(output.summary);
+    let pushed: Awaited<ReturnType<ContainerExecutor["pushChanges"]>>;
     try {
-      const pushed = await this.pushChanges(run, handle, current, output, summary, existingWorkspace);
-      const { finalized } = pushed;
-      if (finalized.outcome === "no_changes") return null;
-      const description = await this.recordDescription(
-        pushed.current,
-        pushed.descriptionState,
-        finalized.outcome === "pull_request_opened" || finalized.outcome === "pull_request_updated"
-          ? finalized.description
-          : undefined,
-      );
-      return {
-        current: pushed.current,
-        finalized,
-        result: this.resultFor({ ...output, summary }, pushed.current, finalized.outcome, finalized),
-        record: { ...dependencyCacheRecord(output), ...pushedRecord(finalized), ...description },
-      };
+      pushed = await this.pushChanges(run, handle, current, output, summary, existingWorkspace);
     } catch (error) {
       if (error instanceof Error && error.message === "coding_run_no_longer_active") throw error;
       containerLog.warn(
@@ -1617,6 +1605,37 @@ export class ContainerExecutor implements Executor {
       );
       return null;
     }
+    const { finalized } = pushed;
+    if (finalized.outcome === "no_changes") return null;
+    // Pushed: from here on the run records the pushed outcome whatever else fails.
+    const description = await this.recordDescription(
+      pushed.current,
+      pushed.descriptionState,
+      finalized.outcome === "pull_request_opened" || finalized.outcome === "pull_request_updated"
+        ? finalized.description
+        : undefined,
+    ).catch((): CodingRunRecord => ({}));
+    let result: CodingRunResult;
+    try {
+      result = this.resultFor({ ...output, summary }, pushed.current, finalized.outcome, finalized);
+    } catch (error) {
+      containerLog.warn(
+        { runId: run.runId, reason: describeFailure(error) },
+        "could not record the worker's summary and tests of a budget-stopped run; recording its push alone",
+      );
+      result = this.resultFor(
+        { ...output, summary: BUDGET_STOPPED_SUMMARY_PREFIX, tests: [], tag: undefined },
+        pushed.current,
+        finalized.outcome,
+        finalized,
+      );
+    }
+    return {
+      current: pushed.current,
+      finalized,
+      result,
+      record: { ...dependencyCacheRecord(output), ...pushedRecord(finalized), ...description },
+    };
   }
 
   /**

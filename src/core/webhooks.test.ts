@@ -66,7 +66,15 @@ function fakeDb(agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
       findUnique: async ({ where }: { where: { id?: string; name?: string } }) => {
         const row = where.id ? agentsById.get(where.id) : agents.find((a) => a.name === where.name);
         if (row) {
-          return { kind: "native", codingProfile: null, budgetUsd: 1, model: "gpt-5.6-luna", ownerId: "p1", ...row };
+          return {
+            kind: "native",
+            codingProfile: null,
+            budgetUsd: 1,
+            allowedOverrunPercent: 0,
+            model: "gpt-5.6-luna",
+            ownerId: "p1",
+            ...row,
+          };
         }
         return null;
       },

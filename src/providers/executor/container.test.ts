@@ -2745,6 +2745,41 @@ describe("ContainerExecutor", () => {
       });
     });
 
+    it("records the pushed outcome when a step after the push fails", async () => {
+      const created = await harness({ budgetUsd: 0.005 });
+      created.jobs.result.resultArtifact = stoppedArtifact;
+      const executor = created.executor as unknown as { resultFor: (...args: unknown[]) => unknown };
+      const real = executor.resultFor.bind(created.executor);
+      let calls = 0;
+      executor.resultFor = (...args: unknown[]) => {
+        calls += 1;
+        if (calls === 1) throw new Error("result_build_failed");
+        return real(...args);
+      };
+      await created.executor.start("run-1");
+
+      expect(created.vcs.finalized).toBe(1);
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.store.run.result).toMatchObject({
+        outcome: "pull_request_opened",
+        pullRequestNumber: 42,
+        summary: PREFIX,
+        tests: [],
+      });
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({ changesPushed: { pullRequestNumber: 42 } });
+    });
+
+    it("still refuses to launch a run that has already spent past its limit", async () => {
+      const created = await harness({ budgetUsd: 1, costUsd: 1.05 });
+      await created.executor.start("run-1");
+
+      expect(created.jobs.launches).toBe(0);
+      expect(created.sessions.creates).toBe(0);
+      expect(created.store.run.status).toBe("refused");
+      expect(created.store.terminations[0]).toMatchObject({ audit: { failureCategory: "budget" } });
+      expect(logged.some((line) => String(line.payload.reason).includes("coding_run_budget_invalid"))).toBe(true);
+    });
+
     it("pushes a budget-stopped local run's changes to its branch", async () => {
       const created = await harness({ budgetUsd: 0.005 });
       created.jobs.result.resultArtifact = stoppedArtifact;
