@@ -349,6 +349,38 @@ describe("run observability tools", () => {
     await client.close();
   });
 
+  it("get_run returns a coding run's base budget and enforced limit", async () => {
+    const now = new Date();
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [
+        {
+          id: "r1",
+          agentId: "a1",
+          status: "succeeded",
+          trigger: "manual",
+          turns: 0,
+          tokensIn: 0,
+          tokensOut: 0,
+          costUsd: 1.04,
+          finalText: null,
+          error: null,
+          startedAt: now,
+          finishedAt: now,
+          codingRun: { result: null, budgetBaseUsd: "1.000000", budgetReservedUsd: "1.100000" },
+        },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({ name: "get_run", arguments: { runId: "r1" } });
+    expect(parseText(result as never)).toMatchObject({ budgetBaseUsd: 1, budgetReservedUsd: 1.1 });
+    await client.close();
+  });
+
   it("get_run lists a run's recorded budget refusals with names filled, and omits the key when there are none", async () => {
     const now = new Date("2026-01-02T03:04:05.000Z");
     const row = {

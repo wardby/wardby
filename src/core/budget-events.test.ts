@@ -29,6 +29,13 @@ const event = (limit: BudgetLimit, details: BudgetEventView["details"]): BudgetE
 });
 
 describe("budget event sentences", () => {
+  it("proxy, run, with an allowed overrun", () => {
+    const e = event("run", proxy({ budgetUsd: 3.3, baseBudgetUsd: 3 }));
+    expect(ownerBudgetSentence(e, "mobile-builder")).toContain(
+      "To continue, raise budgetUsd or allowedOverrunPercent on mobile-builder.",
+    );
+  });
+
   it("proxy, run", () => {
     const e = event("run", proxy());
     expect(ownerBudgetSentence(e, "mobile-builder")).toBe(

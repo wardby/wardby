@@ -191,6 +191,8 @@ export interface ContinuationFinishedDetails {
   agentName?: string;
   /** Host-safe sentence naming the run's budget; used with `budget_exhausted`. */
   budgetSentence?: string;
+  /** Host-safe sentence for a run that finished over its base budget (core/budget-wording.ts); used with `succeeded`. */
+  overrunSentence?: string;
   /** Host-safe sentence naming a model-provider refusal (see core/provider-wording.ts); used with `failed`. */
   providerSentence?: string;
   /** Host-safe sentence naming a coding-run service that never became ready (coding/services/wording.ts); used with `failed`. */

@@ -296,7 +296,7 @@ export class GitHubRemote implements GitRemote {
       const budgetSuffix = details?.budgetSentence ? ` ${details.budgetSentence}` : "";
       const body =
         outcome === "succeeded"
-          ? `✅ ${label} finished.${summarySuffix}`
+          ? `✅ ${label} finished.${details?.overrunSentence ? ` ${details.overrunSentence}` : ""}${summarySuffix}`
           : outcome === "budget_exhausted"
             ? `❌ ${label} ran out of budget.${budgetSuffix}${summarySuffix}`
             : details?.serviceSentence

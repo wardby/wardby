@@ -30,7 +30,7 @@ import {
   protectedPathSentence,
 } from "../../coding/protected-path-wording.js";
 import { CONTINUATION_CLOSED_CATEGORY, CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
-import { budgetSentence } from "../../core/budget-wording.js";
+import { budgetSentence, overrunSentence } from "../../core/budget-wording.js";
 import { fileSelfDefect } from "../../core/self-defects.js";
 import { isTransactionUnavailable } from "../../core/dispatch.js";
 import { CONTENDED_TX_MAX_WAIT_MS } from "../../core/timing.js";
@@ -249,6 +249,8 @@ export interface ContainerRunSnapshot {
   budgetUsd: number;
   /** The agent's own per-run budget; `budgetUsd` is less when its budget group had less left. */
   agentBudgetUsd?: number;
+  /** The run's budget before the agent's allowed overrun (CodingRun.budgetBaseUsd); absent for older runs. */
+  budgetBaseUsd?: number;
   budgetGroupName?: string | null;
   tokensIn: number;
   tokensOut: number;
@@ -425,6 +427,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       mergeOrder: row.codingRun.mergeOrder,
       budgetUsd: Number(row.codingRun.budgetReservedUsd),
       agentBudgetUsd: Number(row.agent.budgetUsd),
+      ...(row.codingRun.budgetBaseUsd == null ? {} : { budgetBaseUsd: Number(row.codingRun.budgetBaseUsd) }),
       budgetGroupName: row.agent.budgetGroup?.name ?? null,
       tokensIn: row.tokensIn,
       tokensOut: row.tokensOut,
@@ -1351,6 +1354,8 @@ export class ContainerExecutor implements Executor {
     // "failed" and is only flipped right before a success or out-of-budget return.
     let outcome: ContinuationOutcome = "failed";
     let finishedSummary: string | undefined;
+    // Set with a success that spent past the run's base budget; says so on the host.
+    let overrun: { overrunSentence?: string } = {};
     // Set when a failed job's session relayed a model-provider failure; names it on the host.
     // Only a failed job: a transient provider error the worker retried past did not end the run.
     let providerClass: ProviderFailureClass | undefined;
@@ -1411,6 +1416,7 @@ export class ContainerExecutor implements Executor {
         });
         this.terminal(current, "succeeded");
         outcome = "succeeded";
+        overrun = this.overrunDetails(current);
         finishedSummary = output.summary;
         return;
       }
@@ -1484,6 +1490,7 @@ export class ContainerExecutor implements Executor {
       }
       this.terminal(current, "succeeded");
       outcome = "succeeded";
+      overrun = this.overrunDetails(current);
       finishedSummary = output.summary;
     } catch (error) {
       if (error instanceof Error && error.message === "coding_run_no_longer_active") {
@@ -1512,6 +1519,7 @@ export class ContainerExecutor implements Executor {
         await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, {
           summary: finishedSummary,
           agentName: run.agentName,
+          ...(outcome === "succeeded" ? overrun : {}),
           ...(outcome === "budget_exhausted" ? { budgetSentence: await this.budgetSentence(run) } : {}),
           ...(outcome === "failed" && providerClass ? { providerSentence: providerSentence(providerClass) } : {}),
           ...(outcome === "failed" && protectedPath
@@ -2232,6 +2240,7 @@ export class ContainerExecutor implements Executor {
       const protectedPathFailed = run.status === "failed" && run.failureCategory === PROTECTED_PATH_CATEGORY;
       await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, {
         agentName: run.agentName,
+        ...(outcome === "succeeded" ? this.overrunDetails(run) : {}),
         ...(outcome === "budget_exhausted" ? { budgetSentence: await this.budgetSentence(run) } : {}),
         ...(providerClass ? { providerSentence: providerSentence(providerClass) } : {}),
         ...(unreadyServices ? { serviceSentence: serviceUnreadySentence(unreadyServices) } : {}),
@@ -2290,6 +2299,13 @@ export class ContainerExecutor implements Executor {
     };
   }
 
+  /** The overrun sentence for a finished run that spent past its base budget, as status details. */
+  private overrunDetails(run: ContainerRunSnapshot): { overrunSentence?: string } {
+    if (run.budgetBaseUsd === undefined) return {};
+    const sentence = overrunSentence(run.costUsd, run.budgetBaseUsd, run.budgetUsd);
+    return sentence ? { overrunSentence: sentence } : {};
+  }
+
   /** The host-safe sentence for a run that ran out of budget. */
   private async budgetSentence(run: ContainerRunSnapshot): Promise<string> {
     const loaded = await this.options.store.budgetEvent?.(run.runId).catch(() => null);
@@ -2297,6 +2313,7 @@ export class ContainerExecutor implements Executor {
     return budgetSentence({
       runBudgetUsd: run.budgetUsd,
       agentBudgetUsd: run.agentBudgetUsd ?? run.budgetUsd,
+      baseBudgetUsd: run.budgetBaseUsd,
       budgetGroupName: run.budgetGroupName,
     });
   }

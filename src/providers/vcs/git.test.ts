@@ -846,6 +846,20 @@ describe("GitVcsProvider", () => {
         );
       });
 
+      it("puts the overrun sentence in the done comment", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationFinished(prepared, "succeeded", {
+          overrunSentence: "Spent $1.04, $0.04 (4%) over its $1.00 budget, within its allowed overrun.",
+          summary: "Done.",
+        });
+
+        expect(github.statusCommentCalls[0].input.body).toBe(
+          "✅ wardby run run-2 finished. Spent $1.04, $0.04 (4%) over its $1.00 budget, within its allowed overrun.\n\nDone.",
+        );
+      });
+
       it("omits the summary suffix entirely when none is given", async () => {
         const { provider, github } = await harness();
         const prepared = await provider.prepareWorkspace(continuationInput());

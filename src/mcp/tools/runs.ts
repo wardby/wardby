@@ -92,6 +92,8 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
           dependencyCacheResult: true,
           prDescriptionOutcome: true,
           packageAuditMode: true,
+          budgetBaseUsd: true,
+          budgetReservedUsd: true,
         },
       });
       const localPr = await ctx.db.localPullRequest.findUnique({
@@ -143,6 +145,8 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       return textResult({
         ...withOperatorMode(run),
         ...(budgetEvents.length > 0 ? { budgetEvents } : {}),
+        ...(codingRun?.budgetReservedUsd != null ? { budgetReservedUsd: Number(codingRun.budgetReservedUsd) } : {}),
+        ...(codingRun?.budgetBaseUsd != null ? { budgetBaseUsd: Number(codingRun.budgetBaseUsd) } : {}),
         ...(codingResult ? { codingResult } : {}),
         ...(failureCategory ? { failureCategory } : {}),
         ...(diagnosticId ? { diagnosticId } : {}),

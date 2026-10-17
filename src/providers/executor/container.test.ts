@@ -372,6 +372,7 @@ class FakeVcs implements VcsProvider {
     summary?: string;
     agentName?: string;
     budgetSentence?: string;
+    overrunSentence?: string;
     serviceSentence?: string;
     protectedPathSentence?: string;
   }> = [];
@@ -446,6 +447,7 @@ class FakeVcs implements VcsProvider {
       summary: details?.summary,
       agentName: details?.agentName,
       ...(details?.budgetSentence ? { budgetSentence: details.budgetSentence } : {}),
+      ...(details?.overrunSentence ? { overrunSentence: details.overrunSentence } : {}),
       ...(details?.providerSentence ? { providerSentence: details.providerSentence } : {}),
       ...(details?.serviceSentence ? { serviceSentence: details.serviceSentence } : {}),
       ...(details?.protectedPathSentence ? { protectedPathSentence: details.protectedPathSentence } : {}),
@@ -1977,6 +1979,39 @@ describe("ContainerExecutor", () => {
       expect(created.vcs.notifyFinishedCalls).toEqual([
         { outcome: "succeeded", summary: "Fixed it.", agentName: "knock-knock-implement" },
       ]);
+    });
+
+    it("tells the host when a succeeded run spent past its base budget", async () => {
+      const created = await harness({ budgetUsd: 0.1, budgetBaseUsd: 0.005 });
+      await created.executor.start("run-1");
+
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({
+        outcome: "succeeded",
+        overrunSentence: "Spent $0.01, $0.01 (100%) over its $0.01 budget, within its allowed overrun.",
+      });
+    });
+
+    it("adds no overrun sentence for a run without a base budget or within it", async () => {
+      const none = await harness({ budgetUsd: 0.1 });
+      await none.executor.start("run-1");
+      expect(none.vcs.notifyFinishedCalls[0]).not.toHaveProperty("overrunSentence");
+
+      const within = await harness({ budgetUsd: 0.1, budgetBaseUsd: 0.05 });
+      await within.executor.start("run-1");
+      expect(within.vcs.notifyFinishedCalls[0]).not.toHaveProperty("overrunSentence");
+    });
+
+    it("names the base budget and allowed overrun when a run with an overrun is out of budget", async () => {
+      const created = await harness({ budgetUsd: 1.1, budgetBaseUsd: 1 });
+      created.sessions.exhausted.add("session-1");
+      created.jobs.statusValue = { state: "failed" };
+      created.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_stream_failed" };
+      await created.executor.start("run-1");
+
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({
+        budgetSentence:
+          "Out of budget: this run's $1.00 budget and its 10% allowed overrun ($1.10 in all) were used up.",
+      });
     });
 
     it("notifies finished with 'budget_exhausted' when the budget is exhausted", async () => {

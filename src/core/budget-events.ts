@@ -28,6 +28,8 @@ export interface ProxyRefusalDetails {
   turn: number;
   /** Filled at read time (budget event names); never stored, and dropped if a stored row has them. */
   agentBudgetUsd?: number;
+  /** Filled at read time: the run's budget before its allowed overrun, when the agent had one. */
+  baseBudgetUsd?: number;
   groupName?: string;
   leadAgentName?: string;
 }
@@ -101,7 +103,10 @@ export function ownerBudgetSentence(event: BudgetEventView, agentName: string): 
     return `Could not start: ${dispatchPeriodSentence(limit, details)}`;
   }
   const first = `Stopped before turn ${details.turn}: ${proxyFacts(details, "the next request")}`;
-  if (limit === "run") return `${first} To continue, raise budgetUsd on ${agentName}.`;
+  if (limit === "run") {
+    const overran = details.baseBudgetUsd !== undefined && details.baseBudgetUsd < details.budgetUsd;
+    return `${first} To continue, raise ${overran ? "budgetUsd or allowedOverrunPercent" : "budgetUsd"} on ${agentName}.`;
+  }
   if (limit === "run-tree") {
     const lead = details.leadAgentName ?? "lead agent";
     return (
@@ -224,6 +229,7 @@ export async function latestBudgetEvent(
 interface BudgetEventNames {
   agentName?: string;
   agentBudgetUsd?: number;
+  baseBudgetUsd?: number;
   groupName?: string;
   leadAgentName?: string;
 }
@@ -242,6 +248,7 @@ async function budgetEventNames(
     select: {
       parentRunId: true,
       agent: { select: { name: true, budgetUsd: true, budgetGroup: { select: { name: true } } } },
+      codingRun: { select: { budgetBaseUsd: true } },
     },
   });
   const names: BudgetEventNames = {};
@@ -252,6 +259,8 @@ async function budgetEventNames(
     if (Number.isFinite(budget)) names.agentBudgetUsd = budget;
     if (run.agent.budgetGroup?.name) names.groupName = run.agent.budgetGroup.name;
   }
+  const base = run.codingRun?.budgetBaseUsd == null ? NaN : Number(run.codingRun.budgetBaseUsd);
+  if (Number.isFinite(base)) names.baseBudgetUsd = base;
   if (withLead) {
     let lead = run.agent?.name;
     let id: string | null = run.parentRunId;
@@ -274,6 +283,7 @@ function withNames(event: BudgetEventView, names: BudgetEventNames): BudgetEvent
   const details: BudgetEventDetails = { ...event.details };
   if (names.groupName) details.groupName = names.groupName;
   if (details.source === "proxy" && names.agentBudgetUsd !== undefined) details.agentBudgetUsd = names.agentBudgetUsd;
+  if (details.source === "proxy" && names.baseBudgetUsd !== undefined) details.baseBudgetUsd = names.baseBudgetUsd;
   if (event.limit === "run-tree" && names.leadAgentName) details.leadAgentName = names.leadAgentName;
   return { ...event, details };
 }
