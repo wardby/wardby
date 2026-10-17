@@ -54,6 +54,20 @@ export interface PreparedWorkspace {
   continuation?: { rootRunId: string };
 }
 
+/**
+ * The pull request a continuation run works on, without its local workspace:
+ * what the host-side finish signals and the no-push description refresh need.
+ * A run finished by another control-plane process (a deploy moved it) has no
+ * workspace to recover, so the executor builds this from the run record, and
+ * `baseCommit` is then unknown.
+ */
+export type ContinuationTarget = Pick<
+  PreparedWorkspace,
+  "runId" | "repository" | "baseRef" | "headRef" | "continuation"
+> & {
+  baseCommit?: string;
+};
+
 /** Already-validated/redacted agent-authored fields (coding/protocol.ts) surfaced in the opened PR, if any. */
 export interface FinalizeChangesDetails {
   summary?: string;
@@ -162,7 +176,7 @@ export interface VcsProvider {
    * `details.protectedPathSentence` (see coding/protected-path-wording.ts).
    */
   notifyContinuationFinished?(
-    workspace: PreparedWorkspace,
+    workspace: ContinuationTarget,
     outcome: ContinuationOutcome,
     details?: ContinuationFinishedDetails,
   ): Promise<void>;
@@ -180,7 +194,7 @@ export interface VcsProvider {
    * (no description details, or a remote without pull requests). Never throws.
    */
   refreshPullRequestDescription?(
-    workspace: PreparedWorkspace,
+    workspace: ContinuationTarget,
     details: FinalizeChangesDetails,
   ): Promise<DescriptionWriteOutcome | undefined>;
   /**

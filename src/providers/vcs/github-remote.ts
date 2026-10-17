@@ -13,6 +13,7 @@ import type { GitRemote, PublishInput, PublishResult } from "./remote.js";
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
+  ContinuationTarget,
   DescriptionWriteOutcome,
   FinalizeChangesDetails,
   PreparedWorkspace,
@@ -196,7 +197,7 @@ export class GitHubRemote implements GitRemote {
 
   /** The no-push path: a fix round that changed nothing still re-derives its PR description. */
   async refreshDescription(
-    workspace: PreparedWorkspace,
+    workspace: ContinuationTarget,
     details: FinalizeChangesDetails,
   ): Promise<DescriptionWriteOutcome | undefined> {
     // No push: the head is the commit the workspace was checked out at.
@@ -205,7 +206,7 @@ export class GitHubRemote implements GitRemote {
 
   /** Never throws: a description problem must not fail an already-pushed run. */
   private async updateDescription(
-    prepared: PreparedWorkspace,
+    prepared: ContinuationTarget,
     details: FinalizeChangesDetails | undefined,
     changedPaths: readonly string[],
     headSha: string | undefined,
@@ -228,7 +229,7 @@ export class GitHubRemote implements GitRemote {
   }
 
   private descriptionInput(
-    prepared: PreparedWorkspace & { continuation: { rootRunId: string } },
+    prepared: ContinuationTarget & { continuation: { rootRunId: string } },
     details: FinalizeChangesDetails & { description: NonNullable<FinalizeChangesDetails["description"]> },
     changedPaths: readonly string[],
     headSha: string | undefined,
@@ -296,7 +297,7 @@ export class GitHubRemote implements GitRemote {
    * never-throw contract as notifyContinuationStarted.
    */
   async notifyContinuationFinished(
-    workspace: PreparedWorkspace,
+    workspace: ContinuationTarget,
     outcome: ContinuationOutcome,
     details?: ContinuationFinishedDetails,
   ): Promise<void> {
@@ -335,7 +336,7 @@ export class GitHubRemote implements GitRemote {
         this.options.github.updateContinuationStatusComment({ ...identity, body }),
         this.options.github.completeContinuationCheckRun({
           repository: workspace.repository,
-          headSha: workspace.baseCommit,
+          ...(workspace.baseCommit ? { headSha: workspace.baseCommit } : { headRef: workspace.headRef }),
           runId: workspace.runId,
           outcome: outcome === "succeeded" ? "succeeded" : "failed",
         }),

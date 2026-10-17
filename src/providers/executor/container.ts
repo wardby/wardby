@@ -83,6 +83,7 @@ import {
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
 import type {
   ContinuationOutcome,
+  ContinuationTarget,
   DescriptionWriteOutcome,
   FinalizeChangesDetails,
   PreparedWorkspace,
@@ -1046,10 +1047,9 @@ export class ContainerExecutor implements Executor {
     this.options.capabilities.delete(runId);
     const input = this.preflightForCleanup(run);
     const workspace = input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null;
-    if (workspace) {
-      await this.options.vcs.cleanup(workspace).catch(() => undefined);
-      await this.options.vcs.notifyContinuationFinished?.(workspace, "failed", { agentName: run.agentName });
-    }
+    if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+    const target = workspace ?? this.continuationTargetOf(run);
+    if (target) await this.options.vcs.notifyContinuationFinished?.(target, "failed", { agentName: run.agentName });
     await rm(this.artifactPath(runId), { recursive: true, force: true }).catch(() => undefined);
     this.emit({ stage: "cleanup", runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
   }
@@ -1536,9 +1536,11 @@ export class ContainerExecutor implements Executor {
       const input = this.preflightForCleanup(run);
       const workspace =
         existingWorkspace ?? (input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null);
-      if (workspace) {
-        await this.options.vcs.cleanup(workspace).catch(() => undefined);
-        await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, {
+      if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+      // A run another process launched has no workspace here; its pull request still gets the final status.
+      const target = workspace ?? this.continuationTargetOf(run);
+      if (target) {
+        await this.options.vcs.notifyContinuationFinished?.(target, outcome, {
           summary: finishedSummary,
           agentName: run.agentName,
           ...(outcome === "succeeded" ? overrun : {}),
@@ -1976,7 +1978,11 @@ export class ContainerExecutor implements Executor {
     if (!state || "failed" in state) return this.recordDescription(run, state, undefined);
     try {
       const input = this.preflightForCleanup(run);
-      const workspace = existingWorkspace ?? (input ? await vcs.recoverWorkspace(input) : null);
+      // Only the pull request is needed: a run another process launched has no workspace here.
+      const workspace =
+        existingWorkspace ??
+        (input ? await vcs.recoverWorkspace(input).catch(() => null) : null) ??
+        this.continuationTargetOf(run);
       if (!workspace) throw new Error("coding_workspace_lost");
       // The same in-flight access check a push gets: a revoked owner's run edits nothing.
       await this.authorizeRepository(run, { inFlight: true });
@@ -2339,6 +2345,22 @@ export class ContainerExecutor implements Executor {
     return resolve(this.artifactRoot, runId);
   }
 
+  /**
+   * A continuation's pull request from the run record alone, for the host-side
+   * finish signals when the workspace is gone (another control-plane process
+   * launched the run). Null for a fresh run: it has no pull request yet.
+   */
+  private continuationTargetOf(run: ContainerRunSnapshot): ContinuationTarget | null {
+    if (!run.rootCodingRunId) return null;
+    return {
+      runId: run.runId,
+      repository: run.repository,
+      baseRef: run.baseRef,
+      headRef: run.headRef,
+      continuation: { rootRunId: run.rootCodingRunId },
+    };
+  }
+
   private preflightForCleanup(run: ContainerRunSnapshot): VcsPrepareInput | null {
     if (!Array.isArray(run.protectedPaths) || !run.protectedPaths.every((path) => typeof path === "string"))
       return null;
@@ -2372,10 +2394,9 @@ export class ContainerExecutor implements Executor {
     }
     const input = this.preflightForCleanup(run);
     const workspace = input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null;
-    if (workspace) {
-      await this.options.vcs.cleanup(workspace).catch(() => undefined);
-      await this.options.vcs.notifyContinuationFinished?.(workspace, "failed", { agentName: run.agentName });
-    }
+    if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+    const target = workspace ?? this.continuationTargetOf(run);
+    if (target) await this.options.vcs.notifyContinuationFinished?.(target, "failed", { agentName: run.agentName });
     await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
     this.emit({ stage: "cleanup", runId: run.runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
   }
