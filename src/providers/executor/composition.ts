@@ -16,6 +16,7 @@ import { drainCodingQueue } from "../../core/coding-queue.js";
 import { prismaServiceStateReporter } from "../../core/coding-service-status.js";
 import { logger } from "../../core/logger.js";
 import { DISABLED_POWER, type Power } from "../../core/power.js";
+import { startDeferredForRequest } from "../../core/host-events.js";
 import { reReviewAfterNoChangeFix, type ReReviewDeps } from "../../core/review-fix.js";
 import { EnvironmentCredentialResolver } from "../coding-proxy/environment-credentials.js";
 import { CodingProxy } from "../coding-proxy/proxy.js";
@@ -41,8 +42,10 @@ const compositionLog = logger.child({ module: "executor-composition" });
 
 /**
  * The coding-run terminal hook: a review-fix round's coding run that made no change re-reviews
- * the PR once (core/review-fix.ts). Started in the background so the executor's terminal path
- * (and the slot release after it) never waits on the host; idempotent, and never throws.
+ * the PR once (core/review-fix.ts), and the reviews of its pull request that waited for it (a
+ * draft's head it may have pushed before recording its result, core/host-events.ts) are
+ * released. Started in the background so the executor's terminal path (and the slot release
+ * after it) never waits on the host; idempotent (released rows are claimed), and never throws.
  * `deps` is read only when a run finishes, after composition returned.
  */
 export function reReviewOnCodingRunTerminal(deps: () => ReReviewDeps): (runId: string) => void {
@@ -50,6 +53,12 @@ export function reReviewOnCodingRunTerminal(deps: () => ReReviewDeps): (runId: s
     void Promise.resolve()
       .then(() => reReviewAfterNoChangeFix(runId, deps()))
       .catch((err: unknown) => compositionLog.warn({ err, runId }, "no-change re-review hook failed"));
+    // Never throws (logs its own failures).
+    void Promise.resolve()
+      .then(() => startDeferredForRequest(deps(), runId))
+      .catch((err: unknown) =>
+        compositionLog.warn({ err, runId }, "could not release the reviews waiting for this run"),
+      );
   };
 }
 

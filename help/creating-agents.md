@@ -3,7 +3,7 @@ id: creating-agents
 title: Choose a native or coding agent
 summary: Decide whether a task should run as a native Wardby agent or an isolated Codex or Claude Code coding agent.
 audience: developer
-tags: [agents, native-agents, coding-agents, codex, claude-code]
+tags: [agents, native-agents, coding-agents, codex, claude-code, schedules, set_schedule]
 appliesTo: >=0.2.1
 ---
 
@@ -66,6 +66,13 @@ as `0 6 * * 1`, and `timezone`), and turn it off with `disable_schedule`. A
 coding agent needs a `codingProfile.defaultTask` first, since a scheduled run
 has no one to pass a task. A native agent's system prompt is its task. Trigger
 the agent once with `trigger_agent` and check the result before scheduling it.
+
+A new schedule first fires at its next window after you set it, never for a
+window that already passed. A schedule of `0 6 * * 1` set on a Wednesday
+first runs the following Monday, so a manual run just before scheduling isn't
+followed by a duplicate. Changing the expression or timezone, or turning a
+disabled schedule back on, starts it again from that moment. If the scheduler
+was down and missed windows, it runs only the latest one, once.
 
 Schedules fire only while a Wardby scheduler runs: `wardby serve`, or
 `wardby scheduler` next to `wardby mcp`. On a quickstart install, start

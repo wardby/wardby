@@ -70,6 +70,7 @@ describe.skipIf(!process.env.DATABASE_URL)("resolveDeferredCodingRun (database)"
       data: {
         runId: run.id,
         task,
+        request: task,
         repository: "openai/example",
         baseRef: "main",
         headRef: `wardby/run-${run.id}`,
@@ -121,6 +122,7 @@ describe.skipIf(!process.env.DATABASE_URL)("resolveDeferredCodingRun (database)"
     expect(coding.task).toContain("Architecture knowledge for this repository");
     expect(coding.task).toContain("- runs.md: how runs start");
     expect(coding.task).toMatch(/\n\nRequest:\nAdd 20 jokes$/);
+    expect(coding.request).toBe("Add 20 jokes");
     expect((await runOf(run.id)).status).toBe("pending");
   });
 

@@ -290,4 +290,16 @@ describe("reReviewOnCodingRunTerminal", () => {
     await vi.waitFor(() => expect(spy).toHaveBeenCalledWith("run-1", deps));
     spy.mockRestore();
   });
+
+  it("releases the reviews that waited for the finished run, swallowing a failure", async () => {
+    const review = await import("../../core/review-fix.js");
+    const events = await import("../../core/host-events.js");
+    const reReview = vi.spyOn(review, "reReviewAfterNoChangeFix").mockResolvedValueOnce(undefined);
+    const release = vi.spyOn(events, "startDeferredForRequest").mockRejectedValueOnce(new Error("boom"));
+    const deps = { db, executor: native, hosts: {}, repoAccess: {} } as never;
+    expect(reReviewOnCodingRunTerminal(() => deps)("run-2")).toBeUndefined();
+    await vi.waitFor(() => expect(release).toHaveBeenCalledWith(deps, "run-2"));
+    reReview.mockRestore();
+    release.mockRestore();
+  });
 });

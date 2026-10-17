@@ -42,6 +42,7 @@ function fakeDb() {
   };
   return {
     calls,
+    $queryRaw: vi.fn(async () => [{ now: new Date() }]),
     tool: {
       findFirst: vi.fn(async () => null),
       create: vi.fn(async (a: unknown) => {

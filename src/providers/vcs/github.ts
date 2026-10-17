@@ -114,6 +114,13 @@ export interface PullRequestInput {
    */
   issue?: { key: string; url?: string; trackerName?: string };
   /**
+   * The issue in this pull request's own repository the run came from (a
+   * mention on a GitHub issue; control-plane data, never model output): the
+   * body's first visible line is `Resolves #N`, the GitHub issue's form of
+   * the issue line above. Used only when `issue` renders no line.
+   */
+  issueNumber?: number;
+  /**
    * The request's other pull requests (control-plane rows only), rendered as
    * the marked "Related pull requests" section. Rendering failures omit it.
    */
@@ -345,10 +352,12 @@ function issueParts(issue: PullRequestInput["issue"]): { key: string; url?: stri
   return { key, ...(safeUrl ? { url: safeUrl } : {}), tracker };
 }
 
+/** The body's issue line: a tracker issue's link, else the same-repository issue the run came from. */
 function issueLine(input: PullRequestInput): string | undefined {
   const parts = issueParts(input.issue);
-  if (!parts?.url) return undefined;
-  return `Resolves ${parts.tracker}issue [${parts.key}](${parts.url})`;
+  if (parts?.url) return `Resolves ${parts.tracker}issue [${parts.key}](${parts.url})`;
+  const number = input.issueNumber;
+  return typeof number === "number" && Number.isSafeInteger(number) && number > 0 ? `Resolves #${number}` : undefined;
 }
 
 /**
@@ -1346,6 +1355,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
           restoredDependencies: input.restoredDependencies,
           changedLockfiles: input.changedLockfiles,
           issue: input.issue,
+          issueNumber: input.issueNumber,
         },
         { omitPackages },
       );

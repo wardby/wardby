@@ -63,6 +63,7 @@ interface FakeAgentRow {
   schedule: string | null;
   timezone: string;
   scheduleEnabled: boolean;
+  lastScheduledAt?: Date | null;
   ownerId: string | null;
   tools: unknown[];
   kind: "native" | "coding";
@@ -121,6 +122,8 @@ function fakeDb(
   const groupsById = new Map(budgetGroups.map((g) => [g.id, g]));
   let counter = rows.size;
   const transactionDb = {
+    // The database clock a schedule start records (core/schedule-start.ts).
+    $queryRaw: async () => [{ now: new Date() }],
     // The coding-run service catalog: the built-in names only.
     codingService: {
       findMany: async ({ where }: { where: { name: { in: string[] } } }) =>
@@ -981,6 +984,57 @@ describe("agent CRUD tools", () => {
     });
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result)).toMatch(/attached|tool/i);
+    await client.close();
+  });
+
+  it("records when a schedule starts on create and on a change, so no past window is backfilled", async () => {
+    const fired = new Date("2026-10-12T06:00:00.000Z");
+    const db = fakeDb([
+      {
+        id: "a1",
+        name: "weekly",
+        systemPrompt: "x",
+        model: "gpt-4o",
+        budgetUsd: 1,
+        maxTurns: 10,
+        schedule: "0 6 * * 1",
+        timezone: "UTC",
+        scheduleEnabled: true,
+        lastScheduledAt: fired,
+        ownerId: "p1",
+        tools: [],
+      },
+    ]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const body = (result: unknown) => JSON.parse((result as { content: { text: string }[] }).content[0].text);
+    const before = Date.now();
+
+    const created = body(
+      await client.callTool({
+        name: "create_agent",
+        arguments: { name: "new", systemPrompt: "x", model: "gpt-4o", budgetUsd: 1, schedule: "0 6 * * 1" },
+      }),
+    );
+    expect(new Date(created.lastScheduledAt).getTime()).toBeGreaterThanOrEqual(before);
+    const manual = body(
+      await client.callTool({
+        name: "create_agent",
+        arguments: { name: "manual", systemPrompt: "x", model: "gpt-4o", budgetUsd: 1 },
+      }),
+    );
+    expect(manual.lastScheduledAt).toBeUndefined();
+
+    // An edit that leaves the schedule alone keeps its firing history.
+    const edited = body(await client.callTool({ name: "update_agent", arguments: { id: "a1", systemPrompt: "y" } }));
+    expect(new Date(edited.lastScheduledAt)).toEqual(fired);
+    await client.callTool({ name: "update_agent", arguments: { id: "a1", scheduleEnabled: false } });
+    const reenabled = body(
+      await client.callTool({ name: "update_agent", arguments: { id: "a1", scheduleEnabled: true } }),
+    );
+    expect(new Date(reenabled.lastScheduledAt).getTime()).toBeGreaterThanOrEqual(before);
     await client.close();
   });
 

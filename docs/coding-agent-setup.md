@@ -547,9 +547,30 @@ before finishing; the changes so far are in this draft." A continuation leaves
 the existing description as it is; its status comment says the run stopped.
 The run's status stays
 `budget_exhausted` and its `budgetEvents` are kept. The status comment points
-at the pull request and says that a comment mentioning the App on it continues
-the work with a fresh budget.
+at the pull request and says that mentioning the agent on it, or on the issue
+the run came from, continues the work with a fresh budget: a comment
+mentioning the App on GitHub, or the service account on a Jira issue.
 
+- A new pull request's description and the run's summary then carry a
+  `### Task` section: the request that started the run, quoted, with mentions
+  defused and wrapper tags neutralised, and cut at 4 KiB with a
+  `[task truncated]` marker. The agent's standing instructions are never
+  included. The worker's own summary follows it, unless it is only the fixed
+  budget sentence. A continuation reads the task from there, so it knows what
+  the draft was for. The request text is shown in the draft, so anyone who can
+  read the pull request can read it.
+- While the draft's latest commit is the one the stopped run pushed, the
+  automatic review is skipped: its check completes as neutral, titled
+  "Skipped: stopped at its budget", and no [fix round](code-review-agents.md#automatic-review-fix-rounds)
+  follows. A review that would start while that run is still finishing waits
+  for its result. Marking the pull request ready for review, or pushing a new
+  commit, gets a normal review; so does an explicit request (re-running the
+  check, or a comment mentioning the App asking for a review). The skip
+  applies to drafts only, because a neutral check counts as passing for branch
+  protection.
+- The status comment says the draft can be continued from the pull request, or
+  from the issue it came from. See
+  [Follow-ups on an issue](code-review-agents.md#follow-ups-on-an-issue).
 - Such a pull request is not marked ready automatically. Marking ready looks at
   the last run that pushed to the pull request, so a later continuation that
   finishes makes it eligible again; a continuation that ends with no changes

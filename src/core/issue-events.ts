@@ -14,7 +14,7 @@ import { RESPONSE_PATH_SNAPSHOT_BUDGET, resolveWorkItem, type ResolvedWorkItem }
 import { dispatchRun, type DispatchDb } from "./dispatch.js";
 import { issueStatusRow, postIssueWorkingStatus } from "./issue-status.js";
 import { logger } from "./logger.js";
-import { openSiblingsForIssue, SIBLING_GUIDANCE, type OpenSibling } from "./related-pull-requests.js";
+import { openPullRequestHints, openSiblingsForIssue, type OpenSibling } from "./related-pull-requests.js";
 import { composeTaskOverride } from "./untrusted-content.js";
 import { dedupeKeys, emitWorkflowEvent } from "./workflow-events.js";
 
@@ -49,8 +49,6 @@ type LinkRow = Awaited<ReturnType<IssueEventDb["agentIssueProject"]["findMany"]>
 };
 
 export type OpenIssuePr = OpenSibling;
-
-const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 type TaskLink = { triggerLabels: string[]; trustedAccountIds: string[] };
 
@@ -99,15 +97,8 @@ export function issueTaskText(
       "do not also post it with jira_comment; use jira_comment only for other issues or progress notes on long work.",
   ];
   // Control-plane data from stored rows (validated here), never issue text.
-  const hinted = openPrs.filter((p) => RUN_ID_RE.test(p.openedByRunId));
-  for (const pr of hinted) {
-    sections.push(
-      `This issue already has an open pull request wardby opened: ${pr.repository}#${pr.number} ` +
-        `(https://github.com/${pr.repository}/pull/${pr.number}). ` +
-        `To revise it, delegate with continuePriorRun set to exactly "${pr.openedByRunId}".`,
-    );
-  }
-  if (hinted.length > 0) sections.push(SIBLING_GUIDANCE);
+  const hints = openPullRequestHints(openPrs);
+  if (hints) sections.push(hints);
   if (matched.includes("mention") && event.comment) {
     sections.push(`Request comment:\n${event.comment.body.slice(0, MAX_TASK_BODY)}`);
   }

@@ -1272,6 +1272,22 @@ describe("pull request issue reference", () => {
     expect(pullRequestBody({ ...base, summary: "Did it." })).not.toContain("Resolves");
   });
 
+  it("names a same-repository GitHub issue as `Resolves #N` in the same place", () => {
+    const body = pullRequestBody({ ...base, summary: "Did it.", issueNumber: 12 });
+    expect(body.split("\n\n").slice(0, 3)).toEqual(["<!-- wardby:run-1 -->", "Resolves #12", "Did it."]);
+    expect(pullRequestTitle({ ...base, issueNumber: 12 })).toBe("Wardby run run-1");
+    // A tracker issue's line wins; a bad number renders nothing.
+    expect(pullRequestBody({ ...base, summary: "Did it.", issue, issueNumber: 12 })).not.toContain("Resolves #12");
+    for (const issueNumber of [0, -1, 1.5, Number.NaN]) {
+      expect(pullRequestBody({ ...base, summary: "Did it.", issueNumber })).not.toContain("Resolves");
+    }
+    // The Related section still goes right after the issue line.
+    const block = `${RELATED_SECTION_START}\nA\n${RELATED_SECTION_END}`;
+    expect(upsertRelatedSection(body, block)).toBe(
+      `<!-- wardby:run-1 -->\n\nResolves #12\n\n${block}\n\n${body.split("\n\n").slice(2).join("\n\n")}`,
+    );
+  });
+
   it("drops a malformed key from both title and body", () => {
     for (const key of ["proj-1", "PROJ-0", "PROJ-1\n# x", "[PROJ-1]", "PROJ", "a b-1"]) {
       expect(pullRequestTitle({ ...base, issue: { key, url: issue.url } })).toBe("Wardby run run-1");

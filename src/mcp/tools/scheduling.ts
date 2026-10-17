@@ -1,5 +1,6 @@
 import { Prisma } from "#prisma";
 import { validateCronExpression } from "../../core/cron.js";
+import { scheduleStartFields } from "../../core/schedule-start.js";
 import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { assertAgentAccess, requireAgentAccess } from "../auth/access.js";
@@ -32,9 +33,10 @@ export function registerSchedulingTools(mcp: WardbyMcpServer): void {
           if (existing.kind === "coding" && !existing.codingProfile?.defaultTask) {
             throw new McpError(400, "A default task is required before enabling a coding-agent schedule.");
           }
+          const next = { schedule: args.schedule, timezone: args.timezone, scheduleEnabled: true };
           return tx.agent.update({
             where: { id: args.agentId },
-            data: { schedule: args.schedule, timezone: args.timezone, scheduleEnabled: true },
+            data: { ...next, ...(await scheduleStartFields(tx, existing, next)) },
           });
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },

@@ -335,7 +335,15 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
       await expect(store.linkedIssueSource(root)).resolves.toEqual({
         issueProvider: "jira",
         issueKey: "ABC-12",
-        hostStatus: { provider: "github", repository: "openai/example", number: 12 },
+        hostStatus: { provider: "github", repository: "openai/example", number: 12, issueMention: false },
+      });
+      // A mention on the issue itself (its stored header) marks the status as an issue mention.
+      await db.run.update({
+        where: { id: top },
+        data: { taskOverride: "[GitHub issue #12: Jokes]\nRepository: openai/example\nRequested by someone" },
+      });
+      await expect(store.linkedIssueSource(root)).resolves.toMatchObject({
+        hostStatus: { provider: "github", repository: "openai/example", number: 12, issueMention: true },
       });
       await expect(store.linkedIssueSource(bare)).resolves.toEqual({
         issueProvider: null,

@@ -15,16 +15,19 @@ import type {
   ReviewHostRegistry,
 } from "../providers/review-host/types.js";
 import { linkedPullRequestAttribution, openingRunAttribution, RESPONSE_PATH_SNAPSHOT_BUDGET } from "./attribution.js";
+import { headStoppedAtBudget, pushingRunInFlight } from "./budget-stopped-head.js";
 import { checkContinuation, dispatchRun } from "./dispatch.js";
 import { mentionStatusRow, postMentionStatus } from "./host-status.js";
-import { handlePullRequestClosed } from "./issue-bridge.js";
+import { githubIssueKey, handlePullRequestClosed } from "./issue-bridge.js";
 import { logger } from "./logger.js";
 import { withoutMarkdownCode } from "./markdown-code.js";
 import { maybeMarkReady } from "./mark-ready.js";
 import { syncMergeOrderChecksForPullRequest } from "./merge-order-check.js";
 import {
   MAX_SIBLING_HINTS,
+  openPullRequestHints,
   openSiblings,
+  openSiblingsForIssue,
   runTreeRoot,
   SIBLING_GUIDANCE,
   type OpenSibling,
@@ -453,6 +456,10 @@ export function mentionTaskText(event: MentionEvent, siblings: readonly OpenSibl
     sections.push(continuationHint(event.number, event.priorRunId));
     const hints = siblingContinuationHints(siblings);
     if (hints) sections.push(hints);
+  } else if (!event.isPullRequest) {
+    // An issue mention: the issue's open wardby pull requests, worded as a Jira issue's are.
+    const hints = openPullRequestHints(siblings);
+    if (hints) sections.push(hints);
   }
   const title = event.subject?.title.replace(/\s+/g, " ").trim().slice(0, MAX_TITLE);
   const description = event.subject?.body.trim() ? event.subject.body.slice(0, MAX_TASK_BODY) : "";
@@ -653,6 +660,87 @@ export async function startReviews(
 }
 
 /**
+ * What an automatic review (a push, a deferred review starting, the re-review after CI) of a
+ * draft does about work a run stopped at its budget left unfinished:
+ * - `wait`: a coding run of the pull request (its root or a continuation) is still pending or
+ *   running, so it may be the one that pushed this head before recording its result; the review
+ *   waits for it (a DeferredReview row with it as leadRunId, released when it finishes).
+ * - `skip`: the head is still the push of a run that stopped at its budget; reviewing it now
+ *   only repeats findings the continuation addresses (see postSkippedReviewChecks).
+ * - `review`: anything else, a pull request that is not a draft, and any failed read.
+ * Only drafts: a neutral check counts as passing for branch protection, so a pull request
+ * someone means to merge (marked ready) is always reviewed, as is a later commit a person
+ * pushed. Explicit requests (a check re-run, a review comment) never come here.
+ */
+type BudgetDraftDecision = { kind: "review" } | { kind: "skip" } | { kind: "wait"; runId: string };
+
+async function budgetDraftDecision(
+  deps: ReviewStartDeps,
+  host: CodeReviewHost,
+  repository: string,
+  prNumber: number,
+  headSha: string,
+  /** The pull request's origin, when the caller already reads it once per event. */
+  readOrigin?: () => Promise<PullRequestOrigin>,
+): Promise<BudgetDraftDecision> {
+  const review = { kind: "review" } as const;
+  const read = readOrigin ?? (host.pullRequestOrigin ? () => host.pullRequestOrigin!(repository, prNumber) : undefined);
+  if (!read) return review;
+  try {
+    const origin = await read();
+    if (origin.draft !== true || !origin.markerRunId) return review;
+    const runId = await pushingRunInFlight(deps.db, { markerRunId: origin.markerRunId, repository });
+    if (runId) return { kind: "wait", runId };
+    const stopped = await headStoppedAtBudget(deps.db, {
+      markerRunId: origin.markerRunId,
+      repository,
+      prNumber,
+      headSha,
+    });
+    return stopped ? { kind: "skip" } : review;
+  } catch (err) {
+    log.warn({ err, repository, prNumber }, "could not read the pull request's coding run; reviewing as usual");
+    return review;
+  }
+}
+
+/**
+ * Instead of reviewing a budget-stopped draft (budgetDraftDecision `skip`): completes a neutral
+ * check per reviewer. No review run, so no RunHostCheck and no fix round. A reviewer that already
+ * reviewed this commit (an explicit request) keeps that review's check: a neutral one over it
+ * would stand, unreviewed again, once the draft is marked ready (that automatic review skips a
+ * reviewed commit).
+ */
+async function postSkippedReviewChecks(
+  deps: ReviewStartDeps,
+  host: CodeReviewHost,
+  repository: string,
+  prNumber: number,
+  headSha: string,
+  targets: ReviewTarget[],
+): Promise<void> {
+  log.info(
+    { repository, prNumber, headSha, agentIds: targets.map((t) => t.agentId) },
+    "review skipped: the draft's last push stopped at its budget",
+  );
+  for (const target of targets) {
+    try {
+      if (await alreadyReviewed(deps, repository, prNumber, headSha, target.agentId)) continue;
+      const { checkId } = await host.startCheck(repository, { headSha, name: target.checkName });
+      await host.completeCheck(repository, {
+        checkId,
+        conclusion: "neutral",
+        title: "Skipped: stopped at its budget",
+        summary:
+          "The last push came from a run that stopped at its budget before finishing. This draft is reviewed when the work continues or when it is marked ready for review.",
+      });
+    } catch (err) {
+      log.warn({ err, repository, prNumber, agentId: target.agentId }, "could not post the skipped review check");
+    }
+  }
+}
+
+/**
  * CI finished on a pull request's head: re-runs, once per head, each review
  * that published only a COMMENT while CI there was still running or had not
  * reported (RunHostCheck.ciPendingAtReview). Waits for the last suite: while
@@ -695,6 +783,19 @@ async function rereviewAfterCi(
       reviewerLinks.filter((l) => waiting.some((r) => r.run.agentId === l.agentId)),
     );
     const allowedIds = new Set(allowed.map((l) => l.agentId));
+    // Decided before the claim, so a re-review not started here is not used up.
+    const decision = await budgetDraftDecision(deps, host, event.repository, prNumber, event.headSha);
+    if (decision.kind === "wait") {
+      log.info(
+        { repository: event.repository, prNumber, headSha: event.headSha, runId: decision.runId },
+        "CI finished: re-review held while the pull request's coding run is still running",
+      );
+      return [];
+    }
+    if (decision.kind === "skip") {
+      await postSkippedReviewChecks(deps, host, event.repository, prNumber, event.headSha, reviewTargets(allowed));
+      return [];
+    }
     // Claimed per row, so concurrent completions re-run each review only once.
     const agentIds = new Set<string>();
     for (const row of waiting.filter((r) => allowedIds.has(r.run.agentId))) {
@@ -859,6 +960,28 @@ async function deferUntilCi(
 type DeferredRow = { id: string; agentId: string; checkName: string };
 
 /**
+ * Deferred rows whose pull request's coding run is still in flight (budgetDraftDecision `wait`):
+ * they now wait for that run, as for a delegating run (reason "request", leadRunId = the run),
+ * and are released when it finishes (startDeferredForRequest from its terminal hook, or the
+ * sweep). The run may have finished meanwhile, its release finding no row: released here then.
+ */
+async function waitForPushingRun(
+  deps: ReviewStartDeps,
+  key: PullRequestKey,
+  rows: DeferredRow[],
+  runId: string,
+): Promise<string[]> {
+  const where = { repository: key.repository, prNumber: key.prNumber, headSha: key.headSha };
+  await deps.db.deferredReview.updateMany({
+    where: { id: { in: rows.map((r) => r.id) } },
+    data: { reason: "request", leadRunId: runId },
+  });
+  log.info({ ...where, runId }, "deferred review held while the pull request's coding run is still running");
+  const run = await deps.db.run.findUnique({ where: { id: runId }, select: { status: true } });
+  return !run || !RUN_NOT_FINISHED.has(run.status) ? releaseRequestRows(deps, runId, "request") : [];
+}
+
+/**
  * Starts deferred reviews for one PR head. The head must still be that sha,
  * open, and not a fork; otherwise every row is dropped (a newer push records
  * its own). Each row is claimed by deleting it, so a concurrent ci_completed
@@ -883,6 +1006,8 @@ async function startDeferred(
     log.info({ ...where, state: head.state }, "deferred review dropped: the pull request moved on or closed");
     return [];
   }
+  const decision = await budgetDraftDecision(deps, host, key.repository, key.prNumber, key.headSha);
+  if (decision.kind === "wait") return waitForPushingRun(deps, key, rows, decision.runId);
   const allowed = await authorizedLinks(
     deps,
     key,
@@ -904,6 +1029,10 @@ async function startDeferred(
   if (targets.length === 0) return [];
   log.info({ ...where, agentIds: targets.map((t) => t.agentId), reason }, "starting the deferred review");
   try {
+    if (decision.kind === "skip") {
+      await postSkippedReviewChecks(deps, host, key.repository, key.prNumber, key.headSha, targets);
+      return [];
+    }
     return await startReviews(deps, host, key.repository, key.prNumber, key.headSha, targets, true);
   } catch (err) {
     // The rows are already claimed (at most once): make the lost start visible.
@@ -1073,7 +1202,10 @@ const RUN_NOT_FINISHED = new Set(["pending", "running"]);
  * reviewer (reason "request", with or without waitForCi) and starts nothing;
  * the lead's finalizer (startDeferredForRequest) or the sweep starts them.
  * Returns null, to review as without it, for any other pull request, or when
- * the lead cannot be resolved or the deferral cannot be recorded.
+ * the lead cannot be resolved or the deferral cannot be recorded. A draft whose
+ * own coding run (root or continuation) is still in flight waits for that run
+ * the same way: it may have pushed this head before recording whether it
+ * stopped at its budget (budgetDraftDecision); its terminal hook releases them.
  */
 async function deferUntilRequest(
   deps: ReviewStartDeps,
@@ -1089,6 +1221,11 @@ async function deferUntilRequest(
     const origin = await readOrigin();
     if (!origin.markerRunId) return null;
     leadRunId = await requestLeadRunId(deps.db, origin.markerRunId, key.repository);
+    // A draft's own coding run still in flight may have pushed this head before recording its
+    // result (a stop at its budget among them): wait for it the same way (budgetDraftDecision).
+    if (!leadRunId && origin.draft === true) {
+      leadRunId = await pushingRunInFlight(deps.db, { markerRunId: origin.markerRunId, repository: key.repository });
+    }
   } catch (err) {
     log.warn(
       { err, repository: key.repository, prNumber: key.prNumber },
@@ -1414,9 +1551,23 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       const reviewers = reviewTargets(allowed.filter((l) => !l.waitForCi || startNow.has(l)));
       const runIds = [...deferral.runIds];
       if (reviewers.length > 0) {
-        runIds.push(
-          ...(await startReviews(deps, host, event.repository, event.prNumber, event.headSha, reviewers, true)),
+        // A coding run still in flight was already waited for (deferUntilRequest); should
+        // recording that have failed, the head is reviewed as usual.
+        const decision = await budgetDraftDecision(
+          deps,
+          host,
+          event.repository,
+          event.prNumber,
+          event.headSha,
+          readOrigin,
         );
+        if (decision.kind === "skip") {
+          await postSkippedReviewChecks(deps, host, event.repository, event.prNumber, event.headSha, reviewers);
+        } else {
+          runIds.push(
+            ...(await startReviews(deps, host, event.repository, event.prNumber, event.headSha, reviewers, true)),
+          );
+        }
       }
       return { runIds, followUps };
     }
@@ -1521,10 +1672,15 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
         return { runIds: [], followUps: [react, reply] };
       }
       // Seeded from the PR's validated marker run: the request it belongs to. Stored state only.
-      const siblings =
-        event.isPullRequest && event.priorRunId
+      // An issue mention is seeded from the issue's recorded pull requests instead.
+      const siblings = event.isPullRequest
+        ? event.priorRunId
           ? await openSiblings(deps.db, event.priorRunId, { repository: event.repository, number: event.number })
-          : [];
+          : []
+        : await openSiblingsForIssue(deps.db, {
+            provider: "github",
+            key: githubIssueKey(event.repository, event.number),
+          });
       const dispatched = await dispatchRun({
         db: deps.db,
         executor: deps.executor,
