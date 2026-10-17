@@ -1,3 +1,7 @@
+import { defuseMentions } from "../core/reply-parts.js";
+import { neutraliseWrapperTags } from "../core/untrusted-content.js";
+import { byteLength, truncateText } from "./protocol.js";
+
 /**
  * A coding continuation whose pull request is no longer open (merged or
  * closed) pushes nothing: git.ts checks before cloning and again before the
@@ -35,9 +39,33 @@ export const WORKER_BUDGET_EXHAUSTED_SUMMARY = "The coding budget was exhausted 
  * then the worker's own summary unless it is only the workers' fixed budget
  * sentence (the prefix already says that).
  */
-export function budgetStoppedSummary(summary: string): string {
-  if (summary.trim() === WORKER_BUDGET_EXHAUSTED_SUMMARY) return BUDGET_STOPPED_SUMMARY_PREFIX;
-  return `${BUDGET_STOPPED_SUMMARY_PREFIX}\n\n${summary}`;
+export function budgetStoppedSummary(summary: string, request?: string | null): string {
+  const head = request?.trim()
+    ? `${BUDGET_STOPPED_SUMMARY_PREFIX}\n\n${budgetStoppedTaskSection(request)}`
+    : BUDGET_STOPPED_SUMMARY_PREFIX;
+  if (summary.trim() === WORKER_BUDGET_EXHAUSTED_SUMMARY) return head;
+  return `${head}\n\n${summary}`;
+}
+
+/** The most of a request a budget-stopped draft quotes. */
+const MAX_TASK_QUOTE_BYTES = 4 * 1024;
+const TASK_TRUNCATED_MARKER = "\n\n[task truncated]";
+
+/**
+ * The "Task" section of a budget-stopped draft: the run's own request (not the
+ * agent's standing instructions) as a Markdown blockquote. The request is
+ * untrusted text going into a pull request body: capped, App mentions
+ * defused, and prompt-fence lookalikes neutralised (a later continuation reads
+ * this body back in its task).
+ */
+export function budgetStoppedTaskSection(request: string): string {
+  const capped = truncateText(request.trim(), MAX_TASK_QUOTE_BYTES, byteLength, TASK_TRUNCATED_MARKER);
+  const safe = neutraliseWrapperTags(defuseMentions(capped));
+  const quoted = safe
+    .split(/\r?\n/)
+    .map((line) => (line.length > 0 ? `> ${line}` : ">"))
+    .join("\n");
+  return `### Task\n\n${quoted}`;
 }
 
 /**

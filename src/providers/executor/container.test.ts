@@ -5,7 +5,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hostBudgetSentence, ownerBudgetSentence, type BudgetEventView } from "../../core/budget-events.js";
 import { InMemoryCodingRunObserver } from "../../coding/observability.js";
-import { CONTINUATION_CLOSED_ERROR, WORKER_BUDGET_EXHAUSTED_SUMMARY } from "../../coding/continuation-wording.js";
+import {
+  budgetStoppedSummary,
+  CONTINUATION_CLOSED_ERROR,
+  WORKER_BUDGET_EXHAUSTED_SUMMARY,
+} from "../../coding/continuation-wording.js";
 import { MAX_CODING_INPUT_BYTES } from "../../coding/protocol.js";
 import type { CodingProvider } from "../../coding/provider.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
@@ -2688,6 +2692,64 @@ describe("ContainerExecutor", () => {
           changesPushed: { pullRequestNumber: 42 },
         },
       ]);
+    });
+
+    it("a fresh budget-stopped draft records its task in the pull request summary", async () => {
+      const created = await harness({ budgetUsd: 0.005, request: "Add a README line" });
+      created.jobs.result.resultArtifact = stoppedArtifact;
+      await created.executor.start("run-1");
+
+      const expected = `${PREFIX}\n\n### Task\n\n> Add a README line\n\nAdded the endpoint; tests still to write.`;
+      expect(created.vcs.lastFinalizeDetails?.summary).toBe(expected);
+      expect((created.store.run.result as { summary: string }).summary).toBe(expected);
+    });
+
+    it("keeps the task in the fallback summary when a step after the push fails", async () => {
+      const created = await harness({ budgetUsd: 0.005, request: "Add a README line" });
+      created.jobs.result.resultArtifact = stoppedArtifact;
+      const executor = created.executor as unknown as { resultFor: (...args: unknown[]) => unknown };
+      const real = executor.resultFor.bind(created.executor);
+      let calls = 0;
+      executor.resultFor = (...args: unknown[]) => {
+        calls += 1;
+        if (calls === 1) throw new Error("result_build_failed");
+        return real(...args);
+      };
+      await created.executor.start("run-1");
+
+      expect((created.store.run.result as { summary: string }).summary).toBe(
+        `${PREFIX}\n\n### Task\n\n> Add a README line`,
+      );
+    });
+
+    it("a budget-stopped continuation still sends no description", async () => {
+      const created = await harness({
+        budgetUsd: 0.005,
+        rootCodingRunId: "root-run",
+        headRef: "wardby/run-root-run",
+        request: "Add a README line",
+      });
+      created.jobs.result.resultArtifact = stoppedArtifact;
+      await created.executor.start("run-1");
+
+      expect(created.vcs.lastFinalizeDetails).not.toHaveProperty("description");
+    });
+
+    it("a later continuation's task carries the recorded Task inside the description note", async () => {
+      const created = await harness({ rootCodingRunId: "root-run", headRef: "wardby/run-root-run" });
+      created.store.pullRequestDescriptionBaseline = async () => ({
+        recordedSha256: null,
+        previousAgentText: budgetStoppedSummary(WORKER_BUDGET_EXHAUSTED_SUMMARY, "Add a README line"),
+        agentTextRunId: "root-run",
+      });
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      const task = input!.task as string;
+      const note = task.slice(task.indexOf("<untrusted_pr_description>"), task.indexOf("</untrusted_pr_description>"));
+      expect(note).toContain("### Task\n\n> Add a README line");
     });
 
     it("ends a budget-stopped run without a push when it made no changes", async () => {

@@ -30,10 +30,10 @@ import {
   protectedPathSentence,
 } from "../../coding/protected-path-wording.js";
 import {
-  BUDGET_STOPPED_SUMMARY_PREFIX,
   budgetStoppedSummary,
   CONTINUATION_CLOSED_CATEGORY,
   CONTINUATION_CLOSED_ERROR,
+  WORKER_BUDGET_EXHAUSTED_SUMMARY,
 } from "../../coding/continuation-wording.js";
 import { budgetSentence, overrunSentence } from "../../core/budget-wording.js";
 import { fileSelfDefect } from "../../core/self-defects.js";
@@ -259,6 +259,8 @@ export interface ContainerRunSnapshot {
   agentName: string;
   ownerId: string | null;
   task: string;
+  /** The run's raw request (no standing instructions); absent on older runs. */
+  request?: string;
   repository: string;
   baseRef: string;
   headRef: string;
@@ -448,6 +450,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       agentName: row.agent.name,
       ownerId: row.agent.ownerId,
       task: row.codingRun.task,
+      ...(row.codingRun.request ? { request: row.codingRun.request } : {}),
       repository: row.codingRun.repository,
       baseRef: row.codingRun.baseRef,
       headRef: row.codingRun.headRef,
@@ -1628,7 +1631,7 @@ export class ContainerExecutor implements Executor {
     result: CodingRunResult;
     record: CodingRunRecord;
   } | null> {
-    const summary = budgetStoppedSummary(output.summary);
+    const summary = budgetStoppedSummary(output.summary, current.request);
     const continuesPullRequest = Boolean(current.rootCodingRunId) && hasPullRequestDescription(current);
     let pushed: Awaited<ReturnType<ContainerExecutor["pushChanges"]>>;
     try {
@@ -1674,7 +1677,12 @@ export class ContainerExecutor implements Executor {
         "could not record the worker's summary and tests of a budget-stopped run; recording its push alone",
       );
       result = this.resultFor(
-        { ...output, summary: BUDGET_STOPPED_SUMMARY_PREFIX, tests: [], tag: undefined },
+        {
+          ...output,
+          summary: budgetStoppedSummary(WORKER_BUDGET_EXHAUSTED_SUMMARY, current.request),
+          tests: [],
+          tag: undefined,
+        },
         pushed.current,
         finalized.outcome,
         finalized,
