@@ -15,7 +15,13 @@ import {
   SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE,
 } from "../coding/services/wording.js";
 import type { AttributionIntent } from "./attribution.js";
-import { dispatchRun, isSerializationConflict, isTransactionUnavailable, type DispatchDb } from "./dispatch.js";
+import {
+  checkContinuation,
+  dispatchRun,
+  isSerializationConflict,
+  isTransactionUnavailable,
+  type DispatchDb,
+} from "./dispatch.js";
 import { CatalogStore, installModelCatalog, uninstallModelCatalogForTests } from "../providers/llm/catalog-store.js";
 import { SHIPPED_CATALOG } from "../providers/llm/catalog-shipped.js";
 import type { SelfDefectSink } from "./self-defects.js";
@@ -1544,6 +1550,28 @@ describe("dispatchRun", () => {
           headRef: "wardby/run-root_run",
           rootCodingRunId: "root_run",
         }),
+      );
+    });
+
+    it("continues a root that stopped at its budget after pushing its changes as a draft", async () => {
+      const agent = codingAgent();
+      const stopped = openPrCodingRun("root_run", {
+        run: { status: "budget_exhausted", agent: { ownerId: "owner_1" } },
+      });
+      const state = fakeDb(agent, [stopped]);
+
+      expect(await checkContinuation(state.db, "root_run", "openai/wardby", "owner_1")).toEqual({
+        ok: true,
+        root: { runId: "root_run", baseRef: "main", headRef: "wardby/run-root_run", pullRequestNumber: 22 },
+      });
+      const result = await dispatchRun({
+        db: state.db,
+        executor: { async start() {}, async stop() {} },
+        agentId: agent.id,
+        continuesCodingRunId: "root_run",
+      });
+      expect(state.codingRuns).toContainEqual(
+        expect.objectContaining({ runId: result?.run.id, rootCodingRunId: "root_run" }),
       );
     });
 

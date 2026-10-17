@@ -155,7 +155,8 @@ export interface VcsProvider {
    * `FinalizeChangesDetails.summary`) so the "done" status reflects what
    * actually happened instead of a caller having to go find out.
    * `budget_exhausted` is a failure that ran out of budget;
-   * `details.budgetSentence` then says how (see core/budget-wording.ts).
+   * `details.budgetSentence` then says how (see core/budget-wording.ts), and
+   * `details.changesPushed` says its changes so far were pushed anyway.
    * A `failed` run the model provider refused carries `details.providerSentence`.
    * A `failed` run whose changes touched a protected path carries
    * `details.protectedPathSentence` (see coding/protected-path-wording.ts).
@@ -199,4 +200,9 @@ export interface ContinuationFinishedDetails {
   serviceSentence?: string;
   /** Host-safe sentence naming a protected path the run's changes touched (coding/protected-path-wording.ts); used with `failed`. */
   protectedPathSentence?: string;
+  /**
+   * Set with `budget_exhausted` when the run's changes so far were pushed anyway
+   * (the pull request it opened or continued, or a branch with no number).
+   */
+  changesPushed?: { pullRequestNumber?: number };
 }

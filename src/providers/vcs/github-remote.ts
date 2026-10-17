@@ -1,4 +1,4 @@
-import { CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
+import { budgetStoppedChangesSentence, CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
 import { normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
 import { logger } from "../../core/logger.js";
 import { validateChangedPath } from "./git.js";
@@ -297,15 +297,22 @@ export class GitHubRemote implements GitRemote {
       const body =
         outcome === "succeeded"
           ? `✅ ${label} finished.${details?.overrunSentence ? ` ${details.overrunSentence}` : ""}${summarySuffix}`
-          : outcome === "budget_exhausted"
-            ? `❌ ${label} ran out of budget.${budgetSuffix}${summarySuffix}`
-            : details?.serviceSentence
-              ? `❌ ${label} could not start: ${details.serviceSentence}${summarySuffix}`
-              : details?.providerSentence
-                ? `❌ ${label} could not run: ${details.providerSentence}${summarySuffix}`
-                : details?.protectedPathSentence
-                  ? `❌ ${label} could not open its changes: ${details.protectedPathSentence}${summarySuffix}`
-                  : `❌ ${label} failed.${summarySuffix}`;
+          : outcome === "budget_exhausted" && details?.changesPushed
+            ? `⚠️ ${label} ran out of budget before finishing.${budgetSuffix} ${budgetStoppedChangesSentence(
+                details.changesPushed.pullRequestNumber
+                  ? `#${details.changesPushed.pullRequestNumber}`
+                  : "this pull request",
+                false,
+              )}${summarySuffix}`
+            : outcome === "budget_exhausted"
+              ? `❌ ${label} ran out of budget.${budgetSuffix}${summarySuffix}`
+              : details?.serviceSentence
+                ? `❌ ${label} could not start: ${details.serviceSentence}${summarySuffix}`
+                : details?.providerSentence
+                  ? `❌ ${label} could not run: ${details.providerSentence}${summarySuffix}`
+                  : details?.protectedPathSentence
+                    ? `❌ ${label} could not open its changes: ${details.protectedPathSentence}${summarySuffix}`
+                    : `❌ ${label} failed.${summarySuffix}`;
       await Promise.allSettled([
         this.options.github.updateContinuationStatusComment({ ...identity, body }),
         this.options.github.completeContinuationCheckRun({
