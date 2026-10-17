@@ -44,6 +44,8 @@ interface FakeRunRow {
     debugTraceMaxMb?: number | null;
     services?: unknown;
     packageAuditMode?: "audit" | "full" | null;
+    budgetBaseUsd?: string | null;
+    budgetReservedUsd?: string | null;
   } | null;
   auditRecords?: Array<{
     ecosystem: string;
