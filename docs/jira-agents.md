@@ -466,7 +466,9 @@ What happens:
   the same branch instead of opening a second pull request. The run message
   lists up to ten open pull requests recorded for the issue this way — any
   agent's, not only the triggered agent's own — each with its own run id, so
-  a follow-up can continue every one the change touches.
+  a follow-up can continue every one the change touches. GitHub issues behave
+  the same way; see
+  [Follow-ups on an issue](code-review-agents.md#follow-ups-on-an-issue).
 - **Several repositories.** When the issue leads to pull requests in more
   than one repository (in the same run, or in later runs for the same issue),
   each pull request's description gets a **Related pull requests** section
@@ -573,6 +575,10 @@ A run is attributed when:
   `issue` object, still run unattributed;
 - its parent run is attributed (sub-agents and coding runs inherit, and cannot
   change it).
+
+Runs on a pull request opened from a GitHub issue mention are attributed too:
+to a work item with provider `github` and key `owner/repo#N`, which
+`cost_report` lists like any other (`provider: "github"` narrows to them).
 
 When a run is attributed to an issue, whatever the source, coding runs it
 starts name that issue in their pull request's title and body. The issue total

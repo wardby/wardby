@@ -17,7 +17,7 @@ vi.mock("./related-pull-requests.js", async (orig) => ({
   ...(await orig<typeof import("./related-pull-requests.js")>()),
   openSiblingsForIssue: vi.fn(async () => []),
 }));
-import { openSiblingsForIssue } from "./related-pull-requests.js";
+import { openPullRequestHints, openSiblingsForIssue } from "./related-pull-requests.js";
 
 const ada = { accountId: "u-1", displayName: "Ada" };
 const event = (over: Partial<IssueEvent>): IssueEvent => ({
@@ -291,6 +291,15 @@ describe("open PR continuation hint", () => {
     const r = await routeIssueEvent(event({}), deps);
     expect(r.runIds).toEqual(["run-a1", "run-a2"]);
     expect(openSiblingsForIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it("writes exactly the shared hint (the one GitHub issues use)", async () => {
+    const siblings = [sib(0), sib(1)];
+    vi.mocked(openSiblingsForIssue).mockResolvedValueOnce(siblings);
+    const { deps } = setup([created], true, []);
+    await routeIssueEvent(event({}), deps);
+    const { task: trusted } = splitTaskOverride(task());
+    expect(trusted).toContain(`\n\n${openPullRequestHints(siblings)}`);
   });
 
   it("issueTaskText itself drops a malformed openedByRunId, never trusting its caller", () => {

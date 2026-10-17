@@ -50,7 +50,7 @@ import { HEARTBEAT_TIMEOUT_MS, RECONCILE_INTERVAL_MS } from "./timing.js";
 import { prisma as defaultDb } from "./db.js";
 import { logger } from "./logger.js";
 import { closeOpenHostCheck } from "./review-host-checks.js";
-import { completeHostStatus } from "./host-status.js";
+import { completeHostStatus, type HostStatusDb } from "./host-status.js";
 import { closeOrphanedIssueStatuses } from "./issue-status.js";
 import { fileSelfDefect } from "./self-defects.js";
 import { emitRunFinishedEvents } from "./workflow-run-events.js";
@@ -134,7 +134,7 @@ export async function closeOrphanedHostChecks(
  * pass. `completeHostStatus` is best-effort and never throws.
  */
 export async function closeOrphanedHostStatuses(
-  db: Pick<PrismaClient, "runHostStatus" | "run" | "registryFetch" | "runBudgetEvent" | "registryAuditRecord">,
+  db: HostStatusDb,
   hosts: ReviewHostRegistry | undefined,
   now: Date = new Date(),
 ): Promise<void> {

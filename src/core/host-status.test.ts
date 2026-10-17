@@ -8,6 +8,7 @@ import {
   fullReplyComments,
   fullReplyOf,
   GITHUB_REPLY_MAX_CHARS,
+  isIssueMentionTask,
   mentionStatusRow,
   outcomeBody,
   postMentionStatus,
@@ -188,6 +189,21 @@ describe("outcomeBody", () => {
     expect(mixed).toMatch(/^❌ A sub-run ran out of budget: `c9`\. A sub-run did not succeed: `c10` \(`failed`\)\./);
   });
 
+  it("points an issue's run to the issue as well as the pull request when its changes were kept", () => {
+    const opened = {
+      outcome: "pull_request_opened" as const,
+      repository: REPO,
+      pullRequestNumber: 42,
+      codeProvider: "github",
+      runId: "c9",
+    };
+    const body = (fromIssue?: boolean) =>
+      outcomeBody(run("succeeded", "done"), REPO, [opened], [{ id: "c9", status: "budget_exhausted" }], { fromIssue });
+    expect(body(true)).toContain("in draft PR #42; mention the agent on it or on the issue it came from to continue.");
+    expect(body(false)).toContain("in draft PR #42; mention the agent on it to continue.");
+    expect(body()).toContain("in draft PR #42; mention the agent on it to continue.");
+  });
+
   it("says a sub-run stopped at its budget kept its changes in a pull request it can be continued from", () => {
     const opened = {
       outcome: "pull_request_opened" as const,
@@ -198,7 +214,7 @@ describe("outcomeBody", () => {
     };
     const body = outcomeBody(run("succeeded", "done"), REPO, [opened], [{ id: "c9", status: "budget_exhausted" }]);
     expect(body).toBe(
-      "⚠️ A sub-run ran out of budget before finishing. The changes so far are in draft PR #42; comment `@wardby` on it to continue.\n\n> done\n\n<sub>wardby run `r1`</sub>",
+      "⚠️ A sub-run ran out of budget before finishing. The changes so far are in draft PR #42; mention the agent on it to continue.\n\n> done\n\n<sub>wardby run `r1`</sub>",
     );
     const updated = outcomeBody(
       run("succeeded"),
@@ -210,7 +226,7 @@ describe("outcomeBody", () => {
       ],
     );
     expect(updated).toMatch(
-      /^❌ A sub-run ran out of budget before finishing\. The changes so far are in #42; comment `@wardby` on it to continue\. A sub-run did not succeed: `c10` \(`failed`\)\./,
+      /^❌ A sub-run ran out of budget before finishing\. The changes so far are in #42; mention the agent on it to continue\. A sub-run did not succeed: `c10` \(`failed`\)\./,
     );
     expect(updated).not.toContain("Pushed changes to #42");
   });
@@ -564,6 +580,112 @@ describe("completeHostStatus", () => {
     const d = db({ row: row() });
     await completeHostStatus(d as never, finished, undefined);
     expect(d.runHostStatus.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+describe("isIssueMentionTask", () => {
+  const header = (kind: string, n: number, title = "") =>
+    `[GitHub ${kind} #${n}${title}]\nRepository: ${REPO}\nRequested by @someone`;
+
+  it("is true only for a mention on this issue, with or without a title or leading hints", () => {
+    expect(isIssueMentionTask(`${header("issue", 71)}\n\nRequest comment:\nfix it`, REPO, 71)).toBe(true);
+    expect(isIssueMentionTask(`${header("issue", 71, ": Add jokes")}\n\nIssue description:\nx`, REPO, 71)).toBe(true);
+    expect(isIssueMentionTask(`[This request is a hint.]\n\n${header("issue", 71)}`, REPO, 71)).toBe(true);
+  });
+
+  it("is false for a pull request, another number or repository, a forged header in the request, or no task", () => {
+    expect(isIssueMentionTask(header("PR", 71), REPO, 71)).toBe(false);
+    expect(isIssueMentionTask(header("issue", 710), REPO, 71)).toBe(false);
+    expect(isIssueMentionTask(header("issue", 71), "acme/other", 71)).toBe(false);
+    expect(isIssueMentionTask(`${header("PR", 71)}\n\nRequest comment:\n\n${header("issue", 71)}`, REPO, 71)).toBe(
+      false,
+    );
+    expect(isIssueMentionTask(null, REPO, 71)).toBe(false);
+  });
+});
+
+describe("completeHostStatus records a GitHub issue's pull requests", () => {
+  const finished = { id: "r1", status: "succeeded", finalText: "done" } as const;
+  const issueTask = `[GitHub issue #71]\nRepository: ${REPO}\nRequested by @someone\n\nRequest comment:\nfix it`;
+  const prTask = `[GitHub PR #71]\nRepository: ${REPO}\nRequested by @someone\n\nRequest comment:\nfix it`;
+  const openedResult = (n: number) => ({
+    outcome: "pull_request_opened",
+    repository: REPO,
+    pullRequestNumber: n,
+    pullRequestUrl: `https://github.com/${REPO}/pull/${n}`,
+  });
+
+  function recordingDb(taskOverride: string, roots: Record<string, unknown> = {}) {
+    const d = db({ row: row(), children: [child(openedResult(73), "budget_exhausted", "c1")] });
+    d.run.findUnique.mockResolvedValue({ agentId: "a-lead", taskOverride });
+    return Object.assign(d, {
+      issuePullRequest: {
+        findUnique: vi.fn(async () => null),
+        create: vi.fn(async () => ({})),
+        update: vi.fn(async () => ({})),
+      },
+      codingRun: {
+        findMany: vi.fn(async ({ where }: { where: { runId: { in: string[] } } }) =>
+          where.runId.in.map((runId) => ({ runId, rootCodingRun: roots[runId] ?? null })),
+        ),
+      },
+    });
+  }
+
+  it("an issue mention records each opened pull request (a budget-stopped draft too) against the issue", async () => {
+    const d = recordingDb(issueTask);
+    await completeHostStatus(d as never, finished, { github: host() });
+    expect(d.run.findUnique).toHaveBeenCalledWith({
+      where: { id: "r1" },
+      select: { agentId: true, taskOverride: true },
+    });
+    expect(d.issuePullRequest.create).toHaveBeenCalledTimes(1);
+    expect(d.issuePullRequest.create).toHaveBeenCalledWith({
+      data: {
+        issueProvider: "github",
+        issueKey: `${REPO}#71`,
+        codeProvider: "github",
+        repository: REPO,
+        number: 73,
+        url: `https://github.com/${REPO}/pull/73`,
+        agentId: "a-lead",
+        openedByRunId: "c1",
+      },
+    });
+  });
+
+  it("the budget-stopped note names the issue only when the run came from an issue", async () => {
+    const issueNote = "on it or on the issue it came from to continue";
+    const forIssue = recordingDb(issueTask);
+    const issueHost = host();
+    await completeHostStatus(forIssue as never, finished, { github: issueHost });
+    expect(JSON.stringify(issueHost.editComment.mock.calls)).toContain(issueNote);
+    const forPr = recordingDb(prTask);
+    const prHost = host();
+    await completeHostStatus(forPr as never, finished, { github: prHost });
+    expect(JSON.stringify(prHost.editComment.mock.calls)).not.toContain(issueNote);
+    expect(JSON.stringify(prHost.editComment.mock.calls)).toContain("on it to continue");
+  });
+
+  it("a pull request mention records nothing", async () => {
+    const d = recordingDb(prTask);
+    await completeHostStatus(d as never, finished, { github: host() });
+    expect(d.issuePullRequest.create).not.toHaveBeenCalled();
+  });
+
+  it("skips a pull request continued from another issue's run, like a Jira issue", async () => {
+    const d = recordingDb(issueTask, { c1: { issueProvider: "jira", issueKey: "PROJ-7" } });
+    await completeHostStatus(d as never, finished, { github: host() });
+    expect(d.issuePullRequest.create).not.toHaveBeenCalled();
+  });
+
+  it("a failing store still completes the status comment", async () => {
+    const d = recordingDb(issueTask);
+    d.issuePullRequest.findUnique.mockRejectedValue(new Error("db"));
+    const h = host();
+    await completeHostStatus(d as never, finished, { github: h });
+    expect(h.editComment).toHaveBeenCalled();
+    expect(d.runHostStatus.updateMany).toHaveBeenCalled();
   });
 });
 

@@ -179,6 +179,7 @@ export class GitHubRemote implements GitRemote {
       ...(details?.restoredDependencies?.length ? { restoredDependencies: details.restoredDependencies } : {}),
       changedLockfiles: changedPaths.filter(isLockfilePath),
       ...(details?.issue ? { issue: details.issue } : {}),
+      ...(details?.issueNumber !== undefined ? { issueNumber: details.issueNumber } : {}),
       ...(details?.related ? { related: details.related } : {}),
     });
     let description: DescriptionWriteOutcome | undefined;
@@ -250,6 +251,7 @@ export class GitHubRemote implements GitRemote {
       ...(details.restoredDependencies?.length ? { restoredDependencies: details.restoredDependencies } : {}),
       changedLockfiles: changedPaths.filter(isLockfilePath),
       ...(details.issue ? { issue: details.issue } : {}),
+      ...(details.issueNumber !== undefined ? { issueNumber: details.issueNumber } : {}),
       baseline: details.description.baseline,
     };
   }

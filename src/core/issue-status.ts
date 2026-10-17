@@ -23,7 +23,7 @@ import {
   workingBody,
   type FinishedRun,
 } from "./host-status.js";
-import { recordPullRequests } from "./issue-bridge.js";
+import { continuedForAnotherIssue, recordPullRequests } from "./issue-bridge.js";
 import { logger } from "./logger.js";
 
 const log = logger.child({ module: "issue-status" });
@@ -181,31 +181,6 @@ async function currentLink(
   return link ? { agentId: run.agentId, ...link } : null;
 }
 
-/**
- * The coding runs (of `runIds`) that continued a pull request opened for a
- * different issue: their PR belongs to that issue, not this one. A continued
- * PR with no issue, or this same issue, is fine.
- */
-async function continuedForAnotherIssue(
-  db: IssueStatusDb,
-  runIds: string[],
-  issue: { provider: string; issueKey: string },
-): Promise<Set<string>> {
-  if (runIds.length === 0) return new Set();
-  const rows = await db.codingRun.findMany({
-    where: { runId: { in: runIds } },
-    select: { runId: true, rootCodingRun: { select: { issueProvider: true, issueKey: true } } },
-  });
-  return new Set(
-    rows
-      .filter(({ rootCodingRun: root }) => {
-        if (!root?.issueKey) return false;
-        return root.issueKey !== issue.issueKey || root.issueProvider !== issue.provider;
-      })
-      .map((row) => row.runId),
-  );
-}
-
 export async function completeIssueStatus(
   db: IssueStatusDb,
   run: FinishedRun,
@@ -232,7 +207,7 @@ export async function completeIssueStatus(
       const foreign = await continuedForAnotherIssue(
         db,
         pullRequests.flatMap((pr) => (pr.pullRequestUrl && pr.runId ? [pr.runId] : [])),
-        status,
+        { provider: status.provider, key: status.issueKey },
       );
       for (const runId of foreign) {
         log.info(
@@ -275,6 +250,7 @@ export async function completeIssueStatus(
         noChanges,
         fullReplyFollows: true,
         noPullRequestText: "Done.",
+        fromIssue: true,
         // One comment per request: this status comment carries the agent's answer.
         replyAsAnswer: true,
       });

@@ -79,10 +79,22 @@ describe("syncOpenPullRequestStates", () => {
     await expect(syncOpenPullRequestStates(db, hosts, trackers, NOW)).resolves.toBe(0);
   });
 
-  it("does nothing without hosts or trackers", async () => {
-    const { db, hosts, trackers } = setup({});
+  it("does nothing without hosts", async () => {
+    const { db, trackers } = setup({});
     await syncOpenPullRequestStates(db, undefined, trackers, NOW);
-    await syncOpenPullRequestStates(db, hosts, undefined, NOW);
     expect(db.issuePullRequest.findMany).not.toHaveBeenCalled();
+  });
+
+  it("still settles rows without trackers (a GitHub issue's pairs need none)", async () => {
+    vi.mocked(handlePullRequestClosed).mockClear();
+    const { db, hosts } = setup({
+      "acme/bff#3": { state: "closed", merged: true },
+      "acme/app#4": { state: "open" },
+      "acme/web#5": { state: "open" },
+    });
+    expect(await syncOpenPullRequestStates(db, hosts, undefined, NOW)).toBe(1);
+    expect(vi.mocked(handlePullRequestClosed).mock.calls.map((c) => [c[1], c[2]])).toEqual([
+      [undefined, { codeProvider: "github", repository: "acme/bff", number: 3, merged: true }],
+    ]);
   });
 });

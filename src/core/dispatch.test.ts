@@ -652,6 +652,7 @@ describe("dispatchRun", () => {
       expect.objectContaining({
         runId: result?.run.id,
         task: "Fix the failing tests",
+        request: "Fix the failing tests",
         repository: "openai/wardby",
         baseRef: "main",
         headRef: `wardby/run-${result?.run.id}`,
@@ -2197,6 +2198,7 @@ describe("coding-run services", () => {
       expect(result?.run.status).toBe("pending");
       expect(state.codingRuns[0]).toMatchObject({
         task: "Add 20 jokes",
+        request: "Add 20 jokes",
         workerImage: null,
         toolImage: null,
         services: [],
@@ -2212,6 +2214,19 @@ describe("coding-run services", () => {
         /exceed the 16384-byte coding task limit/,
       );
       expect(state.codingRuns).toEqual([]);
+    });
+
+    it("stores the raw request apart from the standing instructions, falling back to the default task", async () => {
+      const agent = servicesAgent(["postgres"], "Run the tests first.");
+      const state = fakeDb(agent, [], {}, CATALOG);
+      const { executor } = resolvingExecutor(false);
+
+      await dispatchRun({ db: state.db, executor, agentId: agent.id, codingTask: "Add X" });
+      await dispatchRun({ db: state.db, executor, agentId: agent.id });
+
+      expect(state.codingRuns[0].request).toBe("Add X");
+      expect(state.codingRuns[0].task).toContain("Run the tests first.");
+      expect(state.codingRuns[1].request).toBe(agent.codingProfile.defaultTask);
     });
 
     it("resolves everything at dispatch when the executor never defers", async () => {
@@ -2231,6 +2246,7 @@ describe("coding-run services", () => {
       });
       expect(state.codingRuns[0].task).toMatch(/^Standing instructions for this coding agent:\nRun the tests first\./);
       expect(state.codingRuns[0].task).toMatch(/\n\nRequest:\nAdd 20 jokes$/);
+      expect(state.codingRuns[0].request).toBe("Add 20 jokes");
     });
   });
 });
