@@ -4,7 +4,8 @@ import { isAbsolute, resolve } from "node:path";
 export const CODING_PROTOCOL_VERSION = 1 as const;
 /** The code host every coding run's repository and pull request live on (see pullRequestUrlSchema); the one place to change when another is added. */
 export const CODING_CODE_PROVIDER = "github";
-export const MAX_CODING_ARTIFACT_BYTES = 64 * 1024;
+/** result.json and the agent output file: room for a full summary and test list, JSON-escaped. */
+export const MAX_CODING_ARTIFACT_BYTES = 256 * 1024;
 /** The worker input artifact (input.json): larger than results because it can carry Claude Code repo context. */
 export const MAX_CODING_INPUT_BYTES = 512 * 1024;
 /** Bounds on CodingTaskInput.claudeContext, enforced by the builder (src/coding/claude-context.ts) and this schema. */
@@ -12,7 +13,13 @@ export const CLAUDE_CONTEXT_LIMITS = { maxFiles: 200, maxFileBytes: 64 * 1024, m
 export const MAX_CODING_TASK_BYTES = 16 * 1024;
 /** Room reserved at the end of a composed task for lines the executor appends (e.g. the base commit). */
 export const CODING_TASK_TRAILER_RESERVE_BYTES = 256;
-export const MAX_CODING_SUMMARY_BYTES = 8 * 1024;
+/**
+ * A coding run's summary (the agent's final message, posted as the PR body):
+ * longer text is cut at a line boundary with SUMMARY_TRUNCATED_MARKER rather
+ * than failing the run.
+ */
+export const MAX_CODING_SUMMARY_BYTES = 64 * 1024;
+export const SUMMARY_TRUNCATED_MARKER = "\n\n[summary truncated]";
 export const MAX_CODING_TESTS = 64;
 export const MAX_CODING_TEST_COMMAND_BYTES = 2 * 1024;
 export const MAX_TAG_BYTES = 32;
@@ -54,6 +61,47 @@ export const INVALID_SINGLE_LINE_CONTROL = /[\u0000-\u001F\u007F]/;
 
 export function byteLength(value: string): number {
   return Buffer.byteLength(value, "utf8");
+}
+
+/**
+ * `text` unchanged when `measure(text) <= max`; otherwise its longest prefix
+ * that fits with `marker` appended, cut back to the last line break when one
+ * is in the second half, and never inside a surrogate pair.
+ */
+export function truncateText(
+  text: string,
+  max: number,
+  measure: (value: string) => number = byteLength,
+  marker: string = SUMMARY_TRUNCATED_MARKER,
+): string {
+  if (measure(text) <= max) return text;
+  const room = max - measure(marker);
+  if (room <= 0) return marker.trim();
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const mid = (low + high + 1) >> 1;
+    if (measure(text.slice(0, mid)) <= room) low = mid;
+    else high = mid - 1;
+  }
+  let cut = text.slice(0, low);
+  if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1);
+  const lineBreak = cut.lastIndexOf("\n");
+  if (lineBreak > cut.length / 2) cut = cut.slice(0, lineBreak);
+  return `${cut.trimEnd()}${marker}`;
+}
+
+/**
+ * A summary field: over-long text is redacted, then truncated (truncateText),
+ * then checked like any bounded text. Redacting first keeps a credential that
+ * straddles the cut from leaving its front half in the output.
+ */
+function summaryText() {
+  return z.preprocess(
+    (value) =>
+      typeof value === "string" ? truncateText(redactTokenShapedValues(value), MAX_CODING_SUMMARY_BYTES) : value,
+    boundedText(MAX_CODING_SUMMARY_BYTES),
+  );
 }
 
 function boundedText(maxBytes: number, singleLine = false) {
@@ -577,7 +625,7 @@ const agentOutputFields = {
   schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
   runId: runIdSchema,
   outcome: z.enum(["changes_ready", "no_changes", "budget_exhausted"]),
-  summary: boundedText(MAX_CODING_SUMMARY_BYTES),
+  summary: summaryText(),
   tests: z.array(testResultSchema).max(MAX_CODING_TESTS),
   // Model-written, so normalized rather than rejected; see normalizeCodingTag.
   tag: z.preprocess(normalizeCodingTag, tagSchema),
@@ -757,7 +805,7 @@ export const CodingRunResultSchema = z
       .optional(),
     pullRequestUrl: pullRequestUrlSchema.optional(),
     pullRequestNumber: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
-    summary: boundedText(MAX_CODING_SUMMARY_BYTES),
+    summary: summaryText(),
     tests: z.array(testResultSchema).max(MAX_CODING_TESTS),
     usage: usageSchema,
     tag: tagSchema,

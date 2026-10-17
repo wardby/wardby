@@ -9,7 +9,12 @@ import {
   type PackageAuditReport,
 } from "../../coding/registry/audit-mode.js";
 import { refusalMeaning } from "../../coding/registry/refusal-hints.js";
-import { DEPENDENCY_CACHE_PATH, normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
+import {
+  DEPENDENCY_CACHE_PATH,
+  normalizeGitHubRepository,
+  normalizeGitRef,
+  truncateText,
+} from "../../coding/protocol.js";
 import {
   LATEST_RUN_MARKER_PREFIX,
   RELATED_SECTION_END,
@@ -20,6 +25,7 @@ import {
   descriptionSha256,
   extractRelatedBlock,
   findDescriptionComments,
+  hasClosingKeyword,
   isUneditedDescription,
   supersededDescriptionComment,
   type DescriptionCommentRecord,
@@ -689,8 +695,38 @@ function packageAuditSection(input: PullRequestInput): string | undefined {
   return packageAuditWording(input.packageAudit.mode, summary, { format: "pr" });
 }
 
-/** The hidden run marker stays first and unconditional: createOrFindDraftPullRequest's idempotent lookup depends on it. */
+/**
+ * The pull request body, within GitHub's MAX_PULL_REQUEST_BODY_CHARS. When it
+ * would be longer, the informational Packages section goes first; if that is
+ * not enough, the agent's summary is truncated to fit (fitSummary keeps its
+ * closing-keyword line). The other sections are bounded and stay whole.
+ */
 export function pullRequestBody(input: PullRequestInput, options: { omitPackages?: boolean } = {}): string {
+  const body = buildPullRequestBody(input, options);
+  if (body.length <= MAX_PULL_REQUEST_BODY_CHARS) return body;
+  const withoutPackages = options.omitPackages ? body : buildPullRequestBody(input, { omitPackages: true });
+  if (withoutPackages.length <= MAX_PULL_REQUEST_BODY_CHARS || !input.summary) return withoutPackages;
+  const room = input.summary.length - (withoutPackages.length - MAX_PULL_REQUEST_BODY_CHARS);
+  return buildPullRequestBody({ ...input, summary: fitSummary(input.summary, room) }, { omitPackages: true });
+}
+
+/**
+ * `summary` cut to `max` characters. A last line with a closing keyword
+ * (`Resolves #12`) is kept after the cut, so merging still closes the issue.
+ */
+function fitSummary(summary: string, max: number): string {
+  const measure = (value: string) => value.length;
+  const lines = summary.trimEnd().split("\n");
+  const last = lines[lines.length - 1];
+  if (lines.length > 1 && last.length <= 200 && hasClosingKeyword(last)) {
+    const kept = truncateText(lines.slice(0, -1).join("\n"), max - last.length - 2, measure);
+    return `${kept}\n\n${last}`;
+  }
+  return truncateText(summary, max, measure);
+}
+
+/** The hidden run marker stays first and unconditional: createOrFindDraftPullRequest's idempotent lookup depends on it. */
+function buildPullRequestBody(input: PullRequestInput, options: { omitPackages?: boolean }): string {
   const sections = [`${RUN_MARKER_PREFIX}${input.runId} -->`];
   // Hidden marker stays first; the issue link is the first visible line.
   const issue = issueLine(input);
