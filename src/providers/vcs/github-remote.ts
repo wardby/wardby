@@ -113,6 +113,24 @@ export class GitHubRemote implements GitRemote {
     if (!open) throw new Error(CONTINUATION_CLOSED_ERROR);
   }
 
+  /** See VcsProvider.continuationPullRequestDraft: GitHub's draft flag on the root run's open PR. Never throws. */
+  async continuationPullRequestDraft(workspace: PreparedWorkspace): Promise<boolean | undefined> {
+    const github = this.options.github;
+    if (!workspace.continuation || !github.openPullRequestDraft) return undefined;
+    try {
+      const draft = await github.openPullRequestDraft({
+        runId: workspace.continuation.rootRunId,
+        repository: workspace.repository,
+        baseRef: workspace.baseRef,
+        headRef: workspace.headRef,
+      });
+      return draft ?? undefined;
+    } catch (error) {
+      logger.warn({ err: error, runId: workspace.runId }, "could not read the continuation pull request's draft state");
+      return undefined;
+    }
+  }
+
   /** A continuation's description comment, written before the push (see GitRemote.proposeDescriptionBeforePush). Never throws. */
   async proposeDescriptionBeforePush({
     workspace: prepared,

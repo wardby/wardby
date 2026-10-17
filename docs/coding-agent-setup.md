@@ -374,8 +374,11 @@ the agent's commands); Claude Code itself always runs on
 
 A coding run's budget is reserved when it is dispatched: the agent's own
 `budgetUsd`, tightened to whatever its budget group has left for each
-configured period and, for a sub-agent, whatever its run tree has left. The
-worker can never spend more than that reservation. When a group or run tree
+configured period and, for a sub-agent, whatever its run tree has left. Each
+model request holds part of the reservation before it is sent, and a request
+that would not fit is refused. A reply can still cost more than its hold, up to
+that request's worst case, so a run can end a little over its reservation;
+finished work is still delivered. When a group or run tree
 has nothing left, the run is recorded as `refused` with the error
 `budget_group_exhausted:<day|week|month>` or `run_tree_exhausted`, and no
 container starts (`trigger_agent` returns that status and error directly).
@@ -385,7 +388,9 @@ container starts (`trigger_agent` returns that status and error directly).
 A coding agent's `allowedOverrunPercent` (an integer from 0 to 100, default 0,
 set with `create_agent` or `update_agent`, and shown by `get_agent`) lets a run
 spend a little beyond `budgetUsd` instead of stopping at it. It takes the same
-permission as changing `budgetUsd`. Native runs ignore it.
+permission as changing `budgetUsd`. On a coding agent it raises the limit of
+each of its runs; on a lead agent that delegates, it raises its run tree's
+ceiling for coding sub-agents. Native runs' own model calls are not affected.
 
 At dispatch a coding run gets a base budget (the smallest of the agent's
 `budgetUsd`, what its budget group has left and what its run tree has left) and
@@ -398,7 +403,8 @@ Budget group caps stay hard. A budget group holds the full limit for each run,
 and the overrun can only use room the group and the run tree still have, so a
 nearly spent group trims or removes it. The percent a run actually got can
 therefore be lower than the agent's setting. For a delegated run tree, the
-ceiling uses the lead (root) agent's percent.
+ceiling uses the lead (root) agent's percent, so set it on the lead agent to
+give its coding sub-agents room beyond the lead's `budgetUsd`.
 
 Every live run still pending or running holds its unspent reservation
 (reservation minus cost so far) against its group; a native run holds its
@@ -536,8 +542,10 @@ its allowed overrun." (without the "within" part when it went past the limit).
 
 When a run is stopped for budget and its worker ended cleanly, its changes so
 far are pushed as the usual draft pull request, or added to the pull request it
-was continuing. The description starts "Stopped at its budget before
-finishing; the changes so far are in this draft." The run's status stays
+was continuing. A new pull request's description starts "Stopped at its budget
+before finishing; the changes so far are in this draft." A continuation leaves
+the existing description as it is; its status comment says the run stopped.
+The run's status stays
 `budget_exhausted` and its `budgetEvents` are kept. The status comment points
 at the pull request and says that a comment mentioning the App on it continues
 the work with a fresh budget.
@@ -549,6 +557,11 @@ the work with a fresh budget.
 - The usual push checks still apply (protected paths, diff limits, access). If
   one refuses, or there are no changes, the run ends as `budget_exhausted`
   with nothing pushed.
+- Unfinished work is never pushed onto a pull request that is no longer a
+  draft (marked ready for review by wardby or a person). A continuation of
+  such a pull request that stops for budget ends as `budget_exhausted` with
+  nothing pushed. The draft state is read from the host; when the host cannot
+  be asked, a pull request wardby marked ready counts as not a draft.
 - Nothing is kept from a worker that crashed, timed out or was stopped.
 
 ## Turn limit (Claude Code)

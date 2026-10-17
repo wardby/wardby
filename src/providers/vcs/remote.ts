@@ -51,6 +51,7 @@ export interface GitRemote {
   /** When set, called inside withAccess right before the push; throws to refuse it (GitHub: unset). */
   beforePush?(repository: string, headRef: string): Promise<void>;
   notifyContinuationStarted?: VcsProvider["notifyContinuationStarted"];
+  continuationPullRequestDraft?: VcsProvider["continuationPullRequestDraft"];
   notifyContinuationFinished?: VcsProvider["notifyContinuationFinished"];
   readRepositoryFile?: VcsProvider["readRepositoryFile"];
   /**

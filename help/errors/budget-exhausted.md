@@ -82,11 +82,12 @@ A refused run is not resumed automatically; trigger a new one.
 
 A coding agent's `allowedOverrunPercent` (integer 0 to 100, default 0; set with
 `create_agent` or `update_agent`, same permission as `budgetUsd`) lets a run
-spend up to that percent beyond `budgetUsd`. It applies to coding agents only.
-The run's limit is `budgetUsd` raised by the percent, trimmed to the room its
+spend up to that percent beyond `budgetUsd`. On a lead agent that delegates,
+it raises its run tree's ceiling for coding sub-agents instead; native runs' own
+model calls are not affected. The run's limit is `budgetUsd` raised by the percent, trimmed to the room its
 budget group and run tree still have, so group caps stay hard and the percent a
-run got can be lower than the setting. A delegated run tree uses the lead
-agent's percent. `get_run` shows `budgetBaseUsd` (before the overrun) and
+run got can be lower than the setting. A delegated run tree's ceiling uses the
+lead agent's percent. `get_run` shows `budgetBaseUsd` (before the overrun) and
 `budgetReservedUsd` (the limit). The sentence then names both, for example
 "this run's $1.00 budget and its 10% allowed overrun ($1.10 in all)".
 
@@ -98,15 +99,18 @@ is `succeeded` and its status comment says, for example, "Spent $1.04, $0.04
 
 When a run is stopped for budget and its worker ended cleanly, its changes so
 far are pushed as the usual draft pull request (or added to the one it was
-continuing). The description starts "Stopped at its budget before finishing;
-the changes so far are in this draft." The run stays `budget_exhausted` and
+continuing). A new pull request's description starts "Stopped at its budget
+before finishing; the changes so far are in this draft." A continuation leaves
+the existing description alone. The run stays `budget_exhausted` and
 keeps its `budgetEvents`. A comment mentioning the App on that pull request
 continues the work with a fresh budget. The pull request is not marked ready
 automatically until a later continuation finishes.
 
 If a push check refuses (protected paths, diff limits, access) or there are no
-changes, the run ends as above with nothing pushed. A worker that crashed,
-timed out or was stopped is not kept.
+changes, the run ends as above with nothing pushed. So does a continuation of a
+pull request that is no longer a draft (marked ready for review): unfinished
+work is never pushed onto it. A worker that crashed, timed out or was stopped
+is not kept.
 
 ## Interrupted replies
 

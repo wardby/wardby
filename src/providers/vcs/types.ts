@@ -183,6 +183,13 @@ export interface VcsProvider {
     workspace: PreparedWorkspace,
     details: FinalizeChangesDetails,
   ): Promise<DescriptionWriteOutcome | undefined>;
+  /**
+   * Whether the pull request a continuation pushes to is still a draft, per
+   * the host: true or false, or undefined when unknown (a fresh run, a remote
+   * without pull requests, a pull request no longer open, or a failed
+   * lookup). Optional; never throws.
+   */
+  continuationPullRequestDraft?(workspace: PreparedWorkspace): Promise<boolean | undefined>;
 }
 
 export type ContinuationOutcome = "succeeded" | "failed" | "budget_exhausted";

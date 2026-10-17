@@ -55,7 +55,8 @@ cache-read rate after the first reply of a conversation; see the help article
 
 If coding runs stop just short of finishing, set `allowedOverrunPercent` (0 to
 100, default 0) on the coding agent so a run may spend that percent beyond
-`budgetUsd`. Budget group and run-tree caps stay hard, and `get_run` shows
+`budgetUsd`. Set it on a lead agent that delegates to raise its run tree's
+ceiling for coding sub-agents; native runs' own model calls are not affected. Budget group and run-tree caps stay hard, and `get_run` shows
 `budgetBaseUsd` next to the limit in `budgetReservedUsd`. A run still stopped
 for budget keeps its work as a draft pull request you can continue. See
 `errors/budget-exhausted`.

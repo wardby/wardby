@@ -52,6 +52,13 @@ class FakeGitHub implements GitHubRepositoryAccess {
   /** Thrown this many times in a row (then answers `openPullRequest` normally) -- simulates a transient GitHub failure. */
   openPullRequestFailuresRemaining = 0;
 
+  /** What openPullRequestDraft answers; an Error is thrown. */
+  openPullRequestDraftAnswer: boolean | null | Error = true;
+  async openPullRequestDraft(): Promise<boolean | null> {
+    if (this.openPullRequestDraftAnswer instanceof Error) throw this.openPullRequestDraftAnswer;
+    return this.openPullRequestDraftAnswer;
+  }
+
   async findOpenPullRequest(input: unknown): Promise<PullRequestResult | null> {
     this.openPullRequestCalls.push(structuredClone(input));
     if (this.openPullRequestFailuresRemaining > 0) {
@@ -627,6 +634,21 @@ describe("GitVcsProvider", () => {
         provider.refreshPullRequestDescription?.(prepared, { description: { baseline: BASELINE } }),
       ).resolves.toEqual({ kind: "skipped", reason: "error" });
       await expect(provider.refreshPullRequestDescription?.(prepared, {})).resolves.toBeUndefined();
+    });
+
+    it("continuationPullRequestDraft reports the host's draft state, and undefined when it is unknown", async () => {
+      const { provider, github } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      github.openPullRequestDraftAnswer = true;
+      await expect(provider.continuationPullRequestDraft?.(prepared)).resolves.toBe(true);
+      github.openPullRequestDraftAnswer = false;
+      await expect(provider.continuationPullRequestDraft?.(prepared)).resolves.toBe(false);
+      github.openPullRequestDraftAnswer = null;
+      await expect(provider.continuationPullRequestDraft?.(prepared)).resolves.toBeUndefined();
+      github.openPullRequestDraftAnswer = new Error("github_api_error:503");
+      await expect(provider.continuationPullRequestDraft?.(prepared)).resolves.toBeUndefined();
+      const { continuation: _continuation, ...fresh } = prepared;
+      await expect(provider.continuationPullRequestDraft?.(fresh)).resolves.toBeUndefined();
     });
 
     it("refuses to prepare a continuation whose PR is no longer open, before cloning", async () => {

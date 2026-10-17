@@ -193,6 +193,22 @@ function hasPullRequestDescription(run: { repository: string }): boolean {
 }
 
 /**
+ * A budget-stopped run's stored result names what its kept changes became
+ * (see keepStoppedChanges): the `changesPushed` detail for its status comment,
+ * or nothing when it pushed nothing.
+ */
+function storedChangesPushed(result: unknown): { changesPushed?: { pullRequestNumber?: number } } {
+  const parsed = CodingRunResultSchema.safeParse(result);
+  if (!parsed.success) return {};
+  const stored = parsed.data;
+  if (stored.outcome === "branch_pushed") return { changesPushed: {} };
+  if (stored.outcome === "pull_request_opened" || stored.outcome === "pull_request_updated") {
+    return { changesPushed: { pullRequestNumber: stored.pullRequestNumber } };
+  }
+  return {};
+}
+
+/**
  * What the root run of a legacy pull request (no recorded description hash)
  * stored, from which the description it wrote is rebuilt. Raw stored values:
  * the executor validates them.
@@ -341,6 +357,12 @@ export interface ContainerExecutionStore {
    */
   pullRequestRunIds?(rootRunId: string): Promise<string[]>;
   /**
+   * Whether wardby marked the root run's pull request ready for review
+   * (CodingRun.markedReadyAt). Optional: the fallback when the host's draft
+   * state is unknown; without it the pull request counts as a draft.
+   */
+  pullRequestMarkedReady?(rootRunId: string): Promise<boolean>;
+  /**
    * Where the root run's pull request came from (see LinkedIssueSource).
    * Optional: without it continuations get no issue text.
    */
@@ -480,6 +502,11 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       ...(pr.state ? { state: pr.state } : {}),
       ...(pr.mergeOrder !== undefined ? { mergeOrder: pr.mergeOrder } : {}),
     }));
+  }
+
+  async pullRequestMarkedReady(rootRunId: string): Promise<boolean> {
+    const root = await this.db.codingRun.findUnique({ where: { runId: rootRunId }, select: { markedReadyAt: true } });
+    return Boolean(root?.markedReadyAt);
   }
 
   async pullRequestDescriptionBaseline(rootRunId: string): Promise<StoredDescriptionBaseline> {
@@ -1070,7 +1097,9 @@ export class ContainerExecutor implements Executor {
     let claimId: string | null = null;
     let spendEnabled = Boolean(sessionId);
     try {
-      const prepared = this.preflight(run);
+      // A launched run resumed after a restart is checked the way recover() checks it: its cost so
+      // far may be past the limit (a reply can cost more than its hold), and it is still delivered.
+      const prepared = this.preflight(run, { launched: Boolean(handle) });
       if (!handle) {
         if (run.provisioningClaim) return;
         // No room in the cluster yet (the namespace quota): wait in the queue rather than claim a
@@ -1310,16 +1339,17 @@ export class ContainerExecutor implements Executor {
   }
 
   /**
-   * `finished`: the run's job is done and only its push is left, which spends
-   * nothing; such a run may have cost more than its limit (one reply can cost
-   * more than its hold), and is still pushed.
+   * `launched`: the run's job was already launched (it is running, or done and
+   * only its push is left). The cost check applies only before launch: one
+   * reply can cost more than its hold, so a launched run may already be past
+   * its limit, and its finished work is still delivered.
    */
-  private preflight(run: ContainerRunSnapshot, options: { finished?: boolean } = {}): VcsPrepareInput {
+  private preflight(run: ContainerRunSnapshot, options: { launched?: boolean } = {}): VcsPrepareInput {
     try {
       if (run.status !== "pending" && run.status !== "running") throw new Error("coding_run_status_invalid");
       if (run.agentKind !== "coding" || !run.ownerId) throw new Error("coding_run_ownership_invalid");
       this.modelTerms(run);
-      if (!Number.isFinite(run.budgetUsd) || run.budgetUsd <= 0 || (!options.finished && run.costUsd > run.budgetUsd)) {
+      if (!Number.isFinite(run.budgetUsd) || run.budgetUsd <= 0 || (!options.launched && run.costUsd > run.budgetUsd)) {
         throw new Error("coding_run_budget_invalid");
       }
       const profile = CodingProfileSchema.parse({
@@ -1539,13 +1569,14 @@ export class ContainerExecutor implements Executor {
     output: CodingWorkerOutput,
     summary: string,
     existingWorkspace: PreparedWorkspace | null | undefined,
+    options: { keepDescription?: boolean } = {},
   ): Promise<{
     current: ContainerRunSnapshot;
     workspace: PreparedWorkspace;
     finalized: Awaited<ReturnType<VcsProvider["finalizeChanges"]>>;
     descriptionState: DescriptionState;
   }> {
-    const preparedInput = this.preflight(collectedFor, { finished: true });
+    const preparedInput = this.preflight(collectedFor, { launched: true });
     const workspace = existingWorkspace ?? (await this.options.vcs.recoverWorkspace(preparedInput));
     if (!workspace) throw new Error("coding_workspace_lost");
     await this.options.jobs.materializeWorkspace(handle, workspace.workspacePath);
@@ -1557,7 +1588,8 @@ export class ContainerExecutor implements Executor {
     // And a run stopped while its result was collected (stop_run, a cancelled task) pushes nothing.
     this.requireActive(await this.requireCurrent(run.runId));
     const report = await this.pullRequestRegistryReport(current);
-    const descriptionState = await this.descriptionStateFor(current);
+    // keepDescription: a continuation's existing description is left as it is (no update, no proposal).
+    const descriptionState = options.keepDescription ? null : await this.descriptionStateFor(current);
     const finalized = await this.options.vcs.finalizeChanges(workspace, {
       summary,
       tests: output.tests,
@@ -1576,10 +1608,13 @@ export class ContainerExecutor implements Executor {
   /**
    * A run stopped at its budget whose worker exited cleanly keeps its changes so
    * far: they are pushed as the usual draft (or branch), with a summary that says
-   * the work is unfinished. Null when there was nothing to push or the push
-   * failed for any reason: the run then ends out of budget without them. Once
-   * pushed, the pushed outcome is always returned. Throws only when the run was
-   * stopped meanwhile (the stop wrote its terminal row).
+   * the work is unfinished. A fresh pull request's description starts with that
+   * summary; a continuation leaves its pull request's description alone (the
+   * status comment says the run stopped), and pushes nothing onto a pull request
+   * that is no longer a draft. Null when there was nothing to push or the push
+   * failed or was skipped for any reason: the run then ends out of budget without
+   * them. Once pushed, the pushed outcome is always returned. Throws only when the
+   * run was stopped meanwhile (the stop wrote its terminal row).
    */
   private async keepStoppedChanges(
     run: ContainerRunSnapshot,
@@ -1594,9 +1629,24 @@ export class ContainerExecutor implements Executor {
     record: CodingRunRecord;
   } | null> {
     const summary = budgetStoppedSummary(output.summary);
+    const continuesPullRequest = Boolean(current.rootCodingRunId) && hasPullRequestDescription(current);
     let pushed: Awaited<ReturnType<ContainerExecutor["pushChanges"]>>;
     try {
-      pushed = await this.pushChanges(run, handle, current, output, summary, existingWorkspace);
+      let workspace = existingWorkspace;
+      if (continuesPullRequest) {
+        workspace ??= await this.options.vcs.recoverWorkspace(this.preflight(current, { launched: true }));
+        if (!workspace) throw new Error("coding_workspace_lost");
+        if (!(await this.continuationStillDraft(current, workspace))) {
+          containerLog.info(
+            { runId: run.runId },
+            "a run stopped at its budget pushes nothing onto a pull request that is no longer a draft",
+          );
+          return null;
+        }
+      }
+      pushed = await this.pushChanges(run, handle, current, output, summary, workspace, {
+        keepDescription: continuesPullRequest,
+      });
     } catch (error) {
       if (error instanceof Error && error.message === "coding_run_no_longer_active") throw error;
       containerLog.warn(
@@ -1734,6 +1784,24 @@ export class ContainerExecutor implements Executor {
    * run, or a store without it). Never throws: a load failure is recorded as
    * skipped:error and the push goes ahead without a description update.
    */
+  /**
+   * Whether a continuation's pull request is still a draft: the host's answer
+   * when it has one, else the root run's record of wardby marking it ready.
+   * A failed record lookup counts as not a draft (nothing unfinished is pushed).
+   */
+  private async continuationStillDraft(run: ContainerRunSnapshot, workspace: PreparedWorkspace): Promise<boolean> {
+    const draft = await this.options.vcs.continuationPullRequestDraft?.(workspace).catch(() => undefined);
+    if (draft !== undefined) return draft;
+    const store = this.options.store;
+    if (!run.rootCodingRunId || !store.pullRequestMarkedReady) return true;
+    try {
+      return !(await store.pullRequestMarkedReady(run.rootCodingRunId));
+    } catch (err) {
+      containerLog.warn({ err, runId: run.runId }, "could not read whether the pull request was marked ready");
+      return false;
+    }
+  }
+
   private async descriptionStateFor(run: ContainerRunSnapshot): Promise<DescriptionState> {
     const store = this.options.store;
     if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !store.pullRequestDescriptionBaseline) return null;
@@ -2347,6 +2415,7 @@ export class ContainerExecutor implements Executor {
         agentName: run.agentName,
         ...(outcome === "succeeded" ? this.overrunDetails(run) : {}),
         ...(outcome === "budget_exhausted" ? { budgetSentence: await this.budgetSentence(run) } : {}),
+        ...(outcome === "budget_exhausted" ? storedChangesPushed(run.result) : {}),
         ...(providerClass ? { providerSentence: providerSentence(providerClass) } : {}),
         ...(unreadyServices ? { serviceSentence: serviceUnreadySentence(unreadyServices) } : {}),
         ...(protectedPathFailed ? { protectedPathSentence: protectedPathSentence(null) } : {}),

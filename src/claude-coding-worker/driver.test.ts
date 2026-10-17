@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS, type CodingTaskInput } from "../coding/protocol.js";
+import { WORKER_BUDGET_EXHAUSTED_SUMMARY } from "../coding/continuation-wording.js";
 import {
   CLAUDE_OUTPUT_JSON_SCHEMA,
   CLAUDE_WORKER_SECURITY_INSTRUCTIONS,
@@ -155,7 +156,39 @@ describe("runClaudeCodingWorker", () => {
           yield { type: "result", subtype: "error_max_budget_usd" };
         })(),
     });
-    expect(result).toMatchObject({ runId: input.runId, outcome: "budget_exhausted", tests: [] });
+    expect(result).toMatchObject({
+      runId: input.runId,
+      outcome: "budget_exhausted",
+      summary: WORKER_BUDGET_EXHAUSTED_SUMMARY,
+      tests: [],
+    });
+  });
+
+  it("keeps a successful result whose text mentions the budget refusal code", async () => {
+    const result = await runClaudeCodingWorker({
+      input,
+      proxyBaseUrl: "http://proxy",
+      capability: "cap",
+      signal: new AbortController().signal,
+      createQuery: () =>
+        (async function* () {
+          yield {
+            type: "result",
+            subtype: "success",
+            result: JSON.stringify({
+              schemaVersion: 1,
+              runId: input.runId,
+              outcome: "changes_ready",
+              summary: "Handled the proxy's wardby_budget_exhausted refusal in the client.",
+              tests: [],
+            }),
+          };
+        })(),
+    });
+    expect(result).toMatchObject({
+      outcome: "changes_ready",
+      summary: "Handled the proxy's wardby_budget_exhausted refusal in the client.",
+    });
   });
 
   it("ends cleanly when the proxy refuses a request for budget", async () => {

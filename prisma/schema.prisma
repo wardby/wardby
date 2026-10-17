@@ -25,7 +25,7 @@ model Agent {
   systemPrompt  String
   model         String
   budgetUsd     Decimal             @db.Decimal(10, 4)
-  /// Coding runs may spend up to this percent above budgetUsd; group caps still apply.
+  /// Percent above budgetUsd a run may spend: each coding run's limit, or (on a lead agent) its run tree's ceiling for coding sub-agents; native model calls are unaffected; group caps still apply.
   allowedOverrunPercent Int @default(0)
   createdAt     DateTime            @default(now())
   updatedAt     DateTime            @updatedAt

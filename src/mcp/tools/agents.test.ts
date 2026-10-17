@@ -70,6 +70,8 @@ interface FakeAgentRow {
   budgetGroupId: string | null;
   effort?: string | null;
   nativeExecutionMode?: string;
+  /** Defaults to 0 on create, as the column does. */
+  allowedOverrunPercent?: number;
 }
 
 interface FakeLink {
@@ -151,6 +153,7 @@ function fakeDb(
           kind: "native",
           codingProfile: codingProfile?.create ?? null,
           budgetGroupId: null,
+          allowedOverrunPercent: 0,
           ...agentData,
         };
         rows.set(row.id, row);
@@ -739,7 +742,7 @@ describe("agent CRUD tools", () => {
     const plain = await client.callTool({ name: "create_agent", arguments: { name: "plain", ...base } });
     expect(plain.isError).toBeFalsy();
     const plainAgent = JSON.parse((plain.content as { text: string }[])[0].text);
-    expect(plainAgent.allowedOverrunPercent ?? 0).toBe(0);
+    expect(plainAgent.allowedOverrunPercent).toBe(0);
 
     const flexible = await client.callTool({
       name: "create_agent",

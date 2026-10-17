@@ -578,7 +578,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           minimum: 0,
           maximum: 100,
           description:
-            "Coding runs may spend up to this percent above budgetUsd before they are stopped (budget group caps still apply). 0 = stop at budgetUsd.",
+            "Percent above budgetUsd a run may spend before it is stopped. On a coding agent it raises each of its runs' limit; on a lead agent that delegates, it raises its run tree's ceiling for coding sub-agents. Native runs' own model calls are not affected. Budget group caps still apply. 0 = stop at budgetUsd.",
         },
         maxDelegationsPerRun: {
           type: "integer",
@@ -682,7 +682,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           minimum: 0,
           maximum: 100,
           description:
-            "Coding runs may spend up to this percent above budgetUsd before they are stopped (budget group caps still apply). 0 = stop at budgetUsd.",
+            "Percent above budgetUsd a run may spend before it is stopped. On a coding agent it raises each of its runs' limit; on a lead agent that delegates, it raises its run tree's ceiling for coding sub-agents. Native runs' own model calls are not affected. Budget group caps still apply. 0 = stop at budgetUsd.",
         },
         maxDelegationsPerRun: {
           type: "integer",

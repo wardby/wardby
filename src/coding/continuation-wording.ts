@@ -23,8 +23,20 @@ export function isContinuationClosedError(error: string | null | undefined): boo
 export const BUDGET_STOPPED_SUMMARY_PREFIX =
   "Stopped at its budget before finishing; the changes so far are in this draft.";
 
-/** The summary of a budget-stopped run whose changes were pushed. */
+/**
+ * The fixed summary both coding workers return when the proxy refused a model
+ * request for budget (src/coding-worker/driver.ts,
+ * src/claude-coding-worker/driver.ts; their tests pin it to this constant).
+ */
+export const WORKER_BUDGET_EXHAUSTED_SUMMARY = "The coding budget was exhausted before the task could complete.";
+
+/**
+ * The summary of a budget-stopped run whose changes were pushed: the prefix,
+ * then the worker's own summary unless it is only the workers' fixed budget
+ * sentence (the prefix already says that).
+ */
 export function budgetStoppedSummary(summary: string): string {
+  if (summary.trim() === WORKER_BUDGET_EXHAUSTED_SUMMARY) return BUDGET_STOPPED_SUMMARY_PREFIX;
   return `${BUDGET_STOPPED_SUMMARY_PREFIX}\n\n${summary}`;
 }
 
