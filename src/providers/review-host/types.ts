@@ -280,6 +280,8 @@ export type UpsertNamedCheckInput = {
  * collaborator permission onto these directly; GitLab would map reporter ->
  * read, developer -> write, maintainer -> maintain, owner -> admin.
  */
+export type AcknowledgeOutcome = "picked_up" | "refused";
+
 export type HostPermission = "none" | "read" | "triage" | "write" | "maintain" | "admin";
 export const HOST_PERMISSION_RANK: Readonly<Record<HostPermission, number>> = {
   none: 0,
@@ -346,8 +348,12 @@ export interface CodeReviewHost {
   comment(repository: string, input: CommentInput): Promise<{ url: string; id: string }>;
   /** Replaces the body of a comment the App wrote. */
   editComment(repository: string, input: EditCommentInput): Promise<void>;
-  /** Marks a comment as picked up (GitHub: a 👀 reaction); a host without reactions may do nothing. */
-  acknowledge(repository: string, target: CommentRef): Promise<void>;
+  /**
+   * Marks a comment as picked up (GitHub: a 👀 reaction), or as refused (😕)
+   * when its author can see the repository but lacks the access to start a
+   * run. A host without reactions may do nothing.
+   */
+  acknowledge(repository: string, target: CommentRef, outcome?: AcknowledgeOutcome): Promise<void>;
   startCheck(repository: string, input: StartCheckInput): Promise<{ checkId: string }>;
   completeCheck(repository: string, input: CompleteCheckInput): Promise<void>;
   /**

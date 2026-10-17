@@ -120,10 +120,30 @@ repository can trigger a run. wardby asks GitHub for the author's real
 permission on the repository (by their numeric user id) before either path
 runs; `read` and `triage` are not enough, because a mention drives an agent
 that holds its owner's tools, secrets, and write access. GitHub's
-`author_association` (owner, member, collaborator) is only a first filter:
-it would admit any organization member, or a read-only collaborator. Mentions
-by bots, and mentions from anyone without write access, are ignored silently
-(no run, no reaction).
+`author_association` is only a first filter: it drops first-time authors
+(`FIRST_TIME_CONTRIBUTOR`, `FIRST_TIMER`) and mannequins, and lets every
+other association through to the permission check. That includes
+`CONTRIBUTOR` and `NONE`, which GitHub reports for an organization member
+whose membership is private. Mentions by bots, and mentions from anyone
+without access to the repository, are ignored silently (no run, no reaction).
+The server logs an info line for each one, naming the event, repository and
+association, never the text.
+
+Someone with `read` or `triage` access can see the repository but cannot
+start a run. Their mention gets a 😕 reaction and a one-line reply saying a
+mention needs write access, so they know to ask someone who has it. No run
+starts. Everyone else is refused silently, so a stranger on a public
+repository learns nothing about the App.
+
+A mention inside Markdown code is not a request. Text in an inline code span
+(`` `@<app-slug>` ``), a fenced code block, or an indented code block is
+skipped, so you can document the App's commands in an issue, pull request or
+comment without starting a run. This applies to `@<app-slug> review` too.
+
+If a mention from someone with write access gets no reaction, check the
+server log for `mention ignored`. Older versions dropped `CONTRIBUTOR` and
+`NONE` authors before the permission check. On those versions, make the
+organization membership public or post the mention as a comment.
 
 ### Follow-ups on an issue
 

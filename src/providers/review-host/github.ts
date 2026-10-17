@@ -28,6 +28,7 @@ import {
   type CiView,
   type CodeReviewHost,
   type CommentInput,
+  type AcknowledgeOutcome,
   type CommentRef,
   type CompleteCheckInput,
   type EditCommentInput,
@@ -976,7 +977,7 @@ export class GitHubReviewHost implements CodeReviewHost {
     });
   }
 
-  async acknowledge(repository: string, target: CommentRef): Promise<void> {
+  async acknowledge(repository: string, target: CommentRef, outcome: AcknowledgeOutcome = "picked_up"): Promise<void> {
     const base = repoPath(repository);
     const id = encodeURIComponent(target.id);
     const path =
@@ -986,7 +987,8 @@ export class GitHubReviewHost implements CodeReviewHost {
           ? `${base}/issues/${id}/reactions`
           : `${base}/issues/comments/${id}/reactions`;
     await this.withToken(repository, COMMENT_WRITE, async (get) => {
-      await get(path, { method: "POST", body: JSON.stringify({ content: "eyes" }) }, [200, 201]);
+      const content = outcome === "refused" ? "confused" : "eyes";
+      await get(path, { method: "POST", body: JSON.stringify({ content }) }, [200, 201]);
     });
   }
 
