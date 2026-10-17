@@ -207,8 +207,18 @@ export interface ContinuationCheckRunInput {
   runId: string;
 }
 
-export interface ContinuationCheckRunCompleteInput extends ContinuationCheckRunInput {
+export interface ContinuationCheckRunCompleteInput {
+  repository: string;
+  runId: string;
   outcome: "succeeded" | "failed";
+  /** The commit the check run was created on. */
+  headSha?: string;
+  /**
+   * Used when headSha is unknown (the run's workspace is gone): the check run is
+   * looked up on the pull request's head branch, which a run that pushed nothing
+   * left at that commit.
+   */
+  headRef?: string;
 }
 
 /** One file at one ref, read through the API without a clone. */
@@ -1040,11 +1050,13 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
 
   async completeContinuationCheckRun(input: ContinuationCheckRunCompleteInput): Promise<void> {
     const repository = normalizeGitHubRepository(input.repository);
-    if (!SAFE_RUN_ID.test(input.runId) || !SAFE_COMMIT_SHA.test(input.headSha)) {
+    if (!SAFE_RUN_ID.test(input.runId) || (input.headSha !== undefined && !SAFE_COMMIT_SHA.test(input.headSha))) {
       throw new Error("github_check_run_input_invalid");
     }
+    const ref = input.headSha ?? (input.headRef === undefined ? undefined : normalizeGitRef(input.headRef));
+    if (!ref) throw new Error("github_check_run_input_invalid");
     await this.withChecksToken(repository, async (token) => {
-      const existing = await this.findCheckRun(token, repository, input.headSha, input.runId);
+      const existing = await this.findCheckRun(token, repository, ref, input.runId);
       if (!existing) return;
       const [owner, name] = repository.split("/");
       await this.requestJson(
@@ -1607,12 +1619,12 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
   private async findCheckRun(
     token: string,
     repository: string,
-    headSha: string,
+    ref: string,
     runId: string,
   ): Promise<{ id: number } | null> {
     const [owner, name] = repository.split("/");
     const response = await this.requestJson(
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/commits/${headSha}/check-runs?per_page=100`,
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/commits/${encodeURIComponent(ref)}/check-runs?per_page=100`,
       token,
     );
     const payload = record(await response.json());

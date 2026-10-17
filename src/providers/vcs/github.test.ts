@@ -686,6 +686,43 @@ describe("GitHubAppClient", () => {
       expect(patchedBody).toEqual({ status: "completed", conclusion: "success" });
     });
 
+    it("completeContinuationCheckRun without a commit looks the check run up on the head branch", async () => {
+      const lookedUp: string[] = [];
+      let patchedBody: Record<string, unknown> | undefined;
+      const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (url.endsWith("/installation")) return json({ id: 42 });
+        if (url.endsWith("/access_tokens")) return tokenResponse({ permissions: { checks: "write" } });
+        if (url.includes("/check-runs?") && method === "GET") {
+          lookedUp.push(url);
+          return json({ check_runs: [{ id: 777, external_id: "run-2" }] });
+        }
+        if (url.endsWith("/check-runs/777") && method === "PATCH") {
+          patchedBody = JSON.parse(bodyText(init?.body));
+          return json({ id: 777 }, 200);
+        }
+        if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+        throw new Error(`unexpected request ${method} ${url}`);
+      }) as typeof fetch;
+      const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+
+      await client.completeContinuationCheckRun({
+        repository: "openai/example",
+        headRef: "wardby/run-root-run",
+        runId: "run-2",
+        outcome: "failed",
+      });
+
+      expect(lookedUp).toEqual([
+        "https://api.github.com/repos/openai/example/commits/wardby%2Frun-root-run/check-runs?per_page=100",
+      ]);
+      expect(patchedBody).toEqual({ status: "completed", conclusion: "failure" });
+      await expect(
+        client.completeContinuationCheckRun({ repository: "openai/example", runId: "run-2", outcome: "failed" }),
+      ).rejects.toThrow("github_check_run_input_invalid");
+    });
+
     it("mints the checks token separately from the repository token, so a rejection on one never affects the other", async () => {
       const permissionSetsRequested: string[] = [];
       const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {

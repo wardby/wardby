@@ -19,6 +19,7 @@ import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } f
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
+  ContinuationTarget,
   DescriptionWriteOutcome,
   FinalizeChangesDetails,
   FinalizeChangesResult,
@@ -362,11 +363,12 @@ class FakeVcs implements VcsProvider {
   finalizeDescription?: DescriptionWriteOutcome;
   /** The no-push description refresh; tests that need it assign it. */
   refreshPullRequestDescription?: (
-    workspace: PreparedWorkspace,
+    workspace: ContinuationTarget,
     details: FinalizeChangesDetails,
   ) => Promise<DescriptionWriteOutcome | undefined>;
   notifyStartedCalls = 0;
   lastNotifyStartedAgentName?: string;
+  notifyFinishedTargets: ContinuationTarget[] = [];
   notifyFinishedCalls: Array<{
     outcome: ContinuationOutcome;
     summary?: string;
@@ -437,10 +439,11 @@ class FakeVcs implements VcsProvider {
     this.events.push("notifyStarted");
   }
   async notifyContinuationFinished(
-    _workspace: PreparedWorkspace,
+    target: ContinuationTarget,
     outcome: ContinuationOutcome,
     details?: ContinuationFinishedDetails,
   ): Promise<void> {
+    this.notifyFinishedTargets.push(target);
     this.notifyFinishedCalls.push({
       outcome,
       summary: details?.summary,
@@ -1453,6 +1456,36 @@ describe("ContainerExecutor", () => {
       expect(
         created.events.filter((e) => ["baseline:root-run", "refresh", "record", "complete", "cleanup"].includes(e)),
       ).toEqual(["baseline:root-run", "baseline:root-run", "refresh", "record", "complete", "cleanup"]);
+    });
+
+    // A deploy drains the process that launched the run; the new one finishes it through
+    // recovery, and the old process's local workspace is gone.
+    it("a no_changes run finished by another process still refreshes the description and the final status", async () => {
+      const handle = { backend: "fake", id: "job-1" };
+      const created = await fixRound({ jobHandle: handle, proxySessionId: "session-1" });
+      noChanges(created);
+      created.jobs.statusValue = { state: "succeeded" };
+      let refreshedOn: ContinuationTarget | undefined;
+      created.vcs.refreshPullRequestDescription = async (target) => {
+        refreshedOn = target;
+        return { kind: "refreshed", reason: "too_short", sha256: NEW_SHA, agentTextRunId: "root-run" };
+      };
+      await expect(created.executor.recover({ runId: "run-1", ...handle })).resolves.toEqual({ state: "terminal" });
+
+      const target = {
+        runId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "wardby/run-root-run",
+        continuation: { rootRunId: "root-run" },
+      };
+      expect(refreshedOn).toEqual(target);
+      expect(created.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "refreshed:too_short" });
+      expect(created.vcs.cleaned).toBe(0);
+      expect(created.vcs.notifyFinishedTargets).toEqual([target]);
+      expect(created.vcs.notifyFinishedCalls).toEqual([
+        expect.objectContaining({ outcome: "succeeded", summary: "Already correct." }),
+      ]);
     });
 
     it("changes_ready continuation with an empty diff refreshes the description before store.complete", async () => {
