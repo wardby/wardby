@@ -42,6 +42,7 @@ function lines(count: number, tag: string): string {
 interface PageFile {
   filename: string;
   patchStatus: string;
+  patch: string;
 }
 interface Page {
   headSha: string;
@@ -142,8 +143,10 @@ describe.skipIf(!process.env.DATABASE_URL)("large pull request review (database)
     expect(status).toEqual({
       "src/app.js": "complete",
       "test/app.test.js": "complete",
-      "docs/history.md": "partial",
+      // The code page ends before the docs, so none of the doc's text is in this page.
+      "docs/history.md": "later_page",
     });
+    expect(page.files.find((f) => f.filename === "docs/history.md")!.patch).toBe("");
     expect(page.patchesComplete).toBe(false);
     expect(page.nextPatchCursor).not.toBeNull();
 

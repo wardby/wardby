@@ -64,7 +64,8 @@ describe("GitHubReviewHost reads", () => {
     const first = await host.readPullRequest(REPO, 7, { maxPatchChars: 1_000, agentMarker: "a" });
     expect(first.files.map((f) => [f.filename, f.patchStatus])).toEqual([
       ["src/app.ts", "complete"],
-      ["docs/guide.md", "partial"],
+      // A page with code ends before the docs.
+      ["docs/guide.md", "later_page"],
     ]);
     expect(first.truncatedFiles).toEqual(["docs/guide.md"]);
     const second = await host.readPullRequest(REPO, 7, {

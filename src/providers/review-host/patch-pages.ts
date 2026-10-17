@@ -127,6 +127,7 @@ export async function pagePatches(
   let budget = opts.budget;
   let next: { fileIndex: number; offset: number } | null = null;
   const files: PullRequestFileView[] = [];
+  let pageHasCode = false;
   for (const [index, source] of ordered.entries()) {
     const { changes, ...view } = source;
     const out = (
@@ -148,6 +149,13 @@ export async function pagePatches(
       files.push(out(changes === 0 ? "empty" : "later_page"));
       continue;
     }
+    // A page that carries code ends where the docs, lockfiles and generated files begin, so a
+    // reviewer can stop paging there without that text sitting in its context.
+    if (pageHasCode && changes > 0 && reviewGroup(source.filename) === "other") {
+      files.push(out("later_page"));
+      next = { fileIndex: index, offset: 0 };
+      continue;
+    }
     const patch = await load(source);
     const offset = index === start.fileIndex ? start.offset : 0;
     if (patch === undefined || patch === "") {
@@ -163,6 +171,7 @@ export async function pagePatches(
     // A cursor never points at the end: the part that reaches it does not continue.
     if (offset >= patch.length && offset > 0) throw new PatchCursorError("malformed");
     const rest = patch.slice(offset);
+    if (reviewGroup(source.filename) === "code") pageHasCode = true;
     if (rest.length <= budget) {
       files.push(offset === 0 ? out("complete", rest) : out("partial", rest, { offset, continues: false }));
       budget -= rest.length;

@@ -956,7 +956,7 @@ first. Everything else follows: the repository root's `docs/`, `doc/` and
 `testdata/` folder at any depth; minified `.min.js` and `.min.css` files; and
 documents and images (`.md`, `.mdx`, `.rst`, `.adoc`, `.txt`, `.snap`, `.svg`,
 `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.ico`, `.pdf`, `.lock`).
-`requirements*.txt` and `CMakeLists.txt` count as code. Patches are split on line boundaries, and a file that does not fit on
+`requirements*.txt` and `CMakeLists.txt` count as code. A page that includes source, test or config files stops before the first doc, help, lockfile or generated file, so those come on later pages and a reviewer can skip them. Patches are split on line boundaries, and a file that does not fit on
 the page after other content moves to the next page. Each file has a
 `patchStatus`: `complete`, `partial`, `later_page`, `earlier_page`,
 `unavailable` (the host has no patch, for example a very large file; read it

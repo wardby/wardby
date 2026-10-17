@@ -151,7 +151,8 @@ describe.skipIf(!process.env.DATABASE_URL)("LocalReviewHost (database)", () => {
     const first = await host.readPullRequest(pagedRepository, pr.number, { maxPatchChars: 1_000, agentMarker: "a" });
     expect(first.files.map((f) => [f.filename, f.patchStatus])).toEqual([
       ["src/app.js", "complete"],
-      ["docs/long.md", "partial"],
+      // A page with code ends before the docs.
+      ["docs/long.md", "later_page"],
     ]);
     let cursor = first.nextPatchCursor;
     let text = first.files.find((f) => f.filename === "docs/long.md")!.patch;

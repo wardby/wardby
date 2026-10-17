@@ -72,7 +72,9 @@ source, test and config files first. Each file has a `patchStatus`
 `empty`). While a source, test or config file is listed in `truncatedFiles`,
 call `repo_pr_read` again with `patchCursor` set to `nextPatchCursor`; the pages
 after that hold only docs, help, lockfiles and generated files, which are
-optional for the verdict. Read every `unavailable` source, test or config file
+optional for the verdict. A page that includes source, test or config files
+stops before the first doc, help, lockfile or generated file, so those come on
+later pages and a reviewer can skip them. Read every `unavailable` source, test or config file
 with `repo_read_file` at the head. A cursor goes stale when
 the branch moves (`patch_cursor_stale`): call again without it.
 `repo_publish_review` refuses `APPROVE` and `CHANGES_REQUESTED` with

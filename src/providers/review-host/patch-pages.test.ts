@@ -68,18 +68,52 @@ describe("reviewOrder", () => {
 });
 
 describe("pagePatches", () => {
-  it("fills code before docs whose patches alone exceed the budget", async () => {
+  it("fills code before docs whose patches alone exceed the budget, and ends a code page before the docs", async () => {
     patches["docs/huge.md"] = "+x\n".repeat(50_000);
     patches["src/app.ts"] = "+code\n";
-    const result = await page([file("docs/huge.md", 50_000), file("src/app.ts")], 1_000);
+    const files = [file("docs/huge.md", 50_000), file("src/app.ts")];
+    const result = await page(files, 1_000);
     expect(result.files.map((f) => [f.filename, f.patchStatus])).toEqual([
       ["src/app.ts", "complete"],
-      ["docs/huge.md", "partial"],
+      ["docs/huge.md", "later_page"],
     ]);
     expect(result.patchesComplete).toBe(false);
     expect(result.truncatedFiles).toEqual(["docs/huge.md"]);
     expect(result.remainingPatchFiles).toBe(1);
-    expect(result.nextPatchCursor).not.toBeNull();
+    expect(result.nextPatchCursor).toBe(`v1.${HEAD}.-.1.0.-`);
+    // The next page starts at the docs and fills normally.
+    const second = await page(files, 1_000, result.nextPatchCursor!);
+    expect(second.files.map((f) => [f.filename, f.patchStatus])).toEqual([
+      ["src/app.ts", "earlier_page"],
+      ["docs/huge.md", "partial"],
+    ]);
+    expect(second.files[1]).toMatchObject({ patchOffset: 0, patchContinues: true });
+  });
+
+  it("ends a page that finishes a split code file at the code/other boundary too", async () => {
+    patches["src/big.ts"] = "+x\n".repeat(30);
+    patches["README.md"] = "+doc\n";
+    const files = [file("src/big.ts", 30), file("README.md")];
+    const first = await page(files, 60);
+    const second = await page(files, 60, first.nextPatchCursor!);
+    expect(second.files.map((f) => [f.filename, f.patchStatus])).toEqual([
+      ["src/big.ts", "partial"],
+      ["README.md", "later_page"],
+    ]);
+    expect(second.files[0].patchContinues).toBe(false);
+    expect(second.nextPatchCursor).toBe(`v1.${HEAD}.-.1.0.-`);
+  });
+
+  it("fills a page with no code content normally (docs only, or code with no patch)", async () => {
+    patches["docs/a.md"] = "+a\n";
+    patches["docs/b.md"] = "+b\n";
+    const docsOnly = await page([file("docs/a.md"), file("docs/b.md")], 1_000);
+    expect(docsOnly.files.map((f) => f.patchStatus)).toEqual(["complete", "complete"]);
+    expect(docsOnly.patchesComplete).toBe(true);
+    delete patches["src/gen.ts"];
+    const noCodePatch = await page([file("src/gen.ts", 9_000), file("docs/a.md")], 1_000);
+    expect(noCodePatch.files.map((f) => f.patchStatus)).toEqual(["unavailable", "complete"]);
+    expect(noCodePatch.nextPatchCursor).toBeNull();
   });
 
   it("pages through every patch with the cursor until nothing is left", async () => {
