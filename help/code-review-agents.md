@@ -3,7 +3,7 @@ id: code-review-agents
 title: Run GitHub code-review agents
 summary: Link a read-only review agent to a repository for pull-request checks and trusted mention workflows.
 audience: operator
-tags: [github, code-review, pull-requests, webhooks, ci, checks, waitForCi, markReadyWhenPassing, repo_issue_read, issues, acceptance-criteria, jira]
+tags: [github, code-review, pull-requests, webhooks, ci, checks, waitForCi, markReadyWhenPassing, repo_issue_read, issues, mentions, code-spans, contributor, acceptance-criteria, jira]
 appliesTo: >=0.2.1
 ---
 
@@ -39,7 +39,11 @@ such a pull request automatically, up to a round cap — see
 [Automatic review fix rounds](review-fix-rounds.md).
 
 Wardby skips pull requests whose head is in a fork. It also ignores mentions
-from bots and people without write access. Repository links require the
+from bots and people without write access, checked against the author's real
+repository permission. A private organization member, whom GitHub labels
+`CONTRIBUTOR` or `NONE`, is still checked and can start runs. A mention inside
+Markdown code (an inline code span or a code block) is not a request, so
+quoting `` `@<app-slug>` `` in an issue or comment starts nothing. Repository links require the
 agent owner's linked GitHub access, or an explicitly recorded administrator
 approval.
 

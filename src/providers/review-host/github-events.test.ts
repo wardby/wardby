@@ -138,7 +138,16 @@ describe("normalizeGitHubEvent", () => {
     });
     expect(normalizeGitHubEvent("issue_comment", comment("no mention"), APP)).toBeNull();
     expect(normalizeGitHubEvent("issue_comment", comment("email me@wardby.com"), APP)).toBeNull();
-    expect(normalizeGitHubEvent("issue_comment", comment("@wardby hi", "NONE"), APP)).toBeNull();
+    // A private org member is CONTRIBUTOR or NONE; the live permission check in core/host-events.ts decides.
+    expect(normalizeGitHubEvent("issue_comment", comment("@wardby hi", "NONE"), APP)).toMatchObject({
+      kind: "mention",
+    });
+    expect(normalizeGitHubEvent("issue_comment", comment("@wardby hi", "CONTRIBUTOR"), APP)).toMatchObject({
+      kind: "mention",
+    });
+    for (const association of ["FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "MANNEQUIN"]) {
+      expect(normalizeGitHubEvent("issue_comment", comment("@wardby hi", association), APP)).toBeNull();
+    }
     expect(normalizeGitHubEvent("issue_comment", comment("@wardby hi", "OWNER", "Bot"), APP)).toBeNull();
 
     const reviewComment = {
@@ -362,17 +371,92 @@ describe("normalizeGitHubEvent", () => {
       expect(normalizeGitHubEvent("issues", noChanges, APP)).toBeNull();
     });
 
-    it("ignores untrusted, bot, and other-user edits", () => {
+    it("routes a private org member's issue (CONTRIBUTOR or NONE) to the live permission check", () => {
+      for (const association of ["CONTRIBUTOR", "NONE"]) {
+        expect(normalizeGitHubEvent("issues", issue("opened", "J", "@wardby hi", { association }), APP)).toMatchObject({
+          kind: "mention",
+          comment: { kind: "subject" },
+        });
+        const added = issue("edited", "J", "@wardby hi", { association, changes: { body: { from: "hi" } } });
+        expect(normalizeGitHubEvent("issues", added, APP)).toMatchObject({ kind: "mention" });
+      }
+    });
+
+    it("ignores first-time, bot, and other-user edits", () => {
       expect(
-        normalizeGitHubEvent("issues", issue("opened", "J", "@wardby hi", { association: "NONE" }), APP),
-      ).toBeNull();
-      expect(
-        normalizeGitHubEvent("issues", issue("opened", "J", "@wardby hi", { association: "CONTRIBUTOR" }), APP),
+        normalizeGitHubEvent(
+          "issues",
+          issue("opened", "J", "@wardby hi", { association: "FIRST_TIME_CONTRIBUTOR" }),
+          APP,
+        ),
       ).toBeNull();
       expect(normalizeGitHubEvent("issues", issue("opened", "J", "@wardby hi", { type: "Bot" }), APP)).toBeNull();
       const bySomeoneElse = issue("edited", "J", "@wardby hi", { changes: { body: { from: "hi" } }, sender: "other" });
       expect(normalizeGitHubEvent("issues", bySomeoneElse, APP)).toBeNull();
     });
+  });
+
+  it("ignores a mention that appears only in code, in comments, issue bodies and titles", () => {
+    const comment = (body: string) => ({
+      action: "created",
+      repository,
+      issue: { number: 7 },
+      comment: { id: 4, body, author_association: "OWNER", user: { id: 1001, login: "chfields", type: "User" } },
+    });
+    expect(normalizeGitHubEvent("issue_comment", comment("a comment mentioning `@wardby` continues"), APP)).toBeNull();
+    expect(normalizeGitHubEvent("issue_comment", comment("Example:\n\n```\n@wardby fix it\n```"), APP)).toBeNull();
+    expect(normalizeGitHubEvent("issue_comment", comment("`@wardby` is the App. @wardby fix it"), APP)).toMatchObject({
+      kind: "mention",
+    });
+    const opened = (title: string, body: string) => ({
+      action: "opened",
+      repository,
+      issue: {
+        number: 12,
+        title,
+        body,
+        author_association: "MEMBER",
+        user: { id: 1001, login: "chfields", type: "User" },
+      },
+      sender: { login: "chfields", type: "User" },
+    });
+    expect(normalizeGitHubEvent("issues", opened("Docs for `@wardby`", "Say `@wardby` to start."), APP)).toBeNull();
+    // An edit that newly adds a real mention counts, though the old body quoted it in code.
+    const edited = {
+      ...opened("Docs", "@wardby please do it"),
+      action: "edited",
+      changes: { body: { from: "Say `@wardby` to start." } },
+    };
+    expect(normalizeGitHubEvent("issues", edited, APP)).toMatchObject({ kind: "mention" });
+  });
+
+  it("reports a mention the author pre-filter drops, without its body", () => {
+    const dropped: unknown[] = [];
+    const comment = (body: string, association: string, type = "User") => ({
+      action: "created",
+      repository,
+      issue: { number: 7 },
+      comment: { id: 4, body, author_association: association, user: { id: 1001, login: "someone", type } },
+    });
+    const onDropped = (d: unknown) => dropped.push(d);
+    expect(normalizeGitHubEvent("issue_comment", comment("@wardby hi", "FIRST_TIMER"), APP, onDropped)).toBeNull();
+    expect(normalizeGitHubEvent("issue_comment", comment("@wardby hi", "OWNER", "Bot"), APP, onDropped)).toBeNull();
+    // No mention, nothing to report.
+    expect(normalizeGitHubEvent("issue_comment", comment("hello", "FIRST_TIMER"), APP, onDropped)).toBeNull();
+    expect(dropped).toEqual([
+      {
+        eventName: "issue_comment",
+        repository: "chfields/knock-knock-jokes",
+        association: "FIRST_TIMER",
+        reason: "author_association",
+      },
+      {
+        eventName: "issue_comment",
+        repository: "chfields/knock-knock-jokes",
+        association: "OWNER",
+        reason: "not_a_user",
+      },
+    ]);
   });
 
   it("drops a mention whose author has no positive integer id (H5-3: permission is checked by id)", () => {

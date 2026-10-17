@@ -2,6 +2,26 @@ import { createHmac } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "#prisma";
 
+const logged = vi.hoisted(() => [] as { level: string; payload: Record<string, unknown>; message: string }[]);
+vi.mock("../../core/logger.js", () => {
+  const make = (): Record<string, unknown> => {
+    const at =
+      (level: string) =>
+      (payload: Record<string, unknown>, message?: string): void => {
+        logged.push({ level, payload, message: message ?? "" });
+      };
+    return {
+      child: () => make(),
+      trace: at("trace"),
+      debug: at("debug"),
+      info: at("info"),
+      warn: at("warn"),
+      error: at("error"),
+      fatal: at("fatal"),
+    };
+  };
+  return { logger: make() };
+});
 vi.mock("../../core/host-events.js", () => ({
   routeHostEvent: vi.fn(async () => ({ runIds: ["run1"], followUps: [vi.fn(async () => undefined)] })),
 }));
@@ -145,6 +165,43 @@ describe("handleGitHubEventIngress", () => {
     expect(result).toMatchObject({ status: 202, body: { ignored: true } });
     expect(created).toEqual([]);
     expect(hostEventDelivery.create).not.toHaveBeenCalled();
+  });
+
+  it("logs a mention the author pre-filter dropped, without its body, and claims no delivery", async () => {
+    const { deps: d, created } = deps();
+    const raw = JSON.stringify({
+      action: "created",
+      repository: { full_name: "chfields/knock-knock-jokes" },
+      issue: { number: 7 },
+      comment: {
+        id: 4,
+        body: "@wardby secret-looking request text",
+        author_association: "FIRST_TIMER",
+        user: { id: 1001, login: "someone", type: "User" },
+      },
+    });
+    logged.length = 0;
+    const result = await handleGitHubEventIngress(
+      {
+        headers: { "x-github-event": "issue_comment", "x-github-delivery": "d20", "x-hub-signature-256": sign(raw) },
+        rawBody: raw,
+      },
+      d,
+    );
+    expect(result).toMatchObject({ status: 202, body: { ignored: true } });
+    expect(created).toEqual([]);
+    const line = logged.find((l) => l.message === "mention ignored: its author did not pass the pre-filter");
+    expect(line).toMatchObject({
+      level: "info",
+      payload: {
+        eventName: "issue_comment",
+        repository: "chfields/knock-knock-jokes",
+        association: "FIRST_TIMER",
+        reason: "author_association",
+        deliveryId: "d20",
+      },
+    });
+    expect(JSON.stringify(logged)).not.toContain("secret-looking");
   });
 
   it("requires a delivery id", async () => {

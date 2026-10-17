@@ -4,10 +4,16 @@
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { normalizeGitHubRepository } from "../../coding/protocol.js";
+import { withoutMarkdownCode } from "../../core/markdown-code.js";
 import type { HostEvent } from "./types.js";
 
 const PR_ACTIONS = new Set(["opened", "synchronize", "reopened", "ready_for_review"]);
-const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+/**
+ * GitHub labels an organization member whose membership is private CONTRIBUTOR
+ * or NONE, so both pass; first-time authors and mannequins are drive-by
+ * accounts that cannot have access to a repository they never committed to.
+ */
+const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR", "NONE"]);
 const SAFE_SHA = /^[0-9a-f]{40}$/;
 // GitHub's push payload includes at most 2048 commits.
 const PUSH_MAX_COMMITS = 2048;
@@ -43,9 +49,10 @@ function repositoryOf(payload: Json): string | null {
   }
 }
 
+/** A mention of the App outside code: a mention quoted in code documents it, not requests a run. */
 function mentions(body: string, slug: string): boolean {
   const escaped = slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(^|[^\\w@.-])@${escaped}(?![\\w-])`, "i").test(body);
+  return new RegExp(`(^|[^\\w@.-])@${escaped}(?![\\w-])`, "i").test(withoutMarkdownCode(body));
 }
 
 const text = (value: unknown): string => (typeof value === "string" ? value : "");
@@ -76,30 +83,49 @@ function priorRunIdOf(pr: Json | null, slug: string): string | undefined {
   return appMarkerRunId(pr, slug);
 }
 
+/** Why a mention was dropped before routing; never carries the body. */
+export interface DroppedMention {
+  eventName: string;
+  repository: string;
+  association: string;
+  reason: "author_association" | "not_a_user";
+}
+
 /**
  * A cheap pre-filter only: author_association is not a permission (MEMBER is
  * any org member, COLLABORATOR includes read and triage). The real gate is the
  * author's live repository permission, checked by id in core/host-events.ts.
  */
-function trustedHuman(association: unknown, user: Json | null): user is Json & { login: string; id: number } {
-  return (
-    typeof association === "string" &&
-    TRUSTED_ASSOCIATIONS.has(association) &&
-    user?.type === "User" &&
-    typeof user.login === "string" &&
-    int(user.id) !== null
-  );
+function trustedHuman(
+  association: unknown,
+  user: Json | null,
+  drop: (reason: DroppedMention["reason"], association: string) => void,
+): user is Json & { login: string; id: number } {
+  const label = typeof association === "string" ? association : "missing";
+  if (typeof association !== "string" || !TRUSTED_ASSOCIATIONS.has(association)) {
+    drop("author_association", label);
+    return false;
+  }
+  if (user?.type !== "User" || typeof user.login !== "string" || int(user.id) === null) {
+    drop("not_a_user", label);
+    return false;
+  }
+  return true;
 }
 
+/** `onDropped` hears about a mention the author pre-filter dropped, so the caller can log it. */
 export function normalizeGitHubEvent(
   eventName: string,
   payload: unknown,
   app: { id: number; slug: string },
+  onDropped?: (dropped: DroppedMention) => void,
 ): HostEvent | null {
   const p = obj(payload);
   if (!p) return null;
   const repository = repositoryOf(p);
   if (!repository) return null;
+  const drop = (reason: DroppedMention["reason"], association: string) =>
+    onDropped?.({ eventName, repository, association, reason });
 
   if (eventName === "push") {
     const defaultBranch = obj(p.repository)?.default_branch;
@@ -181,8 +207,8 @@ export function normalizeGitHubEvent(
     if (!number || typeof title !== "string") return null;
     const body = text(issue?.body);
     const user = obj(issue?.user);
-    if (!trustedHuman(issue?.author_association, user)) return null;
     if (!mentions(title, app.slug) && !mentions(body, app.slug)) return null;
+    if (!trustedHuman(issue?.author_association, user, drop)) return null;
     if (p.action === "edited") {
       // Only the author's own edit, and only one that newly adds the mention — not every later edit.
       const sender = obj(p.sender);
@@ -215,7 +241,7 @@ export function normalizeGitHubEvent(
     const body = comment?.body;
     const commentId = int(comment?.id);
     if (typeof body !== "string" || !commentId || !mentions(body, app.slug)) return null;
-    if (!trustedHuman(comment?.author_association, user)) return null;
+    if (!trustedHuman(comment?.author_association, user, drop)) return null;
     const isInline = eventName === "pull_request_review_comment";
     const parent = obj(isInline ? p.pull_request : p.issue);
     const number = int(parent?.number);
