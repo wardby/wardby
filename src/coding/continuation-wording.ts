@@ -62,7 +62,7 @@ export function budgetStoppedTaskSection(request: string): string {
   const capped = truncateText(request.trim(), MAX_TASK_QUOTE_BYTES, byteLength, TASK_TRUNCATED_MARKER);
   const safe = neutraliseWrapperTags(defuseMentions(capped));
   const quoted = safe
-    .split(/\r?\n/)
+    .split(/\r\n|\r|\n/)
     .map((line) => (line.length > 0 ? `> ${line}` : ">"))
     .join("\n");
   return `### Task\n\n${quoted}`;

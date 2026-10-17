@@ -44,6 +44,19 @@ describe("budgetStoppedTaskSection", () => {
     expect(budgetStoppedTaskSection("one\n\ntwo\r\nthree")).toBe("### Task\n\n> one\n>\n> two\n> three");
   });
 
+  it("treats a bare carriage return as a line break, so nothing escapes the quote", () => {
+    expect(budgetStoppedTaskSection("a\rb")).toBe("### Task\n\n> a\n> b");
+    expect(budgetStoppedTaskSection("x\r# h")).toBe("### Task\n\n> x\n> # h");
+    expect(budgetStoppedTaskSection("a\r\nb\rc\nd")).toBe("### Task\n\n> a\n> b\n> c\n> d");
+  });
+
+  it("never splits a code point at the 4 KiB cut", () => {
+    const section = budgetStoppedTaskSection(`${"x".repeat(4094)}\u{1F600}${"y".repeat(100)}`);
+    expect(section).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+    expect(section).not.toContain("\uFFFD");
+    expect(section).toContain("[task truncated]");
+  });
+
   it("defuses mentions", () => {
     const section = budgetStoppedTaskSection("ask @someone and @team-x to look");
     expect(section).not.toMatch(/@[\w-]/);
