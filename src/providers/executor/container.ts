@@ -29,8 +29,13 @@ import {
   protectedPathFromError,
   protectedPathSentence,
 } from "../../coding/protected-path-wording.js";
-import { CONTINUATION_CLOSED_CATEGORY, CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
-import { budgetSentence } from "../../core/budget-wording.js";
+import {
+  BUDGET_STOPPED_SUMMARY_PREFIX,
+  budgetStoppedSummary,
+  CONTINUATION_CLOSED_CATEGORY,
+  CONTINUATION_CLOSED_ERROR,
+} from "../../coding/continuation-wording.js";
+import { budgetSentence, overrunSentence } from "../../core/budget-wording.js";
 import { fileSelfDefect } from "../../core/self-defects.js";
 import { isTransactionUnavailable } from "../../core/dispatch.js";
 import { CONTENDED_TX_MAX_WAIT_MS } from "../../core/timing.js";
@@ -146,6 +151,14 @@ function dependencyCacheRecord(output: CodingWorkerOutput): CodingRunRecord {
   return output.dependencyCache ? { dependencyCacheResult: output.dependencyCache } : {};
 }
 
+/** What a push records on the run: its base commit, and a pushed branch's name (a local repository). */
+function pushedRecord(finalized: Awaited<ReturnType<VcsProvider["finalizeChanges"]>>): CodingRunRecord {
+  return {
+    baseSha: finalized.baseCommit,
+    ...(finalized.outcome === "branch_pushed" ? { resultBranch: finalized.headRef } : {}),
+  };
+}
+
 /** The PR body's dependency cache line: the folders restored from a snapshot (hit or nearest). */
 function restoredDependenciesFor(output: CodingWorkerOutput): { restoredDependencies?: string[] } {
   const folders = restoredDependencyFolders(output.dependencyCache);
@@ -177,6 +190,22 @@ export function descriptionOutcomeLabel(outcome: DescriptionWriteOutcome): strin
 /** A local repository has no pull request: its runs get no description note and record no description outcome. */
 function hasPullRequestDescription(run: { repository: string }): boolean {
   return !isLocalRepository(run.repository);
+}
+
+/**
+ * A budget-stopped run's stored result names what its kept changes became
+ * (see keepStoppedChanges): the `changesPushed` detail for its status comment,
+ * or nothing when it pushed nothing.
+ */
+function storedChangesPushed(result: unknown): { changesPushed?: { pullRequestNumber?: number } } {
+  const parsed = CodingRunResultSchema.safeParse(result);
+  if (!parsed.success) return {};
+  const stored = parsed.data;
+  if (stored.outcome === "branch_pushed") return { changesPushed: {} };
+  if (stored.outcome === "pull_request_opened" || stored.outcome === "pull_request_updated") {
+    return { changesPushed: { pullRequestNumber: stored.pullRequestNumber } };
+  }
+  return {};
 }
 
 /**
@@ -249,6 +278,8 @@ export interface ContainerRunSnapshot {
   budgetUsd: number;
   /** The agent's own per-run budget; `budgetUsd` is less when its budget group had less left. */
   agentBudgetUsd?: number;
+  /** The run's budget before the agent's allowed overrun (CodingRun.budgetBaseUsd); absent for older runs. */
+  budgetBaseUsd?: number;
   budgetGroupName?: string | null;
   tokensIn: number;
   tokensOut: number;
@@ -325,6 +356,12 @@ export interface ContainerExecutionStore {
    * Packages section. Optional: without it the section lists this run's only.
    */
   pullRequestRunIds?(rootRunId: string): Promise<string[]>;
+  /**
+   * Whether wardby marked the root run's pull request ready for review
+   * (CodingRun.markedReadyAt). Optional: the fallback when the host's draft
+   * state is unknown; without it the pull request counts as a draft.
+   */
+  pullRequestMarkedReady?(rootRunId: string): Promise<boolean>;
   /**
    * Where the root run's pull request came from (see LinkedIssueSource).
    * Optional: without it continuations get no issue text.
@@ -425,6 +462,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       mergeOrder: row.codingRun.mergeOrder,
       budgetUsd: Number(row.codingRun.budgetReservedUsd),
       agentBudgetUsd: Number(row.agent.budgetUsd),
+      ...(row.codingRun.budgetBaseUsd == null ? {} : { budgetBaseUsd: Number(row.codingRun.budgetBaseUsd) }),
       budgetGroupName: row.agent.budgetGroup?.name ?? null,
       tokensIn: row.tokensIn,
       tokensOut: row.tokensOut,
@@ -464,6 +502,11 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       ...(pr.state ? { state: pr.state } : {}),
       ...(pr.mergeOrder !== undefined ? { mergeOrder: pr.mergeOrder } : {}),
     }));
+  }
+
+  async pullRequestMarkedReady(rootRunId: string): Promise<boolean> {
+    const root = await this.db.codingRun.findUnique({ where: { runId: rootRunId }, select: { markedReadyAt: true } });
+    return Boolean(root?.markedReadyAt);
   }
 
   async pullRequestDescriptionBaseline(rootRunId: string): Promise<StoredDescriptionBaseline> {
@@ -1054,7 +1097,9 @@ export class ContainerExecutor implements Executor {
     let claimId: string | null = null;
     let spendEnabled = Boolean(sessionId);
     try {
-      const prepared = this.preflight(run);
+      // A launched run resumed after a restart is checked the way recover() checks it: its cost so
+      // far may be past the limit (a reply can cost more than its hold), and it is still delivered.
+      const prepared = this.preflight(run, { launched: Boolean(handle) });
       if (!handle) {
         if (run.provisioningClaim) return;
         // No room in the cluster yet (the namespace quota): wait in the queue rather than claim a
@@ -1293,12 +1338,18 @@ export class ContainerExecutor implements Executor {
     return { version: entry.priceVersion, entry: parseStoredEntry(entry)! };
   }
 
-  private preflight(run: ContainerRunSnapshot): VcsPrepareInput {
+  /**
+   * `launched`: the run's job was already launched (it is running, or done and
+   * only its push is left). The cost check applies only before launch: one
+   * reply can cost more than its hold, so a launched run may already be past
+   * its limit, and its finished work is still delivered.
+   */
+  private preflight(run: ContainerRunSnapshot, options: { launched?: boolean } = {}): VcsPrepareInput {
     try {
       if (run.status !== "pending" && run.status !== "running") throw new Error("coding_run_status_invalid");
       if (run.agentKind !== "coding" || !run.ownerId) throw new Error("coding_run_ownership_invalid");
       this.modelTerms(run);
-      if (!Number.isFinite(run.budgetUsd) || run.budgetUsd <= 0 || run.costUsd > run.budgetUsd) {
+      if (!Number.isFinite(run.budgetUsd) || run.budgetUsd <= 0 || (!options.launched && run.costUsd > run.budgetUsd)) {
         throw new Error("coding_run_budget_invalid");
       }
       const profile = CodingProfileSchema.parse({
@@ -1351,11 +1402,15 @@ export class ContainerExecutor implements Executor {
     // "failed" and is only flipped right before a success or out-of-budget return.
     let outcome: ContinuationOutcome = "failed";
     let finishedSummary: string | undefined;
+    // Set with a success that spent past the run's base budget; says so on the host.
+    let overrun: { overrunSentence?: string } = {};
     // Set when a failed job's session relayed a model-provider failure; names it on the host.
     // Only a failed job: a transient provider error the worker retried past did not end the run.
     let providerClass: ProviderFailureClass | undefined;
     // Set when finalizeChanges refused the collected diff for touching a protected path; names it on the host.
     let protectedPath: string | undefined;
+    // Set when a run stopped at its budget still pushed its changes so far; says so on the host.
+    let changesPushed: { pullRequestNumber?: number } | undefined;
     try {
       if (jobState !== "succeeded") {
         const collected = await this.options.jobs.collect(handle).catch(() => null);
@@ -1387,17 +1442,30 @@ export class ContainerExecutor implements Executor {
       if (collected.reason !== "completed" || !collected.resultArtifact) throw new Error("coding_result_missing");
       const output = parseCodingWorkerOutputJson(collected.resultArtifact);
       if (output.runId !== run.runId) throw new Error("coding_result_run_mismatch");
-      let current = this.requireActive(await this.requireCurrent(run.runId));
-      if (current.costUsd > current.budgetUsd || output.outcome === "budget_exhausted") {
+      const current = this.requireActive(await this.requireCurrent(run.runId));
+      // Finished work is delivered even when it cost more than the run's limit (one reply
+      // can cost more than its hold); the status comment then says so (overrunDetails).
+      if (output.outcome === "budget_exhausted") {
         this.emit({ stage: "budget_cutoff", runId: run.runId, jobId: handle.id });
+        const kept = await this.keepStoppedChanges(run, handle, current, output, existingWorkspace);
         await this.recordRefusal(run.runId, sessionId);
-        await this.options.store.complete(
-          run.runId,
-          "budget_exhausted",
-          this.resultFor(output, current, "budget_exhausted"),
-          dependencyCacheRecord(output),
-        );
-        this.terminal(current, "budget_exhausted");
+        if (kept) {
+          await this.options.store.complete(run.runId, "budget_exhausted", kept.result, kept.record);
+          this.emit({ stage: kept.finalized.outcome, runId: run.runId, jobId: handle.id });
+          this.terminal(kept.current, "budget_exhausted");
+          changesPushed =
+            kept.finalized.outcome === "branch_pushed" ? {} : { pullRequestNumber: kept.finalized.pullRequestNumber };
+          finishedSummary = output.summary;
+        } else {
+          const latest = await this.requireCurrent(run.runId).catch(() => current);
+          await this.options.store.complete(
+            run.runId,
+            "budget_exhausted",
+            this.resultFor(output, latest, "budget_exhausted"),
+            dependencyCacheRecord(output),
+          );
+          this.terminal(latest, "budget_exhausted");
+        }
         outcome = "budget_exhausted";
         return;
       }
@@ -1411,79 +1479,40 @@ export class ContainerExecutor implements Executor {
         });
         this.terminal(current, "succeeded");
         outcome = "succeeded";
+        overrun = this.overrunDetails(current);
         finishedSummary = output.summary;
         return;
       }
 
-      const preparedInput = this.preflight(current);
-      const workspace = existingWorkspace ?? (await this.options.vcs.recoverWorkspace(preparedInput));
-      if (!workspace) throw new Error("coding_workspace_lost");
-      await this.options.jobs.materializeWorkspace(handle, workspace.workspacePath);
-      await normalizeCollectedLockfiles(current.provider, workspace.workspacePath);
-      current = await this.requireCurrent(run.runId);
-      if (current.costUsd > current.budgetUsd) {
-        this.emit({ stage: "budget_cutoff", runId: run.runId, jobId: handle.id });
-        await this.recordRefusal(run.runId, sessionId);
-        await this.options.store.complete(
-          run.runId,
-          "budget_exhausted",
-          this.resultFor(output, current, "budget_exhausted"),
-          dependencyCacheRecord(output),
-        );
-        this.terminal(current, "budget_exhausted");
-        outcome = "budget_exhausted";
-        return;
-      }
-      // One more (usually cached) check right before anything is pushed: access
-      // revoked while the run was working stops the push.
-      await this.authorizeRepository(current, { inFlight: true });
-      // And a run stopped while its result was collected (stop_run, a cancelled task) pushes nothing.
-      this.requireActive(await this.requireCurrent(run.runId));
-      const report = await this.pullRequestRegistryReport(current);
-      const descriptionState = await this.descriptionStateFor(current);
-      const finalized = await this.options.vcs.finalizeChanges(workspace, {
-        summary: output.summary,
-        tests: output.tests,
-        tag: output.tag,
-        ...report,
-        ...restoredDependenciesFor(output),
-        ...this.issueFor(current),
-        ...(await this.relatedFor(current)),
-        ...(descriptionState && "baseline" in descriptionState
-          ? { description: { baseline: descriptionState.baseline } }
-          : {}),
-      });
+      const pushed = await this.pushChanges(run, handle, current, output, output.summary, existingWorkspace);
+      const { finalized, workspace } = pushed;
       // An empty diff pushes nothing, so it refreshes the description the way a
       // worker no_changes does, before complete (the terminal hook reads the body).
       const description =
         finalized.outcome === "no_changes"
-          ? await this.refreshDescriptionInTime(current, output, workspace)
+          ? await this.refreshDescriptionInTime(pushed.current, output, workspace)
           : await this.recordDescription(
-              current,
-              descriptionState,
+              pushed.current,
+              pushed.descriptionState,
               finalized.outcome === "pull_request_opened" || finalized.outcome === "pull_request_updated"
                 ? finalized.description
                 : undefined,
             );
       // A pushed branch (local repository) is a successful run with no pull
       // request; its branch is recorded on the run for the operator to merge.
-      const result = this.resultFor(output, current, finalized.outcome, finalized);
+      const result = this.resultFor(output, pushed.current, finalized.outcome, finalized);
       await this.recordRefusal(run.runId, sessionId);
       await this.options.store.complete(run.runId, "succeeded", result, {
         ...dependencyCacheRecord(output),
-        baseSha: finalized.baseCommit,
-        ...(finalized.outcome === "branch_pushed" ? { resultBranch: finalized.headRef } : {}),
+        ...pushedRecord(finalized),
         ...description,
       });
-      if (
-        finalized.outcome === "pull_request_opened" ||
-        finalized.outcome === "pull_request_updated" ||
-        finalized.outcome === "branch_pushed"
-      ) {
+      if (finalized.outcome !== "no_changes") {
         this.emit({ stage: finalized.outcome, runId: run.runId, jobId: handle.id });
       }
-      this.terminal(current, "succeeded");
+      this.terminal(pushed.current, "succeeded");
       outcome = "succeeded";
+      overrun = this.overrunDetails(pushed.current);
       finishedSummary = output.summary;
     } catch (error) {
       if (error instanceof Error && error.message === "coding_run_no_longer_active") {
@@ -1512,7 +1541,9 @@ export class ContainerExecutor implements Executor {
         await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, {
           summary: finishedSummary,
           agentName: run.agentName,
+          ...(outcome === "succeeded" ? overrun : {}),
           ...(outcome === "budget_exhausted" ? { budgetSentence: await this.budgetSentence(run) } : {}),
+          ...(outcome === "budget_exhausted" && changesPushed ? { changesPushed } : {}),
           ...(outcome === "failed" && providerClass ? { providerSentence: providerSentence(providerClass) } : {}),
           ...(outcome === "failed" && protectedPath
             ? { protectedPathSentence: protectedPathSentence(protectedPath) }
@@ -1523,6 +1554,138 @@ export class ContainerExecutor implements Executor {
       this.emit({ stage: "cleanup", runId: run.runId, jobId: handle.id, cleanupSucceeded: true });
       await this.notifyTerminal(run.runId);
     }
+  }
+
+  /**
+   * Pushes a finished job's changes: copies the job's workspace into the run's,
+   * then, right before finalizeChanges pushes, checks again that the owner still
+   * has access and that the run was not stopped meanwhile. Shared by a finished
+   * run and one stopped at its budget; throws whatever stops the push.
+   */
+  private async pushChanges(
+    run: ContainerRunSnapshot,
+    handle: JobHandle,
+    collectedFor: ContainerRunSnapshot,
+    output: CodingWorkerOutput,
+    summary: string,
+    existingWorkspace: PreparedWorkspace | null | undefined,
+    options: { keepDescription?: boolean } = {},
+  ): Promise<{
+    current: ContainerRunSnapshot;
+    workspace: PreparedWorkspace;
+    finalized: Awaited<ReturnType<VcsProvider["finalizeChanges"]>>;
+    descriptionState: DescriptionState;
+  }> {
+    const preparedInput = this.preflight(collectedFor, { launched: true });
+    const workspace = existingWorkspace ?? (await this.options.vcs.recoverWorkspace(preparedInput));
+    if (!workspace) throw new Error("coding_workspace_lost");
+    await this.options.jobs.materializeWorkspace(handle, workspace.workspacePath);
+    await normalizeCollectedLockfiles(collectedFor.provider, workspace.workspacePath);
+    const current = await this.requireCurrent(run.runId);
+    // One more (usually cached) check right before anything is pushed: access
+    // revoked while the run was working stops the push.
+    await this.authorizeRepository(current, { inFlight: true });
+    // And a run stopped while its result was collected (stop_run, a cancelled task) pushes nothing.
+    this.requireActive(await this.requireCurrent(run.runId));
+    const report = await this.pullRequestRegistryReport(current);
+    // keepDescription: a continuation's existing description is left as it is (no update, no proposal).
+    const descriptionState = options.keepDescription ? null : await this.descriptionStateFor(current);
+    const finalized = await this.options.vcs.finalizeChanges(workspace, {
+      summary,
+      tests: output.tests,
+      tag: output.tag,
+      ...report,
+      ...restoredDependenciesFor(output),
+      ...this.issueFor(current),
+      ...(await this.relatedFor(current)),
+      ...(descriptionState && "baseline" in descriptionState
+        ? { description: { baseline: descriptionState.baseline } }
+        : {}),
+    });
+    return { current, workspace, finalized, descriptionState };
+  }
+
+  /**
+   * A run stopped at its budget whose worker exited cleanly keeps its changes so
+   * far: they are pushed as the usual draft (or branch), with a summary that says
+   * the work is unfinished. A fresh pull request's description starts with that
+   * summary; a continuation leaves its pull request's description alone (the
+   * status comment says the run stopped), and pushes nothing onto a pull request
+   * that is no longer a draft. Null when there was nothing to push or the push
+   * failed or was skipped for any reason: the run then ends out of budget without
+   * them. Once pushed, the pushed outcome is always returned. Throws only when the
+   * run was stopped meanwhile (the stop wrote its terminal row).
+   */
+  private async keepStoppedChanges(
+    run: ContainerRunSnapshot,
+    handle: JobHandle,
+    current: ContainerRunSnapshot,
+    output: CodingWorkerOutput,
+    existingWorkspace: PreparedWorkspace | null | undefined,
+  ): Promise<{
+    current: ContainerRunSnapshot;
+    finalized: Exclude<Awaited<ReturnType<VcsProvider["finalizeChanges"]>>, { outcome: "no_changes" }>;
+    result: CodingRunResult;
+    record: CodingRunRecord;
+  } | null> {
+    const summary = budgetStoppedSummary(output.summary);
+    const continuesPullRequest = Boolean(current.rootCodingRunId) && hasPullRequestDescription(current);
+    let pushed: Awaited<ReturnType<ContainerExecutor["pushChanges"]>>;
+    try {
+      let workspace = existingWorkspace;
+      if (continuesPullRequest) {
+        workspace ??= await this.options.vcs.recoverWorkspace(this.preflight(current, { launched: true }));
+        if (!workspace) throw new Error("coding_workspace_lost");
+        if (!(await this.continuationStillDraft(current, workspace))) {
+          containerLog.info(
+            { runId: run.runId },
+            "a run stopped at its budget pushes nothing onto a pull request that is no longer a draft",
+          );
+          return null;
+        }
+      }
+      pushed = await this.pushChanges(run, handle, current, output, summary, workspace, {
+        keepDescription: continuesPullRequest,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "coding_run_no_longer_active") throw error;
+      containerLog.warn(
+        { runId: run.runId, reason: describeFailure(error) },
+        "could not push the changes of a run stopped at its budget; it ends without them",
+      );
+      return null;
+    }
+    const { finalized } = pushed;
+    if (finalized.outcome === "no_changes") return null;
+    // Pushed: from here on the run records the pushed outcome whatever else fails.
+    const description = await this.recordDescription(
+      pushed.current,
+      pushed.descriptionState,
+      finalized.outcome === "pull_request_opened" || finalized.outcome === "pull_request_updated"
+        ? finalized.description
+        : undefined,
+    ).catch((): CodingRunRecord => ({}));
+    let result: CodingRunResult;
+    try {
+      result = this.resultFor({ ...output, summary }, pushed.current, finalized.outcome, finalized);
+    } catch (error) {
+      containerLog.warn(
+        { runId: run.runId, reason: describeFailure(error) },
+        "could not record the worker's summary and tests of a budget-stopped run; recording its push alone",
+      );
+      result = this.resultFor(
+        { ...output, summary: BUDGET_STOPPED_SUMMARY_PREFIX, tests: [], tag: undefined },
+        pushed.current,
+        finalized.outcome,
+        finalized,
+      );
+    }
+    return {
+      current: pushed.current,
+      finalized,
+      result,
+      record: { ...dependencyCacheRecord(output), ...pushedRecord(finalized), ...description },
+    };
   }
 
   /**
@@ -1621,6 +1784,24 @@ export class ContainerExecutor implements Executor {
    * run, or a store without it). Never throws: a load failure is recorded as
    * skipped:error and the push goes ahead without a description update.
    */
+  /**
+   * Whether a continuation's pull request is still a draft: the host's answer
+   * when it has one, else the root run's record of wardby marking it ready.
+   * A failed record lookup counts as not a draft (nothing unfinished is pushed).
+   */
+  private async continuationStillDraft(run: ContainerRunSnapshot, workspace: PreparedWorkspace): Promise<boolean> {
+    const draft = await this.options.vcs.continuationPullRequestDraft?.(workspace).catch(() => undefined);
+    if (draft !== undefined) return draft;
+    const store = this.options.store;
+    if (!run.rootCodingRunId || !store.pullRequestMarkedReady) return true;
+    try {
+      return !(await store.pullRequestMarkedReady(run.rootCodingRunId));
+    } catch (err) {
+      containerLog.warn({ err, runId: run.runId }, "could not read whether the pull request was marked ready");
+      return false;
+    }
+  }
+
   private async descriptionStateFor(run: ContainerRunSnapshot): Promise<DescriptionState> {
     const store = this.options.store;
     if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !store.pullRequestDescriptionBaseline) return null;
@@ -2232,7 +2413,9 @@ export class ContainerExecutor implements Executor {
       const protectedPathFailed = run.status === "failed" && run.failureCategory === PROTECTED_PATH_CATEGORY;
       await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, {
         agentName: run.agentName,
+        ...(outcome === "succeeded" ? this.overrunDetails(run) : {}),
         ...(outcome === "budget_exhausted" ? { budgetSentence: await this.budgetSentence(run) } : {}),
+        ...(outcome === "budget_exhausted" ? storedChangesPushed(run.result) : {}),
         ...(providerClass ? { providerSentence: providerSentence(providerClass) } : {}),
         ...(unreadyServices ? { serviceSentence: serviceUnreadySentence(unreadyServices) } : {}),
         ...(protectedPathFailed ? { protectedPathSentence: protectedPathSentence(null) } : {}),
@@ -2290,6 +2473,13 @@ export class ContainerExecutor implements Executor {
     };
   }
 
+  /** The overrun sentence for a finished run that spent past its base budget, as status details. */
+  private overrunDetails(run: ContainerRunSnapshot): { overrunSentence?: string } {
+    if (run.budgetBaseUsd === undefined) return {};
+    const sentence = overrunSentence(run.costUsd, run.budgetBaseUsd, run.budgetUsd);
+    return sentence ? { overrunSentence: sentence } : {};
+  }
+
   /** The host-safe sentence for a run that ran out of budget. */
   private async budgetSentence(run: ContainerRunSnapshot): Promise<string> {
     const loaded = await this.options.store.budgetEvent?.(run.runId).catch(() => null);
@@ -2297,6 +2487,7 @@ export class ContainerExecutor implements Executor {
     return budgetSentence({
       runBudgetUsd: run.budgetUsd,
       agentBudgetUsd: run.agentBudgetUsd ?? run.budgetUsd,
+      baseBudgetUsd: run.budgetBaseUsd,
       budgetGroupName: run.budgetGroupName,
     });
   }

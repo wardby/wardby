@@ -15,6 +15,8 @@
  * link on this repository. An opted-in agent outside that run tree never counts. Only
  * authorized links (authorizedVia set) count, for opting in and for review checks.
  *
+ * Work a run stopped at its budget pushed (a draft to continue) is never marked ready.
+ *
  * Never approves, merges, or converts back to draft. Never throws.
  */
 import type { PrismaClient } from "#prisma";
@@ -41,7 +43,7 @@ const CODING_RUN_SELECT = {
   rootCodingRunId: true,
   markedReadyAt: true,
   result: true,
-  run: { select: { agentId: true, parentRunId: true } },
+  run: { select: { agentId: true, parentRunId: true, status: true } },
 } as const;
 
 const passed = (c: { status: string; conclusion: string | null } | undefined): boolean =>
@@ -98,6 +100,7 @@ export async function maybeMarkReady(
     if (pullRequestOutcome(root.result)?.pullRequestNumber !== prNumber) return "not_ready";
     if (!(await optedInInRunTree(deps.db, root.run, optedIn))) return "not_ready";
     if (root.markedReadyAt) return "skipped";
+    if (await lastPushStoppedAtBudget(deps.db, root, prNumber)) return "not_ready";
 
     const checks = await host.readOwnChecks(repository, origin.headSha, [MERGE_ORDER_CHECK_NAME, ...reviewChecks]);
     if (!reviewChecks.every((name) => passed(checks.get(name)))) return "not_ready";
@@ -138,6 +141,25 @@ export async function maybeMarkReady(
     deps.log?.warn({ err, repository, prNumber }, "could not mark the pull request ready for review");
     return "failed";
   }
+}
+
+/**
+ * Whether the last run that pushed to the pull request (the root, or a later continuation of it)
+ * stopped at its budget: its pushed changes are unfinished work, so the draft stays a draft. A
+ * continuation that finished the work makes it eligible again.
+ */
+async function lastPushStoppedAtBudget(
+  db: MarkReadyDb,
+  root: { runId: string; run: { status?: string } | null },
+  prNumber: number,
+): Promise<boolean> {
+  const continuations = await db.codingRun.findMany({
+    where: { rootCodingRunId: root.runId },
+    select: { result: true, run: { select: { status: true } } },
+    orderBy: { createdAt: "desc" },
+  });
+  const last = continuations.find((c) => pullRequestOutcome(c.result)?.pullRequestNumber === prNumber) ?? root;
+  return last.run?.status === "budget_exhausted";
 }
 
 /**

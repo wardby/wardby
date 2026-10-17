@@ -53,6 +53,7 @@ function setup(
     mark: "marked" | "skipped" | Error;
     hostCheck: Record<string, unknown> | null;
     runs: Record<string, { agentId: string; parentRunId: string | null }>;
+    continuations: Array<{ result: unknown; run: { status: string } }>;
   }> = {},
 ) {
   const links = over.links ?? [BUILDER, REVIEWER];
@@ -63,6 +64,7 @@ function setup(
         over.root === undefined ? rootRow({}) : over.root,
       ),
       updateMany: vi.fn(async (_args: unknown) => ({ count: over.claimCount ?? 1 })),
+      findMany: vi.fn(async (_args: unknown) => over.continuations ?? []),
     },
     runHostCheck: {
       findUnique: vi.fn(async (_args: unknown) => (over.hostCheck === undefined ? null : over.hostCheck)),
@@ -119,6 +121,43 @@ describe("maybeMarkReady", () => {
     expect(claim.where).toEqual({ runId: "root", markedReadyAt: null });
     expect(claim.data.markedReadyAt).toBeInstanceOf(Date);
     expect(log.info).toHaveBeenCalled();
+  });
+
+  describe("work a run stopped at its budget", () => {
+    const UPDATED = { ...OPENED, outcome: "pull_request_updated" };
+
+    it("never marks a pull request whose opening run stopped at its budget", async () => {
+      const { deps, host, db } = setup({ root: rootRow({ run: { agentId: "builder", status: "budget_exhausted" } }) });
+      expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+      expect(host.markReadyForReview).not.toHaveBeenCalled();
+      expect(db.codingRun.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("never marks one whose latest pushing continuation stopped at its budget", async () => {
+      const { deps, host } = setup({
+        root: rootRow({ run: { agentId: "builder", status: "succeeded" } }),
+        continuations: [
+          { result: { outcome: "no_changes" }, run: { status: "succeeded" } },
+          { result: UPDATED, run: { status: "budget_exhausted" } },
+          { result: UPDATED, run: { status: "succeeded" } },
+        ],
+      });
+      expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+      expect(host.markReadyForReview).not.toHaveBeenCalled();
+    });
+
+    it("marks it once a later continuation finished the work", async () => {
+      const { deps, db } = setup({
+        root: rootRow({ run: { agentId: "builder", status: "budget_exhausted" } }),
+        continuations: [{ result: UPDATED, run: { status: "succeeded" } }],
+      });
+      expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+      expect(db.codingRun.findMany).toHaveBeenCalledWith({
+        where: { rootCodingRunId: "root" },
+        select: { result: true, run: { select: { status: true } } },
+        orderBy: { createdAt: "desc" },
+      });
+    });
   });
 
   it("is off with no host reads when no write link opted in", async () => {

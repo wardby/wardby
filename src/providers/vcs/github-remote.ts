@@ -1,4 +1,4 @@
-import { CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
+import { budgetStoppedChangesSentence, CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
 import { normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
 import { logger } from "../../core/logger.js";
 import { validateChangedPath } from "./git.js";
@@ -111,6 +111,24 @@ export class GitHubRemote implements GitRemote {
       }
     }
     if (!open) throw new Error(CONTINUATION_CLOSED_ERROR);
+  }
+
+  /** See VcsProvider.continuationPullRequestDraft: GitHub's draft flag on the root run's open PR. Never throws. */
+  async continuationPullRequestDraft(workspace: PreparedWorkspace): Promise<boolean | undefined> {
+    const github = this.options.github;
+    if (!workspace.continuation || !github.openPullRequestDraft) return undefined;
+    try {
+      const draft = await github.openPullRequestDraft({
+        runId: workspace.continuation.rootRunId,
+        repository: workspace.repository,
+        baseRef: workspace.baseRef,
+        headRef: workspace.headRef,
+      });
+      return draft ?? undefined;
+    } catch (error) {
+      logger.warn({ err: error, runId: workspace.runId }, "could not read the continuation pull request's draft state");
+      return undefined;
+    }
   }
 
   /** A continuation's description comment, written before the push (see GitRemote.proposeDescriptionBeforePush). Never throws. */
@@ -296,16 +314,23 @@ export class GitHubRemote implements GitRemote {
       const budgetSuffix = details?.budgetSentence ? ` ${details.budgetSentence}` : "";
       const body =
         outcome === "succeeded"
-          ? `✅ ${label} finished.${summarySuffix}`
-          : outcome === "budget_exhausted"
-            ? `❌ ${label} ran out of budget.${budgetSuffix}${summarySuffix}`
-            : details?.serviceSentence
-              ? `❌ ${label} could not start: ${details.serviceSentence}${summarySuffix}`
-              : details?.providerSentence
-                ? `❌ ${label} could not run: ${details.providerSentence}${summarySuffix}`
-                : details?.protectedPathSentence
-                  ? `❌ ${label} could not open its changes: ${details.protectedPathSentence}${summarySuffix}`
-                  : `❌ ${label} failed.${summarySuffix}`;
+          ? `✅ ${label} finished.${details?.overrunSentence ? ` ${details.overrunSentence}` : ""}${summarySuffix}`
+          : outcome === "budget_exhausted" && details?.changesPushed
+            ? `⚠️ ${label} ran out of budget before finishing.${budgetSuffix} ${budgetStoppedChangesSentence(
+                details.changesPushed.pullRequestNumber
+                  ? `#${details.changesPushed.pullRequestNumber}`
+                  : "this pull request",
+                false,
+              )}${summarySuffix}`
+            : outcome === "budget_exhausted"
+              ? `❌ ${label} ran out of budget.${budgetSuffix}${summarySuffix}`
+              : details?.serviceSentence
+                ? `❌ ${label} could not start: ${details.serviceSentence}${summarySuffix}`
+                : details?.providerSentence
+                  ? `❌ ${label} could not run: ${details.providerSentence}${summarySuffix}`
+                  : details?.protectedPathSentence
+                    ? `❌ ${label} could not open its changes: ${details.protectedPathSentence}${summarySuffix}`
+                    : `❌ ${label} failed.${summarySuffix}`;
       await Promise.allSettled([
         this.options.github.updateContinuationStatusComment({ ...identity, body }),
         this.options.github.completeContinuationCheckRun({

@@ -186,6 +186,42 @@ describe("GitHubAppClient", () => {
     expect(methods.filter((method) => method === "POST /repos/openai/example/pulls")).toHaveLength(0);
   });
 
+  it("openPullRequestDraft reads GitHub's draft flag on the root run's open marked PR", async () => {
+    const answers: unknown[][] = [
+      [
+        {
+          number: 42,
+          html_url: "https://github.com/openai/example/pull/42",
+          body: "<!-- wardby:run-1 -->",
+          draft: true,
+        },
+      ],
+      [
+        {
+          number: 42,
+          html_url: "https://github.com/openai/example/pull/42",
+          body: "<!-- wardby:run-1 -->",
+          draft: false,
+        },
+      ],
+      [],
+    ];
+    const fetchMock = vi.fn(async (input: string) => {
+      const url = String(input);
+      if (url.endsWith("/installation")) return json({ id: 42 });
+      if (url.endsWith("/access_tokens")) return tokenResponse();
+      if (url.includes("/pulls?")) return json(answers.shift());
+      if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+      throw new Error(`unexpected request ${url}`);
+    }) as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+    const input = { runId: "run-1", repository: "openai/example", baseRef: "main", headRef: "wardby/run-run-1" };
+
+    await expect(client.openPullRequestDraft(input)).resolves.toBe(true);
+    await expect(client.openPullRequestDraft(input)).resolves.toBe(false);
+    await expect(client.openPullRequestDraft(input)).resolves.toBeNull();
+  });
+
   it("creates only a draft PR with fixed metadata and recovers a duplicate-create race", async () => {
     let lookups = 0;
     let createBody: Record<string, unknown> | undefined;

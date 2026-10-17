@@ -26,7 +26,11 @@ import {
   serviceUnreadySentence,
 } from "../coding/services/wording.js";
 import { PROTECTED_PATH_CATEGORY, PROTECTED_PATH_HOST_LINE } from "../coding/protected-path-wording.js";
-import { CONTINUATION_CLOSED_CATEGORY, CONTINUATION_CLOSED_HOST_LINE } from "../coding/continuation-wording.js";
+import {
+  budgetStoppedChangesSentence,
+  CONTINUATION_CLOSED_CATEGORY,
+  CONTINUATION_CLOSED_HOST_LINE,
+} from "../coding/continuation-wording.js";
 import type { CodeReviewHost, ReviewHostProvider, ReviewHostRegistry } from "../providers/review-host/types.js";
 import { loadBudgetSentence } from "./budget-wording.js";
 import { logger } from "./logger.js";
@@ -234,13 +238,13 @@ export function outcomeBody(
     packageAudit?: { mode: PackageAuditMode; summary: PackageAuditSummary };
   } = {},
 ): string {
-  const links = pullRequests.map((pr) => {
-    const ref =
-      pr.repository.toLowerCase() === repository.toLowerCase()
-        ? `#${pr.pullRequestNumber}`
-        : `${pr.repository}#${pr.pullRequestNumber}`;
-    return pr.outcome === "pull_request_opened" ? `Opened ${ref}` : `Pushed changes to ${ref}`;
-  });
+  const refOf = (pr: PullRequestOutcome): string =>
+    pr.repository.toLowerCase() === repository.toLowerCase()
+      ? `#${pr.pullRequestNumber}`
+      : `${pr.repository}#${pr.pullRequestNumber}`;
+  const links = pullRequests.map((pr) =>
+    pr.outcome === "pull_request_opened" ? `Opened ${refOf(pr)}` : `Pushed changes to ${refOf(pr)}`,
+  );
   const partial = links.length > 0 ? `\n\n${links.join(", ")}.` : "";
   const refusals = opts.packageRefusals ?? [];
   const blocked = isBlockedByRefusals(run, {
@@ -271,7 +275,14 @@ export function outcomeBody(
   const quoted = reply ? `\n\n${quoteReply(reply)}` : "";
   if (failedChildren.length > 0) {
     // The agent itself finished, but the work it handed off did not.
-    const outOfBudget = failedChildren.filter((c) => c.status === "budget_exhausted");
+    // A sub-run stopped at its budget may still have pushed its changes so far (a draft to continue).
+    const keptBy = new Map(
+      pullRequests.filter((pr) => pr.runId !== undefined).map((pr) => [pr.runId as string, pr] as const),
+    );
+    const keptOf = (c: FailedChild): PullRequestOutcome | undefined =>
+      c.status === "budget_exhausted" ? keptBy.get(c.id) : undefined;
+    const kept = failedChildren.map(keptOf).filter((pr): pr is PullRequestOutcome => pr !== undefined);
+    const outOfBudget = failedChildren.filter((c) => c.status === "budget_exhausted" && !keptOf(c));
     const providerClassOf = (c: FailedChild) =>
       c.status === "failed" ? providerClassOfCategory(c.failureCategory) : null;
     // A coding sub-run its services stopped: refused at dispatch, or a sidecar never became ready.
@@ -303,7 +314,13 @@ export function outcomeBody(
         !protectedPathOf(c) &&
         !continuationClosedOf(c),
     );
-    const lines: string[] = [];
+    const lines: string[] = kept.map(
+      (pr) =>
+        `A sub-run ran out of budget before finishing. ${budgetStoppedChangesSentence(
+          refOf(pr),
+          pr.outcome === "pull_request_opened",
+        )}`,
+    );
     if (outOfBudget.length > 0) {
       lines.push(`A sub-run ran out of budget: ${outOfBudget.map((c) => `\`${c.id}\``).join(", ")}.`);
     }
@@ -320,7 +337,11 @@ export function outcomeBody(
     if (other.length > 0) {
       lines.push(`A sub-run did not succeed: ${other.map((c) => `\`${c.id}\` (\`${c.status}\`)`).join(", ")}.`);
     }
-    return `❌ ${lines.join(" ")}${partial}${quoted}\n\n${footer}`;
+    // The kept pull requests are named in their own lines.
+    const others = links.filter((_, i) => !kept.includes(pullRequests[i]));
+    const otherLinks = others.length > 0 ? `\n\n${others.join(", ")}.` : "";
+    const icon = kept.length === failedChildren.length ? "⚠️" : "❌";
+    return `${icon} ${lines.join(" ")}${otherLinks}${quoted}\n\n${footer}`;
   }
   const failedChecks = pullRequests.reduce((sum, pr) => sum + (pr.failedChecks ?? 0), 0);
   if (links.length > 0 && failedChecks > 0) {

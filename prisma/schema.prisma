@@ -25,6 +25,8 @@ model Agent {
   systemPrompt  String
   model         String
   budgetUsd     Decimal             @db.Decimal(10, 4)
+  /// Percent above budgetUsd a run may spend: each coding run's limit, or (on a lead agent) its run tree's ceiling for coding sub-agents; native model calls are unaffected; group caps still apply.
+  allowedOverrunPercent Int @default(0)
   createdAt     DateTime            @default(now())
   updatedAt     DateTime            @updatedAt
   runs          Run[]
@@ -511,6 +513,8 @@ model CodingRun {
   /// Claude Code's tool-runner image, resolved from the agent's toolchain at dispatch; null for Codex runs.
   toolImage             String?
   budgetReservedUsd     Decimal             @db.Decimal(10, 6)
+  /// The budget before the agent's allowed overrun; budgetReservedUsd is the enforced limit. Null on older runs.
+  budgetBaseUsd         Decimal?            @db.Decimal(10, 6)
   /// What set budgetReservedUsd below the agent's own budget at dispatch:
   /// run-tree, day, week or month. Null = the agent's own budget.
   budgetLimitedBy       String?

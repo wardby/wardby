@@ -571,6 +571,15 @@ export class GitVcsProvider implements VcsProvider {
    * delegated to the remote; a remote without one is a no-op. Wrapped so
    * this can NEVER throw or otherwise affect the real coding run.
    */
+  /** Delegated to the remote; never throws (undefined on any failure). */
+  async continuationPullRequestDraft(workspace: PreparedWorkspace): Promise<boolean | undefined> {
+    try {
+      return await this.remote.continuationPullRequestDraft?.(workspace);
+    } catch {
+      return undefined;
+    }
+  }
+
   async notifyContinuationStarted(workspace: PreparedWorkspace, details?: { agentName?: string }): Promise<void> {
     try {
       await this.remote.notifyContinuationStarted?.(workspace, details);

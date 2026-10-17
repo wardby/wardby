@@ -188,6 +188,33 @@ describe("outcomeBody", () => {
     expect(mixed).toMatch(/^❌ A sub-run ran out of budget: `c9`\. A sub-run did not succeed: `c10` \(`failed`\)\./);
   });
 
+  it("says a sub-run stopped at its budget kept its changes in a pull request it can be continued from", () => {
+    const opened = {
+      outcome: "pull_request_opened" as const,
+      repository: REPO,
+      pullRequestNumber: 42,
+      codeProvider: "github",
+      runId: "c9",
+    };
+    const body = outcomeBody(run("succeeded", "done"), REPO, [opened], [{ id: "c9", status: "budget_exhausted" }]);
+    expect(body).toBe(
+      "⚠️ A sub-run ran out of budget before finishing. The changes so far are in draft PR #42; comment `@wardby` on it to continue.\n\n> done\n\n<sub>wardby run `r1`</sub>",
+    );
+    const updated = outcomeBody(
+      run("succeeded"),
+      REPO,
+      [{ ...opened, outcome: "pull_request_updated" }],
+      [
+        { id: "c9", status: "budget_exhausted" },
+        { id: "c10", status: "failed" },
+      ],
+    );
+    expect(updated).toMatch(
+      /^❌ A sub-run ran out of budget before finishing\. The changes so far are in #42; comment `@wardby` on it to continue\. A sub-run did not succeed: `c10` \(`failed`\)\./,
+    );
+    expect(updated).not.toContain("Pushed changes to #42");
+  });
+
   it("says a sub-run could not reach the model, naming the class of provider failure but not its code", () => {
     const quota = outcomeBody(
       run("succeeded", "done"),
