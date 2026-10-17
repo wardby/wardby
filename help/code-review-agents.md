@@ -104,8 +104,10 @@ opening a second pull request. Jira issues behave the same way (see
 recorded for the issue.
 
 A pull request opened from a mention on a GitHub issue starts its description
-with `Resolves #N` for that issue (same repository), as one opened for a Jira
-issue starts with `Resolves Jira issue …`.
+with `From issue #N` for that issue (same repository), as one opened for a Jira
+issue starts with `Resolves Jira issue …`. The line links the issue but doesn't
+close it; to close it on merge, have the agent end its summary with
+`Resolves #N` (or `Refs #N` to keep it open, for example for a plan).
 
 ## CI and sibling pull requests
 

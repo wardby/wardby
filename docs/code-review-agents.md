@@ -157,10 +157,13 @@ ten open pull requests recorded for the issue, each with its own run id. A
 stopped-for-budget draft is continued this way too (see
 [Stopped for budget](coding-agent-setup.md#stopped-for-budget-the-work-so-far-is-kept)).
 A pull request opened from a mention on a GitHub issue starts its description
-with `Resolves #N` for that issue when the issue is in the same repository,
+with `From issue #N` for that issue when the issue is in the same repository,
 the same place a Jira issue's pull request has its `Resolves Jira issue …`
-line; follow-ups keep the line. GitHub closes the issue when that pull request
-is merged. The help article
+line; follow-ups keep the line. The line only links the issue: whether merging
+closes it is up to the agent. Have the delivery or builder prompt end the
+summary with `Resolves #N` to close the issue on merge, or `Refs #N` to leave
+it open (for a plan, or one ticket of an epic). A follow-up keeps whichever
+line the previous description had. The help article
 [Run GitHub code-review agents](../help/code-review-agents.md#follow-ups-on-an-issue)
 says the same in short.
 

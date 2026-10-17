@@ -20,7 +20,7 @@ function reference(issue: LinkedIssueText): string {
 function note(issue: LinkedIssueText): string {
   const closing =
     issue.kind === "github"
-      ? ` and, on its own line, \`Resolves #${issue.number}\``
+      ? ` and, unchanged, whatever line about issue #${issue.number} the previous description had (such as \`Resolves #${issue.number}\` or \`Refs #${issue.number}\`); do not add one it did not have`
       : " (wardby adds the link to the Jira issue itself)";
   return (
     `This run continues a pull request opened for ${issue.kind === "github" ? `issue #${issue.number}` : `Jira issue ${issue.key}`}. ` +
