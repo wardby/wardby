@@ -373,4 +373,19 @@ describe("pnpm and yarn help", () => {
       expect(ids).toContain("errors/budget-exhausted");
     }
   });
+
+  it("finds the budget-stopped draft articles", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const query of ["budget stopped draft", "continue draft issue", "skipped review"]) {
+      const ids = searchHelp(catalog, query)
+        .slice(0, 3)
+        .map((result) => result.page.id);
+      expect(
+        ids.some((id) => id === "errors/budget-exhausted" || id === "code-review-agents"),
+        query,
+      ).toBe(true);
+    }
+  });
 });

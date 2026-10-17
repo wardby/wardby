@@ -89,6 +89,8 @@ export interface FinalizeChangesDetails {
   restoredDependencies?: readonly string[];
   /** Originating issue (control-plane data): named in the PR title and body. Provider-neutral. */
   issue?: { key: string; url?: string; trackerName?: string };
+  /** The same-repository issue the run came from (a mention on a GitHub issue): the body's `Resolves #N` line. */
+  issueNumber?: number;
   /** The request's other pull requests (control-plane rows): the PR body's Related pull requests section. */
   related?: RelatedPullRequestsInput;
   /** Fix rounds: the control plane's record of the description wardby last wrote; enables the description update. */

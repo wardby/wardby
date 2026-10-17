@@ -243,4 +243,8 @@ export interface IssueEvent {
 export const ISSUE_KEY = /^[A-Z][A-Z0-9_]{0,254}-[1-9]\d{0,9}$/;
 /** A Jira project key. */
 export const PROJECT_KEY = /^[A-Z][A-Z0-9_]{0,254}$/;
-export const projectOf = (issueKey: string): string => issueKey.slice(0, issueKey.lastIndexOf("-"));
+/** An issue key's project: a Jira key's project key ("PROJ-123" → "PROJ"); a GitHub issue key's repository ("owner/repo#5" → "owner/repo"). */
+export const projectOf = (issueKey: string): string => {
+  const hash = issueKey.lastIndexOf("#");
+  return issueKey.slice(0, hash >= 0 ? hash : issueKey.lastIndexOf("-"));
+};

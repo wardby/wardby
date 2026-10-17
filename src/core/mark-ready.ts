@@ -21,6 +21,7 @@
  */
 import type { PrismaClient } from "#prisma";
 import type { ReviewHostRegistry } from "../providers/review-host/types.js";
+import { lastPusher } from "./budget-stopped-head.js";
 import { pullRequestOutcome } from "./host-status.js";
 import type { Logger } from "./logger.js";
 import { MERGE_ORDER_CHECK_NAME } from "./merge-order-check.js";
@@ -150,16 +151,10 @@ export async function maybeMarkReady(
  */
 async function lastPushStoppedAtBudget(
   db: MarkReadyDb,
-  root: { runId: string; run: { status?: string } | null },
+  root: { runId: string; result: unknown; run: { status?: string } | null },
   prNumber: number,
 ): Promise<boolean> {
-  const continuations = await db.codingRun.findMany({
-    where: { rootCodingRunId: root.runId },
-    select: { result: true, run: { select: { status: true } } },
-    orderBy: { createdAt: "desc" },
-  });
-  const last = continuations.find((c) => pullRequestOutcome(c.result)?.pullRequestNumber === prNumber) ?? root;
-  return last.run?.status === "budget_exhausted";
+  return (await lastPusher(db, root, prNumber)).status === "budget_exhausted";
 }
 
 /**

@@ -479,6 +479,34 @@ export interface OpenSibling {
   openedByRunId: string;
 }
 
+const HINT_REPOSITORY = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+
+/**
+ * The continuation hint for a ticket (a GitHub or Jira issue) that already has
+ * open wardby pull requests: one sentence per pull request (up to
+ * MAX_SIBLING_HINTS), then SIBLING_GUIDANCE once, as paragraphs. Built from
+ * stored rows only, with the run id, repository and number re-validated and the
+ * link built here, never taken from issue text. Empty when nothing is hintable.
+ */
+export function openPullRequestHints(prs: readonly OpenSibling[]): string {
+  const lines = prs
+    .filter(
+      (p) =>
+        SAFE_RUN_ID.test(p.openedByRunId) &&
+        HINT_REPOSITORY.test(p.repository) &&
+        Number.isSafeInteger(p.number) &&
+        p.number > 0,
+    )
+    .slice(0, MAX_SIBLING_HINTS)
+    .map(
+      (p) =>
+        `This issue already has an open pull request wardby opened: ${p.repository}#${p.number} ` +
+        `(https://github.com/${p.repository}/pull/${p.number}). ` +
+        `To revise it, delegate with continuePriorRun set to exactly "${p.openedByRunId}".`,
+    );
+  return lines.length > 0 ? [...lines, SIBLING_GUIDANCE].join("\n\n") : "";
+}
+
 /**
  * The group's pull requests a follow-up may continue: stored state "open", or
  * no stored state yet (a same-tree sibling not recorded for an issue), minus

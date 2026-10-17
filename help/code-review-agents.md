@@ -3,7 +3,7 @@ id: code-review-agents
 title: Run GitHub code-review agents
 summary: Link a read-only review agent to a repository for pull-request checks and trusted mention workflows.
 audience: operator
-tags: [github, code-review, pull-requests, webhooks, ci, checks, waitForCi, markReadyWhenPassing, repo_issue_read, issues, mentions, code-spans, contributor, acceptance-criteria, jira]
+tags: [github, code-review, skipped-review, budget-stopped-draft, continue-draft, follow-up, pull-requests, webhooks, ci, checks, waitForCi, markReadyWhenPassing, repo_issue_read, issues, mentions, code-spans, contributor, acceptance-criteria, jira]
 appliesTo: >=0.2.1
 ---
 
@@ -59,6 +59,29 @@ link set up for it, CI on the pushed head still running (see [Review after
 CI (`waitForCi`)](#review-after-ci-waitforci) below). Either can delay the
 check that reports the review's result; neither changes what the review
 itself reports once it runs.
+
+## Drafts stopped at their budget
+
+From Wardby 0.6.1, a pull request that is still a draft, whose latest commit
+came from a coding run that stopped at its budget, is not reviewed automatically. Its check
+completes as neutral, "Skipped: stopped at its budget", and no automatic fix
+round follows. Marking the pull request ready for review or pushing a new
+commit starts a normal review, and so does re-running the check or a review
+mention. The `budget-exhausted` error article describes how a stopped run keeps
+its work.
+
+## Follow-ups on an issue
+
+From Wardby 0.6.1, a mention on a GitHub issue that already has an open pull request Wardby
+opened tells the agent that pull request and the run id to pass as
+`continuePriorRun`, so the work continues on the same branch instead of
+opening a second pull request. Jira issues behave the same way (see
+[Run Jira agents](jira.md)). The run message lists up to ten open pull requests
+recorded for the issue.
+
+A pull request opened from a mention on a GitHub issue starts its description
+with `Resolves #N` for that issue (same repository), as one opened for a Jira
+issue starts with `Resolves Jira issue …`.
 
 ## CI and sibling pull requests
 

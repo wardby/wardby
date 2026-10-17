@@ -19,6 +19,9 @@ A run is attributed to an issue when:
   for the issue — including a review that starts while the agent that asked
   for the pull request is still running, before the pull request is linked to
   the issue (Wardby then uses the issue of the coding run that opened it);
+- it reviews, or answers a mention on, a pull request opened from a GitHub
+  issue: it is attributed to a work item with provider `github` and key
+  `owner/repo#N`;
 - `trigger_agent` named an `issue`, or a webhook call's JSON body named a
   `wardbyIssue`, as `{ "provider": "jira", "key": "PROJ-123" }`, in a project
   the agent is linked to. Keys are matched without regard to case
