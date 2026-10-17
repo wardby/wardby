@@ -78,6 +78,7 @@ the branch moves (`patch_cursor_stale`): call again without it.
 delivered nor read at `headSha`; `COMMENT` is always allowed, so a reviewer
 that cannot read everything should publish `COMMENT` and name what it skipped.
 The shipped reviewer prompt does this; see the [full guide](../docs/code-review-agents.md#large-pull-requests).
+The refusal applies to `control-plane` agents, not yet to `sandbox` mode.
 
 ## Drafts stopped at their budget
 

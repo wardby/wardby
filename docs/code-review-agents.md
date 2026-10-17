@@ -950,9 +950,13 @@ drops a review already being held.
 From Wardby 0.6.1, `repo_pr_read` returns a large pull request's diff in pages.
 All changed files share one character budget per call (`maxPatchChars`,
 default 60,000, at most 200,000). Source, test and configuration files get it
-first, then documentation under the repository root's `docs/`, `doc/` or
-`help/`, lockfiles, generated, vendored and fixture files, and documents and
-images. Patches are split on line boundaries, and a file that does not fit on
+first. Everything else follows: the repository root's `docs/`, `doc/` and
+`help/` folders; lockfiles; anything under a `generated/`, `__generated__/`,
+`dist/`, `vendor/`, `fixtures/`, `__fixtures__/`, `__snapshots__/` or
+`testdata/` folder at any depth; minified `.min.js` and `.min.css` files; and
+documents and images (`.md`, `.mdx`, `.rst`, `.adoc`, `.txt`, `.snap`, `.svg`,
+`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.ico`, `.pdf`, `.lock`).
+`requirements*.txt` and `CMakeLists.txt` count as code. Patches are split on line boundaries, and a file that does not fit on
 the page after other content moves to the next page. Each file has a
 `patchStatus`: `complete`, `partial`, `later_page`, `earlier_page`,
 `unavailable` (the host has no patch, for example a very large file; read it
@@ -975,9 +979,20 @@ cursor returns `patch_cursor_malformed`.
 `repo_read_file` at the head (one read of the path at the head counts).
 Removed files, documentation, lockfiles, generated files and fixtures are not
 gated, `COMMENT` is always allowed, and the refusal changes nothing, so the
-agent can read the files and publish again. A run that never read the head's
-file list (a resumed run, for example) is not gated. A reviewer that cannot
-read everything should publish `COMMENT` and name the files it did not review.
+agent can read the files and publish again. A file read in parts counts only
+when its parts join up from the start of its patch to its last part. The guard
+is per run attempt: a head is gated only when the attempt itself read its first
+page (a `repo_pr_read` without `patchCursor`), so an attempt resumed after a
+restart is not refused for pages an earlier attempt read. A reviewer that
+cannot read everything should publish `COMMENT` and name the files it did not
+review.
+
+The `unread_files` refusal applies to agents in `control-plane` mode. It does
+not yet apply to agents in `sandbox` mode (see
+[Native agent sandbox](native-sandbox.md)): their `repo_pr_read` pages the same
+way, but `repo_publish_review` does not check what the run has read, so the
+reviewer prompt's paging step is what keeps a sandboxed reviewer from judging
+code it never saw.
 Reviewer prompts written before 0.6.1 still work, because the refusal tells
 the agent what to do; update them with the paging step from the shipped
 reviewer prompt.
@@ -1164,6 +1179,8 @@ agent's links. Failures are always a JSON result, never a thrown error:
 | `host_api_error`                | The request to GitHub failed (body-free: `github_api_error:<status>[:<request-id>]`).                                                                                                                                                                      |
 | `ci_failing`                    | `repo_publish_review` called with verdict `APPROVE`, on a `waitForCi` link's own check, while CI on the head is failing. See [Review after CI](#review-after-ci-waitforci) above.                                                                          |
 | `ci_pending`                    | Same, but CI on the head is still running.                                                                                                                                                                                                                 |
+| `patch_cursor_stale`            | `repo_pr_read` with a `patchCursor` issued for another head or compare (the pull request moved on). Call again without `patchCursor`.                                                                                                                      |
+| `patch_cursor_malformed`        | `repo_pr_read` with a `patchCursor` it never issued (damaged, edited or over-long). Pass `nextPatchCursor` exactly as returned.                                                                                                                            |
 | `unread_files`                  | `repo_publish_review` with `APPROVE` or `CHANGES_REQUESTED` while a source, test or config file of the head was listed by `repo_pr_read` but never fully read (all pages via `patchCursor`, or `repo_read_file` at `headSha`). `COMMENT` is never refused. |
 
 `repo_publish_review` also returns
