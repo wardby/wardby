@@ -6,7 +6,7 @@
  */
 import type { Prisma, PrismaClient } from "#prisma";
 import { logger } from "./logger.js";
-import { groupName } from "./budget-wording.js";
+import { groupName, overrunPercent } from "./budget-wording.js";
 
 const log = logger.child({ module: "budget-events" });
 
@@ -73,9 +73,14 @@ function proxyFacts(details: ProxyRefusalDetails, subject: string): string {
   const held = details.heldReservedUsd + details.heldUncertainUsd;
   const left = Math.max(0, details.budgetUsd - details.spentUsd - held);
   const heldPart = held > 0 ? `, ${usd(held)} held by requests in flight` : "";
+  const percent = overrunPercent(details.baseBudgetUsd, details.budgetUsd);
+  const budget =
+    percent !== null && details.baseBudgetUsd !== undefined
+      ? `${usd(details.baseBudgetUsd)} budget and its ${percent}% allowed overrun (${usd(details.budgetUsd)} in all)`
+      : `${usd(details.budgetUsd)} budget`;
   return (
     `${subject} needed a ${usd(details.refusedHoldUsd)} hold, but only ${usd(left)} of this run's ` +
-    `${usd(details.budgetUsd)} budget was left (${usd(details.spentUsd)} spent${heldPart}).`
+    `${budget} was left (${usd(details.spentUsd)} spent${heldPart}).`
   );
 }
 
@@ -104,7 +109,7 @@ export function ownerBudgetSentence(event: BudgetEventView, agentName: string): 
   }
   const first = `Stopped before turn ${details.turn}: ${proxyFacts(details, "the next request")}`;
   if (limit === "run") {
-    const overran = details.baseBudgetUsd !== undefined && details.baseBudgetUsd < details.budgetUsd;
+    const overran = overrunPercent(details.baseBudgetUsd, details.budgetUsd) !== null;
     return `${first} To continue, raise ${overran ? "budgetUsd or allowedOverrunPercent" : "budgetUsd"} on ${agentName}.`;
   }
   if (limit === "run-tree") {

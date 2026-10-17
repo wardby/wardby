@@ -124,6 +124,12 @@ describe("budgetSentence with an allowed overrun", () => {
     );
   });
 
+  it("treats an overrun that rounds to 0% as none", () => {
+    expect(budgetSentence({ runBudgetUsd: 1.001, baseBudgetUsd: 1, agentBudgetUsd: 1 })).toBe(
+      "Out of budget: this run's $1.00 budget was used up.",
+    );
+  });
+
   it("keeps today's sentence without a base or when base equals the limit", () => {
     const today = "Out of budget: this run's $1.00 budget was used up.";
     expect(budgetSentence({ runBudgetUsd: 1, agentBudgetUsd: 1 })).toBe(today);

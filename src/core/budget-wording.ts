@@ -28,6 +28,13 @@ export function groupName(name: string | null | undefined): string | null {
   return cleaned || null;
 }
 
+/** The allowed overrun as a whole percent, or null when the run had none (no base, or it rounds to 0%). */
+export function overrunPercent(baseUsd: number | null | undefined, limitUsd: number): number | null {
+  if (baseUsd == null || !(baseUsd > 0) || !(baseUsd < limitUsd)) return null;
+  const percent = Math.round((limitUsd / baseUsd - 1) * 100);
+  return percent > 0 ? percent : null;
+}
+
 export function budgetSentence(facts: BudgetFacts): string {
   const group = groupName(facts.budgetGroupName);
   if (facts.refused) {
@@ -38,8 +45,8 @@ export function budgetSentence(facts: BudgetFacts): string {
   }
   const runBudget = facts.runBudgetUsd ?? facts.agentBudgetUsd;
   const base = facts.baseBudgetUsd;
-  if (base != null && base > 0 && base < runBudget) {
-    const percent = Math.round((runBudget / base - 1) * 100);
+  const percent = overrunPercent(base, runBudget);
+  if (base != null && percent !== null) {
     return `Out of budget: this run's ${usd(base)} budget and its ${percent}% allowed overrun (${usd(runBudget)} in all) were used up.`;
   }
   const used = `Out of budget: this run's ${usd(runBudget)} budget was used up`;
