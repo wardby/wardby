@@ -3,7 +3,7 @@ id: errors/budget-exhausted
 title: Run stopped out of budget (budget_exhausted)
 summary: A coding run stopped because its next model request did not fit what was left of its budget; get_run's budgetEvents says which limit and why.
 audience: operator
-tags: [error, budget, budget_exhausted, coding_budget_exhausted, holds, prompt-cache, overrun, allowedOverrunPercent]
+tags: [error, budget, budget_exhausted, coding_budget_exhausted, overrun, allowedOverrunPercent, draft]
 appliesTo: ">=0.6.1"
 ---
 
@@ -102,9 +102,17 @@ far are pushed as the usual draft pull request (or added to the one it was
 continuing). A new pull request's description starts "Stopped at its budget
 before finishing; the changes so far are in this draft." A continuation leaves
 the existing description alone. The run stays `budget_exhausted` and
-keeps its `budgetEvents`. A comment mentioning the App on that pull request
-continues the work with a fresh budget. The pull request is not marked ready
-automatically until a later continuation finishes.
+keeps its `budgetEvents`. A comment mentioning the App on that pull request,
+or on the issue it came from, continues the work with a fresh budget. The pull
+request is not marked ready automatically until a later continuation finishes.
+
+A new pull request's description has a `### Task` section quoting the request
+that started the run (capped at 4 KiB, mentions defused), so a continuation
+knows what the draft was for. While the draft's latest commit is the stopped
+run's push, the automatic review is skipped with a neutral check, "Skipped:
+stopped at its budget", and no fix round starts. Marking the pull request ready
+or pushing a new commit gets a normal review. See
+[Run GitHub code-review agents](../code-review-agents.md#drafts-stopped-at-their-budget).
 
 If a push check refuses (protected paths, diff limits, access) or there are no
 changes, the run ends as above with nothing pushed. So does a continuation of a

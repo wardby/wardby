@@ -38,6 +38,10 @@ Some runs do not post `run_failed` at all:
 - a review verdict or failure from a coding agent acting as the reviewer, and
 - runs started from the `wardby run` CLI command.
 
+`pr_opened` and `pr_closed` also post for a pull request opened from a GitHub
+issue mention, the same as for a Jira issue: GitHub issues record the pull
+requests opened for them, and the thread is one per pull request.
+
 A pull request linked to several issues posts `pr_opened` and `pr_closed`
 only to the first linked issue's thread.
 

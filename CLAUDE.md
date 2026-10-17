@@ -192,3 +192,15 @@ must be evaluated for **both** documentation surfaces before it is done:
 Plans and specs must include this as a task, not an afterthought. The PR
 description states what was added to each surface, or why a surface needs
 nothing. Both surfaces follow "Public docs are for operators" above.
+
+## Common interfaces for like systems — STRICT
+
+When wardby supports several systems that play the same role — issue sources
+(GitHub issues, Jira), code hosts, coding agents (Codex, Claude Code), deploy
+targets — they share one interface and one behaviour; provider-specific code
+sits behind it. Before adding behaviour for one provider, check whether a like
+provider already does the same thing: extend or extract the shared path rather
+than writing a parallel one, and bring the other providers to the same
+behaviour in the same change (or open an issue for each one left behind, and
+say so in the PR). User-facing wording for the same event is shared too. Plans
+and reviews check for this.

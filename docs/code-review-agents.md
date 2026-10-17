@@ -31,6 +31,15 @@ Once an agent is linked to a repository with the `pull_request` trigger:
   runs. When the cause is budget, the check says so ("Review could not run:
   out of budget") and names the budget that was used up; use **Re-run** after
   raising the budget or once it resets.
+- A pull request that is still a **draft**, whose latest commit was pushed by a
+  coding run that stopped at its budget, is not reviewed automatically: the
+  check completes as `neutral` with the title "Skipped: stopped at its
+  budget". This is deliberate and is not the dispatch failure above: a draft
+  is not merged, and the review would only repeat findings the continuation
+  addresses. Marking the pull request ready for review or pushing a new
+  commit starts a normal review, and so does re-running the check or a
+  review mention. See
+  [Stopped for budget](coding-agent-setup.md#stopped-for-budget-the-work-so-far-is-kept).
 - On a later review, the agent sees its own unresolved inline threads and
   can **resolve the ones the new head fixes**, so fixed findings collapse on
   the PR page. Only threads that agent started are resolved; people's
@@ -115,6 +124,20 @@ that holds its owner's tools, secrets, and write access. GitHub's
 it would admit any organization member, or a read-only collaborator. Mentions
 by bots, and mentions from anyone without write access, are ignored silently
 (no run, no reaction).
+
+### Follow-ups on an issue
+
+If a mention lands on a GitHub **issue** that already has an open pull request
+wardby opened, the run message includes that pull request and the exact run id
+to pass as `continuePriorRun`, so the agent pushes to the same branch instead
+of opening a second pull request. This is the same behaviour, and the same
+sentence, as [follow-ups on a Jira issue](jira-agents.md): GitHub
+and Jira issues record the pull requests opened for them alike. The message
+lists up to ten open pull requests recorded for the issue, each with its own
+run id. A stopped-for-budget draft is continued this way too (see
+[Stopped for budget](coding-agent-setup.md#stopped-for-budget-the-work-so-far-is-kept)).
+The help article [Run GitHub code-review agents](../help/code-review-agents.md#follow-ups-on-an-issue)
+says the same in short.
 
 ### What the mention agent receives
 
@@ -216,6 +239,10 @@ one per repository) lets wardby fix its own review's findings automatically,
 without waiting for a human to ask. `reviewFixMaxRounds` (an integer from 1
 to 10, default 2) caps how many rounds a single pull request gets before
 wardby stops; re-linking without it resets the cap back to the default.
+
+No round follows a review that was skipped because the draft stopped at its
+budget (neutral, "Skipped: stopped at its budget"); a round needs a
+`CHANGES_REQUESTED` review.
 
 A round starts when wardby's own review check on a pull request finishes as
 `CHANGES_REQUESTED`, and all of the following still hold:
