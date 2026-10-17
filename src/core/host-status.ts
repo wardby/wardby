@@ -534,6 +534,7 @@ async function recordGitHubIssuePullRequests(
           url: pr.pullRequestUrl,
           agentId: run.agentId,
           openedByRunId: pr.runId,
+          outcome: pr.outcome,
         })),
     );
   } catch (err) {

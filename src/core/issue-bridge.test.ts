@@ -3,6 +3,7 @@ import { setWorkflowEventSink, type WorkflowEventInput } from "./workflow-events
 import { Prisma } from "#prisma";
 import { projectOf, type IssueTracker } from "../providers/issue-tracker/types.js";
 import {
+  continuedForAnotherIssue,
   githubIssueKey,
   handlePullRequestClosed,
   recordIssuePullRequests,
@@ -78,6 +79,7 @@ describe("handlePullRequestClosed", () => {
     await handlePullRequestClosed(d as never, { jira: t }, closed(true));
     expect(d.issuePullRequest.findMany).toHaveBeenCalledWith({
       where: { codeProvider: "github", repository: REPO, number: 12, state: "open" },
+      orderBy: { createdAt: "asc" },
     });
     expect(d.issuePullRequest.updateMany).toHaveBeenCalledWith({
       where: { id: "ipr-1", state: "open" },
@@ -369,6 +371,7 @@ describe("recordIssuePullRequests", () => {
     url: `https://github.com/${REPO}/pull/${n}`,
     agentId: "a1",
     openedByRunId: `r-code-${n}`,
+    outcome: "pull_request_opened" as const,
   });
   const issue = { provider: "github", key: `${REPO}#5` };
 
@@ -479,5 +482,107 @@ describe("workflow events", () => {
       onPullRequestOpened: null,
     });
     expect(events.map((e) => (e.payload as { movedTo: string | null }).movedTo)).toEqual([null, null]);
+  });
+
+  const githubPr = (n: number, outcome: BridgedPullRequest["outcome"] = "pull_request_opened") => ({
+    codeProvider: "github",
+    repository: REPO,
+    number: n,
+    url: `https://github.com/${REPO}/pull/${n}`,
+    agentId: "a-lead",
+    openedByRunId: `r-code-${n}`,
+    outcome,
+  });
+  const githubIssue = { provider: "github", key: `${REPO}#5` };
+
+  it("a GitHub issue's pair gets pr_opened when its row is created, then pr_closed on merge", async () => {
+    const store = pairStore();
+    await recordIssuePullRequests(store as never, githubIssue, [githubPr(12), githubPr(13, "pull_request_updated")]);
+    expect(events).toEqual([
+      {
+        dedupeKey: `pr_opened:github:${REPO}#12`,
+        runId: "r-code-12",
+        agentId: "a-lead",
+        workItem: { provider: "github", key: `${REPO}#5` },
+        pullRequest: { codeProvider: "github", repository: REPO, number: 12 },
+        payload: {
+          kind: "pr_opened",
+          prLabel: `${REPO}#12`,
+          prUrl: `https://github.com/${REPO}/pull/12`,
+          movedTo: null,
+        },
+      },
+    ]);
+    const row = { ...store.rows[0], id: "ipr-g" };
+    await handlePullRequestClosed(db([row]) as never, undefined, closed(true));
+    expect(events[1]).toEqual({
+      dedupeKey: `pr_closed:github:${REPO}#12`,
+      agentId: "a-lead",
+      workItem: { provider: "github", key: `${REPO}#5` },
+      pullRequest: { codeProvider: "github", repository: REPO, number: 12 },
+      payload: { kind: "pr_closed", prLabel: `${REPO}#12`, prUrl: row.url, merged: true, movedTo: null },
+    });
+  });
+
+  it("a second completion of a GitHub issue's run emits no duplicate pr_opened", async () => {
+    const store = pairStore();
+    await recordIssuePullRequests(store as never, githubIssue, [githubPr(12)]);
+    await recordIssuePullRequests(store as never, githubIssue, [githubPr(12)]);
+    expect(events.map((e) => e.payload.kind)).toEqual(["pr_opened"]);
+  });
+});
+
+describe("continuedForAnotherIssue", () => {
+  function store(roots: Record<string, string | null>, recorded: Array<{ openedByRunId: string; issue: string }>) {
+    return {
+      codingRun: {
+        findMany: vi.fn(async ({ where }: { where: { runId: { in: string[] } } }) =>
+          where.runId.in.map((runId) => {
+            const root = roots[runId] ?? null;
+            const jira = root?.startsWith("jira:") ? root.slice(5) : null;
+            return {
+              runId,
+              rootCodingRunId: root && !jira ? root : jira ? `root-of-${runId}` : null,
+              rootCodingRun: jira
+                ? { issueProvider: "jira", issueKey: jira }
+                : root
+                  ? { issueProvider: null, issueKey: null }
+                  : null,
+            };
+          }),
+        ),
+      },
+      issuePullRequest: {
+        findMany: vi.fn(async ({ where }: { where: { openedByRunId: { in: string[] } } }) =>
+          recorded
+            .filter((r) => where.openedByRunId.in.includes(r.openedByRunId))
+            .map((r) => {
+              const [issueProvider, issueKey] = r.issue.split("|");
+              return { openedByRunId: r.openedByRunId, issueProvider, issueKey };
+            }),
+        ),
+      },
+    };
+  }
+  const here = { provider: "github", key: `${REPO}#5` };
+
+  it("a continuation whose root was opened for another tracked issue is foreign (unchanged)", async () => {
+    const d = store({ c1: "jira:PROJ-7" }, []);
+    expect(await continuedForAnotherIssue(d as never, ["c1"], here)).toEqual(new Set(["c1"]));
+    expect(await continuedForAnotherIssue(d as never, ["c1"], { provider: "jira", key: "PROJ-7" })).toEqual(new Set());
+  });
+
+  it("a continuation whose root opened a pull request recorded for a different issue, any provider, is foreign", async () => {
+    const d = store({ c1: "opener-1", c2: "opener-2", c3: "opener-3", c4: null }, [
+      { openedByRunId: "opener-1", issue: `github|${REPO}#9` },
+      { openedByRunId: "opener-2", issue: `github|${REPO}#5` },
+      { openedByRunId: "opener-4", issue: `github|${REPO}#9` },
+    ]);
+    // c1 continues another GitHub issue's PR; c2 this issue's; c3 an unrecorded PR; c4 opened its own.
+    expect(await continuedForAnotherIssue(d as never, ["c1", "c2", "c3", "c4"], here)).toEqual(new Set(["c1"]));
+    // A Jira issue's run continuing a GitHub issue's pull request.
+    expect(await continuedForAnotherIssue(d as never, ["c1", "c2"], { provider: "jira", key: "PROJ-7" })).toEqual(
+      new Set(["c1", "c2"]),
+    );
   });
 });

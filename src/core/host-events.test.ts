@@ -684,6 +684,7 @@ describe("routeHostEvent pr_closed", () => {
     expect(result).toEqual({ runIds: [], followUps: [] });
     expect(findMany).toHaveBeenCalledWith({
       where: { codeProvider: "github", repository: REPO, number: 7, state: "open" },
+      orderBy: { createdAt: "asc" },
     });
     expect((d.db as any).agentRepository.findMany).not.toHaveBeenCalled();
     expect(dispatchRun).not.toHaveBeenCalled();
@@ -702,6 +703,7 @@ describe("routeHostEvent pr_closed", () => {
     await expect(routeHostEvent(closed, d)).resolves.toEqual({ runIds: [], followUps: [] });
     expect(findMany).toHaveBeenCalledWith({
       where: { codeProvider: "github", repository: REPO, number: 7, state: "open" },
+      orderBy: { createdAt: "asc" },
     });
   });
 });
