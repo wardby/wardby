@@ -15,7 +15,14 @@ sources:
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
-  affects: ["src/env.ts", "src/core/http-runtime.ts", "src/providers/executor/composition.ts", "src/cli.ts", "src/coding-proxy/main.ts"]
+  affects:
+    [
+      "src/env.ts",
+      "src/core/http-runtime.ts",
+      "src/providers/executor/composition.ts",
+      "src/cli.ts",
+      "src/coding-proxy/main.ts",
+    ]
   citations:
     - id: compatibility
       repo: github:wardby/wardby

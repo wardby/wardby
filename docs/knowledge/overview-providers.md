@@ -17,7 +17,24 @@ sources:
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
-  affects: ["src/providers/index.ts", "src/providers/llm/**", "src/providers/auth/**", "src/providers/storage/**", "src/providers/vcs/**", "src/providers/executor/**", "src/providers/jobs/**", "src/providers/datastore/**", "src/providers/memory/**", "src/providers/engine/**", "src/providers/secrets/**", "src/providers/email/**", "src/providers/review-host/**", "src/providers/issue-tracker/**", "src/providers/chat/**"]
+  affects:
+    [
+      "src/providers/index.ts",
+      "src/providers/llm/**",
+      "src/providers/auth/**",
+      "src/providers/storage/**",
+      "src/providers/vcs/**",
+      "src/providers/executor/**",
+      "src/providers/jobs/**",
+      "src/providers/datastore/**",
+      "src/providers/memory/**",
+      "src/providers/engine/**",
+      "src/providers/secrets/**",
+      "src/providers/email/**",
+      "src/providers/review-host/**",
+      "src/providers/issue-tracker/**",
+      "src/providers/chat/**",
+    ]
   citations:
     - id: registry
       repo: github:wardby/wardby
