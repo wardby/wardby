@@ -78,6 +78,19 @@ describe("KubernetesNativeWorkerLauncher", () => {
     expect(ensureAwake).toHaveBeenCalledWith("gateway", { timeoutMs: 420_000, runId: "run_k1" });
   });
 
+  it("creates nothing for a run that ended during the wake (stillWanted false)", async () => {
+    const ensureAwake = vi.fn(async () => {});
+    const made = setup({ power: { enabled: true, ensureAwake } as unknown as Power });
+    const stillWanted = vi.fn(async () => false);
+    await expect(made.launcher.launch(input, { stillWanted })).rejects.toThrow("native_sandbox_launch_abandoned");
+    expect(stillWanted).toHaveBeenCalledTimes(1);
+    expect([...made.api.objects.keys()].filter((k) => /^(secret|pod|networkpolicy)\//.test(k))).toEqual([]);
+
+    const live = setup({ power: { enabled: true, ensureAwake } as unknown as Power });
+    await live.launcher.launch(input, { stillWanted: async () => true });
+    expect(exists(live.api, "pod", names.pod)).toBe(true);
+  });
+
   it("never calls power when it is disabled", async () => {
     const ensureAwake = vi.fn(async () => {});
     const { launcher } = setup({ power: { enabled: false, ensureAwake } as unknown as Power });

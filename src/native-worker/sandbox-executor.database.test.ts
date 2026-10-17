@@ -9,6 +9,8 @@ import { identityCipher, memoryDatastore, MODEL, noMemory, script, scriptedModel
 import type { WorkerHandle } from "./launch.js";
 import type { WorkerInput } from "./protocol.js";
 import { NativeSandboxExecutor, type ManagedWorkerLauncher } from "./sandbox-executor.js";
+import { reconcileOnce } from "../core/reconciler.js";
+import { HEARTBEAT_TIMEOUT_MS } from "../core/timing.js";
 import { PrismaGatewayLedger } from "./ledger.js";
 import { PooledWorkerLauncher, type WarmWorkerLauncher } from "./warm-pool.js";
 import { PrismaWarmPoolLedger } from "./warm-pool-ledger.js";
@@ -95,6 +97,70 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
     const session = await db.nativeGatewaySession.findUniqueOrThrow({ where: { runId: run.id } });
     expect(session.status).toBe("active");
     expect(JSON.stringify(session)).not.toContain(fake.launched[0].gateway!.capability);
+  });
+
+  // A cold launch (a low-power gateway wake, then a sandbox node scale-up) can take minutes, with no
+  // worker pod for recovery to find; the run must not be reaped as orphaned meanwhile.
+  it("keeps a slowly launching run's heartbeat fresh, so the reconciler leaves it alone", async () => {
+    const fake = fakeLauncher();
+    let finishLaunch!: () => void;
+    const launchGate = new Promise<void>((resolve) => (finishLaunch = resolve));
+    const slow: ManagedWorkerLauncher = {
+      ...fake.launcher,
+      launch: async (input, options) => {
+        await launchGate;
+        expect(await options?.stillWanted?.()).toBe(true);
+        return fake.launcher.launch(input, options);
+      },
+    };
+    const run = await sandboxRun();
+    const executor = new NativeSandboxExecutor({ db, providers, launcher: slow, gatewayUrl, heartbeatIntervalMs: 5 });
+    const started = executor.start(run.id);
+    await vi.waitFor(async () => expect((await row(run.id)).heartbeatAt).not.toBeNull());
+
+    // Long after the run started, but its heartbeat is fresh: nothing to recover, nothing lost.
+    const recover = vi.spyOn(executor, "recover");
+    const lateBy = HEARTBEAT_TIMEOUT_MS + 60_000;
+    await db.run.update({ where: { id: run.id }, data: { startedAt: new Date(Date.now() - lateBy) } });
+    expect(await reconcileOnce(db, new Date(), HEARTBEAT_TIMEOUT_MS, executor)).toBe(0);
+    expect(recover).not.toHaveBeenCalledWith(expect.objectContaining({ runId: run.id }));
+    expect((await row(run.id)).status).toBe("running");
+
+    finishLaunch();
+    await started;
+    expect(fake.launched).toHaveLength(1);
+    // Beats stop with the launch: the worker's progress and recovery take over.
+    const beat = (await row(run.id)).heartbeatAt;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect((await row(run.id)).heartbeatAt).toEqual(beat);
+  });
+
+  it("tells the launcher a run stopped mid-launch is no longer wanted", async () => {
+    const fake = fakeLauncher();
+    let wanted: boolean | undefined;
+    let finishLaunch!: () => void;
+    const launchGate = new Promise<void>((resolve) => (finishLaunch = resolve));
+    const slow: ManagedWorkerLauncher = {
+      ...fake.launcher,
+      launch: async (input, options) => {
+        await launchGate;
+        wanted = await options?.stillWanted?.();
+        if (!wanted) throw new Error("native_sandbox_launch_abandoned: test");
+        return fake.launcher.launch(input, options);
+      },
+    };
+    const run = await sandboxRun();
+    const executor = executorWith(slow);
+    const started = executor.start(run.id).catch((err: unknown) => err);
+    await vi.waitFor(async () =>
+      expect(await db.nativeGatewaySession.findUnique({ where: { runId: run.id } })).not.toBeNull(),
+    );
+    await executor.stop(run.id, "requested");
+    finishLaunch();
+    expect(await started).toBeInstanceOf(Error);
+    expect(wanted).toBe(false);
+    expect(fake.launched).toHaveLength(0);
+    expect((await row(run.id)).status).toBe("cancelled");
   });
 
   it("never launches a second worker for a run started twice, one after the other or at once", async () => {

@@ -378,6 +378,22 @@ sandboxing runtime: with this platform the server refuses to start unless
 two minutes to come up, so raise `NATIVE_SANDBOX_READY_TIMEOUT_MS` (for example
 to `600000`).
 
+A run's worker launch (in low-power mode, the gateway wake first, then the pod
+start and the isolation probe) can take several minutes on cold nodes. The
+control plane keeps the run's heartbeat fresh for the whole launch, so the run
+shows as running and the reconciler does not reap it as orphaned. The launch
+is bounded by its own limits instead: the gateway wake
+([`low_power_wake_timeout`](../help/errors/low-power-wake-timeout.md)),
+`NATIVE_SANDBOX_READY_TIMEOUT_MS`
+([`native_sandbox_worker_unready`](../help/errors/native-sandbox-worker-unready.md))
+and the isolation probe
+([`native_sandbox_network_unenforced`](../help/errors/native-sandbox-network-unenforced.md)).
+If the run is stopped during the launch, no worker pod is created
+([`native_sandbox_launch_abandoned`](../help/errors/native-sandbox-launch-abandoned.md)).
+If the control-plane process running the launch exits partway, the run is
+reported [`native_sandbox_worker_lost`](../help/errors/native-sandbox-worker-lost.md)
+and is not relaunched.
+
 ### Capacity
 
 `NATIVE_SANDBOX_MAX_CONCURRENT` caps how many sandbox runs may be active at

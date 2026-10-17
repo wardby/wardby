@@ -20,9 +20,20 @@ export interface WorkerHandle {
   kill(): void;
 }
 
+export interface WorkerLaunchOptions {
+  /**
+   * Asked after any slow wait (a low-power wake) and before a worker is created: false means the
+   * run ended meanwhile, and the launch stops with NATIVE_SANDBOX_LAUNCH_ABANDONED, creating nothing.
+   */
+  stillWanted?: () => Promise<boolean>;
+}
+
+/** The run ended while its worker was launching, so none was created. */
+export const NATIVE_SANDBOX_LAUNCH_ABANDONED = "native_sandbox_launch_abandoned";
+
 /** Starts a worker for an HTTP-gateway input and returns at once. */
 export interface DetachedWorkerLauncher {
-  launch(input: WorkerInput): Promise<WorkerHandle>;
+  launch(input: WorkerInput, options?: WorkerLaunchOptions): Promise<WorkerHandle>;
   /**
    * False when the worker's network isolation only takes effect after it starts (a Kubernetes
    * NetworkPolicy): its session is then created not ready, and the launcher marks it ready once
@@ -60,6 +71,7 @@ export async function startSandboxRun(options: {
   db: RunnerDb & ConstructorParameters<typeof PrismaGatewayLedger>[0];
   gatewayUrl: string;
   launcher: DetachedWorkerLauncher;
+  stillWanted?: () => Promise<boolean>;
 }): Promise<StartSandboxRunOutcome> {
   const session = await createSandboxSession({
     runId: options.runId,
@@ -70,6 +82,9 @@ export async function startSandboxRun(options: {
     networkReady: options.launcher.networkReadyAtLaunch !== false,
   });
   if (session.kind === "ended") return session;
-  const handle = await options.launcher.launch(session.input);
+  const handle = await options.launcher.launch(
+    session.input,
+    options.stillWanted ? { stillWanted: options.stillWanted } : undefined,
+  );
   return { kind: "launched", sessionId: session.sessionId, handle };
 }
