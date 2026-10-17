@@ -3,3 +3,5 @@
 - 2026-10-15: Created the bundle index; added invariants for transactional agent authorization, delegation admission slots, transactional schedule claims, and first-writer terminal run state.
 
 - 2026-10-15: Added the coverage map, retaining existing MCP and core coverage; completed MCP and config discovery, added schema-boundary, HTTP prompt-discovery, task-cancellation and secret-entry replica contracts, and re-anchored three moved delegation citations. Later uncovered areas remain for the next coverage run.
+
+- 2026-10-16: Completed coverage discovery for areas 4–11; added descriptor-bound file reads, proxy settlement projections, warm input publication, blob absence semantics, nullable tool uniqueness, viewer notification isolation, and import rename-target contracts. Re-anchored eight moved citations across delegation admission, schedule claims, terminal run state, and transactional authorization; existing claims remain current.
