@@ -2026,8 +2026,16 @@ describe("a draft whose last push stopped at its budget", () => {
     { agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" },
     { agentId: "a2", triggers: ["pull_request"], checkName: "security" },
   ];
-  const stoppedRoot = {
+  interface RootRow {
+    runId: string;
+    repository: string;
+    rootCodingRunId: null;
+    result: unknown;
+    run: { status: string };
+  }
+  const stoppedRoot: RootRow = {
     runId: "coder",
+    repository: REPO,
     rootCodingRunId: null,
     result: {
       outcome: "pull_request_opened",
@@ -2038,9 +2046,7 @@ describe("a draft whose last push stopped at its budget", () => {
     },
     run: { status: "budget_exhausted" },
   };
-  function setup(
-    opts: { draft?: boolean; links?: Parameters<typeof deps>[0]; head?: string; root?: typeof stoppedRoot } = {},
-  ) {
+  function setup(opts: { draft?: boolean; links?: Parameters<typeof deps>[0]; head?: string; root?: RootRow } = {}) {
     vi.mocked(dispatchRun).mockClear();
     txStub.runHostCheck.create.mockClear();
     const h = host();
@@ -2060,16 +2066,23 @@ describe("a draft whose last push stopped at its budget", () => {
         ({ headSha: SHA, state: "passing", checks: [], truncated: false, statusesUnavailable: false }) as never,
     );
     const d = deps(opts.links ?? reviewers, h);
-    const root = opts.root ?? stoppedRoot;
+    // Mutable, so a test can finish the run between deliveries.
+    const current = { root: opts.root ?? stoppedRoot };
     Object.assign(d.db, {
       codingRun: {
         findUnique: vi.fn(async ({ where }: { where: { runId: string } }) =>
-          where.runId === root.runId ? root : null,
+          where.runId === current.root.runId ? current.root : null,
         ),
         findMany: vi.fn(async () => []),
+        findFirst: vi.fn(async () => null),
       },
     });
-    return { d, h };
+    const db = d.db as unknown as {
+      deferredReview: Record<string, ReturnType<typeof vi.fn>>;
+      runHostCheck: Record<string, unknown>;
+      run: Record<string, ReturnType<typeof vi.fn>>;
+    };
+    return { d, h, db, current };
   }
   const expectSkipped = (h: CodeReviewHost, names: string[]) => {
     expect(dispatchRun).not.toHaveBeenCalled();
@@ -2113,18 +2126,133 @@ describe("a draft whose last push stopped at its budget", () => {
     await expect(routeHostEvent(pr, d)).resolves.toEqual({ runIds: ["run-a1", "run-a2"], followUps: [] });
   });
 
-  it("skips the re-review after CI finished", async () => {
-    const { d, h } = setup({ links: [reviewers[0]] });
+  const ciEvent: HostEvent = {
+    kind: "ci_completed",
+    provider: "github",
+    repository: REPO,
+    headSha: SHA,
+    prNumbers: [7],
+  };
+  const commentedWhileCiPending = (d: ReturnType<typeof setup>["d"]) => {
+    const updateMany = vi.fn(async () => ({ count: 1 }));
     Object.assign((d.db as unknown as { runHostCheck: object }).runHostCheck, {
       findMany: vi.fn(async () => [
         { runId: "r1", verdict: "COMMENT", ciPendingAtReview: true, ciRereviewAt: null, run: { agentId: "a1" } },
       ]),
-      updateMany: vi.fn(async () => ({ count: 1 })),
+      updateMany,
     });
-    const ci: HostEvent = { kind: "ci_completed", provider: "github", repository: REPO, headSha: SHA, prNumbers: [7] };
-    const result = await routeHostEvent(ci, d);
+    return updateMany;
+  };
+
+  it("skips the re-review after CI finished, without claiming it", async () => {
+    const { d, h } = setup({ links: [reviewers[0]] });
+    const claim = commentedWhileCiPending(d);
+    const result = await routeHostEvent(ciEvent, d);
     expect(result.runIds).toEqual([]);
     expectSkipped(h, ["wardby review"]);
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it("leaves the earlier review standing on the CI re-review: no check, no run, nothing claimed", async () => {
+    const { d, h } = setup({ links: [reviewers[0]] });
+    const claim = commentedWhileCiPending(d);
+    d.reviewLookup.mockResolvedValue({ runId: "r1" });
+    const result = await routeHostEvent(ciEvent, d);
+    expect(result.runIds).toEqual([]);
+    expect(dispatchRun).not.toHaveBeenCalled();
+    expect(h.startCheck).not.toHaveBeenCalled();
+    expect(h.completeCheck).not.toHaveBeenCalled();
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it("holds the CI re-review, unclaimed, while the pull request's coding run is still running", async () => {
+    const { d, h } = setup({
+      links: [reviewers[0]],
+      root: { ...stoppedRoot, result: null, run: { status: "running" } },
+    });
+    const claim = commentedWhileCiPending(d);
+    const result = await routeHostEvent(ciEvent, d);
+    expect(result.runIds).toEqual([]);
+    expect(dispatchRun).not.toHaveBeenCalled();
+    expect(h.startCheck).not.toHaveBeenCalled();
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  describe("a push that arrives while the run that pushed it is still running", () => {
+    const running = { ...stoppedRoot, result: null, run: { status: "running" } };
+    const row = {
+      id: "d1",
+      provider: "github",
+      repository: REPO,
+      prNumber: 7,
+      headSha: SHA,
+      agentId: "a1",
+      checkName: "wardby review",
+    };
+    const held = async () => {
+      const ctx = setup({ links: [reviewers[0]], root: running });
+      await expect(routeHostEvent(pr, ctx.d)).resolves.toEqual({ runIds: [], followUps: [] });
+      return ctx;
+    };
+
+    it("defers the review until that run finishes, reviewing nothing yet", async () => {
+      const { h, db } = await held();
+      expect(dispatchRun).not.toHaveBeenCalled();
+      expect(h.startCheck).not.toHaveBeenCalled();
+      expect(db.deferredReview.createMany).toHaveBeenCalledWith({
+        data: [
+          {
+            provider: "github",
+            repository: REPO,
+            prNumber: 7,
+            headSha: SHA,
+            agentId: "a1",
+            checkName: "wardby review",
+            reason: "request",
+            leadRunId: "coder",
+          },
+        ],
+        skipDuplicates: true,
+      });
+    });
+
+    it("skips it with a neutral check once the run stopped at its budget", async () => {
+      const { d, h, db, current } = await held();
+      current.root = stoppedRoot;
+      db.deferredReview.findMany.mockResolvedValueOnce([row]);
+      await startDeferredForRequest(d, "coder");
+      expect(db.deferredReview.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { leadRunId: "coder", reason: "request" } }),
+      );
+      expectSkipped(h, ["wardby review"]);
+    });
+
+    it("reviews it once the run succeeded", async () => {
+      const { d, h, db, current } = await held();
+      current.root = { ...stoppedRoot, run: { status: "succeeded" } };
+      db.deferredReview.findMany.mockResolvedValueOnce([row]);
+      await startDeferredForRequest(d, "coder");
+      expect(dispatchRun).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(dispatchRun).mock.calls[0][0]).toMatchObject({ agentId: "a1" });
+      expect(h.completeCheck).not.toHaveBeenCalled();
+    });
+
+    it("holds a deferred review that comes due while a continuation is still running", async () => {
+      const { d, h, db } = setup({ links: [{ ...reviewers[0], waitForCi: true }] });
+      (d.db as unknown as { codingRun: { findFirst: ReturnType<typeof vi.fn> } }).codingRun.findFirst.mockResolvedValue(
+        { runId: "cont" },
+      );
+      db.runHostCheck.findMany = vi.fn(async () => []);
+      db.deferredReview.findMany.mockResolvedValueOnce([row]);
+      await expect(routeHostEvent(ciEvent, d)).resolves.toMatchObject({ runIds: [] });
+      expect(db.deferredReview.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ["d1"] } },
+        data: { reason: "request", leadRunId: "cont" },
+      });
+      expect(db.deferredReview.deleteMany).not.toHaveBeenCalled();
+      expect(dispatchRun).not.toHaveBeenCalled();
+      expect(h.startCheck).not.toHaveBeenCalled();
+    });
   });
 
   it("skips a deferred review when it starts", async () => {

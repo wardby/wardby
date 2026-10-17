@@ -38,28 +38,67 @@ export async function lastPusher(
   return { status: last.run?.status, commitSha: commitShaOf(last.result) };
 }
 
+const ROOT_SELECT = {
+  runId: true,
+  repository: true,
+  rootCodingRunId: true,
+  result: true,
+  run: { select: { status: true } },
+} as const;
+
+/** The marker run's root coding run (rootCodingRunId, else itself), only when it is in `repository`. */
+async function markerRoot(db: BudgetStoppedHeadDb, markerRunId: string, repository: string) {
+  const marked = await db.codingRun.findUnique({ where: { runId: markerRunId }, select: ROOT_SELECT });
+  if (!marked) return null;
+  const root = marked.rootCodingRunId
+    ? await db.codingRun.findUnique({ where: { runId: marked.rootCodingRunId }, select: ROOT_SELECT })
+    : marked;
+  return root && root.repository.toLowerCase() === repository.toLowerCase() ? root : null;
+}
+
 /**
  * True when the pull request's head is the push of a run that stopped at its budget: the marker
- * run resolves (through rootCodingRunId) to a root coding run recorded as this pull request, and
- * its last pusher stopped at its budget with `headSha` as its commit. Any lookup failure is
- * false, so the pull request is reviewed as usual.
+ * run resolves (through rootCodingRunId) to a root coding run in `repository` recorded as this
+ * pull request, and its last pusher stopped at its budget with `headSha` as its commit. Any
+ * lookup failure is false, so the pull request is reviewed as usual.
  */
 export async function headStoppedAtBudget(
   db: BudgetStoppedHeadDb,
-  input: { markerRunId: string | null | undefined; prNumber: number; headSha: string },
+  input: { markerRunId: string | null | undefined; repository: string; prNumber: number; headSha: string },
 ): Promise<boolean> {
   try {
     if (!input.markerRunId) return false;
-    const select = { runId: true, rootCodingRunId: true, result: true, run: { select: { status: true } } } as const;
-    const marked = await db.codingRun.findUnique({ where: { runId: input.markerRunId }, select });
-    if (!marked) return false;
-    const root = marked.rootCodingRunId
-      ? await db.codingRun.findUnique({ where: { runId: marked.rootCodingRunId }, select })
-      : marked;
+    const root = await markerRoot(db, input.markerRunId, input.repository);
     if (!root || pullRequestOutcome(root.result)?.pullRequestNumber !== input.prNumber) return false;
     const last = await lastPusher(db, root, input.prNumber);
     return last.status === "budget_exhausted" && last.commitSha === input.headSha;
   } catch {
     return false;
   }
+}
+
+/** Run statuses of a coding run that may still push (its result is not recorded yet). */
+const IN_FLIGHT = ["pending", "running"] as const;
+
+/**
+ * The coding run that may be pushing to the pull request right now: the marker's root coding
+ * run (in `repository`) while it is pending or running, else its newest continuation that is.
+ * Its result, and so whether it stopped at its budget, is recorded only after its push lands,
+ * so a review of the head waits for it. Null when none is in flight or the marker resolves to
+ * nothing.
+ */
+export async function pushingRunInFlight(
+  db: BudgetStoppedHeadDb,
+  input: { markerRunId: string | null | undefined; repository: string },
+): Promise<string | null> {
+  if (!input.markerRunId) return null;
+  const root = await markerRoot(db, input.markerRunId, input.repository);
+  if (!root) return null;
+  if (root.run && (IN_FLIGHT as readonly string[]).includes(root.run.status)) return root.runId;
+  const continuation = await db.codingRun.findFirst({
+    where: { rootCodingRunId: root.runId, run: { status: { in: [...IN_FLIGHT] } } },
+    select: { runId: true },
+    orderBy: { createdAt: "desc" },
+  });
+  return continuation?.runId ?? null;
 }

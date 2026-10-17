@@ -55,7 +55,7 @@ describe("budgetStoppedTaskSection", () => {
     expect(section).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
     expect(section).not.toContain("\uFFFD");
     expect(section).toContain("[task truncated]");
-    expect(section.split("\n>\n> [task truncated]")[0]!.endsWith("x")).toBe(true);
+    expect(section.split("\n>\n> [task truncated]")[0].endsWith("x")).toBe(true);
   });
 
   it("defuses mentions", () => {
