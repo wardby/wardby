@@ -8,7 +8,11 @@ import { Cron } from "croner";
 export interface DueCheckInput {
   schedule: string;
   timezone: string;
-  /** Start of the most recent window this agent already fired for, or null if never. */
+  /**
+   * Start of the most recent window this agent already fired for, or the
+   * moment its schedule was set (see scheduleStartFields); null only for a
+   * schedule set before that was recorded.
+   */
   lastScheduledAt: Date | null;
   now: Date;
 }
@@ -40,6 +44,34 @@ export function dueWindow(input: DueCheckInput): Date | null {
     return null;
   }
   return mostRecent;
+}
+
+export interface ScheduleState {
+  schedule: string | null;
+  timezone: string;
+  scheduleEnabled: boolean;
+}
+
+/**
+ * The `lastScheduledAt` to write with a schedule change. Setting, changing
+ * (expression or timezone) or re-enabling a schedule records `now`, so the
+ * schedule first fires at its next window after that, never for one that
+ * passed before it existed or while it was off. Saving the schedule it
+ * already has records nothing, keeping its firing history. `before` is null
+ * for a new agent.
+ */
+export function scheduleStartFields(
+  before: ScheduleState | null,
+  after: ScheduleState,
+  now: Date,
+): { lastScheduledAt: Date } | Record<string, never> {
+  if (!after.schedule || !after.scheduleEnabled) return {};
+  const unchanged =
+    before !== null &&
+    before.scheduleEnabled &&
+    before.schedule === after.schedule &&
+    before.timezone === after.timezone;
+  return unchanged ? {} : { lastScheduledAt: now };
 }
 
 export function isDue(input: DueCheckInput): boolean {

@@ -69,7 +69,7 @@ import { buildIssueTrackers } from "./providers/issue-tracker/index.js";
 import { buildChatProviders } from "./providers/chat/index.js";
 import { buildReviewHosts } from "./providers/review-host/index.js";
 import { createRepoAccessGate } from "./core/repo-access.js";
-import { validateCronExpression } from "./core/cron.js";
+import { scheduleStartFields, validateCronExpression } from "./core/cron.js";
 import { assertAgentModelAvailable } from "./core/run-pricing.js";
 import { markRunFailedFromExecutorError } from "./core/dispatch.js";
 import { startScheduler } from "./core/scheduler.js";
@@ -590,9 +590,10 @@ async function agentSchedule(args: string[]): Promise<void> {
     fail(`invalid --cron/--timezone: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  const next = { schedule, timezone, scheduleEnabled: true };
   await prisma.agent.update({
     where: { name: name },
-    data: { schedule, timezone, scheduleEnabled: true },
+    data: { ...next, ...scheduleStartFields(agent, next, new Date()) },
   });
   console.log(`schedule set for "${name}": "${schedule}" (${timezone}).`);
 }

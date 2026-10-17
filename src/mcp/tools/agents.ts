@@ -34,7 +34,7 @@ import {
 import { assertAgentModelAvailable } from "../../core/run-pricing.js";
 import { ModelUnavailableError } from "../../providers/llm/catalog-types.js";
 import { currentModelCatalog } from "../../providers/llm/catalog-store.js";
-import { validateCronExpression } from "../../core/cron.js";
+import { scheduleStartFields, validateCronExpression } from "../../core/cron.js";
 import { modelSupportedEfforts } from "../../providers/llm/routing.js";
 import { PROJECT_KEY } from "../../providers/issue-tracker/types.js";
 import { LLM_EFFORT_LEVELS, isLlmEffort } from "../../providers/llm/types.js";
@@ -653,6 +653,15 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       const agent = await ctx.db.agent.create({
         data: {
           ...agentData,
+          ...scheduleStartFields(
+            null,
+            {
+              schedule: agentData.schedule ?? null,
+              timezone: agentData.timezone ?? "UTC",
+              scheduleEnabled: agentData.scheduleEnabled ?? true,
+            },
+            new Date(),
+          ),
           ownerId: ctx.principal.id,
           ...(codingProfile && authorization
             ? { codingProfile: { create: { ...codingProfile, ...profileStamp(authorization) } } }
@@ -989,10 +998,16 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
               : existing.codingProfile
                 ? { update: { ...nextProfile!, ...stamp, ...trace } }
                 : { create: { ...nextProfile!, ...stamp, ...trace } };
+          const scheduleStart = scheduleStartFields(
+            existing,
+            { schedule: nextSchedule, timezone: nextTimezone, scheduleEnabled: nextScheduleEnabled },
+            new Date(),
+          );
           return tx.agent.update({
             where: { id },
             data: {
               ...updates,
+              ...scheduleStart,
               ...(profileMutation ? { codingProfile: profileMutation } : {}),
             },
             include: { codingProfile: true },
