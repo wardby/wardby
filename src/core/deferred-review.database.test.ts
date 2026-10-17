@@ -126,6 +126,8 @@ describe.skipIf(!process.env.DATABASE_URL)("request deferrals (database)", () =>
   let ci = "pending";
   /** PR number → the Wardby marker run id its body carries (absent: a human PR). */
   const markers = new Map<number, string>();
+  /** PR numbers that are drafts. */
+  const drafts = new Set<number>();
 
   const host = {
     provider: "github",
@@ -136,6 +138,7 @@ describe.skipIf(!process.env.DATABASE_URL)("request deferrals (database)", () =>
       state: "open",
       labels: [],
       ...(markers.has(prNumber) ? { markerRunId: markers.get(prNumber) } : {}),
+      ...(drafts.has(prNumber) ? { draft: true } : {}),
     })),
     readCi: vi.fn(async () => ({ headSha: SHA, state: ci, checks: [], truncated: false, statusesUnavailable: false })),
     startCheck: vi.fn(async () => ({ checkId: "1" })),
@@ -252,6 +255,40 @@ describe.skipIf(!process.env.DATABASE_URL)("request deferrals (database)", () =>
       { agentId: waiter, reason: "request", leadRunId: lead },
     ]);
     await expect(requestLeadRunId(db, id("defer-coder"))).resolves.toBe(lead);
+  });
+
+  it("holds a follow-up's push to a draft on the follow-up's lead, not its coding run, and starts it when the lead finishes", async () => {
+    // An earlier request opened the draft and finished; a new request's lead delegated a
+    // continuation that is still running when its push arrives.
+    await run(id("draft-lead"), "succeeded");
+    await run(id("draft-coder"), "succeeded", id("draft-lead"));
+    await coding(id("draft-coder"));
+    markers.set(20, id("draft-coder"));
+    drafts.add(20);
+    const followUpLead = id("follow-up-lead");
+    const followUpCoder = id("follow-up-coder");
+    await run(followUpLead, "running");
+    await run(followUpCoder, "running", followUpLead);
+    await coding(followUpCoder, id("draft-coder"));
+    ci = "passing";
+
+    await expect(routeHostEvent(pushed(20), deps)).resolves.toEqual({ runIds: [], followUps: [] });
+    expect(await rowsFor(20)).toEqual([
+      { agentId: plain, reason: "request", leadRunId: followUpLead },
+      { agentId: waiter, reason: "request", leadRunId: followUpLead },
+    ]);
+
+    // The continuation finishing (its terminal hook) starts nothing: the lead is still working.
+    await finish(followUpCoder, "succeeded");
+    await startDeferredForRequest(deps, followUpCoder);
+    expect(dispatchRun).not.toHaveBeenCalled();
+    expect(await rowsFor(20)).toHaveLength(2);
+
+    // The lead finishing (its finalizer, outside every workflow step) starts both reviews.
+    await finish(followUpLead, "succeeded");
+    await startDeferredForRequest(deps, followUpLead);
+    expect(dispatchedAgents()).toEqual([plain, waiter].sort());
+    expect(await rowsFor(20)).toEqual([]);
   });
 
   it("resolves a continuation run to the tree root through its root coding run", async () => {

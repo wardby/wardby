@@ -855,6 +855,12 @@ yet.
   again: the request that opened it has already finished. A push that
   continues the pull request inside the same, still-running request is held
   like the first one.
+- From Wardby 0.6.1, a push to a pull request that is still a **draft** is
+  held while the coding run that pushed it may still be pushing (its result
+  is not recorded yet), so a run that stopped at its budget is never
+  reviewed mid-way. When that coding run was delegated by a lead that is
+  still running, as for a follow-up request, the review is held until that
+  lead finishes, the same as for the first request.
 - As with the CI fallback below, a hold here does not depend on the
   instance that started it still running when the lead run finishes:
   Wardby's reconciliation sweep reconsiders every review held for at least

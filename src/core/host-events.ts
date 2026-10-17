@@ -690,7 +690,7 @@ async function budgetDraftDecision(
     const origin = await read();
     if (origin.draft !== true || !origin.markerRunId) return review;
     const runId = await pushingRunInFlight(deps.db, { markerRunId: origin.markerRunId, repository });
-    if (runId) return { kind: "wait", runId };
+    if (runId) return { kind: "wait", runId: await pushingRunHold(deps.db, runId) };
     const stopped = await headStoppedAtBudget(deps.db, {
       markerRunId: origin.markerRunId,
       repository,
@@ -1197,6 +1197,27 @@ export async function requestLeadRunId(
 const RUN_NOT_FINISHED = new Set(["pending", "running"]);
 
 /**
+ * The run a draft's review waits for while its coding run `pushingRunId` may still be pushing:
+ * that run's top-level lead while the lead is pending or running, else the coding run itself.
+ * A follow-up's lead is not the one requestLeadRunId finds (that walks up from the pull
+ * request's opening run), yet the review should still wait for the whole request (#259); and
+ * the lead's finalizer releases it outside every workflow step, where the coding run's own
+ * terminal hook, inside the lead's delegation step, could not start a review run.
+ */
+async function pushingRunHold(db: Pick<HostEventDb, "$queryRaw">, pushingRunId: string): Promise<string> {
+  // UNION, not UNION ALL: a parentRunId cycle (never written, but not a constraint) can't recurse forever.
+  const rows = await db.$queryRaw<Array<{ id: string; status: string }>>`
+    WITH RECURSIVE up AS (
+      SELECT r."id", r."parentRunId", r."status"::text AS "status" FROM "Run" r WHERE r."id" = ${pushingRunId}
+      UNION
+      SELECT p."id", p."parentRunId", p."status"::text FROM "Run" p JOIN up u ON p."id" = u."parentRunId"
+    )
+    SELECT u."id", u."status" FROM up u WHERE u."parentRunId" IS NULL LIMIT 1`;
+  const root = rows[0];
+  return root && root.id !== pushingRunId && RUN_NOT_FINISHED.has(root.status) ? root.id : pushingRunId;
+}
+
+/**
  * pr_updated for a pull request a delegated coding run opened, while the
  * request's lead run is still running: records one DeferredReview row per
  * reviewer (reason "request", with or without waitForCi) and starts nothing;
@@ -1224,7 +1245,11 @@ async function deferUntilRequest(
     // A draft's own coding run still in flight may have pushed this head before recording its
     // result (a stop at its budget among them): wait for it the same way (budgetDraftDecision).
     if (!leadRunId && origin.draft === true) {
-      leadRunId = await pushingRunInFlight(deps.db, { markerRunId: origin.markerRunId, repository: key.repository });
+      const pushing = await pushingRunInFlight(deps.db, {
+        markerRunId: origin.markerRunId,
+        repository: key.repository,
+      });
+      leadRunId = pushing && (await pushingRunHold(deps.db, pushing));
     }
   } catch (err) {
     log.warn(

@@ -2346,6 +2346,51 @@ describe("a draft whose last push stopped at its budget", () => {
       expect(dispatchRun).not.toHaveBeenCalled();
       expect(h.startCheck).not.toHaveBeenCalled();
     });
+
+    /** Answers pushingRunHold's walk up from the pushing coding run with `lead`; every other raw query with nothing. */
+    const leadOfPushingRun = (d: ReturnType<typeof setup>["d"], lead: { id: string; status: string }) => {
+      (d.db as unknown as { $queryRaw: ReturnType<typeof vi.fn> }).$queryRaw = vi.fn(
+        async (sql: TemplateStringsArray) => (sql.join("?").includes('WHERE r."id" = ?') ? [lead] : []),
+      );
+    };
+
+    it("waits for the coding run's lead instead while that lead runs, so the whole request finishes first", async () => {
+      const { d, h, db } = setup({ links: [reviewers[0]], root: running });
+      leadOfPushingRun(d, { id: "follow-up-lead", status: "running" });
+      await expect(routeHostEvent(pr, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      expect(db.deferredReview.createMany).toHaveBeenCalledWith({
+        data: [expect.objectContaining({ reason: "request", leadRunId: "follow-up-lead" })],
+        skipDuplicates: true,
+      });
+      expect(dispatchRun).not.toHaveBeenCalled();
+      expect(h.startCheck).not.toHaveBeenCalled();
+    });
+
+    it("waits for the coding run itself when its lead already finished", async () => {
+      const { d, db } = setup({ links: [reviewers[0]], root: running });
+      leadOfPushingRun(d, { id: "follow-up-lead", status: "succeeded" });
+      await expect(routeHostEvent(pr, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      expect(db.deferredReview.createMany).toHaveBeenCalledWith({
+        data: [expect.objectContaining({ leadRunId: "coder" })],
+        skipDuplicates: true,
+      });
+    });
+
+    it("re-parks a deferred review that comes due on the running continuation's lead", async () => {
+      const { d, db } = setup({ links: [{ ...reviewers[0], waitForCi: true }] });
+      (d.db as unknown as { codingRun: { findFirst: ReturnType<typeof vi.fn> } }).codingRun.findFirst.mockResolvedValue(
+        { runId: "cont" },
+      );
+      leadOfPushingRun(d, { id: "follow-up-lead", status: "running" });
+      db.runHostCheck.findMany = vi.fn(async () => []);
+      db.deferredReview.findMany.mockResolvedValueOnce([row]);
+      await expect(routeHostEvent(ciEvent, d)).resolves.toMatchObject({ runIds: [] });
+      expect(db.deferredReview.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ["d1"] } },
+        data: { reason: "request", leadRunId: "follow-up-lead" },
+      });
+      expect(dispatchRun).not.toHaveBeenCalled();
+    });
   });
 
   it("skips a deferred review when it starts", async () => {
