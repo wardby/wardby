@@ -231,22 +231,32 @@ to include secrets or internal details. See
 <details>
 <summary>Builder (coding agent) fields that matter</summary>
 
-| Field (`codingProfile`) | What to set                                                                                                                                                  |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `model` (agent field)   | A capable coding model the chosen provider supports, for example `gpt-5.6-terra` with `codex` or `claude-sonnet-5` with `claude-code`; a mismatch is refused |
-| `provider`              | `codex` or `claude-code`; the agent's `model` must be one that provider supports                                                                             |
-| `repository`            | `your-org/your-repo`; your linked GitHub account needs write access                                                                                          |
-| `baseRef`               | The branch runs start from, usually your default branch                                                                                                      |
-| `toolchain`             | `node` or `node-python` (per language below)                                                                                                                 |
-| `toolchainVersion`      | `"3.12"` for `node-python`; omit for `node`                                                                                                                  |
-| `packageAllowlist`      | Top-level packages per ecosystem (`npm`, `pypi`). Needs `packages:approve` or `agents:admin`                                                                 |
-| `packagePolicy`         | Optional `minReleaseAgeDays` (0 to 30)                                                                                                                       |
-| `services`              | Catalog service names the agent may start, for example `["postgres"]`; see [Services](coding-services.md)                                                    |
-| `protectedPaths`        | Globs a run may not change, for example `[".github/**", "CODEOWNERS"]`. `.wardby/**` is always protected except `.wardby/services.yaml`                      |
-| `timeoutSec`            | 60 to 7200; for example `1800`                                                                                                                               |
-| `workerImageRef`        | Digest-pinned custom image; needs `agents:admin` (see "Other languages")                                                                                     |
-| `defaultTask`           | Needed only to schedule the agent                                                                                                                            |
-| Agent `budgetUsd`       | Per-run budget, reserved at dispatch, for example `5`                                                                                                        |
+| Field (`codingProfile`)       | What to set                                                                                                                                                  |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `model` (agent field)         | A capable coding model the chosen provider supports, for example `gpt-5.6-terra` with `codex` or `claude-sonnet-5` with `claude-code`; a mismatch is refused |
+| `provider`                    | `codex` or `claude-code`; the agent's `model` must be one that provider supports                                                                             |
+| `repository`                  | `your-org/your-repo`; your linked GitHub account needs write access                                                                                          |
+| `baseRef`                     | The branch runs start from, usually your default branch                                                                                                      |
+| `toolchain`                   | `node` or `node-python` (per language below)                                                                                                                 |
+| `toolchainVersion`            | `"3.12"` for `node-python`; omit for `node`                                                                                                                  |
+| `packageAllowlist`            | Top-level packages per ecosystem (`npm`, `pypi`). Needs `packages:approve` or `agents:admin`                                                                 |
+| `packagePolicy`               | Optional `minReleaseAgeDays` (0 to 30)                                                                                                                       |
+| `services`                    | Catalog service names the agent may start, for example `["postgres"]`; see [Services](coding-services.md)                                                    |
+| `protectedPaths`              | Globs a run may not change, for example `[".github/**", "CODEOWNERS"]`. `.wardby/**` is always protected except `.wardby/services.yaml`                      |
+| `timeoutSec`                  | 60 to 7200; for example `1800`                                                                                                                               |
+| `workerImageRef`              | Digest-pinned custom image; needs `agents:admin` (see "Other languages")                                                                                     |
+| `defaultTask`                 | Needed only to schedule the agent                                                                                                                            |
+| Agent `budgetUsd`             | Per-run budget, reserved at dispatch, for example `5`                                                                                                        |
+| Agent `allowedOverrunPercent` | Optional whole percent (0 to 100, default 0) the run may spend beyond `budgetUsd`, for example `10`; coding agents only                                      |
+
+To allow a small overrun on an existing coding agent, call `update_agent`
+(it needs the same permission as changing `budgetUsd`):
+
+```json
+{ "id": "<coding agent id>", "allowedOverrunPercent": 10 }
+```
+
+See [Budgets](coding-agent-setup.md#budgets).
 
 The agent's `systemPrompt` is placed ahead of each request as standing
 instructions. The template below is generic.
