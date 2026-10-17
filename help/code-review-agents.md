@@ -69,9 +69,11 @@ From Wardby 0.6.1, `repo_pr_read` pages a large diff: all files share one
 budget per call (`maxPatchChars`, default 60,000, at most 200,000), with
 source, test and config files first. Each file has a `patchStatus`
 (`complete`, `partial`, `later_page`, `earlier_page`, `unavailable` or
-`empty`). While `patchesComplete` is `false`, call `repo_pr_read` again with
-`patchCursor` set to `nextPatchCursor` until it is null, and read every
-`unavailable` file with `repo_read_file` at the head. A cursor goes stale when
+`empty`). While a source, test or config file is listed in `truncatedFiles`,
+call `repo_pr_read` again with `patchCursor` set to `nextPatchCursor`; the pages
+after that hold only docs, help, lockfiles and generated files, which are
+optional for the verdict. Read every `unavailable` source, test or config file
+with `repo_read_file` at the head. A cursor goes stale when
 the branch moves (`patch_cursor_stale`): call again without it.
 `repo_publish_review` refuses `APPROVE` and `CHANGES_REQUESTED` with
 `unread_files` while a listed source, test or config file is neither fully

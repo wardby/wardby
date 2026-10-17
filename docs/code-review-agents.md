@@ -967,7 +967,11 @@ when the next page carries more of the same file.
 When `patchesComplete` is `false`, the result lists `truncatedFiles`, gives
 `nextPatchCursor`, and estimates the files still to come in
 `remainingPatchFiles`. Call `repo_pr_read` again with the same arguments plus
-`patchCursor` to get the next page. A file the host found `unavailable` stays
+`patchCursor` to get the next page. Because code is filled first, a reviewer
+only has to page while a source, test or config file is still in
+`truncatedFiles`: the pages after that hold documentation, lockfiles and
+generated files, which the `unread_files` refusal never requires, so the
+reviewer can skim or skip them and spend less of its budget. A file the host found `unavailable` stays
 reported as such on later pages, and `patchesComplete` stays `false`. A cursor
 only works for the head and compare it was issued for: after a new push,
 `patch_cursor_stale` says to call again without it, and a damaged or oversized
