@@ -492,6 +492,14 @@ async function priorRunContinues(deps: RouteHostEventDeps, event: MentionEvent):
   return check.ok && check.root.pullRequestNumber === event.number;
 }
 
+/** The reply to a mention whose author can see the repository but cannot push to it. */
+export const NO_WRITE_ACCESS_BODY =
+  "😕 I can't act on this: a mention starts work only for people with write access to this repository. " +
+  "Ask someone with write access to mention me instead.";
+
+/** Read and triage can see the repository, so a refusal there is worth explaining; anyone else stays silent. */
+const EXPLAINED_REFUSAL_LEVELS: ReadonlySet<string> = new Set(["read", "triage"]);
+
 export function unknownPriorRunBody(priorRunId: string): string {
   return (
     `❌ I can't continue this pull request. Its description names wardby run \`${priorRunId}\`, but this wardby ` +
@@ -1461,7 +1469,25 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
           { repository: event.repository, number: event.number, reason: author.reason, level: author.level },
           "mention ignored: its author lacks write access",
         );
-        return none;
+        // Someone who can read the repository gets told why; a stranger learns nothing.
+        if (author.reason !== "insufficient_permission" || !EXPLAINED_REFUSAL_LEVELS.has(author.level ?? "")) {
+          return none;
+        }
+        const refuse = async () => {
+          await host.acknowledge(event.repository, event.comment, "refused").catch((err: unknown) => {
+            log.warn({ err, repository: event.repository, number: event.number }, "could not add the reaction");
+          });
+          await host
+            .comment(event.repository, {
+              number: event.number,
+              body: NO_WRITE_ACCESS_BODY,
+              ...(event.replyToReviewCommentId ? { replyToReviewCommentId: event.replyToReviewCommentId } : {}),
+            })
+            .catch((err: unknown) => {
+              log.warn({ err, repository: event.repository, number: event.number }, "could not post the refusal");
+            });
+        };
+        return { runIds: [], followUps: [refuse] };
       }
       const allowed = await authorizedLinks(deps, event, candidates);
       if (allowed.length === 0) return none;

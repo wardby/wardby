@@ -6,6 +6,7 @@ import {
   DEFERRED_REVIEW_MAX_AGE_MS,
   DEFERRED_REVIEW_MAX_WAIT_MS,
   isReviewCommand,
+  NO_WRITE_ACCESS_BODY,
   reviewTaskText,
   routeHostEvent,
   startDeferredForRequest,
@@ -594,7 +595,7 @@ describe("routeHostEvent repository authorization (H5-1) and mention gate (H5-3)
   });
 
   it.each(["read", "triage"] as const)(
-    "ignores a mention from a %s commenter: no dispatch, no reaction",
+    "refuses a mention from a %s commenter: no dispatch, a 😕 reaction and a one-line reply",
     async (level) => {
       vi.mocked(dispatchRun).mockClear();
       const repoAccess = gate({ commenter: { ok: false, reason: "insufficient_permission", level } });
@@ -607,8 +608,13 @@ describe("routeHostEvent repository authorization (H5-1) and mention gate (H5-3)
         repoAccess,
       );
       for (const body of ["@wardby review", "@wardby please fix it"]) {
-        expect(await routeHostEvent(mention(body), d)).toEqual({ runIds: [], followUps: [] });
+        const result = await routeHostEvent(mention(body), d);
+        expect(result.runIds).toEqual([]);
+        expect(result.followUps).toHaveLength(1);
+        for (const followUp of result.followUps) await followUp();
       }
+      expect(d.hosts.github.acknowledge).toHaveBeenCalledWith(REPO, { kind: "conversation", id: "4" }, "refused");
+      expect(d.hosts.github.comment).toHaveBeenCalledWith(REPO, { number: 7, body: NO_WRITE_ACCESS_BODY });
       expect(dispatchRun).not.toHaveBeenCalled();
       expect(d.hosts.github.startCheck).not.toHaveBeenCalled();
       expect(d.hosts.github.pullRequestHead).not.toHaveBeenCalled();
@@ -620,6 +626,16 @@ describe("routeHostEvent repository authorization (H5-1) and mention gate (H5-3)
       });
     },
   );
+
+  it.each([
+    ["no access", { ok: false, reason: "insufficient_permission", level: "none" }],
+    ["an unverifiable", { ok: false, reason: "check_unavailable" }],
+  ] as const)("stays silent for a mention from %s commenter", async (_label, commenter) => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }], host(), gate({ commenter }));
+    expect(await routeHostEvent(mention("@wardby please fix it"), d)).toEqual({ runIds: [], followUps: [] });
+    expect(dispatchRun).not.toHaveBeenCalled();
+  });
 
   it("dispatches a mention from a commenter with write access", async () => {
     vi.mocked(dispatchRun).mockClear();

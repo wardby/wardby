@@ -40,7 +40,9 @@ such a pull request automatically, up to a round cap — see
 
 Wardby skips pull requests whose head is in a fork. It also ignores mentions
 from bots and people without write access, checked against the author's real
-repository permission. A private organization member, whom GitHub labels
+repository permission. Someone with `read` or `triage` access gets a 😕
+reaction and a reply saying a mention needs write access; anyone else is
+ignored silently. A private organization member, whom GitHub labels
 `CONTRIBUTOR` or `NONE`, is still checked and can start runs. A mention inside
 Markdown code (an inline code span or a code block) is not a request, so
 quoting `` `@<app-slug>` `` in an issue or comment starts nothing. Repository links require the

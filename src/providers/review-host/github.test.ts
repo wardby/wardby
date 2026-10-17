@@ -756,6 +756,12 @@ describe("GitHubReviewHost writes", () => {
       path: `${BASE}/issues/12/reactions`,
       body: { content: "eyes" },
     });
+    await host.acknowledge(REPO, { kind: "conversation", id: "4" }, "refused");
+    expect(calls.at(-1)).toMatchObject({
+      method: "POST",
+      path: `${BASE}/issues/comments/4/reactions`,
+      body: { content: "confused" },
+    });
   });
 
   it("starts an in-progress check and completes it with capped text", async () => {
