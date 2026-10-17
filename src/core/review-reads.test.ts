@@ -59,4 +59,10 @@ describe("ReviewReadLedger", () => {
     reads.recordFileRead("o/r", "main", "src/b.ts");
     expect(reads.unreadCode("o/r", 1, HEAD)).toEqual(["src/b.ts"]);
   });
+
+  it("never gates a removed file, even one with no patch", () => {
+    const reads = new ReviewReadLedger();
+    reads.recordPage("o/r", 1, view([{ ...f("src/gone.ts", "unavailable", ""), status: "removed" }]));
+    expect(reads.unreadCode("o/r", 1, HEAD)).toEqual([]);
+  });
 });

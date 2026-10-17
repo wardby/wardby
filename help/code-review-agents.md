@@ -226,14 +226,14 @@ a tool error instead of publishing anything:
 - `ci_pending` — CI is still running; comment instead. The re-review above
   then runs the review again once a CI check suite finishes.
 
-A separate guard applies per run: `repo_publish_review` refuses `APPROVE` and
-`CHANGES_REQUESTED` with `unread_files` while a source or test file of the head
-was listed by `repo_pr_read` but not fully read. Page with `patchCursor`, or
-read the file with `repo_read_file` at `headSha`; `COMMENT` is always allowed.
-
-Requesting changes or commenting is never affected by this gate. When CI
+Requesting changes or commenting is never affected by the CI gate. When CI
 cannot be read at all, the gate is skipped and the review proceeds as it
 would without `waitForCi`.
+
+A separate guard applies per run: `repo_publish_review` refuses `APPROVE` and
+`CHANGES_REQUESTED` with `unread_files` while a source, test or config file of the head
+was listed by `repo_pr_read` but not fully read. Page with `patchCursor`, or
+read the file with `repo_read_file` at `headSha`; `COMMENT` is always allowed.
 
 Add this to a reviewer's system prompt:
 

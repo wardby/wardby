@@ -1039,4 +1039,48 @@ describe("handleReviewHostTool unread-files publish guard", () => {
     );
     expect(out.error).toBeUndefined();
   });
+
+  it("a not_found repo_read_file does not satisfy the guard", async () => {
+    const c = ctx({ hosts: { github: pageHost() }, reads: new ReviewReadLedger() });
+    await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c);
+    await handleReviewHostTool(
+      "repo_read_file",
+      JSON.stringify({ repository: WRITE.repository, path: "src/a.ts", ref: SHA }),
+      c,
+    );
+    const out = JSON.parse(
+      await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("APPROVE")), c),
+    );
+    expect(out).toMatchObject({ error: "unread_files" });
+  });
+
+  it("does not gate a PR number or head this attempt never read", async () => {
+    const c = ctx({ hosts: { github: pageHost() }, reads: new ReviewReadLedger() });
+    await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c);
+    const otherPr = { ...publishArgs("APPROVE"), prNumber: 8 };
+    const otherHead = { ...publishArgs("APPROVE"), headSha: "f".repeat(40) };
+    for (const args of [otherPr, otherHead]) {
+      const out = JSON.parse(await handleReviewHostTool("repo_publish_review", JSON.stringify(args), c));
+      expect(out.error).toBeUndefined();
+    }
+  });
+
+  it("does not block APPROVE on a removed code file without a patch", async () => {
+    const h = fakeHost();
+    h.readPullRequest = vi.fn(
+      async () =>
+        ({
+          number: 7,
+          headSha: SHA,
+          files: [{ ...codeFile("src/gone.ts", "unavailable"), status: "removed" }],
+          nextPatchCursor: null,
+        }) as never,
+    );
+    const c = ctx({ hosts: { github: h }, reads: new ReviewReadLedger() });
+    await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c);
+    const out = JSON.parse(
+      await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("APPROVE")), c),
+    );
+    expect(out.error).toBeUndefined();
+  });
 });

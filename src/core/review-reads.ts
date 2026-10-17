@@ -2,7 +2,8 @@
  * What one review run attempt has actually read of each pull request head: repo_pr_read pages
  * (a file counts once its whole patch, or its last part, arrived) and repo_read_file reads at
  * that head. repo_publish_review refuses an APPROVE or CHANGES_REQUESTED that would judge a
- * source or test file the run never read. Per attempt and in memory only: a resumed attempt
+ * source, test or config file the run never read. One repo_read_file read of the path at the head
+ * (any window) counts. Per attempt and in memory only: a resumed attempt
  * starts empty, and a head it has no file list for is not gated.
  */
 import { reviewGroup } from "../providers/review-host/patch-pages.js";
@@ -36,7 +37,10 @@ export class ReviewReadLedger {
   recordPage(repository: string, prNumber: number, view: PullRequestView): void {
     const key = this.headKey(repository, prNumber, view.headSha);
     const head = this.heads.get(key) ?? { code: new Set<string>(), read: new Set<string>() };
-    head.code = new Set(view.files.filter((f) => reviewGroup(f.filename) === "code").map((f) => f.filename));
+    // A removed file has nothing to read at the head (repo_read_file is not_found), so it is never gated.
+    head.code = new Set(
+      view.files.filter((f) => f.status !== "removed" && reviewGroup(f.filename) === "code").map((f) => f.filename),
+    );
     for (const file of view.files) if (finished(file)) head.read.add(file.filename);
     this.heads.set(key, head);
   }
