@@ -93,6 +93,7 @@ import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedE
 import { ISSUE_KEY, ISSUE_TRACKER_NAMES, type IssueTrackerProvider } from "../issue-tracker/types.js";
 import { HEARTBEAT_TIMEOUT_MS } from "../../core/timing.js";
 import { collectRelatedPullRequests } from "../../core/related-pull-requests.js";
+import { isIssueMentionTask } from "../../core/host-status.js";
 import {
   pullRequestBody,
   type DescriptionBaseline,
@@ -235,7 +236,8 @@ export interface LegacyDescriptionSource {
 export interface LinkedIssueSource {
   issueProvider?: string | null;
   issueKey?: string | null;
-  hostStatus?: { provider: string; repository: string; number: number } | null;
+  /** `issueMention`: that run was started by a mention on an issue (isIssueMentionTask), not on a pull request. */
+  hostStatus?: { provider: string; repository: string; number: number; issueMention?: boolean } | null;
 }
 
 /** An issue to read for a continuation's task. */
@@ -569,11 +571,21 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     for (let depth = 0; parentRunId && depth < MAX_LINKED_ISSUE_RUN_DEPTH; depth++) {
       const parent = await this.db.run.findUnique({
         where: { id: parentRunId },
-        select: { parentRunId: true, hostStatus: { select: { provider: true, repository: true, number: true } } },
+        select: {
+          parentRunId: true,
+          taskOverride: true,
+          hostStatus: { select: { provider: true, repository: true, number: true } },
+        },
       });
       if (!parent) break;
       if (parent.hostStatus) {
-        hostStatus = parent.hostStatus;
+        const { provider, repository, number } = parent.hostStatus;
+        hostStatus = {
+          provider,
+          repository,
+          number,
+          issueMention: provider === "github" && isIssueMentionTask(parent.taskOverride, repository, number),
+        };
         break;
       }
       parentRunId = parent.parentRunId;
@@ -1300,6 +1312,35 @@ export class ContainerExecutor implements Executor {
     };
   }
 
+  /**
+   * The PR title/body's originating issue, whichever system it is in: the
+   * CodingRun's tracker issue (issueFor), else the GitHub issue in the same
+   * repository whose mention started the run tree (`Resolves #N`). Read from
+   * the root run, so a continuation's rebuilt body keeps the root's line.
+   * Never throws: a failed lookup gives no issue line.
+   */
+  private async issueSourceFor(
+    run: Pick<ContainerRunSnapshot, "runId" | "rootCodingRunId" | "repository" | "issueProvider" | "issueKey">,
+  ): Promise<{ issue?: { key: string; url?: string; trackerName?: string }; issueNumber?: number }> {
+    const tracker = this.issueFor(run);
+    if (tracker.issue || !this.options.store.linkedIssueSource) return tracker;
+    try {
+      const status = (await this.options.store.linkedIssueSource(run.rootCodingRunId ?? run.runId)).hostStatus;
+      if (
+        status?.provider === "github" &&
+        status.issueMention === true &&
+        status.repository.toLowerCase() === run.repository.toLowerCase() &&
+        Number.isSafeInteger(status.number) &&
+        status.number > 0
+      ) {
+        return { issueNumber: status.number };
+      }
+    } catch (err) {
+      containerLog.warn({ err, runId: run.runId }, "could not find the issue the run came from");
+    }
+    return {};
+  }
+
   /** The new PR's Related pull requests input: earlier PRs of the same request, then this one. Never throws. */
   private async relatedFor(run: ContainerRunSnapshot): Promise<{ related?: RelatedPullRequestsInput }> {
     // A continuation's Related block is preserved from the current body (the description update keeps it).
@@ -1599,7 +1640,7 @@ export class ContainerExecutor implements Executor {
       tag: output.tag,
       ...report,
       ...restoredDependenciesFor(output),
-      ...this.issueFor(current),
+      ...(await this.issueSourceFor(current)),
       ...(await this.relatedFor(current)),
       ...(descriptionState && "baseline" in descriptionState
         ? { description: { baseline: descriptionState.baseline } }
@@ -1994,7 +2035,7 @@ export class ContainerExecutor implements Executor {
         tag: output.tag,
         ...(await this.pullRequestRegistryReport(run)),
         ...restoredDependenciesFor(output),
-        ...this.issueFor(run),
+        ...(await this.issueSourceFor(run)),
         description: { baseline: state.baseline },
       };
       const outcome = await vcs.refreshPullRequestDescription(workspace, details);

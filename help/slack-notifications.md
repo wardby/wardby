@@ -28,13 +28,21 @@ per card. This is outbound only: nothing in Slack starts or affects a run.
 
 ## Events
 
-`issue_picked_up`, `run_failed` and `run_blocked` (top-level runs only), `pr_opened` (also for a
-pull request opened from a GitHub issue mention), `review_posted` (approve / changes requested / comment), `review_fix` (round
-started, or stopped at the cap), `pr_closed` (merged or closed, with any
-Jira status move), and `packages_audited` (from Wardby 0.6.1, top-level runs
-only: what its coding runs installed under package audit mode, described in
-the `package-audit-mode` help article; it doesn't change the thread's status). `events` on a link narrows which of these post;
-omitted means all eight. `includeCost` appends the run's spend line.
+`issue_picked_up`, `run_failed` and `run_blocked` (top-level runs only),
+`pr_opened`, `review_posted` (approve / changes requested / comment),
+`review_fix` (round started, or stopped at the cap), `pr_closed` (merged or
+closed, with any Jira status move), and `packages_audited` (from Wardby 0.6.1,
+top-level runs only: what its coding runs installed under package audit mode,
+described in the `package-audit-mode` help article; it doesn't change the
+thread's status). `events` on a link narrows which of these post; omitted
+means all eight. `includeCost` appends the run's spend line.
+
+A pull request opened from a GitHub issue mention posts `pr_opened` and
+`pr_closed` too, the same as one opened for a Jira issue. Its thread is the
+issue's, one per GitHub issue, not one per pull request; once the pull request
+is recorded for the issue, its `review_posted` and `review_fix` events reply
+there as well. The run events of a run a GitHub issue mention started keep a
+thread of their own.
 
 A `run_blocked` event uses the same ⛔ package registry wording and fixes as
 [Run status comments](status-comments.md). See [Package refusal errors](errors/package-refusals.md)

@@ -52,15 +52,33 @@ const MAX_TASK_QUOTE_BYTES = 4 * 1024;
 const TASK_TRUNCATED_MARKER = "\n\n[task truncated]";
 
 /**
+ * A GitHub closing keyword and the issue it names (`Fixes #7`, `closes: owner/repo#7`),
+ * case-insensitive. Group 1 is everything before the `#`.
+ */
+const CLOSING_KEYWORD_REFERENCE =
+  /(\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s*(?:[\w.-]+\/[\w.-]+)?)#(?=\d)/gi;
+
+/**
+ * The request as inert text: every `<` escaped (it is plain text, so no HTML
+ * comment, run marker or section marker can form, and nothing is hidden from
+ * a reader), and the `#` of a closing keyword's issue reference escaped, so
+ * the quote neither closes an issue on merge nor reads as the pull request's
+ * own linked issue. A plain `#7` stays a reference.
+ */
+function inertRequestText(text: string): string {
+  return text.replace(/</g, "&lt;").replace(CLOSING_KEYWORD_REFERENCE, "$1&#35;");
+}
+
+/**
  * The "Task" section of a budget-stopped draft: the run's own request (not the
  * agent's standing instructions) as a Markdown blockquote. The request is
  * untrusted text going into a pull request body: capped, App mentions
- * defused, and prompt-fence lookalikes neutralised (a later continuation reads
- * this body back in its task).
+ * defused, prompt-fence lookalikes neutralised (a later continuation reads
+ * this body back in its task), and made inert (inertRequestText).
  */
 export function budgetStoppedTaskSection(request: string): string {
   const capped = truncateText(request.trim(), MAX_TASK_QUOTE_BYTES, byteLength, TASK_TRUNCATED_MARKER);
-  const safe = neutraliseWrapperTags(defuseMentions(capped));
+  const safe = inertRequestText(neutraliseWrapperTags(defuseMentions(capped)));
   const quoted = safe
     .split(/\r\n|\r|\n/)
     .map((line) => (line.length > 0 ? `> ${line}` : ">"))
@@ -72,10 +90,10 @@ export function budgetStoppedTaskSection(request: string): string {
  * How to continue a budget-stopped run's pushed changes, after "ran out of
  * budget before finishing". `ref` names the pull request (`#42`,
  * `owner/repo#42`), `draft` when this run opened it, `fromIssue` when the
- * run came from an issue (GitHub or Jira), which can be mentioned too. Status comments are
- * posted by the App, and a bot-authored comment never starts a run, so the
- * mention here is safe.
+ * run came from an issue (GitHub or Jira), which can be mentioned on too.
+ * One sentence for every issue source and code host: it names no handle,
+ * because the account to mention differs (the GitHub App, a Jira account).
  */
 export function budgetStoppedChangesSentence(ref: string, draft: boolean, fromIssue = false): string {
-  return `The changes so far are in ${draft ? "draft PR " : ""}${ref}; comment \`@wardby\` on it${fromIssue ? " or on the issue it came from" : ""} to continue.`;
+  return `The changes so far are in ${draft ? "draft PR " : ""}${ref}; mention the agent on it${fromIssue ? " or on the issue it came from" : ""} to continue.`;
 }

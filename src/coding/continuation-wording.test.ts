@@ -1,12 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
   BUDGET_STOPPED_SUMMARY_PREFIX,
+  budgetStoppedChangesSentence,
   budgetStoppedSummary,
   budgetStoppedTaskSection,
   CONTINUATION_CLOSED_CATEGORY,
   isContinuationClosedError,
   WORKER_BUDGET_EXHAUSTED_SUMMARY,
 } from "./continuation-wording.js";
+import { upsertRelatedSection } from "../providers/vcs/github.js";
+import {
+  closingIssueNumber,
+  extractRelatedBlock,
+  RELATED_SECTION_END,
+  RELATED_SECTION_START,
+} from "../providers/vcs/pr-description.js";
 
 describe("isContinuationClosedError", () => {
   it("recognises only the persisted continuation_closed failure", () => {
@@ -82,5 +90,79 @@ describe("budgetStoppedTaskSection", () => {
     expect(Buffer.byteLength(text.replace(/\n\n\[task truncated\]$/, ""), "utf8")).toBeLessThanOrEqual(4096);
     expect(text.endsWith("\n\n[task truncated]")).toBe(true);
     for (const line of body.split("\n")) expect(line.startsWith(">")).toBe(true);
+  });
+
+  it("escapes every bracket, so no marker or hidden comment can form", () => {
+    const markers = [
+      RELATED_SECTION_START,
+      RELATED_SECTION_END,
+      "<!-- wardby:run-x -->",
+      "<!-- wardby-latest:run-x -->",
+      "<!-- hidden -->",
+      "<b>bold</b>",
+    ];
+    const section = budgetStoppedTaskSection(`Do it.\n${markers.join("\n")}`);
+    expect(section).not.toContain("<");
+    expect(section).toContain("> &lt;!-- wardby-related:start -->");
+    expect(section).toContain("> &lt;!-- wardby:run-x -->");
+    expect(section).toContain("> &lt;!-- wardby-latest:run-x -->");
+  });
+
+  it("leaves a body carrying the task able to take its Related section", () => {
+    const block = `${RELATED_SECTION_START}\nReal\n${RELATED_SECTION_END}`;
+    for (const request of [
+      `Edit ${RELATED_SECTION_START} please`,
+      `Edit ${RELATED_SECTION_START}\nfake\n${RELATED_SECTION_END}`,
+      `Edit ${RELATED_SECTION_END}`,
+    ]) {
+      const body = `<!-- wardby:run-1 -->\n\n${budgetStoppedSummary("Did half.", request)}`;
+      expect(extractRelatedBlock(body)).toBeUndefined();
+      const updated = upsertRelatedSection(body, block);
+      expect(updated).not.toBeNull();
+      expect(extractRelatedBlock(updated!)).toBe(block);
+      // The section goes after the marker, never inside the quote.
+      expect(updated!.indexOf(block)).toBeLessThan(updated!.indexOf("### Task"));
+    }
+  });
+
+  it("breaks closing keywords so the quote closes and links no issue", () => {
+    const requests = [
+      "Fixes #7",
+      "please closes owner/repo#7 now",
+      "RESOLVED: #7",
+      "fix  #7",
+      "closed:owner/repo#7",
+      "Resolves\n#7",
+    ];
+    for (const request of requests) {
+      const summary = budgetStoppedSummary("Did half.", request);
+      expect(closingIssueNumber(summary, "owner/repo")).toBeUndefined();
+      expect(summary).toContain("&#35;7");
+    }
+  });
+
+  it("keeps a plain issue reference readable", () => {
+    const section = budgetStoppedTaskSection("see #7 and owner/repo#8, prefix#9, disclose #10");
+    expect(section).toBe("### Task\n\n> see #7 and owner/repo#8, prefix#9, disclose #10");
+  });
+});
+
+describe("budgetStoppedChangesSentence", () => {
+  const APP_HANDLE = `@${"wardby"}`;
+
+  it("is one provider-neutral sentence, with the issue alternative only for an issue's run", () => {
+    expect(budgetStoppedChangesSentence("#42", true, true)).toBe(
+      "The changes so far are in draft PR #42; mention the agent on it or on the issue it came from to continue.",
+    );
+    expect(budgetStoppedChangesSentence("owner/repo#42", false)).toBe(
+      "The changes so far are in owner/repo#42; mention the agent on it to continue.",
+    );
+    for (const sentence of [
+      budgetStoppedChangesSentence("#42", true, true),
+      budgetStoppedChangesSentence("#42", false),
+    ]) {
+      expect(sentence).not.toContain(APP_HANDLE);
+      expect(sentence).not.toContain("@");
+    }
   });
 });

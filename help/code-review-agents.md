@@ -73,6 +73,10 @@ opening a second pull request. Jira issues behave the same way (see
 [Run Jira agents](jira.md)). The run message lists up to ten open pull requests
 recorded for the issue.
 
+A pull request opened from a mention on a GitHub issue starts its description
+with `Resolves #N` for that issue (same repository), as one opened for a Jira
+issue starts with `Resolves Jira issue …`.
+
 ## CI and sibling pull requests
 
 `repo_pr_read` also returns `ci`: the CI check runs and commit statuses on the

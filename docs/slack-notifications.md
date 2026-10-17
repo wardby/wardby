@@ -40,15 +40,22 @@ Some runs do not post `run_failed` at all:
 
 `pr_opened` and `pr_closed` also post for a pull request opened from a GitHub
 issue mention, the same as for a Jira issue: GitHub issues record the pull
-requests opened for them, and the thread is one per pull request.
+requests opened for them. The thread is the issue's, one per GitHub issue
+(`issue:github:owner/repo#N`) however many pull requests it has, not one per
+pull request. Once a pull request is recorded for the issue, its
+`review_posted` and `review_fix` events reply in that thread too. The run
+events (`run_failed`, `run_blocked`, `packages_audited`) of a run a GitHub
+issue mention started are not tied to the issue and post in a thread of
+their own.
 
 A pull request linked to several issues posts `pr_opened` and `pr_closed`
 only to the first linked issue's thread.
 
 ### Threads
 
-Each channel gets one thread per card: one per Jira issue (when the event has
-one) or one per pull request (when it doesn't). The first event for a card
+Each channel gets one thread per card: one per issue (a Jira issue, or the
+GitHub issue a pull request was opened from) when the event has one, else one
+per pull request. The first event for a card
 posts a parent message naming the issue or pull request; every later event
 for the same card is a reply in that thread, and the parent is kept updated
 with a short status line. The statuses are:

@@ -102,13 +102,16 @@ far are pushed as the usual draft pull request (or added to the one it was
 continuing). A new pull request's description starts "Stopped at its budget
 before finishing; the changes so far are in this draft." A continuation leaves
 the existing description alone. The run stays `budget_exhausted` and
-keeps its `budgetEvents`. A comment mentioning the App on that pull request,
-or on the issue it came from, continues the work with a fresh budget. The pull
+keeps its `budgetEvents`. Mentioning the agent on that pull request (a
+comment mentioning the App), or on the issue it came from (the App on a
+GitHub issue, the service account on a Jira issue), continues the work with
+a fresh budget. The pull
 request is not marked ready automatically until a later continuation finishes.
 
 A new pull request's description has a `### Task` section quoting the request
 that started the run (capped at 4 KiB, mentions defused), so a continuation
-knows what the draft was for. While the draft's latest commit is the stopped
+knows what the draft was for. The request text is visible to anyone who can
+read the pull request. While the draft's latest commit is the stopped
 run's push, the automatic review is skipped with a neutral check, "Skipped:
 stopped at its budget", and no fix round starts. Marking the pull request ready
 or pushing a new commit gets a normal review. See

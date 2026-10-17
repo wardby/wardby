@@ -1466,6 +1466,24 @@ describe("ContainerExecutor", () => {
       ).toEqual(["baseline:root-run", "baseline:root-run", "refresh", "record", "complete", "cleanup"]);
     });
 
+    it("a refreshed description keeps the root's GitHub issue line", async () => {
+      const created = await fixRound();
+      noChanges(created);
+      const asked: string[] = [];
+      created.store.linkedIssueSource = async (rootRunId) => {
+        asked.push(rootRunId);
+        return { hostStatus: { provider: "github", repository: "openai/example", number: 12, issueMention: true } };
+      };
+      let refreshed: FinalizeChangesDetails | undefined;
+      created.vcs.refreshPullRequestDescription = async (_workspace, details) => {
+        refreshed = details;
+        return { kind: "refreshed", reason: "too_short", sha256: NEW_SHA, agentTextRunId: "root-run" };
+      };
+      await created.executor.start("run-1");
+      expect(refreshed?.issueNumber).toBe(12);
+      expect(asked).toContain("root-run");
+    });
+
     it("changes_ready continuation with an empty diff refreshes the description before store.complete", async () => {
       const created = await fixRound();
       created.vcs.finalizeEmpty = true;
@@ -1921,6 +1939,54 @@ describe("ContainerExecutor", () => {
         const created = await harness(overrides, IMAGE, undefined, undefined, { issueUrl });
         await created.executor.start("run-1");
         expect(created.vcs.lastFinalizeDetails).not.toHaveProperty("issue");
+      }
+    });
+
+    it("names the same-repository GitHub issue a mention on it started the run from", async () => {
+      const created = await harness({});
+      const asked: string[] = [];
+      created.store.linkedIssueSource = async (rootRunId) => {
+        asked.push(rootRunId);
+        return { hostStatus: { provider: "github", repository: "OpenAI/Example", number: 12, issueMention: true } };
+      };
+      await created.executor.start("run-1");
+      expect(asked).toEqual(["run-1"]);
+      expect(created.vcs.lastFinalizeDetails?.issueNumber).toBe(12);
+      expect(created.vcs.lastFinalizeDetails).not.toHaveProperty("issue");
+    });
+
+    it("keeps the Jira issue line and names no GitHub issue for a Jira run", async () => {
+      const created = await harness({ issueProvider: "jira", issueKey: "PROJ-123" }, IMAGE, undefined, undefined, {
+        issueUrl,
+      });
+      created.store.linkedIssueSource = async () => ({
+        hostStatus: { provider: "github", repository: "openai/example", number: 12, issueMention: true },
+      });
+      await created.executor.start("run-1");
+      expect(created.vcs.lastFinalizeDetails?.issue).toEqual({
+        key: "PROJ-123",
+        url: "https://example.atlassian.net/browse/PROJ-123",
+        trackerName: "Jira",
+      });
+      expect(created.vcs.lastFinalizeDetails).not.toHaveProperty("issueNumber");
+    });
+
+    it("names no issue for a pull request mention, another repository, a manual run, or a failed lookup", async () => {
+      const sources: Array<() => Promise<LinkedIssueSource>> = [
+        async () => ({
+          hostStatus: { provider: "github", repository: "openai/example", number: 40, issueMention: false },
+        }),
+        async () => ({ hostStatus: { provider: "github", repository: "openai/example", number: 40 } }),
+        async () => ({ hostStatus: { provider: "github", repository: "other/repo", number: 12, issueMention: true } }),
+        async () => ({ hostStatus: null }),
+        async () => Promise.reject(new Error("db down")),
+      ];
+      for (const source of sources) {
+        const created = await harness({});
+        created.store.linkedIssueSource = source;
+        await created.executor.start("run-1");
+        expect(created.store.run.status).toBe("succeeded");
+        expect(created.vcs.lastFinalizeDetails).not.toHaveProperty("issueNumber");
       }
     });
   });

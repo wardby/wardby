@@ -320,6 +320,14 @@ describe("GitVcsProvider", () => {
     expect(github.pullRequestCalls[0].related).toEqual(related);
   });
 
+  it("passes the same-repository issue number through to the PR it opens", async () => {
+    const { provider, github, input } = await harness();
+    const prepared = await provider.prepareWorkspace(input);
+    await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+    await provider.finalizeChanges(prepared, { issueNumber: 12 });
+    expect(github.pullRequestCalls[0].issueNumber).toBe(12);
+  });
+
   it("commits with controlled settings, pushes once, and creates one typed draft PR result", async () => {
     const { provider, github, git, input } = await harness();
     const prepared = await provider.prepareWorkspace(input);
@@ -589,6 +597,16 @@ describe("GitVcsProvider", () => {
       const result = await provider.finalizeChanges(prepared, { summary: "new", description: { baseline: BASELINE } });
       expect(result.outcome).toBe("pull_request_updated");
       expect(git.calls.some((call) => call.args.includes("push"))).toBe(true);
+    });
+
+    it("passes the same-repository issue number to the description update", async () => {
+      const { provider, github } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      await provider.refreshPullRequestDescription?.(prepared, {
+        issueNumber: 12,
+        description: { baseline: BASELINE },
+      });
+      expect(github.descriptionCalls[0]).toMatchObject({ issueNumber: 12 });
     });
 
     it("a no-change refresh stamps the workspace's head", async () => {
@@ -929,7 +947,7 @@ describe("GitVcsProvider", () => {
 
         expect(github.statusCommentCalls[0].input.body).toBe(
           "⚠️ builder (wardby run run-2) ran out of budget before finishing. Out of budget: this run's $3.00 budget was used up. " +
-            "The changes so far are in #42; comment `@wardby` on it to continue.\n\nHalf done.",
+            "The changes so far are in #42; mention the agent on it to continue.\n\nHalf done.",
         );
         expect(github.checkRunCalls[0].input).toMatchObject({ outcome: "failed" });
       });

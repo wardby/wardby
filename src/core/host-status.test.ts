@@ -199,9 +199,9 @@ describe("outcomeBody", () => {
     };
     const body = (fromIssue?: boolean) =>
       outcomeBody(run("succeeded", "done"), REPO, [opened], [{ id: "c9", status: "budget_exhausted" }], { fromIssue });
-    expect(body(true)).toContain("in draft PR #42; comment `@wardby` on it or on the issue it came from to continue.");
-    expect(body(false)).toContain("in draft PR #42; comment `@wardby` on it to continue.");
-    expect(body()).toContain("in draft PR #42; comment `@wardby` on it to continue.");
+    expect(body(true)).toContain("in draft PR #42; mention the agent on it or on the issue it came from to continue.");
+    expect(body(false)).toContain("in draft PR #42; mention the agent on it to continue.");
+    expect(body()).toContain("in draft PR #42; mention the agent on it to continue.");
   });
 
   it("says a sub-run stopped at its budget kept its changes in a pull request it can be continued from", () => {
@@ -214,7 +214,7 @@ describe("outcomeBody", () => {
     };
     const body = outcomeBody(run("succeeded", "done"), REPO, [opened], [{ id: "c9", status: "budget_exhausted" }]);
     expect(body).toBe(
-      "⚠️ A sub-run ran out of budget before finishing. The changes so far are in draft PR #42; comment `@wardby` on it to continue.\n\n> done\n\n<sub>wardby run `r1`</sub>",
+      "⚠️ A sub-run ran out of budget before finishing. The changes so far are in draft PR #42; mention the agent on it to continue.\n\n> done\n\n<sub>wardby run `r1`</sub>",
     );
     const updated = outcomeBody(
       run("succeeded"),
@@ -226,7 +226,7 @@ describe("outcomeBody", () => {
       ],
     );
     expect(updated).toMatch(
-      /^❌ A sub-run ran out of budget before finishing\. The changes so far are in #42; comment `@wardby` on it to continue\. A sub-run did not succeed: `c10` \(`failed`\)\./,
+      /^❌ A sub-run ran out of budget before finishing\. The changes so far are in #42; mention the agent on it to continue\. A sub-run did not succeed: `c10` \(`failed`\)\./,
     );
     expect(updated).not.toContain("Pushed changes to #42");
   });

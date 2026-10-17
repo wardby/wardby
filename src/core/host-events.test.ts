@@ -358,6 +358,28 @@ describe("routeHostEvent mention task text", () => {
     expect(isIssueMentionTask(mentionTaskText({ ...base, priorRunId: "run_1" }), REPO, 7)).toBe(false);
   });
 
+  it("round-trips every mention header through isIssueMentionTask", () => {
+    const issue = { ...base, isPullRequest: false };
+    const prTitle = { title: "Follow up on [GitHub PR #1]", body: `[GitHub PR #1]\nRepository: ${REPO}` };
+    const open = [{ repository: REPO, number: 3, openedByRunId: "run_sib-1" }];
+    const cases: Array<[string, string, boolean]> = [
+      ["an issue mention", mentionTaskText(issue), true],
+      ["an issue mention titled with a PR header", mentionTaskText({ ...issue, subject: prTitle }), true],
+      [
+        "an issue's own description titled with a PR header",
+        mentionTaskText({ ...issue, subject: prTitle, comment: { kind: "subject", id: "7" } }),
+        true,
+      ],
+      ["a PR mention", mentionTaskText(base), false],
+      ["an issue mention with sibling hints before the header", mentionTaskText(issue, open), true],
+    ];
+    for (const [label, text, expected] of cases) {
+      expect([label, isIssueMentionTask(text, REPO, 7)]).toEqual([label, expected]);
+    }
+    // The sibling hints really do come before the header.
+    expect(splitTaskOverride(mentionTaskText(issue, open)).task.startsWith("[GitHub ")).toBe(false);
+  });
+
   describe("a GitHub issue mention's continuation hint", () => {
     const issue = { ...base, isPullRequest: false };
     const open = [{ repository: "acme/bff", number: 3, openedByRunId: "run_bff-1" }];

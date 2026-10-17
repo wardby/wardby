@@ -131,12 +131,16 @@ If a mention lands on a GitHub **issue** that already has an open pull request
 wardby opened, the run message includes that pull request and the exact run id
 to pass as `continuePriorRun`, so the agent pushes to the same branch instead
 of opening a second pull request. This is the same behaviour, and the same
-sentence, as [follow-ups on a Jira issue](jira-agents.md): GitHub
-and Jira issues record the pull requests opened for them alike. The message
-lists up to ten open pull requests recorded for the issue, each with its own
-run id. A stopped-for-budget draft is continued this way too (see
+sentence, as [follow-ups on a Jira issue](jira-agents.md): GitHub and Jira
+issues record the pull requests opened for them alike. The message lists up to
+ten open pull requests recorded for the issue, each with its own run id. A
+stopped-for-budget draft is continued this way too (see
 [Stopped for budget](coding-agent-setup.md#stopped-for-budget-the-work-so-far-is-kept)).
-The help article [Run GitHub code-review agents](../help/code-review-agents.md#follow-ups-on-an-issue)
+A pull request opened from a mention on a GitHub issue starts its description
+with `Resolves #N` for that issue when the issue is in the same repository,
+the same place a Jira issue's pull request has its `Resolves Jira issue …`
+line; follow-ups keep the line. The help article
+[Run GitHub code-review agents](../help/code-review-agents.md#follow-ups-on-an-issue)
 says the same in short.
 
 ### What the mention agent receives

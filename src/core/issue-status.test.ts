@@ -564,6 +564,16 @@ describe("completeIssueStatus bridging pull requests to the issue", () => {
     expect(t.transitionTo).toHaveBeenCalledWith("PROJ-1", "In Review");
   });
 
+  it("says a budget-stopped draft can be continued from the pull request or the issue, naming no handle", async () => {
+    const t = tracker();
+    const stopped = { ...child(), status: "budget_exhausted" };
+    const d = db(row, { id: "r1", agentId: "a1" }, withChild(stopped), writeLink());
+    await completeIssueStatus(d, finished, { jira: t });
+    const md = (t.editComment as any).mock.calls[0][2].markdown as string;
+    expect(md).toContain("mention the agent on it or on the issue it came from to continue.");
+    expect(md).not.toContain(`@${"wardby"}`);
+  });
+
   it("does not transition on an updated pull request", async () => {
     const t = tracker();
     const d = db(
