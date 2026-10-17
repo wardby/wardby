@@ -61,12 +61,12 @@ const CLOSING_KEYWORD_REFERENCE =
 /**
  * The request as inert text: every `<` escaped (it is plain text, so no HTML
  * comment, run marker or section marker can form, and nothing is hidden from
- * a reader), and the `#` of a closing keyword's issue reference escaped, so
+ * a reader), and a word joiner put after the `#` of a closing keyword's issue reference, so
  * the quote neither closes an issue on merge nor reads as the pull request's
  * own linked issue. A plain `#7` stays a reference.
  */
 function inertRequestText(text: string): string {
-  return text.replace(/</g, "&lt;").replace(CLOSING_KEYWORD_REFERENCE, "$1&#35;");
+  return text.replace(/</g, "&lt;").replace(CLOSING_KEYWORD_REFERENCE, "$1#&#8288;");
 }
 
 /**

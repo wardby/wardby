@@ -137,7 +137,7 @@ describe("budgetStoppedTaskSection", () => {
     for (const request of requests) {
       const summary = budgetStoppedSummary("Did half.", request);
       expect(closingIssueNumber(summary, "owner/repo")).toBeUndefined();
-      expect(summary).toContain("&#35;7");
+      expect(summary).toContain("#&#8288;7");
     }
   });
 

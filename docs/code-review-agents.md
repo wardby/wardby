@@ -139,7 +139,8 @@ stopped-for-budget draft is continued this way too (see
 A pull request opened from a mention on a GitHub issue starts its description
 with `Resolves #N` for that issue when the issue is in the same repository,
 the same place a Jira issue's pull request has its `Resolves Jira issue …`
-line; follow-ups keep the line. The help article
+line; follow-ups keep the line. GitHub closes the issue when that pull request
+is merged. The help article
 [Run GitHub code-review agents](../help/code-review-agents.md#follow-ups-on-an-issue)
 says the same in short.
 
