@@ -643,6 +643,8 @@ spec:
         env:
         - name: DATABASE_URL
           value: wardby-gateway-database-url
+        - name: WARDBY_GITHUB_ALLOWED_ACCOUNTS
+          value: wardby_github_allowed_accounts
         - name: NODE_ENV
           value: production
         - name: NATIVE_GATEWAY_LISTEN

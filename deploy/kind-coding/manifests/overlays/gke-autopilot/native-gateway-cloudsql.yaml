@@ -62,3 +62,7 @@ spec:
             # The only source of DATABASE_URL: the Secret (wardby-native-gateway-env) carries none.
             - name: DATABASE_URL
               value: wardby-gateway-database-url
+            # Set by up.sh from WARDBY_GITHUB_ALLOWED_ACCOUNTS, like the control plane's: a sandboxed
+            # agent's repo tools run here, so without it only the App's owner's repositories work.
+            - name: WARDBY_GITHUB_ALLOWED_ACCOUNTS
+              value: wardby_github_allowed_accounts

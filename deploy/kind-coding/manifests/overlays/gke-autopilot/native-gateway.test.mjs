@@ -22,6 +22,16 @@ const env = Object.fromEntries(
 );
 
 describe("native gateway on GKE Autopilot", () => {
+  it("serves the same GitHub accounts as the control plane (up.sh fills in one placeholder for both)", () => {
+    const gatewayEnv = Object.fromEntries(
+      find(cloudsql, "Deployment", "wardby-native-gateway")
+        .spec.template.spec.containers.find((c) => c.name === "gateway")
+        .env.map((e) => [e.name, e.value]),
+    );
+    expect(env.WARDBY_GITHUB_ALLOWED_ACCOUNTS).toBe("wardby_github_allowed_accounts");
+    expect(gatewayEnv.WARDBY_GITHUB_ALLOWED_ACCOUNTS).toBe(env.WARDBY_GITHUB_ALLOWED_ACCOUNTS);
+  });
+
   it("ships the gateway from base with no Kubernetes credential, admitting only native run pods", () => {
     expect(read("../../base/kustomization.yaml")).toMatch(/^ {2}- native-gateway\.yaml$/m);
     expect(read("../kind/kustomization.yaml")).not.toMatch(/^ {2}- native-gateway\.yaml$/m);
@@ -48,7 +58,10 @@ describe("native gateway on GKE Autopilot", () => {
     expect(sidecar.image).toBe(proxySidecar.image);
     expect(sidecar.args).toEqual(proxySidecar.args);
     expect(sidecar.restartPolicy).toBe("Always");
-    expect(spec.containers[0].env).toEqual([{ name: "DATABASE_URL", value: "wardby-gateway-database-url" }]);
+    expect(spec.containers[0].env).toEqual([
+      { name: "DATABASE_URL", value: "wardby-gateway-database-url" },
+      { name: "WARDBY_GITHUB_ALLOWED_ACCOUNTS", value: "wardby_github_allowed_accounts" },
+    ]);
     expect(spec.priorityClassName).toBe("wardby-control-plane");
   });
 
