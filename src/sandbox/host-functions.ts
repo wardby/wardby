@@ -24,6 +24,20 @@ import { redactPii } from "./pii-redaction.js";
 /** Below this length a "secret" is too likely to coincidentally match ordinary log text — not worth the false-positive risk of redacting it. */
 const MIN_REDACTABLE_SECRET_LENGTH = 6;
 
+/**
+ * `text` with every exact occurrence of each value replaced by `[REDACTED]`; values shorter than
+ * MIN_REDACTABLE_SECRET_LENGTH are left alone. The one redactor for secret values a tool fetched:
+ * the console bridge here, and the native sandbox worker's stderr.
+ */
+export function redactExactSecretValues(text: string, values: Iterable<string>): string {
+  let out = text;
+  for (const value of values) {
+    if (value.length < MIN_REDACTABLE_SECRET_LENGTH) continue;
+    out = out.split(value).join("[REDACTED]");
+  }
+  return out;
+}
+
 const FETCH_ALLOWED_HOSTS = parseAllowedHosts(process.env.WARDBY_FETCH_ALLOWED_HOSTS);
 let sharedParserPool: ParserWorkerPool | undefined;
 
@@ -125,14 +139,7 @@ export function createPrivilegedHost(options: PrivilegedHostOptions): Privileged
   // fetches but doesn't log it costs nothing extra. Fresh per invocation
   // (one privileged host per sandbox context, one per tool call).
   const fetchedSecretValues = new Set<string>(options.redactSecretValues ?? []);
-  function redactSecrets(text: string): string {
-    let out = text;
-    for (const value of fetchedSecretValues) {
-      if (value.length < MIN_REDACTABLE_SECRET_LENGTH) continue;
-      out = out.split(value).join("[REDACTED]");
-    }
-    return out;
-  }
+  const redactSecrets = (text: string): string => redactExactSecretValues(text, fetchedSecretValues);
 
   return {
     async __bridge_console(argsJson) {

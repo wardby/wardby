@@ -34,9 +34,9 @@ const launcherLog = logger.child({ module: "native-docker-launcher" });
 
 /**
  * Bounded, so a noisy worker cannot flood the log. The worker holds no long-lived credentials (only
- * its run's gateway capability), but this is not a redacted channel: a tool's host calls can hand it
- * secret values (`secrets.get`), which the gateway redacts per call from that tool's console output
- * only, so a crash message that quotes a value the worker was handling reaches the log as is.
+ * its run's gateway capability), and it redacts the secret values it received (every `secrets.get`
+ * result, and the capability) from everything it writes to stderr, its failure line and logger lines
+ * included (stderr-redaction.ts), with the console bridge's redactor and its minimum length.
  */
 export const WORKER_STDERR_TAIL_CHARS = 2000;
 
