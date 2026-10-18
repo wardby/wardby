@@ -771,43 +771,57 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     expect((await db.run.findUniqueOrThrow({ where: { id: run.id } })).executionWorkflowId).toBeNull();
   }, 30_000);
 
-  it("a replay that meets a step its record does not have ends the run lost with the steps-changed reason", async () => {
-    await executor?.close();
-    let release!: () => void;
-    const open = new Promise<void>((resolve) => (release = resolve));
-    const llm = scriptedLlm([finalAnswer("never")], { turn: 1, open });
-    const dying = killableDb();
-    executor = buildWith(llm, executorId, dying.client);
-    await executor.launch();
-    const run = await db.run.create({ data: { agentId, executionManaged: true } });
+  // "turn:1:estimate" is settled by executeRun's backstop; "load" runs ahead of it, in runInsideWorkflow.
+  it.each(["turn:1:estimate", "load"])(
+    "a replay that meets a renamed %s step ends the run lost with the steps-changed reason, and notifies",
+    async (renamed) => {
+      await executor?.close();
+      let release!: () => void;
+      const open = new Promise<void>((resolve) => (release = resolve));
+      const llm = scriptedLlm([finalAnswer("never")], { turn: 1, open });
+      const dying = killableDb();
+      executor = buildWith(llm, executorId, dying.client);
+      await executor.launch();
+      const run = await db.run.create({ data: { agentId, executionManaged: true } });
 
-    const firstAttempt = executor.start(run.id).catch(() => undefined);
-    await waitFor("turn 1 to block inside the LLM step", () => llm.calls.length === 1);
-    await executor.close();
-    dying.kill();
-    release();
-    await firstAttempt;
-    // A release whose steps differ recorded this run: the engine's turn-1 estimate step has another name.
-    await db.$executeRawUnsafe(
-      "UPDATE dbos_test.operation_outputs SET function_name = 'renamed:step' WHERE workflow_uuid = $1 AND function_name = 'turn:1:estimate'",
-      run.id,
-    );
+      const firstAttempt = executor.start(run.id).catch(() => undefined);
+      await waitFor("turn 1 to block inside the LLM step", () => llm.calls.length === 1);
+      await executor.close();
+      dying.kill();
+      release();
+      await firstAttempt;
+      // A release whose steps differ recorded this run: one of its steps has another name.
+      await db.$executeRawUnsafe(
+        "UPDATE dbos_test.operation_outputs SET function_name = 'renamed:step' WHERE workflow_uuid = $1 AND function_name = $2",
+        run.id,
+        renamed,
+      );
 
-    const replayLlm = scriptedLlm([finalAnswer("never")]);
-    executor = buildWith(replayLlm, `${executorId}-replay`);
-    await executor.launch();
-    await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id });
-    await waitFor(
-      "the replay to end the run",
-      async () => (await db.run.findUnique({ where: { id: run.id } }))?.status !== "running",
-    );
+      const events: WorkflowEventInput[] = [];
+      setWorkflowEventSink(async (e) => {
+        events.push(e);
+      });
+      try {
+        const replayLlm = scriptedLlm([finalAnswer("never")]);
+        executor = buildWith(replayLlm, `${executorId}-replay-${renamed}`);
+        await executor.launch();
+        await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id });
+        await waitFor("the replay to notify the run's end", () =>
+          events.some((e) => e.runId === run.id && e.payload.kind === "run_failed"),
+        );
 
-    const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
-    expect(after.status).toBe("lost");
-    expect(after.error).toBe(STEPS_CHANGED_REASON);
-    expect(after.finishedAt).not.toBeNull();
-    expect(replayLlm.calls).toHaveLength(0);
-  }, 30_000);
+        const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+        expect(after.status).toBe("lost");
+        expect(after.error).toBe(STEPS_CHANGED_REASON);
+        expect(after.finishedAt).not.toBeNull();
+        expect(replayLlm.calls).toHaveLength(0);
+        expect(events.filter((e) => e.runId === run.id && e.payload.kind === "run_failed")).toHaveLength(1);
+      } finally {
+        setWorkflowEventSink(null);
+      }
+    },
+    30_000,
+  );
 
   it("a run started in the background from inside another run's step fails, unless started outside its context", async () => {
     // What a coding child's terminal hook does when it finishes inside its lead's delegation

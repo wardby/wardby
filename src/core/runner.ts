@@ -24,6 +24,7 @@ import type { ProviderRegistry } from "../providers/index.js";
 import type { EngineProgress, EngineResult, LoadedTool } from "../providers/engine/types.js";
 import {
   RunOwnershipLostError,
+  STEPS_CHANGED_REASON,
   StepReplayMismatchError,
   runStepInline,
   type StepRunner,
@@ -1647,6 +1648,16 @@ export async function failNativeRun(ctx: NativeRunFinishContext, err: unknown): 
   return settleFinishedNativeRun(ctx, finished, claimed);
 }
 
+/** The terminal write for a run that cannot continue (it ends `lost` with `reason`), then the same settle path. */
+export async function loseNativeRun(ctx: NativeRunFinishContext, reason: string): Promise<Run> {
+  const { run: finished, claimed } = await finishRunClaimed(ctx.db, ctx.runId, {
+    status: "lost",
+    error: reason,
+    finishedAt: new Date(),
+  });
+  return settleFinishedNativeRun(ctx, finished, claimed);
+}
+
 /** Where a run stands for the native gateway: still drivable, cancelled (its task), or otherwise ended. */
 export async function runDrivability(db: RunnerDb, runId: string): Promise<RunDrivability> {
   const run = await db.run.findUnique({ where: { id: runId }, select: { status: true } });
@@ -2180,9 +2191,9 @@ async function executeTrackedRun(
       logRunOwnershipLost(runId, err);
       throw err;
     }
-    // A replay that no longer matches its record: the durable executor ends the run (lost), not a
-    // generic failure.
-    if (err instanceof StepReplayMismatchError) throw err;
+    // A replay that no longer matches its record (a run recorded by a release whose steps differ)
+    // cannot continue: it ends lost, not failed, through the same settle path.
+    if (err instanceof StepReplayMismatchError) return loseNativeRun(finishContext, STEPS_CHANGED_REASON);
     return failNativeRun(finishContext, err);
   }
 }

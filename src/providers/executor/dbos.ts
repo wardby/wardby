@@ -32,7 +32,8 @@ import {
   type RunnerDb,
 } from "../../core/runner.js";
 import { markRunFailedFromExecutorError } from "../../core/dispatch.js";
-import type { SelfDefectSink } from "../../core/self-defects.js";
+import { fileSelfDefectForRun, type SelfDefectSink } from "../../core/self-defects.js";
+import { emitRunFinishedEvents } from "../../core/workflow-run-events.js";
 import { prisma as defaultDb } from "../../core/db.js";
 import { HEARTBEAT_INTERVAL_MS } from "../../core/timing.js";
 import { DRIVABLE } from "../../core/run-status.js";
@@ -55,12 +56,16 @@ const dbosLog = logger.child({ module: "dbos-executor" });
 type Providers = NativeRunProviders;
 type Db = RunnerDb & Pick<PrismaClient, "run">;
 
-/** End a run `lost` with `reason`, unless it already reached a terminal state (first writer wins). */
-async function failNativeRunAsLost(db: Pick<PrismaClient, "run">, runId: string, reason: string): Promise<void> {
-  await db.run.updateMany({
+/**
+ * End a run `lost` with `reason`, unless it already reached a terminal state (first writer wins).
+ * True when this write made it lost.
+ */
+async function failNativeRunAsLost(db: Pick<PrismaClient, "run">, runId: string, reason: string): Promise<boolean> {
+  const { count } = await db.run.updateMany({
     where: { id: runId, status: { in: [...DRIVABLE] } },
     data: { status: "lost", error: reason, finishedAt: new Date() },
   });
+  return count > 0;
 }
 
 /** DBOS's own system pool size (DEFAULT_POOL_SIZE in the SDK's system_database.js); kept for ours. */
@@ -169,8 +174,9 @@ export async function workflowIdOf(db: Pick<PrismaClient, "run">, runId: string)
  * DBOS signals that a replay reached a step whose recorded name differs (the
  * run was recorded by a release whose steps differ, e.g. after a takeover
  * fork) by throwing `DBOSUnexpectedStepError`. Translated into a
- * `StepReplayMismatchError`, which executeRun rethrows untouched so
- * runInsideWorkflow can end the run `lost`.
+ * `StepReplayMismatchError`, which executeRun's backstop settles as `lost`
+ * (runInsideWorkflow does it for a mismatch at the load step, which is outside
+ * that backstop).
  */
 export const dbosStep: StepRunner = async (name, fn) => {
   let ran: { value: unknown } | undefined;
@@ -222,7 +228,7 @@ function usageOf(value: unknown): Record<string, number> | undefined {
  *   again on every replay, now possibly under newer code.
  * - Step names and their order must only change in ways a replay can still
  *   follow; a replay that meets a different recorded name ends the run lost
- *   with STEPS_CHANGED_REASON (runInsideWorkflow).
+ *   with STEPS_CHANGED_REASON (executeRun's backstop, or runInsideWorkflow).
  * - New code must accept step outputs recorded by the previous release (the
  *   `turn:N:llm` TurnResult, tool results). A release that changes a recorded
  *   shape keeps reading the old one, or a takeover fails at that step (lost).
@@ -524,10 +530,15 @@ export class DbosExecutor implements Executor {
           ? err.cause
           : new DbosErrors.DBOSWorkflowConflictError(runId);
       }
-      // A replay (typically a takeover fork) met a step the recorded run does not have.
+      // A replay met a step the recorded run does not have at the load step, ahead of executeRun's
+      // backstop (which settles a mismatch in any later step itself).
       if (err instanceof StepReplayMismatchError) {
         dbosLog.warn({ err, runId }, "replay no longer matches the recorded run");
-        await failNativeRunAsLost(this.db, runId, STEPS_CHANGED_REASON);
+        if (await failNativeRunAsLost(this.db, runId, STEPS_CHANGED_REASON)) {
+          await fileSelfDefectForRun(this.selfDefects, runId);
+          const lost = await this.db.run.findUnique({ where: { id: runId } });
+          if (lost) await emitRunFinishedEvents(this.db, lost);
+        }
         return;
       }
       throw err;

@@ -78,12 +78,15 @@ export class RunOwnershipLostError extends Error {
   }
 }
 
+/** Why a run ends lost when its replay meets a step its record does not have (StepReplayMismatchError). */
+export const STEPS_CHANGED_REASON = "Could not continue across versions: the run's steps changed in the new version.";
+
 /**
  * Part of the StepRunner contract: a durable step runner may throw this when a
  * replayed run reaches a step whose name differs from the one recorded at that
  * position (the run was recorded by a release whose steps differ). The run
- * cannot continue from its record; engines and the runner rethrow it untouched
- * so the executor ends the run itself.
+ * cannot continue from its record; engines rethrow it untouched and the
+ * runner ends the run lost with STEPS_CHANGED_REASON.
  */
 export class StepReplayMismatchError extends Error {
   readonly step: string;

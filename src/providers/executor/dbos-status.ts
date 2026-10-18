@@ -4,6 +4,7 @@
  */
 
 import { DELEGATE_TOOL_PREFIX } from "../../core/tool-names.js";
+import { STEPS_CHANGED_REASON } from "../engine/types.js";
 
 export interface WorkflowStatusLike {
   status: string;
@@ -106,8 +107,8 @@ export interface TakeoverChild {
 
 export type TakeoverDecision = { action: "fork"; startStep: number } | { action: "lost"; reason: string };
 
-/** Why a forked run ends lost when its replay meets a step the new code no longer takes. */
-export const STEPS_CHANGED_REASON = "Could not continue across versions: the run's steps changed in the new version.";
+/** Why a forked run ends lost when its replay meets a step the new code no longer takes (defined with StepReplayMismatchError). */
+export { STEPS_CHANGED_REASON };
 
 const LLM_STEP = /^turn:(\d+):llm$/;
 
