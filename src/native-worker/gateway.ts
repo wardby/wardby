@@ -16,6 +16,7 @@ import type { LlmStreamEvent } from "../providers/llm/types.js";
 import pino from "pino";
 import { isPrivilegedBridgeName, redactExactSecretValues, type PrivilegedHost } from "../sandbox/host-functions.js";
 import { logger } from "../core/logger.js";
+import { declaredCodeOf } from "../core/error-code.js";
 import {
   GatewayError,
   GatewayRequestSchema,
@@ -47,6 +48,26 @@ function redactedError(err: unknown, values: readonly string[]): unknown {
 }
 
 /**
+ * Logs an unexpected error for the operator, redacted by exact value. Fail closed: with no values
+ * to redact by (unavailable or unreadable), only the error's name and declared code are logged,
+ * never its message or stack.
+ */
+export function logUnexpectedError(
+  log: Pick<typeof logger, "error">,
+  err: unknown,
+  values: readonly string[] | undefined,
+  logMessage: string,
+  fields: Record<string, unknown> = {},
+): void {
+  if (values) log.error({ ...fields, err: redactedError(err, values) }, logMessage);
+  else
+    log.error(
+      { ...fields, errName: err instanceof Error ? err.name : typeof err, causeCode: declaredCodeOf(err) },
+      logMessage,
+    );
+}
+
+/**
  * The one way either gateway turns a failure into what the worker sees: an unexpected error is
  * logged for the operator (redacted by the run's secret values) and becomes the checked
  * GatewayError (workerGatewayError); the values are read once and serve both.
@@ -61,7 +82,7 @@ export async function forWorker(
     (v) => [...v],
     () => undefined,
   );
-  gatewayLog.error({ err: redactedError(err, values ?? []) }, logMessage);
+  logUnexpectedError(gatewayLog, err, values, logMessage);
   return workerGatewayError(err, values ? async () => values : undefined);
 }
 

@@ -35,6 +35,7 @@ import { consoleRedactionValues } from "../sandbox/secret-broker.js";
 import type { safeFetch } from "../sandbox/safe-fetch.js";
 import { runUserToolCall } from "../sandbox/user-tool.js";
 import {
+  logUnexpectedError,
   runSandboxedEngine,
   SandboxRunCancelledError,
   type RunDrivability,
@@ -65,7 +66,7 @@ import {
 } from "./subagent-memory-tools.js";
 import { prisma as defaultDb } from "./db.js";
 import { logger } from "./logger.js";
-import { declaredCodeOf } from "./error-code.js";
+import { CHILD_RUN_FAILURE_CODES, declaredCodeOf } from "./error-code.js";
 import { loadCodingConcurrencyConfig } from "../config/providers.js";
 import type { Executor } from "../providers/executor/types.js";
 import type { ReviewHostRegistry } from "../providers/review-host/types.js";
@@ -106,7 +107,7 @@ import { ReviewReadLedger } from "./review-reads.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
 import { loadBudgetEvent, ownerBudgetSentence, type BudgetEventView } from "./budget-events.js";
 
-const runnerLog = logger.child({ module: "runner" });
+export const runnerLog = logger.child({ module: "runner" });
 
 /**
  * Sub-agent dispatch uses one synthetic tool per declared child, named by the
@@ -623,7 +624,7 @@ export function codingChildResult(
     : run.status === "refused"
       ? serviceRefusalSentence(run.error)
       : null;
-  const errorCode = run.status === "failed" ? declaredCodeOf(run.error) : undefined;
+  const errorCode = run.status === "failed" ? declaredCodeOf(run.error, CHILD_RUN_FAILURE_CODES) : undefined;
   const budget =
     budgetEvent && (run.status === "budget_exhausted" || run.status === "refused")
       ? ownerBudgetSentence(budgetEvent.event, budgetEvent.agentName)
@@ -1751,6 +1752,8 @@ export interface DurableDelegationContext {
   issueTrackers: IssueTrackerRegistry | undefined;
   ledger: DelegationLedger;
   sessionId: string;
+  /** Every secret value the run can read, to redact its logs by exact value (unset or failing: nothing is logged of an error but its name and code). */
+  secretValues?: () => Promise<string[]>;
   /** How long one call waits on the child before answering `pending` (the worker calls again). */
   pollWindowMs?: number;
   pollIntervalMs?: number;
@@ -1911,7 +1914,8 @@ export async function durableDelegate(
       // Recorded as the call's result, so the model can report it and a retried callId never
       // dispatches twice. Only the leading code is exposed: messages can carry internals.
       const code = declaredCodeOf(err);
-      runnerLog.error({ err, runId, boundName }, "delegation dispatch failed");
+      const values = await ctx.secretValues?.().catch(() => undefined);
+      logUnexpectedError(runnerLog, err, values, "delegation dispatch failed", { runId, boundName });
       return finish(
         JSON.stringify({
           error: "dispatch_failed",

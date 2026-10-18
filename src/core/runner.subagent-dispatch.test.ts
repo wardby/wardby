@@ -10,6 +10,7 @@ import {
   durableDelegate,
   executeRun,
   parseDelegateArgs,
+  runnerLog,
   type DelegationLedger,
   type LoadedNativeRun,
   type RunnerDb,
@@ -1067,7 +1068,7 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     });
 
     describe("durableDelegate dispatch failure codes", () => {
-      const run = async (message: string) => {
+      const run = async (message: string, secretValues?: () => Promise<string[]>) => {
         const dispatcher: FakeAgent = {
           id: "dispatcher-agent",
           name: "dispatcher",
@@ -1101,6 +1102,7 @@ describe("delegate_to_<boundName> dispatch tool", () => {
             issueTrackers: undefined,
             ledger: fakeDelegationLedger(),
             sessionId: "session-1",
+            secretValues,
           },
           "call-1",
           "delegate_to_child",
@@ -1113,6 +1115,30 @@ describe("delegate_to_<boundName> dispatch tool", () => {
         const text = await run("fake_unlisted_secret_0001: more detail");
         expect(text.includes("fake_unlisted_secret_0001")).toBe(false);
         expect(text.includes("could not be created.")).toBe(true);
+      });
+
+      const logged = async (secretValues?: () => Promise<string[]>) => {
+        const lines: unknown[] = [];
+        const spy = vi.spyOn(runnerLog, "error").mockImplementation((obj: unknown) => {
+          lines.push(obj);
+        });
+        try {
+          await run("failed with fake_dispatch_secret_0003 inside", secretValues);
+        } finally {
+          spy.mockRestore();
+        }
+        return JSON.stringify(lines, (_k, v) => (v instanceof Error ? { message: v.message, stack: v.stack } : v));
+      };
+
+      it("redacts the run's secret values from the logged exception", async () => {
+        const text = await logged(async () => ["fake_dispatch_secret_0003"]);
+        expect(text.includes("fake_dispatch_secret_0003")).toBe(false);
+        expect(text.includes("[REDACTED]")).toBe(true);
+      });
+
+      it("logs no message or stack when the values are unavailable", async () => {
+        expect((await logged()).includes("fake_dispatch_secret_0003")).toBe(false);
+        expect((await logged(() => Promise.reject(new Error("x")))).includes("fake_dispatch_secret_0003")).toBe(false);
       });
 
       it("shows a listed code", async () => {

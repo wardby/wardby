@@ -198,7 +198,16 @@ async function handle(
       return ok(await ctx.llm.countTokens(p.model, p.messages, p.tools));
     }
     case "builtin.call":
-      return ok(await builtin(ctx, ledger, request.callId, params as GatewayParams<"builtin.call">, deps.pollWindowMs));
+      return ok(
+        await builtin(
+          ctx,
+          ledger,
+          request.callId,
+          params as GatewayParams<"builtin.call">,
+          deps.pollWindowMs,
+          scope.secretValues,
+        ),
+      );
     case "host.call":
       return ok(await hostCall(ctx, ledger, request.callId, params as GatewayParams<"host.call">));
     case "progress": {
@@ -364,13 +373,14 @@ async function builtin(
   callId: string,
   params: GatewayParams<"builtin.call">,
   pollWindowMs: number | undefined,
+  secretValues?: () => Promise<string[]>,
 ): Promise<unknown> {
   if (!ctx.snapshot.input.builtinTools.includes(params.name)) {
     throw new GatewayError("not_allowed", `"${params.name}" is not a built-in tool of this run.`);
   }
   if (params.name.startsWith(DELEGATE_TOOL_PREFIX)) {
     const outcome = await durableDelegate(
-      { ...ctx.delegation, pollWindowMs, ledger, sessionId: ctx.session.id },
+      { ...ctx.delegation, pollWindowMs, ledger, sessionId: ctx.session.id, secretValues },
       callId,
       params.name,
       params.argsJson,

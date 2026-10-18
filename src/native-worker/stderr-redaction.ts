@@ -39,7 +39,9 @@ export function redactReceivedSecrets(text: string): string {
  * A pending line longer than this (64 KiB of text) is emitted without waiting for its "\n", so an
  * unterminated stream cannot grow the buffer without bound. The cut keeps back the last
  * (longest remembered value − 1) characters, so a value that has begun but not ended is held whole
- * until its end arrives; the buffer is therefore bounded by this plus the longest value.
+ * until its end arrives; the buffer is therefore bounded by this plus the longest value. When the
+ * safe cut falls back to 0 (a self-overlapping value repeated without a newline), the whole buffer
+ * is emitted redacted instead, so the bound holds for every value.
  */
 export const MAX_PENDING_STDERR_CHARS = 64 * 1024;
 
@@ -97,7 +99,12 @@ function takeReady(text: string): string {
   // A newline ends a line safely unless a remembered value itself holds one.
   const multiLine = redactable().some((value) => value.includes("\n"));
   if (multiLine) cut = safeCut(pending, cut, true);
-  if (pending.length - cut > MAX_PENDING_STDERR_CHARS) cut = safeCut(pending, pending.length, true);
+  if (pending.length - cut > MAX_PENDING_STDERR_CHARS) {
+    cut = safeCut(pending, pending.length, true);
+    // A self-overlapping value can walk the cut back to 0 every time; the whole buffer is then
+    // emitted redacted (complete occurrences replaced), so the buffer stays bounded.
+    if (cut === 0) cut = pending.length;
+  }
   const ready = pending.slice(0, cut);
   pending = pending.slice(cut);
   return ready;

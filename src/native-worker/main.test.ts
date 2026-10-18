@@ -321,6 +321,41 @@ describe("native worker stderr redaction", () => {
     expect(stderr.startsWith("x".repeat(1024))).toBe(true);
     expect(stderr.endsWith("[REDACTED]\n")).toBe(true);
   }, 30_000);
+
+  it("keeps the pending buffer bounded for a self-overlapping value repeated without a newline", async () => {
+    const value = "abababab";
+    const child = spawn(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "--input-type=module",
+        "-e",
+        [
+          'import { installStderrRedaction, rememberSecretValue, MAX_PENDING_STDERR_CHARS } from "./src/native-worker/stderr-redaction.ts";',
+          "installStderrRedaction();",
+          `rememberSecretValue(${JSON.stringify(value)});`,
+          `process.stderr.write("ab".repeat(MAX_PENDING_STDERR_CHARS));`,
+          'process.stdin.on("data", () => {}); process.stdin.on("end", () => process.exit(0));',
+        ].join("\n"),
+      ],
+      { cwd: REPO_ROOT, env: {}, stdio: ["pipe", "ignore", "pipe"] },
+    );
+    let stderr = "";
+    const emitted = new Promise<void>((done) =>
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+        if (stderr.length > 0) done();
+      }),
+    );
+    const exited = new Promise<number | null>((done) => child.on("exit", done));
+    await Promise.race([emitted, exited]);
+    // Emitted by the bound while the child still runs, not by the exit flush.
+    expect(child.exitCode).toBeNull();
+    child.stdin.end();
+    expect(await exited).toBe(0);
+    expect(stderr.includes(value)).toBe(false);
+  }, 30_000);
 });
 
 describe("warm input delivery", () => {

@@ -176,4 +176,17 @@ describe("codingChildResult error codes", () => {
     const out = codingChildResult(stored);
     expect(out.includes("fake_unlisted_code_0001")).toBe(false);
   });
+
+  it("passes wardby's own failure codes through", () => {
+    for (const code of [
+      "coding_queue_timeout",
+      "coding_workspace_lost",
+      "coding_toolchain_unsupported",
+      "native_sandbox_worker_lost",
+      "model_unavailable",
+    ]) {
+      const out = JSON.parse(codingChildResult({ ...base, status: "failed", error: `${code}: detail` }));
+      expect(out.errorCode === code).toBe(true);
+    }
+  });
 });

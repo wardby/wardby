@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
 import { PRIVILEGED_BRIDGE_NAMES, type PrivilegedHost } from "../sandbox/host-functions.js";
 import {
+  forWorker,
   gatewayLog,
   runSandboxedEngine,
   SandboxRunCancelledError,
@@ -410,5 +411,29 @@ describe("worker transports carry only what the HTTP path carries", () => {
       message: GATEWAY_INTERNAL_MESSAGE,
       causeCode: "coding_execution_not_configured",
     });
+  });
+});
+
+describe("forWorker when secret values are unavailable", () => {
+  const FAKE = "fake_unreadable_secret_0002";
+  const logWith = async (secretValues: (() => Promise<Iterable<string>>) | undefined) => {
+    const logged: unknown[] = [];
+    const spy = vi.spyOn(gatewayLog, "error").mockImplementation((obj: unknown) => {
+      logged.push(obj);
+    });
+    try {
+      await forWorker(new Error(`failed with ${FAKE}`), secretValues, "msg");
+    } finally {
+      spy.mockRestore();
+    }
+    return JSON.stringify(logged);
+  };
+
+  it("logs no message or stack when there are no values to redact by", async () => {
+    expect((await logWith(undefined)).includes(FAKE)).toBe(false);
+  });
+
+  it("logs no message or stack when reading the values fails", async () => {
+    expect((await logWith(() => Promise.reject(new Error("no")))).includes(FAKE)).toBe(false);
   });
 });
