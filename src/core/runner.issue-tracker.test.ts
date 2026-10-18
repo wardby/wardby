@@ -147,6 +147,7 @@ function harness(opts: {
       findMany: async () => [],
     },
     agentTool: { findMany: async () => [] },
+    agentSecret: { findMany: async () => [] },
     budgetGroup: { findUnique: async () => null },
     agentSubAgent: { findMany: async () => [] },
     agentIssueProject: {

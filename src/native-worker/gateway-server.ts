@@ -487,7 +487,8 @@ async function replayable(
   }
 }
 
-async function finish(
+/** The worker's terminal call: the run's one terminal write (masked by finishNativeRun), then the session ends. */
+export async function finish(
   ctx: RebuiltRun,
   ledger: PrismaGatewayLedger,
   callId: string,

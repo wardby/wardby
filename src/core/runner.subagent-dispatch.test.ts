@@ -222,7 +222,7 @@ function fakeDb(
     runAttribution: { findUnique: (async () => null) as any, create: (async () => ({})) as any },
     workItem: { upsert: (async () => ({ id: "wi", parentKey: null })) as any },
     agentTool: { findMany: (async () => []) as any },
-    agentSecret: { findFirst: (async () => null) as any },
+    agentSecret: { findFirst: (async () => null) as any, findMany: (async () => []) as any },
     agentDatastore: { findFirst: (async () => null) as any },
     budgetGroup: {
       findUnique: (async ({ where }: any) => {

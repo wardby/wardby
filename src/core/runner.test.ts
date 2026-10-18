@@ -5,7 +5,15 @@ import type { AgentMemoryStore } from "../providers/memory/types.js";
 import type { Engine, EngineResult, EngineRunContext, StepRunner } from "../providers/engine/types.js";
 import type { LlmProvider } from "../providers/index.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
-import { executeRun, runAgent, RunCancelledError, RunOwnershipLostError, type RunnerDb } from "./runner.js";
+import {
+  executeRun,
+  loseNativeRun,
+  runAgent,
+  RunCancelledError,
+  RunOwnershipLostError,
+  type RunnerDb,
+} from "./runner.js";
+import { WITHHELD_TEXT_NOTICE } from "./secret-guard.js";
 import { RoutingLlmProvider, type CatalogLlmAdapter } from "../providers/llm/routing.js";
 import { buildCatalog } from "../providers/llm/catalog.js";
 import { SHIPPED_CATALOG } from "../providers/llm/catalog-shipped.js";
@@ -148,6 +156,8 @@ function fakeDb(
           }))) as any,
     },
     agentSecret: {
+      findMany: (async ({ where }: any) =>
+        secretsData.filter((s) => s.agentId === where.agentId).map((s) => ({ boundName: s.boundName }))) as any,
       findFirst: (async ({ where }: any) => {
         const row = secretsData.find((s) => s.agentId === where.agentId && s.boundName === where.boundName);
         return row
@@ -1711,5 +1721,92 @@ describe("native runs record and keep their catalog entry", () => {
     } finally {
       setWorkflowEventSink(null);
     }
+  });
+});
+
+describe("a native run's final text and error are masked at the terminal write", () => {
+  // Fake values only; assertions check the stored row never holds them.
+  const FAKE_KEY = "fake-secret-value-1234";
+  const agent = { id: "a1", name: "masker", systemPrompt: "s", model: "m", budgetUsd: 10, maxTurns: 10 };
+  const providersWith = (engine: Engine, secrets: SecretCipher = fakeCipher()) => ({
+    llm: noopLlm,
+    engine,
+    datastore: fakeDatastore(),
+    secrets,
+    memory: fakeMemory(),
+  });
+  const usage = { tokensIn: 0, tokensOut: 0, costUsd: 0 };
+
+  it("masks an attached secret's value in the engine result's final text and error", async () => {
+    const db = fakeDb([agent], [], [], [{ agentId: "a1", boundName: "API_KEY", value: FAKE_KEY }]);
+    const run = await db.run.create({ data: { agentId: "a1" } });
+    const engine = fakeEngine({
+      status: "failed",
+      finalText: `the key is ${FAKE_KEY}`,
+      error: `call failed with ${FAKE_KEY}`,
+      turns: 1,
+      usage,
+    });
+    const finished = await executeRun(run.id, providersWith(engine), db);
+    const row: any = await db.run.findUnique({ where: { id: run.id } });
+    expect(JSON.stringify([finished, row]).includes(FAKE_KEY)).toBe(false);
+    expect(row.finalText).toBe("the key is [REDACTED]");
+    expect(row.error).toBe("call failed with [REDACTED]");
+    expect(row.status).toBe("failed");
+  });
+
+  it("masks a thrown error's message on the backstop write", async () => {
+    const db = fakeDb([agent], [], [], [{ agentId: "a1", boundName: "API_KEY", value: FAKE_KEY }]);
+    const run = await db.run.create({ data: { agentId: "a1" } });
+    const engine: Engine = {
+      async run() {
+        throw new Error(`boom ${FAKE_KEY}`);
+      },
+    };
+    const finished = await executeRun(run.id, providersWith(engine), db);
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toBe("boom [REDACTED]");
+  });
+
+  it("stores the withheld notice when the agent's secrets cannot be read, and keeps a null text null", async () => {
+    const db = fakeDb([agent], [], [], [{ agentId: "a1", boundName: "API_KEY", value: FAKE_KEY }]);
+    const run = await db.run.create({ data: { agentId: "a1" } });
+    const failing: SecretCipher = {
+      ...fakeCipher(),
+      decrypt: async () => {
+        throw new Error("decrypt failed");
+      },
+    };
+    const engine = fakeEngine({ status: "succeeded", finalText: `the key is ${FAKE_KEY}`, turns: 1, usage });
+    const finished = await executeRun(run.id, providersWith(engine, failing), db);
+    expect(finished.status).toBe("succeeded");
+    expect(finished.finalText).toBe(WITHHELD_TEXT_NOTICE);
+    expect(finished.error).toBeNull();
+  });
+
+  it("masks a lost run's reason", async () => {
+    const db = fakeDb([agent], [], [], [{ agentId: "a1", boundName: "API_KEY", value: FAKE_KEY }]);
+    const run = await db.run.create({ data: { agentId: "a1", status: "running" } });
+    const ctx = {
+      runId: run.id,
+      db,
+      providers: providersWith(fakeEngine({ status: "succeeded", finalText: "", turns: 0, usage })),
+      reviewHosts: undefined,
+      repoAccess: undefined,
+      issueTrackers: undefined,
+    };
+    const finished = await loseNativeRun(ctx, `lost near ${FAKE_KEY}`);
+    expect({ status: finished.status, error: finished.error }).toEqual({
+      status: "lost",
+      error: "lost near [REDACTED]",
+    });
+  });
+
+  it("leaves the text unchanged for an agent with no secrets", async () => {
+    const db = fakeDb([agent]);
+    const run = await db.run.create({ data: { agentId: "a1" } });
+    const engine = fakeEngine({ status: "succeeded", finalText: `plain ${FAKE_KEY}`, turns: 1, usage });
+    const finished = await executeRun(run.id, providersWith(engine), db);
+    expect(finished.finalText).toBe(`plain ${FAKE_KEY}`);
   });
 });

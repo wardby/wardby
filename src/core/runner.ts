@@ -46,6 +46,7 @@ import type { PrismaGatewayLedger } from "../native-worker/ledger.js";
 import { asStringArray, asPrefixMap } from "../sandbox/tool-capabilities.js";
 import { scopeDatastore } from "../providers/datastore/scoped.js";
 import { buildSecretsAccessor, scopeSecretsAccessor, type SecretsAccessor } from "./secrets.js";
+import { loadAgentSecretValues, maskNamedSecrets, WITHHELD_TEXT_NOTICE } from "./secret-guard.js";
 import { buildSharedDatastoreAccessor, scopeSharedDatastoreAccessor } from "./datastores.js";
 import { effectiveBudgetForRun, type EffectiveBudgetOptions } from "./budget-groups.js";
 import { stopChildrenOfLostRun } from "./lost-run-children.js";
@@ -1622,6 +1623,46 @@ export interface NativeRunFinishContext {
   issueTrackers: IssueTrackerRegistry | undefined;
 }
 
+interface RunTexts {
+  finalText?: string | null;
+  error?: string | null;
+}
+
+/**
+ * `texts` with every value of every secret attached to the run's agent masked, for a terminal
+ * write: the stored row is what get_run, the viewer, host and issue status comments and run
+ * notifications all read. Fails closed: when the secrets cannot be read, every non-null text is
+ * replaced by WITHHELD_TEXT_NOTICE (the log line carries no text and no error message). A pure
+ * function of the stored secrets, so a durable replay writes the same row.
+ */
+async function maskRunTexts(
+  ctx: Pick<NativeRunFinishContext, "runId" | "db" | "providers">,
+  texts: RunTexts,
+): Promise<RunTexts> {
+  const entries = Object.entries(texts) as [keyof RunTexts, string | null | undefined][];
+  if (!entries.some(([, text]) => typeof text === "string" && text.length > 0)) return texts;
+  let mask: (text: string) => string;
+  try {
+    const row = await ctx.db.run.findUnique({ where: { id: ctx.runId }, select: { agentId: true } });
+    if (!row) throw new Error("run not found");
+    const named = await loadAgentSecretValues(ctx.db, ctx.providers.secrets, row.agentId);
+    mask = (text) => maskNamedSecrets(text, named);
+  } catch (err) {
+    runnerLog.warn(
+      {
+        runId: ctx.runId,
+        event: "run_text_secret_check_failed",
+        errorName: err instanceof Error ? err.name : typeof err,
+      },
+      "could not read the agent's secrets to check the run's final text and error; storing the withheld notice",
+    );
+    mask = () => WITHHELD_TEXT_NOTICE;
+  }
+  return Object.fromEntries(
+    entries.map(([key, text]) => [key, typeof text === "string" && text.length > 0 ? mask(text) : text]),
+  );
+}
+
 /** Everything after the terminal write, shared by the normal and backstop paths. */
 async function settleFinishedNativeRun(ctx: NativeRunFinishContext, finished: Run, claimed: boolean): Promise<Run> {
   const { runId, db, providers, reviewHosts, repoAccess, issueTrackers } = ctx;
@@ -1670,13 +1711,14 @@ async function settleFinishedNativeRun(ctx: NativeRunFinishContext, finished: Ru
 
 /** The terminal write for an engine result, then its usage, host/issue status, and follow-ups. */
 export async function finishNativeRun(ctx: NativeRunFinishContext, model: string, result: EngineResult): Promise<Run> {
+  const texts = await maskRunTexts(ctx, { error: result.error ?? null, finalText: result.finalText || null });
   const { run: finished, claimed } = await finishRunClaimed(ctx.db, ctx.runId, {
     status: result.status,
     tokensIn: result.usage.tokensIn,
     tokensOut: result.usage.tokensOut,
     costUsd: result.usage.costUsd,
-    error: result.error ?? null,
-    finalText: result.finalText || null,
+    error: texts.error,
+    finalText: texts.finalText,
     turns: result.turns,
     finishedAt: new Date(),
   });
@@ -1687,9 +1729,10 @@ export async function finishNativeRun(ctx: NativeRunFinishContext, model: string
 
 /** The backstop terminal write for a run that threw. A cancellation is not a failure: it carries the operator's own reason. */
 export async function failNativeRun(ctx: NativeRunFinishContext, err: unknown): Promise<Run> {
+  const { error } = await maskRunTexts(ctx, { error: err instanceof Error ? err.message : String(err) });
   const { run: finished, claimed } = await finishRunClaimed(ctx.db, ctx.runId, {
     status: err instanceof RunCancelledError || err instanceof SandboxRunCancelledError ? "cancelled" : "failed",
-    error: err instanceof Error ? err.message : String(err),
+    error,
     finishedAt: new Date(),
   });
   return settleFinishedNativeRun(ctx, finished, claimed);
@@ -1697,9 +1740,10 @@ export async function failNativeRun(ctx: NativeRunFinishContext, err: unknown): 
 
 /** The terminal write for a run that cannot continue (it ends `lost` with `reason`), then the same settle path. */
 export async function loseNativeRun(ctx: NativeRunFinishContext, reason: string): Promise<Run> {
+  const { error } = await maskRunTexts(ctx, { error: reason });
   const { run: finished, claimed } = await finishRunClaimed(ctx.db, ctx.runId, {
     status: "lost",
-    error: reason,
+    error,
     finishedAt: new Date(),
   });
   if (claimed) await stopChildrenOfLostRun(ctx.db, ctx.providers.executor, ctx.runId);
@@ -2150,7 +2194,8 @@ async function executeTrackedRun(
   // admin disabled or removed the model, or this deployment has no coding or native sandbox
   // executor), and filing would open one defect per affected agent rather than describe a failure
   // of that agent.
-  const finishEarly = async (error: string): Promise<Run> => {
+  const finishEarly = async (reason: string): Promise<Run> => {
+    const { error } = await maskRunTexts({ runId, db, providers }, { error: reason });
     const finished = await finishRun(db, runId, { status: "failed", error, finishedAt: new Date() });
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);
