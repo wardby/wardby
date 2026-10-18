@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  causeCodeOf,
   GatewayRequestSchema,
   MAX_MESSAGE_BYTES,
   parseMessage,
@@ -94,5 +95,20 @@ describe("native worker protocol", () => {
       finalText: "ok",
       turns: 1,
     });
+  });
+});
+
+describe("causeCodeOf", () => {
+  it("accepts a snake_case code with an underscore, bare or followed by a colon", () => {
+    expect(causeCodeOf(new Error("coding_execution_not_configured"))).toBe("coding_execution_not_configured");
+    expect(causeCodeOf(new Error("coding_execution_not_configured: details here"))).toBe(
+      "coding_execution_not_configured",
+    );
+  });
+
+  it("gives no code to a bare word or a code with no underscore", () => {
+    expect(causeCodeOf(new Error("abc123token"))).toBeUndefined();
+    expect(causeCodeOf(new Error("x: y"))).toBeUndefined();
+    expect(causeCodeOf("plainword")).toBeUndefined();
   });
 });

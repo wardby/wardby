@@ -67,10 +67,12 @@ export class GatewayError extends Error {
 /** The longest cause code carried; a longer leading word is not a code. */
 const MAX_CAUSE_CODE_LENGTH = 64;
 
-/** The code an unexpected error's message leads with, if it is short enough to be one. */
+/** The code an unexpected error's message leads with, if it is code-shaped (has an underscore) and short enough. */
 export function causeCodeOf(err: unknown): string | undefined {
   const code = errorCodeOf(err instanceof Error ? err.message : typeof err === "string" ? err : undefined);
-  return code && code.length <= MAX_CAUSE_CODE_LENGTH ? code : undefined;
+  // Only the code form leaves the gateway: snake_case with an underscore, so a bare word
+  // (which could be a token) never crosses.
+  return code && code.includes("_") && code.length <= MAX_CAUSE_CODE_LENGTH ? code : undefined;
 }
 
 /** `err` as a GatewayError: a GatewayError as is, anything else `internal` with its cause code. */

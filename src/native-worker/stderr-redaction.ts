@@ -32,7 +32,12 @@ export function installStderrRedaction(): void {
   setLogLineFilter(redactReceivedSecrets);
   const write = process.stderr.write.bind(process.stderr) as (...args: unknown[]) => boolean;
   process.stderr.write = (chunk: unknown, ...rest: unknown[]) => {
-    const text = typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString("utf8") : undefined;
+    const text =
+      typeof chunk === "string"
+        ? chunk
+        : chunk instanceof Uint8Array
+          ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength).toString("utf8")
+          : undefined;
     return text === undefined ? write(chunk, ...rest) : write(redactReceivedSecrets(text), ...rest);
   };
 }
