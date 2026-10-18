@@ -235,18 +235,47 @@ request. Choose destinations with that in mind:
 - Brokering does not change who can attach tools or grant secrets. Keep
   `allowedSecrets` and `allowedHosts` narrow on each attachment.
 
+## Secret values are never stored
+
+Wardby refuses to store a secret's value anywhere it could be read back. A
+datastore or agent memory write (from a tool in either run mode, from the MCP
+`datastore_set` or `set_agent_memory` tools, or from a bundle import) is refused
+with [`secret_in_value`](../help/errors/secret-in-value.md) when the value
+contains the value of a secret attached to the agent. The error names the
+secret, and nothing is stored. Store the secret's name and read the secret when
+it is needed, with `secrets.get` or `fetch(url, { secrets })`.
+
+- Matching is by exact value, including JSON-escaped forms and, for brokered
+  secrets, the encoded forms the broker scrubs. Values shorter than 6
+  characters are not matched.
+- If the agent's secrets cannot be read to check a value, the write is refused
+  with [`secret_check_unavailable`](../help/errors/secret-in-value.md) and nothing
+  is stored.
+- A bundle import skips a seeded datastore entry that contains an attached
+  secret's value and reports a warning.
+- A native run's final text and error, and comments, reviews, and Jira posts
+  made through built-in tools, have attached secret values replaced with
+  `[REDACTED]`. If the secrets cannot be read when a run ends, its stored text
+  is `[withheld: this text could not be checked for secret values]`. A posting
+  tool that cannot read the secrets returns `secret_check_unavailable` and posts
+  nothing.
+- Values that are split, re-encoded, or otherwise transformed are not detected,
+  and values stored before this check existed are not scanned.
+
 ## Errors
 
-| Code                                                                                     | Meaning                                                                 |
-| ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| [`secret_brokered`](../help/errors/secret-brokered.md)                                   | A tool read a brokered secret with `secrets.get`.                       |
-| [`secret_not_brokered`](../help/errors/secret-not-brokered.md)                           | `fetch` named a secret that is not brokered or not granted to the tool. |
-| [`secret_broker_destination_denied`](../help/errors/secret-broker-destination-denied.md) | The URL is not https, or its host, port, or path is outside the config. |
-| [`secret_broker_conflict`](../help/errors/secret-broker-conflict.md)                     | The request sets what a broker places, or brokers collide.              |
-| [`secret_broker_body_invalid`](../help/errors/secret-broker-body-invalid.md)             | Body placement needs a JSON-object or form-encoded body.                |
-| [`secret_broker_value_invalid`](../help/errors/secret-broker-value-invalid.md)           | The value is too short, or is not the JSON a SigV4 secret needs.        |
-| [`secret_broker_changed`](../help/errors/secret-broker-changed.md)                       | A removal link was created before the broker config last changed.       |
-| [`secret_broker_config_invalid`](../help/errors/secret-broker-config-invalid.md)         | The broker config failed validation.                                    |
+| Code                                                                                     | Meaning                                                                    |
+| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| [`secret_brokered`](../help/errors/secret-brokered.md)                                   | A tool read a brokered secret with `secrets.get`.                          |
+| [`secret_not_brokered`](../help/errors/secret-not-brokered.md)                           | `fetch` named a secret that is not brokered or not granted to the tool.    |
+| [`secret_broker_destination_denied`](../help/errors/secret-broker-destination-denied.md) | The URL is not https, or its host, port, or path is outside the config.    |
+| [`secret_broker_conflict`](../help/errors/secret-broker-conflict.md)                     | The request sets what a broker places, or brokers collide.                 |
+| [`secret_broker_body_invalid`](../help/errors/secret-broker-body-invalid.md)             | Body placement needs a JSON-object or form-encoded body.                   |
+| [`secret_broker_value_invalid`](../help/errors/secret-broker-value-invalid.md)           | The value is too short, or is not the JSON a SigV4 secret needs.           |
+| [`secret_broker_changed`](../help/errors/secret-broker-changed.md)                       | A removal link was created before the broker config last changed.          |
+| [`secret_broker_config_invalid`](../help/errors/secret-broker-config-invalid.md)         | The broker config failed validation.                                       |
+| [`secret_in_value`](../help/errors/secret-in-value.md)                                   | A datastore or memory write contains an attached secret's value.           |
+| [`secret_check_unavailable`](../help/errors/secret-in-value.md)                          | The write or posting could not be checked because secrets were unreadable. |
 
 See also the short help article
 [Brokered secrets](../help/brokered-secrets.md).
