@@ -1,5 +1,17 @@
 import { spawn } from "node:child_process";
-import { lstat, mkdir, opendir, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import {
+  lstat,
+  mkdir,
+  open,
+  opendir,
+  readFile,
+  readlink,
+  realpath,
+  rm,
+  writeFile,
+  type FileHandle,
+} from "node:fs/promises";
 import { isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitExcludePathspecs, normalizeCollectExclusions } from "../../coding/collect-exclude.js";
@@ -959,17 +971,23 @@ export class GitVcsProvider implements VcsProvider {
     for (const path of conflictedPaths) {
       const fullPath = resolve(workspacePath, path);
       if (!fullPath.startsWith(`${workspacePath}${sep}`)) throw new Error("vcs_changed_path_invalid");
+      // One no-follow open, then stat and read through that handle: nothing can swap the file in between.
+      let handle: FileHandle;
+      try {
+        handle = await open(fullPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        // Deleted while resolving, or a symlink (ELOOP): nothing left to hold a marker.
+        if (code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP") continue;
+        throw error;
+      }
       let content: string;
       try {
-        const stat = await lstat(fullPath);
-        // Deleted while resolving, or not a regular file: nothing left to hold a marker.
-        if (!stat.isFile()) continue;
-        content = await readFile(fullPath, "utf8");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ENOTDIR") {
-          continue;
-        }
-        throw error;
+        // Not a regular file (a directory now stands there): nothing to scan.
+        if (!(await handle.stat()).isFile()) continue;
+        content = await handle.readFile("utf8");
+      } finally {
+        await handle.close();
       }
       if (CONFLICT_MARKER_START.test(content) && CONFLICT_MARKER_END.test(content)) {
         throw new Error(`vcs_conflict_markers_remain:${path}`);
