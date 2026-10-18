@@ -10,7 +10,7 @@ import type { IssueTracker } from "../issue-tracker/types.js";
 import type { Executor } from "./types.js";
 import { NativeEngine } from "../../core/engine-native.js";
 import { DBOS } from "@dbos-inc/dbos-sdk";
-import { DBOS_BACKEND, DbosExecutor } from "./dbos.js";
+import { DBOS_BACKEND, DbosExecutor, workflowIdOf } from "./dbos.js";
 import { inFlightRunIds } from "../../core/in-flight-runs.js";
 import { setWorkflowEventSink, type WorkflowEventInput } from "../../core/workflow-events.js";
 import { outsideRunContext } from "../../core/async-context.js";
@@ -241,6 +241,28 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     expect(after.status).toBe("cancelled");
     expect(after.error).toContain("operator cancelled");
     expect(after.finishedAt).not.toBeNull();
+  });
+
+  it("stop cancels the forked workflow named by executionWorkflowId, and workflowIdOf falls back to the run id", async () => {
+    executor = build(scriptedLlm([finalAnswer("x")]));
+    await executor.launch();
+    const forked = await db.run.create({
+      data: { agentId, executionManaged: true, status: "running", executionWorkflowId: "wf-forked" },
+    });
+    const plain = await db.run.create({ data: { agentId, executionManaged: true } });
+    expect(await workflowIdOf(db, forked.id)).toBe("wf-forked");
+    expect(await workflowIdOf(db, plain.id)).toBe(plain.id);
+
+    const cancel = vi.spyOn(DBOS, "cancelWorkflow").mockResolvedValue(undefined);
+    try {
+      await executor.stop(forked.id, "why");
+      expect(cancel).toHaveBeenCalledWith("wf-forked");
+    } finally {
+      cancel.mockRestore();
+    }
+    const after = await db.run.findUniqueOrThrow({ where: { id: forked.id } });
+    expect(after.status).toBe("cancelled");
+    expect(after.error).toContain("why");
   });
 
   it("recover(): reports active for its own live workflow, terminal for a finished one, lost for an unknown id", async () => {

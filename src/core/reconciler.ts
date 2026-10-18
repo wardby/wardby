@@ -244,7 +244,11 @@ export async function reconcileOnce(
       if (claimed.count === 0) continue;
       let recovered;
       try {
-        recovered = await executor.recover({ runId: run.id, backend: run.executionBackend, id: run.id });
+        recovered = await executor.recover({
+          runId: run.id,
+          backend: run.executionBackend,
+          id: run.executionWorkflowId ?? run.id,
+        });
       } catch (err) {
         reconcilerLog.error({ err, runId: run.id }, "durable run recovery failed");
         continue;

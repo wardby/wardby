@@ -130,6 +130,16 @@ function setActiveExecutor(executor: DbosExecutor | undefined): void {
 const cancellationReasons = new Map<string, string>();
 
 /**
+ * The DBOS workflow id that drives a run: `Run.executionWorkflowId` once the
+ * run's workflow was forked under a new application version, otherwise the
+ * run id (a run's first workflow is started with its run id).
+ */
+export async function workflowIdOf(db: Pick<PrismaClient, "run">, runId: string): Promise<string> {
+  const row = await db.run.findUnique({ where: { id: runId }, select: { executionWorkflowId: true } });
+  return row?.executionWorkflowId ?? runId;
+}
+
+/**
  * Bind the engine's step boundary to a DBOS checkpointed step. Never
  * retried: a retry would re-spend.
  *
@@ -335,8 +345,14 @@ export class DbosExecutor implements Executor {
     }
     // Recorded before the cancel so the workflow's next step boundary can
     // find it: DBOS only reports "cancelled", never why.
-    if (reason) cancellationReasons.set(runId, reason);
-    await DBOS.cancelWorkflow(runId);
+    // Keyed by both ids: dbosStep looks it up by the cancelled workflow's id, which is the forked
+    // id for a forked run.
+    const workflowId = await workflowIdOf(this.db, runId);
+    if (reason) {
+      cancellationReasons.set(runId, reason);
+      cancellationReasons.set(workflowId, reason);
+    }
+    await DBOS.cancelWorkflow(workflowId);
   }
 
   /**
@@ -434,6 +450,7 @@ export class DbosExecutor implements Executor {
     } finally {
       clearInterval(timer);
       cancellationReasons.delete(runId);
+      if (DBOS.workflowID) cancellationReasons.delete(DBOS.workflowID);
     }
   }
 }
