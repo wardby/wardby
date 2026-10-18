@@ -9,6 +9,17 @@ import {
 import { createServer } from "node:http";
 import type { AuthProvider, VerifiedToken } from "../../providers/auth/types.js";
 
+const httpLogInfo = vi.hoisted(() => vi.fn());
+vi.mock("../../core/logger.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../../core/logger.js")>();
+  const child = real.logger.child.bind(real.logger);
+  vi.spyOn(real.logger, "child").mockImplementation((bindings, options) => {
+    const log = child(bindings, options);
+    if (bindings.module === "streamable-http") vi.spyOn(log, "info").mockImplementation(httpLogInfo);
+    return log;
+  });
+  return real;
+});
 vi.mock("../host-events/github-ingress.js", () => ({
   handleGitHubEventIngress: vi.fn(),
 }));
@@ -533,5 +544,44 @@ describe("viewer API routing", () => {
     await handle!.close();
     handle = undefined;
     expect(closeStreams).toHaveBeenCalledOnce();
+  });
+});
+
+describe("startHttpServer (close)", () => {
+  it("cuts a response stream still open after the close grace, so shutdown can move on to the run drain", async () => {
+    // A streaming response nothing ends, like a connected MCP client's event stream.
+    const viewer = {
+      handle: vi.fn(async (_req, res) => {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(": open\n\n");
+        return true;
+      }),
+      closeStreams: vi.fn(),
+    } as unknown as import("../../viewer/http.js").ViewerApi;
+    const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb(), config: { canonicalUri: CANONICAL_URI } });
+    const server = await startHttpServer({
+      mcp,
+      config: { canonicalUri: CANONICAL_URI, httpBind: { host: "127.0.0.1", port: 0 }, authProviderKind: "delegating" },
+      auth: {
+        authProvider: fakeAuthProvider(async () => ({ subject: "u", roles: [], scopes: [] })),
+        db: fakeDb(),
+        providers: fakeProviders,
+      },
+      viewer,
+      closeGraceMs: 50,
+    });
+    const res = await fetch(`http://127.0.0.1:${server.port}/admin/api/events?t=secret`);
+    const reader = res.body!.getReader();
+    await reader.read();
+
+    const started = Date.now();
+    await server.close();
+    expect(Date.now() - started).toBeLessThan(2_000);
+    await expect(reader.read()).rejects.toThrow();
+    // Names what was cut, without the query string (it can carry a token).
+    expect(httpLogInfo).toHaveBeenCalledWith(
+      { requests: [{ method: "GET", path: "/admin/api/events", openSeconds: 0 }] },
+      expect.stringContaining("closing them"),
+    );
   });
 });
