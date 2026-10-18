@@ -12,7 +12,7 @@ import {
 } from "../coding/protocol.js";
 import { bareModeContextPrompt, materializeClaudeContext } from "./context.js";
 import { describeError, type DebugTracer } from "../coding-worker/debug-trace.js";
-import { safeWorkerErrorCode } from "../coding-worker/errors.js";
+import { safeWorkerErrorCode, streamFailureCode } from "../coding-worker/errors.js";
 import type { WorkerProgressEvent } from "../coding-worker/types.js";
 
 export const CLAUDE_WORKER_SECURITY_INSTRUCTIONS = `You are running inside an isolated Wardby coding agent.
@@ -198,6 +198,54 @@ function budgetExhausted(input: CodingTaskInput): CodingAgentOutput {
 // a result message's text or in a thrown error. Only this fixed marker is matched; the text is never kept.
 const BUDGET_REFUSAL = /wardby_budget_exhausted/;
 
+/**
+ * The stream failure code for an API failure the Claude SDK reported as a typed error: on an
+ * assistant message (`error`, when the CLI gave up on a request) or a `system` `api_retry` (with
+ * the HTTP status, or none for a connection error or timeout). The same codes as Codex's
+ * (streamFailureCode); undefined when none fits, so the turn fails as `coding_turn_failed`.
+ */
+function claudeApiErrorCode(error: unknown, status: number | null, noResponse: boolean): string | undefined {
+  switch (error) {
+    case "rate_limit":
+      return "coding_stream_rate_limited";
+    case "overloaded":
+    case "server_error":
+      return "coding_stream_upstream_error";
+    case "authentication_failed":
+    case "oauth_org_not_allowed":
+    case "account_on_hold":
+    case "verification_required":
+    case "cloud_credential_error":
+      return "coding_stream_proxy_denied";
+  }
+  if (status === null) return noResponse ? "coding_stream_timeout" : "coding_stream_proxy_unreachable";
+  if (status === 429) return "coding_stream_rate_limited";
+  if (status >= 500) return "coding_stream_upstream_error";
+  if (status === 401 || status === 403) return "coding_stream_proxy_denied";
+  return undefined;
+}
+
+/**
+ * The latest API failure after `message`, as a stream failure code (claudeApiErrorCode): a retry
+ * or a failed reply replaces `previous`, a reply without an error clears it (the request
+ * succeeded), and anything else leaves it. An assistant message's "unknown" error has no status,
+ * so it keeps an earlier retry's more specific code.
+ */
+function latestApiError(
+  previous: string | undefined,
+  message: { type?: unknown; subtype?: unknown; error?: unknown },
+): string | undefined {
+  if (message.type === "system" && message.subtype === "api_retry") {
+    const retry = message as { error_status?: unknown; no_response?: unknown };
+    const status = typeof retry.error_status === "number" ? retry.error_status : null;
+    return claudeApiErrorCode(message.error, status, retry.no_response != null);
+  }
+  if (message.type !== "assistant") return previous;
+  if (message.error === undefined) return undefined;
+  if (message.error === "unknown") return previous;
+  return claudeApiErrorCode(message.error, 0, false);
+}
+
 function isBudgetRefusal(text: unknown): boolean {
   return typeof text === "string" && BUDGET_REFUSAL.test(text);
 }
@@ -256,13 +304,16 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   let finalJson: string | undefined;
   let failed = false;
   let turnLimit = false;
-  let streamFailed = false;
+  let streamFailed: string | false = false;
   let budgetRefused = false;
   let toolUnreachable = false;
+  // The last API failure the SDK reported, as a stream failure code: names a failed turn's cause.
+  let apiError: string | undefined;
   try {
     for await (const message of stream) {
       // Every SDK message, raw: init, assistant (tool_use with the command), user (tool_result), result.
       options.trace?.record("message", message);
+      apiError = latestApiError(apiError, message);
       if (toolServerUnreachable(message)) {
         toolUnreachable = true;
         break;
@@ -292,13 +343,13 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     // is read from the error; its text (which can carry provider content) is never kept.
     if (err instanceof Error && isBudgetRefusal(err.message)) budgetRefused = true;
     else if (err instanceof Error && MAX_TURNS_MESSAGE.test(err.message)) turnLimit = true;
-    else streamFailed = true;
+    else streamFailed = apiError ?? streamFailureCode(err);
   }
   if (budgetRefused) return withCache(budgetExhausted(options.input));
-  if (streamFailed) throw new Error("coding_stream_failed");
+  if (streamFailed) throw new Error(streamFailed);
   if (turnLimit) throw new Error("coding_turn_limit");
   if (toolUnreachable) throw new Error("worker_tool_runner_unreachable");
-  if (failed) throw new Error("coding_turn_failed");
+  if (failed) throw new Error(apiError ?? "coding_turn_failed");
   if (!finalJson) throw new Error("coding_output_missing");
   let output: CodingAgentOutput;
   try {
