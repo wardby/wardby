@@ -12,9 +12,12 @@
  */
 
 import { z } from "zod";
-import { errorCodeOf } from "../core/error-code.js";
+import { causeCodeOf, GATEWAY_CAUSE_CODES } from "../core/error-code.js";
 import { LLM_EFFORT_LEVELS } from "../providers/llm/types.js";
 import { overlapsSecretValue } from "../sandbox/host-functions.js";
+
+// The allow-list and its checked helper live in core/error-code.ts (shared with the runner); re-exported here.
+export { causeCodeOf, GATEWAY_CAUSE_CODES };
 
 export const NATIVE_WORKER_PROTOCOL_VERSION = 1;
 /** Above the sandbox's 12 MiB bridge-result cap, plus envelope. */
@@ -55,7 +58,7 @@ export class GatewayError extends Error {
     readonly code: GatewayErrorCode,
     message: string,
     /**
-     * For `internal` only: the code the underlying error's message led with (errorCodeOf), so the
+     * For `internal` only: the code the underlying error's message led with (causeCodeOf), so the
      * run can name the cause without the rest of that message.
      */
     readonly causeCode?: string,
@@ -65,37 +68,8 @@ export class GatewayError extends Error {
   }
 }
 
-/** The longest cause code carried; a longer leading word is not a code. */
-const MAX_CAUSE_CODE_LENGTH = 64;
-
-/** The code an unexpected error's message leads with, if it is code-shaped (has an underscore) and short enough. */
-export function causeCodeOf(err: unknown): string | undefined {
-  const code = errorCodeOf(err instanceof Error ? err.message : typeof err === "string" ? err : undefined);
-  // Only the code form leaves the gateway: snake_case with an underscore, so a bare word
-  // (which could be a token) never crosses.
-  return code && code.includes("_") && code.length <= MAX_CAUSE_CODE_LENGTH ? code : undefined;
-}
-
 /** What the worker is told about an unexpected gateway failure: never the error's own text. */
 export const GATEWAY_INTERNAL_MESSAGE = "The gateway could not serve this call.";
-
-/**
- * The only cause codes that may leave the gateway: wardby's own codes that an unexpected error on
- * a gateway call path can lead with. Anything else, however code-shaped, could be a value from an
- * error's text, so it never crosses (the worker records `internal` with no cause code).
- * - coding_execution_not_configured, coding_profile_missing: a coding delegation reaching a process
- *   that cannot start coding runs (core/deferred-coding.ts, providers/executor/routing.ts).
- * - message_too_large, message_not_json, message_invalid, unsupported_protocol_version: the
- *   protocol's own ProtocolError codes (this file).
- */
-export const GATEWAY_CAUSE_CODES: ReadonlySet<string> = new Set([
-  "coding_execution_not_configured",
-  "coding_profile_missing",
-  "message_too_large",
-  "message_not_json",
-  "message_invalid",
-  "unsupported_protocol_version",
-]);
 
 /**
  * `err` as the worker may see it, on every transport (HTTP, stdio, loopback). An unexpected error

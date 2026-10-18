@@ -169,3 +169,11 @@ describe("codingChildResult", () => {
     expect(none).not.toHaveProperty("budget");
   });
 });
+
+describe("codingChildResult error codes", () => {
+  it("omits a leading code that is not declared", () => {
+    const stored = { ...base, status: "failed", error: "fake_unlisted_code_0001: detail" };
+    const out = codingChildResult(stored);
+    expect(out.includes("fake_unlisted_code_0001")).toBe(false);
+  });
+});

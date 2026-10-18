@@ -65,7 +65,7 @@ import {
 } from "./subagent-memory-tools.js";
 import { prisma as defaultDb } from "./db.js";
 import { logger } from "./logger.js";
-import { errorCodeOf } from "./error-code.js";
+import { declaredCodeOf } from "./error-code.js";
 import { loadCodingConcurrencyConfig } from "../config/providers.js";
 import type { Executor } from "../providers/executor/types.js";
 import type { ReviewHostRegistry } from "../providers/review-host/types.js";
@@ -623,7 +623,7 @@ export function codingChildResult(
     : run.status === "refused"
       ? serviceRefusalSentence(run.error)
       : null;
-  const errorCode = run.status === "failed" ? errorCodeOf(run.error) : undefined;
+  const errorCode = run.status === "failed" ? declaredCodeOf(run.error) : undefined;
   const budget =
     budgetEvent && (run.status === "budget_exhausted" || run.status === "refused")
       ? ownerBudgetSentence(budgetEvent.event, budgetEvent.agentName)
@@ -1910,7 +1910,7 @@ export async function durableDelegate(
       }
       // Recorded as the call's result, so the model can report it and a retried callId never
       // dispatches twice. Only the leading code is exposed: messages can carry internals.
-      const code = err instanceof Error ? errorCodeOf(err.message) : undefined;
+      const code = declaredCodeOf(err);
       runnerLog.error({ err, runId, boundName }, "delegation dispatch failed");
       return finish(
         JSON.stringify({

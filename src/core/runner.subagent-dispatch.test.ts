@@ -1065,6 +1065,61 @@ describe("delegate_to_<boundName> dispatch tool", () => {
       const codingRun = await db.codingRun.findUnique({ where: { runId: child.id } });
       expect((codingRun as { mergeOrder: number | null } | null)?.mergeOrder).toBe(2);
     });
+
+    describe("durableDelegate dispatch failure codes", () => {
+      const run = async (message: string) => {
+        const dispatcher: FakeAgent = {
+          id: "dispatcher-agent",
+          name: "dispatcher",
+          systemPrompt: "You delegate.",
+          model: "m",
+          budgetUsd: 5,
+          maxTurns: 10,
+        };
+        const child: FakeAgent = { ...dispatcher, id: "child-agent", name: "child" };
+        const db = fakeDb(
+          [dispatcher, child],
+          [{ parentAgentId: "dispatcher-agent", childAgentId: "child-agent", boundName: "child" }],
+        );
+        const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+        (db as any).$transaction = async () => {
+          throw new Error(message);
+        };
+        const outcome = await durableDelegate(
+          {
+            runId: parentRun.id,
+            existingRun: parentRun,
+            loaded: {
+              agentId: "dispatcher-agent",
+              subAgentEdges: [{ childAgentId: "child-agent", boundName: "child" }],
+            } as unknown as LoadedNativeRun,
+            providers: providers(
+              scriptedLlm([]),
+              fakeCodingExecutor(db, { status: "succeeded", finalText: "x", costUsd: 0 }),
+            ),
+            db,
+            issueTrackers: undefined,
+            ledger: fakeDelegationLedger(),
+            sessionId: "session-1",
+          },
+          "call-1",
+          "delegate_to_child",
+          JSON.stringify({ task: "do it" }),
+        );
+        return JSON.stringify(outcome);
+      };
+
+      it("shows no code for an exception led by an unlisted snake_case word", async () => {
+        const text = await run("fake_unlisted_secret_0001: more detail");
+        expect(text.includes("fake_unlisted_secret_0001")).toBe(false);
+        expect(text.includes("could not be created.")).toBe(true);
+      });
+
+      it("shows a listed code", async () => {
+        const text = await run("invalid_merge_order");
+        expect(text.includes("(invalid_merge_order)")).toBe(true);
+      });
+    });
   });
 
   describe("a sandbox-mode native child", () => {
