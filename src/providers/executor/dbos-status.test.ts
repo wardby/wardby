@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   ADOPTION_EXHAUSTED_REASON,
   MAX_RESUME_ATTEMPTS,
+  STEPS_CHANGED_REASON,
   decideRecovery,
+  decideTakeover,
   shouldGiveUpAdoption,
   versionMismatchReason,
 } from "./dbos-status.js";
@@ -94,5 +96,118 @@ describe("versionMismatchReason", () => {
     expect(versionMismatchReason(undefined, "v2")).toBeUndefined();
     expect(versionMismatchReason("v1", undefined)).toBeUndefined();
     expect(versionMismatchReason("", "")).toBeUndefined();
+  });
+});
+
+describe("decideTakeover", () => {
+  const llm = (n: number, names: string[]) => ({
+    functionID: 2,
+    name: `turn:${n}:llm`,
+    output: { toolCalls: names.map((name, i) => ({ id: `c${i}`, name, argsJson: "{}" })) },
+  });
+  const base = [
+    { functionID: 0, name: "load", output: {} },
+    { functionID: 1, name: "turn:1:estimate", output: {} },
+  ];
+
+  it("forks a lead waiting on a coding child from its first unrecorded step", () => {
+    expect(
+      decideTakeover(
+        [...base, llm(1, ["delegate_to_coder"])],
+        [{ status: "pending", kind: "coding", nativeExecutionMode: null }],
+        "m",
+      ),
+    ).toEqual({ action: "fork", startStep: 3 });
+  });
+
+  it("answers lost mid-turn (no recorded reply)", () => {
+    expect(decideTakeover(base, [], "m")).toEqual({ action: "lost", reason: "m" });
+  });
+
+  it("answers lost when the pending tool is not a delegation", () => {
+    expect(decideTakeover([...base, llm(1, ["http_get"])], [], "m").action).toBe("lost");
+  });
+
+  it("answers lost when the in-flight tool is not a delegation, even after a recorded one", () => {
+    const steps = [
+      ...base,
+      llm(1, ["delegate_to_a", "http_get"]),
+      { functionID: 3, name: "turn:1:tool:0", output: "{}" },
+    ];
+    expect(decideTakeover(steps, [], "m")).toEqual({ action: "lost", reason: "m" });
+  });
+
+  it("answers lost when every tool of the turn is recorded", () => {
+    expect(
+      decideTakeover(
+        [...base, llm(1, ["delegate_to_coder"]), { functionID: 3, name: "turn:1:tool:0", output: "{}" }],
+        [],
+        "m",
+      ).action,
+    ).toBe("lost");
+  });
+
+  it("answers lost when a child is a control-plane native run", () => {
+    expect(
+      decideTakeover(
+        [...base, llm(1, ["delegate_to_helper"])],
+        [{ status: "running", kind: "native", nativeExecutionMode: "control_plane" }],
+        "m",
+      ).action,
+    ).toBe("lost");
+  });
+
+  it("answers lost for a native child with no recorded mode (it ran in the control plane)", () => {
+    expect(
+      decideTakeover(
+        [...base, llm(1, ["delegate_to_helper"])],
+        [{ status: "running", kind: "native", nativeExecutionMode: null }],
+        "m",
+      ).action,
+    ).toBe("lost");
+  });
+
+  it("forks a sandbox-mode native child", () => {
+    expect(
+      decideTakeover(
+        [...base, llm(1, ["delegate_to_helper"])],
+        [{ status: "running", kind: "native", nativeExecutionMode: "sandbox" }],
+        "m",
+      ).action,
+    ).toBe("fork");
+  });
+
+  it("with parallel delegations, starts at the first gap", () => {
+    const steps = [
+      ...base,
+      { ...llm(1, ["delegate_to_a", "delegate_to_b"]) },
+      { functionID: 4, name: "turn:1:tool:1", output: "{}" },
+    ];
+    expect(decideTakeover(steps, [{ status: "pending", kind: "coding", nativeExecutionMode: null }], "m")).toEqual({
+      action: "fork",
+      startStep: 3,
+    });
+  });
+
+  it("reads the last recorded turn", () => {
+    const steps = [
+      ...base,
+      { ...llm(1, ["delegate_to_a"]) },
+      { functionID: 3, name: "turn:1:tool:0", output: "{}" },
+      { functionID: 4, name: "turn:2:estimate", output: {} },
+      { ...llm(2, ["delegate_to_b"]), functionID: 5 },
+    ];
+    expect(decideTakeover(steps, [], "m")).toEqual({ action: "fork", startStep: 6 });
+  });
+
+  it("answers lost when the first gap would re-run the recorded reply", () => {
+    const steps = [base[0], llm(1, ["delegate_to_a"])];
+    expect(decideTakeover(steps, [], "m")).toEqual({ action: "lost", reason: "m" });
+  });
+
+  it("names the replay mismatch in the reason a forked run ends with", () => {
+    expect(STEPS_CHANGED_REASON).toBe(
+      "Could not continue across versions: the run's steps changed in the new version.",
+    );
   });
 });

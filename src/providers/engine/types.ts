@@ -78,6 +78,25 @@ export class RunOwnershipLostError extends Error {
   }
 }
 
+/**
+ * Part of the StepRunner contract: a durable step runner may throw this when a
+ * replayed run reaches a step whose name differs from the one recorded at that
+ * position (the run was recorded by a release whose steps differ). The run
+ * cannot continue from its record; engines and the runner rethrow it untouched
+ * so the executor ends the run itself.
+ */
+export class StepReplayMismatchError extends Error {
+  readonly step: string;
+  constructor(step: string, options?: { cause?: unknown }) {
+    super(
+      `step_replay_mismatch: the recorded run has a different step where "${step}" was expected.`,
+      options?.cause === undefined ? undefined : { cause: options.cause },
+    );
+    this.name = "StepReplayMismatchError";
+    this.step = step;
+  }
+}
+
 /** The no-checkpoint default: run the step body directly. */
 export const runStepInline: StepRunner = (_name, fn) => fn();
 

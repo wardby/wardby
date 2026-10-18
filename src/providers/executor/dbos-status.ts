@@ -3,6 +3,8 @@
  * owns. Kept free of DBOS imports so it is unit-testable without Postgres.
  */
 
+import { DELEGATE_TOOL_PREFIX } from "../../core/tool-names.js";
+
 export interface WorkflowStatusLike {
   status: string;
   executorId?: string;
@@ -86,4 +88,84 @@ export function decideRecovery(
         };
   }
   return { action: "lost", reason: `Durable workflow is in unrecognised status "${status.status}".` };
+}
+
+/** One recorded step of a workflow, as `DBOS.listWorkflowSteps` reports it. */
+export interface TakeoverStep {
+  functionID: number;
+  name: string;
+  output: unknown;
+}
+
+/** A still-drivable child of the lead being taken over. */
+export interface TakeoverChild {
+  status: string;
+  kind: "coding" | "native";
+  nativeExecutionMode: string | null;
+}
+
+export type TakeoverDecision = { action: "fork"; startStep: number } | { action: "lost"; reason: string };
+
+/** Why a forked run ends lost when its replay meets a step the new code no longer takes. */
+export const STEPS_CHANGED_REASON = "Could not continue across versions: the run's steps changed in the new version.";
+
+const LLM_STEP = /^turn:(\d+):llm$/;
+
+/**
+ * The tool-call names of a recorded `turn:N:llm` step. Its output is the engine's TurnResult
+ * (engine-native.ts) as DBOS deserialized it: `{ usage, text, toolCalls: [{ id, name, argsJson }],
+ * budgetExceededMidStream, error? }`. Anything else yields undefined (the shape changed: lost).
+ */
+function recordedToolCallNames(output: unknown): string[] | undefined {
+  if (typeof output !== "object" || output === null || !("toolCalls" in output)) return undefined;
+  const calls = output.toolCalls;
+  if (!Array.isArray(calls)) return undefined;
+  const names: string[] = [];
+  for (const call of calls as unknown[]) {
+    if (typeof call !== "object" || call === null || !("name" in call) || typeof call.name !== "string") {
+      return undefined;
+    }
+    names.push(call.name);
+  }
+  return names;
+}
+
+/**
+ * Whether a workflow recorded under another application version can be forked under this one
+ * (design §1): only when it is waiting inside a `delegate_to_*` call of its last recorded turn and
+ * every child it may be waiting on is durable on its own (a coding run, or a sandbox-mode native
+ * run). The fork starts at the first function id with no record, so every recorded step (the
+ * turn's model reply above all) replays from its record and the delegate step re-attaches to its
+ * child. Anything else is `lost` with the mismatch reason, as before.
+ */
+export function decideTakeover(
+  steps: TakeoverStep[],
+  children: TakeoverChild[],
+  mismatchReason: string,
+): TakeoverDecision {
+  const lost: TakeoverDecision = { action: "lost", reason: mismatchReason };
+  const sorted = [...steps].sort((a, b) => a.functionID - b.functionID);
+  const llmStep = sorted.filter((s) => LLM_STEP.test(s.name)).at(-1);
+  if (!llmStep) return lost;
+  const turn = LLM_STEP.exec(llmStep.name)![1];
+  const names = recordedToolCallNames(llmStep.output);
+  if (!names) return lost;
+
+  const recorded = new Set(sorted.map((s) => s.name));
+  const firstPending = names.findIndex((_, i) => !recorded.has(`turn:${turn}:tool:${i}`));
+  // Not waiting in a tool call at all, or waiting in one that is not a delegation (re-running it
+  // under new code would repeat its effect).
+  if (firstPending < 0 || !names[firstPending].startsWith(DELEGATE_TOOL_PREFIX)) return lost;
+
+  const durable = (child: TakeoverChild) => child.kind === "coding" || child.nativeExecutionMode === "sandbox";
+  if (!children.every(durable)) return lost;
+
+  let startStep = 0;
+  for (const step of sorted) {
+    if (step.functionID > startStep) break;
+    if (step.functionID === startStep) startStep += 1;
+  }
+  // A gap at or before the recorded reply would re-run the model turn: never fork into that.
+  if (startStep <= llmStep.functionID) return lost;
+  return { action: "fork", startStep };
 }

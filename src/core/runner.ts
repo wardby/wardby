@@ -22,7 +22,12 @@ import { z } from "zod";
 import type { Prisma, PrismaClient, Run, RunTrigger } from "#prisma";
 import type { ProviderRegistry } from "../providers/index.js";
 import type { EngineProgress, EngineResult, LoadedTool } from "../providers/engine/types.js";
-import { RunOwnershipLostError, runStepInline, type StepRunner } from "../providers/engine/types.js";
+import {
+  RunOwnershipLostError,
+  StepReplayMismatchError,
+  runStepInline,
+  type StepRunner,
+} from "../providers/engine/types.js";
 import { isLlmEffort } from "../providers/llm/types.js";
 import { createPrivilegedHost, type PrivilegedHost } from "../sandbox/host-functions.js";
 import { consoleRedactionValues } from "../sandbox/secret-broker.js";
@@ -2175,6 +2180,9 @@ async function executeTrackedRun(
       logRunOwnershipLost(runId, err);
       throw err;
     }
+    // A replay that no longer matches its record: the durable executor ends the run (lost), not a
+    // generic failure.
+    if (err instanceof StepReplayMismatchError) throw err;
     return failNativeRun(finishContext, err);
   }
 }

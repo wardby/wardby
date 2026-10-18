@@ -11,6 +11,7 @@ import type { Executor } from "./types.js";
 import { NativeEngine } from "../../core/engine-native.js";
 import { DBOS } from "@dbos-inc/dbos-sdk";
 import { DBOS_BACKEND, DbosExecutor, workflowIdOf } from "./dbos.js";
+import { STEPS_CHANGED_REASON, versionMismatchReason } from "./dbos-status.js";
 import { inFlightRunIds } from "../../core/in-flight-runs.js";
 import { setWorkflowEventSink, type WorkflowEventInput } from "../../core/workflow-events.js";
 import { outsideRunContext } from "../../core/async-context.js";
@@ -637,6 +638,175 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
       await db.run.deleteMany({ where: { agentId: lead } });
       await db.agent.deleteMany({ where: { id: { in: [lead, kid] } } });
     }
+  }, 30_000);
+
+  /** What a deploy does to a recorded workflow: it now belongs to an application version this process does not run. */
+  async function recordUnderOtherVersion(workflowId: string): Promise<string> {
+    const other = `older-than-${DBOS.applicationVersion}`;
+    await db.$executeRawUnsafe(
+      "UPDATE dbos_test.workflow_status SET application_version = $1 WHERE workflow_uuid = $2",
+      other,
+      workflowId,
+    );
+    return other;
+  }
+
+  it("recover(): takes over a lead waiting on a durable child under this application version", async () => {
+    await executor?.close();
+    const lead = `dbos-takeover-lead-${suffix}`;
+    const kid = `dbos-takeover-kid-${suffix}`;
+    await db.agent.create({
+      data: { id: lead, name: lead, systemPrompt: "LEAD", model: "m", budgetUsd: 1, maxTurns: 5 },
+    });
+    await db.agent.create({
+      data: {
+        id: kid,
+        name: kid,
+        systemPrompt: "CHILD",
+        model: "m",
+        budgetUsd: 0.1,
+        maxTurns: 3,
+        nativeExecutionMode: "sandbox",
+      },
+    });
+    await db.agentSubAgent.create({ data: { parentAgentId: lead, childAgentId: kid, boundName: "kid" } });
+    const childExecutor = () => {
+      const started: string[] = [];
+      const fake: Executor = {
+        async start(runId) {
+          started.push(runId);
+        },
+        async stop() {},
+      };
+      return { fake, started };
+    };
+    const delegate: LlmStreamEvent[] = [
+      { type: "tool_call", id: "c1", name: "delegate_to_kid", argsJson: JSON.stringify({ task: "x" }) },
+      { type: "done", stopReason: "tool_calls", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.012 } },
+    ];
+    try {
+      const firstChildren = childExecutor();
+      const dying = killableClient();
+      executor = buildWith(scriptedLlm([delegate]), executorId, dying.client, firstChildren.fake);
+      await executor.launch();
+      const run = await db.run.create({ data: { agentId: lead, executionManaged: true } });
+
+      const firstAttempt = executor.start(run.id).catch(() => undefined);
+      await waitFor("the lead to dispatch its child", () => firstChildren.started.length === 1);
+      // "Deploy": the old process dies inside the delegate step, and its workflow is recorded
+      // under an application version the new process does not run.
+      await executor.close();
+      dying.kill();
+      await firstAttempt;
+      await recordUnderOtherVersion(run.id);
+
+      const restartChildren = childExecutor();
+      const resumedLlm = scriptedLlm([finalAnswer("lead done")]);
+      executor = buildWith(resumedLlm, `${executorId}-takeover`, db, restartChildren.fake);
+      await executor.launch();
+      expect(await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id })).toEqual({
+        state: "active",
+      });
+
+      const forked = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+      expect(forked.executionWorkflowId).toBeTruthy();
+      expect(forked.executionWorkflowId).not.toBe(run.id);
+      expect((await DBOS.getWorkflowStatus(run.id))?.status).toBe("CANCELLED");
+      expect((await DBOS.getWorkflowStatus(forked.executionWorkflowId!))?.applicationVersion).toBe(
+        DBOS.applicationVersion,
+      );
+
+      await db.run.updateMany({
+        where: { parentRunId: run.id },
+        data: { status: "succeeded", finalText: "kid done", finishedAt: new Date() },
+      });
+      await waitFor(
+        "the taken-over lead to finish",
+        async () => (await db.run.findUnique({ where: { id: run.id } }))?.finalText != null,
+      );
+
+      const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+      expect(after.status).toBe("succeeded");
+      expect(after.finalText).toBe("lead done");
+      // The same child, re-attached; none started by the new process.
+      const children = await db.run.findMany({ where: { parentRunId: run.id } });
+      expect(children.map((c) => c.id)).toEqual(firstChildren.started);
+      expect(restartChildren.started).toEqual([]);
+      // Turn 1's reply replayed from the record: the new model only served turn 2.
+      expect(resumedLlm.calls).toHaveLength(1);
+      const toolResult = resumedLlm.calls[0].messages.find((m) => m.role === "tool");
+      expect(String(toolResult?.content)).toContain('"finalText":"kid done"');
+    } finally {
+      await db.run.deleteMany({ where: { agent: { id: kid } } });
+      await db.agentSubAgent.deleteMany({ where: { parentAgentId: lead } });
+      await db.run.deleteMany({ where: { agentId: lead } });
+      await db.agent.deleteMany({ where: { id: { in: [lead, kid] } } });
+    }
+  }, 30_000);
+
+  it("recover(): answers lost with the version mismatch for a lead that was mid-turn", async () => {
+    await executor?.close();
+    let release!: () => void;
+    const open = new Promise<void>((resolve) => (release = resolve));
+    const llm = scriptedLlm([finalAnswer("never")], { turn: 1, open });
+    const dying = killableDb();
+    executor = buildWith(llm, executorId, dying.client);
+    await executor.launch();
+    const run = await db.run.create({ data: { agentId, executionManaged: true } });
+
+    const firstAttempt = executor.start(run.id).catch(() => undefined);
+    await waitFor("turn 1 to block inside the LLM step", () => llm.calls.length === 1);
+    await executor.close();
+    dying.kill();
+    release();
+    await firstAttempt;
+    const other = await recordUnderOtherVersion(run.id);
+
+    executor = buildWith(scriptedLlm([]), `${executorId}-midturn`);
+    await executor.launch();
+    expect(await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id })).toEqual({
+      state: "lost",
+      reason: versionMismatchReason(other, DBOS.applicationVersion),
+    });
+    expect((await db.run.findUniqueOrThrow({ where: { id: run.id } })).executionWorkflowId).toBeNull();
+  }, 30_000);
+
+  it("a replay that meets a step its record does not have ends the run lost with the steps-changed reason", async () => {
+    await executor?.close();
+    let release!: () => void;
+    const open = new Promise<void>((resolve) => (release = resolve));
+    const llm = scriptedLlm([finalAnswer("never")], { turn: 1, open });
+    const dying = killableDb();
+    executor = buildWith(llm, executorId, dying.client);
+    await executor.launch();
+    const run = await db.run.create({ data: { agentId, executionManaged: true } });
+
+    const firstAttempt = executor.start(run.id).catch(() => undefined);
+    await waitFor("turn 1 to block inside the LLM step", () => llm.calls.length === 1);
+    await executor.close();
+    dying.kill();
+    release();
+    await firstAttempt;
+    // A release whose steps differ recorded this run: the engine's turn-1 estimate step has another name.
+    await db.$executeRawUnsafe(
+      "UPDATE dbos_test.operation_outputs SET function_name = 'renamed:step' WHERE workflow_uuid = $1 AND function_name = 'turn:1:estimate'",
+      run.id,
+    );
+
+    const replayLlm = scriptedLlm([finalAnswer("never")]);
+    executor = buildWith(replayLlm, `${executorId}-replay`);
+    await executor.launch();
+    await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id });
+    await waitFor(
+      "the replay to end the run",
+      async () => (await db.run.findUnique({ where: { id: run.id } }))?.status !== "running",
+    );
+
+    const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.status).toBe("lost");
+    expect(after.error).toBe(STEPS_CHANGED_REASON);
+    expect(after.finishedAt).not.toBeNull();
+    expect(replayLlm.calls).toHaveLength(0);
   }, 30_000);
 
   it("a run started in the background from inside another run's step fails, unless started outside its context", async () => {

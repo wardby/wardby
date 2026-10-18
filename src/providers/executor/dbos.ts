@@ -22,7 +22,7 @@ import { DBOS, Error as DbosErrors } from "@dbos-inc/dbos-sdk";
 import pg from "pg";
 import type { PrismaClient } from "#prisma";
 import type { DbosConfig } from "../../config/providers.js";
-import { RunOwnershipLostError, type StepRunner } from "../engine/types.js";
+import { RunOwnershipLostError, StepReplayMismatchError, type StepRunner } from "../engine/types.js";
 import {
   executeRun,
   failNativeRun,
@@ -35,11 +35,14 @@ import { markRunFailedFromExecutorError } from "../../core/dispatch.js";
 import type { SelfDefectSink } from "../../core/self-defects.js";
 import { prisma as defaultDb } from "../../core/db.js";
 import { HEARTBEAT_INTERVAL_MS } from "../../core/timing.js";
+import { DRIVABLE } from "../../core/run-status.js";
 import { logger } from "../../core/logger.js";
 import { type DatabaseAuth, type PgAuthOptions, databaseAuthFromEnv, pgConnectionConfig } from "../../core/pg-auth.js";
 import {
   ADOPTION_EXHAUSTED_REASON,
+  STEPS_CHANGED_REASON,
   decideRecovery,
+  decideTakeover,
   shouldGiveUpAdoption,
   versionMismatchReason,
 } from "./dbos-status.js";
@@ -51,6 +54,14 @@ const dbosLog = logger.child({ module: "dbos-executor" });
 
 type Providers = NativeRunProviders;
 type Db = RunnerDb & Pick<PrismaClient, "run">;
+
+/** End a run `lost` with `reason`, unless it already reached a terminal state (first writer wins). */
+async function failNativeRunAsLost(db: Pick<PrismaClient, "run">, runId: string, reason: string): Promise<void> {
+  await db.run.updateMany({
+    where: { id: runId, status: { in: [...DRIVABLE] } },
+    data: { status: "lost", error: reason, finishedAt: new Date() },
+  });
+}
 
 /** DBOS's own system pool size (DEFAULT_POOL_SIZE in the SDK's system_database.js); kept for ours. */
 const DBOS_SYSTEM_POOL_SIZE = 10;
@@ -154,6 +165,12 @@ export async function workflowIdOf(db: Pick<PrismaClient, "run">, runId: string)
  * discarded step's usage, if any, for the log) so executeRun's backstop stops
  * this attempt without writing the run; runInsideWorkflow turns it back into
  * the SDK error.
+ *
+ * DBOS signals that a replay reached a step whose recorded name differs (the
+ * run was recorded by a release whose steps differ, e.g. after a takeover
+ * fork) by throwing `DBOSUnexpectedStepError`. Translated into a
+ * `StepReplayMismatchError`, which executeRun rethrows untouched so
+ * runInsideWorkflow can end the run `lost`.
  */
 export const dbosStep: StepRunner = async (name, fn) => {
   let ran: { value: unknown } | undefined;
@@ -175,6 +192,7 @@ export const dbosStep: StepRunner = async (name, fn) => {
       const discardedUsage = usageOf(ran?.value);
       throw new RunOwnershipLostError(name, { cause: err, ...(discardedUsage ? { discardedUsage } : {}) });
     }
+    if (err instanceof DbosErrors.DBOSUnexpectedStepError) throw new StepReplayMismatchError(name, { cause: err });
     throw err;
   }
 };
@@ -195,6 +213,19 @@ function usageOf(value: unknown): Record<string, number> | undefined {
  * Registered once at module load — DBOS requires registration before
  * launch(). The body must be deterministic between steps; everything
  * non-deterministic in executeRun/engine is inside a runStep.
+ *
+ * Replay constraints. A run's workflow is replayed both by a same-version
+ * resume and, when recover() takes a waiting lead over after a deploy, by a
+ * fork that runs this body under the *new* release against steps the *old*
+ * release recorded (see decideTakeover). So:
+ * - Code between steps must stay deterministic and safe to repeat: it runs
+ *   again on every replay, now possibly under newer code.
+ * - Step names and their order must only change in ways a replay can still
+ *   follow; a replay that meets a different recorded name ends the run lost
+ *   with STEPS_CHANGED_REASON (runInsideWorkflow).
+ * - New code must accept step outputs recorded by the previous release (the
+ *   `turn:N:llm` TurnResult, tool results). A release that changes a recorded
+ *   shape keeps reading the old one, or a takeover fails at that step (lost).
  */
 const runWorkflow = DBOS.registerWorkflow(
   async (runId: string): Promise<void> => {
@@ -382,13 +413,11 @@ export class DbosExecutor implements Executor {
         // DBOS gates recovery and dequeue on application_version. A workflow
         // recorded under a different version is never dequeued here, so
         // resuming it would be an unbounded loop that holds the run
-        // `running` forever: give up at once and let the reconciler reap it.
+        // `running` forever. Instead it is forked under this version when it
+        // is only waiting on durable children, and otherwise given up at once
+        // so the reconciler reaps it (takeOver).
         const mismatch = versionMismatchReason(status?.applicationVersion, DBOS.applicationVersion);
-        if (mismatch) {
-          this.resumeAttempts.delete(handle.runId);
-          dbosLog.warn({ runId: handle.runId, workflowVersion: status?.applicationVersion }, mismatch);
-          return { state: "lost", reason: mismatch };
-        }
+        if (mismatch) return this.takeOver(handle, mismatch, status?.applicationVersion);
         // Belt and braces for every other reason a resume can fail to take
         // (an id we can't dequeue for, a queue that never drains): bound the
         // number of adoptions of one run so the reconciler stops re-driving
@@ -426,6 +455,55 @@ export class DbosExecutor implements Executor {
     }
   }
 
+  /**
+   * A workflow recorded under another application version: fork it under this one when it is only
+   * waiting on durable children (decideTakeover), otherwise answer lost with the mismatch. The
+   * fork counts as an adoption attempt, so repeated failed takeovers of one run end lost too.
+   */
+  private async takeOver(
+    handle: PersistedExecutionHandle,
+    mismatch: string,
+    workflowVersion: string | undefined,
+  ): Promise<ExecutionRecoveryResult> {
+    const steps = (await DBOS.listWorkflowSteps(handle.id)) ?? [];
+    const children = await this.db.run.findMany({
+      where: { parentRunId: handle.runId, status: { in: [...DRIVABLE] } },
+      select: { status: true, nativeExecutionMode: true, agent: { select: { kind: true } } },
+    });
+    const decision = decideTakeover(
+      steps.map((s) => ({ functionID: s.functionID, name: s.name, output: s.output })),
+      children.map((c) => ({ status: c.status, kind: c.agent.kind, nativeExecutionMode: c.nativeExecutionMode })),
+      mismatch,
+    );
+    if (decision.action === "lost") {
+      this.resumeAttempts.delete(handle.runId);
+      dbosLog.warn({ runId: handle.runId, workflowVersion }, mismatch);
+      return { state: "lost", reason: decision.reason };
+    }
+    const attempts = this.resumeAttempts.get(handle.runId) ?? 0;
+    if (shouldGiveUpAdoption(attempts)) {
+      this.resumeAttempts.delete(handle.runId);
+      dbosLog.warn({ runId: handle.runId, attempts }, "giving up on taking over durable run");
+      return { state: "lost", reason: ADOPTION_EXHAUSTED_REASON };
+    }
+    this.resumeAttempts.set(handle.runId, attempts + 1);
+    const forked = await DBOS.forkWorkflow<void>(handle.id, decision.startStep, {
+      applicationVersion: DBOS.applicationVersion,
+    });
+    const forkedId = forked.workflowID;
+    await this.db.run.update({ where: { id: handle.runId }, data: { executionWorkflowId: forkedId } });
+    // So nothing can dequeue the original again (it stays recorded as forked from).
+    await DBOS.cancelWorkflow(handle.id).catch((err: unknown) =>
+      dbosLog.warn({ err, runId: handle.runId }, "could not cancel the forked-from workflow"),
+    );
+    dbosLog.info(
+      { runId: handle.runId, from: handle.id, to: forkedId, startStep: decision.startStep, workflowVersion },
+      "run taken over under this application version",
+    );
+    void forked.getResult().catch((err) => dbosLog.error({ err, runId: handle.runId }, "taken-over run failed"));
+    return { state: "active" };
+  }
+
   /** Workflow body. Public only so the module-level registration can reach it. */
   async runInsideWorkflow(runId: string): Promise<void> {
     const beat = () =>
@@ -445,6 +523,12 @@ export class DbosExecutor implements Executor {
         throw err.cause instanceof DbosErrors.DBOSWorkflowConflictError
           ? err.cause
           : new DbosErrors.DBOSWorkflowConflictError(runId);
+      }
+      // A replay (typically a takeover fork) met a step the recorded run does not have.
+      if (err instanceof StepReplayMismatchError) {
+        dbosLog.warn({ err, runId }, "replay no longer matches the recorded run");
+        await failNativeRunAsLost(this.db, runId, STEPS_CHANGED_REASON);
+        return;
       }
       throw err;
     } finally {
