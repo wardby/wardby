@@ -26,18 +26,17 @@ import { RunOwnershipLostError, StepReplayMismatchError, type StepRunner } from 
 import {
   executeRun,
   failNativeRun,
+  loseNativeRun,
   nativeRunIntegrations,
   RunCancelledError,
   type NativeRunProviders,
   type RunnerDb,
 } from "../../core/runner.js";
 import { markRunFailedFromExecutorError } from "../../core/dispatch.js";
-import { fileSelfDefectForRun, type SelfDefectSink } from "../../core/self-defects.js";
-import { emitRunFinishedEvents } from "../../core/workflow-run-events.js";
+import type { SelfDefectSink } from "../../core/self-defects.js";
 import { prisma as defaultDb } from "../../core/db.js";
 import { HEARTBEAT_INTERVAL_MS } from "../../core/timing.js";
 import { DRIVABLE } from "../../core/run-status.js";
-import { stopChildrenOfLostRun } from "../../core/lost-run-children.js";
 import { logger } from "../../core/logger.js";
 import { type DatabaseAuth, type PgAuthOptions, databaseAuthFromEnv, pgConnectionConfig } from "../../core/pg-auth.js";
 import {
@@ -56,18 +55,6 @@ const dbosLog = logger.child({ module: "dbos-executor" });
 
 type Providers = NativeRunProviders;
 type Db = RunnerDb & Pick<PrismaClient, "run">;
-
-/**
- * End a run `lost` with `reason`, unless it already reached a terminal state (first writer wins).
- * True when this write made it lost.
- */
-async function failNativeRunAsLost(db: Pick<PrismaClient, "run">, runId: string, reason: string): Promise<boolean> {
-  const { count } = await db.run.updateMany({
-    where: { id: runId, status: { in: [...DRIVABLE] } },
-    data: { status: "lost", error: reason, finishedAt: new Date() },
-  });
-  return count > 0;
-}
 
 /** DBOS's own system pool size (DEFAULT_POOL_SIZE in the SDK's system_database.js); kept for ours. */
 const DBOS_SYSTEM_POOL_SIZE = 10;
@@ -542,18 +529,17 @@ export class DbosExecutor implements Executor {
       if (err instanceof RunOwnershipLostError) {
         throw err.cause instanceof DbosErrors.DBOSWorkflowConflictError
           ? err.cause
-          : new DbosErrors.DBOSWorkflowConflictError(runId);
+          : new DbosErrors.DBOSWorkflowConflictError(DBOS.workflowID ?? runId);
       }
       // A replay met a step the recorded run does not have at the load step, ahead of executeRun's
       // backstop (which settles a mismatch in any later step itself).
       if (err instanceof StepReplayMismatchError) {
         dbosLog.warn({ err, runId }, "replay no longer matches the recorded run");
-        if (await failNativeRunAsLost(this.db, runId, STEPS_CHANGED_REASON)) {
-          await stopChildrenOfLostRun(this.db, this.providers.executor, runId);
-          await fileSelfDefectForRun(this.selfDefects, runId);
-          const lost = await this.db.run.findUnique({ where: { id: runId } });
-          if (lost) await emitRunFinishedEvents(this.db, lost);
-        }
+        // The same settle as executeRun's backstop: lost (first writer wins), its children stopped.
+        await loseNativeRun(
+          { runId, db: this.db, providers: this.providers, ...nativeRunIntegrations(this.providers, this.db) },
+          STEPS_CHANGED_REASON,
+        );
         return;
       }
       throw err;
