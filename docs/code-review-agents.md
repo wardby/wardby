@@ -994,12 +994,10 @@ restart is not refused for pages an earlier attempt read. A reviewer that
 cannot read everything should publish `COMMENT` and name the files it did not
 review.
 
-The `unread_files` refusal applies to agents in `control-plane` mode. It does
-not yet apply to agents in `sandbox` mode (see
-[Native agent sandbox](native-sandbox.md)): their `repo_pr_read` pages the same
-way, but `repo_publish_review` does not check what the run has read, so the
-reviewer prompt's paging step is what keeps a sandboxed reviewer from judging
-code it never saw.
+The `unread_files` refusal applies in both execution modes. In `sandbox` mode
+(see [Native agent sandbox](native-sandbox.md)) the gateway saves what the run
+has read on its session after each `repo_pr_read` and `repo_read_file` call, so
+`repo_publish_review` checks the same reads as in `control-plane` mode.
 Reviewer prompts written before 0.6.1 still work, because the refusal tells
 the agent what to do; update them with the paging step from the shipped
 reviewer prompt.

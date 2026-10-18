@@ -26,6 +26,7 @@ import {
   type RunnerDb,
   type SandboxSessionSnapshot,
 } from "../core/runner.js";
+import { ReviewReadLedger } from "../core/review-reads.js";
 import { DELEGATE_TOOL_PREFIX } from "../core/tool-names.js";
 import { RoutingLlmProvider } from "../providers/llm/routing.js";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
@@ -170,6 +171,8 @@ interface RebuiltRun {
   snapshot: SandboxSessionSnapshot;
   llm: LlmProvider;
   tools: ReturnType<typeof createNativeRunTools>;
+  /** The run's review reads, restored from the session; saved back after each read (see builtin). */
+  reviewReads: ReviewReadLedger;
   finishContext: NativeRunFinishContext;
   delegation: Omit<Parameters<typeof durableDelegate>[0], "ledger" | "sessionId">;
 }
@@ -184,10 +187,12 @@ async function rebuild(deps: GatewayServerDeps, session: GatewaySessionRecord): 
     loaded.pricing && providers.llm instanceof RoutingLlmProvider
       ? providers.llm.forRun(loaded.pricing.entry)
       : providers.llm;
+  const reviewReads = ReviewReadLedger.fromJSON(session.reviewReads);
   return {
     session,
     snapshot,
     llm,
+    reviewReads,
     tools: createNativeRunTools({
       runId: session.runId,
       existingRun,
@@ -197,6 +202,7 @@ async function rebuild(deps: GatewayServerDeps, session: GatewaySessionRecord): 
       reviewHosts,
       repoAccess,
       issueTrackers,
+      reviewReads,
     }),
     finishContext: { runId: session.runId, db, providers, reviewHosts, repoAccess, issueTrackers },
     delegation: {
@@ -297,6 +303,9 @@ export async function* streamModel(
   }
 }
 
+/** The review tools that record reads (repo_publish_review checks them). */
+const REVIEW_READ_TOOLS = new Set(["repo_pr_read", "repo_read_file"]);
+
 async function builtin(
   ctx: RebuiltRun,
   ledger: PrismaGatewayLedger,
@@ -318,7 +327,12 @@ async function builtin(
   }
   const handler = ctx.tools.builtinHandler(params.name);
   if (!handler) throw new GatewayError("not_allowed", `"${params.name}" is not a built-in tool of this run.`);
-  return replayable(ledger, ctx.session.id, callId, "builtin.call", () => handler(params.argsJson));
+  return replayable(ledger, ctx.session.id, callId, "builtin.call", async () => {
+    const result = await handler(params.argsJson);
+    // Each request rebuilds the tools, so what a read recorded is saved for the publish request's check.
+    if (REVIEW_READ_TOOLS.has(params.name)) await ledger.mergeReviewReads(ctx.session.id, ctx.reviewReads);
+    return result;
+  });
 }
 
 async function hostCall(

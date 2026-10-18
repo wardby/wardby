@@ -104,3 +104,58 @@ describe("ReviewReadLedger", () => {
     expect(reads.unreadCode("o/r", 1, HEAD)).toEqual([]);
   });
 });
+
+describe("ReviewReadLedger state", () => {
+  it("restores what it had read, and a restored chain of parts continues", () => {
+    const reads = new ReviewReadLedger();
+    reads.recordPage(
+      "o/r",
+      1,
+      view([f("src/a.ts", "partial", "xx", { offset: 0, continues: true }), f("src/b.ts", "unavailable", "")], "v1.c"),
+      false,
+    );
+    reads.recordFileRead("o/r", HEAD, "src/b.ts");
+
+    const restored = ReviewReadLedger.fromJSON(JSON.parse(JSON.stringify(reads.toJSON())));
+    expect(restored.unreadCode("o/r", 1, HEAD)).toEqual(["src/a.ts"]);
+    restored.recordPage("o/r", 1, view([f("src/a.ts", "partial", "yy", { offset: 2, continues: false })], null), true);
+    expect(restored.unreadCode("o/r", 1, HEAD)).toEqual([]);
+  });
+
+  it("starts empty from a missing or malformed state", () => {
+    for (const state of [
+      null,
+      undefined,
+      "x",
+      3,
+      { v: 2 },
+      { v: 1, heads: "x" },
+      { v: 1, heads: { k: { code: 1 } } },
+    ]) {
+      expect(ReviewReadLedger.fromJSON(state).unreadCode("o/r", 1, HEAD)).toBeNull();
+    }
+  });
+
+  it("merges two attempts' reads of the same head", () => {
+    const first = new ReviewReadLedger();
+    first.recordPage("o/r", 1, view([f("src/a.ts", "complete"), f("src/b.ts", "later_page")], "v1.c"), false);
+    const second = new ReviewReadLedger();
+    second.recordPage("o/r", 1, view([f("src/a.ts", "earlier_page"), f("src/b.ts", "complete")], null), true);
+    second.recordFileRead("o/r", HEAD, "src/c.ts");
+
+    first.merge(second);
+    expect(first.unreadCode("o/r", 1, HEAD)).toEqual([]);
+    expect(first.toJSON().fileReads).toEqual({ [`o/r@${HEAD}`]: ["src/c.ts"] });
+  });
+
+  it("keeps the furthest contiguous delivery when merging parts", () => {
+    const a = new ReviewReadLedger();
+    a.recordPage("o/r", 1, view([f("src/a.ts", "partial", "xxxx", { offset: 0, continues: true })], "v1.c"), false);
+    const b = ReviewReadLedger.fromJSON(a.toJSON());
+    b.recordPage("o/r", 1, view([f("src/a.ts", "partial", "yy", { offset: 4, continues: true })], "v1.d"), true);
+
+    a.merge(b);
+    a.recordPage("o/r", 1, view([f("src/a.ts", "partial", "z", { offset: 6, continues: false })], null), true);
+    expect(a.unreadCode("o/r", 1, HEAD)).toEqual([]);
+  });
+});
