@@ -19,7 +19,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
-import type { Prisma, PrismaClient, Run, RunTrigger } from "#prisma";
+import { Prisma, type PrismaClient, type Run, type RunTrigger } from "#prisma";
 import type { ProviderRegistry } from "../providers/index.js";
 import type { EngineProgress, EngineResult, LoadedTool } from "../providers/engine/types.js";
 import {
@@ -1230,6 +1230,32 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
         }
         let release = await delegationGate.acquire();
         let finishSibling = (): void => {};
+        /**
+         * A child create that lost the (parentRunId, parentCallId) unique key to another execution of
+         * this same delegate step (a stalled owner overlapping an adopted attempt): wait on the child
+         * that execution created, as a re-executed step does. A key held by no child of this agent
+         * (an id colliding with another sub-agent's call) is the model's to see, never a run failure.
+         */
+        const afterDelegationKeyConflict = async (err: unknown): Promise<string> => {
+          if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002")) throw err;
+          release();
+          const raced = await findDelegationChild(db, runId, edge.childAgentId, callId);
+          if (raced) {
+            runnerLog.info(
+              { runId, childRunId: raced.id, boundName },
+              "delegation re-attached after a concurrent create",
+            );
+            return reattachDelegatedChild(raced, boundName, argsJson);
+          }
+          runnerLog.warn(
+            { err, runId, boundName },
+            "delegation child create hit a unique key held by no child of this agent",
+          );
+          return JSON.stringify({
+            error: "delegation_conflict",
+            message: "The sub-agent run could not be created: its call id is already used by another sub-agent run.",
+          });
+        };
         try {
           // At most maxDelegationsPerRun dispatches per run (default one: a
           // classifier deciding plan-vs-implement commits to exactly one child),
@@ -1355,7 +1381,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
               // A continuation this deployment cannot make (the run id came from
               // a pull request another deployment opened, say) is the model's to
               // report, not a reason to fail the whole run.
-              if (!(err instanceof ContinuationRefusedError)) throw err;
+              if (!(err instanceof ContinuationRefusedError)) return await afterDelegationKeyConflict(err);
               return JSON.stringify({
                 error: "continuation_refused",
                 message:
@@ -1397,25 +1423,30 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                   "This execution context has no Executor wired in, so a sandbox-mode sub-agent cannot be dispatched.",
               });
             }
-            const dispatched = await dispatchRun({
-              db,
-              executor: providers.executor,
-              selfDefects: { db, issueTrackers },
-              agentId: edge.childAgentId,
-              trigger: "subagent",
-              taskOverride,
-              grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [],
-              parentRunId: runId,
-              parentCallId: callId,
-              triggeredById: existingRun.triggeredById,
-              awaitExecution: true,
-              onPersisted: (persistedRun) => {
-                if (persistedRun.status !== "refused" && persistedRun.status !== "failed") {
-                  finishSibling = delegationSiblings.start();
-                }
-                release();
-              },
-            });
+            let dispatched: Awaited<ReturnType<typeof dispatchRun>>;
+            try {
+              dispatched = await dispatchRun({
+                db,
+                executor: providers.executor,
+                selfDefects: { db, issueTrackers },
+                agentId: edge.childAgentId,
+                trigger: "subagent",
+                taskOverride,
+                grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [],
+                parentRunId: runId,
+                parentCallId: callId,
+                triggeredById: existingRun.triggeredById,
+                awaitExecution: true,
+                onPersisted: (persistedRun) => {
+                  if (persistedRun.status !== "refused" && persistedRun.status !== "failed") {
+                    finishSibling = delegationSiblings.start();
+                  }
+                  release();
+                },
+              });
+            } catch (err) {
+              return await afterDelegationKeyConflict(err);
+            }
             if (!dispatched) {
               return JSON.stringify({ error: "dispatch_failed", message: "The sub-agent run could not be created." });
             }
@@ -1432,18 +1463,23 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
             });
           }
 
-          const childRun = await db.run.create({
-            data: {
-              agentId: edge.childAgentId,
-              trigger: "subagent",
-              parentRunId: runId,
-              parentCallId: callId,
-              grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [],
-              taskOverride,
-              triggeredById: existingRun.triggeredById,
-              nativeExecutionMode: childAgent.nativeExecutionMode,
-            },
-          });
+          let childRun: Run;
+          try {
+            childRun = await db.run.create({
+              data: {
+                agentId: edge.childAgentId,
+                trigger: "subagent",
+                parentRunId: runId,
+                parentCallId: callId,
+                grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [],
+                taskOverride,
+                triggeredById: existingRun.triggeredById,
+                nativeExecutionMode: childAgent.nativeExecutionMode,
+              },
+            });
+          } catch (err) {
+            return await afterDelegationKeyConflict(err);
+          }
           finishSibling = delegationSiblings.start();
           // The child row exists: admit the next delegation while this child runs.
           release();

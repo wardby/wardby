@@ -26,7 +26,8 @@ export async function findDelegationChild(
   const found = (row: { id: string; startedAt: Date }) => ({ id: row.id, createdAt: row.startedAt });
   if (parentCallId) {
     // Same agent too: a call id is the same call only if it names the same sub-agent. A colliding
-    // id from another agent is never adopted (its create then fails on the unique key instead).
+    // id from another agent is never adopted: its create then fails on the unique key, which the
+    // delegate tool answers with a tool-result error (delegation_conflict), never a run failure.
     const keyed = await db.run.findFirst({ where: { parentRunId, parentCallId, agentId: childAgentId }, select });
     if (keyed) return found(keyed);
   }

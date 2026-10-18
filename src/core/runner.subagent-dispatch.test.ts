@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { Prisma } from "#prisma";
 import type { Datastore } from "../providers/datastore/types.js";
 import type { AgentMemoryStore } from "../providers/memory/types.js";
 import type { LlmProvider, LlmRequest, LlmStreamEvent } from "../providers/llm/types.js";
@@ -758,6 +759,71 @@ describe("delegate_to_<boundName> dispatch tool", () => {
       });
       expect(calls.stopped).toEqual([[child.id, "parent resumed without it"]]);
       expect(await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })).toHaveLength(1);
+    });
+
+    describe("a concurrent duplicate execution created the child first (P2002 on the call key)", () => {
+      const sandboxResearcher: FakeAgent = {
+        ...researcher,
+        id: "sandbox-agent",
+        kind: "native",
+        nativeExecutionMode: "sandbox",
+      };
+      const raceEdges = [
+        ...edges,
+        { parentAgentId: "dispatcher-agent", childAgentId: "sandbox-agent", boundName: "sandboxed" },
+      ];
+      /**
+       * The first child create for `callId` loses the unique-key race: another execution of the
+       * same delegate step commits its child (`winner`, unless null) and this create throws P2002.
+       */
+      function losesCreateRace(db: any, callId: string, winner: Record<string, unknown> | null) {
+        const create = db.run.create;
+        let raced = false;
+        db.run.create = async (args: any) => {
+          if (!raced && args.data.parentCallId === callId) {
+            raced = true;
+            if (winner) await create({ data: { ...args.data, ...winner } });
+            throw new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+              code: "P2002",
+              clientVersion: "test",
+              meta: { modelName: "Run", target: ["parentRunId", "parentCallId"] },
+            });
+          }
+          return create(args);
+        };
+      }
+
+      it.each([
+        ["coding", "implement-agent", "delegate_to_implement"],
+        ["sandbox-mode native", "sandbox-agent", "delegate_to_sandboxed"],
+        ["control-plane native", "research-agent", "delegate_to_researcher"],
+      ])("re-attaches a %s child to the existing row instead of failing the run", async (_kind, childAgentId, tool) => {
+        const db = fakeDb([lead, implementer, researcher, sandboxResearcher], raceEdges);
+        const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+        losesCreateRace(db, "toolu_raced", { status: "succeeded", finalText: "the winner's child finished" });
+        const { calls, executor } = recordingExecutor();
+        const llm = scriptedLlm([delegateCall("toolu_raced", tool), finalAnswer("reported")]);
+        const result = await executeRun(parentRun.id, providers(llm, executor as never), db);
+
+        expect(result.status).toBe("succeeded");
+        expect(toolResultSeen(llm, 1)).toMatchObject({ finalText: "the winner's child finished" });
+        const children = await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } });
+        expect(children.map((c: { agentId: string }) => c.agentId)).toEqual([childAgentId]);
+        expect(calls.started).toEqual([]);
+      });
+
+      it("answers a tool-result error, never throws, when no child of this agent holds the key", async () => {
+        const db = fakeDb([lead, implementer], edges);
+        const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+        losesCreateRace(db, "toolu_collides", null);
+        const { calls, executor } = recordingExecutor();
+        const llm = scriptedLlm([delegateCall("toolu_collides", "delegate_to_implement"), finalAnswer("reported")]);
+        const result = await executeRun(parentRun.id, providers(llm, executor as never), db);
+
+        expect(result.status).toBe("succeeded");
+        expect(toolResultSeen(llm, 1)).toMatchObject({ error: "delegation_conflict" });
+        expect(calls.started).toEqual([]);
+      });
     });
 
     it("writes the call id on the child it dispatches", async () => {
