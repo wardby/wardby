@@ -9,6 +9,7 @@ import {
   errorResponse,
   RegistryService,
   type RegistryPlanRequest,
+  type RegistryRefusalsRequest,
   type RegistryRequest,
   type RegistryResponse,
 } from "./registry/service.js";
@@ -257,6 +258,34 @@ describe("coding proxy registry routing", () => {
     expect(plans).toHaveLength(1);
     // Only POST plans; a GET of the same path is an ordinary registry request.
     expect((await fetch(url)).status).toBe(200);
+    await server.close();
+  });
+
+  it("routes GET /registry/-/refusals to the registry's refusals, with the token and since", async () => {
+    const asked: RegistryRefusalsRequest[] = [];
+    const handled: string[] = [];
+    const registry = {
+      handle: async (request: { subpath: string }): Promise<RegistryResponse> => {
+        handled.push(request.subpath);
+        return { status: 200, contentType: "text", body: "" };
+      },
+      refusals: async (request: RegistryRefusalsRequest) => {
+        asked.push(request);
+        return { status: 200, contentType: "application/json", body: '{"refusals":[]}' };
+      },
+    };
+    const server = await startCodingProxyServer(fakeProxy(), { host: "127.0.0.1", port: 0, registry });
+    const base = `http://127.0.0.1:${server.port}/registry/-/refusals`;
+    const response = await fetch(`${base}?since=2026-10-18T12:00:00.000Z`, {
+      headers: { authorization: "Bearer rrg_r" },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ refusals: [] });
+    await fetch(base, { headers: { authorization: "Bearer rrg_r" } });
+    expect(asked).toEqual([{ token: "rrg_r", since: new Date("2026-10-18T12:00:00.000Z") }, { token: "rrg_r" }]);
+    // Never treated as an ecosystem named "-".
+    expect(handled).toEqual([]);
     await server.close();
   });
 

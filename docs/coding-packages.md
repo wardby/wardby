@@ -53,7 +53,7 @@ request never names the internal proxy.
    packages), and the registry for the project-level npm/PyPI packages your
    agent adds during the run.
 
-npm, pnpm, yarn and pip in every coding run are always pointed at the proxy —
+npm, pnpm, yarn, pip and uv in every coding run are always pointed at the proxy —
 this is not optional per run (see [pnpm and yarn](#pnpm-and-yarn) for how
 each client is configured). If an agent has no allowlist entries for an ecosystem (the
 default for a new agent), an install in that ecosystem gets a clear refusal
@@ -1138,6 +1138,61 @@ can otherwise run out of space on a large package; that directory counts
 toward the run's `workspaceDiskMb` and, like the rest of `.cache`, is never
 collected either.
 
+### Python installers: pip, uv and Poetry
+
+The `node-python` worker images ship pip (inside a virtual environment) and
+uv. The worker points both at the registry for every run:
+
+| Setting                         | Client | What it does                                                                  |
+| ------------------------------- | ------ | ----------------------------------------------------------------------------- |
+| `PIP_INDEX_URL`                 | pip    | The registry, with the run's registry-only token, as the only index           |
+| `PIP_ONLY_BINARY=:all:`         | pip    | Wheels only; source distributions are never installed                         |
+| `UV_DEFAULT_INDEX`              | uv     | The same registry URL as `PIP_INDEX_URL` (uv reads none of pip's settings)    |
+| `UV_NO_BUILD=1`                 | uv     | Wheels only from the index; the project itself still builds                   |
+| `PIP_CACHE_DIR`, `UV_CACHE_DIR` | both   | Caches under the workspace's `.cache`, never collected                        |
+| `UV_PYTHON_DOWNLOADS=never`     | uv     | uv never tries to download a Python interpreter (the sandbox can't reach one) |
+
+These are set by the worker, not by an operator, and an agent's or
+service's own environment can't override `PIP_*` or `UV_*` names.
+
+What works, and what doesn't yet:
+
+- **`pip install <package>`, `pip install -r requirements.txt` with
+  top-level requirements, and `uv pip install …`** resolve top-down, so
+  every dependency is allowed by the time it is requested.
+- **A fully pinned requirements file** (`pip-compile` or `pip freeze`
+  output, with or without `--hash`) lists transitive packages as top-level
+  lines. pip and uv request one before reading its parent's metadata, so it
+  is refused `wardby_package_not_allowed` unless it is allowlisted itself.
+  Allowlist those packages, or install from the top-level requirements.
+- **`pip install .`, `uv sync` and other project installs** first install
+  the project's build backend (`[build-system] requires`: `hatchling`,
+  `setuptools`, `poetry-core`, …). Allowlist it like any other package.
+- **`uv sync` from a committed `uv.lock`** is not supported in the sandbox:
+  uv downloads from the URLs recorded in the lock (`files.pythonhosted.org`),
+  which the sandbox can't reach, rather than from its index.
+- **Poetry** is not supported in the sandbox: it can't be pointed at the
+  registry by environment alone (it needs a primary source in
+  `pyproject.toml` plus credentials), and its lock records pypi.org.
+
+**Why an install was refused.** npm prints the registry's refusal body, so
+the agent sees the code and the hint. pip doesn't (a refused package shows
+as `from versions: none`), and uv shows only `403 Forbidden`. So the worker
+tells the agent to run `wardby-packages` after an install that failed
+without saying why: it lists the packages the registry refused for the run
+in the last 15 minutes, each with its code and what to do. For a Claude Code
+agent, the tool runner also adds those lines to any failed command's output
+by itself. The command reads the run's registry-only token from the worker's
+environment and sends it only to the registry.
+
+The registry also records what it hides from a Python index, which pip and
+uv report only as "no versions": a package whose allowed versions publish
+only source distributions (`wardby_file_not_allowed`), or whose every wheel
+is newer than the release-age limit (`wardby_version_filtered`). One case
+stays unrecorded: a single pinned version withheld while others are listed
+(`jinja2==2.10` with a blocking advisory), since the registry never sees
+the client's pin.
+
 ## Safeguards
 
 - **Dependency graph only.** Only packages on the allowlist, or reachable
@@ -1312,8 +1367,11 @@ tree is refused at the same place; approving more packages won't help.
 
 ## Error codes
 
-npm and pip print the proxy's error body verbatim, so these are what you'll
-see on a failed install:
+npm prints the proxy's error body verbatim, so these are what you'll see on
+a failed npm install. pip and uv don't print it: `wardby-packages` lists the
+same codes for the run (see
+[Python installers](#python-installers-pip-uv-and-poetry)), and so do
+`get_run` and the pull request.
 
 | Code                                 | Status | Meaning / what to do                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | ------------------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

@@ -284,4 +284,18 @@ describe("pypiAdapter protocol", () => {
     expect(config.env.PIP_ONLY_BINARY).toBe(":all:");
     expect(config.files).toEqual([]);
   });
+
+  it("configures uv the same way: the registry as its only index, no sdists, its own cache, no downloads", () => {
+    const config = pypiAdapter.workerConfig({
+      registryUrl: "http://wardby-proxy:8787/registry/pypi/",
+      token: "rrg_example",
+      cacheDir: "/workspace/.cache/pypi",
+    });
+    expect(config.env).toMatchObject({
+      UV_DEFAULT_INDEX: "http://wardby:rrg_example@wardby-proxy:8787/registry/pypi/simple/",
+      UV_NO_BUILD: "1",
+      UV_CACHE_DIR: "/workspace/.cache/pypi/uv",
+      UV_PYTHON_DOWNLOADS: "never",
+    });
+  });
 });

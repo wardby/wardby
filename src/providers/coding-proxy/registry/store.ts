@@ -141,6 +141,8 @@ export interface RegistryStore {
   /** Number of refused RegistryFetch rows recorded for the run. */
   refusalCount(runId: string): Promise<number>;
   listFetches(runId: string): Promise<(RegistryFetchRecord & { createdAt: Date })[]>;
+  /** The run's refused rows recorded at or after `since`, newest first, at most `limit`. */
+  listRecentRefusals(runId: string, since: Date, limit: number): Promise<(RegistryFetchRecord & { createdAt: Date })[]>;
   /** Stored facts for these versions (any not stored are absent). */
   getVersionFacts(
     ecosystem: string,
@@ -269,6 +271,17 @@ export class MemoryRegistryStore implements RegistryStore {
 
   async listFetches(runId: string): Promise<(RegistryFetchRecord & { createdAt: Date })[]> {
     return this.fetches.filter((fetch) => fetch.runId === runId);
+  }
+
+  async listRecentRefusals(
+    runId: string,
+    since: Date,
+    limit: number,
+  ): Promise<(RegistryFetchRecord & { createdAt: Date })[]> {
+    return this.fetches
+      .filter((fetch) => fetch.runId === runId && fetch.outcome === "refused" && fetch.createdAt >= since)
+      .reverse()
+      .slice(0, limit);
   }
 
   async getVersionFacts(

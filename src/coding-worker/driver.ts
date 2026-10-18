@@ -2,7 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   CODING_PROTOCOL_VERSION,
-  dependencyCacheTaskNote,
+  workerTaskNote,
   parseCodingAgentOutputJson,
   sanitizeDependencyCacheReport,
   type CodingAgentOutput,
@@ -283,7 +283,7 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
     webSearchMode: "disabled",
     approvalPolicy: "never",
   });
-  const note = dependencyCacheTaskNote(dependencyCache);
+  const note = workerTaskNote(dependencyCache);
   const streamed = await thread.runStreamed(boundedPrompt(options.input.task, options.input.runId, note), {
     outputSchema: CODING_OUTPUT_JSON_SCHEMA,
     signal: options.signal,

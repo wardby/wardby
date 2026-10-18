@@ -11,7 +11,7 @@ describe("summarizeRegistryFetches", () => {
       { ...row, ecosystem: "pypi", name: "react", version: "19.0.0", outcome: "served" },
       { ...row, ecosystem: "npm", name: "left-pad", outcome: "refused", reason: "wardby_package_not_allowed" },
       { ...row, ecosystem: "npm", name: "left-pad", outcome: "refused", reason: "wardby_package_not_allowed" },
-      { ...row, ecosystem: "npm", name: "left-pad", outcome: "refused", reason: "wardby_version_filtered" },
+      { ...row, ecosystem: "npm", name: "left-pad", outcome: "refused", reason: "wardby_upstream_error" },
     ]);
     expect(summary.packages).toEqual([
       { ecosystem: "npm", name: "react", version: "19.0.0", size: 10 },
@@ -24,7 +24,7 @@ describe("summarizeRegistryFetches", () => {
         reason: "wardby_package_not_allowed",
         hint: refusalHint("wardby_package_not_allowed"),
       },
-      { ecosystem: "npm", name: "left-pad", reason: "wardby_version_filtered" },
+      { ecosystem: "npm", name: "left-pad", reason: "wardby_upstream_error" },
     ]);
   });
 
@@ -32,7 +32,7 @@ describe("summarizeRegistryFetches", () => {
     const row = { reason: null, sizeBytes: null, version: null };
     const { packageRefusals } = summarizeRegistryFetches([
       { ...row, ecosystem: "npm", name: "a", outcome: "refused", reason: "wardby_package_not_allowed_pending" },
-      { ...row, ecosystem: "npm", name: "b", outcome: "refused", reason: "wardby_version_filtered" },
+      { ...row, ecosystem: "npm", name: "b", outcome: "refused", reason: "wardby_upstream_error" },
     ]);
     expect(packageRefusals[0]).toEqual({
       ecosystem: "npm",
@@ -41,7 +41,7 @@ describe("summarizeRegistryFetches", () => {
       hint: refusalHint("wardby_package_not_allowed_pending"),
     });
     expect(packageRefusals[0]?.hint).toContain("owner must allowlist");
-    expect(packageRefusals[1]).toEqual({ ecosystem: "npm", name: "b", reason: "wardby_version_filtered" });
+    expect(packageRefusals[1]).toEqual({ ecosystem: "npm", name: "b", reason: "wardby_upstream_error" });
     expect(packageRefusals[1]).not.toHaveProperty("hint");
   });
 

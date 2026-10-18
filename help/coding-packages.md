@@ -3,7 +3,7 @@ id: coding-packages
 title: Approve packages for coding agents
 summary: Let coding workers install vetted npm (also with pnpm or yarn) and PyPI dependencies through Wardby's registry proxy.
 audience: operator
-tags: [coding-agents, packages, npm, pnpm, yarn, pypi, supply-chain, refusals, lockfile, extras, pip-extras]
+tags: [coding-agents, packages, npm, pnpm, yarn, pypi, uv, supply-chain, refusals, lockfile, extras, pip-extras]
 appliesTo: >=0.2.1
 ---
 
@@ -111,6 +111,29 @@ and control plane on the same Wardby version: a proxy from before extras
 support cannot load an allowlist with a `name[extra]` entry, so every registry
 request of that run fails; and once a profile stores an extras entry, do not
 downgrade below the release that added extras.
+
+## Python: pip and uv
+
+The `node-python` images ship pip (used in a virtual environment) and uv,
+and the worker points both at the registry (`PIP_INDEX_URL`, and
+`UV_DEFAULT_INDEX` with `UV_NO_BUILD=1` for wheels only). Top-level installs
+work with either: `pip install -r requirements.txt`, `uv pip install …`.
+
+- **Fully pinned requirements** (`pip-compile`, `pip freeze`) list
+  dependencies as top-level lines, so each one must be allowlisted itself;
+  otherwise it's refused `wardby_package_not_allowed`.
+- **Project installs** (`pip install .`, `uv sync`) need the build backend
+  from `[build-system] requires` (`hatchling`, `setuptools`, …) allowlisted.
+- **`uv sync` from a committed `uv.lock` and Poetry** don't work in the
+  sandbox yet: both download from pypi.org URLs instead of the registry.
+
+pip and uv don't print why the registry refused a package (pip says
+`from versions: none`, uv `403 Forbidden`). The agent is told to run
+`wardby-packages`, which lists the run's recent refusals with their codes
+and hints; a Claude Code agent also gets those lines after any failed
+command. The registry also records packages it hides from the index: one
+with only source distributions (`wardby_file_not_allowed`), or whose every
+wheel is too new (`wardby_version_filtered`).
 
 The quickstart's coding step offers the packages a local repository declares
 (`package.json`, `pyproject.toml` including its build-system packages,

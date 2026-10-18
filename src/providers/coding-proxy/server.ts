@@ -27,7 +27,7 @@ export interface CodingProxyServerConfig {
   host: string;
   port: number;
   expectedHost?: string;
-  registry?: Pick<RegistryService, "handle"> & Partial<Pick<RegistryService, "plan">>;
+  registry?: Pick<RegistryService, "handle"> & Partial<Pick<RegistryService, "plan" | "refusals">>;
   /** The dependency cache (`/cache/...`); absent when the deployment has it off. */
   dependencyCache?: Pick<DependencyCacheService, "handle" | "uploadMs">;
   /** Time to receive a whole request (default HTTP_LIMITS.requestMs); a cache upload gets its upload window instead. */
@@ -237,6 +237,19 @@ export async function startCodingProxyServer(
         }
         if (request.method !== "GET" && request.method !== "HEAD") {
           sendError(response, 405, "method_not_allowed");
+          return;
+        }
+        // The run's recent refusals, for clients that don't print the 403 body (pip, uv).
+        const refusals = request.url.match(/^\/registry\/-\/refusals(?:\?(.*))?$/);
+        if (refusals && config.registry.refusals) {
+          const since = new URLSearchParams(refusals[1] ?? "").get("since");
+          sendRegistry(
+            response,
+            await config.registry.refusals({
+              token: registryToken(request.headers.authorization),
+              ...(since ? { since: new Date(since) } : {}),
+            }),
+          );
           return;
         }
         const match = request.url.match(/^\/registry\/([a-z0-9-]+)\/(.*)$/);

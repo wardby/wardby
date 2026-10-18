@@ -1,6 +1,6 @@
 import {
   CODING_PROTOCOL_VERSION,
-  dependencyCacheTaskNote,
+  workerTaskNote,
   parseCodingAgentOutputJson,
   sanitizeDependencyCacheReport,
   type CodingAgentOutput,
@@ -283,7 +283,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     ? `${CLAUDE_WORKER_SECURITY_INSTRUCTIONS}\n\n${injected}`
     : CLAUDE_WORKER_SECURITY_INSTRUCTIONS;
   const stream = options.createQuery({
-    prompt: boundedPrompt(options.input.task, options.input.runId, dependencyCacheTaskNote(dependencyCache)),
+    prompt: boundedPrompt(options.input.task, options.input.runId, workerTaskNote(dependencyCache)),
     model: options.input.model,
     budgetUsd: options.input.budgetUsd,
     maxTurns: options.input.maxTurns ?? DEFAULT_CLAUDE_MAX_TURNS,

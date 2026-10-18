@@ -56,6 +56,10 @@ const HINTS: Record<string, string> = {
   [GRAPH_LIMIT]: `The run's dependency graph walk hit REGISTRY_MAX_GRAPH_PACKAGES before reaching the package, so it may not be in the graph at all. Retrying will not help. The agent's owner must allowlist the package directly, or the operator can raise the limit.`,
   [GRAPH_INCOMPLETE]:
     "The walk reached the package but timed out before checking its versions, usually a slow upstream. Try again shortly.",
+  wardby_version_filtered:
+    "Every version the agent may use is newer than the release-age limit, outside the allowlisted range, or has a blocking advisory. Pin an older version, or the agent's owner can change the allowlist or policy.",
+  wardby_file_not_allowed:
+    "The registry serves wheels only, and the allowed versions of this package publish only source distributions. Use a version or package that ships a wheel, or ask the agent's owner.",
 };
 
 /** What each refusal code means to someone reading the PR, without the registry's internals. */
@@ -67,6 +71,7 @@ const MEANINGS: Record<string, string> = {
     "not reached before the run's dependency graph walk hit its package limit; the owner must allowlist it directly",
   [GRAPH_INCOMPLETE]: "still being checked against the allowed packages' dependency graph; retry shortly",
   wardby_version_filtered: "withheld: newer than the release-age limit, or a high-severity advisory",
+  wardby_file_not_allowed: "no wheel to install: only source distributions, which the registry does not serve",
   wardby_lockfile_integrity_mismatch: "the lock file's integrity does not match the registry's",
   wardby_upstream_error: "the upstream registry failed (transient)",
   wardby_audit_unavailable: "the advisory check was unavailable (transient)",
