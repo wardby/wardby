@@ -2034,6 +2034,16 @@ describe("ContainerExecutor", () => {
       expect(created.vcs.lastFinalizeDetails).not.toHaveProperty("issueNumber");
     });
 
+    it("keeps the From issue line, never a tracker line, for a run recorded for a GitHub issue", async () => {
+      const created = await harness({ issueProvider: "github", issueKey: "openai/example#12" });
+      created.store.linkedIssueSource = async () => ({
+        hostStatus: { provider: "github", repository: "openai/example", number: 12, issueMention: true },
+      });
+      await created.executor.start("run-1");
+      expect(created.vcs.lastFinalizeDetails?.issueNumber).toBe(12);
+      expect(created.vcs.lastFinalizeDetails).not.toHaveProperty("issue");
+    });
+
     it("names no issue for a pull request mention, another repository, a manual run, or a failed lookup", async () => {
       const sources: Array<() => Promise<LinkedIssueSource>> = [
         async () => ({
@@ -2089,6 +2099,17 @@ describe("ContainerExecutor", () => {
           { repository: "acme/order-service", number: 2 },
           { repository: "openai/example", self: true },
         ],
+      });
+    });
+
+    it("names a GitHub issue the request was recorded for, linked to its page", async () => {
+      const created = await harness({ issueProvider: "github", issueKey: "acme/app#7" });
+      created.store.related = [{ repository: "acme/order-service", number: 2 }];
+      await created.executor.start("run-1");
+      expect(created.vcs.lastFinalizeDetails?.related?.issue).toEqual({
+        key: "acme/app#7",
+        url: "https://github.com/acme/app/issues/7",
+        trackerName: "GitHub",
       });
     });
 

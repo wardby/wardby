@@ -1,11 +1,12 @@
 import { generateKeyPairSync } from "node:crypto";
 import { decodeJwt } from "jose";
 import { describe, expect, it, vi } from "vitest";
-import { ISSUE_KEY } from "../issue-tracker/types.js";
+import { GITHUB_ISSUE_KEY, ISSUE_KEY } from "../issue-tracker/types.js";
 import {
   DEPENDENCY_INSTALL_INCOMPLETE,
   GitHubAppClient,
   MAX_PULL_REQUEST_BODY_CHARS,
+  PR_GITHUB_ISSUE_KEY,
   PR_ISSUE_KEY,
   RELATED_SECTION_END,
   RELATED_SECTION_START,
@@ -1257,6 +1258,14 @@ describe("pull request issue reference", () => {
     expect(PR_ISSUE_KEY.flags).toBe(ISSUE_KEY.flags);
   });
 
+  it("keeps its GitHub issue key pattern in step with GITHUB_ISSUE_KEY, and never puts a GitHub key in the title or issue line", () => {
+    expect(PR_GITHUB_ISSUE_KEY.source).toBe(GITHUB_ISSUE_KEY.source);
+    expect(PR_GITHUB_ISSUE_KEY.flags).toBe(GITHUB_ISSUE_KEY.flags);
+    const github = { key: "acme/app#7", url: "https://github.com/acme/app/issues/7", trackerName: "GitHub" };
+    expect(pullRequestTitle({ ...base, issue: github })).toBe("Wardby run run-1");
+    expect(pullRequestBody({ ...base, issue: github })).not.toContain("acme/app#7");
+  });
+
   it("prefixes the title with the key, keeping the model tag after it", () => {
     expect(pullRequestTitle({ ...base, issue })).toBe("[PROJ-123] Wardby run run-1");
     expect(pullRequestTitle({ ...base, tag: "fix-login", issue })).toBe("[PROJ-123] [fix-login] Wardby run run-1");
@@ -1395,6 +1404,17 @@ describe("related pull requests section", () => {
         ],
       }),
     ).toBeUndefined();
+  });
+
+  it("names a GitHub issue with the same wording as a Jira issue", () => {
+    const block = renderRelatedSection({
+      entries,
+      issue: { key: "acme/app#7", url: "https://github.com/acme/app/issues/7", trackerName: "GitHub" },
+    })!;
+    expect(block).toContain(
+      "Wardby opened these pull requests for the same request for GitHub issue [acme/app#7](https://github.com/acme/app/issues/7).",
+    );
+    expect(renderRelatedSection({ entries, issue: { key: "acme/app#0" } })).not.toContain("acme/app#0");
   });
 
   it("drops a malformed issue key or a non-https url, keeping a valid key as plain text", () => {

@@ -436,8 +436,8 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
   boundary (routes, field names and types, error codes), word for word the same.
 - Wardby adds a **Related pull requests** section to each pull request the
   builders open, listing the others with links, states (open, draft, merged,
-  closed) and the originating issue. With a Jira issue, the list covers every
-  pull request recorded for that issue in any run. When no pull request in the
+  closed) and the originating issue. With a Jira or GitHub issue, the list
+  covers every pull request recorded for that issue in any run. When no pull request in the
   set carries a `mergeOrder` (see below), open ones are numbered as a
   **Suggested merge order** — the order the lead delegated in, not a
   guarantee. When any pull request in the set carries one (open, merged or
