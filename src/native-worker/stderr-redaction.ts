@@ -1,25 +1,45 @@
 /**
  * The sandbox worker's stderr is not a redacted channel by itself: a failed worker's stderr tail
  * reaches the server's log (docker-launcher.ts), and a tool's host calls hand the worker secret
- * values (`secrets.get`). The worker knows those exact values, so it redacts them from everything
- * it writes to stderr — its own failure line and the shared logger's lines — with the same
- * redactor the console bridge uses (minimum length included). One set per worker process.
+ * values (`secrets.get`). The worker knows those exact values (raw and JSON-escaped), so it masks
+ * them in everything it writes to stderr — its own failure line and the shared logger's lines —
+ * with the shared redactor's spans (secretSpans: the union of every occurrence, overlapping ones
+ * included, minimum length included). One set per worker process.
  *
- * Redaction is by line, not by write: a secret value split across two `process.stderr.write`
- * calls would pass a per-write redactor, so writes are buffered and only complete lines (through
- * their "\n") are redacted and emitted. The unterminated remainder is redacted and emitted on
- * exit or SIGTERM/SIGINT (flushStderrRedaction), and early once it grows past
- * MAX_PENDING_STDERR_CHARS. Wherever the buffer is cut, no remembered value is split by the cut
- * (see safeCut).
+ * process.stderr writes are buffered (StderrRedactionBuffer), because a value may arrive split
+ * across writes. On each write the buffer:
+ * 1. holds back `hold`: the longest suffix of the buffer that is a proper prefix of a remembered
+ *    value, since those characters could still become a value;
+ * 2. picks a cut `c` <= length − hold: after the last "\n" there, or, once the text after that
+ *    exceeds MAX_PENDING_STDERR_CHARS, at length − hold; otherwise it emits nothing yet;
+ * 3. masks spans over the whole buffer, with its first `maskedLead` characters forced into a span;
+ * 4. when `c` falls inside a span [s, e), emits [s, c) as the marker and carries `maskedLead` =
+ *    e − c, so the rest of that span is masked when it is emitted later;
+ * 5. emits the masked text before `c` and keeps the rest.
+ * Masking is safe at any cut, so no cut is ever searched for. On exit, SIGTERM/SIGINT and the
+ * worker's fail path the remainder is emitted with its spans, `maskedLead` and the held suffix all
+ * masked: fail closed, a possible value start is emitted as `[REDACTED]`, never raw.
+ *
+ * Why no value character is emitted: an occurrence that begins before `c` either ends within the
+ * buffer (it is a span, masked here, and its part past `c` is carried as `maskedLead`) or runs
+ * past the buffer's end, in which case the text from its start to the end is a proper prefix of
+ * the value, so `hold` >= length − start and `c` <= its start, a contradiction. By induction over
+ * writes, every character emitted that belongs to an occurrence is inside a masked span.
  *
  * The shared logger does not write through process.stderr: pino serializes each log call to one
  * whole line (ending in "\n") and hands that line to its `streamWrite` hook before writing it to
- * fd 2 itself, so the line filter below sees whole lines.
+ * fd 2 itself, so the line filter below (the shared redactor) sees whole lines.
  */
 
 import { StringDecoder } from "node:string_decoder";
 import { setLogLineFilter } from "../core/logger.js";
-import { redactExactSecretValues } from "../sandbox/host-functions.js";
+import {
+  maskSpans,
+  mergeSpans,
+  MIN_REDACTABLE_SECRET_LENGTH,
+  redactExactSecretValues,
+  secretSpans,
+} from "../sandbox/host-functions.js";
 
 const received = new Set<string>();
 
@@ -36,90 +56,111 @@ export function redactReceivedSecrets(text: string): string {
 }
 
 /**
- * A pending line longer than this (64 KiB of text) is emitted without waiting for its "\n", so an
- * unterminated stream cannot grow the buffer without bound. The cut keeps back the last
- * (longest remembered value − 1) characters, so a value that has begun but not ended is held whole
- * until its end arrives; the buffer is therefore bounded by this plus the longest value. When the
- * safe cut falls back to 0 (a self-overlapping value repeated without a newline), the text is
- * withheld: a marker line is emitted and only the part that could still begin a value is kept.
+ * Text after the last "\n" longer than this (64 KiB) is emitted without waiting for its "\n", so an
+ * unterminated stream cannot grow the buffer without bound: it stays within this plus the longest
+ * remembered value plus one write.
  */
 export const MAX_PENDING_STDERR_CHARS = 64 * 1024;
 
-/** Emitted in place of buffered text that could not be split safely (see takeReady). */
-export const STDERR_WITHHELD_MARKER = "[stderr withheld: output could not be split safely]\n";
-
-/** The shared redactor's minimum: shorter values are never redacted, so they never constrain a cut. */
-const MIN_REDACTED_LENGTH = 6;
-
-/** The remembered values the redactor acts on (including escaped forms). */
-const redactable = () => [...received].filter((value) => value.length >= MIN_REDACTED_LENGTH);
-
-/**
- * `cut` moved back until no remembered value is split by it: no complete occurrence straddles
- * it, and (when `holdBack`) the last (longest value − 1) characters stay, so an occurrence still
- * being written starts after the cut. Only moves back, so it never emits more than asked.
- */
-function safeCut(text: string, cut: number, holdBack: boolean): number {
-  const values = redactable();
-  if (values.length === 0) return cut;
-  let c = cut;
-  if (holdBack) c = Math.min(c, text.length - (Math.max(...values.map((v) => v.length)) - 1));
-  c = Math.max(c, 0);
-  for (let moved = true; moved && c > 0;) {
-    moved = false;
-    for (const value of values) {
-      let at = text.indexOf(value, Math.max(0, c - value.length + 1));
-      while (at >= 0 && at < c) {
-        if (at + value.length > c) {
-          c = at;
-          moved = true;
-          break;
-        }
-        at = text.indexOf(value, at + 1);
+/** The longest suffix of `text` that is a proper prefix of one of `values`. */
+function heldLength(text: string, values: readonly string[]): number {
+  let hold = 0;
+  for (const value of values) {
+    for (let k = Math.min(value.length - 1, text.length); k > hold; k -= 1) {
+      if (text.charCodeAt(text.length - k) === value.charCodeAt(0) && text.endsWith(value.slice(0, k))) {
+        hold = k;
+        break;
       }
     }
   }
-  return c;
+  return hold;
 }
 
+/**
+ * The stderr buffer as a value: text in (`write`), masked text out, never a remembered value's
+ * character unmasked (see the module comment). `values` is read on every call, so a value
+ * remembered later applies to what is still buffered.
+ */
+export class StderrRedactionBuffer {
+  private pending = "";
+  private maskedLead = 0;
+  private atLineStart = true;
+
+  constructor(
+    private readonly values: () => readonly string[],
+    private readonly bound = MAX_PENDING_STDERR_CHARS,
+  ) {}
+
+  /** Characters still buffered. */
+  get pendingLength(): number {
+    return this.pending.length;
+  }
+
+  /** Adds `text` and returns what may be emitted now (possibly ""). */
+  write(text: string): string {
+    this.pending += text;
+    const values = this.redactable();
+    const hold = heldLength(this.pending, values);
+    const limit = this.pending.length - hold;
+    // (lastIndexOf treats a negative start as 0, so an empty window is checked first.)
+    let cut = limit > 0 ? this.pending.lastIndexOf("\n", limit - 1) + 1 : 0;
+    if (this.pending.length - cut > this.bound) cut = limit;
+    if (cut <= 0) return "";
+    const spans = this.spans(values, []);
+    const inside = spans.find(([start, end]) => start < cut && cut < end);
+    this.maskedLead = inside ? inside[1] - cut : 0;
+    const ready = maskSpans(
+      this.pending.slice(0, cut),
+      spans.filter(([start]) => start < cut).map(([start, end]): [number, number] => [start, Math.min(end, cut)]),
+    );
+    this.pending = this.pending.slice(cut);
+    return this.emitted(ready);
+  }
+
+  /** Everything still buffered, masked, fail closed (the held suffix too), ending with "\n" if output is mid-line. */
+  flush(): string {
+    const values = this.redactable();
+    const hold = heldLength(this.pending, values);
+    const text = this.pending;
+    const out = maskSpans(text, this.spans(values, hold > 0 ? [[text.length - hold, text.length]] : []));
+    this.pending = "";
+    this.maskedLead = 0;
+    const ready = this.emitted(out);
+    if (this.atLineStart) return ready;
+    this.atLineStart = true;
+    return `${ready}\n`;
+  }
+
+  private redactable(): string[] {
+    return this.values().filter((value) => value.length >= MIN_REDACTABLE_SECRET_LENGTH);
+  }
+
+  /** Spans over the whole buffer, the carried `maskedLead` and any `extra` forced in. */
+  private spans(values: readonly string[], extra: Array<[number, number]>): Array<[number, number]> {
+    const forced: Array<[number, number]> = this.maskedLead > 0 ? [[0, this.maskedLead], ...extra] : extra;
+    return mergeSpans([...secretSpans(this.pending, values), ...forced]);
+  }
+
+  private emitted(text: string): string {
+    if (text) this.atLineStart = text.endsWith("\n");
+    return text;
+  }
+}
+
+const buffer = new StderrRedactionBuffer(() => [...received]);
 let installed = false;
-let pending = "";
 let rawWrite: ((chunk: string) => boolean) | undefined;
 const bytes = new StringDecoder("utf8");
 
-/** Emits the buffered remainder, redacted and ended with "\n". Safe to call any number of times. */
+/** Emits the buffered remainder, masked fail closed and ended with "\n". Safe to call any number of times. */
 export function flushStderrRedaction(): void {
   if (!rawWrite) return;
-  const rest = pending + bytes.end();
-  pending = "";
-  if (rest) rawWrite(`${redactReceivedSecrets(rest)}${rest.endsWith("\n") ? "" : "\n"}`);
+  const tail = bytes.end();
+  const ready = (tail ? buffer.write(tail) : "") + buffer.flush();
+  if (ready) rawWrite(ready);
 }
 
-/** Adds `text` to the buffer and returns what is ready to emit (complete lines, or an over-long remainder). */
-function takeReady(text: string): string {
-  pending += text;
-  let cut = pending.lastIndexOf("\n") + 1;
-  // A newline ends a line safely unless a remembered value itself holds one.
-  const multiLine = redactable().some((value) => value.includes("\n"));
-  if (multiLine) cut = safeCut(pending, cut, true);
-  if (pending.length - cut > MAX_PENDING_STDERR_CHARS) {
-    cut = safeCut(pending, pending.length, true);
-    // A self-overlapping value can walk the cut back to 0 every time. The buffer text is then not
-    // emitted at all (its tail may be the start of a value): a fixed marker line goes out instead,
-    // and only the last (longest value - 1) characters, the part that could still begin a value,
-    // are kept. Nothing unredacted is emitted and the buffer stays bounded.
-    if (cut === 0) {
-      const keep = Math.max(...redactable().map((value) => value.length)) - 1;
-      pending = pending.slice(Math.max(0, pending.length - keep));
-      return STDERR_WITHHELD_MARKER;
-    }
-  }
-  const ready = pending.slice(0, cut);
-  pending = pending.slice(cut);
-  return ready;
-}
-
-/** Routes process.stderr writes and the shared logger's lines through redactReceivedSecrets. */
+/** Routes process.stderr writes through the buffer, and the shared logger's lines through redactReceivedSecrets. */
 export function installStderrRedaction(): void {
   if (installed) return;
   installed = true;
@@ -138,8 +179,8 @@ export function installStderrRedaction(): void {
           ? bytes.write(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength))
           : undefined;
     if (text === undefined) return write(chunk, ...rest);
-    const ready = takeReady(text);
-    if (ready) return write(redactReceivedSecrets(ready), callback);
+    const ready = buffer.write(text);
+    if (ready) return write(ready, callback);
     // Held for its line's end: the write is accepted, so its callback runs as if written.
     if (callback) process.nextTick(callback, null);
     return true;

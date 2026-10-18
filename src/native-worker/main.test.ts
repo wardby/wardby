@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { STDERR_WITHHELD_MARKER } from "./stderr-redaction.js";
+import { holdsValueFragment } from "../sandbox/secret-fragments.test-support.js";
 import type { WorkerInput } from "./protocol.js";
 import { WARM_DELIVERY_ALREADY_DELIVERED, WARM_WORKER_UNCLAIMED_EXIT, warmDeliveryCommand } from "./warm-delivery.js";
 
@@ -211,7 +211,7 @@ describe("native worker stderr redaction", () => {
       { cwd: REPO_ROOT, env: {}, encoding: "utf8", timeout: 30_000 },
     );
   // Assertions compare booleans, so a failure never prints the fake value either.
-  const leaks = (stderr: string) => stderr.includes(FAKE_SECRET);
+  const leaks = (stderr: string) => holdsValueFragment(stderr, [FAKE_SECRET]);
 
   it("redacts a secret value split across two stderr writes", () => {
     const result = redactingChild([
@@ -255,7 +255,7 @@ describe("native worker stderr redaction", () => {
       `process.stderr.write(${JSON.stringify(multiLine.slice(16))} + " b\\n");`,
     ]);
     expect(result.status).toBe(0);
-    expect(result.stderr.includes(multiLine)).toBe(false);
+    expect(holdsValueFragment(result.stderr, [multiLine])).toBe(false);
     expect(result.stderr).toBe("a [REDACTED] b\n");
   });
 
@@ -323,7 +323,7 @@ describe("native worker stderr redaction", () => {
     expect(stderr.endsWith("[REDACTED]\n")).toBe(true);
   }, 30_000);
 
-  it("withholds text it cannot split safely for a self-overlapping value, then still redacts the value", async () => {
+  it("masks a self-overlapping value repeated past the bound, then a value completed in the next write", async () => {
     const value = "abababab";
     const child = spawn(
       process.execPath,
@@ -344,22 +344,114 @@ describe("native worker stderr redaction", () => {
       { cwd: REPO_ROOT, env: {}, stdio: ["pipe", "ignore", "pipe"] },
     );
     let stderr = "";
-    const marked = new Promise<void>((done) =>
+    const emitted = new Promise<void>((done) =>
       child.stderr.on("data", (chunk: Buffer) => {
         stderr += chunk.toString();
-        if (stderr.includes(STDERR_WITHHELD_MARKER)) done();
+        done();
       }),
     );
     const exited = new Promise<number | null>((done) => child.on("exit", done));
-    await Promise.race([marked, exited]);
-    // Before the value is completed: only the marker is out, no prefix of the value, and the child still runs.
+    await Promise.race([emitted, exited]);
+    // Past the bound, the covered text goes out masked while the child still runs; the value's
+    // possible start at the end stays held.
     expect(child.exitCode).toBeNull();
-    expect(stderr === STDERR_WITHHELD_MARKER).toBe(true);
+    expect(holdsValueFragment(stderr, [value])).toBe(false);
     child.stdin.write("go");
     expect(await exited).toBe(0);
-    expect(stderr.includes(value)).toBe(false);
-    expect(stderr.includes("[REDACTED]")).toBe(true);
+    expect(holdsValueFragment(stderr, [value])).toBe(false);
+    expect(stderr.replaceAll("[REDACTED]", "") === "\n").toBe(true);
   }, 30_000);
+
+  it("masks a self-overlapping value repeated past the bound with a partial value at the very end, on exit", () => {
+    const value = "abcabcabc";
+    const result = redactingChild([
+      `rememberSecretValue(${JSON.stringify(value)});`,
+      'const { MAX_PENDING_STDERR_CHARS } = await import("./src/native-worker/stderr-redaction.ts");',
+      'process.stderr.write("abc".repeat(MAX_PENDING_STDERR_CHARS / 2) + " x abcabca");',
+      "process.exit(0);",
+    ]);
+    expect(result.status).toBe(0);
+    expect(holdsValueFragment(result.stderr, [value])).toBe(false);
+    expect(result.stderr.replaceAll("[REDACTED]", "") === " x \n").toBe(true);
+  });
+
+  it("masks a partial value held at exit (fail closed)", () => {
+    const result = redactingChild([
+      'process.stderr.write("first line\\n");',
+      'process.stderr.write("last " + head);',
+      "process.exit(0);",
+    ]);
+    expect(result.status).toBe(0);
+    expect(holdsValueFragment(result.stderr, [FAKE_SECRET])).toBe(false);
+    expect(result.stderr === "first line\nlast [REDACTED]\n").toBe(true);
+  });
+
+  for (const [signal, code] of [
+    ["SIGTERM", 143],
+    ["SIGINT", 130],
+  ] as const) {
+    it(`masks a partial value held when ${signal} arrives (fail closed)`, () => {
+      const result = redactingChild([
+        'process.stderr.write("last " + head);',
+        "setTimeout(() => {}, 20_000);",
+        `process.kill(process.pid, "${signal}");`,
+      ]);
+      expect(result.status).toBe(code);
+      expect(holdsValueFragment(result.stderr, [FAKE_SECRET])).toBe(false);
+      expect(result.stderr === "last [REDACTED]\n").toBe(true);
+    });
+  }
+
+  it("masks a value split between a string write and a Uint8Array write", () => {
+    const result = redactingChild([
+      'process.stderr.write("mixed " + head);',
+      'process.stderr.write(new Uint8Array(Buffer.from(tail + " end\\n")));',
+    ]);
+    expect(result.status).toBe(0);
+    expect(holdsValueFragment(result.stderr, [FAKE_SECRET])).toBe(false);
+    expect(result.stderr === "mixed [REDACTED] end\n").toBe(true);
+  });
+
+  it("masks a value split inside one of its multi-byte characters", () => {
+    const value = "fake-s\u00e9cret-value-0002";
+    const result = redactingChild([
+      `rememberSecretValue(${JSON.stringify(value)});`,
+      `const bytes = Buffer.from("mb " + ${JSON.stringify(value)} + " end\\n");`,
+      // Split between the two bytes of the accented character.
+      "const at = bytes.indexOf(0xc3) + 1;",
+      "process.stderr.write(new Uint8Array(bytes.subarray(0, at)));",
+      "process.stderr.write(new Uint8Array(bytes.subarray(at)));",
+    ]);
+    expect(result.status).toBe(0);
+    expect(holdsValueFragment(result.stderr, [value])).toBe(false);
+    expect(result.stderr === "mb [REDACTED] end\n").toBe(true);
+  });
+
+  it("masks a value holding a newline when a line cut falls inside it", () => {
+    const multiLine = "fake-multi-line\nsecret-value-0001";
+    const result = redactingChild([
+      `rememberSecretValue(${JSON.stringify(multiLine)});`,
+      `process.stderr.write("a " + ${JSON.stringify(multiLine)});`,
+      'process.stderr.write(" b\\n");',
+    ]);
+    expect(result.status).toBe(0);
+    expect(holdsValueFragment(result.stderr, [multiLine])).toBe(false);
+    expect(result.stderr.replaceAll("[REDACTED]", "") === "a  b\n").toBe(true);
+  });
+
+  it("masks a self-overlapping value across the bound cut while more of it arrives", () => {
+    const value = "s3cr3ts";
+    const result = redactingChild([
+      `rememberSecretValue(${JSON.stringify(value)});`,
+      'const { MAX_PENDING_STDERR_CHARS } = await import("./src/native-worker/stderr-redaction.ts");',
+      'process.stderr.write("y".repeat(MAX_PENDING_STDERR_CHARS - 3) + "s3cr3t");',
+      'process.stderr.write("s3cr3ts3cr");',
+      'process.stderr.write("3ts end\\n");',
+    ]);
+    expect(result.status).toBe(0);
+    expect(holdsValueFragment(result.stderr, [value])).toBe(false);
+    expect(result.stderr.replaceAll("[REDACTED]", "") === `${"y".repeat(64 * 1024 - 3)} end\n`).toBe(true);
+  });
 });
 
 describe("warm input delivery", () => {
