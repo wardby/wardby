@@ -75,6 +75,11 @@ export class RoutingExecutor implements Executor {
     return executor.recover(handle);
   }
 
+  /** Only coding runs wait in the coding queue, so only the coding executor is asked. */
+  async cleanupQueueTimeout(runId: string): Promise<void> {
+    await this.coding.cleanupQueueTimeout?.(runId);
+  }
+
   /** Each distinct executor once, in a fixed order: native, coding, sandbox. */
   private distinct(): Executor[] {
     return [this.native, this.coding, this.sandbox].filter(

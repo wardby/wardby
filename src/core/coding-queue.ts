@@ -5,7 +5,8 @@
  *
  *  1. fails queued runs that waited longer than CODING_QUEUE_TIMEOUT_SEC
  *     (coding_queue_timeout), with a conditional update so concurrent
- *     drains never double-fail a run;
+ *     drains never double-fail a run, then lets the executor clean up after
+ *     each (Executor.cleanupQueueTimeout);
  *  2. starts the oldest queued runs, at most as many as there are free
  *     slots, so order stays FIFO in practice. Starting is fire-and-forget,
  *     like dispatchRun: Executor.start resolves only when the run ends.
@@ -68,6 +69,12 @@ export async function drainCodingQueue(options: DrainCodingQueueOptions): Promis
       timedOut += 1;
       // Only this drain made the row failed (a concurrent drain matched zero rows); bounded, never throws.
       await fileSelfDefectForRun(options.selfDefects, runId);
+      // What a launch the cluster refused left behind (a continuation's in-progress check, its input).
+      try {
+        await executor.cleanupQueueTimeout?.(runId);
+      } catch (err) {
+        queueLog.warn({ err, runId }, "queue-timeout cleanup failed");
+      }
     }
   }
 

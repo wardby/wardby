@@ -40,7 +40,12 @@ import {
 } from "../../coding/protocol.js";
 import { CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "./docker-isolation.js";
 import { parseWorkerDiagnosticLine, type WorkerDiagnostic } from "./docker.js";
-import { KubernetesAlreadyExistsError, KubernetesConflictError, type KubernetesApi } from "./kubernetes-api.js";
+import {
+  KubernetesAlreadyExistsError,
+  KubernetesConflictError,
+  KubernetesQuotaExceededError,
+  type KubernetesApi,
+} from "./kubernetes-api.js";
 import {
   ENFORCEMENT_PROBE_DENY_REACHABLE,
   ENFORCEMENT_PROBE_PROVEN,
@@ -76,7 +81,14 @@ import {
 } from "./service-state.js";
 import type { CodingProvider } from "../../coding/provider.js";
 import { serviceUnreadyError } from "../../coding/services/wording.js";
-import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
+import {
+  JobCapacityError,
+  type JobHandle,
+  type JobResult,
+  type JobSpec,
+  type JobStatus,
+  type WorkspaceJobLauncher,
+} from "./types.js";
 import { replaceDirectoryFromStaging } from "./workspace-swap.js";
 import {
   collectExclusions,
@@ -252,11 +264,23 @@ const RESULT_PATH = `${STORAGE_ROOT}/output/result.json`;
 /** Stands in for the proxy ClusterIP when building a pod only to count its resources. */
 const QUOTA_PROBE_PROXY_IP = "10.0.0.1";
 
+/** A Kubernetes object name (RFC 1123 subdomain). */
+const DNS_1123_NAME = /^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/;
+
 const kubernetesLog = logger.child({ module: "kubernetes-jobs" });
 
-type Phase = "provisioning" | "active" | "succeeded" | "failed" | "stopped" | "lost" | "removed";
+type Phase = "provisioning" | "requeued" | "active" | "succeeded" | "failed" | "stopped" | "lost" | "removed";
 type ResultPhase = "succeeded" | "failed" | "stopped" | "lost";
-const PHASES = new Set<Phase>(["provisioning", "active", "succeeded", "failed", "stopped", "lost", "removed"]);
+const PHASES = new Set<Phase>([
+  "provisioning",
+  "requeued",
+  "active",
+  "succeeded",
+  "failed",
+  "stopped",
+  "lost",
+  "removed",
+]);
 const TERMINAL_PHASES = new Set<Phase>(["succeeded", "failed", "stopped", "lost", "removed"]);
 
 interface RunRecord {
@@ -341,6 +365,8 @@ function statusFor(record: RunRecord): JobStatus {
   switch (record.phase) {
     case "provisioning":
       return { state: "pending" };
+    case "requeued":
+      return { state: "pending", capacityRefused: true };
     case "active":
       return { state: "running" };
     case "succeeded":
@@ -660,7 +686,9 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     const handle: JobHandle = { backend: BACKEND, id: `${this.namespace}/${names.token}` };
     const specHash = stableSpecHash(spec);
     const existing = await this.readRecord(names);
-    if (existing) return this.existingLaunch(existing.record, specHash, handle);
+    if (existing && !this.isRequeued(existing, specHash)) {
+      return this.existingLaunch(existing.record, specHash, handle);
+    }
     const createdAt = this.now();
     const record: RunRecord = {
       schemaVersion: RECORD_SCHEMA_VERSION,
@@ -672,18 +700,48 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       phase: "provisioning",
       collectExclude: spec.collectExclude ?? collectExclusions([]),
     };
-    try {
-      // The record is the idempotency fence before any other cluster side effect.
-      await this.api.createConfigMap(this.namespace, this.recordConfigMap(names, record));
-    } catch (error) {
-      if (!(error instanceof KubernetesAlreadyExistsError)) throw error;
-      const raced = await this.readRecord(names);
-      if (!raced) throw error;
-      return this.existingLaunch(raced.record, specHash, handle);
+    if (existing) {
+      // Replaces the requeued record; a conflict means another replica got there first.
+      try {
+        await this.api.replaceConfigMap(
+          this.namespace,
+          names.record,
+          this.recordConfigMap(names, record, existing.resourceVersion),
+        );
+      } catch (error) {
+        if (!(error instanceof KubernetesConflictError)) throw error;
+        const raced = await this.readRecord(names);
+        if (!raced) throw error;
+        if (!this.isRequeued(raced, specHash)) return this.existingLaunch(raced.record, specHash, handle);
+        // Requeued again by the other replica (its attempt was refused too): start over from that record.
+        return this.launch(spec);
+      }
+    } else {
+      try {
+        // The record is the idempotency fence before any other cluster side effect. A quota refusing
+        // this create itself (a count/configmaps quota) is not a capacity refusal: it fails the run.
+        await this.api.createConfigMap(this.namespace, this.recordConfigMap(names, record));
+      } catch (error) {
+        if (!(error instanceof KubernetesAlreadyExistsError)) throw error;
+        const raced = await this.readRecord(names);
+        if (!raced) throw error;
+        if (!this.isRequeued(raced, specHash)) return this.existingLaunch(raced.record, specHash, handle);
+        // Another replica requeued it between our read and create: start over from the requeued record.
+        return this.launch(spec);
+      }
     }
     try {
       await this.provision(spec, names, record);
     } catch (error) {
+      if (error instanceof KubernetesQuotaExceededError) {
+        // Capacity, not failure: leave a record a later launch() provisions afresh.
+        await this.updateRecord(names, () => ({ phase: "requeued" })).catch(() => undefined);
+        await this.cleanupRun(names, 0);
+        this.hintQuotaUnconfigured(error.quotaName);
+        throw new JobCapacityError("kubernetes_quota_exceeded: the namespace ResourceQuota has no room for this run", {
+          cause: error,
+        });
+      }
       // Record the failure before deleting the pod, so a replica that observes "no pod" in between
       // can't record `lost` first and have this more specific outcome dropped.
       await this.updateRecord(names, () => ({
@@ -914,6 +972,23 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     }
   }
 
+  /** True when `found` is a requeued record for this spec, which launch() replaces with a fresh one. */
+  private isRequeued(found: { record: RunRecord }, specHash: string): boolean {
+    if (found.record.phase !== "requeued") return false;
+    if (found.record.specHash !== specHash) throw new Error("job_spec_conflict");
+    return true;
+  }
+
+  /** Tells the operator once that a quota refused a pod while no quota is configured for the pre-launch check. */
+  private hintQuotaUnconfigured(refusedQuota: string | undefined): void {
+    if (this.options.config.resourceQuota) return;
+    const name = refusedQuota !== undefined && DNS_1123_NAME.test(refusedQuota) ? refusedQuota : undefined;
+    this.warnOnce(
+      `kubernetes_resource_quota_unconfigured: a pod was refused by ${name ? `ResourceQuota ${name}` : "a ResourceQuota"}; ` +
+        `set KUBERNETES_RESOURCE_QUOTA=${name ?? "<name>"} and grant the launcher get on that ResourceQuota so runs wait before they start`,
+    );
+  }
+
   private existingLaunch(record: RunRecord, specHash: string, handle: JobHandle): JobHandle {
     if (record.specHash !== specHash) throw new Error("job_spec_conflict");
     // A still-`provisioning` record is not re-provisioned: another replica may legitimately be mid-launch.
@@ -1139,7 +1214,8 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
 
   /** Observes a non-terminal run against its pod and persists any transition; returns the stored record. */
   private async refresh(names: RunNames, record: RunRecord): Promise<RunRecord> {
-    if (isTerminal(record.phase)) return record;
+    // A requeued run has no pod by design; observing it would record it lost.
+    if (isTerminal(record.phase) || record.phase === "requeued") return record;
     const pod = await this.api.readPod(this.namespace, names.pod);
     const observed = observePod(pod, record, this.now(), this.readyTimeoutMs);
     if (!observed) return record;

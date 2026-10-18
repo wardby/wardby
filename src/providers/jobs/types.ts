@@ -49,7 +49,15 @@ export interface JobHandle {
 }
 
 export type JobStatus =
-  | { state: "pending" | "running" }
+  | {
+      state: "pending" | "running";
+      /**
+       * Only ever on `pending`: the backend refused this job's launch for capacity (JobCapacityError)
+       * and nothing of it is running, nor will it start on its own. A caller that finds its job so
+       * may return the run to its queue and later `launch` the same spec again.
+       */
+      capacityRefused?: true;
+    }
   | { state: "succeeded" }
   | { state: "failed"; reason?: string }
   | { state: "stopped" }
@@ -66,10 +74,27 @@ export interface JobResult {
 }
 
 /**
+ * The backend has no room for this job right now (Kubernetes: the namespace ResourceQuota). No
+ * workload of the job is left running; the backend may keep a record of the refusal (Kubernetes
+ * does: its run record, which `status` then reports as `pending` with `capacityRefused`). The
+ * caller may launch the same spec again later.
+ */
+export class JobCapacityError extends Error {
+  readonly code = "coding_capacity_exceeded";
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "JobCapacityError";
+  }
+}
+
+/**
  * Lifecycle invariants implemented by every launcher:
  *
  * - `launch` is idempotent by runId for an identical spec and rejects a
  *   different spec for the same runId.
+ * - `launch` may reject with JobCapacityError when the backend has no room for
+ *   the job; nothing of it is then left running, and a later `launch` of the
+ *   same spec provisions it afresh.
  * - pending may become running or terminal; running may become terminal;
  *   terminal states never change.
  * - `collect` is repeatable for a terminal job until `remove` succeeds.

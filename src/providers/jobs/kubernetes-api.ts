@@ -30,6 +30,17 @@ export class KubernetesForbiddenError extends Error {
   }
 }
 
+/** A create the namespace ResourceQuota refused (HTTP 403 "exceeded quota"). */
+export class KubernetesQuotaExceededError extends Error {
+  /** The refusing quota's name as the API server worded it; unvalidated, and nothing else of the refusal is kept. */
+  readonly quotaName?: string;
+  constructor(message?: string, options?: ErrorOptions & { quotaName?: string }) {
+    super(message, options);
+    this.name = "KubernetesQuotaExceededError";
+    this.quotaName = options?.quotaName;
+  }
+}
+
 /** Stale resourceVersion on replace. */
 export class KubernetesConflictError extends Error {
   constructor(message?: string) {
