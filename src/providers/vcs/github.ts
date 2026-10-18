@@ -330,6 +330,8 @@ export function isSafeGitHubInstallationToken(value: unknown): value is string {
  * executor validates with the shared one.
  */
 export const PR_ISSUE_KEY = /^[A-Z][A-Z0-9_]{0,254}-[1-9]\d{0,9}$/;
+/** Same shape as GITHUB_ISSUE_KEY (issue-tracker/types.ts), duplicated likewise. Only the Related section shows one. */
+export const PR_GITHUB_ISSUE_KEY = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?\/[a-z0-9._-]{1,100}#[1-9]\d{0,9}$/;
 
 /** The issue key when it is well-formed; a malformed one is dropped everywhere it would be rendered. */
 function validIssueKey(input: PullRequestInput): string | undefined {
@@ -343,10 +345,19 @@ export function pullRequestTitle(input: PullRequestInput): string {
   return key ? `[${key}] ${base}` : base;
 }
 
-/** Validated issue parts; the tracker prefix is "" or "<Name> ". */
-function issueParts(issue: PullRequestInput["issue"]): { key: string; url?: string; tracker: string } | undefined {
+/**
+ * Validated issue parts; the tracker prefix is "" or "<Name> ". A GitHub issue
+ * key is accepted only with `orGitHub` (the Related section): the title and
+ * the body's issue line stay tracker-only.
+ */
+function issueParts(
+  issue: PullRequestInput["issue"],
+  orGitHub = false,
+): { key: string; url?: string; tracker: string } | undefined {
   const key = issue?.key;
-  if (typeof key !== "string" || !PR_ISSUE_KEY.test(key)) return undefined;
+  if (typeof key !== "string" || !(PR_ISSUE_KEY.test(key) || (orGitHub && PR_GITHUB_ISSUE_KEY.test(key)))) {
+    return undefined;
+  }
   const url = issue?.url;
   const safeUrl = typeof url === "string" && url.startsWith("https://") && !/[\s<>()]/.test(url) ? url : undefined;
   const name = issue?.trackerName;
@@ -462,7 +473,7 @@ const isDone = (entry: RelatedPullRequestEntry) => entry.state === "merged" || e
 export function renderRelatedSection(input: RelatedPullRequestsInput): string | undefined {
   const valid = input.entries.filter((entry) => relatedLine(entry, "-") !== undefined);
   if (!valid.some((entry) => !entry.self)) return undefined;
-  const issue = issueParts(input.issue);
+  const issue = issueParts(input.issue, true);
   const issueText = issue ? ` for ${issue.tracker}issue ${issue.url ? `[${issue.key}](${issue.url})` : issue.key}` : "";
   const open = valid.filter((entry) => !isDone(entry)).slice(0, MAX_RELATED_PULL_REQUESTS);
   const done = valid.filter(isDone).slice(0, MAX_RELATED_PULL_REQUESTS - open.length);

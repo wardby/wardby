@@ -470,7 +470,8 @@ What happens:
   the same way; see
   [Follow-ups on an issue](code-review-agents.md#follow-ups-on-an-issue).
 - **Several repositories.** When the issue leads to pull requests in more
-  than one repository (in the same run, or in later runs for the same issue),
+  than one repository (in the same run, or in later runs for the same issue,
+  Jira or GitHub),
   each pull request's description gets a **Related pull requests** section
   naming the issue and every pull request recorded for it, merged and closed
   ones included as context; see
@@ -576,12 +577,16 @@ A run is attributed when:
 - its parent run is attributed (sub-agents and coding runs inherit, and cannot
   change it).
 
-Runs on a pull request opened from a GitHub issue mention are attributed too:
-to a work item with provider `github` and key `owner/repo#N`, which
-`cost_report` lists like any other (`provider: "github"` narrows to them).
+GitHub issues are attributed the same way, to a work item with provider
+`github` and key `owner/repo#N`: a run started by a mention on the issue (and
+every sub-agent and coding run it starts), and runs on a pull request opened
+from it. `cost_report` lists them like any other work item
+(`provider: "github"` narrows to them).
 
 When a run is attributed to an issue, whatever the source, coding runs it
-starts name that issue in their pull request's title and body. The issue total
+starts name that issue in their pull request's title and body. A GitHub issue
+is named only in the body, as `From issue #N`, on a pull request in the
+issue's own repository. The issue total
 in a Jira comment's spend line covers every run attributed to that issue,
 whichever agent ran it.
 

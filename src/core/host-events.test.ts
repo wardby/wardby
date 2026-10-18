@@ -975,13 +975,16 @@ describe("routeHostEvent linked-PR attribution", () => {
     }
   });
 
-  it("a mention on a plain issue is not looked up", async () => {
+  it("a mention on a GitHub issue is attributed to that issue's work item, never to a linked PR", async () => {
     vi.mocked(dispatchRun).mockClear();
     const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
     d.linkedIssue.mockResolvedValue(LINK);
-    await routeHostEvent({ ...mention, isPullRequest: false }, d);
+    await routeHostEvent({ ...mention, repository: "Acme/Widgets", isPullRequest: false }, d);
     expect(d.linkedIssue).not.toHaveBeenCalled();
-    expect(vi.mocked(dispatchRun).mock.calls[0][0].attribution).toBeUndefined();
+    expect(vi.mocked(dispatchRun).mock.calls[0][0].attribution).toEqual({
+      source: "issue_event",
+      item: { provider: "github", key: "acme/widgets#7", scopeKey: "acme/widgets", snapshot: null },
+    });
   });
 });
 

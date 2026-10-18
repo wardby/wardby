@@ -14,7 +14,12 @@ import type {
   PullRequestOrigin,
   ReviewHostRegistry,
 } from "../providers/review-host/types.js";
-import { linkedPullRequestAttribution, openingRunAttribution, RESPONSE_PATH_SNAPSHOT_BUDGET } from "./attribution.js";
+import {
+  linkedPullRequestAttribution,
+  openingRunAttribution,
+  resolveWorkItem,
+  RESPONSE_PATH_SNAPSHOT_BUDGET,
+} from "./attribution.js";
 import { headStoppedAtBudget, pushingRunInFlight } from "./budget-stopped-head.js";
 import { checkContinuation, dispatchRun } from "./dispatch.js";
 import { mentionStatusRow, postMentionStatus } from "./host-status.js";
@@ -1720,7 +1725,17 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
               { codeProvider: host.provider, repository: event.repository, number: event.number },
               RESPONSE_PATH_SNAPSHOT_BUDGET,
             )
-          : undefined,
+          : // A mention on an issue is that issue's own run tree, like a Jira issue event's.
+            {
+              source: "issue_event",
+              item: await resolveWorkItem(
+                deps.db,
+                deps.issueTrackers,
+                "github",
+                githubIssueKey(event.repository, event.number),
+                RESPONSE_PATH_SNAPSHOT_BUDGET,
+              ),
+            },
         // Where to report, written with the run: even if this instance dies
         // before the follow-up below, the run's outcome still gets a comment.
         afterPersist: async (tx, run) => {

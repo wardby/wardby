@@ -82,6 +82,7 @@ describe.skipIf(!process.env.DATABASE_URL)("attribution (database)", () => {
     for (const runId of [...runIds].reverse()) await db.run.deleteMany({ where: { id: runId } });
     await db.run.deleteMany({ where: { agentId: { startsWith: PREFIX } } });
     await db.workItem.deleteMany({ where: { provider: "jira", key: { startsWith: `${project}-` } } });
+    await db.workItem.deleteMany({ where: { provider: "github", key: { startsWith: `${PREFIX}${suffix}/` } } });
     await db.codingAgentProfile.deleteMany({ where: { agentId: { startsWith: PREFIX } } });
     await db.agent.deleteMany({ where: { id: { startsWith: PREFIX } } });
     await db.principal.deleteMany({ where: { id: owner } });
@@ -211,6 +212,29 @@ describe.skipIf(!process.env.DATABASE_URL)("attribution (database)", () => {
     ).toMatchObject({ source: "inherited", workItem: { key } });
     expect(await db.codingRun.findUniqueOrThrow({ where: { runId: next } })).toMatchObject({
       issueProvider: "jira",
+      issueKey: key,
+    });
+  });
+
+  it("a GitHub issue's run tree is attributed to its github work item, key only, and its coding runs carry the issue", async () => {
+    const lead = await nativeAgent("g1");
+    const coder = await codingAgent("g2");
+    const key = `${PREFIX}${suffix}/widgets#5`;
+    const root = await dispatch(lead, {
+      attribution: {
+        source: "issue_event",
+        item: { provider: "github", key, scopeKey: `${PREFIX}${suffix}/widgets`, snapshot: null },
+      },
+    });
+    const child = await dispatch(coder, { parentRunId: root });
+    expect(
+      await db.runAttribution.findUniqueOrThrow({ where: { runId: child }, include: { workItem: true } }),
+    ).toMatchObject({
+      source: "inherited",
+      workItem: { provider: "github", key, scopeKey: `${PREFIX}${suffix}/widgets` },
+    });
+    expect(await db.codingRun.findUniqueOrThrow({ where: { runId: child } })).toMatchObject({
+      issueProvider: "github",
       issueKey: key,
     });
   });

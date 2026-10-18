@@ -1,8 +1,8 @@
 /**
  * The pull requests that came from the same request as a run: every pull
  * request opened by a coding run in the same top-level run tree (a lead that
- * fanned out to several repositories), plus any recorded for the same tracker
- * issue (IssuePullRequest). Control-plane rows only.
+ * fanned out to several repositories), plus any recorded for the same Jira or
+ * GitHub issue (IssuePullRequest). Control-plane rows only.
  * Ordered by the delegating agent's declared merge order when any entry has
  * one (CodingRun.mergeOrder; nulls last), then by when each pull request's
  * coding run was dispatched: the lead's delegation order (for a lead with
@@ -25,8 +25,7 @@
 import { Prisma, type PrismaClient, type Run, type RunStatus } from "#prisma";
 import { CODING_CODE_PROVIDER, normalizeGitHubRepository } from "../coding/protocol.js";
 import {
-  ISSUE_KEY,
-  ISSUE_TRACKER_NAMES,
+  issueReference,
   type IssueTrackerProvider,
   type IssueTrackerRegistry,
 } from "../providers/issue-tracker/types.js";
@@ -68,7 +67,7 @@ export interface RelatedPullRequest {
 
 export interface RelatedPullRequestGroup {
   pullRequests: RelatedPullRequest[];
-  /** The first well-formed issue seen on the group's coding runs. */
+  /** The first well-formed issue (a Jira or GitHub issue) seen on the group's coding runs. */
   issue?: { provider: string; key: string };
   /**
    * The top-level run of every run tree the walk visited (the original
@@ -227,7 +226,8 @@ export async function collectRelatedPullRequests(
   let issue: RelatedPullRequestGroup["issue"];
   const issues = new Map<string, { provider: string; key: string }>();
   for (const r of rows) {
-    if (r.issueProvider && r.issueKey && ISSUE_KEY.test(r.issueKey)) {
+    // A Jira issue and a GitHub issue join the same way: by provider and key, each key re-validated.
+    if (r.issueProvider && r.issueKey && issueReference(r.issueProvider, r.issueKey)) {
       const found = { provider: r.issueProvider, key: r.issueKey };
       issue ??= found;
       issues.set(`${found.provider}\0${found.key}`, found);
@@ -345,15 +345,8 @@ function issueFor(
   trackers: IssueTrackerRegistry | undefined,
 ): { key: string; url?: string; trackerName?: string } | undefined {
   if (!group.issue) return undefined;
-  const provider = group.issue.provider as IssueTrackerProvider;
-  let url: string | undefined;
-  try {
-    url = trackers?.[provider]?.issueUrl(group.issue.key);
-  } catch {
-    url = undefined;
-  }
-  const trackerName = Object.hasOwn(ISSUE_TRACKER_NAMES, provider) ? ISSUE_TRACKER_NAMES[provider] : undefined;
-  return { key: group.issue.key, ...(url ? { url } : {}), ...(trackerName ? { trackerName } : {}) };
+  const tracker = trackers?.[group.issue.provider as IssueTrackerProvider];
+  return issueReference(group.issue.provider, group.issue.key, tracker ? (key) => tracker.issueUrl(key) : undefined);
 }
 
 /**

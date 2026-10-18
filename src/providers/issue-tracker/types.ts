@@ -241,6 +241,40 @@ export interface IssueEvent {
 
 /** Shared by the ingress and the tools: a Jira issue key, e.g. PROJ-123. */
 export const ISSUE_KEY = /^[A-Z][A-Z0-9_]{0,254}-[1-9]\d{0,9}$/;
+/** A GitHub issue's recorded key (githubIssueKey): "<owner>/<repo>#<number>", the repository normalised to lowercase. */
+export const GITHUB_ISSUE_KEY = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?\/[a-z0-9._-]{1,100}#[1-9]\d{0,9}$/;
+/** The product name of each system an issue can be recorded from (CodingRun / IssuePullRequest issueProvider). */
+export const ISSUE_SOURCE_NAMES: Readonly<Record<string, string>> = { ...ISSUE_TRACKER_NAMES, github: "GitHub" };
+
+/**
+ * A recorded issue (CodingRun / IssuePullRequest issueProvider + issueKey) as
+ * people see it: the key re-validated for its provider, the system's name and
+ * the issue's page. A GitHub issue's page comes from its key; a tracker
+ * issue's from `trackerUrl` (the tracker's issueUrl), dropped when it throws
+ * or is not https. Undefined for an unknown provider or a malformed key.
+ */
+export function issueReference(
+  provider: string,
+  key: string,
+  trackerUrl?: (key: string) => string | undefined,
+): { key: string; url?: string; trackerName: string } | undefined {
+  let url: string | undefined;
+  if (provider === "github") {
+    if (!GITHUB_ISSUE_KEY.test(key)) return undefined;
+    const hash = key.lastIndexOf("#");
+    url = `https://github.com/${key.slice(0, hash)}/issues/${key.slice(hash + 1)}`;
+  } else if (provider === "jira") {
+    if (!ISSUE_KEY.test(key)) return undefined;
+    try {
+      url = trackerUrl?.(key);
+    } catch {
+      url = undefined;
+    }
+  } else {
+    return undefined;
+  }
+  return { key, ...(url?.startsWith("https://") ? { url } : {}), trackerName: ISSUE_SOURCE_NAMES[provider] };
+}
 /** A Jira project key. */
 export const PROJECT_KEY = /^[A-Z][A-Z0-9_]{0,254}$/;
 /** An issue key's project: a Jira key's project key ("PROJ-123" → "PROJ"); a GitHub issue key's repository ("owner/repo#5" → "owner/repo"). */

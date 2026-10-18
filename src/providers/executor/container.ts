@@ -97,7 +97,7 @@ import type {
   VcsProvider,
 } from "../vcs/types.js";
 import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
-import { ISSUE_KEY, ISSUE_TRACKER_NAMES, type IssueTrackerProvider } from "../issue-tracker/types.js";
+import { ISSUE_KEY, issueReference } from "../issue-tracker/types.js";
 import { HEARTBEAT_TIMEOUT_MS } from "../../core/timing.js";
 import { collectRelatedPullRequests } from "../../core/related-pull-requests.js";
 import { isIssueMentionTask } from "../../core/host-status.js";
@@ -1404,28 +1404,28 @@ export class ContainerExecutor implements Executor {
     if (!decision.ok) throw new RepoAccessError(`repo_access_${decision.reason}`);
   }
 
-  /** The originating issue for the PR title/body: control-plane data from the CodingRun row, key re-validated. */
+  /**
+   * The CodingRun's recorded issue as the Related section shows it (a Jira or
+   * GitHub issue): control-plane data from the CodingRun row, key re-validated.
+   */
+  private recordedIssue(
+    run: Pick<ContainerRunSnapshot, "issueProvider" | "issueKey">,
+  ): { key: string; url?: string; trackerName?: string } | undefined {
+    const { issueProvider, issueKey } = run;
+    if (!issueProvider || !issueKey) return undefined;
+    return issueReference(issueProvider, issueKey, (key) => this.options.issueUrl?.(issueProvider, key));
+  }
+
+  /**
+   * The originating tracker issue for the PR title/body. A GitHub issue is not
+   * one: its line comes from issueSourceFor (`From issue #N`).
+   */
   private issueFor(run: Pick<ContainerRunSnapshot, "issueProvider" | "issueKey">): {
     issue?: { key: string; url?: string; trackerName?: string };
   } {
-    const { issueProvider, issueKey } = run;
-    if (!issueProvider || !issueKey || !ISSUE_KEY.test(issueKey)) return {};
-    let url: string | undefined;
-    try {
-      url = this.options.issueUrl?.(issueProvider, issueKey);
-    } catch {
-      url = undefined;
-    }
-    const trackerName = Object.hasOwn(ISSUE_TRACKER_NAMES, issueProvider)
-      ? ISSUE_TRACKER_NAMES[issueProvider as IssueTrackerProvider]
-      : undefined;
-    return {
-      issue: {
-        key: issueKey,
-        ...(url?.startsWith("https://") ? { url } : {}),
-        ...(trackerName ? { trackerName } : {}),
-      },
-    };
+    if (run.issueProvider === "github") return {};
+    const issue = this.recordedIssue(run);
+    return issue ? { issue } : {};
   }
 
   /**
@@ -1464,7 +1464,7 @@ export class ContainerExecutor implements Executor {
     try {
       const earlier = await this.options.store.relatedPullRequests(run.runId);
       if (earlier.length === 0) return {};
-      const { issue } = this.issueFor(run);
+      const issue = this.recordedIssue(run);
       return {
         related: {
           entries: [

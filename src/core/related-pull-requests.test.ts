@@ -109,6 +109,22 @@ describe("collectRelatedPullRequests", () => {
     ]);
   });
 
+  it("joins pull requests recorded for the same GitHub issue, exactly as for a Jira issue", async () => {
+    const github = { issueProvider: "github", issueKey: "acme/app#7" };
+    const { db: fake } = db(
+      [[row("c4", opened("acme/app", 4), 40, github)]],
+      [{ repository: "acme/app", number: 2, createdAt: at(10), openedByRunId: "earlier", state: "open" }],
+    );
+    const group = await collectRelatedPullRequests(fake, "parent");
+    expect(group.issue).toEqual({ provider: "github", key: "acme/app#7" });
+    expect(group.pullRequests.map((p) => `${p.repository}#${p.number}`)).toEqual(["acme/app#2", "acme/app#4"]);
+    expect(fake.issuePullRequest.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { codeProvider: "github", OR: [{ issueProvider: "github", issueKey: "acme/app#7" }] },
+      }),
+    );
+  });
+
   it("ignores malformed results and malformed issue keys, and skips the issue query without a key", async () => {
     const { db: fake } = db([
       [
@@ -116,6 +132,7 @@ describe("collectRelatedPullRequests", () => {
           issueKey: "bad",
         }),
         row("c2", opened("not a repo", 2), 2, { issueKey: null }),
+        row("c3", { outcome: "no_changes" }, 3, { issueProvider: "github", issueKey: "Acme/App#7" }),
       ],
     ]);
     const group = await collectRelatedPullRequests(fake, "parent");
@@ -237,6 +254,21 @@ describe("updateRelatedPullRequests", () => {
     expect(input.block).toContain("2. **This pull request** — open");
     expect(input.block).toContain("- [acme/order-service#2](https://github.com/acme/order-service/pull/2) — merged");
     expect(input.block).toContain("[PROJ-13](https://example.atlassian.net/browse/PROJ-13)");
+  });
+
+  it("names a GitHub issue the request was recorded for, linked to its page", async () => {
+    const github = { issueProvider: "github", issueKey: "acme/app#7" };
+    const h = host({
+      "acme/order-service#2": { state: "open", markerRunId: "c1" },
+      "acme/bff#3": { state: "open", markerRunId: "c2" },
+      "acme/app#4": { state: "open", markerRunId: "c3" },
+    });
+    const githubRows = rows.map((r) => ({ ...r, ...github }));
+    await updateRelatedPullRequests(finalizerDb([githubRows], recorded), { id: "lead" }, { github: h }, trackers);
+    expect(h.replaceRelatedSection).toHaveBeenCalledTimes(3);
+    expect(h.replaceRelatedSection.mock.calls[0][2].block).toContain(
+      "for the same request for GitHub issue [acme/app#7](https://github.com/acme/app/issues/7).",
+    );
   });
 
   it("never edits a PR whose marker run this deployment did not record for that repository", async () => {

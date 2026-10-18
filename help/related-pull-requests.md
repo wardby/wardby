@@ -11,16 +11,19 @@ appliesTo: ">=0.4.2"
 
 When one request produces pull requests in several repositories — a lead
 agent that delegates to one coding agent per repository, or several runs for
-the same Jira issue — Wardby adds a **Related pull requests** section to each
+the same Jira or GitHub issue — Wardby adds a **Related pull requests** section to each
 of those pull requests' descriptions. It lists the others with links and
 their state, names the originating issue when there is one, and gives a
 merge order: the one the delegating agent set, or else a suggested one.
 
-Without a tracked Jira issue, the list covers the pull requests opened by
-runs in the same delegation tree (the same lead run and everything it
-started). With a tracked issue, the list covers every pull request Wardby
-has recorded for that issue across every run, merged and closed ones
-included, plus that run tree's own siblings.
+Without a tracked issue, the list covers the pull requests opened by runs in
+the same delegation tree (the same lead run and everything it started). With
+a tracked issue (a Jira issue, or a GitHub issue whose `@<app-slug>` mention
+started the request), the list covers every pull request Wardby has recorded
+for that issue across every run, merged and closed ones included, plus that
+run tree's own siblings. The section names the issue the same way for both,
+for example "for Jira issue PROJ-123" or "for GitHub issue owner/repo#7",
+linked to the issue.
 
 - **Written by Wardby, not the model.** The list comes from Wardby's own run
   records, never from the agent's text. Edits you make inside the section
@@ -65,7 +68,7 @@ included, plus that run tree's own siblings.
   name and number, so a request that spans repositories of different
   visibility can show a private repository's name in a public repository's
   pull request. If you mix public and private repositories, keep such work in
-  separate requests: separate Jira issues, or separate lead agents.
+  separate requests: separate issues, or separate lead agents.
 
 Reviewers see the section in the pull request description, so a reviewer
 agent can tell that a field, route, or schema a change relies on is added by
