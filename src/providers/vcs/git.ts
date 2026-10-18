@@ -50,6 +50,8 @@ const SAFE_COMMIT_SHA = /^[0-9a-f]{40}$/;
 const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 /** Where a continuation's target branch is fetched to (never under refs/remotes, so baseCommit's ref is untouched). */
 const MERGE_TARGET_REF = "refs/wardby/merge-target";
+/** Where the head branch is re-fetched while deepening history (see fetchMergeTarget). */
+const MERGE_HEAD_REF = "refs/wardby/merge-head";
 /**
  * The trusted automatic merge of the target branch, recorded at prepare time:
  * a commit whose tree is the merge result (markers in conflicted files), whose
@@ -811,25 +813,27 @@ export class GitVcsProvider implements VcsProvider {
     ref: string,
     auth: { authToken?: string },
   ): Promise<boolean> {
-    const fetch = (depth: readonly string[]) =>
+    const fetch = (depth: readonly string[], refspec: string) =>
       this.gitForPaths(
         gitMetadataPath,
         workspacePath,
-        [
-          ...this.remote.gitConfig,
-          "fetch",
-          "--no-tags",
-          "--no-write-fetch-head",
-          ...depth,
-          "origin",
-          `+refs/heads/${ref}:${MERGE_TARGET_REF}`,
-        ],
+        [...this.remote.gitConfig, "fetch", "--no-tags", "--no-write-fetch-head", ...depth, "origin", refspec],
         auth,
       );
+    const target = `+refs/heads/${ref}:${MERGE_TARGET_REF}`;
+    // The head is deepened through its own ref under refs/wardby, so the clone's
+    // refs/remotes/origin/<head> (baseCommit) never moves.
+    const head = `+refs/heads/${cloneBranch}:${MERGE_HEAD_REF}`;
     try {
-      await fetch(["--depth", "1"]);
+      await fetch(["--depth", "1"], target);
       for (const step of [0, ...MERGE_BASE_DEEPEN_STEPS]) {
-        if (step > 0) await fetch([`--deepen=${step}`]);
+        if (step > 0) {
+          // One fetch per side: newer git deepens only the refs a fetch names
+          // (older git deepened every shallow boundary), and a fetch naming
+          // both deepens only one of them.
+          await fetch([`--deepen=${step}`], head);
+          await fetch([`--deepen=${step}`], target);
+        }
         const base = await this.gitForPaths(
           gitMetadataPath,
           workspacePath,
