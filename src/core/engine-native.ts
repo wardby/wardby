@@ -268,7 +268,9 @@ export class NativeEngine implements Engine {
     toolCalls: TurnResult["toolCalls"],
   ): Promise<string[]> {
     const runCall = (index: number): Promise<string> =>
-      step(`turn:${turn}:tool:${index}`, () => ctx.runSandboxTool(toolCalls[index].name, toolCalls[index].argsJson));
+      step(`turn:${turn}:tool:${index}`, () =>
+        ctx.runSandboxTool(toolCalls[index].name, toolCalls[index].argsJson, toolCalls[index].id),
+      );
     const concurrent = ctx.runsConcurrently;
     const results: string[] = new Array<string>(toolCalls.length);
 

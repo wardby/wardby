@@ -634,7 +634,7 @@ describe("NativeEngine over the real OpenAI SDK", () => {
     const result = await new NativeEngine().run(ctx);
 
     expect(result.status).toBe("succeeded");
-    expect(ctx.runSandboxTool).toHaveBeenCalledWith("lookup", '{"q":"x"}');
+    expect(ctx.runSandboxTool).toHaveBeenCalledWith("lookup", '{"q":"x"}', "call_1");
     expect(server.requests).toHaveLength(2);
     expect(server.requests[1].body.input).toEqual(
       expect.arrayContaining([

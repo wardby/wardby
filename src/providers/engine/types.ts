@@ -95,8 +95,8 @@ export interface EngineRunContext {
   agent: EngineAgent;
   tools: LoadedTool[];
   providers: Pick<ProviderRegistry, "llm">;
-  /** Host bridge: validates params (Zod-in-sandbox) then runs the tool body in the WASM sandbox. Never throws — a tool/validation failure is a JSON error result string, fed back to the model as the tool's result. */
-  runSandboxTool(name: string, argsJson: string): Promise<string>;
+  /** Host bridge: validates params (Zod-in-sandbox) then runs the tool body in the WASM sandbox. Never throws — a tool/validation failure is a JSON error result string, fed back to the model as the tool's result. `callId` is the model's id for this tool call; the same on a replay of the turn. */
+  runSandboxTool(name: string, argsJson: string, callId?: string): Promise<string>;
   /**
    * Consecutive tool calls of one model turn for which this returns true run
    * at the same time as each other (a lead's delegate_to_* calls, when the
