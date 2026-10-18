@@ -188,6 +188,87 @@ describe("native worker stderr redaction", () => {
     expect(result.stderr).toContain("bytes [REDACTED]");
     expect(result.stderr).not.toContain(FAKE_SECRET);
   });
+
+  /** Runs `lines` as a module in a child process with the redaction installed and FAKE_SECRET remembered. */
+  const redactingChild = (lines: string[]) =>
+    spawnSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "--input-type=module",
+        "-e",
+        [
+          'import { installStderrRedaction, rememberSecretValue } from "./src/native-worker/stderr-redaction.ts";',
+          "installStderrRedaction();",
+          `rememberSecretValue(${JSON.stringify(FAKE_SECRET)});`,
+          `const head = ${JSON.stringify(FAKE_SECRET.slice(0, 12))};`,
+          `const tail = ${JSON.stringify(FAKE_SECRET.slice(12))};`,
+          ...lines,
+        ].join("\n"),
+      ],
+      { cwd: REPO_ROOT, env: {}, encoding: "utf8", timeout: 30_000 },
+    );
+  // Assertions compare booleans, so a failure never prints the fake value either.
+  const leaks = (stderr: string) => stderr.includes(FAKE_SECRET);
+
+  it("redacts a secret value split across two stderr writes", () => {
+    const result = redactingChild([
+      'process.stderr.write("split " + head);',
+      'process.stderr.write(tail + " end\\n");',
+    ]);
+    expect(result.status).toBe(0);
+    expect(leaks(result.stderr)).toBe(false);
+    expect(result.stderr).toContain("split [REDACTED] end\n");
+  });
+
+  it("redacts a split secret value in a final unterminated line, flushed on exit", () => {
+    const result = redactingChild([
+      'process.stderr.write("first line\\n");',
+      'process.stderr.write("last " + head);',
+      "process.stderr.write(tail);",
+      "process.exit(0);",
+    ]);
+    expect(result.status).toBe(0);
+    expect(leaks(result.stderr)).toBe(false);
+    expect(result.stderr).toBe("first line\nlast [REDACTED]\n");
+  });
+
+  it("emits a pending line past the bound without waiting for its newline, redacted", async () => {
+    const child = spawn(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "--input-type=module",
+        "-e",
+        [
+          'import { installStderrRedaction, rememberSecretValue, MAX_PENDING_STDERR_CHARS } from "./src/native-worker/stderr-redaction.ts";',
+          "installStderrRedaction();",
+          `rememberSecretValue(${JSON.stringify(FAKE_SECRET)});`,
+          `process.stderr.write("x".repeat(MAX_PENDING_STDERR_CHARS) + ${JSON.stringify(FAKE_SECRET)});`,
+          // Stays alive (no newline written, no exit) until the parent closes stdin.
+          'process.stdin.on("data", () => {}); process.stdin.on("end", () => process.exit(0));',
+        ].join("\n"),
+      ],
+      { cwd: REPO_ROOT, env: {}, stdio: ["pipe", "ignore", "pipe"] },
+    );
+    let stderr = "";
+    const emitted = new Promise<void>((done) =>
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+        if (stderr.includes("[REDACTED]")) done();
+      }),
+    );
+    const exited = new Promise<number | null>((done) => child.on("exit", done));
+    await Promise.race([emitted, exited]);
+    // Emitted while the child still runs: the bound, not the exit flush, let it out.
+    expect(child.exitCode).toBeNull();
+    child.stdin.end();
+    expect(await exited).toBe(0);
+    expect(leaks(stderr)).toBe(false);
+    expect(stderr.startsWith("x".repeat(1024))).toBe(true);
+  }, 30_000);
 });
 
 describe("warm input delivery", () => {

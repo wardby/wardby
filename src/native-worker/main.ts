@@ -10,7 +10,7 @@ import { readFile, stat } from "node:fs/promises";
 import { parseMessage, WorkerInputSchema } from "./protocol.js";
 import { createHttpTransport } from "./http-transport.js";
 import { createStdioTransport } from "./stdio.js";
-import { installStderrRedaction, rememberSecretValue } from "./stderr-redaction.js";
+import { flushStderrRedaction, installStderrRedaction, rememberSecretValue } from "./stderr-redaction.js";
 import { WARM_WORKER_UNCLAIMED_EXIT } from "./warm-delivery.js";
 import { runNativeWorker } from "./worker.js";
 
@@ -76,6 +76,8 @@ async function main(): Promise<void> {
 }
 
 const fail = (err: unknown): never => {
+  // Anything still buffered for its line's end goes out first, so the failure line stands alone.
+  flushStderrRedaction();
   if (err instanceof UnclaimedError) {
     process.stderr.write(`native sandbox worker: ${err.message}\n`);
     process.exit(WARM_WORKER_UNCLAIMED_EXIT);
