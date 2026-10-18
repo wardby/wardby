@@ -37,8 +37,7 @@ import {
 export const gatewayLog = logger.child({ module: "native-gateway" });
 
 /** `err` for the log with every exact secret value removed from its (cause-folded) message and stack. */
-function redactedError(err: unknown, values: readonly string[]): unknown {
-  if (values.length === 0 || !(err instanceof Error)) return err;
+function redactedError(err: Error, values: readonly string[]): Error {
   // pino's own serializer folds the cause chain into message and stack, so a cause is covered too.
   const serialized = pino.stdSerializers.err(err);
   const safe = new Error(redactExactSecretValues(serialized.message, values));
@@ -48,9 +47,10 @@ function redactedError(err: unknown, values: readonly string[]): unknown {
 }
 
 /**
- * Logs an unexpected error for the operator, redacted by exact value. Fail closed: with no values
- * to redact by (unavailable or unreadable), only the error's name and declared code are logged,
- * never its message or stack.
+ * Logs an unexpected error for the operator, redacted by exact value. Fail closed: a thrown value
+ * that is not an Error (a string, an object: its text cannot be redacted reliably), or no values to
+ * redact by (unavailable, unreadable or empty), logs only the error's name and declared code, never
+ * its message, stack or content.
  */
 export function logUnexpectedError(
   log: Pick<typeof logger, "error">,
@@ -59,7 +59,8 @@ export function logUnexpectedError(
   logMessage: string,
   fields: Record<string, unknown> = {},
 ): void {
-  if (values) log.error({ ...fields, err: redactedError(err, values) }, logMessage);
+  if (values && values.length > 0 && err instanceof Error)
+    log.error({ ...fields, err: redactedError(err, values) }, logMessage);
   else
     log.error(
       { ...fields, errName: err instanceof Error ? err.name : typeof err, causeCode: declaredCodeOf(err) },

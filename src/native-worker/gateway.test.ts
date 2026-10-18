@@ -1,10 +1,12 @@
 import { PassThrough } from "node:stream";
+import { inspect } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
 import { PRIVILEGED_BRIDGE_NAMES, type PrivilegedHost } from "../sandbox/host-functions.js";
 import {
   forWorker,
   gatewayLog,
+  logUnexpectedError,
   runSandboxedEngine,
   SandboxRunCancelledError,
   type NativeGateway,
@@ -435,5 +437,40 @@ describe("forWorker when secret values are unavailable", () => {
 
   it("logs no message or stack when reading the values fails", async () => {
     expect((await logWith(() => Promise.reject(new Error("no")))).includes(FAKE)).toBe(false);
+  });
+});
+
+describe("logUnexpectedError fails closed", () => {
+  const FAKE = "fake_thrown_secret_0005";
+  /** Everything `log.error` received, inspected (message and stack included), and whether FAKE is in it. */
+  const logged = (err: unknown, values: readonly string[] | undefined) => {
+    const lines: unknown[] = [];
+    logUnexpectedError({ error: (obj: unknown) => lines.push(obj) } as never, err, values, "msg");
+    const text = inspect(lines, { depth: 10 });
+    return { leaks: text.includes(FAKE), lines };
+  };
+
+  it("logs only the name and declared code for a thrown string, even with values to redact by", () => {
+    const { leaks, lines } = logged(`coding_profile_missing: saw ${FAKE}`, ["other-fake-value-0006"]);
+    expect(leaks).toBe(false);
+    expect(lines).toEqual([{ errName: "string", causeCode: "coding_profile_missing" }]);
+  });
+
+  it("logs only the name for a thrown object", () => {
+    const { leaks, lines } = logged({ detail: FAKE }, ["other-fake-value-0006"]);
+    expect(leaks).toBe(false);
+    expect(lines).toEqual([{ errName: "object", causeCode: undefined }]);
+  });
+
+  it("logs only the name and declared code when the values list is empty", () => {
+    const { leaks, lines } = logged(new TypeError(`saw ${FAKE}`), []);
+    expect(leaks).toBe(false);
+    expect(lines).toEqual([{ errName: "TypeError", causeCode: undefined }]);
+  });
+
+  it("logs an Error redacted by its values when they are known", () => {
+    const { leaks, lines } = logged(new Error(`saw ${FAKE} here`), [FAKE]);
+    expect(leaks).toBe(false);
+    expect((lines[0] as { err: Error }).err.message).toBe("saw [REDACTED] here");
   });
 });

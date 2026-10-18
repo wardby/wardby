@@ -11,10 +11,12 @@
 
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { logger } from "../core/logger.js";
+import { logUnexpectedError } from "./gateway.js";
 import { serveGatewayRequest, type GatewayServerDeps } from "./gateway-server.js";
 import { GatewayError, MAX_MESSAGE_BYTES, toGatewayError } from "./protocol.js";
 
-const httpLog = logger.child({ module: "native-gateway-http" });
+/** The HTTP listener's own log. Exported so tests can watch it. */
+export const httpLog = logger.child({ module: "native-gateway-http" });
 
 export const NATIVE_GATEWAY_PATH = "/native-gateway/v1/call";
 
@@ -101,7 +103,8 @@ export function createGatewayServer(deps: GatewayServerDeps): Server {
         res.end(`${JSON.stringify({ error })}\n`);
       }
     })().catch((err: unknown) => {
-      httpLog.error({ err }, "native gateway HTTP handler failed");
+      // No run's secret values are known here, so only the name and declared code are logged.
+      logUnexpectedError(httpLog, err, undefined, "native gateway HTTP handler failed");
       if (!res.headersSent) res.writeHead(500);
       res.end();
     });
