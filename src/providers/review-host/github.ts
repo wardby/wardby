@@ -11,6 +11,7 @@ import { findDescriptionComments } from "../vcs/pr-description.js";
 import { neutraliseWrapperTags } from "../../core/untrusted-content.js";
 import { MAX_CI_CHECKS, summarizeCi } from "./ci.js";
 import { partitionComments } from "./diff-lines.js";
+import { pagePatches, type PatchSource } from "./patch-pages.js";
 import { appMarkerRunId } from "./github-events.js";
 import {
   findingMarker,
@@ -40,7 +41,6 @@ import {
   type OwnCheckView,
   type PublishReviewInput,
   type PublishReviewResult,
-  type PullRequestFileView,
   type PullRequestHead,
   type PullRequestOrigin,
   type PullRequestView,
@@ -185,15 +185,13 @@ function assertRelativePath(path: string): void {
   }
 }
 
-function fileView(raw: Json): PullRequestFileView & { fullPatch: string | undefined; changes: number } {
+function fileView(raw: Json): PatchSource & { fullPatch: string | undefined } {
   return {
     filename: str(raw.filename),
     status: str(raw.status),
     additions: num(raw.additions),
     deletions: num(raw.deletions),
     previousFilename: typeof raw.previous_filename === "string" ? raw.previous_filename : undefined,
-    patch: "",
-    patchTruncated: false,
     fullPatch: typeof raw.patch === "string" ? raw.patch : undefined,
     changes: typeof raw.changes === "number" ? raw.changes : num(raw.additions) + num(raw.deletions),
   };
@@ -469,7 +467,7 @@ export class GitHubReviewHost implements CodeReviewHost {
   async readPullRequest(
     repository: string,
     prNumber: number,
-    opts: { sinceSha?: string; maxPatchChars: number; agentMarker: string },
+    opts: { sinceSha?: string; maxPatchChars: number; agentMarker: string; patchCursor?: string },
   ): Promise<PullRequestView> {
     const base = repoPath(repository);
     const view = await this.withToken(repository, READ, async (get, graphql) => {
@@ -507,18 +505,13 @@ export class GitHubReviewHost implements CodeReviewHost {
       }
       rawFiles ??= await prFiles();
 
-      let budget = opts.maxPatchChars;
-      const files = rawFiles.map((raw) => {
-        const { fullPatch, changes, ...view } = fileView(raw);
-        const patch = fullPatch ?? "";
-        const kept = patch.length <= budget ? patch : patch.slice(0, Math.max(0, budget));
-        budget -= kept.length;
-        return {
-          ...view,
-          patch: kept,
-          patchTruncated: kept.length < patch.length || (fullPatch === undefined && changes > 0),
-        };
-      });
+      const sources = rawFiles.map(fileView);
+      const fullPatches = new Map(sources.map((f) => [f.filename, f.fullPatch]));
+      const page = await pagePatches(
+        sources.map(({ fullPatch: _fullPatch, ...source }) => source),
+        { budget: opts.maxPatchChars, cursor: opts.patchCursor, headSha, comparedFrom },
+        async (file) => fullPatches.get(file.filename),
+      );
 
       const { id: appId } = await this.client.appIdentity();
       let lastReviewedSha: string | null = null;
@@ -567,7 +560,11 @@ export class GitHubReviewHost implements CodeReviewHost {
         lastReviewedSha,
         comparedFrom,
         baseMergedSince,
-        files,
+        files: page.files,
+        patchesComplete: page.patchesComplete,
+        truncatedFiles: page.truncatedFiles,
+        nextPatchCursor: page.nextPatchCursor,
+        remainingPatchFiles: page.remainingPatchFiles,
         openThreads,
         ...(descriptionProposal ? { descriptionProposal } : {}),
       };

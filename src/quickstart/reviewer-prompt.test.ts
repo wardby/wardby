@@ -52,6 +52,12 @@ describe("THOROUGH_REVIEWER_PROMPT", () => {
     }
   });
 
+  it("sends a change it could not read in full to COMMENT, never CHANGES_REQUESTED (the tool refuses that)", () => {
+    const verdict = THOROUGH_REVIEWER_PROMPT.slice(THOROUGH_REVIEWER_PROMPT.indexOf("VERDICT\n"));
+    expect(verdict).not.toMatch(/could not read enough of the change to judge it, is CHANGES_REQUESTED/);
+    expect(verdict).toMatch(/could not read[^.]*COMMENT[^.]*name the files you did not review/);
+  });
+
   it("is repository-agnostic and never blocks APPROVE on a local repository's missing CI", () => {
     expect(THOROUGH_REVIEWER_PROMPT).not.toMatch(/knock|chfields|pytest|Flask|React|@wardby/i);
     expect(THOROUGH_REVIEWER_PROMPT).toMatch(/"none"[^.]*local repository[^.]*never blocks APPROVE/);

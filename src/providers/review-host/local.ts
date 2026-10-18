@@ -22,6 +22,7 @@ import {
 } from "../../coding/local-repo.js";
 import { SHA, isSafeRefName, isSafeRepoPath, localGit as git } from "../../coding/local-git.js";
 import { skippedInListing } from "./github.js";
+import { pagePatches } from "./patch-pages.js";
 import { verdictConclusion } from "./review-format.js";
 import {
   ReviewHostError,
@@ -37,7 +38,6 @@ import {
   type HostUser,
   type PublishReviewInput,
   type PublishReviewResult,
-  type PullRequestFileView,
   type PullRequestHead,
   type PullRequestView,
   type StartCheckInput,
@@ -235,44 +235,45 @@ export class LocalReviewHost implements CodeReviewHost {
     return files.slice(0, MAX_PR_FILES);
   }
 
-  /** Attaches patches, sharing one character budget across files and flagging truncation like GitHub. */
-  private async withPatches(dir: string, from: string, to: string, files: ChangedFile[], maxPatchChars: number) {
-    let budget = maxPatchChars;
-    const out: PullRequestFileView[] = [];
-    for (const file of files) {
-      const changes = file.additions + file.deletions;
-      if (budget <= 0) {
-        out.push({ ...file, patch: "", patchTruncated: changes > 0 });
-        continue;
-      }
-      let patch: string;
-      let complete = true;
-      try {
+  /** Pages patches like GitHub (patch-pages.ts); a diff is run only for files on the page. */
+  private async withPatches(
+    dir: string,
+    from: string,
+    to: string,
+    files: ChangedFile[],
+    opts: { maxPatchChars: number; patchCursor?: string; headSha: string; comparedFrom: string | null },
+  ) {
+    return pagePatches(
+      files.map((f) => ({ ...f, changes: f.additions + f.deletions })),
+      {
+        budget: opts.maxPatchChars,
+        cursor: opts.patchCursor,
+        headSha: opts.headSha,
+        comparedFrom: opts.comparedFrom,
+      },
+      async (file) => {
         const paths = file.previousFilename ? [file.previousFilename, file.filename] : [file.filename];
-        patch = hunks(
-          await git(dir, [
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-color",
-            "-M",
-            "--end-of-options",
-            from,
-            to,
-            "--",
-            ...paths,
-          ]),
-        );
-      } catch {
-        // Too large for the buffer (or unreadable): no patch, flagged.
-        patch = "";
-        complete = changes === 0;
-      }
-      const kept = patch.length <= budget ? patch : patch.slice(0, Math.max(0, budget));
-      budget -= kept.length;
-      out.push({ ...file, patch: kept, patchTruncated: kept.length < patch.length || !complete });
-    }
-    return out;
+        try {
+          return hunks(
+            await git(dir, [
+              "diff",
+              "--no-ext-diff",
+              "--no-textconv",
+              "--no-color",
+              "-M",
+              "--end-of-options",
+              from,
+              to,
+              "--",
+              ...paths,
+            ]),
+          );
+        } catch {
+          // Too large for the buffer (or unreadable): no patch (unavailable when it has changes).
+          return undefined;
+        }
+      },
+    );
   }
 
   async repositoryPermission(_repository: string, _user: HostUser): Promise<{ level: HostPermission; login: string }> {
@@ -282,7 +283,7 @@ export class LocalReviewHost implements CodeReviewHost {
   async readPullRequest(
     repository: string,
     prNumber: number,
-    opts: { sinceSha?: string; maxPatchChars: number; agentMarker: string },
+    opts: { sinceSha?: string; maxPatchChars: number; agentMarker: string; patchCursor?: string },
   ): Promise<PullRequestView> {
     const { repository: canonical, path: dir } = await this.repo(repository);
     const row = await this.pullRequest(canonical, repository, prNumber);
@@ -335,6 +336,13 @@ export class LocalReviewHost implements CodeReviewHost {
       // The commit list is a courtesy; the diff is the review.
     }
 
+    const page = await this.withPatches(dir, from, headSha, files, {
+      maxPatchChars: opts.maxPatchChars,
+      patchCursor: opts.patchCursor,
+      headSha,
+      comparedFrom,
+    });
+
     const last = await this.db.localReview.findFirst({
       where: { pullRequestId: row.id, agentId: opts.agentMarker },
       orderBy: { createdAt: "desc" },
@@ -360,7 +368,11 @@ export class LocalReviewHost implements CodeReviewHost {
       lastReviewedSha: last?.headSha ?? null,
       comparedFrom,
       baseMergedSince,
-      files: await this.withPatches(dir, from, headSha, files, opts.maxPatchChars),
+      files: page.files,
+      patchesComplete: page.patchesComplete,
+      truncatedFiles: page.truncatedFiles,
+      nextPatchCursor: page.nextPatchCursor,
+      remainingPatchFiles: page.remainingPatchFiles,
       openThreads: [],
       ci: { headSha, state: "none", checks: [], truncated: false, statusesUnavailable: false },
     };

@@ -15,6 +15,17 @@ export type ReviewVerdict = "APPROVE" | "CHANGES_REQUESTED" | "COMMENT";
 export type CheckConclusion = "success" | "failure" | "neutral";
 export type CommentSide = "LEFT" | "RIGHT";
 
+/**
+ * Where a file's patch is in a repo_pr_read result:
+ * - complete: the whole patch is in this result;
+ * - partial: one part, starting at patchOffset; the rest comes with nextPatchCursor;
+ * - later_page: not in this result; call again with nextPatchCursor;
+ * - earlier_page: delivered by an earlier call of the same cursor chain;
+ * - unavailable: the host has no patch for it (too large, binary): read it with repo_read_file;
+ * - empty: nothing to show (no line changes, a pure rename).
+ */
+export type PatchStatus = "complete" | "partial" | "later_page" | "earlier_page" | "unavailable" | "empty";
+
 export interface PullRequestFileView {
   filename: string;
   status: string;
@@ -22,7 +33,20 @@ export interface PullRequestFileView {
   deletions: number;
   previousFilename?: string;
   patch: string;
+  /** True for later_page, unavailable, and a partial part that the next page continues. */
   patchTruncated: boolean;
+  patchStatus: PatchStatus;
+  /** Where this part starts in the file's patch; only on partial. */
+  patchOffset?: number;
+  /** Only on partial: true when the next page continues this file, false when this part is its last. */
+  patchContinues?: boolean;
+}
+
+/** A patchCursor that is not one this deployment issued, or one for a head or compare that has moved on. */
+export class PatchCursorError extends Error {
+  constructor(readonly reason: "malformed" | "stale") {
+    super(reason === "stale" ? "patch_cursor_stale" : "patch_cursor_malformed");
+  }
 }
 
 /** One of this agent's own review threads that is still unresolved. */
@@ -88,6 +112,14 @@ export interface PullRequestView {
    */
   baseMergedSince: boolean;
   files: PullRequestFileView[];
+  /** No patch is left to page through and none is unavailable: with earlier pages, every patch was delivered. */
+  patchesComplete: boolean;
+  /** Files whose patch is not (fully) delivered yet: later_page, unavailable, or a partial part the next page continues; in review order. */
+  truncatedFiles: string[];
+  /** Pass as repo_pr_read's patchCursor for the next page; null when nothing is left to page. */
+  nextPatchCursor: string | null;
+  /** Estimate of files with patch content still to come after this page (a partial file counts once); a later_page file may turn out empty or unavailable once loaded. */
+  remainingPatchFiles: number;
   /** This agent's own unresolved review threads on the PR (the first 100 threads are searched). */
   openThreads: ReviewThreadView[];
   /** CI on headSha (check runs and commit statuses, minus wardby's own); absent on hosts that can't read CI. */
@@ -312,7 +344,7 @@ export interface CodeReviewHost {
   readPullRequest(
     repository: string,
     prNumber: number,
-    opts: { sinceSha?: string; maxPatchChars: number; agentMarker: string },
+    opts: { sinceSha?: string; maxPatchChars: number; agentMarker: string; patchCursor?: string },
   ): Promise<PullRequestView>;
   pullRequestHead(repository: string, prNumber: number): Promise<PullRequestHead>;
   /** CI on one commit, excluding wardby's own checks. Never throws. Hosts that can't say leave it out. */

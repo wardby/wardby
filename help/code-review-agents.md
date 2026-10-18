@@ -3,7 +3,7 @@ id: code-review-agents
 title: Run GitHub code-review agents
 summary: Link a read-only review agent to a repository for pull-request checks and trusted mention workflows.
 audience: operator
-tags: [github, code-review, skipped-review, budget-stopped-draft, continue-draft, follow-up, pull-requests, webhooks, ci, checks, waitForCi, markReadyWhenPassing, repo_issue_read, issues, mentions, code-spans, contributor, acceptance-criteria, jira]
+tags: [github, code-review, skipped-review, budget-stopped-draft, continue-draft, follow-up, pull-requests, webhooks, ci, checks, waitForCi, markReadyWhenPassing, repo_issue_read, issues, mentions, code-spans, contributor, acceptance-criteria, jira, large-pull-request, truncated, patchCursor, unread_files]
 appliesTo: >=0.2.1
 ---
 
@@ -58,9 +58,31 @@ opened](#reviewing-a-pull-request-a-delegated-run-opened) below), and, on a
 link set up for it, CI on the pushed head still running (see [Review after
 CI (`waitForCi`)](#review-after-ci-waitforci) below). Either can delay the
 check that reports the review's result; neither changes what the review
-itself reports once it runs. From Wardby 0.6.1, a push to a draft is also held
+itself reports once it runs. A large diff is read in pages (see [Large pull
+requests](#large-pull-requests)). From Wardby 0.6.1, a push to a draft is also held
 while the coding run that pushed it is still running, and, when a lead
 delegated that run (a follow-up request, say), until that lead finishes.
+
+## Large pull requests
+
+From Wardby 0.6.1, `repo_pr_read` pages a large diff: all files share one
+budget per call (`maxPatchChars`, default 60,000, at most 200,000), with
+source, test and config files first. Each file has a `patchStatus`
+(`complete`, `partial`, `later_page`, `earlier_page`, `unavailable` or
+`empty`). While a source, test or config file is listed in `truncatedFiles`,
+call `repo_pr_read` again with `patchCursor` set to `nextPatchCursor`; the pages
+after that hold only docs, help, lockfiles and generated files, which are
+optional for the verdict. A page that includes source, test or config files
+stops before the first doc, help, lockfile or generated file, so those come on
+later pages and a reviewer can skip them. Read every `unavailable` source, test or config file
+with `repo_read_file` at the head. A cursor goes stale when
+the branch moves (`patch_cursor_stale`): call again without it.
+`repo_publish_review` refuses `APPROVE` and `CHANGES_REQUESTED` with
+`unread_files` while a listed source, test or config file is neither fully
+delivered nor read at `headSha`; `COMMENT` is always allowed, so a reviewer
+that cannot read everything should publish `COMMENT` and name what it skipped.
+The shipped reviewer prompt does this; see the [full guide](../docs/code-review-agents.md#large-pull-requests).
+The refusal applies to `control-plane` agents, not yet to `sandbox` mode.
 
 ## Drafts stopped at their budget
 
@@ -228,9 +250,14 @@ a tool error instead of publishing anything:
 - `ci_pending` — CI is still running; comment instead. The re-review above
   then runs the review again once a CI check suite finishes.
 
-Requesting changes or commenting is never affected by this gate. When CI
+Requesting changes or commenting is never affected by the CI gate. When CI
 cannot be read at all, the gate is skipped and the review proceeds as it
 would without `waitForCi`.
+
+A separate guard applies per run: `repo_publish_review` refuses `APPROVE` and
+`CHANGES_REQUESTED` with `unread_files` while a source, test or config file of the head
+was listed by `repo_pr_read` but not fully read. Page with `patchCursor`, or
+read the file with `repo_read_file` at `headSha`; `COMMENT` is always allowed.
 
 Add this to a reviewer's system prompt:
 

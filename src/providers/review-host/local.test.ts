@@ -117,10 +117,57 @@ describe.skipIf(!process.env.DATABASE_URL)("LocalReviewHost (database)", () => {
 
   it("flags truncated patches once the shared budget runs out", async () => {
     const view = await host.readPullRequest(repository, prNumber, { maxPatchChars: 10, agentMarker: "agent-x" });
+    // Ten characters hold no whole line, so the first file alone on the page is cut at the budget.
     expect(view.files[0].patch).toHaveLength(10);
-    expect(view.files[0].patchTruncated).toBe(true);
+    expect(view.files[0]).toMatchObject({ patchTruncated: true, patchStatus: "partial", patchContinues: true });
     expect(view.files[1].patch).toBe("");
-    expect(view.files[1].patchTruncated).toBe(true);
+    expect(view.files[1]).toMatchObject({ patchTruncated: true, patchStatus: "later_page" });
+    expect(view.nextPatchCursor).not.toBeNull();
+  });
+
+  it("fills code before docs and pages a long doc patch with the cursor", async () => {
+    const pagedPath = join(root, "paged");
+    await mkdir(pagedPath, { recursive: true });
+    await run("git", ["init", "--initial-branch=main", pagedPath]);
+    await writeFile(join(pagedPath, "README.txt"), "base\n");
+    await git(pagedPath, "add", "-A");
+    await git(pagedPath, "commit", "-m", "base");
+    await git(pagedPath, "checkout", "-b", "feature");
+    await mkdir(join(pagedPath, "docs"));
+    await mkdir(join(pagedPath, "src"));
+    await writeFile(
+      join(pagedPath, "docs", "long.md"),
+      Array.from({ length: 400 }, (_, i) => `line ${i}`).join("\n") + "\n",
+    );
+    await writeFile(join(pagedPath, "src", "app.js"), "a\nb\nc\n");
+    await git(pagedPath, "add", "-A");
+    await git(pagedPath, "commit", "-m", "add");
+    const pagedRepository = `local:${pagedPath}`;
+    const pr = await db.localPullRequest.create({
+      data: { repository: pagedRepository, branch: "feature", base: "main" },
+    });
+    prIds.push(pr.id);
+
+    const first = await host.readPullRequest(pagedRepository, pr.number, { maxPatchChars: 1_000, agentMarker: "a" });
+    expect(first.files.map((f) => [f.filename, f.patchStatus])).toEqual([
+      ["src/app.js", "complete"],
+      // A page with code ends before the docs.
+      ["docs/long.md", "later_page"],
+    ]);
+    let cursor = first.nextPatchCursor;
+    let text = first.files.find((f) => f.filename === "docs/long.md")!.patch;
+    while (cursor) {
+      const next = await host.readPullRequest(pagedRepository, pr.number, {
+        maxPatchChars: 1_000,
+        agentMarker: "a",
+        patchCursor: cursor,
+      });
+      text += next.files.find((f) => f.filename === "docs/long.md")!.patch;
+      cursor = next.nextPatchCursor;
+      if (!cursor) expect(next.patchesComplete).toBe(true);
+    }
+    const added = text.split("\n").filter((l) => l.startsWith("+"));
+    expect(added).toEqual(Array.from({ length: 400 }, (_, i) => `+line ${i}`));
   });
 
   it("compares from sinceSha", async () => {

@@ -92,6 +92,7 @@ import { pinNativeRunPricing } from "./run-pricing.js";
 import { RoutingLlmProvider } from "../providers/llm/routing.js";
 import { ModelUnavailableError } from "../providers/llm/catalog-types.js";
 import { trackRun } from "./in-flight-runs.js";
+import { ReviewReadLedger } from "./review-reads.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
 import { loadBudgetEvent, ownerBudgetSentence, type BudgetEventView } from "./budget-events.js";
 
@@ -955,6 +956,8 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
   // jira_create_issue's per-run cap counter: shared by every tool call of this attempt (a resumed attempt
   // starts a fresh one, floored by the run's recorded fingerprint creates).
   const issueCreationCounters = new Map<string, RunCreationCounter>();
+  // What this attempt's review tools have read, for repo_publish_review's unread_files gate.
+  const reviewReads = new ReviewReadLedger();
   // One per attempt: admits this run's delegations one at a time (see the delegate branch).
   const delegationGate = createSerialGate();
   // The children this attempt's delegations have running, and the sub-agents whose delegation is
@@ -976,6 +979,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
           agentId: loaded.agentId,
           links: loaded.repositoryLinks,
           hosts: reviewHosts,
+          reads: reviewReads,
           db,
           runCheck:
             check && !check.completedAt

@@ -39,8 +39,54 @@ describe("GitHubReviewHost reads", () => {
       comparedFrom: null,
       baseMergedSince: false,
     });
-    expect(view.files[0]).toMatchObject({ patch: PATCH, patchTruncated: false });
-    expect(view.files[1]).toMatchObject({ patch: PATCH.slice(0, 5), patchTruncated: true });
+    expect(view.files[0]).toMatchObject({ patch: PATCH, patchTruncated: false, patchStatus: "complete" });
+    // Five characters do not hold a line of b.py, so it waits for the next page.
+    expect(view.files[1]).toMatchObject({ patch: "", patchTruncated: true, patchStatus: "later_page" });
+    expect(view).toMatchObject({ patchesComplete: false, truncatedFiles: ["b.py"], remainingPatchFiles: 1 });
+    expect(view.nextPatchCursor).toMatch(/^v1\./);
+  });
+
+  it("fills code before docs and pages the rest with a cursor", async () => {
+    const DOC = "+doc\n".repeat(400);
+    const SRC = "+src\n".repeat(10);
+    const { client } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path === `${BASE}/pulls/7`) return json(PR);
+      if (path.startsWith(`${BASE}/pulls/7/files`)) {
+        return json([
+          { filename: "docs/guide.md", status: "modified", additions: 400, deletions: 0, changes: 400, patch: DOC },
+          { filename: "src/app.ts", status: "modified", additions: 10, deletions: 0, changes: 10, patch: SRC },
+        ]);
+      }
+      if (path.startsWith(`${BASE}/issues/7/comments`)) return json([]);
+      return undefined;
+    });
+    const host = new GitHubReviewHost(client);
+    const first = await host.readPullRequest(REPO, 7, { maxPatchChars: 1_000, agentMarker: "a" });
+    expect(first.files.map((f) => [f.filename, f.patchStatus])).toEqual([
+      ["src/app.ts", "complete"],
+      // A page with code ends before the docs.
+      ["docs/guide.md", "later_page"],
+    ]);
+    expect(first.truncatedFiles).toEqual(["docs/guide.md"]);
+    const second = await host.readPullRequest(REPO, 7, {
+      maxPatchChars: 1_000,
+      agentMarker: "a",
+      patchCursor: first.nextPatchCursor!,
+    });
+    expect(second.files.find((f) => f.filename === "src/app.ts")!.patchStatus).toBe("earlier_page");
+    let text = first.files.find((f) => f.filename === "docs/guide.md")!.patch;
+    let page = second;
+    for (;;) {
+      text += page.files.find((f) => f.filename === "docs/guide.md")!.patch;
+      if (!page.nextPatchCursor) break;
+      page = await host.readPullRequest(REPO, 7, {
+        maxPatchChars: 1_000,
+        agentMarker: "a",
+        patchCursor: page.nextPatchCursor,
+      });
+    }
+    expect(text).toBe(DOC);
+    expect(page.patchesComplete).toBe(true);
   });
 
   it("reads CI on the head with separate checks/statuses tokens, dropping the App's own checks", async () => {

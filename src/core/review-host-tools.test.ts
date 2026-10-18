@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ReviewHostError, type CiView, type CodeReviewHost } from "../providers/review-host/types.js";
+import { PatchCursorError, ReviewHostError, type CiView, type CodeReviewHost } from "../providers/review-host/types.js";
+import { ReviewReadLedger } from "./review-reads.js";
 import { collectRelatedPullRequests } from "./related-pull-requests.js";
 import { handleReviewHostTool, resolveLink, type RepositoryLink, type ReviewToolContext } from "./review-host-tools.js";
 
@@ -126,6 +127,44 @@ describe("handleReviewHostTool", () => {
       maxPatchChars: 60_000,
       agentMarker: "agent1",
     });
+  });
+
+  it("passes patchCursor to the host and returns its page fields", async () => {
+    const c = ctx();
+    vi.mocked(c.hosts.github!.readPullRequest).mockResolvedValue({
+      number: 7,
+      nextPatchCursor: "v1.next",
+      truncatedFiles: ["docs/a.md"],
+      patchesComplete: false,
+      remainingPatchFiles: 1,
+    } as never);
+    const out = JSON.parse(
+      await handleReviewHostTool(
+        "repo_pr_read",
+        JSON.stringify({ repository: WRITE.repository, prNumber: 7, patchCursor: "v1.prev" }),
+        c,
+      ),
+    );
+    expect(c.hosts.github!.readPullRequest).toHaveBeenCalledWith(
+      WRITE.repository,
+      7,
+      expect.objectContaining({ patchCursor: "v1.prev" }),
+    );
+    expect(out).toMatchObject({ nextPatchCursor: "v1.next", truncatedFiles: ["docs/a.md"], patchesComplete: false });
+  });
+
+  it.each(["stale", "malformed"] as const)("turns a %s cursor into a patch_cursor_%s tool error", async (reason) => {
+    const c = ctx();
+    vi.mocked(c.hosts.github!.readPullRequest).mockRejectedValue(new PatchCursorError(reason));
+    const out = JSON.parse(
+      await handleReviewHostTool(
+        "repo_pr_read",
+        JSON.stringify({ repository: WRITE.repository, prNumber: 7, patchCursor: "v1.x" }),
+        c,
+      ),
+    );
+    expect(out).toMatchObject({ error: `patch_cursor_${reason}` });
+    if (reason === "stale") expect(JSON.stringify(out)).toContain("without patchCursor");
   });
 
   it("adds the CI view with its note to repo_pr_read output", async () => {
@@ -924,5 +963,138 @@ describe("repo_issue_read", () => {
         await handleReviewHostTool("repo_issue_read", JSON.stringify({ repository: WRITE.repository, number: 0 }), c),
       ),
     ).toMatchObject({ error: "invalid_arguments" });
+  });
+});
+
+describe("handleReviewHostTool unread-files publish guard", () => {
+  const codeFile = (filename: string, patchStatus: string) => ({
+    filename,
+    status: "modified",
+    additions: 1,
+    deletions: 0,
+    patch: "x",
+    patchStatus,
+    patchTruncated: patchStatus !== "complete",
+  });
+  const publishArgs = (verdict: string) => ({
+    repository: WRITE.repository,
+    prNumber: 7,
+    headSha: SHA,
+    verdict,
+    summary: "s",
+    body: "b",
+  });
+  const pageHost = () => {
+    const h = fakeHost();
+    h.readPullRequest = vi.fn(
+      async () =>
+        ({
+          number: 7,
+          headSha: SHA,
+          files: [codeFile("src/a.ts", "later_page")],
+          nextPatchCursor: "v1.c",
+        }) as never,
+    );
+    return h;
+  };
+
+  it("refuses APPROVE and CHANGES_REQUESTED while a code file of this head is unread, allows COMMENT", async () => {
+    const c = ctx({ hosts: { github: pageHost() }, reads: new ReviewReadLedger() });
+    await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c);
+    for (const verdict of ["APPROVE", "CHANGES_REQUESTED"]) {
+      const out = JSON.parse(
+        await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs(verdict)), c),
+      );
+      expect(out).toMatchObject({ error: "unread_files" });
+      expect(JSON.stringify(out)).toContain("src/a.ts");
+      expect(out.message).toContain("If the pull request has moved on, repo_pr_read returns the new headSha");
+    }
+    const comment = JSON.parse(
+      await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("COMMENT")), c),
+    );
+    expect(comment.error).toBeUndefined();
+  });
+
+  it("allows the verdict once the file was read with repo_read_file at the head", async () => {
+    const h = pageHost();
+    h.readFile = vi.fn(async () => ({
+      kind: "file" as const,
+      path: "src/a.ts",
+      ref: SHA,
+      totalLines: 1,
+      startLine: 1,
+      endLine: 1,
+      truncated: false,
+      content: "1: x",
+      text: "x",
+    }));
+    const c = ctx({ hosts: { github: h }, reads: new ReviewReadLedger() });
+    await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c);
+    await handleReviewHostTool(
+      "repo_read_file",
+      JSON.stringify({ repository: WRITE.repository, path: "src/a.ts", ref: SHA }),
+      c,
+    );
+    const out = JSON.parse(
+      await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("APPROVE")), c),
+    );
+    expect(out.error).toBeUndefined();
+  });
+
+  it("a not_found repo_read_file does not satisfy the guard", async () => {
+    const c = ctx({ hosts: { github: pageHost() }, reads: new ReviewReadLedger() });
+    await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c);
+    await handleReviewHostTool(
+      "repo_read_file",
+      JSON.stringify({ repository: WRITE.repository, path: "src/a.ts", ref: SHA }),
+      c,
+    );
+    const out = JSON.parse(
+      await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("APPROVE")), c),
+    );
+    expect(out).toMatchObject({ error: "unread_files" });
+  });
+
+  it("does not gate a PR number or head this attempt never read", async () => {
+    const c = ctx({ hosts: { github: pageHost() }, reads: new ReviewReadLedger() });
+    await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c);
+    const otherPr = { ...publishArgs("APPROVE"), prNumber: 8 };
+    const otherHead = { ...publishArgs("APPROVE"), headSha: "f".repeat(40) };
+    for (const args of [otherPr, otherHead]) {
+      const out = JSON.parse(await handleReviewHostTool("repo_publish_review", JSON.stringify(args), c));
+      expect(out.error).toBeUndefined();
+    }
+  });
+
+  it("does not gate a head whose first page this attempt never read (only a cursor page reached it)", async () => {
+    const c = ctx({ hosts: { github: pageHost() }, reads: new ReviewReadLedger() });
+    await handleReviewHostTool(
+      "repo_pr_read",
+      JSON.stringify({ repository: WRITE.repository, prNumber: 7, patchCursor: "v1.c" }),
+      c,
+    );
+    const out = JSON.parse(
+      await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("APPROVE")), c),
+    );
+    expect(out.error).toBeUndefined();
+  });
+
+  it("does not block APPROVE on a removed code file without a patch", async () => {
+    const h = fakeHost();
+    h.readPullRequest = vi.fn(
+      async () =>
+        ({
+          number: 7,
+          headSha: SHA,
+          files: [{ ...codeFile("src/gone.ts", "unavailable"), status: "removed" }],
+          nextPatchCursor: null,
+        }) as never,
+    );
+    const c = ctx({ hosts: { github: h }, reads: new ReviewReadLedger() });
+    await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c);
+    const out = JSON.parse(
+      await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("APPROVE")), c),
+    );
+    expect(out.error).toBeUndefined();
   });
 });
