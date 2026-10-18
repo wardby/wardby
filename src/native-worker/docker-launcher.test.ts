@@ -1,7 +1,24 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { nativeIsolationNames } from "./docker-isolation.js";
-import { DockerNativeWorkerLauncher, type DockerCli, type DockerResult } from "./docker-launcher.js";
+import {
+  DockerNativeWorkerLauncher,
+  WORKER_STDERR_TAIL_CHARS,
+  type DockerCli,
+  type DockerResult,
+} from "./docker-launcher.js";
 import type { WorkerInput } from "./protocol.js";
+
+const launcherWarn = vi.hoisted(() => vi.fn());
+vi.mock("../core/logger.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../core/logger.js")>();
+  const child = real.logger.child.bind(real.logger);
+  vi.spyOn(real.logger, "child").mockImplementation((bindings, options) => {
+    const log = child(bindings, options);
+    if (bindings.module === "native-docker-launcher") vi.spyOn(log, "warn").mockImplementation(launcherWarn);
+    return log;
+  });
+  return real;
+});
 
 const image = `ghcr.io/wardby/wardby/wardby-native-worker@sha256:${"a".repeat(64)}`;
 const input = {
@@ -187,5 +204,41 @@ describe("DockerNativeWorkerLauncher warm pool workers", () => {
     ]);
     expect(await launcher(docker).listWarm()).toEqual([token]);
     expect(await launcher(docker).listWorkers()).toEqual([]);
+  });
+});
+
+describe("DockerNativeWorkerLauncher worker exit logging", () => {
+  it("logs the tail of a non-zero worker's stderr with the warn", async () => {
+    launcherWarn.mockClear();
+    const { docker } = fakeDocker([
+      [/^container inspect/, no("Error: No such container")],
+      [/^image inspect/, ok("sha256:abc")],
+      [/^run -i/, { code: 1, stdout: "", stderr: "x".repeat(2500) + "\nError: boom" }],
+      [/^container wait/, ok("1\n")],
+    ]);
+    const handle = await launcher(docker).launch(input);
+    expect(await handle.exited).toBe(1);
+    await vi.waitFor(() => expect(launcherWarn).toHaveBeenCalled());
+    const [fields, message] = launcherWarn.mock.calls[0];
+    expect(message).toBe("native worker exited non-zero");
+    expect(fields).toMatchObject({ container: names.worker, code: 1 });
+    expect(fields.stderrTail).toHaveLength(WORKER_STDERR_TAIL_CHARS);
+    expect(fields.stderrTail.endsWith("Error: boom")).toBe(true);
+  });
+
+  it("omits stderrTail when the worker's stderr is only whitespace", async () => {
+    launcherWarn.mockClear();
+    const { docker } = fakeDocker([
+      [/^container inspect/, no("Error: No such container")],
+      [/^image inspect/, ok("sha256:abc")],
+      [/^run -i/, { code: 2, stdout: "", stderr: "   \n  " }],
+      [/^container wait/, ok("2\n")],
+    ]);
+    const handle = await launcher(docker).launch(input);
+    expect(await handle.exited).toBe(2);
+    await vi.waitFor(() => expect(launcherWarn).toHaveBeenCalled());
+    const [fields] = launcherWarn.mock.calls[0];
+    expect(fields).toEqual({ container: names.worker, code: 2 });
+    expect(fields).not.toHaveProperty("stderrTail");
   });
 });
