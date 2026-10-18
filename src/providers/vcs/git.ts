@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { lstat, mkdir, opendir, readFile, readlink, realpath, rm } from "node:fs/promises";
+import { lstat, mkdir, opendir, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitExcludePathspecs, normalizeCollectExclusions } from "../../coding/collect-exclude.js";
@@ -25,6 +25,7 @@ import type {
   FinalizeChangesDetails,
   FinalizeChangesResult,
   PreparedWorkspace,
+  TargetMerge,
   VcsPrepareInput,
   VcsProvider,
 } from "./types.js";
@@ -35,6 +36,22 @@ const MAX_GIT_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_WORKSPACE_ENTRIES = 100_000;
 const SAFE_COMMIT_SHA = /^[0-9a-f]{40}$/;
 const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+/** Where a continuation's target branch is fetched to (never under refs/remotes, so baseCommit's ref is untouched). */
+const MERGE_TARGET_REF = "refs/wardby/merge-target";
+/**
+ * The trusted automatic merge of the target branch, recorded at prepare time:
+ * a commit whose tree is the merge result (markers in conflicted files), whose
+ * parents are baseCommit and the target commit, and whose message carries the
+ * target ref and the conflicted paths as JSON. Recovery and finalize read it
+ * back; the agent's changes are measured against its tree.
+ */
+const MERGE_STATE_REF = "refs/wardby/merge-state";
+const MERGE_STATE_SUBJECT = "wardby merge state";
+/** How far `fetch --deepen` goes, step by step, looking for a merge base in a depth-1 clone. */
+const MERGE_BASE_DEEPEN_STEPS = [64, 256, 1024, 4096] as const;
+/** A conflict marker pair at the start of a line: git writes 7 characters (any longer run counts too), then a space or the line end. */
+const CONFLICT_MARKER_START = /^<{7,}(?: |\r?$)/m;
+const CONFLICT_MARKER_END = /^>{7,}(?: |\r?$)/m;
 const HARDENED_GIT_CONFIG = [
   "-c",
   "core.hooksPath=/dev/null",
@@ -54,6 +71,8 @@ export interface GitCommandOptions {
   cwd?: string;
   authToken?: string;
   maxOutputBytes?: number;
+  /** Non-zero exit codes that still resolve with the output (`merge-tree` exits 1 on conflicts). */
+  acceptExitCodes?: readonly number[];
 }
 
 export interface GitCommandResult {
@@ -182,7 +201,7 @@ export class NodeGitCommandRunner implements GitCommandRunner {
           stdout: Buffer.concat(stdout).toString("utf8"),
           stderr: redactGitOutput(Buffer.concat(stderr).toString("utf8"), secrets),
         };
-        if (code !== 0) {
+        if (code !== 0 && (code === null || !options.acceptExitCodes?.includes(code))) {
           rejectPromise(new GitCommandError(code, result.stderr.trim()));
           return;
         }
@@ -257,6 +276,29 @@ function nullSeparated(value: string): string[] {
   return values.map(validateChangedPath);
 }
 
+function safeGitRef(value: string): string | null {
+  try {
+    return normalizeGitRef(value);
+  } catch {
+    return null;
+  }
+}
+
+/** The merge state's message: a fixed subject, then the target ref and conflicted paths as JSON. */
+function mergeStateMessage(targetMerge: Pick<TargetMerge, "ref" | "conflictedPaths">): string {
+  return `${MERGE_STATE_SUBJECT}\n\n${JSON.stringify({ ref: targetMerge.ref, conflicted: targetMerge.conflictedPaths })}\n`;
+}
+
+function sameTargetMerge(left: TargetMerge | undefined, right: TargetMerge | undefined): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.ref === right.ref &&
+    left.targetCommit === right.targetCommit &&
+    left.conflictedPaths.length === right.conflictedPaths.length &&
+    left.conflictedPaths.every((path, index) => path === right.conflictedPaths[index])
+  );
+}
+
 function directChild(root: string, child: string): boolean {
   return child.startsWith(`${root}${sep}`) && !child.slice(root.length + 1).includes(sep);
 }
@@ -310,6 +352,11 @@ export class GitVcsProvider implements VcsProvider {
     // baseCommit already means exactly what it needs to: "where this
     // round started."
     const cloneBranch = normalized.continuation ? normalized.headRef : normalized.baseRef;
+    // A continuation is first brought up to date with the branch its pull
+    // request targets now (a person may have retargeted it since the root run).
+    const target = normalized.continuation ? await this.remote.pullRequestBase?.(normalized) : null;
+    const mergeRef = target ? safeGitRef(target.ref) : null;
+    let mergeFetched = false;
 
     try {
       await this.remote.withAccess(normalized.repository, async (token) => {
@@ -352,6 +399,9 @@ export class GitVcsProvider implements VcsProvider {
           ],
           { cwd: runRoot, ...auth },
         );
+        if (mergeRef && mergeRef !== normalized.headRef) {
+          mergeFetched = await this.fetchMergeTarget(gitMetadataPath, workspacePath, cloneBranch, mergeRef, auth);
+        }
       });
       await rm(resolve(workspacePath, ".git"), { force: true });
       const baseCommit = await this.revParseRaw(
@@ -383,7 +433,16 @@ export class GitVcsProvider implements VcsProvider {
         "HEAD",
         `refs/heads/${normalized.headRef}`,
       ]);
-      await this.gitForPaths(gitMetadataPath, workspacePath, ["read-tree", "--reset", "-u", baseCommit]);
+      const merged =
+        mergeFetched && mergeRef
+          ? await this.mergeTargetBranch(gitMetadataPath, workspacePath, baseCommit, mergeRef)
+          : null;
+      await this.gitForPaths(gitMetadataPath, workspacePath, [
+        "read-tree",
+        "--reset",
+        "-u",
+        merged?.tree ?? baseCommit,
+      ]);
       await this.inspectWorkspace(workspacePath);
 
       return {
@@ -392,6 +451,7 @@ export class GitVcsProvider implements VcsProvider {
         baseCommit,
         workspacePath,
         gitMetadataPath,
+        ...(merged ? { targetMerge: merged.targetMerge } : {}),
       };
     } catch (error) {
       await rm(runRoot, { recursive: true, force: true });
@@ -429,12 +489,18 @@ export class GitVcsProvider implements VcsProvider {
     await this.assertSafeLocalConfig(prepared.gitMetadataPath);
     const symbolicHead = (await this.gitFor(prepared, ["symbolic-ref", "--short", "HEAD"])).stdout.trim();
     if (symbolicHead !== prepared.headRef) throw new Error("vcs_head_ref_mismatch");
+    const merge = await this.readMergeState(prepared);
     const currentHead = await this.revParse(prepared, "HEAD");
     if (currentHead !== prepared.baseCommit) {
       const parent = await this.revParse(prepared, "HEAD^");
       if (parent !== prepared.baseCommit) throw new Error("vcs_commit_history_invalid");
+      if (merge && (await this.revParse(prepared, "HEAD^2")) !== merge.targetCommit) {
+        throw new Error("vcs_commit_history_invalid");
+      }
     }
-    return prepared;
+    if (!merge) return prepared;
+    const { stateCommit: _stateCommit, ...targetMerge } = merge;
+    return { ...prepared, targetMerge };
   }
 
   async finalizeChanges(
@@ -445,6 +511,9 @@ export class GitVcsProvider implements VcsProvider {
     await this.inspectWorkspace(prepared.workspacePath);
     await this.assertRemote(prepared);
     await this.assertSafeLocalConfig(prepared.gitMetadataPath);
+    // The merge state on disk is the trusted record; the handle must agree with it.
+    const merge = await this.readMergeState(prepared);
+    if (!sameTargetMerge(merge, prepared.targetMerge)) throw new Error("vcs_workspace_handle_invalid");
     // Excluded paths (src/coding/collect-exclude.ts) are never collected from the worker, so
     // they are also neither added nor deleted here: tracked files under them stay untouched.
     await this.gitFor(prepared, [
@@ -454,18 +523,13 @@ export class GitVcsProvider implements VcsProvider {
       ":/",
       ...gitExcludePathspecs(normalizeCollectExclusions(prepared.collectExclude)),
     ]);
+    // Every check below applies to the agent's own changes: against baseCommit, or, after a
+    // merge, against the trusted automatic merge result (so the target branch's own changes,
+    // protected paths included, pass, while any agent edit -- a conflict it resolved, a
+    // target change it reverted -- is checked).
+    const comparedTo = merge?.stateCommit ?? prepared.baseCommit;
     const changed = nullSeparated(
-      (
-        await this.gitFor(prepared, [
-          "diff",
-          "--cached",
-          "--name-only",
-          "-z",
-          "--no-renames",
-          prepared.baseCommit,
-          "--",
-        ])
-      ).stdout,
+      (await this.gitFor(prepared, ["diff", "--cached", "--name-only", "-z", "--no-renames", comparedTo, "--"])).stdout,
     );
     if (changed.length > this.maxChangedFiles) throw new Error("vcs_changed_file_limit");
     const protectedChange = changed.find(protectedPathMatcher(prepared.protectedPaths));
@@ -476,7 +540,7 @@ export class GitVcsProvider implements VcsProvider {
       diff = (
         await this.gitFor(
           prepared,
-          ["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", prepared.baseCommit, "--"],
+          ["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", comparedTo, "--"],
           { maxOutputBytes: this.maxDiffBytes },
         )
       ).stdout;
@@ -487,8 +551,11 @@ export class GitVcsProvider implements VcsProvider {
       throw error;
     }
     if (Buffer.byteLength(diff, "utf8") > this.maxDiffBytes) throw new Error("vcs_diff_size_limit");
+    // After the size limits, so a conflicted file is never read past what the diff limit allows.
+    if (merge) await this.assertConflictsResolved(prepared.workspacePath, merge.conflictedPaths);
     const currentHead = await this.revParse(prepared, "HEAD");
-    if (changed.length === 0 && currentHead === prepared.baseCommit) {
+    // A merge with no agent edits still has the merge itself to push.
+    if (!merge && changed.length === 0 && currentHead === prepared.baseCommit) {
       return {
         outcome: "no_changes",
         repository: prepared.repository,
@@ -500,12 +567,17 @@ export class GitVcsProvider implements VcsProvider {
     const symbolicHead = (await this.gitFor(prepared, ["symbolic-ref", "--short", "HEAD"])).stdout.trim();
     if (symbolicHead !== prepared.headRef) throw new Error("vcs_head_ref_mismatch");
     let commitSha: string;
-    if (currentHead === prepared.baseCommit) {
+    if (currentHead === prepared.baseCommit && merge) {
+      commitSha = await this.commitMerge(prepared, merge);
+    } else if (currentHead === prepared.baseCommit) {
       await this.gitFor(prepared, ["commit", "--no-verify", "--no-gpg-sign", "-m", `Wardby run ${prepared.runId}`]);
       commitSha = await this.revParse(prepared, "HEAD");
     } else {
       const parent = await this.revParse(prepared, "HEAD^");
       if (parent !== prepared.baseCommit) throw new Error("vcs_commit_history_invalid");
+      if (merge && (await this.revParse(prepared, "HEAD^2")) !== merge.targetCommit) {
+        throw new Error("vcs_commit_history_invalid");
+      }
       const afterCommitChanges = nullSeparated(
         (await this.gitFor(prepared, ["diff", "--cached", "--name-only", "-z", "HEAD", "--"])).stdout,
       );
@@ -541,7 +613,37 @@ export class GitVcsProvider implements VcsProvider {
       pullRequestNumber: published.number,
       pullRequestUrl: published.url,
       ...(published.description ? { description: published.description } : {}),
+      ...(merge && prepared.continuation
+        ? {
+            targetMerge: {
+              ref: merge.ref,
+              targetCommit: merge.targetCommit,
+              conflicts: merge.conflictedPaths.length,
+            },
+          }
+        : {}),
     };
+  }
+
+  /** The two-parent merge commit (baseCommit, the target) of the staged tree, as the Wardby identity. */
+  private async commitMerge(prepared: PreparedWorkspace, merge: TargetMerge): Promise<string> {
+    const tree = (await this.gitFor(prepared, ["write-tree"])).stdout.trim();
+    if (!SAFE_COMMIT_SHA.test(tree)) throw new Error("vcs_commit_sha_invalid");
+    const commitSha = (
+      await this.gitFor(prepared, [
+        "commit-tree",
+        tree,
+        "-p",
+        prepared.baseCommit,
+        "-p",
+        merge.targetCommit,
+        "-m",
+        `Merge ${merge.ref} into ${prepared.headRef} (Wardby run ${prepared.runId})`,
+      ])
+    ).stdout.trim();
+    if (!SAFE_COMMIT_SHA.test(commitSha)) throw new Error("vcs_commit_sha_invalid");
+    await this.gitFor(prepared, ["update-ref", `refs/heads/${prepared.headRef}`, commitSha, prepared.baseCommit]);
+    return commitSha;
   }
 
   /** Re-derive a continuation's PR description without a push, delegated to the remote; never throws. */
@@ -681,6 +783,198 @@ export class GitVcsProvider implements VcsProvider {
       throw new Error("vcs_workspace_path_invalid");
     }
     return { ...workspace, ...normalized };
+  }
+
+  /**
+   * Fetches a continuation's target branch from the same `origin` the clone
+   * came from (never another URL, so never a fork) and deepens the depth-1
+   * clone step by step until the head and the target share a merge base.
+   * Returns true once they do; throws vcs_target_merge_failed when the fetch
+   * fails or no merge base turns up within MERGE_BASE_DEEPEN_STEPS.
+   */
+  private async fetchMergeTarget(
+    gitMetadataPath: string,
+    workspacePath: string,
+    cloneBranch: string,
+    ref: string,
+    auth: { authToken?: string },
+  ): Promise<boolean> {
+    const fetch = (depth: readonly string[]) =>
+      this.gitForPaths(
+        gitMetadataPath,
+        workspacePath,
+        [
+          ...this.remote.gitConfig,
+          "fetch",
+          "--no-tags",
+          "--no-write-fetch-head",
+          ...depth,
+          "origin",
+          `+refs/heads/${ref}:${MERGE_TARGET_REF}`,
+        ],
+        auth,
+      );
+    try {
+      await fetch(["--depth", "1"]);
+      for (const step of [0, ...MERGE_BASE_DEEPEN_STEPS]) {
+        if (step > 0) await fetch([`--deepen=${step}`]);
+        const base = await this.gitForPaths(
+          gitMetadataPath,
+          workspacePath,
+          ["merge-base", `refs/remotes/origin/${cloneBranch}`, MERGE_TARGET_REF],
+          { acceptExitCodes: [1] },
+        );
+        if (base.stdout.trim()) return true;
+      }
+    } catch (error) {
+      throw new Error("vcs_target_merge_failed", { cause: error });
+    }
+    throw new Error("vcs_target_merge_failed");
+  }
+
+  /**
+   * Merges the fetched target into baseCommit without touching the index or
+   * the working tree (`merge-tree --write-tree`: no MERGE_HEAD, no hooks, no
+   * merge drivers -- none are configured), and records the result as the merge
+   * state. Null when the target is already part of the branch (nothing to merge).
+   */
+  private async mergeTargetBranch(
+    gitMetadataPath: string,
+    workspacePath: string,
+    baseCommit: string,
+    ref: string,
+  ): Promise<{ tree: string; targetMerge: TargetMerge } | null> {
+    const targetCommit = await this.revParseRaw(gitMetadataPath, workspacePath, `${MERGE_TARGET_REF}^{commit}`);
+    const mergeBase = (
+      await this.gitForPaths(gitMetadataPath, workspacePath, ["merge-base", baseCommit, targetCommit])
+    ).stdout.trim();
+    if (mergeBase === targetCommit) return null;
+    // The clone is --no-checkout and nothing is read into the index or the
+    // working tree until after this merge, so no repository .gitattributes
+    // (a marker size, `-merge`, `merge=union`) can steer it.
+    let output: string;
+    try {
+      output = (
+        await this.gitForPaths(
+          gitMetadataPath,
+          workspacePath,
+          ["merge-tree", "--write-tree", "-z", "--name-only", "--no-messages", baseCommit, targetCommit],
+          { acceptExitCodes: [1] },
+        )
+      ).stdout;
+    } catch (error) {
+      throw new Error("vcs_target_merge_failed", { cause: error });
+    }
+    const [tree, ...paths] = output.split("\0");
+    if (!SAFE_COMMIT_SHA.test(tree)) throw new Error("vcs_target_merge_failed");
+    const conflictedPaths = [...new Set(paths.filter(Boolean))].map(validateChangedPath);
+    if (conflictedPaths.length > this.maxChangedFiles) throw new Error("vcs_target_merge_failed");
+    const targetMerge: TargetMerge = { ref, targetCommit, conflictedPaths };
+    // The message goes through a file: a long conflicted-path list could pass an argument's size limit.
+    const messagePath = resolve(gitMetadataPath, "WARDBY_MERGE_STATE_MSG");
+    await writeFile(messagePath, mergeStateMessage(targetMerge), { mode: 0o600 });
+    try {
+      const stateCommit = (
+        await this.gitForPaths(gitMetadataPath, workspacePath, [
+          "commit-tree",
+          tree,
+          "-p",
+          baseCommit,
+          "-p",
+          targetCommit,
+          "-F",
+          messagePath,
+        ])
+      ).stdout.trim();
+      if (!SAFE_COMMIT_SHA.test(stateCommit)) throw new Error("vcs_commit_sha_invalid");
+      await this.gitForPaths(gitMetadataPath, workspacePath, ["update-ref", MERGE_STATE_REF, stateCommit]);
+    } finally {
+      await rm(messagePath, { force: true });
+    }
+    return { tree, targetMerge };
+  }
+
+  /** The recorded merge state (see MERGE_STATE_REF), validated, or undefined when the workspace merged nothing. */
+  private async readMergeState(
+    workspace: Pick<PreparedWorkspace, "gitMetadataPath" | "workspacePath" | "baseCommit">,
+  ): Promise<(TargetMerge & { stateCommit: string }) | undefined> {
+    const { gitMetadataPath, workspacePath } = workspace;
+    const stateCommit = (
+      await this.gitForPaths(gitMetadataPath, workspacePath, [
+        "for-each-ref",
+        "--format=%(objectname)",
+        MERGE_STATE_REF,
+      ])
+    ).stdout.trim();
+    if (!stateCommit) return undefined;
+    if (!SAFE_COMMIT_SHA.test(stateCommit)) throw new Error("vcs_merge_state_invalid");
+    const raw = (await this.gitForPaths(gitMetadataPath, workspacePath, ["cat-file", "commit", stateCommit])).stdout;
+    const split = raw.indexOf("\n\n");
+    if (split < 0) throw new Error("vcs_merge_state_invalid");
+    const parents = raw
+      .slice(0, split)
+      .split("\n")
+      .filter((line) => line.startsWith("parent "))
+      .map((line) => line.slice("parent ".length));
+    const message = raw.slice(split + 2);
+    if (
+      parents.length !== 2 ||
+      parents[0] !== workspace.baseCommit ||
+      !SAFE_COMMIT_SHA.test(parents[1]) ||
+      !message.startsWith(`${MERGE_STATE_SUBJECT}\n\n`)
+    ) {
+      throw new Error("vcs_merge_state_invalid");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(message.slice(MERGE_STATE_SUBJECT.length + 2));
+    } catch (error) {
+      throw new Error("vcs_merge_state_invalid", { cause: error });
+    }
+    const state = parsed as { ref?: unknown; conflicted?: unknown };
+    if (
+      typeof state.ref !== "string" ||
+      !Array.isArray(state.conflicted) ||
+      state.conflicted.length > this.maxChangedFiles ||
+      state.conflicted.some((path) => typeof path !== "string")
+    ) {
+      throw new Error("vcs_merge_state_invalid");
+    }
+    const ref = safeGitRef(state.ref);
+    if (!ref) throw new Error("vcs_merge_state_invalid");
+    return {
+      ref,
+      targetCommit: parents[1],
+      conflictedPaths: (state.conflicted as string[]).map(validateChangedPath),
+      stateCommit,
+    };
+  }
+
+  /**
+   * Refuses to finalize while a file the merge left conflicted still holds a
+   * conflict marker pair. Only those files are read: elsewhere a line of
+   * `<<<<<<<` may be legitimate content (a fixture, a doc about merging).
+   */
+  private async assertConflictsResolved(workspacePath: string, conflictedPaths: readonly string[]): Promise<void> {
+    for (const path of conflictedPaths) {
+      const fullPath = resolve(workspacePath, path);
+      if (!fullPath.startsWith(`${workspacePath}${sep}`)) throw new Error("vcs_changed_path_invalid");
+      let content: string;
+      try {
+        const stat = await lstat(fullPath);
+        // Deleted while resolving, or not a regular file: nothing left to hold a marker.
+        if (!stat.isFile()) continue;
+        content = await readFile(fullPath, "utf8");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ENOTDIR") {
+          continue;
+        }
+        throw error;
+      }
+      if (CONFLICT_MARKER_START.test(content) && CONFLICT_MARKER_END.test(content)) {
+        throw new Error(`vcs_conflict_markers_remain:${path}`);
+      }
+    }
   }
 
   private async inspectWorkspace(workspacePath: string): Promise<void> {

@@ -35,6 +35,16 @@ import {
   CONTINUATION_CLOSED_ERROR,
   WORKER_BUDGET_EXHAUSTED_SUMMARY,
 } from "../../coding/continuation-wording.js";
+import {
+  CONFLICT_MARKERS_ERROR_PREFIX,
+  MERGE_CONFLICT_CATEGORY,
+  TARGET_MERGE_CATEGORY,
+  TARGET_MERGE_FAILED_ERROR,
+  conflictMarkersPathFromError,
+  conflictMarkersSentence,
+  mergeSentence,
+  withTargetMerge,
+} from "../../coding/merge-wording.js";
 import { budgetSentence, overrunSentence } from "../../core/budget-wording.js";
 import { fileSelfDefect } from "../../core/self-defects.js";
 import { isTransactionUnavailable } from "../../core/dispatch.js";
@@ -1569,6 +1579,10 @@ export class ContainerExecutor implements Executor {
     let providerClass: ProviderFailureClass | undefined;
     // Set when finalizeChanges refused the collected diff for touching a protected path; names it on the host.
     let protectedPath: string | undefined;
+    // Set when a continuation's merge of its target branch left conflict markers behind; names the file on the host.
+    let conflictMarkersPath: string | undefined;
+    // Set with a success whose push merged the pull request's target branch; says what on the host.
+    let merged: { mergeSentence?: string } = {};
     // Set when a run stopped at its budget still pushed its changes so far; says so on the host.
     let changesPushed: { pullRequestNumber?: number } | undefined;
     try {
@@ -1615,6 +1629,9 @@ export class ContainerExecutor implements Executor {
           this.terminal(kept.current, "budget_exhausted");
           changesPushed =
             kept.finalized.outcome === "branch_pushed" ? {} : { pullRequestNumber: kept.finalized.pullRequestNumber };
+          if (kept.finalized.outcome === "pull_request_updated" && kept.finalized.targetMerge) {
+            merged = { mergeSentence: mergeSentence(kept.finalized.targetMerge) };
+          }
           finishedSummary = output.summary;
         } else {
           const latest = await this.requireCurrent(run.runId).catch(() => current);
@@ -1629,7 +1646,8 @@ export class ContainerExecutor implements Executor {
         outcome = "budget_exhausted";
         return;
       }
-      if (output.outcome === "no_changes") {
+      // A workspace that merged its target branch has that merge to push even when the agent changed nothing.
+      if (output.outcome === "no_changes" && !(await this.mergedTargetBranch(current, existingWorkspace))) {
         // Before complete: the terminal hook (a no-change fix round's re-review) reads the refreshed body.
         const description = await this.refreshDescriptionInTime(current, output, existingWorkspace);
         await this.recordRefusal(run.runId, sessionId);
@@ -1673,6 +1691,9 @@ export class ContainerExecutor implements Executor {
       this.terminal(pushed.current, "succeeded");
       outcome = "succeeded";
       overrun = this.overrunDetails(pushed.current);
+      if (finalized.outcome === "pull_request_updated" && finalized.targetMerge) {
+        merged = { mergeSentence: mergeSentence(finalized.targetMerge) };
+      }
       finishedSummary = output.summary;
     } catch (error) {
       if (error instanceof Error && error.message === "coding_run_no_longer_active") {
@@ -1690,6 +1711,7 @@ export class ContainerExecutor implements Executor {
         await this.options.store.terminate(run.runId, "failed", failure.error, failure.audit);
         this.terminal(run, "failed", failure.audit);
         protectedPath = protectedPathFromError(error) ?? undefined;
+        conflictMarkersPath = conflictMarkersPathFromError(error) ?? undefined;
       }
     } finally {
       await this.options.jobs.remove(handle).catch(() => undefined);
@@ -1703,18 +1725,35 @@ export class ContainerExecutor implements Executor {
         await this.options.vcs.notifyContinuationFinished?.(target, outcome, {
           summary: finishedSummary,
           agentName: run.agentName,
-          ...(outcome === "succeeded" ? overrun : {}),
+          ...(outcome === "succeeded" ? { ...merged, ...overrun } : {}),
           ...(outcome === "budget_exhausted" ? { budgetSentence: await this.budgetSentence(run) } : {}),
-          ...(outcome === "budget_exhausted" && changesPushed ? { changesPushed } : {}),
+          ...(outcome === "budget_exhausted" && changesPushed ? { changesPushed, ...merged } : {}),
           ...(outcome === "failed" && providerClass ? { providerSentence: providerSentence(providerClass) } : {}),
           ...(outcome === "failed" && protectedPath
             ? { protectedPathSentence: protectedPathSentence(protectedPath) }
+            : {}),
+          ...(outcome === "failed" && conflictMarkersPath
+            ? { conflictMarkersSentence: conflictMarkersSentence(conflictMarkersPath) }
             : {}),
         });
       }
       await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
       this.emit({ stage: "cleanup", runId: run.runId, jobId: handle.id, cleanupSucceeded: true });
       await this.notifyTerminal(run.runId);
+    }
+  }
+
+  /** Whether the run's workspace merged its pull request's target branch (PreparedWorkspace.targetMerge). */
+  private async mergedTargetBranch(
+    run: ContainerRunSnapshot,
+    existingWorkspace: PreparedWorkspace | null | undefined,
+  ): Promise<boolean> {
+    if (!run.rootCodingRunId) return false;
+    if (existingWorkspace) return Boolean(existingWorkspace.targetMerge);
+    try {
+      return Boolean((await this.options.vcs.recoverWorkspace(this.preflight(run, { launched: true })))?.targetMerge);
+    } catch {
+      return false;
     }
   }
 
@@ -2474,8 +2513,10 @@ export class ContainerExecutor implements Executor {
     const withCommit = withBaseCommit(run.task, workspace.baseCommit);
     const description = await this.currentDescriptionText(run);
     // The ticket first, then the description: each is cut to what's left of the task's budget.
+    // The target-branch merge note (conflicts to resolve) comes before the ticket and the description.
+    const withMerge = withTargetMerge(withCommit, workspace.targetMerge, run.headRef);
     const task = withPullRequestDescription(
-      withLinkedIssue(withCommit, await this.linkedIssueFor(run, description)),
+      withLinkedIssue(withMerge, await this.linkedIssueFor(run, description)),
       description,
     );
     if (withCommit === run.task && /^[0-9a-f]{40}$/.test(workspace.baseCommit)) {
@@ -2865,6 +2906,10 @@ const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: stri
   // Checked before the generic "vcs_" fallback: the collected diff touched a
   // path this agent may not edit, not a generic workspace/git failure.
   ["vcs_protected_path:", PROTECTED_PATH_CATEGORY],
+  // A continuation's target-branch merge (git.ts): conflict markers left in a
+  // conflicted file, or a target branch that could not be fetched or merged.
+  [CONFLICT_MARKERS_ERROR_PREFIX, MERGE_CONFLICT_CATEGORY],
+  [TARGET_MERGE_FAILED_ERROR, TARGET_MERGE_CATEGORY],
   // A continuation whose pull request was merged or closed: nothing pushed (coding/continuation-wording.ts).
   [CONTINUATION_CLOSED_ERROR, CONTINUATION_CLOSED_CATEGORY],
   // A provider whose worker images this deployment doesn't configure (codex or claude-code): configuration.

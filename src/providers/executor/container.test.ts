@@ -396,6 +396,8 @@ class FakeVcs implements VcsProvider {
   finalizeEmpty = false;
   /** The description outcome finalize reports on a pull request, when set. */
   finalizeDescription?: DescriptionWriteOutcome;
+  /** The target-branch merge prepare reports on a continuation's workspace, when set. */
+  targetMerge?: PreparedWorkspace["targetMerge"];
   /** The no-push description refresh; tests that need it assign it. */
   refreshPullRequestDescription?: (
     workspace: ContinuationTarget,
@@ -414,6 +416,8 @@ class FakeVcs implements VcsProvider {
     overrunSentence?: string;
     serviceSentence?: string;
     protectedPathSentence?: string;
+    mergeSentence?: string;
+    conflictMarkersSentence?: string;
     changesPushed?: { pullRequestNumber?: number };
   }> = [];
 
@@ -465,6 +469,15 @@ class FakeVcs implements VcsProvider {
       pullRequestNumber: 42,
       pullRequestUrl: "https://github.com/openai/example/pull/42",
       ...(this.finalizeDescription ? { description: structuredClone(this.finalizeDescription) } : {}),
+      ...(workspace.continuation && workspace.targetMerge
+        ? {
+            targetMerge: {
+              ref: workspace.targetMerge.ref,
+              targetCommit: workspace.targetMerge.targetCommit,
+              conflicts: workspace.targetMerge.conflictedPaths.length,
+            },
+          }
+        : {}),
     };
   }
   async cleanup(): Promise<void> {
@@ -492,6 +505,8 @@ class FakeVcs implements VcsProvider {
       ...(details?.providerSentence ? { providerSentence: details.providerSentence } : {}),
       ...(details?.serviceSentence ? { serviceSentence: details.serviceSentence } : {}),
       ...(details?.protectedPathSentence ? { protectedPathSentence: details.protectedPathSentence } : {}),
+      ...(details?.mergeSentence ? { mergeSentence: details.mergeSentence } : {}),
+      ...(details?.conflictMarkersSentence ? { conflictMarkersSentence: details.conflictMarkersSentence } : {}),
       ...(details?.changesPushed ? { changesPushed: details.changesPushed } : {}),
     });
     this.events.push(`notifyFinished:${outcome}`);
@@ -504,6 +519,7 @@ class FakeVcs implements VcsProvider {
       baseCommit: "a".repeat(40),
       workspacePath: join(this.root, input.runId, "workspace"),
       gitMetadataPath: join(this.root, input.runId, "git"),
+      ...(input.continuation && this.targetMerge ? { targetMerge: structuredClone(this.targetMerge) } : {}),
     };
   }
 }
@@ -2351,6 +2367,79 @@ describe("ContainerExecutor", () => {
             "its changes include `CODEOWNERS`, which this agent may not edit, so none of its changes were kept. Ask again without changing that file, or have the repository owner make that change.",
         },
       ]);
+    });
+
+    describe("a continuation that merged its pull request's target branch", () => {
+      const TARGET = "c".repeat(40);
+      const continuing = async (conflictedPaths: string[] = []) => {
+        const created = await harness({ rootCodingRunId: "root-run", headRef: "wardby/run-root-run" });
+        created.vcs.targetMerge = { ref: "main", targetCommit: TARGET, conflictedPaths };
+        let task = "";
+        created.jobs.onLaunch = () => {
+          task = (JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as { task: string }).task;
+        };
+        return { created, task: () => task };
+      };
+
+      it("tells the agent which files conflict and says what was merged on the host", async () => {
+        const { created, task } = await continuing(["src/app.ts"]);
+        await created.executor.start("run-1");
+        expect(task()).toContain("Merge conflicts: before you started, wardby merged `main` @ ccccccc");
+        expect(task()).toContain("- `src/app.ts`");
+        expect(created.store.run.status).toBe("succeeded");
+        expect(created.vcs.notifyFinishedCalls).toEqual([
+          expect.objectContaining({
+            outcome: "succeeded",
+            mergeSentence: "Merged `main` @ `ccccccc` into this branch; resolved conflicts in 1 file.",
+          }),
+        ]);
+      });
+
+      it("pushes the merge even when the agent changed nothing", async () => {
+        const { created } = await continuing();
+        created.jobs.result.resultArtifact = JSON.stringify({
+          schemaVersion: 1,
+          runId: "run-1",
+          outcome: "no_changes",
+          summary: "Brought the branch up to date.",
+          tests: [],
+        });
+        await created.executor.start("run-1");
+        expect(created.vcs.finalized).toBe(1);
+        expect(created.store.run.result).toMatchObject({ outcome: "pull_request_updated" });
+        expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({
+          mergeSentence: "Merged `main` @ `ccccccc` into this branch; no conflicts.",
+        });
+      });
+
+      it("fails a run that left conflict markers as merge_conflict, naming the file on the host", async () => {
+        const { created } = await continuing(["src/app.ts"]);
+        created.vcs.finalizeChanges = async () => {
+          throw new Error("vcs_conflict_markers_remain:src/app.ts");
+        };
+        await created.executor.start("run-1");
+        expect(created.store.terminations).toEqual([
+          {
+            status: "failed",
+            error: expect.stringMatching(/^coding_failure_merge_conflict:coding_diag_/),
+            audit: { failureCategory: "merge_conflict", diagnosticId: expect.stringMatching(/^coding_diag_/) },
+          },
+        ]);
+        expect(created.vcs.notifyFinishedCalls).toEqual([
+          {
+            outcome: "failed",
+            agentName: "knock-knock-implement",
+            conflictMarkersSentence:
+              "`src/app.ts` still has conflict markers after merging this pull request's target branch, so none of its changes were pushed. Ask again to resolve the conflicts.",
+          },
+        ]);
+      });
+
+      it("adds nothing to a run with no merge", async () => {
+        const created = await harness({ rootCodingRunId: "root-run", headRef: "wardby/run-root-run" });
+        await created.executor.start("run-1");
+        expect(created.vcs.notifyFinishedCalls[0]).not.toHaveProperty("mergeSentence");
+      });
     });
 
     it("classifies a continuation of a no-longer-open PR as continuation_closed, refused before any spend", async () => {

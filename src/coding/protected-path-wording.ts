@@ -30,7 +30,7 @@ const MAX_PATH_CHARS = 200;
  * collapse to one line, and the result is capped with an ellipsis. Null when
  * nothing usable is left.
  */
-function sanitizePath(path: string): string | null {
+export function sanitizePath(path: string): string | null {
   // eslint-disable-next-line no-control-regex -- deliberately stripping C0/DEL control characters.
   const withoutControls = path.replace(/[\u0000-\u001f\u007f]+/g, " ");
   const oneLine = withoutControls.replace(/\s+/g, " ").trim();

@@ -19,15 +19,13 @@ an open pull request carrying that run's marker for the branch. Nothing from
 the run was pushed either way, so the pull request (and anyone who merged or
 closed it) is unaffected.
 
-Two things besides an actual merge or close can also make the check come back
-"no longer found," since it looks for an **open** pull request with that
-exact base branch and the run's hidden marker still in its description:
-
-- the pull request's base branch was retargeted to something other than the
-  one the run recorded;
-- the hidden `<!-- wardby:<run-id> -->` marker was removed or edited out of
-  the pull request's description (wardby relies on it to find its own PR;
-  nothing else identifies it).
+One thing besides an actual merge or close can also make the check come back
+"no longer found," since it looks for an **open** pull request from the run's
+branch with the run's hidden marker still in its description: the hidden
+`<!-- wardby:<run-id> -->` marker was removed or edited out of the pull
+request's description (wardby relies on it to find its own PR; nothing else
+identifies it). Retargeting the pull request to another base branch does not
+close it for wardby: the follow-up continues it and merges the new base.
 
 When the pull request was merged or closed **before the run started**, the
 check before cloning catches it: the run's status is `refused`, and nothing
@@ -66,9 +64,8 @@ sub-run instead, without the error code:
 If the change is still needed, ask again without `continuePriorRun` (or
 without naming the closed pull request). The new run opens a fresh pull
 request from the repository's default branch. If the check is wrongly
-finding nothing when the pull request is in fact open, check that its base
-branch still matches what wardby recorded and that the `<!-- wardby:... -->`
-marker is still in its description, unedited.
+finding nothing when the pull request is in fact open, check that the
+`<!-- wardby:... -->` marker is still in its description, unedited.
 
 Related: [Run GitHub code-review agents](../code-review-agents.md),
 [Automatic review fix rounds](../review-fix-rounds.md),
