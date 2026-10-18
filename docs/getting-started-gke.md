@@ -201,7 +201,9 @@ refuses to start with either one set and no token.
 `WARDBY_GITHUB_ALLOWED_ACCOUNTS` (optional, not a secret) adds GitHub accounts
 the App serves besides its owner. Pass it to `up.sh` on every run, for example
 `WARDBY_GITHUB_ALLOWED_ACCOUNTS=acme-labs WARDBY_HOSTNAME=app.example.com deploy/gke/up.sh`;
-a run without it serves only the App's owner. See
+a run without it serves only the App's owner. `up.sh` gives the same value to
+the control plane and to the native sandbox gateway, which runs sandboxed
+agents' repository tools. See
 [Which accounts the App serves](code-review-agents.md#which-accounts-the-app-serves-wardby_github_allowed_accounts).
 
 `WARDBY_MOBILE_ENABLED=true` (optional, not a secret) lets the Wardby mobile app
