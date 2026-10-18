@@ -65,6 +65,7 @@ import {
 } from "./subagent-memory-tools.js";
 import { prisma as defaultDb } from "./db.js";
 import { logger } from "./logger.js";
+import { errorCodeOf } from "./error-code.js";
 import { loadCodingConcurrencyConfig } from "../config/providers.js";
 import type { Executor } from "../providers/executor/types.js";
 import type { ReviewHostRegistry } from "../providers/review-host/types.js";
@@ -593,10 +594,6 @@ export interface WaitForCodingChildOptions {
 }
 
 /** The leading snake_case code of an error message (`code: sentence`); messages can carry internals. */
-function errorCodeOf(message: string | null | undefined): string | undefined {
-  return message ? /^([a-z][a-z0-9_]*)(:|$)/.exec(message)?.[1] : undefined;
-}
-
 /**
  * What a coding sub-agent's run tells the parent run's model. A run refused
  * over its services carries the host sentence (never the raw Run.error), so

@@ -33,6 +33,7 @@ import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
 import { isPrivilegedBridgeName } from "../sandbox/host-functions.js";
 import { PrismaGatewayLedger, type GatewaySessionRecord } from "./ledger.js";
 import {
+  causeCodeOf,
   GatewayError,
   GatewayRequestSchema,
   parseParams,
@@ -67,10 +68,15 @@ const ok = (result: unknown): GatewayResponse => ({
   status: 200,
   body: { ok: true, result: result ?? null },
 });
-const fail = (status: number, code: GatewayErrorCode | "unauthorized", message: string): GatewayResponse => ({
+const fail = (
+  status: number,
+  code: GatewayErrorCode | "unauthorized",
+  message: string,
+  causeCode?: string,
+): GatewayResponse => ({
   kind: "json",
   status,
-  body: { ok: false, error: { code, message } },
+  body: { ok: false, error: { code, message, ...(causeCode ? { causeCode } : {}) } },
 });
 
 const STATUS_FOR: Record<string, number> = {
@@ -93,9 +99,13 @@ export async function serveGatewayRequest(
   try {
     return await handle(deps, authorization, body);
   } catch (err) {
-    if (err instanceof GatewayError) return fail(STATUS_FOR[err.code] ?? 500, err.code, err.message);
+    if (err instanceof GatewayError) return fail(STATUS_FOR[err.code] ?? 500, err.code, err.message, err.causeCode);
     serverLog.error({ err }, "native gateway request failed");
-    return fail(500, "internal", "The gateway could not serve this call.");
+    // Only the code the error leads with leaves the gateway, never the rest of its message.
+    const causeCode = causeCodeOf(err);
+    return causeCode
+      ? fail(500, "internal", `The gateway could not serve this call (${causeCode}).`, causeCode)
+      : fail(500, "internal", "The gateway could not serve this call.");
   }
 }
 

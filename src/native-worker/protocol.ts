@@ -12,6 +12,7 @@
  */
 
 import { z } from "zod";
+import { errorCodeOf } from "../core/error-code.js";
 import { LLM_EFFORT_LEVELS } from "../providers/llm/types.js";
 
 export const NATIVE_WORKER_PROTOCOL_VERSION = 1;
@@ -52,10 +53,30 @@ export class GatewayError extends Error {
   constructor(
     readonly code: GatewayErrorCode,
     message: string,
+    /**
+     * For `internal` only: the code the underlying error's message led with (errorCodeOf), so the
+     * run can name the cause without the rest of that message.
+     */
+    readonly causeCode?: string,
   ) {
     super(message);
     this.name = "GatewayError";
   }
+}
+
+/** The longest cause code carried; a longer leading word is not a code. */
+const MAX_CAUSE_CODE_LENGTH = 64;
+
+/** The code an unexpected error's message leads with, if it is short enough to be one. */
+export function causeCodeOf(err: unknown): string | undefined {
+  const code = errorCodeOf(err instanceof Error ? err.message : typeof err === "string" ? err : undefined);
+  return code && code.length <= MAX_CAUSE_CODE_LENGTH ? code : undefined;
+}
+
+/** `err` as a GatewayError: a GatewayError as is, anything else `internal` with its cause code. */
+export function toGatewayError(err: unknown): GatewayError {
+  if (err instanceof GatewayError) return new GatewayError(err.code, err.message, err.causeCode);
+  return new GatewayError("internal", err instanceof Error ? err.message : String(err), causeCodeOf(err));
 }
 
 const runId = z.string().min(1).max(64);

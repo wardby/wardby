@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
-import { streamModel } from "./gateway-server.js";
+import { serveGatewayRequest, streamModel } from "./gateway-server.js";
 
 type Ctx = Parameters<typeof streamModel>[0];
 type Ledger = Parameters<typeof streamModel>[1];
@@ -100,5 +100,45 @@ describe("streamModel mid-stream failure", () => {
     expect(err).toBe(streamError);
     expect(ledger.markUncertain).toHaveBeenCalledTimes(1);
     expect(ledger.markUncertain.mock.calls[0]).toEqual(["sess_1", "call_1"]);
+  });
+});
+
+describe("serveGatewayRequest unexpected errors", () => {
+  /** Deps whose session lookup throws `err`: the first thing a request does after its bearer check. */
+  const throwingDeps = (err: Error) =>
+    ({
+      db: { nativeGatewaySession: { findUnique: async () => Promise.reject(err) } },
+      providers: {},
+    }) as unknown as Parameters<typeof serveGatewayRequest>[0];
+
+  it("answers internal with only the error's leading code, never the rest of its message", async () => {
+    const err = new Error("coding_execution_not_configured: detail-that-must-not-leave-the-gateway");
+    const response = await serveGatewayRequest(throwingDeps(err), "Bearer cap", {});
+    expect(response).toEqual({
+      kind: "json",
+      status: 500,
+      body: {
+        ok: false,
+        error: {
+          code: "internal",
+          message: "The gateway could not serve this call (coding_execution_not_configured).",
+          causeCode: "coding_execution_not_configured",
+        },
+      },
+    });
+    expect(JSON.stringify(response)).not.toContain("detail-that-must-not-leave-the-gateway");
+  });
+
+  it("keeps the generic message when the error names no code", async () => {
+    const response = await serveGatewayRequest(
+      throwingDeps(new Error("Connection refused at 10.0.0.1")),
+      "Bearer cap",
+      {},
+    );
+    expect(response).toEqual({
+      kind: "json",
+      status: 500,
+      body: { ok: false, error: { code: "internal", message: "The gateway could not serve this call." } },
+    });
   });
 });

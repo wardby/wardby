@@ -8,15 +8,10 @@
 
 import type { LlmStreamEvent } from "../providers/llm/types.js";
 import type { NativeGateway, WorkerLauncher } from "./gateway.js";
-import { GatewayError, parseMessage, WorkerInputSchema, type GatewayRequest } from "./protocol.js";
+import { parseMessage, toGatewayError, WorkerInputSchema, type GatewayRequest } from "./protocol.js";
 import { runNativeWorker, type GatewayTransport } from "./worker.js";
 
 const wire = <T>(value: T): T => (value === undefined ? value : (JSON.parse(JSON.stringify(value)) as T));
-
-function asGatewayError(err: unknown): GatewayError {
-  if (err instanceof GatewayError) return new GatewayError(err.code, err.message);
-  return new GatewayError("internal", err instanceof Error ? err.message : String(err));
-}
 
 export function createLoopbackTransport(gateway: NativeGateway): GatewayTransport {
   return {
@@ -24,14 +19,14 @@ export function createLoopbackTransport(gateway: NativeGateway): GatewayTranspor
       try {
         return wire(await gateway.call(wire(request)));
       } catch (err) {
-        throw asGatewayError(err);
+        throw toGatewayError(err);
       }
     },
     async *stream(request: GatewayRequest): AsyncIterable<LlmStreamEvent> {
       try {
         for await (const event of gateway.stream(wire(request))) yield wire(event);
       } catch (err) {
-        throw asGatewayError(err);
+        throw toGatewayError(err);
       }
     },
   };
