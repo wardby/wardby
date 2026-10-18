@@ -47,6 +47,7 @@ import { scopeDatastore } from "../providers/datastore/scoped.js";
 import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
 import { buildSharedDatastoreAccessor, scopeSharedDatastoreAccessor } from "./datastores.js";
 import { effectiveBudgetForRun, type EffectiveBudgetOptions } from "./budget-groups.js";
+import { stopChildrenOfLostRun } from "./lost-run-children.js";
 import { createDelegationSiblings } from "./delegation-siblings.js";
 import { findDelegationChild } from "./delegation-child.js";
 import { DRIVABLE } from "./run-status.js";
@@ -1655,6 +1656,7 @@ export async function loseNativeRun(ctx: NativeRunFinishContext, reason: string)
     error: reason,
     finishedAt: new Date(),
   });
+  if (claimed) await stopChildrenOfLostRun(ctx.db, ctx.providers.executor, ctx.runId);
   return settleFinishedNativeRun(ctx, finished, claimed);
 }
 

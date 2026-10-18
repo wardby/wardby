@@ -37,6 +37,7 @@ import { emitRunFinishedEvents } from "../../core/workflow-run-events.js";
 import { prisma as defaultDb } from "../../core/db.js";
 import { HEARTBEAT_INTERVAL_MS } from "../../core/timing.js";
 import { DRIVABLE } from "../../core/run-status.js";
+import { stopChildrenOfLostRun } from "../../core/lost-run-children.js";
 import { logger } from "../../core/logger.js";
 import { type DatabaseAuth, type PgAuthOptions, databaseAuthFromEnv, pgConnectionConfig } from "../../core/pg-auth.js";
 import {
@@ -535,6 +536,7 @@ export class DbosExecutor implements Executor {
       if (err instanceof StepReplayMismatchError) {
         dbosLog.warn({ err, runId }, "replay no longer matches the recorded run");
         if (await failNativeRunAsLost(this.db, runId, STEPS_CHANGED_REASON)) {
+          await stopChildrenOfLostRun(this.db, this.providers.executor, runId);
           await fileSelfDefectForRun(this.selfDefects, runId);
           const lost = await this.db.run.findUnique({ where: { id: runId } });
           if (lost) await emitRunFinishedEvents(this.db, lost);

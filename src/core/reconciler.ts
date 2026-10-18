@@ -49,6 +49,7 @@ import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import { HEARTBEAT_TIMEOUT_MS, RECONCILE_INTERVAL_MS } from "./timing.js";
 import { prisma as defaultDb } from "./db.js";
 import { logger } from "./logger.js";
+import { stopChildrenOfLostRun } from "./lost-run-children.js";
 import { closeOpenHostCheck } from "./review-host-checks.js";
 import { completeHostStatus, type HostStatusDb } from "./host-status.js";
 import { closeOrphanedIssueStatuses } from "./issue-status.js";
@@ -261,6 +262,7 @@ export async function reconcileOnce(
       });
       lost += result.count;
       if (result.count > 0) {
+        await stopChildrenOfLostRun(db, executor, run.id);
         await fileSelfDefect(
           db,
           issueTrackers,
@@ -285,6 +287,7 @@ export async function reconcileOnce(
     lost += result.count;
     // Only after this pass made the row lost (not when another instance won the race); bounded, never throws.
     if (result.count > 0) {
+      await stopChildrenOfLostRun(db, executor, run.id);
       await fileSelfDefect(
         db,
         issueTrackers,
