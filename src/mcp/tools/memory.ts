@@ -8,6 +8,8 @@
 import type { WardbyMcpServer } from "../server.js";
 import { requireAgentAccess } from "../auth/access.js";
 import { textResult } from "./text-result.js";
+import { SecretInValueError, SecretCheckUnavailableError } from "../../core/secret-guard.js";
+import { McpError } from "../errors.js";
 
 export function registerMemoryTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
@@ -50,7 +52,14 @@ export function registerMemoryTools(mcp: WardbyMcpServer): void {
     },
     handler: async (args: { agentId: string; key: string; content: string }, ctx) => {
       await requireAgentAccess(ctx, args.agentId, "owner");
-      await ctx.providers.memory.set(args.agentId, args.key, args.content);
+      try {
+        await ctx.providers.memory.set(args.agentId, args.key, args.content);
+      } catch (err) {
+        if (err instanceof SecretInValueError || err instanceof SecretCheckUnavailableError) {
+          throw new McpError(400, err.message);
+        }
+        throw err;
+      }
       return textResult({ ok: true });
     },
   });

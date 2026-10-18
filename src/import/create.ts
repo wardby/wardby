@@ -13,6 +13,15 @@ import type { SecretCipher } from "../providers/secrets/types.js";
 import { scheduleStartFields } from "../core/schedule-start.js";
 import { createSecret, attachSecret } from "../core/secrets.js";
 import { createDatastore, attachDatastore } from "../core/datastores.js";
+import { guardDatastore } from "../core/secret-guarded-stores.js";
+import {
+  SecretCheckUnavailableError,
+  SecretInValueError,
+  createDbSecretWriteGuard,
+  loadAgentSecretValues,
+  secretNamesIn,
+  type NamedSecretValues,
+} from "../core/secret-guard.js";
 import { createWebhook } from "../core/webhooks.js";
 import { deriveJsonSchema } from "../sandbox/zod-params.js";
 import { findSameNamedAttachedTool, reservedToolNameReason } from "../core/tool-names.js";
@@ -58,6 +67,11 @@ function nativeSandboxConfigured(): boolean {
   } catch {
     return false;
   }
+}
+
+/** A seeded entry's key for a warning; withheld when the entry was refused over a secret (the key may hold it). */
+function seedKeyLabel(key: string, err: unknown): string {
+  return err instanceof SecretInValueError || err instanceof SecretCheckUnavailableError ? "<key withheld>" : key;
 }
 
 export async function createFromBundle(
@@ -323,7 +337,7 @@ export async function createFromBundle(
   }
 
   // Step 6: Per-agent datastore seed
-  const ds = new PostgresDatastore(db, cipher);
+  const ds = guardDatastore(new PostgresDatastore(db, cipher), createDbSecretWriteGuard(db, cipher));
   for (const d of bundle.readSingleDatastores()) {
     const agentId = agentIdMap.get(d.agentName);
     if (!agentId) continue;
@@ -334,7 +348,7 @@ export async function createFromBundle(
         datastoreEntries++;
       } catch (err) {
         warnings.push(
-          `datastore ${d.agentName}/${entry.key}: failed to set (${err instanceof Error ? err.message : String(err)})`,
+          `datastore ${d.agentName}/${seedKeyLabel(entry.key, err)}: failed to set (${err instanceof Error ? err.message : String(err)})`,
         );
       }
     }
@@ -348,6 +362,13 @@ export async function createFromBundle(
     }
   } else {
     const owner = ownerId; // hasOwner guarantees non-null
+    // The import is one writer for shared seeds: check them against the secrets
+    // of every agent it created, loaded once and fail closed if unreadable.
+    let importedSecrets: Promise<NamedSecretValues[]> | undefined;
+    const loadImportedSecrets = () =>
+      (importedSecrets ??= Promise.all(
+        [...agentIdMap.values()].map((id) => loadAgentSecretValues(db, cipher, id)),
+      ).then((all) => all.flat()));
     for (const sd of bundle.readSharedDatastores()) {
       let created: Awaited<ReturnType<typeof createDatastore>>;
       try {
@@ -371,12 +392,20 @@ export async function createFromBundle(
 
       for (const entry of sd.entries) {
         try {
+          let named: NamedSecretValues[];
+          try {
+            named = await loadImportedSecrets();
+          } catch {
+            throw new SecretCheckUnavailableError();
+          }
+          const names = secretNamesIn([entry.key, entry.value], named);
+          if (names.length > 0) throw new SecretInValueError(names);
           await db.datastoreEntry.create({
             data: { datastoreId: created.id, key: entry.key, value: entry.value as Prisma.InputJsonValue, pii: false },
           });
         } catch (err) {
           warnings.push(
-            `shared-datastore ${sd.name}/${entry.key}: failed to seed (${err instanceof Error ? err.message : String(err)})`,
+            `shared-datastore ${sd.name}/${seedKeyLabel(entry.key, err)}: failed to seed (${err instanceof Error ? err.message : String(err)})`,
           );
         }
       }

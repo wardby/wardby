@@ -6,6 +6,8 @@ import { buildMcpServer } from "../server.js";
 import { registerDatastoreTools } from "./datastore.js";
 import type { McpRequestContext } from "../context.js";
 import type { DatastoreValue } from "../../providers/index.js";
+import { createSecretWriteGuard } from "../../core/secret-guard.js";
+import { guardDatastore } from "../../core/secret-guarded-stores.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 
 const CANONICAL_URI = "https://host/mcp";
@@ -655,6 +657,54 @@ describe("shared datastore tools", () => {
     await client.callTool({ name: "datastore_set", arguments: { agentId: "a1", key: "k1", value: "private-v" } });
     const getResult = await client.callTool({ name: "datastore_get", arguments: { agentId: "a1", key: "k1" } });
     expect(parseText(getResult as never)).toEqual({ value: "private-v" });
+    await client.close();
+  });
+});
+
+describe("secret-bearing datastore writes", () => {
+  async function setup() {
+    const db = fakeDb([{ id: "a1", ownerId: "p1" }]);
+    const raw = fakeDatastore();
+    const datastore = guardDatastore(
+      raw,
+      createSecretWriteGuard({ load: async () => [{ name: "API_KEY", values: ["fake-secret-value-1234"] }] }),
+    ) as unknown as ReturnType<typeof fakeDatastore>;
+    const mcp = buildMcpServer({ providers: { datastore } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, datastore, "p1", ["agents:read", "datastore:write"]));
+    registerDatastoreTools(mcp);
+    return { raw, client: await connectClient(mcp) };
+  }
+
+  function expectRefusal(result: { isError?: boolean; content: unknown }) {
+    expect(result.isError).toBe(true);
+    const text = (result.content as { text: string }[])[0].text;
+    expect(text).toContain("API_KEY");
+    expect(text).toContain("secret_in_value");
+    expect(text).not.toContain("fake-secret-value-1234");
+  }
+
+  it("datastore_set refuses a private value holding an attached secret", async () => {
+    const { raw, client } = await setup();
+    const result = await client.callTool({
+      name: "datastore_set",
+      arguments: { agentId: "a1", key: "k1", value: { token: "fake-secret-value-1234" } },
+    });
+    expectRefusal(result);
+    expect(await raw.get("a1", "k1")).toBeUndefined();
+    await client.close();
+  });
+
+  it("datastore_set with boundName refuses a value holding an attached secret", async () => {
+    const { raw, client } = await setup();
+    const created = await client.callTool({ name: "create_datastore", arguments: { name: "shared-kb" } });
+    const { id: datastoreId } = parseText(created as never) as { id: string };
+    await client.callTool({ name: "attach_datastore", arguments: { agentId: "a1", datastoreId } });
+    const result = await client.callTool({
+      name: "datastore_set",
+      arguments: { agentId: "a1", key: "k1", value: "fake-secret-value-1234", boundName: "shared-kb" },
+    });
+    expectRefusal(result);
+    expect(await raw.getShared(datastoreId, "k1")).toBeUndefined();
     await client.close();
   });
 });

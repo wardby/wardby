@@ -389,3 +389,16 @@ describe("pnpm and yarn help", () => {
     }
   });
 });
+
+describe("secret in value help", () => {
+  it("is found for the error codes and the obvious datastore and memory queries", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const id = "errors/secret-in-value";
+    for (const query of ["secret_in_value", "secret_check_unavailable", "datastore secret", "memory secret"]) {
+      expect(searchHelp(catalog, query)[0]?.page.id, query).toBe(id);
+    }
+    expect(catalog.pages.find((entry) => entry.id === id)?.markdown).toContain("`secret_in_value`");
+  });
+});

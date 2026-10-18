@@ -1,9 +1,11 @@
 import { SANDBOX_PRELUDE } from "./prelude.js";
-import { LOCAL_BRIDGE_NAMES, PRIVILEGED_BRIDGE_NAMES } from "./host-functions.js";
+import { createPrivilegedHost, LOCAL_BRIDGE_NAMES, PRIVILEGED_BRIDGE_NAMES } from "./host-functions.js";
 import { describe, expect, it, vi } from "vitest";
 import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
 import type { SecretsAccessor } from "../core/secrets.js";
-import type { SharedDatastoreAccessor } from "../core/datastores.js";
+import { buildSharedDatastoreAccessor, type SharedDatastoreAccessor } from "../core/datastores.js";
+import { createSecretWriteGuard } from "../core/secret-guard.js";
+import { guardDatastore } from "../core/secret-guarded-stores.js";
 import { runInSandbox } from "./run-in-sandbox.js";
 import type { SecretBrokerConfig } from "../core/secret-broker-config.js";
 import type { safeFetch } from "./safe-fetch.js";
@@ -550,5 +552,55 @@ describe("brokered secrets through fetch", () => {
     const serialized = JSON.stringify(calls);
     expect(serialized).toContain("[REDACTED]");
     expect(serialized).not.toContain("ghp_secretvalue");
+  });
+});
+
+describe("datastore writes holding an attached secret's value", () => {
+  const VALUE = "fake-secret-value-1234";
+  const guard = createSecretWriteGuard({ load: async () => [{ name: "API_KEY", values: [VALUE] }] });
+  const inner = fakeDatastore();
+  const setShared = vi.spyOn(inner, "setShared");
+  const set = vi.spyOn(inner, "set");
+  const db = {
+    agentDatastore: {
+      findFirst: async () => ({ datastoreId: "ds1", datastore: { ownerId: "o" }, agent: { ownerId: "o" } }),
+    },
+  } as unknown as Parameters<typeof buildSharedDatastoreAccessor>[2];
+  const guarded = guardDatastore(inner, guard);
+  const host = createPrivilegedHost({
+    agentId: "a",
+    datastore: guarded,
+    sharedDatastore: buildSharedDatastoreAccessor("a", guarded, db),
+    logTag: "t",
+    secrets: fakeSecrets({}),
+  });
+
+  it.each([
+    ["__bridge_datastoreSet", ["k", VALUE]],
+    ["__bridge_sharedDatastoreSet", ["bound", "k", { nested: `x ${VALUE}` }]],
+  ] as const)("%s rejects with the secret's name and not its value", async (bridge, callArgs) => {
+    const err = await host[bridge](JSON.stringify(callArgs)).catch((e: unknown) => e as Error);
+    expect(err).toBeInstanceOf(Error);
+    const message = (err as Error).message;
+    expect(message).toContain('secret "API_KEY"');
+    expect(message).not.toContain(VALUE);
+    expect(set).not.toHaveBeenCalled();
+    expect(setShared).not.toHaveBeenCalled();
+  });
+
+  it("lets tool code see the refusal as the bridge error message, without the value", async () => {
+    const result = await runInSandbox({
+      code: `try { await datastore.set("k", ${JSON.stringify(VALUE)}); return "stored"; } catch (e) { return String(e.message); }`,
+      params: {},
+      agentId: "a",
+      datastore: guarded,
+      sharedDatastore: fakeSharedDatastore(),
+      secrets: fakeSecrets({}),
+      toolName: "t",
+    });
+    expect(result).toMatchObject({ ok: true });
+    const text = JSON.stringify(result);
+    expect(text).toContain('secret \\"API_KEY\\"');
+    expect(text).not.toContain(VALUE);
   });
 });

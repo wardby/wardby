@@ -46,6 +46,13 @@ import type { PrismaGatewayLedger } from "../native-worker/ledger.js";
 import { asStringArray, asPrefixMap } from "../sandbox/tool-capabilities.js";
 import { scopeDatastore } from "../providers/datastore/scoped.js";
 import { buildSecretsAccessor, scopeSecretsAccessor, type SecretsAccessor } from "./secrets.js";
+import {
+  loadAgentSecretValues,
+  maskNamedSecrets,
+  POSTING_TOOL_NAMES,
+  SECRET_CHECK_UNAVAILABLE_MESSAGE,
+  WITHHELD_TEXT_NOTICE,
+} from "./secret-guard.js";
 import { buildSharedDatastoreAccessor, scopeSharedDatastoreAccessor } from "./datastores.js";
 import { effectiveBudgetForRun, type EffectiveBudgetOptions } from "./budget-groups.js";
 import { stopChildrenOfLostRun } from "./lost-run-children.js";
@@ -1123,7 +1130,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
     }
   };
 
-  const builtinHandler = (name: string): BuiltinToolHandler | undefined => {
+  const unguardedBuiltinHandler = (name: string): BuiltinToolHandler | undefined => {
     if (loaded.memoryEnabled && MEMORY_TOOL_NAMES.has(name)) {
       return async (argsJson: string): Promise<string> => {
         return handleMemoryTool(name, argsJson, loaded.agentId, providers.memory);
@@ -1528,6 +1535,30 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
   };
 
   /**
+   * The only route to a built-in tool, in both execution modes (the in-process loop and the native
+   * gateway's builtin.call). A tool that posts model-written text to a host, and a delegate_to_*
+   * call (its task text becomes the child run's stored task), has every attached secret's value
+   * masked in its arguments first; when the secrets cannot be read the call is refused and
+   * neither the host nor a child run is reached. (The native gateway serves delegate_to_* through
+   * durableDelegate, which masks the same way.)
+   */
+  const builtinHandler = (name: string): BuiltinToolHandler | undefined => {
+    const handler = unguardedBuiltinHandler(name);
+    if (!handler || !(POSTING_TOOL_NAMES.has(name) || name.startsWith(DELEGATE_TOOL_PREFIX))) return handler;
+    return async (argsJson: string, toolCallId?: string): Promise<string> => {
+      const masked = await maskModelWrittenArgs(
+        { db, secrets: providers.secrets, agentId: loaded.agentId, runId },
+        name,
+        argsJson,
+      );
+      if (masked === undefined) {
+        return JSON.stringify({ error: "secret_check_unavailable", message: SECRET_CHECK_UNAVAILABLE_MESSAGE });
+      }
+      return handler(masked, toolCallId);
+    };
+  };
+
+  /**
    * The privileged host for one call of the user tool `name`, scoped to that attachment's
    * consented capabilities. Undefined for a name that is not an attached user tool. In-process it
    * serves the sandbox directly; the native sandbox gateway serves a worker's bridge calls with it.
@@ -1622,6 +1653,46 @@ export interface NativeRunFinishContext {
   issueTrackers: IssueTrackerRegistry | undefined;
 }
 
+interface RunTexts {
+  finalText?: string | null;
+  error?: string | null;
+}
+
+/**
+ * `texts` with every value of every secret attached to the run's agent masked, for a terminal
+ * write: the stored row is what get_run, the viewer, host and issue status comments and run
+ * notifications all read. Fails closed: when the secrets cannot be read, every non-null text is
+ * replaced by WITHHELD_TEXT_NOTICE (the log line carries no text and no error message). A pure
+ * function of the stored secrets, so a durable replay writes the same row.
+ */
+async function maskRunTexts(
+  ctx: Pick<NativeRunFinishContext, "runId" | "db" | "providers">,
+  texts: RunTexts,
+): Promise<RunTexts> {
+  const entries = Object.entries(texts) as [keyof RunTexts, string | null | undefined][];
+  if (!entries.some(([, text]) => typeof text === "string" && text.length > 0)) return texts;
+  let mask: (text: string) => string;
+  try {
+    const row = await ctx.db.run.findUnique({ where: { id: ctx.runId }, select: { agentId: true } });
+    if (!row) throw new Error("run not found");
+    const named = await loadAgentSecretValues(ctx.db, ctx.providers.secrets, row.agentId);
+    mask = (text) => maskNamedSecrets(text, named);
+  } catch (err) {
+    runnerLog.warn(
+      {
+        runId: ctx.runId,
+        event: "run_text_secret_check_failed",
+        errorName: err instanceof Error ? err.name : typeof err,
+      },
+      "could not read the agent's secrets to check the run's final text and error; storing the withheld notice",
+    );
+    mask = () => WITHHELD_TEXT_NOTICE;
+  }
+  return Object.fromEntries(
+    entries.map(([key, text]) => [key, typeof text === "string" && text.length > 0 ? mask(text) : text]),
+  );
+}
+
 /** Everything after the terminal write, shared by the normal and backstop paths. */
 async function settleFinishedNativeRun(ctx: NativeRunFinishContext, finished: Run, claimed: boolean): Promise<Run> {
   const { runId, db, providers, reviewHosts, repoAccess, issueTrackers } = ctx;
@@ -1670,13 +1741,14 @@ async function settleFinishedNativeRun(ctx: NativeRunFinishContext, finished: Ru
 
 /** The terminal write for an engine result, then its usage, host/issue status, and follow-ups. */
 export async function finishNativeRun(ctx: NativeRunFinishContext, model: string, result: EngineResult): Promise<Run> {
+  const texts = await maskRunTexts(ctx, { error: result.error ?? null, finalText: result.finalText || null });
   const { run: finished, claimed } = await finishRunClaimed(ctx.db, ctx.runId, {
     status: result.status,
     tokensIn: result.usage.tokensIn,
     tokensOut: result.usage.tokensOut,
     costUsd: result.usage.costUsd,
-    error: result.error ?? null,
-    finalText: result.finalText || null,
+    error: texts.error,
+    finalText: texts.finalText,
     turns: result.turns,
     finishedAt: new Date(),
   });
@@ -1687,9 +1759,10 @@ export async function finishNativeRun(ctx: NativeRunFinishContext, model: string
 
 /** The backstop terminal write for a run that threw. A cancellation is not a failure: it carries the operator's own reason. */
 export async function failNativeRun(ctx: NativeRunFinishContext, err: unknown): Promise<Run> {
+  const { error } = await maskRunTexts(ctx, { error: err instanceof Error ? err.message : String(err) });
   const { run: finished, claimed } = await finishRunClaimed(ctx.db, ctx.runId, {
     status: err instanceof RunCancelledError || err instanceof SandboxRunCancelledError ? "cancelled" : "failed",
-    error: err instanceof Error ? err.message : String(err),
+    error,
     finishedAt: new Date(),
   });
   return settleFinishedNativeRun(ctx, finished, claimed);
@@ -1697,9 +1770,10 @@ export async function failNativeRun(ctx: NativeRunFinishContext, err: unknown): 
 
 /** The terminal write for a run that cannot continue (it ends `lost` with `reason`), then the same settle path. */
 export async function loseNativeRun(ctx: NativeRunFinishContext, reason: string): Promise<Run> {
+  const { error } = await maskRunTexts(ctx, { error: reason });
   const { run: finished, claimed } = await finishRunClaimed(ctx.db, ctx.runId, {
     status: "lost",
-    error: reason,
+    error,
     finishedAt: new Date(),
   });
   if (claimed) await stopChildrenOfLostRun(ctx.db, ctx.providers.executor, ctx.runId);
@@ -1772,6 +1846,32 @@ export interface DurableDelegationContext {
 }
 
 export type DurableDelegationOutcome = { result: string } | { pending: true };
+
+/**
+ * A tool call's model-written arguments with every secret value attached to the agent masked, or
+ * undefined (logged by error name only) when the secrets cannot be read and the call must be refused.
+ */
+async function maskModelWrittenArgs(
+  ctx: { db: RunnerDb; secrets: NativeRunProviders["secrets"]; agentId: string; runId: string },
+  tool: string,
+  argsJson: string,
+): Promise<string | undefined> {
+  try {
+    const named = await loadAgentSecretValues(ctx.db, ctx.secrets, ctx.agentId);
+    return maskNamedSecrets(argsJson, named);
+  } catch (err) {
+    runnerLog.warn(
+      {
+        runId: ctx.runId,
+        tool,
+        event: "post_secret_check_failed",
+        errorName: err instanceof Error ? err.name : typeof err,
+      },
+      "could not read the agent's secrets to check a posted text; refusing the call",
+    );
+    return undefined;
+  }
+}
 
 /** Long-poll window: well under common proxy and load-balancer idle timeouts. */
 export const DELEGATION_POLL_WINDOW_MS = 20_000;
@@ -1849,6 +1949,20 @@ export async function durableDelegate(
   }
 
   if (!childRunId) {
+    // About to create a child: its task is model-written and stored, so mask the parent's secret
+    // values first. Only here, never on a poll of an existing child (a transient secret-read
+    // failure must not orphan a running child). Recorded as the call's result, which also completes a waiting row; the model's retry comes with a new callId.
+    const maskedArgsJson = await maskModelWrittenArgs(
+      { db, secrets: providers.secrets, agentId: loaded.agentId, runId },
+      name,
+      argsJson,
+    );
+    if (maskedArgsJson === undefined) {
+      return finish(JSON.stringify({ error: "secret_check_unavailable", message: SECRET_CHECK_UNAVAILABLE_MESSAGE }));
+    }
+    const maskedArgs = parseDelegateArgs(maskedArgsJson);
+    if ("refusal" in maskedArgs) return finish(maskedArgs.refusal);
+    const dispatchArgs = maskedArgs.args;
     const limit = loaded.maxDelegationsPerRun ?? 1;
     const refusalNow = async (reader: { run: { findMany: RunnerDb["run"]["findMany"] } }) => {
       const prior = await reader.run.findMany({ where: { parentRunId: runId }, select: { agentId: true } });
@@ -1897,8 +2011,15 @@ export async function durableDelegate(
         agentId: edge.childAgentId,
         trigger: "subagent",
         ...(coding
-          ? { codingTask: args.task, continuesCodingRunId: args.continuePriorRun, mergeOrder: args.mergeOrder }
-          : { taskOverride: delegationTaskOverride(args), grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [] }),
+          ? {
+              codingTask: dispatchArgs.task,
+              continuesCodingRunId: dispatchArgs.continuePriorRun,
+              mergeOrder: dispatchArgs.mergeOrder,
+            }
+          : {
+              taskOverride: delegationTaskOverride(dispatchArgs),
+              grantedParentMemoryKeys: dispatchArgs.grantParentMemoryKeys ?? [],
+            }),
         parentRunId: runId,
         parentCallId: callId,
         // The child's result flows back into this run, which the triggerer sees, so the child is visible to them too.
@@ -2150,7 +2271,8 @@ async function executeTrackedRun(
   // admin disabled or removed the model, or this deployment has no coding or native sandbox
   // executor), and filing would open one defect per affected agent rather than describe a failure
   // of that agent.
-  const finishEarly = async (error: string): Promise<Run> => {
+  const finishEarly = async (reason: string): Promise<Run> => {
+    const { error } = await maskRunTexts({ runId, db, providers }, { error: reason });
     const finished = await finishRun(db, runId, { status: "failed", error, finishedAt: new Date() });
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);

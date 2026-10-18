@@ -4,6 +4,7 @@ import {
   checkedEvents,
   CONSOLE_WITHHELD_MESSAGE,
   failureResponse,
+  finish,
   hostCall,
   runSecretValues,
   serveGatewayRequest,
@@ -271,5 +272,59 @@ describe("console bridge when the tool's redaction list cannot be read", () => {
     expect(consoleCalls.length).toBe(0);
     expect(JSON.stringify(warned).includes(FAKE_CONSOLE)).toBe(false);
     expect(warned).toEqual([[{ tool: "lookup" }, CONSOLE_WITHHELD_MESSAGE]]);
+  });
+});
+
+describe("the worker's finish call", () => {
+  // Fake value only; the assertion checks the stored row never holds it.
+  const FAKE_KEY = "fake-secret-value-1234";
+
+  it("stores the final text and error with the attached secret's value masked", async () => {
+    const row: Record<string, unknown> = { id: "run_1", agentId: "a1", status: "running", parentRunId: null };
+    const db = {
+      run: {
+        findUnique: async () => row,
+        findUniqueOrThrow: async () => row,
+        updateMany: async ({ data }: { data: Record<string, unknown> }) => {
+          Object.assign(row, data);
+          return { count: 1 };
+        },
+      },
+      agentSecret: {
+        findMany: async () => [{ boundName: "API_KEY" }],
+        findFirst: async () => ({ secret: { ciphertext: FAKE_KEY, ownerId: "p1" }, agent: { ownerId: "p1" } }),
+      },
+      runModelUsage: { upsert: async () => ({}) },
+    };
+    const secrets = { keyId: () => "k1", encrypt: async (v: string) => v, decrypt: async (v: string) => v };
+    const ctx = {
+      session: { id: "sess_1" },
+      snapshot: { input: { agent: { model: MODEL } } },
+      finishContext: {
+        runId: "run_1",
+        db,
+        providers: { secrets },
+        reviewHosts: undefined,
+        repoAccess: undefined,
+        issueTrackers: undefined,
+      },
+    } as unknown as Parameters<typeof finish>[0];
+    const ledger = {
+      claim: async () => ({ outcome: "claimed" }),
+      totals: async () => ({ tokensIn: 0, tokensOut: 0, costUsd: 0, cachedInputTokens: 0, cacheWriteTokens: 0 }),
+      recordResult: async () => undefined,
+      endSession: async () => undefined,
+    } as unknown as Parameters<typeof finish>[1];
+    await finish(ctx, ledger, "call_1", {
+      status: "failed",
+      finalText: `the key is ${FAKE_KEY}`,
+      error: `failed with ${FAKE_KEY}`,
+      turns: 1,
+    });
+    expect({ status: row.status, finalText: row.finalText, error: row.error }).toEqual({
+      status: "failed",
+      finalText: "the key is [REDACTED]",
+      error: "failed with [REDACTED]",
+    });
   });
 });

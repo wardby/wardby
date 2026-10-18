@@ -57,6 +57,9 @@ function fakeDb(agents: FakeAgent[], runs: Record<string, any>): RunnerDb {
     agentTool: {
       findMany: (async () => []) as any,
     },
+    agentSecret: {
+      findMany: (async () => []) as any,
+    },
     agentSubAgent: {
       findFirst: (async () => null) as any,
       findMany: (async () => []) as any,

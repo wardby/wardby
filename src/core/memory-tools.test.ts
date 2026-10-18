@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentMemoryStore, AgentMemorySearchHit } from "../providers/memory/types.js";
+import { SecretCheckUnavailableError, SecretInValueError } from "./secret-guard.js";
 import { MEMORY_TOOL_DEFS, MEMORY_TOOL_NAMES, handleMemoryTool } from "./memory-tools.js";
 
 function fakeMemory(): AgentMemoryStore & { store: Map<string, string> } {
@@ -103,5 +104,37 @@ describe("handleMemoryTool", () => {
     const memory = fakeMemory();
     const result = await handleMemoryTool("memory_set", JSON.stringify({ key: "k", content: "TOO_BIG" }), "a1", memory);
     expect(JSON.parse(result)).toMatchObject({ error: "memory_content_limit" });
+  });
+});
+
+describe("memory_set secret refusals", () => {
+  it("returns secret_in_value with the secret name and not the value, storing nothing", async () => {
+    const memory = fakeMemory();
+    memory.set = async () => {
+      throw new SecretInValueError(["API_KEY"]);
+    };
+    const out = await handleMemoryTool(
+      "memory_set",
+      JSON.stringify({ key: "k", content: "fake-secret-value-1234" }),
+      "a1",
+      memory,
+    );
+    const parsed = JSON.parse(out) as { error: string; message: string; secretNames: string[] };
+    expect(parsed.error).toBe("secret_in_value");
+    expect(parsed.message).toContain("API_KEY");
+    expect(parsed.secretNames).toEqual(["API_KEY"]);
+    expect(out).not.toContain("fake-secret-value-1234");
+    expect(memory.store.size).toBe(0);
+  });
+
+  it("returns secret_check_unavailable", async () => {
+    const memory = fakeMemory();
+    memory.set = async () => {
+      throw new SecretCheckUnavailableError();
+    };
+    const out = await handleMemoryTool("memory_set", JSON.stringify({ key: "k", content: "x" }), "a1", memory);
+    const parsed = JSON.parse(out) as { error: string; message: string };
+    expect(parsed.error).toBe("secret_check_unavailable");
+    expect(parsed.message).toContain("secret_check_unavailable");
   });
 });

@@ -13,6 +13,7 @@ import {
 } from "../../core/datastores.js";
 import { McpError } from "../errors.js";
 import { textResult } from "./text-result.js";
+import { SecretInValueError, SecretCheckUnavailableError } from "../../core/secret-guard.js";
 
 /**
  * A `boundName` names an *attachment* (agentId, boundName) -> Datastore.
@@ -224,14 +225,21 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
       ctx,
     ) => {
       await requireAgentAccess(ctx, args.agentId, "owner");
-      if (args.boundName) {
-        await requireMutableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id);
-        const accessor = buildSharedDatastoreAccessor(args.agentId, ctx.providers.datastore, ctx.db);
-        await accessor.set(args.boundName, args.key, args.value, { pii: args.pii });
+      try {
+        if (args.boundName) {
+          await requireMutableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id);
+          const accessor = buildSharedDatastoreAccessor(args.agentId, ctx.providers.datastore, ctx.db);
+          await accessor.set(args.boundName, args.key, args.value, { pii: args.pii });
+          return textResult({ ok: true });
+        }
+        await ctx.providers.datastore.set(args.agentId, args.key, args.value, { pii: args.pii });
         return textResult({ ok: true });
+      } catch (err) {
+        if (err instanceof SecretInValueError || err instanceof SecretCheckUnavailableError) {
+          throw new McpError(400, err.message);
+        }
+        throw err;
       }
-      await ctx.providers.datastore.set(args.agentId, args.key, args.value, { pii: args.pii });
-      return textResult({ ok: true });
     },
   });
 
