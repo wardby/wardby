@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { STDERR_WITHHELD_MARKER } from "./stderr-redaction.js";
 import type { WorkerInput } from "./protocol.js";
 import { WARM_DELIVERY_ALREADY_DELIVERED, WARM_WORKER_UNCLAIMED_EXIT, warmDeliveryCommand } from "./warm-delivery.js";
 
@@ -322,7 +323,7 @@ describe("native worker stderr redaction", () => {
     expect(stderr.endsWith("[REDACTED]\n")).toBe(true);
   }, 30_000);
 
-  it("keeps the pending buffer bounded for a self-overlapping value repeated without a newline", async () => {
+  it("withholds text it cannot split safely for a self-overlapping value, then still redacts the value", async () => {
     const value = "abababab";
     const child = spawn(
       process.execPath,
@@ -335,26 +336,29 @@ describe("native worker stderr redaction", () => {
           'import { installStderrRedaction, rememberSecretValue, MAX_PENDING_STDERR_CHARS } from "./src/native-worker/stderr-redaction.ts";',
           "installStderrRedaction();",
           `rememberSecretValue(${JSON.stringify(value)});`,
-          `process.stderr.write("ab".repeat(MAX_PENDING_STDERR_CHARS));`,
-          'process.stdin.on("data", () => {}); process.stdin.on("end", () => process.exit(0));',
+          'process.stderr.write("ab".repeat(MAX_PENDING_STDERR_CHARS) + "abab");',
+          // The rest of a value that began at the end of the first write.
+          'process.stdin.once("data", () => { process.stderr.write("abab\\n"); process.exit(0); });',
         ].join("\n"),
       ],
       { cwd: REPO_ROOT, env: {}, stdio: ["pipe", "ignore", "pipe"] },
     );
     let stderr = "";
-    const emitted = new Promise<void>((done) =>
+    const marked = new Promise<void>((done) =>
       child.stderr.on("data", (chunk: Buffer) => {
         stderr += chunk.toString();
-        if (stderr.length > 0) done();
+        if (stderr.includes(STDERR_WITHHELD_MARKER)) done();
       }),
     );
     const exited = new Promise<number | null>((done) => child.on("exit", done));
-    await Promise.race([emitted, exited]);
-    // Emitted by the bound while the child still runs, not by the exit flush.
+    await Promise.race([marked, exited]);
+    // Before the value is completed: only the marker is out, no prefix of the value, and the child still runs.
     expect(child.exitCode).toBeNull();
-    child.stdin.end();
+    expect(stderr === STDERR_WITHHELD_MARKER).toBe(true);
+    child.stdin.write("go");
     expect(await exited).toBe(0);
     expect(stderr.includes(value)).toBe(false);
+    expect(stderr.includes("[REDACTED]")).toBe(true);
   }, 30_000);
 });
 

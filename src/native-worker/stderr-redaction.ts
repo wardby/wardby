@@ -40,10 +40,13 @@ export function redactReceivedSecrets(text: string): string {
  * unterminated stream cannot grow the buffer without bound. The cut keeps back the last
  * (longest remembered value − 1) characters, so a value that has begun but not ended is held whole
  * until its end arrives; the buffer is therefore bounded by this plus the longest value. When the
- * safe cut falls back to 0 (a self-overlapping value repeated without a newline), the whole buffer
- * is emitted redacted instead, so the bound holds for every value.
+ * safe cut falls back to 0 (a self-overlapping value repeated without a newline), the text is
+ * withheld: a marker line is emitted and only the part that could still begin a value is kept.
  */
 export const MAX_PENDING_STDERR_CHARS = 64 * 1024;
+
+/** Emitted in place of buffered text that could not be split safely (see takeReady). */
+export const STDERR_WITHHELD_MARKER = "[stderr withheld: output could not be split safely]\n";
 
 /** The shared redactor's minimum: shorter values are never redacted, so they never constrain a cut. */
 const MIN_REDACTED_LENGTH = 6;
@@ -101,9 +104,15 @@ function takeReady(text: string): string {
   if (multiLine) cut = safeCut(pending, cut, true);
   if (pending.length - cut > MAX_PENDING_STDERR_CHARS) {
     cut = safeCut(pending, pending.length, true);
-    // A self-overlapping value can walk the cut back to 0 every time; the whole buffer is then
-    // emitted redacted (complete occurrences replaced), so the buffer stays bounded.
-    if (cut === 0) cut = pending.length;
+    // A self-overlapping value can walk the cut back to 0 every time. The buffer text is then not
+    // emitted at all (its tail may be the start of a value): a fixed marker line goes out instead,
+    // and only the last (longest value - 1) characters, the part that could still begin a value,
+    // are kept. Nothing unredacted is emitted and the buffer stays bounded.
+    if (cut === 0) {
+      const keep = Math.max(...redactable().map((value) => value.length)) - 1;
+      pending = pending.slice(Math.max(0, pending.length - keep));
+      return STDERR_WITHHELD_MARKER;
+    }
   }
   const ready = pending.slice(0, cut);
   pending = pending.slice(cut);
