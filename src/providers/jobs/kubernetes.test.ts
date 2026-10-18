@@ -12,11 +12,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Power } from "../../core/power.js";
 import { jobLauncherContract } from "./contract-suite.js";
 import { FakeKubernetesApi } from "./fake-kubernetes-api.js";
-import { KubernetesConflictError } from "./kubernetes-api.js";
+import { KubernetesConflictError, KubernetesQuotaExceededError } from "./kubernetes-api.js";
 import { KubernetesJobLauncher, hostTarArchive, type KubernetesJobLauncherOptions } from "./kubernetes.js";
 import { kubernetesRunNames } from "./kubernetes-isolation.js";
 import type { ServiceStateUpdate } from "./service-state.js";
-import type { JobHandle, JobSpec } from "./types.js";
+import { JobCapacityError, type JobHandle, type JobSpec } from "./types.js";
 
 const IMAGE = `localhost:5001/wardby-coding-worker@sha256:${"a".repeat(64)}`;
 const CAPABILITY = `rrp_${"c".repeat(32)}`;
@@ -2157,5 +2157,86 @@ describe("KubernetesJobLauncher capacity check", () => {
     };
     expect(await h.launcher.hasCapacityFor(h.spec)).toBe(true);
     expect(h.warnings.some((w) => w.startsWith("kubernetes_resource_quota_unreadable"))).toBe(true);
+  });
+});
+
+describe("KubernetesJobLauncher quota refusal", () => {
+  const recordPhase = (h: Awaited<ReturnType<typeof harness>>) => {
+    const map = h.api.objects.get(`configmap/wardby-coding/${h.names.record}`) as { data?: Record<string, string> };
+    return (JSON.parse(Object.values(map.data ?? {})[0] ?? "{}") as { phase?: string }).phase;
+  };
+  const refuse = (h: Awaited<ReturnType<typeof harness>>, quotaName?: string) => {
+    h.api.onCreatePod = async () => {
+      throw new KubernetesQuotaExceededError("exceeded quota: pod/wardby-coding/x", { cause: undefined, quotaName });
+    };
+  };
+
+  it("reports a quota refusal as a capacity error, cleans up, and records requeued", async () => {
+    const h = await harness();
+    refuse(h);
+    const error = await h.launcher.launch(h.spec).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(JobCapacityError);
+    expect((error as JobCapacityError).code).toBe("coding_capacity_exceeded");
+    expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+    expect(h.api.objects.has(`networkpolicy/wardby-coding/${h.names.policy}`)).toBe(false);
+    expect(h.api.objects.has(`secret/wardby-coding/${h.names.secret}`)).toBe(false);
+    expect(recordPhase(h)).toBe("requeued");
+  });
+
+  it("provisions afresh when launched again after a requeue", async () => {
+    const h = await harness();
+    refuse(h);
+    await h.launcher.launch(h.spec).catch(() => undefined);
+    expect((await h.launcher.status({ backend: "kubernetes", id: `wardby-coding/${h.names.token}` })).state).not.toBe(
+      "running",
+    );
+    h.api.onCreatePod = async () => {};
+    const handle = await h.launcher.launch(h.spec);
+    expect(handle).toEqual({ backend: "kubernetes", id: `wardby-coding/${h.names.token}` });
+    expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(true);
+    expect(["provisioning", "active"]).toContain(recordPhase(h));
+  });
+
+  it("rejects a different spec for a requeued run", async () => {
+    const h = await harness();
+    refuse(h);
+    await h.launcher.launch(h.spec).catch(() => undefined);
+    await expect(h.launcher.launch({ ...h.spec, timeoutSec: 901 })).rejects.toThrow("job_spec_conflict");
+  });
+
+  it("still records failed and rethrows for a non-quota provisioning error", async () => {
+    const h = await harness();
+    h.api.onCreatePod = async () => {
+      throw new Error("boom");
+    };
+    await expect(h.launcher.launch(h.spec)).rejects.toThrow("boom");
+    expect(recordPhase(h)).toBe("failed");
+  });
+
+  it("hints once, naming the refusing quota, when no resourceQuota is configured", async () => {
+    const h = await harness();
+    refuse(h, "wardby-coding");
+    await h.launcher.launch(h.spec).catch(() => undefined);
+    await h.launcher.launch(h.spec).catch(() => undefined);
+    const hints = h.warnings.filter((w) => w.startsWith("kubernetes_resource_quota_unconfigured"));
+    expect(hints).toHaveLength(1);
+    expect(hints[0]).toContain("KUBERNETES_RESOURCE_QUOTA=wardby-coding");
+  });
+
+  it("does not hint when resourceQuota is configured", async () => {
+    const h = await harness(undefined, { resourceQuota: "wardby-coding" });
+    refuse(h, "wardby-coding");
+    await h.launcher.launch(h.spec).catch(() => undefined);
+    expect(h.warnings.some((w) => w.startsWith("kubernetes_resource_quota_unconfigured"))).toBe(false);
+  });
+
+  it("leaves a malformed quota name out of the hint", async () => {
+    const h = await harness();
+    refuse(h, "Bad Name!;rm");
+    await h.launcher.launch(h.spec).catch(() => undefined);
+    const hint = h.warnings.find((w) => w.startsWith("kubernetes_resource_quota_unconfigured"));
+    expect(hint).toBeDefined();
+    expect(hint).not.toContain("Bad");
+    expect(hint).toContain("KUBERNETES_RESOURCE_QUOTA");
   });
 });

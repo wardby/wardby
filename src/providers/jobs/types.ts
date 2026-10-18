@@ -77,6 +77,16 @@ export interface JobResult {
  *   job is rejected so cleanup cannot silently become an implicit stop.
  * - no operation implicitly relaunches a missing, stopped, or removed job.
  */
+/** The backend has no room for this job right now (Kubernetes: the namespace ResourceQuota).
+ * Nothing of the run is left behind; the caller may retry the same spec later. */
+export class JobCapacityError extends Error {
+  readonly code = "coding_capacity_exceeded";
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "JobCapacityError";
+  }
+}
+
 export interface JobLauncher {
   /**
    * The handle `launch(spec)` will return, when a backend can derive it from the spec alone with no

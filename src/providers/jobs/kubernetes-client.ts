@@ -30,6 +30,7 @@ import {
   KubernetesConflictError,
   KubernetesForbiddenError,
   KubernetesNotFoundError,
+  KubernetesQuotaExceededError,
   type KubernetesApi,
   type KubernetesExecOptions,
 } from "./kubernetes-api.js";
@@ -74,6 +75,12 @@ async function deleteIgnoringMissing(remove: () => Promise<unknown>): Promise<vo
   }
 }
 
+/** The error's message plus its body as text, for matching only; never copied into a thrown message. */
+function bodyText(error: unknown): string {
+  const { body, message } = error as ApiException<unknown>;
+  return `${message}\n${typeof body === "string" ? body : JSON.stringify(body ?? "")}`;
+}
+
 async function create<T>(what: string, write: () => Promise<T>): Promise<T> {
   try {
     return await write();
@@ -81,6 +88,10 @@ async function create<T>(what: string, write: () => Promise<T>): Promise<T> {
     const code = statusCode(error);
     if (code === 409) throw new KubernetesAlreadyExistsError(what);
     if (code === 404) throw new KubernetesNotFoundError(what);
+    if (code === 403 && /exceeded quota/i.test(bodyText(error))) {
+      const quotaName = /exceeded quota: ([^\s,"\\]+)/i.exec(bodyText(error))?.[1];
+      throw new KubernetesQuotaExceededError(`exceeded quota: ${what}`, { cause: error, quotaName });
+    }
     throw error;
   }
 }

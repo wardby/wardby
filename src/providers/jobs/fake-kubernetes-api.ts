@@ -45,6 +45,8 @@ export class FakeKubernetesApi implements KubernetesApi {
   };
   /** The admission chain a dry-run create runs through. Default: echo the pod back unchanged. */
   onDryRunCreatePod: (namespace: string, body: V1Pod) => Promise<V1Pod> = async (_namespace, body) => body;
+  /** Runs at the start of every pod create; tests throw KubernetesQuotaExceededError (or anything) from it. */
+  onCreatePod: (namespace: string, body: V1Pod) => Promise<void> = async () => {};
   readonly deploymentPatches: Array<{ name: string; replicas?: number; annotations?: Record<string, string> }> = [];
   /** Deployment names whose patch throws KubernetesForbiddenError. */
   forbidden = new Set<string>();
@@ -117,6 +119,7 @@ export class FakeKubernetesApi implements KubernetesApi {
     this.delete("secret", namespace, name);
   }
   async createPod(namespace: string, body: V1Pod) {
+    await this.onCreatePod(namespace, body);
     return this.create("pod", namespace, body);
   }
   /**
