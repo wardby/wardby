@@ -169,6 +169,15 @@ describe("workerGatewayError", () => {
     expect(gatewayUnlisted.causeCode).toBeUndefined();
   });
 
+  it.each(["secret_in_value", "secret_check_unavailable"])(
+    "carries the declared secret-guard code %s",
+    async (code) => {
+      expect(GATEWAY_CAUSE_CODES.has(code)).toBe(true);
+      const err = await workerGatewayError(new Error(`${code}: not stored.`), secrets());
+      expect(err.causeCode).toBe(code);
+    },
+  );
+
   it("sends no cause code it could not check", async () => {
     expect((await workerGatewayError(new Error("coding_execution_not_configured"))).causeCode).toBeUndefined();
     const failing = async (): Promise<string[]> => Promise.reject(new Error("secret store down"));

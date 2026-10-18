@@ -23,6 +23,8 @@ import {
   loadGitHubVcsConfig,
 } from "../config/providers.js";
 import { prisma } from "../core/db.js";
+import { guardDatastore, guardAgentMemory } from "../core/secret-guarded-stores.js";
+import { createDbSecretWriteGuard } from "../core/secret-guard.js";
 import { waitForInFlightRuns } from "../core/in-flight-runs.js";
 import { NativeEngine } from "../core/engine-native.js";
 import { resolveLlmRegistrations, RoutingLlmProvider } from "../providers/llm/index.js";
@@ -182,8 +184,9 @@ export function buildMcpProviders(): McpProviderComposition {
   const llm = new RoutingLlmProvider(llmResult.registrations);
   const engine = new NativeEngine();
   const secrets = buildSecretCipher(providerConfig);
-  const datastore = new PostgresDatastore(prisma, secrets);
-  const memory = new PostgresAgentMemory(prisma);
+  const secretGuard = createDbSecretWriteGuard(prisma, secrets);
+  const datastore = guardDatastore(new PostgresDatastore(prisma, secrets), secretGuard);
+  const memory = guardAgentMemory(new PostgresAgentMemory(prisma), secretGuard);
   const reviewHosts = buildReviewHosts(process.env, prisma);
   const issueTrackers = buildIssueTrackers();
   const hostUserAuthorizers = buildHostUserAuthorizers();

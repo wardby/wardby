@@ -15,6 +15,11 @@ export interface DatastoreSetOptions {
    * for values that actually carry PII.
    */
   pii?: boolean;
+  /**
+   * Shared stores only: the agent doing the write, so the secret guard can
+   * check the value against that agent's attached secrets. Never persisted.
+   */
+  writerAgentId?: string;
 }
 
 export interface Datastore {

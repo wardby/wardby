@@ -10,6 +10,7 @@
  * agents' data.
  */
 import { z } from "zod";
+import { SecretInValueError, SecretCheckUnavailableError } from "./secret-guard.js";
 import type { LoadedTool } from "../providers/engine/types.js";
 import type { AgentMemoryStore } from "../providers/memory/types.js";
 import {
@@ -133,6 +134,12 @@ export async function handleMemoryTool(
         error: "validation_failed",
         message: err.issues.map((issue) => `${issue.path.join(".") || "input"}: ${issue.message}`).join("; "),
       });
+    }
+    if (err instanceof SecretInValueError) {
+      return JSON.stringify({ error: err.code, message: err.message, secretNames: err.secretNames });
+    }
+    if (err instanceof SecretCheckUnavailableError) {
+      return JSON.stringify({ error: err.code, message: err.message });
     }
     const code = err instanceof Error ? err.message : "memory_error";
     return JSON.stringify({ error: code, message: MEMORY_ERROR_MESSAGES[code] ?? code });

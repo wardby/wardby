@@ -63,6 +63,8 @@ import { PostgresAgentMemory } from "./providers/memory/index.js";
 import { buildSecretCipher } from "./providers/secrets/index.js";
 import type { ProviderRegistry } from "./providers/index.js";
 import { prisma } from "./core/db.js";
+import { guardDatastore, guardAgentMemory } from "./core/secret-guarded-stores.js";
+import { createDbSecretWriteGuard } from "./core/secret-guard.js";
 import { runAgent, type NativeRunProviders } from "./core/runner.js";
 import { cancelRunOnSignal } from "./core/run-heartbeat.js";
 import { buildIssueTrackers } from "./providers/issue-tracker/index.js";
@@ -144,11 +146,11 @@ function buildDatastore(cipher: ProviderRegistry["secrets"]): ProviderRegistry["
   if (config.datastore !== "postgres") {
     fail(`DATASTORE "${String(config.datastore)}" has no adapter yet (only "postgres").`);
   }
-  return new PostgresDatastore(prisma, cipher);
+  return guardDatastore(new PostgresDatastore(prisma, cipher), createDbSecretWriteGuard(prisma, cipher));
 }
 
-function buildMemory(): ProviderRegistry["memory"] {
-  return new PostgresAgentMemory(prisma);
+function buildMemory(cipher: ProviderRegistry["secrets"]): ProviderRegistry["memory"] {
+  return guardAgentMemory(new PostgresAgentMemory(prisma), createDbSecretWriteGuard(prisma, cipher));
 }
 
 function buildSecrets(): ProviderRegistry["secrets"] {
@@ -663,7 +665,7 @@ async function run(name: string | undefined): Promise<void> {
   const engine = buildEngine();
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
-  const memory = buildMemory();
+  const memory = buildMemory(secrets);
 
   let run;
   // Ctrl-C (or a SIGTERM) records the run as cancelled rather than leaving a
@@ -854,7 +856,7 @@ async function scheduler(args: string[]): Promise<void> {
   const engine = buildEngine();
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
-  const memory = buildMemory();
+  const memory = buildMemory(secrets);
   const reviewHosts = buildReviewHosts(process.env, prisma);
   const issueTrackers = buildIssueTrackers();
   const chat = buildChatProviders();
@@ -964,7 +966,7 @@ async function nativeGateway(): Promise<void> {
     engine: buildEngine(),
     datastore: buildDatastore(secrets),
     secrets,
-    memory: buildMemory(),
+    memory: buildMemory(secrets),
     reviewHosts,
     issueTrackers: buildIssueTrackers(),
     repoAccess: createRepoAccessGate({ db: prisma, hosts: reviewHosts }),

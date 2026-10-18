@@ -31,6 +31,9 @@ export function causeCodeOf(err: unknown): string | undefined {
  * - native_sandbox_unavailable: createRun/the router refusing a sandbox-mode agent with no sandbox executor
  *   (core/runner.ts).
  * - run_tree_exhausted: dispatchRun refusing a run whose tree budget is spent (core/dispatch.ts).
+ * - secret_in_value, secret_check_unavailable: the datastore and memory write guard refusing a value
+ *   that holds an attached secret's value (core/secret-guard.ts); the code carries only the name of
+ *   the secret, never its value, across the gateway.
  */
 export const GATEWAY_CAUSE_CODES: ReadonlySet<string> = new Set([
   "coding_execution_not_configured",
@@ -43,6 +46,8 @@ export const GATEWAY_CAUSE_CODES: ReadonlySet<string> = new Set([
   "coding_worker_image_invalid",
   "native_sandbox_unavailable",
   "run_tree_exhausted",
+  "secret_in_value",
+  "secret_check_unavailable",
 ]);
 
 /**

@@ -222,7 +222,7 @@ function fakeDb(
     runAttribution: { findUnique: (async () => null) as any, create: (async () => ({})) as any },
     workItem: { upsert: (async () => ({ id: "wi", parentKey: null })) as any },
     agentTool: { findMany: (async () => []) as any },
-    agentSecret: { findFirst: (async () => null) as any },
+    agentSecret: { findFirst: (async () => null) as any, findMany: (async () => []) as any },
     agentDatastore: { findFirst: (async () => null) as any },
     budgetGroup: {
       findUnique: (async ({ where }: any) => {
@@ -417,6 +417,75 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     expect(childRun[0].finalText).toBe("the child found it");
     // No executor watches an inline child, so it beats itself (its budget-group hold stays live).
     expect(childRun[0].heartbeatAt).toBeInstanceOf(Date);
+  });
+
+  describe("masks the parent's attached secret values in the delegated task", () => {
+    const FAKE = "fake-secret-value-1234";
+    function setup(opts: { unreadable?: boolean } = {}) {
+      const orchestrator: FakeAgent = {
+        id: "parent-agent",
+        name: "orchestrator",
+        systemPrompt: "sys",
+        model: "m",
+        budgetUsd: 10,
+        maxTurns: 10,
+      };
+      const researcher: FakeAgent = {
+        id: "child-agent",
+        name: "researcher",
+        systemPrompt: "sys",
+        model: "m",
+        budgetUsd: 10,
+        maxTurns: 10,
+      };
+      const db = fakeDb(
+        [orchestrator, researcher],
+        [{ parentAgentId: "parent-agent", childAgentId: "child-agent", boundName: "researcher" }],
+      );
+      (db as any).agentSecret.findMany = async ({ where }: any) =>
+        where.agentId === "parent-agent" ? [{ boundName: "API_KEY" }] : [];
+      (db as any).$queryRaw = async () => [{ usd: null, ciphertext: "ct", broker: null }];
+      const secrets = {
+        keyId: () => "k",
+        encrypt: async (v: string) => v,
+        decrypt: async () => {
+          if (opts.unreadable) throw new Error(`decrypt failed for ${FAKE}`);
+          return FAKE;
+        },
+      } as unknown as SecretCipher;
+      return { db, secrets };
+    }
+
+    it("stores the child's task with the value replaced", async () => {
+      const { db, secrets } = setup();
+      const parentRun = await db.run.create({ data: { agentId: "parent-agent" } });
+      const llm = scriptedLlm([
+        toolCall("delegate_to_researcher", JSON.stringify({ task: `use token ${FAKE} please` })),
+        finalAnswer("child done"),
+        finalAnswer("done"),
+      ]);
+      await executeRun(parentRun.id, { ...providers(llm), secrets }, db);
+      const kids = (await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })) as Array<{
+        taskOverride: string | null;
+      }>;
+      expect(kids).toHaveLength(1);
+      expect(kids[0].taskOverride).toBe("use token [REDACTED] please");
+      expect(JSON.stringify(kids)).not.toContain(FAKE);
+    });
+
+    it("refuses with secret_check_unavailable and creates no child when the secrets cannot be read", async () => {
+      const { db, secrets } = setup({ unreadable: true });
+      const parentRun = await db.run.create({ data: { agentId: "parent-agent" } });
+      const llm = scriptedLlm([
+        toolCall("delegate_to_researcher", JSON.stringify({ task: `use ${FAKE}` })),
+        finalAnswer("done"),
+      ]);
+      await executeRun(parentRun.id, { ...providers(llm), secrets }, db);
+      expect(await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })).toHaveLength(0);
+      const seen = JSON.stringify(toolResultSeen(llm, 1));
+      expect(seen).toContain("secret_check_unavailable");
+      expect(seen).not.toContain(FAKE);
+    });
   });
 
   it("folds a datastoreRef into the child's taskOverride as a note, not a silent extra mechanism", async () => {
