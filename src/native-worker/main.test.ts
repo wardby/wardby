@@ -427,6 +427,44 @@ describe("native worker stderr redaction", () => {
     expect(result.stderr === "mb [REDACTED] end\n").toBe(true);
   });
 
+  it("masks a value holding a non-BMP character split between the halves of its surrogate pair", () => {
+    const value = "fake-\u{1F511}-secret-0003";
+    const at = value.indexOf("\u{1F511}") + 1; // between the high and the low surrogate
+    const result = redactingChild([
+      `rememberSecretValue(${JSON.stringify(value)});`,
+      `process.stderr.write("s " + ${JSON.stringify(value)}.slice(0, ${at}));`,
+      `process.stderr.write(${JSON.stringify(value)}.slice(${at}) + " end\\n");`,
+    ]);
+    expect(result.status).toBe(0);
+    expect(holdsValueFragment(result.stderr, [value])).toBe(false);
+    expect(result.stderr === "s [REDACTED] end\n").toBe(true);
+  });
+
+  it("masks a lone high surrogate still held at exit (fail closed)", () => {
+    const result = redactingChild(['process.stderr.write("tail \\uD83D");', "process.exit(0);"]);
+    expect(result.status).toBe(0);
+    expect(result.stderr === "tail [REDACTED]\n").toBe(true);
+  });
+
+  it("decodes a DataView chunk through the same byte path, never writing it raw", () => {
+    const result = redactingChild([
+      'const data = Buffer.from("dv " + head + tail + " end\\n");',
+      "process.stderr.write(new DataView(data.buffer, data.byteOffset, data.byteLength));",
+    ]);
+    expect(result.status).toBe(0);
+    expect(leaks(result.stderr)).toBe(false);
+    expect(result.stderr === "dv [REDACTED] end\n").toBe(true);
+  });
+
+  it("refuses a chunk that is neither a string nor bytes, without its content", () => {
+    const result = redactingChild([
+      "try { process.stderr.write({ toString: () => head + tail }); } catch (err) { process.stdout.write(String(err instanceof TypeError)); }",
+    ]);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("true");
+    expect(leaks(result.stderr)).toBe(false);
+  });
+
   it("masks a value holding a newline when a line cut falls inside it", () => {
     const multiLine = "fake-multi-line\nsecret-value-0001";
     const result = redactingChild([

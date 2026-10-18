@@ -7,7 +7,9 @@
  * included, minimum length included). One set per worker process.
  *
  * process.stderr writes are buffered (StderrRedactionBuffer), because a value may arrive split
- * across writes. On each write the buffer:
+ * across writes. Strings and any ArrayBufferView go through one UTF-8 decoder (a string's trailing
+ * high surrogate is held for the next write, so a split surrogate pair still matches); any other
+ * chunk type is refused, never written raw. On each write the buffer:
  * 1. holds back `hold`: the longest suffix of the buffer that is a proper prefix of a remembered
  *    value, since those characters could still become a value;
  * 2. picks a cut `c` <= length − hold: after the last "\n" there, or, once the text after that
@@ -117,12 +119,20 @@ export class StderrRedactionBuffer {
     return this.emitted(ready);
   }
 
-  /** Everything still buffered, masked, fail closed (the held suffix too), ending with "\n" if output is mid-line. */
-  flush(): string {
+  /**
+   * Everything still buffered, masked, fail closed (the held suffix too), ending with "\n" if output
+   * is mid-line. `maskTail` masks one more character at the end: a write's trailing lone high
+   * surrogate that never got its low half.
+   */
+  flush(maskTail = false): string {
+    if (maskTail) this.pending += "\uFFFD";
     const values = this.redactable();
-    const hold = heldLength(this.pending, values);
     const text = this.pending;
-    const out = maskSpans(text, this.spans(values, hold > 0 ? [[text.length - hold, text.length]] : []));
+    const hold = heldLength(text, values);
+    const extra: Array<[number, number]> = [];
+    if (hold > 0) extra.push([text.length - hold, text.length]);
+    if (maskTail) extra.push([text.length - 1, text.length]);
+    const out = maskSpans(text, this.spans(values, extra));
     this.pending = "";
     this.maskedLead = 0;
     const ready = this.emitted(out);
@@ -151,12 +161,43 @@ const buffer = new StderrRedactionBuffer(() => [...received]);
 let installed = false;
 let rawWrite: ((chunk: string) => boolean) | undefined;
 const bytes = new StringDecoder("utf8");
+/**
+ * A string write's trailing high surrogate, held for the next write: encoded alone it would become
+ * U+FFFD, and a value whose non-BMP character is split between two writes would never match.
+ */
+let heldHighSurrogate = "";
+
+const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
+const UTF8_ENCODINGS = new Set([undefined, "utf8", "utf-8"]);
+
+/** `chunk` decoded through the one byte decoder (a held high surrogate joined first); throws for any other chunk type. */
+function decodeChunk(chunk: unknown, encoding: BufferEncoding | undefined): string {
+  if (typeof chunk === "string" && UTF8_ENCODINGS.has(encoding?.toLowerCase())) {
+    let text = heldHighSurrogate + chunk;
+    heldHighSurrogate = "";
+    if (text.length > 0 && isHighSurrogate(text.charCodeAt(text.length - 1))) {
+      heldHighSurrogate = text.slice(-1);
+      text = text.slice(0, -1);
+    }
+    return bytes.write(Buffer.from(text, "utf8"));
+  }
+  // Anything else ends a held surrogate's chance of a low half: it is decoded alone (as U+FFFD).
+  const lone = heldHighSurrogate ? bytes.write(Buffer.from(heldHighSurrogate, "utf8")) : "";
+  heldHighSurrogate = "";
+  if (typeof chunk === "string") return lone + bytes.write(Buffer.from(chunk, encoding));
+  if (ArrayBuffer.isView(chunk))
+    return lone + bytes.write(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+  // Never handed to the raw write: its content is unknown. The message names no content.
+  throw new TypeError("process.stderr.write takes a string or bytes (an ArrayBufferView).");
+}
 
 /** Emits the buffered remainder, masked fail closed and ended with "\n". Safe to call any number of times. */
 export function flushStderrRedaction(): void {
   if (!rawWrite) return;
+  const lone = heldHighSurrogate !== "";
+  heldHighSurrogate = "";
   const tail = bytes.end();
-  const ready = (tail ? buffer.write(tail) : "") + buffer.flush();
+  const ready = (tail ? buffer.write(tail) : "") + buffer.flush(lone);
   if (ready) rawWrite(ready);
 }
 
@@ -172,13 +213,7 @@ export function installStderrRedaction(): void {
     const callback = rest.find((arg): arg is (err?: Error | null) => void => typeof arg === "function");
     // Every write goes through the one decoder, so a string after an incomplete multi-byte
     // character from an earlier byte write keeps its place.
-    const text =
-      typeof chunk === "string"
-        ? bytes.write(Buffer.from(chunk, encoding ?? "utf8"))
-        : chunk instanceof Uint8Array
-          ? bytes.write(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength))
-          : undefined;
-    if (text === undefined) return write(chunk, ...rest);
+    const text = decodeChunk(chunk, encoding);
     const ready = buffer.write(text);
     if (ready) return write(ready, callback);
     // Held for its line's end: the write is accepted, so its callback runs as if written.
