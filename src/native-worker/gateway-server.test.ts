@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
 import { checkedEvents, failureResponse, runSecretValues, serveGatewayRequest, streamModel } from "./gateway-server.js";
 import { GATEWAY_INTERNAL_MESSAGE, GatewayError } from "./protocol.js";
+import { gatewayLog } from "./gateway.js";
 
 type Ctx = Parameters<typeof streamModel>[0];
 type Ledger = Parameters<typeof streamModel>[1];
@@ -112,15 +113,43 @@ describe("serveGatewayRequest unexpected errors", () => {
       providers: {},
     }) as unknown as Parameters<typeof serveGatewayRequest>[0];
 
-  it("sends no cause code before the run's tools are rebuilt, when it cannot be checked", async () => {
+  it("before the run's tools are rebuilt, passes a declared code, checked against the capability", async () => {
     const err = new Error("coding_execution_not_configured: detail-that-must-not-leave-the-gateway");
     const response = await serveGatewayRequest(throwingDeps(err), "Bearer cap", {});
     expect(response).toEqual({
       kind: "json",
       status: 500,
-      body: { ok: false, error: { code: "internal", message: "The gateway could not serve this call." } },
+      body: {
+        ok: false,
+        error: {
+          code: "internal",
+          message: "The gateway could not serve this call (coding_execution_not_configured).",
+          causeCode: "coding_execution_not_configured",
+        },
+      },
     });
     expect(JSON.stringify(response)).not.toContain("detail-that-must-not-leave-the-gateway");
+  });
+
+  it("before the run's tools are rebuilt, redacts the capability from the log line and the cause code", async () => {
+    // A capability that happens to equal a declared code: the exact-value guard still drops it.
+    const capability = "coding_execution_not_configured";
+    const logged: Array<{ err: Error }> = [];
+    const spy = vi.spyOn(gatewayLog, "error").mockImplementation(((obj: { err: Error }) => {
+      logged.push(obj);
+    }) as never);
+    let response: unknown;
+    try {
+      response = await serveGatewayRequest(throwingDeps(new Error(`${capability}: x`)), `Bearer ${capability}`, {});
+    } finally {
+      spy.mockRestore();
+    }
+    const body = (response as { body: { error: Record<string, unknown> } }).body;
+    expect({
+      keys: Object.keys(body.error).sort(),
+      logged: logged.length,
+      logRedacted: logged[0]?.err.message === "[REDACTED]: x",
+    }).toEqual({ keys: ["code", "message"], logged: 1, logRedacted: true });
   });
 
   it("keeps the generic message when the error names no code", async () => {

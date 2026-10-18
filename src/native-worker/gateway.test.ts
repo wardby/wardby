@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
 import { PRIVILEGED_BRIDGE_NAMES, type PrivilegedHost } from "../sandbox/host-functions.js";
 import {
+  gatewayLog,
   runSandboxedEngine,
   SandboxRunCancelledError,
   type NativeGateway,
@@ -294,6 +295,32 @@ describe("runSandboxedEngine unexpected errors", () => {
     }, throwing(FAKE_READABLE));
     await result;
     expect(shape(seen)).toEqual(SAFE_INTERNAL);
+  });
+
+  it("logs the unexpected error for the operator, redacted by the run's values", async () => {
+    const logged: unknown[] = [];
+    const spy = vi.spyOn(gatewayLog, "error").mockImplementation(((obj: unknown, msg: string) => {
+      logged.push({ obj, msg });
+    }) as never);
+    try {
+      const { result } = await withWorker(
+        async (gateway) => {
+          await errorOf(gateway.call(req("builtin.call", { name: "memory_get", argsJson: "{}" })));
+          await gateway.call(finish());
+        },
+        throwing(`saw ${FAKE_READABLE} here`),
+      );
+      await result;
+    } finally {
+      spy.mockRestore();
+    }
+    const line = logged[0] as { obj: { err: Error }; msg: string } | undefined;
+    expect({
+      count: logged.length,
+      msg: line?.msg,
+      redacted: line?.obj.err.message === "saw [REDACTED] here",
+      leaks: leaks({ message: line?.obj.err.message, stack: line?.obj.err.stack }),
+    }).toEqual({ count: 1, msg: "native gateway request failed", redacted: true, leaks: false });
   });
 
   it("passes a normal cause code, without the rest of the message", async () => {

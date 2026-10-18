@@ -13,7 +13,8 @@
 
 import type { EngineProgress, EngineResult, EngineRunContext } from "../providers/engine/types.js";
 import type { LlmStreamEvent } from "../providers/llm/types.js";
-import { isPrivilegedBridgeName, type PrivilegedHost } from "../sandbox/host-functions.js";
+import pino from "pino";
+import { isPrivilegedBridgeName, redactExactSecretValues, type PrivilegedHost } from "../sandbox/host-functions.js";
 import { logger } from "../core/logger.js";
 import {
   GatewayError,
@@ -28,7 +29,41 @@ import {
   workerGatewayError,
 } from "./protocol.js";
 
-const gatewayLog = logger.child({ module: "native-gateway" });
+/**
+ * The gateways' log. Both (in-process and HTTP) log an unexpected error here, as `native gateway
+ * request failed` (or `native gateway model stream failed`). Exported so tests can watch it.
+ */
+export const gatewayLog = logger.child({ module: "native-gateway" });
+
+/** `err` for the log with every exact secret value removed from its (cause-folded) message and stack. */
+function redactedError(err: unknown, values: readonly string[]): unknown {
+  if (values.length === 0 || !(err instanceof Error)) return err;
+  // pino's own serializer folds the cause chain into message and stack, so a cause is covered too.
+  const serialized = pino.stdSerializers.err(err);
+  const safe = new Error(redactExactSecretValues(serialized.message, values));
+  safe.name = err.name;
+  safe.stack = redactExactSecretValues(serialized.stack ?? "", values);
+  return safe;
+}
+
+/**
+ * The one way either gateway turns a failure into what the worker sees: an unexpected error is
+ * logged for the operator (redacted by the run's secret values) and becomes the checked
+ * GatewayError (workerGatewayError); the values are read once and serve both.
+ */
+export async function forWorker(
+  err: unknown,
+  secretValues: (() => Promise<Iterable<string>>) | undefined,
+  logMessage: string,
+): Promise<GatewayError> {
+  if (err instanceof GatewayError) return workerGatewayError(err, secretValues);
+  const values = await secretValues?.().then(
+    (v) => [...v],
+    () => undefined,
+  );
+  gatewayLog.error({ err: redactedError(err, values ?? []) }, logMessage);
+  return workerGatewayError(err, values ? async () => values : undefined);
+}
 
 /** The trusted gateway as a transport sees it: untrusted requests in, results or GatewayErrors out. */
 export interface NativeGateway {
@@ -238,14 +273,14 @@ export async function runSandboxedEngine(options: SandboxedEngineOptions): Promi
       try {
         return await served.call(raw);
       } catch (err) {
-        throw await workerGatewayError(err, runSecretValues);
+        throw await forWorker(err, runSecretValues, "native gateway request failed");
       }
     },
     async *stream(raw) {
       try {
         yield* served.stream(raw);
       } catch (err) {
-        throw await workerGatewayError(err, runSecretValues);
+        throw await forWorker(err, runSecretValues, "native gateway model stream failed");
       }
     },
   };

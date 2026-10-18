@@ -80,9 +80,27 @@ export function causeCodeOf(err: unknown): string | undefined {
 export const GATEWAY_INTERNAL_MESSAGE = "The gateway could not serve this call.";
 
 /**
+ * The only cause codes that may leave the gateway: wardby's own codes that an unexpected error on
+ * a gateway call path can lead with. Anything else, however code-shaped, could be a value from an
+ * error's text, so it never crosses (the worker records `internal` with no cause code).
+ * - coding_execution_not_configured, coding_profile_missing: a coding delegation reaching a process
+ *   that cannot start coding runs (core/deferred-coding.ts, providers/executor/routing.ts).
+ * - message_too_large, message_not_json, message_invalid, unsupported_protocol_version: the
+ *   protocol's own ProtocolError codes (this file).
+ */
+export const GATEWAY_CAUSE_CODES: ReadonlySet<string> = new Set([
+  "coding_execution_not_configured",
+  "coding_profile_missing",
+  "message_too_large",
+  "message_not_json",
+  "message_invalid",
+  "unsupported_protocol_version",
+]);
+
+/**
  * `err` as the worker may see it, on every transport (HTTP, stdio, loopback). An unexpected error
  * becomes `internal` with the generic message; a GatewayError keeps its code and message. A cause
- * code is carried only once checked: not when it equals, contains, or is contained in a secret
+ * code is carried only when it is declared (GATEWAY_CAUSE_CODES) and checked: not when it equals, contains, or is contained in a secret
  * value the run can read (`secretValues`, read only when there is a code to check), and not at
  * all when there is nothing to check it against or reading the values fails.
  */
@@ -90,7 +108,9 @@ export async function workerGatewayError(
   err: unknown,
   secretValues?: () => Promise<Iterable<string>>,
 ): Promise<GatewayError> {
-  const candidate = err instanceof GatewayError ? err.causeCode : causeCodeOf(err);
+  const leading = err instanceof GatewayError ? err.causeCode : causeCodeOf(err);
+  // Declared codes only; the exact-value check below is a second guard.
+  const candidate = leading && GATEWAY_CAUSE_CODES.has(leading) ? leading : undefined;
   let causeCode: string | undefined;
   if (candidate && secretValues) {
     const values = await secretValues().catch(() => undefined);
@@ -106,11 +126,14 @@ export async function workerGatewayError(
 
 /**
  * `err` as a transport carries it to the worker: a GatewayError (already checked by the gateway
- * that threw it) as is; anything else `internal` with the generic message and no cause code, since
+ * that threw it) as is, with a declared cause code only; anything else `internal` with the generic message and no cause code, since
  * a transport has no secret values to check one against.
  */
 export function toGatewayError(err: unknown): GatewayError {
-  if (err instanceof GatewayError) return new GatewayError(err.code, err.message, err.causeCode);
+  if (err instanceof GatewayError) {
+    const causeCode = err.causeCode && GATEWAY_CAUSE_CODES.has(err.causeCode) ? err.causeCode : undefined;
+    return new GatewayError(err.code, err.message, causeCode);
+  }
   return new GatewayError("internal", GATEWAY_INTERNAL_MESSAGE);
 }
 

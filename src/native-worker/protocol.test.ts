@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   causeCodeOf,
+  GATEWAY_CAUSE_CODES,
   GATEWAY_INTERNAL_MESSAGE,
   GatewayError,
   GatewayRequestSchema,
@@ -155,9 +156,17 @@ describe("workerGatewayError", () => {
     expect(err.message).not.toContain("detail-that-stays");
   });
 
-  it("ignores a secret value below the redactor's minimum length, as the redactor does", async () => {
-    const err = await workerGatewayError(new Error("ab_cd"), secrets("ab_cd"));
-    expect(err.causeCode).toBe("ab_cd");
+  it("passes only a declared wardby error code, never another snake_case word", async () => {
+    expect(GATEWAY_CAUSE_CODES.has("coding_execution_not_configured")).toBe(true);
+    const listed = await workerGatewayError(new Error("coding_execution_not_configured"), secrets());
+    expect(listed.causeCode).toBe("coding_execution_not_configured");
+    const unlisted = await workerGatewayError(new Error("some_unlisted_word: detail"), secrets());
+    expect(shape(unlisted)).toEqual(SAFE_INTERNAL);
+    const gatewayUnlisted = await workerGatewayError(
+      new GatewayError("internal", "x", "some_unlisted_word"),
+      secrets(),
+    );
+    expect(gatewayUnlisted.causeCode).toBeUndefined();
   });
 
   it("sends no cause code it could not check", async () => {
@@ -185,8 +194,16 @@ describe("toGatewayError", () => {
     expect(shape(err)).toEqual(SAFE_INTERNAL);
   });
 
-  it("passes a GatewayError as it is", () => {
-    const err = toGatewayError(new GatewayError("internal", GATEWAY_INTERNAL_MESSAGE, "checked_code"));
-    expect(err).toMatchObject({ code: "internal", message: GATEWAY_INTERNAL_MESSAGE, causeCode: "checked_code" });
+  it("passes a GatewayError as it is, keeping only a declared cause code", () => {
+    const err = toGatewayError(
+      new GatewayError("internal", GATEWAY_INTERNAL_MESSAGE, "coding_execution_not_configured"),
+    );
+    expect(err).toMatchObject({
+      code: "internal",
+      message: GATEWAY_INTERNAL_MESSAGE,
+      causeCode: "coding_execution_not_configured",
+    });
+    const unlisted = toGatewayError(new GatewayError("internal", GATEWAY_INTERNAL_MESSAGE, "some_unlisted_word"));
+    expect(unlisted.causeCode).toBeUndefined();
   });
 });
