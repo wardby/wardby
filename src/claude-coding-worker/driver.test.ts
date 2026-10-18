@@ -235,7 +235,83 @@ describe("runClaudeCodingWorker", () => {
           throw new Error("API Error: 500");
         })(),
       ),
-    ).rejects.toThrow("coding_stream_failed");
+    ).rejects.toThrow("coding_stream_upstream_error");
+    // The same codes as Codex for what the stream threw, and the generic code for anything else.
+    for (const [text, code] of [
+      ["Claude Code process exited with code 1", "coding_stream_agent_exited"],
+      ["connect ECONNREFUSED 10.0.0.1:443", "coding_stream_proxy_unreachable"],
+      ["provider secret", "coding_stream_failed"],
+    ]) {
+      await expect(
+        run(() =>
+          (async function* () {
+            yield { type: "system" };
+            throw new Error(text);
+          })(),
+        ),
+      ).rejects.toThrow(new RegExp(`^${code}$`));
+    }
+  });
+
+  it("names the API failure the SDK reported when the turn fails", async () => {
+    const run = (messages: unknown[]) =>
+      runClaudeCodingWorker({
+        input,
+        proxyBaseUrl: "http://proxy",
+        capability: "cap",
+        signal: new AbortController().signal,
+        createQuery: (() =>
+          (async function* () {
+            for (const message of messages) yield message;
+          })()) as unknown as ClaudeQueryFactory,
+      });
+    const failed = { type: "result", subtype: "error_during_execution", result: "provider detail" };
+    const assistant = (error: string) => ({ type: "assistant", message: { content: [] }, error });
+    const retry = (error: string, errorStatus: number | null, noResponse = false) => ({
+      type: "system",
+      subtype: "api_retry",
+      error,
+      error_status: errorStatus,
+      ...(noResponse ? { no_response: { waited_ms: 1, retry_wait_ms: 1 } } : {}),
+    });
+    const cases: [unknown[], string][] = [
+      [[assistant("rate_limit"), failed], "coding_stream_rate_limited"],
+      [[assistant("overloaded"), failed], "coding_stream_upstream_error"],
+      [[assistant("server_error"), failed], "coding_stream_upstream_error"],
+      [[assistant("authentication_failed"), failed], "coding_stream_proxy_denied"],
+      [[retry("unknown", null, true), assistant("unknown"), failed], "coding_stream_timeout"],
+      [[retry("unknown", null), assistant("unknown"), failed], "coding_stream_proxy_unreachable"],
+      [[retry("unknown", 503), failed], "coding_stream_upstream_error"],
+      [[retry("unknown", 429), failed], "coding_stream_rate_limited"],
+      // The last report wins: a retry that later became a rate limit is reported as the rate limit.
+      [[retry("unknown", null), assistant("rate_limit"), failed], "coding_stream_rate_limited"],
+      // A retried request that then succeeded says nothing about a later failure.
+      [[retry("rate_limit", 429), { type: "assistant", message: { content: [] } }, failed], "coding_turn_failed"],
+      [[retry("unknown", null), assistant("max_output_tokens"), failed], "coding_turn_failed"],
+      // No code fits these: the turn still fails as before.
+      [[assistant("invalid_request"), failed], "coding_turn_failed"],
+      [[assistant("billing_error"), failed], "coding_stream_quota_exceeded"],
+      [[failed], "coding_turn_failed"],
+    ];
+    for (const [messages, code] of cases) {
+      await expect(run(messages)).rejects.toThrow(new RegExp(`^${code}$`));
+    }
+    // A run that succeeds after a retried API error is not a failure.
+    const done = JSON.stringify({
+      schemaVersion: 1,
+      runId: input.runId,
+      outcome: "no_changes",
+      summary: "s",
+      tests: [],
+    });
+    await expect(
+      run([retry("rate_limit", 429), { type: "result", subtype: "success", result: done }]),
+    ).resolves.toMatchObject({ outcome: "no_changes" });
+    // The proxy's budget refusal still ends the run out of budget, whatever the SDK called it.
+    const refusal = 'API Error: 429 {"error":{"code":"wardby_budget_exhausted"}}';
+    await expect(
+      run([assistant("rate_limit"), { type: "result", subtype: "error_during_execution", result: refusal }]),
+    ).resolves.toMatchObject({ outcome: "budget_exhausted" });
   });
 
   it("fails closed when cancellation interrupts the provider stream", async () => {
