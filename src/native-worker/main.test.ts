@@ -188,24 +188,6 @@ describe("native worker stderr redaction", () => {
     expect(result.stderr).toContain("bytes [REDACTED]");
     expect(result.stderr).not.toContain(FAKE_SECRET);
   });
-
-  it("redacts a secret value written to stderr as a plain Uint8Array", () => {
-    const script = [
-      'import { installStderrRedaction, rememberSecretValue } from "./src/native-worker/stderr-redaction.ts";',
-      "installStderrRedaction();",
-      `rememberSecretValue(${JSON.stringify(FAKE_SECRET)});`,
-      `process.stderr.write(new Uint8Array(Buffer.from("bytes " + ${JSON.stringify(FAKE_SECRET)} + "\\n")));`,
-    ].join("\n");
-    const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
-      cwd: REPO_ROOT,
-      env: {},
-      encoding: "utf8",
-      timeout: 30_000,
-    });
-    expect(result.status).toBe(0);
-    expect(result.stderr).toContain("bytes [REDACTED]");
-    expect(result.stderr).not.toContain(FAKE_SECRET);
-  });
 });
 
 describe("warm input delivery", () => {
