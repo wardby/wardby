@@ -17,6 +17,12 @@ import {
 import { GATEWAY_INTERNAL_MESSAGE, GatewayError, type WorkerInput } from "./protocol.js";
 import { createLoopbackTransport, loopbackLauncher } from "./loopback.js";
 import { serveStdioWorker } from "./stdio.js";
+import { createSecretWriteGuard } from "../core/secret-guard.js";
+import { guardAgentMemory, guardDatastore } from "../core/secret-guarded-stores.js";
+import { handleMemoryTool } from "../core/memory-tools.js";
+import { createPrivilegedHost } from "../sandbox/host-functions.js";
+import type { Datastore } from "../providers/datastore/types.js";
+import type { AgentMemoryStore } from "../providers/memory/types.js";
 
 const input: WorkerInput = {
   v: 1,
@@ -491,5 +497,74 @@ describe("logUnexpectedError fails closed", () => {
     const { leaks, lines } = logged(new Error(`saw ${FAKE} here`), [FAKE]);
     expect(leaks).toBe(false);
     expect((lines[0] as { err: Error }).err.message).toBe("saw [REDACTED] here");
+  });
+});
+
+describe("gateway refuses to store an attached secret's value", () => {
+  const VALUE = "fake-secret-value-1234";
+  const guard = createSecretWriteGuard({ load: async () => [{ name: "API_KEY", values: [VALUE] }] });
+  const written: unknown[] = [];
+  const datastore = guardDatastore(
+    {
+      set: async (_agent: string, _key: string, value: unknown) => void written.push(value),
+      setShared: async (_id: string, _key: string, value: unknown) => void written.push(value),
+    } as unknown as Datastore,
+    guard,
+  );
+  const memory = guardAgentMemory(
+    { set: async (...a: unknown[]) => void written.push(a) } as unknown as AgentMemoryStore,
+    guard,
+  );
+  const host = createPrivilegedHost({
+    agentId: "a1",
+    datastore,
+    sharedDatastore: {} as never,
+    logTag: "lookup",
+    secrets: { get: async () => undefined },
+  });
+
+  it("returns the refusal for a datastore bridge as a bridge_error naming the secret, not the value", async () => {
+    const { result } = await withWorker(
+      async (gateway) => {
+        const err = await gateway
+          .call(
+            req("host.call", {
+              tool: "lookup",
+              invocation: "t1",
+              bridge: "__bridge_datastoreSet",
+              argsJson: JSON.stringify(["k", VALUE]),
+            }),
+          )
+          .catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(GatewayError);
+        expect(err).toMatchObject({ code: "bridge_error", message: expect.stringContaining('secret "API_KEY"') });
+        expect((err as Error).message).not.toContain(VALUE);
+        await gateway.call(finish());
+      },
+      { privilegedHostFor: () => host },
+    );
+    await result;
+    expect(written).toEqual([]);
+  });
+
+  it("returns the refusal for memory_set as a tool result, not the value", async () => {
+    const { result } = await withWorker(
+      async (gateway) => {
+        const out = await gateway.call(
+          req("builtin.call", { name: "memory_set", argsJson: JSON.stringify({ key: "k", content: VALUE }) }),
+        );
+        const text = JSON.stringify(out);
+        expect(text).toContain("secret_in_value");
+        expect(text).toContain("API_KEY");
+        expect(text).not.toContain(VALUE);
+        await gateway.call(finish());
+      },
+      {
+        input: { ...input, builtinTools: ["memory_set"] },
+        builtinHandler: (name) => (args) => handleMemoryTool(name, args, "a1", memory),
+      },
+    );
+    await result;
+    expect(written).toEqual([]);
   });
 });
