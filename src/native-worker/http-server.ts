@@ -6,15 +6,17 @@
  *
  *   POST /native-gateway/v1/call   body: GatewayRequest
  *   → application/json            { ok: true, result } | { ok: false, error: { code, message } }
- *   → application/x-ndjson        (llm.stream) { event } … then { end: true } or { error }
+ *   → application/x-ndjson        (llm.stream) { event } … then { end: true } or { error: { code, message, causeCode? } }
  */
 
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { logger } from "../core/logger.js";
+import { logUnexpectedError } from "./gateway.js";
 import { serveGatewayRequest, type GatewayServerDeps } from "./gateway-server.js";
-import { GatewayError, MAX_MESSAGE_BYTES } from "./protocol.js";
+import { GatewayError, MAX_MESSAGE_BYTES, toGatewayError } from "./protocol.js";
 
-const httpLog = logger.child({ module: "native-gateway-http" });
+/** The HTTP listener's own log. Exported so tests can watch it. */
+export const httpLog = logger.child({ module: "native-gateway-http" });
 
 export const NATIVE_GATEWAY_PATH = "/native-gateway/v1/call";
 
@@ -94,14 +96,15 @@ export function createGatewayServer(deps: GatewayServerDeps): Server {
         for await (const event of response.events) res.write(`${JSON.stringify({ event })}\n`);
         res.end(`${JSON.stringify({ end: true })}\n`);
       } catch (err) {
-        const error =
-          err instanceof GatewayError
-            ? { code: err.code, message: err.message }
-            : { code: "internal", message: err instanceof Error ? err.message : String(err) };
+        // The gateway's stream fails only with a checked GatewayError (checkedEvents); anything else
+        // still crosses as the generic message, never its own text.
+        const { code, message, causeCode } = toGatewayError(err);
+        const error = { code, message, ...(causeCode ? { causeCode } : {}) };
         res.end(`${JSON.stringify({ error })}\n`);
       }
     })().catch((err: unknown) => {
-      httpLog.error({ err }, "native gateway HTTP handler failed");
+      // No run's secret values are known here, so only the name and declared code are logged.
+      logUnexpectedError(httpLog, err, undefined, "native gateway HTTP handler failed");
       if (!res.headersSent) res.writeHead(500);
       res.end();
     });

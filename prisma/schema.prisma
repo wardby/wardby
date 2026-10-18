@@ -363,6 +363,9 @@ model Run {
   /// in-process runs. The reconciler consults the backend before declaring a
   /// stale run lost, and can adopt one orphaned by a dead instance.
   executionBackend     String?
+  /// The DBOS workflow that currently holds this run, when it is not the run id: set when
+  /// recover() forks the run's workflow under a new application version. Null = the run id.
+  executionWorkflowId  String?
   /// The agent's nativeExecutionMode when this run was created, fixed for the
   /// run's life and what the executor routes on. Null for coding runs and for
   /// native runs from before the field existed, which run in the control plane.
@@ -399,6 +402,9 @@ model Run {
   parentRunId             String?
   parentRun               Run?     @relation("RunTree", fields: [parentRunId], references: [id])
   childRuns               Run[]    @relation("RunTree")
+  /// The parent's delegation call (the model's tool-call id) that created this child, so a
+  /// re-executed delegate step finds the same child instead of starting another.
+  parentCallId            String?
   /// Ephemeral, per-dispatch grant: exactly the parent-memory keys this
   /// one child run was handed permission to read via parent_memory_get.
   /// Never a standing allowlist — re-granted on every dispatch call.
@@ -426,6 +432,7 @@ model Run {
   @@index([parentRunId])
   @@index([startDeferredAt])
   @@index([stopRequestedAt])
+  @@unique([parentRunId, parentCallId])
 }
 
 /// Phase 5: owner-configured coding behavior. Runtime credentials and opaque

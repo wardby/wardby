@@ -7,9 +7,11 @@ import type { Datastore, DatastoreValue } from "../datastore/types.js";
 import type { SecretCipher } from "../secrets/types.js";
 import type { AgentMemoryStore } from "../memory/types.js";
 import type { IssueTracker } from "../issue-tracker/types.js";
+import type { Executor } from "./types.js";
 import { NativeEngine } from "../../core/engine-native.js";
 import { DBOS } from "@dbos-inc/dbos-sdk";
-import { DBOS_BACKEND, DbosExecutor } from "./dbos.js";
+import { DBOS_BACKEND, DbosExecutor, workflowIdOf } from "./dbos.js";
+import { STEPS_CHANGED_REASON, versionMismatchReason } from "./dbos-status.js";
 import { inFlightRunIds } from "../../core/in-flight-runs.js";
 import { setWorkflowEventSink, type WorkflowEventInput } from "../../core/workflow-events.js";
 import { outsideRunContext } from "../../core/async-context.js";
@@ -111,7 +113,7 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     return buildWith(llm, executorId);
   }
 
-  function buildWith(llm: LlmProvider, id: string, runnerDb: PrismaClient = db) {
+  function buildWith(llm: LlmProvider, id: string, runnerDb: PrismaClient = db, childExecutor?: Executor) {
     return new DbosExecutor(
       {
         llm,
@@ -119,6 +121,7 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
         datastore: fakeDatastore(),
         secrets: fakeCipher,
         memory: {} as AgentMemoryStore,
+        ...(childExecutor ? { executor: childExecutor } : {}),
       },
       { systemDatabaseUrl: process.env.DATABASE_URL, schemaName: "dbos_test", executorId: id },
       runnerDb,
@@ -156,6 +159,35 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
       agentSubAgent: db.agentSubAgent,
       run,
     } as unknown as PrismaClient;
+    return { client, kill: () => (alive = false) };
+  }
+
+  /**
+   * Like killableDb, but the whole client (every model, `$transaction`, raw queries) dies at
+   * `kill()`: a run that dispatches a sub-agent goes through dispatchRun, which needs all of it.
+   */
+  function killableClient(): { client: PrismaClient; kill: () => void } {
+    let alive = true;
+    const dead = () => Promise.reject(new Error("simulated process death: database handle is gone"));
+    const guardFn =
+      (fn: (...args: unknown[]) => unknown, self: unknown) =>
+      (...args: unknown[]) =>
+        alive ? fn.apply(self, args) : dead();
+    const client = new Proxy(db, {
+      get(target, prop) {
+        const value: unknown = Reflect.get(target, prop);
+        if (typeof value === "function") return guardFn(value as (...args: unknown[]) => unknown, target);
+        if (value && typeof value === "object" && typeof prop === "string" && !prop.startsWith("$")) {
+          return new Proxy(value, {
+            get(model, key) {
+              const method: unknown = Reflect.get(model, key);
+              return typeof method === "function" ? guardFn(method as (...args: unknown[]) => unknown, model) : method;
+            },
+          });
+        }
+        return value;
+      },
+    });
     return { client, kill: () => (alive = false) };
   }
 
@@ -210,6 +242,28 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     expect(after.status).toBe("cancelled");
     expect(after.error).toContain("operator cancelled");
     expect(after.finishedAt).not.toBeNull();
+  });
+
+  it("stop cancels the forked workflow named by executionWorkflowId, and workflowIdOf falls back to the run id", async () => {
+    executor = build(scriptedLlm([finalAnswer("x")]));
+    await executor.launch();
+    const forked = await db.run.create({
+      data: { agentId, executionManaged: true, status: "running", executionWorkflowId: "wf-forked" },
+    });
+    const plain = await db.run.create({ data: { agentId, executionManaged: true } });
+    expect(await workflowIdOf(db, forked.id)).toBe("wf-forked");
+    expect(await workflowIdOf(db, plain.id)).toBe(plain.id);
+
+    const cancel = vi.spyOn(DBOS, "cancelWorkflow").mockResolvedValue(undefined);
+    try {
+      await executor.stop(forked.id, "why");
+      expect(cancel).toHaveBeenCalledWith("wf-forked");
+    } finally {
+      cancel.mockRestore();
+    }
+    const after = await db.run.findUniqueOrThrow({ where: { id: forked.id } });
+    expect(after.status).toBe("cancelled");
+    expect(after.error).toContain("why");
   });
 
   it("recover(): reports active for its own live workflow, terminal for a finished one, lost for an unknown id", async () => {
@@ -495,6 +549,494 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     await db.run.deleteMany({ where: { agentId: lead } });
     await db.agent.deleteMany({ where: { id: { in: [lead, ...kids] } } });
   }, 30_000);
+
+  it("a resumed lead re-attaches to the sub-agent its interrupted delegate call created", async () => {
+    await executor?.close();
+    const lead = `dbos-reattach-lead-${suffix}`;
+    const kid = `dbos-reattach-kid-${suffix}`;
+    await db.agent.create({
+      data: { id: lead, name: lead, systemPrompt: "LEAD", model: "m", budgetUsd: 1, maxTurns: 5 },
+    });
+    // A sandbox-mode child goes through the Executor (here a fake that never runs it), so it stays
+    // pending, and durable on its own, while the lead waits on it.
+    await db.agent.create({
+      data: {
+        id: kid,
+        name: kid,
+        systemPrompt: "CHILD",
+        model: "m",
+        budgetUsd: 0.1,
+        maxTurns: 3,
+        nativeExecutionMode: "sandbox",
+      },
+    });
+    await db.agentSubAgent.create({ data: { parentAgentId: lead, childAgentId: kid, boundName: "kid" } });
+    const childExecutor = () => {
+      const started: string[] = [];
+      const stopped: string[] = [];
+      const fake: Executor = {
+        async start(runId) {
+          started.push(runId);
+        },
+        async stop(runId) {
+          stopped.push(runId);
+        },
+      };
+      return { fake, started, stopped };
+    };
+    const delegate: LlmStreamEvent[] = [
+      { type: "tool_call", id: "c1", name: "delegate_to_kid", argsJson: JSON.stringify({ task: "x" }) },
+      { type: "done", stopReason: "tool_calls", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.012 } },
+    ];
+    try {
+      const firstChildren = childExecutor();
+      const dying = killableClient();
+      executor = buildWith(scriptedLlm([delegate]), executorId, dying.client, firstChildren.fake);
+      await executor.launch();
+      const run = await db.run.create({ data: { agentId: lead, executionManaged: true } });
+
+      const firstAttempt = executor.start(run.id).catch(() => undefined);
+      // The delegate step is waiting on the child it dispatched.
+      await waitFor("the lead to dispatch its child", () => firstChildren.started.length === 1);
+      // "Crash" inside the delegate step: turn 1's LLM reply is recorded, its tool step is not.
+      await executor.close();
+      dying.kill();
+      await firstAttempt;
+
+      const restartChildren = childExecutor();
+      const resumedLlm = scriptedLlm([finalAnswer("lead done")]);
+      executor = buildWith(resumedLlm, `${executorId}-restart`, db, restartChildren.fake);
+      await executor.launch();
+      const resumed = await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id });
+      expect(["active", "terminal"]).toContain(resumed.state);
+
+      // The re-executed delegate step adopts the same child rather than refusing it as a duplicate.
+      await db.run.updateMany({
+        where: { parentRunId: run.id },
+        data: { status: "succeeded", finalText: "kid done", finishedAt: new Date() },
+      });
+      await waitFor(
+        "the resumed lead to finish",
+        async () => (await db.run.findUnique({ where: { id: run.id } }))?.finalText != null,
+      );
+
+      const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+      expect(after.status).toBe("succeeded");
+      expect(after.finalText).toBe("lead done");
+      const children = await db.run.findMany({ where: { parentRunId: run.id } });
+      expect(children).toHaveLength(1);
+      expect(children[0].id).toBe(firstChildren.started[0]);
+      expect(children[0].parentCallId).toBe("c1");
+      expect(restartChildren.started).toEqual([]);
+      // Turn 1 replayed from the record; the child's result reached the lead's turn 2.
+      expect(resumedLlm.calls).toHaveLength(1);
+      const toolResult = resumedLlm.calls[0].messages.find((m) => m.role === "tool");
+      expect(String(toolResult?.content)).toContain('"finalText":"kid done"');
+    } finally {
+      await db.run.deleteMany({ where: { agent: { id: kid } } });
+      await db.agentSubAgent.deleteMany({ where: { parentAgentId: lead } });
+      await db.run.deleteMany({ where: { agentId: lead } });
+      await db.agent.deleteMany({ where: { id: { in: [lead, kid] } } });
+    }
+  }, 30_000);
+
+  /** What a deploy does to a recorded workflow: it now belongs to an application version this process does not run. */
+  async function recordUnderOtherVersion(workflowId: string): Promise<string> {
+    const other = `older-than-${DBOS.applicationVersion}`;
+    await db.$executeRawUnsafe(
+      "UPDATE dbos_test.workflow_status SET application_version = $1 WHERE workflow_uuid = $2",
+      other,
+      workflowId,
+    );
+    return other;
+  }
+
+  it("recover(): takes over a lead waiting on a durable child under this application version", async () => {
+    await executor?.close();
+    const lead = `dbos-takeover-lead-${suffix}`;
+    const kid = `dbos-takeover-kid-${suffix}`;
+    await db.agent.create({
+      data: { id: lead, name: lead, systemPrompt: "LEAD", model: "m", budgetUsd: 1, maxTurns: 5 },
+    });
+    await db.agent.create({
+      data: {
+        id: kid,
+        name: kid,
+        systemPrompt: "CHILD",
+        model: "m",
+        budgetUsd: 0.1,
+        maxTurns: 3,
+        nativeExecutionMode: "sandbox",
+      },
+    });
+    await db.agentSubAgent.create({ data: { parentAgentId: lead, childAgentId: kid, boundName: "kid" } });
+    const childExecutor = () => {
+      const started: string[] = [];
+      const fake: Executor = {
+        async start(runId) {
+          started.push(runId);
+        },
+        async stop() {},
+      };
+      return { fake, started };
+    };
+    const delegate: LlmStreamEvent[] = [
+      { type: "tool_call", id: "c1", name: "delegate_to_kid", argsJson: JSON.stringify({ task: "x" }) },
+      { type: "done", stopReason: "tool_calls", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.012 } },
+    ];
+    try {
+      const firstChildren = childExecutor();
+      const dying = killableClient();
+      executor = buildWith(scriptedLlm([delegate]), executorId, dying.client, firstChildren.fake);
+      await executor.launch();
+      const run = await db.run.create({ data: { agentId: lead, executionManaged: true } });
+
+      const firstAttempt = executor.start(run.id).catch(() => undefined);
+      await waitFor("the lead to dispatch its child", () => firstChildren.started.length === 1);
+      // "Deploy": the old process dies inside the delegate step, and its workflow is recorded
+      // under an application version the new process does not run.
+      await executor.close();
+      dying.kill();
+      await firstAttempt;
+      await recordUnderOtherVersion(run.id);
+
+      const restartChildren = childExecutor();
+      const resumedLlm = scriptedLlm([finalAnswer("lead done")]);
+      executor = buildWith(resumedLlm, `${executorId}-takeover`, db, restartChildren.fake);
+      await executor.launch();
+      expect(await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id })).toEqual({
+        state: "active",
+      });
+
+      const forked = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+      expect(forked.executionWorkflowId).toBeTruthy();
+      expect(forked.executionWorkflowId).not.toBe(run.id);
+      expect((await DBOS.getWorkflowStatus(run.id))?.status).toBe("CANCELLED");
+      expect((await DBOS.getWorkflowStatus(forked.executionWorkflowId!))?.applicationVersion).toBe(
+        DBOS.applicationVersion,
+      );
+
+      await db.run.updateMany({
+        where: { parentRunId: run.id },
+        data: { status: "succeeded", finalText: "kid done", finishedAt: new Date() },
+      });
+      await waitFor(
+        "the taken-over lead to finish",
+        async () => (await db.run.findUnique({ where: { id: run.id } }))?.finalText != null,
+      );
+
+      const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+      expect(after.status).toBe("succeeded");
+      expect(after.finalText).toBe("lead done");
+      // The same child, re-attached; none started by the new process.
+      const children = await db.run.findMany({ where: { parentRunId: run.id } });
+      expect(children.map((c) => c.id)).toEqual(firstChildren.started);
+      expect(restartChildren.started).toEqual([]);
+      // Turn 1's reply replayed from the record: the new model only served turn 2.
+      expect(resumedLlm.calls).toHaveLength(1);
+      const toolResult = resumedLlm.calls[0].messages.find((m) => m.role === "tool");
+      expect(String(toolResult?.content)).toContain('"finalText":"kid done"');
+    } finally {
+      await db.run.deleteMany({ where: { agent: { id: kid } } });
+      await db.agentSubAgent.deleteMany({ where: { parentAgentId: lead } });
+      await db.run.deleteMany({ where: { agentId: lead } });
+      await db.agent.deleteMany({ where: { id: { in: [lead, kid] } } });
+    }
+  }, 30_000);
+
+  /** A fake child Executor that records starts and never runs anything, so the child stays pending. */
+  function recordingChildExecutor() {
+    const started: string[] = [];
+    const fake: Executor = {
+      async start(runId) {
+        started.push(runId);
+      },
+      async stop() {},
+    };
+    return { fake, started };
+  }
+
+  /**
+   * A lead that delegated to a sandbox-mode child (durable on its own) and whose process died inside
+   * the delegate step; its workflow is then recorded under another application version (a deploy).
+   */
+  async function leadWaitingAfterDeploy(label: string) {
+    await executor?.close();
+    const lead = `dbos-${label}-lead-${suffix}`;
+    const kid = `dbos-${label}-kid-${suffix}`;
+    await db.agent.create({
+      data: { id: lead, name: lead, systemPrompt: "LEAD", model: "m", budgetUsd: 1, maxTurns: 5 },
+    });
+    await db.agent.create({
+      data: {
+        id: kid,
+        name: kid,
+        systemPrompt: "CHILD",
+        model: "m",
+        budgetUsd: 0.1,
+        maxTurns: 3,
+        nativeExecutionMode: "sandbox",
+      },
+    });
+    await db.agentSubAgent.create({ data: { parentAgentId: lead, childAgentId: kid, boundName: "kid" } });
+    const delegate: LlmStreamEvent[] = [
+      { type: "tool_call", id: "c1", name: "delegate_to_kid", argsJson: JSON.stringify({ task: "x" }) },
+      { type: "done", stopReason: "tool_calls", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.012 } },
+    ];
+    const firstChildren = recordingChildExecutor();
+    const dying = killableClient();
+    executor = buildWith(scriptedLlm([delegate]), executorId, dying.client, firstChildren.fake);
+    await executor.launch();
+    const run = await db.run.create({ data: { agentId: lead, executionManaged: true } });
+    const firstAttempt = executor.start(run.id).catch(() => undefined);
+    await waitFor("the lead to dispatch its child", () => firstChildren.started.length === 1);
+    await executor.close();
+    dying.kill();
+    await firstAttempt;
+    await recordUnderOtherVersion(run.id);
+    const cleanup = async () => {
+      await db.run.deleteMany({ where: { agent: { id: kid } } });
+      await db.agentSubAgent.deleteMany({ where: { parentAgentId: lead } });
+      await db.run.deleteMany({ where: { agentId: lead } });
+      await db.agent.deleteMany({ where: { id: { in: [lead, kid] } } });
+    };
+    return { run, childId: firstChildren.started[0], cleanup };
+  }
+
+  /** Workflows DBOS forked from `workflowId`. */
+  async function forksOf(workflowId: string): Promise<string[]> {
+    const rows = await db.$queryRawUnsafe<{ workflow_uuid: string }[]>(
+      "SELECT workflow_uuid FROM dbos_test.workflow_status WHERE forked_from = $1",
+      workflowId,
+    );
+    return rows.map((r) => r.workflow_uuid);
+  }
+
+  /** Mark the lead's child succeeded and wait for the lead to finish with its own final answer. */
+  async function finishChildAndLead(runId: string): Promise<void> {
+    await db.run.updateMany({
+      where: { parentRunId: runId },
+      data: { status: "succeeded", finalText: "kid done", finishedAt: new Date() },
+    });
+    await waitFor(
+      "the lead to finish",
+      async () => (await db.run.findUnique({ where: { id: runId } }))?.finalText != null,
+    );
+  }
+
+  it("recover(): a takeover interrupted before it recorded the fork does not fork the run a second time", async () => {
+    const { run, childId, cleanup } = await leadWaitingAfterDeploy("idempotent");
+    try {
+      // The process records the fork's id on the run and fails there (or dies) once.
+      let failed = false;
+      const flaky = new Proxy(db, {
+        get(target, prop) {
+          if (prop !== "run") return Reflect.get(target, prop);
+          return new Proxy(target.run, {
+            get(model, key) {
+              if (key !== "update") return Reflect.get(model, key);
+              return (args: { data: { executionWorkflowId?: unknown } }) => {
+                if (!failed && args.data.executionWorkflowId !== undefined) {
+                  failed = true;
+                  return Promise.reject(new Error("simulated failure recording the fork"));
+                }
+                return model.update(args as never);
+              };
+            },
+          });
+        },
+      });
+      const restartChildren = recordingChildExecutor();
+      const resumedLlm = scriptedLlm([finalAnswer("lead done")]);
+      executor = buildWith(resumedLlm, `${executorId}-idempotent`, flaky, restartChildren.fake);
+      await executor.launch();
+      const handle = { runId: run.id, backend: DBOS_BACKEND, id: run.id };
+      await expect(executor.recover(handle)).rejects.toThrow("simulated failure recording the fork");
+      expect((await db.run.findUniqueOrThrow({ where: { id: run.id } })).executionWorkflowId).toBeNull();
+
+      // The reconciler's next pass asks again with the run id: the same fork is recorded, no second.
+      expect(await executor.recover(handle)).toEqual({ state: "active" });
+      const forkId = `${run.id}@${DBOS.applicationVersion}`;
+      expect(await forksOf(run.id)).toEqual([forkId]);
+      expect((await db.run.findUniqueOrThrow({ where: { id: run.id } })).executionWorkflowId).toBe(forkId);
+      expect((await DBOS.getWorkflowStatus(run.id))?.status).toBe("CANCELLED");
+
+      await finishChildAndLead(run.id);
+      expect((await db.run.findUniqueOrThrow({ where: { id: run.id } })).finalText).toBe("lead done");
+      expect((await db.run.findMany({ where: { parentRunId: run.id } })).map((c) => c.id)).toEqual([childId]);
+      expect(restartChildren.started).toEqual([]);
+      expect(resumedLlm.calls).toHaveLength(1);
+    } finally {
+      await cleanup();
+    }
+  }, 30_000);
+
+  it("recover(): a second deploy takes the fork over again, and the run follows the newest fork", async () => {
+    const { run, childId, cleanup } = await leadWaitingAfterDeploy("refork");
+    try {
+      // Deploy 1: this version forks the run, then its process dies while the fork waits on the child.
+      const dying = killableClient();
+      const secondChildren = recordingChildExecutor();
+      executor = buildWith(scriptedLlm([]), `${executorId}-refork-1`, dying.client, secondChildren.fake);
+      await executor.launch();
+      expect(await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id })).toEqual({
+        state: "active",
+      });
+      const firstFork = (await db.run.findUniqueOrThrow({ where: { id: run.id } })).executionWorkflowId!;
+      expect(firstFork).toBe(`${run.id}@${DBOS.applicationVersion}`);
+      await waitFor(
+        "the fork to be running here",
+        async () => (await DBOS.getWorkflowStatus(firstFork))?.status === "PENDING",
+      );
+      await executor.close();
+      dying.kill();
+      // Deploy 2: the fork itself now belongs to an older version.
+      await recordUnderOtherVersion(firstFork);
+
+      const thirdChildren = recordingChildExecutor();
+      const resumedLlm = scriptedLlm([finalAnswer("lead done")]);
+      executor = buildWith(resumedLlm, `${executorId}-refork-2`, db, thirdChildren.fake);
+      await executor.launch();
+      expect(await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: firstFork })).toEqual({
+        state: "active",
+      });
+      const secondFork = (await db.run.findUniqueOrThrow({ where: { id: run.id } })).executionWorkflowId!;
+      expect(secondFork).toBe(`${firstFork}@${DBOS.applicationVersion}`);
+      expect(await forksOf(firstFork)).toEqual([secondFork]);
+      // The steps the first release recorded travel with each fork.
+      const steps = ((await DBOS.listWorkflowSteps(secondFork)) ?? []).map((s) => s.name);
+      expect(steps).toEqual(expect.arrayContaining(["load", "turn:1:llm"]));
+
+      await finishChildAndLead(run.id);
+      expect((await db.run.findUniqueOrThrow({ where: { id: run.id } })).finalText).toBe("lead done");
+      expect((await db.run.findMany({ where: { parentRunId: run.id } })).map((c) => c.id)).toEqual([childId]);
+      expect([...secondChildren.started, ...thirdChildren.started]).toEqual([]);
+      expect(resumedLlm.calls).toHaveLength(1);
+    } finally {
+      await cleanup();
+    }
+  }, 30_000);
+
+  it("recover(): a fork orphaned under its own version is resumed (same-version adoption) and finishes", async () => {
+    const { run, childId, cleanup } = await leadWaitingAfterDeploy("fork-resume");
+    try {
+      const dying = killableClient();
+      const secondChildren = recordingChildExecutor();
+      executor = buildWith(scriptedLlm([]), `${executorId}-fork-resume-1`, dying.client, secondChildren.fake);
+      await executor.launch();
+      expect(await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id })).toEqual({
+        state: "active",
+      });
+      const fork = (await db.run.findUniqueOrThrow({ where: { id: run.id } })).executionWorkflowId!;
+      await waitFor(
+        "the fork to be running here",
+        async () => (await DBOS.getWorkflowStatus(fork))?.status === "PENDING",
+      );
+      // The process that took the run over dies too, with no deploy: same version, another executor.
+      await executor.close();
+      dying.kill();
+
+      const thirdChildren = recordingChildExecutor();
+      const resumedLlm = scriptedLlm([finalAnswer("lead done")]);
+      executor = buildWith(resumedLlm, `${executorId}-fork-resume-2`, db, thirdChildren.fake);
+      await executor.launch();
+      expect(await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: fork })).toEqual({
+        state: "active",
+      });
+      // Resumed, not forked again.
+      expect(await forksOf(fork)).toEqual([]);
+      expect((await db.run.findUniqueOrThrow({ where: { id: run.id } })).executionWorkflowId).toBe(fork);
+
+      await finishChildAndLead(run.id);
+      const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+      expect(after.status).toBe("succeeded");
+      expect(after.finalText).toBe("lead done");
+      expect((await db.run.findMany({ where: { parentRunId: run.id } })).map((c) => c.id)).toEqual([childId]);
+      expect([...secondChildren.started, ...thirdChildren.started]).toEqual([]);
+      expect(resumedLlm.calls).toHaveLength(1);
+    } finally {
+      await cleanup();
+    }
+  }, 30_000);
+
+  it("recover(): answers lost with the version mismatch for a lead that was mid-turn", async () => {
+    await executor?.close();
+    let release!: () => void;
+    const open = new Promise<void>((resolve) => (release = resolve));
+    const llm = scriptedLlm([finalAnswer("never")], { turn: 1, open });
+    const dying = killableDb();
+    executor = buildWith(llm, executorId, dying.client);
+    await executor.launch();
+    const run = await db.run.create({ data: { agentId, executionManaged: true } });
+
+    const firstAttempt = executor.start(run.id).catch(() => undefined);
+    await waitFor("turn 1 to block inside the LLM step", () => llm.calls.length === 1);
+    await executor.close();
+    dying.kill();
+    release();
+    await firstAttempt;
+    const other = await recordUnderOtherVersion(run.id);
+
+    executor = buildWith(scriptedLlm([]), `${executorId}-midturn`);
+    await executor.launch();
+    expect(await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id })).toEqual({
+      state: "lost",
+      reason: versionMismatchReason(other, DBOS.applicationVersion),
+    });
+    expect((await db.run.findUniqueOrThrow({ where: { id: run.id } })).executionWorkflowId).toBeNull();
+  }, 30_000);
+
+  // "turn:1:estimate" is settled by executeRun's backstop; "load" runs ahead of it, in runInsideWorkflow.
+  it.each(["turn:1:estimate", "load"])(
+    "a replay that meets a renamed %s step ends the run lost with the steps-changed reason, and notifies",
+    async (renamed) => {
+      await executor?.close();
+      let release!: () => void;
+      const open = new Promise<void>((resolve) => (release = resolve));
+      const llm = scriptedLlm([finalAnswer("never")], { turn: 1, open });
+      const dying = killableDb();
+      executor = buildWith(llm, executorId, dying.client);
+      await executor.launch();
+      const run = await db.run.create({ data: { agentId, executionManaged: true } });
+
+      const firstAttempt = executor.start(run.id).catch(() => undefined);
+      await waitFor("turn 1 to block inside the LLM step", () => llm.calls.length === 1);
+      await executor.close();
+      dying.kill();
+      release();
+      await firstAttempt;
+      // A release whose steps differ recorded this run: one of its steps has another name.
+      await db.$executeRawUnsafe(
+        "UPDATE dbos_test.operation_outputs SET function_name = 'renamed:step' WHERE workflow_uuid = $1 AND function_name = $2",
+        run.id,
+        renamed,
+      );
+
+      const events: WorkflowEventInput[] = [];
+      setWorkflowEventSink(async (e) => {
+        events.push(e);
+      });
+      try {
+        const replayLlm = scriptedLlm([finalAnswer("never")]);
+        executor = buildWith(replayLlm, `${executorId}-replay-${renamed}`);
+        await executor.launch();
+        await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id });
+        await waitFor("the replay to notify the run's end", () =>
+          events.some((e) => e.runId === run.id && e.payload.kind === "run_failed"),
+        );
+
+        const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+        expect(after.status).toBe("lost");
+        expect(after.error).toBe(STEPS_CHANGED_REASON);
+        expect(after.finishedAt).not.toBeNull();
+        expect(replayLlm.calls).toHaveLength(0);
+        expect(events.filter((e) => e.runId === run.id && e.payload.kind === "run_failed")).toHaveLength(1);
+      } finally {
+        setWorkflowEventSink(null);
+      }
+    },
+    30_000,
+  );
 
   it("a run started in the background from inside another run's step fails, unless started outside its context", async () => {
     // What a coding child's terminal hook does when it finishes inside its lead's delegation

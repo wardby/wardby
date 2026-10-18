@@ -82,6 +82,35 @@ describe("NativeEngine", () => {
     });
   });
 
+  it("passes each tool call's model-assigned id to runSandboxTool", async () => {
+    const llm = scriptedLlm(
+      [
+        [
+          { type: "tool_call", id: "call_1", name: "echo", argsJson: "{}" },
+          { type: "done", stopReason: "tool_calls", usage: { inputTokens: 9, outputTokens: 2, costUsd: 11 } },
+        ],
+        [
+          { type: "text", delta: "done" },
+          { type: "done", stopReason: "stop", usage: { inputTokens: 20, outputTokens: 6, costUsd: 26 } },
+        ],
+      ],
+      (usage) => usage.inputTokens + usage.outputTokens,
+      (messages) => messages.reduce((sum, m) => sum + m.content.length, 0),
+    );
+    const seen: Array<[string, string, string | undefined]> = [];
+    const ctx = makeContext({
+      llm,
+      runSandboxTool: async (name: string, argsJson: string, callId?: string) => {
+        seen.push([name, argsJson, callId]);
+        return "ok";
+      },
+    });
+
+    await new NativeEngine().run(ctx);
+
+    expect(seen).toEqual([["echo", "{}", "call_1"]]);
+  });
+
   it("terminates succeeded after a tool-call -> result -> final-answer sequence", async () => {
     const llm = scriptedLlm(
       [
@@ -105,7 +134,7 @@ describe("NativeEngine", () => {
     expect(result.status).toBe("succeeded");
     expect(result.finalText).toBe("It is 72F in Boston.");
     expect(result.turns).toBe(2);
-    expect(runSandboxTool).toHaveBeenCalledWith("getWeather", '{"city":"Boston"}');
+    expect(runSandboxTool).toHaveBeenCalledWith("getWeather", '{"city":"Boston"}', "c1");
     // Turn 2's request must replay the assistant's tool call and the tool's result.
     const turn2Messages = llm.calls[1].messages;
     expect(turn2Messages.some((m) => m.role === "assistant" && m.toolCalls?.[0]?.id === "c1")).toBe(true);

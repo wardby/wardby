@@ -37,6 +37,8 @@ COPY --from=build /build/dist/coding-worker/errors.js ./coding-worker/errors.js
 COPY --from=build /build/dist/coding-worker/debug-trace.js ./coding-worker/debug-trace.js
 COPY --from=build /build/dist/coding-worker/keeper.js ./coding-worker/keeper.js
 COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
+# The shared secret redactor (debug-trace.js); it imports nothing.
+COPY --from=build /build/dist/core/secret-spans.js ./core/secret-spans.js
 COPY --from=build /build/dist/coding/registry/token.js ./coding/registry/token.js
 # tool-socket.js derives its wait for the tool runner's dependency cache from the module's own
 # timeouts (DEFAULT_TIMEOUTS); only its constants are read here, the tool runner runs it.

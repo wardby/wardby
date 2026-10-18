@@ -78,6 +78,28 @@ export class RunOwnershipLostError extends Error {
   }
 }
 
+/** Why a run ends lost when its replay meets a step its record does not have (StepReplayMismatchError). */
+export const STEPS_CHANGED_REASON = "Could not continue across versions: the run's steps changed in the new version.";
+
+/**
+ * Part of the StepRunner contract: a durable step runner may throw this when a
+ * replayed run reaches a step whose name differs from the one recorded at that
+ * position (the run was recorded by a release whose steps differ). The run
+ * cannot continue from its record; engines rethrow it untouched and the
+ * runner ends the run lost with STEPS_CHANGED_REASON.
+ */
+export class StepReplayMismatchError extends Error {
+  readonly step: string;
+  constructor(step: string, options?: { cause?: unknown }) {
+    super(
+      `step_replay_mismatch: the recorded run has a different step where "${step}" was expected.`,
+      options?.cause === undefined ? undefined : { cause: options.cause },
+    );
+    this.name = "StepReplayMismatchError";
+    this.step = step;
+  }
+}
+
 /** The no-checkpoint default: run the step body directly. */
 export const runStepInline: StepRunner = (_name, fn) => fn();
 
@@ -95,8 +117,8 @@ export interface EngineRunContext {
   agent: EngineAgent;
   tools: LoadedTool[];
   providers: Pick<ProviderRegistry, "llm">;
-  /** Host bridge: validates params (Zod-in-sandbox) then runs the tool body in the WASM sandbox. Never throws — a tool/validation failure is a JSON error result string, fed back to the model as the tool's result. */
-  runSandboxTool(name: string, argsJson: string): Promise<string>;
+  /** Host bridge: validates params (Zod-in-sandbox) then runs the tool body in the WASM sandbox. Never throws — a tool/validation failure is a JSON error result string, fed back to the model as the tool's result. `callId` is the model's id for this tool call; the same on a replay of the turn. */
+  runSandboxTool(name: string, argsJson: string, callId?: string): Promise<string>;
   /**
    * Consecutive tool calls of one model turn for which this returns true run
    * at the same time as each other (a lead's delegate_to_* calls, when the

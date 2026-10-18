@@ -67,6 +67,20 @@ describe("runNativeWorker gateway errors", () => {
     expect((finishes[0].params as { error: string }).error).toBe("native_sandbox_gateway_error: internal");
   });
 
+  it("names the cause code an internal gateway error carries, and only that", async () => {
+    const { transport, finishes } = transportRejecting(
+      new GatewayError(
+        "internal",
+        "The gateway could not serve this call (coding_execution_not_configured).",
+        "coding_execution_not_configured",
+      ),
+    );
+    await runNativeWorker(input, transport);
+    expect((finishes[0].params as { error: string }).error).toBe(
+      "native_sandbox_gateway_error: internal: coding_execution_not_configured",
+    );
+  });
+
   it("keeps a run that already ended quiet: no finish, the error still propagates", async () => {
     const err = new GatewayError("run_not_drivable", "ended");
     const { transport, finishes } = transportRejecting(err);

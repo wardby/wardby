@@ -43,8 +43,23 @@ function redactErr(error: unknown): unknown {
   return redactDeep(pino.stdSerializers.err(error as Error));
 }
 
+/** Applied to every serialized line before it is written. Identity unless a process sets one. */
+let lineFilter: (line: string) => string = (line) => line;
+
+/**
+ * Sets the filter every log line passes through on its way to stderr. The native sandbox worker
+ * uses it to redact the secret values it received (native-worker/stderr-redaction.ts).
+ */
+export function setLogLineFilter(filter: (line: string) => string): void {
+  lineFilter = filter;
+}
+
 export const logger = pino(
-  { level: process.env.LOG_LEVEL ?? "info", serializers: { err: redactErr } },
+  {
+    level: process.env.LOG_LEVEL ?? "info",
+    serializers: { err: redactErr },
+    hooks: { streamWrite: (line) => lineFilter(line) },
+  },
   pino.destination({ fd: 2, sync: false }),
 );
 

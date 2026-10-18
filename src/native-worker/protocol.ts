@@ -12,7 +12,12 @@
  */
 
 import { z } from "zod";
+import { causeCodeOf, GATEWAY_CAUSE_CODES } from "../core/error-code.js";
 import { LLM_EFFORT_LEVELS } from "../providers/llm/types.js";
+import { overlapsSecretValue } from "../sandbox/host-functions.js";
+
+// The allow-list and its checked helper live in core/error-code.ts (shared with the runner); re-exported here.
+export { causeCodeOf, GATEWAY_CAUSE_CODES };
 
 export const NATIVE_WORKER_PROTOCOL_VERSION = 1;
 /** Above the sandbox's 12 MiB bridge-result cap, plus envelope. */
@@ -52,10 +57,58 @@ export class GatewayError extends Error {
   constructor(
     readonly code: GatewayErrorCode,
     message: string,
+    /**
+     * For `internal` only: the code the underlying error's message led with (causeCodeOf), so the
+     * run can name the cause without the rest of that message.
+     */
+    readonly causeCode?: string,
   ) {
     super(message);
     this.name = "GatewayError";
   }
+}
+
+/** What the worker is told about an unexpected gateway failure: never the error's own text. */
+export const GATEWAY_INTERNAL_MESSAGE = "The gateway could not serve this call.";
+
+/**
+ * `err` as the worker may see it, on every transport (HTTP, stdio, loopback). An unexpected error
+ * becomes `internal` with the generic message; a GatewayError keeps its code and message. A cause
+ * code is carried only when it is declared (GATEWAY_CAUSE_CODES) and checked: not when it equals, contains, or is contained in a secret
+ * value the run can read (`secretValues`, read only when there is a code to check), and not at
+ * all when there is nothing to check it against or reading the values fails.
+ */
+export async function workerGatewayError(
+  err: unknown,
+  secretValues?: () => Promise<Iterable<string>>,
+): Promise<GatewayError> {
+  const leading = err instanceof GatewayError ? err.causeCode : causeCodeOf(err);
+  // Declared codes only; the exact-value check below is a second guard.
+  const candidate = leading && GATEWAY_CAUSE_CODES.has(leading) ? leading : undefined;
+  let causeCode: string | undefined;
+  if (candidate && secretValues) {
+    const values = await secretValues().catch(() => undefined);
+    if (values && !overlapsSecretValue(candidate, values)) causeCode = candidate;
+  }
+  if (err instanceof GatewayError) return new GatewayError(err.code, err.message, causeCode);
+  return new GatewayError(
+    "internal",
+    causeCode ? `The gateway could not serve this call (${causeCode}).` : GATEWAY_INTERNAL_MESSAGE,
+    causeCode,
+  );
+}
+
+/**
+ * `err` as a transport carries it to the worker: a GatewayError (already checked by the gateway
+ * that threw it) as is, with a declared cause code only; anything else `internal` with the generic message and no cause code, since
+ * a transport has no secret values to check one against.
+ */
+export function toGatewayError(err: unknown): GatewayError {
+  if (err instanceof GatewayError) {
+    const causeCode = err.causeCode && GATEWAY_CAUSE_CODES.has(err.causeCode) ? err.causeCode : undefined;
+    return new GatewayError(err.code, err.message, causeCode);
+  }
+  return new GatewayError("internal", GATEWAY_INTERNAL_MESSAGE);
 }
 
 const runId = z.string().min(1).max(64);

@@ -11,7 +11,6 @@
  * reported usage; the worker's own usage numbers are never read.
  */
 
-import { logger } from "../core/logger.js";
 import {
   createNativeRunTools,
   durableDelegate,
@@ -31,6 +30,7 @@ import { DELEGATE_TOOL_PREFIX } from "../core/tool-names.js";
 import { RoutingLlmProvider } from "../providers/llm/routing.js";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
 import { isPrivilegedBridgeName } from "../sandbox/host-functions.js";
+import { forWorker, gatewayLog } from "./gateway.js";
 import { PrismaGatewayLedger, type GatewaySessionRecord } from "./ledger.js";
 import {
   GatewayError,
@@ -40,8 +40,6 @@ import {
   type GatewayMethod,
   type GatewayParams,
 } from "./protocol.js";
-
-const serverLog = logger.child({ module: "native-gateway-server" });
 
 /** Output tokens reserved for a model call that names no maxTokens (as the coding proxy does). */
 export const GATEWAY_DEFAULT_RESERVE_OUTPUT_TOKENS = 4_096;
@@ -67,10 +65,15 @@ const ok = (result: unknown): GatewayResponse => ({
   status: 200,
   body: { ok: true, result: result ?? null },
 });
-const fail = (status: number, code: GatewayErrorCode | "unauthorized", message: string): GatewayResponse => ({
+const fail = (
+  status: number,
+  code: GatewayErrorCode | "unauthorized",
+  message: string,
+  causeCode?: string,
+): GatewayResponse => ({
   kind: "json",
   status,
-  body: { ok: false, error: { code, message } },
+  body: { ok: false, error: { code, message, ...(causeCode ? { causeCode } : {}) } },
 });
 
 const STATUS_FOR: Record<string, number> = {
@@ -90,12 +93,54 @@ export async function serveGatewayRequest(
   authorization: string | undefined,
   body: unknown,
 ): Promise<GatewayResponse> {
+  // The capability once parsed, then every secret value of the rebuilt run: what a cause code and
+  // the log line are checked against. Unset (no bearer), no cause code is sent.
+  const scope: { secretValues?: () => Promise<string[]> } = {};
   try {
-    return await handle(deps, authorization, body);
+    return await handle(deps, authorization, body, scope);
   } catch (err) {
-    if (err instanceof GatewayError) return fail(STATUS_FOR[err.code] ?? 500, err.code, err.message);
-    serverLog.error({ err }, "native gateway request failed");
-    return fail(500, "internal", "The gateway could not serve this call.");
+    return failureResponse(err, scope.secretValues);
+  }
+}
+
+/**
+ * Every secret value the rebuilt run can read (each user tool's readable or brokered values), and
+ * the request's own capability: what a cause code is checked against before it leaves the gateway.
+ */
+export function runSecretValues(
+  ctx: Pick<RebuiltRun, "snapshot" | "tools">,
+  capability: string,
+): () => Promise<string[]> {
+  return async () => {
+    const perTool = await Promise.all(
+      Object.keys(ctx.snapshot.input.userTools).map((tool) => ctx.tools.readableSecretValues(tool)),
+    );
+    return [capability, ...perTool.flat()];
+  };
+}
+
+/**
+ * A failure as its response. Only a checked cause code leaves the gateway (workerGatewayError),
+ * never the rest of an unexpected error's message; the server's own log line is redacted by the
+ * same values.
+ */
+export async function failureResponse(
+  err: unknown,
+  secretValues: (() => Promise<string[]>) | undefined,
+): Promise<GatewayResponse> {
+  const sent = await forWorker(err, secretValues, "native gateway request failed");
+  return fail(STATUS_FOR[sent.code] ?? 500, sent.code, sent.message, sent.causeCode);
+}
+
+/** A model stream whose failure reaches the worker as the same checked error a JSON response carries. */
+export async function* checkedEvents(
+  events: AsyncIterable<LlmStreamEvent>,
+  secretValues: (() => Promise<string[]>) | undefined,
+): AsyncIterable<LlmStreamEvent> {
+  try {
+    yield* events;
+  } catch (err) {
+    throw await forWorker(err, secretValues, "native gateway model stream failed");
   }
 }
 
@@ -103,11 +148,14 @@ async function handle(
   deps: GatewayServerDeps,
   authorization: string | undefined,
   body: unknown,
+  scope: { secretValues?: () => Promise<string[]> },
 ): Promise<GatewayResponse> {
   const { db } = deps;
   const ledger = new PrismaGatewayLedger(db);
   const token = /^Bearer (\S+)$/.exec(authorization ?? "")?.[1];
   if (!token) return fail(401, "unauthorized", "A gateway capability is required.");
+  // Until the run's tools are rebuilt, the capability is the secret value an error is checked against.
+  scope.secretValues = async () => [token];
   const session = await ledger.findSessionByCapabilityHash(sandboxCapabilityHash(token));
   if (!session) return fail(401, "unauthorized", "Unknown gateway capability.");
 
@@ -134,19 +182,32 @@ async function handle(
   }
 
   const ctx = await rebuild(deps, session);
+  scope.secretValues = runSecretValues(ctx, token);
   switch (request.method) {
     case "llm.stream":
       return {
         kind: "stream",
         status: 200,
-        events: streamModel(ctx, ledger, request.callId, params as GatewayParams<"llm.stream">),
+        events: checkedEvents(
+          streamModel(ctx, ledger, request.callId, params as GatewayParams<"llm.stream">),
+          scope.secretValues,
+        ),
       };
     case "llm.countTokens": {
       const p = params as GatewayParams<"llm.countTokens">;
       return ok(await ctx.llm.countTokens(p.model, p.messages, p.tools));
     }
     case "builtin.call":
-      return ok(await builtin(ctx, ledger, request.callId, params as GatewayParams<"builtin.call">, deps.pollWindowMs));
+      return ok(
+        await builtin(
+          ctx,
+          ledger,
+          request.callId,
+          params as GatewayParams<"builtin.call">,
+          deps.pollWindowMs,
+          scope.secretValues,
+        ),
+      );
     case "host.call":
       return ok(await hostCall(ctx, ledger, request.callId, params as GatewayParams<"host.call">));
     case "progress": {
@@ -312,13 +373,14 @@ async function builtin(
   callId: string,
   params: GatewayParams<"builtin.call">,
   pollWindowMs: number | undefined,
+  secretValues?: () => Promise<string[]>,
 ): Promise<unknown> {
   if (!ctx.snapshot.input.builtinTools.includes(params.name)) {
     throw new GatewayError("not_allowed", `"${params.name}" is not a built-in tool of this run.`);
   }
   if (params.name.startsWith(DELEGATE_TOOL_PREFIX)) {
     const outcome = await durableDelegate(
-      { ...ctx.delegation, pollWindowMs, ledger, sessionId: ctx.session.id },
+      { ...ctx.delegation, pollWindowMs, ledger, sessionId: ctx.session.id, secretValues },
       callId,
       params.name,
       params.argsJson,
@@ -335,7 +397,16 @@ async function builtin(
   });
 }
 
-async function hostCall(
+/**
+ * Logged (at warn) in place of a user tool's console line when that tool's redaction list cannot
+ * be read: without the complete list the line cannot be shown to be free of its secret values, so
+ * none of it is logged. The tool's call still succeeds, as a console write does in-process.
+ */
+export const CONSOLE_WITHHELD_MESSAGE =
+  "sandbox tool console line withheld: the tool's secret values could not be read";
+
+/** Serves one privileged bridge call for a worker (exported for tests). */
+export async function hostCall(
   ctx: RebuiltRun,
   ledger: PrismaGatewayLedger,
   callId: string,
@@ -345,7 +416,19 @@ async function hostCall(
   if (!ctx.snapshot.input.userTools[params.tool]) {
     throw new GatewayError("not_allowed", `"${params.tool}" is not a user tool of this run.`);
   }
-  const redact = params.bridge === "__bridge_console" ? await ctx.tools.readableSecretValues(params.tool) : undefined;
+  let redact: readonly string[] | undefined;
+  if (params.bridge === "__bridge_console") {
+    // Fail closed: a console line is redacted by the tool's complete list or not logged at all.
+    const values = await ctx.tools.readableSecretValues(params.tool).then(
+      (v) => v,
+      () => undefined,
+    );
+    if (!values) {
+      gatewayLog.warn({ tool: params.tool }, CONSOLE_WITHHELD_MESSAGE);
+      return null;
+    }
+    redact = values;
+  }
   const host = ctx.tools.privilegedHostFor(params.tool, AbortSignal.timeout(30_000), redact);
   if (!host) throw new GatewayError("not_allowed", `"${params.tool}" is not a user tool of this run.`);
   const bridge = host[params.bridge];

@@ -2,13 +2,15 @@
  * Native sandbox worker process entry. Reads its WorkerInput as the first line
  * on stdin, runs the run's engine against the gateway on stdin/stdout
  * (stdio.ts), and exits 0 once it has sent its result. stdout carries only
- * protocol frames; diagnostics (and the shared logger) go to stderr.
+ * protocol frames; diagnostics (and the shared logger) go to stderr, without any secret value the
+ * worker received (stderr-redaction.ts).
  */
 
 import { readFile, stat } from "node:fs/promises";
 import { parseMessage, WorkerInputSchema } from "./protocol.js";
 import { createHttpTransport } from "./http-transport.js";
 import { createStdioTransport } from "./stdio.js";
+import { flushStderrRedaction, installStderrRedaction, rememberSecretValue } from "./stderr-redaction.js";
 import { WARM_WORKER_UNCLAIMED_EXIT } from "./warm-delivery.js";
 import { runNativeWorker } from "./worker.js";
 
@@ -64,6 +66,7 @@ async function readInput(): Promise<string> {
 
 async function main(): Promise<void> {
   const input = parseMessage(await readInput(), WorkerInputSchema);
+  if (input.gateway) rememberSecretValue(input.gateway.capability);
   // The gateway answers only after the worker asks, so choosing the transport after the input
   // line misses nothing.
   const transport = input.gateway
@@ -72,14 +75,19 @@ async function main(): Promise<void> {
   await runNativeWorker(input, transport);
 }
 
-main().then(
-  () => process.exit(0),
-  (err: unknown) => {
-    if (err instanceof UnclaimedError) {
-      process.stderr.write(`native sandbox worker: ${err.message}\n`);
-      process.exit(WARM_WORKER_UNCLAIMED_EXIT);
-    }
-    process.stderr.write(`native sandbox worker failed: ${err instanceof Error ? err.message : String(err)}\n`);
-    process.exit(1);
-  },
-);
+const fail = (err: unknown): never => {
+  // Anything still buffered for its line's end goes out first, so the failure line stands alone.
+  flushStderrRedaction();
+  if (err instanceof UnclaimedError) {
+    process.stderr.write(`native sandbox worker: ${err.message}\n`);
+    process.exit(WARM_WORKER_UNCLAIMED_EXIT);
+  }
+  process.stderr.write(`native sandbox worker failed: ${err instanceof Error ? err.message : String(err)}\n`);
+  process.exit(1);
+};
+
+installStderrRedaction();
+// Node's own report of an uncaught error would bypass the redaction: fail the same way instead.
+process.on("uncaughtException", fail);
+process.on("unhandledRejection", fail);
+main().then(() => process.exit(0), fail);

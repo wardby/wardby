@@ -13,6 +13,7 @@ import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
 import { computeCost } from "../providers/llm/pricing-core.js";
 import { PRIVILEGED_BRIDGE_NAMES, type PrivilegedHost } from "../sandbox/host-functions.js";
 import { runUserToolCall } from "../sandbox/user-tool.js";
+import { rememberSecretValue } from "./stderr-redaction.js";
 import {
   GatewayError,
   NATIVE_WORKER_PROTOCOL_VERSION,
@@ -77,7 +78,10 @@ export async function runNativeWorker(input: WorkerInput, transport: GatewayTran
         bridge,
         async (argsJson: string) => {
           try {
-            return await call("host.call", { tool, invocation, bridge, argsJson });
+            const result = await call("host.call", { tool, invocation, bridge, argsJson });
+            // A secret value now lives in this process: keep it out of everything it writes to stderr.
+            if (bridge === "__bridge_secretsGet" && typeof result === "string") rememberSecretValue(result);
+            return result;
           } catch (err) {
             // A bridge failure reaches the tool as the same error message it would see in-process.
             if (err instanceof GatewayError && err.code === "bridge_error")
@@ -145,10 +149,11 @@ export async function runNativeWorker(input: WorkerInput, transport: GatewayTran
       status: "failed",
       finalText: "",
       turns: 0,
-      // `internal` wraps raw exception text on some transports, so only its code is persisted.
+      // `internal` wraps raw exception text on some transports, so only its code (and the cause
+      // code the gateway carried with it, if any) is persisted, never its message.
       error:
         err.code === "internal"
-          ? "native_sandbox_gateway_error: internal"
+          ? `native_sandbox_gateway_error: internal${err.causeCode ? `: ${err.causeCode}` : ""}`
           : `native_sandbox_gateway_error: ${err.code}: ${err.message.slice(0, 1024)}`,
     });
     return;

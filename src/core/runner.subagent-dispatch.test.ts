@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { Prisma } from "#prisma";
 import type { Datastore } from "../providers/datastore/types.js";
 import type { AgentMemoryStore } from "../providers/memory/types.js";
 import type { LlmProvider, LlmRequest, LlmStreamEvent } from "../providers/llm/types.js";
@@ -9,6 +10,7 @@ import {
   durableDelegate,
   executeRun,
   parseDelegateArgs,
+  runnerLog,
   type DelegationLedger,
   type LoadedNativeRun,
   type RunnerDb,
@@ -67,6 +69,7 @@ interface FakeRun {
   finalText: string | null;
   turns: number;
   parentRunId: string | null;
+  parentCallId?: string | null;
   grantedParentMemoryKeys: string[];
   taskOverride: string | null;
   triggeredById?: string | null;
@@ -174,6 +177,14 @@ function fakeDb(
         runs.set(where.id, { ...record, ...data });
         return { count: 1 };
       }) as any,
+      // findDelegationChild's keyed lookup: the child one delegation call created.
+      findFirst: (async ({ where }: any) => {
+        const found = [...runs.values()].find(
+          (r) =>
+            r.parentRunId === where.parentRunId && r.parentCallId === where.parentCallId && r.agentId === where.agentId,
+        );
+        return found ? { id: found.id, startedAt: found.startedAt } : null;
+      }) as any,
       findMany: (async ({ where }: any) => {
         // Like the real relations: a run carries its CodingRun row (its reservation) and its agent's budgetUsd.
         const all = [...runs.values()].map((r) => ({
@@ -181,6 +192,16 @@ function fakeDb(
           codingRun: codingRuns.get(r.id) ?? null,
           agent: { budgetUsd: agents.find((a) => a.id === r.agentId)?.budgetUsd ?? 0 },
         }));
+        if (where.parentCallId === null) {
+          // findDelegationChild's legacy lookup: drivable children of one agent with no call id.
+          return all.filter(
+            (r) =>
+              r.parentRunId === where.parentRunId &&
+              r.agentId === where.agentId &&
+              (r.parentCallId ?? null) === null &&
+              where.status.in.includes(r.status),
+          );
+        }
         if (where.agentId) {
           return all.filter((r) => where.agentId.in.includes(r.agentId) && r.startedAt >= where.startedAt.gte);
         }
@@ -288,8 +309,10 @@ const finalAnswer = (text: string): LlmStreamEvent[] => [
   { type: "text", delta: text },
   { type: "done", stopReason: "stop", usage: { inputTokens: 10, outputTokens: 5, costUsd: 0.01 } },
 ];
+/** Every scripted tool call gets its own id, as a real model's do: a delegation keys its child on it. */
+let toolCallSeq = 0;
 const toolCall = (name: string, argsJson: string): LlmStreamEvent[] => [
-  { type: "tool_call", id: "c1", name, argsJson },
+  { type: "tool_call", id: `c${++toolCallSeq}`, name, argsJson },
   { type: "done", stopReason: "tool_calls", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.01 } },
 ];
 /**
@@ -297,7 +320,7 @@ const toolCall = (name: string, argsJson: string): LlmStreamEvent[] => [
  * come from its own engine turns: live progress overwrites the run's cost columns with them.
  */
 const costlyToolCall = (name: string, argsJson: string, tokens: number): LlmStreamEvent[] => [
-  { type: "tool_call", id: "c1", name, argsJson },
+  { type: "tool_call", id: `c${++toolCallSeq}`, name, argsJson },
   {
     type: "done",
     stopReason: "tool_calls",
@@ -616,6 +639,208 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     expect(childRuns[0].executionManaged).toBe(true);
   });
 
+  describe("a re-executed delegate call (a resume, or a takeover under a new version)", () => {
+    const lead: FakeAgent = {
+      id: "dispatcher-agent",
+      name: "knock-knock-delivery",
+      systemPrompt: "You classify and delegate.",
+      model: "m",
+      budgetUsd: 5,
+      maxTurns: 10,
+    };
+    const implementer: FakeAgent = {
+      id: "implement-agent",
+      name: "knock-knock-implement",
+      systemPrompt: "unused for coding agents",
+      model: "gpt-5.6-luna",
+      budgetUsd: 5,
+      maxTurns: 10,
+      kind: "coding",
+      codingProfile,
+    };
+    const researcher: FakeAgent = {
+      id: "research-agent",
+      name: "researcher",
+      systemPrompt: "You research.",
+      model: "m",
+      budgetUsd: 5,
+      maxTurns: 10,
+    };
+    const edges = [
+      { parentAgentId: "dispatcher-agent", childAgentId: "implement-agent", boundName: "implement" },
+      { parentAgentId: "dispatcher-agent", childAgentId: "research-agent", boundName: "researcher" },
+    ];
+    const delegateCall = (id: string, name: string): LlmStreamEvent[] => [
+      { type: "tool_call", id, name, argsJson: JSON.stringify({ task: "add the feature" }) },
+      { type: "done", stopReason: "tool_calls", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.01 } },
+    ];
+    const recordingExecutor = () => {
+      const calls = { started: [] as string[], stopped: [] as Array<[string, string]> };
+      return {
+        calls,
+        executor: {
+          async start(runId: string) {
+            calls.started.push(runId);
+          },
+          async stop(runId: string, reason: string) {
+            calls.stopped.push([runId, reason]);
+          },
+        },
+      };
+    };
+
+    it("re-attaches to the coding child its call created and returns its result, starting no second child", async () => {
+      const db = fakeDb([lead, implementer], edges);
+      const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+      const child = await db.run.create({
+        data: {
+          agentId: "implement-agent",
+          trigger: "subagent",
+          parentRunId: parentRun.id,
+          parentCallId: "toolu_same",
+          status: "succeeded",
+          finalText: "Implemented it before the restart.",
+        },
+      });
+      const { calls, executor } = recordingExecutor();
+      const llm = scriptedLlm([delegateCall("toolu_same", "delegate_to_implement"), finalAnswer("reported")]);
+      const result = await executeRun(parentRun.id, providers(llm, executor as never), db);
+
+      expect(result.status).toBe("succeeded");
+      expect(toolResultSeen(llm, 1)).toMatchObject({
+        status: "succeeded",
+        finalText: "Implemented it before the restart.",
+      });
+      const children = await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } });
+      expect(children.map((c) => c.id)).toEqual([child.id]);
+      expect(calls.started).toEqual([]);
+    });
+
+    it("still refuses a different call naming a sub-agent this run already used", async () => {
+      const db = fakeDb([lead, implementer], edges);
+      const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+      await db.run.create({
+        data: {
+          agentId: "implement-agent",
+          trigger: "subagent",
+          parentRunId: parentRun.id,
+          parentCallId: "toolu_first",
+          status: "succeeded",
+        },
+      });
+      const { calls, executor } = recordingExecutor();
+      const llm = scriptedLlm([delegateCall("toolu_second", "delegate_to_implement"), finalAnswer("reported")]);
+      await executeRun(parentRun.id, providers(llm, executor as never), db);
+
+      expect(toolResultSeen(llm, 1)).toMatchObject({ error: "already_dispatched" });
+      expect(await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })).toHaveLength(1);
+      expect(calls.started).toEqual([]);
+    });
+
+    it("stops a control-plane native child that was running inline and starts no new one", async () => {
+      const db = fakeDb([lead, researcher], edges);
+      const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+      const child = await db.run.create({
+        data: {
+          agentId: "research-agent",
+          trigger: "subagent",
+          parentRunId: parentRun.id,
+          parentCallId: "toolu_inline",
+          status: "running",
+          nativeExecutionMode: "control_plane",
+        },
+      });
+      const { calls, executor } = recordingExecutor();
+      const llm = scriptedLlm([delegateCall("toolu_inline", "delegate_to_researcher"), finalAnswer("reported")]);
+      await executeRun(parentRun.id, providers(llm, executor as never), db);
+
+      expect(toolResultSeen(llm, 1)).toEqual({
+        error: "subagent_interrupted",
+        message: "The sub-agent was interrupted by a restart and cannot be resumed; no new sub-agent run was started.",
+      });
+      expect(calls.stopped).toEqual([[child.id, "parent resumed without it"]]);
+      expect(await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })).toHaveLength(1);
+    });
+
+    describe("a concurrent duplicate execution created the child first (P2002 on the call key)", () => {
+      const sandboxResearcher: FakeAgent = {
+        ...researcher,
+        id: "sandbox-agent",
+        kind: "native",
+        nativeExecutionMode: "sandbox",
+      };
+      const raceEdges = [
+        ...edges,
+        { parentAgentId: "dispatcher-agent", childAgentId: "sandbox-agent", boundName: "sandboxed" },
+      ];
+      /**
+       * The first child create for `callId` loses the unique-key race: another execution of the
+       * same delegate step commits its child (`winner`, unless null) and this create throws P2002.
+       */
+      function losesCreateRace(db: any, callId: string, winner: Record<string, unknown> | null) {
+        const create = db.run.create;
+        let raced = false;
+        db.run.create = async (args: any) => {
+          if (!raced && args.data.parentCallId === callId) {
+            raced = true;
+            if (winner) await create({ data: { ...args.data, ...winner } });
+            throw new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+              code: "P2002",
+              clientVersion: "test",
+              meta: { modelName: "Run", target: ["parentRunId", "parentCallId"] },
+            });
+          }
+          return create(args);
+        };
+      }
+
+      it.each([
+        ["coding", "implement-agent", "delegate_to_implement"],
+        ["sandbox-mode native", "sandbox-agent", "delegate_to_sandboxed"],
+        ["control-plane native", "research-agent", "delegate_to_researcher"],
+      ])("re-attaches a %s child to the existing row instead of failing the run", async (_kind, childAgentId, tool) => {
+        const db = fakeDb([lead, implementer, researcher, sandboxResearcher], raceEdges);
+        const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+        losesCreateRace(db, "toolu_raced", { status: "succeeded", finalText: "the winner's child finished" });
+        const { calls, executor } = recordingExecutor();
+        const llm = scriptedLlm([delegateCall("toolu_raced", tool), finalAnswer("reported")]);
+        const result = await executeRun(parentRun.id, providers(llm, executor as never), db);
+
+        expect(result.status).toBe("succeeded");
+        expect(toolResultSeen(llm, 1)).toMatchObject({ finalText: "the winner's child finished" });
+        const children = await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } });
+        expect(children.map((c: { agentId: string }) => c.agentId)).toEqual([childAgentId]);
+        expect(calls.started).toEqual([]);
+      });
+
+      it("answers a tool-result error, never throws, when no child of this agent holds the key", async () => {
+        const db = fakeDb([lead, implementer], edges);
+        const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+        losesCreateRace(db, "toolu_collides", null);
+        const { calls, executor } = recordingExecutor();
+        const llm = scriptedLlm([delegateCall("toolu_collides", "delegate_to_implement"), finalAnswer("reported")]);
+        const result = await executeRun(parentRun.id, providers(llm, executor as never), db);
+
+        expect(result.status).toBe("succeeded");
+        expect(toolResultSeen(llm, 1)).toMatchObject({ error: "delegation_conflict" });
+        expect(calls.started).toEqual([]);
+      });
+    });
+
+    it("writes the call id on the child it dispatches", async () => {
+      const db = fakeDb([lead, implementer], edges);
+      const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+      const executor = fakeCodingExecutor(db, { status: "succeeded", finalText: "done", costUsd: 0.01 });
+      const llm = scriptedLlm([delegateCall("toolu_new", "delegate_to_implement"), finalAnswer("reported")]);
+      await executeRun(parentRun.id, providers(llm, executor), db);
+
+      const [child] = (await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })) as Array<{
+        parentCallId?: string | null;
+      }>;
+      expect(child.parentCallId).toBe("toolu_new");
+    });
+  });
+
   describe("mergeOrder", () => {
     it("parseDelegateArgs accepts an integer 1-99", () => {
       const parsed = parseDelegateArgs(JSON.stringify({ task: "x", mergeOrder: 2 }));
@@ -840,6 +1065,86 @@ describe("delegate_to_<boundName> dispatch tool", () => {
       }>;
       const codingRun = await db.codingRun.findUnique({ where: { runId: child.id } });
       expect((codingRun as { mergeOrder: number | null } | null)?.mergeOrder).toBe(2);
+    });
+
+    describe("durableDelegate dispatch failure codes", () => {
+      const run = async (message: string, secretValues?: () => Promise<string[]>) => {
+        const dispatcher: FakeAgent = {
+          id: "dispatcher-agent",
+          name: "dispatcher",
+          systemPrompt: "You delegate.",
+          model: "m",
+          budgetUsd: 5,
+          maxTurns: 10,
+        };
+        const child: FakeAgent = { ...dispatcher, id: "child-agent", name: "child" };
+        const db = fakeDb(
+          [dispatcher, child],
+          [{ parentAgentId: "dispatcher-agent", childAgentId: "child-agent", boundName: "child" }],
+        );
+        const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+        (db as any).$transaction = async () => {
+          throw new Error(message);
+        };
+        const outcome = await durableDelegate(
+          {
+            runId: parentRun.id,
+            existingRun: parentRun,
+            loaded: {
+              agentId: "dispatcher-agent",
+              subAgentEdges: [{ childAgentId: "child-agent", boundName: "child" }],
+            } as unknown as LoadedNativeRun,
+            providers: providers(
+              scriptedLlm([]),
+              fakeCodingExecutor(db, { status: "succeeded", finalText: "x", costUsd: 0 }),
+            ),
+            db,
+            issueTrackers: undefined,
+            ledger: fakeDelegationLedger(),
+            sessionId: "session-1",
+            secretValues,
+          },
+          "call-1",
+          "delegate_to_child",
+          JSON.stringify({ task: "do it" }),
+        );
+        return JSON.stringify(outcome);
+      };
+
+      it("shows no code for an exception led by an unlisted snake_case word", async () => {
+        const text = await run("fake_unlisted_secret_0001: more detail");
+        expect(text.includes("fake_unlisted_secret_0001")).toBe(false);
+        expect(text.includes("could not be created.")).toBe(true);
+      });
+
+      const logged = async (secretValues?: () => Promise<string[]>) => {
+        const lines: unknown[] = [];
+        const spy = vi.spyOn(runnerLog, "error").mockImplementation((obj: unknown) => {
+          lines.push(obj);
+        });
+        try {
+          await run("failed with fake_dispatch_secret_0003 inside", secretValues);
+        } finally {
+          spy.mockRestore();
+        }
+        return JSON.stringify(lines, (_k, v) => (v instanceof Error ? { message: v.message, stack: v.stack } : v));
+      };
+
+      it("redacts the run's secret values from the logged exception", async () => {
+        const text = await logged(async () => ["fake_dispatch_secret_0003"]);
+        expect(text.includes("fake_dispatch_secret_0003")).toBe(false);
+        expect(text.includes("[REDACTED]")).toBe(true);
+      });
+
+      it("logs no message or stack when the values are unavailable", async () => {
+        expect((await logged()).includes("fake_dispatch_secret_0003")).toBe(false);
+        expect((await logged(() => Promise.reject(new Error("x")))).includes("fake_dispatch_secret_0003")).toBe(false);
+      });
+
+      it("shows a listed code", async () => {
+        const text = await run("invalid_merge_order");
+        expect(text.includes("(invalid_merge_order)")).toBe(true);
+      });
     });
   });
 

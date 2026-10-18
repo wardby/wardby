@@ -32,6 +32,14 @@ import { NATIVE_SANDBOX_WARM_DELIVERY_FAILED, type WarmWorkerLauncher } from "./
 
 const launcherLog = logger.child({ module: "native-docker-launcher" });
 
+/**
+ * Bounded, so a noisy worker cannot flood the log. The worker holds no long-lived credentials (only
+ * its run's gateway capability), and it redacts the secret values it received (every `secrets.get`
+ * result, and the capability) from everything it writes to stderr, its failure line and logger lines
+ * included (stderr-redaction.ts), with the console bridge's redactor and its minimum length.
+ */
+export const WORKER_STDERR_TAIL_CHARS = 2000;
+
 export interface DockerResult {
   code: number | null;
   stdout: string;
@@ -114,7 +122,11 @@ export class DockerNativeWorkerLauncher implements DetachedWorkerLauncher, WarmW
       // `docker wait`, which a restarted server can call again.
       void this.docker.run(args, { input: `${JSON.stringify(input)}\n` }).then((result) => {
         if (result.code !== 0 && result.code !== null && !/Conflict/.test(result.stderr)) {
-          launcherLog.warn({ container: names.worker, code: result.code }, "native worker exited non-zero");
+          const stderrTail = result.stderr.trim().slice(-WORKER_STDERR_TAIL_CHARS);
+          launcherLog.warn(
+            { container: names.worker, code: result.code, ...(stderrTail ? { stderrTail } : {}) },
+            "native worker exited non-zero",
+          );
         }
       });
     } else {

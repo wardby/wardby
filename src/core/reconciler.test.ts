@@ -25,6 +25,8 @@ interface FakeRun {
   executionBackend: string | null;
   agent: { kind: "native" | "coding" };
   codingRun: { jobBackend: string | null; jobHandle: string | null } | null;
+  parentRunId?: string | null;
+  executionWorkflowId?: string | null;
 }
 
 /** Minimal Prisma-`where`-filter matcher: equality, `{lt}`, `null`, and nested `OR` arrays. */
@@ -104,6 +106,44 @@ describe("reconcileOnce", () => {
     expect(runs[0].status).toBe("lost");
     expect(runs[0].error).toMatch(/Orphaned/);
     expect(runs[0].finishedAt).toEqual(NOW);
+  });
+
+  describe("children of a lead marked lost", () => {
+    const child = () => baseRun({ id: "child", parentRunId: "r1", status: "pending", startedAt: NOW });
+
+    it("stops the pending child when a durable lead is reported lost", async () => {
+      const runs = [baseRun({ heartbeatAt: STALE, executionBackend: "dbos" }), child()];
+      const stops: [string, string | undefined][] = [];
+      const executor: Executor = {
+        async start() {},
+        async stop(id, reason) {
+          stops.push([id, reason]);
+        },
+        async recover() {
+          return { state: "lost", reason: "gone" };
+        },
+      };
+
+      const count = await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, executor);
+
+      expect(count).toBe(1);
+      expect(stops).toEqual([["child", "parent run lost"]]);
+    });
+
+    it("stops the pending child when a stale lead falls through to the generic lost write", async () => {
+      const runs = [baseRun({ heartbeatAt: STALE }), child()];
+      const stops: [string, string | undefined][] = [];
+      const executor: Executor = {
+        async start() {},
+        async stop(id, reason) {
+          stops.push([id, reason]);
+        },
+      };
+
+      await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, executor);
+
+      expect(stops).toEqual([["child", "parent run lost"]]);
+    });
   });
 
   it("leaves a scheduled run with a fresh heartbeat alone", async () => {
@@ -327,6 +367,16 @@ describe("reconcileOnce", () => {
     expect(recover).toHaveBeenCalledWith({ runId: runs[0].id, backend: "dbos", id: runs[0].id });
     expect(runs[0].status).toBe("running");
     expect(runs[0].heartbeatAt).toEqual(NOW);
+  });
+
+  it("asks the executor about the forked workflow a taken-over run records, not the run id", async () => {
+    const runs = [baseRun({ heartbeatAt: STALE, executionBackend: "dbos", executionWorkflowId: "r1@v2" })];
+    const recover = vi.fn(async () => ({ state: "active" as const }));
+    const executor: Executor = { start: async () => undefined, stop: async () => undefined, recover };
+
+    await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, executor);
+
+    expect(recover).toHaveBeenCalledWith({ runId: runs[0].id, backend: "dbos", id: "r1@v2" });
   });
 
   it("marks a durable-backend run lost when the executor reports it lost", async () => {

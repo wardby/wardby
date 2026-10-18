@@ -21,8 +21,18 @@ import { logger as defaultLogger, type Logger } from "../core/logger.js";
 import { createParserWorkerPool, type ParserWorkerPool } from "./parser-worker/pool.js";
 import { redactPii } from "./pii-redaction.js";
 
-/** Below this length a "secret" is too likely to coincidentally match ordinary log text — not worth the false-positive risk of redacting it. */
-const MIN_REDACTABLE_SECRET_LENGTH = 6;
+// The shared secret redactor lives in core/secret-spans.ts (no imports, so every worker image can
+// ship it); re-exported here for the callers that already import it from this module.
+export {
+  maskSpans,
+  mergeSpans,
+  MIN_REDACTABLE_SECRET_LENGTH,
+  overlapsSecretValue,
+  redactExactSecretValues,
+  secretSpans,
+  withEscapedForms,
+} from "../core/secret-spans.js";
+import { redactExactSecretValues, withEscapedForms } from "../core/secret-spans.js";
 
 const FETCH_ALLOWED_HOSTS = parseAllowedHosts(process.env.WARDBY_FETCH_ALLOWED_HOSTS);
 let sharedParserPool: ParserWorkerPool | undefined;
@@ -125,14 +135,8 @@ export function createPrivilegedHost(options: PrivilegedHostOptions): Privileged
   // fetches but doesn't log it costs nothing extra. Fresh per invocation
   // (one privileged host per sandbox context, one per tool call).
   const fetchedSecretValues = new Set<string>(options.redactSecretValues ?? []);
-  function redactSecrets(text: string): string {
-    let out = text;
-    for (const value of fetchedSecretValues) {
-      if (value.length < MIN_REDACTABLE_SECRET_LENGTH) continue;
-      out = out.split(value).join("[REDACTED]");
-    }
-    return out;
-  }
+  // The console line is JSON text, so each value is masked in its escaped form too.
+  const redactSecrets = (text: string): string => redactExactSecretValues(text, withEscapedForms(fetchedSecretValues));
 
   return {
     async __bridge_console(argsJson) {

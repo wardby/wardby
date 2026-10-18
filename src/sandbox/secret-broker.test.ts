@@ -1,3 +1,4 @@
+import { holdsValueFragment } from "./secret-fragments.test-support.js";
 import { describe, expect, it } from "vitest";
 import {
   applyBrokerPlacements,
@@ -262,5 +263,25 @@ describe("consoleRedactionValues", () => {
     expect(
       consoleRedactionValues({ value: "not-json", broker } as Parameters<typeof consoleRedactionValues>[0]),
     ).toEqual(["not-json"]);
+  });
+});
+
+describe("scrubBrokeredResponse with a self-overlapping value", () => {
+  it("masks every overlapping occurrence in the url, a header and the body", () => {
+    const value = "abcabcabc";
+    const text = `v=${"abc".repeat(5)}`;
+    const out = scrubBrokeredResponse(
+      {
+        url: `https://x/?${text}`,
+        headers: { "x-echo": text },
+        bodyBase64: Buffer.from(text).toString("base64"),
+        ok: true,
+      },
+      [value],
+    );
+    const seen = [out.url, out.headers["x-echo"] ?? "", Buffer.from(out.bodyBase64, "base64").toString("latin1")].join(
+      " ",
+    );
+    expect(holdsValueFragment(seen, [value])).toBe(false);
   });
 });

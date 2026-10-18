@@ -19,16 +19,23 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
-import type { Prisma, PrismaClient, Run, RunTrigger } from "#prisma";
+import { Prisma, type PrismaClient, type Run, type RunTrigger } from "#prisma";
 import type { ProviderRegistry } from "../providers/index.js";
 import type { EngineProgress, EngineResult, LoadedTool } from "../providers/engine/types.js";
-import { RunOwnershipLostError, runStepInline, type StepRunner } from "../providers/engine/types.js";
+import {
+  RunOwnershipLostError,
+  STEPS_CHANGED_REASON,
+  StepReplayMismatchError,
+  runStepInline,
+  type StepRunner,
+} from "../providers/engine/types.js";
 import { isLlmEffort } from "../providers/llm/types.js";
 import { createPrivilegedHost, type PrivilegedHost } from "../sandbox/host-functions.js";
 import { consoleRedactionValues } from "../sandbox/secret-broker.js";
 import type { safeFetch } from "../sandbox/safe-fetch.js";
 import { runUserToolCall } from "../sandbox/user-tool.js";
 import {
+  logUnexpectedError,
   runSandboxedEngine,
   SandboxRunCancelledError,
   type RunDrivability,
@@ -38,10 +45,13 @@ import { NATIVE_WORKER_PROTOCOL_VERSION, type WorkerInput } from "../native-work
 import type { PrismaGatewayLedger } from "../native-worker/ledger.js";
 import { asStringArray, asPrefixMap } from "../sandbox/tool-capabilities.js";
 import { scopeDatastore } from "../providers/datastore/scoped.js";
-import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
+import { buildSecretsAccessor, scopeSecretsAccessor, type SecretsAccessor } from "./secrets.js";
 import { buildSharedDatastoreAccessor, scopeSharedDatastoreAccessor } from "./datastores.js";
 import { effectiveBudgetForRun, type EffectiveBudgetOptions } from "./budget-groups.js";
+import { stopChildrenOfLostRun } from "./lost-run-children.js";
 import { createDelegationSiblings } from "./delegation-siblings.js";
+import { findDelegationChild } from "./delegation-child.js";
+import { DRIVABLE } from "./run-status.js";
 import { createSerialGate } from "./serial-gate.js";
 import { withRunHeartbeat } from "./run-heartbeat.js";
 import { ContinuationRefusedError, dispatchRun } from "./dispatch.js";
@@ -56,6 +66,7 @@ import {
 } from "./subagent-memory-tools.js";
 import { prisma as defaultDb } from "./db.js";
 import { logger } from "./logger.js";
+import { CHILD_RUN_FAILURE_CODES, declaredCodeOf } from "./error-code.js";
 import { loadCodingConcurrencyConfig } from "../config/providers.js";
 import type { Executor } from "../providers/executor/types.js";
 import type { ReviewHostRegistry } from "../providers/review-host/types.js";
@@ -96,7 +107,7 @@ import { ReviewReadLedger } from "./review-reads.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
 import { loadBudgetEvent, ownerBudgetSentence, type BudgetEventView } from "./budget-events.js";
 
-const runnerLog = logger.child({ module: "runner" });
+export const runnerLog = logger.child({ module: "runner" });
 
 /**
  * Sub-agent dispatch uses one synthetic tool per declared child, named by the
@@ -468,18 +479,7 @@ function toIssueProjectLink(row: {
   };
 }
 
-/**
- * The two states a Run can still be driven out of. Every write `executeRun`
- * makes is filtered on these: a durable executor can have two attempts of the
- * same run in flight at once (a still-live original parked in a slow LLM step
- * and an adopted attempt the reconciler resumed elsewhere), and whichever
- * reaches a terminal state first must win. A conditional `updateMany` makes
- * that a database-level CAS rather than a race — the loser's WHERE matches
- * zero rows. It also stops a *later* attempt resurrecting a run the
- * reconciler already reaped: a `lost` row stays `lost`. A step-level
- * ownership loss writes nothing at all (RunOwnershipLostError).
- */
-const DRIVABLE = ["pending", "running"] as const;
+// DRIVABLE (the two states a Run can still be driven out of) lives in run-status.ts.
 
 /**
  * Raised when a run's step boundary observed a cancellation (DbosExecutor's
@@ -595,10 +595,6 @@ export interface WaitForCodingChildOptions {
 }
 
 /** The leading snake_case code of an error message (`code: sentence`); messages can carry internals. */
-function errorCodeOf(message: string | null | undefined): string | undefined {
-  return message ? /^([a-z][a-z0-9_]*)(:|$)/.exec(message)?.[1] : undefined;
-}
-
 /**
  * What a coding sub-agent's run tells the parent run's model. A run refused
  * over its services carries the host sentence (never the raw Run.error), so
@@ -628,7 +624,7 @@ export function codingChildResult(
     : run.status === "refused"
       ? serviceRefusalSentence(run.error)
       : null;
-  const errorCode = run.status === "failed" ? errorCodeOf(run.error) : undefined;
+  const errorCode = run.status === "failed" ? declaredCodeOf(run.error, CHILD_RUN_FAILURE_CODES) : undefined;
   const budget =
     budgetEvent && (run.status === "budget_exhausted" || run.status === "refused")
       ? ownerBudgetSentence(budgetEvent.event, budgetEvent.agentName)
@@ -940,8 +936,29 @@ export interface NativeRunToolsOptions {
 /** An attached user tool as the load step pinned it: its code, schema, and consented capabilities. */
 export type LoadedUserTool = LoadedNativeRun["toolsByName"][string];
 
-/** A built-in tool's handler for one call; built-ins run on the trusted side, never in a sandbox. */
-export type BuiltinToolHandler = (argsJson: string) => Promise<string>;
+/**
+ * A built-in tool's handler for one call; built-ins run on the trusted side, never in a sandbox.
+ * `callId` is the model's id for the tool call, when the caller has one: a delegation keys its
+ * child on it (Run.parentCallId), so a re-executed call re-attaches instead of dispatching twice.
+ */
+export type BuiltinToolHandler = (argsJson: string, callId?: string) => Promise<string>;
+
+/**
+ * Every value of the secrets `names` (readable or brokered; a SigV4 secret's key and token alone
+ * too, the same set the in-process host redacts), as a redaction list. Rejects when ANY read
+ * fails: a list missing one secret would let that secret through, so a caller treats a rejection
+ * as "no list" and fails closed. A secret with no value contributes nothing.
+ */
+export async function readRedactionValues(accessor: SecretsAccessor, names: readonly string[]): Promise<string[]> {
+  const values = await Promise.all(
+    names.map((secret) =>
+      accessor.resolve
+        ? accessor.resolve(secret).then((e) => (e ? consoleRedactionValues(e) : []))
+        : accessor.get(secret).then((v) => (v === undefined ? [] : [v])),
+    ),
+  );
+  return values.flat().filter((value): value is string => typeof value === "string");
+}
 
 /**
  * One attempt's tool surface for a native run. `builtinHandler(name)` is the
@@ -967,6 +984,144 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
   // place in the same-child and limit checks while the gate is open to the others.
   const delegationSiblings = createDelegationSiblings();
   const waitingDelegations = new Set<string>();
+
+  /**
+   * Waits on a dispatched coding or sandbox-mode native child until it is terminal, its wait
+   * bound passes (it is then stopped), or this run is cancelled, and returns what the model sees.
+   * The bound is measured from the child's creation, so a re-executed delegate step (a resume, or
+   * a takeover under a new version) never extends how long this run waits for it.
+   */
+  const awaitDelegatedChild = async (wait: {
+    executor: Pick<Executor, "stop">;
+    childRunId: string;
+    createdAtMs: number;
+    kind: "coding" | "native-sandbox";
+    boundName: string;
+    mergeOrderNote: string | undefined;
+    /** Called as soon as the wait ends, before the result is built (frees a waiting sibling). */
+    onSettled: () => void;
+  }): Promise<string> => {
+    const { executor, childRunId, kind, boundName } = wait;
+    const startedAt = Date.now();
+    let boundMs: number;
+    if (kind === "coding") {
+      const codingRun = await db.codingRun.findUnique({
+        where: { runId: childRunId },
+        select: { timeoutSec: true },
+      });
+      const { queueTimeoutSec } = loadCodingConcurrencyConfig();
+      boundMs = (queueTimeoutSec + (codingRun?.timeoutSec ?? 0) + CODING_CHILD_WAIT_GRACE_SEC) * 1000;
+    } else {
+      boundMs = SANDBOX_CHILD_WAIT_SEC * 1000;
+    }
+    const elapsedMs = Math.max(0, Date.now() - wait.createdAtMs);
+    // Executor.start may resolve before the child is terminal, so wait on the row.
+    const waited = await waitForCodingChild({
+      db,
+      executor,
+      childRunId,
+      parentRunId: runId,
+      boundMs: Math.max(0, boundMs - elapsedMs),
+    });
+    wait.onSettled();
+    runnerLog.info(
+      {
+        runId,
+        childRunId,
+        boundName,
+        outcome: waited.kind === "terminal" ? waited.run.status : waited.kind,
+        durationMs: Date.now() - startedAt,
+      },
+      "delegation finished",
+    );
+    if (waited.kind === "timed_out") {
+      return JSON.stringify({
+        error: "subagent_wait_timed_out",
+        runId: childRunId,
+        message:
+          kind === "coding"
+            ? "The coding sub-agent did not finish within its queue timeout plus run timeout; it was stopped and produced no result."
+            : "The sandbox sub-agent did not finish in time; it was stopped and produced no result.",
+      });
+    }
+    if (waited.kind === "parent_cancelled") {
+      return JSON.stringify({
+        error: "parent_cancelled",
+        runId: childRunId,
+        message:
+          kind === "coding"
+            ? "This run was cancelled while waiting for the coding sub-agent; the sub-agent was stopped."
+            : "This run was cancelled while waiting for the sandbox sub-agent; the sub-agent was stopped.",
+      });
+    }
+    if (kind === "coding") {
+      const stored = await db.codingRun
+        .findUnique({ where: { runId: childRunId }, select: { result: true } })
+        .catch((err: unknown) => {
+          runnerLog.warn({ err, childRunId }, "could not read the coding sub-run's result");
+          return null;
+        });
+      return codingChildResult(waited.run, stored?.result, await loadBudgetEvent(db, childRunId));
+    }
+    return nativeChildResult(waited.run, wait.mergeOrderNote);
+  };
+
+  /**
+   * A re-executed delegate call whose child already exists (findDelegationChild): wait on it
+   * again rather than refuse it as a duplicate. A control-plane native child ran inline in the
+   * attempt that died, so nothing drives it any more: it is stopped (or its result returned, if
+   * it had finished) and no new child is started.
+   */
+  const reattachDelegatedChild = async (
+    child: { id: string; createdAt: Date },
+    boundName: string,
+    argsJson: string,
+  ): Promise<string> => {
+    const row = await db.run.findUniqueOrThrow({ where: { id: child.id } });
+    const childAgentRow = await db.agent.findUnique({ where: { id: row.agentId }, select: { kind: true } });
+    const parsedArgs = parseDelegateArgs(argsJson);
+    const mergeOrderNote =
+      "args" in parsedArgs && parsedArgs.args.mergeOrder !== undefined ? MERGE_ORDER_IGNORED_NOTE : undefined;
+    const coding = childAgentRow?.kind === "coding";
+    if (!coding && row.nativeExecutionMode !== "sandbox") {
+      if (!DRIVABLE.includes(row.status as (typeof DRIVABLE)[number])) return nativeChildResult(row, mergeOrderNote);
+      await providers.executor?.stop(child.id, "parent resumed without it").catch((err: unknown) => {
+        runnerLog.warn({ err, childRunId: child.id, runId }, "failed to stop an interrupted sub-agent run");
+      });
+      return JSON.stringify({
+        error: "subagent_interrupted",
+        message: "The sub-agent was interrupted by a restart and cannot be resumed; no new sub-agent run was started.",
+      });
+    }
+    if (!providers.executor) {
+      return coding
+        ? JSON.stringify({
+            error: "coding_dispatch_unavailable",
+            message:
+              "This execution context has no Executor wired in, so a coding-kind sub-agent cannot be dispatched.",
+          })
+        : JSON.stringify({
+            error: "sandbox_dispatch_unavailable",
+            message:
+              "This execution context has no Executor wired in, so a sandbox-mode sub-agent cannot be dispatched.",
+          });
+    }
+    // Counted as a running sibling while it is waited on, as a fresh dispatch is.
+    const finishSibling = delegationSiblings.start();
+    try {
+      return await awaitDelegatedChild({
+        executor: providers.executor,
+        childRunId: child.id,
+        createdAtMs: child.createdAt.getTime(),
+        kind: coding ? "coding" : "native-sandbox",
+        boundName,
+        mergeOrderNote: coding ? undefined : mergeOrderNote,
+        onSettled: finishSibling,
+      });
+    } finally {
+      finishSibling();
+    }
+  };
 
   const builtinHandler = (name: string): BuiltinToolHandler | undefined => {
     if (loaded.memoryEnabled && MEMORY_TOOL_NAMES.has(name)) {
@@ -1072,7 +1227,9 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
       };
     }
     if (name.startsWith(DELEGATE_TOOL_PREFIX)) {
-      return async (argsJson: string): Promise<string> => {
+      return async (argsJson: string, toolCallId?: string): Promise<string> => {
+        // An empty id (an adapter that had none) is no key: every such call would share it.
+        const callId = toolCallId || undefined;
         const boundName = name.slice(DELEGATE_TOOL_PREFIX.length);
         const edge = loaded.subAgentEdges.find((e) => e.boundName === boundName);
         if (!edge) {
@@ -1081,8 +1238,41 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
             message: `No sub-agent is bound to name "${boundName}".`,
           });
         }
+        // A re-executed delegate step (a resume, or a takeover under a new version) finds the
+        // child this very call created and waits on it again, instead of refusing it as a duplicate.
+        const existingChild = await findDelegationChild(db, runId, edge.childAgentId, callId);
+        if (existingChild) {
+          runnerLog.info({ runId, childRunId: existingChild.id, boundName }, "delegation re-attached");
+          return reattachDelegatedChild(existingChild, boundName, argsJson);
+        }
         let release = await delegationGate.acquire();
         let finishSibling = (): void => {};
+        /**
+         * A child create that lost the (parentRunId, parentCallId) unique key to another execution of
+         * this same delegate step (a stalled owner overlapping an adopted attempt): wait on the child
+         * that execution created, as a re-executed step does. A key held by no child of this agent
+         * (an id colliding with another sub-agent's call) is the model's to see, never a run failure.
+         */
+        const afterDelegationKeyConflict = async (err: unknown): Promise<string> => {
+          if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002")) throw err;
+          release();
+          const raced = await findDelegationChild(db, runId, edge.childAgentId, callId);
+          if (raced) {
+            runnerLog.info(
+              { runId, childRunId: raced.id, boundName },
+              "delegation re-attached after a concurrent create",
+            );
+            return reattachDelegatedChild(raced, boundName, argsJson);
+          }
+          runnerLog.warn(
+            { err, runId, boundName },
+            "delegation child create hit a unique key held by no child of this agent",
+          );
+          return JSON.stringify({
+            error: "delegation_conflict",
+            message: "The sub-agent run could not be created: its call id is already used by another sub-agent run.",
+          });
+        };
         try {
           // At most maxDelegationsPerRun dispatches per run (default one: a
           // classifier deciding plan-vs-implement commits to exactly one child),
@@ -1190,6 +1380,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                 continuesCodingRunId: args.continuePriorRun,
                 mergeOrder: args.mergeOrder,
                 parentRunId: runId,
+                parentCallId: callId,
                 // The child's result flows back into this run, which the
                 // triggerer sees, so the child is visible to them too.
                 triggeredById: existingRun.triggeredById,
@@ -1207,7 +1398,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
               // A continuation this deployment cannot make (the run id came from
               // a pull request another deployment opened, say) is the model's to
               // report, not a reason to fail the whole run.
-              if (!(err instanceof ContinuationRefusedError)) throw err;
+              if (!(err instanceof ContinuationRefusedError)) return await afterDelegationKeyConflict(err);
               return JSON.stringify({
                 error: "continuation_refused",
                 message:
@@ -1219,53 +1410,16 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
               return JSON.stringify({ error: "dispatch_failed", message: "The sub-agent run could not be created." });
             }
             const childRunId = dispatched.run.id;
-            const startedAt = Date.now();
             runnerLog.info({ runId, childRunId, boundName, kind: "coding" }, "delegation started");
-            const codingRun = await db.codingRun.findUnique({
-              where: { runId: childRunId },
-              select: { timeoutSec: true },
-            });
-            const { queueTimeoutSec } = loadCodingConcurrencyConfig();
-            const waited = await waitForCodingChild({
-              db,
+            return await awaitDelegatedChild({
               executor: providers.executor,
               childRunId,
-              parentRunId: runId,
-              boundMs: (queueTimeoutSec + (codingRun?.timeoutSec ?? 0) + CODING_CHILD_WAIT_GRACE_SEC) * 1000,
+              createdAtMs: dispatched.run.startedAt.getTime(),
+              kind: "coding",
+              boundName,
+              mergeOrderNote: undefined,
+              onSettled: finishSibling,
             });
-            finishSibling();
-            runnerLog.info(
-              {
-                runId,
-                childRunId,
-                boundName,
-                outcome: waited.kind === "terminal" ? waited.run.status : waited.kind,
-                durationMs: Date.now() - startedAt,
-              },
-              "delegation finished",
-            );
-            if (waited.kind === "timed_out") {
-              return JSON.stringify({
-                error: "subagent_wait_timed_out",
-                runId: childRunId,
-                message:
-                  "The coding sub-agent did not finish within its queue timeout plus run timeout; it was stopped and produced no result.",
-              });
-            }
-            if (waited.kind === "parent_cancelled") {
-              return JSON.stringify({
-                error: "parent_cancelled",
-                runId: childRunId,
-                message: "This run was cancelled while waiting for the coding sub-agent; the sub-agent was stopped.",
-              });
-            }
-            const stored = await db.codingRun
-              .findUnique({ where: { runId: childRunId }, select: { result: true } })
-              .catch((err: unknown) => {
-                runnerLog.warn({ err, childRunId }, "could not read the coding sub-run's result");
-                return null;
-              });
-            return codingChildResult(waited.run, stored?.result, await loadBudgetEvent(db, childRunId));
           }
 
           const taskOverride = delegationTaskOverride(args);
@@ -1286,77 +1440,63 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                   "This execution context has no Executor wired in, so a sandbox-mode sub-agent cannot be dispatched.",
               });
             }
-            const dispatched = await dispatchRun({
-              db,
-              executor: providers.executor,
-              selfDefects: { db, issueTrackers },
-              agentId: edge.childAgentId,
-              trigger: "subagent",
-              taskOverride,
-              grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [],
-              parentRunId: runId,
-              triggeredById: existingRun.triggeredById,
-              awaitExecution: true,
-              onPersisted: (persistedRun) => {
-                if (persistedRun.status !== "refused" && persistedRun.status !== "failed") {
-                  finishSibling = delegationSiblings.start();
-                }
-                release();
-              },
-            });
+            let dispatched: Awaited<ReturnType<typeof dispatchRun>>;
+            try {
+              dispatched = await dispatchRun({
+                db,
+                executor: providers.executor,
+                selfDefects: { db, issueTrackers },
+                agentId: edge.childAgentId,
+                trigger: "subagent",
+                taskOverride,
+                grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [],
+                parentRunId: runId,
+                parentCallId: callId,
+                triggeredById: existingRun.triggeredById,
+                awaitExecution: true,
+                onPersisted: (persistedRun) => {
+                  if (persistedRun.status !== "refused" && persistedRun.status !== "failed") {
+                    finishSibling = delegationSiblings.start();
+                  }
+                  release();
+                },
+              });
+            } catch (err) {
+              return await afterDelegationKeyConflict(err);
+            }
             if (!dispatched) {
               return JSON.stringify({ error: "dispatch_failed", message: "The sub-agent run could not be created." });
             }
             const childRunId = dispatched.run.id;
-            const startedAt = Date.now();
             runnerLog.info({ runId, childRunId, boundName, kind: "native-sandbox" }, "delegation started");
-            // Executor.start may resolve before the child is terminal, so wait on the row like a coding child.
-            const waited = await waitForCodingChild({
-              db,
+            return await awaitDelegatedChild({
               executor: providers.executor,
               childRunId,
-              parentRunId: runId,
-              boundMs: SANDBOX_CHILD_WAIT_SEC * 1000,
+              createdAtMs: dispatched.run.startedAt.getTime(),
+              kind: "native-sandbox",
+              boundName,
+              mergeOrderNote,
+              onSettled: finishSibling,
             });
-            finishSibling();
-            runnerLog.info(
-              {
-                runId,
-                childRunId,
-                boundName,
-                outcome: waited.kind === "terminal" ? waited.run.status : waited.kind,
-                durationMs: Date.now() - startedAt,
-              },
-              "delegation finished",
-            );
-            if (waited.kind === "timed_out") {
-              return JSON.stringify({
-                error: "subagent_wait_timed_out",
-                runId: childRunId,
-                message: "The sandbox sub-agent did not finish in time; it was stopped and produced no result.",
-              });
-            }
-            if (waited.kind === "parent_cancelled") {
-              return JSON.stringify({
-                error: "parent_cancelled",
-                runId: childRunId,
-                message: "This run was cancelled while waiting for the sandbox sub-agent; the sub-agent was stopped.",
-              });
-            }
-            return nativeChildResult(waited.run, mergeOrderNote);
           }
 
-          const childRun = await db.run.create({
-            data: {
-              agentId: edge.childAgentId,
-              trigger: "subagent",
-              parentRunId: runId,
-              grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [],
-              taskOverride,
-              triggeredById: existingRun.triggeredById,
-              nativeExecutionMode: childAgent.nativeExecutionMode,
-            },
-          });
+          let childRun: Run;
+          try {
+            childRun = await db.run.create({
+              data: {
+                agentId: edge.childAgentId,
+                trigger: "subagent",
+                parentRunId: runId,
+                parentCallId: callId,
+                grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [],
+                taskOverride,
+                triggeredById: existingRun.triggeredById,
+                nativeExecutionMode: childAgent.nativeExecutionMode,
+              },
+            });
+          } catch (err) {
+            return await afterDelegationKeyConflict(err);
+          }
           finishSibling = delegationSiblings.start();
           // The child row exists: admit the next delegation while this child runs.
           release();
@@ -1417,21 +1557,14 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
     const tool = toolsByName.get(name);
     return tool ? scopedHost(name, tool, signal, redactSecretValues) : undefined;
   };
-  /** Every secret value the user tool `name` may use (readable or brokered), for console redaction by a stateless gateway. */
+  /**
+   * Every secret value the user tool `name` may use (readable or brokered), for console redaction
+   * by a stateless gateway. Rejects when any read fails (readRedactionValues).
+   */
   const readableSecretValues = async (name: string): Promise<string[]> => {
     const tool = toolsByName.get(name);
     if (!tool) return [];
-    const scoped = scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets);
-    const values = await Promise.all(
-      tool.allowedSecrets.map((secret) =>
-        (scoped.resolve
-          ? scoped.resolve(secret).then((e) => (e ? consoleRedactionValues(e) : []))
-          : scoped.get(secret).then((v) => (v === undefined ? [] : [v]))
-        ).catch(() => []),
-      ),
-    );
-    // A SigV4 secret's key and token alone, too: the same set the in-process host redacts.
-    return values.flat().filter((value): value is string => typeof value === "string");
+    return readRedactionValues(scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets), tool.allowedSecrets);
   };
 
   const runUserTool = async (name: string, argsJson: string): Promise<string> => {
@@ -1445,9 +1578,9 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
     return runUserToolCall(tool, argsJson, (signal) => scopedHost(name, tool, signal));
   };
 
-  const runSandboxTool = async (name: string, argsJson: string): Promise<string> => {
+  const runSandboxTool = async (name: string, argsJson: string, callId?: string): Promise<string> => {
     const builtin = builtinHandler(name);
-    return builtin ? builtin(argsJson) : runUserTool(name, argsJson);
+    return builtin ? builtin(argsJson, callId) : runUserTool(name, argsJson);
   };
 
   return { toolsByName, builtinHandler, privilegedHostFor, readableSecretValues, runUserTool, runSandboxTool };
@@ -1562,6 +1695,17 @@ export async function failNativeRun(ctx: NativeRunFinishContext, err: unknown): 
   return settleFinishedNativeRun(ctx, finished, claimed);
 }
 
+/** The terminal write for a run that cannot continue (it ends `lost` with `reason`), then the same settle path. */
+export async function loseNativeRun(ctx: NativeRunFinishContext, reason: string): Promise<Run> {
+  const { run: finished, claimed } = await finishRunClaimed(ctx.db, ctx.runId, {
+    status: "lost",
+    error: reason,
+    finishedAt: new Date(),
+  });
+  if (claimed) await stopChildrenOfLostRun(ctx.db, ctx.providers.executor, ctx.runId);
+  return settleFinishedNativeRun(ctx, finished, claimed);
+}
+
 /** Where a run stands for the native gateway: still drivable, cancelled (its task), or otherwise ended. */
 export async function runDrivability(db: RunnerDb, runId: string): Promise<RunDrivability> {
   const run = await db.run.findUnique({ where: { id: runId }, select: { status: true } });
@@ -1618,6 +1762,8 @@ export interface DurableDelegationContext {
   issueTrackers: IssueTrackerRegistry | undefined;
   ledger: DelegationLedger;
   sessionId: string;
+  /** Every secret value the run can read, to redact its logs by exact value (unset or failing: nothing is logged of an error but its name and code). */
+  secretValues?: () => Promise<string[]>;
   /** How long one call waits on the child before answering `pending` (the worker calls again). */
   pollWindowMs?: number;
   pollIntervalMs?: number;
@@ -1695,11 +1841,11 @@ export async function durableDelegate(
   if (!childRunId && state?.childAgentId === edge.childAgentId) {
     // A replica that died between dispatching the child and recording it left the child row:
     // adopt it rather than refusing this very delegation as a duplicate.
-    const orphan = await db.run.findFirst({
-      where: { parentRunId: runId, agentId: edge.childAgentId },
-      select: { id: true },
-    });
-    childRunId = orphan?.id ?? null;
+    childRunId = (await findDelegationChild(db, runId, edge.childAgentId, callId))?.id ?? null;
+    // Recorded, so later calls wait on it by id (a legacy child is only found while still drivable).
+    if (childRunId) {
+      await ledger.setDelegation(sessionId, callId, { status: "pending", childAgentId: edge.childAgentId, childRunId });
+    }
   }
 
   if (!childRunId) {
@@ -1754,6 +1900,7 @@ export async function durableDelegate(
           ? { codingTask: args.task, continuesCodingRunId: args.continuePriorRun, mergeOrder: args.mergeOrder }
           : { taskOverride: delegationTaskOverride(args), grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [] }),
         parentRunId: runId,
+        parentCallId: callId,
         // The child's result flows back into this run, which the triggerer sees, so the child is visible to them too.
         triggeredById: existingRun.triggeredById,
         beforePersist: async (tx) => {
@@ -1776,8 +1923,9 @@ export async function durableDelegate(
       }
       // Recorded as the call's result, so the model can report it and a retried callId never
       // dispatches twice. Only the leading code is exposed: messages can carry internals.
-      const code = err instanceof Error ? errorCodeOf(err.message) : undefined;
-      runnerLog.error({ err, runId, boundName }, "delegation dispatch failed");
+      const code = declaredCodeOf(err);
+      const values = await ctx.secretValues?.().catch(() => undefined);
+      logUnexpectedError(runnerLog, err, values, "delegation dispatch failed", { runId, boundName });
       return finish(
         JSON.stringify({
           error: "dispatch_failed",
@@ -2061,6 +2209,7 @@ async function executeTrackedRun(
         ctx: { providers: { llm }, onText, onProgress },
         builtinHandler: tools.builtinHandler,
         privilegedHostFor: tools.privilegedHostFor,
+        readableSecretValues: tools.readableSecretValues,
         drivability: () => runDrivability(db, runId),
         launcher: providers.nativeSandbox,
       });
@@ -2094,6 +2243,9 @@ async function executeTrackedRun(
       logRunOwnershipLost(runId, err);
       throw err;
     }
+    // A replay that no longer matches its record (a run recorded by a release whose steps differ)
+    // cannot continue: it ends lost, not failed, through the same settle path.
+    if (err instanceof StepReplayMismatchError) return loseNativeRun(finishContext, STEPS_CHANGED_REASON);
     return failNativeRun(finishContext, err);
   }
 }

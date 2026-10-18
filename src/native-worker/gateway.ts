@@ -13,8 +13,15 @@
 
 import type { EngineProgress, EngineResult, EngineRunContext } from "../providers/engine/types.js";
 import type { LlmStreamEvent } from "../providers/llm/types.js";
-import { isPrivilegedBridgeName, type PrivilegedHost } from "../sandbox/host-functions.js";
+import pino from "pino";
+import {
+  isPrivilegedBridgeName,
+  redactExactSecretValues,
+  withEscapedForms,
+  type PrivilegedHost,
+} from "../sandbox/host-functions.js";
 import { logger } from "../core/logger.js";
+import { declaredCodeOf } from "../core/error-code.js";
 import {
   GatewayError,
   GatewayRequestSchema,
@@ -25,9 +32,67 @@ import {
   type GatewayParams,
   type GatewayRequest,
   type WorkerInput,
+  workerGatewayError,
 } from "./protocol.js";
 
-const gatewayLog = logger.child({ module: "native-gateway" });
+/**
+ * The gateways' log. Both (in-process and HTTP) log an unexpected error here, as `native gateway
+ * request failed` (or `native gateway model stream failed`). Exported so tests can watch it.
+ */
+export const gatewayLog = logger.child({ module: "native-gateway" });
+
+/** `err` for the log with every exact secret value removed from its (cause-folded) message and stack. */
+function redactedError(err: Error, rawValues: readonly string[]): Error {
+  // The same expansion as the console bridge and the worker: a value may sit escaped in the text.
+  const values = withEscapedForms(rawValues);
+  // pino's own serializer folds the cause chain into message and stack, so a cause is covered too.
+  const serialized = pino.stdSerializers.err(err);
+  const safe = new Error(redactExactSecretValues(serialized.message, values));
+  safe.name = err.name;
+  safe.stack = redactExactSecretValues(serialized.stack ?? "", values);
+  return safe;
+}
+
+/**
+ * Logs an unexpected error for the operator, redacted by exact value. A successfully read list is
+ * complete (its reader rejects when any secret's read fails), so an empty one means the run has no
+ * secret values and the message is logged as is. Fail closed: a thrown value that is not an Error
+ * (a string, an object: its text cannot be redacted reliably), or no list (unavailable or
+ * unreadable), logs only the error's name and declared code, never its message, stack or content.
+ */
+export function logUnexpectedError(
+  log: Pick<typeof logger, "error">,
+  err: unknown,
+  values: readonly string[] | undefined,
+  logMessage: string,
+  fields: Record<string, unknown> = {},
+): void {
+  if (values && err instanceof Error) log.error({ ...fields, err: redactedError(err, values) }, logMessage);
+  else
+    log.error(
+      { ...fields, errName: err instanceof Error ? err.name : typeof err, causeCode: declaredCodeOf(err) },
+      logMessage,
+    );
+}
+
+/**
+ * The one way either gateway turns a failure into what the worker sees: an unexpected error is
+ * logged for the operator (redacted by the run's secret values) and becomes the checked
+ * GatewayError (workerGatewayError); the values are read once and serve both.
+ */
+export async function forWorker(
+  err: unknown,
+  secretValues: (() => Promise<Iterable<string>>) | undefined,
+  logMessage: string,
+): Promise<GatewayError> {
+  if (err instanceof GatewayError) return workerGatewayError(err, secretValues);
+  const values = await secretValues?.().then(
+    (v) => [...v],
+    () => undefined,
+  );
+  logUnexpectedError(gatewayLog, err, values, logMessage);
+  return workerGatewayError(err, values ? async () => values : undefined);
+}
 
 /** The trusted gateway as a transport sees it: untrusted requests in, results or GatewayErrors out. */
 export interface NativeGateway {
@@ -53,6 +118,11 @@ export interface SandboxedEngineOptions {
   ctx: Pick<EngineRunContext, "providers" | "onText" | "onProgress">;
   builtinHandler: (name: string) => ((argsJson: string) => Promise<string>) | undefined;
   privilegedHostFor: (tool: string, signal: AbortSignal) => PrivilegedHost | undefined;
+  /**
+   * Every secret value the user tool `tool` may read. A failure's cause code that overlaps any of
+   * the run's values is not sent to the worker; without this, no cause code is sent.
+   */
+  readableSecretValues?: (tool: string) => Promise<string[]>;
   drivability: () => Promise<RunDrivability>;
   launcher: WorkerLauncher;
 }
@@ -119,7 +189,13 @@ export async function runSandboxedEngine(options: SandboxedEngineOptions): Promi
     usedCallIds.add(callId);
   };
 
-  const gateway: NativeGateway = {
+  /** The run's readable secret values, for checking a failure's cause code before the worker sees it. */
+  const readable = options.readableSecretValues;
+  const runSecretValues = readable
+    ? async () => (await Promise.all(Object.keys(input.userTools).map((tool) => readable(tool)))).flat()
+    : undefined;
+
+  const served: NativeGateway = {
     async *stream(raw) {
       const { request, params } = await admit(raw, "llm.stream");
       claim(request.callId);
@@ -216,6 +292,24 @@ export async function runSandboxedEngine(options: SandboxedEngineOptions): Promi
         }
         default:
           throw new GatewayError("invalid_request", `"${request.method}" is a streaming method.`);
+      }
+    },
+  };
+
+  // What crosses to the worker on every transport: a GatewayError, never an unexpected error's text.
+  const gateway: NativeGateway = {
+    async call(raw) {
+      try {
+        return await served.call(raw);
+      } catch (err) {
+        throw await forWorker(err, runSecretValues, "native gateway request failed");
+      }
+    },
+    async *stream(raw) {
+      try {
+        yield* served.stream(raw);
+      } catch (err) {
+        throw await forWorker(err, runSecretValues, "native gateway model stream failed");
       }
     },
   };

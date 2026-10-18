@@ -55,6 +55,33 @@ describe("createHttpTransport", () => {
     await expect(transport.call(request)).rejects.toMatchObject({ code: "not_ready" });
   });
 
+  it("carries an internal error's cause code to the worker", async () => {
+    const { fetch } = scripted([
+      () =>
+        json(
+          {
+            ok: false,
+            error: {
+              code: "internal",
+              message: "The gateway could not serve this call (coding_execution_not_configured).",
+              causeCode: "coding_execution_not_configured",
+            },
+          },
+          500,
+        ),
+    ]);
+    const transport = createHttpTransport({
+      url: "http://gw",
+      capability: "c".repeat(43),
+      fetch,
+      sleep: async () => {},
+    });
+    await expect(transport.call(request)).rejects.toMatchObject({
+      code: "internal",
+      causeCode: "coding_execution_not_configured",
+    });
+  });
+
   it("never retries other refusals", async () => {
     const { fetch, calls } = scripted([() => json({ ok: false, error: { code: "not_allowed", message: "no" } }, 403)]);
     const transport = createHttpTransport({

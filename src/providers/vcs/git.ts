@@ -12,6 +12,7 @@ import {
 } from "../../coding/protected-paths.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import { globRegex } from "../../core/glob.js";
+import { redactExactSecretValues } from "../../core/secret-spans.js";
 import type { Writable } from "node:stream";
 import { MAX_REDACTED_SPAN, redactTokenShapedValues, normalizeGitRef } from "../../coding/protocol.js";
 import { isSafeGitHubInstallationToken, type RepositoryFileInput } from "./github.js";
@@ -80,10 +81,10 @@ export function redactGitOutput(value: string, secrets: readonly string[] = []):
   // MAX_REDACTED_SPAN of margin rather than on all 2 MiB git may have produced
   // (see redactAndTruncate: the margin is what keeps truncation safe). The rest
   // is discarded here and never reaches a log or the database.
-  let output = value.slice(0, GIT_OUTPUT_DISPLAY_BYTES + MAX_REDACTED_SPAN);
-  for (const secret of secrets) {
-    if (secret) output = output.split(secret).join("[REDACTED]");
-  }
+  // The shared span-union redactor; any non-empty value counts here, as it always has.
+  const output = redactExactSecretValues(value.slice(0, GIT_OUTPUT_DISPLAY_BYTES + MAX_REDACTED_SPAN), secrets, {
+    minLength: 1,
+  });
   return redactTokenShapedValues(output).slice(0, GIT_OUTPUT_DISPLAY_BYTES);
 }
 

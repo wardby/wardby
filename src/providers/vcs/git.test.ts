@@ -26,6 +26,7 @@ import {
   type GitCommandRunner,
 } from "./git.js";
 import { GitHubRemote } from "./github-remote.js";
+import { holdsValueFragment } from "../../sandbox/secret-fragments.test-support.js";
 import type { VcsPrepareInput } from "./types.js";
 import { collectExclusions, gitExcludePathspecs } from "../../coding/collect-exclude.js";
 
@@ -1293,5 +1294,18 @@ describe("Git process boundary", () => {
         server.close((error) => (error ? rejectPromise(error) : resolvePromise())),
       );
     }
+  });
+});
+
+describe("redactGitOutput with a self-overlapping value", () => {
+  it("masks every overlapping occurrence, leaving no fragment", () => {
+    const value = "abcabcabc";
+    const out = redactGitOutput(`out ${"abc".repeat(5)} done`, [value]);
+    expect(holdsValueFragment(out, [value])).toBe(false);
+    expect(out === "out [REDACTED] done").toBe(true);
+  });
+
+  it("still redacts a value shorter than the sandbox redactor's minimum", () => {
+    expect(redactGitOutput("x abcd y", ["abcd"]) === "x [REDACTED] y").toBe(true);
   });
 });

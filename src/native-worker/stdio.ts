@@ -6,7 +6,7 @@
  * worker's diagnostics only.
  *
  * Frames, worker → control:  { id, request }
- * Frames, control → worker:  { id, ok: true, result } | { id, ok: false, error: { code, message } }
+ * Frames, control → worker:  { id, ok: true, result } | { id, ok: false, error: { code, message, causeCode? } }
  *                            | { id, event }  (llm.stream events)  | { id, end: true }
  */
 
@@ -18,6 +18,7 @@ import {
   GatewayError,
   MAX_MESSAGE_BYTES,
   ProtocolError,
+  toGatewayError,
   type GatewayErrorCode,
   type GatewayRequest,
 } from "./protocol.js";
@@ -48,10 +49,10 @@ function writeLine(stream: Writable, frame: unknown): void {
   stream.write(`${line}\n`);
 }
 
+/** An error as the worker sees it: exactly what the HTTP path carries (protocol.ts toGatewayError). */
 const errorFrame = (err: unknown) => {
-  const gatewayError =
-    err instanceof GatewayError ? err : new GatewayError("internal", err instanceof Error ? err.message : String(err));
-  return { code: gatewayError.code, message: gatewayError.message };
+  const { code, message, causeCode } = toGatewayError(err);
+  return { code, message, ...(causeCode ? { causeCode } : {}) };
 };
 
 type Pending =
@@ -73,7 +74,7 @@ export function createStdioTransport(input: Readable, output: Writable): Gateway
         id: number;
         ok?: boolean;
         result?: unknown;
-        error?: { code: string; message: string };
+        error?: { code: string; message: string; causeCode?: string };
         event?: LlmStreamEvent;
         end?: boolean;
       };
@@ -86,7 +87,11 @@ export function createStdioTransport(input: Readable, output: Writable): Gateway
       const entry = pending.get(frame.id);
       if (!entry) return;
       const error = frame.error
-        ? new GatewayError(frame.error.code as GatewayErrorCode, frame.error.message)
+        ? new GatewayError(
+            frame.error.code as GatewayErrorCode,
+            frame.error.message,
+            typeof frame.error.causeCode === "string" ? frame.error.causeCode : undefined,
+          )
         : undefined;
       if (entry.kind === "call") {
         pending.delete(frame.id);

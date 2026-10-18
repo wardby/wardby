@@ -1,6 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
-import { streamModel } from "./gateway-server.js";
+import {
+  checkedEvents,
+  CONSOLE_WITHHELD_MESSAGE,
+  failureResponse,
+  hostCall,
+  runSecretValues,
+  serveGatewayRequest,
+  streamModel,
+} from "./gateway-server.js";
+import { GATEWAY_INTERNAL_MESSAGE, GatewayError } from "./protocol.js";
+import { gatewayLog } from "./gateway.js";
 
 type Ctx = Parameters<typeof streamModel>[0];
 type Ledger = Parameters<typeof streamModel>[1];
@@ -100,5 +110,166 @@ describe("streamModel mid-stream failure", () => {
     expect(err).toBe(streamError);
     expect(ledger.markUncertain).toHaveBeenCalledTimes(1);
     expect(ledger.markUncertain.mock.calls[0]).toEqual(["sess_1", "call_1"]);
+  });
+});
+
+describe("serveGatewayRequest unexpected errors", () => {
+  /** Deps whose session lookup throws `err`: the first thing a request does after its bearer check. */
+  const throwingDeps = (err: Error) =>
+    ({
+      db: { nativeGatewaySession: { findUnique: async () => Promise.reject(err) } },
+      providers: {},
+    }) as unknown as Parameters<typeof serveGatewayRequest>[0];
+
+  it("before the run's tools are rebuilt, passes a declared code, checked against the capability", async () => {
+    const err = new Error("coding_execution_not_configured: detail-that-must-not-leave-the-gateway");
+    const response = await serveGatewayRequest(throwingDeps(err), "Bearer cap", {});
+    expect(response).toEqual({
+      kind: "json",
+      status: 500,
+      body: {
+        ok: false,
+        error: {
+          code: "internal",
+          message: "The gateway could not serve this call (coding_execution_not_configured).",
+          causeCode: "coding_execution_not_configured",
+        },
+      },
+    });
+    expect(JSON.stringify(response)).not.toContain("detail-that-must-not-leave-the-gateway");
+  });
+
+  it("before the run's tools are rebuilt, redacts the capability from the log line and the cause code", async () => {
+    // A capability that happens to equal a declared code: the exact-value guard still drops it.
+    const capability = "coding_execution_not_configured";
+    const logged: Array<{ err: Error }> = [];
+    const spy = vi.spyOn(gatewayLog, "error").mockImplementation(((obj: { err: Error }) => {
+      logged.push(obj);
+    }) as never);
+    let response: unknown;
+    try {
+      response = await serveGatewayRequest(throwingDeps(new Error(`${capability}: x`)), `Bearer ${capability}`, {});
+    } finally {
+      spy.mockRestore();
+    }
+    const body = (response as { body: { error: Record<string, unknown> } }).body;
+    expect({
+      keys: Object.keys(body.error).sort(),
+      logged: logged.length,
+      logRedacted: logged[0]?.err.message === "[REDACTED]: x",
+    }).toEqual({ keys: ["code", "message"], logged: 1, logRedacted: true });
+  });
+
+  it("keeps the generic message when the error names no code", async () => {
+    const response = await serveGatewayRequest(
+      throwingDeps(new Error("Connection refused at 10.0.0.1")),
+      "Bearer cap",
+      {},
+    );
+    expect(response).toEqual({
+      kind: "json",
+      status: 500,
+      body: { ok: false, error: { code: "internal", message: "The gateway could not serve this call." } },
+    });
+  });
+});
+
+// Obviously fake, and code-shaped on purpose: a token like this passes causeCodeOf on its own.
+const FAKE_READABLE = "fake_readable_secret_0003";
+const FAKE_CAPABILITY = "fake_capability_value_0003";
+const leaks = (value: unknown) => JSON.stringify(value).includes(FAKE_READABLE);
+
+describe("gateway cause codes are checked against the run's secret values", () => {
+  const rebuilt = {
+    snapshot: { input: { userTools: { lookup: {}, other: {} } } },
+    tools: { readableSecretValues: async (tool: string) => (tool === "lookup" ? [FAKE_READABLE] : ["other_value"]) },
+  } as unknown as Parameters<typeof runSecretValues>[0];
+
+  it("checks against every user tool's readable values and the request's own capability", async () => {
+    const values = await runSecretValues(rebuilt, FAKE_CAPABILITY)();
+    expect(values.includes(FAKE_READABLE) && values.includes("other_value") && values.includes(FAKE_CAPABILITY)).toBe(
+      true,
+    );
+  });
+
+  it("answers no cause code when the error's message is a readable secret value", async () => {
+    const response = await failureResponse(new Error(FAKE_READABLE), runSecretValues(rebuilt, FAKE_CAPABILITY));
+    const body = (response as { body: { error: Record<string, unknown> } }).body;
+    expect({ keys: Object.keys(body.error).sort(), generic: body.error.message === GATEWAY_INTERNAL_MESSAGE }).toEqual({
+      keys: ["code", "message"],
+      generic: true,
+    });
+    expect(leaks(response)).toBe(false);
+  });
+
+  it("answers no cause code equal to the request's own capability", async () => {
+    const response = await failureResponse(new Error(FAKE_CAPABILITY), runSecretValues(rebuilt, FAKE_CAPABILITY));
+    expect(JSON.stringify(response).includes(FAKE_CAPABILITY)).toBe(false);
+  });
+
+  it("passes a normal code", async () => {
+    const response = await failureResponse(
+      new Error("coding_execution_not_configured: detail"),
+      runSecretValues(rebuilt, FAKE_CAPABILITY),
+    );
+    expect(response).toEqual({
+      kind: "json",
+      status: 500,
+      body: {
+        ok: false,
+        error: {
+          code: "internal",
+          message: "The gateway could not serve this call (coding_execution_not_configured).",
+          causeCode: "coding_execution_not_configured",
+        },
+      },
+    });
+  });
+
+  it("fails a model stream with the same checked error, never the raw one", async () => {
+    // eslint-disable-next-line require-yield
+    async function* failing(): AsyncIterable<LlmStreamEvent> {
+      throw new Error(FAKE_READABLE);
+    }
+    const err = (await drain(checkedEvents(failing(), runSecretValues(rebuilt, FAKE_CAPABILITY)))) as GatewayError;
+    expect({
+      gatewayError: err instanceof GatewayError,
+      code: err.code,
+      generic: err.message === GATEWAY_INTERNAL_MESSAGE,
+      hasCauseCode: err.causeCode !== undefined,
+    }).toEqual({ gatewayError: true, code: "internal", generic: true, hasCauseCode: false });
+  });
+});
+
+describe("console bridge when the tool's redaction list cannot be read", () => {
+  const FAKE_CONSOLE = "fake_console_secret_0009";
+  it("emits only a fixed marker line, never the console line", async () => {
+    const consoleCalls: string[] = [];
+    const ctx = {
+      snapshot: { input: { userTools: { lookup: {} } } },
+      tools: {
+        readableSecretValues: () => Promise.reject(new Error("secret read failed")),
+        privilegedHostFor: () => ({ __bridge_console: async (argsJson: string) => consoleCalls.push(argsJson) }),
+      },
+    } as unknown as Parameters<typeof hostCall>[0];
+    const warned: unknown[] = [];
+    const spy = vi.spyOn(gatewayLog, "warn").mockImplementation(((obj: unknown, msg: string) => {
+      warned.push([obj, msg]);
+    }) as never);
+    let result: unknown;
+    try {
+      result = await hostCall(ctx, {} as never, "call_1", {
+        tool: "lookup",
+        invocation: "inv_1",
+        bridge: "__bridge_console",
+        argsJson: JSON.stringify(["info", [`saw ${FAKE_CONSOLE}`]]),
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(result).toBeNull();
+    expect(consoleCalls.length).toBe(0);
+    expect(JSON.stringify(warned).includes(FAKE_CONSOLE)).toBe(false);
+    expect(warned).toEqual([[{ tool: "lookup" }, CONSOLE_WITHHELD_MESSAGE]]);
   });
 });

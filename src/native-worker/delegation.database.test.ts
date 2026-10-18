@@ -152,6 +152,8 @@ describe.skipIf(!process.env.DATABASE_URL)("durableDelegate (database)", () => {
       trigger: "subagent",
       executionManaged: true,
       taskOverride: "do a thing",
+      // Keyed on the worker's callId, so the same call finds this child again.
+      parentCallId: "d-1",
     });
 
     // The worker calls again with the same callId: still pending, and no second child.
@@ -175,6 +177,7 @@ describe.skipIf(!process.env.DATABASE_URL)("durableDelegate (database)", () => {
       data: {
         agentId: childA,
         parentRunId: l.run.id,
+        parentCallId: "d-1",
         trigger: "subagent",
         executionManaged: true,
         status: "succeeded",
@@ -186,6 +189,25 @@ describe.skipIf(!process.env.DATABASE_URL)("durableDelegate (database)", () => {
     expect(ex.started).toEqual([]);
     expect(await db.run.count({ where: { parentRunId: l.run.id } })).toBe(1);
     expect(orphan.id).toBeTruthy();
+  });
+
+  it("adopts a still-running orphan created before children carried their call id", async () => {
+    const l = await lead();
+    const ex = controlledExecutor();
+    const ctx = ctxFor(l, ex.executor);
+    await ledger.claim(l.session.id, "d-1", "builtin.call");
+    await ledger.setDelegation(l.session.id, "d-1", { status: "pending", childAgentId: childA });
+    const orphan = await db.run.create({
+      data: { agentId: childA, parentRunId: l.run.id, trigger: "subagent", executionManaged: true, status: "running" },
+    });
+    expect(await durableDelegate(ctx, "d-1", "delegate_to_a", JSON.stringify({ task: "x" }))).toEqual({
+      pending: true,
+    });
+    await ex.finishChild(orphan.id, "legacy orphan result");
+    const outcome = await durableDelegate(ctx, "d-1", "delegate_to_a", JSON.stringify({ task: "x" }));
+    expect(outcome).toEqual({ result: expect.stringContaining('"finalText":"legacy orphan result"') });
+    expect(ex.started).toEqual([]);
+    expect(await db.run.count({ where: { parentRunId: l.run.id } })).toBe(1);
   });
 
   it("turns an unexpected dispatch error into a recorded result naming only its code, and replays it", async () => {

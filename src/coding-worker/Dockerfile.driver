@@ -26,6 +26,8 @@ WORKDIR /opt/wardby
 COPY --from=worker-dependencies /worker/node_modules ./node_modules
 COPY --from=build /build/dist/coding-worker ./coding-worker
 COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
+# The shared secret redactor (debug-trace.js); it imports nothing.
+COPY --from=build /build/dist/core/secret-spans.js ./core/secret-spans.js
 # The driver's registry-mode setup (driver.js -> coding/registry/worker-config.js)
 # and its adapters. Their third-party imports are in src/coding-worker/package.json.
 COPY --from=build /build/dist/coding/registry ./coding/registry

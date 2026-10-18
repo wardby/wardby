@@ -31,8 +31,12 @@ export function createHttpTransport(options: HttpTransportOptions): GatewayTrans
       headers: { "content-type": "application/json", authorization: `Bearer ${options.capability}` },
       body: JSON.stringify(request),
     });
-  const gatewayError = (error: { code?: string; message?: string } | undefined, status: number) =>
-    new GatewayError((error?.code ?? "internal") as GatewayErrorCode, error?.message ?? `gateway answered ${status}`);
+  const gatewayError = (error: { code?: string; message?: string; causeCode?: string } | undefined, status: number) =>
+    new GatewayError(
+      (error?.code ?? "internal") as GatewayErrorCode,
+      error?.message ?? `gateway answered ${status}`,
+      typeof error?.causeCode === "string" ? error.causeCode : undefined,
+    );
 
   return {
     async call(request) {
@@ -52,7 +56,9 @@ export function createHttpTransport(options: HttpTransportOptions): GatewayTrans
           continue;
         }
         const body = (await response.json().catch(() => undefined)) as
-          { ok: true; result: unknown } | { ok: false; error: { code: string; message: string } } | undefined;
+          | { ok: true; result: unknown }
+          | { ok: false; error: { code: string; message: string; causeCode?: string } }
+          | undefined;
         if (body?.ok === true) return body.result;
         // Isolation not proven yet (a pod's NetworkPolicy is still being programmed): wait and ask again.
         if (body?.ok === false && body.error.code === "not_ready" && Date.now() < giveUpAt) {
@@ -77,7 +83,7 @@ export function createHttpTransport(options: HttpTransportOptions): GatewayTrans
         }
         if (response.headers.get("content-type")?.includes("application/x-ndjson") && response.body) break;
         const body = (await response.json().catch(() => undefined)) as
-          { error?: { code: string; message: string } } | undefined;
+          { error?: { code: string; message: string; causeCode?: string } } | undefined;
         // Refused before any reservation was taken, so asking again is safe.
         if (body?.error?.code === "not_ready" && Date.now() < giveUpAt) {
           await sleep(RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)]);

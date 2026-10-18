@@ -9,6 +9,7 @@ import {
   workerDebugTracer,
 } from "./debug-trace.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
+import { holdsValueFragment } from "../sandbox/secret-fragments.test-support.js";
 
 const CAPABILITY = `rrp_${"A".repeat(43)}`;
 
@@ -189,5 +190,18 @@ describe("workerDebugTracer", () => {
     tracer!.record("event", { a: CAPABILITY, b: `//proxy/registry/npm/:_authToken=${registryToken}` });
     expect(lines[0]).not.toContain(CAPABILITY);
     expect(lines[0]).not.toContain(registryToken.slice(4));
+  });
+});
+
+describe("redactSecrets with a self-overlapping value", () => {
+  it("masks every overlapping occurrence, leaving no fragment", () => {
+    const value = "abcabcabc";
+    const out = redactSecrets(`trace ${"abc".repeat(5)} end`, [value]);
+    expect(holdsValueFragment(out, [value])).toBe(false);
+    expect(out === "trace [REDACTED] end").toBe(true);
+  });
+
+  it("still redacts a value shorter than the sandbox redactor's minimum", () => {
+    expect(redactSecrets("x abcd y", ["abcd"]) === "x [REDACTED] y").toBe(true);
   });
 });

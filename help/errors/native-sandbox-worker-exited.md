@@ -13,8 +13,9 @@ appliesTo: ">=0.5.4"
 
 1. Read the exit code in the run's error (`get_run`). Code 137 usually means the memory limit was hit.
 2. If limits are the cause, raise `NATIVE_SANDBOX_MEMORY_MB`, `NATIVE_SANDBOX_PIDS`, or `NATIVE_SANDBOX_CPUS` on the server and restart it.
-3. Otherwise test the agent's tools with `dry_run_tool` and fix the failing code.
-4. Trigger the run again.
+3. With Docker, read the server log line `native worker exited non-zero`: its `stderrTail` is the end of the worker's error output. Secret values the worker received from `secrets.get` (six characters or longer, as in tool console output) appear there as `[REDACTED]`.
+4. Otherwise test the agent's tools with `dry_run_tool` and fix the failing code.
+5. Trigger the run again.
 
 See [Run native agents in a sandbox](../native-sandbox.md) and the
 [native sandbox guide](../../docs/native-sandbox.md).
