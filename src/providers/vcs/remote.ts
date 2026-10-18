@@ -50,6 +50,20 @@ export interface GitRemote {
   assertPushRef?(headRef: string): void;
   /** When set, called inside withAccess right before the push; throws to refuse it (GitHub: unset). */
   beforePush?(repository: string, headRef: string): Promise<void>;
+  /**
+   * Optional: the branch a continuation's pull request currently targets, which
+   * prepareWorkspace merges into the workspace before the agent starts (GitHub:
+   * the open PR's base; local: unset, so no merge). Null when there is nothing to
+   * merge from: not a continuation, the PR is a fork's, or the lookup failed.
+   * Never throws.
+   */
+  pullRequestBase?(input: {
+    runId: string;
+    repository: string;
+    baseRef: string;
+    headRef: string;
+    continuation?: { rootRunId: string };
+  }): Promise<{ ref: string } | null>;
   notifyContinuationStarted?: VcsProvider["notifyContinuationStarted"];
   continuationPullRequestDraft?: VcsProvider["continuationPullRequestDraft"];
   notifyContinuationFinished?: VcsProvider["notifyContinuationFinished"];

@@ -114,6 +114,33 @@ export class GitHubRemote implements GitRemote {
     if (!open) throw new Error(CONTINUATION_CLOSED_ERROR);
   }
 
+  /** See GitRemote.pullRequestBase: the root run's open PR's current base branch. Never throws. */
+  async pullRequestBase(input: {
+    runId: string;
+    repository: string;
+    baseRef: string;
+    headRef: string;
+    continuation?: { rootRunId: string };
+  }): Promise<{ ref: string } | null> {
+    const github = this.options.github;
+    if (!input.continuation || !github.openPullRequestBase) return null;
+    try {
+      const found = await github.openPullRequestBase({
+        runId: input.continuation.rootRunId,
+        repository: input.repository,
+        baseRef: input.baseRef,
+        headRef: input.headRef,
+      });
+      return found ? { ref: found.baseRef } : null;
+    } catch (error) {
+      logger.warn(
+        { err: error, runId: input.runId },
+        "could not read the continuation pull request's base branch; continuing without merging it",
+      );
+      return null;
+    }
+  }
+
   /** See VcsProvider.continuationPullRequestDraft: GitHub's draft flag on the root run's open PR. Never throws. */
   async continuationPullRequestDraft(workspace: PreparedWorkspace): Promise<boolean | undefined> {
     const github = this.options.github;
@@ -317,14 +344,14 @@ export class GitHubRemote implements GitRemote {
       const budgetSuffix = details?.budgetSentence ? ` ${details.budgetSentence}` : "";
       const body =
         outcome === "succeeded"
-          ? `✅ ${label} finished.${details?.overrunSentence ? ` ${details.overrunSentence}` : ""}${summarySuffix}`
+          ? `✅ ${label} finished.${details?.mergeSentence ? ` ${details.mergeSentence}` : ""}${details?.overrunSentence ? ` ${details.overrunSentence}` : ""}${summarySuffix}`
           : outcome === "budget_exhausted" && details?.changesPushed
             ? `⚠️ ${label} ran out of budget before finishing.${budgetSuffix} ${budgetStoppedChangesSentence(
                 details.changesPushed.pullRequestNumber
                   ? `#${details.changesPushed.pullRequestNumber}`
                   : "this pull request",
                 false,
-              )}${summarySuffix}`
+              )}${details?.mergeSentence ? ` ${details.mergeSentence}` : ""}${summarySuffix}`
             : outcome === "budget_exhausted"
               ? `❌ ${label} ran out of budget.${budgetSuffix}${summarySuffix}`
               : details?.serviceSentence
@@ -333,7 +360,9 @@ export class GitHubRemote implements GitRemote {
                   ? `❌ ${label} could not run: ${details.providerSentence}${summarySuffix}`
                   : details?.protectedPathSentence
                     ? `❌ ${label} could not open its changes: ${details.protectedPathSentence}${summarySuffix}`
-                    : `❌ ${label} failed.${summarySuffix}`;
+                    : details?.conflictMarkersSentence
+                      ? `❌ ${label} could not push its changes: ${details.conflictMarkersSentence}${summarySuffix}`
+                      : `❌ ${label} failed.${summarySuffix}`;
       await Promise.allSettled([
         this.options.github.updateContinuationStatusComment({ ...identity, body }),
         this.options.github.completeContinuationCheckRun({

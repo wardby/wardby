@@ -65,6 +65,8 @@ export const CHILD_RUN_FAILURE_CODES: ReadonlySet<string> = new Set([
   "coding_failure_github",
   "coding_failure_protected_path",
   "coding_failure_continuation_closed",
+  "coding_failure_merge_conflict",
+  "coding_failure_target_merge",
   "coding_failure_workspace",
   "coding_failure_budget",
   "coding_failure_artifact",

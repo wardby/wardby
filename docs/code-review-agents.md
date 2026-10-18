@@ -260,6 +260,52 @@ PR description:
   agent can reach only the tools and access you would give that outsider's
   text.
 
+## Follow-ups bring the pull request up to date
+
+Every follow-up run on a pull request a wardby coding run opened (a mention on
+the pull request, a delegated `continuePriorRun`, a review fix round) first
+merges the branch the pull request **currently** targets into its branch:
+
+- **The target is read from GitHub when the run starts**, so a pull request
+  retargeted since it opened (a stacked pull request whose parent merged, a
+  release branch) merges its new base. Retargeting does not make wardby treat
+  the pull request as closed.
+- **The merge happens before the agent starts**, in trusted wardby code. The
+  target branch is fetched from the same repository with the App's access;
+  a fork is never fetched. A branch that already contains its target is left
+  exactly as it was, and the run behaves as it always has.
+- **Conflicts are the agent's to resolve.** The conflicted files keep standard
+  conflict markers, and the agent's task lists them, says which side is the
+  pull request and which is the target, and asks it to resolve every conflict
+  keeping both sides' intent, fix the tests the combination broke, and run the
+  repository's checks. A conflicted file that still holds markers when the run
+  ends stops the push: the run fails with category `merge_conflict`
+  ([help](../help/errors/merge-conflict.md)) and nothing is pushed. A
+  conflicted file with no markers (a binary file, or one deleted on one side
+  and changed on the other) holds one side's version, or the changed version,
+  and the agent is asked to check it.
+- **The push is one merge commit authored by Wardby**, whose parents are the
+  head the run started from and the target. It is pushed even when the agent
+  changed nothing else, so "please update this PR" or "please fix the merge
+  conflicts" in a mention is enough. The run's status comment says what was
+  merged ("Merged `main` @ `1a2b3c4` into this branch; resolved conflicts in 2
+  files.").
+- **Checks apply to the agent's own changes**, measured against the automatic
+  merge: the target branch's changes, including to protected paths, merge as
+  they are, while an agent edit to a protected path (resolving a conflict in
+  one, or reverting the target's change to one) is refused as usual, so a
+  conflict in a protected path has to be resolved by hand. The
+  changed-file and diff-size limits count only the agent's changes, so merging
+  a busy target branch does not exhaust them.
+- **The push stays a fast-forward** of the head the run started from: a push
+  by anyone else in the meantime fails the run, with nothing pushed, as before.
+- A target branch that cannot be fetched or shares no history with the pull
+  request fails the run before the agent starts, with category `target_merge`
+  ([help](../help/errors/target-merge.md)).
+
+The clone is shallow, so wardby deepens its history step by step until the
+branch and its target share a commit, up to about 5,000 commits back.
+
 ## Automatic review fix rounds
 
 Linking an agent with the `review_fix` trigger (`access: "write"`, at most
