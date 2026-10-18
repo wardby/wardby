@@ -4,6 +4,8 @@ import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import { registerMemoryTools } from "./memory.js";
 import type { McpRequestContext } from "../context.js";
+import { createSecretWriteGuard } from "../../core/secret-guard.js";
+import { guardAgentMemory } from "../../core/secret-guarded-stores.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 
 const CANONICAL_URI = "https://host/mcp";
@@ -200,6 +202,33 @@ describe("agent memory tools", () => {
     await client.callTool({ name: "delete_agent_memory", arguments: { agentId: "a1", key: "k1" } });
     const listedAfter = await client.callTool({ name: "list_agent_memory", arguments: { agentId: "a1" } });
     expect(parseText(listedAfter as never)).toEqual([]);
+    await client.close();
+  });
+});
+
+describe("secret-bearing memory writes", () => {
+  it("set_agent_memory refuses a value holding an attached secret, naming it and storing nothing", async () => {
+    const db = fakeDb([{ id: "a1", ownerId: "p1" }]);
+    const raw = fakeMemory();
+    const memory = guardAgentMemory(
+      raw,
+      createSecretWriteGuard({ load: async () => [{ name: "API_KEY", values: ["fake-secret-value-1234"] }] }),
+    ) as unknown as ReturnType<typeof fakeMemory>;
+    const mcp = buildMcpServer({ providers: { memory } as never, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, memory, "p1", ["agents:read", "memory:write"]));
+    registerMemoryTools(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "set_agent_memory",
+      arguments: { agentId: "a1", key: "k1", content: "key is fake-secret-value-1234" },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as { text: string }[])[0].text;
+    expect(text).toContain("API_KEY");
+    expect(text).toContain("secret_in_value");
+    expect(text).not.toContain("fake-secret-value-1234");
+    expect(await raw.get("a1", "k1")).toBeUndefined();
     await client.close();
   });
 });

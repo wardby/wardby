@@ -13,6 +13,8 @@ import type { SecretCipher } from "../providers/secrets/types.js";
 import { scheduleStartFields } from "../core/schedule-start.js";
 import { createSecret, attachSecret } from "../core/secrets.js";
 import { createDatastore, attachDatastore } from "../core/datastores.js";
+import { guardDatastore } from "../core/secret-guarded-stores.js";
+import { createDbSecretWriteGuard } from "../core/secret-guard.js";
 import { createWebhook } from "../core/webhooks.js";
 import { deriveJsonSchema } from "../sandbox/zod-params.js";
 import { findSameNamedAttachedTool, reservedToolNameReason } from "../core/tool-names.js";
@@ -323,7 +325,7 @@ export async function createFromBundle(
   }
 
   // Step 6: Per-agent datastore seed
-  const ds = new PostgresDatastore(db, cipher);
+  const ds = guardDatastore(new PostgresDatastore(db, cipher), createDbSecretWriteGuard(db, cipher));
   for (const d of bundle.readSingleDatastores()) {
     const agentId = agentIdMap.get(d.agentName);
     if (!agentId) continue;

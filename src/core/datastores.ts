@@ -98,7 +98,7 @@ export function buildSharedDatastoreAccessor(
     async set(boundName, key, value, opts) {
       const datastoreId = await resolveDatastoreId(agentId, boundName, db);
       if (!datastoreId) throw new Error("datastore_not_bound");
-      await datastore.setShared(datastoreId, key, value, opts);
+      await datastore.setShared(datastoreId, key, value, { ...opts, writerAgentId: agentId });
     },
     async delete(boundName, key) {
       const datastoreId = await resolveDatastoreId(agentId, boundName, db);
