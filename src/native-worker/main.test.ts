@@ -234,7 +234,57 @@ describe("native worker stderr redaction", () => {
     expect(result.stderr).toBe("first line\nlast [REDACTED]\n");
   });
 
-  it("emits a pending line past the bound without waiting for its newline, redacted", async () => {
+  it("redacts a secret value split across the write that crosses the bound", () => {
+    const result = redactingChild([
+      'const { MAX_PENDING_STDERR_CHARS } = await import("./src/native-worker/stderr-redaction.ts");',
+      'process.stderr.write("x".repeat(MAX_PENDING_STDERR_CHARS));',
+      "process.stderr.write(head);",
+      'process.stderr.write(tail + " end\\n");',
+    ]);
+    expect(result.status).toBe(0);
+    expect(leaks(result.stderr)).toBe(false);
+    expect(result.stderr.endsWith("[REDACTED] end\n")).toBe(true);
+  });
+
+  it("redacts a remembered value holding a newline, split across writes after that newline", () => {
+    const multiLine = "fake-multi-line\nsecret-value-0001";
+    const result = redactingChild([
+      `rememberSecretValue(${JSON.stringify(multiLine)});`,
+      `process.stderr.write("a " + ${JSON.stringify(multiLine.slice(0, 16))});`,
+      `process.stderr.write(${JSON.stringify(multiLine.slice(16))} + " b\\n");`,
+    ]);
+    expect(result.status).toBe(0);
+    expect(result.stderr.includes(multiLine)).toBe(false);
+    expect(result.stderr).toBe("a [REDACTED] b\n");
+  });
+
+  it("keeps byte order when a string write follows an incomplete multi-byte character", () => {
+    const result = redactingChild([
+      "process.stderr.write(new Uint8Array([0x61, 0x62, 0xc3]));",
+      'process.stderr.write("cd\\n");',
+    ]);
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("ab\ufffdcd\n");
+  });
+
+  for (const [signal, code] of [
+    ["SIGTERM", 143],
+    ["SIGINT", 130],
+  ] as const) {
+    it(`flushes the redacted tail on ${signal} and exits ${code}`, () => {
+      const result = redactingChild([
+        'process.stderr.write("last " + head);',
+        "process.stderr.write(tail);",
+        "setTimeout(() => {}, 20_000);",
+        `process.kill(process.pid, "${signal}");`,
+      ]);
+      expect(result.status).toBe(code);
+      expect(leaks(result.stderr)).toBe(false);
+      expect(result.stderr).toBe("last [REDACTED]\n");
+    });
+  }
+
+  it("emits a pending line past the bound without waiting for its newline, holding a value whole", async () => {
     const child = spawn(
       process.execPath,
       [
@@ -257,17 +307,19 @@ describe("native worker stderr redaction", () => {
     const emitted = new Promise<void>((done) =>
       child.stderr.on("data", (chunk: Buffer) => {
         stderr += chunk.toString();
-        if (stderr.includes("[REDACTED]")) done();
+        if (stderr.length >= 64 * 1024) done();
       }),
     );
     const exited = new Promise<number | null>((done) => child.on("exit", done));
     await Promise.race([emitted, exited]);
-    // Emitted while the child still runs: the bound, not the exit flush, let it out.
+    // The text before the value was emitted while the child still runs: the bound, not the exit
+    // flush, let it out. The value itself is held whole, then flushed redacted at exit.
     expect(child.exitCode).toBeNull();
     child.stdin.end();
     expect(await exited).toBe(0);
     expect(leaks(stderr)).toBe(false);
     expect(stderr.startsWith("x".repeat(1024))).toBe(true);
+    expect(stderr.endsWith("[REDACTED]\n")).toBe(true);
   }, 30_000);
 });
 
