@@ -46,7 +46,13 @@ import type { PrismaGatewayLedger } from "../native-worker/ledger.js";
 import { asStringArray, asPrefixMap } from "../sandbox/tool-capabilities.js";
 import { scopeDatastore } from "../providers/datastore/scoped.js";
 import { buildSecretsAccessor, scopeSecretsAccessor, type SecretsAccessor } from "./secrets.js";
-import { loadAgentSecretValues, maskNamedSecrets, WITHHELD_TEXT_NOTICE } from "./secret-guard.js";
+import {
+  loadAgentSecretValues,
+  maskNamedSecrets,
+  POSTING_TOOL_NAMES,
+  SECRET_CHECK_UNAVAILABLE_MESSAGE,
+  WITHHELD_TEXT_NOTICE,
+} from "./secret-guard.js";
 import { buildSharedDatastoreAccessor, scopeSharedDatastoreAccessor } from "./datastores.js";
 import { effectiveBudgetForRun, type EffectiveBudgetOptions } from "./budget-groups.js";
 import { stopChildrenOfLostRun } from "./lost-run-children.js";
@@ -1124,7 +1130,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
     }
   };
 
-  const builtinHandler = (name: string): BuiltinToolHandler | undefined => {
+  const unguardedBuiltinHandler = (name: string): BuiltinToolHandler | undefined => {
     if (loaded.memoryEnabled && MEMORY_TOOL_NAMES.has(name)) {
       return async (argsJson: string): Promise<string> => {
         return handleMemoryTool(name, argsJson, loaded.agentId, providers.memory);
@@ -1526,6 +1532,36 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
     }
 
     return undefined;
+  };
+
+  /**
+   * The only route to a built-in tool, in both execution modes (the in-process loop and the native
+   * gateway's builtin.call). A tool that posts model-written text to a host has every attached
+   * secret's value masked in its arguments first; when the secrets cannot be read the call is
+   * refused and the host is never reached.
+   */
+  const builtinHandler = (name: string): BuiltinToolHandler | undefined => {
+    const handler = unguardedBuiltinHandler(name);
+    if (!handler || !POSTING_TOOL_NAMES.has(name)) return handler;
+    return async (argsJson: string, toolCallId?: string): Promise<string> => {
+      let masked: string;
+      try {
+        const named = await loadAgentSecretValues(db, providers.secrets, loaded.agentId);
+        masked = maskNamedSecrets(argsJson, named);
+      } catch (err) {
+        runnerLog.warn(
+          {
+            runId,
+            tool: name,
+            event: "post_secret_check_failed",
+            errorName: err instanceof Error ? err.name : typeof err,
+          },
+          "could not read the agent's secrets to check a posted text; refusing the call",
+        );
+        return JSON.stringify({ error: "secret_check_unavailable", message: SECRET_CHECK_UNAVAILABLE_MESSAGE });
+      }
+      return handler(masked, toolCallId);
+    };
   };
 
   /**

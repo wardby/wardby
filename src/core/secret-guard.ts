@@ -116,3 +116,23 @@ export function createSecretWriteGuard(source: {
 export function createDbSecretWriteGuard(db: SecretGuardDb, cipher: SecretGuardCipher): SecretWriteGuard {
   return createSecretWriteGuard({ load: (id) => loadAgentSecretValues(db, cipher, id) });
 }
+
+/**
+ * Built-in tools whose arguments become text on a host, so their arguments are masked before
+ * the call. Review host: repo_publish_review (summary, body, inline comment bodies), repo_comment
+ * (body). Jira: jira_comment and jira_edit_own_comment (body), jira_update_fields (labels,
+ * components, priority, custom fields), jira_create_issue (summary, description, labels,
+ * components, custom fields, fingerprint), jira_set_property (a stored value), jira_transition
+ * (toStatus, which Jira may echo in an error). Read tools and jira_link_issues (a link type name
+ * checked against an allowlist) are left out.
+ */
+export const POSTING_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "repo_publish_review",
+  "repo_comment",
+  "jira_comment",
+  "jira_edit_own_comment",
+  "jira_update_fields",
+  "jira_create_issue",
+  "jira_set_property",
+  "jira_transition",
+]);

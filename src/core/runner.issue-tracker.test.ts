@@ -433,3 +433,63 @@ describe("self-defects at run finalization", () => {
     expect(tracker.createIssue).not.toHaveBeenCalled();
   });
 });
+
+describe("posting built-ins mask the agent's attached secret values", () => {
+  const FAKE = "fake-secret-value-1234";
+  const withSecret = (db: RunnerDb, opts: { unreadable?: boolean } = {}) => {
+    (db as any).agentSecret.findMany = async () => [{ boundName: "JIRA_TOKEN" }];
+    (db as any).$queryRaw = async () => [{ usd: null, ciphertext: "ct", broker: null }];
+    return {
+      ...({} as SecretCipher),
+      keyId: () => "k",
+      encrypt: async (s: string) => s,
+      decrypt: async () => {
+        if (opts.unreadable) throw new Error(`decrypt failed for ${FAKE}`);
+        return FAKE;
+      },
+    } as SecretCipher;
+  };
+
+  it("masks the value in a comment before the tracker sees it", async () => {
+    const tracker = fakeTracker();
+    const { db, state, llm } = harness({
+      links: [LINK],
+      script: [toolCall("jira_comment", { issueKey: "PROJ-1", body: `the token is ${FAKE}` }), text("done")],
+    });
+    const secrets = withSecret(db);
+    await executeRun("run1", { ...providers(llm), secrets, issueTrackers: { jira: tracker } }, db);
+    const sent = JSON.stringify(vi.mocked(tracker.comment).mock.calls);
+    expect(sent).toContain("the token is [REDACTED]");
+    expect(sent).not.toContain(FAKE);
+    expect(state.toolResults.join("")).not.toContain(FAKE);
+  });
+
+  it("refuses the call and never reaches the tracker when the secrets cannot be read", async () => {
+    const tracker = fakeTracker();
+    const { db, state, llm } = harness({
+      links: [LINK],
+      script: [toolCall("jira_comment", { issueKey: "PROJ-1", body: `the token is ${FAKE}` }), text("done")],
+    });
+    const secrets = withSecret(db, { unreadable: true });
+    await executeRun("run1", { ...providers(llm), secrets, issueTrackers: { jira: tracker } }, db);
+    expect(tracker.comment).not.toHaveBeenCalled();
+    const result = state.toolResults.join("");
+    expect(result).toContain("secret_check_unavailable");
+    expect(result).toContain("The agent's secrets could not be read to check this value; try again.");
+    expect(result).not.toContain(FAKE);
+  });
+
+  it("leaves a read tool's arguments untouched and does not read the secrets", async () => {
+    const tracker = fakeTracker();
+
+    const { db, state, llm } = harness({
+      links: [LINK],
+      script: [toolCall("jira_list_transitions", { issueKey: "PROJ-1" }), text("done")],
+    });
+    const secrets = withSecret(db, { unreadable: true });
+    const run = await executeRun("run1", { ...providers(llm), secrets, issueTrackers: { jira: tracker } }, db);
+    expect(run.status).toBe("succeeded");
+    expect(state.toolResults.join("")).not.toContain("secret_check_unavailable");
+    expect(state.toolResults.join("")).toContain("transition_not_allowed");
+  });
+});

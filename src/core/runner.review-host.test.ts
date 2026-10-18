@@ -451,3 +451,38 @@ describe("a lead run's finalizer releases the reviews waiting for its request (#
     expect(startDeferredForRequest).not.toHaveBeenCalled();
   });
 });
+
+describe("repo_* posting built-ins mask the agent's attached secret values", () => {
+  const FAKE = "fake-secret-value-1234";
+  const comment = toolCall("repo_comment", { repository: REPO, number: 7, body: `the token is ${FAKE}` });
+  const cipher = (unreadable: boolean): SecretCipher => ({
+    keyId: () => "k",
+    encrypt: async (s: string) => s,
+    decrypt: async () => {
+      if (unreadable) throw new Error(`decrypt failed for ${FAKE}`);
+      return FAKE;
+    },
+  });
+  const attach = (db: RunnerDb) => {
+    (db as any).agentSecret.findMany = async () => [{ boundName: "GH_TOKEN" }];
+    (db as any).$queryRaw = async () => [{ ciphertext: "ct", broker: null }];
+  };
+
+  it("masks the value in a comment before the host sees it", async () => {
+    const host = fakeHost();
+    const { db, llm } = harness({ links: [LINK], script: [comment, text("done")] });
+    attach(db);
+    await executeRun("run1", { ...providers(llm), secrets: cipher(false), reviewHosts: { github: host } }, db);
+    const sent = JSON.stringify(vi.mocked(host.comment).mock.calls);
+    expect(sent).toContain("the token is [REDACTED]");
+    expect(sent).not.toContain(FAKE);
+  });
+
+  it("refuses the call and never reaches the host when the secrets cannot be read", async () => {
+    const host = fakeHost();
+    const { db, llm } = harness({ links: [LINK], script: [comment, text("done")] });
+    attach(db);
+    await executeRun("run1", { ...providers(llm), secrets: cipher(true), reviewHosts: { github: host } }, db);
+    expect(host.comment).not.toHaveBeenCalled();
+  });
+});
