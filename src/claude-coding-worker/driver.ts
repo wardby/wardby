@@ -1,6 +1,5 @@
 import {
   CODING_PROTOCOL_VERSION,
-  workerTaskNote,
   parseCodingAgentOutputJson,
   sanitizeDependencyCacheReport,
   type CodingAgentOutput,
@@ -12,6 +11,7 @@ import {
 } from "../coding/protocol.js";
 import { bareModeContextPrompt, materializeClaudeContext } from "./context.js";
 import { describeError, type DebugTracer } from "../coding-worker/debug-trace.js";
+import { workerTaskNote } from "../coding-worker/task-note.js";
 import { safeWorkerErrorCode, streamFailureCode } from "../coding-worker/errors.js";
 import type { WorkerProgressEvent } from "../coding-worker/types.js";
 

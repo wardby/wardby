@@ -2,7 +2,6 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   CODING_PROTOCOL_VERSION,
-  workerTaskNote,
   parseCodingAgentOutputJson,
   sanitizeDependencyCacheReport,
   type CodingAgentOutput,
@@ -10,6 +9,7 @@ import {
   type CodingWorkerOutput,
   type DependencyCacheReport,
 } from "../coding/protocol.js";
+import { workerTaskNote } from "./task-note.js";
 import { normalizeRegistryLockfiles } from "../coding/registry/lockfiles.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
 import { registryWorkerSetup } from "../coding/registry/worker-config.js";
