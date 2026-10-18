@@ -135,6 +135,62 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
     expect((await row(run.id)).heartbeatAt).toEqual(beat);
   });
 
+  it("keeps one launch heartbeat in flight at a time, so none lands after the launch returns", async () => {
+    const fake = fakeLauncher();
+    let finishLaunch!: () => void;
+    const launchGate = new Promise<void>((resolve) => (finishLaunch = resolve));
+    const slow: ManagedWorkerLauncher = {
+      ...fake.launcher,
+      launch: async (input, options) => {
+        await launchGate;
+        return fake.launcher.launch(input, options);
+      },
+    };
+    // Heartbeat writes slower than the beat interval, finishing in random order (a loaded database).
+    let inFlight = 0;
+    let most = 0;
+    let beats = 0;
+    const jittered = new Proxy(db, {
+      get(target, key, receiver) {
+        if (key !== "run") return Reflect.get(target, key, receiver);
+        return new Proxy(target.run, {
+          get(run, method, r) {
+            if (method !== "updateMany") return Reflect.get(run, method, r);
+            return async (args: { data?: { heartbeatAt?: unknown } }) => {
+              if (!args.data?.heartbeatAt) return run.updateMany(args as never);
+              inFlight += 1;
+              most = Math.max(most, inFlight);
+              beats += 1;
+              try {
+                await new Promise((resolve) => setTimeout(resolve, 5 + Math.random() * 30));
+                return await run.updateMany(args as never);
+              } finally {
+                inFlight -= 1;
+              }
+            };
+          },
+        });
+      },
+    });
+    const run = await sandboxRun();
+    const executor = new NativeSandboxExecutor({
+      db: jittered,
+      providers,
+      launcher: slow,
+      gatewayUrl,
+      heartbeatIntervalMs: 2,
+    });
+    const started = executor.start(run.id);
+    await vi.waitFor(() => expect(beats).toBeGreaterThanOrEqual(3));
+    finishLaunch();
+    await started;
+    expect(most).toBe(1);
+    expect(inFlight).toBe(0);
+    const beat = (await row(run.id)).heartbeatAt;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect((await row(run.id)).heartbeatAt).toEqual(beat);
+  });
+
   it("tells the launcher a run stopped mid-launch is no longer wanted", async () => {
     const fake = fakeLauncher();
     let wanted: boolean | undefined;

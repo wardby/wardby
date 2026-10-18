@@ -155,10 +155,14 @@ export class NativeSandboxExecutor implements Executor {
           data: { heartbeatAt: new Date(this.now()) },
         })
         .catch((err: unknown) => executorLog.warn({ err, runId }, "could not refresh a launching run's heartbeat"));
-    let inFlight: Promise<unknown> = Promise.resolve();
+    // At most one beat in flight: a tick while one is pending is skipped. Overlapping beats could
+    // commit out of order, and only the last one sent would be awaited below.
+    let inFlight: Promise<unknown> | undefined;
     const timer = setInterval(
       () => {
-        inFlight = beat();
+        inFlight ??= beat().finally(() => {
+          inFlight = undefined;
+        });
       },
       this.options.heartbeatIntervalMs ?? Math.floor(HEARTBEAT_TIMEOUT_MS / 3),
     );
@@ -168,7 +172,7 @@ export class NativeSandboxExecutor implements Executor {
       return await work();
     } finally {
       clearInterval(timer);
-      // A beat already sent lands before the launch returns, never after the worker's own beats.
+      // The beat in flight, if any, lands before the launch returns, never after the worker's own beats.
       await inFlight;
     }
   }
