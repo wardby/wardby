@@ -1928,19 +1928,7 @@ export async function durableDelegate(
       }),
     );
   }
-  // The task is model-written and becomes the child's stored task: mask the parent's secret values
-  // first. Not recorded on the ledger, so a retry of this call can succeed once the secrets read.
-  const maskedArgsJson = await maskModelWrittenArgs(
-    { db, secrets: providers.secrets, agentId: loaded.agentId, runId },
-    name,
-    argsJson,
-  );
-  if (maskedArgsJson === undefined) {
-    return {
-      result: JSON.stringify({ error: "secret_check_unavailable", message: SECRET_CHECK_UNAVAILABLE_MESSAGE }),
-    };
-  }
-  const parsedArgs = parseDelegateArgs(maskedArgsJson);
+  const parsedArgs = parseDelegateArgs(argsJson);
   if ("refusal" in parsedArgs) return finish(parsedArgs.refusal);
   const { args } = parsedArgs;
   const authorized = await authorizeDelegation(db, loaded.agentId, edge, boundName, args);
@@ -1961,6 +1949,22 @@ export async function durableDelegate(
   }
 
   if (!childRunId) {
+    // About to create a child: its task is model-written and stored, so mask the parent's secret
+    // values first. Only here, never on a poll of an existing child (a transient secret-read
+    // failure must not orphan a running child). Not recorded on the ledger: a retry can succeed.
+    const maskedArgsJson = await maskModelWrittenArgs(
+      { db, secrets: providers.secrets, agentId: loaded.agentId, runId },
+      name,
+      argsJson,
+    );
+    if (maskedArgsJson === undefined) {
+      return {
+        result: JSON.stringify({ error: "secret_check_unavailable", message: SECRET_CHECK_UNAVAILABLE_MESSAGE }),
+      };
+    }
+    const maskedArgs = parseDelegateArgs(maskedArgsJson);
+    if ("refusal" in maskedArgs) return finish(maskedArgs.refusal);
+    const dispatchArgs = maskedArgs.args;
     const limit = loaded.maxDelegationsPerRun ?? 1;
     const refusalNow = async (reader: { run: { findMany: RunnerDb["run"]["findMany"] } }) => {
       const prior = await reader.run.findMany({ where: { parentRunId: runId }, select: { agentId: true } });
@@ -2009,8 +2013,15 @@ export async function durableDelegate(
         agentId: edge.childAgentId,
         trigger: "subagent",
         ...(coding
-          ? { codingTask: args.task, continuesCodingRunId: args.continuePriorRun, mergeOrder: args.mergeOrder }
-          : { taskOverride: delegationTaskOverride(args), grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [] }),
+          ? {
+              codingTask: dispatchArgs.task,
+              continuesCodingRunId: dispatchArgs.continuePriorRun,
+              mergeOrder: dispatchArgs.mergeOrder,
+            }
+          : {
+              taskOverride: delegationTaskOverride(dispatchArgs),
+              grantedParentMemoryKeys: dispatchArgs.grantParentMemoryKeys ?? [],
+            }),
         parentRunId: runId,
         parentCallId: callId,
         // The child's result flows back into this run, which the triggerer sees, so the child is visible to them too.

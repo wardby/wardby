@@ -201,6 +201,33 @@ describe.skipIf(!process.env.DATABASE_URL)("durableDelegate (database)", () => {
       }
     });
 
+    it("a poll of an already dispatched child never reads the secrets, so a read failure cannot orphan it", async () => {
+      await attach();
+      try {
+        const l = await lead();
+        const ex = controlledExecutor();
+        const args = JSON.stringify({ task: `use ${FAKE}` });
+        const good = { ...ctxFor(l, ex.executor), providers: { ...providersWith(ex.executor), secrets: cipher } };
+        expect(await durableDelegate(good, "m-3", "delegate_to_a", args)).toEqual({ pending: true });
+        const broken = {
+          ...cipher,
+          decrypt: async () => {
+            throw new Error("decrypt failed");
+          },
+        } as unknown as SecretCipher;
+        const bad = { ...good, providers: { ...good.providers, secrets: broken } };
+        expect(await durableDelegate(bad, "m-3", "delegate_to_a", args)).toEqual({ pending: true });
+        await ex.finishChild(ex.started[0], "done by a");
+        expect(await durableDelegate(bad, "m-3", "delegate_to_a", args)).toEqual({
+          result: expect.stringContaining('"finalText":"done by a"'),
+        });
+        expect(ex.started).toHaveLength(1);
+        expect(await db.run.count({ where: { parentRunId: l.run.id } })).toBe(1);
+      } finally {
+        await detach();
+      }
+    });
+
     it("refuses with secret_check_unavailable and creates no child when the secrets cannot be read", async () => {
       await attach();
       try {
