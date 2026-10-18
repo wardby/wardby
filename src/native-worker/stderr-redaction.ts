@@ -7,9 +7,10 @@
  * included, minimum length included). One set per worker process.
  *
  * process.stderr writes are buffered (StderrRedactionBuffer), because a value may arrive split
- * across writes. Strings and any ArrayBufferView go through one UTF-8 decoder (a string's trailing
- * high surrogate is held for the next write, so a split surrogate pair still matches); any other
- * chunk type is refused, never written raw. On each write the buffer:
+ * across writes. A string is matched as text, whatever encoding it was written with (its trailing
+ * high surrogate is held for the next write, so a split surrogate pair still matches); a hex or
+ * base64 string and any ArrayBufferView go through one UTF-8 byte decoder; any other chunk type is
+ * refused, never written raw. Emitted text is written as UTF-8. On each write the buffer:
  * 1. holds back `hold`: the longest suffix of the buffer that is a proper prefix of a remembered
  *    value, since those characters could still become a value;
  * 2. picks a cut `c` <= length − hold: after the last "\n" there, or, once the text after that
@@ -167,27 +168,42 @@ const bytes = new StringDecoder("utf8");
 let heldHighSurrogate = "";
 
 const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
-const UTF8_ENCODINGS = new Set([undefined, "utf8", "utf-8"]);
+/** String encodings that name bytes rather than text: such a string is decoded to its bytes first. */
+const BYTE_STRING_ENCODINGS = new Set(["hex", "base64", "base64url"]);
 
-/** `chunk` decoded through the one byte decoder (a held high surrogate joined first); throws for any other chunk type. */
+/**
+ * `chunk` as text for the buffer. A string is matched as the JavaScript string itself, whatever
+ * text encoding it was written with (utf16le, latin1, ...): re-encoding it and decoding the bytes as
+ * UTF-8 would turn an ASCII value into one with NULs that never matches. Its trailing high surrogate
+ * is held for the next write. A hex or base64 string, and any ArrayBufferView, goes through the one
+ * byte decoder. Any other chunk type throws (after emitting a held surrogate masked).
+ */
 function decodeChunk(chunk: unknown, encoding: BufferEncoding | undefined): string {
-  if (typeof chunk === "string" && UTF8_ENCODINGS.has(encoding?.toLowerCase())) {
-    let text = heldHighSurrogate + chunk;
+  if (typeof chunk === "string" && !BYTE_STRING_ENCODINGS.has(encoding?.toLowerCase() ?? "")) {
+    // An incomplete multi-byte character from an earlier byte write ends here (as U+FFFD), in order.
+    let text = bytes.end() + heldHighSurrogate + chunk;
     heldHighSurrogate = "";
     if (text.length > 0 && isHighSurrogate(text.charCodeAt(text.length - 1))) {
       heldHighSurrogate = text.slice(-1);
       text = text.slice(0, -1);
     }
-    return bytes.write(Buffer.from(text, "utf8"));
+    return text;
   }
-  // Anything else ends a held surrogate's chance of a low half: it is decoded alone (as U+FFFD).
+  if (typeof chunk !== "string" && !ArrayBuffer.isView(chunk)) {
+    // Never handed to the raw write: its content is unknown. A held surrogate goes out masked
+    // first (fail closed, with everything buffered before it). The message names no content.
+    if (heldHighSurrogate) {
+      heldHighSurrogate = "";
+      const out = buffer.flush(true);
+      if (out) rawWrite?.(out);
+    }
+    throw new TypeError("process.stderr.write takes a string or bytes (an ArrayBufferView).");
+  }
+  // Bytes end a held surrogate's chance of a low half: it is decoded alone (as U+FFFD).
   const lone = heldHighSurrogate ? bytes.write(Buffer.from(heldHighSurrogate, "utf8")) : "";
   heldHighSurrogate = "";
   if (typeof chunk === "string") return lone + bytes.write(Buffer.from(chunk, encoding));
-  if (ArrayBuffer.isView(chunk))
-    return lone + bytes.write(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength));
-  // Never handed to the raw write: its content is unknown. The message names no content.
-  throw new TypeError("process.stderr.write takes a string or bytes (an ArrayBufferView).");
+  return lone + bytes.write(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength));
 }
 
 /** Emits the buffered remainder, masked fail closed and ended with "\n". Safe to call any number of times. */

@@ -488,6 +488,27 @@ describe("native worker stderr redaction", () => {
     expect(leaks(result.stderr)).toBe(false);
   });
 
+  for (const encoding of ["utf16le", "ucs2", "latin1"]) {
+    it(`redacts a value in a string written with the ${encoding} encoding, as text`, () => {
+      const result = redactingChild([`process.stderr.write("enc " + head + tail + " end\\n", "${encoding}");`]);
+      expect(result.status).toBe(0);
+      expect(leaks(result.stderr)).toBe(false);
+      expect(result.stderr === "enc [REDACTED] end\n").toBe(true);
+    });
+  }
+
+  it("masks a held high surrogate before refusing a chunk that is neither a string nor bytes", () => {
+    const result = redactingChild([
+      'process.stderr.write("pre \\uD83D");',
+      "try { process.stderr.write(42); } catch (err) { process.stdout.write(String(err instanceof TypeError)); }",
+      'process.stderr.write("after\\n");',
+    ]);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("true");
+    expect(result.stderr.startsWith("pre [REDACTED]")).toBe(true);
+    expect(result.stderr.includes("\ufffd")).toBe(false);
+  });
+
   it("masks a value holding a newline when a line cut falls inside it", () => {
     const multiLine = "fake-multi-line\nsecret-value-0001";
     const result = redactingChild([
