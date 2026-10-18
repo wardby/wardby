@@ -1,9 +1,9 @@
 ---
 id: cost-attribution
 title: Attribute agent spend to issues
-summary: See what agent work on a Jira card, epic, or project cost, by model and token kind, with the cost_report MCP tool.
+summary: See what agent work on a Jira card, epic, or project, or on a GitHub issue, cost, by model and token kind, with the cost_report MCP tool.
 audience: operator
-tags: [cost, spend, attribution, jira, epic, reporting, cost_report, tokens]
+tags: [cost, spend, attribution, jira, github, github-issues, epic, reporting, cost_report, tokens]
 appliesTo: >=0.2.1
 ---
 
@@ -15,13 +15,15 @@ work on a card, an epic, or a whole project cost.
 A run is attributed to an issue when:
 
 - a Jira event on that issue started it;
+- an `@wardby` mention on a GitHub issue started it: it is attributed to a work
+  item with provider `github` and key `owner/repo#N`, like a Jira issue, so
+  `cost_report` shows the issue's total;
 - it reviews, or answers an `@wardby` mention on, a pull request Wardby opened
   for the issue — including a review that starts while the agent that asked
   for the pull request is still running, before the pull request is linked to
   the issue (Wardby then uses the issue of the coding run that opened it);
 - it reviews, or answers a mention on, a pull request opened from a GitHub
-  issue: it is attributed to a work item with provider `github` and key
-  `owner/repo#N`;
+  issue: it is attributed to that issue's `github` work item;
 - `trigger_agent` named an `issue`, or a webhook call's JSON body named a
   `wardbyIssue`, as `{ "provider": "jira", "key": "PROJ-123" }`, in a project
   the agent is linked to. Keys are matched without regard to case
