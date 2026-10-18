@@ -635,6 +635,7 @@ describe.skipIf(!process.env.DATABASE_URL)("createFromBundle (database)", () => 
           attachedAgentNames: [agentName],
           entries: [
             { key: "leaky", value: { note: `token ${plaintext}` } },
+            { key: `cache/${plaintext}`, value: { note: "fine" } },
             { key: "clean", value: { note: "fine" } },
           ],
         },
@@ -668,9 +669,10 @@ describe.skipIf(!process.env.DATABASE_URL)("createFromBundle (database)", () => 
         allowOpenFetch: false,
       });
 
-      const warning = result.warnings.find((w) => w.includes("leaky"));
-      expect(warning).toContain("secret_in_value");
-      expect(warning).toContain(secretName);
+      const refused = result.warnings.filter((w) => w.includes("secret_in_value"));
+      expect(refused).toHaveLength(2);
+      expect(refused.every((w) => w.includes(secretName))).toBe(true);
+      expect(refused.every((w) => w.includes("<key withheld>"))).toBe(true);
       expect(JSON.stringify(result.warnings)).not.toContain(plaintext);
       const ds = await db.datastore.findFirstOrThrow({ where: { name: sharedName, ownerId: owner.id } });
       const rows = await db.datastoreEntry.findMany({ where: { datastoreId: ds.id } });

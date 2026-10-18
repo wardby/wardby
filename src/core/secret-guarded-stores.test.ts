@@ -56,6 +56,28 @@ describe("guardDatastore", () => {
     expect(calls).toEqual([]);
   });
 
+  it("refuses a private key holding a secret and does not store it", async () => {
+    const { inner, calls } = fakeDatastore();
+    const ds = guardDatastore(inner, guard);
+    const err = await ds.set("agent-1", `cache/${FAKE}`, "clean").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SecretInValueError);
+    expect((err as Error).message).toContain("API_KEY");
+    expect((err as Error).message).not.toContain(FAKE);
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a shared key holding a secret and does not store it", async () => {
+    const { inner, calls } = fakeDatastore();
+    const ds = guardDatastore(inner, guard);
+    const err = await ds
+      .setShared("ds1", `cache/${FAKE}`, "clean", { writerAgentId: "agent-1" })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SecretInValueError);
+    expect((err as Error).message).toContain("API_KEY");
+    expect((err as Error).message).not.toContain(FAKE);
+    expect(calls).toEqual([]);
+  });
+
   it("passes a clean value through with the same arguments", async () => {
     const { inner, calls } = fakeDatastore();
     const ds = guardDatastore(inner, guard);
@@ -107,6 +129,16 @@ describe("guardAgentMemory", () => {
     const { inner, calls } = fakeMemory();
     const mem = guardAgentMemory(inner, guard);
     await expect(mem.set("agent-1", "k", `note ${FAKE}`)).rejects.toBeInstanceOf(SecretInValueError);
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a key holding a secret and does not store it", async () => {
+    const { inner, calls } = fakeMemory();
+    const mem = guardAgentMemory(inner, guard);
+    const err = await mem.set("agent-1", `note-${FAKE}`, "clean").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SecretInValueError);
+    expect((err as Error).message).toContain("API_KEY");
+    expect((err as Error).message).not.toContain(FAKE);
     expect(calls).toEqual([]);
   });
 

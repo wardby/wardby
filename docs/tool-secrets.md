@@ -240,7 +240,7 @@ request. Choose destinations with that in mind:
 Wardby refuses to store a secret's value anywhere it could be read back. A
 datastore or agent memory write (from a tool in either run mode, from the MCP
 `datastore_set` or `set_agent_memory` tools, or from a bundle import) is refused
-with [`secret_in_value`](../help/errors/secret-in-value.md) when the value
+with [`secret_in_value`](../help/errors/secret-in-value.md) when the value or the key
 contains the value of a secret attached to the agent. The error names the
 secret, and nothing is stored. Store the secret's name and read the secret when
 it is needed, with `secrets.get` or `fetch(url, { secrets })`.
@@ -251,14 +251,17 @@ it is needed, with `secrets.get` or `fetch(url, { secrets })`.
 - If the agent's secrets cannot be read to check a value, the write is refused
   with [`secret_check_unavailable`](../help/errors/secret-in-value.md) and nothing
   is stored.
-- A bundle import skips a seeded datastore entry that contains an attached
-  secret's value and reports a warning.
+- A bundle import skips a seeded datastore entry (per-agent or shared) whose key
+  or value contains an attached secret's value and reports a warning that names
+  the secret; the entry's key is withheld from the warning.
 - A native run's final text and error, and comments, reviews, and Jira posts
   made through built-in tools, have attached secret values replaced with
-  `[REDACTED]`. If the secrets cannot be read when a run ends, its stored text
-  is `[withheld: this text could not be checked for secret values]`. A posting
-  tool that cannot read the secrets returns `secret_check_unavailable` and posts
-  nothing.
+  `[REDACTED]`. So does the task text of a `delegate_to_*` call, using the
+  delegating agent's secrets, before the sub-agent's run is created, in both run
+  modes. If the secrets cannot be read when a run ends, its stored final text
+  and error are `[withheld: this text could not be checked for secret values]`.
+  A posting tool or `delegate_to_*` call that cannot read the secrets returns
+  `secret_check_unavailable` and posts nothing or creates no sub-agent run.
 - Values that are split, re-encoded, or otherwise transformed are not detected,
   and values stored before this check existed are not scanned.
 

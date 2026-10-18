@@ -1536,28 +1536,22 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
 
   /**
    * The only route to a built-in tool, in both execution modes (the in-process loop and the native
-   * gateway's builtin.call). A tool that posts model-written text to a host has every attached
-   * secret's value masked in its arguments first; when the secrets cannot be read the call is
-   * refused and the host is never reached.
+   * gateway's builtin.call). A tool that posts model-written text to a host, and a delegate_to_*
+   * call (its task text becomes the child run's stored task), has every attached secret's value
+   * masked in its arguments first; when the secrets cannot be read the call is refused and
+   * neither the host nor a child run is reached. (The native gateway serves delegate_to_* through
+   * durableDelegate, which masks the same way.)
    */
   const builtinHandler = (name: string): BuiltinToolHandler | undefined => {
     const handler = unguardedBuiltinHandler(name);
-    if (!handler || !POSTING_TOOL_NAMES.has(name)) return handler;
+    if (!handler || !(POSTING_TOOL_NAMES.has(name) || name.startsWith(DELEGATE_TOOL_PREFIX))) return handler;
     return async (argsJson: string, toolCallId?: string): Promise<string> => {
-      let masked: string;
-      try {
-        const named = await loadAgentSecretValues(db, providers.secrets, loaded.agentId);
-        masked = maskNamedSecrets(argsJson, named);
-      } catch (err) {
-        runnerLog.warn(
-          {
-            runId,
-            tool: name,
-            event: "post_secret_check_failed",
-            errorName: err instanceof Error ? err.name : typeof err,
-          },
-          "could not read the agent's secrets to check a posted text; refusing the call",
-        );
+      const masked = await maskModelWrittenArgs(
+        { db, secrets: providers.secrets, agentId: loaded.agentId, runId },
+        name,
+        argsJson,
+      );
+      if (masked === undefined) {
         return JSON.stringify({ error: "secret_check_unavailable", message: SECRET_CHECK_UNAVAILABLE_MESSAGE });
       }
       return handler(masked, toolCallId);
@@ -1853,6 +1847,32 @@ export interface DurableDelegationContext {
 
 export type DurableDelegationOutcome = { result: string } | { pending: true };
 
+/**
+ * A tool call's model-written arguments with every secret value attached to the agent masked, or
+ * undefined (logged by error name only) when the secrets cannot be read and the call must be refused.
+ */
+async function maskModelWrittenArgs(
+  ctx: { db: RunnerDb; secrets: NativeRunProviders["secrets"]; agentId: string; runId: string },
+  tool: string,
+  argsJson: string,
+): Promise<string | undefined> {
+  try {
+    const named = await loadAgentSecretValues(ctx.db, ctx.secrets, ctx.agentId);
+    return maskNamedSecrets(argsJson, named);
+  } catch (err) {
+    runnerLog.warn(
+      {
+        runId: ctx.runId,
+        tool,
+        event: "post_secret_check_failed",
+        errorName: err instanceof Error ? err.name : typeof err,
+      },
+      "could not read the agent's secrets to check a posted text; refusing the call",
+    );
+    return undefined;
+  }
+}
+
 /** Long-poll window: well under common proxy and load-balancer idle timeouts. */
 export const DELEGATION_POLL_WINDOW_MS = 20_000;
 
@@ -1908,7 +1928,19 @@ export async function durableDelegate(
       }),
     );
   }
-  const parsedArgs = parseDelegateArgs(argsJson);
+  // The task is model-written and becomes the child's stored task: mask the parent's secret values
+  // first. Not recorded on the ledger, so a retry of this call can succeed once the secrets read.
+  const maskedArgsJson = await maskModelWrittenArgs(
+    { db, secrets: providers.secrets, agentId: loaded.agentId, runId },
+    name,
+    argsJson,
+  );
+  if (maskedArgsJson === undefined) {
+    return {
+      result: JSON.stringify({ error: "secret_check_unavailable", message: SECRET_CHECK_UNAVAILABLE_MESSAGE }),
+    };
+  }
+  const parsedArgs = parseDelegateArgs(maskedArgsJson);
   if ("refusal" in parsedArgs) return finish(parsedArgs.refusal);
   const { args } = parsedArgs;
   const authorized = await authorizeDelegation(db, loaded.agentId, edge, boundName, args);

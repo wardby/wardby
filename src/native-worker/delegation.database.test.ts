@@ -166,6 +166,64 @@ describe.skipIf(!process.env.DATABASE_URL)("durableDelegate (database)", () => {
     expect(ex.started).toHaveLength(1);
   });
 
+  describe("masks the lead's attached secret values in the delegated task", () => {
+    const FAKE = `fake-secret-value-${tag}`;
+    const secretId = `dd-secret-${tag}`;
+    const cipher = {
+      keyId: () => "k",
+      encrypt: async (v: string) => v,
+      decrypt: async (v: string) => v,
+    };
+
+    async function attach() {
+      await db.secret.create({ data: { id: secretId, name: `api-${tag}`, ciphertext: FAKE, keyId: "k", ownerId } });
+      await db.agentSecret.create({ data: { agentId: leadId, secretId, boundName: "API_KEY" } });
+    }
+    async function detach() {
+      await db.agentSecret.deleteMany({ where: { agentId: leadId } });
+      await db.secret.deleteMany({ where: { id: secretId } });
+    }
+
+    it("stores the child's task with the value replaced", async () => {
+      await attach();
+      try {
+        const l = await lead();
+        const ex = controlledExecutor();
+        const ctx = { ...ctxFor(l, ex.executor), providers: { ...providersWith(ex.executor), secrets: cipher } };
+        expect(
+          await durableDelegate(ctx, "m-1", "delegate_to_a", JSON.stringify({ task: `use token ${FAKE} please` })),
+        ).toEqual({ pending: true });
+        const child = await db.run.findUniqueOrThrow({ where: { id: ex.started[0] } });
+        expect(child.taskOverride).toBe("use token [REDACTED] please");
+        expect(JSON.stringify(child)).not.toContain(FAKE);
+      } finally {
+        await detach();
+      }
+    });
+
+    it("refuses with secret_check_unavailable and creates no child when the secrets cannot be read", async () => {
+      await attach();
+      try {
+        const l = await lead();
+        const ex = controlledExecutor();
+        const broken = {
+          ...cipher,
+          decrypt: async () => {
+            throw new Error(`decrypt failed for ${FAKE}`);
+          },
+        } as unknown as SecretCipher;
+        const ctx = { ...ctxFor(l, ex.executor), providers: { ...providersWith(ex.executor), secrets: broken } };
+        const outcome = await durableDelegate(ctx, "m-2", "delegate_to_a", JSON.stringify({ task: `use ${FAKE}` }));
+        expect(outcome).toEqual({ result: expect.stringContaining("secret_check_unavailable") });
+        expect(JSON.stringify(outcome)).not.toContain(FAKE);
+        expect(ex.started).toEqual([]);
+        expect(await db.run.count({ where: { parentRunId: l.run.id } })).toBe(0);
+      } finally {
+        await detach();
+      }
+    });
+  });
+
   it("adopts a child a dead replica dispatched but never recorded, instead of refusing it as a duplicate", async () => {
     const l = await lead();
     const ex = controlledExecutor();

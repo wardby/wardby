@@ -3,7 +3,7 @@ import type { AgentMemoryStore } from "../providers/memory/types.js";
 import { SecretCheckUnavailableError, type SecretWriteGuard } from "./secret-guard.js";
 
 /**
- * Datastore that refuses a value holding an attached secret's value. Shared
+ * Datastore that refuses a key or value holding an attached secret's value. Shared
  * writes are checked against `opts.writerAgentId`; without it the writer is
  * unknown, so the write is refused (fail closed). `writerAgentId` is stripped
  * before the inner store sees it.
@@ -12,7 +12,7 @@ export function guardDatastore(inner: Datastore, guard: SecretWriteGuard): Datas
   return {
     get: (agentId, key) => inner.get(agentId, key),
     async set(agentId, key, value, opts) {
-      await guard.assertNoSecrets(agentId, value);
+      await guard.assertNoSecrets(agentId, [key, value]);
       return inner.set(agentId, key, value, opts);
     },
     delete: (agentId, key) => inner.delete(agentId, key),
@@ -21,7 +21,7 @@ export function guardDatastore(inner: Datastore, guard: SecretWriteGuard): Datas
     async setShared(datastoreId, key, value, opts) {
       const { writerAgentId, ...rest } = opts ?? {};
       if (!writerAgentId) throw new SecretCheckUnavailableError();
-      await guard.assertNoSecrets(writerAgentId, value);
+      await guard.assertNoSecrets(writerAgentId, [key, value]);
       return inner.setShared(datastoreId, key, value, rest);
     },
     deleteShared: (datastoreId, key) => inner.deleteShared(datastoreId, key),
@@ -29,12 +29,12 @@ export function guardDatastore(inner: Datastore, guard: SecretWriteGuard): Datas
   };
 }
 
-/** Agent memory that refuses content holding an attached secret's value. */
+/** Agent memory that refuses a key or content holding an attached secret's value. */
 export function guardAgentMemory(inner: AgentMemoryStore, guard: SecretWriteGuard): AgentMemoryStore {
   return {
     get: (agentId, key) => inner.get(agentId, key),
     async set(agentId, key, content) {
-      await guard.assertNoSecrets(agentId, content);
+      await guard.assertNoSecrets(agentId, [key, content]);
       return inner.set(agentId, key, content);
     },
     list: (agentId) => inner.list(agentId),

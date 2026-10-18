@@ -69,6 +69,11 @@ function nativeSandboxConfigured(): boolean {
   }
 }
 
+/** A seeded entry's key for a warning; withheld when the entry was refused over a secret (the key may hold it). */
+function seedKeyLabel(key: string, err: unknown): string {
+  return err instanceof SecretInValueError || err instanceof SecretCheckUnavailableError ? "<key withheld>" : key;
+}
+
 export async function createFromBundle(
   bundle: Bundle,
   recon: Reconciliation,
@@ -343,7 +348,7 @@ export async function createFromBundle(
         datastoreEntries++;
       } catch (err) {
         warnings.push(
-          `datastore ${d.agentName}/${entry.key}: failed to set (${err instanceof Error ? err.message : String(err)})`,
+          `datastore ${d.agentName}/${seedKeyLabel(entry.key, err)}: failed to set (${err instanceof Error ? err.message : String(err)})`,
         );
       }
     }
@@ -393,14 +398,14 @@ export async function createFromBundle(
           } catch {
             throw new SecretCheckUnavailableError();
           }
-          const names = secretNamesIn(entry.value, named);
+          const names = secretNamesIn([entry.key, entry.value], named);
           if (names.length > 0) throw new SecretInValueError(names);
           await db.datastoreEntry.create({
             data: { datastoreId: created.id, key: entry.key, value: entry.value as Prisma.InputJsonValue, pii: false },
           });
         } catch (err) {
           warnings.push(
-            `shared-datastore ${sd.name}/${entry.key}: failed to seed (${err instanceof Error ? err.message : String(err)})`,
+            `shared-datastore ${sd.name}/${seedKeyLabel(entry.key, err)}: failed to seed (${err instanceof Error ? err.message : String(err)})`,
           );
         }
       }

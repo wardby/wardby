@@ -10,8 +10,9 @@ appliesTo: ">=0.6.1"
 # A value was not stored because it contains a secret (secret_in_value)
 
 `secret_in_value` means a write to a datastore or agent memory contained the
-value of a secret attached to the agent. The write came from the `datastore_set`
-or `memory_set` tool, from the `datastore_set` or `set_agent_memory` MCP tool, or
+value of a secret attached to the agent, in the value or in the key. The write
+came from a tool's `datastore.set` (or a shared datastore's `set`), from the
+`memory_set` tool, from the `datastore_set` or `set_agent_memory` MCP tools, or
 from a bundle import. The error names the secret. Nothing was stored.
 
 Secret values are never stored in datastores or agent memory, because anything
@@ -35,9 +36,10 @@ connection and the secret encryption configuration on the server.
 
 ## Bundle imports
 
-A shared datastore entry in an imported bundle whose value contains an attached
-secret's value is skipped, and the import reports a warning that names the
-entry. The rest of the bundle is still imported.
+A seeded datastore entry in an imported bundle, per-agent or shared, whose key
+or value contains an attached secret's value is skipped, and the import reports
+a warning that names the secret (the entry's key is withheld from the warning).
+The rest of the bundle is still imported.
 
 ## Also masked
 
@@ -45,12 +47,16 @@ Secret values are also kept out of other output:
 
 - A native run's final text and error have attached secret values replaced with
   `[REDACTED]`.
+- The task text of a `delegate_to_*` call has the delegating agent's attached
+  secret values replaced with `[REDACTED]` before the sub-agent's run is created.
 - Comments, reviews, and Jira posts made through built-in tools have attached
   secret values replaced with `[REDACTED]`.
-- If the secrets cannot be read when a run ends, its stored final text is
+- If the secrets cannot be read when a run ends, both its stored final text and
+  its stored error are
   `[withheld: this text could not be checked for secret values]`.
-- If the secrets cannot be read when a posting tool runs, the tool returns
-  `secret_check_unavailable` and posts nothing.
+- If the secrets cannot be read when a posting tool or a `delegate_to_*` call
+  runs, the tool returns `secret_check_unavailable` and posts nothing or creates
+  no sub-agent run.
 
 ## Limits
 
