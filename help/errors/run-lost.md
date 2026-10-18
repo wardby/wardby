@@ -26,6 +26,8 @@ A native run that is waiting in a `delegate_to_*` call on a coding sub-agent, or
 
 When a run is marked lost, sub-agent runs it started that are still going are stopped with the reason `parent run lost`. They are not left running for nobody.
 
+A run that continues after a restart or a deploy cannot continue a control-plane native sub-agent it was waiting on: that sub-agent ran inside the process that stopped. The sub-agent run is stopped with the reason `parent resumed without it`, and no new one is started. The parent run goes on, and its `delegate_to_*` call returns the error `subagent_interrupted` ("The sub-agent was interrupted by a restart and cannot be resumed; no new sub-agent run was started."), so the model can report it.
+
 ## What to do
 
 1. Read the reason with `get_run`.

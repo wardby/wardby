@@ -525,16 +525,15 @@ the step that was in flight runs again. Coding runs are Kubernetes Jobs and are 
   by the new version: it continues when the sub-agent finishes, without
   repeating the turns it already took. A run that was mid-turn, waiting on
   another tool, or waiting on a control-plane native sub-agent is marked
-  `lost` when the version changes, as is a taken-over run whose recorded
-  steps no longer match the new code, and a run still going after the drain
-  limit. The sub-agent runs a lost run started are stopped (reason
+  `lost` rather than taken over, as is a taken-over run whose recorded steps
+  no longer match the new code, and a run still going after the drain limit.
+  The sub-agent runs a lost run started are stopped (reason
   `parent run lost`). If an `@`-mention started a lost run, its status comment
-  on GitHub says the
-  request was interrupted and should be repeated. The manifest's
-  `terminationGracePeriodSeconds` (600) must stay above the drain limit plus
-  the `preStop` delay. Autopilot does not allow more than 600: a larger value
-  is lowered to 600, so to change the budget, lower `SHUTDOWN_DRAIN_SECONDS`
-  rather than raising the grace period.
+  on GitHub says the request was interrupted and should be repeated. The
+  manifest's `terminationGracePeriodSeconds` (600) must stay above the drain
+  limit plus the `preStop` delay. Autopilot does not allow more than 600: a
+  larger value is lowered to 600, so to change the budget, lower
+  `SHUTDOWN_DRAIN_SECONDS` rather than raising the grace period.
 - **Data at rest and retention.** `dbos.operation_outputs` holds every step's
   output — prompts, model responses and full tool results — with no retention
   limit. Pruning finished workflows is the operator's job; see
