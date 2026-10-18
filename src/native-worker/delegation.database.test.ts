@@ -228,6 +228,47 @@ describe.skipIf(!process.env.DATABASE_URL)("durableDelegate (database)", () => {
       }
     });
 
+    it("a refused waiting call is completed, so the model's retry under a new callId is not refused", async () => {
+      await attach();
+      try {
+        const l = await lead({ maxDelegationsPerRun: 2, parallelDelegations: true, budgetUsd: 0.1 });
+        const ex = controlledExecutor();
+        const sibling = await db.run.create({
+          data: {
+            agentId: childA,
+            parentRunId: l.run.id,
+            trigger: "subagent",
+            executionManaged: true,
+            status: "running",
+            costUsd: 0.1,
+            heartbeatAt: new Date(),
+          },
+        });
+        const good = { ...ctxFor(l, ex.executor), providers: { ...providersWith(ex.executor), secrets: cipher } };
+        const args = JSON.stringify({ task: "y" });
+        expect(await durableDelegate(good, "w-1", "delegate_to_b", args)).toEqual({ pending: true });
+        expect(await ledger.delegation(l.session.id, "w-1")).toMatchObject({ status: "waiting_budget" });
+
+        const broken = {
+          ...cipher,
+          decrypt: async () => {
+            throw new Error("decrypt failed");
+          },
+        } as unknown as SecretCipher;
+        const bad = { ...good, providers: { ...good.providers, secrets: broken } };
+        expect(await durableDelegate(bad, "w-1", "delegate_to_b", args)).toEqual({
+          result: expect.stringContaining("secret_check_unavailable"),
+        });
+        expect(await ledger.waitingChildAgentIds(l.session.id, "w-2")).toEqual([]);
+
+        await db.run.update({ where: { id: sibling.id }, data: { status: "succeeded", finishedAt: new Date() } });
+        expect(await durableDelegate(good, "w-2", "delegate_to_b", args)).toEqual({ pending: true });
+        expect(ex.started).toHaveLength(1);
+      } finally {
+        await detach();
+      }
+    });
+
     it("refuses with secret_check_unavailable and creates no child when the secrets cannot be read", async () => {
       await attach();
       try {

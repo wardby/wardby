@@ -1951,16 +1951,14 @@ export async function durableDelegate(
   if (!childRunId) {
     // About to create a child: its task is model-written and stored, so mask the parent's secret
     // values first. Only here, never on a poll of an existing child (a transient secret-read
-    // failure must not orphan a running child). Not recorded on the ledger: a retry can succeed.
+    // failure must not orphan a running child). Recorded as the call's result, which also completes a waiting row; the model's retry comes with a new callId.
     const maskedArgsJson = await maskModelWrittenArgs(
       { db, secrets: providers.secrets, agentId: loaded.agentId, runId },
       name,
       argsJson,
     );
     if (maskedArgsJson === undefined) {
-      return {
-        result: JSON.stringify({ error: "secret_check_unavailable", message: SECRET_CHECK_UNAVAILABLE_MESSAGE }),
-      };
+      return finish(JSON.stringify({ error: "secret_check_unavailable", message: SECRET_CHECK_UNAVAILABLE_MESSAGE }));
     }
     const maskedArgs = parseDelegateArgs(maskedArgsJson);
     if ("refusal" in maskedArgs) return finish(maskedArgs.refusal);
