@@ -7,6 +7,8 @@ import {
   REVIEWER_AGENT,
   REVIEWER_PROMPT,
   SHORT_REVIEWER_PROMPT_V1,
+  THOROUGH_REVIEWER_PROMPT_V3,
+  THOROUGH_REVIEWER_PROMPT_V4,
   seedCodingAgents,
   type AgentData,
   type CodingSeedInput,
@@ -189,6 +191,26 @@ describe("seedCodingAgents", () => {
     expect(result.reviewer).toEqual({ id, status: "updated" });
     expect(agents.get(REVIEWER_AGENT)).toMatchObject({ systemPrompt: THOROUGH_REVIEWER_PROMPT, maxTurns: 25 });
     expect(links.size).toBe(1);
+  });
+
+  it.each([
+    ["V3", THOROUGH_REVIEWER_PROMPT_V3],
+    ["V4", THOROUGH_REVIEWER_PROMPT_V4],
+  ])("moves a reviewer seeded with the thorough prompt %s onto the current one", async (_name, prompt) => {
+    expect(prompt).not.toBe(THOROUGH_REVIEWER_PROMPT);
+    const { db, agents } = memoryDb();
+    const { id } = await db.createAgent({
+      name: REVIEWER_AGENT,
+      kind: "native",
+      model: "m",
+      budgetUsd: 1,
+      systemPrompt: prompt,
+      maxTurns: 25,
+      ownerId: "owner-1",
+    });
+    const result = await seedCodingAgents(db, input);
+    expect(result.reviewer).toEqual({ id, status: "updated" });
+    expect(agents.get(REVIEWER_AGENT)?.systemPrompt).toBe(THOROUGH_REVIEWER_PROMPT);
   });
 
   it("refuses a model the coding provider does not support", async () => {

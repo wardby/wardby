@@ -52,10 +52,18 @@ describe("THOROUGH_REVIEWER_PROMPT", () => {
     }
   });
 
-  it("sends a change it could not read in full to COMMENT, never CHANGES_REQUESTED (the tool refuses that)", () => {
+  it("sends a change it could not read in full to CHANGES_REQUESTED, never COMMENT (a neutral check passes)", () => {
     const verdict = THOROUGH_REVIEWER_PROMPT.slice(THOROUGH_REVIEWER_PROMPT.indexOf("VERDICT\n"));
-    expect(verdict).not.toMatch(/could not read enough of the change to judge it, is CHANGES_REQUESTED/);
-    expect(verdict).toMatch(/could not read[^.]*COMMENT[^.]*name the files you did not review/);
+    expect(verdict).toMatch(
+      /could not all read: publish CHANGES_REQUESTED with the "## Not reviewed" section[^.]*never COMMENT/,
+    );
+    const step4 = THOROUGH_REVIEWER_PROMPT.slice(
+      THOROUGH_REVIEWER_PROMPT.indexOf("\n4. "),
+      THOROUGH_REVIEWER_PROMPT.indexOf("\n5. "),
+    );
+    expect(step4).toMatch(/Never APPROVE while a source, test or config file is unread/);
+    expect(step4).toMatch(/publish CHANGES_REQUESTED, start the body with a "## Not reviewed" section/);
+    expect(step4).not.toMatch(/publish COMMENT/);
   });
 
   it("is repository-agnostic and never blocks APPROVE on a local repository's missing CI", () => {

@@ -77,10 +77,11 @@ stops before the first doc, help, lockfile or generated file, so those come on
 later pages and a reviewer can skip them. Read every `unavailable` source, test or config file
 with `repo_read_file` at the head. A cursor goes stale when
 the branch moves (`patch_cursor_stale`): call again without it.
-`repo_publish_review` refuses `APPROVE` and `CHANGES_REQUESTED` with
+`repo_publish_review` refuses `APPROVE` with
 `unread_files` while a listed source, test or config file is neither fully
-delivered nor read at `headSha`; `COMMENT` is always allowed, so a reviewer
-that cannot read everything should publish `COMMENT` and name what it skipped.
+delivered nor read at `headSha`. A reviewer that cannot read everything should
+publish `CHANGES_REQUESTED` and name what it skipped: `COMMENT` completes the
+check as neutral, which branch protection treats as passing.
 The shipped reviewer prompt does this; see the [full guide](../docs/code-review-agents.md#large-pull-requests).
 The refusal applies in both `control-plane` and `sandbox` mode.
 
@@ -254,10 +255,11 @@ Requesting changes or commenting is never affected by the CI gate. When CI
 cannot be read at all, the gate is skipped and the review proceeds as it
 would without `waitForCi`.
 
-A separate guard applies per run: `repo_publish_review` refuses `APPROVE` and
-`CHANGES_REQUESTED` with `unread_files` while a source, test or config file of the head
+A separate guard applies per run: `repo_publish_review` refuses `APPROVE`
+with `unread_files` while a source, test or config file of the head
 was listed by `repo_pr_read` but not fully read. Page with `patchCursor`, or
-read the file with `repo_read_file` at `headSha`; `COMMENT` is always allowed.
+read the file with `repo_read_file` at `headSha`; if that is not possible,
+publish `CHANGES_REQUESTED` and name the files not reviewed.
 
 Add this to a reviewer's system prompt:
 
