@@ -19,6 +19,10 @@ existing link to it are refused.
 
 - **The repository should be served:** an operator adds its owner's login to
   `WARDBY_GITHUB_ALLOWED_ACCOUNTS` and restarts the server, then links it again.
+- **Only sandboxed runs are refused** (the same link works for a
+  `control-plane` agent): the native sandbox gateway runs a sandboxed agent's
+  repository tools and needs the same `WARDBY_GITHUB_ALLOWED_ACCOUNTS` as the
+  control plane. Set it on both, then restart the gateway.
 - **It should not:** use a repository owned by a served account, or another
   wardby server with its own GitHub App.
 
