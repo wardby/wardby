@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   causeCodeOf,
+  GATEWAY_INTERNAL_MESSAGE,
+  GatewayError,
   GatewayRequestSchema,
   MAX_MESSAGE_BYTES,
   parseMessage,
   parseParams,
   ProtocolError,
+  toGatewayError,
   WorkerInputSchema,
+  workerGatewayError,
   type WorkerInput,
 } from "./protocol.js";
 
@@ -110,5 +114,79 @@ describe("causeCodeOf", () => {
     expect(causeCodeOf(new Error("abc123token"))).toBeUndefined();
     expect(causeCodeOf(new Error("x: y"))).toBeUndefined();
     expect(causeCodeOf("plainword")).toBeUndefined();
+  });
+});
+
+// Obviously fake, and code-shaped on purpose: a token like this passes causeCodeOf on its own.
+const FAKE_READABLE = "fake_readable_secret_0001";
+const secrets =
+  (...values: string[]) =>
+  async () =>
+    values;
+/** What a test may print about an error that could hold the fake value: booleans and fixed codes only. */
+const shape = (err: GatewayError) => ({
+  code: err.code,
+  generic: err.message === GATEWAY_INTERNAL_MESSAGE,
+  hasCauseCode: err.causeCode !== undefined,
+  leaks: JSON.stringify({ ...err, message: err.message }).includes(FAKE_READABLE),
+});
+const SAFE_INTERNAL = { code: "internal", generic: true, hasCauseCode: false, leaks: false };
+
+describe("workerGatewayError", () => {
+  it("drops a cause code equal to a secret value the run can read", async () => {
+    const err = await workerGatewayError(new Error(FAKE_READABLE), secrets(FAKE_READABLE));
+    expect(shape(err)).toEqual(SAFE_INTERNAL);
+  });
+
+  it("drops a cause code that contains, or is contained in, a secret value", async () => {
+    const contains = await workerGatewayError(new Error(`x_${FAKE_READABLE}: detail`), secrets(FAKE_READABLE));
+    expect(shape(contains)).toEqual(SAFE_INTERNAL);
+    const containedIn = await workerGatewayError(new Error("readable_secret: detail"), secrets(FAKE_READABLE));
+    expect(shape(containedIn)).toEqual(SAFE_INTERNAL);
+  });
+
+  it("passes a normal code, with the generic message naming it", async () => {
+    const err = await workerGatewayError(
+      new Error("coding_execution_not_configured: detail-that-stays"),
+      secrets(FAKE_READABLE),
+    );
+    expect(err.causeCode).toBe("coding_execution_not_configured");
+    expect(err.message).toBe("The gateway could not serve this call (coding_execution_not_configured).");
+    expect(err.message).not.toContain("detail-that-stays");
+  });
+
+  it("ignores a secret value below the redactor's minimum length, as the redactor does", async () => {
+    const err = await workerGatewayError(new Error("ab_cd"), secrets("ab_cd"));
+    expect(err.causeCode).toBe("ab_cd");
+  });
+
+  it("sends no cause code it could not check", async () => {
+    expect((await workerGatewayError(new Error("coding_execution_not_configured"))).causeCode).toBeUndefined();
+    const failing = async (): Promise<string[]> => Promise.reject(new Error("secret store down"));
+    expect((await workerGatewayError(new Error("coding_execution_not_configured"), failing)).causeCode).toBeUndefined();
+  });
+
+  it("checks a GatewayError's cause code too, keeping its code and message", async () => {
+    const err = await workerGatewayError(
+      new GatewayError("internal", "fixed text", FAKE_READABLE),
+      secrets(FAKE_READABLE),
+    );
+    expect({ ...shape(err), message: err.message }).toEqual({
+      ...SAFE_INTERNAL,
+      generic: false,
+      message: "fixed text",
+    });
+  });
+});
+
+describe("toGatewayError", () => {
+  it("carries only the generic message for an unexpected error, never its text or an unchecked code", () => {
+    const err = toGatewayError(new Error(`${FAKE_READABLE}: raw detail`));
+    expect(shape(err)).toEqual(SAFE_INTERNAL);
+  });
+
+  it("passes a GatewayError as it is", () => {
+    const err = toGatewayError(new GatewayError("internal", GATEWAY_INTERNAL_MESSAGE, "checked_code"));
+    expect(err).toMatchObject({ code: "internal", message: GATEWAY_INTERNAL_MESSAGE, causeCode: "checked_code" });
   });
 });

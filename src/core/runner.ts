@@ -2195,6 +2195,7 @@ async function executeTrackedRun(
         ctx: { providers: { llm }, onText, onProgress },
         builtinHandler: tools.builtinHandler,
         privilegedHostFor: tools.privilegedHostFor,
+        readableSecretValues: tools.readableSecretValues,
         drivability: () => runDrivability(db, runId),
         launcher: providers.nativeSandbox,
       });

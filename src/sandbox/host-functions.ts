@@ -38,6 +38,19 @@ export function redactExactSecretValues(text: string, values: Iterable<string>):
   return out;
 }
 
+/**
+ * Whether `text` equals, contains, or is contained in any of `values`, under the same minimum
+ * length as redactExactSecretValues. For a short field that is sent whole or not at all (a native
+ * gateway error's cause code), where redacting part of it would still leave part of a value.
+ */
+export function overlapsSecretValue(text: string, values: Iterable<string>): boolean {
+  for (const value of values) {
+    if (value.length < MIN_REDACTABLE_SECRET_LENGTH) continue;
+    if (text.includes(value) || value.includes(text)) return true;
+  }
+  return false;
+}
+
 const FETCH_ALLOWED_HOSTS = parseAllowedHosts(process.env.WARDBY_FETCH_ALLOWED_HOSTS);
 let sharedParserPool: ParserWorkerPool | undefined;
 

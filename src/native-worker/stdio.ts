@@ -6,7 +6,7 @@
  * worker's diagnostics only.
  *
  * Frames, worker → control:  { id, request }
- * Frames, control → worker:  { id, ok: true, result } | { id, ok: false, error: { code, message } }
+ * Frames, control → worker:  { id, ok: true, result } | { id, ok: false, error: { code, message, causeCode? } }
  *                            | { id, event }  (llm.stream events)  | { id, end: true }
  */
 
@@ -49,6 +49,7 @@ function writeLine(stream: Writable, frame: unknown): void {
   stream.write(`${line}\n`);
 }
 
+/** An error as the worker sees it: exactly what the HTTP path carries (protocol.ts toGatewayError). */
 const errorFrame = (err: unknown) => {
   const { code, message, causeCode } = toGatewayError(err);
   return { code, message, ...(causeCode ? { causeCode } : {}) };

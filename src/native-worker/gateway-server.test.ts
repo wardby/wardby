@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
-import { serveGatewayRequest, streamModel } from "./gateway-server.js";
+import { checkedEvents, failureResponse, runSecretValues, serveGatewayRequest, streamModel } from "./gateway-server.js";
+import { GATEWAY_INTERNAL_MESSAGE, GatewayError } from "./protocol.js";
 
 type Ctx = Parameters<typeof streamModel>[0];
 type Ledger = Parameters<typeof streamModel>[1];
@@ -111,20 +112,13 @@ describe("serveGatewayRequest unexpected errors", () => {
       providers: {},
     }) as unknown as Parameters<typeof serveGatewayRequest>[0];
 
-  it("answers internal with only the error's leading code, never the rest of its message", async () => {
+  it("sends no cause code before the run's tools are rebuilt, when it cannot be checked", async () => {
     const err = new Error("coding_execution_not_configured: detail-that-must-not-leave-the-gateway");
     const response = await serveGatewayRequest(throwingDeps(err), "Bearer cap", {});
     expect(response).toEqual({
       kind: "json",
       status: 500,
-      body: {
-        ok: false,
-        error: {
-          code: "internal",
-          message: "The gateway could not serve this call (coding_execution_not_configured).",
-          causeCode: "coding_execution_not_configured",
-        },
-      },
+      body: { ok: false, error: { code: "internal", message: "The gateway could not serve this call." } },
     });
     expect(JSON.stringify(response)).not.toContain("detail-that-must-not-leave-the-gateway");
   });
@@ -140,5 +134,72 @@ describe("serveGatewayRequest unexpected errors", () => {
       status: 500,
       body: { ok: false, error: { code: "internal", message: "The gateway could not serve this call." } },
     });
+  });
+});
+
+// Obviously fake, and code-shaped on purpose: a token like this passes causeCodeOf on its own.
+const FAKE_READABLE = "fake_readable_secret_0003";
+const FAKE_CAPABILITY = "fake_capability_value_0003";
+const leaks = (value: unknown) => JSON.stringify(value).includes(FAKE_READABLE);
+
+describe("gateway cause codes are checked against the run's secret values", () => {
+  const rebuilt = {
+    snapshot: { input: { userTools: { lookup: {}, other: {} } } },
+    tools: { readableSecretValues: async (tool: string) => (tool === "lookup" ? [FAKE_READABLE] : ["other_value"]) },
+  } as unknown as Parameters<typeof runSecretValues>[0];
+
+  it("checks against every user tool's readable values and the request's own capability", async () => {
+    const values = await runSecretValues(rebuilt, FAKE_CAPABILITY)();
+    expect(values.includes(FAKE_READABLE) && values.includes("other_value") && values.includes(FAKE_CAPABILITY)).toBe(
+      true,
+    );
+  });
+
+  it("answers no cause code when the error's message is a readable secret value", async () => {
+    const response = await failureResponse(new Error(FAKE_READABLE), runSecretValues(rebuilt, FAKE_CAPABILITY));
+    const body = (response as { body: { error: Record<string, unknown> } }).body;
+    expect({ keys: Object.keys(body.error).sort(), generic: body.error.message === GATEWAY_INTERNAL_MESSAGE }).toEqual({
+      keys: ["code", "message"],
+      generic: true,
+    });
+    expect(leaks(response)).toBe(false);
+  });
+
+  it("answers no cause code equal to the request's own capability", async () => {
+    const response = await failureResponse(new Error(FAKE_CAPABILITY), runSecretValues(rebuilt, FAKE_CAPABILITY));
+    expect(JSON.stringify(response).includes(FAKE_CAPABILITY)).toBe(false);
+  });
+
+  it("passes a normal code", async () => {
+    const response = await failureResponse(
+      new Error("coding_execution_not_configured: detail"),
+      runSecretValues(rebuilt, FAKE_CAPABILITY),
+    );
+    expect(response).toEqual({
+      kind: "json",
+      status: 500,
+      body: {
+        ok: false,
+        error: {
+          code: "internal",
+          message: "The gateway could not serve this call (coding_execution_not_configured).",
+          causeCode: "coding_execution_not_configured",
+        },
+      },
+    });
+  });
+
+  it("fails a model stream with the same checked error, never the raw one", async () => {
+    // eslint-disable-next-line require-yield
+    async function* failing(): AsyncIterable<LlmStreamEvent> {
+      throw new Error(FAKE_READABLE);
+    }
+    const err = (await drain(checkedEvents(failing(), runSecretValues(rebuilt, FAKE_CAPABILITY)))) as GatewayError;
+    expect({
+      gatewayError: err instanceof GatewayError,
+      code: err.code,
+      generic: err.message === GATEWAY_INTERNAL_MESSAGE,
+      hasCauseCode: err.causeCode !== undefined,
+    }).toEqual({ gatewayError: true, code: "internal", generic: true, hasCauseCode: false });
   });
 });

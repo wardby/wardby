@@ -1,3 +1,4 @@
+import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
 import { PRIVILEGED_BRIDGE_NAMES, type PrivilegedHost } from "../sandbox/host-functions.js";
@@ -8,8 +9,9 @@ import {
   type RunDrivability,
   type SandboxedEngineOptions,
 } from "./gateway.js";
-import { GatewayError, type WorkerInput } from "./protocol.js";
-import { loopbackLauncher } from "./loopback.js";
+import { GATEWAY_INTERNAL_MESSAGE, GatewayError, type WorkerInput } from "./protocol.js";
+import { createLoopbackTransport, loopbackLauncher } from "./loopback.js";
+import { serveStdioWorker } from "./stdio.js";
 
 const input: WorkerInput = {
   v: 1,
@@ -252,5 +254,134 @@ describe("runSandboxedEngine (trusted gateway)", () => {
     });
     expect(result.finalText).toBe("The note says hello.");
     expect(texts).toEqual(["The note says ", "hello."]);
+  });
+});
+
+// Obviously fake, and code-shaped on purpose: a token like this passes causeCodeOf on its own.
+const FAKE_READABLE = "fake_readable_secret_0002";
+const leaks = (value: unknown) => JSON.stringify(value).includes(FAKE_READABLE);
+/** What a test may print about an error that could hold the fake value: booleans and fixed codes only. */
+const shape = (err: { code?: string; message?: string; causeCode?: string } | undefined) => ({
+  gatewayError: err instanceof GatewayError,
+  code: err?.code,
+  generic: err?.message === GATEWAY_INTERNAL_MESSAGE,
+  hasCauseCode: err?.causeCode !== undefined,
+  leaks: leaks({ ...err, message: err?.message }),
+});
+const SAFE_INTERNAL = { gatewayError: true, code: "internal", generic: true, hasCauseCode: false, leaks: false };
+const errorOf = async (promise: Promise<unknown>) =>
+  promise.then(
+    () => undefined,
+    (err: unknown) => err as GatewayError,
+  );
+
+describe("runSandboxedEngine unexpected errors", () => {
+  const throwing = (message: string) => ({
+    builtinHandler: (name: string) =>
+      name === "memory_get"
+        ? async () => {
+            throw new Error(message);
+          }
+        : undefined,
+    readableSecretValues: async (tool: string) => (tool === "lookup" ? [FAKE_READABLE] : []),
+  });
+
+  it("drops a cause code equal to a secret value the run's tools can read, and never sends the raw message", async () => {
+    let seen: GatewayError | undefined;
+    const { result } = await withWorker(async (gateway) => {
+      seen = await errorOf(gateway.call(req("builtin.call", { name: "memory_get", argsJson: "{}" })));
+      await gateway.call(finish());
+    }, throwing(FAKE_READABLE));
+    await result;
+    expect(shape(seen)).toEqual(SAFE_INTERNAL);
+  });
+
+  it("passes a normal cause code, without the rest of the message", async () => {
+    let seen: GatewayError | undefined;
+    const { result } = await withWorker(async (gateway) => {
+      seen = await errorOf(gateway.call(req("builtin.call", { name: "memory_get", argsJson: "{}" })));
+      await gateway.call(finish());
+    }, throwing("coding_execution_not_configured: detail-that-stays"));
+    await result;
+    expect(seen).toMatchObject({ code: "internal", causeCode: "coding_execution_not_configured" });
+    expect(seen?.message).not.toContain("detail-that-stays");
+  });
+
+  it("checks a model stream's failure the same way", async () => {
+    let seen: GatewayError | undefined;
+    const llm = {
+      ...llmStreaming([]),
+      // eslint-disable-next-line require-yield
+      async *stream(): AsyncIterable<LlmStreamEvent> {
+        throw new Error(FAKE_READABLE);
+      },
+    } as LlmProvider;
+    const { result } = await withWorker(
+      async (gateway) => {
+        seen = await errorOf(drain(gateway.stream(req("llm.stream", { request: { model: "m", messages: [] } }))));
+        await gateway.call(finish());
+      },
+      { ...throwing(""), ctx: { providers: { llm } } },
+    );
+    await result;
+    expect(shape(seen)).toEqual(SAFE_INTERNAL);
+  });
+});
+
+/** A gateway whose every call and stream fails with `err`, as an unwrapped gateway could. */
+const failingGateway = (err: Error): NativeGateway => ({
+  call: async () => Promise.reject(err),
+  // eslint-disable-next-line require-yield
+  async *stream() {
+    throw err;
+  },
+});
+
+describe("worker transports carry only what the HTTP path carries", () => {
+  const raw = new Error(`${FAKE_READABLE}: raw exception text`);
+
+  it("loopback: an unexpected error crosses as the generic message and no unchecked code", async () => {
+    const transport = createLoopbackTransport(failingGateway(raw));
+    const call = await errorOf(transport.call(req("progress", {}) as never));
+    const stream = await errorOf(drain(transport.stream(req("llm.stream", {}) as never)));
+    expect([shape(call), shape(stream)]).toEqual([SAFE_INTERNAL, SAFE_INTERNAL]);
+  });
+
+  it("loopback: a checked cause code from the gateway passes", async () => {
+    const checked = new GatewayError("internal", GATEWAY_INTERNAL_MESSAGE, "coding_execution_not_configured");
+    const err = await errorOf(createLoopbackTransport(failingGateway(checked)).call(req("progress", {}) as never));
+    expect(err).toMatchObject({ code: "internal", causeCode: "coding_execution_not_configured" });
+  });
+
+  /** Sends one request frame to serveStdioWorker and returns the frame it answers with. */
+  const stdioAnswer = (gateway: NativeGateway, method: string) => {
+    const toGateway = new PassThrough();
+    const fromGateway = new PassThrough();
+    serveStdioWorker(toGateway, fromGateway, gateway);
+    const answer = new Promise<{ error: { code: string; message: string; causeCode?: string } }>((done) =>
+      fromGateway.once("data", (chunk: Buffer) => done(JSON.parse(chunk.toString()) as never)),
+    );
+    toGateway.write(`${JSON.stringify({ id: 1, request: req(method, {}) })}\n`);
+    return answer;
+  };
+
+  it("stdio: an unexpected error crosses as the generic message and no unchecked code", async () => {
+    for (const method of ["progress", "llm.stream"]) {
+      const frame = await stdioAnswer(failingGateway(raw), method);
+      expect({ ...shape(frame.error), gatewayError: true, keys: Object.keys(frame.error).sort() }).toEqual({
+        ...SAFE_INTERNAL,
+        keys: ["code", "message"],
+      });
+    }
+  });
+
+  it("stdio: a checked cause code from the gateway passes", async () => {
+    const checked = new GatewayError("internal", GATEWAY_INTERNAL_MESSAGE, "coding_execution_not_configured");
+    const frame = await stdioAnswer(failingGateway(checked), "progress");
+    expect(frame.error).toEqual({
+      code: "internal",
+      message: GATEWAY_INTERNAL_MESSAGE,
+      causeCode: "coding_execution_not_configured",
+    });
   });
 });

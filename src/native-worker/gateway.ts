@@ -25,6 +25,7 @@ import {
   type GatewayParams,
   type GatewayRequest,
   type WorkerInput,
+  workerGatewayError,
 } from "./protocol.js";
 
 const gatewayLog = logger.child({ module: "native-gateway" });
@@ -53,6 +54,11 @@ export interface SandboxedEngineOptions {
   ctx: Pick<EngineRunContext, "providers" | "onText" | "onProgress">;
   builtinHandler: (name: string) => ((argsJson: string) => Promise<string>) | undefined;
   privilegedHostFor: (tool: string, signal: AbortSignal) => PrivilegedHost | undefined;
+  /**
+   * Every secret value the user tool `tool` may read. A failure's cause code that overlaps any of
+   * the run's values is not sent to the worker; without this, no cause code is sent.
+   */
+  readableSecretValues?: (tool: string) => Promise<string[]>;
   drivability: () => Promise<RunDrivability>;
   launcher: WorkerLauncher;
 }
@@ -119,7 +125,13 @@ export async function runSandboxedEngine(options: SandboxedEngineOptions): Promi
     usedCallIds.add(callId);
   };
 
-  const gateway: NativeGateway = {
+  /** The run's readable secret values, for checking a failure's cause code before the worker sees it. */
+  const readable = options.readableSecretValues;
+  const runSecretValues = readable
+    ? async () => (await Promise.all(Object.keys(input.userTools).map((tool) => readable(tool)))).flat()
+    : undefined;
+
+  const served: NativeGateway = {
     async *stream(raw) {
       const { request, params } = await admit(raw, "llm.stream");
       claim(request.callId);
@@ -216,6 +228,24 @@ export async function runSandboxedEngine(options: SandboxedEngineOptions): Promi
         }
         default:
           throw new GatewayError("invalid_request", `"${request.method}" is a streaming method.`);
+      }
+    },
+  };
+
+  // What crosses to the worker on every transport: a GatewayError, never an unexpected error's text.
+  const gateway: NativeGateway = {
+    async call(raw) {
+      try {
+        return await served.call(raw);
+      } catch (err) {
+        throw await workerGatewayError(err, runSecretValues);
+      }
+    },
+    async *stream(raw) {
+      try {
+        yield* served.stream(raw);
+      } catch (err) {
+        throw await workerGatewayError(err, runSecretValues);
       }
     },
   };

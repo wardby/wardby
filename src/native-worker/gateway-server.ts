@@ -11,6 +11,7 @@
  * reported usage; the worker's own usage numbers are never read.
  */
 
+import pino from "pino";
 import { logger } from "../core/logger.js";
 import {
   createNativeRunTools,
@@ -30,13 +31,13 @@ import { ReviewReadLedger } from "../core/review-reads.js";
 import { DELEGATE_TOOL_PREFIX } from "../core/tool-names.js";
 import { RoutingLlmProvider } from "../providers/llm/routing.js";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
-import { isPrivilegedBridgeName } from "../sandbox/host-functions.js";
+import { isPrivilegedBridgeName, redactExactSecretValues } from "../sandbox/host-functions.js";
 import { PrismaGatewayLedger, type GatewaySessionRecord } from "./ledger.js";
 import {
-  causeCodeOf,
   GatewayError,
   GatewayRequestSchema,
   parseParams,
+  workerGatewayError,
   type GatewayErrorCode,
   type GatewayMethod,
   type GatewayParams,
@@ -96,16 +97,77 @@ export async function serveGatewayRequest(
   authorization: string | undefined,
   body: unknown,
 ): Promise<GatewayResponse> {
+  // Set once the run's tools are rebuilt: before that, no cause code can be checked, so none is sent.
+  const scope: { secretValues?: () => Promise<string[]> } = {};
   try {
-    return await handle(deps, authorization, body);
+    return await handle(deps, authorization, body, scope);
   } catch (err) {
-    if (err instanceof GatewayError) return fail(STATUS_FOR[err.code] ?? 500, err.code, err.message, err.causeCode);
-    serverLog.error({ err }, "native gateway request failed");
-    // Only the code the error leads with leaves the gateway, never the rest of its message.
-    const causeCode = causeCodeOf(err);
-    return causeCode
-      ? fail(500, "internal", `The gateway could not serve this call (${causeCode}).`, causeCode)
-      : fail(500, "internal", "The gateway could not serve this call.");
+    return failureResponse(err, scope.secretValues);
+  }
+}
+
+/**
+ * Every secret value the rebuilt run can read (each user tool's readable or brokered values), and
+ * the request's own capability: what a cause code is checked against before it leaves the gateway.
+ */
+export function runSecretValues(
+  ctx: Pick<RebuiltRun, "snapshot" | "tools">,
+  capability: string,
+): () => Promise<string[]> {
+  return async () => {
+    const perTool = await Promise.all(
+      Object.keys(ctx.snapshot.input.userTools).map((tool) => ctx.tools.readableSecretValues(tool)),
+    );
+    return [capability, ...perTool.flat()];
+  };
+}
+
+/**
+ * A failure as its response. Only a checked cause code leaves the gateway (workerGatewayError),
+ * never the rest of an unexpected error's message; the server's own log line is redacted by the
+ * same values.
+ */
+export async function failureResponse(
+  err: unknown,
+  secretValues: (() => Promise<string[]>) | undefined,
+): Promise<GatewayResponse> {
+  const sent = await forWorker(err, secretValues, "native gateway request failed");
+  return fail(STATUS_FOR[sent.code] ?? 500, sent.code, sent.message, sent.causeCode);
+}
+
+/** Logs an unexpected error (redacted by the run's values) and returns what the worker may see of it. */
+async function forWorker(
+  err: unknown,
+  secretValues: (() => Promise<string[]>) | undefined,
+  logMessage: string,
+): Promise<GatewayError> {
+  if (err instanceof GatewayError) return workerGatewayError(err, secretValues);
+  const values = await secretValues?.().catch(() => undefined);
+  serverLog.error({ err: redactedError(err, values ?? []) }, logMessage);
+  // Read once: the same values check the cause code.
+  return workerGatewayError(err, values ? async () => values : undefined);
+}
+
+/** `err` for the log with every exact secret value removed from its (cause-folded) message and stack. */
+function redactedError(err: unknown, values: readonly string[]): unknown {
+  if (values.length === 0 || !(err instanceof Error)) return err;
+  // pino's own serializer folds the cause chain into message and stack, so a cause is covered too.
+  const serialized = pino.stdSerializers.err(err);
+  const safe = new Error(redactExactSecretValues(serialized.message, values));
+  safe.name = err.name;
+  safe.stack = redactExactSecretValues(serialized.stack ?? "", values);
+  return safe;
+}
+
+/** A model stream whose failure reaches the worker as the same checked error a JSON response carries. */
+export async function* checkedEvents(
+  events: AsyncIterable<LlmStreamEvent>,
+  secretValues: (() => Promise<string[]>) | undefined,
+): AsyncIterable<LlmStreamEvent> {
+  try {
+    yield* events;
+  } catch (err) {
+    throw await forWorker(err, secretValues, "native gateway model stream failed");
   }
 }
 
@@ -113,6 +175,7 @@ async function handle(
   deps: GatewayServerDeps,
   authorization: string | undefined,
   body: unknown,
+  scope: { secretValues?: () => Promise<string[]> },
 ): Promise<GatewayResponse> {
   const { db } = deps;
   const ledger = new PrismaGatewayLedger(db);
@@ -144,12 +207,16 @@ async function handle(
   }
 
   const ctx = await rebuild(deps, session);
+  scope.secretValues = runSecretValues(ctx, token);
   switch (request.method) {
     case "llm.stream":
       return {
         kind: "stream",
         status: 200,
-        events: streamModel(ctx, ledger, request.callId, params as GatewayParams<"llm.stream">),
+        events: checkedEvents(
+          streamModel(ctx, ledger, request.callId, params as GatewayParams<"llm.stream">),
+          scope.secretValues,
+        ),
       };
     case "llm.countTokens": {
       const p = params as GatewayParams<"llm.countTokens">;
