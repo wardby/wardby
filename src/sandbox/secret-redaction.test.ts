@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { redactExactSecretValues, secretSpans } from "./host-functions.js";
+import { createPrivilegedHost, redactExactSecretValues, secretSpans, withEscapedForms } from "./host-functions.js";
 import { holdsValueFragment } from "./secret-fragments.test-support.js";
 
 // Fake values only. Every assertion compares booleans or marker-only text, so a failure cannot print a value.
@@ -58,5 +58,42 @@ describe("secretSpans", () => {
 
   it("ignores values below the minimum length", () => {
     expect(secretSpans("abcde abcde", ["abcde"])).toEqual([]);
+  });
+});
+
+describe("console bridge redacts each value's escaped form too", () => {
+  const PEM = "-----BEGIN FAKE KEY-----\nZmFrZS1wZW0tYm9keS0wMDAx\n-----END FAKE KEY-----";
+  const QUOTED = 'fake"quoted\\value\t0007';
+  /** What the console bridge logs for `logArgs`, given the values it may redact. */
+  async function consoleLine(logArgs: unknown[], values: readonly string[]): Promise<string> {
+    const lines: string[] = [];
+    const log = {
+      info: (m: string) => lines.push(m),
+      warn: (m: string) => lines.push(m),
+      error: (m: string) => lines.push(m),
+    };
+    const host = createPrivilegedHost({
+      agentId: "agent_1",
+      datastore: {} as never,
+      sharedDatastore: {} as never,
+      logTag: "t",
+      logger: { child: () => log } as never,
+      redactSecretValues: values,
+    });
+    await host.__bridge_console(JSON.stringify(["info", logArgs]));
+    return lines.join("\n");
+  }
+
+  it("masks a multi-line PEM-shaped value and a value with a quote, backslash and tab", async () => {
+    const line = await consoleLine([`key ${PEM}`, { nested: QUOTED }], [PEM, QUOTED]);
+    const forms = [PEM, QUOTED].flatMap((value) => [value, JSON.stringify(value).slice(1, -1)]);
+    expect(holdsValueFragment(line, forms)).toBe(false);
+    expect(line.includes("[REDACTED]")).toBe(true);
+  });
+});
+
+describe("withEscapedForms", () => {
+  it("adds each value's JSON-escaped form when it differs", () => {
+    expect(withEscapedForms(["plain-value", 'a"b\nc'])).toEqual(["plain-value", 'a"b\nc', 'a\\"b\\nc']);
   });
 });

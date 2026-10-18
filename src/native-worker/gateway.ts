@@ -14,7 +14,12 @@
 import type { EngineProgress, EngineResult, EngineRunContext } from "../providers/engine/types.js";
 import type { LlmStreamEvent } from "../providers/llm/types.js";
 import pino from "pino";
-import { isPrivilegedBridgeName, redactExactSecretValues, type PrivilegedHost } from "../sandbox/host-functions.js";
+import {
+  isPrivilegedBridgeName,
+  redactExactSecretValues,
+  withEscapedForms,
+  type PrivilegedHost,
+} from "../sandbox/host-functions.js";
 import { logger } from "../core/logger.js";
 import { declaredCodeOf } from "../core/error-code.js";
 import {
@@ -37,7 +42,9 @@ import {
 export const gatewayLog = logger.child({ module: "native-gateway" });
 
 /** `err` for the log with every exact secret value removed from its (cause-folded) message and stack. */
-function redactedError(err: Error, values: readonly string[]): Error {
+function redactedError(err: Error, rawValues: readonly string[]): Error {
+  // The same expansion as the console bridge and the worker: a value may sit escaped in the text.
+  const values = withEscapedForms(rawValues);
   // pino's own serializer folds the cause chain into message and stack, so a cause is covered too.
   const serialized = pino.stdSerializers.err(err);
   const safe = new Error(redactExactSecretValues(serialized.message, values));

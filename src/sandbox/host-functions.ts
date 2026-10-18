@@ -25,6 +25,20 @@ import { redactPii } from "./pii-redaction.js";
 export const MIN_REDACTABLE_SECRET_LENGTH = 6;
 
 /**
+ * Each value plus its JSON-escaped form (`JSON.stringify(v).slice(1, -1)`) when that differs: a
+ * value holding a quote, a backslash, a newline or a control character appears escaped once it is
+ * inside JSON text (a console line, a log line). The one expansion every redaction list goes through.
+ */
+export function withEscapedForms(values: Iterable<string>): string[] {
+  const out = new Set<string>();
+  for (const value of values) {
+    out.add(value);
+    out.add(JSON.stringify(value).slice(1, -1));
+  }
+  return [...out];
+}
+
+/**
  * The merged, sorted [start, end) spans of `text` covered by any occurrence of any value, overlapping
  * occurrences included (the search advances by one character, not by the value's length), so a
  * self-overlapping value such as `abcabcabc` is covered wherever any occurrence of it lies.
@@ -186,7 +200,8 @@ export function createPrivilegedHost(options: PrivilegedHostOptions): Privileged
   // fetches but doesn't log it costs nothing extra. Fresh per invocation
   // (one privileged host per sandbox context, one per tool call).
   const fetchedSecretValues = new Set<string>(options.redactSecretValues ?? []);
-  const redactSecrets = (text: string): string => redactExactSecretValues(text, fetchedSecretValues);
+  // The console line is JSON text, so each value is masked in its escaped form too.
+  const redactSecrets = (text: string): string => redactExactSecretValues(text, withEscapedForms(fetchedSecretValues));
 
   return {
     async __bridge_console(argsJson) {

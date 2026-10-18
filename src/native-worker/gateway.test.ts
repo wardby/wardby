@@ -3,6 +3,7 @@ import { inspect } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
 import { PRIVILEGED_BRIDGE_NAMES, type PrivilegedHost } from "../sandbox/host-functions.js";
+import { holdsValueFragment } from "../sandbox/secret-fragments.test-support.js";
 import {
   forWorker,
   gatewayLog,
@@ -466,6 +467,19 @@ describe("logUnexpectedError fails closed", () => {
     const { leaks, lines } = logged(new TypeError(`saw ${FAKE}`), []);
     expect(leaks).toBe(false);
     expect(lines).toEqual([{ errName: "TypeError", causeCode: undefined }]);
+  });
+
+  it("masks a value's JSON-escaped form in the logged message and stack", () => {
+    const value = 'fake"gateway\nvalue-0008';
+    const escaped = JSON.stringify(value).slice(1, -1);
+    const lines: unknown[] = [];
+    logUnexpectedError(
+      { error: (obj: unknown) => lines.push(obj) } as never,
+      new Error(`body {"k":"${escaped}"}`),
+      [value],
+      "msg",
+    );
+    expect(holdsValueFragment(inspect(lines, { depth: 10 }), [value, escaped])).toBe(false);
   });
 
   it("logs an Error redacted by its values when they are known", () => {

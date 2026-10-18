@@ -41,15 +41,14 @@ import {
   MIN_REDACTABLE_SECRET_LENGTH,
   redactExactSecretValues,
   secretSpans,
+  withEscapedForms,
 } from "../sandbox/host-functions.js";
 
 const received = new Set<string>();
 
 /** Records a secret value this process received, and its JSON-escaped form (as a log line holds it). */
 export function rememberSecretValue(value: string): void {
-  received.add(value);
-  const escaped = JSON.stringify(value).slice(1, -1);
-  if (escaped !== value) received.add(escaped);
+  for (const form of withEscapedForms([value])) received.add(form);
 }
 
 /** `text` without any secret value this process received. */
