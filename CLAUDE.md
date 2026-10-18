@@ -204,3 +204,25 @@ than writing a parallel one, and bring the other providers to the same
 behaviour in the same change (or open an issue for each one left behind, and
 say so in the PR). User-facing wording for the same event is shared too. Plans
 and reviews check for this.
+
+## Secrets never leave their boundary — STRICT
+
+A secret value must never reach any output, by any path. Secret values include
+API keys, tokens, passwords, OAuth and session credentials, brokered secret
+values, and run capabilities. Outputs include:
+
+- logs at any level, stdout/stderr and captured streams, crash traces;
+- run records (`Run.error`, final text), tool results, and errors passed
+  across a process or service boundary;
+- comments, pull requests and issues, telemetry, and test output;
+- data an agent stored and later read back.
+
+"Low risk", "only on a crash", and "debug only" are not exceptions.
+
+- **Every new output path shows how secret values are kept out of it.** That
+  covers a log field, a captured stream, an error message that crosses a
+  boundary, and a persisted or published field. Either the path never carries
+  the content, or it redacts by exact value through the shared redactor.
+  A test with fake values proves it.
+- **If exposure cannot be ruled out, the path does not ship.**
+- **Plans and reviews check every new output path against this rule.**
