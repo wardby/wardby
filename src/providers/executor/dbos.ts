@@ -494,10 +494,23 @@ export class DbosExecutor implements Executor {
       return { state: "lost", reason: ADOPTION_EXHAUSTED_REASON };
     }
     this.resumeAttempts.set(handle.runId, attempts + 1);
-    const forked = await DBOS.forkWorkflow<void>(handle.id, decision.startStep, {
-      applicationVersion: DBOS.applicationVersion,
-    });
-    const forkedId = forked.workflowID;
+    // Deterministic, so a takeover that forked but never recorded the fork (the run write below
+    // failed, or the process died) is finished by the next pass rather than forked a second time:
+    // two workflows driving one run would each spend on every turn. DBOS inserts a fork's row with
+    // a plain INSERT (bulkForkWorkflows in the SDK's system_database.js), so a repeated id would
+    // fail on the key: look first, and treat a lost race the same way.
+    const forkedId = `${handle.id}@${DBOS.applicationVersion}`;
+    if (!(await DBOS.getWorkflowStatus(forkedId))) {
+      try {
+        await DBOS.forkWorkflow<void>(handle.id, decision.startStep, {
+          newWorkflowID: forkedId,
+          applicationVersion: DBOS.applicationVersion,
+        });
+      } catch (err) {
+        if (!(await DBOS.getWorkflowStatus(forkedId))) throw err;
+      }
+    }
+    const forked = DBOS.retrieveWorkflow<void>(forkedId);
     await this.db.run.update({ where: { id: handle.runId }, data: { executionWorkflowId: forkedId } });
     // So nothing can dequeue the original again (it stays recorded as forked from).
     await DBOS.cancelWorkflow(handle.id).catch((err: unknown) =>

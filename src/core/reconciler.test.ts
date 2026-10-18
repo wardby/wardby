@@ -26,6 +26,7 @@ interface FakeRun {
   agent: { kind: "native" | "coding" };
   codingRun: { jobBackend: string | null; jobHandle: string | null } | null;
   parentRunId?: string | null;
+  executionWorkflowId?: string | null;
 }
 
 /** Minimal Prisma-`where`-filter matcher: equality, `{lt}`, `null`, and nested `OR` arrays. */
@@ -366,6 +367,16 @@ describe("reconcileOnce", () => {
     expect(recover).toHaveBeenCalledWith({ runId: runs[0].id, backend: "dbos", id: runs[0].id });
     expect(runs[0].status).toBe("running");
     expect(runs[0].heartbeatAt).toEqual(NOW);
+  });
+
+  it("asks the executor about the forked workflow a taken-over run records, not the run id", async () => {
+    const runs = [baseRun({ heartbeatAt: STALE, executionBackend: "dbos", executionWorkflowId: "r1@v2" })];
+    const recover = vi.fn(async () => ({ state: "active" as const }));
+    const executor: Executor = { start: async () => undefined, stop: async () => undefined, recover };
+
+    await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, executor);
+
+    expect(recover).toHaveBeenCalledWith({ runId: runs[0].id, backend: "dbos", id: "r1@v2" });
   });
 
   it("marks a durable-backend run lost when the executor reports it lost", async () => {
