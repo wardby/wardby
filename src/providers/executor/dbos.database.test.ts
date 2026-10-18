@@ -7,6 +7,7 @@ import type { Datastore, DatastoreValue } from "../datastore/types.js";
 import type { SecretCipher } from "../secrets/types.js";
 import type { AgentMemoryStore } from "../memory/types.js";
 import type { IssueTracker } from "../issue-tracker/types.js";
+import type { Executor } from "./types.js";
 import { NativeEngine } from "../../core/engine-native.js";
 import { DBOS } from "@dbos-inc/dbos-sdk";
 import { DBOS_BACKEND, DbosExecutor } from "./dbos.js";
@@ -111,7 +112,7 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     return buildWith(llm, executorId);
   }
 
-  function buildWith(llm: LlmProvider, id: string, runnerDb: PrismaClient = db) {
+  function buildWith(llm: LlmProvider, id: string, runnerDb: PrismaClient = db, childExecutor?: Executor) {
     return new DbosExecutor(
       {
         llm,
@@ -119,6 +120,7 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
         datastore: fakeDatastore(),
         secrets: fakeCipher,
         memory: {} as AgentMemoryStore,
+        ...(childExecutor ? { executor: childExecutor } : {}),
       },
       { systemDatabaseUrl: process.env.DATABASE_URL, schemaName: "dbos_test", executorId: id },
       runnerDb,
@@ -156,6 +158,35 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
       agentSubAgent: db.agentSubAgent,
       run,
     } as unknown as PrismaClient;
+    return { client, kill: () => (alive = false) };
+  }
+
+  /**
+   * Like killableDb, but the whole client (every model, `$transaction`, raw queries) dies at
+   * `kill()`: a run that dispatches a sub-agent goes through dispatchRun, which needs all of it.
+   */
+  function killableClient(): { client: PrismaClient; kill: () => void } {
+    let alive = true;
+    const dead = () => Promise.reject(new Error("simulated process death: database handle is gone"));
+    const guardFn =
+      (fn: (...args: unknown[]) => unknown, self: unknown) =>
+      (...args: unknown[]) =>
+        alive ? fn.apply(self, args) : dead();
+    const client = new Proxy(db, {
+      get(target, prop) {
+        const value: unknown = Reflect.get(target, prop);
+        if (typeof value === "function") return guardFn(value as (...args: unknown[]) => unknown, target);
+        if (value && typeof value === "object" && typeof prop === "string" && !prop.startsWith("$")) {
+          return new Proxy(value, {
+            get(model, key) {
+              const method: unknown = Reflect.get(model, key);
+              return typeof method === "function" ? guardFn(method as (...args: unknown[]) => unknown, model) : method;
+            },
+          });
+        }
+        return value;
+      },
+    });
     return { client, kill: () => (alive = false) };
   }
 
@@ -494,6 +525,96 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     await db.agentSubAgent.deleteMany({ where: { parentAgentId: lead } });
     await db.run.deleteMany({ where: { agentId: lead } });
     await db.agent.deleteMany({ where: { id: { in: [lead, ...kids] } } });
+  }, 30_000);
+
+  it("a resumed lead re-attaches to the sub-agent its interrupted delegate call created", async () => {
+    await executor?.close();
+    const lead = `dbos-reattach-lead-${suffix}`;
+    const kid = `dbos-reattach-kid-${suffix}`;
+    await db.agent.create({
+      data: { id: lead, name: lead, systemPrompt: "LEAD", model: "m", budgetUsd: 1, maxTurns: 5 },
+    });
+    // A sandbox-mode child goes through the Executor (here a fake that never runs it), so it stays
+    // pending, and durable on its own, while the lead waits on it.
+    await db.agent.create({
+      data: {
+        id: kid,
+        name: kid,
+        systemPrompt: "CHILD",
+        model: "m",
+        budgetUsd: 0.1,
+        maxTurns: 3,
+        nativeExecutionMode: "sandbox",
+      },
+    });
+    await db.agentSubAgent.create({ data: { parentAgentId: lead, childAgentId: kid, boundName: "kid" } });
+    const childExecutor = () => {
+      const started: string[] = [];
+      const stopped: string[] = [];
+      const fake: Executor = {
+        async start(runId) {
+          started.push(runId);
+        },
+        async stop(runId) {
+          stopped.push(runId);
+        },
+      };
+      return { fake, started, stopped };
+    };
+    const delegate: LlmStreamEvent[] = [
+      { type: "tool_call", id: "c1", name: "delegate_to_kid", argsJson: JSON.stringify({ task: "x" }) },
+      { type: "done", stopReason: "tool_calls", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.012 } },
+    ];
+    try {
+      const firstChildren = childExecutor();
+      const dying = killableClient();
+      executor = buildWith(scriptedLlm([delegate]), executorId, dying.client, firstChildren.fake);
+      await executor.launch();
+      const run = await db.run.create({ data: { agentId: lead, executionManaged: true } });
+
+      const firstAttempt = executor.start(run.id).catch(() => undefined);
+      // The delegate step is waiting on the child it dispatched.
+      await waitFor("the lead to dispatch its child", () => firstChildren.started.length === 1);
+      // "Crash" inside the delegate step: turn 1's LLM reply is recorded, its tool step is not.
+      await executor.close();
+      dying.kill();
+      await firstAttempt;
+
+      const restartChildren = childExecutor();
+      const resumedLlm = scriptedLlm([finalAnswer("lead done")]);
+      executor = buildWith(resumedLlm, `${executorId}-restart`, db, restartChildren.fake);
+      await executor.launch();
+      const resumed = await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id });
+      expect(["active", "terminal"]).toContain(resumed.state);
+
+      // The re-executed delegate step adopts the same child rather than refusing it as a duplicate.
+      await db.run.updateMany({
+        where: { parentRunId: run.id },
+        data: { status: "succeeded", finalText: "kid done", finishedAt: new Date() },
+      });
+      await waitFor(
+        "the resumed lead to finish",
+        async () => (await db.run.findUnique({ where: { id: run.id } }))?.finalText != null,
+      );
+
+      const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+      expect(after.status).toBe("succeeded");
+      expect(after.finalText).toBe("lead done");
+      const children = await db.run.findMany({ where: { parentRunId: run.id } });
+      expect(children).toHaveLength(1);
+      expect(children[0].id).toBe(firstChildren.started[0]);
+      expect(children[0].parentCallId).toBe("c1");
+      expect(restartChildren.started).toEqual([]);
+      // Turn 1 replayed from the record; the child's result reached the lead's turn 2.
+      expect(resumedLlm.calls).toHaveLength(1);
+      const toolResult = resumedLlm.calls[0].messages.find((m) => m.role === "tool");
+      expect(String(toolResult?.content)).toContain('"finalText":"kid done"');
+    } finally {
+      await db.run.deleteMany({ where: { agent: { id: kid } } });
+      await db.agentSubAgent.deleteMany({ where: { parentAgentId: lead } });
+      await db.run.deleteMany({ where: { agentId: lead } });
+      await db.agent.deleteMany({ where: { id: { in: [lead, kid] } } });
+    }
   }, 30_000);
 
   it("a run started in the background from inside another run's step fails, unless started outside its context", async () => {

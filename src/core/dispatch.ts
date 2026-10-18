@@ -120,6 +120,12 @@ export interface DispatchRunOptions {
   /** Sub-agent dispatch (see AgentSubAgent): links this run into a run tree. */
   parentRunId?: string;
   /**
+   * The parent's delegation call (the model's tool-call id) that dispatches this sub-agent run.
+   * Unique per parent, so a re-executed delegate step finds the child its call created
+   * (findDelegationChild) instead of starting a second one.
+   */
+  parentCallId?: string;
+  /**
    * Cost attribution for a run that starts a new attribution (issue event,
    * linked PR, explicit key), resolved before the call (attribution.ts
    * resolveWorkItem). Ignored when the parent run or the continued coding run
@@ -767,6 +773,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             // Fixed for the run's life: the executor routes on this, never on the agent's current setting.
             nativeExecutionMode: agent.kind === "native" ? agent.nativeExecutionMode : null,
             parentRunId: options.parentRunId,
+            parentCallId: options.parentCallId,
             grantedParentMemoryKeys: options.grantedParentMemoryKeys ?? [],
             taskOverride: options.taskOverride,
             triggeredById: options.triggeredById ?? null,
