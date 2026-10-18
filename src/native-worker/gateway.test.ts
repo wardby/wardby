@@ -463,10 +463,15 @@ describe("logUnexpectedError fails closed", () => {
     expect(lines).toEqual([{ errName: "object", causeCode: undefined }]);
   });
 
-  it("logs only the name and declared code when the values list is empty", () => {
-    const { leaks, lines } = logged(new TypeError(`saw ${FAKE}`), []);
+  it("logs only the name and declared code when the values are unavailable", () => {
+    const { leaks, lines } = logged(new TypeError(`saw ${FAKE}`), undefined);
     expect(leaks).toBe(false);
     expect(lines).toEqual([{ errName: "TypeError", causeCode: undefined }]);
+  });
+
+  it("logs the message for a successfully read empty list, like any complete list", () => {
+    const { lines } = logged(new TypeError("no secrets here"), []);
+    expect((lines[0] as { err: Error }).err.message).toBe("no secrets here");
   });
 
   it("masks a value's JSON-escaped form in the logged message and stack", () => {

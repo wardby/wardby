@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
-import { checkedEvents, failureResponse, runSecretValues, serveGatewayRequest, streamModel } from "./gateway-server.js";
+import {
+  checkedEvents,
+  CONSOLE_WITHHELD_MESSAGE,
+  failureResponse,
+  hostCall,
+  runSecretValues,
+  serveGatewayRequest,
+  streamModel,
+} from "./gateway-server.js";
 import { GATEWAY_INTERNAL_MESSAGE, GatewayError } from "./protocol.js";
 import { gatewayLog } from "./gateway.js";
 
@@ -230,5 +238,38 @@ describe("gateway cause codes are checked against the run's secret values", () =
       generic: err.message === GATEWAY_INTERNAL_MESSAGE,
       hasCauseCode: err.causeCode !== undefined,
     }).toEqual({ gatewayError: true, code: "internal", generic: true, hasCauseCode: false });
+  });
+});
+
+describe("console bridge when the tool's redaction list cannot be read", () => {
+  const FAKE_CONSOLE = "fake_console_secret_0009";
+  it("emits only a fixed marker line, never the console line", async () => {
+    const consoleCalls: string[] = [];
+    const ctx = {
+      snapshot: { input: { userTools: { lookup: {} } } },
+      tools: {
+        readableSecretValues: () => Promise.reject(new Error("secret read failed")),
+        privilegedHostFor: () => ({ __bridge_console: async (argsJson: string) => consoleCalls.push(argsJson) }),
+      },
+    } as unknown as Parameters<typeof hostCall>[0];
+    const warned: unknown[] = [];
+    const spy = vi.spyOn(gatewayLog, "warn").mockImplementation(((obj: unknown, msg: string) => {
+      warned.push([obj, msg]);
+    }) as never);
+    let result: unknown;
+    try {
+      result = await hostCall(ctx, {} as never, "call_1", {
+        tool: "lookup",
+        invocation: "inv_1",
+        bridge: "__bridge_console",
+        argsJson: JSON.stringify(["info", [`saw ${FAKE_CONSOLE}`]]),
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(result).toBeNull();
+    expect(consoleCalls.length).toBe(0);
+    expect(JSON.stringify(warned).includes(FAKE_CONSOLE)).toBe(false);
+    expect(warned).toEqual([[{ tool: "lookup" }, CONSOLE_WITHHELD_MESSAGE]]);
   });
 });

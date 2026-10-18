@@ -54,10 +54,11 @@ function redactedError(err: Error, rawValues: readonly string[]): Error {
 }
 
 /**
- * Logs an unexpected error for the operator, redacted by exact value. Fail closed: a thrown value
- * that is not an Error (a string, an object: its text cannot be redacted reliably), or no values to
- * redact by (unavailable, unreadable or empty), logs only the error's name and declared code, never
- * its message, stack or content.
+ * Logs an unexpected error for the operator, redacted by exact value. A successfully read list is
+ * complete (its reader rejects when any secret's read fails), so an empty one means the run has no
+ * secret values and the message is logged as is. Fail closed: a thrown value that is not an Error
+ * (a string, an object: its text cannot be redacted reliably), or no list (unavailable or
+ * unreadable), logs only the error's name and declared code, never its message, stack or content.
  */
 export function logUnexpectedError(
   log: Pick<typeof logger, "error">,
@@ -66,8 +67,7 @@ export function logUnexpectedError(
   logMessage: string,
   fields: Record<string, unknown> = {},
 ): void {
-  if (values && values.length > 0 && err instanceof Error)
-    log.error({ ...fields, err: redactedError(err, values) }, logMessage);
+  if (values && err instanceof Error) log.error({ ...fields, err: redactedError(err, values) }, logMessage);
   else
     log.error(
       { ...fields, errName: err instanceof Error ? err.name : typeof err, causeCode: declaredCodeOf(err) },

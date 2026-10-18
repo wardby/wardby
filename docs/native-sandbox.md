@@ -685,6 +685,11 @@ skipped unless its script sets its flag:
   the port in `NATIVE_GATEWAY_URL` (default 8790).
 - **Sub-agents never start.** Confirm `wardby serve` or `wardby scheduler` is
   running; the scheduler leader starts them.
+- **A tool's console output is missing.** If the gateway logs
+  `sandbox tool console line withheld: the tool's secret values could not be read`,
+  reading one of the tool's attached secrets failed. Without every value it
+  cannot redact the line, so it logs none of it. The tool call itself still
+  succeeds. Check the secret store and the tool's attached secrets.
 - **Tool code fails inside the sandbox.** The worker has no network except the
   gateway and a read-only filesystem apart from `/tmp`; tools must use the
   provided fetch, datastore, and secret functions.

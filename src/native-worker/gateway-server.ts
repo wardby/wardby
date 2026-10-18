@@ -30,7 +30,7 @@ import { DELEGATE_TOOL_PREFIX } from "../core/tool-names.js";
 import { RoutingLlmProvider } from "../providers/llm/routing.js";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
 import { isPrivilegedBridgeName } from "../sandbox/host-functions.js";
-import { forWorker } from "./gateway.js";
+import { forWorker, gatewayLog } from "./gateway.js";
 import { PrismaGatewayLedger, type GatewaySessionRecord } from "./ledger.js";
 import {
   GatewayError,
@@ -397,7 +397,16 @@ async function builtin(
   });
 }
 
-async function hostCall(
+/**
+ * Logged (at warn) in place of a user tool's console line when that tool's redaction list cannot
+ * be read: without the complete list the line cannot be shown to be free of its secret values, so
+ * none of it is logged. The tool's call still succeeds, as a console write does in-process.
+ */
+export const CONSOLE_WITHHELD_MESSAGE =
+  "sandbox tool console line withheld: the tool's secret values could not be read";
+
+/** Serves one privileged bridge call for a worker (exported for tests). */
+export async function hostCall(
   ctx: RebuiltRun,
   ledger: PrismaGatewayLedger,
   callId: string,
@@ -407,7 +416,19 @@ async function hostCall(
   if (!ctx.snapshot.input.userTools[params.tool]) {
     throw new GatewayError("not_allowed", `"${params.tool}" is not a user tool of this run.`);
   }
-  const redact = params.bridge === "__bridge_console" ? await ctx.tools.readableSecretValues(params.tool) : undefined;
+  let redact: readonly string[] | undefined;
+  if (params.bridge === "__bridge_console") {
+    // Fail closed: a console line is redacted by the tool's complete list or not logged at all.
+    const values = await ctx.tools.readableSecretValues(params.tool).then(
+      (v) => v,
+      () => undefined,
+    );
+    if (!values) {
+      gatewayLog.warn({ tool: params.tool }, CONSOLE_WITHHELD_MESSAGE);
+      return null;
+    }
+    redact = values;
+  }
   const host = ctx.tools.privilegedHostFor(params.tool, AbortSignal.timeout(30_000), redact);
   if (!host) throw new GatewayError("not_allowed", `"${params.tool}" is not a user tool of this run.`);
   const bridge = host[params.bridge];

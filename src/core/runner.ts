@@ -45,7 +45,7 @@ import { NATIVE_WORKER_PROTOCOL_VERSION, type WorkerInput } from "../native-work
 import type { PrismaGatewayLedger } from "../native-worker/ledger.js";
 import { asStringArray, asPrefixMap } from "../sandbox/tool-capabilities.js";
 import { scopeDatastore } from "../providers/datastore/scoped.js";
-import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
+import { buildSecretsAccessor, scopeSecretsAccessor, type SecretsAccessor } from "./secrets.js";
 import { buildSharedDatastoreAccessor, scopeSharedDatastoreAccessor } from "./datastores.js";
 import { effectiveBudgetForRun, type EffectiveBudgetOptions } from "./budget-groups.js";
 import { stopChildrenOfLostRun } from "./lost-run-children.js";
@@ -944,6 +944,23 @@ export type LoadedUserTool = LoadedNativeRun["toolsByName"][string];
 export type BuiltinToolHandler = (argsJson: string, callId?: string) => Promise<string>;
 
 /**
+ * Every value of the secrets `names` (readable or brokered; a SigV4 secret's key and token alone
+ * too, the same set the in-process host redacts), as a redaction list. Rejects when ANY read
+ * fails: a list missing one secret would let that secret through, so a caller treats a rejection
+ * as "no list" and fails closed. A secret with no value contributes nothing.
+ */
+export async function readRedactionValues(accessor: SecretsAccessor, names: readonly string[]): Promise<string[]> {
+  const values = await Promise.all(
+    names.map((secret) =>
+      accessor.resolve
+        ? accessor.resolve(secret).then((e) => (e ? consoleRedactionValues(e) : []))
+        : accessor.get(secret).then((v) => (v === undefined ? [] : [v])),
+    ),
+  );
+  return values.flat().filter((value): value is string => typeof value === "string");
+}
+
+/**
  * One attempt's tool surface for a native run. `builtinHandler(name)` is the
  * single source of truth for which names are trusted built-ins (memory,
  * repo_*, jira_*, sub-agent/parent memory, delegate_to_*) and returns undefined
@@ -1540,21 +1557,14 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
     const tool = toolsByName.get(name);
     return tool ? scopedHost(name, tool, signal, redactSecretValues) : undefined;
   };
-  /** Every secret value the user tool `name` may use (readable or brokered), for console redaction by a stateless gateway. */
+  /**
+   * Every secret value the user tool `name` may use (readable or brokered), for console redaction
+   * by a stateless gateway. Rejects when any read fails (readRedactionValues).
+   */
   const readableSecretValues = async (name: string): Promise<string[]> => {
     const tool = toolsByName.get(name);
     if (!tool) return [];
-    const scoped = scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets);
-    const values = await Promise.all(
-      tool.allowedSecrets.map((secret) =>
-        (scoped.resolve
-          ? scoped.resolve(secret).then((e) => (e ? consoleRedactionValues(e) : []))
-          : scoped.get(secret).then((v) => (v === undefined ? [] : [v]))
-        ).catch(() => []),
-      ),
-    );
-    // A SigV4 secret's key and token alone, too: the same set the in-process host redacts.
-    return values.flat().filter((value): value is string => typeof value === "string");
+    return readRedactionValues(scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets), tool.allowedSecrets);
   };
 
   const runUserTool = async (name: string, argsJson: string): Promise<string> => {
