@@ -61,6 +61,9 @@ A continuation (`continuePriorRun`) checks separately that the pull request
 it is asked to continue is still open on GitHub; one already merged or closed
 fails with category `continuation_closed` and nothing pushed — see
 [Continuation's pull request is no longer open](../help/errors/continuation-closed.md).
+Before its agent starts, a continuation also merges the branch the pull
+request currently targets, and the agent resolves any conflicts — see
+[Follow-ups bring the pull request up to date](code-review-agents.md#follow-ups-bring-the-pull-request-up-to-date).
 Over stdio, the local operator holds every role, so `repositoryAdminOverride`
 is the way to approve a repository there.
 
@@ -128,7 +131,8 @@ JOB_LAUNCHER=docker
 To build on an earlier result, trigger with `baseRef: "wardby/run-<run id>"`. A
 continuation of a run (a lead agent revising its earlier work) fast-forwards the
 same branch; if the branch has moved, or is checked out, the run fails with
-`local_branch_conflict` and nothing is pushed.
+`local_branch_conflict` and nothing is pushed. A local repository has no pull
+requests, so a continuation there does not merge any other branch first.
 
 Result branches accumulate, and wardby does not delete them. Clean up with
 `git branch -D wardby/run-<run id>`.

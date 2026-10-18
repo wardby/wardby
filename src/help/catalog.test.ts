@@ -7,6 +7,7 @@ import semver from "semver";
 import { buildHelpCatalog } from "./catalog.js";
 import { SERVICE_REFUSAL_CODES, SERVICE_UNREADY_CATEGORY } from "../coding/services/wording.js";
 import { PROTECTED_PATH_CATEGORY } from "../coding/protected-path-wording.js";
+import { MERGE_CONFLICT_CATEGORY, TARGET_MERGE_CATEGORY } from "../coding/merge-wording.js";
 
 const roots: string[] = [];
 
@@ -112,7 +113,13 @@ describe("buildHelpCatalog", () => {
     const ids = new Set(catalog.pages.map((entry) => entry.id));
 
     expect(ids).toContain("coding-services");
-    for (const code of [...SERVICE_REFUSAL_CODES, SERVICE_UNREADY_CATEGORY, PROTECTED_PATH_CATEGORY]) {
+    for (const code of [
+      ...SERVICE_REFUSAL_CODES,
+      SERVICE_UNREADY_CATEGORY,
+      PROTECTED_PATH_CATEGORY,
+      MERGE_CONFLICT_CATEGORY,
+      TARGET_MERGE_CATEGORY,
+    ]) {
       const id = `errors/${code.replaceAll("_", "-")}`;
       expect(ids, id).toContain(id);
       expect(catalog.pages.find((entry) => entry.id === id)?.markdown).toContain(`\`${code}`);

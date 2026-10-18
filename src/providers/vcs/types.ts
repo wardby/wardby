@@ -52,6 +52,20 @@ export interface PreparedWorkspace {
   protectedPaths: string[];
   collectExclude: string[];
   continuation?: { rootRunId: string };
+  /**
+   * Set when prepareWorkspace merged the pull request's current target branch
+   * into a continuation's workspace (it was behind): the target branch, the
+   * commit merged, and the paths the merge left conflicted (markers in the
+   * workspace). Read back from the workspace's git metadata on recovery, never
+   * from worker output.
+   */
+  targetMerge?: TargetMerge;
+}
+
+export interface TargetMerge {
+  ref: string;
+  targetCommit: string;
+  conflictedPaths: string[];
 }
 
 /**
@@ -127,6 +141,8 @@ export type FinalizeChangesResult =
       pullRequestNumber: number;
       pullRequestUrl: string;
       description?: DescriptionWriteOutcome;
+      /** The pushed head is a merge of the PR's target branch (see PreparedWorkspace.targetMerge). */
+      targetMerge?: { ref: string; targetCommit: string; conflicts: number };
     }
   | {
       /** Pushed the run's branch to a remote with no pull requests (a local
@@ -223,6 +239,10 @@ export interface ContinuationFinishedDetails {
   serviceSentence?: string;
   /** Host-safe sentence naming a protected path the run's changes touched (coding/protected-path-wording.ts); used with `failed`. */
   protectedPathSentence?: string;
+  /** Host-safe sentence naming what was merged from the target branch (coding/merge-wording.ts); used with `succeeded`. */
+  mergeSentence?: string;
+  /** Host-safe sentence naming a file still holding conflict markers (coding/merge-wording.ts); used with `failed`. */
+  conflictMarkersSentence?: string;
   /**
    * Set with `budget_exhausted` when the run's changes so far were pushed anyway
    * (the pull request it opened or continued, or a branch with no number).

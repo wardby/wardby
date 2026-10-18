@@ -268,6 +268,18 @@ export interface GitHubRepositoryAccess {
     headRef: string;
   }): Promise<boolean | null>;
   /**
+   * The current base branch of the root run's marked open pull request (it
+   * changes when someone retargets the PR), or null when the PR is not open or
+   * its head or base is in another repository (a fork). Optional: without it,
+   * continuations are not brought up to date with their target branch.
+   */
+  openPullRequestBase?(input: {
+    runId: string;
+    repository: string;
+    baseRef: string;
+    headRef: string;
+  }): Promise<{ number: number; baseRef: string } | null>;
+  /**
    * Rewrites the root run's open pull request description for a fix round,
    * or, when a person edited it since wardby last wrote it, upserts a comment
    * carrying the proposed description instead. Never throws. Optional:
@@ -1197,6 +1209,44 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     });
   }
 
+  /** See GitHubRepositoryAccess.openPullRequestBase: the marked open PR's current base, same repository only. */
+  async openPullRequestBase(input: {
+    runId: string;
+    repository: string;
+    baseRef: string;
+    headRef: string;
+  }): Promise<{ number: number; baseRef: string } | null> {
+    const repository = normalizeGitHubRepository(input.repository);
+    const baseRef = normalizeGitRef(input.baseRef);
+    const headRef = normalizeGitRef(input.headRef);
+    if (!SAFE_RUN_ID.test(input.runId)) throw new Error("github_pull_request_input_invalid");
+    return this.withRepositoryToken(repository, async (token) => {
+      const found = await this.findMarkedPullRequest(token, {
+        runId: input.runId,
+        repository,
+        baseRef,
+        headRef,
+        acceptReadyForReview: true,
+      });
+      if (!found) return null;
+      const base = record(found.raw.base);
+      const head = record(found.raw.head);
+      const sameRepository = (side: Record<string, unknown>): boolean => {
+        const name =
+          side.repo && typeof side.repo === "object" ? (side.repo as Record<string, unknown>).full_name : null;
+        return typeof name === "string" && name.toLowerCase() === repository.toLowerCase();
+      };
+      // A fork's branch is never fetched: wardby's own heads live in the PR's repository.
+      if (!sameRepository(base) || !sameRepository(head)) return null;
+      if (typeof base.ref !== "string") throw new Error("github_api_invalid_response");
+      try {
+        return { number: found.pr.number, baseRef: normalizeGitRef(base.ref) };
+      } catch (error) {
+        throw new Error("github_api_invalid_response", { cause: error });
+      }
+    });
+  }
+
   /**
    * A fix round's description update (see GitHubRepositoryAccess). One
    * repository token; every failure becomes `skipped:error`.
@@ -1583,16 +1633,20 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     return (await this.findMarkedPullRequest(token, input))?.pr ?? null;
   }
 
-  /** findPullRequest, plus the matched pull request's raw body. */
+  /**
+   * findPullRequest, plus the matched pull request's raw body and payload. Not
+   * filtered by base: a person may retarget the PR, and the head branch plus the
+   * run marker already identify it. When several open PRs match, the one on
+   * `baseRef` wins.
+   */
   private async findMarkedPullRequest(
     token: string,
     input: PullRequestInput,
-  ): Promise<{ pr: PullRequestResult; body: string; draft: boolean } | null> {
+  ): Promise<{ pr: PullRequestResult; body: string; draft: boolean; raw: Record<string, unknown> } | null> {
     const [owner, name] = input.repository.split("/");
     const query = new URLSearchParams({
       state: "open",
       head: `${owner}:${input.headRef}`,
-      base: input.baseRef,
       per_page: "100",
     });
     const response = await this.requestJson(
@@ -1602,17 +1656,24 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     const payload: unknown = await response.json();
     if (!Array.isArray(payload)) throw new Error("github_api_invalid_response");
     const marker = `${RUN_MARKER_PREFIX}${input.runId} -->`;
+    let first: Record<string, unknown> | undefined;
     for (const item of payload) {
       const candidate = record(item);
-      if (typeof candidate.body === "string" && candidate.body.includes(marker)) {
-        return {
-          pr: this.parsePullRequest(candidate, input.repository, input.acceptReadyForReview === true),
-          body: candidate.body,
-          draft: candidate.draft === true,
-        };
+      if (typeof candidate.body !== "string" || !candidate.body.includes(marker)) continue;
+      const base = candidate.base && typeof candidate.base === "object" ? (candidate.base as { ref?: unknown }) : {};
+      if (base.ref === input.baseRef) {
+        first = candidate;
+        break;
       }
+      first ??= candidate;
     }
-    return null;
+    if (!first) return null;
+    return {
+      pr: this.parsePullRequest(first, input.repository, input.acceptReadyForReview === true),
+      body: first.body as string,
+      draft: first.draft === true,
+      raw: first,
+    };
   }
 
   private parsePullRequest(value: unknown, repository: string, acceptReadyForReview = false): PullRequestResult {

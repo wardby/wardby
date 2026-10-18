@@ -188,6 +188,78 @@ describe("GitHubAppClient", () => {
     expect(methods.filter((method) => method === "POST /repos/openai/example/pulls")).toHaveLength(0);
   });
 
+  describe("openPullRequestBase and a retargeted pull request", () => {
+    const LOOKUP = { runId: "run-1", repository: "openai/example", baseRef: "main", headRef: "wardby/run-run-1" };
+    const side = (ref: string, repository = "openai/example") => ({ ref, repo: { full_name: repository } });
+    function clientAnswering(pulls: unknown[], seen: URL[] = []): GitHubAppClient {
+      const fetchMock = vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url.endsWith("/installation")) return json({ id: 42 });
+        if (url.endsWith("/access_tokens")) return tokenResponse();
+        if (url.includes("/pulls?")) {
+          seen.push(new URL(url));
+          return json(pulls);
+        }
+        if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+        throw new Error(`unexpected request ${url}`);
+      }) as typeof fetch;
+      return new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+    }
+    const marked = (extra: Record<string, unknown>) => ({
+      number: 42,
+      html_url: "https://github.com/openai/example/pull/42",
+      body: "<!-- wardby:run-1 -->",
+      draft: true,
+      ...extra,
+    });
+
+    it("returns the PR's current base, which may differ from the stored baseRef", async () => {
+      const seen: URL[] = [];
+      const client = clientAnswering([marked({ base: side("release/2"), head: side("wardby/run-run-1") })], seen);
+      await expect(client.openPullRequestBase(LOOKUP)).resolves.toEqual({ number: 42, baseRef: "release/2" });
+      // Not filtered by base, so a retargeted PR is still found (and a continuation still sees it open).
+      expect(seen[0].searchParams.has("base")).toBe(false);
+      expect(seen[0].searchParams.get("head")).toBe("openai:wardby/run-run-1");
+      await expect(client.findOpenPullRequest(LOOKUP)).resolves.toEqual({
+        number: 42,
+        url: "https://github.com/openai/example/pull/42",
+      });
+    });
+
+    it("prefers the marked PR on the stored baseRef when several are open", async () => {
+      const client = clientAnswering([
+        marked({ number: 41, html_url: "https://github.com/openai/example/pull/41", base: side("other") }),
+        marked({ base: side("main"), head: side("wardby/run-run-1") }),
+      ]);
+      await expect(client.findOpenPullRequest(LOOKUP)).resolves.toMatchObject({ number: 42 });
+    });
+
+    it("returns null for a fork on either side, and for no open PR", async () => {
+      await expect(
+        clientAnswering([
+          marked({ base: side("main"), head: side("wardby/run-run-1", "someone/example") }),
+        ]).openPullRequestBase(LOOKUP),
+      ).resolves.toBeNull();
+      await expect(
+        clientAnswering([
+          marked({ base: side("main", "someone/example"), head: side("wardby/run-run-1") }),
+        ]).openPullRequestBase(LOOKUP),
+      ).resolves.toBeNull();
+      await expect(clientAnswering([]).openPullRequestBase(LOOKUP)).resolves.toBeNull();
+    });
+
+    it("refuses a malformed base ref as an invalid response", async () => {
+      await expect(
+        clientAnswering([marked({ base: side("-x..y"), head: side("wardby/run-run-1") })]).openPullRequestBase(LOOKUP),
+      ).rejects.toThrow("github_api_invalid_response");
+      await expect(
+        clientAnswering([
+          marked({ base: { repo: { full_name: "openai/example" } }, head: side("x") }),
+        ]).openPullRequestBase(LOOKUP),
+      ).rejects.toThrow("github_api_invalid_response");
+    });
+  });
+
   it("openPullRequestDraft reads GitHub's draft flag on the root run's open marked PR", async () => {
     const answers: unknown[][] = [
       [
