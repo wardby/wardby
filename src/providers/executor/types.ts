@@ -32,6 +32,14 @@ export interface Executor {
    */
   recover?: (handle: PersistedExecutionHandle) => Promise<ExecutionRecoveryResult>;
   /**
+   * Called by drainCodingQueue for each queued coding run it failed with coding_queue_timeout, after
+   * that write: releases what an earlier attempt of the run left (a launch the backend refused for
+   * capacity), such as a continuation's in-progress host signal and its input artifact. Best effort;
+   * a throw is logged by the caller. Optional: an executor that never leaves a queued run anything
+   * to release omits it.
+   */
+  cleanupQueueTimeout?: (runId: string) => Promise<void>;
+  /**
    * Optional one-time startup. A durable backend connects and re-drives the
    * workflows it owned before the last restart. Composition roots call it
    * before starting the scheduler or MCP server.

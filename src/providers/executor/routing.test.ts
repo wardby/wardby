@@ -19,6 +19,21 @@ describe("RoutingExecutor", () => {
     expect(coding.stop).toHaveBeenCalledWith("coding-run", "requested");
   });
 
+  it("hands a queue-timed-out run's cleanup to the coding executor only", async () => {
+    const native = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}), cleanupQueueTimeout: vi.fn() };
+    const coding = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}), cleanupQueueTimeout: vi.fn() };
+    const executor = new RoutingExecutor({ kindForRun: async () => "coding" }, native, coding);
+
+    await executor.cleanupQueueTimeout("coding-run");
+    expect(coding.cleanupQueueTimeout).toHaveBeenCalledWith("coding-run");
+    expect(native.cleanupQueueTimeout).not.toHaveBeenCalled();
+    // A coding executor without the hook is fine.
+    await new RoutingExecutor({ kindForRun: async () => "coding" }, native, {
+      start: vi.fn(async () => {}),
+      stop: vi.fn(async () => {}),
+    }).cleanupQueueTimeout("coding-run");
+  });
+
   it("routes recovery by agent kind so a native durable handle never reaches the coding executor", async () => {
     const native = {
       start: vi.fn(async () => {}),

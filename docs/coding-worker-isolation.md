@@ -504,13 +504,33 @@ size (a service sidecar adds to a run's CPU and memory) and other pods share the
 quota. Set `KUBERNETES_RESOURCE_QUOTA` to the quota's name and the launcher
 checks, before a run claims a slot, whether the pod it would create fits the
 quota's free room. A run that doesn't fit is queued the same way as a run over
-`CODING_MAX_CONCURRENT`, and is retried when a run ends and on each leader tick;
-without the check, the API server refuses the pod and the run fails. The check
-reads one ResourceQuota by name (`get` on `resourcequotas` with that
+`CODING_MAX_CONCURRENT`, and is retried when a run ends and on each leader tick.
+The check reads one ResourceQuota by name (`get` on `resourcequotas` with that
 `resourceName` in the launcher's Role). If the quota is missing or can't be
 read, the launcher logs `kubernetes_resource_quota_missing` or
-`kubernetes_resource_quota_unreadable` once and launches as before. Size
-`CODING_MAX_CONCURRENT` to the quota too, so slots and quota agree.
+`kubernetes_resource_quota_unreadable` once and launches as before.
+
+The check can be stale: the quota may fill up between the check and the pod
+create, or `KUBERNETES_RESOURCE_QUOTA` may be unset. When the cluster still
+refuses the pod, the run does not fail. It returns to the coding queue (the
+control plane logs `coding run waiting for capacity: the cluster refused its
+pod`), keeps its place and its original queue clock, and is retried no sooner
+than about a minute later. It fails only when `CODING_QUEUE_TIMEOUT_SEC`
+expires, with `coding_queue_timeout`; a follow-up run on a pull request then
+also finishes the in-progress status it posted there, as failed. The queue stays first in, first out, so
+runs behind a refused run wait for it, and each retry happens about once a
+minute while the quota is full. A refused run shows `running` briefly, then
+`pending` again while it waits. When `KUBERNETES_RESOURCE_QUOTA` is unset and a
+pod is refused by a ResourceQuota, the launcher logs
+`kubernetes_resource_quota_unconfigured` once per process: set
+`KUBERNETES_RESOURCE_QUOTA` to that quota and grant the launcher `get` on it, so
+runs wait before they start instead of being refused at creation. The Docker
+launcher has no quota, so none of this applies there. In low-power mode, a run
+waiting in the coding queue keeps the coding proxy awake, as any queued run
+does.
+
+Size the quota for `CODING_MAX_CONCURRENT` times the run pod's requests, so
+slots and quota agree.
 
 Operating the queue across replicas:
 

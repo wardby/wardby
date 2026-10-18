@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApiException } from "@kubernetes/client-node";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { KubernetesForbiddenError } from "./kubernetes-api.js";
+import { KubernetesForbiddenError, KubernetesQuotaExceededError } from "./kubernetes-api.js";
 import { ClientNodeKubernetesApi } from "./kubernetes-client.js";
 
 // A throwaway kubeconfig so the constructor never reads the operator's real one;
@@ -57,5 +57,43 @@ describe("ClientNodeKubernetesApi reads", () => {
     const dep = await api.readDeployment("ns", "d").catch((e: unknown) => e);
     expect(dep).toBeInstanceOf(ApiException);
     expect((dep as ApiException<unknown>).code).toBe(500);
+  });
+});
+
+describe("ClientNodeKubernetesApi quota refusals", () => {
+  const saved = process.env.KUBECONFIG;
+  beforeAll(() => {
+    const dir = mkdtempSync(join(tmpdir(), "wardby-kubeconfig-"));
+    writeFileSync(join(dir, "config"), KUBECONFIG);
+    process.env.KUBECONFIG = join(dir, "config");
+  });
+  afterAll(() => {
+    if (saved === undefined) delete process.env.KUBECONFIG;
+    else process.env.KUBECONFIG = saved;
+  });
+  const pod = { metadata: { name: "p" } };
+  const refused = (body: string) => async () => {
+    throw new ApiException(403, "Forbidden", body, {});
+  };
+
+  it("maps a 403 'exceeded quota' on createPod to KubernetesQuotaExceededError without the body", async () => {
+    const body = JSON.stringify({
+      message:
+        "pods is forbidden: exceeded quota: wardby-coding, requested: limits.cpu=2, used: limits.cpu=7, limited: limits.cpu=8",
+    });
+    const api = client({ createNamespacedPod: refused(body) }, {});
+    const error = await api.createPod("ns", pod).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KubernetesQuotaExceededError);
+    expect((error as Error).message).toContain("pod/ns/p");
+    expect((error as Error).message).not.toContain("limits.cpu");
+    expect((error as KubernetesQuotaExceededError).quotaName).toBe("wardby-coding");
+    expect((error as Error).cause).toBeInstanceOf(ApiException);
+  });
+
+  it("rethrows a 403 that is not a quota refusal unchanged", async () => {
+    const api = client({ createNamespacedPod: refused('{"message":"pods is forbidden: no RBAC"}') }, {});
+    const error = await api.createPod("ns", pod).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiException);
+    expect((error as ApiException<unknown>).code).toBe(403);
   });
 });
