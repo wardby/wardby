@@ -3,7 +3,7 @@ id: troubleshooting/coding-workers
 title: Troubleshoot coding workers
 summary: Investigate coding-worker setup, isolation preflight, and safe failure handling.
 audience: operator
-tags: [coding-agents, docker, kubernetes, isolation, services, debug-trace, debugTraceMinutes, debugTraceMaxMb, maxOutputTokens, output-tokens, claude-code, codex, memory, CODING_MEMORY_MB, CODING_CPUS, out-of-memory]
+tags: [coding-agents, quota, coding_queue_timeout, docker, kubernetes, isolation, services, debug-trace, debugTraceMinutes, debugTraceMaxMb, maxOutputTokens, output-tokens, claude-code, codex, memory, CODING_MEMORY_MB, CODING_CPUS, out-of-memory]
 appliesTo: >=0.2.1
 ---
 
@@ -114,12 +114,25 @@ for where the log lives and what is redacted.
 
 ## Runs that wait for cluster capacity
 
-On Kubernetes with `KUBERNETES_RESOURCE_QUOTA` set, a run whose pod would not
-fit the namespace quota stays `pending` with `codingQueuedAt` set, like a run
-over `CODING_MAX_CONCURRENT`, and starts once other runs finish. A run still
-waiting after `CODING_QUEUE_TIMEOUT_SEC` fails with `coding_queue_timeout`:
-raise the quota, lower the run pods' size, or lower `CODING_MAX_CONCURRENT` so
-fewer runs compete.
+On Kubernetes, a run whose pod would not fit the namespace quota waits instead
+of failing. With `KUBERNETES_RESOURCE_QUOTA` set, it is held before it starts;
+without it, or if the quota fills up meanwhile, the cluster refuses the pod and
+the run returns to the queue. Either way it stays `pending` with
+`codingQueuedAt` set, like a run over `CODING_MAX_CONCURRENT`, and is retried
+(a refused run no sooner than about a minute later). A refused run shows
+`running` briefly, then `pending` again.
+
+A run still waiting after `CODING_QUEUE_TIMEOUT_SEC` fails with
+`coding_queue_timeout`. That can mean either the concurrency limit or the
+namespace quota. To tell which, look for the control-plane log line
+`coding run waiting for capacity: the cluster refused its pod` (quota), and run
+`kubectl describe resourcequota -n <namespace>` to compare used against hard
+limits. If the quota is full, raise it, lower the run pods' size, or lower
+`CODING_MAX_CONCURRENT` so fewer runs compete; size the quota for
+`CODING_MAX_CONCURRENT` times the run pod's requests. If the log line
+`kubernetes_resource_quota_unconfigured` appears, set `KUBERNETES_RESOURCE_QUOTA`
+to the named quota and grant the launcher `get` on it. See
+[the queue section](../../docs/coding-worker-isolation.md).
 
 A lead agent with `parallelDelegations` starts several coding runs together;
 expect some of them to queue when the lead fans out wider than the free slots.
