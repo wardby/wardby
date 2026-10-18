@@ -5,6 +5,7 @@ import {
   redactTokenShapedValues,
 } from "../coding/protocol.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
+import { redactExactSecretValues } from "../core/secret-spans.js";
 
 /**
  * Admin-requested debug trace (CodingTaskInput.debugTrace). When a run is
@@ -32,8 +33,8 @@ const EXTRA_TOKEN_PATTERNS = [/rrp_[A-Za-z0-9_-]{8,}/g, /rrg_[A-Za-z0-9_-]{8,}/g
 
 /** Redacts the given exact secrets, then every token-shaped value. */
 export function redactSecrets(text: string, secrets: readonly string[] = []): string {
-  let redacted = text;
-  for (const secret of secrets) if (secret) redacted = redacted.split(secret).join(REDACTED);
+  // The shared span-union redactor; any non-empty value counts here, as it always has.
+  let redacted = redactExactSecretValues(text, secrets, { marker: REDACTED, minLength: 1 });
   redacted = redactTokenShapedValues(redacted);
   return EXTRA_TOKEN_PATTERNS.reduce((value, pattern) => value.replace(pattern, REDACTED), redacted);
 }

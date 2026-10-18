@@ -42,7 +42,7 @@ import {
   redactExactSecretValues,
   secretSpans,
   withEscapedForms,
-} from "../sandbox/host-functions.js";
+} from "../core/secret-spans.js";
 
 const received = new Set<string>();
 

@@ -21,83 +21,18 @@ import { logger as defaultLogger, type Logger } from "../core/logger.js";
 import { createParserWorkerPool, type ParserWorkerPool } from "./parser-worker/pool.js";
 import { redactPii } from "./pii-redaction.js";
 
-/** Below this length a "secret" is too likely to coincidentally match ordinary log text — not worth the false-positive risk of redacting it. */
-export const MIN_REDACTABLE_SECRET_LENGTH = 6;
-
-/**
- * Each value plus its JSON-escaped form (`JSON.stringify(v).slice(1, -1)`) when that differs: a
- * value holding a quote, a backslash, a newline or a control character appears escaped once it is
- * inside JSON text (a console line, a log line). The one expansion every redaction list goes through.
- */
-export function withEscapedForms(values: Iterable<string>): string[] {
-  const out = new Set<string>();
-  for (const value of values) {
-    out.add(value);
-    out.add(JSON.stringify(value).slice(1, -1));
-  }
-  return [...out];
-}
-
-/**
- * The merged, sorted [start, end) spans of `text` covered by any occurrence of any value, overlapping
- * occurrences included (the search advances by one character, not by the value's length), so a
- * self-overlapping value such as `abcabcabc` is covered wherever any occurrence of it lies.
- * Values shorter than MIN_REDACTABLE_SECRET_LENGTH are ignored. Overlapping or adjacent spans merge.
- */
-export function secretSpans(text: string, values: Iterable<string>): Array<[number, number]> {
-  const spans: Array<[number, number]> = [];
-  for (const value of new Set(values)) {
-    if (value.length < MIN_REDACTABLE_SECRET_LENGTH) continue;
-    for (let at = text.indexOf(value); at >= 0; at = text.indexOf(value, at + 1)) spans.push([at, at + value.length]);
-  }
-  return mergeSpans(spans);
-}
-
-/** `spans` sorted and merged, overlapping or adjacent ones joined. */
-export function mergeSpans(spans: ReadonlyArray<readonly [number, number]>): Array<[number, number]> {
-  const sorted = spans.filter(([start, end]) => end > start).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  const merged: Array<[number, number]> = [];
-  for (const [start, end] of sorted) {
-    const last = merged[merged.length - 1];
-    if (last && start <= last[1]) last[1] = Math.max(last[1], end);
-    else merged.push([start, end]);
-  }
-  return merged;
-}
-
-/** `text` with each of the merged, sorted `spans` replaced by one `[REDACTED]`. */
-export function maskSpans(text: string, spans: ReadonlyArray<readonly [number, number]>): string {
-  let out = "";
-  let from = 0;
-  for (const [start, end] of spans) {
-    out += `${text.slice(from, start)}[REDACTED]`;
-    from = end;
-  }
-  return out + text.slice(from);
-}
-
-/**
- * `text` with the union of every occurrence of each value (secretSpans) replaced by `[REDACTED]`;
- * values shorter than MIN_REDACTABLE_SECRET_LENGTH are left alone. No character of any occurrence
- * survives, however occurrences overlap. The one redactor for secret values: the console bridge
- * here, the native gateway's log, and the native sandbox worker's stderr.
- */
-export function redactExactSecretValues(text: string, values: Iterable<string>): string {
-  return maskSpans(text, secretSpans(text, values));
-}
-
-/**
- * Whether `text` equals, contains, or is contained in any of `values`, under the same minimum
- * length as redactExactSecretValues. For a short field that is sent whole or not at all (a native
- * gateway error's cause code), where redacting part of it would still leave part of a value.
- */
-export function overlapsSecretValue(text: string, values: Iterable<string>): boolean {
-  for (const value of values) {
-    if (value.length < MIN_REDACTABLE_SECRET_LENGTH) continue;
-    if (text.includes(value) || value.includes(text)) return true;
-  }
-  return false;
-}
+// The shared secret redactor lives in core/secret-spans.ts (no imports, so every worker image can
+// ship it); re-exported here for the callers that already import it from this module.
+export {
+  maskSpans,
+  mergeSpans,
+  MIN_REDACTABLE_SECRET_LENGTH,
+  overlapsSecretValue,
+  redactExactSecretValues,
+  secretSpans,
+  withEscapedForms,
+} from "../core/secret-spans.js";
+import { redactExactSecretValues, withEscapedForms } from "../core/secret-spans.js";
 
 const FETCH_ALLOWED_HOSTS = parseAllowedHosts(process.env.WARDBY_FETCH_ALLOWED_HOSTS);
 let sharedParserPool: ParserWorkerPool | undefined;

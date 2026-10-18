@@ -4,6 +4,7 @@
  * (host-functions.ts) does the I/O. SigV4 signing is in secret-broker-sigv4.ts.
  */
 import { parseSigV4Value, type SecretBrokerConfig } from "../core/secret-broker-config.js";
+import { redactExactSecretValues } from "../core/secret-spans.js";
 
 export interface BrokeredSecret {
   name: string;
@@ -154,10 +155,9 @@ function encodedForms(value: string): string[] {
     .sort((a, b) => b.length - a.length);
 }
 
+/** The shared span-union redactor, with this site's marker (every form is already six or more characters). */
 function scrubText(text: string, forms: readonly string[]): string {
-  let out = text;
-  for (const form of forms) out = out.split(form).join(REDACTED);
-  return out;
+  return redactExactSecretValues(text, forms, { marker: REDACTED });
 }
 
 export function scrubBrokeredResponse<
