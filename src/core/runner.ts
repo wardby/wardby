@@ -933,6 +933,8 @@ export interface NativeRunToolsOptions {
   reviewHosts: ReviewHostRegistry | undefined;
   repoAccess: RepoAccessGate | undefined;
   issueTrackers: IssueTrackerRegistry | undefined;
+  /** What earlier requests of this run read (a sandbox run's gateway restores it per request); fresh otherwise. */
+  reviewReads?: ReviewReadLedger;
 }
 
 /** An attached user tool as the load step pinned it: its code, schema, and consented capabilities. */
@@ -957,7 +959,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
   // starts a fresh one, floored by the run's recorded fingerprint creates).
   const issueCreationCounters = new Map<string, RunCreationCounter>();
   // What this attempt's review tools have read, for repo_publish_review's unread_files gate.
-  const reviewReads = new ReviewReadLedger();
+  const reviewReads = options.reviewReads ?? new ReviewReadLedger();
   // One per attempt: admits this run's delegations one at a time (see the delegate branch).
   const delegationGate = createSerialGate();
   // The children this attempt's delegations have running, and the sub-agents whose delegation is

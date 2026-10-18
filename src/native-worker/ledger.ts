@@ -8,6 +8,7 @@
  */
 
 import type { Prisma, PrismaClient } from "#prisma";
+import { ReviewReadLedger } from "../core/review-reads.js";
 
 export type GatewayLedgerDb = Pick<
   PrismaClient,
@@ -22,6 +23,8 @@ export interface GatewaySessionRecord {
   budgetUsd: number;
   snapshot: unknown;
   networkReadyAt: Date | null;
+  /** The run's saved review reads (ReviewReadsState), or null before it reads a pull request. */
+  reviewReads?: unknown;
 }
 
 export interface CreateGatewaySessionInput {
@@ -78,6 +81,7 @@ function toSession(row: {
   budgetUsd: Prisma.Decimal;
   snapshot: Prisma.JsonValue;
   networkReadyAt: Date | null;
+  reviewReads?: Prisma.JsonValue;
 }): GatewaySessionRecord {
   return { ...row, budgetUsd: Number(row.budgetUsd) };
 }
@@ -109,6 +113,24 @@ export class PrismaGatewayLedger {
       where: { runId, networkReadyAt: null },
       data: { networkReadyAt: at },
     });
+  }
+
+  /**
+   * Adds one request's review reads to the session's saved ones, under the session's row lock:
+   * reads only add, so parallel tool calls of one run each keep what they read.
+   */
+  async mergeReviewReads(sessionId: string, reads: ReviewReadLedger): Promise<void> {
+    await this.db.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw<{ reviewReads: Prisma.JsonValue | null }[]>`
+        SELECT "reviewReads" FROM "NativeGatewaySession" WHERE "id" = ${sessionId} FOR UPDATE`;
+      if (!locked[0]) return;
+      const saved = ReviewReadLedger.fromJSON(locked[0].reviewReads);
+      saved.merge(reads);
+      await tx.nativeGatewaySession.update({
+        where: { id: sessionId },
+        data: { reviewReads: saved.toJSON() as unknown as Prisma.InputJsonValue },
+      });
+    }, LEDGER_TX);
   }
 
   async endSession(sessionId: string, status: "finished" | "cancelled"): Promise<void> {

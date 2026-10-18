@@ -546,10 +546,6 @@ set on the gateway, not the server.
 - A sandbox run has a maximum lifetime of 60 minutes. Past it the worker is
   stopped and the run fails with `native_sandbox_deadline_exceeded`.
 - The agent's own turn and budget limits still apply as for any native agent.
-- A code-review agent's `repo_publish_review` does not yet refuse a verdict
-  with `unread_files` in `sandbox` mode: that check applies to `control-plane`
-  runs only. A sandboxed reviewer still pages large diffs with `patchCursor`;
-  see [Large pull requests](code-review-agents.md#large-pull-requests).
 
 ## Stopping a run
 
