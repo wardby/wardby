@@ -225,4 +225,8 @@ values, and run capabilities. Outputs include:
   the content, or it redacts by exact value through the shared redactor.
   A test with fake values proves it.
 - **If exposure cannot be ruled out, the path does not ship.**
+- **Exception — operator diagnostics:** a bounded tail of an untrusted
+  process's output may go to operator logs (never to MCP, the viewer, run
+  records, or anything published) when it is redacted by exact value against
+  every secret value delivered to that process.
 - **Plans and reviews check every new output path against this rule.**
