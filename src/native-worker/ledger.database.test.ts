@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../core/db.js";
+import { ReviewReadLedger } from "../core/review-reads.js";
+import type { PullRequestView } from "../providers/review-host/types.js";
 import { PrismaGatewayLedger } from "./ledger.js";
 
 describe.skipIf(!process.env.DATABASE_URL)("PrismaGatewayLedger (database)", () => {
@@ -33,6 +35,37 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaGatewayLedger (database)", () 
     });
     return { run, hash, created };
   }
+
+  it("saves review reads across requests, merging parallel saves without losing any", async () => {
+    const { hash, created } = await session();
+    expect((await ledger.findSessionByCapabilityHash(hash))?.reviewReads).toBeNull();
+    const head = "b".repeat(40);
+    const file = (filename: string, patchStatus: "complete" | "later_page") => ({
+      filename,
+      status: "modified",
+      additions: 1,
+      deletions: 0,
+      patch: "x",
+      patchStatus,
+      patchTruncated: false,
+    });
+    const page = { headSha: head, files: [file("src/a.ts", "complete"), file("src/b.ts", "later_page")] };
+    const first = new ReviewReadLedger();
+    first.recordPage("o/r", 1, page as unknown as PullRequestView, false);
+    await ledger.mergeReviewReads(created.id, first);
+
+    // Two later requests each restore the saved reads and read one more file, at the same time.
+    const saved = (await ledger.findSessionByCapabilityHash(hash))!.reviewReads;
+    const left = ReviewReadLedger.fromJSON(saved);
+    const right = ReviewReadLedger.fromJSON(saved);
+    left.recordFileRead("o/r", head, "src/b.ts");
+    right.recordFileRead("o/r", head, "src/c.ts");
+    await Promise.all([ledger.mergeReviewReads(created.id, left), ledger.mergeReviewReads(created.id, right)]);
+
+    const restored = ReviewReadLedger.fromJSON((await ledger.findSessionByCapabilityHash(hash))!.reviewReads);
+    expect(restored.unreadCode("o/r", 1, head)).toEqual([]);
+    expect(restored.toJSON().fileReads[`o/r@${head}`]?.sort()).toEqual(["src/b.ts", "src/c.ts"]);
+  });
 
   it("finds an active session by capability hash, and no longer once it is finished", async () => {
     const { hash, created } = await session();

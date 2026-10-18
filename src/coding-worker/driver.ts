@@ -14,7 +14,7 @@ import { normalizeRegistryLockfiles } from "../coding/registry/lockfiles.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
 import { registryWorkerSetup } from "../coding/registry/worker-config.js";
 import { describeError } from "./debug-trace.js";
-import { safeWorkerErrorCode } from "./errors.js";
+import { safeWorkerErrorCode, streamFailureCode } from "./errors.js";
 import { disabledCodexSkills } from "./skills.js";
 import type { DependencyCacheModule, WorkerEvent, WorkerProgressEvent, WorkerRunOptions } from "./types.js";
 
@@ -347,28 +347,3 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
 }
 
 const BUDGET_EXHAUSTED = "budget_exhausted";
-
-/**
- * What a Codex stream failure was, as a fixed code: the error text itself can
- * carry prompts, repository content or provider detail, so only the matched
- * category ever leaves the worker. Checked in order; the proxy's own budget
- * refusal (a 429 carrying wardby_budget_exhausted) wins over the generic 429.
- */
-const STREAM_FAILURE_CODES: ReadonlyArray<readonly [RegExp, string]> = [
-  [/wardby_budget_exhausted/, BUDGET_EXHAUSTED],
-  [/\b40[13]\b|unauthori[sz]ed|forbidden/, "coding_stream_proxy_denied"],
-  [/\b429\b|too many requests|rate.?limit/, "coding_stream_rate_limited"],
-  [/\b5\d\d\b|bad gateway|service unavailable|internal server error/, "coding_stream_upstream_error"],
-  [/timed? ?out/, "coding_stream_timeout"],
-  [
-    /connection (?:refused|reset|closed)|econn(?:refused|reset)|enotfound|eai_again|error sending request|broken pipe|dns/,
-    "coding_stream_proxy_unreachable",
-  ],
-  [/exited with (?:code|signal)|exit code/, "coding_stream_agent_exited"],
-];
-
-function streamFailureCode(error: unknown): string {
-  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  for (const [pattern, code] of STREAM_FAILURE_CODES) if (pattern.test(message)) return code;
-  return "coding_stream_failed";
-}

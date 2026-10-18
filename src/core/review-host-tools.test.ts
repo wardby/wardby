@@ -998,21 +998,23 @@ describe("handleReviewHostTool unread-files publish guard", () => {
     return h;
   };
 
-  it("refuses APPROVE and CHANGES_REQUESTED while a code file of this head is unread, allows COMMENT", async () => {
+  it("refuses APPROVE while a code file of this head is unread, allows CHANGES_REQUESTED and COMMENT", async () => {
     const c = ctx({ hosts: { github: pageHost() }, reads: new ReviewReadLedger() });
     await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c);
-    for (const verdict of ["APPROVE", "CHANGES_REQUESTED"]) {
-      const out = JSON.parse(
+    const out = JSON.parse(
+      await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("APPROVE")), c),
+    );
+    expect(out).toMatchObject({ error: "unread_files" });
+    expect(JSON.stringify(out)).toContain("src/a.ts");
+    expect(out.message).toContain("publish CHANGES_REQUESTED and name the files you did not review");
+    expect(out.message).toContain("If the pull request has moved on, repo_pr_read returns the new headSha");
+    // An unfinished review must be able to block the merge: COMMENT completes the check as neutral.
+    for (const verdict of ["CHANGES_REQUESTED", "COMMENT"]) {
+      const published = JSON.parse(
         await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs(verdict)), c),
       );
-      expect(out).toMatchObject({ error: "unread_files" });
-      expect(JSON.stringify(out)).toContain("src/a.ts");
-      expect(out.message).toContain("If the pull request has moved on, repo_pr_read returns the new headSha");
+      expect(published.error).toBeUndefined();
     }
-    const comment = JSON.parse(
-      await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("COMMENT")), c),
-    );
-    expect(comment.error).toBeUndefined();
   });
 
   it("allows the verdict once the file was read with repo_read_file at the head", async () => {
