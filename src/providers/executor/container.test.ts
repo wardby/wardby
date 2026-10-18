@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -43,6 +43,7 @@ import { descriptionSha256 } from "../vcs/pr-description.js";
 import {
   CAPACITY_RETRY_BACKOFF_MS,
   ContainerExecutor,
+  type CapacityRequeueOutcome,
   DESCRIPTION_REFRESH_TIMEOUT_MS,
   RunCapabilityVault,
   type LinkedIssueRef,
@@ -257,21 +258,24 @@ class FakeStore implements ContainerExecutionStore {
   }
 
   /** Every requeueAfterCapacityRefusal call, and what the next ones answer (null = mirror the real store). */
-  requeues: Array<{ runId: string; owned: { claimId: string; planned?: JobHandle } }> = [];
-  requeueAnswer: boolean | null = null;
-  async requeueAfterCapacityRefusal(runId: string, owned: { claimId: string; planned?: JobHandle }): Promise<boolean> {
+  requeues: Array<{ runId: string; owned: { claimId?: string; planned?: JobHandle } }> = [];
+  requeueAnswer: CapacityRequeueOutcome | null = null;
+  async requeueAfterCapacityRefusal(
+    runId: string,
+    owned: { claimId?: string; planned?: JobHandle },
+  ): Promise<CapacityRequeueOutcome> {
     this.requeues.push({ runId, owned: structuredClone(owned) });
     if (this.requeueAnswer !== null) return this.requeueAnswer;
-    const holdsClaim = this.run.provisioningClaim === owned.claimId;
+    const holdsClaim = owned.claimId !== undefined && this.run.provisioningClaim === owned.claimId;
     const holdsPlanned =
       owned.planned !== undefined && JSON.stringify(this.run.jobHandle) === JSON.stringify(owned.planned);
-    if (!["pending", "running"].includes(this.run.status) || !(holdsClaim || holdsPlanned)) return false;
+    if (!["pending", "running"].includes(this.run.status) || !(holdsClaim || holdsPlanned)) return "not_owned";
     // Mirrors the real store: the run waits again, with no handle and no proxy session.
     this.run.status = "pending";
     this.run.provisioningClaim = null;
     this.run.jobHandle = null;
     this.run.proxySessionId = null;
-    return true;
+    return "requeued";
   }
 
   async complete(
@@ -3337,7 +3341,7 @@ describe("ContainerExecutor", () => {
 
     it("writes nothing more when the run is no longer this attempt's to requeue", async () => {
       const created = await refused();
-      created.store.requeueAnswer = false;
+      created.store.requeueAnswer = "not_owned";
       await created.executor.start("run-1");
       expect(created.store.requeues).toHaveLength(1);
       expect(created.store.terminations).toEqual([]);
@@ -3377,6 +3381,111 @@ describe("ContainerExecutor", () => {
       expect(created.store.run.status).toBe("succeeded");
       expect(created.store.terminations).toEqual([]);
       expect(created.sessions.creates).toBe(2);
+    });
+
+    it("removes the run's input artifact: the next attempt writes its own", async () => {
+      const created = await refused();
+      let written = false;
+      created.jobs.onLaunch = () => {
+        written = existsSync(created.jobs.lastSpec!.inputArtifact);
+      };
+      await created.executor.start("run-1");
+      expect(written).toBe(true);
+      expect(existsSync(join(created.root, "artifacts", "run-1"))).toBe(false);
+    });
+
+    it("fails the run the normal way when the session has spend recorded, removing the refused job", async () => {
+      const created = await refused();
+      created.store.requeueAnswer = "spend_recorded";
+      await created.executor.start("run-1");
+      expect(created.store.requeues).toHaveLength(1);
+      expect(created.store.run.status).toBe("failed");
+      expect(created.store.terminations).toHaveLength(1);
+      // The planned handle names the launcher's requeued record: stopped and removed, never left to relaunch.
+      expect(created.jobs.stops).toBe(1);
+      expect(created.jobs.removals).toBe(1);
+      expect(created.vcs.cleaned).toBe(1);
+      expect(created.observer.events.map((event) => event.stage)).toEqual([
+        "queued",
+        "prepared",
+        "stopping",
+        "terminal",
+        "cleanup",
+      ]);
+    });
+
+    it("cleans up a refused continuation that then times out in the queue", async () => {
+      const created = await refused();
+      Object.assign(created.store.run, { rootCodingRunId: "root-run", headRef: "wardby/run-root-run" });
+      await created.executor.start("run-1");
+      expect(created.vcs.notifyStartedCalls).toBe(1);
+      expect(created.store.run.status).toBe("pending");
+      // drainCodingQueue failed it with coding_queue_timeout, then hands it to the executor.
+      created.store.run.status = "failed";
+      await created.executor.cleanupQueueTimeout("run-1");
+      expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "failed", agentName: "knock-knock-implement" }]);
+      expect(created.vcs.notifyFinishedTargets[0]).toMatchObject({
+        runId: "run-1",
+        continuation: { rootRunId: "root-run" },
+      });
+      expect(existsSync(join(created.root, "artifacts", "run-1"))).toBe(false);
+      // Its backoff entry is gone too: a start is no longer skipped silently.
+      const before = created.observer.events.length;
+      await created.executor.start("run-1");
+      expect(created.observer.events.slice(before).map((event) => event.stage)).toContain("queued");
+    });
+
+    it("leaves a queue-timed-out run that never started a continuation without a host signal", async () => {
+      const created = await harness({ status: "failed" });
+      await created.executor.cleanupQueueTimeout("run-1");
+      expect(created.vcs.notifyFinishedCalls).toEqual([]);
+    });
+
+    describe("recovery after a crash between the refusal and the requeue", () => {
+      /** The launcher recorded the refusal; the store still says running with the planned handle. */
+      async function crashed() {
+        const planned = { backend: "fake", id: "planned-run-1" };
+        const created = await harness({ status: "running", jobHandle: planned, proxySessionId: "session-1" });
+        created.jobs.statusValue = { state: "pending", capacityRefused: true };
+        await mkdir(join(created.root, "artifacts", "run-1"), { recursive: true });
+        await writeFile(join(created.root, "artifacts", "run-1", "input.json"), "{}");
+        return { ...created, planned };
+      }
+
+      it("finishes the requeue instead of reporting the run active forever", async () => {
+        const created = await crashed();
+        await expect(created.executor.recover({ runId: "run-1", ...created.planned })).resolves.toEqual({
+          state: "active",
+        });
+        expect(created.store.requeues).toEqual([{ runId: "run-1", owned: { planned: created.planned } }]);
+        expect(created.store.run).toMatchObject({ status: "pending", jobHandle: null, proxySessionId: null });
+        expect(created.store.terminations).toEqual([]);
+        expect(created.store.heartbeats).toBe(0);
+        expect(created.jobs.stops).toBe(0);
+        expect(created.vcs.notifyFinishedCalls).toEqual([]);
+        expect(existsSync(join(created.root, "artifacts", "run-1"))).toBe(false);
+        expect(created.observer.events.map((event) => event.stage)).toEqual(["queued"]);
+      });
+
+      it("ends the run as lost when the session has spend recorded", async () => {
+        const created = await crashed();
+        created.store.requeueAnswer = "spend_recorded";
+        const recovered = await created.executor.recover({ runId: "run-1", ...created.planned });
+        expect(recovered.state).toBe("lost");
+        expect(created.store.run.status).toBe("lost");
+        expect(created.jobs.stops).toBe(1);
+        expect(created.jobs.removals).toBe(1);
+      });
+
+      it("reports a run another path already requeued or ended without touching it", async () => {
+        const created = await crashed();
+        created.store.requeueAnswer = "not_owned";
+        await expect(created.executor.recover({ runId: "run-1", ...created.planned })).resolves.toEqual({
+          state: "active",
+        });
+        expect(created.store.terminations).toEqual([]);
+        expect(existsSync(join(created.root, "artifacts", "run-1"))).toBe(true);
+      });
     });
 
     it("still fails the run when the store cannot requeue", async () => {

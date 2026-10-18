@@ -139,8 +139,20 @@ const CODING_SLOT_LOCK_SQL = "SELECT 1 AS locked FROM pg_advisory_xact_lock(7412
  * transaction turns it into a plain "unavailable" result.
  */
 class RunNoLongerActiveError extends Error {}
-/** Private sentinel: rolls back requeueAfterCapacityRefusal's transaction, which then returns false. */
-class NotRequeuedError extends Error {}
+/** Private sentinel: rolls back requeueAfterCapacityRefusal's transaction with the outcome it carries. */
+class NotRequeuedError extends Error {
+  constructor(readonly outcome: Exclude<CapacityRequeueOutcome, "requeued">) {
+    super(outcome);
+  }
+}
+
+/**
+ * What requeueAfterCapacityRefusal did: "requeued" the run waits in the queue again; "not_owned"
+ * the attempt no longer owns the run (another took it, or it ended), and nothing changed;
+ * "spend_recorded" its proxy session has spend against it, so nothing changed and the caller
+ * fails the run instead.
+ */
+export type CapacityRequeueOutcome = "requeued" | "not_owned" | "spend_recorded";
 
 function proxyProtocol(provider: string): ProxyProtocol {
   if (provider === "codex") return "openai-responses";
@@ -359,10 +371,14 @@ export interface ContainerExecutionStore {
    * Returns a run whose launch the backend refused for capacity (JobCapacityError) to the coding
    * queue: pending, no job handle, no proxy session, and queuedAt the run's dispatch time, so it
    * keeps its place and CODING_QUEUE_TIMEOUT_SEC still counts from when it first waited. Only while
-   * this attempt still owns it (the provisioning claim, or the planned handle it persisted); false
-   * otherwise, changing nothing. Optional: without it the refused run fails.
+   * the caller still owns it (the provisioning claim, or the planned handle it persisted — all
+   * recovery has after a crash), and only when its session has no spend; otherwise it changes
+   * nothing and says why. Optional: without it the refused run fails.
    */
-  requeueAfterCapacityRefusal?(runId: string, owned: { claimId: string; planned?: JobHandle }): Promise<boolean>;
+  requeueAfterCapacityRefusal?(
+    runId: string,
+    owned: { claimId?: string; planned?: JobHandle },
+  ): Promise<CapacityRequeueOutcome>;
   heartbeat(runId: string): Promise<void>;
   /**
    * The pull requests already opened for the same request as this run (same
@@ -734,40 +750,44 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     });
   }
 
-  async requeueAfterCapacityRefusal(runId: string, owned: { claimId: string; planned?: JobHandle }): Promise<boolean> {
+  async requeueAfterCapacityRefusal(
+    runId: string,
+    owned: { claimId?: string; planned?: JobHandle },
+  ): Promise<CapacityRequeueOutcome> {
+    const holds = [
+      ...(owned.claimId ? [{ jobBackend: PROVISIONING_BACKEND, jobHandle: owned.claimId }] : []),
+      ...(owned.planned ? [{ jobBackend: owned.planned.backend, jobHandle: owned.planned.id }] : []),
+    ];
+    if (holds.length === 0) return "not_owned";
     try {
-      return await this.db.$transaction(async (tx) => {
+      return await this.db.$transaction(async (tx): Promise<CapacityRequeueOutcome> => {
         const run = await tx.run.findUnique({ where: { id: runId }, select: { startedAt: true } });
-        if (!run) return false;
-        const holds = [
-          { jobBackend: PROVISIONING_BACKEND, jobHandle: owned.claimId },
-          ...(owned.planned ? [{ jobBackend: owned.planned.backend, jobHandle: owned.planned.id }] : []),
-        ];
+        if (!run) return "not_owned";
         // queuedAt is the dispatch time, not now: claimProvisioning clears it on every claim, and a
         // fresh value per refusal would keep a run the cluster refuses forever from timing out.
         const released = await tx.codingRun.updateMany({
           where: { runId, OR: holds, run: { status: { in: ["pending", "running"] } } },
           data: { jobBackend: null, jobHandle: null, queuedAt: run.startedAt },
         });
-        if (released.count !== 1) return false;
+        if (released.count !== 1) return "not_owned";
         // The pod never started, so its session served no request. A run has one session, and the
         // next attempt creates its own: drop this one, but never one with spend recorded against it.
         const session = await tx.codingProxySession.findUnique({
           where: { runId },
           select: { id: true, _count: { select: { requests: true } } },
         });
-        if (session && session._count.requests > 0) throw new NotRequeuedError();
+        if (session && session._count.requests > 0) throw new NotRequeuedError("spend_recorded");
         if (session) await tx.codingProxySession.delete({ where: { id: session.id } });
         const waiting = await tx.run.updateMany({
           where: { id: runId, status: { in: ["pending", "running"] } },
           data: { status: "pending", heartbeatAt: null },
         });
         // Ended (stopped, say) since the release above: roll the release back too.
-        if (waiting.count !== 1) throw new NotRequeuedError();
-        return true;
+        if (waiting.count !== 1) throw new NotRequeuedError("not_owned");
+        return "requeued";
       });
     } catch (err) {
-      if (err instanceof NotRequeuedError) return false;
+      if (err instanceof NotRequeuedError) return err.outcome;
       throw err;
     }
   }
@@ -1040,7 +1060,10 @@ export class ContainerExecutor implements Executor {
   private readonly now: () => Date;
   private readonly observer: CodingRunObserver;
   private readonly startedAt = new Map<string, number>();
-  /** When the cluster last refused each queued run's launch for capacity (this.now() ms). */
+  /**
+   * When the cluster last refused each queued run's launch for capacity (this.now() ms). Per
+   * process: another replica's drain may start the run again inside the backoff.
+   */
   private readonly capacityRefusedAt = new Map<string, number>();
 
   constructor(private readonly options: ContainerExecutorOptions) {
@@ -1154,6 +1177,9 @@ export class ContainerExecutor implements Executor {
       await this.abandon(run, "coding_job_status_unavailable");
       return { state: "lost", reason: "coding_job_status_unavailable" };
     }
+    if (status.state === "pending" && status.capacityRefused && this.options.store.requeueAfterCapacityRefusal) {
+      return this.finishCapacityRequeue(run, run.jobHandle);
+    }
     if (status.state === "pending" || status.state === "running") {
       await this.options.store.heartbeat(run.runId);
       return { state: "active" };
@@ -1266,17 +1292,24 @@ export class ContainerExecutor implements Executor {
         // there is no job to stop; nothing ran, so the session is dropped with the claim and a
         // fresh one is made on the next attempt.
         if (sessionId) await this.options.sessions.cancelSession(sessionId).catch(() => undefined);
-        if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
         const requeued = await this.options.store.requeueAfterCapacityRefusal(runId, {
           claimId,
           ...(planned ? { planned } : {}),
         });
-        if (requeued) {
-          this.recordCapacityRefusal(runId);
-          this.emit({ stage: "queued", runId });
-          containerLog.info({ runId }, "coding run waiting for capacity: the cluster refused its pod");
+        if (requeued !== "spend_recorded") {
+          if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+          if (requeued === "requeued") {
+            // The next attempt writes its own input; this one names a session that is gone.
+            await rm(this.artifactPath(runId), { recursive: true, force: true }).catch(() => undefined);
+            this.recordCapacityRefusal(runId);
+            this.emit({ stage: "queued", runId });
+            containerLog.info({ runId }, "coding run waiting for capacity: the cluster refused its pod");
+          }
+          return;
         }
-        return;
+        // Spend against a pod that never started: fail it like any launch error, and stop and remove
+        // the launcher's record through the planned handle so the run is never launched again.
+        if (planned) handle = planned;
       }
       if (sessionId) await this.options.sessions.cancelSession(sessionId).catch(() => undefined);
       if (handle) await this.options.jobs.stop(handle, "executor_failure").catch(() => undefined);
@@ -2306,6 +2339,54 @@ export class ContainerExecutor implements Executor {
     const current = await this.options.store.load(runId);
     if (!current) throw new Error("coding_run_not_found");
     return current;
+  }
+
+  /**
+   * Recovery's half of a capacity refusal: the launcher recorded it, but the process died before the
+   * store put the run back in the queue. The planned handle the attempt persisted is the ownership
+   * proof; the run waits in the queue again, never reported ended.
+   */
+  private async finishCapacityRequeue(run: ContainerRunSnapshot, planned: JobHandle): Promise<ExecutionRecoveryResult> {
+    const outcome = await this.options.store.requeueAfterCapacityRefusal!(run.runId, { planned });
+    if (outcome === "spend_recorded") {
+      await this.abandon(run, "coding_ambiguous_provisioning");
+      return { state: "lost", reason: "coding_ambiguous_provisioning" };
+    }
+    if (outcome === "not_owned") {
+      const current = await this.options.store.load(run.runId);
+      if (!current || !TERMINAL_STATUSES.has(current.status)) return { state: "active" };
+      await this.cleanupTerminal(current);
+      return { state: "terminal" };
+    }
+    // The session went with the requeue; the rest of what the dead attempt left is removed here.
+    this.options.capabilities.delete(run.runId);
+    const input = this.preflightForCleanup(run);
+    const workspace = input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null;
+    if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+    await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
+    this.emit({ stage: "queued", runId: run.runId });
+    containerLog.info({ runId: run.runId }, "coding run waiting for capacity: recovered a refusal its process left");
+    return { state: "active" };
+  }
+
+  /**
+   * After drainCodingQueue failed a queued run (coding_queue_timeout): releases what an earlier
+   * attempt the cluster refused left behind, as stop() does for a queued run. A refused
+   * continuation already marked its pull request as being worked on; that check is finished
+   * here. Best effort; the artifact is removed only where this process wrote it.
+   */
+  async cleanupQueueTimeout(runId: string): Promise<void> {
+    this.capacityRefusedAt.delete(runId);
+    this.options.capabilities.delete(runId);
+    const run = await this.options.store.load(runId);
+    if (run) {
+      const input = this.preflightForCleanup(run);
+      const workspace = input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null;
+      if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+      const target = workspace ?? this.continuationTargetOf(run);
+      if (target) await this.options.vcs.notifyContinuationFinished?.(target, "failed", { agentName: run.agentName });
+    }
+    await rm(this.artifactPath(runId), { recursive: true, force: true }).catch(() => undefined);
   }
 
   private recordCapacityRefusal(runId: string): void {

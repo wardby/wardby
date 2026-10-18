@@ -364,8 +364,9 @@ function isTerminal(phase: Phase): boolean {
 function statusFor(record: RunRecord): JobStatus {
   switch (record.phase) {
     case "provisioning":
-    case "requeued":
       return { state: "pending" };
+    case "requeued":
+      return { state: "pending", capacityRefused: true };
     case "active":
       return { state: "running" };
     case "succeeded":
@@ -711,11 +712,14 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
         if (!(error instanceof KubernetesConflictError)) throw error;
         const raced = await this.readRecord(names);
         if (!raced) throw error;
-        return this.existingLaunch(raced.record, specHash, handle);
+        if (!this.isRequeued(raced, specHash)) return this.existingLaunch(raced.record, specHash, handle);
+        // Requeued again by the other replica (its attempt was refused too): start over from that record.
+        return this.launch(spec);
       }
     } else {
       try {
-        // The record is the idempotency fence before any other cluster side effect.
+        // The record is the idempotency fence before any other cluster side effect. A quota refusing
+        // this create itself (a count/configmaps quota) is not a capacity refusal: it fails the run.
         await this.api.createConfigMap(this.namespace, this.recordConfigMap(names, record));
       } catch (error) {
         if (!(error instanceof KubernetesAlreadyExistsError)) throw error;

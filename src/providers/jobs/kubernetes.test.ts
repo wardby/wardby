@@ -2197,6 +2197,40 @@ describe("KubernetesJobLauncher quota refusal", () => {
     expect(["provisioning", "active"]).toContain(recordPhase(h));
   });
 
+  it("reports a requeued run as pending and refused for capacity, with nothing running", async () => {
+    const h = await harness();
+    refuse(h);
+    await h.launcher.launch(h.spec).catch(() => undefined);
+    const handle = { backend: "kubernetes", id: `wardby-coding/${h.names.token}` };
+    expect(await h.launcher.status(handle)).toEqual({ state: "pending", capacityRefused: true });
+    // Observing it again records nothing: it has no pod by design, and is not lost.
+    expect(await h.launcher.status(handle)).toEqual({ state: "pending", capacityRefused: true });
+    expect(recordPhase(h)).toBe("requeued");
+  });
+
+  it("provisions afresh when another replica rewrote the requeued record first", async () => {
+    const h = await harness();
+    refuse(h);
+    await h.launcher.launch(h.spec).catch(() => undefined);
+    h.api.onCreatePod = async () => {};
+    // Another replica rewrites the record (still requeued: its own attempt was refused too) between
+    // this launch's read and its replace, so the replace conflicts.
+    const replace = h.api.replaceConfigMap.bind(h.api);
+    let raced = false;
+    h.api.replaceConfigMap = async (namespace, name, body) => {
+      if (!raced && name === h.names.record) {
+        raced = true;
+        await replace(namespace, name, structuredClone(h.api.objects.get(`configmap/${namespace}/${name}`)!));
+      }
+      return replace(namespace, name, body);
+    };
+    const handle = await h.launcher.launch(h.spec);
+    expect(raced).toBe(true);
+    expect(handle).toEqual({ backend: "kubernetes", id: `wardby-coding/${h.names.token}` });
+    expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(true);
+    expect(["provisioning", "active"]).toContain(recordPhase(h));
+  });
+
   it("rejects a different spec for a requeued run", async () => {
     const h = await harness();
     refuse(h);

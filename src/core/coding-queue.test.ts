@@ -136,3 +136,59 @@ describe("drainCodingQueue self-defects", () => {
     expect(fileIssue).not.toHaveBeenCalled();
   });
 });
+
+describe("drainCodingQueue queue-timeout cleanup", () => {
+  it("asks the executor to clean up each run this drain timed out, after failing it", async () => {
+    const runs = [queuedRun()];
+    const seen: Array<{ runId: string; status: string }> = [];
+    const cleaning: Executor = {
+      ...executor,
+      cleanupQueueTimeout: vi.fn(async (runId: string) => {
+        seen.push({ runId, status: runs[0].status });
+      }),
+    };
+
+    await drainCodingQueue({
+      db: fakeQueue(runs),
+      executor: cleaning,
+      maxConcurrent: 1,
+      queueTimeoutSec: 60,
+      now: () => NOW,
+    });
+
+    expect(seen).toEqual([{ runId: "r1", status: "failed" }]);
+  });
+
+  it("does not clean up a run another drain already ended", async () => {
+    const runs = [queuedRun("failed")];
+    const cleanupQueueTimeout = vi.fn(async () => {});
+
+    await drainCodingQueue({
+      db: fakeQueue(runs),
+      executor: { ...executor, cleanupQueueTimeout },
+      maxConcurrent: 1,
+      queueTimeoutSec: 60,
+      now: () => NOW,
+    });
+
+    expect(cleanupQueueTimeout).not.toHaveBeenCalled();
+  });
+
+  it("keeps draining when the cleanup throws", async () => {
+    const runs = [queuedRun(), { ...queuedRun(), id: "r2" }];
+    const cleanupQueueTimeout = vi.fn(async () => {
+      throw new Error("host down");
+    });
+
+    const result = await drainCodingQueue({
+      db: fakeQueue(runs),
+      executor: { ...executor, cleanupQueueTimeout },
+      maxConcurrent: 1,
+      queueTimeoutSec: 60,
+      now: () => NOW,
+    });
+
+    expect(result.timedOut).toBe(2);
+    expect(cleanupQueueTimeout).toHaveBeenCalledTimes(2);
+  });
+});
