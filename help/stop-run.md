@@ -55,3 +55,4 @@ triggered but whose agent you can no longer execute returns a 403.
 - [Operate managed agents](operating-agents.md)
 - [Run native agents in a sandbox](native-sandbox.md)
 - [Slack notifications](slack-notifications.md)
+- [Run lost](errors/run-lost.md), for runs a deploy interrupted
