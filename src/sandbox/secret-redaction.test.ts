@@ -84,6 +84,20 @@ describe("console bridge redacts each value's escaped form too", () => {
     return lines.join("\n");
   }
 
+  it("masks a value logged as JSON text (console.log(JSON.stringify({ key: value }))), escaped twice", async () => {
+    for (const value of [PEM, 'fake"quoted-value-0011']) {
+      const line = await consoleLine([JSON.stringify({ key: value })], [value]);
+      const once = JSON.stringify(value).slice(1, -1);
+      const twice = JSON.stringify(once).slice(1, -1);
+      expect({ fragment: holdsValueFragment(line, [value, once, twice]), masked: line.includes("[REDACTED]") }).toEqual(
+        {
+          fragment: false,
+          masked: true,
+        },
+      );
+    }
+  });
+
   it("masks a multi-line PEM-shaped value and a value with a quote, backslash and tab", async () => {
     const line = await consoleLine([`key ${PEM}`, { nested: QUOTED }], [PEM, QUOTED]);
     const forms = [PEM, QUOTED].flatMap((value) => [value, JSON.stringify(value).slice(1, -1)]);
@@ -94,6 +108,11 @@ describe("console bridge redacts each value's escaped form too", () => {
 
 describe("withEscapedForms", () => {
   it("adds each value's JSON-escaped form when it differs", () => {
-    expect(withEscapedForms(["plain-value", 'a"b\nc'])).toEqual(["plain-value", 'a"b\nc', 'a\\"b\\nc']);
+    expect(withEscapedForms(["plain-value", 'a"b\nc'])).toEqual([
+      "plain-value",
+      'a"b\nc',
+      'a\\"b\\nc',
+      'a\\\\\\"b\\\\nc',
+    ]);
   });
 });

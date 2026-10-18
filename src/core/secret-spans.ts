@@ -22,16 +22,23 @@ export interface RedactOptions {
   minLength?: number;
 }
 
+/** `text` as it appears inside a JSON string literal (JSON.stringify without the quotes). */
+const jsonEscaped = (text: string) => JSON.stringify(text).slice(1, -1);
+
 /**
- * Each value plus its JSON-escaped form (`JSON.stringify(v).slice(1, -1)`) when that differs: a
- * value holding a quote, a backslash, a newline or a control character appears escaped once it is
- * inside JSON text (a console line, a log line). The one expansion every redaction list goes through.
+ * Each value plus its JSON-escaped forms, deduplicated: escaped once (`JSON.stringify(v).slice(1, -1)`)
+ * and twice. A value holding a quote, a backslash, a newline or a control character appears escaped
+ * once inside JSON text (a console line, a log line), and twice when that JSON text is itself
+ * logged as a string (`console.log(JSON.stringify({ key: value }))` through the console bridge, or
+ * a logger field that already holds JSON). The one expansion every redaction list goes through.
  */
 export function withEscapedForms(values: Iterable<string>): string[] {
   const out = new Set<string>();
   for (const value of values) {
+    const once = jsonEscaped(value);
     out.add(value);
-    out.add(JSON.stringify(value).slice(1, -1));
+    out.add(once);
+    out.add(jsonEscaped(once));
   }
   return [...out];
 }

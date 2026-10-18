@@ -172,6 +172,29 @@ describe("native worker stderr redaction", () => {
     expect(result.stderr).not.toContain(FAKE_SECRET);
   });
 
+  it("redacts a value in a logger field that already holds JSON text (escaped twice on the line)", () => {
+    const value = 'fake"logged\\json-value-0012';
+    const script = [
+      'import { installStderrRedaction, rememberSecretValue } from "./src/native-worker/stderr-redaction.ts";',
+      'import { logger } from "./src/core/logger.ts";',
+      "installStderrRedaction();",
+      `rememberSecretValue(${JSON.stringify(value)});`,
+      `logger.error({ body: JSON.stringify({ key: ${JSON.stringify(value)} }) }, "saw body");`,
+      "logger.flush();",
+    ].join("\n");
+    const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      cwd: REPO_ROOT,
+      env: {},
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    const once = JSON.stringify(value).slice(1, -1);
+    const twice = JSON.stringify(once).slice(1, -1);
+    expect(result.status).toBe(0);
+    expect(holdsValueFragment(result.stderr, [value, once, twice])).toBe(false);
+    expect(result.stderr.includes("[REDACTED]")).toBe(true);
+  });
+
   it("redacts a secret value written to stderr as a plain Uint8Array", () => {
     const script = [
       'import { installStderrRedaction, rememberSecretValue } from "./src/native-worker/stderr-redaction.ts";',
