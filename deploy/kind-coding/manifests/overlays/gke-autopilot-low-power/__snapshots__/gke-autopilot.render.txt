@@ -420,6 +420,8 @@ spec:
           value: dbos
         - name: DBOS__APPVERSION
           value: wardby-dbos-app-version
+        - name: SHUTDOWN_DRAIN_SECONDS
+          value: "540"
         - name: JOB_LAUNCHER
           value: kubernetes
         - name: KUBERNETES_NAMESPACE
@@ -554,7 +556,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       serviceAccountName: wardby-control-plane
-      terminationGracePeriodSeconds: 720
+      terminationGracePeriodSeconds: 600
       volumes:
       - emptyDir:
           sizeLimit: 3Gi

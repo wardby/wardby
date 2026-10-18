@@ -122,7 +122,8 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
     const recover = vi.spyOn(executor, "recover");
     const lateBy = HEARTBEAT_TIMEOUT_MS + 60_000;
     await db.run.update({ where: { id: run.id }, data: { startedAt: new Date(Date.now() - lateBy) } });
-    expect(await reconcileOnce(db, new Date(), HEARTBEAT_TIMEOUT_MS, executor)).toBe(0);
+    // Not the count it returns: it sweeps the whole database, which other test files share.
+    await reconcileOnce(db, new Date(), HEARTBEAT_TIMEOUT_MS, executor);
     expect(recover).not.toHaveBeenCalledWith(expect.objectContaining({ runId: run.id }));
     expect((await row(run.id)).status).toBe("running");
 

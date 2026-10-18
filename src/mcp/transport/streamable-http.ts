@@ -21,6 +21,15 @@ import { VIEWER_API_PREFIX, type ViewerApi } from "../../viewer/http.js";
 
 const httpLog = logger.child({ module: "streamable-http" });
 
+/**
+ * close() waits this long for open requests to finish, then cuts them. A
+ * connected MCP client's event stream never ends on its own, so without a
+ * limit close() would hold shutdown until the pod is killed. On Kubernetes
+ * the load balancer has already moved traffic away by then (preStop), and
+ * clients reconnect to another instance.
+ */
+export const CLOSE_GRACE_MS = 10_000;
+
 export interface HttpServerConfig {
   canonicalUri: string;
   httpBind: { host: string; port: number };
@@ -40,6 +49,8 @@ export interface StartHttpServerOptions {
   hostUserAuth?: { github?: HostUserCallbackDeps };
   /** The admin viewer API (/admin/api/*); absent = those paths answer 404. */
   viewer?: ViewerApi;
+  /** How long close() lets open requests finish before cutting them (default CLOSE_GRACE_MS). */
+  closeGraceMs?: number;
 }
 export interface HttpServerHandle {
   port: number;
@@ -72,7 +83,11 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
   ]);
   const validateHost = hostHeaderValidation([canonical.hostname]);
   const nodeHandler = toNodeHandler(createMcpHandler(opts.mcp.factory, { responseMode: opts.config.responseMode }));
+  // Requests still being answered, so a close that has to cut them can say which they were.
+  const open = new Map<ServerResponse, { method: string; path: string; startedAt: number }>();
   const server = createServer({ maxHeaderSize: 16 * 1024, requireHostHeader: false }, (req, res) => {
+    open.set(res, { method: req.method ?? "", path: (req.url ?? "").split("?")[0], startedAt: Date.now() });
+    res.once("close", () => open.delete(res));
     void route(req, res).catch((err: unknown) => {
       if (res.headersSent) {
         res.destroy();
@@ -261,7 +276,21 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
     close: () =>
       new Promise((resolve, reject) => {
         opts.viewer?.closeStreams();
-        server.close((err) => (err ? reject(err) : resolve()));
+        const cut = setTimeout(() => {
+          const now = Date.now();
+          const requests = [...open.values()].map((r) => ({
+            method: r.method,
+            path: r.path,
+            openSeconds: Math.round((now - r.startedAt) / 1000),
+          }));
+          httpLog.info({ requests }, "HTTP connections still open after the close grace; closing them");
+          server.closeAllConnections();
+        }, opts.closeGraceMs ?? CLOSE_GRACE_MS);
+        server.close((err) => {
+          clearTimeout(cut);
+          if (err) reject(err);
+          else resolve();
+        });
         server.closeIdleConnections();
       }),
   };

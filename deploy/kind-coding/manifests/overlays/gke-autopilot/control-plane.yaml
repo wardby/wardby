@@ -97,10 +97,12 @@ spec:
       # Evicted after coding runs and the headroom placeholder, never before
       # them (priority.yaml).
       priorityClassName: wardby-control-plane
-      # The 30s preStop drain below, then up to SHUTDOWN_DRAIN_SECONDS (600 by
-      # default) for the runs this pod is executing to finish, plus a margin
+      # The 30s preStop drain below, then up to SHUTDOWN_DRAIN_SECONDS (540,
+      # set below) for the runs this pod is executing to finish, plus a margin
       # to close the executor. An idle pod exits as soon as preStop ends.
-      terminationGracePeriodSeconds: 720
+      # Autopilot caps this at 600: a larger value is lowered to 600, which
+      # is why the drain limit sits below it.
+      terminationGracePeriodSeconds: 600
       # TRUE here, and false on every other pod in this namespace. This is the
       # one workload that talks to the Kubernetes API; the worker and the proxy
       # get no token at all.
@@ -281,6 +283,10 @@ spec:
             # with the in-process executor. Target-specific, so a placeholder.
             - name: DBOS__APPVERSION
               value: wardby-dbos-app-version
+            # Fits the 30s preStop, this drain and a 30s margin inside the
+            # 600s grace period above.
+            - name: SHUTDOWN_DRAIN_SECONDS
+              value: "540"
             - name: JOB_LAUNCHER
               value: kubernetes
             # KUBERNETES_CONTEXT is deliberately unset: ClientNodeKubernetesApi

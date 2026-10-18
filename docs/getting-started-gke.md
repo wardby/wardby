@@ -516,12 +516,17 @@ the step that was in flight runs again. Coding runs are Kubernetes Jobs and are 
   `up.sh` re-run whose source did not change, runs continue. When you deploy
   new code, the old pod first **drains**: after its 30-second `preStop` it
   stops the scheduler and waits for the runs it is executing to finish, up to
-  `SHUTDOWN_DRAIN_SECONDS` (default 600), while the new pod serves traffic.
+  `SHUTDOWN_DRAIN_SECONDS` (540 in the GKE manifest), while the new pod
+  serves traffic. Open HTTP connections, such as a connected MCP client's
+  stream, get 10 seconds to finish and are then closed; clients reconnect to
+  the new pod.
   An idle pod exits at once. A run still going after that limit is marked
   `lost`; if an `@`-mention started it, its status comment on GitHub says the
   request was interrupted and should be repeated. The manifest's
-  `terminationGracePeriodSeconds` (720) must stay above the drain limit plus
-  the `preStop` delay.
+  `terminationGracePeriodSeconds` (600) must stay above the drain limit plus
+  the `preStop` delay. Autopilot does not allow more than 600: a larger value
+  is lowered to 600, so to change the budget, lower `SHUTDOWN_DRAIN_SECONDS`
+  rather than raising the grace period.
 - **Data at rest and retention.** `dbos.operation_outputs` holds every step's
   output — prompts, model responses and full tool results — with no retention
   limit. Pruning finished workflows is the operator's job; see
