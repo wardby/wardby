@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { CONTINUATION_CLOSED_SENTENCE } from "../coding/continuation-wording.js";
+import { CONTINUATION_CLOSED_CATEGORY, CONTINUATION_CLOSED_SENTENCE } from "../coding/continuation-wording.js";
+import { PROTECTED_PATH_CATEGORY } from "../coding/protected-path-wording.js";
+import { SERVICE_UNREADY_CATEGORY } from "../coding/services/wording.js";
+import type { ProviderFailureClass } from "./provider-wording.js";
 import { ownerBudgetSentence } from "./budget-events.js";
 import { codingChildResult } from "./runner.js";
 
@@ -188,5 +191,49 @@ describe("codingChildResult error codes", () => {
       const out = JSON.parse(codingChildResult({ ...base, status: "failed", error: `${code}: detail` }));
       expect(out.errorCode === code).toBe(true);
     }
+  });
+  it("passes the container executor's terminal coding_failure_<category> codes through", () => {
+    const categories = [
+      "turn_limit",
+      SERVICE_UNREADY_CATEGORY,
+      "preflight",
+      "job",
+      "repo_access_unavailable",
+      "repo_access",
+      "github",
+      PROTECTED_PATH_CATEGORY,
+      CONTINUATION_CLOSED_CATEGORY,
+      "workspace",
+      "budget",
+      "artifact",
+      "cancelled",
+      "executor",
+    ];
+    for (const category of categories) {
+      const code = `coding_failure_${category}`;
+      const out = JSON.parse(codingChildResult({ ...base, status: "failed", error: `${code}:coding_diag_x` }));
+      expect({ category, passed: out.errorCode === code }).toEqual({ category, passed: true });
+    }
+  });
+
+  it("passes coding_provider_<class> through for every provider failure class", () => {
+    const classes: Record<ProviderFailureClass, true> = {
+      quota: true,
+      rate_limited: true,
+      unavailable: true,
+      rejected: true,
+    };
+    for (const providerClass of Object.keys(classes)) {
+      const code = `coding_provider_${providerClass}`;
+      const out = JSON.parse(codingChildResult({ ...base, status: "failed", error: code }));
+      expect({ providerClass, passed: out.errorCode === code }).toEqual({ providerClass, passed: true });
+    }
+  });
+
+  it("omits an unlisted coding_failure_ word", () => {
+    const out = JSON.parse(
+      codingChildResult({ ...base, status: "failed", error: "coding_failure_fakeword:coding_diag_x" }),
+    );
+    expect(out).not.toHaveProperty("errorCode");
   });
 });

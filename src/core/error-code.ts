@@ -49,10 +49,31 @@ export const GATEWAY_CAUSE_CODES: ReadonlySet<string> = new Set([
  * The codes wardby itself writes as a failed coding or native child run's Run.error (read from the
  * literals in core/dispatch.ts, core/coding-queue.ts, providers/executor/*, core/run-pricing.ts,
  * providers/llm/catalog-types.ts and the native sandbox). A parent may be told which of these a
- * child failed with; any other leading word is not shown. Includes GATEWAY_CAUSE_CODES.
+ * child failed with; any other leading word is not shown. Includes GATEWAY_CAUSE_CODES, and the
+ * container executor's terminal codes: `coding_failure_<category>` for every category
+ * failureCategory files a failure under (providers/executor/container.ts), and
+ * `coding_provider_<class>` for every provider failure class (core/provider-wording.ts).
  */
 export const CHILD_RUN_FAILURE_CODES: ReadonlySet<string> = new Set([
   ...GATEWAY_CAUSE_CODES,
+  "coding_failure_turn_limit",
+  "coding_failure_service_unready",
+  "coding_failure_preflight",
+  "coding_failure_job",
+  "coding_failure_repo_access_unavailable",
+  "coding_failure_repo_access",
+  "coding_failure_github",
+  "coding_failure_protected_path",
+  "coding_failure_continuation_closed",
+  "coding_failure_workspace",
+  "coding_failure_budget",
+  "coding_failure_artifact",
+  "coding_failure_cancelled",
+  "coding_failure_executor",
+  "coding_provider_quota",
+  "coding_provider_rate_limited",
+  "coding_provider_unavailable",
+  "coding_provider_rejected",
   "coding_ambiguous_provisioning",
   "coding_artifact_duplicate_key",
   "coding_artifact_invalid_json",
