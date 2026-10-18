@@ -32,7 +32,12 @@ import { NATIVE_SANDBOX_WARM_DELIVERY_FAILED, type WarmWorkerLauncher } from "./
 
 const launcherLog = logger.child({ module: "native-docker-launcher" });
 
-/** The worker holds no credentials; the tail is bounded so a noisy worker cannot flood the log. */
+/**
+ * Bounded, so a noisy worker cannot flood the log. The worker holds no long-lived credentials (only
+ * its run's gateway capability), but this is not a redacted channel: a tool's host calls can hand it
+ * secret values (`secrets.get`), which the gateway redacts per call from that tool's console output
+ * only, so a crash message that quotes a value the worker was handling reaches the log as is.
+ */
 export const WORKER_STDERR_TAIL_CHARS = 2000;
 
 export interface DockerResult {

@@ -72,6 +72,7 @@ export interface LlmUsage {
 
 export type LlmStreamEvent =
   | { type: "text"; delta: string }
+  /** `id` must be unique within a run, not only within a turn: a delegation keys its child run on it. */
   | { type: "tool_call"; id: string; name: string; argsJson: string }
   | { type: "done"; stopReason: string; usage: LlmUsage };
 
