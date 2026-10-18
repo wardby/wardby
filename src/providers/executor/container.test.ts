@@ -19,7 +19,14 @@ import { shippedCatalog } from "../llm/catalog.js";
 import { SHIPPED_CATALOG_VERSION } from "../llm/catalog-shipped.js";
 import { entryOf } from "../llm/catalog-types.js";
 import { ReviewHostError, type HostPermission } from "../review-host/types.js";
-import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "../jobs/types.js";
+import {
+  JobCapacityError,
+  type JobHandle,
+  type JobResult,
+  type JobSpec,
+  type JobStatus,
+  type WorkspaceJobLauncher,
+} from "../jobs/types.js";
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
@@ -34,6 +41,7 @@ import type {
 import { pullRequestBody, type DescriptionBaseline, type RelatedPullRequestEntry } from "../vcs/github.js";
 import { descriptionSha256 } from "../vcs/pr-description.js";
 import {
+  CAPACITY_RETRY_BACKOFF_MS,
   ContainerExecutor,
   DESCRIPTION_REFRESH_TIMEOUT_MS,
   RunCapabilityVault,
@@ -246,6 +254,24 @@ class FakeStore implements ContainerExecutionStore {
 
   async heartbeat(): Promise<void> {
     this.heartbeats += 1;
+  }
+
+  /** Every requeueAfterCapacityRefusal call, and what the next ones answer (null = mirror the real store). */
+  requeues: Array<{ runId: string; owned: { claimId: string; planned?: JobHandle } }> = [];
+  requeueAnswer: boolean | null = null;
+  async requeueAfterCapacityRefusal(runId: string, owned: { claimId: string; planned?: JobHandle }): Promise<boolean> {
+    this.requeues.push({ runId, owned: structuredClone(owned) });
+    if (this.requeueAnswer !== null) return this.requeueAnswer;
+    const holdsClaim = this.run.provisioningClaim === owned.claimId;
+    const holdsPlanned =
+      owned.planned !== undefined && JSON.stringify(this.run.jobHandle) === JSON.stringify(owned.planned);
+    if (!["pending", "running"].includes(this.run.status) || !(holdsClaim || holdsPlanned)) return false;
+    // Mirrors the real store: the run waits again, with no handle and no proxy session.
+    this.run.status = "pending";
+    this.run.provisioningClaim = null;
+    this.run.jobHandle = null;
+    this.run.proxySessionId = null;
+    return true;
   }
 
   async complete(
@@ -3265,6 +3291,101 @@ describe("ContainerExecutor", () => {
     await created.executor.start("run-1");
     expect(created.store.run.status).toBe("failed");
     expect(created.store.terminations.at(-1)).toMatchObject({ status: "failed" });
+  });
+
+  describe("a launch the cluster refuses for capacity (namespace quota)", () => {
+    async function refused() {
+      const clock = { now: new Date("2026-10-18T12:00:00Z") };
+      const created = await harness({ status: "pending" }, IMAGE, new InMemoryCodingRunObserver(), undefined, {
+        now: () => clock.now,
+      });
+      created.jobs.planned = { backend: "fake", id: "planned" };
+      created.jobs.launchError = new JobCapacityError("kubernetes_quota_exceeded");
+      return { ...created, clock };
+    }
+
+    it("returns the run to the queue instead of failing it", async () => {
+      const created = await refused();
+      await created.executor.start("run-1");
+
+      expect(created.store.terminations).toEqual([]);
+      expect(created.store.requeues).toEqual([
+        {
+          runId: "run-1",
+          owned: { claimId: expect.any(String), planned: { backend: "fake", id: "planned-run-1" } },
+        },
+      ]);
+      expect(created.store.run).toMatchObject({ status: "pending", jobHandle: null, proxySessionId: null });
+      expect(created.sessions.cancels).toBe(1);
+      expect(created.vcs.cleaned).toBe(1);
+      expect(created.vcs.notifyFinishedCalls).toEqual([]);
+      // The launcher already removed what it created; there is no job to stop.
+      expect(created.jobs.stops).toBe(0);
+      expect(created.jobs.removals).toBe(0);
+      await expect(created.capabilities.get("run-1")).rejects.toThrow("coding_capability_unavailable");
+      expect(created.observer.events.map((event) => event.stage)).toEqual(["queued", "prepared", "queued"]);
+      expect(created.observer.events.at(-1)).toMatchObject({ stage: "queued", runId: "run-1" });
+    });
+
+    it("passes only the claim when the backend has no planned handle", async () => {
+      const created = await refused();
+      created.jobs.planned = undefined;
+      await created.executor.start("run-1");
+      expect(created.store.requeues.map((call) => call.owned)).toEqual([{ claimId: expect.any(String) }]);
+      expect(created.store.run.status).toBe("pending");
+    });
+
+    it("writes nothing more when the run is no longer this attempt's to requeue", async () => {
+      const created = await refused();
+      created.store.requeueAnswer = false;
+      await created.executor.start("run-1");
+      expect(created.store.requeues).toHaveLength(1);
+      expect(created.store.terminations).toEqual([]);
+      expect(created.store.completions).toEqual([]);
+      expect(created.vcs.notifyFinishedCalls).toEqual([]);
+      expect(created.observer.events.map((event) => event.stage)).toEqual(["queued", "prepared"]);
+    });
+
+    it("waits out the backoff before trying the run again, then launches it", async () => {
+      const created = await refused();
+      await created.executor.start("run-1");
+      expect(created.jobs.launches).toBe(1);
+      const touched = () => ({
+        prepared: created.vcs.prepared,
+        cleaned: created.vcs.cleaned,
+        sessions: created.sessions.creates,
+        cancels: created.sessions.cancels,
+        persisted: created.store.persistedHandles.length,
+        heartbeats: created.store.heartbeats,
+        requeues: created.store.requeues.length,
+        capacityChecks: created.jobs.capacityChecks.length,
+      });
+      const before = touched();
+
+      // As drainCodingQueue would, just inside the backoff: nothing is claimed or launched.
+      created.jobs.launchError = undefined;
+      created.clock.now = new Date(created.clock.now.getTime() + CAPACITY_RETRY_BACKOFF_MS - 1);
+      await created.executor.start("run-1");
+      expect(created.jobs.launches).toBe(1);
+      expect(created.store.run).toMatchObject({ status: "pending", provisioningClaim: null, jobHandle: null });
+      expect(touched()).toEqual(before);
+
+      // After the backoff it is tried normally, and launches now that the cluster has room.
+      created.clock.now = new Date(created.clock.now.getTime() + 1);
+      await created.executor.start("run-1");
+      expect(created.jobs.launches).toBe(2);
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.store.terminations).toEqual([]);
+      expect(created.sessions.creates).toBe(2);
+    });
+
+    it("still fails the run when the store cannot requeue", async () => {
+      const created = await refused();
+      (created.store as { requeueAfterCapacityRefusal?: unknown }).requeueAfterCapacityRefusal = undefined;
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("failed");
+      expect(created.store.terminations).toHaveLength(1);
+    });
   });
 
   it("never relaunches a stale provisioning claim during recovery", async () => {

@@ -327,6 +327,172 @@ describe.skipIf(!process.env.DATABASE_URL)("coding concurrency (PostgreSQL, glob
     await retire([queuedRun, orphanRun]);
   });
 
+  describe("requeueAfterCapacityRefusal (the cluster refused the run's pod)", () => {
+    const planned = (runId: string) => ({ backend: "kubernetes", id: `job-${runId}` });
+
+    async function openSession(runId: string): Promise<void> {
+      await db.codingProxySession.create({
+        data: {
+          id: `session-${runId}`,
+          runId,
+          capabilityHash: `cap-${runId}`,
+          credentialRef: "env:OPENAI_API_KEY",
+          allowedModels: ["gpt-5.6-luna"],
+          deadlineAt: new Date(Date.now() + 3600_000),
+          budgetUsd: 1,
+        },
+      });
+    }
+
+    /** One refused launch, the way the executor drives the store: claim, session, planned handle, refusal. */
+    async function refuseOnce(store: PrismaContainerExecutionStore, runId: string, claimId: string): Promise<boolean> {
+      await expect(store.claimProvisioning(runId, claimId)).resolves.toBe("claimed");
+      await openSession(runId);
+      await store.persistHandle(runId, claimId, planned(runId));
+      return store.requeueAfterCapacityRefusal(runId, { claimId, planned: planned(runId) });
+    }
+
+    it("puts the run back in the queue at its dispatch time, only for the attempt that owns it", async () => {
+      const dispatchedAt = new Date(Date.now() - 10 * 60_000);
+      const runId = id("requeue");
+      await seed(runId, { startedAt: dispatchedAt });
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.claimProvisioning(runId, "claim-1")).resolves.toBe("claimed");
+      await openSession(runId);
+      await store.persistHandle(runId, "claim-1", planned(runId));
+      const owned = await db.run.findUniqueOrThrow({ where: { id: runId }, include: { codingRun: true } });
+      expect(owned.status).toBe("running");
+
+      // Another attempt's claim or handle: nothing changes.
+      await expect(store.requeueAfterCapacityRefusal(runId, { claimId: "claim-other" })).resolves.toBe(false);
+      await expect(
+        store.requeueAfterCapacityRefusal(runId, {
+          claimId: "claim-other",
+          planned: { backend: "kubernetes", id: "x" },
+        }),
+      ).resolves.toBe(false);
+      await expect(db.run.findUniqueOrThrow({ where: { id: runId }, include: { codingRun: true } })).resolves.toEqual(
+        owned,
+      );
+
+      await expect(
+        store.requeueAfterCapacityRefusal(runId, { claimId: "claim-1", planned: planned(runId) }),
+      ).resolves.toBe(true);
+      const row = await db.run.findUniqueOrThrow({ where: { id: runId }, include: { codingRun: true } });
+      expect(row.status).toBe("pending");
+      expect(row.heartbeatAt).toBeNull();
+      expect(row.codingRun).toMatchObject({ jobBackend: null, jobHandle: null });
+      // Its place and its queue clock are where it first waited (dispatch), not the refusal.
+      expect(row.codingRun?.queuedAt).toEqual(row.startedAt);
+      expect(row.startedAt).toEqual(dispatchedAt);
+      // Nothing ran, so the session is gone and the next attempt makes a fresh one.
+      expect(await db.codingProxySession.count({ where: { runId } })).toBe(0);
+      await expect(store.load(runId)).resolves.toMatchObject({
+        status: "pending",
+        jobHandle: null,
+        provisioningClaim: null,
+        proxySessionId: null,
+      });
+      // Waiting, not orphaned: the reconciler leaves it to the coding queue.
+      await reconcileOnce(db, new Date());
+      expect((await db.run.findUniqueOrThrow({ where: { id: runId } })).status).toBe("pending");
+
+      // A second call no longer owns anything.
+      await expect(
+        store.requeueAfterCapacityRefusal(runId, { claimId: "claim-1", planned: planned(runId) }),
+      ).resolves.toBe(false);
+      await retire([runId]);
+    });
+
+    it("releases a bare provisioning claim (a backend without a planned handle)", async () => {
+      const runId = id("requeue-claim");
+      await seed(runId);
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.claimProvisioning(runId, "claim-1")).resolves.toBe("claimed");
+      await expect(store.requeueAfterCapacityRefusal(runId, { claimId: "claim-1" })).resolves.toBe(true);
+      const row = await db.run.findUniqueOrThrow({ where: { id: runId }, include: { codingRun: true } });
+      expect(row.status).toBe("pending");
+      expect(row.codingRun).toMatchObject({ jobBackend: null, jobHandle: null, queuedAt: row.startedAt });
+      await retire([runId]);
+    });
+
+    it("leaves a run that already ended alone", async () => {
+      const runId = id("requeue-failed");
+      await seed(runId);
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.claimProvisioning(runId, "claim-1")).resolves.toBe("claimed");
+      await store.persistHandle(runId, "claim-1", planned(runId));
+      await db.run.update({
+        where: { id: runId },
+        data: { status: "failed", error: "stopped", finishedAt: new Date() },
+      });
+      await expect(
+        store.requeueAfterCapacityRefusal(runId, { claimId: "claim-1", planned: planned(runId) }),
+      ).resolves.toBe(false);
+      const row = await db.run.findUniqueOrThrow({ where: { id: runId }, include: { codingRun: true } });
+      expect(row.status).toBe("failed");
+      expect(row.codingRun).toMatchObject({ jobBackend: "kubernetes", jobHandle: `job-${runId}`, queuedAt: null });
+    });
+
+    it("never drops a session that has spend recorded: the run is left as it was", async () => {
+      const runId = id("requeue-spent");
+      await seed(runId);
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.claimProvisioning(runId, "claim-1")).resolves.toBe("claimed");
+      await openSession(runId);
+      await db.codingProxyRequest.create({
+        data: {
+          sessionId: `session-${runId}`,
+          requestKey: "r1",
+          requestFingerprint: "f1",
+          model: "gpt-5.6-luna",
+          reservationUsd: 0.01,
+          pricingVersion: "test",
+          pricingSnapshot: {},
+        },
+      });
+      await store.persistHandle(runId, "claim-1", planned(runId));
+      const before = await db.run.findUniqueOrThrow({ where: { id: runId }, include: { codingRun: true } });
+      await expect(
+        store.requeueAfterCapacityRefusal(runId, { claimId: "claim-1", planned: planned(runId) }),
+      ).resolves.toBe(false);
+      await expect(db.run.findUniqueOrThrow({ where: { id: runId }, include: { codingRun: true } })).resolves.toEqual(
+        before,
+      );
+      expect(await db.codingProxyRequest.count({ where: { sessionId: `session-${runId}` } })).toBe(1);
+      await retire([runId]);
+    });
+
+    it("a run refused again and again still times out in the queue, counted from its dispatch", async () => {
+      const queueTimeoutSec = 3600;
+      const dispatchedAt = new Date(Date.now() - 5 * 60_000);
+      const runId = id("requeue-timeout");
+      await seed(runId, { startedAt: dispatchedAt });
+      const store = new PrismaContainerExecutionStore(db);
+      const drain = async (now: Date) =>
+        drainCodingQueue({
+          db,
+          executor: recordingExecutor([]),
+          // No free slot: this drain only applies the timeout.
+          maxConcurrent: await activeSlotCount(),
+          queueTimeoutSec,
+          now: () => now,
+        });
+
+      for (const attempt of [1, 2, 3]) {
+        await expect(refuseOnce(store, runId, `claim-${attempt}`)).resolves.toBe(true);
+        await drain(new Date(dispatchedAt.getTime() + queueTimeoutSec * 1000 - 1000));
+        expect((await db.run.findUniqueOrThrow({ where: { id: runId } })).status).toBe("pending");
+      }
+
+      await drain(new Date(dispatchedAt.getTime() + queueTimeoutSec * 1000 + 1000));
+      const row = await db.run.findUniqueOrThrow({ where: { id: runId }, include: { codingRun: true } });
+      expect(row.status).toBe("failed");
+      expect(row.error).toBe(CODING_QUEUE_TIMEOUT_ERROR);
+      expect(row.codingRun?.failureCategory).toBe(CODING_QUEUE_TIMEOUT_ERROR);
+    });
+  });
+
   // Low-power idle rules. busy=true assertions run against the whole
   // database. A busy=false assertion cannot: many other database test files
   // create coding runs that sit in the default "pending" status (this file

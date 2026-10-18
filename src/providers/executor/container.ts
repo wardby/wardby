@@ -80,7 +80,13 @@ import {
   type BudgetEventView,
   type BudgetLimit,
 } from "../../core/budget-events.js";
-import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
+import {
+  JobCapacityError,
+  type JobHandle,
+  type JobResourceLimits,
+  type JobSpec,
+  type WorkspaceJobLauncher,
+} from "../jobs/types.js";
 import type {
   ContinuationOutcome,
   ContinuationTarget,
@@ -113,6 +119,11 @@ const TERMINAL_STATUSES = new Set(["succeeded", "failed", "refused", "lost", "bu
 const PROVISIONING_BACKEND = "provisioning";
 /** The longest a no-change fix round's description refresh may hold up the run's terminal write. */
 export const DESCRIPTION_REFRESH_TIMEOUT_MS = 60_000;
+/**
+ * After the cluster refuses a run's launch for capacity, how long this executor leaves the run
+ * waiting in the queue before trying it again (drainCodingQueue starts it every tick meanwhile).
+ */
+export const CAPACITY_RETRY_BACKOFF_MS = 60_000;
 /** How many runs above a root coding run are searched for the mention that started it. */
 const MAX_LINKED_ISSUE_RUN_DEPTH = 8;
 /** Serializes concurrency-slot claims across replicas. Distinct from the OAuth client lock (7412901). */
@@ -128,6 +139,8 @@ const CODING_SLOT_LOCK_SQL = "SELECT 1 AS locked FROM pg_advisory_xact_lock(7412
  * transaction turns it into a plain "unavailable" result.
  */
 class RunNoLongerActiveError extends Error {}
+/** Private sentinel: rolls back requeueAfterCapacityRefusal's transaction, which then returns false. */
+class NotRequeuedError extends Error {}
 
 function proxyProtocol(provider: string): ProxyProtocol {
   if (provider === "codex") return "openai-responses";
@@ -342,6 +355,14 @@ export interface ContainerExecutionStore {
    */
   markQueued?(runId: string): Promise<void>;
   persistHandle(runId: string, claimId: string, handle: JobHandle): Promise<void>;
+  /**
+   * Returns a run whose launch the backend refused for capacity (JobCapacityError) to the coding
+   * queue: pending, no job handle, no proxy session, and queuedAt the run's dispatch time, so it
+   * keeps its place and CODING_QUEUE_TIMEOUT_SEC still counts from when it first waited. Only while
+   * this attempt still owns it (the provisioning claim, or the planned handle it persisted); false
+   * otherwise, changing nothing. Optional: without it the refused run fails.
+   */
+  requeueAfterCapacityRefusal?(runId: string, owned: { claimId: string; planned?: JobHandle }): Promise<boolean>;
   heartbeat(runId: string): Promise<void>;
   /**
    * The pull requests already opened for the same request as this run (same
@@ -713,6 +734,44 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     });
   }
 
+  async requeueAfterCapacityRefusal(runId: string, owned: { claimId: string; planned?: JobHandle }): Promise<boolean> {
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const run = await tx.run.findUnique({ where: { id: runId }, select: { startedAt: true } });
+        if (!run) return false;
+        const holds = [
+          { jobBackend: PROVISIONING_BACKEND, jobHandle: owned.claimId },
+          ...(owned.planned ? [{ jobBackend: owned.planned.backend, jobHandle: owned.planned.id }] : []),
+        ];
+        // queuedAt is the dispatch time, not now: claimProvisioning clears it on every claim, and a
+        // fresh value per refusal would keep a run the cluster refuses forever from timing out.
+        const released = await tx.codingRun.updateMany({
+          where: { runId, OR: holds, run: { status: { in: ["pending", "running"] } } },
+          data: { jobBackend: null, jobHandle: null, queuedAt: run.startedAt },
+        });
+        if (released.count !== 1) return false;
+        // The pod never started, so its session served no request. A run has one session, and the
+        // next attempt creates its own: drop this one, but never one with spend recorded against it.
+        const session = await tx.codingProxySession.findUnique({
+          where: { runId },
+          select: { id: true, _count: { select: { requests: true } } },
+        });
+        if (session && session._count.requests > 0) throw new NotRequeuedError();
+        if (session) await tx.codingProxySession.delete({ where: { id: session.id } });
+        const waiting = await tx.run.updateMany({
+          where: { id: runId, status: { in: ["pending", "running"] } },
+          data: { status: "pending", heartbeatAt: null },
+        });
+        // Ended (stopped, say) since the release above: roll the release back too.
+        if (waiting.count !== 1) throw new NotRequeuedError();
+        return true;
+      });
+    } catch (err) {
+      if (err instanceof NotRequeuedError) return false;
+      throw err;
+    }
+  }
+
   async persistHandle(runId: string, claimId: string, handle: JobHandle): Promise<void> {
     await this.db.$transaction(async (tx) => {
       const coding = await tx.codingRun.findUnique({ where: { runId }, include: { run: true } });
@@ -981,6 +1040,8 @@ export class ContainerExecutor implements Executor {
   private readonly now: () => Date;
   private readonly observer: CodingRunObserver;
   private readonly startedAt = new Map<string, number>();
+  /** When the cluster last refused each queued run's launch for capacity (this.now() ms). */
+  private readonly capacityRefusedAt = new Map<string, number>();
 
   constructor(private readonly options: ContainerExecutorOptions) {
     this.artifactRoot = resolve(options.artifactRoot);
@@ -1032,6 +1093,8 @@ export class ContainerExecutor implements Executor {
   async start(runId: string): Promise<void> {
     const current = this.active.get(runId);
     if (current) return current;
+    // Refused for capacity a moment ago: keep its place and clock in the queue, untouched.
+    if (this.inCapacityBackoff(runId)) return;
     this.startedAt.set(runId, this.now().getTime());
     this.emit({ stage: "queued", runId });
     const execution = this.execute(runId).finally(async () => {
@@ -1110,6 +1173,7 @@ export class ContainerExecutor implements Executor {
     let sessionId = run.proxySessionId;
     let handle = run.jobHandle;
     let claimId: string | null = null;
+    let planned: JobHandle | undefined;
     let spendEnabled = Boolean(sessionId);
     try {
       // A launched run resumed after a restart is checked the way recover() checks it: its cost so
@@ -1163,13 +1227,14 @@ export class ContainerExecutor implements Executor {
         const spec = this.jobSpec(run, inputArtifact);
         // Backends whose handle is derivable (Kubernetes) persist it first, so a crash between the
         // launch and the write still leaves a handle `abandon()` can stop and remove the run with.
-        const planned = this.options.jobs.plannedHandle?.(spec);
+        planned = this.options.jobs.plannedHandle?.(spec);
         if (planned) await this.options.store.persistHandle(runId, claimId!, planned);
         handle = await this.whileHeartbeating(runId, () => this.options.jobs.launch(spec));
         if (planned && (planned.backend !== handle.backend || planned.id !== handle.id)) {
           throw new Error("coding_job_handle_mismatch");
         }
         await this.options.store.persistHandle(runId, claimId!, handle);
+        this.capacityRefusedAt.delete(runId);
         this.options.capabilities.delete(runId);
         this.emit({ stage: "launched", runId, jobId: handle.id, budgetReservedUsd: run.budgetUsd });
       }
@@ -1195,6 +1260,24 @@ export class ContainerExecutor implements Executor {
       }
     } catch (error) {
       this.options.capabilities.delete(runId);
+      if (error instanceof JobCapacityError && claimId && this.options.store.requeueAfterCapacityRefusal) {
+        // The cluster has no room for the pod (Kubernetes: the namespace quota): the run waits in
+        // the queue again rather than failing. The launcher already removed what it created, so
+        // there is no job to stop; nothing ran, so the session is dropped with the claim and a
+        // fresh one is made on the next attempt.
+        if (sessionId) await this.options.sessions.cancelSession(sessionId).catch(() => undefined);
+        if (workspace) await this.options.vcs.cleanup(workspace).catch(() => undefined);
+        const requeued = await this.options.store.requeueAfterCapacityRefusal(runId, {
+          claimId,
+          ...(planned ? { planned } : {}),
+        });
+        if (requeued) {
+          this.recordCapacityRefusal(runId);
+          this.emit({ stage: "queued", runId });
+          containerLog.info({ runId }, "coding run waiting for capacity: the cluster refused its pod");
+        }
+        return;
+      }
       if (sessionId) await this.options.sessions.cancelSession(sessionId).catch(() => undefined);
       if (handle) await this.options.jobs.stop(handle, "executor_failure").catch(() => undefined);
       const outOfBudget = spendEnabled && (await this.outOfBudget(sessionId));
@@ -2225,6 +2308,23 @@ export class ContainerExecutor implements Executor {
     return current;
   }
 
+  private recordCapacityRefusal(runId: string): void {
+    const now = this.now().getTime();
+    // Drop the ones whose backoff is over, so runs that never come back (timed out in the queue) do not pile up.
+    for (const [id, at] of this.capacityRefusedAt) {
+      if (now - at >= CAPACITY_RETRY_BACKOFF_MS) this.capacityRefusedAt.delete(id);
+    }
+    this.capacityRefusedAt.set(runId, now);
+  }
+
+  private inCapacityBackoff(runId: string): boolean {
+    const at = this.capacityRefusedAt.get(runId);
+    if (at === undefined) return false;
+    if (this.now().getTime() - at < CAPACITY_RETRY_BACKOFF_MS) return true;
+    this.capacityRefusedAt.delete(runId);
+    return false;
+  }
+
   /**
    * False when the launcher reports this run's job would not fit the cluster right now; the run
    * is then queued and drainCodingQueue retries it. Launchers and stores without the hooks, and
@@ -2594,6 +2694,7 @@ export class ContainerExecutor implements Executor {
     outcome: "succeeded" | "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
     audit?: CodingFailureAudit,
   ): void {
+    this.capacityRefusedAt.delete(run.runId);
     this.emit({
       stage: "terminal",
       runId: run.runId,
