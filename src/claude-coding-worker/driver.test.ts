@@ -290,7 +290,7 @@ describe("runClaudeCodingWorker", () => {
       [[retry("unknown", null), assistant("max_output_tokens"), failed], "coding_turn_failed"],
       // No code fits these: the turn still fails as before.
       [[assistant("invalid_request"), failed], "coding_turn_failed"],
-      [[assistant("billing_error"), failed], "coding_turn_failed"],
+      [[assistant("billing_error"), failed], "coding_stream_quota_exceeded"],
       [[failed], "coding_turn_failed"],
     ];
     for (const [messages, code] of cases) {

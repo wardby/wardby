@@ -71,6 +71,14 @@ setting. The default and the setting need a Claude Code worker image from
 Wardby 0.7.0 or later: an older pinned image still caps replies at 4096 tokens
 and rejects a run whose agent sets `maxOutputTokens`.
 
+## Runs refused because the provider is out of credit
+
+A diagnostic of `job_coding_stream_quota_exceeded` means the model provider
+behind the coding proxy refused the run because its account is out of credit or
+over a spend limit, not that the run's own budget ran out. Every run on that
+account fails the same way until the limit is raised; see the help article
+`errors/coding-stream-quota-exceeded`.
+
 ## Runs that die while running checks (out of memory)
 
 A run that fails with `coding_failure_executor` while it runs a linter, a type

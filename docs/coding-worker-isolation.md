@@ -74,7 +74,11 @@ again.
 If the stream still fails, the run's diagnostic (in the control-plane log,
 under the run's `coding_diag_…` id) names the cause as a fixed code, never the
 error text: `job_coding_stream_proxy_denied` (401/403 from the proxy),
-`job_coding_stream_rate_limited` (429), `job_coding_stream_upstream_error`
+`job_coding_stream_rate_limited` (429), `job_coding_stream_quota_exceeded`
+(the provider account is out of credit or over its spend limit; OpenAI answers
+that with a 429 too, and retrying never helps; see
+[the error article](../help/errors/coding-stream-quota-exceeded.md)),
+`job_coding_stream_upstream_error`
 (5xx), `job_coding_stream_timeout`, `job_coding_stream_proxy_unreachable`
 (the worker could not connect), `job_coding_stream_agent_exited` (the agent
 process exited without an HTTP error), or `job_coding_stream_failed` when none
@@ -82,10 +86,10 @@ of these match. A refusal because the run's budget is used up ends the run as
 out of budget instead.
 Claude Code reports most API failures as a failed turn rather than a dropped
 stream; the Claude worker reads the error type its SDK reports and uses the
-same codes (a rate limit, an overloaded or failing provider, a refused
-credential, a timeout or an unreachable proxy). A failed turn with no such
-error, or with one none of these codes covers (for example a billing error or
-an invalid request), is `job_coding_turn_failed`.
+same codes (a rate limit, an exhausted credit balance, an overloaded or
+failing provider, a refused credential, a timeout or an unreachable proxy). A
+failed turn with no such error, or with one none of these codes covers (for
+example an invalid request), is `job_coding_turn_failed`.
 
 The proxy side of the same request is in the coding proxy's log as
 `audit.*` events (`audit.request.reserved`, `audit.response.completed`,

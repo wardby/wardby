@@ -370,6 +370,16 @@ describe("runCodingWorker", () => {
         ["unexpected status 401 Unauthorized: secret-detail", "coding_stream_proxy_denied"],
         ["unexpected status 403 Forbidden", "coding_stream_proxy_denied"],
         ["exceeded retry limit, last status: 429 Too Many Requests", "coding_stream_rate_limited"],
+        // A spend limit or an empty balance is a 429 too, but retrying never helps: named apart.
+        [
+          'unexpected status 429 Too Many Requests: {"error":{"code":"insufficient_quota"}}',
+          "coding_stream_quota_exceeded",
+        ],
+        [
+          'exceeded retry limit, last status: 429 Too Many Requests: {"code":"project_spend_limit_exceeded"}',
+          "coding_stream_quota_exceeded",
+        ],
+        ["You exceeded your current quota, please check your plan and billing details", "coding_stream_quota_exceeded"],
         ["unexpected status 502 Bad Gateway: upstream_transport_error", "coding_stream_upstream_error"],
         ["stream disconnected: request timed out", "coding_stream_timeout"],
         [

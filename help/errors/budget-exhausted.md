@@ -141,3 +141,7 @@ budget once, at the lead (its reservation minus what the whole tree has spent),
 decided per period. `get_budget_group` reports `heldRuns` for each period.
 
 See also [Troubleshoot budgets and reservations](../troubleshooting/budgets.md).
+
+A coding run refused by the model provider itself because its account is out of
+credit or over a spend limit is a different failure; see
+[errors/coding-stream-quota-exceeded](coding-stream-quota-exceeded.md).

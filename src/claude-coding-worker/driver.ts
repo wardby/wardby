@@ -208,6 +208,8 @@ function claudeApiErrorCode(error: unknown, status: number | null, noResponse: b
   switch (error) {
     case "rate_limit":
       return "coding_stream_rate_limited";
+    case "billing_error":
+      return "coding_stream_quota_exceeded";
     case "overloaded":
     case "server_error":
       return "coding_stream_upstream_error";
