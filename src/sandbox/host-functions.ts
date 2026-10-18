@@ -22,20 +22,54 @@ import { createParserWorkerPool, type ParserWorkerPool } from "./parser-worker/p
 import { redactPii } from "./pii-redaction.js";
 
 /** Below this length a "secret" is too likely to coincidentally match ordinary log text — not worth the false-positive risk of redacting it. */
-const MIN_REDACTABLE_SECRET_LENGTH = 6;
+export const MIN_REDACTABLE_SECRET_LENGTH = 6;
 
 /**
- * `text` with every exact occurrence of each value replaced by `[REDACTED]`; values shorter than
- * MIN_REDACTABLE_SECRET_LENGTH are left alone. The one redactor for secret values a tool fetched:
- * the console bridge here, and the native sandbox worker's stderr.
+ * The merged, sorted [start, end) spans of `text` covered by any occurrence of any value, overlapping
+ * occurrences included (the search advances by one character, not by the value's length), so a
+ * self-overlapping value such as `abcabcabc` is covered wherever any occurrence of it lies.
+ * Values shorter than MIN_REDACTABLE_SECRET_LENGTH are ignored. Overlapping or adjacent spans merge.
+ */
+export function secretSpans(text: string, values: Iterable<string>): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  for (const value of new Set(values)) {
+    if (value.length < MIN_REDACTABLE_SECRET_LENGTH) continue;
+    for (let at = text.indexOf(value); at >= 0; at = text.indexOf(value, at + 1)) spans.push([at, at + value.length]);
+  }
+  return mergeSpans(spans);
+}
+
+/** `spans` sorted and merged, overlapping or adjacent ones joined. */
+export function mergeSpans(spans: ReadonlyArray<readonly [number, number]>): Array<[number, number]> {
+  const sorted = spans.filter(([start, end]) => end > start).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged: Array<[number, number]> = [];
+  for (const [start, end] of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && start <= last[1]) last[1] = Math.max(last[1], end);
+    else merged.push([start, end]);
+  }
+  return merged;
+}
+
+/** `text` with each of the merged, sorted `spans` replaced by one `[REDACTED]`. */
+export function maskSpans(text: string, spans: ReadonlyArray<readonly [number, number]>): string {
+  let out = "";
+  let from = 0;
+  for (const [start, end] of spans) {
+    out += `${text.slice(from, start)}[REDACTED]`;
+    from = end;
+  }
+  return out + text.slice(from);
+}
+
+/**
+ * `text` with the union of every occurrence of each value (secretSpans) replaced by `[REDACTED]`;
+ * values shorter than MIN_REDACTABLE_SECRET_LENGTH are left alone. No character of any occurrence
+ * survives, however occurrences overlap. The one redactor for secret values: the console bridge
+ * here, the native gateway's log, and the native sandbox worker's stderr.
  */
 export function redactExactSecretValues(text: string, values: Iterable<string>): string {
-  let out = text;
-  for (const value of values) {
-    if (value.length < MIN_REDACTABLE_SECRET_LENGTH) continue;
-    out = out.split(value).join("[REDACTED]");
-  }
-  return out;
+  return maskSpans(text, secretSpans(text, values));
 }
 
 /**
