@@ -14,7 +14,14 @@ import { scheduleStartFields } from "../core/schedule-start.js";
 import { createSecret, attachSecret } from "../core/secrets.js";
 import { createDatastore, attachDatastore } from "../core/datastores.js";
 import { guardDatastore } from "../core/secret-guarded-stores.js";
-import { createDbSecretWriteGuard } from "../core/secret-guard.js";
+import {
+  SecretCheckUnavailableError,
+  SecretInValueError,
+  createDbSecretWriteGuard,
+  loadAgentSecretValues,
+  secretNamesIn,
+  type NamedSecretValues,
+} from "../core/secret-guard.js";
 import { createWebhook } from "../core/webhooks.js";
 import { deriveJsonSchema } from "../sandbox/zod-params.js";
 import { findSameNamedAttachedTool, reservedToolNameReason } from "../core/tool-names.js";
@@ -350,6 +357,13 @@ export async function createFromBundle(
     }
   } else {
     const owner = ownerId; // hasOwner guarantees non-null
+    // The import is one writer for shared seeds: check them against the secrets
+    // of every agent it created, loaded once and fail closed if unreadable.
+    let importedSecrets: Promise<NamedSecretValues[]> | undefined;
+    const loadImportedSecrets = () =>
+      (importedSecrets ??= Promise.all(
+        [...agentIdMap.values()].map((id) => loadAgentSecretValues(db, cipher, id)),
+      ).then((all) => all.flat()));
     for (const sd of bundle.readSharedDatastores()) {
       let created: Awaited<ReturnType<typeof createDatastore>>;
       try {
@@ -373,6 +387,14 @@ export async function createFromBundle(
 
       for (const entry of sd.entries) {
         try {
+          let named: NamedSecretValues[];
+          try {
+            named = await loadImportedSecrets();
+          } catch {
+            throw new SecretCheckUnavailableError();
+          }
+          const names = secretNamesIn(entry.value, named);
+          if (names.length > 0) throw new SecretInValueError(names);
           await db.datastoreEntry.create({
             data: { datastoreId: created.id, key: entry.key, value: entry.value as Prisma.InputJsonValue, pii: false },
           });
