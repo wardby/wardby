@@ -44,7 +44,9 @@ export interface DependencyCacheTimeouts {
   readonly transferMs: number;
   readonly transferMsPerMiB: number;
   readonly installMs: number;
+  /** Packing a snapshot: 5 min, plus `tarMsPerMiB` (0.5 s) per MiB of the installed tree; never past the upload deadline. */
   readonly tarMs: number;
+  readonly tarMsPerMiB: number;
   readonly totalMs: number;
   readonly killGraceMs: number;
   readonly settleMs: number;
@@ -117,6 +119,14 @@ export interface DependencyCacheTestHooks {
 
 export declare const DEADLINE_SHARE: number;
 
+/** How long packing a snapshot may take for a tree of `treeBytes`: `tarMs` plus `tarMsPerMiB` per MiB,
+ *  cut to what is left before `uploadDeadline` (`limit: "upload_window"`). */
+export declare function archiveLimit(
+  timeouts: Pick<DependencyCacheTimeouts, "tarMs" | "tarMsPerMiB">,
+  treeBytes: number,
+  uploadDeadline: number | undefined,
+  now?: number,
+): { limit: "pack" | "upload_window"; limitMs: number };
 /** min(DEFAULT_TIMEOUTS.totalMs, DEADLINE_SHARE × time left before `deadlineAt`), ≥ 0; the default without a usable deadline. */
 export declare function dependencyCacheTimeLimit(deadlineAt: string | Date | number | undefined, now?: number): number;
 

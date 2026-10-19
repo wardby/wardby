@@ -1033,6 +1033,17 @@ Other bounds:
   sooner, so a short run keeps most of its time for the agent. A rebuild is
   bounded to 5 minutes, and the worker stops uploading once the proxy's upload
   window is nearly over.
+- Packing a snapshot (`tar` and gzip) gets 5 minutes plus 0.5 seconds per MiB
+  of the installed tree (a 1 GiB tree gets about 13.5 minutes), and never runs
+  past the upload window: a snapshot that couldn't be uploaded isn't packed.
+  gzip is CPU-bound, so a large tree on a 1-CPU pod can still run out of time.
+  The worker log then records `snapshot_skipped` with reason `timeout`, the
+  `stage` (`archive`, `scan` or `upload`), `writtenBytes`, `estimateBytes`,
+  `elapsedMs`, and the `limit` that fired (`pack`, `upload_window`, `upload`
+  or `deadline`) with its `limitMs`. No snapshot is stored, so every run on
+  that lockfile installs again. Give coding pods more CPU (`CODING_CPUS=2`);
+  if `limit` is `upload_window`, also raise
+  `WARDBY_DEPENDENCY_CACHE_UPLOAD_SECONDS`.
 - On Docker the workspace can be a tmpfs, whose inode limit can bind before
   its byte limit on a very large restore. The cache is then skipped
   (`internal_error`) and the run continues.

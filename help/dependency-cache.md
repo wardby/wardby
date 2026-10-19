@@ -3,7 +3,7 @@ id: dependency-cache
 title: Dependency cache for coding runs
 summary: Restore npm node_modules from a verified snapshot before a coding agent starts, so runs skip the install.
 audience: operator
-tags: [coding-agents, packages, npm, node_modules, dependency-cache, cache, npm-ci, lockfile, snapshot, restore, blob-store, workspaces, tool_unavailable, budget_too_small, snapshot_skipped, disk, sha_mismatch, unsafe_archive, dependencyCache, worker_input_failed, workerImageRef]
+tags: [coding-agents, packages, npm, node_modules, dependency-cache, cache, npm-ci, lockfile, snapshot, restore, blob-store, workspaces, tool_unavailable, budget_too_small, snapshot_skipped, timeout, CODING_CPUS, disk, sha_mismatch, unsafe_archive, dependencyCache, worker_input_failed, workerImageRef]
 appliesTo: >=0.6.1
 ---
 
@@ -127,6 +127,13 @@ or `nearest` snapshot is not a reason: the project shows `cold`.
 | `tool_unavailable`                                                                           | Claude Code tool-runner image predates the cache or is custom; rebuild it from the current tool-runner image. The proxy still seals on the run's first model request.                                                                              |
 | `already_started`, `invalid_deadline`                                                        | Not expected: a command ran before preparation, or the worker and tool runner images are from different releases.                                                                                                                                  |
 | `worker_input_failed` (the run fails)                                                        | A Codex or Claude Code worker image, or a `workerImageRef` image, older than the cache. Update the images, or rebuild the custom image `FROM` the current release, before turning the cache on.                                                    |
+
+Every run of a large project installing `cold` again usually means its
+snapshot is never stored. Check the worker log for `snapshot_skipped`: reason
+`timeout` with `stage: archive` means packing ran out of time. Packing gets 5
+minutes plus 0.5 seconds per MiB of the tree, and gzip is CPU-bound, so give
+coding pods more CPU (`CODING_CPUS=2`). With `limit: upload_window`, also raise
+`WARDBY_DEPENDENCY_CACHE_UPLOAD_SECONDS`.
 
 `rebuild` of `failed`, `timeout` or `unsealed` means native add-ons may be
 unbuilt; the agent can run `npm rebuild`.
