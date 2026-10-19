@@ -1,7 +1,7 @@
 ---
 id: errors/patch-cursor-malformed
 title: Patch cursor is malformed
-summary: A repo_pr_read call passed a patchCursor this deployment never issued, or one that was edited, damaged or too long.
+summary: A repo_pr_read call passed a patchCursor that is not a well-formed cursor for the pull request (edited, truncated, retyped or too long).
 audience: operator
 tags: [error, code-review-agents, repo_pr_read, patchCursor, patch_cursor_malformed, patch_cursor_stale]
 appliesTo: ">=0.6.1"
@@ -10,9 +10,10 @@ appliesTo: ">=0.6.1"
 # Patch cursor is malformed
 
 `repo_pr_read` returns `patch_cursor_malformed` to a review agent when the
-`patchCursor` it passed is not one wardby issued: the value was edited,
-truncated, damaged in transit, retyped by the model, or is over-long. Nothing
-is read and nothing else changes; the call can be made again.
+`patchCursor` it passed is not a well-formed cursor for this pull request: the
+value was edited, truncated, damaged in transit, retyped by the model, or is
+over-long. No page is returned or recorded as read, and nothing else changes;
+the call can be made again.
 
 A cursor is also tied to the pull request's head and compare. When the pull
 request has moved on since the cursor was issued, the call returns

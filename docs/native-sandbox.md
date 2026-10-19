@@ -636,12 +636,15 @@ included in the run's cost.
 A run's error appears in its `error` field in `get_run` and `list_runs`.
 
 For the gateway's `internal` code, the run's error carries a `causeCode` only
-when the failing error's message led with one of wardby's own declared codes
-and that code does not match a secret value the run can read; it is shown as
-`native_sandbox_gateway_error: internal: <causeCode>`. The gateway's own log
-line (`native gateway request failed`) carries `causeCode` as well, plus the
-error's message and stack with the run's secret values redacted, or only the
-error's name (`errName`) and `causeCode` when it could not read those values.
+when the failing error's message led with one of wardby's own declared codes,
+the gateway could read the run's secret values, and that code does not match
+any of them; it is shown as `native_sandbox_gateway_error: internal: <causeCode>`.
+Otherwise the error is just `native_sandbox_gateway_error: internal`. The
+gateway's own log line (`native gateway request failed`) carries the error with
+its message and stack, the run's secret values replaced by `[REDACTED]`, so the
+message itself starts with the code; it has no separate `causeCode` field. Only
+when the gateway could not read the run's secret values does the line carry just
+the error's name (`errName`) and a `causeCode` field, with no message.
 See [Native sandbox gateway error](../help/errors/native-sandbox-gateway-error.md).
 
 ## Roll back

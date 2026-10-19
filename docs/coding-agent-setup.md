@@ -15,6 +15,8 @@ registry) but never holds the run capability.
   for each enabled coding provider: `OPENAI_API_KEY` and/or
   `ANTHROPIC_API_KEY`.
 - The local database has the current Prisma migrations applied.
+- git 2.38 or newer on any machine that runs the wardby server outside the
+  shipped image (follow-up runs merge the pull request's target branch with it).
 - A GitHub App is installed on only the repository to be exercised. (Not needed
   for a repository on this machine; see
   [Local repositories](#local-repositories).) Grant it
