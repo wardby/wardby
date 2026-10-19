@@ -16,6 +16,7 @@
 
 ## Invariants
 
+- [Tool edits must serialize with new attachments](tool-edit-attachment-isolation.md) — Attachment checks protect another owner's capabilities only when concurrent MCP attachment participates in the same isolation contract.
 - [HTTP compatibility depends on bootstrap order](http-dispatcher-bootstrap.md) — A Kubernetes client import can change built-in fetch behavior even when jobs use Docker.
 - [Pricing races must use the persisted winner](run-pricing-first-writer.md) — Concurrent native attempts must reuse the catalog terms that won the conditional pricing write.
 - [Private datastore wrappers must reject shared methods](private-datastore-shared-boundary.md) — Prefix restrictions on private keys cannot authorize the provider shared-store methods.
@@ -44,14 +45,14 @@
 
 ## Coverage
 
-1. src/mcp/ (tools, auth, access, grants): covered 2026-10-17 (6 concepts)
+1. src/mcp/ (tools, auth, access, grants): covered 2026-10-19 (7 concepts)
 2. src/config/ and env handling: covered 2026-10-17 (2 concepts)
-3. src/core/ runner, scheduler, dispatch, budgets, delegation: covered 2026-10-17 (7 concepts)
-4. src/coding/ and src/coding-worker/, src/claude-*/ (coding runs, workers): covered 2026-10-17 (2 concepts)
-5. src/providers/coding-proxy/ (proxy, package registry): covered 2026-10-17 (3 concepts)
-6. src/sandbox/ and src/native-worker/ (native sandbox, isolation): covered 2026-10-17 (3 concepts)
-7. src/providers/ other seams (LLM, auth, storage, VCS, executors): covered 2026-10-17 (7 concepts)
-8. prisma/ (schema, migrations): covered 2026-10-17 (3 concepts)
+3. src/core/ runner, scheduler, dispatch, budgets, delegation: covered 2026-10-19 (8 concepts)
+4. src/coding/ and src/coding-worker/, src/claude-*/ (coding runs, workers): covered 2026-10-19 (2 concepts)
+5. src/providers/coding-proxy/ (proxy, package registry): covered 2026-10-19 (3 concepts)
+6. src/sandbox/ and src/native-worker/ (native sandbox, isolation): covered 2026-10-19 (3 concepts)
+7. src/providers/ other seams (LLM, auth, storage, VCS, executors): covered 2026-10-19 (7 concepts)
+8. prisma/ (schema, migrations): covered 2026-10-19 (3 concepts)
 9. deploy/ (Terraform, Kubernetes, scripts): covered 2026-10-17 (2 concepts)
-10. src/quickstart/, src/import/, the CLI files in src/: covered 2026-10-17 (4 concepts)
-11. src/viewer/, src/observability/, src/knowledge/, src/tools/: covered 2026-10-17 (2 concepts)
+10. src/quickstart/, src/import/, the CLI files in src/: covered 2026-10-19 (5 concepts)
+11. src/viewer/, src/observability/, src/knowledge/, src/tools/: covered 2026-10-19 (2 concepts)

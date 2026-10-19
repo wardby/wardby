@@ -9,9 +9,9 @@ sources:
   - id: index
     url: https://github.com/wardby/wardby/blob/744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be/prisma/migrations/20260925030000_tool_name_per_owner/migration.sql#L1-L11
   - id: import
-    url: https://github.com/wardby/wardby/blob/744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be/src/import/create.ts#L112-L128
+    url: https://github.com/wardby/wardby/blob/87d6ed5a5361fddede4703ea73452caa9bb25b12/src/import/create.ts#L124-L140
   - id: cli
-    url: https://github.com/wardby/wardby/blob/744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be/src/cli.ts#L311-L318
+    url: https://github.com/wardby/wardby/blob/87d6ed5a5361fddede4703ea73452caa9bb25b12/src/cli.ts#L314-L321
 wardby:
   schema: 1
   roles: [builder, reviewer]
@@ -27,16 +27,16 @@ wardby:
     - id: import
       repo: github:wardby/wardby
       path: src/import/create.ts
-      lines: [112, 128]
+      lines: [124, 140]
       symbol: createFromBundle
-      sha: 744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be
-      spanHash: sha256:ad43b75b4bbf957fbf0bffa2003df56bcf120d96261ef7d322101e69f1aaa903
+      sha: 87d6ed5a5361fddede4703ea73452caa9bb25b12
+      spanHash: sha256:30db448cacfddc9bfc7dbb19bdbbfd97c2aff1a1901c5b4a36a053c75351222a
     - id: cli
       repo: github:wardby/wardby
       path: src/cli.ts
-      lines: [311, 318]
+      lines: [314, 321]
       symbol: toolCreate
-      sha: 744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be
+      sha: 87d6ed5a5361fddede4703ea73452caa9bb25b12
       spanHash: sha256:bec79921d22a9a3264b81b1996624bb967a79acd2884f58659650ceda1db4b08
   confidence: high
 ---
@@ -47,6 +47,6 @@ PostgreSQL treats NULL owners as distinct in the compound tool-name index. CLI c
 
 [^index]: prisma/migrations/20260925030000_tool_name_per_owner/migration.sql, lines 1-11.
 
-[^import]: src/import/create.ts, lines 112-128.
+[^import]: src/import/create.ts, lines 124-140.
 
-[^cli]: src/cli.ts, lines 311-318.
+[^cli]: src/cli.ts, lines 314-321.

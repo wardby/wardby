@@ -9,11 +9,11 @@ sources:
   - id: registry
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/index.ts#L33-L47
   - id: execution
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/executor/composition.ts#L87-L126
+    url: https://github.com/wardby/wardby/blob/87d6ed5a5361fddede4703ea73452caa9bb25b12/src/providers/executor/composition.ts#L97-L135
   - id: model
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/llm/routing.ts#L67-L79
   - id: vcs
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/vcs/routing.ts#L26-L53
+    url: https://github.com/wardby/wardby/blob/87d6ed5a5361fddede4703ea73452caa9bb25b12/src/providers/vcs/routing.ts#L26-L56
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -46,10 +46,10 @@ wardby:
     - id: execution
       repo: github:wardby/wardby
       path: src/providers/executor/composition.ts
-      lines: [87, 126]
+      lines: [97, 135]
       symbol: buildConfiguredExecutor
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:68bdd107cd1d591a2ac700c253fa8449e7316347e48e23055fca286612685275
+      sha: 87d6ed5a5361fddede4703ea73452caa9bb25b12
+      spanHash: sha256:829b7e59070f9ecebb00b3f41ab0f369d17e2bb9f80f06fe05f665e4b84a76b7
     - id: model
       repo: github:wardby/wardby
       path: src/providers/llm/routing.ts
@@ -60,10 +60,10 @@ wardby:
     - id: vcs
       repo: github:wardby/wardby
       path: src/providers/vcs/routing.ts
-      lines: [26, 53]
+      lines: [26, 56]
       symbol: RoutingVcsProvider.target
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:338d5bc2f7ab53f490045d41a6db1639351fc50d958887c77afee4855d46cc6e
+      sha: 87d6ed5a5361fddede4703ea73452caa9bb25b12
+      spanHash: sha256:2d1d659bb3261a81a75affda38ff7343516eaa78cb98e9dcb9901e92889e4ab0
   confidence: high
 ---
 
@@ -82,8 +82,8 @@ Adapters own external API translation, lifecycle handles and error semantics. [P
 
 [^registry]: src/providers/index.ts, lines 33-47.
 
-[^execution]: src/providers/executor/composition.ts, lines 87-126.
+[^execution]: src/providers/executor/composition.ts, lines 97-135.
 
 [^model]: src/providers/llm/routing.ts, lines 67-79.
 
-[^vcs]: src/providers/vcs/routing.ts, lines 26-53.
+[^vcs]: src/providers/vcs/routing.ts, lines 26-56.

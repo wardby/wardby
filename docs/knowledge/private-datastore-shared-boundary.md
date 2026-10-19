@@ -9,7 +9,7 @@ sources:
   - id: deny
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/datastore/scoped.ts#L33-L52
   - id: wiring
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/runner.ts#L1368-L1388
+    url: https://github.com/wardby/wardby/blob/87d6ed5a5361fddede4703ea73452caa9bb25b12/src/core/runner.ts#L1566-L1583
   - id: shared
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/datastores.ts#L119-L151
 wardby:
@@ -27,10 +27,10 @@ wardby:
     - id: wiring
       repo: github:wardby/wardby
       path: src/core/runner.ts
-      lines: [1368, 1388]
+      lines: [1566, 1583]
       symbol: createNativeRunTools.scopedHost
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:61bb446c6ed2a1fde4c53951680588ac75de28d6b3219eebb8ae801cd4438816
+      sha: 87d6ed5a5361fddede4703ea73452caa9bb25b12
+      spanHash: sha256:64f24616313e56c64acc3854411117fc93c92fbc7adb1053ec669938cbe1de2f
     - id: shared
       repo: github:wardby/wardby
       path: src/core/datastores.ts
@@ -49,6 +49,6 @@ The private wrapper therefore rejects every shared method, including reads, even
 
 [^deny]: src/providers/datastore/scoped.ts, lines 33-52.
 
-[^wiring]: src/core/runner.ts, lines 1368-1388.
+[^wiring]: src/core/runner.ts, lines 1566-1583.
 
 [^shared]: src/core/datastores.ts, lines 119-151.
