@@ -243,7 +243,7 @@ export const REVIEW_HOST_TOOL_DEFS: LoadedTool[] = [
   {
     name: "repo_publish_review",
     description:
-      "Publishes your review of one pull request head, in one call: inline comments on diff lines (a ```suggestion block in a comment body becomes a one-click fix; comments on lines outside the diff move to the summary automatically), one summary comment that is edited in place on later reviews, and — only on the pull request this run was started for, by an agent linked with a check name — the check conclusion (APPROVE = success, CHANGES_REQUESTED = failure, COMMENT = neutral). Pass resolveThreadIds with the ids of your openThreads that this head fixes; only your own open threads on this PR are resolved, and the result lists resolvedThreadIds and skippedThreadIds. Returns published:false with reason stale_head if the PR moved on; then stop. On a link configured with waitForCi, nothing is published and an APPROVE is refused with a tool error — ci_failing while CI on this head is failing, ci_pending while it is still running — publish CHANGES_REQUESTED or COMMENT instead. APPROVE is refused with unread_files while a source, test or config file of this head that repo_pr_read listed has not been fully delivered or read with repo_read_file at headSha; if you cannot read them all, publish CHANGES_REQUESTED and name the files you did not review. APPROVE is also refused with file_list_truncated once a repo_pr_read of this head had fileListComplete false, until a complete repo_pr_read without sinceSha; call repo_pr_read without sinceSha if you passed it, or else publish CHANGES_REQUESTED or COMMENT. Every code file any repo_pr_read of the head listed stays gated: a sinceSha read never removes one.",
+      "Publishes your review of one pull request head, in one call: inline comments on diff lines (a ```suggestion block in a comment body becomes a one-click fix; comments on lines outside the diff move to the summary automatically), one summary comment that is edited in place on later reviews, and — only on the pull request this run was started for, by an agent linked with a check name — the check conclusion (APPROVE = success, CHANGES_REQUESTED = failure, COMMENT = neutral). Pass resolveThreadIds with the ids of your openThreads that this head fixes; only your own open threads on this PR are resolved, and the result lists resolvedThreadIds and skippedThreadIds. Returns published:false with reason stale_head if the PR moved on; then stop. On a link configured with waitForCi, nothing is published and an APPROVE is refused with a tool error — ci_failing while CI on this head is failing, ci_pending while it is still running — publish CHANGES_REQUESTED or COMMENT instead. APPROVE is refused with unread_files while a source, test or config file of this head that repo_pr_read listed has not been fully delivered or read with repo_read_file at headSha; if you cannot read them all, publish CHANGES_REQUESTED and name the files you did not review. APPROVE is also refused with file_list_truncated once a repo_pr_read of this head had fileListComplete false, until a complete repo_pr_read without sinceSha; call repo_pr_read without sinceSha if you passed it, or else publish CHANGES_REQUESTED or COMMENT. Every code file any repo_pr_read of the head listed stays gated: a sinceSha read never removes one. APPROVE is refused with full_read_required while you have no repo_pr_read of this head without sinceSha and one used a sinceSha other than the lastReviewedSha it returned.",
     jsonSchema: {
       type: "object",
       properties: {
@@ -533,6 +533,16 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
                 "An APPROVE would cover files you were never shown, so it is refused. " +
                 "If you passed sinceSha, call repo_pr_read again without it to get the whole list. " +
                 "Otherwise publish CHANGES_REQUESTED (or COMMENT) on what you read, and say the pull request is too large to review in full; splitting it lets it be reviewed.",
+            );
+          }
+          // A compare lists only what changed since its base; a base the host never vouched for
+          // (any ancestor the model picked) hides everything before it.
+          if (ctx.reads?.baseUnverified(link.repository, a.prNumber, a.headSha)) {
+            return error(
+              "full_read_required",
+              "You have not read the whole pull request at this head (repo_pr_read without sinceSha), and a repo_pr_read of it used a sinceSha other than the lastReviewedSha it returned, so files changed before that commit were never listed. " +
+                "An APPROVE is refused until you call repo_pr_read without sinceSha (or with sinceSha = lastReviewedSha) and read what it lists. " +
+                "If you cannot, publish CHANGES_REQUESTED (or COMMENT) on what you read.",
             );
           }
           const unread = ctx.reads?.unreadCode(link.repository, a.prNumber, a.headSha) ?? null;

@@ -1070,6 +1070,15 @@ complete `sinceSha` read does not. Otherwise the pull request is too large for a
 agent to approve: split it, or have a person review it. See
 [`file_list_truncated`](../help/errors/file-list-truncated.md).
 
+`sinceSha` accepts any earlier commit of the branch, so a read with it only
+narrows the review to the changes since that commit. `repo_publish_review`
+therefore refuses `APPROVE` with `full_read_required` while the run has no
+`repo_pr_read` of the head without `sinceSha` and one of its reads compared
+from a commit other than the `lastReviewedSha` that read returned. A commit
+named in the pull request's own text is never a safe base. The agent reads the
+whole pull request (no `sinceSha`) or passes `lastReviewedSha`; see
+[`full_read_required`](../help/errors/full-read-required.md).
+
 ### Mark ready when passing (`markReadyWhenPassing`)
 
 With Wardby 0.7.0 or later, `markReadyWhenPassing` (boolean, default
@@ -1255,6 +1264,7 @@ agent's links. Failures are always a JSON result, never a thrown error:
 | `patch_cursor_stale`            | `repo_pr_read` with a `patchCursor` issued for another head or compare (the pull request moved on). Call again without `patchCursor`.                                                                                                                                                                                                                                     |
 | `patch_cursor_malformed`        | `repo_pr_read` with a `patchCursor` it never issued (damaged, edited or over-long). Pass `nextPatchCursor` exactly as returned.                                                                                                                                                                                                                                           |
 | `unread_files`                  | `repo_publish_review` with `APPROVE` while a source, test or config file of the head was listed by `repo_pr_read` but never fully read (all pages via `patchCursor`, or `repo_read_file` at `headSha`). Read the files, or publish `CHANGES_REQUESTED` naming the files not reviewed.                                                                                     |
+| `full_read_required`            | `repo_publish_review` with `APPROVE` when the run read the head only with a `sinceSha` other than the `lastReviewedSha` that read returned. Call `repo_pr_read` without `sinceSha` (or with `lastReviewedSha`), or publish `CHANGES_REQUESTED`. See [Large pull requests](#large-pull-requests).                                                                          |
 | `file_list_truncated`           | `repo_publish_review` with `APPROVE` after a `repo_pr_read` of the head in the run had `fileListComplete: false` (more changed files than the host lists) and no complete read without `sinceSha` followed. Call `repo_pr_read` without `sinceSha` if it was passed; otherwise publish `CHANGES_REQUESTED` or `COMMENT`. See [Large pull requests](#large-pull-requests). |
 
 `repo_publish_review` also returns

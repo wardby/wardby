@@ -1050,6 +1050,57 @@ describe("handleReviewHostTool unread-files publish guard", () => {
     }
   });
 
+  it("refuses APPROVE with full_read_required after only a compare from a base the host never returned", async () => {
+    const base = "b".repeat(40);
+    let trusted: string | null = null;
+    const h = fakeHost();
+    h.readPullRequest = vi.fn(
+      async () =>
+        ({
+          number: 7,
+          headSha: SHA,
+          files: [codeFile("src/a.ts", "complete")],
+          nextPatchCursor: null,
+          comparedFrom: base,
+          lastReviewedSha: trusted,
+          lastCoveredSha: trusted,
+          fileListComplete: true,
+        }) as never,
+    );
+    const c = ctx({ hosts: { github: h }, reads: new ReviewReadLedger() });
+    const readSince = () =>
+      handleReviewHostTool(
+        "repo_pr_read",
+        JSON.stringify({ repository: WRITE.repository, prNumber: 7, sinceSha: base }),
+        c,
+      );
+    await readSince();
+    const out = JSON.parse(
+      await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("APPROVE")), c),
+    );
+    expect(out).toMatchObject({ error: "full_read_required" });
+    expect(out.message).toContain("call repo_pr_read without sinceSha");
+    expect(h.publishReview).not.toHaveBeenCalled();
+    for (const verdict of ["CHANGES_REQUESTED", "COMMENT"]) {
+      const published = JSON.parse(
+        await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs(verdict)), c),
+      );
+      expect(published.error).toBeUndefined();
+    }
+    // A fresh attempt whose compare base is the head the host returned may approve the delta.
+    trusted = base;
+    const fresh = ctx({ hosts: { github: h }, reads: new ReviewReadLedger() });
+    await handleReviewHostTool(
+      "repo_pr_read",
+      JSON.stringify({ repository: WRITE.repository, prNumber: 7, sinceSha: base }),
+      fresh,
+    );
+    const approved = JSON.parse(
+      await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("APPROVE")), fresh),
+    );
+    expect(approved.error).toBeUndefined();
+  });
+
   it("allows APPROVE once a later read of the head lists every file", async () => {
     const h = fakeHost();
     let complete = false;

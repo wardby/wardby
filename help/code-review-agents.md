@@ -266,7 +266,8 @@ was listed by `repo_pr_read` but not fully read. Page with `patchCursor`, or
 read the file with `repo_read_file` at `headSha`; if that is not possible,
 publish `CHANGES_REQUESTED` and name the files not reviewed. `APPROVE` is
 also refused with `file_list_truncated` while the head's file list is cut
-(`fileListComplete: false`).
+(`fileListComplete: false`), and with `full_read_required` when the run read
+the head only with a `sinceSha` other than the `lastReviewedSha` it returned.
 
 Add this to a reviewer's system prompt:
 

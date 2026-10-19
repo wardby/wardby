@@ -43,7 +43,6 @@ import {
   type StartCheckInput,
 } from "./types.js";
 
-/** GitHub lists at most 3 pages of 100 files; match it. */
 /** A pull request's file list is cut at this many files (as GitHub's host bounds its paging). */
 const MAX_PR_FILES = 1000;
 const MAX_LISTED_FILES = 1000;

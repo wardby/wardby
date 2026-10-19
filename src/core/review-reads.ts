@@ -12,6 +12,9 @@
  * sinceSha compare against any ancestor) never drops a file an earlier read listed. An APPROVE is
  * also refused while a list of the head was cut by the host (fileListComplete false) and no whole
  * list of the pull request (no sinceSha) has been seen: files past the cut were never listed.
+ * A compare's base is the model's choice (any ancestor of the head), so an APPROVE is refused
+ * with full_read_required while the attempt saw no whole list and some compare base is not a
+ * head the host vouches for (lastReviewedSha of the same read).
  * Every field only grows, so a merge is a plain union and both modes gate alike.
  */
 import { reviewGroup } from "../providers/review-host/patch-pages.js";
@@ -30,6 +33,10 @@ interface HeadReads {
   listCut: boolean;
   /** A whole file list of the pull request (not a compare) was seen for this head, so `code` holds every code file. */
   fullListSeen: boolean;
+  /** Every compare base (comparedFrom) a read of this head used. */
+  bases: Set<string>;
+  /** Heads the host returned as safe compare bases with reads of this head. */
+  trustedBases: Set<string>;
 }
 
 /** A ledger as JSON, for a sandbox run's gateway session. */
@@ -45,6 +52,8 @@ export interface ReviewReadsState {
       /** Absent in a state saved before the fields existed: read as false. */
       listCut?: boolean;
       fullListSeen?: boolean;
+      bases?: string[];
+      trustedBases?: string[];
     }
   >;
   fileReads: Record<string, string[]>;
@@ -75,7 +84,9 @@ export class ReviewReadLedger {
         !isStringArray(head.read) ||
         !isOffsets(head.deliveredTo) ||
         (head.listCut !== undefined && typeof head.listCut !== "boolean") ||
-        (head.fullListSeen !== undefined && typeof head.fullListSeen !== "boolean")
+        (head.fullListSeen !== undefined && typeof head.fullListSeen !== "boolean") ||
+        (head.bases !== undefined && !isStringArray(head.bases)) ||
+        (head.trustedBases !== undefined && !isStringArray(head.trustedBases))
       ) {
         return new ReviewReadLedger();
       }
@@ -86,6 +97,8 @@ export class ReviewReadLedger {
         deliveredTo: new Map(Object.entries(head.deliveredTo)),
         listCut: head.listCut ?? false,
         fullListSeen: head.fullListSeen ?? false,
+        bases: new Set(head.bases ?? []),
+        trustedBases: new Set(head.trustedBases ?? []),
       });
     }
     for (const [key, paths] of Object.entries(s.fileReads)) {
@@ -108,6 +121,8 @@ export class ReviewReadLedger {
             deliveredTo: Object.fromEntries(head.deliveredTo),
             listCut: head.listCut,
             fullListSeen: head.fullListSeen,
+            bases: [...head.bases],
+            trustedBases: [...head.trustedBases],
           },
         ]),
       ),
@@ -130,11 +145,15 @@ export class ReviewReadLedger {
           deliveredTo: new Map(theirs.deliveredTo),
           listCut: theirs.listCut,
           fullListSeen: theirs.fullListSeen,
+          bases: new Set(theirs.bases),
+          trustedBases: new Set(theirs.trustedBases),
         });
         continue;
       }
       mine.listCut ||= theirs.listCut;
       mine.fullListSeen ||= theirs.fullListSeen;
+      for (const sha of theirs.bases) mine.bases.add(sha);
+      for (const sha of theirs.trustedBases) mine.trustedBases.add(sha);
       mine.sawFirstPage ||= theirs.sawFirstPage;
       for (const path of theirs.code) mine.code.add(path);
       for (const path of theirs.read) mine.read.add(path);
@@ -163,7 +182,12 @@ export class ReviewReadLedger {
       deliveredTo: new Map<string, number>(),
       listCut: false,
       fullListSeen: false,
+      bases: new Set<string>(),
+      trustedBases: new Set<string>(),
     };
+    if (view.comparedFrom) head.bases.add(view.comparedFrom);
+    const trusted = view.lastReviewedSha;
+    if (trusted) head.trustedBases.add(trusted);
     if (!withCursor) head.sawFirstPage = true;
     if (view.fileListComplete === false) head.listCut = true;
     else if (!view.comparedFrom) head.fullListSeen = true;
@@ -212,5 +236,15 @@ export class ReviewReadLedger {
   fileListCut(repository: string, prNumber: number, headSha: string): boolean {
     const head = this.heads.get(this.headKey(repository, prNumber, headSha));
     return !!head?.sawFirstPage && head.listCut && !head.fullListSeen;
+  }
+
+  /**
+   * The attempt saw no whole list of the head, and some read compared from a base the host did not
+   * vouch for: files changed before that base were never listed (false when it never saw the first page).
+   */
+  baseUnverified(repository: string, prNumber: number, headSha: string): boolean {
+    const head = this.heads.get(this.headKey(repository, prNumber, headSha));
+    if (!head?.sawFirstPage || head.fullListSeen) return false;
+    return [...head.bases].some((base) => !head.trustedBases.has(base));
   }
 }

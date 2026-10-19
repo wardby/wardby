@@ -213,6 +213,53 @@ describe("ReviewReadLedger state", () => {
     });
   });
 
+  describe("a compare from a base the host did not vouch for", () => {
+    const B1 = "b".repeat(40);
+    const B2 = "c".repeat(40);
+    const read = (comparedFrom: string | null, trusted: string | null) =>
+      ({
+        headSha: HEAD,
+        files: [f("src/a.ts", "complete")],
+        nextPatchCursor: null,
+        comparedFrom,
+        lastReviewedSha: trusted,
+        lastCoveredSha: trusted,
+        fileListComplete: true,
+      }) as unknown as PullRequestView;
+
+    it("is unverified on a first review that compares from any ancestor (control plane)", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, read(B1, null), false);
+      expect(reads.unreadCode("o/r", 1, HEAD)).toEqual([]);
+      expect(reads.baseUnverified("o/r", 1, HEAD)).toBe(true);
+      // A whole list of the pull request settles it.
+      reads.recordPage("o/r", 1, read(null, null), false);
+      expect(reads.baseUnverified("o/r", 1, HEAD)).toBe(false);
+    });
+
+    it("is verified when the base is the head the same read vouched for, and not for another base", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, read(B1, B1), false);
+      expect(reads.baseUnverified("o/r", 1, HEAD)).toBe(false);
+      reads.recordPage("o/r", 1, read(B2, B1), false);
+      expect(reads.baseUnverified("o/r", 1, HEAD)).toBe(true);
+      expect(reads.baseUnverified("o/r", 2, HEAD)).toBe(false);
+    });
+
+    it("is unverified the same way in sandbox mode (saved, restored and merged)", () => {
+      const saved = new ReviewReadLedger();
+      const request = ReviewReadLedger.fromJSON(JSON.parse(JSON.stringify(saved.toJSON())));
+      request.recordPage("o/r", 1, read(B1, null), false);
+      saved.merge(request);
+      const restored = ReviewReadLedger.fromJSON(JSON.parse(JSON.stringify(saved.toJSON())));
+      expect(restored.baseUnverified("o/r", 1, HEAD)).toBe(true);
+      const trusted = ReviewReadLedger.fromJSON(restored.toJSON());
+      trusted.recordPage("o/r", 1, read(B1, B1), false);
+      restored.merge(trusted);
+      expect(restored.baseUnverified("o/r", 1, HEAD)).toBe(false);
+    });
+  });
+
   describe("a file list the host cut", () => {
     const cut = (files: PullRequestFileView[]) =>
       ({ headSha: HEAD, files, nextPatchCursor: null, fileListComplete: false }) as unknown as PullRequestView;
@@ -229,7 +276,7 @@ describe("ReviewReadLedger state", () => {
       expect(reads.fileListCut("o/r", 2, HEAD)).toBe(false);
     });
 
-    it("follows the latest list: a whole list after a cut one clears it", () => {
+    it("a whole full list after a cut one clears it", () => {
       const reads = new ReviewReadLedger();
       reads.recordPage("o/r", 1, cut([f("src/a.ts", "complete")]), false);
       reads.recordPage("o/r", 1, whole([f("src/a.ts", "complete")]), false);
@@ -243,7 +290,7 @@ describe("ReviewReadLedger state", () => {
       expect(ReviewReadLedger.fromJSON(state).fileListCut("o/r", 1, HEAD)).toBe(true);
       for (const head of Object.values(state.heads)) {
         delete head.listCut;
-        delete head.lists;
+        delete head.fullListSeen;
       }
       expect(ReviewReadLedger.fromJSON(state).fileListCut("o/r", 1, HEAD)).toBe(false);
       expect(ReviewReadLedger.fromJSON(state).unreadCode("o/r", 1, HEAD)).toEqual([]);
