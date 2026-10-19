@@ -5,15 +5,16 @@
  * of refusing it as a duplicate.
  */
 import type { PrismaClient } from "#prisma";
-import { DRIVABLE } from "./run-status.js";
 
 export type DelegationChildDb = Pick<PrismaClient, "run">;
 
 /**
  * The child a delegation call already created, if any: exact key first (Run.parentCallId, the
  * model's tool-call id), then (legacy rows created before parentCallId existed) the single
- * drivable child of that agent with no key. Two or more such legacy children are ambiguous and
- * adopt none. `createdAt` is the child row's creation time (Run.startedAt, set when the row is
+ * child of that agent with no key, in any status: it may have finished while the lead was
+ * between deploys, and its result is what the re-run step is owed. A run delegates to each
+ * sub-agent at most once, so a lead has no older finished child of the same agent to confuse it
+ * with. Two or more such legacy children are ambiguous and adopt none. `createdAt` is the child row's creation time (Run.startedAt, set when the row is
  * written and never rewritten), from which the caller measures its wait bound.
  */
 export async function findDelegationChild(
@@ -32,7 +33,7 @@ export async function findDelegationChild(
     if (keyed) return found(keyed);
   }
   const legacy = await db.run.findMany({
-    where: { parentRunId, agentId: childAgentId, parentCallId: null, status: { in: [...DRIVABLE] } },
+    where: { parentRunId, agentId: childAgentId, parentCallId: null },
     select,
     take: 2,
   });
