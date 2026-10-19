@@ -113,6 +113,37 @@ describe("estimateInterrupted", () => {
     expect(costUsd).toBe(0.5);
   });
 
+  it("treats message_start's output count as a floor: the relayed output wins when larger", () => {
+    const facts = {
+      readUsage: { inputTokens: 1_000, cachedInputTokens: 0, cacheWriteTokens: 0 },
+      outputFloorTokens: 1,
+      relayedOutputBytes: 60_000,
+      reservationUsd: 2,
+      maxOutputTokens: 32_000,
+    };
+    expect(estimateInterrupted(facts, PRICE).usage.outputTokens).toBe(20_000);
+    expect(estimateInterrupted({ ...facts, relayedOutputBytes: 1 }, PRICE).usage.outputTokens).toBe(1);
+    expect(estimateInterrupted({ ...facts, outputFloorTokens: 25_000 }, PRICE).usage.outputTokens).toBe(25_000);
+  });
+
+  it("with nothing relayed and no run median, settles at the output the hold reserved for", () => {
+    const readUsage = { inputTokens: 1_000, cachedInputTokens: 0, cacheWriteTokens: 0 };
+    const base = { relayedOutputBytes: 0, reservationUsd: 2.12, maxOutputTokens: 32_000 };
+    expect(estimateInterrupted({ ...base, readUsage, outputFloorTokens: 1 }, PRICE).usage.outputTokens).toBe(32_000);
+    const withMedian = { ...base, readUsage, outputFloorTokens: 1, medianOutputTokens: 700 };
+    expect(estimateInterrupted(withMedian, PRICE).usage.outputTokens).toBe(700);
+    const previous = {
+      inputTokens: 50_000,
+      cachedInputTokens: 0,
+      cacheWriteTokens: 0,
+      outputTokens: 80,
+      reasoningTokens: 0,
+    };
+    expect(estimateInterrupted({ ...base, previous }, PRICE).usage.outputTokens).toBe(32_000);
+    // A run's first request: the full hold.
+    expect(estimateInterrupted(base, PRICE).costUsd).toBe(2.12);
+  });
+
   it("counts relayed text high: ceil(bytes / 3)", () => {
     expect(relayedOutputTokens(0)).toBe(0);
     expect(relayedOutputTokens(10)).toBe(4);

@@ -322,7 +322,10 @@ describe("CodingProxy", () => {
       budgetUsd: one * 2,
       fetch: async () => {
         call += 1;
-        if (call === 1) return new Response('event: response.output_text.delta\ndata: {"delta":"x"}\n\n');
+        if (call === 1)
+          return new Response(
+            'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"x"}\n\n',
+          );
         return new Response(completedSse(USAGE), { headers: { "content-type": "text/event-stream" } });
       },
     });
@@ -1671,6 +1674,54 @@ describe("interrupted replies settle at an estimate", () => {
       usage: { inputTokens: 125, cachedInputTokens: 25, cacheWriteTokens: 10 },
     });
     expect(request!.actualCostUsd!).toBeLessThan(request!.reservationUsd);
+  });
+
+  it("prices an Anthropic reply cut before message_delta from the relayed text, tool input and thinking", async () => {
+    // message_start's output_tokens is a placeholder (usually 1), not a running count.
+    const frame = (data: unknown) => `event: ${(data as { type: string }).type}\ndata: ${JSON.stringify(data)}\n\n`;
+    const delta = (delta: unknown) => frame({ type: "content_block_delta", index: 0, delta });
+    const chunk = "a".repeat(300);
+    const stream =
+      frame({
+        type: "message_start",
+        message: {
+          usage: { input_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 1 },
+        },
+      }) +
+      Array.from({ length: 4 }, () => delta({ type: "thinking_delta", thinking: chunk })).join("") +
+      Array.from({ length: 3 }, () => delta({ type: "text_delta", text: chunk })).join("") +
+      Array.from({ length: 3 }, () => delta({ type: "input_json_delta", partial_json: chunk })).join("");
+    const h = await harness({
+      protocol: "anthropic-messages",
+      fetch: async () => new Response(stream, { headers: { "content-type": "text/event-stream" } }),
+    });
+    await expect(
+      execute(h, "anthropic-cut-floor", new TestSink(), await fixture("anthropic-sdk-request.json")),
+    ).rejects.toMatchObject({ status: 502 });
+    const request = await h.ledger.getRequest(reservedRequestId(h.events));
+    // 10 deltas × 300 bytes = 3,000 bytes relayed: ceil(3000 / 3) = 1,000 output tokens.
+    expect(request).toMatchObject({ status: "uncertain", costEstimated: true, usage: { outputTokens: 1_000 } });
+    expect(request!.actualCostUsd!).toBeCloseTo((100 * 1 + 1_000 * 4) / 1e6, 12);
+  });
+
+  it("prices an OpenAI reply cut mid-stream from relayed function arguments and reasoning text", async () => {
+    const frame = (type: string, delta: string) => `event: ${type}\ndata: ${JSON.stringify({ type, delta })}\n\n`;
+    const chunk = "b".repeat(30);
+    const stream =
+      frame("response.reasoning_summary_text.delta", chunk) +
+      frame("response.reasoning_text.delta", chunk) +
+      frame("response.function_call_arguments.delta", chunk) +
+      frame("response.output_text.delta", chunk);
+    const h = await harness({
+      budgetUsd: 10,
+      fetch: async () => new Response(stream, { headers: { "content-type": "text/event-stream" } }),
+    });
+    await expect(execute(h, "openai-cut-tools", new TestSink(), requestBody(true))).rejects.toMatchObject({
+      status: 502,
+    });
+    const request = await h.ledger.getRequest(reservedRequestId(h.events));
+    // 4 deltas × 30 bytes = 120 bytes relayed: 40 output tokens.
+    expect(request).toMatchObject({ status: "uncertain", costEstimated: true, usage: { outputTokens: 40 } });
   });
 
   it("keeps refusing a retry of the same body with duplicate_uncertain", async () => {

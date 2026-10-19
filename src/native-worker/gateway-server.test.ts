@@ -86,6 +86,34 @@ describe("streamModel mid-stream failure", () => {
     expect(ledger.release).not.toHaveBeenCalled();
   });
 
+  it("counts streamed tool calls in the estimate, and falls back to a high byte count when counting fails", async () => {
+    const ledger = fakeLedger();
+    const argsJson = JSON.stringify({ path: "a".repeat(290) });
+    let counted = 0;
+    const priceUsd = vi.fn((_model: string, _usage: { inputTokens: number; outputTokens: number }) => 0.01);
+    const llm = {
+      countTokens: vi.fn(async () => {
+        counted += 1;
+        if (counted === 1) return 100;
+        throw new Error("tokenizer unavailable");
+      }),
+      priceUsd,
+      async *stream(): AsyncIterable<LlmStreamEvent> {
+        yield { type: "text", delta: "abc" };
+        yield { type: "tool_call", id: "t1", name: "read", argsJson };
+        throw new Error("upstream reset");
+      },
+    } as unknown as LlmProvider;
+    await drain(streamModel(ctxFor(llm), ledger as unknown as Ledger, "call_1", params));
+    const output = Math.ceil(Buffer.byteLength(`abcread${argsJson}`) / 3);
+    expect(priceUsd).toHaveBeenLastCalledWith(MODEL, { inputTokens: 100, outputTokens: output });
+    expect(ledger.markUncertain).toHaveBeenCalledWith(
+      "sess_1",
+      "call_1",
+      expect.objectContaining({ outputTokens: output }),
+    );
+  });
+
   it("marks the call uncertain without an estimate when pricing throws, and rethrows the stream error", async () => {
     const ledger = fakeLedger();
     const { llm, streamError } = failingLlm({

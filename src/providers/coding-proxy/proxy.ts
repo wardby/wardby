@@ -1477,10 +1477,29 @@ export class CodingProxy {
   }
 }
 
-/** UTF-8 bytes of output text in a relayed SSE frame: OpenAI text deltas, Anthropic text_delta blocks. */
+/** OpenAI Responses events whose string `delta` is generated output: text, tool input, reasoning. */
+const OPENAI_OUTPUT_DELTAS = new Set([
+  "response.output_text.delta",
+  "response.refusal.delta",
+  "response.function_call_arguments.delta",
+  "response.custom_tool_call_input.delta",
+  "response.reasoning_text.delta",
+  "response.reasoning_summary_text.delta",
+]);
+
+/** The generated-output field of each Anthropic content_block_delta type (signatures are not output). */
+const ANTHROPIC_OUTPUT_DELTAS: Record<string, string> = {
+  text_delta: "text",
+  input_json_delta: "partial_json",
+  thinking_delta: "thinking",
+};
+
+/**
+ * UTF-8 bytes of generated output in a relayed SSE frame: text, tool-call input and thinking or
+ * reasoning deltas, which are most of a coding agent's output.
+ */
 function relayedTextBytes(frame: string, protocol: ProxyProtocol): number {
-  const type = protocol === "anthropic-messages" ? "content_block_delta" : "response.output_text.delta";
-  if (!frame.includes(type)) return 0;
+  if (!frame.includes(protocol === "anthropic-messages" ? "content_block_delta" : ".delta")) return 0;
   try {
     const data = frame
       .split("\n")
@@ -1488,10 +1507,17 @@ function relayedTextBytes(frame: string, protocol: ProxyProtocol): number {
       .map((line) => line.slice(5).trimStart())
       .join("\n");
     const value = JSON.parse(data) as Record<string, unknown> | null;
-    if (!value || value.type !== type) return 0;
-    if (protocol === "openai-responses") return typeof value.delta === "string" ? Buffer.byteLength(value.delta) : 0;
+    if (!value || typeof value.type !== "string") return 0;
+    if (protocol === "openai-responses") {
+      return OPENAI_OUTPUT_DELTAS.has(value.type) && typeof value.delta === "string"
+        ? Buffer.byteLength(value.delta)
+        : 0;
+    }
+    if (value.type !== "content_block_delta") return 0;
     const delta = value.delta as Record<string, unknown> | undefined;
-    return delta?.type === "text_delta" && typeof delta.text === "string" ? Buffer.byteLength(delta.text) : 0;
+    const field = typeof delta?.type === "string" ? ANTHROPIC_OUTPUT_DELTAS[delta.type] : undefined;
+    const text = field ? delta?.[field] : undefined;
+    return typeof text === "string" ? Buffer.byteLength(text) : 0;
   } catch {
     return 0;
   }
