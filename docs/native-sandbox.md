@@ -635,6 +635,15 @@ included in the run's cost.
 
 A run's error appears in its `error` field in `get_run` and `list_runs`.
 
+For the gateway's `internal` code, the run's error carries a `causeCode` only
+when the failing error's message led with one of wardby's own declared codes
+and that code does not match a secret value the run can read; it is shown as
+`native_sandbox_gateway_error: internal: <causeCode>`. The gateway's own log
+line (`native gateway request failed`) carries `causeCode` as well, plus the
+error's message and stack with the run's secret values redacted, or only the
+error's name (`errName`) and `causeCode` when it could not read those values.
+See [Native sandbox gateway error](../help/errors/native-sandbox-gateway-error.md).
+
 ## Roll back
 
 Set the agent back to `control-plane` with `update_agent` or
