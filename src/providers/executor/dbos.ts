@@ -397,23 +397,28 @@ export class DbosExecutor implements Executor {
     // cancelled with the caller's reason even when its workflow runs in another process (where the
     // reason map below is empty) or has no workflow at all yet (cancelWorkflow then matches
     // nothing). The workflow's next step then throws, and its own terminal write matches no row.
-    const row = await this.db.run.findUnique({ where: { id: runId }, select: { status: true } });
-    if (row && (row.status === "pending" || row.status === "running")) {
-      await failNativeRun(
-        { runId, db: this.db, providers: this.providers, ...nativeRunIntegrations(this.providers, this.db) },
-        new RunCancelledError(reason ?? "The run was cancelled."),
-      );
+    // The cancel runs even when that settle throws (a host or issue update failing after the
+    // write): a cancelled row whose workflow kept going would keep spending.
+    try {
+      const row = await this.db.run.findUnique({ where: { id: runId }, select: { status: true } });
+      if (row && (row.status === "pending" || row.status === "running")) {
+        await failNativeRun(
+          { runId, db: this.db, providers: this.providers, ...nativeRunIntegrations(this.providers, this.db) },
+          new RunCancelledError(reason ?? "The run was cancelled."),
+        );
+      }
+    } finally {
+      // Recorded before the cancel so the workflow's next step boundary can
+      // find it: DBOS only reports "cancelled", never why.
+      // Keyed by both ids: dbosStep looks it up by the cancelled workflow's id, which is the forked
+      // id for a forked run.
+      const workflowId = await workflowIdOf(this.db, runId);
+      if (reason) {
+        cancellationReasons.set(runId, reason);
+        cancellationReasons.set(workflowId, reason);
+      }
+      await DBOS.cancelWorkflow(workflowId);
     }
-    // Recorded before the cancel so the workflow's next step boundary can
-    // find it: DBOS only reports "cancelled", never why.
-    // Keyed by both ids: dbosStep looks it up by the cancelled workflow's id, which is the forked
-    // id for a forked run.
-    const workflowId = await workflowIdOf(this.db, runId);
-    if (reason) {
-      cancellationReasons.set(runId, reason);
-      cancellationReasons.set(workflowId, reason);
-    }
-    await DBOS.cancelWorkflow(workflowId);
   }
 
   /**

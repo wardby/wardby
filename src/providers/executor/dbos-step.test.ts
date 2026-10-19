@@ -4,16 +4,25 @@ import { DBOS, Error as DbosErrors } from "@dbos-inc/dbos-sdk";
 vi.mock("../../core/runner.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../core/runner.js")>()),
   executeRun: vi.fn(),
+  failNativeRun: vi.fn(),
 }));
 
-import { executeRun, RunCancelledError, RunOwnershipLostError, type NativeRunProviders } from "../../core/runner.js";
+import {
+  executeRun,
+  failNativeRun,
+  RunCancelledError,
+  RunOwnershipLostError,
+  type NativeRunProviders,
+} from "../../core/runner.js";
 import { dbosStep, dbosStepFor, DbosExecutor } from "./dbos.js";
 
 const executeRunMock = vi.mocked(executeRun);
+const failNativeRunMock = vi.mocked(failNativeRun);
 
 afterEach(() => {
   vi.restoreAllMocks();
   executeRunMock.mockReset();
+  failNativeRunMock.mockReset();
 });
 
 describe("dbosStep", () => {
@@ -140,5 +149,31 @@ describe("DbosExecutor.runInsideWorkflow", () => {
     executeRunMock.mockRejectedValueOnce(boom);
 
     await expect(executor().runInsideWorkflow("r3")).rejects.toBe(boom);
+  });
+});
+
+describe("DbosExecutor.stop", () => {
+  function launchedExecutor(row: { status: string; executionWorkflowId: string | null }) {
+    const db = { run: { findUnique: vi.fn(async () => row) } };
+    const executor = new DbosExecutor(
+      {} as NativeRunProviders,
+      { systemDatabaseUrl: "postgresql://unused", schemaName: "dbos_test", executorId: "unit" },
+      db as never,
+      60_000,
+    );
+    // stop() launches DBOS only when this executor has not; the cancel itself is stubbed.
+    (executor as unknown as { launched: boolean }).launched = true;
+    return executor;
+  }
+
+  it("still cancels the workflow when the terminal write's settle throws", async () => {
+    failNativeRunMock.mockRejectedValueOnce(new Error("closing the review check failed"));
+    const cancel = vi.spyOn(DBOS, "cancelWorkflow").mockResolvedValue(undefined);
+
+    await expect(
+      launchedExecutor({ status: "running", executionWorkflowId: null }).stop("r1", "operator stop"),
+    ).rejects.toThrow("closing the review check failed");
+
+    expect(cancel).toHaveBeenCalledWith("r1");
   });
 });
