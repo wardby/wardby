@@ -283,6 +283,26 @@ describe("package blocked status", () => {
       setWorkflowEventSink(null);
     }
   });
+  it("neither blocks nor warns on a refusal the same package was served after a retry", async () => {
+    const sink = vi.fn();
+    setWorkflowEventSink(sink);
+    try {
+      const db = slackDb({ outcome: "no_changes" });
+      db.registryFetch.findMany.mockResolvedValue([
+        { ...refusals("wardby_upstream_error")[0], outcome: "refused", version: null, sizeBytes: null },
+        { ecosystem: "npm", name: "pkg", reason: null, outcome: "served", version: "1.0.0", sizeBytes: 10 },
+      ] as never);
+      const outcome = await collectRunOutcome(db as never, run);
+      expect(outcome.packageRefusals).toEqual([]);
+      const body = outcomeBody(run, "repo", outcome.pullRequests, outcome.failedChildren, outcome);
+      expect(body).not.toContain("⛔");
+      expect(body).not.toContain("⚠️");
+      await emitRunFinishedEvents(db as never, finished("succeeded"));
+      expect(sink).not.toHaveBeenCalled();
+    } finally {
+      setWorkflowEventSink(null);
+    }
+  });
   it("does not emit run_blocked for a succeeded run that answered despite refusals", async () => {
     const sink = vi.fn();
     setWorkflowEventSink(sink);

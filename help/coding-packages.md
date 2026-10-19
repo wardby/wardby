@@ -208,6 +208,10 @@ pull request or pushed changes result, GitHub and Jira status comments show
 status keeps the agent's reply or answer, or the pull request link, and adds a
 ⚠️ dependency install warning. Refusal lists show at most ten distinct entries and a count
 of the rest; `get_run` has the full list.
+A refusal the run got past does not count: when the registry later served the
+same package (or, for a refused version, that version), for example after npm
+retried a temporary error, it is left out of the status, the warning and
+`get_run`.
 
 For next steps, see [Package refusal errors](errors/package-refusals.md) and
 [Run status comments](status-comments.md). After an approver updates the

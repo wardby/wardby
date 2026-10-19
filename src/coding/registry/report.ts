@@ -72,12 +72,24 @@ export type RegistryRefusalSummary = {
   hint?: string;
 };
 
+/**
+ * Rows must be in the order they were recorded (createdAt ascending): a
+ * refusal followed by a served row for the same package no longer counts,
+ * since the install went on to get it (npm retrying a temporary
+ * `wardby_upstream_error`, an audit that was briefly unavailable). A refusal
+ * of one version is cleared only by that version being served; a refusal of
+ * the whole name (no version) by any version of it. A refusal recorded after
+ * the package was served still counts. Cleared refusals are left out of every
+ * surface (get_run, the PR warning, the status comments, Slack), because each
+ * of them tells the user the install did not finish, which is then untrue.
+ */
 export function summarizeRegistryFetches(rows: readonly RegistryFetchRow[]): {
   packages: RegistryPackageSummary[];
   packageRefusals: RegistryRefusalSummary[];
 } {
   const packages = new Map<string, RegistryPackageSummary>();
-  const refusals = new Map<string, RegistryRefusalSummary>();
+  // Each refusal with the versions it still stands for ("" = the whole name).
+  const refusals = new Map<string, { summary: RegistryRefusalSummary; versions: Set<string> }>();
   for (const row of rows) {
     if (row.outcome === "served" && row.version) {
       const key = `${row.ecosystem}\0${row.name}\0${row.version}`;
@@ -91,14 +103,29 @@ export function summarizeRegistryFetches(rows: readonly RegistryFetchRow[]): {
       const accepted = parseAcceptedAdvisories(row.reason);
       if (accepted.length > 0)
         summary.acceptedAdvisories = [...new Set([...(summary.acceptedAdvisories ?? []), ...accepted])];
+      for (const [refusalKey, refusal] of refusals) {
+        if (refusal.summary.ecosystem !== row.ecosystem || refusal.summary.name !== row.name) continue;
+        refusal.versions.delete("");
+        refusal.versions.delete(row.version);
+        if (refusal.versions.size === 0) refusals.delete(refusalKey);
+      }
     } else if (row.outcome === "refused") {
       const reason = row.reason ?? "refused";
       const key = `${row.ecosystem}\0${row.name}\0${reason}`;
-      if (!refusals.has(key)) {
+      let refusal = refusals.get(key);
+      if (!refusal) {
         const hint = refusalHint(reason);
-        refusals.set(key, { ecosystem: row.ecosystem, name: row.name, reason, ...(hint ? { hint } : {}) });
+        refusal = {
+          summary: { ecosystem: row.ecosystem, name: row.name, reason, ...(hint ? { hint } : {}) },
+          versions: new Set(),
+        };
+        refusals.set(key, refusal);
       }
+      refusal.versions.add(row.version ?? "");
     }
   }
-  return { packages: [...packages.values()], packageRefusals: [...refusals.values()] };
+  return {
+    packages: [...packages.values()],
+    packageRefusals: [...refusals.values()].map((refusal) => refusal.summary),
+  };
 }

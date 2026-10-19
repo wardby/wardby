@@ -1386,9 +1386,15 @@ one package):
 `hint` says what the refusal code means and what to do about it; it is
 present for the allowlist codes below and omitted for codes without guidance.
 `size` is the number of bytes served, or `null` if none was recorded.
+A refusal the run got past is left out of `packageRefusals`, and so out of
+the pull request warning, the status comments and Slack: the registry later
+served the same package (for a refusal of one version, that version), for
+example after npm retried a temporary `wardby_upstream_error`. A refusal
+recorded after the package was served still counts.
 `get_run` also returns `packagePlan: { "approved": <n>, "refused": <n> }`:
 the exact versions lockfile plans approved for the run, and the distinct
-entries they refused (each refusal is also in `packageRefusals`). A run with
+entries they refused (each refusal is also in `packageRefusals`, unless that
+version was served later). A run with
 [package audit mode](#package-audit-mode) on also returns `packageAuditMode`
 and `packageAudit`, and its pull request opens with a caution banner listing
 the packages installed outside the allowlist.
