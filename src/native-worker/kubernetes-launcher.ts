@@ -18,7 +18,7 @@ import { KubernetesAlreadyExistsError, type KubernetesApi } from "../providers/j
 import { canonicalResources } from "../providers/jobs/kubernetes-isolation.js";
 import type { KubernetesPlatform } from "../providers/jobs/kubernetes-platform.js";
 import { NATIVE_GATEWAY_PORT, type NativeWorkerLimits } from "./docker-isolation.js";
-import { workerTailFields, type NativeWorkerState } from "./docker-launcher.js";
+import { WORKER_TAIL_TIMEOUT_MS, withTimeout, workerTailFields, type NativeWorkerState } from "./docker-launcher.js";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import {
@@ -49,9 +49,13 @@ export const NATIVE_SANDBOX_NETWORK_UNENFORCED = "native_sandbox_network_unenfor
 export const NATIVE_SANDBOX_ISOLATION_MISMATCH = "native_sandbox_isolation_mismatch";
 export const NATIVE_SANDBOX_CAPACITY = "native_sandbox_capacity";
 
-/** A failed worker's log is read this far back (lines, then bytes) before its tail is redacted and cut. */
-const WORKER_LOG_TAIL_LINES = 200;
-const WORKER_LOG_TAIL_BYTES = 64 * 1024;
+/**
+ * A failed worker's log is read this far back before its tail is redacted and cut. The API server
+ * applies `limitBytes` from the start of the selected lines, so it would cut the end (the worker's
+ * final failure line): it is only a memory cap, far above what the line bound selects in practice.
+ */
+const WORKER_LOG_TAIL_LINES = 100;
+const WORKER_LOG_TAIL_BYTES = 1024 * 1024;
 
 /** The API server's refusal of a pod the namespace's ResourceQuota has no room for (403 "exceeded quota"). */
 export function isQuotaRejection(err: unknown): boolean {
@@ -85,6 +89,8 @@ export interface KubernetesNativeWorkerLauncherOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Low-power mode: wakes the (possibly scaled-to-zero) native gateway before a launch. Default `DISABLED_POWER`. */
   power?: Power;
+  /** The bound on a failed worker's diagnostic (log and secret reads) before its exit is reported. Default WORKER_TAIL_TIMEOUT_MS. */
+  diagnosticTimeoutMs?: number;
 }
 
 /**
@@ -203,24 +209,25 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher, Wa
     launchOptions: WorkerLaunchOptions,
   ): Promise<void> {
     if (code === 0) return;
-    let log = "";
+    // One bound for the whole diagnostic, so a hung read never holds back the exit (and the run's end).
+    const by = Date.now() + (this.options.diagnosticTimeoutMs ?? WORKER_TAIL_TIMEOUT_MS);
+    let log: string;
     try {
-      log = await this.api.readLogTail(
-        this.ns,
-        podName,
-        NATIVE_WORKER_CONTAINER,
-        WORKER_LOG_TAIL_LINES,
-        WORKER_LOG_TAIL_BYTES,
+      log = await withTimeout(
+        this.api.readLogTail(this.ns, podName, NATIVE_WORKER_CONTAINER, WORKER_LOG_TAIL_LINES, WORKER_LOG_TAIL_BYTES),
+        by - Date.now(),
       );
     } catch {
-      // Optional: the pod may already be gone.
+      // The pod may already be gone, the read may be refused (no pods/log), or it timed out.
+      k8sLog.warn({ pod: podName, code, stderrTailOmitted: "log_read_failed" }, "native worker exited non-zero");
+      return;
     }
-    // The read stops at whichever bound it meets first: a line bound cuts the start, a byte bound
+    // The read stops at whichever bound it meets first: the line bound cuts the start, the byte cap
     // (counted from the start of the selected lines) the end. A read that met neither is whole.
     const bytes = Buffer.byteLength(log);
     const end = bytes >= WORKER_LOG_TAIL_BYTES - 3;
     const start = end || log.split("\n").length >= WORKER_LOG_TAIL_LINES;
-    const tail = await workerTailFields(log, input, launchOptions.secretValues, { start, end });
+    const tail = await workerTailFields(log, input, launchOptions.secretValues, { start, end }, by - Date.now());
     k8sLog.warn({ pod: podName, code, ...tail }, "native worker exited non-zero");
   }
 

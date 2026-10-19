@@ -42,12 +42,34 @@ const launcherLog = logger.child({ module: "native-docker-launcher" });
  */
 export const WORKER_STDERR_TAIL_CHARS = 2000;
 
+/** How long a failed worker's diagnostic (its log read and its secret values read) may take in all. */
+export const WORKER_TAIL_TIMEOUT_MS = 10_000;
+
+/**
+ * Log fields for a failed worker's output. `stderrTailOmitted` says why there is no tail although
+ * there may be output: its secret values could not be read (so it could not be redacted), or its
+ * log could not be read (Kubernetes).
+ */
+export interface WorkerTailFields {
+  stderrTail?: string;
+  stderrTailOmitted?: "secrets_unavailable" | "log_read_failed";
+}
+
+/** `promise`, or a rejection once `ms` pass first. */
+export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("worker_diagnostic_timeout")), Math.max(0, ms));
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 /**
  * A failed worker's output tail as log fields: `stderrTail`, masked by exact value through the
  * shared redactor against every secret value delivered to that worker (its gateway capability,
  * from its input, and each value its tools may read, from `secretValues`, with their JSON-escaped
- * forms). When those values are not given or cannot be read, no tail: `stderrTailOmitted` (fail
- * closed). No fields when the output is empty.
+ * forms). When those values are not given, cannot be read, or are not read within `timeoutMs`, no
+ * tail: `stderrTailOmitted: "secrets_unavailable"` (fail closed). No fields when the output is empty.
  *
  * `cut`: `output` is a slice of a longer output (a log read bounded by lines or bytes), so it may
  * begin (`start`) or end (`end`) inside a value, which no exact match finds; as many characters as
@@ -58,14 +80,15 @@ export async function workerTailFields(
   input: WorkerInput,
   secretValues: (() => Promise<readonly string[]>) | undefined,
   cut: { start?: boolean; end?: boolean } = {},
-): Promise<{ stderrTail?: string; stderrTailOmitted?: true }> {
+  timeoutMs = WORKER_TAIL_TIMEOUT_MS,
+): Promise<WorkerTailFields> {
   if (!output.trim()) return {};
   let delivered: readonly string[];
   try {
-    if (!secretValues) return { stderrTailOmitted: true };
-    delivered = await secretValues();
+    if (!secretValues) return { stderrTailOmitted: "secrets_unavailable" };
+    delivered = await withTimeout(secretValues(), timeoutMs);
   } catch {
-    return { stderrTailOmitted: true };
+    return { stderrTailOmitted: "secrets_unavailable" };
   }
   const values = withEscapedForms([...(input.gateway ? [input.gateway.capability] : []), ...delivered]);
   const spans = secretSpans(output, values);
@@ -98,8 +121,12 @@ export function processDockerCli(binary = "docker"): DockerCli {
         let stdout = "";
         let stderr = "";
         const timer = options.timeoutMs ? setTimeout(() => child.kill("SIGKILL"), options.timeoutMs) : undefined;
-        child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
-        child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+        // One decoder per stream, so a multi-byte character split across chunks still decodes (and a
+        // secret holding it still matches the redactor exactly).
+        child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
+        child.stdout.on("data", (chunk: string) => (stdout += chunk));
+        child.stderr.on("data", (chunk: string) => (stderr += chunk));
         child.on("error", (err) => resolve({ code: null, stdout, stderr: err.message }));
         child.on("close", (code) => {
           if (timer) clearTimeout(timer);

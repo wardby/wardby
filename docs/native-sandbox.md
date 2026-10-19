@@ -686,10 +686,15 @@ skipped unless its script sets its flag:
 - **A worker exited non-zero.** The server logs `native worker exited non-zero`
   with the exit code and `stderrTail`, the last 2,000 characters of the worker's
   output. Before logging it, the server masks the run's gateway capability and
-  every secret value the agent's tools can read as `[REDACTED]`. If it cannot
-  read one of those secrets, it logs `stderrTailOmitted` and no tail. On
-  Kubernetes the tail comes from the worker pod's log (the launcher needs `get`
-  on `pods/log`), and when that read is cut short, its cut ends are masked too.
+  every secret value the agent's tools can read as `[REDACTED]`. Encoded forms
+  of a value (URL-encoded, base64) are not matched. Instead of a tail, the line
+  may carry `stderrTailOmitted`: `secrets_unavailable` means one of those
+  secrets could not be read within 10 seconds, so the tail could not be
+  redacted; `log_read_failed` (Kubernetes) means the worker pod's log could not
+  be read within 10 seconds. Either way the run's failure is still recorded. On
+  Kubernetes the tail comes from the last 100 lines of the worker pod's log (the
+  launcher needs `get` on `pods/log`); when that read is cut short, its cut ends
+  are masked too.
 - **Workers cannot reach the gateway.** Confirm `NATIVE_GATEWAY_CONTAINER`
   matches the running container's name exactly and that the gateway listens on
   the port in `NATIVE_GATEWAY_URL` (default 8790).

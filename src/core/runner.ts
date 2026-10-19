@@ -2216,9 +2216,20 @@ export async function createSandboxSession(options: {
     sessionId: session.id,
     capability,
     input: { ...input, gateway: { url: options.gatewayUrl, capability } },
-    secretValues: async () =>
-      (await Promise.all([...tools.toolsByName.keys()].map((name) => tools.readableSecretValues(name)))).flat(),
+    secretValues: () => userToolSecretValues(tools, Object.keys(input.userTools)),
   };
+}
+
+/**
+ * Every secret value the sandbox run's user tools `names` may read (readable or brokered): what its
+ * worker can be handed, so what the gateway checks its cause codes against and a launcher masks
+ * from the worker's output tail. Rejects when any read fails (readRedactionValues).
+ */
+export async function userToolSecretValues(
+  tools: Pick<ReturnType<typeof createNativeRunTools>, "readableSecretValues">,
+  names: readonly string[],
+): Promise<string[]> {
+  return (await Promise.all(names.map((name) => tools.readableSecretValues(name)))).flat();
 }
 
 /** Run.executionBackend for a sandbox-mode run whose worker is (or was) launched. */

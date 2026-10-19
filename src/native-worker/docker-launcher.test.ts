@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { nativeIsolationNames } from "./docker-isolation.js";
 import {
   DockerNativeWorkerLauncher,
+  processDockerCli,
   WORKER_STDERR_TAIL_CHARS,
   type DockerCli,
   type DockerResult,
@@ -207,6 +208,17 @@ describe("DockerNativeWorkerLauncher warm pool workers", () => {
   });
 });
 
+describe("processDockerCli", () => {
+  it("decodes a multi-byte character split across output chunks", async () => {
+    // "é" is 0xc3 0xa9: written as two separate chunks, it must still come back whole.
+    const script =
+      "process.stderr.write(Buffer.from([0xc3]), () => setTimeout(() => process.stderr.write(Buffer.from([0xa9])), 50))";
+    const result = await processDockerCli(process.execPath).run(["-e", script]);
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe("é");
+  });
+});
+
 describe("DockerNativeWorkerLauncher worker exit logging", () => {
   const noSecrets = { secretValues: async () => [] };
   const failing = (stderr: string) =>
@@ -256,7 +268,7 @@ describe("DockerNativeWorkerLauncher worker exit logging", () => {
       expect(await handle.exited).toBe(1);
       await vi.waitFor(() => expect(launcherWarn).toHaveBeenCalled());
       const [fields] = launcherWarn.mock.calls[0];
-      expect(fields).toEqual({ container: names.worker, code: 1, stderrTailOmitted: true });
+      expect(fields).toEqual({ container: names.worker, code: 1, stderrTailOmitted: "secrets_unavailable" });
     }
   });
 
