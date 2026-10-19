@@ -173,7 +173,9 @@ function isOrderedBefore(run: RunOrder, other: RunOrder): boolean {
  * A delegated run tree is held once, at its root. A sub-run whose tree root
  * is a counted run of this group with a live, counted hold spends inside the
  * root's hold, so it holds nothing (its cost still counts as spent), and the
- * root holds its reservation minus the cost of every run in its tree. A sub-run
+ * root holds its reservation minus the cost of every run in its tree, or the
+ * unspent part of its tree's live coding reservations when that is more (a
+ * coding run's reservation takes the root agent's overrun). A sub-run
  * whose root is in another group, has finished, or whose hold is left out
  * here (excludeReservationRunIds, holdsBefore) holds its own reservation. So
  * does a sub-run in a period its root did not start in (a root that started
@@ -246,14 +248,31 @@ export async function computeGroupSpend(
   }
   // Such a root holds its reservation minus the cost of its whole tree, every
   // run in it included (also runs in other groups: they spend the tree too).
-  const treeCostByRoot = new Map<string, number>();
+  // A coding run in the tree may hold more than that: its reservation takes the
+  // root agent's overrun, so the root holds at least the unspent part of every
+  // live coding reservation below it.
+  const treeHoldByRoot = new Map<string, number>();
   for (const rootId of heldRoots) {
     const treeRunIds = await collectTreeRunIds(db, rootId);
-    const treeRuns = await db.run.findMany({ where: { id: { in: treeRunIds } }, select: { costUsd: true } });
-    treeCostByRoot.set(
-      rootId,
-      treeRuns.reduce((sum, t) => sum + Number(t.costUsd), 0),
-    );
+    const treeRuns = await db.run.findMany({
+      where: { id: { in: treeRunIds } },
+      select: {
+        id: true,
+        status: true,
+        costUsd: true,
+        startedAt: true,
+        heartbeatAt: true,
+        codingRun: { select: { budgetReservedUsd: true, timeoutSec: true } },
+      },
+    });
+    const treeCostUsd = treeRuns.reduce((sum, t) => sum + Number(t.costUsd), 0);
+    const codingHoldsUsd = treeRuns
+      .filter(
+        (t) => t.id !== rootId && t.codingRun != null && !excluded.has(t.id) && isHoldLive(t, now, queueTimeoutSec),
+      )
+      .reduce((sum, t) => sum + Math.max(0, Number(t.codingRun!.budgetReservedUsd) - Number(t.costUsd)), 0);
+    const root = countedById.get(rootId)!;
+    treeHoldByRoot.set(rootId, Math.max(reservationOf(root) - treeCostUsd, codingHoldsUsd));
   }
 
   const accounted = counted.map((r) => {
@@ -261,7 +280,7 @@ export async function computeGroupSpend(
     const rootId = rootOf.get(r.id);
     let ownReservedUsd = 0;
     if (heldRoots.has(r.id)) {
-      ownReservedUsd = Math.max(0, reservationOf(r) - (treeCostByRoot.get(r.id) ?? 0));
+      ownReservedUsd = Math.max(0, treeHoldByRoot.get(r.id) ?? 0);
     } else if (holds(r)) {
       ownReservedUsd = Math.max(0, reservationOf(r) - costUsd);
     }

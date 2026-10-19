@@ -348,6 +348,41 @@ describe.skipIf(!process.env.DATABASE_URL)("budget groups (database)", () => {
     });
   });
 
+  it("a delegated tree holds its coding child's overrun-raised reservation, so the group never reserves past its cap", async () => {
+    const g = await group("tree-overrun", 20);
+    const lead = id("overrun-lead");
+    await db.agent.create({
+      data: {
+        id: lead,
+        name: lead,
+        systemPrompt: "t",
+        model: "t",
+        budgetUsd: 10,
+        allowedOverrunPercent: 50,
+        ownerId: owner,
+        budgetGroupId: g,
+      },
+    });
+    const builder = await codingAgent("overrun-builder", 10, g);
+    await db.agent.update({ where: { id: builder }, data: { allowedOverrunPercent: 50 } });
+    const other = await codingAgent("overrun-other", 10, g);
+    const parent = await db.run.create({ data: { agentId: lead, status: "running", costUsd: 0 } });
+    const child = await dispatchRun({ db, executor, agentId: builder, trigger: "subagent", parentRunId: parent.id });
+
+    // The tree may spend $10 x 1.5 = $15 through its coding child: the group must hold that, not the lead's $10.
+    const childReserved = (await reservedUsd(child!.run.id)) ?? 0;
+    expect(childReserved).toBeCloseTo(15, 6);
+    const result = await dispatchRun({ db, executor, agentId: other });
+    const otherReserved = (await reservedUsd(result!.run.id)) ?? 0;
+    expect(otherReserved).toBeCloseTo(5, 6);
+    expect(childReserved + otherReserved).toBeLessThanOrEqual(20 + 1e-6);
+
+    await db.run.updateMany({
+      where: { id: { in: [parent.id, child!.run.id, result!.run.id] } },
+      data: { status: "cancelled", finishedAt: new Date() },
+    });
+  });
+
   it("parallel delegations: concurrent coding children of one parent never reserve more than the tree has left", async () => {
     const parentAgent = await nativeAgent("par-parent", 10, null);
     const children = await Promise.all([0, 1, 2, 3].map((i) => codingAgent(`par-child-${i}`, 4, null)));

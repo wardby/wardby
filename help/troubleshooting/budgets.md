@@ -45,7 +45,8 @@ For a shared-group refusal, read [Budget group exhausted](../errors/budget-group
 To see exactly which limit stopped a run and with what numbers, read
 `budgetEvents` in `get_run`; see the help article `errors/budget-exhausted`.
 A lead and the sub-agents it starts in the same budget group hold the lead's
-budget once, and `get_budget_group` reports `heldRuns` for each period.
+budget once (or the tree's unspent coding reservations, if the lead's overrun
+let them reserve more), and `get_budget_group` reports `heldRuns` for each period.
 
 A coding run's per-request holds price the cached part of the input at the
 cache-read rate after the first reply of a conversation; see the help article
