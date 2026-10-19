@@ -441,7 +441,7 @@ export interface ContainerExecutionStore {
     status: "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
     error: string,
     audit?: CodingFailureAudit,
-  ): Promise<void>;
+  ): Promise<boolean>;
   /**
    * Copies the proxy session's first budget refusal (CodingProxySession.budgetRefusal, written by the
    * proxy, which has no access to RunBudgetEvent) into the run's budget events, once per run, whatever
@@ -905,14 +905,16 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     status: "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
     error: string,
     audit?: CodingFailureAudit,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const finishedAt = new Date();
+    let changed = false;
     const agentId = await this.db.$transaction(async (tx) => {
       const updated = await tx.run.updateMany({
         where: { id: runId, status: { in: ["pending", "running"] } },
         data: { status, error, finishedAt, heartbeatAt: new Date() },
       });
       if (!updated.count) return null;
+      changed = true;
       if (audit) {
         await tx.codingRun.update({
           where: { runId },
@@ -925,6 +927,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     });
     // After commit, so the failure category is readable; cancelled/refused are skipped inside fileSelfDefect.
     if (agentId) await this.selfDefect({ id: runId, agentId, status, error, finishedAt });
+    return changed;
   }
 }
 
@@ -1147,7 +1150,9 @@ export class ContainerExecutor implements Executor {
     this.emit({ stage: "stopping", runId, jobId: run.jobHandle?.id });
     // Persist the cancellation fence first so a concurrent finisher cannot publish.
     const failure = this.failure("cancelled", { cancelled: true });
-    await this.options.store.terminate(runId, "cancelled", failure.error, failure.audit);
+    // False when the run reached a terminal status after the load above: its finisher owns the
+    // cleanup and the continuation comment, so stopping now would overwrite a good outcome.
+    if (!(await this.options.store.terminate(runId, "cancelled", failure.error, failure.audit))) return;
     await this.recordRefusal(runId, run.proxySessionId);
     this.terminal(run, "cancelled", failure.audit);
     if (run.proxySessionId) await this.options.sessions.cancelSession(run.proxySessionId).catch(() => undefined);
