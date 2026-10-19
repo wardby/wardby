@@ -8,6 +8,8 @@ export interface InterruptedFacts {
   reportedOutputTokens?: number;
   /** message_start's output count: a placeholder (usually 1), so only a floor, never the count. */
   outputFloorTokens?: number;
+  /** A stream that failed before its response started: the provider generated no output. */
+  beforeResponse?: boolean;
   /** UTF-8 bytes of output relayed to the client before the break: text, tool input, thinking. */
   relayedOutputBytes: number;
   /** Usage of the session's latest completed, non-estimated reply for the same model. */
@@ -36,11 +38,13 @@ export function relayedOutputTokens(bytes: number): number {
  * › 1b): usage already read, else the previous reply's input, else the input
  * part of the hold; plus the output seen so far. With no output seen and no
  * run median to go by, the output the hold reserved for: an unknown output
- * fails toward overestimating. Never more than the request's worst case.
+ * fails toward overestimating. A stream that failed before its response
+ * started generated none. Never more than the request's worst case.
  */
 export function estimateInterrupted(facts: InterruptedFacts, pricing: ModelPricing): InterruptedEstimate {
   const relayed = relayedOutputTokens(facts.relayedOutputBytes);
-  const output = relayed > 0 ? relayed : (facts.medianOutputTokens ?? facts.maxOutputTokens);
+  const unknown = facts.beforeResponse ? 0 : facts.maxOutputTokens;
+  const output = relayed > 0 || facts.beforeResponse ? relayed : (facts.medianOutputTokens ?? unknown);
   const clamp = (cost: number) => Math.max(0, Math.min(cost, facts.ceilingUsd ?? facts.reservationUsd));
   if (facts.readUsage) {
     const usage: ProxyUsage = {
@@ -64,7 +68,7 @@ export function estimateInterrupted(facts: InterruptedFacts, pricing: ModelPrici
     inputTokens: 0,
     cachedInputTokens: 0,
     cacheWriteTokens: 0,
-    outputTokens: relayed > 0 ? relayed : facts.maxOutputTokens,
+    outputTokens: relayed > 0 ? relayed : unknown,
     reasoningTokens: 0,
   };
   const inputPart = facts.reservationUsd - (facts.maxOutputTokens * pricing.outputPerMTok) / 1_000_000;

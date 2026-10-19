@@ -5,6 +5,7 @@ import {
   CONSOLE_WITHHELD_MESSAGE,
   failureResponse,
   finish,
+  GATEWAY_DEFAULT_RESERVE_OUTPUT_TOKENS,
   hostCall,
   runSecretValues,
   serveGatewayRequest,
@@ -112,6 +113,43 @@ describe("streamModel mid-stream failure", () => {
       "call_1",
       expect.objectContaining({ outputTokens: output }),
     );
+  });
+
+  /** A provider whose stream fails before its first event, after its response started or not. */
+  function cutBeforeFirstEvent(started: boolean) {
+    const priceUsd = vi.fn((_model: string, _usage: { inputTokens: number; outputTokens: number }) => 0.01);
+    const llm = {
+      countTokens: vi.fn(async () => 100),
+      priceUsd,
+      // eslint-disable-next-line require-yield
+      async *stream(_req: unknown, _signal: unknown, hooks?: { onResponseStarted?: () => void }) {
+        if (started) hooks?.onResponseStarted?.();
+        throw new Error("upstream reset");
+      },
+    } as unknown as LlmProvider;
+    return { llm, priceUsd };
+  }
+
+  it("once the response started, books the hold's output for a stream cut before its first event", async () => {
+    const ledger = fakeLedger();
+    const { llm, priceUsd } = cutBeforeFirstEvent(true);
+    await drain(streamModel(ctxFor(llm), ledger as unknown as Ledger, "call_1", params));
+    const reserved = GATEWAY_DEFAULT_RESERVE_OUTPUT_TOKENS;
+    expect(priceUsd).toHaveBeenLastCalledWith(MODEL, { inputTokens: 100, outputTokens: reserved });
+    expect(ledger.markUncertain).toHaveBeenCalledWith(
+      "sess_1",
+      "call_1",
+      expect.objectContaining({ outputTokens: reserved }),
+    );
+    expect(ledger.release).not.toHaveBeenCalled();
+  });
+
+  it("before the response started, releases the hold: nothing was generated", async () => {
+    const ledger = fakeLedger();
+    const { llm } = cutBeforeFirstEvent(false);
+    await drain(streamModel(ctxFor(llm), ledger as unknown as Ledger, "call_1", params));
+    expect(ledger.release).toHaveBeenCalledWith("sess_1", "call_1");
+    expect(ledger.markUncertain).not.toHaveBeenCalled();
   });
 
   it("marks the call uncertain without an estimate when pricing throws, and rethrows the stream error", async () => {

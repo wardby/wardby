@@ -14,7 +14,15 @@ import {
   type ModelProvider,
   type ResolvedCatalogEntry,
 } from "./catalog-types.js";
-import type { LlmEffort, LlmMessage, LlmProvider, LlmRequest, LlmStreamEvent, LlmToolDef } from "./types.js";
+import type {
+  LlmEffort,
+  LlmMessage,
+  LlmProvider,
+  LlmRequest,
+  LlmStreamEvent,
+  LlmStreamHooks,
+  LlmToolDef,
+} from "./types.js";
 
 /** Effort levels `model` accepts, from the current catalog; no credentials needed (config-time validation). */
 export function modelSupportedEfforts(model: string): readonly LlmEffort[] {
@@ -82,8 +90,8 @@ export class RoutingLlmProvider implements LlmProvider {
     return this.byProvider.get(this.entryFor(model).provider)!;
   }
 
-  stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<LlmStreamEvent> {
-    return this.resolve(req.model).stream(req, signal);
+  stream(req: LlmRequest, signal?: AbortSignal, hooks?: LlmStreamHooks): AsyncIterable<LlmStreamEvent> {
+    return this.resolve(req.model).stream(req, signal, hooks);
   }
 
   countTokens(model: string, messages: LlmMessage[], tools?: LlmToolDef[]): Promise<number> {

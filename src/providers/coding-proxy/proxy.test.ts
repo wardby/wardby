@@ -1724,6 +1724,45 @@ describe("interrupted replies settle at an estimate", () => {
     expect(request).toMatchObject({ status: "uncertain", costEstimated: true, usage: { outputTokens: 40 } });
   });
 
+  describe("a first stream cut with nothing relayed", () => {
+    const raw = requestBody(true);
+    const normalized = JSON.stringify({ ...JSON.parse(raw), store: false, background: false });
+    const hold = estimateReservationUsd(Buffer.byteLength(normalized), 10, PRICE);
+    const outputPart = (10 * PRICE.outputPerMTok) / 1e6;
+    // Room for one hold plus one input-only estimate, not for two holds.
+    const budgetUsd = 2 * hold - outputPart / 2;
+
+    it("before the response started, keeps the input-only estimate: nothing was generated", async () => {
+      let call = 0;
+      const h = await harness({
+        budgetUsd,
+        fetch: async () => {
+          call += 1;
+          if (call === 1) throw new Error("connection reset");
+          return new Response(completedSse(USAGE), { headers: { "content-type": "text/event-stream" } });
+        },
+      });
+      await expect(execute(h, "no-response", new TestSink(), raw)).rejects.toMatchObject({ status: 502 });
+      const request = await h.ledger.getRequest(reservedRequestId(h.events));
+      expect(request).toMatchObject({ status: "uncertain", costEstimated: true, usage: { outputTokens: 0 } });
+      expect(request!.actualCostUsd!).toBeCloseTo(hold - outputPart, 12);
+      await expect(execute(h, "next", new TestSink(), raw)).resolves.toBeDefined();
+    });
+
+    it("once the response started, books the output the hold reserved for", async () => {
+      const h = await harness({
+        budgetUsd,
+        // A frame with no type relays no output.
+        fetch: async () => new Response('event: response.output_text.delta\ndata: {"delta":"x"}\n\n'),
+      });
+      await expect(execute(h, "started", new TestSink(), raw)).rejects.toMatchObject({ status: 502 });
+      const request = await h.ledger.getRequest(reservedRequestId(h.events));
+      expect(request).toMatchObject({ status: "uncertain", costEstimated: true, usage: { outputTokens: 10 } });
+      expect(request!.actualCostUsd!).toBeCloseTo(hold, 12);
+      await expect(execute(h, "next", new TestSink(), raw)).rejects.toMatchObject({ code: "wardby_budget_exhausted" });
+    });
+  });
+
   it("keeps refusing a retry of the same body with duplicate_uncertain", async () => {
     const raw = requestBody(true);
     const h = await harness({
