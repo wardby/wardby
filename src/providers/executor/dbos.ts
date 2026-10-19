@@ -32,6 +32,7 @@ import {
   loseNativeRun,
   nativeRunIntegrations,
   RunCancelledError,
+  stopAwareStep,
   type NativeRunProviders,
   type RunnerDb,
 } from "../../core/runner.js";
@@ -189,21 +190,19 @@ export function dbosStepFor(db: Pick<PrismaClient, "run">, runId: string): StepR
 }
 
 /**
- * dbosStepFor that also stops at a step boundary once the run's row is terminal, as stopAwareStep
- * does for inline runs. DBOS stops a workflow it was told to cancel, but stop() can cancel only the
- * workflow the run names, and a takeover's fork is named only once recorded: a fork already running
- * before that (or whose record failed) would otherwise keep paying for turns under a run stop()
- * already made terminal. A failed read lets the step run: this is a fence, not a new way to fail.
+ * dbosStepFor behind the same per-step row read as inline runs (stopAwareStep), failing open. DBOS
+ * stops a workflow it was told to cancel, but stop() can cancel only the workflow the run names, and
+ * a takeover's fork is named only once recorded: a fork already running before that (or whose
+ * record failed) would otherwise keep paying for turns under a run stop() already made terminal.
+ * The same read fences out a taken-over original as soon as the run names its fork, before the
+ * takeover's cancel lands, and even when that cancel failed: it stops as an ownership loss, without
+ * a terminal write or the settle side effects (host checks, status comments) the fork owns.
  */
 export function stopAwareDbosStep(db: Pick<PrismaClient, "run">, runId: string): StepRunner {
-  const inner = dbosStepFor(db, runId);
-  return async (name, fn) => {
-    const row = await db.run.findUnique({ where: { id: runId }, select: { status: true } }).catch(() => null);
-    if (row && !DRIVABLE.includes(row.status as (typeof DRIVABLE)[number])) {
-      throw new RunCancelledError(`Run ${row.status}: stopped before step "${name}".`);
-    }
-    return inner(name, fn);
-  };
+  return stopAwareStep(db, runId, dbosStepFor(db, runId), {
+    failOpen: true,
+    workflowId: () => DBOS.workflowID,
+  });
 }
 
 async function runDbosStep<T>(
@@ -415,8 +414,10 @@ export class DbosExecutor implements Executor {
     // cancelled with the caller's reason even when its workflow runs in another process (where the
     // reason map below is empty) or has no workflow at all yet (cancelWorkflow then matches
     // nothing). The workflow's next step then throws, and its own terminal write matches no row.
-    // The cancel runs even when that settle throws (a host or issue update failing after the
-    // write): a cancelled row whose workflow kept going would keep spending.
+    // The cancel is still attempted when that settle throws (a host or issue update failing after
+    // the write) or the database is unreachable: a cancelled row whose workflow kept going would
+    // keep spending. The settle's error, if any, is the one rethrown.
+    let settleFailed: { err: unknown } | undefined;
     try {
       const row = await this.db.run.findUnique({ where: { id: runId }, select: { status: true } });
       if (row && (row.status === "pending" || row.status === "running")) {
@@ -425,18 +426,26 @@ export class DbosExecutor implements Executor {
           new RunCancelledError(reason ?? "The run was cancelled."),
         );
       }
-    } finally {
-      // Recorded before the cancel so the workflow's next step boundary can
-      // find it: DBOS only reports "cancelled", never why.
-      // Keyed by both ids: dbosStep looks it up by the cancelled workflow's id, which is the forked
-      // id for a forked run.
-      const workflowId = await workflowIdOf(this.db, runId);
-      if (reason) {
-        cancellationReasons.set(runId, reason);
-        cancellationReasons.set(workflowId, reason);
-      }
-      await DBOS.cancelWorkflow(workflowId);
+    } catch (err) {
+      settleFailed = { err };
     }
+    // Recorded before the cancel so the workflow's next step boundary can
+    // find it: DBOS only reports "cancelled", never why.
+    // Keyed by both ids: dbosStep looks it up by the cancelled workflow's id, which is the forked
+    // id for a forked run. A failed read targets the run id, the workflow of any run never forked.
+    const workflowId = await workflowIdOf(this.db, runId).catch(() => runId);
+    if (reason) {
+      cancellationReasons.set(runId, reason);
+      cancellationReasons.set(workflowId, reason);
+    }
+    try {
+      await DBOS.cancelWorkflow(workflowId);
+    } catch (err) {
+      if (!settleFailed) throw err;
+      // The error's name only: this path adds no message text to any output.
+      dbosLog.warn({ runId, error: err instanceof Error ? err.name : typeof err }, "could not cancel the workflow");
+    }
+    if (settleFailed) throw settleFailed.err;
   }
 
   /**

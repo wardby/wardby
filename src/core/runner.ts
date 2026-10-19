@@ -533,19 +533,52 @@ async function finishRunClaimed(
   return { run: await db.run.findUniqueOrThrow({ where: { id: runId } }), claimed: updated.count > 0 };
 }
 
+/** Options for a durable executor's use of stopAwareStep (DbosExecutor); inline runs pass none. */
+export interface StopAwareStepOptions {
+  /** A failed read lets the step run, so the check adds no new way for a run to fail. */
+  failOpen?: boolean;
+  /**
+   * The workflow driving this attempt. When the run names a different one (`executionWorkflowId`,
+   * once a takeover recorded its fork), this attempt no longer owns the run and stops with a
+   * RunOwnershipLostError: no terminal write, no settle side effects. A null id fences nothing, so
+   * a fork whose record failed is not fenced out of the run it drives.
+   */
+  workflowId?: () => string | undefined;
+}
+
 /**
- * The inline step runner, made to notice a stop. An inline step has no durable runtime that could
- * interrupt it (DbosExecutor's steps are interrupted by DBOS itself), so before each step this reads
- * the run's own row: once anything else has made it terminal (stop_run, an MCP task's cancel, a
- * parent run's stop, the reconciler), the run stops at this boundary with a RunCancelledError. The
- * terminal row is never rewritten (finishRunClaimed matches zero rows), so the stop keeps its reason.
+ * A step runner made to notice a stop. Before each step this reads the run's own row: once anything
+ * else has made it terminal (stop_run, an MCP task's cancel, a parent run's stop, the reconciler),
+ * the run stops at this boundary with a RunCancelledError. The terminal row is never rewritten
+ * (finishRunClaimed matches zero rows), so the stop keeps its reason. Inline runs need it because
+ * nothing else interrupts their steps. DbosExecutor wraps its own step runner in it too: DBOS stops
+ * only a workflow it was told to cancel, and stop() can name only the workflow the run records.
  */
-export function stopAwareStep(db: Pick<RunnerDb, "run">, runId: string, inner: StepRunner = runStepInline): StepRunner {
-  return async (name, fn) => {
-    const row = await db.run.findUnique({ where: { id: runId }, select: { status: true } });
+export function stopAwareStep(
+  db: Pick<RunnerDb, "run">,
+  runId: string,
+  inner: StepRunner = runStepInline,
+  options: StopAwareStepOptions = {},
+): StepRunner {
+  const check = async (name: string, own: string | undefined): Promise<void> => {
+    const read = db.run.findUnique({ where: { id: runId }, select: { status: true, executionWorkflowId: true } });
+    const row = options.failOpen ? await read.catch(() => null) : await read;
+    if (row?.executionWorkflowId && own && row.executionWorkflowId !== own) {
+      throw new RunOwnershipLostError(name);
+    }
     if (row && !DRIVABLE.includes(row.status as (typeof DRIVABLE)[number])) {
       throw new RunCancelledError(`Run ${row.status}: stopped before step "${name}".`);
     }
+  };
+  // Each check waits for the one before it, so steps reach `inner` in the order they were called,
+  // as they did without a read in front: a durable runner numbers a step when it is called (DBOS
+  // assigns its function id then), and a replay of concurrent delegations matches steps by number.
+  let previous: Promise<unknown> = Promise.resolve();
+  return async (name, fn) => {
+    const own = options.workflowId?.();
+    const checked = previous.then(() => check(name, own));
+    previous = checked.catch(() => undefined);
+    await checked;
     return inner(name, fn);
   };
 }
@@ -2261,8 +2294,8 @@ async function executeTrackedRun(
     ? (providers.repoAccess ?? createRepoAccessGate({ db, hosts: reviewHosts }))
     : undefined;
   const issueTrackers = configuredIssueTrackers(providers.issueTrackers);
-  // Inline execution checks for a stop before every step (stopAwareStep); a durable executor's own
-  // step runner is interrupted by its runtime instead.
+  // Inline execution checks for a stop before every step (stopAwareStep); a durable executor passes
+  // its own step runner, which does its own check (DbosExecutor wraps it in stopAwareStep too).
   if (step === runStepInline) step = stopAwareStep(db, runId);
 
   // Fails a run that ends before its engine starts, closing what its trigger opened (the review
