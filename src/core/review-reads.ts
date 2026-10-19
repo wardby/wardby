@@ -39,6 +39,12 @@ interface HeadReads {
   bases: Set<string>;
   /** Heads the host returned as safe compare bases with reads of this head. */
   trustedBases: Set<string>;
+  /**
+   * `bases` holds every compare base of this head. False for a head saved before bases were
+   * recorded, or rewritten by a gateway that does not know them: it may have compared from any
+   * commit, so only a whole list of the pull request verifies it.
+   */
+  basesKnown: boolean;
 }
 
 /** A ledger as JSON, for a sandbox run's gateway session. */
@@ -56,6 +62,8 @@ export interface ReviewReadsState {
       fullListSeen?: boolean;
       bases?: string[];
       trustedBases?: string[];
+      /** Absent (a state saved without bases, or by an older gateway): the bases are unknown. */
+      basesKnown?: boolean;
     }
   >;
   fileReads: Record<string, string[]>;
@@ -88,7 +96,8 @@ export class ReviewReadLedger {
         (head.listCut !== undefined && typeof head.listCut !== "boolean") ||
         (head.fullListSeen !== undefined && typeof head.fullListSeen !== "boolean") ||
         (head.bases !== undefined && !isStringArray(head.bases)) ||
-        (head.trustedBases !== undefined && !isStringArray(head.trustedBases))
+        (head.trustedBases !== undefined && !isStringArray(head.trustedBases)) ||
+        (head.basesKnown !== undefined && typeof head.basesKnown !== "boolean")
       ) {
         return new ReviewReadLedger();
       }
@@ -101,6 +110,7 @@ export class ReviewReadLedger {
         fullListSeen: head.fullListSeen ?? false,
         bases: new Set(head.bases ?? []),
         trustedBases: new Set(head.trustedBases ?? []),
+        basesKnown: head.basesKnown === true && head.bases !== undefined,
       });
     }
     for (const [key, paths] of Object.entries(s.fileReads)) {
@@ -125,6 +135,7 @@ export class ReviewReadLedger {
             fullListSeen: head.fullListSeen,
             bases: [...head.bases],
             trustedBases: [...head.trustedBases],
+            basesKnown: head.basesKnown,
           },
         ]),
       ),
@@ -149,6 +160,7 @@ export class ReviewReadLedger {
           fullListSeen: theirs.fullListSeen,
           bases: new Set(theirs.bases),
           trustedBases: new Set(theirs.trustedBases),
+          basesKnown: theirs.basesKnown,
         });
         continue;
       }
@@ -156,6 +168,7 @@ export class ReviewReadLedger {
       mine.fullListSeen ||= theirs.fullListSeen;
       for (const sha of theirs.bases) mine.bases.add(sha);
       for (const sha of theirs.trustedBases) mine.trustedBases.add(sha);
+      mine.basesKnown &&= theirs.basesKnown;
       mine.sawFirstPage ||= theirs.sawFirstPage;
       for (const path of theirs.code) mine.code.add(path);
       for (const path of theirs.read) mine.read.add(path);
@@ -186,6 +199,7 @@ export class ReviewReadLedger {
       fullListSeen: false,
       bases: new Set<string>(),
       trustedBases: new Set<string>(),
+      basesKnown: true,
     };
     if (view.comparedFrom) head.bases.add(view.comparedFrom);
     const trusted = view.lastCoveredSha;
@@ -242,12 +256,13 @@ export class ReviewReadLedger {
 
   /**
    * The attempt saw no whole list of the head, and some read compared from a base the host did not
-   * vouch for: files changed before that base were never listed (false when it never saw the first page).
+   * vouch for, or its bases are unknown (saved without them): files changed before that base were never
+   * listed (false when it never saw the first page).
    */
   baseUnverified(repository: string, prNumber: number, headSha: string): boolean {
     const head = this.heads.get(this.headKey(repository, prNumber, headSha));
     if (!head?.sawFirstPage || head.fullListSeen) return false;
-    return [...head.bases].some((base) => !head.trustedBases.has(base));
+    return !head.basesKnown || [...head.bases].some((base) => !head.trustedBases.has(base));
   }
 
   /**

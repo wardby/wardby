@@ -1083,7 +1083,11 @@ returned. A review that does not cover its head keeps the earlier covered head.
 On GitHub the covered head is kept in the agent's summary comment marker (a
 summary comment written by a version before 0.6.1 has none, so the next review
 reads the whole pull request); on a local repository it is kept with each
-review.
+review. Only a marker at the very start of the App's own summary comment
+counts. wardby removes its hidden markers from text an agent passes to
+`repo_comment` and `repo_publish_review`, and removes review markers from
+every other comment it posts (a run's status and reply included), so an agent
+cannot be talked into vouching for a head it never read.
 
 `repo_publish_review` refuses `APPROVE` with `full_read_required` while the
 run has no `repo_pr_read` of the head without `sinceSha` and one of its reads
@@ -1092,7 +1096,11 @@ commit named in the pull request's own text, or `lastReviewedSha` when it
 differs from `lastCoveredSha`, is not a safe base. The agent reads the whole
 pull request (no `sinceSha`) or passes `lastCoveredSha`; the shipped reviewer
 prompt does this. See
-[`full_read_required`](../help/errors/full-read-required.md).
+[`full_read_required`](../help/errors/full-read-required.md). Reviewer prompts written before 0.6.1 pass `lastReviewedSha`
+as `sinceSha`; they still work, because the refusal tells the agent to read
+the whole pull request, but update their re-review step from the shipped
+reviewer prompt to avoid the extra read. Owners of agents whose prompt is
+stored with the agent update it with `update_agent`.
 
 ### Mark ready when passing (`markReadyWhenPassing`)
 

@@ -344,6 +344,37 @@ describe.skipIf(!process.env.DATABASE_URL)("LocalReviewHost (database)", () => {
     expect(await publish("APPROVE")).toMatchObject({ error: "file_list_truncated" });
     expect(await publish("CHANGES_REQUESTED")).toMatchObject({ published: true });
     expect(await db.localReview.count({ where: { pullRequestId: pr.id, verdict: "APPROVE" } })).toBe(0);
+
+    // A later run reviews a one-file delta from the head the cut review left: it was never covered.
+    await writeFile(join(bigDir, "gen", "late.ts"), "export const late = 1;\n");
+    await git(bigDir, "add", "gen/late.ts");
+    await git(bigDir, "commit", "-m", "one more");
+    const nextHead = await git(bigDir, "rev-parse", "HEAD");
+    const run2 = { ...ctx, reads: new ReviewReadLedger() };
+    const delta = JSON.parse(
+      await handleReviewHostTool(
+        "repo_pr_read",
+        JSON.stringify({ repository, prNumber: pr.number, sinceSha: bigHead }),
+        run2,
+      ),
+    );
+    expect(delta).toMatchObject({ comparedFrom: bigHead, lastReviewedSha: bigHead, lastCoveredSha: null });
+    expect(delta.files).toHaveLength(1);
+    const approve = JSON.parse(
+      await handleReviewHostTool(
+        "repo_publish_review",
+        JSON.stringify({
+          repository,
+          prNumber: pr.number,
+          headSha: nextHead,
+          verdict: "APPROVE",
+          summary: "s",
+          body: "b",
+        }),
+        run2,
+      ),
+    );
+    expect(approve).toMatchObject({ error: "full_read_required" });
   }, 60_000);
 
   it("returns the latest covered head as lastCoveredSha; a review that did not read every file keeps it", async () => {

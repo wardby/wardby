@@ -260,6 +260,56 @@ describe("ReviewReadLedger state", () => {
     });
   });
 
+  describe("a head saved without its compare bases (an older state, or an older gateway's rewrite)", () => {
+    const B1 = "b".repeat(40);
+    const delta = (lastCoveredSha: string | null = null) =>
+      ({
+        headSha: HEAD,
+        files: [f("src/a.ts", "complete")],
+        nextPatchCursor: null,
+        comparedFrom: B1,
+        lastReviewedSha: B1,
+        lastCoveredSha,
+        fileListComplete: true,
+      }) as unknown as PullRequestView;
+    const legacy = (reads: ReviewReadLedger) => {
+      const state = JSON.parse(JSON.stringify(reads.toJSON())) as { heads: Record<string, Record<string, unknown>> };
+      for (const head of Object.values(state.heads)) {
+        delete head.bases;
+        delete head.trustedBases;
+        delete head.basesKnown;
+      }
+      return ReviewReadLedger.fromJSON(state);
+    };
+
+    it("is never covered and stays unverified until a whole list is read", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, delta(), false);
+      const old = legacy(reads);
+      expect(old.unreadCode("o/r", 1, HEAD)).toEqual([]);
+      expect(old.baseUnverified("o/r", 1, HEAD)).toBe(true);
+      expect(old.covered("o/r", 1, HEAD)).toBe(false);
+      // Even a later delta from a vouched-for base does not settle it: the earlier bases are unknown.
+      old.recordPage("o/r", 1, delta(B1), false);
+      expect(old.covered("o/r", 1, HEAD)).toBe(false);
+      old.recordPage("o/r", 1, { ...delta(), comparedFrom: null }, false);
+      expect(old.covered("o/r", 1, HEAD)).toBe(true);
+    });
+
+    it("keeps the bases unknown through a merge with a ledger that knows them", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, delta(B1), false);
+      const saved = legacy(reads);
+      const fresh = new ReviewReadLedger();
+      fresh.recordPage("o/r", 1, delta(B1), false);
+      expect(fresh.baseUnverified("o/r", 1, HEAD)).toBe(false);
+      fresh.merge(saved);
+      expect(fresh.baseUnverified("o/r", 1, HEAD)).toBe(true);
+      // A state this version saved round-trips as known.
+      expect(ReviewReadLedger.fromJSON(JSON.parse(JSON.stringify(reads.toJSON()))).covered("o/r", 1, HEAD)).toBe(true);
+    });
+  });
+
   describe("covered(): this attempt read every file of the head", () => {
     const B1 = "b".repeat(40);
     const page = (

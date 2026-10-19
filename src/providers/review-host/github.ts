@@ -21,6 +21,8 @@ import {
   parseReviewMarker,
   renderInlineComment,
   renderSummaryComment,
+  stripReviewMarkers,
+  stripWardbyMarkers,
   verdictConclusion,
 } from "./review-format.js";
 import {
@@ -149,12 +151,9 @@ export function toReviewHostError(err: unknown): ReviewHostError {
   return new ReviewHostError("host_api_error", "github_request_failed");
 }
 
-/** wardby's hidden markers (run, review, finding, status, related-section); never shown to agents. */
-const HIDDEN_MARKER = /<!--\s*(?:wardby|reevo-run)[\s\S]*?-->/g;
-
 /** Untrusted issue text for an agent: wardby markers removed, then cut at `limit` characters. */
 function capped(text: string, limit: number): { text: string; truncated: boolean } {
-  const clean = text.replace(HIDDEN_MARKER, "");
+  const clean = stripWardbyMarkers(text);
   return clean.length > limit ? { text: clean.slice(0, limit), truncated: true } : { text: clean, truncated: false };
 }
 
@@ -972,12 +971,12 @@ export class GitHubReviewHost implements CodeReviewHost {
       const response = input.replyToReviewCommentId
         ? await get(
             `${base}/pulls/${input.number}/comments/${encodeURIComponent(input.replyToReviewCommentId)}/replies`,
-            { method: "POST", body: JSON.stringify({ body: input.body }) },
+            { method: "POST", body: JSON.stringify({ body: stripReviewMarkers(input.body) }) },
             [201],
           )
         : await get(
             `${base}/issues/${input.number}/comments`,
-            { method: "POST", body: JSON.stringify({ body: input.body }) },
+            { method: "POST", body: JSON.stringify({ body: stripReviewMarkers(input.body) }) },
             [201],
           );
       const created = record(await response.json());
@@ -990,7 +989,7 @@ export class GitHubReviewHost implements CodeReviewHost {
     const id = encodeURIComponent(input.id);
     const path = input.kind === "inline" ? `${base}/pulls/comments/${id}` : `${base}/issues/comments/${id}`;
     await this.withToken(repository, COMMENT_WRITE, async (get) => {
-      await get(path, { method: "PATCH", body: JSON.stringify({ body: input.body }) }, [200]);
+      await get(path, { method: "PATCH", body: JSON.stringify({ body: stripReviewMarkers(input.body) }) }, [200]);
     });
   }
 

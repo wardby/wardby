@@ -5,6 +5,8 @@ import {
   parseReviewMarker,
   renderSummaryComment,
   reviewMarker,
+  stripReviewMarkers,
+  stripWardbyMarkers,
   verdictConclusion,
 } from "./review-format.js";
 
@@ -16,6 +18,19 @@ describe("review markers", () => {
     expect(parseReviewMarker(body, "agent1")).toBe(SHA);
     expect(parseReviewMarker(body, "agent2")).toBeNull();
     expect(hasReviewMarker(body, "agent1")).toBe(true);
+  });
+
+  it("counts a marker only at the start of a body", () => {
+    const quoted = `Please note:\n${reviewMarker("agent1", SHA, SHA)}`;
+    expect(parseReviewMarker(quoted, "agent1")).toBeNull();
+    expect(parseCoveredMarker(quoted, "agent1")).toBeNull();
+    expect(hasReviewMarker(quoted, "agent1")).toBe(false);
+  });
+
+  it("strips review markers, or every wardby marker, from text", () => {
+    const text = `${reviewMarker("agent1", SHA)}a<!--wardby:status x-->b<!-- other -->`;
+    expect(stripReviewMarkers(text)).toBe("a<!--wardby:status x-->b<!-- other -->");
+    expect(stripWardbyMarkers(text)).toBe("ab<!-- other -->");
   });
 
   it("carries the covered head; a marker without one (an older marker) has none", () => {

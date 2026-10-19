@@ -20,14 +20,18 @@ export function reviewMarker(agentMarker: string, headSha: string, coveredSha?: 
   return `${MARKER_PREFIX}${agentMarker} sha=${headSha}${coveredSha ? ` covered=${coveredSha}` : ""} -->`;
 }
 
+/**
+ * The review marker counts only at the very start of a body, where renderSummaryComment writes it:
+ * anywhere else it is text someone else wrote (model text the App posted, for one).
+ */
 export function hasReviewMarker(body: string, agentMarker: string): boolean {
   assertMarker(agentMarker);
-  return body.includes(`${MARKER_PREFIX}${agentMarker} sha=`);
+  return body.startsWith(`${MARKER_PREFIX}${agentMarker} sha=`);
 }
 
 function matchReviewMarker(body: string, agentMarker: string): RegExpExecArray | null {
   assertMarker(agentMarker);
-  return new RegExp(`${MARKER_PREFIX}${agentMarker} sha=([0-9a-f]{40})(?: covered=([0-9a-f]{40}))? -->`).exec(body);
+  return new RegExp(`^${MARKER_PREFIX}${agentMarker} sha=([0-9a-f]{40})(?: covered=([0-9a-f]{40}))? -->`).exec(body);
 }
 
 export function parseReviewMarker(body: string, agentMarker: string): string | null {
@@ -37,6 +41,23 @@ export function parseReviewMarker(body: string, agentMarker: string): string | n
 /** The marker's covered head; null for a marker without one. */
 export function parseCoveredMarker(body: string, agentMarker: string): string | null {
   return matchReviewMarker(body, agentMarker)?.[2] ?? null;
+}
+
+/** wardby's hidden markers (run, review, finding, status, related-section). */
+const WARDBY_MARKER = /<!--\s*(?:wardby|reevo-run)[\s\S]*?-->/g;
+const REVIEW_MARKER = /<!--\s*wardby:review:[\s\S]*?-->/g;
+
+/** Model-written text with every wardby hidden marker removed, so it can never pose as one. */
+export function stripWardbyMarkers(text: string): string {
+  return text.replace(WARDBY_MARKER, "");
+}
+
+/**
+ * Text the App posts as a comment with any review marker removed: only publishReview writes one,
+ * so a marker in any other comment (status, reply, repo_comment) is forged.
+ */
+export function stripReviewMarkers(text: string): string {
+  return text.replace(REVIEW_MARKER, "");
 }
 
 export function verdictConclusion(verdict: ReviewVerdict): CheckConclusion {
