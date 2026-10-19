@@ -14,7 +14,7 @@ import {
   RunOwnershipLostError,
   type NativeRunProviders,
 } from "../../core/runner.js";
-import { dbosStep, dbosStepFor, DbosExecutor } from "./dbos.js";
+import { dbosStep, dbosStepFor, DbosExecutor, stopAwareDbosStep } from "./dbos.js";
 
 const executeRunMock = vi.mocked(executeRun);
 const failNativeRunMock = vi.mocked(failNativeRun);
@@ -105,6 +105,29 @@ describe("dbosStepFor", () => {
     const err = await dbosStepFor(db as never, "r1")("turn:2:llm", async () => "x").catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(RunCancelledError);
+  });
+});
+
+describe("stopAwareDbosStep", () => {
+  it("stops before the step, without running it, once the run's row is terminal", async () => {
+    const runStep = vi.spyOn(DBOS, "runStep");
+    const db = { run: { findUnique: vi.fn(async () => ({ status: "cancelled" })) } };
+
+    const err = await stopAwareDbosStep(db as never, "r1")("turn:2:llm", async () => "x").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(RunCancelledError);
+    expect((err as Error).message).toBe('Run cancelled: stopped before step "turn:2:llm".');
+    expect(runStep).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["the row is drivable", async () => ({ status: "running" })],
+    ["the row cannot be read", async () => Promise.reject(new Error("db down"))],
+  ])("runs the step when %s", async (_label, findUnique) => {
+    vi.spyOn(DBOS, "runStep").mockResolvedValueOnce("recorded");
+    const db = { run: { findUnique: vi.fn(findUnique) } };
+
+    await expect(stopAwareDbosStep(db as never, "r1")("turn:2:llm", async () => "x")).resolves.toBe("recorded");
   });
 });
 

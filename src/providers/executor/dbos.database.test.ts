@@ -959,6 +959,61 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     }
   }, 30_000);
 
+  it("a fork that stop() missed (the takeover had not recorded it yet) stops at its next step", async () => {
+    const { run, cleanup } = await leadWaitingAfterDeploy("missed-fork");
+    try {
+      // The takeover forks, then fails to record the fork on the run: stop() can only name the original.
+      const flaky = new Proxy(db, {
+        get(target, prop) {
+          if (prop !== "run") return Reflect.get(target, prop);
+          return new Proxy(target.run, {
+            get(model, key) {
+              if (key !== "update") return Reflect.get(model, key);
+              return (args: { data: { executionWorkflowId?: unknown } }) =>
+                args.data.executionWorkflowId !== undefined
+                  ? Promise.reject(new Error("simulated failure recording the fork"))
+                  : model.update(args as never);
+            },
+          });
+        },
+      });
+      const resumedLlm = scriptedLlm([finalAnswer("never paid for")]);
+      executor = buildWith(resumedLlm, `${executorId}-missed-fork`, flaky, recordingChildExecutor().fake);
+      await executor.launch();
+      const stale = new Date(0);
+      await db.run.update({ where: { id: run.id }, data: { heartbeatAt: stale } });
+      await expect(executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id })).rejects.toThrow(
+        "simulated failure recording the fork",
+      );
+      const forkId = `${run.id}@${DBOS.applicationVersion}`;
+      // The fork's body is running (it beats), past executeRun's check of a terminal row.
+      await waitFor(
+        "the fork's body to start",
+        async () => (await db.run.findUniqueOrThrow({ where: { id: run.id } })).heartbeatAt!.getTime() > 0,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      await executor.stop(run.id, "operator stop");
+      await db.run.updateMany({
+        where: { parentRunId: run.id },
+        data: { status: "succeeded", finalText: "kid done", finishedAt: new Date() },
+      });
+      await waitFor("the fork to end", async () =>
+        ["SUCCESS", "ERROR", "CANCELLED"].includes((await DBOS.getWorkflowStatus(forkId))?.status ?? ""),
+      );
+
+      const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+      expect({ status: after.status, error: after.error }).toEqual({
+        status: "cancelled",
+        error: "operator stop",
+      });
+      // The fork never started another turn for a run that was already cancelled.
+      expect(resumedLlm.calls).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  }, 30_000);
+
   it("recover(): a stalled-but-alive original that sees the takeover's cancel stops without writing the run", async () => {
     await executor?.close();
     const lead = `dbos-alive-lead-${suffix}`;

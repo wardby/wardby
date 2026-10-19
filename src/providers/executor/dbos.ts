@@ -188,6 +188,24 @@ export function dbosStepFor(db: Pick<PrismaClient, "run">, runId: string): StepR
   return (name, fn) => runDbosStep(name, fn, supersedes);
 }
 
+/**
+ * dbosStepFor that also stops at a step boundary once the run's row is terminal, as stopAwareStep
+ * does for inline runs. DBOS stops a workflow it was told to cancel, but stop() can cancel only the
+ * workflow the run names, and a takeover's fork is named only once recorded: a fork already running
+ * before that (or whose record failed) would otherwise keep paying for turns under a run stop()
+ * already made terminal. A failed read lets the step run: this is a fence, not a new way to fail.
+ */
+export function stopAwareDbosStep(db: Pick<PrismaClient, "run">, runId: string): StepRunner {
+  const inner = dbosStepFor(db, runId);
+  return async (name, fn) => {
+    const row = await db.run.findUnique({ where: { id: runId }, select: { status: true } }).catch(() => null);
+    if (row && !DRIVABLE.includes(row.status as (typeof DRIVABLE)[number])) {
+      throw new RunCancelledError(`Run ${row.status}: stopped before step "${name}".`);
+    }
+    return inner(name, fn);
+  };
+}
+
 async function runDbosStep<T>(
   name: string,
   fn: () => Promise<T>,
@@ -561,7 +579,7 @@ export class DbosExecutor implements Executor {
     await beat();
     const timer = setInterval(() => void beat(), this.heartbeatIntervalMs);
     try {
-      await executeRun(runId, this.providers, this.db, undefined, dbosStepFor(this.db, runId));
+      await executeRun(runId, this.providers, this.db, undefined, stopAwareDbosStep(this.db, runId));
     } catch (err) {
       // An ownership loss leaves the workflow body as the SDK's own conflict error, so DBOS takes
       // its duplicate-execution path: it records nothing and parks this attempt until the winner
