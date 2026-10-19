@@ -193,10 +193,13 @@ function fakeDb(
           agent: { budgetUsd: agents.find((a) => a.id === r.agentId)?.budgetUsd ?? 0 },
         }));
         if (where.parentCallId === null) {
-          // findDelegationChild's legacy lookup: children of one agent with no call id, any status.
+          // findDelegationChild's legacy lookup: children of one agent with no call id (drivable only when the caller has no call id).
           return all.filter(
             (r) =>
-              r.parentRunId === where.parentRunId && r.agentId === where.agentId && (r.parentCallId ?? null) === null,
+              r.parentRunId === where.parentRunId &&
+              r.agentId === where.agentId &&
+              (r.parentCallId ?? null) === null &&
+              (!where.status || where.status.in.includes(r.status)),
           );
         }
         if (where.agentId) {
