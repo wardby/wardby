@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  archiveLimit,
   checkConsistency,
   dependencyCacheBudget,
   dependencyCacheTimeLimit,
@@ -2007,5 +2008,53 @@ describe("readRegularFile", () => {
   it("refuses a directory", async () => {
     await mkdir(join(dir, "sub"));
     await expect(readRegularFile(join(dir, "sub"), 100)).rejects.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------- packing limit
+
+describe("snapshot packing limit", () => {
+  const MiB = 1024 * 1024;
+  const timeouts = { tarMs: 300_000, tarMsPerMiB: 500 };
+
+  it("ships a per-MiB packing rate", () => {
+    expect(DEFAULT_TIMEOUTS.tarMs).toBe(300_000);
+    expect(DEFAULT_TIMEOUTS.tarMsPerMiB).toBe(500);
+  });
+
+  it("grows with the installed tree", () => {
+    expect(archiveLimit(timeouts, 0, undefined)).toEqual({ limit: "pack", limitMs: 300_000 });
+    expect(archiveLimit(timeouts, 10 * MiB, undefined)).toEqual({ limit: "pack", limitMs: 305_000 });
+    expect(archiveLimit(timeouts, 800 * MiB, undefined)).toEqual({ limit: "pack", limitMs: 700_000 });
+  });
+
+  it("never runs past the upload deadline", () => {
+    const now = 1_000_000;
+    expect(archiveLimit(timeouts, 800 * MiB, now + 400_000, now)).toEqual({ limit: "upload_window", limitMs: 400_000 });
+    expect(archiveLimit(timeouts, 800 * MiB, now + 900_000, now)).toEqual({ limit: "pack", limitMs: 700_000 });
+    expect(archiveLimit(timeouts, 0, now - 5, now)).toEqual({ limit: "upload_window", limitMs: 0 });
+  });
+
+  it("a packing timeout logs the stage, bytes, estimate, elapsed time and the limit that fired", async () => {
+    env.FAKE_NPM_BIG = String(8 * MiB);
+    const result = await prepare({ timeouts: { tarMs: 1, tarMsPerMiB: 0 } });
+    expect(result).toMatchObject({ result: "cold" });
+    expect(state.uploads).toHaveLength(0);
+    const skipped = events.find((entry) => entry.event === "snapshot_skipped");
+    expect(skipped).toMatchObject({ reason: "timeout", stage: "archive", limit: "pack", limitMs: 1 });
+    expect(skipped?.writtenBytes).toEqual(expect.any(Number));
+    expect(skipped?.estimateBytes).toEqual(expect.any(Number));
+    expect(skipped?.elapsedMs).toEqual(expect.any(Number));
+    expect(await cacheLeftovers()).toEqual([]);
+    expect(await exists(join(workspace, "node_modules/beta/big.bin"))).toBe(true);
+  });
+
+  it("does not pack when the upload window has already passed", async () => {
+    const { projects } = await prepareAll({ timeouts: { uploadWindowMs: 1, uploadMarginMs: 0 } });
+    expect(projects[0]).toMatchObject({ result: "cold" });
+    expect(events.some((entry) => entry.event === "snapshot_skipped" && entry.reason === "upload_window_passed")).toBe(
+      true,
+    );
+    expect(events.some((entry) => entry.event === "snapshot_skipped" && entry.reason === "timeout")).toBe(false);
   });
 });

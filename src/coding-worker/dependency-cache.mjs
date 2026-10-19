@@ -78,7 +78,10 @@ const MIB = 1024 * 1024;
  *  sooner). With the default totalMs (20 min) a slow run simply stops
  *  uploading after ~14 min while still restoring and installing.
  *  `transferMs` is the floor for a download or upload,
- *  which also gets `transferMsPerMiB` for every MiB it moves. After
+ *  which also gets `transferMsPerMiB` for every MiB it moves; `tarMs` is the
+ *  floor for packing a snapshot, which gets `tarMsPerMiB` for every MiB of
+ *  the installed tree it reads (gzip is CPU-bound, so a large tree on a
+ *  small pod needs longer), and never runs past the upload deadline. After
  *  `totalMs` the work is aborted and gets `settleMs` to clean up; then the
  *  workspace is closed to it (no rename, removal or install) and it is sealed.
  *  `httpMs` bounds each small proxy call (lookup, seal); `planMs` the
@@ -96,6 +99,7 @@ export const DEFAULT_TIMEOUTS = Object.freeze({
   transferMsPerMiB: 1_000,
   installMs: 600_000,
   tarMs: 300_000,
+  tarMsPerMiB: 500,
   totalMs: 1_200_000,
   killGraceMs: 5_000,
   settleMs: 6_000,
@@ -1103,14 +1107,44 @@ async function restoreCommitted(context, project) {
   }
 }
 
+/** How long packing a snapshot may take: `tarMs` plus `tarMsPerMiB` for
+ *  every MiB of the installed tree, cut to what is left of the upload window
+ *  (an archive finished after it could not be uploaded). `limit` names the
+ *  bound that applies: `pack` or `upload_window`. Still bounded by `totalMs`
+ *  through the run's signal. */
+export function archiveLimit(timeouts, treeBytes, uploadDeadline, now = Date.now()) {
+  const packMs = timeouts.tarMs + Math.ceil(Math.max(0, treeBytes) / MIB) * (timeouts.tarMsPerMiB ?? 0);
+  if (uploadDeadline !== undefined && uploadDeadline - now < packMs)
+    return { limit: "upload_window", limitMs: Math.max(0, uploadDeadline - now) };
+  return { limit: "pack", limitMs: packMs };
+}
+
 /** Archives node_modules and uploads it. Never throws: the installed tree is
  *  fine either way, so a failure here only logs. */
 async function snapshot(context, project, maxBytes) {
   const { cacheDir, cacheBase, query, token, signal, timeouts, session } = context;
   const archive = join(cacheDir, `${randomName("dep-snap")}.tgz`);
   track(context, archive);
+  const started = Date.now();
+  let stage = "estimate";
+  let estimate;
+  let written = 0;
+  // Which bound a timeout in this stage hit, and how long it allowed.
+  let bound;
   const skip = (reason) => {
-    context.log("snapshot_skipped", { reason });
+    if (reason !== "timeout") {
+      context.log("snapshot_skipped", { reason });
+      return undefined;
+    }
+    const fired = signal.aborted ? { limit: "deadline", limitMs: timeouts.totalMs } : (bound ?? {});
+    context.log("snapshot_skipped", {
+      reason,
+      stage,
+      writtenBytes: written,
+      ...(estimate !== undefined ? { estimateBytes: estimate } : {}),
+      elapsedMs: Date.now() - started,
+      ...fired,
+    });
     return undefined;
   };
   try {
@@ -1118,7 +1152,7 @@ async function snapshot(context, project, maxBytes) {
     // Only an archive that fits what is left of the disk budget, measured now
     // (npm's own writes included), is written; the installed tree stays either way.
     const room = await measureRemaining(context);
-    const estimate = archiveEstimate(context);
+    estimate = archiveEstimate(context);
     if (estimate > room) {
       context.log("snapshot_skipped", {
         reason: "budget",
@@ -1128,10 +1162,13 @@ async function snapshot(context, project, maxBytes) {
       });
       return undefined;
     }
-    let written = 0;
+    bound = archiveLimit(timeouts, context.installedBytes ?? 0, context.uploadDeadline);
+    // Not packed at all when the archive could no longer be uploaded.
+    if (bound.limit === "upload_window" && bound.limitMs <= 0) return skip("upload_window_passed");
+    stage = "archive";
     const code = await run("tar", ["-czf", "-", "-C", project.dir, ROOT], {
       env: { PATH: context.env.PATH ?? process.env.PATH ?? "", COPYFILE_DISABLE: "1" },
-      timeoutMs: timeouts.tarMs,
+      timeoutMs: bound.limitMs,
       killGraceMs: timeouts.killGraceMs,
       signal,
       session,
@@ -1166,6 +1203,8 @@ async function snapshot(context, project, maxBytes) {
     // bounds to its digest, so a later restore that verifies that digest may
     // safely avoid parsing the same archive a second time.
     let validation;
+    stage = "scan";
+    bound = undefined;
     try {
       validation = await scanArchive(archive, { budgetBytes: Number.MAX_SAFE_INTEGER, signal });
     } catch (error) {
@@ -1176,6 +1215,8 @@ async function snapshot(context, project, maxBytes) {
     if (context.uploadDeadline !== undefined && Date.now() >= context.uploadDeadline)
       return skip("upload_window_passed");
     const timeoutMs = timeouts.transferMs + Math.ceil(size / MIB) * timeouts.transferMsPerMiB;
+    stage = "upload";
+    bound = { limit: "upload", limitMs: timeoutMs };
     const result = await callJson(
       new URL(`blob?${query}`, cacheBase),
       {
