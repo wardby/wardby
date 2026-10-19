@@ -47,8 +47,11 @@ export function parseAndShip(request: ParseRequest): ShippedLockfile {
   });
   if (!parsed.dependencyKeys) throw new Error("this lockfile format cannot be parsed off the event loop");
   const index = new Map(parsed.entries.map((entry, at) => [entry, at]));
-  const edgesOf = (path: string, what: string) => {
-    const keys = parsed.dependencyKeys!(path);
+  const edgesOf = (path: string, what: "entry" | "project") => {
+    let keys = parsed.dependencyKeys!(path);
+    // A project's edges only label audited packages top-level (best effort):
+    // past the bound they are cut, never a reason to refuse the plan.
+    if (what === "project") keys = keys.slice(0, MAX_EDGES_PER_ENTRY);
     if (keys.length > MAX_EDGES_PER_ENTRY)
       throw new RegistryError(
         413,

@@ -54,6 +54,16 @@ describe("parseLockfileOffThread", () => {
     });
   }
 
+  it("cuts a project's edges at the bound instead of refusing the lockfile", async () => {
+    const declared = ["a", ...Array.from({ length: 2100 }, (_, at) => `dep-${at}`)]
+      .map((name) => `      ${name}:\n        specifier: ^1.0.0\n        version: 1.0.0\n`)
+      .join("");
+    const body = `lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n${declared}\npackages:\n\n  a@1.0.0:\n    resolution: {integrity: sha512-a}\n\nsnapshots:\n\n  a@1.0.0: {}\n`;
+    const shipped = await parseLockfileOffThread("npm", body, OPTIONS, { timeoutMs: 10_000 });
+    expect(shipped.projects[0].dependencies).toHaveLength(2101);
+    expect(shipped.resolve(".", "a")).toMatchObject({ name: "a", version: "1.0.0" });
+  });
+
   it("passes the parser's refusals through with their status and code", async () => {
     expect(
       await failure(parseLockfileOffThread("npm", "lockfileVersion: 5.4\n", OPTIONS, { timeoutMs: 10_000 })),
