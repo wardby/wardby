@@ -138,9 +138,9 @@ most the gap between the estimate and the real cost.
 
 A lead and the sub-agents it starts in the same budget group hold the lead's
 budget once, at the lead (its reservation minus what the whole tree has spent),
-decided per period. If the tree's live coding runs reserved more than that,
-through the lead's `allowedOverrunPercent`, the lead holds their unspent
-reservations instead. `get_budget_group` reports `heldRuns` for each period.
+decided per period. If the tree's live sub-agent runs hold more than that
+(a coding run's reservation takes the lead's `allowedOverrunPercent`), the
+lead holds their unspent holds instead. `get_budget_group` reports `heldRuns` for each period.
 
 See also [Troubleshoot budgets and reservations](../troubleshooting/budgets.md).
 

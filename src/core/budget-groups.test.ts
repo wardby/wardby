@@ -427,6 +427,51 @@ describe("a delegated tree is held once", () => {
     expect(week).toMatchObject({ spentUsd: 4, reservedUsd: 11, remainingUsd: 5, heldRuns: 1 });
   });
 
+  it("a live native sibling beside the coding child: the tree holds both unspent holds", async () => {
+    // Lead $10 with 50% overrun; a native $5 child, then a coding child sized $15 - $5 = $10.
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 0, startedAt: NOW, status: "running" },
+        { id: "N", agentId: "helper", costUsd: 0, startedAt: NOW, status: "running", parentRunId: "L" },
+        {
+          id: "C",
+          agentId: "builder",
+          costUsd: 0,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 10 },
+        },
+      ],
+      [{ id: "helper", budgetGroupId: null, budgetUsd: 5 }],
+    );
+    const cap = { dailyBudgetUsd: null, weeklyBudgetUsd: 20, monthlyBudgetUsd: null } as never;
+    const [week] = await computeGroupSpend(db, cap, [{ id: "lead", budgetUsd: 10 }, ...members.slice(1)], NOW);
+    expect(week).toMatchObject({ spentUsd: 0, reservedUsd: 15, remainingUsd: 5, heldRuns: 1 });
+  });
+
+  it("a live child reserving less than the root has left: the root's own hold wins", async () => {
+    const db = fakeDb(
+      [],
+      [
+        { id: "L", agentId: "lead", costUsd: 0, startedAt: NOW, status: "running" },
+        {
+          id: "C",
+          agentId: "builder",
+          costUsd: 2,
+          startedAt: NOW,
+          status: "running",
+          parentRunId: "L",
+          codingRun: { budgetReservedUsd: 10 },
+        },
+      ],
+    );
+    const [week] = await computeGroupSpend(db, group, members, NOW);
+    // $21 - $2 = $19, not the child's $10 - $2 = $8.
+    expect(week).toMatchObject({ spentUsd: 2, reservedUsd: 19, remainingUsd: 4, heldRuns: 1 });
+  });
+
   it("a finished coding child no longer raises the tree's hold", async () => {
     const db = fakeDb(
       [],
