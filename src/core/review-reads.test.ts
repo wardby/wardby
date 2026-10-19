@@ -159,6 +159,60 @@ describe("ReviewReadLedger state", () => {
     expect(a.unreadCode("o/r", 1, HEAD)).toEqual([]);
   });
 
+  describe("a sinceSha read after a full read of the same head", () => {
+    const compare = (files: PullRequestFileView[], fileListComplete = true) =>
+      ({
+        headSha: HEAD,
+        files,
+        nextPatchCursor: null,
+        comparedFrom: "b".repeat(40),
+        fileListComplete,
+      }) as unknown as PullRequestView;
+    const full = (files: PullRequestFileView[], fileListComplete = true) =>
+      ({
+        headSha: HEAD,
+        files,
+        nextPatchCursor: null,
+        comparedFrom: null,
+        fileListComplete,
+      }) as unknown as PullRequestView;
+    const listed = [f("src/a.ts", "complete"), f("src/b.ts", "later_page"), f("src/c.ts", "later_page")];
+
+    it("never narrows the gate (control plane: one ledger)", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, full(listed), false);
+      reads.recordPage("o/r", 1, compare([f("src/a.ts", "complete")]), false);
+      expect(reads.unreadCode("o/r", 1, HEAD)).toEqual(["src/b.ts", "src/c.ts"]);
+    });
+
+    it("never narrows the gate (sandbox: each request's ledger merged into the saved one)", () => {
+      const first = new ReviewReadLedger();
+      first.recordPage("o/r", 1, full(listed), false);
+      const saved = ReviewReadLedger.fromJSON(first.toJSON());
+      const second = ReviewReadLedger.fromJSON(saved.toJSON());
+      second.recordPage("o/r", 1, compare([f("src/a.ts", "complete")]), false);
+      expect(second.unreadCode("o/r", 1, HEAD)).toEqual(["src/b.ts", "src/c.ts"]);
+      saved.merge(second);
+      expect(saved.unreadCode("o/r", 1, HEAD)).toEqual(["src/b.ts", "src/c.ts"]);
+    });
+
+    it("a whole compare list does not clear a cut full list; a whole full list does", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, full([f("src/a.ts", "complete")], false), false);
+      reads.recordPage("o/r", 1, compare([f("src/a.ts", "complete")]), false);
+      expect(reads.fileListCut("o/r", 1, HEAD)).toBe(true);
+      reads.recordPage("o/r", 1, full([f("src/a.ts", "complete")]), false);
+      expect(reads.fileListCut("o/r", 1, HEAD)).toBe(false);
+    });
+
+    it("a cut compare list after a whole full list is not cut: the full list's files stay gated", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, full([f("src/a.ts", "complete")]), false);
+      reads.recordPage("o/r", 1, compare([f("src/a.ts", "complete")], false), false);
+      expect(reads.fileListCut("o/r", 1, HEAD)).toBe(false);
+    });
+  });
+
   describe("a file list the host cut", () => {
     const cut = (files: PullRequestFileView[]) =>
       ({ headSha: HEAD, files, nextPatchCursor: null, fileListComplete: false }) as unknown as PullRequestView;
@@ -195,7 +249,7 @@ describe("ReviewReadLedger state", () => {
       expect(ReviewReadLedger.fromJSON(state).unreadCode("o/r", 1, HEAD)).toEqual([]);
     });
 
-    it("merges: the newer list decides, and side-by-side lists keep a cut", () => {
+    it("merges: a whole full list clears a cut, and a cut kept side by side with a compare stays", () => {
       const saved = new ReviewReadLedger();
       saved.recordPage("o/r", 1, cut([f("src/a.ts", "complete")]), false);
       const newer = ReviewReadLedger.fromJSON(saved.toJSON());
@@ -204,14 +258,18 @@ describe("ReviewReadLedger state", () => {
       stale.merge(newer);
       expect(stale.fileListCut("o/r", 1, HEAD)).toBe(false);
 
-      const base = new ReviewReadLedger();
-      base.recordPage("o/r", 1, whole([f("src/a.ts", "complete")]), false);
-      const left = ReviewReadLedger.fromJSON(base.toJSON());
-      const right = ReviewReadLedger.fromJSON(base.toJSON());
-      left.recordPage("o/r", 1, whole([f("src/a.ts", "complete")]), false);
+      // Side by side: a whole compare list never clears the other request's cut full list.
+      const left = new ReviewReadLedger();
+      const right = new ReviewReadLedger();
+      left.recordPage("o/r", 1, { ...whole([f("src/a.ts", "complete")]), comparedFrom: "b".repeat(40) }, false);
       right.recordPage("o/r", 1, cut([f("src/a.ts", "complete")]), false);
       left.merge(right);
       expect(left.fileListCut("o/r", 1, HEAD)).toBe(true);
+      // And a whole full list in either request means every file is listed.
+      const done = new ReviewReadLedger();
+      done.recordPage("o/r", 1, whole([f("src/a.ts", "complete")]), false);
+      left.merge(done);
+      expect(left.fileListCut("o/r", 1, HEAD)).toBe(false);
     });
   });
 });
