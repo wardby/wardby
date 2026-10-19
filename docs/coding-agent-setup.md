@@ -104,7 +104,7 @@ JOB_LAUNCHER=docker
   directly, so the control plane must not run in a container, a pod or on
   another machine. A trusted folder the server cannot see is ignored, so its
   repositories fail with `local_repo_not_allowed`, and `doctor` reports the
-  folder as missing. The machine needs git 2.24 or newer.
+  folder as missing. The machine needs git 2.38 or newer.
 - **Worker images.** Use worker images from the same release as the control
   plane. An older worker image rejects `local:` repositories (the run fails with
   `worker_input_failed`), including a Codex agent's bring-your-own
