@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createPrismaClient } from "../../core/db.js";
 import { handleReviewHostTool, type RepositoryLink } from "../../core/review-host-tools.js";
+import { ReviewReadLedger } from "../../core/review-reads.js";
 import { LocalReviewHost } from "./local.js";
 import { ReviewHostError } from "./types.js";
 
@@ -299,4 +300,49 @@ describe.skipIf(!process.env.DATABASE_URL)("LocalReviewHost (database)", () => {
       }),
     ).toBe(1);
   });
+
+  it("cuts a file list over 1,000 files, and repo_publish_review then refuses APPROVE", async () => {
+    // A separate worktree, so the source checkout (with its uncommitted edit) is left alone.
+    const bigDir = join(base, "big");
+    await git(repoPath, "worktree", "add", "-b", "big", bigDir, "main");
+    await mkdir(join(bigDir, "gen"));
+    await Promise.all(
+      Array.from({ length: 1001 }, (_, i) =>
+        writeFile(join(bigDir, "gen", `f${i}.ts`), `export const x${i} = ${i};\n`),
+      ),
+    );
+    await git(bigDir, "add", "gen");
+    await git(bigDir, "commit", "-m", "many files");
+    const bigHead = await git(bigDir, "rev-parse", "HEAD");
+    const pr = await db.localPullRequest.create({ data: { repository, branch: "big", base: "main" } });
+    prIds.push(pr.id);
+
+    const view = await host.readPullRequest(repository, pr.number, { maxPatchChars: 60_000, agentMarker: "agent-x" });
+    expect(view.files).toHaveLength(1000);
+    expect(view.fileListComplete).toBe(false);
+    const small = await host.readPullRequest(repository, prNumber, { maxPatchChars: 60_000, agentMarker: "agent-x" });
+    expect(small.fileListComplete).toBe(true);
+
+    const link: RepositoryLink = { provider: "local", repository, access: "write", checkName: null, waitForCi: false };
+    const ctx = {
+      agentId: "agent-big",
+      links: [link],
+      hosts: { local: host },
+      runCheck: null,
+      markRunCheckCompleted: vi.fn(async () => undefined),
+      authorize: vi.fn(async () => ({ ok: true as const })),
+      db,
+      reads: new ReviewReadLedger(),
+    };
+    await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository, prNumber: pr.number }), ctx);
+    const publish = (verdict: string) =>
+      handleReviewHostTool(
+        "repo_publish_review",
+        JSON.stringify({ repository, prNumber: pr.number, headSha: bigHead, verdict, summary: "s", body: "b" }),
+        ctx,
+      ).then((out) => JSON.parse(out));
+    expect(await publish("APPROVE")).toMatchObject({ error: "file_list_truncated" });
+    expect(await publish("CHANGES_REQUESTED")).toMatchObject({ published: true });
+    expect(await db.localReview.count({ where: { pullRequestId: pr.id, verdict: "APPROVE" } })).toBe(0);
+  }, 60_000);
 });

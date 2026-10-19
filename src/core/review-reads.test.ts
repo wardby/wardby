@@ -158,4 +158,60 @@ describe("ReviewReadLedger state", () => {
     a.recordPage("o/r", 1, view([f("src/a.ts", "partial", "z", { offset: 6, continues: false })], null), true);
     expect(a.unreadCode("o/r", 1, HEAD)).toEqual([]);
   });
+
+  describe("a file list the host cut", () => {
+    const cut = (files: PullRequestFileView[]) =>
+      ({ headSha: HEAD, files, nextPatchCursor: null, fileListComplete: false }) as unknown as PullRequestView;
+    const whole = (files: PullRequestFileView[]) =>
+      ({ headSha: HEAD, files, nextPatchCursor: null, fileListComplete: true }) as unknown as PullRequestView;
+
+    it("is cut even when every listed file was read, and only once the first page was seen", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, cut([f("src/a.ts", "complete")]), true);
+      expect(reads.fileListCut("o/r", 1, HEAD)).toBe(false);
+      reads.recordPage("o/r", 1, cut([f("src/a.ts", "complete")]), false);
+      expect(reads.unreadCode("o/r", 1, HEAD)).toEqual([]);
+      expect(reads.fileListCut("o/r", 1, HEAD)).toBe(true);
+      expect(reads.fileListCut("o/r", 2, HEAD)).toBe(false);
+    });
+
+    it("follows the latest list: a whole list after a cut one clears it", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, cut([f("src/a.ts", "complete")]), false);
+      reads.recordPage("o/r", 1, whole([f("src/a.ts", "complete")]), false);
+      expect(reads.fileListCut("o/r", 1, HEAD)).toBe(false);
+    });
+
+    it("survives toJSON/fromJSON, and a state saved without the field reads as not cut", () => {
+      const reads = new ReviewReadLedger();
+      reads.recordPage("o/r", 1, cut([f("src/a.ts", "complete")]), false);
+      const state = JSON.parse(JSON.stringify(reads.toJSON())) as { heads: Record<string, Record<string, unknown>> };
+      expect(ReviewReadLedger.fromJSON(state).fileListCut("o/r", 1, HEAD)).toBe(true);
+      for (const head of Object.values(state.heads)) {
+        delete head.listCut;
+        delete head.lists;
+      }
+      expect(ReviewReadLedger.fromJSON(state).fileListCut("o/r", 1, HEAD)).toBe(false);
+      expect(ReviewReadLedger.fromJSON(state).unreadCode("o/r", 1, HEAD)).toEqual([]);
+    });
+
+    it("merges: the newer list decides, and side-by-side lists keep a cut", () => {
+      const saved = new ReviewReadLedger();
+      saved.recordPage("o/r", 1, cut([f("src/a.ts", "complete")]), false);
+      const newer = ReviewReadLedger.fromJSON(saved.toJSON());
+      newer.recordPage("o/r", 1, whole([f("src/a.ts", "complete")]), false);
+      const stale = ReviewReadLedger.fromJSON(saved.toJSON());
+      stale.merge(newer);
+      expect(stale.fileListCut("o/r", 1, HEAD)).toBe(false);
+
+      const base = new ReviewReadLedger();
+      base.recordPage("o/r", 1, whole([f("src/a.ts", "complete")]), false);
+      const left = ReviewReadLedger.fromJSON(base.toJSON());
+      const right = ReviewReadLedger.fromJSON(base.toJSON());
+      left.recordPage("o/r", 1, whole([f("src/a.ts", "complete")]), false);
+      right.recordPage("o/r", 1, cut([f("src/a.ts", "complete")]), false);
+      left.merge(right);
+      expect(left.fileListCut("o/r", 1, HEAD)).toBe(true);
+    });
+  });
 });

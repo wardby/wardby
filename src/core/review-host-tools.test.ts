@@ -1017,6 +1017,66 @@ describe("handleReviewHostTool unread-files publish guard", () => {
     }
   });
 
+  it("refuses APPROVE with file_list_truncated when the host cut the file list, allows CHANGES_REQUESTED and COMMENT", async () => {
+    const h = fakeHost();
+    // Every listed file was delivered in full, so only the cut stands in the way.
+    h.readPullRequest = vi.fn(
+      async () =>
+        ({
+          number: 7,
+          headSha: SHA,
+          files: [codeFile("src/a.ts", "complete")],
+          nextPatchCursor: null,
+          fileListComplete: false,
+        }) as never,
+    );
+    const c = ctx({ hosts: { github: h }, reads: new ReviewReadLedger() });
+    const read = JSON.parse(
+      await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c),
+    );
+    expect(read.fileListComplete).toBe(false);
+    const out = JSON.parse(
+      await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("APPROVE")), c),
+    );
+    expect(out).toMatchObject({ error: "file_list_truncated" });
+    expect(out.message).toContain("call repo_pr_read again without it");
+    expect(out.message).toContain("publish CHANGES_REQUESTED (or COMMENT)");
+    expect(h.publishReview).not.toHaveBeenCalled();
+    for (const verdict of ["CHANGES_REQUESTED", "COMMENT"]) {
+      const published = JSON.parse(
+        await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs(verdict)), c),
+      );
+      expect(published.error).toBeUndefined();
+    }
+  });
+
+  it("allows APPROVE once a later read of the head lists every file", async () => {
+    const h = fakeHost();
+    let complete = false;
+    h.readPullRequest = vi.fn(
+      async () =>
+        ({
+          number: 7,
+          headSha: SHA,
+          files: [codeFile("src/a.ts", "complete")],
+          nextPatchCursor: null,
+          fileListComplete: complete,
+        }) as never,
+    );
+    const c = ctx({ hosts: { github: h }, reads: new ReviewReadLedger() });
+    await handleReviewHostTool(
+      "repo_pr_read",
+      JSON.stringify({ repository: WRITE.repository, prNumber: 7, sinceSha: "b".repeat(40) }),
+      c,
+    );
+    complete = true;
+    await handleReviewHostTool("repo_pr_read", JSON.stringify({ repository: WRITE.repository, prNumber: 7 }), c);
+    const out = JSON.parse(
+      await handleReviewHostTool("repo_publish_review", JSON.stringify(publishArgs("APPROVE")), c),
+    );
+    expect(out.error).toBeUndefined();
+  });
+
   it("allows the verdict once the file was read with repo_read_file at the head", async () => {
     const h = pageHost();
     h.readFile = vi.fn(async () => ({

@@ -53,7 +53,10 @@ const log = logger.child({ module: "github-review-host" });
 
 const READ = { contents: "read", pull_requests: "read" } as const;
 const SAFE_SHA = /^[0-9a-f]{40}$/;
-const MAX_FILE_PAGES = 3;
+/** Pages of 100 files read from a pull request's file list: an upper bound, so a huge PR costs a bounded number of calls. */
+const MAX_FILE_PAGES = 10;
+/** GitHub's compare endpoint returns at most this many files, with no way to page for more. */
+const COMPARE_FILE_LIMIT = 300;
 const MAX_COMMENT_PAGES = 3;
 /** wardby's proposed description in a pull request read is cut to this many bytes (UTF-8). */
 export const MAX_REVIEW_DESCRIPTION_PROPOSAL_BYTES = 16 * 1024;
@@ -474,13 +477,20 @@ export class GitHubReviewHost implements CodeReviewHost {
       const pr = record(await (await get(`${base}/pulls/${prNumber}`)).json());
       const { headSha, isFork, state } = this.head(repository, pr);
 
+      // The listing is cut when the page bound stops it before the PR's changed_files count
+      // (or, without a count, on a full last page): an APPROVE then has unlisted files to judge.
+      let fileListComplete = true;
       const prFiles = async (): Promise<Json[]> => {
         const all: Json[] = [];
+        let lastFull = false;
         for (let page = 1; page <= MAX_FILE_PAGES; page++) {
           const batch = list(await (await get(`${base}/pulls/${prNumber}/files?per_page=100&page=${page}`)).json());
           all.push(...batch);
-          if (batch.length < 100) break;
+          lastFull = batch.length >= 100;
+          if (!lastFull) break;
         }
+        const changed = pr.changed_files;
+        if (typeof changed === "number" ? all.length < changed : lastFull) fileListComplete = false;
         return all;
       };
 
@@ -492,6 +502,7 @@ export class GitHubReviewHost implements CodeReviewHost {
         if (compare.status === "ahead") {
           rawFiles = list(compare.files ?? []);
           comparedFrom = opts.sinceSha;
+          if (rawFiles.length >= COMPARE_FILE_LIMIT) fileListComplete = false;
           // A merge commit since the last review (typically the base branch
           // merged in) makes the compare carry every base-branch change too.
           // The PR's own diff is always relative to the base, so it holds
@@ -561,6 +572,7 @@ export class GitHubReviewHost implements CodeReviewHost {
         comparedFrom,
         baseMergedSince,
         files: page.files,
+        fileListComplete,
         patchesComplete: page.patchesComplete,
         truncatedFiles: page.truncatedFiles,
         nextPatchCursor: page.nextPatchCursor,

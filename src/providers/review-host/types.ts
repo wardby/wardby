@@ -112,6 +112,12 @@ export interface PullRequestView {
    */
   baseMergedSince: boolean;
   files: PullRequestFileView[];
+  /**
+   * False when `files` is cut: the host's listing stopped at its upper bound before every
+   * changed file (on GitHub, also a compare at its 300-file limit). repo_publish_review then
+   * refuses an APPROVE of this head with file_list_truncated.
+   */
+  fileListComplete: boolean;
   /** No patch is left to page through and none is unavailable: with earlier pages, every patch was delivered. */
   patchesComplete: boolean;
   /** Files whose patch is not (fully) delivered yet: later_page, unavailable, or a partial part the next page continues; in review order. */
