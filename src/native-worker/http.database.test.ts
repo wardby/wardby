@@ -319,6 +319,8 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox gateway over HTTP (da
       gatewayUrl: serviceUrl,
     });
     if (live.kind !== "started") throw new Error("expected a session");
+    // What a launcher masks from the worker's output tail: every value its tools may read.
+    expect(await live.secretValues()).toEqual(["s3cret-value-123"]);
     const auth = { authorization: `Bearer ${live.capability}`, "content-type": "application/json" };
     const foreign = await post(auth, finishBody(done.finished.id));
     expect(foreign.status).toBe(403);

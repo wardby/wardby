@@ -9,6 +9,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { logger } from "../core/logger.js";
+import { maskSpans, mergeSpans, secretSpans, withEscapedForms } from "../core/secret-spans.js";
 import {
   buildGatewayConnectArgs,
   buildGatewayDisconnectArgs,
@@ -25,7 +26,7 @@ import {
   NATIVE_WORKER_LABEL_FILTER,
   type NativeWorkerLimits,
 } from "./docker-isolation.js";
-import type { DetachedWorkerLauncher, WorkerHandle } from "./launch.js";
+import type { DetachedWorkerLauncher, WorkerHandle, WorkerLaunchOptions } from "./launch.js";
 import type { WorkerInput } from "./protocol.js";
 import { warmDeliveryCommand } from "./warm-delivery.js";
 import { NATIVE_SANDBOX_WARM_DELIVERY_FAILED, type WarmWorkerLauncher } from "./warm-pool.js";
@@ -36,9 +37,47 @@ const launcherLog = logger.child({ module: "native-docker-launcher" });
  * Bounded, so a noisy worker cannot flood the log. The worker holds no long-lived credentials (only
  * its run's gateway capability), and it redacts the secret values it received (every `secrets.get`
  * result, and the capability) from everything it writes to stderr, its failure line and logger lines
- * included (stderr-redaction.ts), with the console bridge's redactor and its minimum length.
+ * included (stderr-redaction.ts), with the console bridge's redactor and its minimum length. The
+ * worker is untrusted, so the launcher masks the tail again itself (workerTailFields).
  */
 export const WORKER_STDERR_TAIL_CHARS = 2000;
+
+/**
+ * A failed worker's output tail as log fields: `stderrTail`, masked by exact value through the
+ * shared redactor against every secret value delivered to that worker (its gateway capability,
+ * from its input, and each value its tools may read, from `secretValues`, with their JSON-escaped
+ * forms). When those values are not given or cannot be read, no tail: `stderrTailOmitted` (fail
+ * closed). No fields when the output is empty.
+ *
+ * `cut`: `output` is a slice of a longer output (a log read bounded by lines or bytes), so it may
+ * begin (`start`) or end (`end`) inside a value, which no exact match finds; as many characters as
+ * the longest value less one are masked at each cut end too.
+ */
+export async function workerTailFields(
+  output: string,
+  input: WorkerInput,
+  secretValues: (() => Promise<readonly string[]>) | undefined,
+  cut: { start?: boolean; end?: boolean } = {},
+): Promise<{ stderrTail?: string; stderrTailOmitted?: true }> {
+  if (!output.trim()) return {};
+  let delivered: readonly string[];
+  try {
+    if (!secretValues) return { stderrTailOmitted: true };
+    delivered = await secretValues();
+  } catch {
+    return { stderrTailOmitted: true };
+  }
+  const values = withEscapedForms([...(input.gateway ? [input.gateway.capability] : []), ...delivered]);
+  const spans = secretSpans(output, values);
+  const longest = Math.max(0, ...values.map((value) => value.length));
+  if (longest > 1) {
+    if (cut.start) spans.push([0, Math.min(output.length, longest - 1)]);
+    if (cut.end) spans.push([Math.max(0, output.length - (longest - 1)), output.length]);
+  }
+  // Masked whole, then cut: a cut can then split only a marker or plain text, never a value.
+  const stderrTail = maskSpans(output, mergeSpans(spans)).trim().slice(-WORKER_STDERR_TAIL_CHARS);
+  return stderrTail ? { stderrTail } : {};
+}
 
 export interface DockerResult {
   code: number | null;
@@ -105,7 +144,7 @@ export class DockerNativeWorkerLauncher implements DetachedWorkerLauncher, WarmW
     await this.must(["image", "pull", "--quiet", this.options.image], "pull the worker image");
   }
 
-  async launch(input: WorkerInput): Promise<WorkerHandle> {
+  async launch(input: WorkerInput, launchOptions: WorkerLaunchOptions = {}): Promise<WorkerHandle> {
     const runId = input.runId;
     const names = nativeIsolationNames(runId);
     const existing = await this.inspect(runId);
@@ -120,13 +159,10 @@ export class DockerNativeWorkerLauncher implements DetachedWorkerLauncher, WarmW
       const args = buildNativeWorkerRunArgs({ runId, image: this.options.image, limits: this.options.limits });
       // Attached so the input (capability included) goes in on stdin; the exit is read with
       // `docker wait`, which a restarted server can call again.
-      void this.docker.run(args, { input: `${JSON.stringify(input)}\n` }).then((result) => {
+      void this.docker.run(args, { input: `${JSON.stringify(input)}\n` }).then(async (result) => {
         if (result.code !== 0 && result.code !== null && !/Conflict/.test(result.stderr)) {
-          const stderrTail = result.stderr.trim().slice(-WORKER_STDERR_TAIL_CHARS);
-          launcherLog.warn(
-            { container: names.worker, code: result.code, ...(stderrTail ? { stderrTail } : {}) },
-            "native worker exited non-zero",
-          );
+          const tail = await workerTailFields(result.stderr, input, launchOptions.secretValues);
+          launcherLog.warn({ container: names.worker, code: result.code, ...tail }, "native worker exited non-zero");
         }
       });
     } else {

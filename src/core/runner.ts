@@ -2123,7 +2123,14 @@ export interface SandboxSessionSnapshot {
 }
 
 export type SandboxSessionOutcome =
-  | { kind: "started"; input: WorkerInput; capability: string; sessionId: string }
+  | {
+      kind: "started";
+      input: WorkerInput;
+      capability: string;
+      sessionId: string;
+      /** Every secret value the run's user tools may read, read on demand (never stored); rejects when any read fails. */
+      secretValues: () => Promise<string[]>;
+    }
   /** The run ended before a worker was needed (already terminal, or failed at load). */
   | { kind: "ended"; run: Run };
 
@@ -2209,6 +2216,8 @@ export async function createSandboxSession(options: {
     sessionId: session.id,
     capability,
     input: { ...input, gateway: { url: options.gatewayUrl, capability } },
+    secretValues: async () =>
+      (await Promise.all([...tools.toolsByName.keys()].map((name) => tools.readableSecretValues(name)))).flat(),
   };
 }
 
