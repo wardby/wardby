@@ -1,4 +1,4 @@
-FROM ghcr.io/wardby/wardby/wardby-coding-worker-driver@sha256:c8054d0c800bd629df0c803e17f3e1b63ede8f8ef184dbed8b986b9a72e576f5 AS runtime
+FROM ghcr.io/wardby/wardby/wardby-coding-worker-driver@sha256:6730cd8ca3ad3031c2f4f56da3ed3cc9d27ea5ae453e3b9bf5fa0038c4b7f8f1 AS runtime
 # python3-venv (ensurepip plus the bundled pip wheel) stays installed: in
 # registry mode (docs/coding-packages.md) the agent installs packages with
 # `python -m venv --system-site-packages .venv && .venv/bin/python -m pip
@@ -30,6 +30,9 @@ RUN test ! -e /usr/bin/docker \
     && python --version \
     && python -m pytest --version \
     && uv --version \
+    # The driver's uv shim (/opt/wardby/bin/uv) runs this real uv.
+    && test "$(bash -lc 'command -v uv')" = /opt/wardby/bin/uv \
+    && bash -lc 'uv --version' | grep -q '^uv 0.12.23' \
     # A registry-mode venv must be creatable offline, carry pip, and still see
     # the preinstalled pytest/ruff through --system-site-packages.
     && python -m venv --system-site-packages /tmp/venv-check \
