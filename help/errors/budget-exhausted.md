@@ -128,12 +128,14 @@ is not kept.
 When a reply breaks off before its final usage, the proxy settles the request
 at an estimate instead of keeping its whole hold: the usage it already read,
 else the input of the same conversation's previous reply on the same model plus
-the body's growth since then as uncached input, else the input part of the
-hold, plus the output relayed so far (text, tool-call input, and thinking or
+the body's growth since then, else the whole body as new input, plus the output relayed so far (text, tool-call input, and thinking or
 reasoning text) counted high, and never more than the request's worst case. If
 nothing was relayed, the output part is the median output of the run's replies
-on that model, or the full output the hold reserved for when there is none. A
-streaming request that failed before the provider's response started books no
+on that model, or the full output the hold reserved for when there is none.
+The previous reply is used only if it started within the 5-minute prompt cache
+window before the request and the body has not shrunk since. New input is
+counted at one token per 3 bytes and priced at the higher of the model's input
+and cache-write rates. A streaming request that failed before the provider's response started books no
 output. The native sandbox gateway follows the same rule: a call cut after the
 response started but before any output (for example while the model was
 thinking) is booked at its input plus the output its hold reserved for. The

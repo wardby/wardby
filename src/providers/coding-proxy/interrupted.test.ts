@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ModelPricing } from "../llm/pricing-core.js";
 import { CACHE_WINDOW_MS } from "./hold.js";
+import { estimateReservationUsd } from "./metering.js";
 import { estimateInterrupted, previousInput, relayedOutputTokens } from "./interrupted.js";
 import type { PreviousReply } from "./types.js";
 
@@ -167,6 +168,8 @@ describe("estimateInterrupted", () => {
 
 describe("previousInput", () => {
   const NOW = new Date("2026-10-19T12:00:00.000Z");
+  // A model whose cache writes bill at the input rate (pre-GPT-5.6 OpenAI): growth is fresh input.
+  const FLAT: ModelPricing = { ...PRICE, cacheWritePerMTok: PRICE.inputPerMTok };
   const prev = (over: Partial<PreviousReply> = {}): PreviousReply => ({
     model: "m",
     status: "completed",
@@ -176,27 +179,27 @@ describe("previousInput", () => {
     startedAt: new Date(NOW.getTime() - 60_000),
     ...over,
   });
-  const input = (previous: PreviousReply | null, over: { openai?: boolean; bodyBytes?: number } = {}) => ({
-    protocol: over.openai ? ("openai-responses" as const) : ("anthropic-messages" as const),
+  const input = (previous: PreviousReply | null, over: { pricing?: ModelPricing; bodyBytes?: number } = {}) => ({
     model: "m",
     bodyBytes: "bodyBytes" in over ? over.bodyBytes : 10_000,
     previous,
+    pricing: over.pricing ?? PRICE,
     now: NOW,
   });
 
-  it("adds the body's growth to the previous prompt: a cache write on Anthropic", () => {
+  it("adds the body's growth (bytes / 3) as a cache write where that rate is the higher", () => {
     expect(previousInput(input(prev()))).toEqual({
       inputTokens: 1_000,
       cachedInputTokens: 800,
-      cacheWriteTokens: 100 + 6_000,
+      cacheWriteTokens: 100 + 2_000,
       outputTokens: 0,
       reasoningTokens: 0,
     });
   });
 
-  it("adds the body's growth as fresh input on OpenAI", () => {
-    expect(previousInput(input(prev(), { openai: true }))).toEqual({
-      inputTokens: 1_000 + 6_000,
+  it("adds the body's growth as fresh input where cache writes bill no more than input", () => {
+    expect(previousInput(input(prev(), { pricing: FLAT }))).toEqual({
+      inputTokens: 1_000 + 2_000,
       cachedInputTokens: 800,
       cacheWriteTokens: 100,
       outputTokens: 0,
@@ -216,5 +219,77 @@ describe("previousInput", () => {
     ["an expired cache", input(prev({ startedAt: new Date(NOW.getTime() - CACHE_WINDOW_MS - 1) }))],
   ])("has none for %s", (_name, args) => {
     expect(previousInput(args)).toBeUndefined();
+  });
+});
+
+describe("estimateInterrupted with no usable previous reply", () => {
+  // Claude Opus 4.6 published rates: $5 input, $6.25 cache write, $0.50 cache read, $25 output.
+  const OPUS: ModelPricing = {
+    encoding: "o200k_base",
+    inputPerMTok: 5,
+    cachedInputPerMTok: 0.5,
+    cacheWritePerMTok: 6.25,
+    outputPerMTok: 25,
+  };
+  const fullHold = (bytes: number, maxOutputTokens: number, pricing: ModelPricing) =>
+    estimateReservationUsd(bytes, maxOutputTokens, pricing);
+
+  it("uses the model's median output, not the hold's, when nothing was relayed", () => {
+    const facts = { relayedOutputBytes: 0, medianOutputTokens: 700, maxOutputTokens: 32_000 };
+    const withBody = estimateInterrupted(
+      { ...facts, bodyBytes: 30_000, reservationUsd: fullHold(30_000, 32_000, PRICE) },
+      PRICE,
+    );
+    expect(withBody.usage).toMatchObject({ cacheWriteTokens: 10_000, outputTokens: 700 });
+    const noBody = estimateInterrupted({ ...facts, reservationUsd: 2.12 }, PRICE);
+    expect(noBody.usage.outputTokens).toBe(700);
+    expect(usd(noBody.costUsd)).toBe(usd(2.12 - (32_000 * 10) / 1e6 + (700 * 10) / 1e6));
+  });
+
+  it("books a 600 KB Opus body cut before its response at bytes / 3, between the real cost and 3x it", () => {
+    const bytes = 600_000;
+    const { usage, costUsd } = estimateInterrupted(
+      {
+        beforeResponse: true,
+        relayedOutputBytes: 0,
+        bodyBytes: bytes,
+        reservationUsd: fullHold(bytes, 32_000, OPUS),
+        maxOutputTokens: 32_000,
+      },
+      OPUS,
+    );
+    expect(usage).toEqual({
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      cacheWriteTokens: 200_000,
+      outputTokens: 0,
+      reasoningTokens: 0,
+    });
+    expect(usd(costUsd)).toBe(1.25);
+    // About 4 bytes a token, the whole prompt written to the cache: the most it could have billed.
+    const real = ((bytes / 4) * 6.25) / 1e6;
+    expect(costUsd).toBeGreaterThanOrEqual(real);
+    expect(costUsd).toBeLessThanOrEqual(3 * real);
+  });
+
+  it.each([
+    ["Opus", OPUS],
+    ["a flat cache-write rate", { ...PRICE, cacheWritePerMTok: PRICE.inputPerMTok }],
+    ["no cache rates", { encoding: "o200k_base" as const, inputPerMTok: 3, outputPerMTok: 15 }],
+  ])("never books more than the full hold (%s)", (_name, pricing) => {
+    for (const bytes of [1, 2, 3, 1_000, 600_000]) {
+      for (const [relayedOutputBytes, medianOutputTokens] of [
+        [0, undefined],
+        [0, 50_000],
+        [300_000, undefined],
+      ] as const) {
+        const reservationUsd = fullHold(bytes, 4_096, pricing);
+        const { costUsd } = estimateInterrupted(
+          { relayedOutputBytes, medianOutputTokens, bodyBytes: bytes, reservationUsd, maxOutputTokens: 4_096 },
+          pricing,
+        );
+        expect(costUsd).toBeLessThanOrEqual(reservationUsd);
+      }
+    }
   });
 });

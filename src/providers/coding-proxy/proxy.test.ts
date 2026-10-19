@@ -1749,18 +1749,19 @@ describe("interrupted replies settle at an estimate", () => {
       });
       const lead1 = await requestFor(h, 0);
       const lead2 = await requestFor(h, 2);
-      const growth = lead2.requestBytes! - lead1.requestBytes!;
-      expect(growth).toBe(38_000);
-      // The growth is priced as uncached input; the earlier cached part stays at the cache-read rate.
+      expect(lead2.requestBytes! - lead1.requestBytes!).toBe(38_000);
+      // The growth at bytes / 3, at the cache-write rate (above input here); the earlier cached part
+      // stays at the cache-read rate.
+      const growth = Math.ceil(38_000 / 3);
       expect(lead2).toMatchObject({
         status: "uncertain",
         costEstimated: true,
-        usage: { inputTokens: 1_000 + growth, cachedInputTokens: 800, outputTokens: 1 },
+        usage: { inputTokens: 1_000, cachedInputTokens: 800, cacheWriteTokens: growth, outputTokens: 1 },
       });
-      expect(lead2.actualCostUsd!).toBeCloseTo(((200 + growth) * 1 + 800 * 0.1 + 1 * 4) / 1e6, 12);
+      expect(lead2.actualCostUsd!).toBeCloseTo((200 * 1 + 800 * 0.1 + growth * 2 + 1 * 4) / 1e6, 12);
     });
 
-    it("keeps the input part of the hold when its conversation has no usable previous reply", async () => {
+    it("prices the whole body at bytes / 3 when its conversation has no usable previous reply", async () => {
       const replies = [() => done(20, 0), () => new Response(cut)];
       const h = await harness({ budgetUsd: 10, fetch: async () => replies.shift()!() });
       await execute(h, "sub-1", new TestSink(), body("sub", "s"));
@@ -1768,11 +1769,14 @@ describe("interrupted replies settle at an estimate", () => {
         status: 502,
       });
       const lead = await requestFor(h, 1);
-      expect(lead).toMatchObject({ status: "uncertain", costEstimated: true, usage: { inputTokens: 0 } });
-      // The hold's input part (every body byte as a token at input + cache-write rates) plus 1 output token.
-      const inputPart = lead.reservationUsd - (10 * PRICE.outputPerMTok) / 1e6;
-      expect(inputPart).toBeGreaterThan((40_000 * 3) / 1e6);
-      expect(lead.actualCostUsd!).toBeCloseTo(inputPart + (1 * 4) / 1e6, 12);
+      const tokens = Math.ceil(lead.requestBytes! / 3);
+      expect(lead).toMatchObject({
+        status: "uncertain",
+        costEstimated: true,
+        usage: { inputTokens: 0, cachedInputTokens: 0, cacheWriteTokens: tokens, outputTokens: 1 },
+      });
+      expect(lead.actualCostUsd!).toBeCloseTo((tokens * 2 + 1 * 4) / 1e6, 12);
+      expect(lead.actualCostUsd!).toBeLessThan(lead.reservationUsd);
     });
 
     it("before the response started, books the same conversation's input and no output", async () => {
@@ -1784,13 +1788,38 @@ describe("interrupted replies settle at an estimate", () => {
       });
       const lead1 = await requestFor(h, 0);
       const lead2 = await requestFor(h, 1);
-      const growth = lead2.requestBytes! - lead1.requestBytes!;
+      const growth = Math.ceil((lead2.requestBytes! - lead1.requestBytes!) / 3);
       expect(lead2).toMatchObject({
         status: "uncertain",
         costEstimated: true,
-        usage: { inputTokens: 1_000 + growth, cachedInputTokens: 800, outputTokens: 0 },
+        usage: { inputTokens: 1_000, cachedInputTokens: 800, cacheWriteTokens: growth, outputTokens: 0 },
       });
-      expect(lead2.actualCostUsd!).toBeCloseTo(((200 + growth) * 1 + 800 * 0.1) / 1e6, 12);
+      expect(lead2.actualCostUsd!).toBeCloseTo((200 * 1 + 800 * 0.1 + growth * 2) / 1e6, 12);
+    });
+
+    it("on Anthropic, adds the growth to the previous reply's cache writes", async () => {
+      const base = JSON.parse(await fixture("anthropic-sdk-request.json"));
+      const first = JSON.stringify({ ...base, stream: false });
+      const second = JSON.stringify({
+        ...base,
+        messages: [...base.messages, { role: "assistant", content: [{ type: "text", text: "a".repeat(30_000) }] }],
+      });
+      const response = JSON.parse(await fixture("anthropic-message-response.json"));
+      const replies = [async () => Response.json(response), () => Promise.reject(new Error("connection reset"))];
+      const h = await harness({ protocol: "anthropic-messages", budgetUsd: 10, fetch: async () => replies.shift()!() });
+      await execute(h, "a-1", new TestSink(), first);
+      await expect(execute(h, "a-2", new TestSink(), second)).rejects.toMatchObject({ status: 502 });
+      const a1 = await requestFor(h, 0);
+      const a2 = await requestFor(h, 1);
+      expect(a2.conversationKey).toBe(a1.conversationKey);
+      const growth = Math.ceil((a2.requestBytes! - a1.requestBytes!) / 3);
+      // The fixture's reply: 100 fresh + 25 cache-read input tokens, 10 cache writes.
+      expect(a2).toMatchObject({
+        status: "uncertain",
+        costEstimated: true,
+        usage: { inputTokens: 125, cachedInputTokens: 25, cacheWriteTokens: 10 + growth, outputTokens: 0 },
+      });
+      expect(a2.actualCostUsd!).toBeCloseTo((100 * 1 + 25 * 0.1 + (10 + growth) * 2) / 1e6, 12);
     });
   });
 
@@ -1799,8 +1828,10 @@ describe("interrupted replies settle at an estimate", () => {
     const normalized = JSON.stringify({ ...JSON.parse(raw), store: false, background: false });
     const hold = estimateReservationUsd(Buffer.byteLength(normalized), 10, PRICE);
     const outputPart = (10 * PRICE.outputPerMTok) / 1e6;
-    // Room for one hold plus one input-only estimate, not for two holds.
-    const budgetUsd = 2 * hold - outputPart / 2;
+    // The body at bytes / 3, at the cache-write rate (above input here).
+    const inputOnly = (Math.ceil(Buffer.byteLength(normalized) / 3) * 2) / 1e6;
+    // Room for one hold plus one input-only estimate, not for one with the hold's output too.
+    const budgetUsd = hold + inputOnly + outputPart / 2;
 
     it("before the response started, keeps the input-only estimate: nothing was generated", async () => {
       let call = 0;
@@ -1815,7 +1846,7 @@ describe("interrupted replies settle at an estimate", () => {
       await expect(execute(h, "no-response", new TestSink(), raw)).rejects.toMatchObject({ status: 502 });
       const request = await h.ledger.getRequest(reservedRequestId(h.events));
       expect(request).toMatchObject({ status: "uncertain", costEstimated: true, usage: { outputTokens: 0 } });
-      expect(request!.actualCostUsd!).toBeCloseTo(hold - outputPart, 12);
+      expect(request!.actualCostUsd!).toBeCloseTo(inputOnly, 12);
       await expect(execute(h, "next", new TestSink(), raw)).resolves.toBeDefined();
     });
 
@@ -1828,7 +1859,7 @@ describe("interrupted replies settle at an estimate", () => {
       await expect(execute(h, "started", new TestSink(), raw)).rejects.toMatchObject({ status: 502 });
       const request = await h.ledger.getRequest(reservedRequestId(h.events));
       expect(request).toMatchObject({ status: "uncertain", costEstimated: true, usage: { outputTokens: 10 } });
-      expect(request!.actualCostUsd!).toBeCloseTo(hold, 12);
+      expect(request!.actualCostUsd!).toBeCloseTo(inputOnly + outputPart, 12);
       await expect(execute(h, "next", new TestSink(), raw)).rejects.toMatchObject({ code: "wardby_budget_exhausted" });
     });
   });

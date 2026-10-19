@@ -144,6 +144,10 @@ interface RelayProgress {
   stream: boolean;
   /** Set once the upstream response has started (its headers arrived). */
   responseStarted?: boolean;
+  /** UTF-8 bytes of the request body the proxy forwarded. */
+  bodyBytes: number;
+  /** The request's input estimated at reserve time from its conversation's previous reply. */
+  previousInput?: ProxyUsage;
   /** UTF-8 bytes of output text relayed to the client. */
   relayedOutputBytes: number;
   /** The Anthropic stream's usage tracker, once a stream is being relayed. */
@@ -1085,6 +1089,7 @@ export class CodingProxy {
     const conversation = conversationKey(session.protocol, parsed.body);
     // A failed lookup holds the ceiling: never a reason to fail the request.
     const previous = conversation ? await this.ledger.previousReply(session.id, conversation).catch(() => null) : null;
+    const holdNow = this.now();
     const hold = estimateHold({
       protocol: session.protocol,
       model: parsed.model,
@@ -1092,8 +1097,10 @@ export class CodingProxy {
       maxOutputTokens: parsed.maxOutputTokens,
       pricing: snapshot,
       previous,
-      now: this.now(),
+      now: holdNow,
     });
+    // An interrupted reply's input, from the same previous reply and clock as the hold.
+    const previousPrompt = previousInput({ model: parsed.model, bodyBytes, previous, pricing: snapshot, now: holdNow });
     const reservationUsd = hold.holdUsd;
     const holdAudit = {
       reservationUsd,
@@ -1177,6 +1184,8 @@ export class CodingProxy {
     const progress: RelayProgress = {
       maxOutputTokens: parsed.maxOutputTokens,
       stream: parsed.stream,
+      bodyBytes,
+      ...(previousPrompt ? { previousInput: previousPrompt } : {}),
       relayedOutputBytes: 0,
     };
     const cleanupActive = () => {
@@ -1468,20 +1477,14 @@ export class CodingProxy {
   ): Promise<InterruptedEstimate | undefined> {
     try {
       const hints = await this.ledger.settlementHints(session.id, request.model);
-      const previous = previousInput({
-        protocol: session.protocol,
-        model: request.model,
-        bodyBytes: request.requestBytes,
-        previous: request.conversationKey ? await this.ledger.previousReply(session.id, request.conversationKey) : null,
-        now: this.now(),
-      });
       const estimate = estimateInterrupted(
         {
           ...progress.anthropic?.partial(),
           beforeResponse: progress.stream && !progress.responseStarted,
           relayedOutputBytes: progress.relayedOutputBytes,
           ...hints,
-          ...(previous ? { previous } : {}),
+          ...(progress.previousInput ? { previous: progress.previousInput } : {}),
+          bodyBytes: progress.bodyBytes,
           reservationUsd: request.reservationUsd,
           maxOutputTokens: progress.maxOutputTokens,
           ceilingUsd: request.ceilingUsd ?? request.reservationUsd,

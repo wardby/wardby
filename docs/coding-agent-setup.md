@@ -493,8 +493,11 @@ at an estimate instead of leaving its whole hold in place. The estimate is the
 input usage the proxy already read; failing that, the input of the previous
 completed reply in the same conversation (the main conversation and each
 sub-agent are tracked apart) on the same model, plus the request body's growth
-since then priced as uncached input at one token per byte; failing that, the
-input part of the request's hold. It adds the output relayed so far (text,
+since then. That reply is used only if it started within the 5-minute prompt
+cache window before the request and the body has not shrunk since (as after a
+compaction). Failing that, the whole request body counts as new input. New input
+is counted at one token per 3 bytes, a deliberately high count, and priced at the
+higher of the model's input and cache-write rates. It adds the output relayed so far (text,
 tool-call input, and thinking or reasoning text), counted high. If nothing was
 relayed, it adds the median output of the run's replies on that model, or, with
 no completed reply on that model, the full output the hold reserved for. A
